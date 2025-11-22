@@ -1,0 +1,5 @@
+{
+  "name": "NanoFlow Project Tracker",
+  "description": "A complex project tracking application with dual-view (Text/Flowchart), markdown support, task synchronization, and Gemini AI integration.",
+  "requestFramePermissions": []
+}
