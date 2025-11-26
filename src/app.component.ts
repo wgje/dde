@@ -1,4 +1,4 @@
-import { Component, inject, signal, WritableSignal, HostListener, computed, ViewChild } from '@angular/core';
+import { Component, inject, signal, HostListener, computed, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StoreService } from './services/store.service';
 import { SupabaseClientService } from './services/supabase-client.service';
@@ -55,17 +55,26 @@ export class AppComponent {
 
   showSettings = signal(false);
   showNewProjectModal = signal(false);
-  showGenAIModal = signal(false);
-  showImageEditModal = signal(false);
-
-  genAiImage: WritableSignal<string | null> = signal(null);
-  editingImage: WritableSignal<string | null> = signal(null);
-  isGenerating = signal(false);
+  showLoginModal = signal(false);
+  
+  // 删除项目确认对话框
+  showDeleteProjectModal = signal(false);
+  deleteProjectTarget = signal<{ id: string; name: string } | null>(null);
 
   constructor() {
     void this.bootstrapSession();
     this.checkMobile();
     this.setupSwUpdateListener();
+    this.applyStoredTheme();
+  }
+  
+  private applyStoredTheme() {
+    // 从 localStorage 恢复主题（作为初始值，登录后会被云端覆盖）
+    const savedTheme = localStorage.getItem('nanoflow.theme') as 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender' | null;
+    if (savedTheme && savedTheme !== 'default') {
+      this.store.theme.set(savedTheme);
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    }
   }
 
   private setupSwUpdateListener() {
@@ -179,6 +188,7 @@ export class AppComponent {
       this.sessionEmail.set(data.session.user.email ?? null);
       await this.store.setCurrentUser(data.session.user.id);
       this.isReloginMode.set(false);
+      this.showLoginModal.set(false); // 关闭登录模态框
       if (opts?.closeSettings) {
         this.showSettings.set(false);
       }
@@ -298,6 +308,30 @@ export class AppComponent {
       this.showNewProjectModal.set(false);
   }
 
+  // 确认删除项目
+  confirmDeleteProject(projectId: string, projectName: string, event: Event) {
+    event.stopPropagation();
+    this.deleteProjectTarget.set({ id: projectId, name: projectName });
+    this.showDeleteProjectModal.set(true);
+  }
+  
+  // 执行删除项目
+  async executeDeleteProject() {
+    const target = this.deleteProjectTarget();
+    if (target) {
+      await this.store.deleteProject(target.id);
+      this.expandedProjectId.set(null);
+    }
+    this.showDeleteProjectModal.set(false);
+    this.deleteProjectTarget.set(null);
+  }
+  
+  // 取消删除项目
+  cancelDeleteProject() {
+    this.showDeleteProjectModal.set(false);
+    this.deleteProjectTarget.set(null);
+  }
+
   openSettings() {
     this.showSettings.set(true);
   }
@@ -316,48 +350,14 @@ export class AppComponent {
       const val = (e.target as HTMLSelectElement).value as 'auto' | 'fixed';
       this.store.floatingWindowPref.set(val);
   }
+  
+  updateTheme(theme: 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender') {
+    // 使用 store 的 setTheme 方法，会自动同步到云端
+    void this.store.setTheme(theme);
+  }
 
   updateFilter(e: Event) {
       this.store.filterMode.set((e.target as HTMLSelectElement).value);
-  }
-  
-  generateImage() {
-      this.closeSettings();
-      this.showGenAIModal.set(true);
-  }
-  
-  openImageEditor() {
-      this.closeSettings();
-      this.showImageEditModal.set(true);
-  }
-  
-  async runImageGen(prompt: string) {
-      if (!prompt) return;
-      this.isGenerating.set(true);
-      const img = await this.store.generateImage(prompt);
-      this.genAiImage.set(img);
-      this.isGenerating.set(false);
-  }
-
-  async runImageEdit(prompt: string) {
-      if (!prompt || !this.editingImage()) return;
-      this.isGenerating.set(true);
-      const result = await this.store.editImageWithPrompt(this.editingImage()!, prompt);
-      if (result) {
-          this.editingImage.set(result); // Update view with new image
-      }
-      this.isGenerating.set(false);
-  }
-
-  onFileSelected(event: Event) {
-      const file = (event.target as HTMLInputElement).files?.[0];
-      if (file) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-              this.editingImage.set(e.target?.result as string);
-          };
-          reader.readAsDataURL(file);
-      }
   }
 
   @HostListener('window:resize')

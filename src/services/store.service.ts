@@ -56,6 +56,9 @@ export class StoreService {
   // UI State
   isMobile = signal(false);
   
+  // Network status
+  isOnline = signal(typeof window !== 'undefined' ? navigator.onLine : true);
+  
   // State
   projects = signal<Project[]>([]);
   readonly currentUserId = signal<string | null>(null);
@@ -91,6 +94,12 @@ export class StoreService {
   // Settings
   readonly layoutDirection = signal<'ltr' | 'rtl'>('ltr');
   readonly floatingWindowPref = signal<'auto' | 'fixed'>('auto');
+  
+  // Theme Settings
+  readonly theme = signal<'default' | 'ocean' | 'forest' | 'sunset' | 'lavender'>('default');
+  
+  // User Preferences (synced to cloud)
+  private preferencesKey = 'nanoflow.preferences-v1';
 
   // AI
   private ai: GoogleGenAI | null = null;
@@ -438,6 +447,12 @@ export class StoreService {
     }
 
     this.loadFromCacheOrSeed();
+    
+    // Monitor network status
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => this.isOnline.set(true));
+      window.addEventListener('offline', () => this.isOnline.set(false));
+    }
   }
 
   async setCurrentUser(userId: string | null) {
@@ -449,10 +464,91 @@ export class StoreService {
     this.teardownRealtimeSubscription();
     if (userId && this.supabase.isConfigured) {
       await this.loadProjects();
+      await this.loadUserPreferences(); // 加载用户偏好设置
       await this.initRealtimeSubscription();
     } else {
       this.loadFromCacheOrSeed();
+      this.loadLocalPreferences(); // 加载本地偏好设置
     }
+  }
+  
+  // 加载用户偏好设置（从云端）
+  private async loadUserPreferences() {
+    const userId = this.currentUserId();
+    if (!userId || !this.supabase.isConfigured) return;
+    
+    try {
+      const { data, error } = await this.supabase.client()
+        .from('user_preferences')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+      
+      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
+        throw error;
+      }
+      
+      if (data?.theme) {
+        this.theme.set(data.theme);
+        this.applyThemeToDOM(data.theme);
+        // 同时保存到本地
+        localStorage.setItem('nanoflow.theme', data.theme);
+      }
+    } catch (e) {
+      console.warn('加载用户偏好设置失败', e);
+      // 降级到本地设置
+      this.loadLocalPreferences();
+    }
+  }
+  
+  // 加载本地偏好设置
+  private loadLocalPreferences() {
+    const savedTheme = localStorage.getItem('nanoflow.theme') as 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender' | null;
+    if (savedTheme) {
+      this.theme.set(savedTheme);
+      this.applyThemeToDOM(savedTheme);
+    }
+  }
+  
+  // 保存用户偏好设置（到云端）
+  async saveUserPreferences() {
+    const userId = this.currentUserId();
+    const currentTheme = this.theme();
+    
+    // 始终保存到本地
+    localStorage.setItem('nanoflow.theme', currentTheme);
+    
+    if (!userId || !this.supabase.isConfigured) return;
+    
+    try {
+      const { error } = await this.supabase.client()
+        .from('user_preferences')
+        .upsert({
+          user_id: userId,
+          theme: currentTheme,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id' });
+      
+      if (error) throw error;
+    } catch (e) {
+      console.warn('保存用户偏好设置到云端失败', e);
+    }
+  }
+  
+  // 应用主题到 DOM
+  private applyThemeToDOM(theme: string) {
+    if (theme === 'default') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', theme);
+    }
+  }
+  
+  // 设置主题
+  async setTheme(theme: 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender') {
+    this.theme.set(theme);
+    this.applyThemeToDOM(theme);
+    await this.saveUserPreferences();
   }
 
   private seedProjects(): Project[] {
@@ -565,12 +661,22 @@ export class StoreService {
     });
   }
 
+  // 防抖：避免短时间内多次触发同步
+  private remoteChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  
   private async handleRemoteChange(payload: any) {
-    try {
-      await this.loadProjects();
-    } catch (e) {
-      console.error('处理实时更新失败', e);
+    // 防抖 300ms，避免快速连续变更导致频繁刷新
+    if (this.remoteChangeTimer) {
+      clearTimeout(this.remoteChangeTimer);
     }
+    this.remoteChangeTimer = setTimeout(async () => {
+      try {
+        await this.loadProjects();
+      } catch (e) {
+        console.error('处理实时更新失败', e);
+      }
+      this.remoteChangeTimer = null;
+    }, 300);
   }
 
   async loadProjects() {
@@ -668,6 +774,37 @@ export class StoreService {
     this.schedulePersist();
   }
 
+  // 删除项目
+  async deleteProject(projectId: string) {
+    const userId = this.currentUserId();
+    
+    // 从本地状态删除
+    this.projects.update(p => p.filter(proj => proj.id !== projectId));
+    
+    // 如果删除的是当前活动项目，切换到其他项目
+    if (this.activeProjectId() === projectId) {
+      const remaining = this.projects();
+      this.activeProjectId.set(remaining[0]?.id ?? null);
+    }
+    
+    // 如果已登录，从云端删除
+    if (userId && this.supabase.isConfigured) {
+      try {
+        const { error } = await this.supabase.client()
+          .from('projects')
+          .delete()
+          .eq('id', projectId)
+          .eq('owner_id', userId);
+        if (error) throw error;
+      } catch (e: any) {
+        console.error('Delete project from cloud failed', e);
+        this.syncError.set(e?.message ?? String(e));
+      }
+    }
+    
+    this.saveOfflineSnapshot();
+  }
+
   updateProjectMetadata(projectId: string, metadata: { description?: string; createdDate?: string }) {
     this.projects.update(projects => projects.map(p => p.id === projectId ? {
       ...p,
@@ -699,6 +836,21 @@ export class StoreService {
     }));
   }
 
+  // 完成待办项：将 - [ ] 改为 - [x]
+  completeUnfinishedItem(taskId: string, itemText: string) {
+    const task = this.tasks().find(t => t.id === taskId);
+    if (!task) return;
+    
+    // 匹配并替换第一个匹配的未完成项
+    const escapedText = itemText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`- \\[ \\]\\s*${escapedText}`);
+    const newContent = task.content.replace(regex, `- [x] ${itemText}`);
+    
+    if (newContent !== task.content) {
+      this.updateTaskContent(taskId, newContent);
+    }
+  }
+
   updateTaskTitle(taskId: string, title: string) {
     this.updateActiveProject(p => this.rebalance({
       ...p,
@@ -718,6 +870,26 @@ export class StoreService {
     this.updateActiveProject(p => this.rebalance({
       ...p,
       tasks: p.tasks.map(t => t.id === taskId ? { ...t, status } : t)
+    }));
+  }
+
+  // 删除任务（及其所有子任务和连接）
+  deleteTask(taskId: string) {
+    const activeP = this.activeProject();
+    if (!activeP) return;
+    
+    // 收集要删除的所有任务ID（包括子任务）
+    const idsToDelete = new Set<string>();
+    const collectDescendants = (id: string) => {
+      idsToDelete.add(id);
+      activeP.tasks.filter(t => t.parentId === id).forEach(child => collectDescendants(child.id));
+    };
+    collectDescendants(taskId);
+    
+    this.updateActiveProject(p => this.rebalance({
+      ...p,
+      tasks: p.tasks.filter(t => !idsToDelete.has(t.id)),
+      connections: p.connections.filter(c => !idsToDelete.has(c.source) && !idsToDelete.has(c.target))
     }));
   }
 

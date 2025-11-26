@@ -2,6 +2,122 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ========== 主题变量 ========== */
+:root {
+  /* 默认主题 - 原石色系 */
+  --theme-bg: #F9F8F6;
+  --theme-sidebar-bg: #F9F8F6;
+  --theme-card-bg: #FFFFFF;
+  --theme-primary: #4f46e5;
+  --theme-primary-light: #eef2ff;
+  --theme-accent: #0d9488;
+  --theme-text: #57534e;
+  --theme-text-dark: #292524;
+  --theme-border: #e7e5e4;
+}
+
+/* 海洋主题 */
+[data-theme="ocean"] {
+  --theme-bg: #f0f9ff;
+  --theme-sidebar-bg: #e0f2fe;
+  --theme-card-bg: #ffffff;
+  --theme-primary: #0284c7;
+  --theme-primary-light: #e0f2fe;
+  --theme-accent: #0891b2;
+  --theme-text: #475569;
+  --theme-text-dark: #0c4a6e;
+  --theme-border: #bae6fd;
+}
+
+/* 森林主题 */
+[data-theme="forest"] {
+  --theme-bg: #f0fdf4;
+  --theme-sidebar-bg: #dcfce7;
+  --theme-card-bg: #ffffff;
+  --theme-primary: #16a34a;
+  --theme-primary-light: #dcfce7;
+  --theme-accent: #059669;
+  --theme-text: #4b5563;
+  --theme-text-dark: #14532d;
+  --theme-border: #bbf7d0;
+}
+
+/* 日落主题 */
+[data-theme="sunset"] {
+  --theme-bg: #fff7ed;
+  --theme-sidebar-bg: #ffedd5;
+  --theme-card-bg: #ffffff;
+  --theme-primary: #ea580c;
+  --theme-primary-light: #ffedd5;
+  --theme-accent: #dc2626;
+  --theme-text: #57534e;
+  --theme-text-dark: #7c2d12;
+  --theme-border: #fed7aa;
+}
+
+/* 薰衣草主题 */
+[data-theme="lavender"] {
+  --theme-bg: #faf5ff;
+  --theme-sidebar-bg: #f3e8ff;
+  --theme-card-bg: #ffffff;
+  --theme-primary: #9333ea;
+  --theme-primary-light: #f3e8ff;
+  --theme-accent: #c026d3;
+  --theme-text: #6b7280;
+  --theme-text-dark: #581c87;
+  --theme-border: #e9d5ff;
+}
+
+/* 应用主题变量 */
+.theme-bg { background-color: var(--theme-bg); }
+.theme-sidebar-bg { background-color: var(--theme-sidebar-bg); }
+.theme-card-bg { background-color: var(--theme-card-bg); }
+.theme-primary { color: var(--theme-primary); }
+.theme-primary-bg { background-color: var(--theme-primary); }
+.theme-primary-light-bg { background-color: var(--theme-primary-light); }
+.theme-accent { color: var(--theme-accent); }
+.theme-text { color: var(--theme-text); }
+.theme-text-dark { color: var(--theme-text-dark); }
+.theme-border { border-color: var(--theme-border); }
+
+/* 弹窗动画 */
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+.animate-scale-in {
+  animation: scaleIn 0.2s ease-out;
+}
+.animate-slide-up {
+  animation: slideUp 0.25s ease-out;
+}
+.animate-dropdown {
+  animation: dropdown 0.15s ease-out;
+}
+.animate-slide-down {
+  animation: slideDown 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes dropdown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Mobile-friendly tweaks */
 .responsive-stack {
   display: flex;
@@ -13,7 +129,7 @@
     flex-direction: column;
   }
 
-  button,
+  /* 只对主要交互元素应用 44px 最小高度，排除紧凑按钮 */
   input,
   select,
   textarea,
@@ -21,6 +137,39 @@
     min-height: 44px;
     padding-top: 0.5rem;
     padding-bottom: 0.5rem;
+  }
+  
+  /* 紧凑按钮：不强制最小高度 */
+  .btn-compact {
+    min-height: auto !important;
+    padding-top: 0.25rem !important;
+    padding-bottom: 0.25rem !important;
+  }
+}
+
+/* 触摸设备：禁用 hover 状态的粘滞效果 */
+@media (hover: none) and (pointer: coarse) {
+  /* 防止 hover 状态在触摸后"粘住" */
+  .group:hover .group-hover\:text-stone-500,
+  .group:hover .group-hover\:text-stone-900,
+  .group:hover .group-hover\:bg-stone-400,
+  .group:hover .group-hover\:text-retro-rust,
+  .group:hover .group-hover\:bg-orange-400 {
+    color: inherit;
+    background-color: inherit;
+  }
+  
+  /* 触摸设备上让某些隐藏元素始终可见 */
+  .touch-always-visible {
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+  
+  /* 增加触摸设备上的点击反馈 */
+  button:active,
+  .cursor-pointer:active {
+    transform: scale(0.97);
+    transition: transform 0.1s ease;
   }
 }
 

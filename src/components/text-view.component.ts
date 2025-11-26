@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StoreService, Task } from '../services/store.service';
 
@@ -7,441 +7,617 @@ import { StoreService, Task } from '../services/store.service';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div class="flex flex-col h-full bg-canvas">
-      
-      <!-- 1. 待完成区域 (To-Do Area) -->
-      <div class="flex-none mx-4 mt-4 px-4 pb-2 transition-all duration-300 overflow-hidden rounded-2xl bg-retro-rust/10 border border-retro-rust/30">
-        <div (click)="store.isTextUnfinishedOpen.set(!store.isTextUnfinishedOpen())" 
-             class="py-3 cursor-pointer flex justify-between items-center group select-none">
-          <span class="font-bold text-retro-dark text-sm flex items-center gap-3 tracking-tight">
+    <div class="flex flex-col h-full bg-canvas"><!-- 1. 待完成区域 -->
+      <section 
+        class="flex-none mt-2 px-2 pb-1 rounded-xl bg-retro-rust/10 border border-retro-rust/30 transition-all"
+        [ngClass]="{'mx-4 mt-4': !isMobile(), 'mx-2': isMobile()}">
+        <header 
+          (click)="store.isTextUnfinishedOpen.set(!store.isTextUnfinishedOpen())" 
+          class="py-2 cursor-pointer flex justify-between items-center group select-none">
+          <span class="font-bold text-retro-dark flex items-center gap-2 tracking-tight"
+                [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
             <span class="w-1.5 h-1.5 rounded-full bg-retro-rust shadow-[0_0_6px_rgba(193,91,62,0.4)]"></span>
             待办事项
           </span>
-          <span class="text-stone-300 text-xs transition-transform duration-300 group-hover:text-stone-500" [class.rotate-180]="!store.isTextUnfinishedOpen()">
-            ▼
-          </span>
-        </div>
+          <span class="text-stone-300 text-xs group-hover:text-stone-500 transition-transform" 
+                [class.rotate-180]="!store.isTextUnfinishedOpen()">▼</span>
+        </header>
         
         @if (store.isTextUnfinishedOpen()) {
-          <div class="pb-4 max-h-48 overflow-y-auto grid grid-cols-1 gap-2 animate-slide-down">
-            @for (item of store.unfinishedItems(); track item.taskId + item.text) {
-              <div (dblclick)="jumpToTask(item.taskId)" class="p-3 bg-panel/50 backdrop-blur-sm rounded-lg border border-retro-muted/20 hover:border-retro-rust hover:shadow-sm cursor-pointer group transition-all flex items-start gap-3">
-                 <div class="mt-1 w-3 h-3 rounded-full border border-retro-muted flex items-center justify-center bg-canvas group-hover:border-retro-rust transition-colors"></div>
-                 <div class="flex-1">
-                    <div class="text-[10px] font-bold text-retro-muted mb-0.5 tracking-wider group-hover:text-retro-rust transition-colors">{{item.taskDisplayId}}</div>
-                    <div class="text-sm text-stone-600 line-clamp-2 group-hover:text-stone-900 transition-colors leading-relaxed">{{item.text}}</div>
-                 </div>
+          <div class="pb-2 overflow-y-auto grid grid-cols-1 animate-collapse-open"
+               [ngClass]="{'max-h-48 gap-2': !isMobile(), 'max-h-36 gap-1': isMobile()}">
+            @for (item of store.unfinishedItems(); track trackUnfinished(item)) {
+              <div class="p-2 bg-panel/50 backdrop-blur-sm rounded-lg border border-retro-muted/20 hover:border-retro-rust hover:shadow-sm cursor-pointer group flex items-start gap-2 active:scale-[0.98] transition-all">
+                <button 
+                  (click)="completeItem(item.taskId, item.text, $event)"
+                  class="mt-0.5 w-4 h-4 rounded-full border-2 border-retro-muted bg-canvas hover:border-green-500 hover:bg-green-50 active:scale-90 transition-all"
+                  title="点击完成"></button>
+                <div class="flex-1 min-w-0" (click)="jumpToTask(item.taskId)">
+                  <div class="text-[9px] font-bold text-retro-muted mb-0.5 tracking-wider group-hover:text-retro-rust transition-colors">{{item.taskDisplayId}}</div>
+                  <div class="text-xs text-stone-600 line-clamp-2 group-hover:text-stone-900 transition-colors leading-relaxed">{{item.text}}</div>
+                </div>
               </div>
-            }
-            @if (store.unfinishedItems().length === 0) {
-                <div class="text-xs text-stone-400 italic py-2 font-light">暂无待办</div>
+            } @empty {
+              <div class="text-xs text-stone-400 italic py-1 font-light">暂无待办</div>
             }
           </div>
         }
-      </div>
+      </section>
 
-      <!-- 2. 待分配区域 (To-Assign Area) -->
-      <div class="flex-none mx-4 mt-2 mb-4 px-4 pb-2 transition-all duration-300 overflow-hidden rounded-2xl bg-retro-teal/10 border border-retro-teal/30">
-         <div (click)="store.isTextUnassignedOpen.set(!store.isTextUnassignedOpen())" 
-              class="py-3 cursor-pointer flex justify-between items-center group select-none">
-            <span class="font-bold text-retro-dark text-sm flex items-center gap-3 tracking-tight">
-                <span class="w-1.5 h-1.5 rounded-full bg-retro-teal shadow-[0_0_6px_rgba(74,140,140,0.4)]"></span>
-                待分配
-            </span>
-            <span class="text-stone-300 text-xs transition-transform duration-300 group-hover:text-stone-500" [class.rotate-180]="!store.isTextUnassignedOpen()">
-                ▼
-            </span>
-         </div>
+      <!-- 2. 待分配区域 -->
+      <section 
+        class="flex-none mt-1 mb-2 px-2 pb-1 rounded-xl bg-retro-teal/10 border border-retro-teal/30 transition-all"
+        [ngClass]="{'mx-4 mt-2 mb-4': !isMobile(), 'mx-2': isMobile()}">
+        <header 
+          (click)="store.isTextUnassignedOpen.set(!store.isTextUnassignedOpen())" 
+          class="py-2 cursor-pointer flex justify-between items-center group select-none">
+          <span class="font-bold text-retro-dark flex items-center gap-2 tracking-tight"
+                [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
+            <span class="w-1.5 h-1.5 rounded-full bg-retro-teal shadow-[0_0_6px_rgba(74,140,140,0.4)]"></span>
+            待分配
+          </span>
+          <span class="text-stone-300 text-xs group-hover:text-stone-500 transition-transform" 
+                [class.rotate-180]="!store.isTextUnassignedOpen()">▼</span>
+        </header>
 
-         @if (store.isTextUnassignedOpen()) {
-            <div class="pb-4 animate-slide-down">
-               <div class="flex flex-wrap gap-2">
-                  @for (task of store.unassignedTasks(); track task.id) {
-                    <div 
-                      class="px-3 py-1.5 bg-panel/50 backdrop-blur-sm border border-retro-muted/30 rounded-md text-xs font-medium text-retro-muted hover:border-retro-teal hover:text-retro-teal cursor-pointer transition-all"
-                      (click)="selectTask(task)">
-                       {{task.title}}
-                    </div>
-                  }
-                  @if (store.unassignedTasks().length === 0) {
-                      <div class="text-xs text-stone-400 italic py-1 font-light">暂无</div>
-                  }
-                  <button (click)="createUnassigned()" class="px-3 py-1.5 bg-panel/30 hover:bg-retro-teal/20 text-retro-muted hover:text-retro-teal rounded-md text-xs font-medium border border-transparent transition-all">+ 新建</button>
-               </div>
+        @if (store.isTextUnassignedOpen()) {
+          <div class="pb-2 animate-collapse-open">
+            <div class="flex flex-wrap" [ngClass]="{'gap-2': !isMobile(), 'gap-1.5': isMobile()}">
+              @for (task of store.unassignedTasks(); track task.id) {
+                <div 
+                  draggable="true"
+                  (dragstart)="onDragStart($event, task)"
+                  (dragend)="onDragEnd()"
+                  (touchstart)="onTouchStart($event, task)"
+                  (touchmove)="onTouchMove($event)"
+                  (touchend)="onTouchEnd($event)"
+                  class="px-2 py-1 bg-panel/50 backdrop-blur-sm border border-retro-muted/30 rounded-md text-xs font-medium text-retro-muted hover:border-retro-teal hover:text-retro-teal cursor-grab active:cursor-grabbing touch-none transition-all"
+                  [class.opacity-50]="draggingTaskId() === task.id"
+                  (click)="selectTask(task)">
+                  {{task.title}}
+                </div>
+              } @empty {
+                <span class="text-xs text-stone-400 italic py-1 font-light">暂无</span>
+              }
+              <button 
+                (click)="createUnassigned()" 
+                class="px-2 py-1 bg-panel/30 hover:bg-retro-teal/20 text-retro-muted hover:text-retro-teal rounded-md text-xs font-medium transition-all">
+                + 新建
+              </button>
             </div>
-         }
-      </div>
+          </div>
+        }
+      </section>
 
-      <!-- 3. 阶段区域 (Stage Area) -->
-      <div class="flex-1 min-h-0 px-4 pb-6"
-           [class.overflow-x-auto]="!store.isMobile()"
-           [class.overflow-y-hidden]="!store.isMobile()"
-           [class.overflow-y-auto]="store.isMobile()"
-           [class.overflow-x-hidden]="store.isMobile()">
-        <div class="rounded-3xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-6 py-6 shadow-inner"
-             [class.h-full]="!store.isMobile()"
-             [class.min-h-0]="!store.isMobile()"
-             [class.min-w-full]="!store.isMobile()"
-             [class.w-fit]="!store.isMobile()"
-             [class.w-full]="store.isMobile()"
-             [class.h-fit]="store.isMobile()">
-          <div class="flex flex-col"
-               [class.h-full]="!store.isMobile()"
-               [class.min-h-0]="!store.isMobile()">
-            <div class="flex items-center justify-between mb-4 text-xs text-stone-500">
-              <div class="flex items-center gap-2 relative">
-                <span class="font-medium text-retro-muted">阶段筛选</span>
-                <button 
-                  (click)="isStageFilterOpen.set(!isStageFilterOpen()); isRootFilterOpen.set(false); $event.stopPropagation()"
-                  class="flex items-center gap-2 border border-retro-muted/30 rounded-md px-3 py-1.5 bg-canvas/70 backdrop-blur text-retro-dark hover:bg-retro-muted/10 transition-colors text-xs min-w-[80px] justify-between">
-                  <span>{{ currentStageLabel }}</span>
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 transition-transform duration-200" [class.rotate-180]="isStageFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
+      <!-- 3. 阶段区域 -->
+      <section 
+        class="flex-1 min-h-0 overflow-auto"
+        [ngClass]="{'px-4 pb-6': !isMobile(), 'px-2 pb-4': isMobile()}">
+        <div 
+          class="rounded-xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-2 py-2 shadow-inner w-full h-full flex flex-col"
+          [ngClass]="{'rounded-2xl px-4 py-3': !isMobile()}">
+          
+          <!-- 筛选栏 -->
+          <div class="flex items-center justify-between text-stone-500"
+               [ngClass]="{'mb-3': !isMobile(), 'mb-2': isMobile()}">
+            <!-- 阶段筛选 -->
+            <div class="flex items-center gap-1 relative">
+              <span class="font-medium text-retro-muted" 
+                    [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">阶段</span>
+              <button 
+                (click)="toggleFilter('stage', $event)"
+                class="flex items-center gap-1 border border-retro-muted/30 rounded-md bg-canvas/70 backdrop-blur text-retro-dark hover:bg-retro-muted/10 transition-colors"
+                [ngClass]="{'text-xs px-3 py-1.5': !isMobile(), 'text-[10px] px-2 py-1': isMobile()}">
+                <span>{{ currentStageLabel() }}</span>
+                <svg class="transition-transform" [ngClass]="{'h-3 w-3': !isMobile(), 'h-2.5 w-2.5': isMobile()}" [class.rotate-180]="isStageFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
 
-                @if (isStageFilterOpen()) {
-                  <div class="fixed inset-0 z-40" (click)="isStageFilterOpen.set(false)"></div>
-                  <div class="absolute left-0 top-full mt-1 w-32 bg-white/90 backdrop-blur-xl border border-stone-100 rounded-xl shadow-lg z-50 py-1 animate-fade-in overflow-hidden">
+              @if (isStageFilterOpen()) {
+                <div class="fixed inset-0 z-40" (click)="isStageFilterOpen.set(false)"></div>
+                <div class="absolute left-0 top-full mt-1 bg-white/90 backdrop-blur-xl border border-stone-100 rounded-xl shadow-lg z-50 py-1 animate-dropdown"
+                     [ngClass]="{'w-32': !isMobile(), 'w-auto min-w-[70px]': isMobile()}">
+                  <div 
+                    (click)="setStageFilter('all')"
+                    class="px-3 py-1.5 text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between transition-colors"
+                    [ngClass]="{'text-xs px-4 py-2': !isMobile(), 'text-[10px] py-1': isMobile()}">
+                    <span>全部</span>
+                    @if (store.stageFilter() === 'all') { <span class="text-indigo-600 font-bold">✓</span> }
+                  </div>
+                  <div class="h-px bg-stone-100 my-0.5"></div>
+                  @for (stage of store.stages(); track stage.stageNumber) {
                     <div 
-                      (click)="store.setStageFilter('all'); isStageFilterOpen.set(false)"
-                      class="px-4 py-2 text-xs text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between group transition-colors">
-                      <span>全部</span>
-                      @if (store.stageFilter() === 'all') { <span class="text-indigo-600 font-bold">✓</span> }
+                      (click)="setStageFilter(stage.stageNumber)"
+                      class="px-3 py-1.5 text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between transition-colors"
+                      [ngClass]="{'text-xs px-4 py-2': !isMobile(), 'text-[10px] py-1': isMobile()}">
+                      <span>阶段 {{stage.stageNumber}}</span>
+                      @if (store.stageFilter() === stage.stageNumber) { <span class="text-indigo-600 font-bold">✓</span> }
                     </div>
-                    <div class="h-px bg-stone-100 my-1"></div>
-                    @for (stage of store.stages(); track stage.stageNumber) {
-                      <div 
-                        (click)="store.setStageFilter(stage.stageNumber); isStageFilterOpen.set(false)"
-                        class="px-4 py-2 text-xs text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between group transition-colors">
-                        <span>阶段 {{stage.stageNumber}}</span>
-                        @if (store.stageFilter() === stage.stageNumber) { <span class="text-indigo-600 font-bold">✓</span> }
-                      </div>
-                    }
-                  </div>
-                }
-              </div>
-              <div class="flex items-center gap-2 relative">
-                <span class="font-medium text-retro-muted">延伸筛选</span>
-                <button 
-                  (click)="isRootFilterOpen.set(!isRootFilterOpen()); isStageFilterOpen.set(false); $event.stopPropagation()"
-                  class="flex items-center gap-2 border border-retro-muted/30 rounded-md px-3 py-1.5 bg-canvas/70 backdrop-blur text-retro-dark hover:bg-retro-muted/10 transition-colors text-xs min-w-[100px] justify-between">
-                  <span class="truncate max-w-[120px]">{{ currentRootLabel }}</span>
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 transition-transform duration-200" [class.rotate-180]="isRootFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-
-                @if (isRootFilterOpen()) {
-                  <div class="fixed inset-0 z-40" (click)="isRootFilterOpen.set(false)"></div>
-                  <div class="absolute left-0 top-full mt-1 w-48 bg-white/90 backdrop-blur-xl border border-stone-100 rounded-xl shadow-lg z-50 py-1 animate-fade-in overflow-hidden">
-                    <div 
-                      (click)="store.stageViewRootFilter.set('all'); isRootFilterOpen.set(false)"
-                      class="px-4 py-2 text-xs text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between group transition-colors">
-                      <span>全部任务</span>
-                      @if (store.stageViewRootFilter() === 'all') { <span class="text-indigo-600 font-bold">✓</span> }
-                    </div>
-                    <div class="h-px bg-stone-100 my-1"></div>
-                    @for (root of store.allStage1Tasks(); track root.id) {
-                      <div 
-                        (click)="store.stageViewRootFilter.set(root.id); isRootFilterOpen.set(false)"
-                        class="px-4 py-2 text-xs text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between group transition-colors">
-                        <span class="truncate">{{root.title}}</span>
-                        @if (store.stageViewRootFilter() === root.id) { <span class="text-indigo-600 font-bold">✓</span> }
-                      </div>
-                    }
-                  </div>
-                }
-              </div>
-            </div>
-            <div class="gap-8"
-                 [class.flex]="true"
-                 [class.h-full]="!store.isMobile()"
-                 [class.min-h-0]="!store.isMobile()"
-                 [class.flex-row]="!store.isMobile()"
-                 [class.flex-col]="store.isMobile()">
-              @for (stage of visibleStages(); track stage.stageNumber) {
-                <div class="flex-shrink-0 flex flex-col bg-retro-cream/70 backdrop-blur border border-retro-muted/20 rounded-2xl px-4 py-5 shadow-sm overflow-hidden"
-                     [class.w-80]="!store.isMobile()"
-                     [class.max-w-[20rem]]="!store.isMobile()"
-                     [class.min-w-0]="!store.isMobile()"
-                     [class.h-full]="!store.isMobile()"
-                     [class.min-h-0]="!store.isMobile()"
-                     [class.w-full]="store.isMobile()"
-                     [class.max-h-[75vh]]="store.isMobile()">
-                  <!-- Stage Header -->
-                  <div class="mb-4 flex justify-between items-center px-1">
-                    <h3 class="font-bold text-retro-olive text-sm tracking-tight flex items-center gap-2">
-                      <span class="inline-block w-1 h-4 rounded-full bg-retro-olive"></span>
-                      阶段 {{stage.stageNumber}}
-                    </h3>
-                    <span class="text-retro-olive text-[10px] font-mono bg-canvas/60 px-2 py-0.5 rounded-full">{{stage.tasks.length}}</span>
-                  </div>
-
-                  <!-- Tasks List -->
-                  <div class="flex-1 min-h-0 overflow-y-auto space-y-3 custom-scrollbar pr-1 task-stack touch-pan-y">
-                  @for (task of stage.tasks; track task.id; let i = $index) {
-                    @if (shouldShow(task, stage.stageNumber, i)) {
-                      <div 
-                        (click)="selectTask(task)"
-                        class="relative bg-canvas/80 backdrop-blur-sm border border-transparent rounded-lg p-4 cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 ease-out group stack-card max-w-full min-w-0 overflow-hidden"
-                        [class.shadow-sm]="selectedTaskId() !== task.id"
-                        [class.border-retro-muted/20]="selectedTaskId() !== task.id"
-                        [class.ring-1]="selectedTaskId() === task.id"
-                        [class.ring-retro-gold]="selectedTaskId() === task.id"
-                        [class.shadow-md]="selectedTaskId() === task.id"
-                        [class.h-16]="getMobileViewMode(task.id, stage.tasks) === 'collapsed'"
-                        [class.h-28]="getMobileViewMode(task.id, stage.tasks) === 'partial'"
-                        [class.h-auto]="getMobileViewMode(task.id, stage.tasks) === 'full'"
-                        [class.opacity-80]="getMobileViewMode(task.id, stage.tasks) === 'collapsed'"
-                        [class.opacity-90]="getMobileViewMode(task.id, stage.tasks) === 'partial'"
-                        [class.opacity-100]="getMobileViewMode(task.id, stage.tasks) === 'full'"
-                        [class.scale-95]="getMobileViewMode(task.id, stage.tasks) === 'collapsed'"
-                        [class.scale-98]="getMobileViewMode(task.id, stage.tasks) === 'partial'"
-                        [class.scale-100]="getMobileViewMode(task.id, stage.tasks) === 'full'">
-                        
-                        <!-- Header -->
-                        <div class="flex justify-between items-start mb-2">
-                           <span class="font-mono text-[10px] font-medium text-retro-muted">{{task.displayId}}</span>
-                           <div class="text-[10px] text-retro-muted/60 font-light">{{task.createdDate | date:'HH:mm'}}</div>
-                        </div>
-                        
-                        <div class="font-medium text-sm text-retro-dark mb-1 leading-relaxed">{{task.title}}</div>
-                        
-                        <!-- Collapsed Content Preview -->
-                        @if (selectedTaskId() !== task.id) {
-                            <div class="text-xs text-stone-500 font-light leading-relaxed markdown-preview"
-                                 [class.hidden]="getMobileViewMode(task.id, stage.tasks) === 'collapsed'"
-                                 [class.line-clamp-2]="getMobileViewMode(task.id, stage.tasks) === 'partial'"
-                                 [class.opacity-40]="previewMode(stage.stageNumber, i, task.id) === 'minimal'">
-                                 {{task.content}}
-                            </div>
-                        }
-
-                        <!-- Expanded Editing Area -->
-                        @if (selectedTaskId() === task.id) {
-                          <div class="mt-3 space-y-3 animate-fade-in max-w-full">
-                            <textarea 
-                               #contentInput
-                               [value]="task.content"
-                               (input)="updateContent(task.id, contentInput.value)"
-                                (click)="$event.stopPropagation()"
-                                class="w-full h-32 text-sm p-2 border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none"
-                                placeholder="输入 Markdown 内容..."></textarea>
-                            
-                            <!-- Actions -->
-                            <div class="flex flex-wrap gap-2 pt-2 border-t border-stone-100">
-                                <button (click)="addSibling(task, $event)" class="flex-1 px-2 py-1.5 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-all duration-200" title="添加同级">
-                                  <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                                  同级
-                                </button>
-                                <button (click)="addChild(task, $event)" class="flex-1 px-2 py-1.5 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-all duration-200" title="添加下级">
-                                  <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 10 20 15 15 20"></polyline><path d="M4 4v7a4 4 0 0 0 4 4h12"></path></svg>
-                                  下级
-                                </button>
-                             </div>
-                          </div>
-                        }
-                      </div>
-                    }
                   }
-                  </div>
                 </div>
               }
-              
-              <!-- Add Stage Placeholder -->
-              <div class="w-12 flex-shrink-0 flex items-start pt-10 justify-center opacity-0 hover:opacity-100 transition-opacity" [class.opacity-100]="store.isMobile()">
-                 <button (click)="addNewStage()" class="w-8 h-8 rounded-full bg-transparent border border-dashed border-stone-300 text-stone-400 hover:border-stone-400 hover:text-stone-600 flex items-center justify-center">
-                    <span class="text-xl font-light">+</span>
-                 </button>
-              </div>
+            </div>
+            
+            <!-- 延伸筛选 -->
+            <div class="flex items-center gap-1 relative">
+              <span class="font-medium text-retro-muted"
+                    [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">延伸</span>
+              <button 
+                (click)="toggleFilter('root', $event)"
+                class="flex items-center gap-1 border border-retro-muted/30 rounded-md bg-canvas/70 backdrop-blur text-retro-dark hover:bg-retro-muted/10 transition-colors"
+                [ngClass]="{'text-xs px-3 py-1.5': !isMobile(), 'text-[10px] px-2 py-1': isMobile()}">
+                <span class="truncate" [ngClass]="{'max-w-[100px]': !isMobile(), 'max-w-[60px]': isMobile()}">{{ currentRootLabel() }}</span>
+                <svg class="transition-transform" [ngClass]="{'h-3 w-3': !isMobile(), 'h-2.5 w-2.5': isMobile()}" [class.rotate-180]="isRootFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              @if (isRootFilterOpen()) {
+                <div class="fixed inset-0 z-40" (click)="isRootFilterOpen.set(false)"></div>
+                <div class="absolute right-0 top-full mt-1 bg-white/90 backdrop-blur-xl border border-stone-100 rounded-xl shadow-lg z-50 py-1 animate-dropdown"
+                     [ngClass]="{'w-48': !isMobile(), 'w-auto min-w-[90px] max-w-[150px]': isMobile()}">
+                  <div 
+                    (click)="setRootFilter('all')"
+                    class="px-3 py-1.5 text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between transition-colors"
+                    [ngClass]="{'text-xs px-4 py-2': !isMobile(), 'text-[10px] py-1': isMobile()}">
+                    <span>全部任务</span>
+                    @if (store.stageViewRootFilter() === 'all') { <span class="text-indigo-600 font-bold">✓</span> }
+                  </div>
+                  <div class="h-px bg-stone-100 my-0.5"></div>
+                  @for (root of store.allStage1Tasks(); track root.id) {
+                    <div 
+                      (click)="setRootFilter(root.id)"
+                      class="px-3 py-1.5 text-stone-600 hover:bg-indigo-50 hover:text-indigo-900 cursor-pointer flex items-center justify-between transition-colors"
+                      [ngClass]="{'text-xs px-4 py-2': !isMobile(), 'text-[10px] py-1': isMobile()}">
+                      <span class="truncate">{{root.title}}</span>
+                      @if (store.stageViewRootFilter() === root.id) { <span class="text-indigo-600 font-bold">✓</span> }
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+          </div>
+          
+          <!-- 阶段列表 -->
+          <div class="w-full flex-1 overflow-auto"
+               [ngClass]="{'grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 content-start': !isMobile(), 'flex flex-col gap-2': isMobile()}">
+            @for (stage of visibleStages(); track stage.stageNumber) {
+              <article 
+                [attr.data-stage-number]="stage.stageNumber"
+                class="flex flex-col bg-retro-cream/70 backdrop-blur border border-retro-muted/20 rounded-xl shadow-sm overflow-hidden transition-all"
+                [ngClass]="{
+                  'rounded-2xl': !isMobile(), 
+                  'w-full': isMobile(),
+                  'border-retro-teal border-2 bg-retro-teal/5': dragOverStage() === stage.stageNumber
+                }"
+                (dragover)="onStageDragOver($event, stage.stageNumber)"
+                (dragleave)="dragOverStage.set(null)"
+                (drop)="onStageDrop($event, stage.stageNumber)">
+                
+                <!-- 阶段标题 -->
+                <header 
+                  class="px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-retro-cream/90 transition-colors select-none"
+                  [ngClass]="{'px-4 py-3': !isMobile()}"
+                  (click)="toggleStageCollapse(stage.stageNumber)">
+                  <h3 class="font-bold text-retro-olive tracking-tight flex items-center"
+                      [ngClass]="{'text-sm gap-2': !isMobile(), 'text-xs gap-1.5': isMobile()}">
+                    <span class="rounded-full bg-retro-olive" 
+                          [ngClass]="{'w-1 h-4': !isMobile(), 'w-0.5 h-3': isMobile()}"></span>
+                    阶段 {{stage.stageNumber}}
+                  </h3>
+                  <div class="flex items-center" [ngClass]="{'gap-2': !isMobile(), 'gap-1.5': isMobile()}">
+                    <span class="text-retro-olive font-mono bg-canvas/60 rounded-full"
+                          [ngClass]="{'text-[10px] px-2': !isMobile(), 'text-[9px] px-1.5 py-0.5': isMobile()}">
+                      {{stage.tasks.length}}
+                    </span>
+                    <span class="text-stone-400 text-[10px] transition-transform" 
+                          [class.rotate-180]="!isStageExpanded(stage.stageNumber)">▼</span>
+                  </div>
+                </header>
+
+                <!-- 任务列表 -->
+                @if (isStageExpanded(stage.stageNumber)) {
+                  <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-2 pb-2 task-stack animate-collapse-open"
+                       [ngClass]="{'space-y-2 px-3 pb-3': !isMobile(), 'space-y-1.5 max-h-[40vh]': isMobile()}">
+                    @for (task of stage.tasks; track task.id) {
+                      @if (shouldShowTask(task)) {
+                        @if (dropTargetInfo()?.stageNumber === stage.stageNumber && dropTargetInfo()?.beforeTaskId === task.id) {
+                          <div class="h-0.5 bg-retro-teal rounded-full mx-1 animate-pulse"></div>
+                        }
+                        <div 
+                          [attr.data-task-id]="task.id"
+                          (click)="selectTask(task)"
+                          draggable="true"
+                          (dragstart)="onDragStart($event, task)"
+                          (dragend)="onDragEnd()"
+                          (dragover)="onTaskDragOver($event, task, stage.stageNumber)"
+                          class="relative bg-canvas/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden select-none"
+                          [ngClass]="{
+                            'p-3': !isMobile(), 
+                            'p-2': isMobile(),
+                            'shadow-sm border-retro-muted/20': selectedTaskId() !== task.id,
+                            'ring-1 ring-retro-gold shadow-md': selectedTaskId() === task.id,
+                            'opacity-50': draggingTaskId() === task.id
+                          }">
+                          
+                          <div class="flex justify-between items-start"
+                               [ngClass]="{'mb-1': !isMobile(), 'mb-0.5': isMobile()}">
+                            <span class="font-mono font-medium text-retro-muted"
+                                  [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">{{task.displayId}}</span>
+                            <span class="text-retro-muted/60 font-light"
+                                  [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">{{task.createdDate | date:'HH:mm'}}</span>
+                          </div>
+                          
+                          <div class="font-medium text-retro-dark leading-snug line-clamp-2"
+                               [ngClass]="{'text-sm mb-1': !isMobile(), 'text-xs mb-0.5': isMobile()}">{{task.title}}</div>
+                          
+                          @if (selectedTaskId() !== task.id) {
+                            <div class="text-stone-500 font-light leading-relaxed line-clamp-1"
+                                 [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">{{task.content}}</div>
+                          } @else {
+                            <div class="animate-collapse-open"
+                                 (click)="$event.stopPropagation()"
+                                 (touchstart)="$event.stopPropagation()"
+                                 [ngClass]="{'mt-2 space-y-2': !isMobile(), 'mt-1.5 space-y-1.5': isMobile()}">
+                              <textarea 
+                                #contentInput
+                                [value]="task.content"
+                                (input)="store.updateTaskContent(task.id, contentInput.value)"
+                                class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none touch-manipulation"
+                                [ngClass]="{'h-24 text-xs p-2': !isMobile(), 'h-28 text-[11px] p-2': isMobile()}"
+                                placeholder="输入 Markdown 内容..."></textarea>
+                              
+                              <div class="flex flex-wrap border-t border-stone-100"
+                                   [ngClass]="{'gap-2 pt-2': !isMobile(), 'gap-1.5 pt-1.5': isMobile()}">
+                                <button 
+                                  (click)="addSibling(task, $event)" 
+                                  class="flex-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 font-medium rounded-md flex items-center justify-center transition-all"
+                                  [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
+                                  title="添加同级">
+                                  <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                  同级
+                                </button>
+                                <button 
+                                  (click)="addChild(task, $event)" 
+                                  class="flex-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 font-medium rounded-md flex items-center justify-center transition-all"
+                                  [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
+                                  title="添加下级">
+                                  <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>
+                                  下级
+                                </button>
+                                <button 
+                                  (click)="deleteTask(task, $event)" 
+                                  class="bg-stone-100 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-all"
+                                  [ngClass]="{'px-2 py-1 text-xs': !isMobile(), 'px-1.5 py-0.5 text-[10px]': isMobile()}"
+                                  title="删除任务">
+                                  <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                </button>
+                              </div>
+                            </div>
+                          }
+                        </div>
+                      }
+                    }
+                    @if (dropTargetInfo()?.stageNumber === stage.stageNumber && dropTargetInfo()?.beforeTaskId === null) {
+                      <div class="h-0.5 bg-retro-teal rounded-full mx-1 animate-pulse"></div>
+                    }
+                  </div>
+                }
+              </article>
+            }
+            
+            <!-- 添加阶段按钮 -->
+            <div class="flex items-center justify-center rounded-xl border-2 border-dashed border-stone-200 hover:border-stone-300 transition-all cursor-pointer min-h-[60px]"
+                 [ngClass]="{'py-6': !isMobile(), 'py-4': isMobile()}"
+                 (click)="addNewStage()">
+              <span class="text-stone-400 hover:text-stone-600 text-lg font-light">+ 新阶段</span>
             </div>
           </div>
         </div>
-      </div>
+      </section>
+      
+      <!-- 删除确认弹窗 -->
+      @if (deleteConfirmTask()) {
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
+             (click)="deleteConfirmTask.set(null)">
+          <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-scale-in"
+               [ngClass]="{'w-80 mx-4': isMobile(), 'w-96': !isMobile()}"
+               (click)="$event.stopPropagation()">
+            <div class="px-5 pt-5 pb-4">
+              <div class="flex items-center gap-3 mb-3">
+                <div class="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                  <svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 class="text-lg font-bold text-stone-800">删除任务</h3>
+                  <p class="text-xs text-stone-500">此操作不可撤销</p>
+                </div>
+              </div>
+              <p class="text-sm text-stone-600 leading-relaxed">
+                确定删除任务 <span class="font-semibold text-stone-800">"{{ deleteConfirmTask()?.title }}"</span> 吗？
+              </p>
+              <p class="text-xs text-stone-400 mt-1">这将同时删除其所有子任务。</p>
+            </div>
+            <div class="flex border-t border-stone-100">
+              <button 
+                (click)="deleteConfirmTask.set(null)"
+                class="flex-1 px-4 py-3 text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors">
+                取消
+              </button>
+              <button 
+                (click)="confirmDelete()"
+                class="flex-1 px-4 py-3 text-sm font-medium text-white bg-red-500 hover:bg-red-600 transition-colors">
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `,
   styles: [`
-    .animate-slide-down { animation: slideDown 0.3s ease-out; }
-    .animate-fade-in { animation: fadeIn 0.3s ease-out; }
-    @keyframes slideDown { from { opacity:0; transform: translateY(-10px); } to { opacity:1; transform: translateY(0); } }
-    @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+    .animate-collapse-open { 
+      animation: collapseOpen 0.25s ease-out; 
+    }
+    @keyframes collapseOpen { 
+      from { opacity: 0; transform: translateY(-8px); max-height: 0; } 
+      to { opacity: 1; transform: translateY(0); max-height: 1000px; } 
+    }
   `]
 })
 export class TextViewComponent {
-  store = inject(StoreService);
-  // isUnfinishedOpen removed as it is now in store
-  selectedTaskId = signal<string | null>(null);
+  readonly store = inject(StoreService);
+  
+  // UI 状态
+  readonly selectedTaskId = signal<string | null>(null);
+  readonly collapsedStages = signal<Set<number>>(new Set());
+  readonly isStageFilterOpen = signal(false);
+  readonly isRootFilterOpen = signal(false);
+  
+  // 删除确认状态
+  readonly deleteConfirmTask = signal<Task | null>(null);
+  
+  // 拖拽状态
+  readonly draggingTaskId = signal<string | null>(null);
+  readonly dragOverStage = signal<number | null>(null);
+  readonly dropTargetInfo = signal<{ stageNumber: number; beforeTaskId: string | null } | null>(null);
+  
+  // 触摸拖拽状态
+  private touchState = { task: null as Task | null, startY: 0, targetStage: null as number | null };
 
-  // toggleUnfinished removed
-
-  hoveredTask = signal<{ id: string; stage: number; index: number } | null>(null);
-  draggingTaskId = signal<string | null>(null);
-  isStageFilterOpen = signal(false);
-  isRootFilterOpen = signal(false);
-
-  get currentStageLabel() {
+  // 计算属性
+  readonly isMobile = this.store.isMobile;
+  
+  readonly currentStageLabel = computed(() => {
     const filter = this.store.stageFilter();
-    if (filter === 'all') return '全部';
-    return `阶段 ${filter}`;
-  }
+    return filter === 'all' ? '全部' : `阶段 ${filter}`;
+  });
 
-  get currentRootLabel() {
+  readonly currentRootLabel = computed(() => {
     const filter = this.store.stageViewRootFilter();
     if (filter === 'all') return '全部任务';
-    const task = this.store.allStage1Tasks().find(t => t.id === filter);
-    return task ? task.title : '全部任务';
+    return this.store.allStage1Tasks().find(t => t.id === filter)?.title ?? '全部任务';
+  });
+
+  readonly visibleStages = computed(() => {
+    const filter = this.store.stageFilter();
+    const stages = this.store.stages();
+    return filter === 'all' ? stages : stages.filter(s => s.stageNumber === filter);
+  });
+
+  constructor() {
+    queueMicrotask(() => {
+      const collapsed = new Set(this.store.stages().map(s => s.stageNumber));
+      this.collapsedStages.set(collapsed);
+    });
   }
 
+  // 工具方法
+  trackUnfinished = (item: { taskId: string; text: string }) => `${item.taskId}-${item.text}`;
+  isStageExpanded = (stageNumber: number) => !this.collapsedStages().has(stageNumber);
+
+  shouldShowTask(task: Task): boolean {
+    const rootFilter = this.store.stageViewRootFilter();
+    if (rootFilter === 'all') return true;
+    const root = this.store.allStage1Tasks().find(t => t.id === rootFilter);
+    return root ? (task.id === root.id || task.displayId.startsWith(root.displayId + ',')) : true;
+  }
+
+  // 筛选操作
+  toggleFilter(type: 'stage' | 'root', event: Event) {
+    event.stopPropagation();
+    if (type === 'stage') {
+      this.isStageFilterOpen.update(v => !v);
+      this.isRootFilterOpen.set(false);
+    } else {
+      this.isRootFilterOpen.update(v => !v);
+      this.isStageFilterOpen.set(false);
+    }
+  }
+
+  setStageFilter(value: 'all' | number) {
+    this.store.setStageFilter(value);
+    this.isStageFilterOpen.set(false);
+  }
+
+  setRootFilter(value: string) {
+    this.store.stageViewRootFilter.set(value);
+    this.isRootFilterOpen.set(false);
+  }
+
+  // 阶段折叠
+  toggleStageCollapse(stageNumber: number) {
+    this.collapsedStages.update(set => {
+      const newSet = new Set(set);
+      newSet.has(stageNumber) ? newSet.delete(stageNumber) : newSet.add(stageNumber);
+      return newSet;
+    });
+  }
+
+  expandStage(stageNumber: number) {
+    this.collapsedStages.update(set => {
+      const newSet = new Set(set);
+      newSet.delete(stageNumber);
+      return newSet;
+    });
+  }
+
+  // 任务选择
   selectTask(task: Task) {
-      if (this.selectedTaskId() === task.id) {
-          this.selectedTaskId.set(null);
-      } else {
-          this.selectedTaskId.set(task.id);
+    this.selectedTaskId.update(id => id === task.id ? null : task.id);
+  }
+
+  // 待办项操作
+  completeItem(taskId: string, itemText: string, event: Event) {
+    event.stopPropagation();
+    this.store.completeUnfinishedItem(taskId, itemText);
+  }
+
+  jumpToTask(id: string) {
+    const task = this.store.tasks().find(t => t.id === id);
+    if (!task) return;
+    
+    if (task.stage) {
+      this.expandStage(task.stage);
+      if (this.store.stageFilter() !== 'all' && this.store.stageFilter() !== task.stage) {
+        this.store.setStageFilter('all');
       }
+    }
+    
+    this.selectedTaskId.set(id);
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-task-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
   }
 
-  onTaskDragStart(e: DragEvent, task: Task) {
-      this.draggingTaskId.set(task.id);
-      e.dataTransfer?.setData('text/plain', JSON.stringify(task));
+  // 拖拽操作
+  onDragStart(e: DragEvent, task: Task) {
+    this.draggingTaskId.set(task.id);
+    e.dataTransfer?.setData('application/json', JSON.stringify(task));
+    e.dataTransfer!.effectAllowed = 'move';
   }
 
-  onTaskDragOver(e: DragEvent, task: Task) {
-      e.preventDefault();
+  onDragEnd() {
+    this.draggingTaskId.set(null);
+    this.dragOverStage.set(null);
+    this.dropTargetInfo.set(null);
   }
 
-  onTaskDrop(e: DragEvent, targetTask: Task) {
-      e.preventDefault();
-      const draggingId = this.draggingTaskId();
-      if (draggingId && draggingId !== targetTask.id) {
-          // Reorder logic would go here
-      }
-      this.draggingTaskId.set(null);
+  onTaskDragOver(e: DragEvent, targetTask: Task, stageNumber: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const isAbove = e.clientY < rect.top + rect.height / 2;
+    
+    if (isAbove) {
+      this.dropTargetInfo.set({ stageNumber, beforeTaskId: targetTask.id });
+    } else {
+      const stage = this.visibleStages().find(s => s.stageNumber === stageNumber);
+      const idx = stage?.tasks.findIndex(t => t.id === targetTask.id) ?? -1;
+      const nextTask = stage?.tasks[idx + 1];
+      this.dropTargetInfo.set({ stageNumber, beforeTaskId: nextTask?.id ?? null });
+    }
   }
 
-  onTaskHover(task: Task, stage: number, index: number) {
-      this.hoveredTask.set({ id: task.id, stage, index });
-  }
-
-  onStageDragOver(e: DragEvent) {
-      e.preventDefault();
+  onStageDragOver(e: DragEvent, stageNumber: number) {
+    e.preventDefault();
+    this.dragOverStage.set(stageNumber);
+    this.expandStage(stageNumber);
+    
+    const dropInfo = this.dropTargetInfo();
+    if (!dropInfo || dropInfo.stageNumber !== stageNumber) {
+      this.dropTargetInfo.set({ stageNumber, beforeTaskId: null });
+    }
   }
 
   onStageDrop(e: DragEvent, stageNumber: number) {
-      e.preventDefault();
-      const data = e.dataTransfer?.getData('text/plain');
-      if (data) {
-          const task = JSON.parse(data);
-          if (task.stage !== stageNumber) {
-              this.store.moveTaskToStage(task.id, stageNumber);
-          }
+    e.preventDefault();
+    const data = e.dataTransfer?.getData('application/json');
+    if (data) {
+      const task = JSON.parse(data) as Task;
+      this.store.moveTaskToStage(task.id, stageNumber, this.dropTargetInfo()?.beforeTaskId);
+      this.expandStage(stageNumber);
+    }
+    this.onDragEnd();
+  }
+
+  // 触摸拖拽
+  onTouchStart(e: TouchEvent, task: Task) {
+    if (e.touches.length !== 1) return;
+    this.touchState = { task, startY: e.touches[0].clientY, targetStage: null };
+    this.draggingTaskId.set(task.id);
+  }
+
+  onTouchMove(e: TouchEvent) {
+    if (!this.touchState.task || e.touches.length !== 1) return;
+    e.preventDefault();
+    
+    const touch = e.touches[0];
+    const elements = document.elementsFromPoint(touch.clientX, touch.clientY);
+    
+    for (const el of elements) {
+      const stageEl = el.closest('[data-stage-number]');
+      if (stageEl) {
+        const stageNum = parseInt(stageEl.getAttribute('data-stage-number') || '0', 10);
+        if (stageNum > 0) {
+          this.touchState.targetStage = stageNum;
+          this.dragOverStage.set(stageNum);
+          this.expandStage(stageNum);
+          break;
+        }
       }
+    }
   }
 
-  onCanvasDragOver(e: DragEvent) {
-      e.preventDefault();
+  onTouchEnd(e: TouchEvent) {
+    const { task, startY, targetStage } = this.touchState;
+    if (!task) return;
+    
+    const dragDistance = Math.abs((e.changedTouches[0]?.clientY ?? startY) - startY);
+    if (dragDistance > 30 && targetStage) {
+      this.store.moveTaskToStage(task.id, targetStage);
+      this.expandStage(targetStage);
+    }
+    
+    this.touchState = { task: null, startY: 0, targetStage: null };
+    this.onDragEnd();
   }
 
-  onUnassignDrop(e: DragEvent) {
-      e.preventDefault();
-      const data = e.dataTransfer?.getData('text/plain');
-      if (data) {
-          const task = JSON.parse(data);
-          this.store.moveTaskToStage(task.id, null);
-      }
-  }
-  
-  jumpToTask(id: string) {
-      this.selectedTaskId.set(id);
-      // logic to scroll to element would go here
-  }
-
-  visibleStages() {
-      const filter = this.store.stageFilter();
-      const stages = this.store.stages();
-      if (filter === 'all') return stages;
-      return stages.filter(s => s.stageNumber === filter);
-  }
-
-  updateRootFilter(e: Event) {
-      const val = (e.target as HTMLSelectElement).value;
-      this.store.stageViewRootFilter.set(val);
-  }
-
-  onStageFilterChange(e: Event) {
-      const val = (e.target as HTMLSelectElement).value;
-      this.store.setStageFilter(val === 'all' ? 'all' : +val);
-  }
-
-  shouldShow(task: Task, stageNumber?: number, index?: number) {
-      // Stage Filter
-      if (this.store.stageFilter() !== 'all' && task.stage !== this.store.stageFilter()) {
-          return false;
-      }
-      
-      // Root Task Filter (Stage View Only)
-      const rootFilter = this.store.stageViewRootFilter();
-      if (rootFilter !== 'all') {
-          const root = this.store.allStage1Tasks().find(t => t.id === rootFilter);
-          if (root) {
-              // Show if it's the root itself or a descendant (based on displayId prefix)
-              // e.g. root="1", child="1,a"
-              const isRelated = task.id === root.id || task.displayId.startsWith(root.displayId + ',');
-              if (!isRelated) return false;
-          }
-      }
-
-      return true;
-  }
-  
-  previewMode(stage: number, index: number, taskId: string): 'full' | 'minimal' | 'hidden' {
-      return 'full';
-  }
-  
-  updateContent(id: string, content: string) {
-      this.store.updateTaskContent(id, content);
-  }
-  
+  // 任务创建
   addSibling(task: Task, e: Event) {
-      e.stopPropagation();
-      this.store.addTask("新同级任务", "详情...", task.stage, task.parentId, true);
+    e.stopPropagation();
+    this.store.addTask('新同级任务', '详情...', task.stage, task.parentId, true);
   }
-  
+
   addChild(task: Task, e: Event) {
-      e.stopPropagation();
-      const nextStage = (task.stage || 0) + 1;
-      this.store.addTask("新子任务", "详情...", nextStage, task.id, false);
+    e.stopPropagation();
+    this.store.addTask('新子任务', '详情...', (task.stage || 0) + 1, task.id, false);
   }
-  
+
+  deleteTask(task: Task, e: Event) {
+    e.stopPropagation();
+    this.deleteConfirmTask.set(task);
+  }
+
+  confirmDelete() {
+    const task = this.deleteConfirmTask();
+    if (task) {
+      this.selectedTaskId.set(null);
+      this.store.deleteTask(task.id);
+      this.deleteConfirmTask.set(null);
+    }
+  }
+
   createUnassigned() {
-      this.store.addTask("新未分配任务", "...", null, null, false);
+    this.store.addTask('新未分配任务', '...', null, null, false);
   }
-  
+
   addNewStage() {
-      // Adds a task to a new max stage + 1
-      const maxStage = Math.max(...this.store.stages().map(s => s.stageNumber), 0);
-      this.store.addTask("新阶段任务", "开始...", maxStage + 1, null, false);
-  }
-  
-  async askAI(task: Task, e: Event) {
-      e.stopPropagation();
-      const res = await this.store.think(`为任务 "${task.title}" 建议一个详细的检查清单。`);
-      this.store.updateTaskContent(task.id, task.content + '\n\n**AI 建议:**\n' + res);
-  }
-
-  getMobileViewMode(taskId: string, stageTasks: Task[]): 'full' | 'partial' | 'collapsed' {
-    if (!this.store.isMobile()) return 'full';
-    
-    const selectedId = this.selectedTaskId();
-    if (selectedId === taskId) return 'full';
-    
-    if (!selectedId) return 'collapsed'; 
-
-    const selectedIndex = stageTasks.findIndex(t => t.id === selectedId);
-    const myIndex = stageTasks.findIndex(t => t.id === taskId);
-    
-    if (selectedIndex !== -1 && Math.abs(selectedIndex - myIndex) === 1) return 'partial';
-    
-    return 'collapsed';
+    const maxStage = Math.max(...this.store.stages().map(s => s.stageNumber), 0);
+    this.store.addTask('新阶段任务', '开始...', maxStage + 1, null, false);
   }
 }

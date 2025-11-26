@@ -6,28 +6,32 @@ import { environment } from '../environments/environment'; // 引入环境文件
   providedIn: 'root'
 })
 export class SupabaseClientService {
-  private supabase: SupabaseClient;
+  private supabase: SupabaseClient | null = null;
 
   constructor() {
     const supabaseUrl = environment.supabaseUrl;
     const supabaseAnonKey = environment.supabaseAnonKey;
 
     if (!supabaseUrl || !supabaseAnonKey) {
-      console.error('Supabase keys missing. Check src/environments/environment.ts');
-      // 防止报错崩溃，给个空值，但功能会失效
-      this.supabase = createClient('https://placeholder.supabase.co', 'placeholder');
+      console.warn('Supabase keys missing. Check src/environments/environment.ts. App will run in offline mode.');
+      // 不创建客户端，使用 null
       return;
     }
 
-    this.supabase = createClient(supabaseUrl, supabaseAnonKey);
+    try {
+      this.supabase = createClient(supabaseUrl, supabaseAnonKey);
+    } catch (e) {
+      console.error('Failed to initialize Supabase client:', e);
+      this.supabase = null;
+    }
   }
 
   get isConfigured() {
-    return Boolean(environment.supabaseUrl && environment.supabaseAnonKey);
+    return this.supabase !== null;
   }
 
   client(): SupabaseClient {
-    if (!this.isConfigured) {
+    if (!this.supabase) {
       throw new Error('Supabase 未配置，请提供 NG_APP_SUPABASE_URL 与 NG_APP_SUPABASE_ANON_KEY');
     }
     return this.supabase;
@@ -38,21 +42,21 @@ export class SupabaseClientService {
   }
 
   async getSession() {
-    if (!this.isConfigured) {
+    if (!this.supabase) {
       return { data: { session: null as Session | null }, error: null };
     }
     return this.supabase.auth.getSession();
   }
 
   async signInWithPassword(email: string, password: string): Promise<AuthResponse> {
-    if (!this.isConfigured) {
+    if (!this.supabase) {
       throw new Error('Supabase 未配置，无法登录');
     }
     return this.supabase.auth.signInWithPassword({ email, password });
   }
 
   async signOut() {
-    if (!this.isConfigured) return;
+    if (!this.supabase) return;
     await this.supabase.auth.signOut();
   }
 }
