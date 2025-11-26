@@ -2,11 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 
-// 读取 .env.local
-const envConfig = dotenv.config({ path: path.resolve(__dirname, '../.env.local') }).parsed;
+// 优先读取 .env.local，其次读取进程环境（方便 Vercel/Supabase 等 CI 环境）
+const localEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.local') }).parsed || {};
+const supabaseUrl = process.env.NG_APP_SUPABASE_URL || localEnv.NG_APP_SUPABASE_URL;
+const supabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY || localEnv.NG_APP_SUPABASE_ANON_KEY;
 
-if (!envConfig) {
-  console.error('❌ 未找到 .env.local 文件或文件为空');
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error('❌ 未找到 Supabase 环境变量，请设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY');
   process.exit(1);
 }
 
@@ -16,8 +18,8 @@ const targetPathProd = path.resolve(__dirname, '../src/environments/environment.
 const envFileContent = `
 export const environment = {
   production: false,
-  supabaseUrl: '${envConfig.NG_APP_SUPABASE_URL}',
-  supabaseAnonKey: '${envConfig.NG_APP_SUPABASE_ANON_KEY}'
+  supabaseUrl: '${supabaseUrl}',
+  supabaseAnonKey: '${supabaseAnonKey}'
 };
 `;
 
