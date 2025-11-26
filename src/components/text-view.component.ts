@@ -91,10 +91,10 @@ import { StoreService, Task } from '../services/store.service';
 
       <!-- 3. 阶段区域 -->
       <section 
-        class="flex-1 min-h-0 overflow-auto"
+        class="flex-1 min-h-0 overflow-hidden flex flex-col"
         [ngClass]="{'px-4 pb-6': !isMobile(), 'px-2 pb-4': isMobile()}">
         <div 
-          class="rounded-xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-2 py-2 shadow-inner w-full h-full flex flex-col"
+          class="rounded-xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-2 py-2 shadow-inner w-full h-full flex flex-col overflow-hidden"
           [ngClass]="{'rounded-2xl px-4 py-3': !isMobile()}">
           
           <!-- 筛选栏 -->
@@ -180,8 +180,8 @@ import { StoreService, Task } from '../services/store.service';
           </div>
           
           <!-- 阶段列表 -->
-          <div class="w-full flex-1 overflow-auto"
-               [ngClass]="{'grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 content-start items-start': !isMobile(), 'flex flex-col gap-2': isMobile()}">
+            <div class="w-full flex-1 min-h-0 overflow-auto"
+              [ngClass]="{'grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 content-start items-start': !isMobile(), 'flex flex-col gap-2 flex-1 min-h-0': isMobile()}">
             @for (stage of visibleStages(); track stage.stageNumber) {
               <article 
                 [attr.data-stage-number]="stage.stageNumber"

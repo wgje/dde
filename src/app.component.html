@@ -163,11 +163,7 @@
   }
 
   <!-- Main Content -->
-  <main class="flex-1 flex relative responsive-stack overflow-x-hidden" style="background-color: var(--theme-bg);"
-        [class.h-full]="!store.isMobile()"
-        [class.h-auto]="store.isMobile()"
-        [class.overflow-hidden]="!store.isMobile()"
-        [class.overflow-y-auto]="store.isMobile()"
+  <main class="flex-1 flex relative responsive-stack overflow-x-hidden h-full overflow-hidden" style="background-color: var(--theme-bg);"
         role="main"
         aria-label="任务管理区域">
     @if (store.activeProjectId()) {
@@ -175,6 +171,8 @@
       <div class="flex flex-col border-r min-w-[300px]" style="background-color: var(--theme-bg); border-color: var(--theme-border);"
            [class.hidden]="store.isMobile() && mobileActiveView() !== 'text'"
            [class.w-full]="store.isMobile()"
+           [class.flex-1]="store.isMobile()"
+           [class.min-h-0]="store.isMobile()"
            [style.width.%]="store.isMobile() ? 100 : store.textColumnRatio()">
         <!-- Header for Text Column -->
         <div class="shrink-0 z-10"
@@ -280,9 +278,7 @@
              }
            }
         </div>
-        <app-text-view class="flex-1"
-                       [class.overflow-hidden]="!store.isMobile()"
-                       [class.overflow-y-auto]="store.isMobile()"></app-text-view>
+        <app-text-view class="flex-1 min-h-0 overflow-hidden"></app-text-view>
       </div>
 
       <!-- Content Resizer -->
