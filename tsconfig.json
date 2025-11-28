@@ -25,7 +25,7 @@
     }
   },
   "files": [
-    "./index.tsx",
+    "./main.ts",
     "./src/typings.d.ts"
   ],
   "angularCompilerOptions": {

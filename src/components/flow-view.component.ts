@@ -2,8 +2,7 @@ import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewIn
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService, Task } from '../services/store.service';
-
-declare var go: any;
+import * as go from 'gojs';
 
 @Component({
   selector: 'app-flow-view',

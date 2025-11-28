@@ -51,8 +51,18 @@ CREATE POLICY "owner delete" ON public.projects
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON public.projects(owner_id);
 
--- 启用实时订阅
-ALTER PUBLICATION supabase_realtime ADD TABLE public.projects;
+-- 启用实时订阅（如果尚未添加）
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' 
+    AND schemaname = 'public' 
+    AND tablename = 'projects'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.projects;
+  END IF;
+END $$;
 
 -- ============================================
 -- 2. 用户偏好设置表 (user_preferences)

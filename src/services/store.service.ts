@@ -2,6 +2,7 @@
 import { GoogleGenAI } from '@google/genai';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { SupabaseClientService } from './supabase-client.service';
+import { environment } from '../environments/environment';
 
 export interface Task {
   id: string;
@@ -116,6 +117,12 @@ export class StoreService {
   private editingTimer: ReturnType<typeof setTimeout> | null = null;
 
   private resolveApiKey() {
+    // 优先从环境配置读取
+    const envKey = (environment as any).geminiApiKey;
+    if (typeof envKey === 'string' && envKey.trim() && !envKey.includes('YOUR_')) {
+      return envKey.trim();
+    }
+    // 其次从全局变量读取（兼容旧版配置）
     const candidate = (globalThis as any).__GENAI_API_KEY__;
     if (typeof candidate === 'string' && candidate.trim()) {
       return candidate.trim();

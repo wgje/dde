@@ -1,14 +1,2 @@
-declare module '@angular/service-worker' {
-  import { Observable } from 'rxjs';
-
-  export interface VersionReadyEvent {
-    type: 'VERSION_READY';
-  }
-
-  export abstract class SwUpdate {
-    abstract readonly isEnabled: boolean;
-    abstract readonly versionUpdates: Observable<VersionReadyEvent>;
-  }
-
-  export function provideServiceWorker(script: string, options?: any): any;
-}
+// 如需添加自定义类型声明，请在此文件中添加
+// @angular/service-worker 自带类型定义，无需手动声明

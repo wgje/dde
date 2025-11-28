@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { createClient, type AuthResponse, type Session, type SupabaseClient } from '@supabase/supabase-js';
 import { environment } from '../environments/environment'; // 引入环境文件
 
@@ -7,14 +7,31 @@ import { environment } from '../environments/environment'; // 引入环境文件
 })
 export class SupabaseClientService {
   private supabase: SupabaseClient | null = null;
+  
+  // 配置状态信号，UI 可以响应式订阅
+  readonly configurationError = signal<string | null>(null);
+  readonly isOfflineMode = signal(false);
 
   constructor() {
     const supabaseUrl = environment.supabaseUrl;
     const supabaseAnonKey = environment.supabaseAnonKey;
 
-    if (!supabaseUrl || !supabaseAnonKey) {
-      console.warn('Supabase keys missing. Check src/environments/environment.ts. App will run in offline mode.');
-      // 不创建客户端，使用 null
+    // 检查是否为模板占位符
+    const isPlaceholder = (val: string) => 
+      !val || val === 'YOUR_SUPABASE_URL' || val === 'YOUR_SUPABASE_ANON_KEY';
+
+    if (isPlaceholder(supabaseUrl) || isPlaceholder(supabaseAnonKey)) {
+      const errorMsg = 'Supabase 环境变量未配置。请运行 npm run config 或手动配置 .env.local 文件。';
+      
+      if (environment.production) {
+        // 生产环境：记录严重错误
+        console.error('🚨 [CRITICAL]', errorMsg);
+        this.configurationError.set(errorMsg);
+      } else {
+        // 开发环境：警告并进入离线模式
+        console.warn('⚠️', errorMsg, '应用将以离线模式运行。');
+        this.isOfflineMode.set(true);
+      }
       return;
     }
 
@@ -22,6 +39,7 @@ export class SupabaseClientService {
       this.supabase = createClient(supabaseUrl, supabaseAnonKey);
     } catch (e) {
       console.error('Failed to initialize Supabase client:', e);
+      this.configurationError.set('Supabase 客户端初始化失败');
       this.supabase = null;
     }
   }
