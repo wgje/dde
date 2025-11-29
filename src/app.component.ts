@@ -1,9 +1,13 @@
 import { Component, inject, signal, HostListener, computed, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StoreService } from './services/store.service';
+import { AuthService } from './services/auth.service';
+import { UndoService } from './services/undo.service';
+import { ToastService } from './services/toast.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { TextViewComponent } from './components/text-view.component';
 import { FlowViewComponent } from './components/flow-view.component';
+import { ToastContainerComponent } from './components/toast-container.component';
 import { FormsModule } from '@angular/forms';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
@@ -11,13 +15,16 @@ import { filter } from 'rxjs/operators';
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, TextViewComponent, FlowViewComponent, FormsModule],
+  imports: [CommonModule, TextViewComponent, FlowViewComponent, ToastContainerComponent, FormsModule],
   templateUrl: './app.component.html',
 })
 export class AppComponent {
   store = inject(StoreService);
-  supabase = inject(SupabaseClientService);
+  auth = inject(AuthService);
+  undoService = inject(UndoService);
   swUpdate = inject(SwUpdate);
+  toast = inject(ToastService);
+  supabaseClient = inject(SupabaseClientService);
   
   @ViewChild(FlowViewComponent) flowView?: FlowViewComponent;
 
@@ -33,6 +40,17 @@ export class AppComponent {
   isCheckingSession = signal(true);
   sessionEmail = signal<string | null>(null);
   isReloginMode = signal(false);
+  
+  // 配置错误提示对话框
+  showConfigHelp = signal(false);
+  
+  // 注册模式
+  isSignupMode = signal(false);
+  authConfirmPassword = signal('');
+  
+  // 密码重置模式
+  isResetPasswordMode = signal(false);
+  resetPasswordSent = signal(false);
 
   // Mobile Support
   mobileActiveView = signal<'text' | 'flow'>('text');
@@ -154,6 +172,14 @@ export class AppComponent {
 
   readonly showSettingsAuthForm = computed(() => !this.store.currentUserId() || this.isReloginMode());
   
+  // 冲突解决相关
+  showConflictModal = signal(false);
+  conflictData = signal<{
+    localProject: any;
+    remoteProject: any;
+    projectId: string;
+  } | null>(null);
+  
   currentFilterLabel = computed(() => {
     const filterId = this.store.filterMode();
     if (filterId === 'all') return '全部任务';
@@ -174,6 +200,75 @@ export class AppComponent {
     this.checkMobile();
     this.setupSwUpdateListener();
     this.applyStoredTheme();
+    this.setupConflictHandler();
+  }
+  
+  private setupConflictHandler() {
+    // 监听冲突事件
+    this.store.onConflict = (local, remote, projectId) => {
+      this.conflictData.set({ localProject: local, remoteProject: remote, projectId });
+      this.showConflictModal.set(true);
+    };
+  }
+  
+  // 解决冲突：使用本地版本
+  resolveConflictLocal() {
+    const data = this.conflictData();
+    if (data) {
+      this.store.resolveConflict(data.projectId, 'local');
+      this.toast.success('已使用本地版本');
+    }
+    this.showConflictModal.set(false);
+    this.conflictData.set(null);
+  }
+  
+  // 解决冲突：使用远程版本
+  resolveConflictRemote() {
+    const data = this.conflictData();
+    if (data) {
+      this.store.resolveConflict(data.projectId, 'remote');
+      this.toast.success('已使用云端版本');
+    }
+    this.showConflictModal.set(false);
+    this.conflictData.set(null);
+  }
+  
+  // 解决冲突：智能合并
+  resolveConflictMerge() {
+    const data = this.conflictData();
+    if (data) {
+      this.store.resolveConflict(data.projectId, 'merge');
+      this.toast.success('智能合并完成');
+    }
+    this.showConflictModal.set(false);
+    this.conflictData.set(null);
+  }
+  
+  // 取消冲突解决（稍后处理）
+  cancelConflictResolution() {
+    this.showConflictModal.set(false);
+    // 不清除 conflictData，以便稍后可以重新打开
+    this.toast.info('冲突待解决，下次同步时会再次提示');
+  }
+  
+  // 撤销/重做快捷键
+  @HostListener('document:keydown', ['$event'])
+  handleKeyboardShortcut(event: KeyboardEvent) {
+    // Ctrl+Z / Cmd+Z: 撤销
+    if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      this.undoService.undo();
+    }
+    // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
+    if ((event.ctrlKey || event.metaKey) && event.key === 'z' && event.shiftKey) {
+      event.preventDefault();
+      this.undoService.redo();
+    }
+    // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
+    if ((event.ctrlKey || event.metaKey) && event.key === 'y') {
+      event.preventDefault();
+      this.undoService.redo();
+    }
   }
   
   private applyStoredTheme() {
@@ -263,18 +358,16 @@ export class AppComponent {
   }
 
   private async bootstrapSession() {
-    if (!this.supabase.isConfigured) {
+    if (!this.auth.isConfigured) {
       this.isCheckingSession.set(false);
       return;
     }
     this.isCheckingSession.set(true);
     try {
-      const { data, error } = await this.supabase.getSession();
-      if (error) throw error;
-      const session = data?.session;
-      if (session?.user) {
-        this.sessionEmail.set(session.user.email ?? null);
-        await this.store.setCurrentUser(session.user.id);
+      const result = await this.auth.checkSession();
+      if (result.userId) {
+        this.sessionEmail.set(result.email);
+        await this.store.setCurrentUser(result.userId);
       }
     } catch (e: any) {
       this.authError.set(e?.message ?? String(e));
@@ -285,21 +378,21 @@ export class AppComponent {
 
   async handleLogin(event?: Event, opts?: { closeSettings?: boolean }) {
     event?.preventDefault();
-    if (!this.supabase.isConfigured) {
+    if (!this.auth.isConfigured) {
       this.authError.set('Supabase keys missing. Set NG_APP_SUPABASE_URL/NG_APP_SUPABASE_ANON_KEY.');
       return;
     }
     this.authError.set(null);
     this.isAuthLoading.set(true);
     try {
-      const { data, error } = await this.supabase.signInWithPassword(this.authEmail(), this.authPassword());
-      if (error || !data.session?.user) {
-        throw new Error(error?.message || 'Login failed');
+      const result = await this.auth.signIn(this.authEmail(), this.authPassword());
+      if (result.error || !result.success) {
+        throw new Error(result.error || 'Login failed');
       }
-      this.sessionEmail.set(data.session.user.email ?? null);
-      await this.store.setCurrentUser(data.session.user.id);
+      this.sessionEmail.set(this.auth.sessionEmail());
+      await this.store.setCurrentUser(this.auth.currentUserId());
       this.isReloginMode.set(false);
-      this.showLoginModal.set(false); // 关闭登录模态框
+      this.showLoginModal.set(false);
       if (opts?.closeSettings) {
         this.showSettings.set(false);
       }
@@ -310,14 +403,116 @@ export class AppComponent {
       this.isCheckingSession.set(false);
     }
   }
+  
+  // 新增：注册功能
+  async handleSignup(event?: Event) {
+    event?.preventDefault();
+    if (!this.auth.isConfigured) {
+      this.authError.set('Supabase keys missing.');
+      return;
+    }
+    
+    // 验证密码匹配
+    if (this.authPassword() !== this.authConfirmPassword()) {
+      this.authError.set('两次输入的密码不一致');
+      return;
+    }
+    
+    // 密码强度检查
+    if (this.authPassword().length < 6) {
+      this.authError.set('密码长度至少6位');
+      return;
+    }
+    
+    this.authError.set(null);
+    this.isAuthLoading.set(true);
+    try {
+      const result = await this.auth.signUp(this.authEmail(), this.authPassword());
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (result.needsConfirmation) {
+        // 需要邮箱验证
+        this.authError.set('注册成功！请查收邮件并点击验证链接完成注册。');
+      } else if (result.success && this.auth.currentUserId()) {
+        // 注册成功且自动登录
+        this.sessionEmail.set(this.auth.sessionEmail());
+        await this.store.setCurrentUser(this.auth.currentUserId());
+        this.showLoginModal.set(false);
+        this.isSignupMode.set(false);
+      }
+    } catch (e: any) {
+      this.authError.set(e?.message ?? String(e));
+    } finally {
+      this.isAuthLoading.set(false);
+    }
+  }
+  
+  // 新增：密码重置
+  async handleResetPassword(event?: Event) {
+    event?.preventDefault();
+    if (!this.auth.isConfigured) {
+      this.authError.set('Supabase keys missing.');
+      return;
+    }
+    
+    if (!this.authEmail()) {
+      this.authError.set('请输入邮箱地址');
+      return;
+    }
+    
+    this.authError.set(null);
+    this.isAuthLoading.set(true);
+    try {
+      const result = await this.auth.resetPassword(this.authEmail());
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      this.resetPasswordSent.set(true);
+    } catch (e: any) {
+      this.authError.set(e?.message ?? String(e));
+    } finally {
+      this.isAuthLoading.set(false);
+    }
+  }
+  
+  // 切换到注册模式
+  switchToSignup() {
+    this.isSignupMode.set(true);
+    this.isResetPasswordMode.set(false);
+    this.authError.set(null);
+    this.authPassword.set('');
+    this.authConfirmPassword.set('');
+  }
+  
+  // 切换到登录模式
+  switchToLogin() {
+    this.isSignupMode.set(false);
+    this.isResetPasswordMode.set(false);
+    this.resetPasswordSent.set(false);
+    this.authError.set(null);
+  }
+  
+  // 切换到密码重置模式
+  switchToResetPassword() {
+    this.isResetPasswordMode.set(true);
+    this.isSignupMode.set(false);
+    this.resetPasswordSent.set(false);
+    this.authError.set(null);
+  }
 
   async signOut() {
-    if (this.supabase.isConfigured) {
-      await this.supabase.signOut();
+    // 先清空本地敏感数据，防止数据泄露
+    this.store.clearLocalData();
+    
+    if (this.auth.isConfigured) {
+      await this.auth.signOut();
     }
     this.sessionEmail.set(null);
     this.authPassword.set('');
     this.isReloginMode.set(false);
+    this.isSignupMode.set(false);
+    this.isResetPasswordMode.set(false);
     await this.store.setCurrentUser(null);
   }
 

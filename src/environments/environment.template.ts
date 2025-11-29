@@ -5,6 +5,5 @@
 export const environment = {
   production: false,
   supabaseUrl: 'YOUR_SUPABASE_URL',
-  supabaseAnonKey: 'YOUR_SUPABASE_ANON_KEY',
-  geminiApiKey: 'YOUR_GEMINI_API_KEY'  // 可选：AI 功能
+  supabaseAnonKey: 'YOUR_SUPABASE_ANON_KEY'
 };

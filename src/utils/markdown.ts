@@ -1,75 +1,261 @@
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 
-declare const marked: any;
-declare const mermaid: any;
+/**
+ * 安全的 Markdown 渲染器
+ * 支持基础语法：标题、粗体、斜体、删除线、链接、代码、列表、待办
+ * 
+ * 安全特性：
+ * - 转义所有 HTML 特殊字符
+ * - 验证和清洗 URL（阻止 javascript: 伪协议）
+ * - 限制允许的 HTML 标签和属性
+ */
 
-let markedConfigured = false;
-let mermaidInitialized = false;
+/**
+ * 危险 URL 协议列表
+ */
+const DANGEROUS_PROTOCOLS = [
+  'javascript:',
+  'vbscript:',
+  'data:text/html',
+  'data:application/javascript',
+];
 
-function escapeHtml(value: string) {
-  return (value || '').replace(/&/g, '&amp;')
+/**
+ * 验证 URL 是否安全
+ */
+function isSafeUrl(url: string): boolean {
+  const normalized = url.toLowerCase().trim();
+  return !DANGEROUS_PROTOCOLS.some(proto => normalized.startsWith(proto));
+}
+
+/**
+ * 清洗 URL，返回安全的 URL 或空字符串
+ */
+function sanitizeUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!isSafeUrl(trimmed)) {
+    console.warn('Blocked potentially dangerous URL:', trimmed);
+    return '#blocked';
+  }
+  // 转义 URL 中的特殊字符
+  return trimmed
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * 转义 HTML 特殊字符
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
-function sanitizeHref(href?: string | null) {
-  if (!href) return '#';
-  const trimmed = href.trim().toLowerCase();
-  if (trimmed.startsWith('javascript:') || trimmed.startsWith('data:')) return '#';
-  return href;
+/**
+ * 解析内联 Markdown 语法（安全版本）
+ */
+function parseInline(text: string): string {
+  let result = escapeHtml(text);
+  
+  // 代码块 `code`
+  result = result.replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 bg-stone-100 rounded text-xs font-mono text-pink-600">$1</code>');
+  
+  // 粗体 **text** 或 __text__
+  result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  result = result.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  
+  // 斜体 *text* 或 _text_
+  result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  result = result.replace(/_([^_]+)_/g, '<em>$1</em>');
+  
+  // 删除线 ~~text~~
+  result = result.replace(/~~([^~]+)~~/g, '<del class="text-stone-400">$1</del>');
+  
+  // 链接 [text](url) - 使用安全的 URL 处理
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+    const safeUrl = sanitizeUrl(url);
+    return `<a href="${safeUrl}" class="text-indigo-600 hover:text-indigo-800 underline" target="_blank" rel="noopener noreferrer">${text}</a>`;
+  });
+  
+  return result;
 }
 
-function ensureMarkedConfigured() {
-  if (markedConfigured || typeof marked === 'undefined') return;
-
-  const renderer = new marked.Renderer();
-  const baseCode = renderer.code?.bind(renderer);
-
-  renderer.code = (code: string, infostring?: string, escaped?: boolean) => {
-    const lang = (infostring || '').trim().toLowerCase();
-    if (lang === 'mermaid' || lang === 'flowchart') {
-      return `<div class="mermaid">${code}</div>`;
+/**
+ * 渲染 Markdown 为 HTML
+ */
+export function renderMarkdown(content: string): string {
+  if (!content) return '';
+  
+  const lines = content.split('\n');
+  const htmlLines: string[] = [];
+  let inCodeBlock = false;
+  let codeBlockContent: string[] = [];
+  let codeBlockLang = '';
+  let inList = false;
+  let listItems: string[] = [];
+  
+  const flushList = () => {
+    if (listItems.length > 0) {
+      htmlLines.push('<ul class="list-disc list-inside space-y-1 my-2">');
+      listItems.forEach(item => {
+        htmlLines.push(`<li class="text-stone-600">${item}</li>`);
+      });
+      htmlLines.push('</ul>');
+      listItems = [];
+      inList = false;
     }
-    return baseCode ? baseCode(code, infostring, escaped) : false;
   };
-  renderer.html = (html: string) => escapeHtml(html);
-  renderer.link = (href: string | null, title: string | null, text: string) => {
-    const safeHref = sanitizeHref(href);
-    const safeTitle = title ? ` title="${escapeHtml(title)}"` : '';
-    return `<a href="${escapeHtml(safeHref)}"${safeTitle} rel="noopener noreferrer" target="_blank">${text}</a>`;
-  };
-
-  marked.use({ renderer });
-  markedConfigured = true;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // 代码块开始/结束
+    if (line.startsWith('```')) {
+      if (inCodeBlock) {
+        // 结束代码块
+        htmlLines.push(`<pre class="bg-stone-800 text-stone-100 rounded-lg p-3 text-xs font-mono overflow-x-auto my-2"><code>${escapeHtml(codeBlockContent.join('\n'))}</code></pre>`);
+        codeBlockContent = [];
+        inCodeBlock = false;
+      } else {
+        // 开始代码块
+        flushList();
+        codeBlockLang = line.slice(3).trim();
+        inCodeBlock = true;
+      }
+      continue;
+    }
+    
+    if (inCodeBlock) {
+      codeBlockContent.push(line);
+      continue;
+    }
+    
+    // 空行
+    if (line.trim() === '') {
+      flushList();
+      htmlLines.push('<br/>');
+      continue;
+    }
+    
+    // 标题
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      flushList();
+      const level = headingMatch[1].length;
+      const text = parseInline(headingMatch[2]);
+      const sizeClass = ['text-xl font-bold', 'text-lg font-bold', 'text-base font-semibold', 'text-sm font-semibold', 'text-xs font-semibold', 'text-xs font-medium'][level - 1];
+      htmlLines.push(`<h${level} class="${sizeClass} text-stone-800 my-2">${text}</h${level}>`);
+      continue;
+    }
+    
+    // 待办事项（特殊处理）
+    const todoMatch = line.match(/^-\s*\[([ xX])\]\s*(.+)$/);
+    if (todoMatch) {
+      flushList();
+      const isChecked = todoMatch[1].toLowerCase() === 'x';
+      const text = parseInline(todoMatch[2]);
+      const checkedClass = isChecked ? 'line-through text-stone-400' : 'text-stone-700';
+      const checkboxClass = isChecked ? 'text-emerald-500' : 'text-stone-300';
+      htmlLines.push(`<div class="flex items-start gap-2 my-1">
+        <span class="${checkboxClass}">${isChecked ? '☑' : '☐'}</span>
+        <span class="${checkedClass}">${text}</span>
+      </div>`);
+      continue;
+    }
+    
+    // 无序列表
+    const ulMatch = line.match(/^[-*+]\s+(.+)$/);
+    if (ulMatch) {
+      inList = true;
+      listItems.push(parseInline(ulMatch[1]));
+      continue;
+    }
+    
+    // 有序列表
+    const olMatch = line.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      flushList();
+      htmlLines.push(`<div class="flex items-start gap-2 my-1">
+        <span class="text-stone-400 text-xs">•</span>
+        <span class="text-stone-600">${parseInline(olMatch[1])}</span>
+      </div>`);
+      continue;
+    }
+    
+    // 分割线
+    if (/^[-*_]{3,}$/.test(line.trim())) {
+      flushList();
+      htmlLines.push('<hr class="my-3 border-stone-200"/>');
+      continue;
+    }
+    
+    // 引用
+    if (line.startsWith('>')) {
+      flushList();
+      const text = parseInline(line.slice(1).trim());
+      htmlLines.push(`<blockquote class="border-l-4 border-stone-300 pl-3 my-2 text-stone-500 italic">${text}</blockquote>`);
+      continue;
+    }
+    
+    // 普通段落
+    flushList();
+    htmlLines.push(`<p class="text-stone-600 my-1">${parseInline(line)}</p>`);
+  }
+  
+  // 处理未闭合的代码块
+  if (inCodeBlock && codeBlockContent.length > 0) {
+    htmlLines.push(`<pre class="bg-stone-800 text-stone-100 rounded-lg p-3 text-xs font-mono overflow-x-auto my-2"><code>${escapeHtml(codeBlockContent.join('\n'))}</code></pre>`);
+  }
+  
+  // 处理未闭合的列表
+  flushList();
+  
+  return htmlLines.join('');
 }
 
-function schedule(fn: () => void) {
-  if (typeof queueMicrotask === 'function') {
-    queueMicrotask(fn);
-  } else {
-    setTimeout(fn, 0);
-  }
-}
-
-function runMermaid(host?: HTMLElement) {
-  if (!host || typeof mermaid === 'undefined') return;
-  if (!mermaidInitialized) {
-    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
-    mermaidInitialized = true;
-  }
-  const nodes = host.querySelectorAll('.markdown-preview .mermaid:not([data-processed])');
-  if (nodes.length === 0) return;
-  mermaid.run({ nodes });
-}
-
-export function renderMarkdownWithMermaid(content: string, sanitizer: DomSanitizer, host?: HTMLElement): SafeHtml | string {
-  if (typeof marked === 'undefined') return content;
-  ensureMarkedConfigured();
-  const html = marked.parse(escapeHtml(content || ''));
-  if (host) {
-    schedule(() => runMermaid(host));
-  }
+/**
+ * 渲染 Markdown 并返回安全的 HTML（用于 Angular）
+ */
+export function renderMarkdownSafe(content: string, sanitizer: DomSanitizer): SafeHtml {
+  const html = renderMarkdown(content);
   return sanitizer.bypassSecurityTrustHtml(html);
 }
+
+/**
+ * 提取纯文本摘要（用于预览）
+ */
+export function extractPlainText(content: string, maxLength: number = 100): string {
+  if (!content) return '';
+  
+  // 移除 Markdown 语法
+  let text = content
+    .replace(/```[\s\S]*?```/g, '') // 代码块
+    .replace(/`[^`]+`/g, '') // 行内代码
+    .replace(/\*\*([^*]+)\*\*/g, '$1') // 粗体
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1') // 斜体
+    .replace(/_([^_]+)_/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1') // 删除线
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // 链接
+    .replace(/^#+\s+/gm, '') // 标题
+    .replace(/^[-*+]\s+/gm, '') // 列表
+    .replace(/^\d+\.\s+/gm, '') // 有序列表
+    .replace(/^>\s+/gm, '') // 引用
+    .replace(/^[-*_]{3,}$/gm, '') // 分割线
+    .replace(/-\s*\[([ xX])\]\s*/g, '') // 待办
+    .replace(/\n+/g, ' ') // 换行转空格
+    .trim();
+  
+  if (text.length > maxLength) {
+    text = text.slice(0, maxLength) + '...';
+  }
+  
+  return text;
+}
+

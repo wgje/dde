@@ -1,13 +1,16 @@
-import { Component, inject, signal, computed, Output, EventEmitter, OnDestroy } from '@angular/core';
+import { Component, inject, signal, computed, Output, EventEmitter, OnDestroy, ElementRef, ViewChild, NgZone, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { StoreService, Task } from '../services/store.service';
+import { DomSanitizer } from '@angular/platform-browser';
+import { StoreService } from '../services/store.service';
+import { Task } from '../models';
+import { renderMarkdownSafe, extractPlainText } from '../utils/markdown';
 
 @Component({
   selector: 'app-text-view',
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div class="flex flex-col h-full bg-canvas overflow-y-auto overflow-x-hidden text-view-scroll-container"><!-- 1. 待完成区域 -->
+    <div #scrollContainer class="flex flex-col h-full bg-canvas overflow-y-auto overflow-x-hidden text-view-scroll-container"><!-- 1. 待完成区域 -->
       <section 
         class="flex-none mt-2 px-2 pb-1 rounded-xl bg-retro-rust/10 border border-retro-rust/30 transition-all"
         [ngClass]="{'mx-4 mt-4': !isMobile(), 'mx-2': isMobile()}">
@@ -33,7 +36,7 @@ import { StoreService, Task } from '../services/store.service';
                   class="mt-0.5 w-4 h-4 rounded-full border-2 border-retro-muted bg-canvas hover:border-green-500 hover:bg-green-50 active:scale-90 transition-all"
                   title="点击完成"></button>
                 <div class="flex-1 min-w-0" (click)="jumpToTask(item.taskId)">
-                  <div class="text-[9px] font-bold text-retro-muted mb-0.5 tracking-wider group-hover:text-retro-rust transition-colors">{{item.taskDisplayId}}</div>
+                  <div class="text-[9px] font-bold text-retro-muted mb-0.5 tracking-wider group-hover:text-retro-rust transition-colors">{{store.compressDisplayId(item.taskDisplayId)}}</div>
                   <div class="text-xs text-stone-600 line-clamp-2 group-hover:text-stone-900 transition-colors leading-relaxed">{{item.text}}</div>
                 </div>
               </div>
@@ -306,7 +309,7 @@ import { StoreService, Task } from '../services/store.service';
                           <div class="flex justify-between items-start"
                                [ngClass]="{'mb-1': !isMobile(), 'mb-0.5': isMobile()}">
                             <span class="font-mono font-medium text-retro-muted"
-                                  [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">{{task.displayId}}</span>
+                                  [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">{{store.compressDisplayId(task.displayId)}}</span>
                             <span class="text-retro-muted/60 font-light"
                                   [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">{{task.createdDate | date:'yyyy/MM/dd HH:mm'}}</span>
                           </div>
@@ -315,12 +318,15 @@ import { StoreService, Task } from '../services/store.service';
                             <div class="font-medium text-retro-dark leading-snug line-clamp-2"
                                  [ngClass]="{'text-sm mb-1': !isMobile(), 'text-xs mb-0.5': isMobile()}">{{task.title || '未命名任务'}}</div>
                             <div class="text-stone-500 font-light leading-relaxed line-clamp-1"
-                                 [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">{{task.content}}</div>
+                                 [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">{{getContentPreview(task.content)}}</div>
                           } @else {
+                            <!-- 展开编辑模式：桌面端并排布局，手机端垂直布局 -->
                             <div class="animate-collapse-open"
                                  (click)="$event.stopPropagation()"
-                                 (touchstart)="$event.stopPropagation()"
-                                 [ngClass]="{'mt-2 space-y-2': !isMobile(), 'mt-1.5 space-y-1.5': isMobile()}">
+                                 [ngClass]="{'mt-2 flex gap-3': !isMobile(), 'mt-1.5': isMobile()}">
+                              
+                              <!-- 主编辑区域 -->
+                              <div [ngClass]="{'flex-1 space-y-2': !isMobile(), 'space-y-1.5': isMobile()}">
                               <!-- 标题编辑 -->
                               <input
                                 #titleInput
@@ -333,16 +339,43 @@ import { StoreService, Task } from '../services/store.service';
                                 class="w-full font-medium text-retro-dark border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none bg-stone-50 touch-manipulation"
                                 [ngClass]="{'text-sm p-2': !isMobile(), 'text-xs p-1.5': isMobile()}"
                                 placeholder="任务名称...">
-                              <!-- 内容编辑 -->
-                              <textarea 
-                                #contentInput
-                                [value]="task.content"
-                                (input)="onContentInput(task.id, contentInput.value)"
-                                (focus)="onInputFocus()"
-                                (blur)="onInputBlur()"
-                                class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none touch-manipulation"
-                                [ngClass]="{'h-24 text-xs p-2': !isMobile(), 'h-28 text-[11px] p-2': isMobile()}"
-                                placeholder="输入 Markdown 内容..."></textarea>
+                              <!-- 内容编辑/预览 -->
+                              <div class="relative">
+                                <!-- 预览/编辑切换按钮 -->
+                                <div class="absolute top-1 right-1 z-10 flex gap-1">
+                                  <button 
+                                    (click)="togglePreviewMode(task.id); $event.stopPropagation()"
+                                    class="px-2 py-0.5 text-[9px] rounded transition-all"
+                                    [class.bg-indigo-500]="isPreviewMode(task.id)"
+                                    [class.text-white]="isPreviewMode(task.id)"
+                                    [class.bg-stone-100]="!isPreviewMode(task.id)"
+                                    [class.text-stone-500]="!isPreviewMode(task.id)"
+                                    [class.hover:bg-stone-200]="!isPreviewMode(task.id)"
+                                    title="切换预览/编辑">
+                                    {{ isPreviewMode(task.id) ? '编辑' : '预览' }}
+                                  </button>
+                                </div>
+                                
+                                @if (isPreviewMode(task.id)) {
+                                  <!-- Markdown 预览 -->
+                                  <div 
+                                    class="w-full border border-stone-200 rounded-lg bg-white overflow-y-auto markdown-preview"
+                                    [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
+                                    [innerHTML]="renderMarkdown(task.content)">
+                                  </div>
+                                } @else {
+                                  <!-- Markdown 编辑 -->
+                                  <textarea 
+                                    #contentInput
+                                    [value]="task.content"
+                                    (input)="onContentInput(task.id, contentInput.value)"
+                                    (focus)="onInputFocus()"
+                                    (blur)="onInputBlur()"
+                                    class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none touch-manipulation"
+                                    [ngClass]="{'h-24 text-xs p-2 pt-6': !isMobile(), 'h-28 text-[11px] p-2 pt-6': isMobile()}"
+                                    placeholder="输入 Markdown 内容..."></textarea>
+                                }
+                              </div>
                               
                               <!-- 快速待办输入 -->
                               <div class="flex items-center gap-1 bg-retro-rust/5 border border-retro-rust/20 rounded-lg overflow-hidden"
@@ -393,6 +426,96 @@ import { StoreService, Task } from '../services/store.service';
                                   <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                                 </button>
                               </div>
+                              </div>
+                              
+                              <!-- 关联区域：桌面端在右侧，手机端在底部，支持折叠 -->
+                              @if (getTaskConnections(task.id); as connections) {
+                                @if (connections.outgoing.length > 0 || connections.incoming.length > 0) {
+                                  <div [ngClass]="{
+                                    'flex-shrink-0 border-l border-violet-100 pl-2': !isMobile(),
+                                    'w-36': !isMobile() && !isConnectionsCollapsed(),
+                                    'w-8': !isMobile() && isConnectionsCollapsed(),
+                                    'border-t border-violet-100 pt-2 mt-2': isMobile()
+                                  }" class="transition-all duration-200">
+                                    <!-- 标题栏：点击可折叠/展开 -->
+                                    <div class="flex items-center gap-1 cursor-pointer select-none"
+                                         [ngClass]="{'mb-1.5': !isConnectionsCollapsed(), 'flex-col': !isMobile() && isConnectionsCollapsed()}"
+                                         (click)="isConnectionsCollapsed.set(!isConnectionsCollapsed()); $event.stopPropagation()">
+                                      <span class="text-violet-500 text-xs">🔗</span>
+                                      @if (!isConnectionsCollapsed()) {
+                                        <span class="text-[10px] font-medium text-violet-700">关联</span>
+                                        <span class="text-[9px] text-violet-400">({{connections.outgoing.length + connections.incoming.length}})</span>
+                                      } @else {
+                                        <span class="text-[9px] text-violet-400 font-bold">{{connections.outgoing.length + connections.incoming.length}}</span>
+                                      }
+                                      <svg class="w-3 h-3 text-violet-400 transition-transform ml-auto"
+                                           [ngClass]="{'rotate-180': isConnectionsCollapsed(), '-rotate-90': !isMobile() && !isConnectionsCollapsed(), 'rotate-0': isMobile() && !isConnectionsCollapsed()}"
+                                           fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                      </svg>
+                                    </div>
+                                    
+                                    <!-- 关联内容：可折叠 -->
+                                    @if (!isConnectionsCollapsed()) {
+                                      <div class="animate-collapse-open">
+                                        <!-- 发出的关联（本任务指向其他任务） -->
+                                        @if (connections.outgoing.length > 0) {
+                                          <div class="mb-2">
+                                            <div class="text-[10px] text-stone-400 mb-1 flex items-center gap-1">
+                                              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
+                                              关联到
+                                            </div>
+                                            <div class="space-y-1">
+                                              @for (conn of connections.outgoing; track conn.targetId) {
+                                                <div class="flex items-start gap-2 p-1.5 bg-violet-50/50 rounded-lg border border-violet-100 group cursor-pointer hover:bg-violet-100/50 transition-all"
+                                                     (click)="openLinkedTaskEditor(conn.targetTask!, $event)">
+                                                  <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center gap-1.5">
+                                                      <span class="text-[9px] font-bold text-violet-400">{{store.compressDisplayId(conn.targetTask?.displayId || '?')}}</span>
+                                                      <span class="text-[11px] text-violet-700 truncate font-medium">{{conn.targetTask?.title || '未命名'}}</span>
+                                                    </div>
+                                                    @if (conn.description) {
+                                                      <div class="text-[10px] text-violet-500 mt-0.5 italic truncate">"{{conn.description}}"</div>
+                                                    }
+                                                  </div>
+                                                  <svg class="w-3 h-3 flex-shrink-0 text-violet-400 group-hover:text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                                </div>
+                                              }
+                                            </div>
+                                          </div>
+                                        }
+                                        
+                                        <!-- 接收的关联（其他任务指向本任务） -->
+                                        @if (connections.incoming.length > 0) {
+                                          <div>
+                                            <div class="text-[10px] text-stone-400 mb-1 flex items-center gap-1">
+                                              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16l-4-4m0 0l4-4m-4 4h18"/></svg>
+                                              被关联
+                                            </div>
+                                            <div class="space-y-1">
+                                              @for (conn of connections.incoming; track conn.sourceId) {
+                                                <div class="flex items-start gap-2 p-1.5 bg-indigo-50/50 rounded-lg border border-indigo-100 group cursor-pointer hover:bg-indigo-100/50 transition-all"
+                                                     (click)="openLinkedTaskEditor(conn.sourceTask!, $event)">
+                                                  <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center gap-1.5">
+                                                      <span class="text-[9px] font-bold text-indigo-400">{{store.compressDisplayId(conn.sourceTask?.displayId || '?')}}</span>
+                                                      <span class="text-[11px] text-indigo-700 truncate font-medium">{{conn.sourceTask?.title || '未命名'}}</span>
+                                                    </div>
+                                                    @if (conn.description) {
+                                                      <div class="text-[10px] text-indigo-500 mt-0.5 italic truncate">"{{conn.description}}"</div>
+                                                    }
+                                                  </div>
+                                                  <svg class="w-3 h-3 flex-shrink-0 text-indigo-400 group-hover:text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                                </div>
+                                              }
+                                            </div>
+                                          </div>
+                                        }
+                                      </div>
+                                    }
+                                  </div>
+                                }
+                              }
                             </div>
                           }
                         </div>
@@ -419,7 +542,7 @@ import { StoreService, Task } from '../services/store.service';
       <!-- 删除确认弹窗 -->
       @if (deleteConfirmTask()) {
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
-             (click)="deleteConfirmTask.set(null)">
+             (click)="deleteConfirmTask.set(null); deleteKeepChildren.set(false)">
           <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-scale-in"
                [ngClass]="{'w-80 mx-4': isMobile(), 'w-96': !isMobile()}"
                (click)="$event.stopPropagation()">
@@ -438,11 +561,29 @@ import { StoreService, Task } from '../services/store.service';
               <p class="text-sm text-stone-600 leading-relaxed">
                 确定删除任务 <span class="font-semibold text-stone-800">"{{ deleteConfirmTask()?.title }}"</span> 吗？
               </p>
-              <p class="text-xs text-stone-400 mt-1">这将同时删除其所有子任务。</p>
+              
+              <!-- 保留子任务选项 -->
+              @if (hasChildren(deleteConfirmTask()!)) {
+                <div class="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg">
+                  <label class="flex items-start gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      [checked]="deleteKeepChildren()"
+                      (change)="deleteKeepChildren.set(!deleteKeepChildren())"
+                      class="mt-0.5 w-4 h-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500">
+                    <div>
+                      <span class="text-xs font-medium text-amber-800">保留子任务</span>
+                      <p class="text-[10px] text-amber-600 mt-0.5">子任务将提升到当前任务的父级</p>
+                    </div>
+                  </label>
+                </div>
+              } @else {
+                <p class="text-xs text-stone-400 mt-1">这将同时删除其所有子任务。</p>
+              }
             </div>
             <div class="flex border-t border-stone-100">
               <button 
-                (click)="deleteConfirmTask.set(null)"
+                (click)="deleteConfirmTask.set(null); deleteKeepChildren.set(false)"
                 class="flex-1 px-4 py-3 text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors">
                 取消
               </button>
@@ -467,8 +608,14 @@ import { StoreService, Task } from '../services/store.service';
     }
   `]
 })
-export class TextViewComponent implements OnDestroy {
+export class TextViewComponent implements OnDestroy, AfterViewInit {
   readonly store = inject(StoreService);
+  private readonly sanitizer = inject(DomSanitizer);
+  private readonly elementRef = inject(ElementRef);
+  private readonly ngZone = inject(NgZone);
+  
+  // ViewChild 引用滚动容器
+  @ViewChild('scrollContainer', { static: true }) scrollContainerRef!: ElementRef<HTMLElement>;
   
   // 输出事件：通知父组件定位到流程图中的节点
   @Output() focusFlowNode = new EventEmitter<string>();
@@ -479,11 +626,18 @@ export class TextViewComponent implements OnDestroy {
   readonly isStageFilterOpen = signal(false);
   readonly isRootFilterOpen = signal(false);
   
+  // 关联区域折叠状态
+  readonly isConnectionsCollapsed = signal(false);
+  
+  // Markdown 预览模式（每个任务独立）
+  readonly previewTaskId = signal<string | null>(null);
+  
   // 待分配任务编辑状态
   readonly editingTaskId = signal<string | null>(null);
   
   // 删除确认状态
   readonly deleteConfirmTask = signal<Task | null>(null);
+  readonly deleteKeepChildren = signal(false); // 是否保留子任务
   
   // 拖拽状态
   readonly draggingTaskId = signal<string | null>(null);
@@ -566,19 +720,124 @@ export class TextViewComponent implements OnDestroy {
     });
   }
 
+  ngAfterViewInit() {
+    // 初始化滚动容器引用
+  }
+
   // 组件销毁时清理资源
   ngOnDestroy() {
     this.resetTouchState();
     this.removeDragGhost();
   }
 
+  // ========== 安全的 DOM 访问方法 ==========
+  
+  /**
+   * 获取滚动容器 - 优先使用 ViewChild，fallback 到组件内查找
+   */
+  private getScrollContainer(): HTMLElement | null {
+    return this.scrollContainerRef?.nativeElement 
+      ?? this.elementRef.nativeElement.querySelector('.text-view-scroll-container');
+  }
+  
+  /**
+   * 安全滚动到指定元素
+   */
+  private scrollToElementById(selector: string, options?: ScrollIntoViewOptions): void {
+    this.ngZone.runOutsideAngular(() => {
+      requestAnimationFrame(() => {
+        const el = this.elementRef.nativeElement.querySelector(selector);
+        if (el) {
+          el.scrollIntoView(options ?? { behavior: 'smooth', block: 'center' });
+        }
+      });
+    });
+  }
+  
+  /**
+   * 安全滚动到任务卡片并可选聚焦输入框
+   */
+  private scrollToTaskAndFocus(taskId: string, inputSelector?: string, delay: number = 100): void {
+    this.ngZone.runOutsideAngular(() => {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`) 
+            ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (inputSelector) {
+              setTimeout(() => {
+                const input = el.querySelector(inputSelector) as HTMLInputElement;
+                if (input) {
+                  input.focus();
+                  input.select?.();
+                }
+              }, delay);
+            }
+          }
+        }, 50);
+      });
+    });
+  }
+
   // 工具方法
   trackUnfinished = (item: { taskId: string; text: string }) => `${item.taskId}-${item.text}`;
   isStageExpanded = (stageNumber: number) => !this.collapsedStages().has(stageNumber);
+  
+  // Markdown 渲染方法
+  renderMarkdown(content: string) {
+    return renderMarkdownSafe(content, this.sanitizer);
+  }
+  
+  // 提取纯文本摘要
+  getContentPreview(content: string, maxLength: number = 80) {
+    return extractPlainText(content, maxLength);
+  }
+  
+  // 检查是否处于预览模式
+  isPreviewMode(taskId: string): boolean {
+    return this.previewTaskId() === taskId;
+  }
+  
+  // 切换预览模式
+  togglePreviewMode(taskId: string) {
+    if (this.previewTaskId() === taskId) {
+      this.previewTaskId.set(null);
+    } else {
+      this.previewTaskId.set(taskId);
+    }
+  }
+  
+  // 检查任务是否有子任务
+  hasChildren(task: Task): boolean {
+    return this.store.tasks().some(t => t.parentId === task.id);
+  }
 
   shouldShowTask(task: Task): boolean {
     // 筛选逻辑已经在 visibleStages 中处理，这里始终返回 true
     return true;
+  }
+  
+  // 获取任务的关联连接（调用 store 的方法）
+  getTaskConnections(taskId: string) {
+    return this.store.getTaskConnections(taskId);
+  }
+  
+  // 打开关联任务编辑（展开该任务并滚动到视图）
+  openLinkedTaskEditor(task: Task, event: Event) {
+    event.stopPropagation();
+    if (!task) return;
+    
+    // 展开任务所在的阶段
+    if (task.stage) {
+      this.expandStage(task.stage);
+    }
+    
+    // 选中该任务
+    this.selectedTaskId.set(task.id);
+    
+    // 滚动到该任务 - 使用安全的 DOM 访问
+    this.scrollToElementById(`[data-task-id="${task.id}"]`);
   }
 
   // 筛选操作
@@ -642,7 +901,17 @@ export class TextViewComponent implements OnDestroy {
 
   // 任务选择
   selectTask(task: Task) {
+    const wasSelected = this.selectedTaskId() === task.id;
     this.selectedTaskId.update(id => id === task.id ? null : task.id);
+    
+    // 选中新任务时默认进入预览模式
+    if (!wasSelected && this.selectedTaskId() === task.id) {
+      this.previewTaskId.set(task.id);
+    } else if (wasSelected) {
+      // 取消选中时清除预览模式
+      this.previewTaskId.set(null);
+    }
+    
     // 通知父组件，让流程图定位到该节点（仅当选中时，且不在移动端）
     if (this.selectedTaskId() === task.id && !this.isMobile()) {
       this.focusFlowNode.emit(task.id);
@@ -715,9 +984,7 @@ export class TextViewComponent implements OnDestroy {
     }
     
     this.selectedTaskId.set(id);
-    requestAnimationFrame(() => {
-      document.querySelector(`[data-task-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
+    this.scrollToElementById(`[data-task-id="${id}"]`);
   }
 
   // 输入状态管理 - 防止输入抖动
@@ -848,9 +1115,8 @@ export class TextViewComponent implements OnDestroy {
   // ========== 自动滚动功能 ==========
   
   private startAutoScroll(clientY: number) {
-    // 找到滚动容器
-    const container = document.querySelector('.text-view-scroll-container') as HTMLElement 
-      || document.querySelector('[class*="overflow-y-auto"]') as HTMLElement;
+    // 使用安全的方式获取滚动容器
+    const container = this.getScrollContainer();
     
     if (!container) return;
     
@@ -895,9 +1161,8 @@ export class TextViewComponent implements OnDestroy {
   
   // 触摸拖拽时的自动滚动
   private performTouchAutoScroll(clientY: number) {
-    // 找到滚动容器（整个文本视图）
-    const container = document.querySelector('.text-view-scroll-container') as HTMLElement 
-      || document.querySelector('[class*="bg-canvas"][class*="overflow-y-auto"]') as HTMLElement;
+    // 使用安全的方式获取滚动容器
+    const container = this.getScrollContainer();
     
     if (!container) return;
     
@@ -1176,8 +1441,16 @@ export class TextViewComponent implements OnDestroy {
     const task = this.deleteConfirmTask();
     if (task) {
       this.selectedTaskId.set(null);
-      this.store.deleteTask(task.id);
+      
+      // 根据选项决定是否保留子任务
+      if (this.deleteKeepChildren()) {
+        this.store.deleteTaskKeepChildren(task.id);
+      } else {
+        this.store.deleteTask(task.id);
+      }
+      
       this.deleteConfirmTask.set(null);
+      this.deleteKeepChildren.set(false);
     }
   }
 
@@ -1186,22 +1459,8 @@ export class TextViewComponent implements OnDestroy {
     if (newTaskId) {
       // 选中新任务并开启编辑模式
       this.editingTaskId.set(newTaskId);
-      // 滚动到视图并聚焦到标题输入框
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          const el = document.querySelector(`[data-unassigned-task="${newTaskId}"]`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            // 聚焦到标题输入框
-            setTimeout(() => {
-              const input = el.querySelector('input') as HTMLInputElement;
-              if (input) {
-                input.focus();
-              }
-            }, 100);
-          }
-        }, 50);
-      });
+      // 滚动到视图并聚焦到标题输入框 - 使用安全的 DOM 访问
+      this.scrollToTaskAndFocus(newTaskId, 'input');
     }
   }
   
@@ -1219,23 +1478,8 @@ export class TextViewComponent implements OnDestroy {
     // 选中新任务
     this.selectedTaskId.set(taskId);
     
-    // 滚动到新任务位置
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const el = document.querySelector(`[data-task-id="${taskId}"]`);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          // 聚焦到标题输入框
-          setTimeout(() => {
-            const titleInput = el.querySelector('input[data-title-input]') as HTMLInputElement;
-            if (titleInput) {
-              titleInput.focus();
-              titleInput.select();
-            }
-          }, 100);
-        }
-      }, 100);
-    });
+    // 滚动到新任务位置 - 使用安全的 DOM 访问
+    this.scrollToTaskAndFocus(taskId, 'input[data-title-input]');
   }
 
   addNewStage() {

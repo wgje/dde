@@ -210,4 +210,136 @@ div[class*="diagram"] > div:last-child:not(:first-child) {
     -webkit-overflow-scrolling: touch;
     scroll-behavior: auto;
   }
+  
+  /* 文本视图容器 - 允许水平滑动手势穿透 */
+  .text-view-scroll-container {
+    touch-action: pan-y pan-x;
+  }
+}
+
+/* Markdown 预览样式 */
+.markdown-preview {
+  line-height: 1.6;
+  word-wrap: break-word;
+}
+
+.markdown-preview h1 {
+  font-size: 1.25em;
+  font-weight: 700;
+  color: #292524;
+  margin: 0.75em 0 0.5em 0;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid #e7e5e4;
+}
+
+.markdown-preview h2 {
+  font-size: 1.125em;
+  font-weight: 600;
+  color: #292524;
+  margin: 0.6em 0 0.4em 0;
+}
+
+.markdown-preview h3 {
+  font-size: 1em;
+  font-weight: 600;
+  color: #44403c;
+  margin: 0.5em 0 0.3em 0;
+}
+
+.markdown-preview h4,
+.markdown-preview h5,
+.markdown-preview h6 {
+  font-size: 0.875em;
+  font-weight: 600;
+  color: #57534e;
+  margin: 0.4em 0 0.25em 0;
+}
+
+.markdown-preview p {
+  margin: 0.5em 0;
+  color: #57534e;
+}
+
+.markdown-preview strong {
+  font-weight: 600;
+  color: #292524;
+}
+
+.markdown-preview em {
+  font-style: italic;
+}
+
+.markdown-preview code {
+  background-color: #f5f5f4;
+  color: #dc2626;
+  padding: 0.125em 0.375em;
+  border-radius: 0.25em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.875em;
+}
+
+.markdown-preview pre {
+  background-color: #1c1917;
+  color: #e7e5e4;
+  padding: 0.75em 1em;
+  border-radius: 0.5em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+  font-size: 0.8em;
+}
+
+.markdown-preview pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+.markdown-preview blockquote {
+  border-left: 3px solid #a8a29e;
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: #78716c;
+  font-style: italic;
+}
+
+.markdown-preview ul,
+.markdown-preview ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-preview ul {
+  list-style-type: disc;
+}
+
+.markdown-preview ol {
+  list-style-type: decimal;
+}
+
+.markdown-preview li {
+  margin: 0.25em 0;
+  color: #57534e;
+}
+
+.markdown-preview a {
+  color: #4f46e5;
+  text-decoration: underline;
+  transition: color 0.15s;
+}
+
+.markdown-preview a:hover {
+  color: #3730a3;
+}
+
+.markdown-preview hr {
+  border: none;
+  border-top: 1px solid #d6d3d1;
+  margin: 1em 0;
+}
+
+/* Markdown todo 项样式 */
+.markdown-preview input[type="checkbox"] {
+  margin-right: 0.5em;
+  accent-color: #4f46e5;
 }

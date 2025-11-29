@@ -1,7 +1,8 @@
 import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { StoreService, Task } from '../services/store.service';
+import { StoreService } from '../services/store.service';
+import { Task } from '../models';
 import * as go from 'gojs';
 
 @Component({
@@ -30,7 +31,7 @@ import * as go from 'gojs';
                            @for (item of store.unfinishedItems(); track item.taskId + item.text) {
                                <li class="text-xs text-stone-600 flex items-center gap-3 bg-white/80 backdrop-blur-sm border border-stone-100/50 p-2 rounded-lg hover:border-orange-200 cursor-pointer group shadow-sm transition-all" (click)="centerOnNode(item.taskId)">
                                    <span class="w-1 h-1 rounded-full bg-stone-200 group-hover:bg-orange-400 transition-colors ml-1"></span>
-                                   <span class="font-bold text-retro-muted text-[9px] tracking-wider">{{item.taskDisplayId}}</span>
+                                   <span class="font-bold text-retro-muted text-[9px] tracking-wider">{{store.compressDisplayId(item.taskDisplayId)}}</span>
                                    <span class="truncate flex-1 group-hover:text-stone-900 transition-colors">{{item.text}}</span>
                                </li>
                            }
@@ -151,45 +152,19 @@ import * as go from 'gojs';
                    </svg>
                </button>
                <!-- 连接模式按钮 -->
-               <button 
-                 (click)="toggleLinkMode()" 
-                 class="backdrop-blur rounded-lg shadow-sm border transition-all"
-                 [class.p-2]="!store.isMobile()"
-                 [class.p-1.5]="store.isMobile()"
-                 [class.bg-indigo-500]="isLinkMode()"
-                 [class.text-white]="isLinkMode()"
-                 [class.border-indigo-500]="isLinkMode()"
-                 [class.bg-white/90]="!isLinkMode()"
-                 [class.text-stone-600]="!isLinkMode()"
-                 [class.border-stone-200]="!isLinkMode()"
-                 [class.hover:bg-stone-50]="!isLinkMode()"
-                 title="连接模式：点击两个节点创建跨树连接">
-                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
-                        [class.h-5]="!store.isMobile()" [class.w-5]="!store.isMobile()"
-                        [class.h-4]="store.isMobile()" [class.w-4]="store.isMobile()">
+               <button (click)="toggleLinkMode()" class="backdrop-blur rounded-lg shadow-sm border transition-all hover:bg-stone-50" [class.p-2]="!store.isMobile()" [class.p-1.5]="store.isMobile()" [class.bg-indigo-500]="isLinkMode()" [class.text-white]="isLinkMode()" [class.border-indigo-500]="isLinkMode()" [class.bg-white]="!isLinkMode()" [class.text-stone-600]="!isLinkMode()" [class.border-stone-200]="!isLinkMode()" title="连接模式">
+                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" [class.h-5]="!store.isMobile()" [class.w-5]="!store.isMobile()" [class.h-4]="store.isMobile()" [class.w-4]="store.isMobile()">
                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                    </svg>
                </button>
            </div>
            
-           <!-- 连接模式提示 - 移动端优化 -->
+           <!-- 连接模式提示 -->
            @if (isLinkMode()) {
-             <div class="absolute z-10 bg-indigo-500 text-white font-medium rounded-lg shadow-lg animate-fade-in flex items-center"
-                  [class.top-4]="!store.isMobile()"
-                  [class.left-4]="!store.isMobile()"
-                  [class.px-3]="!store.isMobile()"
-                  [class.py-2]="!store.isMobile()"
-                  [class.text-xs]="!store.isMobile()"
-                  [class.top-2]="store.isMobile()"
-                  [class.left-1/2]="store.isMobile()"
-                  [class.-translate-x-1/2]="store.isMobile()"
-                  [class.px-2]="store.isMobile()"
-                  [class.py-1.5]="store.isMobile()"
-                  [class.text-[10px]]="store.isMobile()"
-                  [class.max-w-[90vw]]="store.isMobile()">
+             <div class="absolute z-10 bg-indigo-500 text-white font-medium rounded-lg shadow-lg animate-fade-in flex items-center px-3 py-2 text-xs top-4 left-4" [ngClass]="{'top-2 left-1/2 -translate-x-1/2 px-2 py-1.5 max-w-[90vw]': store.isMobile(), 'text-[10px]': store.isMobile()}">
                @if (linkSourceTask()) {
                  <span class="truncate">已选: <span class="font-bold">{{ linkSourceTask()?.title }}</span></span>
-                 <span class="mx-1">→</span>
+                 <span class="mx-1">&rarr;</span>
                  <span>点击目标</span>
                } @else {
                  点击源节点
@@ -198,96 +173,103 @@ import * as go from 'gojs';
              </div>
            }
 
-           <!-- 4. 详情区域 - 桌面端右侧面板 -->
-           @if (!store.isMobile()) {
-             <div class="absolute top-6 right-0 z-20 flex pointer-events-none">
-                <div class="relative flex pointer-events-auto">
-                    <!-- Toggle Button -->
-                    <button (click)="store.isFlowDetailOpen.set(!store.isFlowDetailOpen())" 
-                            class="absolute left-0 top-8 -translate-x-full bg-white/90 backdrop-blur border border-stone-200 border-r-0 rounded-l-lg p-2 shadow-sm hover:bg-white text-stone-400 hover:text-stone-600 transition-all z-30 flex items-center justify-center w-8 h-10 pl-2">
-                        <span class="text-[10px] transition-transform duration-300" [class.rotate-180]="store.isFlowDetailOpen()">◀</span>
-                    </button>
-
-                    <!-- Content Panel - 桌面端 -->
-                    <div class="max-h-96 bg-white/95 backdrop-blur-xl border-l border-stone-200/50 shadow-xl transition-all duration-500 ease-out overflow-hidden flex flex-col rounded-bl-lg"
-                         [class.w-0]="!store.isFlowDetailOpen()"
-                         [class.w-64]="store.isFlowDetailOpen()"
-                         [class.opacity-0]="!store.isFlowDetailOpen()"
-                         [class.opacity-100]="store.isFlowDetailOpen()">
-                        
-                        <div class="px-3 py-2 border-b border-stone-100 flex justify-between items-center">
+           <!-- 4. 详情区域 - 桌面端可拖动浮动面板 -->
+           @if (!store.isMobile() && store.isFlowDetailOpen()) {
+             <div class="absolute z-20 pointer-events-auto"
+                  [style.right.px]="taskDetailPos().x < 0 ? 0 : null"
+                  [style.top.px]="taskDetailPos().y < 0 ? 24 : taskDetailPos().y"
+                  [style.left.px]="taskDetailPos().x >= 0 ? taskDetailPos().x : null">
+                <!-- Content Panel - 桌面端可拖动 -->
+                <div class="w-64 max-h-96 bg-white/95 backdrop-blur-xl border border-stone-200/50 shadow-xl overflow-hidden flex flex-col rounded-xl">
+                    
+                    <!-- 可拖动标题栏 -->
+                    <div class="px-3 py-2 border-b border-stone-100 flex justify-between items-center cursor-move select-none bg-gradient-to-r from-stone-50 to-white"
+                         (mousedown)="startDragTaskDetail($event)"
+                         (touchstart)="startDragTaskDetail($event)">
+                        <div class="flex items-center gap-1.5">
+                            <span class="text-[8px] text-stone-400">☰</span>
                             <h3 class="font-bold text-stone-700 text-xs">任务详情</h3>
-                            <button (click)="store.isFlowDetailOpen.set(false)" class="text-stone-400 hover:text-stone-600 p-1">
-                              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                              </svg>
-                            </button>
                         </div>
+                        <button (click)="store.isFlowDetailOpen.set(false)" class="text-stone-400 hover:text-stone-600 p-1">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                    </div>
                         
-                        <div class="flex-1 overflow-y-auto px-3 py-2 space-y-2">
-                            @if (selectedTask(); as task) {
-                                <div class="space-y-2">
-                                    <div class="flex items-center gap-2 text-[10px]">
-                                        <span class="font-bold text-retro-muted bg-stone-100 px-1.5 py-0.5 rounded">{{task.displayId}}</span>
-                                        <span class="text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
-                                        <span class="px-1.5 py-0.5 rounded"
-                                              [class.bg-emerald-100]="task.status === 'completed'"
-                                              [class.text-emerald-700]="task.status === 'completed'"
-                                              [class.bg-amber-100]="task.status !== 'completed'"
-                                              [class.text-amber-700]="task.status !== 'completed'">
-                                          {{task.status === 'completed' ? '完成' : '进行中'}}
-                                        </span>
-                                    </div>
-                                    
-                                    <input type="text" [ngModel]="task.title" (ngModelChange)="updateTaskTitle(task.id, $event)"
-                                        class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
-                                        placeholder="任务标题">
-                                    
-                                    <textarea [ngModel]="task.content" (ngModelChange)="updateTaskContent(task.id, $event)" rows="4"
-                                        class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono leading-relaxed"
-                                        placeholder="输入内容..."></textarea>
+                    <div class="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+                        @if (selectedTask(); as task) {
+                            <div class="space-y-2">
+                                <div class="flex items-center gap-2 text-[10px]">
+                                    <span class="font-bold text-retro-muted bg-stone-100 px-1.5 py-0.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
+                                    <span class="text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
+                                    <span class="px-1.5 py-0.5 rounded"
+                                          [class.bg-emerald-100]="task.status === 'completed'"
+                                          [class.text-emerald-700]="task.status === 'completed'"
+                                          [class.bg-amber-100]="task.status !== 'completed'"
+                                          [class.text-amber-700]="task.status !== 'completed'">
+                                      {{task.status === 'completed' ? '完成' : '进行中'}}
+                                    </span>
+                                </div>
+                                
+                                <input type="text" [ngModel]="task.title" (ngModelChange)="updateTaskTitle(task.id, $event)"
+                                    class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+                                    placeholder="任务标题">
+                                
+                                <textarea [ngModel]="task.content" (ngModelChange)="updateTaskContent(task.id, $event)" rows="4"
+                                    class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono leading-relaxed"
+                                    placeholder="输入内容..."></textarea>
 
-                                    <div class="flex gap-1.5 pt-1">
-                                        <button (click)="addSiblingTask(task)"
-                                            class="flex-1 px-2 py-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 text-[10px] font-medium rounded transition-all">
-                                            +同级
-                                        </button>
-                                        <button (click)="addChildTask(task)"
-                                            class="flex-1 px-2 py-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 text-[10px] font-medium rounded transition-all">
-                                            +下级
-                                        </button>
-                                        <button (click)="toggleTaskStatus(task)"
-                                            class="flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all border"
-                                            [class.bg-emerald-50]="task.status !== 'completed'"
-                                            [class.text-emerald-700]="task.status !== 'completed'"
-                                            [class.border-emerald-200]="task.status !== 'completed'"
-                                            [class.bg-stone-50]="task.status === 'completed'"
-                                            [class.text-stone-600]="task.status === 'completed'"
-                                            [class.border-stone-200]="task.status === 'completed'">
-                                            {{task.status === 'completed' ? '撤销' : '完成'}}
-                                        </button>
-                                        <button (click)="deleteTask(task)"
-                                            class="px-2 py-1 bg-stone-50 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 text-[10px] font-medium rounded transition-all">
-                                            删除
-                                        </button>
-                                    </div>
+                                <div class="flex gap-1.5 pt-1">
+                                    <button (click)="addSiblingTask(task)"
+                                        class="flex-1 px-2 py-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 text-[10px] font-medium rounded transition-all">
+                                        +同级
+                                    </button>
+                                    <button (click)="addChildTask(task)"
+                                        class="flex-1 px-2 py-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 text-[10px] font-medium rounded transition-all">
+                                        +下级
+                                    </button>
+                                    <button (click)="toggleTaskStatus(task)"
+                                        class="flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all border"
+                                        [class.bg-emerald-50]="task.status !== 'completed'"
+                                        [class.text-emerald-700]="task.status !== 'completed'"
+                                        [class.border-emerald-200]="task.status !== 'completed'"
+                                        [class.bg-stone-50]="task.status === 'completed'"
+                                        [class.text-stone-600]="task.status === 'completed'"
+                                        [class.border-stone-200]="task.status === 'completed'">
+                                        {{task.status === 'completed' ? '撤销' : '完成'}}
+                                    </button>
+                                    <button (click)="deleteTask(task)"
+                                        class="px-2 py-1 bg-stone-50 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 text-[10px] font-medium rounded transition-all">
+                                        删除
+                                    </button>
                                 </div>
-                            } @else if (store.activeProject(); as proj) {
-                                <div class="text-[11px] space-y-1">
-                                    <div class="font-bold text-stone-800">{{proj.name}}</div>
-                                    <div class="text-stone-400 font-mono text-[10px]">{{proj.createdDate | date:'yyyy-MM-dd'}}</div>
-                                    <div class="text-stone-500 mt-1">{{proj.description}}</div>
-                                </div>
-                            } @else {
-                                <div class="py-4 text-center text-stone-400 text-[10px]">
-                                    双击节点查看详情
-                                </div>
-                            }
-                        </div>
+                            </div>
+                        } @else if (store.activeProject()) {
+                            <div class="text-[11px] space-y-1">
+                                <div class="font-bold text-stone-800">{{store.activeProject()?.name}}</div>
+                                <div class="text-stone-400 font-mono text-[10px]">{{store.activeProject()?.createdDate | date:'yyyy-MM-dd'}}</div>
+                                <div class="text-stone-500 mt-1">{{store.activeProject()?.description}}</div>
+                            </div>
+                        } @else {
+                            <div class="py-4 text-center text-stone-400 text-[10px]">
+                                双击节点查看详情
+                            </div>
+                        }
                     </div>
                 </div>
              </div>
            }
+           <!-- 桌面端详情开启按钮 -->
+             @if (!store.isMobile() && !store.isFlowDetailOpen()) {
+               <button (click)="store.isFlowDetailOpen.set(true)" 
+                       class="absolute top-6 right-2 z-20 bg-white/90 backdrop-blur border border-stone-200 rounded-lg p-2 shadow-sm hover:bg-white text-stone-400 hover:text-stone-600 transition-all flex items-center gap-1">
+                   <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                   </svg>
+                   <span class="text-[10px] font-medium">详情</span>
+               </button>
+             }
 
            <!-- 4. 详情区域 - 手机端底部抽屉 -->
            @if (store.isMobile()) {
@@ -330,7 +312,7 @@ import * as go from 'gojs';
                    @if (selectedTask(); as task) {
                      <!-- 紧凑的任务信息 -->
                      <div class="flex items-center gap-2 mb-2">
-                       <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 px-1.5 rounded">{{task.displayId}}</span>
+                       <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 px-1.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
                        <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd HH:mm'}}</span>
                        <span class="text-[9px] px-1.5 py-0.5 rounded"
                              [class.bg-emerald-100]="task.status === 'completed'"
@@ -405,7 +387,7 @@ import * as go from 'gojs';
        <!-- 删除确认弹窗 -->
        @if (deleteConfirmTask()) {
          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
-              (click)="deleteConfirmTask.set(null)">
+              (click)="deleteConfirmTask.set(null); deleteKeepChildren.set(false)">
            <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-scale-in mx-4"
                 [ngClass]="{'w-80': store.isMobile(), 'w-96': !store.isMobile()}"
                 (click)="$event.stopPropagation()">
@@ -424,11 +406,29 @@ import * as go from 'gojs';
                <p class="text-sm text-stone-600 leading-relaxed">
                  确定删除任务 <span class="font-semibold text-stone-800">"{{ deleteConfirmTask()?.title }}"</span> 吗？
                </p>
-               <p class="text-xs text-stone-400 mt-1">这将同时删除其所有子任务。</p>
+               
+               <!-- 保留子任务选项 -->
+               @if (hasChildren(deleteConfirmTask()!)) {
+                 <div class="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg">
+                   <label class="flex items-start gap-2 cursor-pointer">
+                     <input 
+                       type="checkbox" 
+                       [checked]="deleteKeepChildren()"
+                       (change)="deleteKeepChildren.set(!deleteKeepChildren())"
+                       class="mt-0.5 w-4 h-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500">
+                     <div>
+                       <span class="text-xs font-medium text-amber-800">保留子任务</span>
+                       <p class="text-[10px] text-amber-600 mt-0.5">子任务将提升到当前任务的父级</p>
+                     </div>
+                   </label>
+                 </div>
+               } @else {
+                 <p class="text-xs text-stone-400 mt-1">这将同时删除其所有子任务。</p>
+               }
              </div>
              <div class="flex border-t border-stone-100">
                <button 
-                 (click)="deleteConfirmTask.set(null)"
+                 (click)="deleteConfirmTask.set(null); deleteKeepChildren.set(false)"
                  class="flex-1 px-4 py-3 text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors">
                  取消
                </button>
@@ -461,6 +461,75 @@ import * as go from 'gojs';
            </div>
          </div>
        }
+       
+       <!-- 联系块内联编辑器 - 浮动在连接线附近，可拖动 -->
+       @if (connectionEditorData(); as connData) {
+         <div class="absolute z-30 animate-scale-in"
+              [style.left.px]="connectionEditorPos().x"
+              [style.top.px]="connectionEditorPos().y">
+           <div class="bg-white rounded-xl shadow-xl border border-violet-200 overflow-hidden w-52"
+                (click)="$event.stopPropagation()">
+             <!-- 可拖动标题栏 -->
+             <div class="px-3 py-2 bg-gradient-to-r from-violet-50 to-indigo-50 border-b border-violet-100 flex items-center justify-between cursor-move select-none"
+                  (mousedown)="startDragConnEditor($event)"
+                  (touchstart)="startDragConnEditor($event)">
+               <div class="flex items-center gap-1.5">
+                 <span class="text-sm">🔗</span>
+                 <span class="text-xs font-medium text-violet-700">编辑关联</span>
+                 <span class="text-[8px] text-violet-400 ml-1">☰ 拖动</span>
+               </div>
+               <button (click)="closeConnectionEditor(); $event.stopPropagation()" class="text-stone-400 hover:text-stone-600 p-0.5">
+                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                 </svg>
+               </button>
+             </div>
+             
+             <!-- 连接的两个任务 - 紧凑显示 -->
+             <div class="px-3 py-2 bg-stone-50/50 border-b border-stone-100">
+               <div class="flex items-center gap-1 text-[10px]">
+                 @if (getConnectionTasks().source; as source) {
+                   <span class="font-bold text-violet-500 truncate max-w-[70px]">{{store.compressDisplayId(source.displayId)}}</span>
+                 }
+                 <svg class="w-3 h-3 text-violet-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                 </svg>
+                 @if (getConnectionTasks().target; as target) {
+                   <span class="font-bold text-indigo-500 truncate max-w-[70px]">{{store.compressDisplayId(target.displayId)}}</span>
+                 }
+               </div>
+             </div>
+             
+             <!-- 描述输入 - 自动调整高度 -->
+             <div class="px-3 py-2">
+               <textarea 
+                 #descInput
+                 id="connectionDescTextarea"
+                 (keydown.escape)="closeConnectionEditor()"
+                 (input)="autoResizeTextarea($event)"
+                 class="w-full text-xs text-stone-700 border border-stone-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-violet-300 focus:border-violet-400 bg-white resize-none"
+                 placeholder="输入关联描述..."
+                 [style.min-height.px]="28"
+                 [style.max-height.px]="120"
+                 autofocus>{{connData.description}}</textarea>
+             </div>
+             
+             <!-- 操作按钮 - 紧凑 -->
+             <div class="flex border-t border-stone-100">
+               <button 
+                 (click)="closeConnectionEditor()"
+                 class="flex-1 px-2 py-1.5 text-[10px] font-medium text-stone-500 hover:bg-stone-50 transition-colors">
+                 取消
+               </button>
+               <button 
+                 (click)="saveConnectionDescription(descInput.value)"
+                 class="flex-1 px-2 py-1.5 text-[10px] font-medium text-white bg-violet-500 hover:bg-violet-600 transition-colors">
+                 保存
+               </button>
+             </div>
+           </div>
+         </div>
+       }
     </div>
   `
 })
@@ -482,6 +551,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 删除确认状态
   deleteConfirmTask = signal<Task | null>(null);
+  deleteKeepChildren = signal(false); // 是否保留子任务
   
   // 连接模式状态
   isLinkMode = signal(false);
@@ -489,6 +559,16 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 移动端连接线删除提示
   linkDeleteHint = signal<{ link: any; x: number; y: number } | null>(null);
+  
+  // 联系块编辑器状态 - 包含位置信息用于内联显示
+  connectionEditorData = signal<{ sourceId: string; targetId: string; description: string; x: number; y: number } | null>(null);
+  // 联系块编辑器拖动位置（独立 signal 以便拖动时实时更新）
+  connectionEditorPos = signal<{ x: number; y: number }>({ x: 0, y: 0 });
+  private connEditorDragState = { isDragging: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
+  
+  // 任务详情面板拖动位置（桐端）
+  taskDetailPos = signal<{ x: number; y: number }>({ x: -1, y: -1 }); // -1 表示使用默认位置
+  private taskDetailDragState = { isDragging: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
   
   // 计算属性: 获取选中的任务对象
   selectedTask = computed(() => {
@@ -557,12 +637,188 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
     }
   }
+  
+  // 打开联系块编辑器 - 在点击位置附近显示
+  openConnectionEditor(sourceId: string, targetId: string, description: string, x: number, y: number) {
+    // 调整位置，稍微向左和上偏移以便编辑框出现在点击位置旁边
+    const adjustedX = Math.max(10, x - 100);
+    const adjustedY = Math.max(10, y - 20);
+    this.connectionEditorData.set({ sourceId, targetId, description, x: adjustedX, y: adjustedY });
+    this.connectionEditorPos.set({ x: adjustedX, y: adjustedY });
+    
+    // 编辑器打开后自动调整 textarea 高度
+    setTimeout(() => {
+      const textarea = document.querySelector('#connectionDescTextarea') as HTMLTextAreaElement;
+      if (textarea) {
+        textarea.style.height = 'auto';
+        textarea.style.height = Math.min(120, Math.max(28, textarea.scrollHeight)) + 'px';
+      }
+    }, 10);
+  }
+  
+  // 开始拖动联系块编辑器
+  startDragConnEditor(event: MouseEvent | TouchEvent) {
+    event.preventDefault();
+    const pos = this.connectionEditorPos();
+    const clientX = event instanceof MouseEvent ? event.clientX : event.touches[0].clientX;
+    const clientY = event instanceof MouseEvent ? event.clientY : event.touches[0].clientY;
+    
+    this.connEditorDragState = {
+      isDragging: true,
+      startX: clientX,
+      startY: clientY,
+      offsetX: pos.x,
+      offsetY: pos.y
+    };
+    
+    // 添加全局事件监听
+    document.addEventListener('mousemove', this.onDragConnEditor);
+    document.addEventListener('mouseup', this.stopDragConnEditor);
+    document.addEventListener('touchmove', this.onDragConnEditor);
+    document.addEventListener('touchend', this.stopDragConnEditor);
+  }
+  
+  // 拖动中
+  private onDragConnEditor = (event: MouseEvent | TouchEvent) => {
+    if (!this.connEditorDragState.isDragging) return;
+    
+    const clientX = event instanceof MouseEvent ? event.clientX : event.touches[0].clientX;
+    const clientY = event instanceof MouseEvent ? event.clientY : event.touches[0].clientY;
+    
+    const deltaX = clientX - this.connEditorDragState.startX;
+    const deltaY = clientY - this.connEditorDragState.startY;
+    
+    const newX = Math.max(0, this.connEditorDragState.offsetX + deltaX);
+    const newY = Math.max(0, this.connEditorDragState.offsetY + deltaY);
+    
+    this.zone.run(() => {
+      this.connectionEditorPos.set({ x: newX, y: newY });
+    });
+  };
+  
+  // 停止拖动
+  private stopDragConnEditor = () => {
+    this.connEditorDragState.isDragging = false;
+    document.removeEventListener('mousemove', this.onDragConnEditor);
+    document.removeEventListener('mouseup', this.stopDragConnEditor);
+    document.removeEventListener('touchmove', this.onDragConnEditor);
+    document.removeEventListener('touchend', this.stopDragConnEditor);
+  };
+  
+  // 开始拖动任务详情面板
+  startDragTaskDetail(event: MouseEvent | TouchEvent) {
+    event.preventDefault();
+    const pos = this.taskDetailPos();
+    const clientX = event instanceof MouseEvent ? event.clientX : event.touches[0].clientX;
+    const clientY = event instanceof MouseEvent ? event.clientY : event.touches[0].clientY;
+    
+    // 如果是默认位置，计算当前实际位置
+    const diagramDiv = this.diagram?.div;
+    let currentX = pos.x;
+    let currentY = pos.y;
+    if (pos.x < 0 && diagramDiv) {
+      const rect = diagramDiv.getBoundingClientRect();
+      currentX = rect.width - 256 - 8; // w-64 = 256px, 右边距8px
+      currentY = 24;
+    }
+    
+    this.taskDetailDragState = {
+      isDragging: true,
+      startX: clientX,
+      startY: clientY,
+      offsetX: currentX,
+      offsetY: currentY
+    };
+    
+    document.addEventListener('mousemove', this.onDragTaskDetail);
+    document.addEventListener('mouseup', this.stopDragTaskDetail);
+    document.addEventListener('touchmove', this.onDragTaskDetail);
+    document.addEventListener('touchend', this.stopDragTaskDetail);
+  }
+  
+  // 拖动任务详情面板中
+  private onDragTaskDetail = (event: MouseEvent | TouchEvent) => {
+    if (!this.taskDetailDragState.isDragging) return;
+    
+    const clientX = event instanceof MouseEvent ? event.clientX : event.touches[0].clientX;
+    const clientY = event instanceof MouseEvent ? event.clientY : event.touches[0].clientY;
+    
+    const deltaX = clientX - this.taskDetailDragState.startX;
+    const deltaY = clientY - this.taskDetailDragState.startY;
+    
+    const newX = Math.max(0, this.taskDetailDragState.offsetX + deltaX);
+    const newY = Math.max(0, this.taskDetailDragState.offsetY + deltaY);
+    
+    this.zone.run(() => {
+      this.taskDetailPos.set({ x: newX, y: newY });
+    });
+  };
+  
+  // 停止拖动任务详情面板
+  private stopDragTaskDetail = () => {
+    this.taskDetailDragState.isDragging = false;
+    document.removeEventListener('mousemove', this.onDragTaskDetail);
+    document.removeEventListener('mouseup', this.stopDragTaskDetail);
+    document.removeEventListener('touchmove', this.onDragTaskDetail);
+    document.removeEventListener('touchend', this.stopDragTaskDetail);
+  };
+  
+  // 关闭联系块编辑器
+  closeConnectionEditor() {
+    this.connectionEditorData.set(null);
+  }
+  
+  // 保存联系块描述
+  saveConnectionDescription(description: string) {
+    const data = this.connectionEditorData();
+    if (data) {
+      this.store.updateConnectionDescription(data.sourceId, data.targetId, description);
+      this.closeConnectionEditor();
+      // 刷新图表以显示新描述
+      setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+    }
+  }
+  
+  // 自动调整 textarea 高度
+  autoResizeTextarea(event: Event) {
+    const textarea = event.target as HTMLTextAreaElement;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(120, Math.max(28, textarea.scrollHeight)) + 'px';
+  }
+  
+  // 获取连接的源任务和目标任务
+  getConnectionTasks(): { source: Task | null; target: Task | null } {
+    const data = this.connectionEditorData();
+    if (!data) return { source: null, target: null };
+    const tasks = this.store.tasks();
+    return {
+      source: tasks.find(t => t.id === data.sourceId) || null,
+      target: tasks.find(t => t.id === data.targetId) || null
+    };
+  }
 
   constructor() {
+      // 监听任务数据变化，更新图表
       effect(() => {
           const tasks = this.store.tasks();
           if (this.diagram) {
               this.updateDiagram(tasks);
+          }
+      });
+      
+      // 跨视图选中状态同步：监听外部选中任务的变化
+      effect(() => {
+          const selectedId = this.selectedTaskId();
+          if (selectedId && this.diagram) {
+              const node = this.diagram.findNodeForKey(selectedId);
+              if (node && !node.isSelected) {
+                  // 自动定位到选中的节点（不打开详情面板）
+                  this.diagram.select(node);
+                  // 如果节点不在视图中，滚动到节点位置
+                  if (!this.diagram.viewportBounds.containsRect(node.actualBounds)) {
+                      this.diagram.centerRect(node.actualBounds);
+                  }
+              }
           }
       });
   }
@@ -672,9 +928,22 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       const task = this.deleteConfirmTask();
       if (task) {
           this.selectedTaskId.set(null);
-          this.store.deleteTask(task.id);
+          
+          // 根据选项决定是否保留子任务
+          if (this.deleteKeepChildren()) {
+              this.store.deleteTaskKeepChildren(task.id);
+          } else {
+              this.store.deleteTask(task.id);
+          }
+          
           this.deleteConfirmTask.set(null);
+          this.deleteKeepChildren.set(false);
       }
+  }
+  
+  // 检查任务是否有子任务
+  hasChildren(task: Task): boolean {
+      return this.store.tasks().some(t => t.parentId === task.id);
   }
 
   startPaletteResize(e: MouseEvent) {
@@ -991,7 +1260,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       const $ = go.GraphObject.make;
 
       this.diagram = $(go.Diagram, this.diagramDiv.nativeElement, {
-          "undoManager.isEnabled": true,
+          // 禁用 GoJS 内置的 UndoManager，避免与 Store 状态分裂
+          // 撤销/重做应通过全局状态管理实现
+          "undoManager.isEnabled": false,
           "animationManager.isEnabled": false, // 禁用动画提升性能
           "allowDrop": true,
           // 默认不使用自动布局，保持用户手动调整的位置
@@ -1154,6 +1425,58 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
             // Arrowhead
             $(go.Shape, { toArrow: "Standard", stroke: null, scale: 1.2 },
               new go.Binding("fill", "isCrossTree", (isCross: boolean) => isCross ? "#6366f1" : "#94a3b8")
+            ),
+            // 联系块 - 只在跨树连接（虚线）上显示，紧凑设计
+            $(go.Panel, "Auto",
+              { 
+                segmentIndex: NaN,  // 自动居中于连接线
+                segmentFraction: 0.5,
+                cursor: "pointer",
+                click: (e: any, panel: any) => {
+                  // 阻止事件冒泡，避免选中连接线
+                  e.handled = true;
+                  const linkData = panel.part?.data;
+                  if (linkData?.isCrossTree) {
+                    // 获取点击位置相对于流程图容器
+                    const diagramDiv = this.diagram?.div;
+                    if (diagramDiv) {
+                      const rect = diagramDiv.getBoundingClientRect();
+                      const clickX = e.event.pageX - rect.left;
+                      const clickY = e.event.pageY - rect.top;
+                      this.zone.run(() => {
+                        this.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', clickX, clickY);
+                      });
+                    }
+                  }
+                }
+              },
+              new go.Binding("visible", "isCrossTree", (isCross: boolean) => isCross),
+              // 联系块背景 - 更小更紧凑
+              $(go.Shape, "RoundedRectangle", 
+                { 
+                  fill: "#f5f3ff", // violet-50
+                  stroke: "#8b5cf6", // violet-500
+                  strokeWidth: 1,
+                  parameter1: 4
+                }
+              ),
+              // 联系块内容 - 紧凑布局
+              $(go.Panel, "Horizontal",
+                { margin: 3, defaultAlignment: go.Spot.Center },
+                // 联系图标
+                $(go.TextBlock, "🔗", { font: "8px sans-serif" }),
+                // 描述文本（如果有）- 只显示简短文本
+                $(go.TextBlock, 
+                  { 
+                    font: "500 8px sans-serif", 
+                    stroke: "#6d28d9", // violet-700
+                    maxSize: new go.Size(50, 14),
+                    overflow: go.TextBlock.OverflowEllipsis,
+                    margin: new go.Margin(0, 0, 0, 2)
+                  },
+                  new go.Binding("text", "description", (desc: string) => desc ? desc.substring(0, 6) : "...")
+                )
+              )
             )
           );
       
@@ -1249,6 +1572,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
       this.diagram.addDiagramListener('LinkDrawn', (e: any) => this.handleLinkGesture(e));
       this.diagram.addDiagramListener('LinkRelinked', (e: any) => this.handleLinkGesture(e));
+      
+      // 点击背景时关闭联系块编辑器
+      this.diagram.addDiagramListener('BackgroundSingleClicked', () => {
+        this.zone.run(() => {
+          this.closeConnectionEditor();
+        });
+      });
   }
   
   // 根据拖放位置查找插入点
@@ -1321,22 +1651,31 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           return;
       }
       
+      // 检查更新类型：如果是仅位置更新，跳过重建
+      const lastUpdateType = this.store.getLastUpdateType();
+      if (lastUpdateType === 'position') {
+          // 位置更新已由 SelectionMoved 监听器处理，不需要重建
+          return;
+      }
+      
       // 获取所有任务（包括待分配的），只要任务有位置信息或 stage 就显示
       // 待分配任务如果被拖入流程图（有位置信息）也会显示
       // stage 可能是 null 或 undefined，都要处理
       const tasksToShow = tasks.filter(t => t.stage != null || (t.x !== 0 || t.y !== 0));
       
-      console.log('📊 updateDiagram:', { 
-          totalTasks: tasks.length, 
-          tasksToShow: tasksToShow.length,
-          firstFewTasks: tasks.slice(0, 3).map(t => ({ id: t.id, title: t.title, stage: t.stage, x: t.x, y: t.y }))
+      // 保存当前选中状态
+      const selectedKeys = new Set<string>();
+      this.diagram.selection.each((part: any) => {
+          if (part.data?.key) {
+              selectedKeys.add(part.data.key);
+          }
       });
       
-      // Build a map of existing node locations to preserve user's manual positioning
-      const existingLocations = new Map<string, string>();
+      // Build a map of existing node data to detect actual changes
+      const existingNodeMap = new Map<string, any>();
       (model as any).nodeDataArray.forEach((n: any) => {
-          if (n.key && n.loc) {
-              existingLocations.set(n.key, n.loc);
+          if (n.key) {
+              existingNodeMap.set(n.key, n);
           }
       });
       
@@ -1353,13 +1692,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       let newNodeIndex = 0;
 
       tasksToShow.forEach(t => {
-          // 优先使用内存中的位置，其次使用 store 中保存的位置
-          const existingLoc = existingLocations.get(t.id);
+          const existingNode = existingNodeMap.get(t.id);
           let loc: string;
           
-          if (existingLoc) {
-              // 使用当前内存中的位置
-              loc = existingLoc;
+          if (existingNode?.loc) {
+              // 优先保持现有位置（用户拖动后的位置）
+              loc = existingNode.loc;
           } else if (t.x !== 0 || t.y !== 0) {
               // 使用 store 中保存的位置
               loc = `${t.x} ${t.y}`;
@@ -1378,7 +1716,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           nodeDataArray.push({
               key: t.id,
               title: t.title || '未命名任务',
-              displayId: t.displayId,
+              displayId: this.store.compressDisplayId(t.displayId),
               stage: t.stage, // Add stage info for drag computation
               loc: loc,
               color: nodeColor,
@@ -1411,7 +1749,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                       key: `cross-${conn.source}-${conn.target}`,
                       from: conn.source,
                       to: conn.target,
-                      isCrossTree: true
+                      isCrossTree: true,
+                      description: conn.description || '' // 联系块描述
                   });
               }
           }
@@ -1441,6 +1780,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       
       this.diagram.skipsUndoManager = false;
       this.diagram.commitTransaction('update');
+      
+      // 恢复选中状态
+      if (selectedKeys.size > 0) {
+          this.diagram.nodes.each((node: any) => {
+              if (selectedKeys.has(node.data?.key)) {
+                  node.isSelected = true;
+              }
+          });
+      }
   }
 
   createUnassigned() {

@@ -2,6 +2,9 @@
 
 <div class="flex h-full w-full overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
   
+  <!-- Toast 通知容器 -->
+  <app-toast-container></app-toast-container>
+  
   <!-- Left Sidebar: Project List -->
   <aside class="border-r flex flex-col shrink-0 transition-all duration-75 shadow-[4px_0_24px_rgba(0,0,0,0.02)] z-10 overflow-hidden" style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
          [style.width.px]="isSidebarOpen() ? store.sidebarWidth() : 0"
@@ -20,16 +23,58 @@
 
     <!-- Project List -->
     <div class="flex-1 overflow-y-auto px-4 space-y-1 min-w-[240px]">
+      <!-- 全局搜索框 -->
+      <div class="mb-3 relative">
+        <input 
+          type="text" 
+          [ngModel]="store.searchQuery()" 
+          (ngModelChange)="store.searchQuery.set($event)"
+          placeholder="搜索任务..."
+          class="w-full px-3 py-2 text-xs border border-stone-200 rounded-lg bg-white/80 focus:outline-none focus:ring-1 focus:ring-indigo-300 focus:border-indigo-300 transition-all pl-8"
+          aria-label="搜索任务">
+        <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+        @if (store.searchQuery()) {
+          <button 
+            (click)="store.searchQuery.set('')" 
+            class="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
+            aria-label="清除搜索">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        }
+      </div>
+      
+      <!-- 搜索结果 -->
+      @if (store.searchQuery() && store.searchResults().length > 0) {
+        <div class="mb-3 p-2 bg-indigo-50 rounded-lg border border-indigo-100 animate-fade-in">
+          <div class="text-[10px] font-semibold text-indigo-600 mb-1.5 uppercase tracking-wide">
+            搜索结果 ({{store.searchResults().length}})
+          </div>
+          <div class="space-y-1 max-h-48 overflow-y-auto">
+            @for (task of store.searchResults(); track task.id) {
+              <div 
+                (click)="store.activeProjectId.set(store.activeProject()?.id ?? null); onFocusFlowNode(task.id)"
+                class="px-2 py-1.5 bg-white rounded-md text-xs cursor-pointer hover:bg-indigo-100 transition-colors group">
+                <div class="flex items-center gap-1.5">
+                  <span class="font-mono text-[9px] text-indigo-400">{{store.compressDisplayId(task.displayId)}}</span>
+                  <span class="font-medium text-stone-700 truncate group-hover:text-indigo-700">{{task.title || '未命名'}}</span>
+                </div>
+              </div>
+            }
+          </div>
+        </div>
+      } @else if (store.searchQuery() && store.searchResults().length === 0) {
+        <div class="mb-3 p-2 bg-stone-50 rounded-lg text-xs text-stone-400 text-center">
+          未找到匹配的任务
+        </div>
+      }
+      
       @for (proj of store.projects(); track proj.id) {
         <div class="space-y-2">
-          <div 
-            (click)="selectProject(proj.id)"
-            (dblclick)="handleProjectDoubleClick(proj.id, $event)"
-            class="px-4 py-3 rounded-lg cursor-pointer transition-all duration-200 group"
-            [class.bg-indigo-100/60]="store.activeProjectId() === proj.id"
-            [class.text-indigo-900]="store.activeProjectId() === proj.id"
-            [class.text-stone-500]="store.activeProjectId() !== proj.id"
-            [class.hover:bg-stone-100]="store.activeProjectId() !== proj.id">
+          <div (click)="selectProject(proj.id)" (dblclick)="handleProjectDoubleClick(proj.id, $event)" class="px-4 py-3 rounded-lg cursor-pointer transition-all duration-200 group hover:bg-stone-100" [class.bg-indigo-100]="store.activeProjectId() === proj.id" [class.text-indigo-900]="store.activeProjectId() === proj.id" [class.text-stone-500]="store.activeProjectId() !== proj.id">
             <div class="font-medium text-sm transition-colors">{{ proj.name }}</div>
             @if (store.activeProjectId() === proj.id) {
               <div class="text-[10px] text-indigo-400 mt-1 animate-fade-in leading-relaxed font-mono">
@@ -104,15 +149,21 @@
     <!-- Sidebar Footer -->
     <div class="mx-4 mb-6 min-w-[200px] shrink-0 space-y-2">
       <!-- 网络/同步状态指示器 -->
-      @if (!store.isOnline() || store.offlineMode() || store.isSyncing()) {
+      @if (!store.isOnline() || store.offlineMode() || store.isSyncing() || store.sessionExpired()) {
         <div class="flex items-center gap-2 px-4 py-2 rounded-lg text-xs animate-fade-in"
-             [class.bg-red-50]="!store.isOnline()"
-             [class.text-red-600]="!store.isOnline()"
-             [class.bg-amber-50]="store.isOnline() && store.offlineMode()"
-             [class.text-amber-600]="store.isOnline() && store.offlineMode()"
-             [class.bg-indigo-50]="store.isOnline() && store.isSyncing() && !store.offlineMode()"
-             [class.text-indigo-600]="store.isOnline() && store.isSyncing() && !store.offlineMode()">
-          @if (!store.isOnline()) {
+             [class.bg-red-50]="!store.isOnline() || store.sessionExpired()"
+             [class.text-red-600]="!store.isOnline() || store.sessionExpired()"
+             [class.bg-amber-50]="store.isOnline() && store.offlineMode() && !store.sessionExpired()"
+             [class.text-amber-600]="store.isOnline() && store.offlineMode() && !store.sessionExpired()"
+             [class.bg-indigo-50]="store.isOnline() && store.isSyncing() && !store.offlineMode() && !store.sessionExpired()"
+             [class.text-indigo-600]="store.isOnline() && store.isSyncing() && !store.offlineMode() && !store.sessionExpired()">
+          @if (store.sessionExpired()) {
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <span>登录已过期</span>
+            <button (click)="startRelogin()" class="ml-1 underline hover:no-underline">重新登录</button>
+          } @else if (!store.isOnline()) {
             <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
               <line x1="2" y1="2" x2="22" y2="22" stroke-linecap="round"/>
@@ -129,6 +180,11 @@
               <line x1="4" y1="4" x2="20" y2="20" stroke-linecap="round"/>
             </svg>
             <span>离线模式</span>
+            @if (supabaseClient.configurationError()) {
+              <button (click)="showConfigHelp.set(true); $event.stopPropagation()" class="ml-1 text-amber-700 hover:text-amber-900 underline hover:no-underline text-[10px]" title="查看配置指南">
+                配置帮助
+              </button>
+            }
           }
         </div>
       }
@@ -497,36 +553,353 @@
             </svg>
           </div>
           <div>
-            <h3 class="text-lg font-semibold text-stone-800">登录</h3>
-            <p class="text-xs text-stone-500">登录后可同步云端数据</p>
+            <h3 class="text-lg font-semibold text-stone-800">
+              @if (isResetPasswordMode()) { 重置密码 }
+              @else if (isSignupMode()) { 注册账号 }
+              @else { 登录 }
+            </h3>
+            <p class="text-xs text-stone-500">
+              @if (isResetPasswordMode()) { 输入邮箱接收重置链接 }
+              @else if (isSignupMode()) { 创建新账号开始使用 }
+              @else { 登录后可同步云端数据 }
+            </p>
           </div>
         </div>
         
-        <form (submit)="handleLogin($event, { closeSettings: false }); showLoginModal.set(false)" class="space-y-4">
-          <div class="space-y-3">
-            <input type="email" placeholder="邮箱" 
-                   [ngModel]="authEmail()" (ngModelChange)="authEmail.set($event)" 
-                   [ngModelOptions]="{standalone: true}" name="authEmailModal" 
-                   class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
-                   autocomplete="email" required>
-            <input type="password" placeholder="密码" 
-                   [ngModel]="authPassword()" (ngModelChange)="authPassword.set($event)" 
-                   [ngModelOptions]="{standalone: true}" name="authPasswordModal" 
-                   class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
-                   autocomplete="current-password" required>
+        <!-- 密码重置表单 -->
+        @if (isResetPasswordMode()) {
+          @if (resetPasswordSent()) {
+            <div class="text-center py-4">
+              <div class="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-3">
+                <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                </svg>
+              </div>
+              <p class="text-stone-700 text-sm mb-1">重置邮件已发送</p>
+              <p class="text-stone-500 text-xs">请查收邮件并点击链接重置密码</p>
+              <button type="button" (click)="switchToLogin()" class="mt-4 px-4 py-2 text-indigo-600 hover:bg-indigo-50 rounded-lg text-sm">返回登录</button>
+            </div>
+          } @else {
+            <form (submit)="handleResetPassword($event)" class="space-y-4">
+              <input type="email" placeholder="邮箱" 
+                     [ngModel]="authEmail()" (ngModelChange)="authEmail.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="resetEmail" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="email" required>
+              
+              @if (authError()) {
+                <div class="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{{ authError() }}</div>
+              }
+              
+              <div class="flex gap-2 pt-2">
+                <button type="button" (click)="switchToLogin()" class="flex-1 px-4 py-2.5 text-stone-600 hover:bg-stone-100 rounded-lg transition-colors text-sm font-medium">返回登录</button>
+                <button type="submit" class="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-semibold disabled:opacity-60" [disabled]="isAuthLoading()">
+                  @if (isAuthLoading()) { 发送中... } @else { 发送重置邮件 }
+                </button>
+              </div>
+            </form>
+          }
+        }
+        <!-- 注册表单 -->
+        @else if (isSignupMode()) {
+          <form (submit)="handleSignup($event)" class="space-y-4">
+            <div class="space-y-3">
+              <input type="email" placeholder="邮箱" 
+                     [ngModel]="authEmail()" (ngModelChange)="authEmail.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="signupEmail" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="email" required>
+              <input type="password" placeholder="密码（至少6位）" 
+                     [ngModel]="authPassword()" (ngModelChange)="authPassword.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="signupPassword" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="new-password" required minlength="6">
+              <input type="password" placeholder="确认密码" 
+                     [ngModel]="authConfirmPassword()" (ngModelChange)="authConfirmPassword.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="signupConfirmPassword" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="new-password" required>
+            </div>
+            
+            @if (authError()) {
+              <div class="text-xs bg-amber-50 border border-amber-100 rounded-lg px-3 py-2"
+                   [class.text-red-500]="!authError()?.includes('成功')"
+                   [class.text-green-600]="authError()?.includes('成功')">{{ authError() }}</div>
+            }
+            
+            <div class="flex gap-2 pt-2">
+              <button type="button" (click)="switchToLogin()" class="flex-1 px-4 py-2.5 text-stone-600 hover:bg-stone-100 rounded-lg transition-colors text-sm font-medium">返回登录</button>
+              <button type="submit" class="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-semibold disabled:opacity-60" [disabled]="isAuthLoading()">
+                @if (isAuthLoading()) { 注册中... } @else { 注册 }
+              </button>
+            </div>
+          </form>
+        }
+        <!-- 登录表单 -->
+        @else {
+          <form (submit)="handleLogin($event, { closeSettings: false }); showLoginModal.set(false)" class="space-y-4">
+            <div class="space-y-3">
+              <input type="email" placeholder="邮箱" 
+                     [ngModel]="authEmail()" (ngModelChange)="authEmail.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="authEmailModal" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="email" required>
+              <input type="password" placeholder="密码" 
+                     [ngModel]="authPassword()" (ngModelChange)="authPassword.set($event)" 
+                     [ngModelOptions]="{standalone: true}" name="authPasswordModal" 
+                     class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
+                     autocomplete="current-password" required>
+            </div>
+            
+            @if (authError()) {
+              <div class="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{{ authError() }}</div>
+            }
+            
+            <div class="flex flex-col gap-2 pt-2">
+              <div class="flex gap-2">
+                <button type="button" (click)="showLoginModal.set(false)" class="flex-1 px-4 py-2.5 text-stone-600 hover:bg-stone-100 rounded-lg transition-colors text-sm font-medium">取消</button>
+                <button type="submit" class="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-semibold disabled:opacity-60" [disabled]="isAuthLoading()">
+                  @if (isAuthLoading()) { 登录中... } @else { 登录 }
+                </button>
+              </div>
+              <div class="flex justify-center gap-4 text-xs">
+                <button type="button" (click)="switchToSignup()" class="text-indigo-600 hover:text-indigo-800">没有账号？注册</button>
+                <button type="button" (click)="switchToResetPassword()" class="text-stone-500 hover:text-stone-700">忘记密码？</button>
+              </div>
+            </div>
+          </form>
+        }
+      </div>
+    </div>
+  }
+  
+  <!-- Conflict Resolution Modal -->
+  @if (showConflictModal() && conflictData()) {
+    <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl p-6 animate-scale-in max-h-[90vh] overflow-y-auto" (click)="$event.stopPropagation()">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+            <svg class="w-5 h-5 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+          </div>
+          <div>
+            <h3 class="text-lg font-semibold text-stone-800">数据冲突</h3>
+            <p class="text-xs text-stone-500">本地和云端数据存在差异，请选择解决方案</p>
+          </div>
+        </div>
+        
+        <!-- 差异概览 -->
+        <div class="mb-4 p-3 bg-stone-50 rounded-lg border border-stone-200">
+          <div class="text-xs font-medium text-stone-600 mb-2 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+            差异概览
+          </div>
+          <div class="grid grid-cols-3 gap-2 text-[10px]">
+            <div class="p-2 bg-white rounded border border-stone-100">
+              <div class="text-stone-400 mb-0.5">项目名称</div>
+              <div class="font-medium text-stone-700">{{ conflictData()?.localProject?.name || conflictData()?.remoteProject?.name }}</div>
+            </div>
+            <div class="p-2 bg-white rounded border border-stone-100">
+              <div class="text-stone-400 mb-0.5">本地任务数</div>
+              <div class="font-medium text-indigo-600">{{ conflictData()?.localProject?.tasks?.length || 0 }}</div>
+            </div>
+            <div class="p-2 bg-white rounded border border-stone-100">
+              <div class="text-stone-400 mb-0.5">云端任务数</div>
+              <div class="font-medium text-teal-600">{{ conflictData()?.remoteProject?.tasks?.length || 0 }}</div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <!-- 本地版本 -->
+          <div class="p-3 rounded-lg border-2 border-stone-200 hover:border-indigo-400 transition-colors cursor-pointer group"
+               (click)="resolveConflictLocal()">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-4 h-4 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="16" rx="2"/>
+                <path d="M7 8h10M7 12h6"/>
+              </svg>
+              <span class="text-sm font-medium text-stone-700 group-hover:text-indigo-700">本地版本</span>
+            </div>
+            <div class="text-xs text-stone-500 space-y-1">
+              <p class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+                任务数：<span class="font-medium text-indigo-600">{{ conflictData()?.localProject?.tasks?.length || 0 }}</span>
+              </p>
+              <p class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-stone-300"></span>
+                修改：{{ conflictData()?.localProject?.updatedAt | date:'yyyy-MM-dd HH:mm' }}
+              </p>
+            </div>
+            <div class="mt-2 text-[10px] text-indigo-600 bg-indigo-50 px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+              点击选择本地版本
+            </div>
           </div>
           
-          @if (authError()) {
-            <div class="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{{ authError() }}</div>
-          }
-          
-          <div class="flex gap-2 pt-2">
-            <button type="button" (click)="showLoginModal.set(false)" class="flex-1 px-4 py-2.5 text-stone-600 hover:bg-stone-100 rounded-lg transition-colors text-sm font-medium">取消</button>
-            <button type="submit" class="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-semibold disabled:opacity-60" [disabled]="isAuthLoading()">
-              @if (isAuthLoading()) { 登录中... } @else { 登录 }
+          <!-- 云端版本 -->
+          <div class="p-3 rounded-lg border-2 border-stone-200 hover:border-teal-400 transition-colors cursor-pointer group"
+               (click)="resolveConflictRemote()">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-4 h-4 text-teal-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/>
+              </svg>
+              <span class="text-sm font-medium text-stone-700 group-hover:text-teal-700">云端版本</span>
+            </div>
+            <div class="text-xs text-stone-500 space-y-1">
+              <p class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-teal-400"></span>
+                任务数：<span class="font-medium text-teal-600">{{ conflictData()?.remoteProject?.tasks?.length || 0 }}</span>
+              </p>
+              <p class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-stone-300"></span>
+                修改：{{ conflictData()?.remoteProject?.updated_at | date:'yyyy-MM-dd HH:mm' }}
+              </p>
+            </div>
+            <div class="mt-2 text-[10px] text-teal-600 bg-teal-50 px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+              点击选择云端版本
+            </div>
+          </div>
+        </div>
+        
+        <!-- 智能合并选项 -->
+        <div class="mb-4 p-3 bg-gradient-to-r from-violet-50 to-indigo-50 rounded-lg border border-violet-200">
+          <div class="flex items-start gap-2">
+            <svg class="w-4 h-4 text-violet-500 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+            <div class="flex-1">
+              <div class="text-xs font-medium text-violet-700 mb-1">智能合并（推荐）</div>
+              <p class="text-[10px] text-violet-600 mb-2">保留双方的新增内容，合并修改。如果同一任务在双方都有修改，将优先使用较新的版本。</p>
+              <button 
+                (click)="resolveConflictMerge()"
+                class="px-3 py-1.5 bg-violet-500 text-white text-xs font-medium rounded-lg hover:bg-violet-600 transition-colors flex items-center gap-1.5">
+                <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/>
+                </svg>
+                执行智能合并
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="text-xs text-stone-400 mb-4 p-2 bg-stone-50 rounded-lg">
+          💡 <span class="font-medium">提示：</span>选择「本地版本」将覆盖云端数据；选择「云端版本」将丢弃本地未同步的更改；「智能合并」会尝试保留双方的修改。
+        </div>
+        
+        <div class="flex justify-between items-center">
+          <button 
+            (click)="cancelConflictResolution()"
+            class="px-3 py-1.5 text-stone-500 hover:text-stone-700 text-xs transition-colors">
+            稍后解决
+          </button>
+          <div class="flex gap-2">
+            <button (click)="resolveConflictRemote()" class="px-4 py-2 text-stone-600 hover:bg-stone-100 rounded-lg transition-colors text-sm font-medium border border-stone-200">
+              使用云端
+            </button>
+            <button (click)="resolveConflictLocal()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
+              使用本地
             </button>
           </div>
-        </form>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- 配置帮助对话框 -->
+  @if (showConfigHelp()) {
+    <div class="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in p-4" (click)="showConfigHelp.set(false)">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" (click)="$event.stopPropagation()">
+        <div class="px-6 py-5 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-amber-200">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+              <svg class="w-5 h-5 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+              </svg>
+            </div>
+            <div>
+              <h3 class="text-lg font-bold text-stone-800">Supabase 配置指南</h3>
+              <p class="text-xs text-amber-700">启用云同步需要配置 Supabase 环境变量</p>
+            </div>
+          </div>
+        </div>
+        
+        <div class="px-6 py-5 space-y-4 max-h-[60vh] overflow-y-auto">
+          <div class="text-sm text-stone-600">
+            <p class="mb-3">您当前处于<span class="font-semibold text-amber-600">离线模式</span>，数据只保存在本地浏览器中。要启用云端同步，请按以下步骤配置：</p>
+          </div>
+          
+          <div class="space-y-3">
+            <div class="p-3 bg-stone-50 rounded-lg">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold flex items-center justify-center">1</span>
+                <span class="font-medium text-stone-700 text-sm">创建 Supabase 项目</span>
+              </div>
+              <p class="text-xs text-stone-500 ml-7">
+                访问 <a href="https://supabase.com" target="_blank" class="text-indigo-600 hover:underline">supabase.com</a> 创建免费账号和项目
+              </p>
+            </div>
+            
+            <div class="p-3 bg-stone-50 rounded-lg">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold flex items-center justify-center">2</span>
+                <span class="font-medium text-stone-700 text-sm">获取 API 密钥</span>
+              </div>
+              <p class="text-xs text-stone-500 ml-7">
+                在项目设置 &gt; API 中找到 Project URL 和 anon public key
+              </p>
+            </div>
+            
+            <div class="p-3 bg-stone-50 rounded-lg">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold flex items-center justify-center">3</span>
+                <span class="font-medium text-stone-700 text-sm">配置环境变量</span>
+              </div>
+              <p class="text-xs text-stone-500 ml-7 mb-2">
+                在项目根目录创建 <code class="px-1.5 py-0.5 bg-stone-200 rounded text-[11px] font-mono">.env.local</code> 文件：
+              </p>
+              <div class="ml-7 p-2 bg-stone-800 rounded text-[11px] font-mono text-stone-100 overflow-x-auto">
+                <div>NG_APP_SUPABASE_URL=your-project-url</div>
+                <div>NG_APP_SUPABASE_ANON_KEY=your-anon-key</div>
+              </div>
+            </div>
+            
+            <div class="p-3 bg-stone-50 rounded-lg">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold flex items-center justify-center">4</span>
+                <span class="font-medium text-stone-700 text-sm">运行配置脚本</span>
+              </div>
+              <p class="text-xs text-stone-500 ml-7 mb-2">
+                执行以下命令生成环境配置：
+              </p>
+              <div class="ml-7 p-2 bg-stone-800 rounded text-[11px] font-mono text-stone-100">
+                npm run config && npm start
+              </div>
+            </div>
+          </div>
+          
+          <div class="p-3 bg-emerald-50 rounded-lg border border-emerald-200">
+            <div class="flex items-start gap-2">
+              <svg class="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <p class="text-xs text-emerald-700">
+                <span class="font-semibold">离线模式也能正常使用</span> - 您的数据会保存在浏览器本地存储中，但无法跨设备同步。
+              </p>
+            </div>
+          </div>
+        </div>
+        
+        <div class="px-6 py-4 bg-stone-50 border-t border-stone-200 flex justify-end gap-3">
+          <a href="https://github.com/your-repo/nanoflow#readme" target="_blank" class="px-4 py-2 text-stone-600 hover:text-stone-800 text-sm font-medium transition-colors">
+            查看文档
+          </a>
+          <button (click)="showConfigHelp.set(false)" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
+            我知道了
+          </button>
+        </div>
       </div>
     </div>
   }
