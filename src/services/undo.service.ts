@@ -5,6 +5,11 @@ import { UNDO_CONFIG } from '../config/constants';
 /**
  * 撤销/重做服务
  * 实现应用级别的撤销重做功能
+ * 
+ * 特性：
+ * - 防抖合并：连续的编辑操作会被合并为一个撤销记录
+ * - 栈大小限制：避免内存溢出
+ * - 版本追踪：与远程同步配合使用
  */
 @Injectable({
   providedIn: 'root'
@@ -17,7 +22,7 @@ export class UndoService {
   
   /** 是否可以撤销 */
   readonly canUndo = computed(() => this.undoStack().length > 0);
-  /** 是否可以撤销 */
+  /** 是否可以重做 */
   readonly canRedo = computed(() => this.redoStack().length > 0);
   
   /** 撤销栈大小 */
@@ -27,33 +32,131 @@ export class UndoService {
   
   /** 是否正在执行撤销/重做操作（防止循环记录） */
   private isUndoRedoing = false;
+  
+  /** 防抖相关状态 */
+  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingAction: Omit<UndoAction, 'timestamp'> | null = null;
+  private lastActionTime = 0;
+  
+  /** 防抖配置 */
+  private readonly DEBOUNCE_DELAY = 800; // 800ms 内的连续编辑合并
+  private readonly MERGE_WINDOW = 2000; // 2s 内同类型操作可合并
 
   /**
    * 记录一个操作（用于后续撤销）
+   * 会自动防抖，连续的编辑操作会合并为一个撤销记录
+   * @param projectVersion 当前项目版本号，用于撤销时检测远程更新冲突
    */
-  recordAction(action: Omit<UndoAction, 'timestamp'>): void {
+  recordAction(action: Omit<UndoAction, 'timestamp'>, projectVersion?: number): void {
     if (this.isUndoRedoing) return;
     
-    const fullAction: UndoAction = {
-      ...action,
-      timestamp: Date.now()
-    };
+    // 检查是否应该与上一个操作合并
+    const now = Date.now();
+    const lastAction = this.undoStack().at(-1);
     
-    this.undoStack.update(stack => {
-      const newStack = [...stack, fullAction];
-      // 限制栈大小
-      if (newStack.length > UNDO_CONFIG.MAX_HISTORY_SIZE) {
-        return newStack.slice(-UNDO_CONFIG.MAX_HISTORY_SIZE);
-      }
-      return newStack;
-    });
+    // 合并条件：
+    // 1. 同一个项目
+    // 2. 同类型操作（都是 task-update）
+    // 3. 在合并窗口内
+    const shouldMerge = lastAction &&
+      lastAction.projectId === action.projectId &&
+      lastAction.type === action.type &&
+      action.type === 'task-update' &&
+      (now - lastAction.timestamp) < this.MERGE_WINDOW;
+    
+    if (shouldMerge && lastAction) {
+      // 合并操作：保留最初的 before 快照，更新 after 快照
+      this.undoStack.update(stack => {
+        const updated = [...stack];
+        const lastIdx = updated.length - 1;
+        updated[lastIdx] = {
+          ...updated[lastIdx],
+          timestamp: now,
+          data: {
+            before: updated[lastIdx].data.before, // 保留原始的 before
+            after: action.data.after // 使用最新的 after
+          }
+        };
+        return updated;
+      });
+    } else {
+      // 创建新的撤销记录
+      const fullAction: UndoAction = {
+        ...action,
+        timestamp: now,
+        projectVersion // 记录当前项目版本号
+      };
+      
+      this.undoStack.update(stack => {
+        const newStack = [...stack, fullAction];
+        // 限制栈大小
+        if (newStack.length > UNDO_CONFIG.MAX_HISTORY_SIZE) {
+          return newStack.slice(-UNDO_CONFIG.MAX_HISTORY_SIZE);
+        }
+        return newStack;
+      });
+    }
     
     // 有新操作时清空重做栈
     this.redoStack.set([]);
+    this.lastActionTime = now;
+  }
+  
+  /**
+   * 带防抖的记录操作
+   * 用于高频输入场景（如输入框），延迟提交以合并多次输入
+   */
+  recordActionDebounced(action: Omit<UndoAction, 'timestamp'>): void {
+    if (this.isUndoRedoing) return;
+    
+    // 如果没有待处理的操作，保存初始快照
+    if (!this.pendingAction) {
+      this.pendingAction = action;
+    } else {
+      // 更新 after 快照，保留原始 before
+      this.pendingAction = {
+        ...this.pendingAction,
+        data: {
+          before: this.pendingAction.data.before,
+          after: action.data.after
+        }
+      };
+    }
+    
+    // 清除之前的定时器
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+    }
+    
+    // 设置新的防抖定时器
+    this.debounceTimer = setTimeout(() => {
+      if (this.pendingAction) {
+        this.recordAction(this.pendingAction);
+        this.pendingAction = null;
+      }
+      this.debounceTimer = null;
+    }, this.DEBOUNCE_DELAY);
+  }
+  
+  /**
+   * 立即提交待处理的防抖操作
+   * 在用户离开编辑状态时调用
+   */
+  flushPendingAction(): void {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    
+    if (this.pendingAction) {
+      this.recordAction(this.pendingAction);
+      this.pendingAction = null;
+    }
   }
 
   /**
    * 执行撤销
+   * 在撤销前检查快照中的任务是否仍然存在
    * @returns 需要应用的撤销数据，或 null（如果没有可撤销的操作）
    */
   undo(): UndoAction | null {
@@ -63,6 +166,10 @@ export class UndoService {
     this.isUndoRedoing = true;
     
     const action = stack[stack.length - 1];
+    
+    // 注意：撤销操作的安全检查由 StoreService.applyProjectSnapshot 完成
+    // 这里不阻止撤销，只记录可能的警告供日志使用
+    
     this.undoStack.update(s => s.slice(0, -1));
     this.redoStack.update(s => [...s, action]);
     
@@ -86,6 +193,36 @@ export class UndoService {
     
     this.isUndoRedoing = false;
     return action;
+  }
+
+  /**
+   * 清理过时的撤销记录
+   * 当检测到远程更新时调用，移除版本号低于当前版本的记录
+   * 这可以防止撤销时意外覆盖远程更新
+   */
+  clearOutdatedHistory(projectId: string, currentVersion: number): number {
+    const before = this.undoStack().length;
+    
+    this.undoStack.update(stack => 
+      stack.filter(action => {
+        // 保留不同项目的记录
+        if (action.projectId !== projectId) return true;
+        // 保留版本号匹配或较新的记录
+        if (action.projectVersion === undefined) return true;
+        return action.projectVersion >= currentVersion - 1;
+      })
+    );
+    
+    // 同时清理重做栈中的过时记录
+    this.redoStack.update(stack => 
+      stack.filter(action => {
+        if (action.projectId !== projectId) return true;
+        if (action.projectVersion === undefined) return true;
+        return action.projectVersion >= currentVersion - 1;
+      })
+    );
+    
+    return before - this.undoStack().length;
   }
 
   /**

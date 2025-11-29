@@ -1,0 +1,293 @@
+import { Component, inject, signal, Output, EventEmitter, Input, computed } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { StoreService } from '../../services/store.service';
+import { ToastService } from '../../services/toast.service';
+import { Task } from '../../models';
+
+/**
+ * 回收站模态框组件
+ * 展示已删除的任务并提供恢复/永久删除功能
+ */
+@Component({
+  selector: 'app-trash-modal',
+  standalone: true,
+  imports: [CommonModule],
+  template: `
+    @if (show) {
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
+           (click)="close.emit()">
+        <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden w-full max-w-lg mx-4 animate-scale-in max-h-[80vh] flex flex-col"
+             (click)="$event.stopPropagation()">
+          
+          <!-- 标题栏 -->
+          <div class="px-5 py-4 border-b border-stone-100 flex items-center justify-between flex-shrink-0">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center">
+                <svg class="w-5 h-5 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-lg font-bold text-stone-800">回收站</h3>
+                <p class="text-xs text-stone-500">{{ deletedTasks().length }} 个已删除任务</p>
+              </div>
+            </div>
+            <button (click)="close.emit()" class="text-stone-400 hover:text-stone-600 p-1">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          <!-- 任务列表 -->
+          <div class="flex-1 overflow-y-auto px-5 py-3">
+            @if (deletedTasks().length === 0) {
+              <div class="text-center py-8">
+                <div class="w-16 h-16 mx-auto mb-4 rounded-full bg-stone-50 flex items-center justify-center">
+                  <svg class="w-8 h-8 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <p class="text-stone-400 text-sm">回收站是空的</p>
+                <p class="text-stone-300 text-xs mt-1">删除的任务将在此显示</p>
+              </div>
+            } @else {
+              <ul class="space-y-2">
+                @for (task of deletedTasks(); track task.id) {
+                  <li class="p-3 bg-stone-50 rounded-lg border border-stone-100 hover:border-stone-200 transition-all">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="font-medium text-stone-800 text-sm truncate">{{ task.title }}</span>
+                          @if (task.shortId) {
+                            <span class="text-[9px] font-mono text-stone-400 bg-stone-100 px-1 rounded">{{ task.shortId }}</span>
+                          }
+                        </div>
+                        <p class="text-xs text-stone-500 truncate">{{ task.content || '无内容' }}</p>
+                        <div class="flex items-center gap-2 mt-1">
+                          <span class="text-[10px] text-stone-400">
+                            删除于 {{ formatDeletedAt(task.deletedAt) }}
+                          </span>
+                          @if (hasChildren(task.id)) {
+                            <span class="text-[10px] text-amber-600 bg-amber-50 px-1.5 rounded">
+                              含 {{ getChildCount(task.id) }} 个子任务
+                            </span>
+                          }
+                        </div>
+                      </div>
+                      <div class="flex gap-1 flex-shrink-0">
+                        <button 
+                          (click)="restoreTask(task)"
+                          class="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[10px] font-medium rounded transition-all"
+                          title="恢复任务">
+                          恢复
+                        </button>
+                        <button 
+                          (click)="confirmPermanentDelete(task)"
+                          class="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-medium rounded transition-all"
+                          title="永久删除">
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                }
+              </ul>
+            }
+          </div>
+          
+          <!-- 底部操作栏 -->
+          <div class="px-5 py-3 border-t border-stone-100 flex justify-between items-center flex-shrink-0 bg-stone-50/50">
+            <p class="text-[10px] text-stone-400">
+              任务将在删除 30 天后自动清除
+            </p>
+            @if (deletedTasks().length > 0) {
+              <button 
+                (click)="confirmEmptyTrash()"
+                class="px-3 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg transition-all">
+                清空回收站
+              </button>
+            }
+          </div>
+        </div>
+      </div>
+      
+      <!-- 确认永久删除对话框 -->
+      @if (confirmDeleteTask()) {
+        <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
+             (click)="confirmDeleteTask.set(null)">
+          <div class="bg-white rounded-xl shadow-2xl border border-stone-200 p-5 w-80 mx-4 animate-scale-in"
+               (click)="$event.stopPropagation()">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h4 class="font-bold text-stone-800">永久删除</h4>
+                <p class="text-xs text-stone-500">此操作不可撤销</p>
+              </div>
+            </div>
+            <p class="text-sm text-stone-600 mb-4">
+              确定永久删除 "<span class="font-medium">{{ confirmDeleteTask()?.title }}</span>" 吗？
+              @if (hasChildren(confirmDeleteTask()!.id)) {
+                <span class="text-amber-600">其 {{ getChildCount(confirmDeleteTask()!.id) }} 个子任务也将被删除。</span>
+              }
+            </p>
+            <div class="flex gap-2">
+              <button 
+                (click)="confirmDeleteTask.set(null)"
+                class="flex-1 px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium rounded-lg transition-all">
+                取消
+              </button>
+              <button 
+                (click)="executePermanentDelete()"
+                class="flex-1 px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-lg transition-all">
+                永久删除
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+      
+      <!-- 确认清空回收站对话框 -->
+      @if (showEmptyConfirm()) {
+        <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
+             (click)="showEmptyConfirm.set(false)">
+          <div class="bg-white rounded-xl shadow-2xl border border-stone-200 p-5 w-80 mx-4 animate-scale-in"
+               (click)="$event.stopPropagation()">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </div>
+              <div>
+                <h4 class="font-bold text-stone-800">清空回收站</h4>
+                <p class="text-xs text-stone-500">此操作不可撤销</p>
+              </div>
+            </div>
+            <p class="text-sm text-stone-600 mb-4">
+              确定永久删除回收站中的所有 {{ deletedTasks().length }} 个任务吗？
+            </p>
+            <div class="flex gap-2">
+              <button 
+                (click)="showEmptyConfirm.set(false)"
+                class="flex-1 px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 text-sm font-medium rounded-lg transition-all">
+                取消
+              </button>
+              <button 
+                (click)="executeEmptyTrash()"
+                class="flex-1 px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-medium rounded-lg transition-all">
+                全部删除
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+    }
+  `
+})
+export class TrashModalComponent {
+  @Input() show = false;
+  @Output() close = new EventEmitter<void>();
+  
+  private store = inject(StoreService);
+  private toast = inject(ToastService);
+  
+  // 确认删除状态
+  confirmDeleteTask = signal<Task | null>(null);
+  showEmptyConfirm = signal(false);
+  
+  // 已删除任务列表
+  deletedTasks = computed(() => this.store.deletedTasks());
+  
+  /**
+   * 格式化删除时间
+   */
+  formatDeletedAt(deletedAt: string | null | undefined): string {
+    if (!deletedAt) return '未知时间';
+    
+    const date = new Date(deletedAt);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    
+    if (diffDays === 0) {
+      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+      if (diffHours === 0) {
+        const diffMinutes = Math.floor(diffMs / (1000 * 60));
+        return `${diffMinutes} 分钟前`;
+      }
+      return `${diffHours} 小时前`;
+    } else if (diffDays === 1) {
+      return '昨天';
+    } else if (diffDays < 7) {
+      return `${diffDays} 天前`;
+    } else {
+      return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+    }
+  }
+  
+  /**
+   * 检查任务是否有子任务
+   */
+  hasChildren(taskId: string): boolean {
+    return this.store.tasks().some(t => t.parentId === taskId);
+  }
+  
+  /**
+   * 获取子任务数量
+   */
+  getChildCount(taskId: string): number {
+    const countDescendants = (id: string): number => {
+      const children = this.store.tasks().filter(t => t.parentId === id);
+      return children.length + children.reduce((sum, child) => sum + countDescendants(child.id), 0);
+    };
+    return countDescendants(taskId);
+  }
+  
+  /**
+   * 恢复任务
+   */
+  restoreTask(task: Task) {
+    this.store.restoreTask(task.id);
+    this.toast.success('已恢复', `任务 "${task.title}" 已恢复`);
+  }
+  
+  /**
+   * 确认永久删除
+   */
+  confirmPermanentDelete(task: Task) {
+    this.confirmDeleteTask.set(task);
+  }
+  
+  /**
+   * 执行永久删除
+   */
+  executePermanentDelete() {
+    const task = this.confirmDeleteTask();
+    if (task) {
+      this.store.permanentlyDeleteTask(task.id);
+      this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
+    }
+    this.confirmDeleteTask.set(null);
+  }
+  
+  /**
+   * 确认清空回收站
+   */
+  confirmEmptyTrash() {
+    this.showEmptyConfirm.set(true);
+  }
+  
+  /**
+   * 执行清空回收站
+   */
+  executeEmptyTrash() {
+    this.store.emptyTrash();
+    this.showEmptyConfirm.set(false);
+    this.toast.success('已清空', '回收站已清空');
+  }
+}

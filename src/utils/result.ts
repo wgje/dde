@@ -1,0 +1,105 @@
+/**
+ * 操作结果类型
+ * 用于统一表示可能失败的操作结果
+ */
+export type Result<T, E = Error> = 
+  | { ok: true; value: T }
+  | { ok: false; error: E };
+
+/**
+ * 操作错误类型
+ */
+export interface OperationError {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * 常见错误码
+ */
+export const ErrorCodes = {
+  // 布局错误
+  LAYOUT_RANK_CONFLICT: 'LAYOUT_RANK_CONFLICT',
+  LAYOUT_PARENT_CHILD_CONFLICT: 'LAYOUT_PARENT_CHILD_CONFLICT',
+  LAYOUT_CYCLE_DETECTED: 'LAYOUT_CYCLE_DETECTED',
+  LAYOUT_NO_SPACE: 'LAYOUT_NO_SPACE',
+  
+  // 数据错误
+  DATA_NOT_FOUND: 'DATA_NOT_FOUND',
+  DATA_INVALID: 'DATA_INVALID',
+  DATA_DUPLICATE: 'DATA_DUPLICATE',
+  
+  // 同步错误
+  SYNC_CONFLICT: 'SYNC_CONFLICT',
+  SYNC_OFFLINE: 'SYNC_OFFLINE',
+  SYNC_AUTH_EXPIRED: 'SYNC_AUTH_EXPIRED',
+  
+  // 权限错误
+  PERMISSION_DENIED: 'PERMISSION_DENIED',
+  
+  // 通用错误
+  UNKNOWN: 'UNKNOWN'
+} as const;
+
+export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
+
+/**
+ * 创建成功结果
+ */
+export function success<T>(value: T): Result<T, OperationError> {
+  return { ok: true, value };
+}
+
+/**
+ * 创建失败结果
+ */
+export function failure<T = never>(
+  code: ErrorCode, 
+  message: string, 
+  details?: Record<string, unknown>
+): Result<T, OperationError> {
+  return { 
+    ok: false, 
+    error: { code, message, details } 
+  };
+}
+
+/**
+ * 错误消息映射（用于 UI 显示）
+ */
+export const ErrorMessages: Record<ErrorCode, string> = {
+  [ErrorCodes.LAYOUT_RANK_CONFLICT]: '任务排序冲突，请稍后重试',
+  [ErrorCodes.LAYOUT_PARENT_CHILD_CONFLICT]: '无法移动：会破坏父子关系约束',
+  [ErrorCodes.LAYOUT_CYCLE_DETECTED]: '无法移动：会产生循环依赖',
+  [ErrorCodes.LAYOUT_NO_SPACE]: '该区域已满，无法放置更多任务',
+  [ErrorCodes.DATA_NOT_FOUND]: '数据不存在',
+  [ErrorCodes.DATA_INVALID]: '数据格式无效',
+  [ErrorCodes.DATA_DUPLICATE]: '数据重复',
+  [ErrorCodes.SYNC_CONFLICT]: '数据冲突，请选择保留的版本',
+  [ErrorCodes.SYNC_OFFLINE]: '当前离线，数据将在恢复连接后同步',
+  [ErrorCodes.SYNC_AUTH_EXPIRED]: '登录已过期，请重新登录',
+  [ErrorCodes.PERMISSION_DENIED]: '没有权限执行此操作',
+  [ErrorCodes.UNKNOWN]: '未知错误'
+};
+
+/**
+ * 获取用户友好的错误消息
+ */
+export function getErrorMessage(error: OperationError): string {
+  return ErrorMessages[error.code as ErrorCode] || error.message || ErrorMessages[ErrorCodes.UNKNOWN];
+}
+
+/**
+ * 类型守卫：判断结果是否成功
+ */
+export function isSuccess<T, E>(result: Result<T, E>): result is { ok: true; value: T } {
+  return result.ok === true;
+}
+
+/**
+ * 类型守卫：判断结果是否失败
+ */
+export function isFailure<T, E>(result: Result<T, E>): result is { ok: false; error: E } {
+  return result.ok === false;
+}

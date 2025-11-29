@@ -1,30 +1,62 @@
-import { Component, inject, signal, HostListener, computed, ViewChild } from '@angular/core';
+import { Component, inject, signal, HostListener, computed, ViewChild, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { ActivatedRoute, Router, NavigationEnd } from '@angular/router';
 import { StoreService } from './services/store.service';
 import { AuthService } from './services/auth.service';
 import { UndoService } from './services/undo.service';
 import { ToastService } from './services/toast.service';
 import { SupabaseClientService } from './services/supabase-client.service';
+import { UiStateService } from './services/ui-state.service';
 import { TextViewComponent } from './components/text-view.component';
 import { FlowViewComponent } from './components/flow-view.component';
 import { ToastContainerComponent } from './components/toast-container.component';
+import { 
+  SettingsModalComponent, 
+  LoginModalComponent, 
+  ConflictModalComponent, 
+  NewProjectModalComponent, 
+  DeleteConfirmModalComponent,
+  ConfigHelpModalComponent,
+  TrashModalComponent
+} from './components/modals';
 import { FormsModule } from '@angular/forms';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
-import { filter } from 'rxjs/operators';
+import { filter, takeUntil } from 'rxjs/operators';
+import { Subject } from 'rxjs';
+import { getErrorMessage } from './utils/result';
+import { ThemeType } from './models';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, TextViewComponent, FlowViewComponent, ToastContainerComponent, FormsModule],
+  imports: [
+    CommonModule, 
+    FormsModule,
+    TextViewComponent, 
+    FlowViewComponent, 
+    ToastContainerComponent,
+    SettingsModalComponent,
+    LoginModalComponent,
+    ConflictModalComponent,
+    NewProjectModalComponent,
+    DeleteConfirmModalComponent,
+    ConfigHelpModalComponent,
+    TrashModalComponent
+  ],
   templateUrl: './app.component.html',
 })
-export class AppComponent {
+export class AppComponent implements OnInit, OnDestroy {
   store = inject(StoreService);
   auth = inject(AuthService);
   undoService = inject(UndoService);
   swUpdate = inject(SwUpdate);
   toast = inject(ToastService);
   supabaseClient = inject(SupabaseClientService);
+  uiState = inject(UiStateService);
+  
+  private route = inject(ActivatedRoute);
+  private router = inject(Router);
+  private destroy$ = new Subject<void>();
   
   @ViewChild(FlowViewComponent) flowView?: FlowViewComponent;
 
@@ -194,6 +226,9 @@ export class AppComponent {
   // 删除项目确认对话框
   showDeleteProjectModal = signal(false);
   deleteProjectTarget = signal<{ id: string; name: string } | null>(null);
+  
+  // 回收站模态框
+  showTrashModal = signal(false);
 
   constructor() {
     void this.bootstrapSession();
@@ -201,6 +236,78 @@ export class AppComponent {
     this.setupSwUpdateListener();
     this.applyStoredTheme();
     this.setupConflictHandler();
+  }
+  
+  ngOnInit() {
+    this.setupRouteSync();
+  }
+  
+  ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+  
+  /**
+   * 设置路由参数与状态的同步
+   * 监听 URL 变化并更新 activeProjectId
+   */
+  private setupRouteSync() {
+    // 监听路由参数变化
+    this.router.events.pipe(
+      filter(event => event instanceof NavigationEnd),
+      takeUntil(this.destroy$)
+    ).subscribe(() => {
+      this.syncStateFromRoute();
+    });
+    
+    // 初始同步
+    this.syncStateFromRoute();
+    
+    // 监听 activeProjectId 变化，更新 URL
+    // 使用 effect 或手动订阅
+  }
+  
+  /**
+   * 从路由参数同步状态
+   */
+  private syncStateFromRoute() {
+    // 获取当前完整路由
+    let currentRoute = this.route;
+    while (currentRoute.firstChild) {
+      currentRoute = currentRoute.firstChild;
+    }
+    
+    const params = currentRoute.snapshot.params;
+    const projectId = params['projectId'];
+    const taskId = params['taskId'];
+    
+    if (projectId && projectId !== this.store.activeProjectId()) {
+      // 检查项目是否存在
+      const projectExists = this.store.projects().some(p => p.id === projectId);
+      if (projectExists) {
+        this.store.activeProjectId.set(projectId);
+      } else {
+        // 项目不存在，重定向到默认路由
+        void this.router.navigate(['/projects']);
+      }
+    }
+    
+    // 如果有 taskId，可以定位到对应任务
+    if (taskId && this.flowView) {
+      setTimeout(() => {
+        this.flowView?.centerOnNode(taskId, true);
+      }, 100);
+    }
+  }
+  
+  /**
+   * 更新 URL 以反映当前状态（可选调用）
+   */
+  updateUrlForProject(projectId: string) {
+    void this.router.navigate(['/projects', projectId], { 
+      replaceUrl: true,
+      queryParamsHandling: 'preserve'
+    });
   }
   
   private setupConflictHandler() {
@@ -657,13 +764,32 @@ export class AppComponent {
       this.store.floatingWindowPref.set(val);
   }
   
-  updateTheme(theme: 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender') {
+  updateTheme(theme: ThemeType) {
     // 使用 store 的 setTheme 方法，会自动同步到云端
     void this.store.setTheme(theme);
   }
 
   updateFilter(e: Event) {
       this.store.filterMode.set((e.target as HTMLSelectElement).value);
+  }
+  
+  // 以下方法用于适配 LoginModalComponent 的事件
+  async handleLoginFromModal(data: { email: string; password: string }) {
+    this.authEmail.set(data.email);
+    this.authPassword.set(data.password);
+    await this.handleLogin();
+  }
+  
+  async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }) {
+    this.authEmail.set(data.email);
+    this.authPassword.set(data.password);
+    this.authConfirmPassword.set(data.confirmPassword);
+    await this.handleSignup();
+  }
+  
+  async handleResetPasswordFromModal(email: string) {
+    this.authEmail.set(email);
+    await this.handleResetPassword();
   }
 
   @HostListener('window:resize')

@@ -2,6 +2,17 @@ import { Injectable, signal } from '@angular/core';
 import { createClient, type AuthResponse, type Session, type SupabaseClient } from '@supabase/supabase-js';
 import { environment } from '../environments/environment'; // 引入环境文件
 
+/**
+ * 敏感密钥检测模式
+ * 用于防止 SERVICE_ROLE_KEY 意外泄露到前端
+ */
+const SENSITIVE_KEY_PATTERNS = [
+  'service_role',
+  'secret',
+  'private',
+  'admin'
+];
+
 @Injectable({
   providedIn: 'root'
 })
@@ -34,6 +45,16 @@ export class SupabaseClientService {
       }
       return;
     }
+    
+    // 🔒 安全检查：确保不会意外使用 SERVICE_ROLE_KEY
+    if (this.isSensitiveKey(supabaseAnonKey)) {
+      const securityError = '🚨 [SECURITY] 检测到敏感密钥！前端不应使用 SERVICE_ROLE_KEY，请使用 ANON_KEY。';
+      console.error(securityError);
+      this.configurationError.set('安全配置错误：请使用公开的 ANON_KEY 而非 SERVICE_ROLE_KEY');
+      
+      // 阻止使用敏感密钥
+      return;
+    }
 
     try {
       this.supabase = createClient(supabaseUrl, supabaseAnonKey);
@@ -42,6 +63,37 @@ export class SupabaseClientService {
       this.configurationError.set('Supabase 客户端初始化失败');
       this.supabase = null;
     }
+  }
+  
+  /**
+   * 检测是否为敏感密钥
+   * 通过 JWT payload 分析或密钥命名模式检测
+   */
+  private isSensitiveKey(key: string): boolean {
+    if (!key) return false;
+    
+    try {
+      // JWT 格式：header.payload.signature
+      const parts = key.split('.');
+      if (parts.length === 3) {
+        // 解码 payload（不需要验证签名，只检查内容）
+        const payload = JSON.parse(atob(parts[1]));
+        
+        // 检查 role 字段
+        if (payload.role && payload.role !== 'anon') {
+          console.warn('⚠️ 检测到非匿名角色密钥:', payload.role);
+          return SENSITIVE_KEY_PATTERNS.some(pattern => 
+            payload.role.toLowerCase().includes(pattern)
+          );
+        }
+      }
+    } catch (e) {
+      // 解析失败，不是有效的 JWT，检查字符串模式
+    }
+    
+    // 字符串模式检测（备用）
+    const lowerKey = key.toLowerCase();
+    return SENSITIVE_KEY_PATTERNS.some(pattern => lowerKey.includes(pattern));
   }
 
   get isConfigured() {

@@ -26,6 +26,27 @@
       background: #cbd5e1; 
     }
 
+    /* 移动端触摸交互优化 */
+    /* 禁止浏览器默认手势干扰流程图拖拽 */
+    .flow-canvas-container {
+      touch-action: none;
+    }
+    
+    /* 侧边栏可垂直滚动但禁止水平手势 */
+    .sidebar-touch-area {
+      touch-action: pan-y pinch-zoom;
+    }
+    
+    /* 主内容区域允许基本手势 */
+    .main-content-area {
+      touch-action: pan-x pan-y;
+    }
+    
+    /* 未分配任务拖拽区域 */
+    .unassigned-drag-area {
+      touch-action: none;
+    }
+
     /* Fisheye Effect for Unassigned Tasks */
     .fisheye-container {
       display: flex;
@@ -81,10 +102,12 @@
       background-size: 20px 20px;
     }
     
-    /* 隐藏 GoJS 试用版水印 */
-    canvas ~ div {
-      display: none !important;
-    }
+    /* 
+     * GoJS 授权提示：
+     * 如果使用 GoJS 试用版，会显示水印。
+     * 请购买正版授权或在代码中配置 License Key。
+     * 参考: https://gojs.net/latest/intro/license.html
+     */
   </style>
   <!-- 注意: importmap 已移除，Angular CLI 构建使用 npm 依赖 -->
   <link rel="manifest" href="manifest.webmanifest">

@@ -2,7 +2,10 @@ import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewIn
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../services/store.service';
+import { ToastService } from '../services/toast.service';
 import { Task } from '../models';
+import { getErrorMessage, isFailure } from '../utils/result';
+import { environment } from '../environments/environment';
 import * as go from 'gojs';
 
 @Component({
@@ -56,7 +59,10 @@ import * as go from 'gojs';
 
                @if (store.isFlowUnassignedOpen()) {
                    <div class="pb-4 animate-slide-down max-h-32 overflow-y-auto">
-                       <div class="flex flex-wrap gap-2" id="unassignedPalette">
+                       <div class="flex flex-wrap gap-2 unassigned-drag-area" 
+                            id="unassignedPalette"
+                            (dragover)="onUnassignedDragOver($event)"
+                            (drop)="onUnassignedDrop($event)">
                            @for (task of store.unassignedTasks(); track task.id) {
                                <div 
                                    draggable="true" 
@@ -73,6 +79,12 @@ import * as go from 'gojs';
                            }
                            <button (click)="createUnassigned()" class="px-3 py-1.5 bg-white/50 hover:bg-teal-50 text-stone-400 hover:text-teal-600 rounded-md text-xs font-medium border border-transparent transition-all">+ 新建</button>
                        </div>
+                       <!-- 拖回待分配区域的提示 -->
+                       @if (isDropTargetActive()) {
+                         <div class="mt-2 p-2 border-2 border-dashed border-teal-300 rounded-lg bg-teal-50/50 text-center text-xs text-teal-600 animate-pulse">
+                           拖放到此处解除分配
+                         </div>
+                       }
                    </div>
                }
            </div>
@@ -91,8 +103,8 @@ import * as go from 'gojs';
 
        <!-- 3. 流程图区域 -->
        <div class="flex-1 relative overflow-hidden bg-[#F9F8F6] mt-0 mx-0 border-t border-stone-200/50">
-           <!-- GoJS Diagram Div -->
-           <div #diagramDiv class="absolute inset-0 w-full h-full z-0"></div>
+           <!-- GoJS Diagram Div - flow-canvas-container 类用于禁用浏览器默认触摸手势 -->
+           <div #diagramDiv class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
 
            <!-- 手机端返回文本视图按钮 -->
            @if (store.isMobile()) {
@@ -530,6 +542,83 @@ import * as go from 'gojs';
            </div>
          </div>
        }
+       
+       <!-- 连接类型选择对话框 -->
+       @if (linkTypeDialog(); as dialog) {
+         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in"
+              (click)="cancelLinkCreate()">
+           <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden w-80 mx-4 animate-scale-in"
+                (click)="$event.stopPropagation()">
+             <div class="px-5 pt-5 pb-4">
+               <div class="flex items-center gap-3 mb-4">
+                 <div class="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center">
+                   <svg class="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                     <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                   </svg>
+                 </div>
+                 <div>
+                   <h3 class="text-base font-bold text-stone-800">选择连接类型</h3>
+                   <p class="text-xs text-stone-500">请选择要创建的连接方式</p>
+                 </div>
+               </div>
+               
+               <!-- 任务信息 -->
+               <div class="mb-4 p-3 bg-stone-50 rounded-lg">
+                 <div class="flex items-center gap-2 text-xs">
+                   <span class="font-medium text-stone-600 truncate max-w-[100px]">{{ dialog.sourceTask?.title || '源任务' }}</span>
+                   <svg class="w-4 h-4 text-stone-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                   </svg>
+                   <span class="font-medium text-stone-600 truncate max-w-[100px]">{{ dialog.targetTask?.title || '目标任务' }}</span>
+                 </div>
+               </div>
+               
+               <!-- 连接类型选项 -->
+               <div class="space-y-2">
+                 <button 
+                   (click)="confirmParentChildLink()"
+                   class="w-full p-3 border-2 border-teal-200 bg-teal-50/50 rounded-xl hover:border-teal-400 hover:bg-teal-50 transition-all text-left group">
+                   <div class="flex items-center gap-3">
+                     <div class="w-8 h-8 rounded-lg bg-teal-100 flex items-center justify-center group-hover:bg-teal-200 transition-colors">
+                       <svg class="w-4 h-4 text-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                         <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                       </svg>
+                     </div>
+                     <div>
+                       <div class="font-semibold text-sm text-teal-800">父子关系</div>
+                       <div class="text-[10px] text-teal-600">目标任务成为子任务，移动到下一阶段</div>
+                     </div>
+                   </div>
+                 </button>
+                 
+                 <button 
+                   (click)="confirmCrossTreeLink()"
+                   class="w-full p-3 border-2 border-indigo-200 bg-indigo-50/50 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all text-left group">
+                   <div class="flex items-center gap-3">
+                     <div class="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center group-hover:bg-indigo-200 transition-colors">
+                       <svg class="w-4 h-4 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                       </svg>
+                     </div>
+                     <div>
+                       <div class="font-semibold text-sm text-indigo-800">关联引用</div>
+                       <div class="text-[10px] text-indigo-600">创建虚线连接，表示任务间的关联关系</div>
+                     </div>
+                   </div>
+                 </button>
+               </div>
+             </div>
+             
+             <div class="flex border-t border-stone-100">
+               <button 
+                 (click)="cancelLinkCreate()"
+                 class="flex-1 px-4 py-3 text-sm font-medium text-stone-600 hover:bg-stone-50 transition-colors">
+                 取消
+               </button>
+             </div>
+           </div>
+         </div>
+       }
     </div>
   `
 })
@@ -538,7 +627,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   @Output() goBackToText = new EventEmitter<void>();
   
   store = inject(StoreService);
-    private readonly zone = inject(NgZone);
+  private toast = inject(ToastService);
+  private readonly zone = inject(NgZone);
   
   // 暴露 window 给模板使用
   readonly window = typeof window !== 'undefined' ? window : { innerHeight: 800 };
@@ -605,8 +695,23 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private drawerStartY = 0;
   private drawerStartHeight = 0;
   
+  // 从流程图拖回待分配区域的状态
+  isDropTargetActive = signal(false);
+  private draggingFromDiagram = signal<string | null>(null);
+  
   // 性能优化：位置保存防抖定时器
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // 连接类型选择对话框状态
+  linkTypeDialog = signal<{
+    show: boolean;
+    sourceId: string;
+    targetId: string;
+    sourceTask: Task | null;
+    targetTask: Task | null;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // 连接模式方法
   toggleLinkMode() {
@@ -806,6 +911,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           }
       });
       
+      // 监听搜索查询变化，更新图表高亮
+      effect(() => {
+          const query = this.store.searchQuery();
+          // 当搜索词变化时刷新图表以更新高亮状态
+          if (this.diagram) {
+              this.updateDiagram(this.store.tasks());
+          }
+      });
+      
       // 跨视图选中状态同步：监听外部选中任务的变化
       effect(() => {
           const selectedId = this.selectedTaskId();
@@ -898,18 +1012,22 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   // 添加同级任务
   addSiblingTask(task: Task) {
-      const newTaskId = this.store.addTask('新同级任务', '', task.stage, task.parentId, true);
-      if (newTaskId) {
-          this.selectedTaskId.set(newTaskId);
+      const result = this.store.addTask('新同级任务', '', task.stage, task.parentId, true);
+      if (isFailure(result)) {
+          this.toast.error('添加任务失败', getErrorMessage(result.error));
+      } else {
+          this.selectedTaskId.set(result.value);
       }
   }
 
   // 添加子任务
   addChildTask(task: Task) {
       const nextStage = (task.stage || 0) + 1;
-      const newTaskId = this.store.addTask('新子任务', '', nextStage, task.id, false);
-      if (newTaskId) {
-          this.selectedTaskId.set(newTaskId);
+      const result = this.store.addTask('新子任务', '', nextStage, task.id, false);
+      if (isFailure(result)) {
+          this.toast.error('添加任务失败', getErrorMessage(result.error));
+      } else {
+          this.selectedTaskId.set(result.value);
       }
   }
 
@@ -1069,6 +1187,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   // 移动端待分配块触摸拖动
+  // 改进：使用 passive: false 确保可以阻止默认行为，避免与 GoJS 画布滚动冲突
   onUnassignedTouchStart(e: TouchEvent, task: Task) {
     if (e.touches.length !== 1) return;
     
@@ -1082,13 +1201,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       ghost: null
     };
     
-    // 长按 200ms 后开始拖拽
+    // 长按 250ms 后开始拖拽（增加延迟避免误触）
     this.unassignedTouchState.longPressTimer = setTimeout(() => {
       this.unassignedTouchState.isDragging = true;
       this.unassignedDraggingId.set(task.id);
       this.createUnassignedGhost(task, touch.clientX, touch.clientY);
       if (navigator.vibrate) navigator.vibrate(50);
-    }, 200);
+    }, 250);
   }
   
   onUnassignedTouchMove(e: TouchEvent) {
@@ -1098,17 +1217,21 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const deltaX = Math.abs(touch.clientX - this.unassignedTouchState.startX);
     const deltaY = Math.abs(touch.clientY - this.unassignedTouchState.startY);
     
-    // 如果移动超过阈值但还没开始拖拽，取消长按
-    if (!this.unassignedTouchState.isDragging && (deltaX > 10 || deltaY > 10)) {
+    // 如果移动超过阈值但还没开始拖拽，取消长按（允许页面滚动）
+    if (!this.unassignedTouchState.isDragging && (deltaX > 15 || deltaY > 15)) {
       if (this.unassignedTouchState.longPressTimer) {
         clearTimeout(this.unassignedTouchState.longPressTimer);
         this.unassignedTouchState.longPressTimer = null;
       }
+      // 不阻止事件，让页面正常滚动
       return;
     }
     
     if (this.unassignedTouchState.isDragging) {
+      // 只有在拖拽状态才阻止默认行为
       e.preventDefault();
+      e.stopPropagation();
+      
       // 更新幽灵元素位置
       if (this.unassignedTouchState.ghost) {
         this.unassignedTouchState.ghost.style.left = `${touch.clientX - 40}px`;
@@ -1210,6 +1333,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           clearTimeout(this.resizeDebounceTimer);
           this.resizeDebounceTimer = null;
       }
+      if (this.viewStateSaveTimer) {
+          clearTimeout(this.viewStateSaveTimer);
+          this.viewStateSaveTimer = null;
+      }
       // 清理待分配块长按定时器
       if (this.unassignedTouchState.longPressTimer) {
           clearTimeout(this.unassignedTouchState.longPressTimer);
@@ -1257,6 +1384,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           return;
       }
       
+      // 注入 GoJS License Key（如果配置了）
+      if (environment.gojsLicenseKey) {
+          (go.Diagram as any).licenseKey = environment.gojsLicenseKey;
+      }
+      
       const $ = go.GraphObject.make;
 
       this.diagram = $(go.Diagram, this.diagramDiv.nativeElement, {
@@ -1286,7 +1418,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                   if (part instanceof go.Node) {
                       const loc = part.location;
                       this.zone.run(() => {
-                          this.store.updateTaskPosition(part.data.key, loc.x, loc.y);
+                          // 使用带 Rank 同步的位置更新，保持文本视图和流程图排序一致
+                          this.store.updateTaskPositionWithRankSync(part.data.key, loc.x, loc.y);
                       });
                   }
               });
@@ -1579,6 +1712,62 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           this.closeConnectionEditor();
         });
       });
+      
+      // 监听视口变化，保存视图状态
+      this.diagram.addDiagramListener('ViewportBoundsChanged', (e: any) => {
+        this.saveViewState();
+      });
+      
+      // 恢复之前保存的视图状态
+      this.restoreViewState();
+  }
+  
+  /**
+   * 保存视图状态（防抖）
+   */
+  private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  private saveViewState() {
+    if (!this.diagram) return;
+    
+    // 防抖，避免频繁保存
+    if (this.viewStateSaveTimer) {
+      clearTimeout(this.viewStateSaveTimer);
+    }
+    
+    this.viewStateSaveTimer = setTimeout(() => {
+      const projectId = this.store.activeProjectId();
+      if (!projectId) return;
+      
+      const scale = this.diagram.scale;
+      const pos = this.diagram.position;
+      
+      this.store.updateViewState(projectId, {
+        scale,
+        positionX: pos.x,
+        positionY: pos.y
+      });
+      
+      this.viewStateSaveTimer = null;
+    }, 1000); // 1 秒防抖
+  }
+  
+  /**
+   * 恢复视图状态
+   */
+  private restoreViewState() {
+    if (!this.diagram) return;
+    
+    const viewState = this.store.getViewState();
+    if (!viewState) return;
+    
+    // 延迟恢复，确保图表已完全加载
+    setTimeout(() => {
+      if (this.diagram) {
+        this.diagram.scale = viewState.scale;
+        this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
+      }
+    }, 200);
   }
   
   // 根据拖放位置查找插入点
@@ -1709,9 +1898,33 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               newNodeIndex++;
           }
           
+          // 检查是否匹配搜索
+          const searchQuery = this.store.searchQuery().toLowerCase().trim();
+          const isSearchMatch = searchQuery && (
+            t.title.toLowerCase().includes(searchQuery) ||
+            t.content.toLowerCase().includes(searchQuery) ||
+            t.displayId.toLowerCase().includes(searchQuery)
+          );
+          
           // 待分配任务使用较深的青色背景，已分配任务使用白色/绿色背景
-          const nodeColor = t.stage === null ? '#ccfbf1' : (t.status === 'completed' ? '#f0fdf4' : 'white'); // teal-100 vs white
-          const borderColor = t.stage === null ? '#14b8a6' : '#e7e5e4'; // teal-500 vs stone-200
+          // 搜索匹配时使用黄色高亮
+          let nodeColor: string;
+          let borderColor: string;
+          
+          if (isSearchMatch) {
+              // 搜索匹配：使用黄色高亮
+              nodeColor = '#fef08a'; // yellow-200
+              borderColor = '#eab308'; // yellow-500
+          } else if (t.stage === null) {
+              nodeColor = '#ccfbf1'; // teal-100
+              borderColor = '#14b8a6'; // teal-500
+          } else if (t.status === 'completed') {
+              nodeColor = '#f0fdf4'; // green-50
+              borderColor = '#e7e5e4'; // stone-200
+          } else {
+              nodeColor = 'white';
+              borderColor = '#e7e5e4'; // stone-200
+          }
           
           nodeDataArray.push({
               key: t.id,
@@ -1722,6 +1935,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               color: nodeColor,
               borderColor: borderColor,
               isUnassigned: t.stage === null,
+              isSearchMatch: isSearchMatch, // 标记搜索匹配
               isSelected: false // handled by diagram selection
           });
           
@@ -1792,14 +2006,75 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   createUnassigned() {
-      this.store.addTask('新任务', '', null, null, false);
+      const result = this.store.addTask('新任务', '', null, null, false);
+      if (isFailure(result)) {
+          this.toast.error('创建任务失败', getErrorMessage(result.error));
+      }
   }
 
   onDragStart(event: DragEvent, task: Task) {
       if (event.dataTransfer) {
           event.dataTransfer.setData("text", JSON.stringify(task));
+          event.dataTransfer.setData("application/json", JSON.stringify(task));
           event.dataTransfer.effectAllowed = "move";
       }
+  }
+  
+  // ========== 从流程图拖回待分配区域 ==========
+  
+  /**
+   * 待分配区域 dragover 事件处理
+   */
+  onUnassignedDragOver(event: DragEvent) {
+      event.preventDefault();
+      if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'move';
+      }
+      // 显示拖放提示
+      this.isDropTargetActive.set(true);
+  }
+  
+  /**
+   * 待分配区域 drop 事件处理
+   * 将任务从流程图解除分配
+   */
+  onUnassignedDrop(event: DragEvent) {
+      event.preventDefault();
+      this.isDropTargetActive.set(false);
+      
+      // 尝试获取拖动的任务数据
+      let data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
+      if (!data) return;
+      
+      try {
+          const task = JSON.parse(data);
+          if (task?.id && task.stage !== null) {
+              // 解除任务分配（移回待分配区域）
+              this.store.detachTask(task.id);
+              this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
+              
+              // 刷新图表
+              setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+          }
+      } catch (err) {
+          console.error('Drop to unassigned error:', err);
+      }
+  }
+  
+  /**
+   * 开始从流程图拖动节点（用于拖回待分配区域）
+   */
+  startDragFromDiagram(taskId: string) {
+      this.draggingFromDiagram.set(taskId);
+      this.isDropTargetActive.set(true);
+  }
+  
+  /**
+   * 结束从流程图拖动
+   */
+  endDragFromDiagram() {
+      this.draggingFromDiagram.set(null);
+      this.isDropTargetActive.set(false);
   }
 
   // 点击待分配任务块，在流程图中定位到该任务节点
@@ -1834,17 +2109,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       }
   }
 
-  // 窗口大小变化时重新调整图表（ResizeObserver 会处理容器大小变化，这里主要处理全屏等场景）
-  @HostListener('window:resize')
-  onWindowResize() {
-      // ResizeObserver 已经在监听容器变化，这里不需要重复处理
-      // 但保留作为后备
-      if (this.diagram && !this.resizeObserver) {
-          setTimeout(() => {
-              this.diagram.requestUpdate();
-          }, 100);
-      }
-  }
+  // 窗口大小变化已由 ResizeObserver 处理，不再需要重复监听
+  // 移除冗余的 @HostListener('window:resize')
 
   @HostListener('window:keydown', ['$event'])
   handleDiagramShortcut(event: KeyboardEvent) {
@@ -1920,26 +2186,77 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
             const childId = toNode?.data?.key;
             if (!parentId || !childId || parentId === childId) return;
 
+            // 获取连接终点位置用于对话框定位
+            const midPoint = link.midPoint || toNode.location;
+            const viewPt = this.diagram.transformDocToView(midPoint);
+            const diagramRect = this.diagramDiv.nativeElement.getBoundingClientRect();
+            const dialogX = diagramRect.left + viewPt.x;
+            const dialogY = diagramRect.top + viewPt.y;
+
             // 检查目标节点是否已有父节点
             const childTask = this.store.tasks().find(t => t.id === childId);
+            const parentTask = this.store.tasks().find(t => t.id === parentId);
+            
+            // 先移除临时连接线
+            this.diagram.remove(link);
+            
             if (childTask?.parentId) {
-                // 如果已有父节点，创建跨树连接（虚线）而不是父子关系
-                this.diagram.remove(link);
+                // 目标已有父节点，只能创建跨树连接（关联）
                 this.zone.run(() => {
                     this.store.addCrossTreeConnection(parentId, childId);
+                    this.toast.success('已创建关联', '目标任务已有父级，已创建关联连接');
                     setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
                 });
                 return;
             }
-
-            const parentStage = typeof fromNode.data?.stage === 'number' ? fromNode.data.stage : null;
-            const childStage = typeof toNode.data?.stage === 'number' ? toNode.data.stage : null;
-            const nextStage = parentStage !== null ? parentStage + 1 : (childStage ?? 1);
-
-            this.diagram.remove(link);
+            
+            // 目标没有父节点，显示选择对话框让用户决定连接类型
             this.zone.run(() => {
-                    this.store.moveTaskToStage(childId, nextStage, undefined, parentId);
+                this.linkTypeDialog.set({
+                    show: true,
+                    sourceId: parentId,
+                    targetId: childId,
+                    sourceTask: parentTask || null,
+                    targetTask: childTask || null,
+                    x: dialogX,
+                    y: dialogY
+                });
             });
+    }
+    
+    /**
+     * 确认创建父子关系连接
+     */
+    confirmParentChildLink() {
+        const dialog = this.linkTypeDialog();
+        if (!dialog) return;
+        
+        const parentTask = dialog.sourceTask;
+        const parentStage = parentTask?.stage ?? null;
+        const nextStage = parentStage !== null ? parentStage + 1 : 1;
+        
+        this.store.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
+        this.linkTypeDialog.set(null);
+        setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+    }
+    
+    /**
+     * 确认创建关联连接（跨树）
+     */
+    confirmCrossTreeLink() {
+        const dialog = this.linkTypeDialog();
+        if (!dialog) return;
+        
+        this.store.addCrossTreeConnection(dialog.sourceId, dialog.targetId);
+        this.linkTypeDialog.set(null);
+        setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+    }
+    
+    /**
+     * 取消连接创建
+     */
+    cancelLinkCreate() {
+        this.linkTypeDialog.set(null);
     }
     
     // 移动端显示连接线删除提示

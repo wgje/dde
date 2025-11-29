@@ -5,7 +5,26 @@
 /**
  * 任务状态枚举
  */
-export type TaskStatus = 'active' | 'completed';
+export type TaskStatus = 'active' | 'completed' | 'archived';
+
+/**
+ * 附件类型
+ */
+export type AttachmentType = 'image' | 'document' | 'link' | 'file';
+
+/**
+ * 附件模型
+ */
+export interface Attachment {
+  id: string;
+  type: AttachmentType;
+  name: string;
+  url: string; // 对于存储在 Supabase Storage 的文件，这是签名 URL
+  thumbnailUrl?: string; // 图片缩略图
+  mimeType?: string;
+  size?: number; // 文件大小（字节）
+  createdAt: string;
+}
 
 /**
  * 任务模型
@@ -25,6 +44,19 @@ export interface Task {
   displayId: string; // 显示 ID，如 "1", "1,a", "2,b" (动态计算，会随位置变化)
   shortId?: string; // 永久短 ID，如 "NF-A1B2" (创建时生成，永不改变)
   hasIncompleteTask?: boolean; // 是否包含未完成的待办项
+  deletedAt?: string | null; // 软删除时间戳，null 表示未删除
+  
+  // 新增：附件支持
+  attachments?: Attachment[];
+  
+  // 新增：标签支持（预留）
+  tags?: string[];
+  
+  // 新增：优先级（预留）
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  
+  // 新增：截止日期（预留）
+  dueDate?: string | null;
 }
 
 /**
@@ -48,6 +80,17 @@ export interface Project {
   connections: Connection[];
   updatedAt?: string; // 用于冲突检测
   version?: number; // 数据版本号
+  // 视图状态持久化
+  viewState?: ViewState;
+}
+
+/**
+ * 视图状态（用于持久化流程图视口位置）
+ */
+export interface ViewState {
+  scale: number; // 缩放比例
+  positionX: number; // 视口 X 位置
+  positionY: number; // 视口 Y 位置
 }
 
 /**
@@ -75,6 +118,7 @@ export type ThemeType = 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender';
 
 /**
  * Supabase 项目行数据结构
+ * 支持 v1 (JSONB) 和 v2 (独立表) 两种格式
  */
 export interface ProjectRow {
   id: string;
@@ -82,11 +126,16 @@ export interface ProjectRow {
   title?: string | null;
   description?: string | null;
   created_date?: string | null;
+  updated_at?: string | null;
+  version?: number;
+  /** v1 格式: 存储 tasks 和 connections 的 JSONB 列 */
   data?: {
     tasks?: Task[];
     connections?: Connection[];
+    version?: number;
   } | null;
-  updated_at?: string | null;
+  /** v2 格式: 标记是否已迁移到独立表 */
+  migrated_to_v2?: boolean;
 }
 
 /**
@@ -126,6 +175,8 @@ export interface UndoAction {
   type: UndoActionType;
   timestamp: number;
   projectId: string;
+  /** 记录操作时的项目版本号，用于检测远程更新冲突 */
+  projectVersion?: number;
   data: {
     before: Partial<Project>;
     after: Partial<Project>;

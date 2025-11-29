@@ -38,6 +38,19 @@ SENSITIVE_FILES=(
     ".env.production"
 )
 
+# 定义敏感密钥模式（用于内容检查）
+SENSITIVE_PATTERNS=(
+    "supabaseUrl.*http"
+    "supabaseAnonKey.*eyJ"
+    "service_role.*eyJ"
+    "SUPABASE_URL"
+    "SUPABASE_ANON_KEY"
+    "SUPABASE_SERVICE_ROLE_KEY"
+    "password.*="
+    "secret.*="
+    "apiKey.*="
+)
+
 echo ""
 echo "正在检查并清理敏感文件..."
 
@@ -48,6 +61,33 @@ for file in "${SENSITIVE_FILES[@]}"; do
         git rm --cached "$file" 2>/dev/null || true
     fi
 done
+
+# 检查文件内容是否包含敏感信息
+echo ""
+echo "检查文件内容是否包含敏感信息..."
+FOUND_SENSITIVE=false
+
+for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+    # 检查环境文件
+    for file in "src/environments/environment.ts" "src/environments/environment.development.ts"; do
+        if [ -f "$file" ]; then
+            if grep -qiE "$pattern" "$file" 2>/dev/null; then
+                # 排除模板文件中的占位符
+                if ! grep -qE "YOUR_|PLACEHOLDER|example\.com" "$file" 2>/dev/null; then
+                    echo -e "  ${RED}警告：${NC} $file 可能包含敏感信息（匹配模式: $pattern）"
+                    FOUND_SENSITIVE=true
+                fi
+            fi
+        fi
+    done
+done
+
+if [ "$FOUND_SENSITIVE" = true ]; then
+    echo ""
+    echo -e "${RED}⚠️  发现可能的敏感信息！${NC}"
+    echo "   请检查上述文件，确保没有硬编码真实的 API 密钥。"
+    echo "   建议使用环境变量或 .env.local 文件（已被 .gitignore 忽略）。"
+fi
 
 # 确认 .gitignore 包含这些文件
 echo ""

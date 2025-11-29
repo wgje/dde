@@ -2,8 +2,10 @@ import { Component, inject, signal, computed, Output, EventEmitter, OnDestroy, E
 import { CommonModule } from '@angular/common';
 import { DomSanitizer } from '@angular/platform-browser';
 import { StoreService } from '../services/store.service';
+import { ToastService } from '../services/toast.service';
 import { Task } from '../models';
 import { renderMarkdownSafe, extractPlainText } from '../utils/markdown';
+import { getErrorMessage, isFailure } from '../utils/result';
 
 @Component({
   selector: 'app-text-view',
@@ -610,6 +612,7 @@ import { renderMarkdownSafe, extractPlainText } from '../utils/markdown';
 })
 export class TextViewComponent implements OnDestroy, AfterViewInit {
   readonly store = inject(StoreService);
+  private readonly toast = inject(ToastService);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly elementRef = inject(ElementRef);
   private readonly ngZone = inject(NgZone);
@@ -1106,8 +1109,12 @@ export class TextViewComponent implements OnDestroy, AfterViewInit {
     const data = e.dataTransfer?.getData('application/json');
     if (data) {
       const task = JSON.parse(data) as Task;
-      this.store.moveTaskToStage(task.id, stageNumber, this.dropTargetInfo()?.beforeTaskId);
-      this.expandStage(stageNumber);
+      const result = this.store.moveTaskToStage(task.id, stageNumber, this.dropTargetInfo()?.beforeTaskId);
+      if (isFailure(result)) {
+        this.toast.error('移动任务失败', getErrorMessage(result.error));
+      } else {
+        this.expandStage(stageNumber);
+      }
     }
     this.onDragEnd();
   }
@@ -1385,8 +1392,12 @@ export class TextViewComponent implements OnDestroy, AfterViewInit {
     
     // 只有在真正拖拽状态下才执行移动
     if (isDragging && targetStage) {
-      this.store.moveTaskToStage(task.id, targetStage, targetBeforeId);
-      this.expandStage(targetStage);
+      const result = this.store.moveTaskToStage(task.id, targetStage, targetBeforeId);
+      if (isFailure(result)) {
+        this.toast.error('移动任务失败', getErrorMessage(result.error));
+      } else {
+        this.expandStage(targetStage);
+      }
     }
     
     this.resetTouchState();
@@ -1417,18 +1428,22 @@ export class TextViewComponent implements OnDestroy, AfterViewInit {
   // 任务创建
   addSibling(task: Task, e: Event) {
     e.stopPropagation();
-    const newTaskId = this.store.addTask('', '', task.stage, task.parentId, true);
-    if (newTaskId) {
-      this.navigateToNewTask(newTaskId, task.stage);
+    const result = this.store.addTask('', '', task.stage, task.parentId, true);
+    if (isFailure(result)) {
+      this.toast.error('添加任务失败', getErrorMessage(result.error));
+    } else {
+      this.navigateToNewTask(result.value, task.stage);
     }
   }
 
   addChild(task: Task, e: Event) {
     e.stopPropagation();
     const newStage = (task.stage || 0) + 1;
-    const newTaskId = this.store.addTask('', '', newStage, task.id, false);
-    if (newTaskId) {
-      this.navigateToNewTask(newTaskId, newStage);
+    const result = this.store.addTask('', '', newStage, task.id, false);
+    if (isFailure(result)) {
+      this.toast.error('添加任务失败', getErrorMessage(result.error));
+    } else {
+      this.navigateToNewTask(result.value, newStage);
     }
   }
 
@@ -1455,12 +1470,14 @@ export class TextViewComponent implements OnDestroy, AfterViewInit {
   }
 
   createUnassigned() {
-    const newTaskId = this.store.addTask('', '', null, null, false);
-    if (newTaskId) {
+    const result = this.store.addTask('', '', null, null, false);
+    if (isFailure(result)) {
+      this.toast.error('创建任务失败', getErrorMessage(result.error));
+    } else {
       // 选中新任务并开启编辑模式
-      this.editingTaskId.set(newTaskId);
+      this.editingTaskId.set(result.value);
       // 滚动到视图并聚焦到标题输入框 - 使用安全的 DOM 访问
-      this.scrollToTaskAndFocus(newTaskId, 'input');
+      this.scrollToTaskAndFocus(result.value, 'input');
     }
   }
   
@@ -1484,9 +1501,11 @@ export class TextViewComponent implements OnDestroy, AfterViewInit {
 
   addNewStage() {
     const maxStage = Math.max(...this.store.stages().map(s => s.stageNumber), 0);
-    const newTaskId = this.store.addTask('', '', maxStage + 1, null, false);
-    if (newTaskId) {
-      this.navigateToNewTask(newTaskId, maxStage + 1);
+    const result = this.store.addTask('', '', maxStage + 1, null, false);
+    if (isFailure(result)) {
+      this.toast.error('创建阶段失败', getErrorMessage(result.error));
+    } else {
+      this.navigateToNewTask(result.value, maxStage + 1);
     }
   }
 }
