@@ -21,7 +21,7 @@ import { Task } from '../../models';
          [class.bottom-4]="!store.isMobile()"
          [class.left-4]="!store.isMobile()"
          [class.left-2]="store.isMobile()"
-         [style.bottom.px]="store.isMobile() ? (store.isFlowDetailOpen() ? (drawerHeightVh() * windowInnerHeight / 100 + 8) : 8) : 16">
+         [style.bottom]="mobileBottomPosition()">
         
         <!-- 放大按钮 -->
         <button (click)="zoomIn.emit()" 
@@ -115,6 +115,16 @@ export class FlowToolbarComponent {
   readonly toggleLinkMode = output<void>();
   readonly cancelLinkMode = output<void>();
   
-  // 暴露 window.innerHeight 给模板
-  readonly windowInnerHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
+  // 计算移动端工具栏底部位置
+  // 使用 calc() 和 vh 单位，确保位置与抽屉高度正确绑定
+  readonly mobileBottomPosition = computed(() => {
+    if (!this.store.isMobile()) {
+      return '16px'; // 桌面端使用固定值
+    }
+    if (this.store.isFlowDetailOpen()) {
+      // 抽屉打开时，工具栏位于抽屉上方 8px
+      return `calc(${this.drawerHeightVh()}vh + 8px)`;
+    }
+    return '8px'; // 抽屉关闭时
+  });
 }

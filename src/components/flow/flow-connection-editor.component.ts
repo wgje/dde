@@ -1,4 +1,4 @@
-import { Component, input, output, ElementRef, ViewChild, AfterViewInit } from '@angular/core';
+import { Component, input, output, ElementRef, ViewChild, AfterViewInit, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Task } from '../../models';
 
@@ -26,9 +26,9 @@ export interface ConnectionTasks {
   template: `
     @if (data(); as connData) {
       <div class="absolute z-30 animate-scale-in"
-           [style.left.px]="position().x"
-           [style.top.px]="position().y">
-        <div class="bg-white rounded-xl shadow-xl border border-violet-200 overflow-hidden w-52"
+           [style.left.px]="clampedPosition().x"
+           [style.top.px]="clampedPosition().y">
+        <div class="bg-white rounded-xl shadow-xl border border-violet-200 overflow-hidden w-48 max-w-[calc(100vw-2rem)]"
              (click)="$event.stopPropagation()">
           <!-- 可拖动标题栏 -->
           <div class="px-3 py-2 bg-gradient-to-r from-violet-50 to-indigo-50 border-b border-violet-100 flex items-center justify-between cursor-move select-none"
@@ -103,6 +103,23 @@ export class FlowConnectionEditorComponent {
   readonly save = output<string>();
   readonly positionChange = output<{ x: number; y: number }>();
   readonly dragStart = output<MouseEvent | TouchEvent>();
+  
+  // 计算限制在视口内的位置
+  readonly clampedPosition = computed(() => {
+    const pos = this.position();
+    const editorWidth = 192; // w-48 = 12rem = 192px
+    const editorHeight = 200; // 估算高度
+    const padding = 16;
+    
+    // 获取视口尺寸（如果在浏览器环境中）
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1000;
+    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
+    
+    return {
+      x: Math.max(padding, Math.min(pos.x, viewportWidth - editorWidth - padding)),
+      y: Math.max(padding, Math.min(pos.y, viewportHeight - editorHeight - padding))
+    };
+  });
 
   // 压缩显示ID（简化版，具体逻辑由父组件处理）
   compressDisplayId(displayId: string | undefined): string {

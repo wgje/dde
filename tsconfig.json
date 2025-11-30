@@ -17,16 +17,23 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "allowJs": true,
-    "jsx": "react-jsx",
     "paths": {
       "@/*": [
         "./*"
       ]
-    }
+    },
+    // 启用严格模式子选项，逐步增强类型安全
+    "strictNullChecks": true,
+    "strictPropertyInitialization": false,
+    "noImplicitAny": false
   },
   "files": [
     "./main.ts",
     "./src/typings.d.ts"
+  ],
+  "exclude": [
+    "e2e/**/*",
+    "playwright.config.ts"
   ],
   "angularCompilerOptions": {
     "disableTypeScriptVersionCheck": true

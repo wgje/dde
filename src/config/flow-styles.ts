@@ -101,16 +101,16 @@ export const DEFAULT_FLOW_STYLES: FlowStyleConfig = {
     background: 'white',
     selectedBorder: '#0d9488', // teal-600
     defaultBorder: '#e7e5e4', // stone-200
-    unassignedBackground: '#ccfbf1', // teal-100
-    unassignedBorder: '#14b8a6', // teal-500
-    completedBackground: '#f0fdf4', // green-50
+    unassignedBackground: '#dbeafe', // blue-100 - 蓝色系，与绿色已完成形成对比
+    unassignedBorder: '#3b82f6', // blue-500
+    completedBackground: '#dcfce7', // green-100 - 更鲜艳的绿色
     searchHighlightBackground: '#fef08a', // yellow-200
     searchHighlightBorder: '#eab308', // yellow-500
   },
   text: {
     displayIdColor: '#78716C', // stone-500
     titleColor: '#57534e', // stone-600
-    unassignedTitleColor: '#0f766e', // teal-700
+    unassignedTitleColor: '#1d4ed8', // blue-700
     font: {
       displayId: 'bold 9px sans-serif',
       title: '400 12px sans-serif',
@@ -140,16 +140,16 @@ export const OCEAN_FLOW_STYLES: FlowStyleConfig = {
     background: '#f0f9ff', // sky-50
     selectedBorder: '#0284c7', // sky-600
     defaultBorder: '#bae6fd', // sky-200
-    unassignedBackground: '#e0f2fe', // sky-100
-    unassignedBorder: '#0ea5e9', // sky-500
-    completedBackground: '#ecfeff', // cyan-50
+    unassignedBackground: '#c7d2fe', // indigo-200 - 紫蓝色，与青色已完成形成对比
+    unassignedBorder: '#6366f1', // indigo-500
+    completedBackground: '#a7f3d0', // emerald-200 - 更鲜艳的青绿色
     searchHighlightBackground: '#fef08a',
     searchHighlightBorder: '#eab308',
   },
   text: {
     displayIdColor: '#0369a1', // sky-700
     titleColor: '#0c4a6e', // sky-900
-    unassignedTitleColor: '#0e7490', // cyan-700
+    unassignedTitleColor: '#4338ca', // indigo-700
     font: {
       displayId: 'bold 9px sans-serif',
       title: '400 12px sans-serif',
@@ -179,16 +179,16 @@ export const FOREST_FLOW_STYLES: FlowStyleConfig = {
     background: '#f0fdf4', // green-50
     selectedBorder: '#16a34a', // green-600
     defaultBorder: '#bbf7d0', // green-200
-    unassignedBackground: '#dcfce7', // green-100
-    unassignedBorder: '#22c55e', // green-500
-    completedBackground: '#ecfdf5', // emerald-50
+    unassignedBackground: '#fef3c7', // amber-100 - 琥珀色，与绿色已完成形成对比
+    unassignedBorder: '#f59e0b', // amber-500
+    completedBackground: '#bbf7d0', // green-200 - 更鲜艳的绿色
     searchHighlightBackground: '#fef08a',
     searchHighlightBorder: '#eab308',
   },
   text: {
     displayIdColor: '#15803d', // green-700
     titleColor: '#14532d', // green-900
-    unassignedTitleColor: '#047857', // emerald-700
+    unassignedTitleColor: '#b45309', // amber-700
     font: {
       displayId: 'bold 9px sans-serif',
       title: '400 12px sans-serif',
@@ -218,16 +218,16 @@ export const SUNSET_FLOW_STYLES: FlowStyleConfig = {
     background: '#fff7ed', // orange-50
     selectedBorder: '#ea580c', // orange-600
     defaultBorder: '#fed7aa', // orange-200
-    unassignedBackground: '#ffedd5', // orange-100
-    unassignedBorder: '#f97316', // orange-500
-    completedBackground: '#fef2f2', // red-50
+    unassignedBackground: '#fce7f3', // pink-100 - 粉色，与绿色已完成形成对比
+    unassignedBorder: '#ec4899', // pink-500
+    completedBackground: '#bbf7d0', // green-200 - 绿色表示完成
     searchHighlightBackground: '#fef08a',
     searchHighlightBorder: '#eab308',
   },
   text: {
     displayIdColor: '#c2410c', // orange-700
     titleColor: '#7c2d12', // orange-900
-    unassignedTitleColor: '#b91c1c', // red-700
+    unassignedTitleColor: '#be185d', // pink-700
     font: {
       displayId: 'bold 9px sans-serif',
       title: '400 12px sans-serif',
@@ -257,16 +257,16 @@ export const LAVENDER_FLOW_STYLES: FlowStyleConfig = {
     background: '#faf5ff', // purple-50
     selectedBorder: '#9333ea', // purple-600
     defaultBorder: '#e9d5ff', // purple-200
-    unassignedBackground: '#f3e8ff', // purple-100
-    unassignedBorder: '#a855f7', // purple-500
-    completedBackground: '#fdf4ff', // fuchsia-50
+    unassignedBackground: '#fae8ff', // fuchsia-100 - 粉紫色
+    unassignedBorder: '#d946ef', // fuchsia-500
+    completedBackground: '#a7f3d0', // emerald-200 - 绿色表示完成，形成对比
     searchHighlightBackground: '#fef08a',
     searchHighlightBorder: '#eab308',
   },
   text: {
     displayIdColor: '#7e22ce', // purple-700
     titleColor: '#581c87', // purple-900
-    unassignedTitleColor: '#a21caf', // fuchsia-700
+    unassignedTitleColor: '#c026d3', // fuchsia-600
     font: {
       displayId: 'bold 9px sans-serif',
       title: '400 12px sans-serif',

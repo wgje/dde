@@ -13,9 +13,8 @@ export interface ValidationResult {
 }
 
 // ============================================================
-// 附件验证 - 预留功能
-// 注意：附件功能已在数据模型中定义，但 UI 暂未实现
-// 以下代码为未来附件功能做准备
+// 附件验证
+// 附件功能已完整实现，包括 UI 和后端存储
 // ============================================================
 
 // 允许的附件 MIME 类型
@@ -34,7 +33,6 @@ const MAX_ATTACHMENTS_PER_TASK = 20;
 
 /**
  * 验证单个附件
- * 注意：附件功能已完整实现
  */
 export function validateAttachment(attachment: Partial<Attachment>): ValidationResult {
   const errors: string[] = [];
@@ -315,7 +313,6 @@ export function validateProject(project: Partial<Project>): ValidationResult {
 
 /**
  * 安全地解析和验证附件数据
- * 注意：附件功能已完整实现
  */
 export function sanitizeAttachment(attachment: any): Attachment {
   const validTypes: AttachmentType[] = ['image', 'document', 'link', 'file'];

@@ -1,6 +1,7 @@
-import { Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { Task, Project, Connection } from '../models';
 import { LAYOUT_CONFIG, LETTERS } from '../config/constants';
+import { ToastService } from './toast.service';
 
 /**
  * 布局算法配置
@@ -8,9 +9,22 @@ import { LAYOUT_CONFIG, LETTERS } from '../config/constants';
 const ALGORITHM_CONFIG = {
   /** 最大树深度限制（防止栈溢出） */
   MAX_TREE_DEPTH: 500,
-  /** 最大迭代次数（防止死循环） */
-  MAX_ITERATIONS: 10000,
+  /** 基础最大迭代次数 */
+  BASE_MAX_ITERATIONS: 10000,
+  /** 每个任务增加的迭代次数 */
+  ITERATIONS_PER_TASK: 100,
 } as const;
+
+/**
+ * 计算动态迭代限制
+ * 根据任务数量动态调整，确保大型项目能正常处理
+ */
+function calculateMaxIterations(taskCount: number): number {
+  return Math.max(
+    ALGORITHM_CONFIG.BASE_MAX_ITERATIONS,
+    taskCount * ALGORITHM_CONFIG.ITERATIONS_PER_TASK
+  );
+}
 
 /**
  * 布局服务
@@ -26,6 +40,10 @@ const ALGORITHM_CONFIG = {
   providedIn: 'root'
 })
 export class LayoutService {
+  private toast = inject(ToastService);
+  
+  /** 是否已显示过迭代超限警告（避免重复提示） */
+  private hasShownIterationWarning = false;
 
   // ========== 公共方法 ==========
 
@@ -115,8 +133,9 @@ export class LayoutService {
     const assignChildrenIterative = (rootId: string) => {
       const stack: { parentId: string; depth: number }[] = [{ parentId: rootId, depth: 0 }];
       let iterations = 0;
+      const maxIterations = calculateMaxIterations(tasks.length);
       
-      while (stack.length > 0 && iterations < ALGORITHM_CONFIG.MAX_ITERATIONS) {
+      while (stack.length > 0 && iterations < maxIterations) {
         iterations++;
         const { parentId, depth } = stack.pop()!;
         
@@ -142,8 +161,9 @@ export class LayoutService {
         });
       }
       
-      if (iterations >= ALGORITHM_CONFIG.MAX_ITERATIONS) {
+      if (iterations >= maxIterations) {
         console.error('displayId 分配迭代次数超限，可能存在循环依赖');
+        this.notifyIterationLimit('displayId 分配');
       }
     };
 
@@ -174,8 +194,9 @@ export class LayoutService {
       
       queue.push({ nodeId: rootId, floor: rootTask.rank, depth: 0 });
       let iterations = 0;
+      const maxIterations = calculateMaxIterations(tasks.length);
       
-      while (queue.length > 0 && iterations < ALGORITHM_CONFIG.MAX_ITERATIONS) {
+      while (queue.length > 0 && iterations < maxIterations) {
         iterations++;
         const { nodeId, floor: parentFloor, depth } = queue.shift()!;
         
@@ -196,8 +217,9 @@ export class LayoutService {
         });
       }
       
-      if (iterations >= ALGORITHM_CONFIG.MAX_ITERATIONS) {
+      if (iterations >= maxIterations) {
         console.error('级联更新迭代次数超限');
+        this.notifyIterationLimit('级联更新');
       }
     };
 
@@ -358,8 +380,9 @@ export class LayoutService {
     const visited = new Set<string>();
     let current: string | null = newParentId;
     let iterations = 0;
+    const maxIterations = calculateMaxIterations(tasks.length);
     
-    while (current && iterations < ALGORITHM_CONFIG.MAX_ITERATIONS) {
+    while (current && iterations < maxIterations) {
       iterations++;
       
       if (visited.has(current)) return true;
@@ -370,8 +393,9 @@ export class LayoutService {
       current = parentTask?.parentId || null;
     }
     
-    if (iterations >= ALGORITHM_CONFIG.MAX_ITERATIONS) {
+    if (iterations >= maxIterations) {
       console.error('循环检测迭代次数超限，假定存在循环');
+      this.notifyIterationLimit('循环检测');
       return true;
     }
     
@@ -383,6 +407,25 @@ export class LayoutService {
    */
   detectIncomplete(content: string): boolean {
     return /- \[ \]/.test(content || '');
+  }
+  
+  /**
+   * 通知用户迭代超限
+   * 使用防抖避免多次弹窗
+   */
+  private notifyIterationLimit(operation: string): void {
+    if (this.hasShownIterationWarning) return;
+    
+    this.hasShownIterationWarning = true;
+    this.toast.warning(
+      '数据结构异常',
+      `${operation}过程中检测到异常，可能存在循环依赖。建议检查任务的父子关系。`
+    );
+    
+    // 5秒后重置，允许再次显示
+    setTimeout(() => {
+      this.hasShownIterationWarning = false;
+    }, 5000);
   }
 
   /**

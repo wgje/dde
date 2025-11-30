@@ -51,8 +51,8 @@ export class SupabaseClientService {
       const securityError = '🚨 [SECURITY] 检测到敏感密钥！前端不应使用 SERVICE_ROLE_KEY，请使用 ANON_KEY。';
       console.error(securityError);
       this.configurationError.set('安全配置错误：请使用公开的 ANON_KEY 而非 SERVICE_ROLE_KEY');
-      
-      // 阻止使用敏感密钥
+      // 阻止创建客户端，强制进入离线模式
+      this.isOfflineMode.set(true);
       return;
     }
 
@@ -81,10 +81,9 @@ export class SupabaseClientService {
         
         // 检查 role 字段
         if (payload.role && payload.role !== 'anon') {
-          console.warn('⚠️ 检测到非匿名角色密钥:', payload.role);
-          return SENSITIVE_KEY_PATTERNS.some(pattern => 
-            payload.role.toLowerCase().includes(pattern)
-          );
+          // 检测到非匿名角色密钥，直接返回 true 阻止使用
+          console.error('🚨 检测到非匿名角色密钥:', payload.role, '- 已阻止使用');
+          return true;
         }
       }
     } catch (e) {

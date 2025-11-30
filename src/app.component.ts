@@ -7,6 +7,7 @@ import { UndoService } from './services/undo.service';
 import { ToastService } from './services/toast.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { MigrationService } from './services/migration.service';
+import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ToastContainerComponent } from './components/toast-container.component';
 import { SyncStatusComponent } from './components/sync-status.component';
 import { 
@@ -17,7 +18,8 @@ import {
   DeleteConfirmModalComponent,
   ConfigHelpModalComponent,
   TrashModalComponent,
-  MigrationModalComponent
+  MigrationModalComponent,
+  ErrorRecoveryModalComponent
 } from './components/modals';
 import { FormsModule } from '@angular/forms';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
@@ -42,7 +44,8 @@ import { ThemeType, Project } from './models';
     DeleteConfirmModalComponent,
     ConfigHelpModalComponent,
     TrashModalComponent,
-    MigrationModalComponent
+    MigrationModalComponent,
+    ErrorRecoveryModalComponent
   ],
   templateUrl: './app.component.html',
 })
@@ -54,6 +57,7 @@ export class AppComponent implements OnInit, OnDestroy {
   toast = inject(ToastService);
   supabaseClient = inject(SupabaseClientService);
   migrationService = inject(MigrationService);
+  errorHandler = inject(GlobalErrorHandler);
   
   private route = inject(ActivatedRoute);
   private router = inject(Router);
@@ -162,7 +166,8 @@ export class AppComponent implements OnInit, OnDestroy {
     const threshold = 50; // 滑动阈值
     
     // 向右滑动打开侧边栏
-    if (deltaX > threshold) {
+    // 但在流程图视图中不响应，避免与画布操作冲突
+    if (deltaX > threshold && this.store.activeView() !== 'flow') {
       this.isSidebarOpen.set(true);
     }
     
@@ -203,6 +208,13 @@ export class AppComponent implements OnInit, OnDestroy {
   // 项目重命名状态
   renamingProjectId = signal<string | null>(null);
   renameProjectName = signal('');
+  
+  // 统一搜索查询
+  unifiedSearchQuery = signal<string>('');
+  
+  // 搜索防抖定时器
+  private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly SEARCH_DEBOUNCE_DELAY = 300; // 300ms 搜索防抖
 
   constructor() {
     void this.bootstrapSession();
@@ -227,6 +239,12 @@ export class AppComponent implements OnInit, OnDestroy {
     
     // 移除全局事件监听器
     window.removeEventListener('toggle-sidebar', this.handleToggleSidebar);
+    
+    // 清理搜索防抖定时器
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
   }
   
   /**
@@ -373,9 +391,18 @@ export class AppComponent implements OnInit, OnDestroy {
           takeUntil(this.destroy$)
         )
         .subscribe(() => {
-          if (confirm('软件有更新，是否刷新以获取最新功能？')) {
-            window.location.reload();
-          }
+          // 使用 ToastService 显示更新通知，带操作按钮
+          this.toast.info(
+            '🚀 发现新版本', 
+            '软件有更新可用，点击刷新获取最新功能',
+            {
+              duration: 0, // 不自动关闭
+              action: {
+                label: '立即刷新',
+                onClick: () => window.location.reload()
+              }
+            }
+          );
         });
     }
   }
@@ -886,5 +913,36 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.store.isMobile()) {
       this.isSidebarOpen.set(false); // Auto-close sidebar on mobile
     }
+  }
+  
+  // ========== 统一搜索方法 ==========
+  
+  /**
+   * 处理统一搜索输入变化
+   * 同时更新项目和任务搜索（带防抖）
+   */
+  onUnifiedSearchChange(query: string) {
+    // 立即更新显示值
+    this.unifiedSearchQuery.set(query);
+    
+    // 防抖更新实际搜索
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+    }
+    
+    this.searchDebounceTimer = setTimeout(() => {
+      // 同步到两个搜索 signal
+      this.store.projectSearchQuery.set(query);
+      this.store.searchQuery.set(query);
+      this.searchDebounceTimer = null;
+    }, this.SEARCH_DEBOUNCE_DELAY);
+  }
+  
+  /**
+   * 清除统一搜索
+   */
+  clearUnifiedSearch() {
+    this.unifiedSearchQuery.set('');
+    this.store.clearSearch();
   }
 }

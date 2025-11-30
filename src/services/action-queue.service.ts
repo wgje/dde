@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject, signal, OnDestroy } from '@angular/core';
 import { CACHE_CONFIG, QUEUE_CONFIG } from '../config/constants';
 import { Project, Task, UserPreferences } from '../models';
 import { LoggerService } from './logger.service';
@@ -90,6 +90,8 @@ const LOCAL_QUEUE_CONFIG = {
   MAX_QUEUE_SIZE: 100,
   /** 死信队列最大大小 */
   MAX_DEAD_LETTER_SIZE: 50,
+  /** 死信队列条目最大存活时间（毫秒）- 24小时 */
+  DEAD_LETTER_TTL: 24 * 60 * 60 * 1000,
   /** 无处理器操作超时（毫秒）- 5分钟后移入死信队列 */
   NO_PROCESSOR_TIMEOUT: QUEUE_CONFIG.NO_PROCESSOR_TIMEOUT,
   /** 业务错误模式（这些错误不需要重试） */
@@ -121,7 +123,7 @@ const LOCAL_QUEUE_CONFIG = {
 @Injectable({
   providedIn: 'root'
 })
-export class ActionQueueService {
+export class ActionQueueService implements OnDestroy {
   private logger = inject(LoggerService).category('ActionQueue');
   private toast = inject(ToastService);
   
@@ -149,10 +151,18 @@ export class ActionQueueService {
   /** 失败通知回调 */
   private failureCallbacks: Array<(item: DeadLetterItem) => void> = [];
   
+  /** 网络监听器引用（用于清理） */
+  private onlineHandler: (() => void) | null = null;
+  private offlineHandler: (() => void) | null = null;
+  
   constructor() {
     this.loadQueueFromStorage();
     this.loadDeadLetterFromStorage();
     this.setupNetworkListeners();
+  }
+  
+  ngOnDestroy(): void {
+    this.removeNetworkListeners();
   }
   
   // ========== 公共方法 ==========
@@ -215,6 +225,21 @@ export class ActionQueueService {
     this.saveQueueToStorage();
   }
   
+  /** 队列处理开始前的回调 - 用于暂停 Realtime 更新 */
+  private onQueueProcessStart: (() => void) | null = null;
+  
+  /** 队列处理结束后的回调 - 用于恢复 Realtime 更新 */
+  private onQueueProcessEnd: (() => void) | null = null;
+  
+  /**
+   * 设置队列处理生命周期回调
+   * 用于在处理队列期间暂停 Realtime 更新，避免竞态条件
+   */
+  setQueueProcessCallbacks(onStart: () => void, onEnd: () => void) {
+    this.onQueueProcessStart = onStart;
+    this.onQueueProcessEnd = onEnd;
+  }
+  
   /**
    * 处理队列中的所有操作
    */
@@ -224,6 +249,10 @@ export class ActionQueueService {
     }
     
     this.isProcessing.set(true);
+    
+    // 通知开始处理 - 暂停 Realtime 更新
+    this.onQueueProcessStart?.();
+    
     let processed = 0;
     let failed = 0;
     let movedToDeadLetter = 0;
@@ -277,6 +306,8 @@ export class ActionQueueService {
       }
     } finally {
       this.isProcessing.set(false);
+      // 通知处理结束 - 恢复 Realtime 更新
+      this.onQueueProcessEnd?.();
     }
     
     return { processed, failed, movedToDeadLetter };
@@ -469,17 +500,37 @@ export class ActionQueueService {
   private setupNetworkListeners() {
     if (typeof window === 'undefined') return;
     
-    window.addEventListener('online', () => {
+    this.onlineHandler = () => {
       this.isOnline = true;
       // 网络恢复时自动处理队列
       void this.processQueue();
-    });
+    };
     
-    window.addEventListener('offline', () => {
+    this.offlineHandler = () => {
       this.isOnline = false;
-    });
+    };
+    
+    window.addEventListener('online', this.onlineHandler);
+    window.addEventListener('offline', this.offlineHandler);
     
     this.isOnline = navigator.onLine;
+  }
+  
+  /**
+   * 移除网络状态监听
+   */
+  private removeNetworkListeners() {
+    if (typeof window === 'undefined') return;
+    
+    if (this.onlineHandler) {
+      window.removeEventListener('online', this.onlineHandler);
+      this.onlineHandler = null;
+    }
+    
+    if (this.offlineHandler) {
+      window.removeEventListener('offline', this.offlineHandler);
+      this.offlineHandler = null;
+    }
   }
   
   /**
@@ -536,6 +587,7 @@ export class ActionQueueService {
   
   /**
    * 从本地存储加载死信队列
+   * 同时清理过期条目（TTL 清理）
    */
   private loadDeadLetterFromStorage() {
     if (typeof localStorage === 'undefined') return;
@@ -545,8 +597,21 @@ export class ActionQueueService {
       if (saved) {
         const queue = JSON.parse(saved) as DeadLetterItem[];
         if (Array.isArray(queue)) {
-          this.deadLetterQueue.set(queue);
-          this.deadLetterSize.set(queue.length);
+          // TTL 清理：移除过期的死信条目
+          const now = Date.now();
+          const validQueue = queue.filter(item => {
+            const failedTime = new Date(item.failedAt).getTime();
+            return (now - failedTime) < LOCAL_QUEUE_CONFIG.DEAD_LETTER_TTL;
+          });
+          
+          this.deadLetterQueue.set(validQueue);
+          this.deadLetterSize.set(validQueue.length);
+          
+          // 如果有条目被清理，更新存储
+          if (validQueue.length < queue.length) {
+            this.saveDeadLetterToStorage();
+            this.logger.info(`清理了 ${queue.length - validQueue.length} 个过期的死信队列条目`);
+          }
         }
       }
     } catch (e) {

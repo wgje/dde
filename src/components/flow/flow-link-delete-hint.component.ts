@@ -1,4 +1,4 @@
-import { Component, input, output } from '@angular/core';
+import { Component, input, output, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 export interface LinkDeleteHint {
@@ -18,8 +18,8 @@ export interface LinkDeleteHint {
   template: `
     @if (hint(); as h) {
       <div class="fixed z-50 animate-scale-in"
-           [style.left.px]="h.x - 60"
-           [style.top.px]="h.y - 50">
+           [style.left.px]="clampedX()"
+           [style.top.px]="clampedY()">
         <div class="bg-white rounded-lg shadow-xl border border-stone-200 p-2 flex gap-2">
           <button 
             (click)="confirm.emit()"
@@ -41,4 +41,25 @@ export class FlowLinkDeleteHintComponent {
 
   readonly confirm = output<void>();
   readonly cancel = output<void>();
+  
+  // 计算限制在视口内的位置
+  readonly clampedX = computed(() => {
+    const h = this.hint();
+    if (!h) return 0;
+    const hintWidth = 180; // 估算宽度
+    const padding = 16;
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 400;
+    const rawX = h.x - 60;
+    return Math.max(padding, Math.min(rawX, viewportWidth - hintWidth - padding));
+  });
+  
+  readonly clampedY = computed(() => {
+    const h = this.hint();
+    if (!h) return 0;
+    const hintHeight = 50; // 估算高度
+    const padding = 16;
+    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 600;
+    const rawY = h.y - 50;
+    return Math.max(padding, Math.min(rawY, viewportHeight - hintHeight - padding));
+  });
 }

@@ -22,9 +22,9 @@ export interface LinkTypeDialogData {
   imports: [CommonModule],
   template: `
     @if (data(); as dialog) {
-      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in"
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm animate-fade-in p-4"
            (click)="cancel.emit()">
-        <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden w-80 mx-4 animate-scale-in"
+        <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden w-full max-w-xs animate-scale-in"
              (click)="$event.stopPropagation()">
           <div class="px-5 pt-5 pb-4">
             <div class="flex items-center gap-3 mb-4">

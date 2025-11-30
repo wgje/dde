@@ -48,6 +48,7 @@ export class MigrationService {
   
   private readonly GUEST_DATA_KEY = 'nanoflow.guest-data';
   private readonly DATA_VERSION = 2; // 数据结构版本号
+  private readonly GUEST_DATA_EXPIRY_DAYS = 30; // 访客数据过期天数
   
   /**
    * 检查是否需要数据迁移
@@ -283,15 +284,20 @@ export class MigrationService {
   
   /**
    * 保存访客数据标记（在用户登出或未登录时创建数据时调用）
+   * 数据将在 GUEST_DATA_EXPIRY_DAYS 天后过期
    */
   saveGuestData(projects: Project[]) {
     if (typeof localStorage === 'undefined') return;
     
     try {
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + this.GUEST_DATA_EXPIRY_DAYS);
+      
       localStorage.setItem(this.GUEST_DATA_KEY, JSON.stringify({
         projects,
         version: this.DATA_VERSION,
-        savedAt: new Date().toISOString()
+        savedAt: new Date().toISOString(),
+        expiresAt: expiresAt.toISOString()
       }));
     } catch (e) {
       console.warn('保存访客数据失败:', e);
@@ -300,7 +306,7 @@ export class MigrationService {
   
   /**
    * 获取本地访客数据
-   * 包含版本检查和数据迁移
+   * 包含版本检查、数据迁移和过期检查
    */
   getLocalGuestData(): Project[] | null {
     if (typeof localStorage === 'undefined') return null;
@@ -312,6 +318,17 @@ export class MigrationService {
         const parsed = JSON.parse(guestData);
         const dataVersion = parsed.version ?? 1;
         let projects = parsed.projects || null;
+        
+        // 过期检查 - 使用 UTC 时间戳比较，避免时区问题
+        if (parsed.expiresAt) {
+          const expiresAtTimestamp = new Date(parsed.expiresAt).getTime();
+          const nowTimestamp = Date.now();
+          if (expiresAtTimestamp < nowTimestamp) {
+            console.log('访客数据已过期，清理中...');
+            this.clearLocalGuestData();
+            return null;
+          }
+        }
         
         // 版本检查和迁移
         if (projects && dataVersion < this.DATA_VERSION) {

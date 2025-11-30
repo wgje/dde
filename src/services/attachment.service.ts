@@ -34,6 +34,32 @@ export interface UploadProgress {
 }
 
 /**
+ * 安全的路径段验证
+ * 防止路径遍历攻击
+ */
+function sanitizePathSegment(segment: string): string {
+  // 移除路径遍历字符和特殊字符
+  return segment
+    .replace(/\.\.+/g, '') // 移除 ..
+    .replace(/[\/\\]/g, '') // 移除斜杠
+    .replace(/[<>:"|?*\x00-\x1f]/g, '') // 移除不安全字符
+    .trim();
+}
+
+/**
+ * 验证路径段是否安全
+ * 允许 UUID 格式（包含连字符）和常见安全字符
+ */
+function isValidPathSegment(segment: string): boolean {
+  if (!segment || segment.length === 0) return false;
+  if (segment.length > 255) return false;
+  if (segment.includes('..')) return false;
+  if (segment.includes('/') || segment.includes('\\')) return false;
+  // 允许字母、数字、下划线和连字符（UUID 需要连字符）
+  return /^[a-zA-Z0-9_\-]+$/.test(segment);
+}
+
+/**
  * 附件上传服务
  * 负责与 Supabase Storage 的文件上传、下载、删除操作
  * 包含自动 URL 刷新机制
@@ -93,6 +119,14 @@ export class AttachmentService implements OnDestroy {
    */
   setUrlRefreshCallback(callback: (refreshedUrls: Map<string, { url: string; thumbnailUrl?: string }>) => void) {
     this.urlRefreshCallback = callback;
+  }
+
+  /**
+   * 清除 URL 刷新回调
+   * 在组件销毁时调用，防止内存泄漏
+   */
+  clearUrlRefreshCallback() {
+    this.urlRefreshCallback = null;
   }
 
   /**
@@ -179,8 +213,19 @@ export class AttachmentService implements OnDestroy {
       return { success: false, error: `文件大小不能超过 ${ATTACHMENT_CONFIG.MAX_FILE_SIZE / 1024 / 1024}MB` };
     }
 
+    // 验证路径参数安全性
+    if (!isValidPathSegment(userId)) {
+      return { success: false, error: '用户 ID 包含不安全字符' };
+    }
+    if (!isValidPathSegment(projectId)) {
+      return { success: false, error: '项目 ID 包含不安全字符' };
+    }
+    if (!isValidPathSegment(taskId)) {
+      return { success: false, error: '任务 ID 包含不安全字符' };
+    }
+
     const attachmentId = crypto.randomUUID();
-    const fileExt = file.name.split('.').pop() || '';
+    const fileExt = sanitizePathSegment(file.name.split('.').pop() || 'bin');
     const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${fileExt}`;
     
     // 更新上传进度

@@ -70,6 +70,25 @@ import { ToastService, ToastMessage } from '../services/toast.service';
                   {{ message.message }}
                 </p>
               }
+              @if (message.action) {
+                <button
+                  (click)="handleAction(message)"
+                  class="mt-2 text-xs font-medium px-3 py-1 rounded-md transition-colors"
+                  [class.bg-emerald-100]="message.type === 'success'"
+                  [class.text-emerald-700]="message.type === 'success'"
+                  [class.hover:bg-emerald-200]="message.type === 'success'"
+                  [class.bg-red-100]="message.type === 'error'"
+                  [class.text-red-700]="message.type === 'error'"
+                  [class.hover:bg-red-200]="message.type === 'error'"
+                  [class.bg-amber-100]="message.type === 'warning'"
+                  [class.text-amber-700]="message.type === 'warning'"
+                  [class.hover:bg-amber-200]="message.type === 'warning'"
+                  [class.bg-blue-100]="message.type === 'info'"
+                  [class.text-blue-700]="message.type === 'info'"
+                  [class.hover:bg-blue-200]="message.type === 'info'">
+                  {{ message.action.label }}
+                </button>
+              }
             </div>
             
             <!-- Close Button -->
@@ -113,4 +132,14 @@ import { ToastService, ToastMessage } from '../services/toast.service';
 })
 export class ToastContainerComponent {
   readonly toast = inject(ToastService);
+  
+  /**
+   * 处理 Toast 操作按钮点击
+   */
+  handleAction(message: ToastMessage): void {
+    if (message.action?.onClick) {
+      message.action.onClick();
+    }
+    this.toast.dismiss(message.id);
+  }
 }

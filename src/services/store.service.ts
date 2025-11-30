@@ -7,6 +7,7 @@ import { LayoutService } from './layout.service';
 import { ActionQueueService } from './action-queue.service';
 import { MigrationService } from './migration.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
+import { AttachmentService } from './attachment.service';
 import { 
   Task, Project, Connection, UnfinishedItem, ThemeType, Attachment 
 } from '../models';
@@ -32,6 +33,7 @@ export class StoreService {
   private actionQueue = inject(ActionQueueService);
   private migrationService = inject(MigrationService);
   private conflictService = inject(ConflictResolutionService);
+  private attachmentService = inject(AttachmentService);
   private destroyRef = inject(DestroyRef);
   
   // ========== 代理访问其他服务的状态 ==========
@@ -86,10 +88,17 @@ export class StoreService {
   readonly isFlowUnassignedOpen = signal(true);
   readonly isFlowDetailOpen = signal(false);
   
+  /** 统一搜索查询 - 同时搜索项目和任务 */
   readonly searchQuery = signal<string>('');
   
-  /** 项目列表搜索查询 */
+  /** 项目列表搜索查询 (为了向后兼容保留) */
   readonly projectSearchQuery = signal<string>('');
+  
+  /** 统一搜索查询防抖定时器 */
+  private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  /** 防抖后的搜索查询 */
+  private debouncedSearchQuery = signal<string>('');
 
   // ========== 核心数据状态 ==========
   readonly projects = signal<Project[]>([]);
@@ -194,31 +203,33 @@ export class StoreService {
   });
   
   readonly searchResults = computed(() => {
-    const query = this.searchQuery().toLowerCase().trim();
+    const query = this.normalizeSearchQuery(this.searchQuery());
     if (!query) return [];
     
     return this.tasks().filter(t => 
-      t.title.toLowerCase().includes(query) ||
-      t.content.toLowerCase().includes(query) ||
-      t.displayId.toLowerCase().includes(query) ||
+      this.fuzzyMatch(t.title, query) ||
+      this.fuzzyMatch(t.content, query) ||
+      this.fuzzyMatch(t.displayId, query) ||
+      // 搜索短 ID
+      (t.shortId && this.fuzzyMatch(t.shortId, query)) ||
       // 搜索附件名称
-      (t.attachments?.some(a => a.name.toLowerCase().includes(query)) ?? false) ||
+      (t.attachments?.some(a => this.fuzzyMatch(a.name, query)) ?? false) ||
       // 搜索标签
-      (t.tags?.some(tag => tag.toLowerCase().includes(query)) ?? false)
+      (t.tags?.some(tag => this.fuzzyMatch(tag, query)) ?? false)
     );
   });
 
   /** 项目列表搜索结果（模糊搜索）*/
   readonly filteredProjects = computed(() => {
-    const query = this.projectSearchQuery().toLowerCase().trim();
+    const query = this.normalizeSearchQuery(this.projectSearchQuery());
     const projects = this.projects();
     
     if (!query) return projects;
     
     // 模糊搜索：支持项目名称、描述的部分匹配
     return projects.filter(p => {
-      const nameMatch = p.name.toLowerCase().includes(query);
-      const descMatch = p.description?.toLowerCase().includes(query) ?? false;
+      const nameMatch = this.fuzzyMatch(p.name, query);
+      const descMatch = p.description ? this.fuzzyMatch(p.description, query) : false;
       return nameMatch || descMatch;
     });
   });
@@ -242,6 +253,8 @@ export class StoreService {
     this.loadFromCacheOrSeed();
     this.setupActionQueueProcessors();
     this.startTrashCleanupTimer();
+    this.setupAttachmentUrlRefresh();
+    this.setupQueueSyncCoordination();
     
     // 设置远程变更回调 - 使用增量更新而非全量重载
     this.syncService.setRemoteChangeCallback(async (payload) => {
@@ -315,31 +328,46 @@ export class StoreService {
       case 'UPDATE':
         // 插入或更新任务 - 需要从服务器获取完整数据
         // 因为 Realtime 的 payload 可能不包含完整任务数据
-        void this.syncService.loadSingleProject(projectId, this.currentUserId()!).then(remoteProject => {
-          if (!remoteProject) return;
-          
-          const remoteTask = remoteProject.tasks.find(t => t.id === taskId);
-          if (!remoteTask) return;
-          
-          this.projects.update(projects =>
-            projects.map(p => {
-              if (p.id !== projectId) return p;
-              
-              const existingTaskIndex = p.tasks.findIndex(t => t.id === taskId);
-              if (existingTaskIndex >= 0) {
-                // 更新现有任务
-                const updatedTasks = [...p.tasks];
-                updatedTasks[existingTaskIndex] = remoteTask;
-                return { ...p, tasks: updatedTasks };
-              } else {
-                // 插入新任务
-                return { ...p, tasks: [...p.tasks, remoteTask] };
-              }
-            })
-          );
-        });
+        this.syncService.loadSingleProject(projectId, this.currentUserId()!)
+          .then(remoteProject => {
+            if (!remoteProject) return;
+            
+            const remoteTask = remoteProject.tasks.find(t => t.id === taskId);
+            if (!remoteTask) return;
+            
+            this.projects.update(projects =>
+              projects.map(p => {
+                if (p.id !== projectId) return p;
+                
+                const existingTaskIndex = p.tasks.findIndex(t => t.id === taskId);
+                if (existingTaskIndex >= 0) {
+                  // 更新现有任务
+                  const updatedTasks = [...p.tasks];
+                  updatedTasks[existingTaskIndex] = remoteTask;
+                  return { ...p, tasks: updatedTasks };
+                } else {
+                  // 插入新任务
+                  return { ...p, tasks: [...p.tasks, remoteTask] };
+                }
+              })
+            );
+          })
+          .catch(error => {
+            console.error('处理远程任务更新失败', error);
+          });
         break;
     }
+  }
+
+  /**
+   * 设置队列同步与 Realtime 的协调
+   * 在队列处理期间暂停 Realtime 更新，避免竞态条件
+   */
+  private setupQueueSyncCoordination() {
+    this.actionQueue.setQueueProcessCallbacks(
+      () => this.syncService.pauseRealtimeUpdates(),
+      () => this.syncService.resumeRealtimeUpdates()
+    );
   }
 
   /**
@@ -439,6 +467,61 @@ export class StoreService {
   }
 
   /**
+   * 设置附件 URL 刷新回调
+   * 当签名 URL 即将过期时，自动刷新并更新任务中的 URL
+   */
+  private setupAttachmentUrlRefresh() {
+    this.attachmentService.setUrlRefreshCallback((refreshedUrls) => {
+      if (refreshedUrls.size === 0) return;
+      
+      // 更新任务中的附件 URL
+      this.projects.update(projects => projects.map(project => {
+        let hasChanges = false;
+        const updatedTasks = project.tasks.map(task => {
+          if (!task.attachments || task.attachments.length === 0) return task;
+          
+          const updatedAttachments = task.attachments.map(attachment => {
+            const refreshed = refreshedUrls.get(attachment.id);
+            if (refreshed) {
+              hasChanges = true;
+              return {
+                ...attachment,
+                url: refreshed.url,
+                thumbnailUrl: refreshed.thumbnailUrl ?? attachment.thumbnailUrl
+              };
+            }
+            return attachment;
+          });
+          
+          return hasChanges ? { ...task, attachments: updatedAttachments } : task;
+        });
+        
+        return hasChanges ? { ...project, tasks: updatedTasks } : project;
+      }));
+    });
+  }
+
+  /**
+   * 监控当前项目所有附件的 URL（在加载项目时调用）
+   */
+  private monitorProjectAttachments(project: Project) {
+    const userId = this.currentUserId();
+    if (!userId) return;
+    
+    // 清除之前的监控
+    this.attachmentService.clearMonitoredAttachments();
+    
+    // 添加所有附件到监控列表
+    for (const task of project.tasks) {
+      if (task.attachments && task.attachments.length > 0) {
+        for (const attachment of task.attachments) {
+          this.attachmentService.monitorAttachment(userId, project.id, task.id, attachment);
+        }
+      }
+    }
+  }
+
+  /**
    * 清理超过保留期限的回收站项目
    */
   private cleanupOldTrashItems() {
@@ -512,20 +595,33 @@ export class StoreService {
         const validated = this.validateAndRebalance(remoteProject);
         this.projects.update(ps => [...ps, validated]);
       } else {
-        // 更新现有项目 - 检查版本号
+        // 更新现有项目 - 检查版本号（乐观锁）
         const localVersion = localProject.version ?? 0;
         const remoteVersion = remoteProject.version ?? 0;
         
         if (remoteVersion > localVersion) {
-          // 远程版本更新，清理过时的撤销历史
-          // 这可以防止撤销时意外覆盖远程更新
+          // 远程版本更新
+          const versionDiff = remoteVersion - localVersion;
+          
+          // 清理过时的撤销历史
           const clearedCount = this.undoService.clearOutdatedHistory(projectId, remoteVersion);
           if (clearedCount > 0) {
             console.log(`清理了 ${clearedCount} 条过时的撤销历史 (项目: ${projectId})`);
           }
           
-          // 合并或替换 - 使用 ConflictResolutionService
+          // 如果用户正在编辑且版本差距较大，提示用户
+          if (this.isEditing && versionDiff > 1) {
+            this.toastService.info('数据已更新', '其他设备的更改已同步，当前编辑内容将与远程合并');
+          }
+          
+          // 智能合并本地和远程更改
           const mergeResult = this.conflictService.smartMerge(localProject, remoteProject);
+          
+          // 如果有冲突且用户正在编辑，提示用户
+          if (mergeResult.conflictCount > 0 && this.isEditing) {
+            this.toastService.warning('合并提示', '检测到与远程更改的冲突，已自动合并');
+          }
+          
           const validated = this.validateAndRebalance(mergeResult.project);
           this.projects.update(ps => ps.map(p => p.id === projectId ? validated : p));
         }
@@ -584,6 +680,11 @@ export class StoreService {
       await this.loadProjects();
       await this.loadUserPreferences();
       await this.syncService.initRealtimeSubscription(userId);
+      
+      // 尝试恢复持久化的冲突数据
+      await this.syncService.tryReloadConflictData(userId, (id) => 
+        this.projects().find(p => p.id === id)
+      );
     } else {
       this.loadFromCacheOrSeed();
       this.loadLocalPreferences();
@@ -600,6 +701,9 @@ export class StoreService {
     // 如果切换到同一个项目，无需操作
     if (previousProjectId === projectId) return;
     
+    // 清理搜索状态
+    this.searchQuery.set('');
+    
     // 先 flush 待处理的防抖操作，确保数据不丢失
     this.undoService.flushPendingAction();
     
@@ -610,6 +714,16 @@ export class StoreService {
     
     // 设置新的活动项目
     this.activeProjectId.set(projectId);
+    
+    // 更新附件 URL 监控
+    if (projectId) {
+      const newProject = this.projects().find(p => p.id === projectId);
+      if (newProject) {
+        this.monitorProjectAttachments(newProject);
+      }
+    } else {
+      this.attachmentService.clearMonitoredAttachments();
+    }
   }
 
   /**
@@ -730,8 +844,17 @@ export class StoreService {
       
       if (previousActive && rebalanced.some(p => p.id === previousActive)) {
         this.activeProjectId.set(previousActive);
+        // 监控当前活动项目的附件 URL
+        const activeProject = rebalanced.find(p => p.id === previousActive);
+        if (activeProject) {
+          this.monitorProjectAttachments(activeProject);
+        }
       } else {
         this.activeProjectId.set(rebalanced[0]?.id ?? null);
+        // 监控当前活动项目的附件 URL
+        if (rebalanced[0]) {
+          this.monitorProjectAttachments(rebalanced[0]);
+        }
       }
       
       this.syncService.saveOfflineSnapshot(rebalanced);
@@ -935,9 +1058,11 @@ export class StoreService {
       p.id === projectId ? resolvedProject : p
     ));
     
-    // 如果解决冲突的项目是当前活动项目，清空撤销历史避免状态混乱
+    // 如果解决冲突的项目是当前活动项目，清空撤销历史并同步新的基准版本号
+    // 这样后续的操作才会使用正确的版本号进行版本检测
     if (this.activeProjectId() === projectId) {
-      this.undoService.clearHistory(projectId);
+      const newVersion = resolvedProject.version ?? 0;
+      this.undoService.clearHistory(projectId, newVersion);
     }
     
     // 强制同步解决后的数据（除了选择远程版本的情况）
@@ -1403,7 +1528,7 @@ export class StoreService {
   /**
    * 软删除任务（移动到回收站）
    * 任务及其子任务都会被标记为已删除
-   * 同时清理所有指向这些任务或从这些任务发出的连接
+   * 同时保存涉及这些任务的连接以便恢复时还原
    */
   deleteTask(taskId: string) {
     const activeP = this.activeProject();
@@ -1421,10 +1546,23 @@ export class StoreService {
     
     const now = new Date().toISOString();
     
+    // 找出所有涉及被删除任务的连接，保存到主任务上以便恢复
+    const deletedConnections = activeP.connections.filter(
+      c => idsToDelete.has(c.source) || idsToDelete.has(c.target)
+    );
+    
     this.recordAndUpdate(p => this.layoutService.rebalance({
       ...p,
-      tasks: p.tasks.map(t => idsToDelete.has(t.id) ? { ...t, deletedAt: now, stage: null } : t),
-      // 清理所有涉及被删除任务的连接（包括父子连接和跨树连接）
+      tasks: p.tasks.map(t => {
+        if (t.id === taskId) {
+          // 在主任务上保存被删除的连接
+          return { ...t, deletedAt: now, stage: null, deletedConnections };
+        } else if (idsToDelete.has(t.id)) {
+          return { ...t, deletedAt: now, stage: null };
+        }
+        return t;
+      }),
+      // 暂时移除涉及被删除任务的连接
       connections: p.connections.filter(c => !idsToDelete.has(c.source) && !idsToDelete.has(c.target))
     }));
   }
@@ -1457,11 +1595,15 @@ export class StoreService {
 
   /**
    * 从回收站恢复任务
-   * 同时恢复所有子任务
+   * 同时恢复所有子任务和之前保存的连接
    */
   restoreTask(taskId: string) {
     const activeP = this.activeProject();
     if (!activeP) return;
+    
+    // 获取主任务上保存的被删除连接
+    const mainTask = activeP.tasks.find(t => t.id === taskId);
+    const savedConnections = mainTask?.deletedConnections || [];
     
     // 收集所有需要恢复的任务（包括子任务）
     const idsToRestore = new Set<string>();
@@ -1474,10 +1616,30 @@ export class StoreService {
       activeP.tasks.filter(t => t.parentId === id).forEach(child => stack.push(child.id));
     }
     
-    this.recordAndUpdate(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.map(t => idsToRestore.has(t.id) ? { ...t, deletedAt: null } : t)
-    }));
+    this.recordAndUpdate(p => {
+      // 恢复任务并清除 deletedConnections 属性
+      const restoredTasks = p.tasks.map(t => {
+        if (idsToRestore.has(t.id)) {
+          const { deletedConnections, ...rest } = t;
+          return { ...rest, deletedAt: null };
+        }
+        return t;
+      });
+      
+      // 合并恢复的连接（避免重复）
+      const existingConnKeys = new Set(
+        p.connections.map(c => `${c.source}->${c.target}`)
+      );
+      const connectionsToRestore = savedConnections.filter(
+        c => !existingConnKeys.has(`${c.source}->${c.target}`)
+      );
+      
+      return this.layoutService.rebalance({
+        ...p,
+        tasks: restoredTasks,
+        connections: [...p.connections, ...connectionsToRestore]
+      });
+    });
   }
 
   /**
@@ -1561,7 +1723,7 @@ export class StoreService {
       this.recordAndUpdate(p => this.layoutService.rebalance({
         ...p,
         tasks: [...p.tasks, newTask],
-        connections: parentId ? [...p.connections, { source: parentId, target: newTask.id }] : [...p.connections]
+        connections: parentId ? [...p.connections, { id: crypto.randomUUID(), source: parentId, target: newTask.id }] : [...p.connections]
       }));
     }
     
@@ -1585,7 +1747,11 @@ export class StoreService {
     
     this.recordAndUpdate(p => ({
       ...p,
-      connections: [...p.connections, { source: sourceId, target: targetId }]
+      connections: [...p.connections, { 
+        id: crypto.randomUUID(),
+        source: sourceId, 
+        target: targetId 
+      }]
     }));
   }
 
@@ -1917,7 +2083,7 @@ export class StoreService {
           }
         ],
         connections: [
-          { source: 't1', target: 't2' }
+          { id: 'conn-seed-1', source: 't1', target: 't2' }
         ]
       })
     ];
@@ -2201,5 +2367,81 @@ export class StoreService {
 
   private detectCycle(taskId: string, newParentId: string | null, tasks: Task[]): boolean {
     return this.layoutService.detectCycle(taskId, newParentId, tasks);
+  }
+  
+  // ========== 搜索辅助方法 ==========
+  
+  /**
+   * 规范化搜索查询
+   * 移除标点符号，转换为小写，用于模糊匹配
+   */
+  private normalizeSearchQuery(query: string): string {
+    return query
+      .toLowerCase()
+      .trim()
+      // 移除常见标点符号
+      .replace(/[.,!?;:'"()[\]{}<>@#$%^&*+=~`|\\/-]/g, '')
+      // 合并多个空格
+      .replace(/\s+/g, ' ');
+  }
+  
+  /**
+   * 模糊匹配
+   * 支持字符序列匹配 (例如 "abc" 匹配 "axbycz")
+   */
+  private fuzzyMatch(text: string, query: string): boolean {
+    if (!text || !query) return false;
+    
+    const normalizedText = text.toLowerCase();
+    
+    // 1. 包含匹配 (最快)
+    if (normalizedText.includes(query)) {
+      return true;
+    }
+    
+    // 2. 字符序列匹配 (Fuzzy Sequence Matching)
+    let queryIndex = 0;
+    let textIndex = 0;
+    
+    while (queryIndex < query.length && textIndex < normalizedText.length) {
+      if (query[queryIndex] === normalizedText[textIndex]) {
+        queryIndex++;
+      }
+      textIndex++;
+    }
+    
+    return queryIndex === query.length;
+  }
+  
+  /**
+   * 设置搜索查询（带防抖）
+   * 用于高频输入场景
+   */
+  setSearchQueryDebounced(query: string, delay: number = 300): void {
+    // 立即更新原始查询（用于 UI 显示）
+    this.searchQuery.set(query);
+    
+    // 防抖更新实际搜索
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+    }
+    
+    this.searchDebounceTimer = setTimeout(() => {
+      this.debouncedSearchQuery.set(query);
+      this.searchDebounceTimer = null;
+    }, delay);
+  }
+  
+  /**
+   * 清除搜索查询
+   */
+  clearSearch(): void {
+    this.searchQuery.set('');
+    this.projectSearchQuery.set('');
+    this.debouncedSearchQuery.set('');
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
   }
 }

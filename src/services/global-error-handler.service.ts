@@ -1,4 +1,4 @@
-import { ErrorHandler, Injectable, inject, NgZone } from '@angular/core';
+import { ErrorHandler, Injectable, inject, NgZone, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { LoggerService, LogLevel } from './logger.service';
 import { ToastService } from './toast.service';
@@ -12,8 +12,32 @@ export enum ErrorSeverity {
   SILENT = 'silent',
   /** 提示级：需要 Toast 弹窗告诉用户（如保存失败、网络断开） */
   NOTIFY = 'notify',
+  /** 可恢复级：显示恢复对话框，让用户选择处理方式 */
+  RECOVERABLE = 'recoverable',
   /** 致命级：需要跳转到错误页面（如 Store 初始化失败导致白屏） */
   FATAL = 'fatal'
+}
+
+/**
+ * 恢复选项
+ */
+export interface RecoveryOption {
+  id: string;
+  label: string;
+  style: 'primary' | 'secondary' | 'danger';
+}
+
+/**
+ * 可恢复错误信息
+ */
+export interface RecoverableError {
+  title: string;
+  message: string;
+  details?: string;
+  options: RecoveryOption[];
+  defaultOptionId?: string;
+  autoSelectIn?: number;
+  resolve: (optionId: string) => void;
 }
 
 /**
@@ -51,6 +75,9 @@ export class GlobalErrorHandler implements ErrorHandler {
   private toast = inject(ToastService);
   private router = inject(Router);
   private zone = inject(NgZone);
+
+  /** 当前可恢复错误（用于显示恢复对话框） */
+  readonly recoverableError = signal<RecoverableError | null>(null);
 
   /** 错误分类规则（顺序敏感，优先匹配前面的规则） */
   private readonly classificationRules: ErrorClassificationRule[] = [
@@ -172,6 +199,10 @@ export class GlobalErrorHandler implements ErrorHandler {
       case ErrorSeverity.NOTIFY:
         this.handleNotifyError(errorMessage, errorStack, error);
         break;
+      case ErrorSeverity.RECOVERABLE:
+        // 可恢复错误会被特殊处理，这里只记录日志
+        this.logger.warn('Recoverable error', { message: errorMessage, stack: errorStack });
+        break;
       case ErrorSeverity.FATAL:
         this.handleFatalError(errorMessage, errorStack, error);
         break;
@@ -205,6 +236,56 @@ export class GlobalErrorHandler implements ErrorHandler {
    */
   get isFatalState(): boolean {
     return this.hasFatalError;
+  }
+
+  /**
+   * 显示可恢复错误对话框
+   * 返回 Promise，等待用户选择后 resolve
+   * 
+   * @example
+   * const choice = await errorHandler.showRecoveryDialog({
+   *   title: '同步失败',
+   *   message: '无法将更改同步到云端',
+   *   options: [
+   *     { id: 'retry', label: '重试', style: 'primary' },
+   *     { id: 'offline', label: '离线模式', style: 'secondary' },
+   *     { id: 'discard', label: '丢弃更改', style: 'danger' }
+   *   ]
+   * });
+   * 
+   * if (choice === 'retry') { ... }
+   */
+  showRecoveryDialog(config: {
+    title: string;
+    message: string;
+    details?: string;
+    options: RecoveryOption[];
+    defaultOptionId?: string;
+    autoSelectIn?: number;
+  }): Promise<string> {
+    return new Promise((resolve) => {
+      this.zone.run(() => {
+        this.recoverableError.set({
+          ...config,
+          resolve: (optionId: string) => {
+            this.recoverableError.set(null);
+            resolve(optionId);
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * 关闭恢复对话框（不选择任何选项）
+   * 返回 null
+   */
+  dismissRecoveryDialog(): void {
+    const current = this.recoverableError();
+    if (current) {
+      current.resolve('dismiss');
+      this.recoverableError.set(null);
+    }
   }
 
   // ========== 私有方法 ==========

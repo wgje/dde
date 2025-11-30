@@ -329,15 +329,20 @@ export class TrashModalComponent {
    * 检查任务是否有子任务
    */
   hasChildren(taskId: string): boolean {
-    return this.store.tasks().some(t => t.parentId === taskId);
+    // 同时检查当前任务列表和已删除任务列表
+    const allTasks = [...this.store.tasks(), ...this.store.deletedTasks()];
+    return allTasks.some(t => t.parentId === taskId);
   }
   
   /**
-   * 获取子任务数量
+   * 获取子任务数量（包括已删除的子任务）
    */
   getChildCount(taskId: string): number {
+    // 同时计算当前任务和已删除任务中的子任务
+    const allTasks = [...this.store.tasks(), ...this.store.deletedTasks()];
+    
     const countDescendants = (id: string): number => {
-      const children = this.store.tasks().filter(t => t.parentId === id);
+      const children = allTasks.filter(t => t.parentId === id);
       return children.length + children.reduce((sum, child) => sum + countDescendants(child.id), 0);
     };
     return countDescendants(taskId);

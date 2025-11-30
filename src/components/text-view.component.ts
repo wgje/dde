@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, Output, EventEmitter, OnDestroy, ElementRef, ViewChild, NgZone, AfterViewInit } from '@angular/core';
+import { Component, inject, signal, computed, Output, EventEmitter, OnDestroy, ElementRef, ViewChild, NgZone, AfterViewInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { DomSanitizer } from '@angular/platform-browser';
 import { StoreService } from '../services/store.service';
@@ -13,6 +13,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
   selector: 'app-text-view',
   standalone: true,
   imports: [CommonModule, AttachmentManagerComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div #scrollContainer class="flex flex-col h-full bg-canvas overflow-y-auto overflow-x-hidden text-view-scroll-container"><!-- 1. 待完成区域 -->
       <section 
@@ -85,7 +86,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                         (input)="onTitleInput(task.id, unassignedTitleInput.value)"
                         (focus)="onInputFocus()"
                         (blur)="onInputBlur()"
-                        class="w-full text-sm font-medium text-stone-800 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-stone-50"
+                        class="w-full text-sm font-medium text-stone-800 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-white"
                         placeholder="任务名称..."
                         autofocus>
                       <textarea
@@ -94,7 +95,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                         (input)="onContentInput(task.id, unassignedContentInput.value)"
                         (focus)="onInputFocus()"
                         (blur)="onInputBlur()"
-                        class="w-full text-xs text-stone-600 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-stone-50 resize-none font-mono h-16"
+                        class="w-full text-xs text-stone-600 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-white resize-none font-mono h-16"
                         placeholder="任务描述..."></textarea>
                       
                       <!-- 快速待办输入 -->
@@ -340,8 +341,13 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                                 (input)="onTitleInput(task.id, titleInput.value)"
                                 (focus)="onInputFocus()"
                                 (blur)="onInputBlur()"
-                                class="w-full font-medium text-retro-dark border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none bg-stone-50 touch-manipulation"
-                                [ngClass]="{'text-sm p-2': !isMobile(), 'text-xs p-1.5': isMobile()}"
+                                class="w-full font-medium text-retro-dark border rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none touch-manipulation transition-colors"
+                                [ngClass]="{
+                                  'text-sm p-2': !isMobile(), 
+                                  'text-xs p-1.5': isMobile(),
+                                  'bg-retro-muted/5 border-retro-muted/20': isPreviewMode(task.id),
+                                  'bg-white border-stone-200': !isPreviewMode(task.id)
+                                }"
                                 placeholder="任务名称...">
                               <!-- 内容编辑/预览 -->
                               <div class="relative">
@@ -363,7 +369,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                                 @if (isPreviewMode(task.id)) {
                                   <!-- Markdown 预览 -->
                                   <div 
-                                    class="w-full border border-stone-200 rounded-lg bg-white overflow-y-auto markdown-preview"
+                                    class="w-full border border-retro-muted/20 rounded-lg bg-retro-muted/5 overflow-y-auto markdown-preview"
                                     [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
                                     [innerHTML]="renderMarkdown(task.content)">
                                   </div>
@@ -375,7 +381,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                                     (input)="onContentInput(task.id, contentInput.value)"
                                     (focus)="onInputFocus()"
                                     (blur)="onInputBlur()"
-                                    class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none touch-manipulation"
+                                    class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-white resize-none touch-manipulation"
                                     [ngClass]="{'h-24 text-xs p-2 pt-6': !isMobile(), 'h-28 text-[11px] p-2 pt-6': isMobile()}"
                                     placeholder="输入 Markdown 内容..."></textarea>
                                 }

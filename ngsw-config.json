@@ -26,5 +26,32 @@
         ]
       }
     }
+  ],
+  "dataGroups": [
+    {
+      "name": "supabase-api-readonly",
+      "urls": [
+        "https://*.supabase.co/rest/v1/projects*",
+        "https://*.supabase.co/rest/v1/tasks*"
+      ],
+      "cacheConfig": {
+        "strategy": "freshness",
+        "maxSize": 100,
+        "maxAge": "1d",
+        "timeout": "5s"
+      }
+    },
+    {
+      "name": "supabase-storage",
+      "urls": [
+        "https://*.supabase.co/storage/v1/object/*"
+      ],
+      "cacheConfig": {
+        "strategy": "freshness",
+        "maxSize": 50,
+        "maxAge": "7d",
+        "timeout": "10s"
+      }
+    }
   ]
 }

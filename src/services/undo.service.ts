@@ -20,6 +20,9 @@ export class UndoService {
   /** 重做栈 */
   private redoStack = signal<UndoAction[]>([]);
   
+  /** 项目基准版本号映射（冲突解决后用于追踪新的基准版本） */
+  private projectBaseVersions = new Map<string, number>();
+  
   /** 是否可以撤销 */
   readonly canUndo = computed(() => this.undoStack().length > 0);
   /** 是否可以重做 */
@@ -167,8 +170,11 @@ export class UndoService {
     const action = stack[stack.length - 1];
     
     // 版本检查：如果远程版本已更新，拒绝撤销
+    // 只有当两个版本号都有定义时才进行检查
     if (currentProjectVersion !== undefined && 
+        currentProjectVersion !== null &&
         action.projectVersion !== undefined &&
+        action.projectVersion !== null &&
         currentProjectVersion > action.projectVersion + 1) {
       return 'version-mismatch';
     }
@@ -197,8 +203,11 @@ export class UndoService {
     const action = stack[stack.length - 1];
     
     // 版本检查：如果远程版本已更新，拒绝重做
+    // 只有当两个版本号都有定义时才进行检查
     if (currentProjectVersion !== undefined && 
+        currentProjectVersion !== null &&
         action.projectVersion !== undefined &&
+        action.projectVersion !== null &&
         currentProjectVersion > action.projectVersion + 1) {
       return 'version-mismatch';
     }
@@ -245,8 +254,9 @@ export class UndoService {
   /**
    * 清空历史（切换项目时调用）
    * @param projectId 可选，指定要清空的项目ID。如果不传则清空所有历史。
+   * @param newBaseVersion 可选，设置新的基准版本号（用于冲突解决后）
    */
-  clearHistory(projectId?: string): void {
+  clearHistory(projectId?: string, newBaseVersion?: number): void {
     // 取消任何待处理的防抖操作
     this.flushPendingAction();
     
@@ -254,10 +264,16 @@ export class UndoService {
       // 只清空指定项目的历史
       this.undoStack.update(stack => stack.filter(a => a.projectId !== projectId));
       this.redoStack.update(stack => stack.filter(a => a.projectId !== projectId));
+      
+      // 如果提供了新的基准版本号，记录它供后续检测使用
+      if (newBaseVersion !== undefined) {
+        this.projectBaseVersions.set(projectId, newBaseVersion);
+      }
     } else {
       // 清空所有历史
       this.undoStack.set([]);
       this.redoStack.set([]);
+      this.projectBaseVersions.clear();
     }
   }
   

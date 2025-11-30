@@ -90,15 +90,15 @@ import { renderMarkdown } from '../../utils/markdown';
            [style.max-height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
         <!-- 拖动条 -->
-        <div class="flex justify-center py-2 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
+        <div class="flex justify-center py-1.5 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
              (touchstart)="startDrawerResize($event)">
-          <div class="w-12 h-1.5 bg-stone-300 rounded-full"></div>
+          <div class="w-10 h-1 bg-stone-300 rounded-full"></div>
         </div>
         
-        <!-- 标题栏 -->
-        <div class="px-3 pb-2 flex justify-between items-center flex-shrink-0">
+        <!-- 标题栏 - 紧凑 -->
+        <div class="px-3 pb-1 flex justify-between items-center flex-shrink-0">
           <h3 class="font-bold text-stone-700 text-xs">任务详情</h3>
-          <button (click)="store.isFlowDetailOpen.set(false)" class="text-stone-400 hover:text-stone-600 p-1">
+          <button (click)="store.isFlowDetailOpen.set(false)" class="text-stone-400 hover:text-stone-600 p-0.5">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -111,7 +111,7 @@ import { renderMarkdown } from '../../utils/markdown';
           @if (task(); as t) {
             <ng-container *ngTemplateOutlet="mobileTaskContent; context: { $implicit: t }"></ng-container>
           } @else {
-            <div class="text-center text-stone-400 text-xs py-4">双击节点查看详情</div>
+            <div class="text-center text-stone-400 text-xs py-2">双击节点查看详情</div>
           }
         </div>
       </div>
@@ -151,7 +151,7 @@ import { renderMarkdown } from '../../utils/markdown';
                   <h4 class="text-xs font-medium text-stone-800 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (task.content) {
                       <div 
-                          class="text-[11px] text-stone-600 prose prose-stone prose-xs max-w-none leading-relaxed markdown-preview"
+                          class="text-[11px] text-stone-600 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto"
                           [innerHTML]="renderMarkdownContent(task.content)">
                       </div>
                   } @else {
@@ -308,72 +308,125 @@ import { renderMarkdown } from '../../utils/markdown';
     
     <!-- 移动端任务内容模板 -->
     <ng-template #mobileTaskContent let-task>
-      <!-- 紧凑的任务信息 -->
-      <div class="flex items-center gap-2 mb-2">
-        <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 px-1.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
-        <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd HH:mm'}}</span>
-        <span class="text-[9px] px-1.5 py-0.5 rounded"
+      <!-- 紧凑的任务信息头 - 单行布局 -->
+      <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
+        <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 px-1.5 py-0.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
+        <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
+        <span class="text-[9px] px-1 py-0.5 rounded"
               [class.bg-emerald-100]="task.status === 'completed'"
               [class.text-emerald-700]="task.status === 'completed'"
               [class.bg-amber-100]="task.status !== 'completed'"
               [class.text-amber-700]="task.status !== 'completed'">
-          {{task.status === 'completed' ? '已完成' : '进行中'}}
+          {{task.status === 'completed' ? '完成' : '进行'}}
         </span>
-      </div>
-      
-      <!-- 标题输入 -->
-      <input type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
-        class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1.5 mb-2 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
-        placeholder="任务标题">
-      
-      <!-- 内容输入 -->
-      <textarea [ngModel]="task.content" (ngModelChange)="contentChange.emit({ taskId: task.id, content: $event })" rows="2"
-        class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1.5 mb-2 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono"
-        placeholder="任务内容..."></textarea>
-      
-      <!-- 快速待办输入 -->
-      <div class="flex items-center gap-1 bg-retro-rust/5 border border-retro-rust/20 rounded overflow-hidden p-0.5 mb-2">
-        <span class="text-retro-rust flex-shrink-0 text-[10px] pl-1.5">☐</span>
-        <input
-          #quickTodoInput
-          type="text"
-          (keydown.enter)="addQuickTodo(task.id, quickTodoInput)"
-          class="flex-1 bg-transparent border-none outline-none text-stone-600 placeholder-stone-400 text-[11px] py-1 px-1"
-          placeholder="输入待办，回车添加...">
-        <button
-          (click)="addQuickTodo(task.id, quickTodoInput)"
-          class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded p-1 mr-0.5 transition-all"
-          title="添加待办">
-          <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <!-- 预览/编辑切换按钮 -->
+        <button 
+          (click)="toggleEditMode()"
+          class="ml-auto text-[9px] px-1.5 py-0.5 rounded transition-colors"
+          [class.bg-indigo-100]="!isEditMode()"
+          [class.text-indigo-600]="!isEditMode()"
+          [class.bg-stone-100]="isEditMode()"
+          [class.text-stone-500]="isEditMode()">
+          {{ isEditMode() ? '预览' : '编辑' }}
         </button>
       </div>
       
-      <!-- 操作按钮 - 横向紧凑排列 -->
-      <div class="flex gap-1.5">
+      <!-- 预览模式 -->
+      @if (!isEditMode()) {
+        <div class="space-y-1.5">
+          <!-- 标题 -->
+          <h4 class="text-xs font-medium text-stone-800 leading-tight">{{ task.title || '无标题' }}</h4>
+          
+          <!-- Markdown 预览内容 -->
+          @if (task.content) {
+            <div 
+              class="text-[11px] text-stone-600 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-28 overflow-y-auto"
+              [innerHTML]="renderMarkdownContent(task.content)">
+            </div>
+          } @else {
+            <div class="text-[10px] text-stone-400 italic">无内容</div>
+          }
+          
+          <!-- 属性标签 -->
+          <div class="flex flex-wrap gap-1 text-[9px]">
+            @if (task.priority) {
+              <span class="px-1 py-0.5 rounded"
+                    [class.bg-red-100]="task.priority === 'urgent'"
+                    [class.text-red-700]="task.priority === 'urgent'"
+                    [class.bg-orange-100]="task.priority === 'high'"
+                    [class.text-orange-700]="task.priority === 'high'"
+                    [class.bg-yellow-100]="task.priority === 'medium'"
+                    [class.text-yellow-700]="task.priority === 'medium'"
+                    [class.bg-blue-100]="task.priority === 'low'"
+                    [class.text-blue-700]="task.priority === 'low'">
+                {{ getPriorityLabel(task.priority) }}
+              </span>
+            }
+            @if (task.dueDate) {
+              <span class="text-stone-500">📅 {{ task.dueDate | date:'MM-dd' }}</span>
+            }
+            @for (tag of task.tags || []; track tag) {
+              <span class="px-1 py-0.5 bg-indigo-100 text-indigo-700 rounded">{{ tag }}</span>
+            }
+          </div>
+        </div>
+      } @else {
+        <!-- 编辑模式 -->
+        <div class="space-y-1.5">
+          <!-- 标题输入 -->
+          <input type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
+            class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+            placeholder="任务标题">
+          
+          <!-- 内容输入 -->
+          <textarea [ngModel]="task.content" (ngModelChange)="contentChange.emit({ taskId: task.id, content: $event })" rows="3"
+            class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono"
+            placeholder="任务内容（支持 Markdown）..."></textarea>
+          
+          <!-- 快速待办输入 -->
+          <div class="flex items-center gap-1 bg-retro-rust/5 border border-retro-rust/20 rounded overflow-hidden p-0.5">
+            <span class="text-retro-rust flex-shrink-0 text-[10px] pl-1">☐</span>
+            <input
+              #quickTodoInput
+              type="text"
+              (keydown.enter)="addQuickTodo(task.id, quickTodoInput)"
+              class="flex-1 bg-transparent border-none outline-none text-stone-600 placeholder-stone-400 text-[10px] py-0.5 px-1"
+              placeholder="待办，回车添加...">
+            <button
+              (click)="addQuickTodo(task.id, quickTodoInput)"
+              class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded p-0.5 mr-0.5 transition-all">
+              <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          </div>
+        </div>
+      }
+      
+      <!-- 操作按钮 - 紧凑横排 -->
+      <div class="flex gap-1 mt-2">
         <button (click)="addSibling.emit(task)"
-          class="flex-1 px-2 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[10px] font-medium rounded transition-all">
+          class="flex-1 px-1.5 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[9px] font-medium rounded transition-all">
           +同级
         </button>
         <button (click)="addChild.emit(task)"
-          class="flex-1 px-2 py-1 bg-retro-rust/10 text-retro-rust border border-retro-rust/30 text-[10px] font-medium rounded transition-all">
+          class="flex-1 px-1.5 py-1 bg-retro-rust/10 text-retro-rust border border-retro-rust/30 text-[9px] font-medium rounded transition-all">
           +下级
         </button>
         <button (click)="toggleStatus.emit(task)"
-          class="flex-1 px-2 py-1 text-[10px] font-medium rounded border transition-all"
+          class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded border transition-all"
           [class.bg-emerald-50]="task.status !== 'completed'"
           [class.text-emerald-700]="task.status !== 'completed'"
           [class.border-emerald-200]="task.status !== 'completed'"
           [class.bg-stone-50]="task.status === 'completed'"
           [class.text-stone-600]="task.status === 'completed'"
           [class.border-stone-200]="task.status === 'completed'">
-          {{task.status === 'completed' ? '未完成' : '完成'}}
+          {{task.status === 'completed' ? '撤销' : '完成'}}
         </button>
       </div>
       
-      <!-- 第二行按钮：归档和删除 -->
-      <div class="flex gap-1.5 mt-1.5">
+      <!-- 第二行：归档和删除 -->
+      <div class="flex gap-1 mt-1">
         <button (click)="archiveTask.emit(task)"
-          class="flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all border"
+          class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded transition-all border"
           [class.bg-violet-50]="task.status !== 'archived'"
           [class.text-violet-600]="task.status !== 'archived'"
           [class.border-violet-200]="task.status !== 'archived'"
@@ -383,12 +436,12 @@ import { renderMarkdown } from '../../utils/markdown';
           {{task.status === 'archived' ? '取消归档' : '归档'}}
         </button>
         <button (click)="deleteTask.emit(task)"
-          class="px-2 py-1 bg-stone-50 text-stone-400 border border-stone-200 text-[10px] font-medium rounded transition-all">
+          class="px-1.5 py-1 bg-stone-50 text-stone-400 border border-stone-200 text-[9px] font-medium rounded transition-all">
           删除
         </button>
       </div>
       
-      <!-- 附件管理（手机端） -->
+      <!-- 附件管理（手机端） - 紧凑 -->
       @if (store.currentUserId()) {
         <app-attachment-manager
           [userId]="store.currentUserId()!"

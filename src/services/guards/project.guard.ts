@@ -65,14 +65,9 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
     return true;
   }
   
-  // 项目不存在，检查是否正在加载
-  if (store.isLoadingRemote()) {
-    // 正在加载远程数据，允许访问（可能稍后会加载到）
-    // 实际显示会在数据加载完成后处理
-    return true;
-  }
-  
   // 项目确实不存在，重定向到项目列表并显示提示
+  // 注意：之前这里有一个"正在加载时返回 true"的逻辑，但这会导致竞态条件
+  // 现在我们已经等待了数据加载完成，所以可以确定项目确实不存在
   toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
   
   void router.navigate(['/projects']);
@@ -82,6 +77,10 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
 /**
  * 项目权限守卫（预留）
  * 用于未来的多用户/团队功能
+ * 
+ * @deprecated 当前版本此守卫等同于 projectExistsGuard。
+ * 未来实现多用户/团队功能时会扩展为检查 owner_id 和协作者列表。
+ * 新代码请直接使用 projectExistsGuard。
  */
 export const projectAccessGuard: CanActivateFn = (route: ActivatedRouteSnapshot, state) => {
   // 当前版本项目仅属于当前用户

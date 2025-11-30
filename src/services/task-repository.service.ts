@@ -120,20 +120,40 @@ export class TaskRepositoryService {
 
   /**
    * 批量保存任务
+   * 注意：Supabase upsert 是原子操作，但如果部分失败无法自动回滚
+   * 调用方应该处理失败情况并决定是否需要重试
    */
-  async saveTasks(projectId: string, tasks: Task[]): Promise<{ success: boolean; error?: string }> {
+  async saveTasks(projectId: string, tasks: Task[]): Promise<{ success: boolean; error?: string; failedCount?: number }> {
     if (!this.supabase.isConfigured) return { success: true };
     if (tasks.length === 0) return { success: true };
 
     const taskRows = tasks.map(task => this.mapTaskToRow(projectId, task));
 
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .upsert(taskRows, { onConflict: 'id' });
+    // 对于大批量任务，分批处理以避免超时和单次失败影响所有数据
+    const BATCH_SIZE = 50;
+    let failedCount = 0;
+    let lastError: string | undefined;
 
-    if (error) {
-      console.error('Failed to save tasks:', error);
-      return { success: false, error: error.message };
+    for (let i = 0; i < taskRows.length; i += BATCH_SIZE) {
+      const batch = taskRows.slice(i, i + BATCH_SIZE);
+      const { error } = await this.supabase.client()
+        .from('tasks')
+        .upsert(batch, { onConflict: 'id' });
+
+      if (error) {
+        console.error(`Failed to save tasks batch ${i}-${i + batch.length}:`, error);
+        failedCount += batch.length;
+        lastError = error.message;
+        // 继续处理其他批次，不中断
+      }
+    }
+
+    if (failedCount > 0) {
+      return { 
+        success: false, 
+        error: `${failedCount} 个任务保存失败: ${lastError}`,
+        failedCount 
+      };
     }
 
     return { success: true };

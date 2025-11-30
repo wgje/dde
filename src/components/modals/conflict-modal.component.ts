@@ -253,10 +253,14 @@ export class ConflictModalComponent {
       let title: string;
       
       if (localTask && remoteTask) {
-        // 两边都有
+        // 两边都有 - 进行全面比较
         const isSame = localTask.title === remoteTask.title && 
                        localTask.content === remoteTask.content &&
-                       localTask.status === remoteTask.status;
+                       localTask.status === remoteTask.status &&
+                       localTask.priority === remoteTask.priority &&
+                       localTask.dueDate === remoteTask.dueDate &&
+                       JSON.stringify(localTask.tags || []) === JSON.stringify(remoteTask.tags || []) &&
+                       JSON.stringify(localTask.attachments || []) === JSON.stringify(remoteTask.attachments || []);
         status = isSame ? 'same' : 'modified';
         title = localTask.title || remoteTask.title || '未命名';
       } else if (localTask) {

@@ -13,6 +13,7 @@ export type ModalType =
   | 'conflict'
   | 'configHelp'
   | 'trash'
+  | 'migration'
   | 'connectionEditor'
   | 'linkTypeDialog';
 
@@ -32,7 +33,8 @@ export type ModalData =
   | DeleteTaskData
   | ConflictData
   | ConnectionEditorData
-  | LinkTypeData;
+  | LinkTypeData
+  | undefined;
 
 export interface DeleteProjectData {
   projectId: string;

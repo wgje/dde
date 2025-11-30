@@ -50,6 +50,9 @@ export interface Task {
   hasIncompleteTask?: boolean; // 是否包含未完成的待办项
   deletedAt?: string | null; // 软删除时间戳，null 表示未删除
   
+  // 删除任务时保存的连接，用于恢复时还原
+  deletedConnections?: Connection[];
+  
   // 新增：附件支持
   attachments?: Attachment[];
   
@@ -67,6 +70,8 @@ export interface Task {
  * 连接模型（任务之间的关联）
  */
 export interface Connection {
+  /** 连接的唯一标识符 */
+  id?: string;
   source: string;
   target: string;
   description?: string; // 联系块描述
@@ -187,3 +192,8 @@ export interface UndoAction {
     after: Partial<Project>;
   };
 }
+
+// ============================================
+// GoJS 边界类型导出
+// ============================================
+export * from './gojs-boundary';

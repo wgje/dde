@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, input } from '@angular/core';
+import { Component, inject, signal, computed, input, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService, DeadLetterItem } from '../services/action-queue.service';
 import { SyncService } from '../services/sync.service';
@@ -15,6 +15,7 @@ import { SyncService } from '../services/sync.service';
   selector: 'app-sync-status',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (compact() && !embedded()) {
       <!-- 紧凑模式：仅显示状态指示器 -->

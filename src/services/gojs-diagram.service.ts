@@ -1,9 +1,10 @@
-import { Injectable, inject, signal, NgZone } from '@angular/core';
+import { Injectable, inject, signal, NgZone, computed } from '@angular/core';
 import { StoreService } from './store.service';
 import { LoggerService } from './logger.service';
 import { Task } from '../models';
 import { environment } from '../environments/environment';
 import { GOJS_CONFIG } from '../config/constants';
+import { getFlowStyles, FlowStyleConfig, FlowTheme } from '../config/flow-styles';
 import * as go from 'gojs';
 
 export interface DiagramCallbacks {
@@ -36,6 +37,12 @@ export class GoJSDiagramService {
   private diagram: go.Diagram | null = null;
   private callbacks: DiagramCallbacks | null = null;
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  /** 当前主题样式配置 */
+  private readonly currentStyles = computed(() => {
+    const theme = this.store.theme() as FlowTheme;
+    return getFlowStyles(theme);
+  });
   
   /** 图表错误状态 */
   readonly diagramError = signal<string | null>(null);
@@ -110,6 +117,17 @@ export class GoJSDiagramService {
   }
   
   /**
+   * 清理待执行的位置保存操作
+   * 在项目切换时调用，防止旧项目的位置被保存到新项目
+   */
+  clearPendingPositionSave() {
+    if (this.positionSaveTimer) {
+      clearTimeout(this.positionSaveTimer);
+      this.positionSaveTimer = null;
+    }
+  }
+  
+  /**
    * 获取图表实例
    */
   getDiagram(): go.Diagram | null {
@@ -174,18 +192,25 @@ export class GoJSDiagramService {
     }
   }
   
+  /** 最小缩放比例 */
+  private readonly MIN_SCALE = 0.1;
+  /** 最大缩放比例 */
+  private readonly MAX_SCALE = 4.0;
+  
   /**
    * 缩放
    */
   zoomIn() {
     if (this.diagram) {
-      this.diagram.scale *= 1.1;
+      const newScale = this.diagram.scale * 1.1;
+      this.diagram.scale = Math.min(newScale, this.MAX_SCALE);
     }
   }
   
   zoomOut() {
     if (this.diagram) {
-      this.diagram.scale *= 0.9;
+      const newScale = this.diagram.scale * 0.9;
+      this.diagram.scale = Math.max(newScale, this.MIN_SCALE);
     }
   }
   
@@ -369,22 +394,22 @@ export class GoJSDiagramService {
       },
       new go.Binding("fill", "color"),
       new go.Binding("stroke", "", (data: any, obj: any) => {
-        if (obj.part.isSelected) return "#0d9488";
-        return data.isUnassigned ? "#14b8a6" : "#e7e5e4";
+        if (obj.part.isSelected) return data.selectedBorderColor || "#0d9488";
+        return data.borderColor || "#e7e5e4";
       }).ofObject(),
-      new go.Binding("strokeWidth", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 2 : 1)),
+      new go.Binding("strokeWidth", "borderWidth")),
       
       $(go.Panel, "Vertical",
         new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
         $(go.TextBlock, { font: "bold 9px sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
           new go.Binding("text", "displayId"),
+          new go.Binding("stroke", "displayIdColor"),
           new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
         $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: "400 12px sans-serif", stroke: "#57534e" },
           new go.Binding("text", "title"),
           new go.Binding("font", "isUnassigned", (isUnassigned: boolean) => 
             isUnassigned ? "500 11px sans-serif" : "400 12px sans-serif"),
-          new go.Binding("stroke", "isUnassigned", (isUnassigned: boolean) => 
-            isUnassigned ? "#0f766e" : "#57534e"),
+          new go.Binding("stroke", "titleColor"),
           new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) => 
             isUnassigned ? new go.Size(120, NaN) : new go.Size(160, NaN)))
       )
@@ -514,17 +539,35 @@ export class GoJSDiagramService {
         (t.tags?.some(tag => tag.toLowerCase().includes(searchQuery)) ?? false)
       );
       
-      // 节点颜色
+      // 节点颜色 - 使用主题配置
+      const styles = this.currentStyles();
       let nodeColor: string;
       if (isSearchMatch) {
-        nodeColor = '#fef08a';
+        nodeColor = styles.node.searchHighlightBackground;
       } else if (t.stage === null) {
-        nodeColor = '#ccfbf1';
+        nodeColor = styles.node.unassignedBackground;
       } else if (t.status === 'completed') {
-        nodeColor = '#f0fdf4';
+        nodeColor = styles.node.completedBackground;
       } else {
-        nodeColor = 'white';
+        nodeColor = styles.node.background;
       }
+      
+      // 边框颜色
+      let borderColor: string;
+      let borderWidth: number;
+      if (isSearchMatch) {
+        borderColor = styles.node.searchHighlightBorder;
+        borderWidth = 2;
+      } else if (t.stage === null) {
+        borderColor = styles.node.unassignedBorder;
+        borderWidth = 2;
+      } else {
+        borderColor = styles.node.defaultBorder;
+        borderWidth = 1;
+      }
+      
+      // 文字颜色
+      const titleColor = t.stage === null ? styles.text.unassignedTitleColor : styles.text.titleColor;
       
       nodeDataArray.push({
         key: t.id,
@@ -533,6 +576,11 @@ export class GoJSDiagramService {
         stage: t.stage,
         loc: loc,
         color: nodeColor,
+        borderColor: borderColor,
+        borderWidth: borderWidth,
+        titleColor: titleColor,
+        displayIdColor: styles.text.displayIdColor,
+        selectedBorderColor: styles.node.selectedBorder,
         isUnassigned: t.stage === null,
         isSearchMatch: isSearchMatch,
         isSelected: false

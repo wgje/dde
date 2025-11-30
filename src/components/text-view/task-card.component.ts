@@ -83,8 +83,13 @@ export interface TaskConnections {
               (input)="onTitleInput(titleInput.value)"
               (focus)="inputFocus.emit()"
               (blur)="inputBlur.emit()"
-              class="w-full font-medium text-retro-dark border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none bg-stone-50 touch-manipulation"
-              [ngClass]="{'text-sm p-2': !isMobile(), 'text-xs p-1.5': isMobile()}"
+              class="w-full font-medium text-retro-dark border rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none touch-manipulation transition-colors"
+              [ngClass]="{
+                'text-sm p-2': !isMobile(), 
+                'text-xs p-1.5': isMobile(),
+                'bg-retro-muted/5 border-retro-muted/20': isPreviewMode(),
+                'bg-white border-stone-200': !isPreviewMode()
+              }"
               placeholder="任务名称...">
             
             <!-- 内容编辑/预览 -->
@@ -105,7 +110,7 @@ export interface TaskConnections {
               
               @if (isPreviewMode()) {
                 <div 
-                  class="w-full border border-stone-200 rounded-lg bg-white overflow-y-auto markdown-preview"
+                  class="w-full border border-retro-muted/20 rounded-lg bg-retro-muted/5 overflow-y-auto markdown-preview"
                   [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
                   [innerHTML]="renderedMarkdown()">
                 </div>
@@ -116,7 +121,7 @@ export interface TaskConnections {
                   (input)="onContentInput(contentInput.value)"
                   (focus)="inputFocus.emit()"
                   (blur)="inputBlur.emit()"
-                  class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-stone-50 resize-none touch-manipulation"
+                  class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-white resize-none touch-manipulation"
                   [ngClass]="{'h-24 text-xs p-2 pt-6': !isMobile(), 'h-28 text-[11px] p-2 pt-6': isMobile()}"
                   placeholder="输入 Markdown 内容..."></textarea>
               }

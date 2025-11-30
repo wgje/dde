@@ -12,10 +12,10 @@ import { Task } from '../../models';
   imports: [CommonModule],
   template: `
     @if (task(); as t) {
-      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in p-4"
            (click)="cancel.emit()">
-        <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-scale-in mx-4"
-             [ngClass]="{'w-80': isMobile(), 'w-96': !isMobile()}"
+        <div class="bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden animate-scale-in w-full"
+             [ngClass]="{'max-w-xs': isMobile(), 'max-w-sm': !isMobile()}"
              (click)="$event.stopPropagation()">
           <div class="px-5 pt-5 pb-4">
             <div class="flex items-center gap-3 mb-3">

@@ -9,6 +9,9 @@
     "build": "npm run config && ng build",
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
     "config": "node scripts/set-env.cjs",
     "seed:supabase": "node scripts/seed-supabase.js",
     "setup:storage": "node scripts/setup-storage-bucket.cjs"
@@ -31,6 +34,7 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.0",
     "@types/jasmine": "^5.1.13",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.22",

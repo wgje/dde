@@ -1,4 +1,4 @@
-import { Component, signal, Output, EventEmitter, input } from '@angular/core';
+import { Component, signal, computed, Output, EventEmitter, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
@@ -72,11 +72,41 @@ import { FormsModule } from '@angular/forms';
                      [ngModelOptions]="{standalone: true}" name="signupEmail" 
                      class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
                      autocomplete="email" required>
-              <input type="password" placeholder="密码（至少6位）" 
+              <input type="password" placeholder="密码（至少8位，含大小写和数字）" 
                      [ngModel]="password()" (ngModelChange)="password.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupPassword" 
                      class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
-                     autocomplete="new-password" required minlength="6">
+                     autocomplete="new-password" required minlength="8">
+              
+              <!-- 密码强度指示器 -->
+              @if (password().length > 0) {
+                <div class="space-y-1">
+                  <div class="flex gap-1">
+                    @for (i of [0, 1, 2, 3]; track i) {
+                      <div class="h-1 flex-1 rounded-full transition-all"
+                           [class.bg-red-400]="passwordStrength() >= 1 && i === 0 && passwordStrength() < 2"
+                           [class.bg-amber-400]="passwordStrength() >= 2 && i <= 1 && passwordStrength() < 3"
+                           [class.bg-lime-400]="passwordStrength() >= 3 && i <= 2 && passwordStrength() < 4"
+                           [class.bg-green-500]="passwordStrength() === 4 && i <= 3"
+                           [class.bg-stone-200]="(passwordStrength() < 1) || 
+                                                 (passwordStrength() === 1 && i > 0) ||
+                                                 (passwordStrength() === 2 && i > 1) ||
+                                                 (passwordStrength() === 3 && i > 2)">
+                      </div>
+                    }
+                  </div>
+                  <div class="text-[10px] flex justify-between">
+                    <span [class.text-red-500]="passwordStrength() < 2"
+                          [class.text-amber-500]="passwordStrength() === 2"
+                          [class.text-lime-600]="passwordStrength() === 3"
+                          [class.text-green-600]="passwordStrength() === 4">
+                      {{ passwordStrengthText() }}
+                    </span>
+                    <span class="text-stone-400">{{ passwordHint() }}</span>
+                  </div>
+                </div>
+              }
+              
               <input type="password" placeholder="确认密码" 
                      [ngModel]="confirmPassword()" (ngModelChange)="confirmPassword.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupConfirmPassword" 
@@ -157,6 +187,50 @@ export class LoginModalComponent {
   isSignupMode = signal(false);
   isResetPasswordMode = signal(false);
   resetPasswordSent = signal(false);
+  
+  /**
+   * 计算密码强度 (0-4)
+   * 0: 太短
+   * 1: 弱（仅满足长度）
+   * 2: 中（满足2个条件）
+   * 3: 强（满足3个条件）
+   * 4: 很强（满足所有条件）
+   */
+  passwordStrength = computed(() => {
+    const pwd = this.password();
+    if (pwd.length < 8) return 0;
+    
+    let score = 1; // 长度满足
+    if (/[a-z]/.test(pwd)) score++; // 小写字母
+    if (/[A-Z]/.test(pwd)) score++; // 大写字母
+    if (/\d/.test(pwd)) score++; // 数字
+    if (/[^a-zA-Z0-9]/.test(pwd)) score++; // 特殊字符
+    
+    return Math.min(4, score);
+  });
+  
+  passwordStrengthText = computed(() => {
+    const strength = this.passwordStrength();
+    switch (strength) {
+      case 0: return '密码太短';
+      case 1: return '弱';
+      case 2: return '中';
+      case 3: return '强';
+      case 4: return '很强';
+      default: return '';
+    }
+  });
+  
+  passwordHint = computed(() => {
+    const pwd = this.password();
+    if (pwd.length < 8) return '需要至少8位';
+    const missing: string[] = [];
+    if (!/[a-z]/.test(pwd)) missing.push('小写');
+    if (!/[A-Z]/.test(pwd)) missing.push('大写');
+    if (!/\d/.test(pwd)) missing.push('数字');
+    if (missing.length > 0) return `建议添加: ${missing.join('、')}`;
+    return '✓';
+  });
   
   switchToSignup() {
     this.isSignupMode.set(true);

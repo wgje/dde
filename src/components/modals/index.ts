@@ -7,3 +7,5 @@ export { DeleteConfirmModalComponent } from './delete-confirm-modal.component';
 export { ConfigHelpModalComponent } from './config-help-modal.component';
 export { TrashModalComponent } from './trash-modal.component';
 export { MigrationModalComponent } from './migration-modal.component';
+export { ErrorRecoveryModalComponent } from './error-recovery-modal.component';
+export type { ErrorRecoveryOption, ErrorRecoveryResult } from './error-recovery-modal.component';

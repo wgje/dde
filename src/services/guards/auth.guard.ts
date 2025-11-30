@@ -8,22 +8,66 @@ const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
 /** 匿名用户数据隔离 key */
 const ANONYMOUS_DATA_KEY = 'nanoflow.anonymous-session';
 
+/** 内存中的匿名会话 ID 缓存 */
+let memoryAnonymousSessionId: string | null = null;
+
 /**
  * 生成或获取匿名会话 ID
  * 用于隔离不同匿名用户的数据
+ * 
+ * 优先级：
+ * 1. sessionStorage（正常浏览）
+ * 2. localStorage（隐私模式 sessionStorage 不可用时的回退）
+ * 3. 内存缓存（所有存储都不可用时的最终回退）
  */
 function getOrCreateAnonymousSessionId(): string {
+  // 首先尝试 sessionStorage
   try {
     let sessionId = sessionStorage.getItem(ANONYMOUS_DATA_KEY);
-    if (!sessionId) {
-      sessionId = `anon_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
-      sessionStorage.setItem(ANONYMOUS_DATA_KEY, sessionId);
+    if (sessionId) {
+      return sessionId;
     }
+  } catch {
+    // sessionStorage 不可用，继续尝试其他方式
+  }
+  
+  // 尝试 localStorage 作为回退（持久但跨会话）
+  try {
+    let sessionId = localStorage.getItem(ANONYMOUS_DATA_KEY);
+    if (sessionId) {
+      // 检查是否是有效的会话 ID（不超过 24 小时）
+      const match = sessionId.match(/^anon_(\d+)_/);
+      if (match) {
+        const timestamp = parseInt(match[1], 10);
+        const hoursSinceCreation = (Date.now() - timestamp) / (1000 * 60 * 60);
+        if (hoursSinceCreation < 24) {
+          return sessionId;
+        }
+      }
+    }
+    
+    // 创建新的会话 ID
+    sessionId = `anon_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+    localStorage.setItem(ANONYMOUS_DATA_KEY, sessionId);
+    
+    // 同时尝试保存到 sessionStorage
+    try {
+      sessionStorage.setItem(ANONYMOUS_DATA_KEY, sessionId);
+    } catch {
+      // 忽略 sessionStorage 错误
+    }
+    
     return sessionId;
   } catch {
-    // sessionStorage 不可用时使用内存中的临时 ID
-    return `anon_temp_${Date.now()}`;
+    // localStorage 也不可用，使用内存缓存
   }
+  
+  // 最终回退：使用内存缓存
+  if (!memoryAnonymousSessionId) {
+    memoryAnonymousSessionId = `anon_mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+    console.warn('存储不可用，使用内存缓存的匿名会话 ID（刷新后将丢失）');
+  }
+  return memoryAnonymousSessionId;
 }
 
 /**
@@ -66,21 +110,42 @@ export function saveAuthCache(userId: string | null): void {
 
 /**
  * 等待会话检查完成
- * 添加超时保护，防止无限等待
+ * 使用 Promise 和信号量代替轮询，更可靠
  */
 async function waitForSessionCheck(authService: AuthService, maxWaitMs: number = 10000): Promise<void> {
-  const startTime = Date.now();
-  const checkInterval = 50;
-  
-  while (Date.now() - startTime < maxWaitMs) {
-    if (!authService.authState().isCheckingSession) {
-      return;
-    }
-    await new Promise(resolve => setTimeout(resolve, checkInterval));
+  // 如果已经完成检查，直接返回
+  if (!authService.authState().isCheckingSession) {
+    return;
   }
   
-  // 超时后继续，不阻塞用户
-  console.warn('会话检查超时，继续处理');
+  // 使用 Promise.race 实现超时控制
+  return new Promise<void>((resolve) => {
+    const startTime = Date.now();
+    
+    // 创建一个间隔检查器
+    const checkInterval = setInterval(() => {
+      // 检查是否完成
+      if (!authService.authState().isCheckingSession) {
+        clearInterval(checkInterval);
+        resolve();
+        return;
+      }
+      
+      // 检查是否超时
+      if (Date.now() - startTime >= maxWaitMs) {
+        clearInterval(checkInterval);
+        console.warn('会话检查超时，继续处理');
+        resolve();
+        return;
+      }
+    }, 50);
+    
+    // 额外的超时保护
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      resolve();
+    }, maxWaitMs + 100);
+  });
 }
 
 /**
@@ -155,6 +220,9 @@ export function getDataIsolationId(authService: AuthService): string {
 /**
  * 强制登录守卫
  * 用于必须登录才能访问的功能（如导出、分享等）
+ * 
+ * @note 当前版本未在任何路由中使用。预留给未来需要严格认证的功能。
+ * 与 authGuard 的区别：authGuard 允许匿名访问，此守卫强制要求登录。
  */
 export const requireAuthGuard: CanActivateFn = (route, state) => {
   const authService = inject(AuthService);

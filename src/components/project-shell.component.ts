@@ -36,14 +36,17 @@ import { FlowViewComponent } from './flow-view.component';
   template: `
     <div class="flex h-full w-full overflow-hidden" style="background-color: var(--theme-bg);">
       @if (store.activeProjectId()) {
-        <!-- Text Column -->
+        <!-- Text Column - 允许滑动手势切换 -->
         <div class="flex flex-col border-r min-w-[300px]" 
              style="background-color: var(--theme-bg); border-color: var(--theme-border);"
-             [class.hidden]="store.isMobile() && mobileActiveView() !== 'text'"
+             [class.hidden]="store.isMobile() && store.activeView() !== 'text'"
              [class.w-full]="store.isMobile()"
              [class.flex-1]="store.isMobile()"
              [class.min-h-0]="store.isMobile()"
-             [style.width.%]="store.isMobile() ? 100 : store.textColumnRatio()">
+             [style.width.%]="store.isMobile() ? 100 : store.textColumnRatio()"
+             (touchstart)="onTextViewTouchStart($event)"
+             (touchmove)="onTextViewTouchMove($event)"
+             (touchend)="onTextViewTouchEnd($event)">
           
           <!-- Header for Text Column -->
           <div class="shrink-0 z-10"
@@ -163,7 +166,7 @@ import { FlowViewComponent } from './flow-view.component';
         <!-- Flow Column -->
         <div class="flex-1 flex flex-col min-w-[300px] relative" 
              style="background-color: var(--theme-bg);"
-             [class.hidden]="store.isMobile() && mobileActiveView() !== 'flow'"
+             [class.hidden]="store.isMobile() && store.activeView() !== 'flow'"
              [class.w-full]="store.isMobile()">
            <div class="flex items-center justify-between shrink-0 z-10"
                 [ngClass]="{'h-16 mx-6 mt-6': !store.isMobile(), 'mx-2 mt-2 mb-1': store.isMobile()}">
@@ -202,13 +205,20 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   // UI 状态
   isFilterOpen = signal(false);
-  mobileActiveView = signal<'text' | 'flow'>('text');
+  // 使用 store.activeView 代替本地的 mobileActiveView，使其他组件可以访问当前视图状态
   
   // 内容调整状态
   private isResizingContent = false;
   private startX = 0;
   private startRatio = 0;
   private mainContentWidth = 0;
+  
+  // 手机端滑动手势状态 - 用于文本视图切换到流程图
+  private textViewSwipeState = {
+    startX: 0,
+    startY: 0,
+    isSwiping: false
+  };
   
   // 计算属性
   currentFilterLabel() {
@@ -250,12 +260,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       .subscribe(() => {
         const currentUrl = this.router.url;
         if (currentUrl.endsWith('/flow')) {
-          this.mobileActiveView.set('flow');
+          this.store.activeView.set('flow');
         } else if (currentUrl.endsWith('/text')) {
-          this.mobileActiveView.set('text');
+          this.store.activeView.set('text');
         } else if (currentUrl.includes('/task/')) {
           // 任务深链接默认使用流程图视图
-          this.mobileActiveView.set('flow');
+          this.store.activeView.set('flow');
         }
       });
   }
@@ -279,7 +289,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       if (task && this.flowView) {
         // 任务存在且 flowView 已初始化
         // 切换到流程图视图
-        this.mobileActiveView.set('flow');
+        this.store.activeView.set('flow');
         
         // 等待图表渲染后定位
         setTimeout(() => {
@@ -316,7 +326,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   // ========== 视图切换 ==========
   
   switchToFlow() {
-    this.mobileActiveView.set('flow');
+    this.store.activeView.set('flow');
     // 更新 URL
     const projectId = this.store.activeProjectId();
     if (projectId) {
@@ -328,7 +338,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   }
   
   switchToText() {
-    this.mobileActiveView.set('text');
+    this.store.activeView.set('text');
     // 更新 URL
     const projectId = this.store.activeProjectId();
     if (projectId) {
@@ -396,5 +406,49 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     }
+  }
+  
+  // ========== 文本视图滑动手势 ==========
+  // 允许从文本视图向左滑动切换到流程图
+  // 流程图视图不处理滑动手势，避免与画布操作冲突
+  
+  onTextViewTouchStart(e: TouchEvent) {
+    if (!this.store.isMobile()) return;
+    if (e.touches.length !== 1) return;
+    
+    this.textViewSwipeState = {
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      isSwiping: false
+    };
+  }
+  
+  onTextViewTouchMove(e: TouchEvent) {
+    if (!this.store.isMobile()) return;
+    if (e.touches.length !== 1) return;
+    
+    const deltaX = e.touches[0].clientX - this.textViewSwipeState.startX;
+    const deltaY = Math.abs(e.touches[0].clientY - this.textViewSwipeState.startY);
+    
+    // 只有水平滑动距离大于垂直滑动时才认为是切换手势
+    // 向左滑动（deltaX < 0）切换到流程图
+    if (deltaX < -30 && Math.abs(deltaX) > deltaY * 1.5) {
+      this.textViewSwipeState.isSwiping = true;
+    }
+  }
+  
+  onTextViewTouchEnd(e: TouchEvent) {
+    if (!this.store.isMobile()) return;
+    if (!this.textViewSwipeState.isSwiping) return;
+    
+    const deltaX = e.changedTouches[0].clientX - this.textViewSwipeState.startX;
+    const threshold = 50; // 滑动阈值
+    
+    // 向左滑动切换到流程图
+    if (deltaX < -threshold) {
+      this.switchToFlow();
+    }
+    
+    this.textViewSwipeState.isSwiping = false;
   }
 }

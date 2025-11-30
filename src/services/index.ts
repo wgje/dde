@@ -10,7 +10,6 @@ export { TaskRepositoryService } from './task-repository.service';
 
 // 同步相关服务
 export { SyncService, type RemoteProjectChangePayload, type RemoteTaskChangePayload } from './sync.service';
-export { SyncCoordinatorService } from './sync-coordinator.service';
 export { ConflictResolutionService } from './conflict-resolution.service';
 export { ActionQueueService, type QueuedAction, type DeadLetterItem, type EnqueueParams } from './action-queue.service';
 
@@ -19,7 +18,7 @@ export { AuthService } from './auth.service';
 export { SupabaseClientService } from './supabase-client.service';
 
 // UI 相关服务
-export { ToastService, type ToastMessage } from './toast.service';
+export { ToastService, type ToastMessage, type ToastOptions, type ToastAction } from './toast.service';
 export { LayoutService } from './layout.service';
 export { ModalService, type ModalType, type ModalState, type ModalData } from './modal.service';
 

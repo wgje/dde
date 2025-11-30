@@ -1,12 +1,13 @@
-import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../services/store.service';
 import { ToastService } from '../services/toast.service';
 import { LoggerService } from '../services/logger.service';
-import { Task, Attachment } from '../models';
+import { Task, Attachment, ThemeType } from '../models';
 import { getErrorMessage, isFailure } from '../utils/result';
 import { environment } from '../environments/environment';
+import { getFlowStyles, FlowStyleConfig } from '../config/flow-styles';
 import { 
   FlowToolbarComponent, 
   FlowPaletteComponent, 
@@ -36,6 +37,7 @@ import * as go from 'gojs';
     FlowConnectionEditorComponent,
     FlowLinkDeleteHintComponent
   ],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex flex-col h-full bg-[#F9F8F6] relative">
        
@@ -445,9 +447,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       // 监听搜索查询变化，更新图表高亮
       effect(() => {
           const query = this.store.searchQuery();
-          // 当搜索词变化时刷新图表以更新高亮状态
+          // 当搜索词变化时强制刷新图表以更新高亮状态
           if (this.diagram) {
-              this.updateDiagram(this.store.tasks());
+              this.updateDiagram(this.store.tasks(), true);
+          }
+      });
+      
+      // 监听主题变化，更新图表节点颜色
+      effect(() => {
+          const theme = this.store.theme();
+          // 当主题变化时强制刷新图表以更新节点颜色
+          if (this.diagram) {
+              this.updateDiagram(this.store.tasks(), true);
           }
       });
       
@@ -876,18 +887,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   ngOnDestroy() {
-      // 清理 GoJS diagram 实例
-      if (this.diagram) {
-          this.diagram.div = null;
-          this.diagram.clear();
-      }
+      // === 清理顺序很重要 ===
+      // 1. 首先清理定时器，防止在组件销毁后执行回调
+      // 2. 然后清理事件监听器，防止内存泄漏
+      // 3. 最后清理 diagram 实例
       
-      // 清理 ResizeObserver
-      if (this.resizeObserver) {
-          this.resizeObserver.disconnect();
-          this.resizeObserver = null;
-      }
-      // 清理定时器
+      // 1. 清理所有定时器
       if (this.positionSaveTimer) {
           clearTimeout(this.positionSaveTimer);
           this.positionSaveTimer = null;
@@ -900,27 +905,36 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           clearTimeout(this.viewStateSaveTimer);
           this.viewStateSaveTimer = null;
       }
-      // 清理待分配块长按定时器
       if (this.unassignedTouchState.longPressTimer) {
           clearTimeout(this.unassignedTouchState.longPressTimer);
       }
-      // 清理幽灵元素
-      if (this.unassignedTouchState.ghost) {
-          this.unassignedTouchState.ghost.remove();
-      }
       
-      // 清理全局事件监听器 - 修复内存泄漏
-      // 清理联系块编辑器拖拽事件
+      // 2. 清理全局事件监听器
       document.removeEventListener('mousemove', this.onDragConnEditor);
       document.removeEventListener('mouseup', this.stopDragConnEditor);
       document.removeEventListener('touchmove', this.onDragConnEditor);
       document.removeEventListener('touchend', this.stopDragConnEditor);
-      
-      // 清理任务详情面板拖拽事件
       document.removeEventListener('mousemove', this.onDragTaskDetail);
       document.removeEventListener('mouseup', this.stopDragTaskDetail);
       document.removeEventListener('touchmove', this.onDragTaskDetail);
       document.removeEventListener('touchend', this.stopDragTaskDetail);
+      
+      // 3. 清理 ResizeObserver
+      if (this.resizeObserver) {
+          this.resizeObserver.disconnect();
+          this.resizeObserver = null;
+      }
+      
+      // 4. 清理幽灵元素
+      if (this.unassignedTouchState.ghost) {
+          this.unassignedTouchState.ghost.remove();
+      }
+      
+      // 5. 最后清理 GoJS diagram 实例
+      if (this.diagram) {
+          this.diagram.div = null;
+          this.diagram.clear();
+      }
   }
   
   private setupResizeObserver() {
@@ -989,11 +1003,19 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       
       // 监听节点移动完成（拖动结束时才保存，而非实时保存）
       this.diagram.addDiagramListener('SelectionMoved', (e: any) => {
+          // 捕获当前项目 ID，用于验证防抖回调执行时项目是否已切换
+          const projectIdAtMove = this.store.activeProjectId();
+          
           // 使用防抖，避免多选拖动时频繁保存
           if (this.positionSaveTimer) {
               clearTimeout(this.positionSaveTimer);
           }
           this.positionSaveTimer = setTimeout(() => {
+              // 验证项目是否已切换，避免将旧项目的位置保存到新项目
+              if (this.store.activeProjectId() !== projectIdAtMove) {
+                  return;
+              }
+              
               e.subject.each((part: any) => {
                   if (part instanceof go.Node) {
                       const loc = part.location;
@@ -1076,22 +1098,23 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                       cursor: "move" 
                   },
                   new go.Binding("fill", "color"),
-                  // 待分配任务使用深青色边框和背景，已分配任务使用默认边框
+                  // 使用节点数据中传递的颜色
                   new go.Binding("stroke", "", (data: any, obj: any) => {
-                      if (obj.part.isSelected) return "#0d9488"; // teal-600
-                      return data.isUnassigned ? "#14b8a6" : "#e7e5e4"; // teal-500 vs stone-200
+                      if (obj.part.isSelected) return data.selectedBorderColor || "#0d9488";
+                      return data.borderColor || "#e7e5e4";
                   }).ofObject(),
-                  new go.Binding("strokeWidth", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 2 : 1)
+                  new go.Binding("strokeWidth", "borderWidth")
                 ),
                 $(go.Panel, "Vertical",
                     new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
                     $(go.TextBlock, { font: "bold 9px sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
                         new go.Binding("text", "displayId"),
+                        new go.Binding("stroke", "displayIdColor"),
                         new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
                     $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: "400 12px sans-serif", stroke: "#57534e" },
                         new go.Binding("text", "title"),
                         new go.Binding("font", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? "500 11px sans-serif" : "400 12px sans-serif"),
-                        new go.Binding("stroke", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? "#0f766e" : "#57534e"), // teal-700 vs stone-600
+                        new go.Binding("stroke", "titleColor"),
                         new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? new go.Size(120, NaN) : new go.Size(160, NaN)))
                 )
             ),
@@ -1416,7 +1439,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       }
   }
 
-  updateDiagram(tasks: Task[]) {
+  updateDiagram(tasks: Task[], forceRefresh: boolean = false) {
       // 如果有错误状态，不执行更新
       if (this.diagramError()) {
           return;
@@ -1439,9 +1462,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       
       try {
       
-      // 检查更新类型：如果是仅位置更新，跳过重建
+      // 检查更新类型：如果是仅位置更新，跳过重建（除非强制刷新）
       const lastUpdateType = this.store.getLastUpdateType();
-      if (lastUpdateType === 'position') {
+      if (lastUpdateType === 'position' && !forceRefresh) {
           // 位置更新已由 SelectionMoved 监听器处理，不需要重建
           return;
       }
@@ -1512,24 +1535,37 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
             (t.tags?.some(tag => tag.toLowerCase().includes(searchQuery)) ?? false)
           );
           
-          // 待分配任务使用较深的青色背景，已分配任务使用白色/绿色背景
-          // 搜索匹配时使用黄色高亮
+          // 使用主题配置获取颜色
+          const styles = getFlowStyles(this.store.theme() as any);
           let nodeColor: string;
           let borderColor: string;
+          let borderWidth: number;
+          let titleColor: string;
           
           if (isSearchMatch) {
               // 搜索匹配：使用黄色高亮
-              nodeColor = '#fef08a'; // yellow-200
-              borderColor = '#eab308'; // yellow-500
+              nodeColor = styles.node.searchHighlightBackground;
+              borderColor = styles.node.searchHighlightBorder;
+              borderWidth = 2;
+              titleColor = styles.text.titleColor;
           } else if (t.stage === null) {
-              nodeColor = '#ccfbf1'; // teal-100
-              borderColor = '#14b8a6'; // teal-500
+              // 待分配任务
+              nodeColor = styles.node.unassignedBackground;
+              borderColor = styles.node.unassignedBorder;
+              borderWidth = 2;
+              titleColor = styles.text.unassignedTitleColor;
           } else if (t.status === 'completed') {
-              nodeColor = '#f0fdf4'; // green-50
-              borderColor = '#e7e5e4'; // stone-200
+              // 已完成任务
+              nodeColor = styles.node.completedBackground;
+              borderColor = styles.node.defaultBorder;
+              borderWidth = 1;
+              titleColor = styles.text.titleColor;
           } else {
-              nodeColor = 'white';
-              borderColor = '#e7e5e4'; // stone-200
+              // 普通任务
+              nodeColor = styles.node.background;
+              borderColor = styles.node.defaultBorder;
+              borderWidth = 1;
+              titleColor = styles.text.titleColor;
           }
           
           nodeDataArray.push({
@@ -1540,6 +1576,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               loc: loc,
               color: nodeColor,
               borderColor: borderColor,
+              borderWidth: borderWidth,
+              titleColor: titleColor,
+              displayIdColor: styles.text.displayIdColor,
+              selectedBorderColor: styles.node.selectedBorder,
               isUnassigned: t.stage === null,
               isSearchMatch: isSearchMatch, // 标记搜索匹配
               isSelected: false // handled by diagram selection
