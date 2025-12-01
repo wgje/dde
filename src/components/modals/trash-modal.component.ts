@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { StoreService } from '../../services/store.service';
 import { ToastService } from '../../services/toast.service';
 import { Task } from '../../models';
+import { TRASH_CONFIG } from '../../config/constants';
 
 /**
  * 回收站模态框组件
@@ -181,7 +182,7 @@ import { Task } from '../../models';
           <div class="px-5 py-3 border-t border-stone-100 flex justify-between items-center flex-shrink-0 bg-stone-50/50">
             @if (activeTab() === 'deleted') {
               <p class="text-[10px] text-stone-400">
-                任务将在删除 30 天后自动清除
+                任务将在删除 {{ autoCleanupDays }} 天后自动清除
               </p>
               @if (deletedTasks().length > 0) {
                 <button 
@@ -289,6 +290,9 @@ export class TrashModalComponent {
   // 确认删除状态
   confirmDeleteTask = signal<Task | null>(null);
   showEmptyConfirm = signal(false);
+  
+  // 从配置读取自动清理天数
+  readonly autoCleanupDays = TRASH_CONFIG.AUTO_CLEANUP_DAYS;
   
   // 已删除任务列表
   deletedTasks = computed(() => this.store.deletedTasks());

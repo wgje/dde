@@ -31,7 +31,7 @@ import { FormsModule } from '@angular/forms';
         
         <!-- 密码重置表单 -->
         @if (isResetPasswordMode()) {
-          @if (resetPasswordSent()) {
+          @if (resetPasswordSentInput() || resetPasswordSent()) {
             <div class="text-center py-4">
               <div class="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-3">
                 <svg class="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -72,7 +72,7 @@ import { FormsModule } from '@angular/forms';
                      [ngModelOptions]="{standalone: true}" name="signupEmail" 
                      class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
                      autocomplete="email" required>
-              <input type="password" placeholder="密码（至少8位，含大小写和数字）" 
+              <input type="password" placeholder="密码（至少8位）" 
                      [ngModel]="password()" (ngModelChange)="password.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupPassword" 
                      class="w-full border border-stone-200 rounded-lg px-4 py-3 text-sm text-stone-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-all" 
@@ -176,6 +176,8 @@ export class LoginModalComponent {
   authError = input<string | null>(null);
   /** 是否正在加载 */
   isLoading = input(false);
+  /** 重置密码邮件是否已发送（由父组件控制） */
+  resetPasswordSentInput = input<boolean>(false, { alias: 'resetPasswordSent' });
   
   // 内部状态：用于模态框内部清除错误
   private _internalError = signal<string | null>(null);

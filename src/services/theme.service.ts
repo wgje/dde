@@ -3,6 +3,7 @@ import { ThemeType } from '../models';
 import { CACHE_CONFIG } from '../config/constants';
 import { SyncService } from './sync.service';
 import { AuthService } from './auth.service';
+import { ToastService } from './toast.service';
 
 /**
  * 主题服务
@@ -18,9 +19,13 @@ import { AuthService } from './auth.service';
 export class ThemeService {
   private syncService = inject(SyncService);
   private authService = inject(AuthService);
+  private toast = inject(ToastService);
   
   /** 当前主题 */
   readonly theme = signal<ThemeType>('default');
+  
+  /** 主题保存状态 */
+  readonly isSaving = signal(false);
   
   constructor() {
     this.loadLocalTheme();
@@ -39,7 +44,15 @@ export class ThemeService {
     // 同步到云端
     const userId = this.authService.currentUserId();
     if (userId) {
-      await this.syncService.saveUserPreferences(userId, { theme });
+      this.isSaving.set(true);
+      try {
+        await this.syncService.saveUserPreferences(userId, { theme });
+        this.toast.info('主题已保存', '', 1500);
+      } catch (error) {
+        this.toast.warning('主题保存失败', '将在下次联网时同步');
+      } finally {
+        this.isSaving.set(false);
+      }
     }
   }
   

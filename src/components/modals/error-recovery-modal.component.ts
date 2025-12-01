@@ -1,5 +1,6 @@
-import { Component, Input, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ChangeDetectionStrategy, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 
 /**
  * 错误恢复选项
@@ -39,7 +40,7 @@ export interface ErrorRecoveryResult {
 @Component({
   selector: 'app-error-recovery-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" 
@@ -130,7 +131,7 @@ export interface ErrorRecoveryResult {
     }
   `]
 })
-export class ErrorRecoveryModalComponent {
+export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   /** 对话框类型 */
   @Input() type: 'error' | 'warning' | 'info' = 'error';
   

@@ -82,6 +82,8 @@ export const AUTH_CONFIG = {
   SESSION_CHECK_TIMEOUT: 10000,
   /** 记住登录状态过期时间（毫秒）- 7天 */
   REMEMBER_ME_EXPIRY: 7 * 24 * 60 * 60 * 1000,
+  /** 密码最小长度（与后端保持一致） */
+  MIN_PASSWORD_LENGTH: 8,
 } as const;
 
 /**

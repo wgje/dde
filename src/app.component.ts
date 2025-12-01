@@ -10,6 +10,7 @@ import { MigrationService } from './services/migration.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ToastContainerComponent } from './components/toast-container.component';
 import { SyncStatusComponent } from './components/sync-status.component';
+import { OfflineBannerComponent } from './components/offline-banner.component';
 import { 
   SettingsModalComponent, 
   LoginModalComponent, 
@@ -37,6 +38,7 @@ import { ThemeType, Project } from './models';
     RouterOutlet,
     ToastContainerComponent,
     SyncStatusComponent,
+    OfflineBannerComponent,
     SettingsModalComponent,
     LoginModalComponent,
     ConflictModalComponent,
@@ -208,6 +210,7 @@ export class AppComponent implements OnInit, OnDestroy {
   // 项目重命名状态
   renamingProjectId = signal<string | null>(null);
   renameProjectName = signal('');
+  private originalProjectName = '';
   
   // 统一搜索查询
   unifiedSearchQuery = signal<string>('');
@@ -544,9 +547,10 @@ export class AppComponent implements OnInit, OnDestroy {
       return;
     }
     
-    // 密码强度检查
-    if (this.authPassword().length < 6) {
-      this.authError.set('密码长度至少6位');
+    // 密码强度检查（使用统一配置）
+    const minLen = 8; // AUTH_CONFIG.MIN_PASSWORD_LENGTH
+    if (this.authPassword().length < minLen) {
+      this.authError.set(`密码长度至少${minLen}位`);
       return;
     }
     
@@ -652,30 +656,46 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   selectProject(id: string) {
+    // 如果点击的是当前展开的项目，则收起详情
     if (this.expandedProjectId() === id) {
       this.expandedProjectId.set(null);
       this.isEditingDescription.set(false);
-    } else {
-      this.store.activeProjectId.set(id);
-      this.expandedProjectId.set(id);
-      this.ensureProjectDraft(id);
-      this.isEditingDescription.set(false);
-      // 导航到项目视图
-      void this.router.navigate(['/projects', id, 'text']);
+      return;
+    }
+    
+    // 展开新项目的详情
+    this.store.activeProjectId.set(id);
+    this.expandedProjectId.set(id);
+    this.ensureProjectDraft(id);
+    this.isEditingDescription.set(false);
+    
+    // 移动端流程图视图下：切换项目时直接导航（用于快速对比不同项目的流程图）
+    const currentView = this.store.activeView() || 'text';
+    if (this.store.isMobile() && currentView === 'flow') {
+      void this.router.navigate(['/projects', id, currentView]);
+    }
+    // 其他情况：只展开详情，不自动导航，让用户可以先看项目简介
+  }
+  
+  // 进入项目视图（双击或点击进入按钮）
+  enterProject(id: string) {
+    this.store.activeProjectId.set(id);
+    this.expandedProjectId.set(id);
+    this.ensureProjectDraft(id);
+    const currentView = this.store.activeView() || 'text';
+    void this.router.navigate(['/projects', id, currentView]);
+    // 移动端自动关闭侧边栏
+    if (this.store.isMobile()) {
+      this.isSidebarOpen.set(false);
     }
   }
 
   handleProjectDoubleClick(id: string, event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    // Ensure it's expanded and active
-    this.store.activeProjectId.set(id);
-    this.expandedProjectId.set(id);
-    this.ensureProjectDraft(id);
-    // Enter edit mode
+    // 双击进入项目并开启简介编辑模式
     this.isEditingDescription.set(true);
-    // 导航到项目视图
-    void this.router.navigate(['/projects', id, 'text']);
+    this.enterProject(id);
   }
   
   // 开始重命名项目
@@ -683,13 +703,14 @@ export class AppComponent implements OnInit, OnDestroy {
     event.stopPropagation();
     this.renamingProjectId.set(projectId);
     this.renameProjectName.set(currentName);
+    this.originalProjectName = currentName;
   }
   
   // 执行重命名
   executeRenameProject() {
     const projectId = this.renamingProjectId();
     const newName = this.renameProjectName().trim();
-    if (projectId && newName) {
+    if (projectId && newName && newName !== this.originalProjectName) {
       this.store.renameProject(projectId, newName);
       this.toast.success('项目重命名成功');
     }
@@ -872,6 +893,8 @@ export class AppComponent implements OnInit, OnDestroy {
   async handleResetPasswordFromModal(email: string) {
     this.authEmail.set(email);
     await this.handleResetPassword();
+    // 通知 LoginModalComponent 更新重置邮件发送状态
+    // resetPasswordSent 状态已在 handleResetPassword 中设置
   }
   
   /**

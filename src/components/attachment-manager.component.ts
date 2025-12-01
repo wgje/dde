@@ -25,6 +25,7 @@ import { Attachment } from '../models';
             <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
           </svg>
           附件 ({{ attachments().length }}/{{ maxAttachments }})
+          <span class="text-stone-400">· 单文件≤10MB</span>
         </span>
         
         <!-- 上传按钮 -->
@@ -207,6 +208,7 @@ export class AttachmentManagerComponent implements OnInit, OnDestroy {
   
   // 配置
   readonly maxAttachments = 20;
+  readonly maxFileSizeBytes = 10 * 1024 * 1024; // 10MB
   readonly acceptedTypes = 'image/*,application/pdf,text/*,.doc,.docx';
   
   // 计算属性
@@ -308,11 +310,26 @@ export class AttachmentManagerComponent implements OnInit, OnDestroy {
     
     // 上传文件
     const filesToUpload = Array.from(files).slice(0, remainingSlots);
+    
+    // 检查文件大小限制
+    const oversizedFiles = filesToUpload.filter(f => f.size > this.maxFileSizeBytes);
+    if (oversizedFiles.length > 0) {
+      const names = oversizedFiles.map(f => f.name).join(', ');
+      this.error.emit(`以下文件超过 10MB 限制: ${names}`);
+      // 过滤掉超大文件继续上传
+      const validFiles = filesToUpload.filter(f => f.size <= this.maxFileSizeBytes);
+      if (validFiles.length === 0) {
+        input.value = '';
+        return;
+      }
+    }
+    
+    const validFilesToUpload = filesToUpload.filter(f => f.size <= this.maxFileSizeBytes);
     const result = await this.attachmentService.uploadFiles(
       userIdVal,
       projectIdVal,
       taskIdVal,
-      filesToUpload
+      validFilesToUpload
     );
     
     // 处理结果 - 使用原子操作

@@ -6,12 +6,39 @@ import { Task } from '../../models';
 /**
  * 流程图工具栏组件
  * 包含缩放、自动布局、连接模式等控制按钮
+ * 移动端额外提供侧边栏切换按钮
  */
 @Component({
   selector: 'app-flow-toolbar',
   standalone: true,
   imports: [CommonModule],
   template: `
+    <!-- 移动端顶部工具栏：侧边栏切换按钮 + 返回文本视图 -->
+    @if (store.isMobile()) {
+      <div class="absolute top-2 left-2 z-10 flex items-center gap-2">
+        <!-- 侧边栏/项目列表切换按钮 -->
+        <button 
+          (click)="toggleSidebar.emit()"
+          class="bg-white/90 backdrop-blur rounded-lg shadow-sm border border-stone-200 hover:bg-stone-50 text-stone-600 p-1.5 flex items-center"
+          title="打开项目列表">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        
+        <!-- 返回文本视图按钮 -->
+        <button 
+          (click)="goBackToText.emit()"
+          class="bg-white/90 backdrop-blur rounded-lg shadow-sm border border-stone-200 hover:bg-stone-50 text-stone-600 p-1.5 flex items-center gap-1"
+          title="返回文本视图">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+          </svg>
+          <span class="text-[10px] font-medium">文本</span>
+        </button>
+      </div>
+    }
+
     <!-- Zoom Controls -->
     <div class="absolute z-10 flex gap-2"
          [class.transition-all]="!isResizingDrawer()"
@@ -114,6 +141,8 @@ export class FlowToolbarComponent {
   readonly autoLayout = output<void>();
   readonly toggleLinkMode = output<void>();
   readonly cancelLinkMode = output<void>();
+  readonly toggleSidebar = output<void>();
+  readonly goBackToText = output<void>();
   
   // 计算移动端工具栏底部位置
   // 使用 calc() 和 vh 单位，确保位置与抽屉高度正确绑定

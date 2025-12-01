@@ -86,6 +86,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                         (input)="onTitleInput(task.id, unassignedTitleInput.value)"
                         (focus)="onInputFocus()"
                         (blur)="onInputBlur()"
+                        (keydown.escape)="editingTaskId.set(null)"
                         class="w-full text-sm font-medium text-stone-800 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-white"
                         placeholder="任务名称..."
                         autofocus>
@@ -95,6 +96,7 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                         (input)="onContentInput(task.id, unassignedContentInput.value)"
                         (focus)="onInputFocus()"
                         (blur)="onInputBlur()"
+                        (keydown.escape)="editingTaskId.set(null)"
                         class="w-full text-xs text-stone-600 border border-stone-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-retro-teal bg-white resize-none font-mono h-16"
                         placeholder="任务描述..."></textarea>
                       
@@ -118,6 +120,12 @@ import { AttachmentManagerComponent } from './attachment-manager.component';
                       </div>
                       
                       <div class="flex justify-end gap-2">
+                        <button 
+                          (click)="editingTaskId.set(null)"
+                          class="px-3 py-1 text-xs text-stone-500 hover:bg-stone-100 rounded transition-all"
+                          title="按 ESC 键也可取消">
+                          取消
+                        </button>
                         <button 
                           (click)="editingTaskId.set(null)"
                           class="px-3 py-1 text-xs text-retro-teal hover:bg-retro-teal/10 rounded transition-all">

@@ -61,7 +61,7 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   
   // 如果超时且仍在加载中，重定向到项目列表并显示具体原因
   if (!initResult.loaded && store.isLoadingRemote()) {
-    toast.warning('加载超时', initResult.reason || '数据加载超时，请检查网络连接');
+    toast.warning('加载时间较长', '网络响应较慢，请检查网络连接后重试');
     void router.navigate(['/projects']);
     return false;
   }

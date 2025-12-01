@@ -12,6 +12,7 @@ import { ActivatedRoute, Router } from '@angular/router';
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 import { StoreService } from '../services/store.service';
+import { ToastService } from '../services/toast.service';
 import { TextViewComponent } from './text-view.component';
 import { FlowViewComponent } from './flow-view.component';
 
@@ -197,6 +198,7 @@ import { FlowViewComponent } from './flow-view.component';
 })
 export class ProjectShellComponent implements OnInit, OnDestroy {
   store = inject(StoreService);
+  private toast = inject(ToastService);
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private destroy$ = new Subject<void>();
@@ -241,7 +243,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
           if (projectExists) {
             this.store.activeProjectId.set(projectId);
           } else {
-            // 项目不存在，重定向到项目列表
+            // 项目不存在，显示提示并重定向到项目列表
+            this.toast.warning('项目不存在', '请求的项目可能已被删除或您没有访问权限');
             void this.router.navigate(['/projects']);
             return;
           }
@@ -314,13 +317,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
           
           // 如果任务确实不存在（而不是加载超时），显示提示
           if (!isLoading && !task) {
-            import('../services/toast.service').then(m => {
-              // 使用动态导入避免循环依赖
-              const toast = (window as any).__nanoflowToastService;
-              if (toast) {
-                toast.warning('任务不存在', '请求的任务可能已被删除或您没有访问权限');
-              }
-            });
+            this.toast.warning('任务不存在', '请求的任务可能已被删除或您没有访问权限');
           }
         }
       }
@@ -362,19 +359,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   toggleSidebar() {
     // 通过事件通知父组件切换侧边栏
-    // 这里使用 UiStateService 来通信
-    this.store.isMobile() 
-      ? this.navigateToProjectList()
-      : this.emitToggleSidebar();
+    // 移动端和桌面端都使用全局事件来控制侧边栏
+    window.dispatchEvent(new CustomEvent('toggle-sidebar'));
   }
   
   private navigateToProjectList() {
     void this.router.navigate(['/projects']);
-  }
-  
-  private emitToggleSidebar() {
-    // 桌面端使用全局事件
-    window.dispatchEvent(new CustomEvent('toggle-sidebar'));
   }
   
   // ========== 流程图节点定位 ==========

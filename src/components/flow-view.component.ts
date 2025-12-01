@@ -59,18 +59,34 @@ import * as go from 'gojs';
        <!-- 3. 流程图区域 -->
        <div class="flex-1 relative overflow-hidden bg-[#F9F8F6] mt-0 mx-0 border-t border-stone-200/50">
            <!-- GoJS Diagram Div - flow-canvas-container 类用于禁用浏览器默认触摸手势 -->
-           <div #diagramDiv class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
-
-           <!-- 手机端返回文本视图按钮 -->
-           @if (store.isMobile()) {
-             <button 
-               (click)="goBackToText.emit()"
-               class="absolute top-2 left-2 z-10 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-stone-200 hover:bg-stone-50 text-stone-600 p-1.5 flex items-center gap-1">
-               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-               </svg>
-               <span class="text-[10px] font-medium">文本</span>
-             </button>
+           @if (!diagramError()) {
+             <div #diagramDiv class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+           } @else {
+             <!-- 流程图加载失败时的降级 UI -->
+             <div class="absolute inset-0 flex flex-col items-center justify-center bg-stone-50 p-6">
+               <div class="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center mb-4">
+                 <svg class="w-8 h-8 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                 </svg>
+               </div>
+               <h3 class="text-lg font-semibold text-stone-800 mb-2">流程图加载失败</h3>
+               <p class="text-sm text-stone-500 text-center mb-4">{{ diagramError() }}</p>
+               <div class="flex gap-3">
+                 <button 
+                   (click)="retryInitDiagram()"
+                   class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
+                   重试加载
+                 </button>
+                 <button 
+                   (click)="goBackToText.emit()"
+                   class="px-4 py-2 bg-stone-200 text-stone-700 rounded-lg hover:bg-stone-300 transition-colors text-sm font-medium">
+                   切换到文本视图
+                 </button>
+               </div>
+               <p class="text-xs text-stone-400 mt-4">
+                 提示：您仍可以在文本视图中管理任务
+               </p>
+             </div>
            }
 
            <!-- 工具栏 -->
@@ -83,7 +99,9 @@ import * as go from 'gojs';
              (zoomOut)="zoomOut()"
              (autoLayout)="applyAutoLayout()"
              (toggleLinkMode)="toggleLinkMode()"
-             (cancelLinkMode)="cancelLinkMode()">
+             (cancelLinkMode)="cancelLinkMode()"
+             (toggleSidebar)="emitToggleSidebar()"
+             (goBackToText)="goBackToText.emit()">
            </app-flow-toolbar>
 
            <!-- 任务详情面板 -->
@@ -2264,5 +2282,26 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         if (tag?.trim()) {
             this.store.addTaskTag(taskId, tag.trim());
         }
+    }
+    
+    /**
+     * 重试初始化流程图
+     */
+    retryInitDiagram() {
+        this.diagramError.set(null);
+        // 延迟执行以确保 DOM 已更新
+        setTimeout(() => {
+            this.initDiagram();
+            if (this.diagram) {
+                this.updateDiagram(this.store.tasks());
+            }
+        }, 100);
+    }
+    
+    /**
+     * 触发侧边栏切换（用于移动端）
+     */
+    emitToggleSidebar() {
+        window.dispatchEvent(new CustomEvent('toggle-sidebar'));
     }
 }
