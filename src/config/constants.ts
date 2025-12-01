@@ -58,10 +58,14 @@ export const CACHE_CONFIG = {
  * 附件配置
  */
 export const ATTACHMENT_CONFIG = {
-  /** 签名 URL 过期时间（毫秒）- 6小时，留出1小时缓冲 */
-  URL_EXPIRY_BUFFER: 6 * 60 * 60 * 1000,
-  /** URL 刷新检查间隔（毫秒）- 30分钟 */
-  URL_REFRESH_CHECK_INTERVAL: 30 * 60 * 1000,
+  /** 
+   * 签名 URL 刷新缓冲时间（毫秒）- 6天
+   * Supabase 签名 URL 默认有效期为 7 天，我们在到期前 1 天刷新
+   * 这样确保 URL 在实际过期前被刷新
+   */
+  URL_EXPIRY_BUFFER: 6 * 24 * 60 * 60 * 1000,
+  /** URL 刷新检查间隔（毫秒）- 1小时 */
+  URL_REFRESH_CHECK_INTERVAL: 60 * 60 * 1000,
 } as const;
 
 /**

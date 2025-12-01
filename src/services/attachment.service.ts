@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, OnDestroy } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { Attachment, AttachmentType } from '../models';
 import { ATTACHMENT_CONFIG as GLOBAL_ATTACHMENT_CONFIG } from '../config/constants';
@@ -29,7 +29,7 @@ const ATTACHMENT_CONFIG = {
 export interface UploadProgress {
   fileName: string;
   progress: number;
-  status: 'pending' | 'uploading' | 'completed' | 'error';
+  status: 'pending' | 'uploading' | 'completed' | 'error' | 'cancelled';
   error?: string;
 }
 
@@ -62,13 +62,14 @@ function isValidPathSegment(segment: string): boolean {
 /**
  * 附件上传服务
  * 负责与 Supabase Storage 的文件上传、下载、删除操作
- * 包含自动 URL 刷新机制
+ * 包含自动 URL 刷新机制和上传取消支持
  */
 @Injectable({
   providedIn: 'root'
 })
-export class AttachmentService implements OnDestroy {
+export class AttachmentService {
   private supabase = inject(SupabaseClientService);
+  private destroyRef = inject(DestroyRef);
 
   /** 当前上传进度 */
   readonly uploadProgress = signal<UploadProgress[]>([]);
@@ -85,12 +86,19 @@ export class AttachmentService implements OnDestroy {
   /** 需要监控刷新的附件列表 */
   private monitoredAttachments: Map<string, { userId: string; projectId: string; taskId: string; attachment: Attachment }> = new Map();
 
+  /** 上传取消控制器映射 (fileName -> AbortController) */
+  private uploadAbortControllers: Map<string, AbortController> = new Map();
+
   constructor() {
     this.startUrlRefreshMonitor();
-  }
-
-  ngOnDestroy() {
-    this.stopUrlRefreshMonitor();
+    
+    // 使用 DestroyRef 替代 ngOnDestroy，确保 root 服务也能正确清理
+    this.destroyRef.onDestroy(() => {
+      this.stopUrlRefreshMonitor();
+      this.cancelAllUploads();
+      this.clearUrlRefreshCallback();
+      this.clearMonitoredAttachments();
+    });
   }
 
   /**
@@ -193,6 +201,7 @@ export class AttachmentService implements OnDestroy {
 
   /**
    * 上传文件
+   * 支持取消操作：调用 cancelUpload(fileName) 可取消进行中的上传
    * @param userId 用户 ID
    * @param projectId 项目 ID
    * @param taskId 任务 ID
@@ -204,7 +213,7 @@ export class AttachmentService implements OnDestroy {
     projectId: string,
     taskId: string,
     file: File
-  ): Promise<{ success: boolean; attachment?: Attachment; error?: string }> {
+  ): Promise<{ success: boolean; attachment?: Attachment; error?: string; cancelled?: boolean }> {
     if (!this.supabase.isConfigured) {
       return { success: false, error: 'Supabase 未配置' };
     }
@@ -229,21 +238,54 @@ export class AttachmentService implements OnDestroy {
     const fileExt = sanitizePathSegment(file.name.split('.').pop() || 'bin');
     const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${fileExt}`;
     
+    // 创建取消控制器
+    const abortController = new AbortController();
+    this.uploadAbortControllers.set(file.name, abortController);
+    
     // 更新上传进度
     this.updateProgress(file.name, 0, 'uploading');
     this.isUploading.set(true);
 
     try {
+      // 检查是否已被取消
+      if (abortController.signal.aborted) {
+        throw new DOMException('Upload cancelled', 'AbortError');
+      }
+
       // 上传文件到 Supabase Storage
-      const { data, error } = await this.supabase.client().storage
+      // 注意：Supabase Storage JS SDK 目前不原生支持 AbortController
+      // 我们通过在上传前后检查信号状态来实现取消
+      const uploadPromise = this.supabase.client().storage
         .from(ATTACHMENT_CONFIG.BUCKET_NAME)
         .upload(filePath, file, {
           cacheControl: '3600',
           upsert: false
         });
 
+      // 创建取消监听
+      const abortPromise = new Promise<never>((_, reject) => {
+        abortController.signal.addEventListener('abort', () => {
+          reject(new DOMException('Upload cancelled', 'AbortError'));
+        });
+      });
+
+      // 竞速：上传完成或被取消
+      const { data, error } = await Promise.race([
+        uploadPromise,
+        abortPromise.then(() => ({ data: null, error: new Error('Upload cancelled') }))
+      ]) as { data: any; error: any };
+
       if (error) {
         throw error;
+      }
+
+      // 再次检查是否在上传完成后被取消（边界情况）
+      if (abortController.signal.aborted) {
+        // 上传已完成但用户取消了，尝试删除已上传的文件
+        await this.supabase.client().storage
+          .from(ATTACHMENT_CONFIG.BUCKET_NAME)
+          .remove([filePath]);
+        throw new DOMException('Upload cancelled', 'AbortError');
       }
 
       // 获取公开 URL 或签名 URL
@@ -283,12 +325,67 @@ export class AttachmentService implements OnDestroy {
       
       return { success: true, attachment };
     } catch (e: any) {
+      // 检查是否为取消操作
+      if (e?.name === 'AbortError' || e?.message === 'Upload cancelled') {
+        console.log(`Upload cancelled: ${file.name}`);
+        this.updateProgress(file.name, 0, 'cancelled');
+        return { success: false, cancelled: true, error: '上传已取消' };
+      }
+      
       console.error('File upload failed:', e);
       this.updateProgress(file.name, 0, 'error', e?.message);
       return { success: false, error: e?.message ?? '上传失败' };
     } finally {
-      this.isUploading.set(false);
+      // 清理取消控制器
+      this.uploadAbortControllers.delete(file.name);
+      
+      // 更新上传状态
+      if (this.uploadAbortControllers.size === 0) {
+        this.isUploading.set(false);
+      }
     }
+  }
+
+  /**
+   * 取消指定文件的上传
+   * @param fileName 文件名
+   * @returns 是否成功取消
+   */
+  cancelUpload(fileName: string): boolean {
+    const controller = this.uploadAbortControllers.get(fileName);
+    if (controller) {
+      controller.abort();
+      this.uploadAbortControllers.delete(fileName);
+      this.updateProgress(fileName, 0, 'cancelled');
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 取消所有正在进行的上传
+   */
+  cancelAllUploads(): void {
+    for (const [fileName, controller] of this.uploadAbortControllers) {
+      controller.abort();
+      this.updateProgress(fileName, 0, 'cancelled');
+    }
+    this.uploadAbortControllers.clear();
+    this.isUploading.set(false);
+  }
+
+  /**
+   * 检查指定文件是否正在上传
+   */
+  isFileUploading(fileName: string): boolean {
+    return this.uploadAbortControllers.has(fileName);
+  }
+
+  /**
+   * 获取正在上传的文件数量
+   */
+  getActiveUploadCount(): number {
+    return this.uploadAbortControllers.size;
   }
 
   /**

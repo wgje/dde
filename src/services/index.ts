@@ -7,6 +7,7 @@
 export { StoreService } from './store.service';
 export { ProjectStateService } from './project-state.service';
 export { TaskRepositoryService } from './task-repository.service';
+export { TaskOperationService, type CreateTaskParams, type MoveTaskParams, type InsertBetweenParams } from './task-operation.service';
 
 // 同步相关服务
 export { SyncService, type RemoteProjectChangePayload, type RemoteTaskChangePayload } from './sync.service';
@@ -21,6 +22,7 @@ export { SupabaseClientService } from './supabase-client.service';
 export { ToastService, type ToastMessage, type ToastOptions, type ToastAction } from './toast.service';
 export { LayoutService } from './layout.service';
 export { ModalService, type ModalType, type ModalState, type ModalData } from './modal.service';
+export { UiStateService } from './ui-state.service';
 
 // 功能服务
 export { UndoService } from './undo.service';
@@ -29,6 +31,8 @@ export { AttachmentService } from './attachment.service';
 export { MigrationService } from './migration.service';
 export { LoggerService } from './logger.service';
 export { GoJSDiagramService, type DiagramCallbacks, type InsertPosition } from './gojs-diagram.service';
+export { SearchService, type SearchResult, type ProjectSearchResult } from './search.service';
+export { FlowDiagramConfigService, type GoJSNodeData, type GoJSLinkData, type GoJSDiagramData } from './flow-diagram-config.service';
 
 // Guards
 export { authGuard, saveAuthCache, getDataIsolationId } from './guards/auth.guard';

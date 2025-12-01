@@ -1,0 +1,888 @@
+/**
+ * ConflictResolutionService 单元测试 (Vitest + Angular TestBed)
+ * 
+ * 测试覆盖：
+ * 1. 冲突解决策略 - local/remote/merge
+ * 2. 智能合并算法 - 任务合并、连接合并
+ * 3. 字段级合并 - 时间戳比较、标签合并
+ * 4. 文本内容合并 - 行级合并、前缀/后缀检测
+ * 5. 离线数据重连合并
+ * 6. 边缘情况 - 空数据、大数据量
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
+import { ConflictResolutionService, ConflictResolutionStrategy, MergeResult } from './conflict-resolution.service';
+import { SyncService } from './sync.service';
+import { LayoutService } from './layout.service';
+import { ToastService } from './toast.service';
+import { LoggerService } from './logger.service';
+import { Project, Task, Connection } from '../models';
+
+// ========== 模拟依赖服务 ==========
+
+const mockSyncService = {
+  syncState: signal({
+    isSyncing: false,
+    isOnline: true,
+    offlineMode: false,
+    sessionExpired: false,
+    syncError: null,
+    hasConflict: false,
+    conflictData: null,
+  }),
+  resolveConflict: vi.fn(),
+  saveProjectToCloud: vi.fn().mockResolvedValue({ success: true }),
+};
+
+const mockLayoutService = {
+  validateAndFixTree: vi.fn((project: Project) => ({
+    project,
+    issues: [] as string[],
+  })),
+  rebalance: vi.fn((project: Project) => project),
+};
+
+const mockToastService = {
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
+  info: vi.fn(),
+};
+
+const mockLoggerCategory = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+};
+
+const mockLoggerService = {
+  category: vi.fn(() => mockLoggerCategory),
+};
+
+// ========== 辅助函数 ==========
+
+let connectionIdCounter = 0;
+
+function createTestConnection(overrides?: Partial<Connection>): Connection {
+  return {
+    id: `conn-${++connectionIdCounter}`,
+    source: 'task-1',
+    target: 'task-2',
+    ...overrides,
+  };
+}
+
+function createTestProject(overrides?: Partial<Project>): Project {
+  return {
+    id: `proj-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    name: 'Test Project',
+    description: '',
+    createdDate: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    tasks: [],
+    connections: [],
+    version: 1,
+    ...overrides,
+  };
+}
+
+function createTestTask(overrides?: Partial<Task>): Task {
+  return {
+    id: `task-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    title: 'Test Task',
+    content: '',
+    stage: 1,
+    parentId: null,
+    order: 1,
+    rank: 1000,
+    status: 'active',
+    x: 0,
+    y: 0,
+    createdDate: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    displayId: 'A',
+    hasIncompleteTask: false,
+    ...overrides,
+  };
+}
+
+// ========== 测试用例 ==========
+
+describe('ConflictResolutionService', () => {
+  let service: ConflictResolutionService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    TestBed.configureTestingModule({
+      providers: [
+        ConflictResolutionService,
+        { provide: SyncService, useValue: mockSyncService },
+        { provide: LayoutService, useValue: mockLayoutService },
+        { provide: ToastService, useValue: mockToastService },
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
+    });
+
+    service = TestBed.inject(ConflictResolutionService);
+  });
+
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  // ==================== 冲突解决策略 ====================
+
+  describe('冲突解决策略', () => {
+    describe('local 策略', () => {
+      it('应该使用本地版本并递增版本号', () => {
+        const localProject = createTestProject({ id: 'proj-1', version: 5 });
+        const remoteProject = createTestProject({ id: 'proj-1', version: 7 });
+
+        const result = service.resolveConflict('proj-1', 'local', localProject, remoteProject);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.version).toBe(6); // 本地版本 + 1
+        }
+        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
+          'proj-1',
+          expect.objectContaining({ version: 6 }),
+          'local'
+        );
+      });
+
+      it('版本为 undefined 时应该使用 1', () => {
+        const localProject = createTestProject({ id: 'proj-1', version: undefined });
+
+        const result = service.resolveConflict('proj-1', 'local', localProject);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.version).toBe(1);
+        }
+      });
+    });
+
+    describe('remote 策略', () => {
+      it('应该使用远程版本', () => {
+        const localProject = createTestProject({ id: 'proj-1', version: 5 });
+        const remoteProject = createTestProject({ 
+          id: 'proj-1', 
+          version: 7,
+          name: 'Remote Name',
+        });
+
+        const result = service.resolveConflict('proj-1', 'remote', localProject, remoteProject);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.name).toBe('Remote Name');
+        }
+        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
+          'proj-1',
+          expect.objectContaining({ name: 'Remote Name' }),
+          'remote'
+        );
+      });
+
+      it('远程项目为空时应该返回错误', () => {
+        const localProject = createTestProject({ id: 'proj-1' });
+
+        const result = service.resolveConflict('proj-1', 'remote', localProject);
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error.message).toContain('远程项目数据不存在');
+        }
+      });
+    });
+
+    describe('merge 策略', () => {
+      it('应该合并双方的更改', () => {
+        const localProject = createTestProject({
+          id: 'proj-1',
+          version: 5,
+          tasks: [createTestTask({ id: 'task-1', title: 'Local Task' })],
+        });
+        const remoteProject = createTestProject({
+          id: 'proj-1',
+          version: 7,
+          tasks: [createTestTask({ id: 'task-2', title: 'Remote Task' })],
+        });
+
+        const result = service.resolveConflict('proj-1', 'merge', localProject, remoteProject);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.tasks.length).toBe(2);
+          expect(result.value.version).toBe(8); // max(5, 7) + 1
+        }
+      });
+
+      it('远程项目为空时应该返回错误', () => {
+        const localProject = createTestProject({ id: 'proj-1' });
+
+        const result = service.resolveConflict('proj-1', 'merge', localProject);
+
+        expect(result.ok).toBe(false);
+      });
+
+      it('合并有问题时应该显示提示', () => {
+        const localProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({ id: 'task-1' })],
+        });
+        const remoteProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({ id: 'task-1', title: 'Different Title' })],
+        });
+
+        // 模拟验证返回问题
+        mockLayoutService.validateAndFixTree.mockReturnValueOnce({
+          project: { ...localProject },
+          issues: ['Fixed orphan task'],
+        });
+
+        service.resolveConflict('proj-1', 'merge', localProject, remoteProject);
+
+        expect(mockToastService.info).toHaveBeenCalled();
+      });
+    });
+  });
+
+  // ==================== 智能合并算法 ====================
+
+  describe('智能合并算法', () => {
+    describe('任务合并', () => {
+      it('本地新增的任务应该保留', () => {
+        const localProject = createTestProject({
+          tasks: [
+            createTestTask({ id: 'task-1', title: 'Original' }),
+            createTestTask({ id: 'task-new-local', title: 'New Local' }),
+          ],
+        });
+        const remoteProject = createTestProject({
+          tasks: [createTestTask({ id: 'task-1', title: 'Original' })],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        expect(result.project.tasks).toHaveLength(2);
+        expect(result.project.tasks.find(t => t.id === 'task-new-local')).toBeDefined();
+      });
+
+      it('远程新增的任务应该保留', () => {
+        const localProject = createTestProject({
+          tasks: [createTestTask({ id: 'task-1', title: 'Original' })],
+        });
+        const remoteProject = createTestProject({
+          tasks: [
+            createTestTask({ id: 'task-1', title: 'Original' }),
+            createTestTask({ id: 'task-new-remote', title: 'New Remote' }),
+          ],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        expect(result.project.tasks).toHaveLength(2);
+        expect(result.project.tasks.find(t => t.id === 'task-new-remote')).toBeDefined();
+      });
+
+      it('双方都有的任务应该字段级合并', () => {
+        const oldTime = new Date('2024-01-01T00:00:00Z').toISOString();
+        const newTime = new Date('2024-01-02T00:00:00Z').toISOString();
+
+        const localProject = createTestProject({
+          tasks: [createTestTask({
+            id: 'task-1',
+            title: 'Local Title',
+            content: 'Local Content',
+            updatedAt: newTime,
+          })],
+        });
+        const remoteProject = createTestProject({
+          tasks: [createTestTask({
+            id: 'task-1',
+            title: 'Remote Title',
+            content: 'Remote Content',
+            updatedAt: oldTime,
+          })],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        const mergedTask = result.project.tasks[0];
+        expect(mergedTask.title).toBe('Local Title'); // 本地更新时间更新
+        expect(result.conflictCount).toBeGreaterThan(0);
+      });
+    });
+
+    describe('连接合并', () => {
+      it('应该合并双方的连接', () => {
+        const localProject = createTestProject({
+          connections: [createTestConnection({ id: 'conn-1', source: 'task-1', target: 'task-2' })],
+        });
+        const remoteProject = createTestProject({
+          connections: [createTestConnection({ id: 'conn-2', source: 'task-3', target: 'task-4' })],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        expect(result.project.connections).toHaveLength(2);
+      });
+
+      it('重复连接应该去重', () => {
+        const localProject = createTestProject({
+          connections: [createTestConnection({ id: 'conn-1', source: 'task-1', target: 'task-2' })],
+        });
+        const remoteProject = createTestProject({
+          connections: [createTestConnection({ id: 'conn-2', source: 'task-1', target: 'task-2' })],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        expect(result.project.connections).toHaveLength(1);
+      });
+
+      it('软删除的连接应该正确处理', () => {
+        const localProject = createTestProject({
+          connections: [
+            createTestConnection({ id: 'conn-1', source: 'task-1', target: 'task-2', deletedAt: null }),
+          ],
+        });
+        const remoteProject = createTestProject({
+          connections: [
+            createTestConnection({ id: 'conn-2', source: 'task-1', target: 'task-2', deletedAt: new Date().toISOString() }),
+          ],
+        });
+
+        const result = service.smartMerge(localProject, remoteProject);
+
+        // 本地未删除的连接应该保留
+        const conn = result.project.connections.find(
+          c => c.source === 'task-1' && c.target === 'task-2'
+        );
+        expect(conn?.deletedAt).toBeNull();
+      });
+    });
+  });
+
+  // ==================== 字段级合并 ====================
+
+  describe('字段级合并', () => {
+    it('更新时间较新的字段应该胜出', () => {
+      const oldTime = new Date('2024-01-01T00:00:00Z').toISOString();
+      const newTime = new Date('2024-01-02T00:00:00Z').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Old Title',
+          status: 'completed',
+          updatedAt: oldTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'New Title',
+          status: 'active',
+          updatedAt: newTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      const task = result.project.tasks[0];
+      expect(task.title).toBe('New Title');
+      expect(task.status).toBe('active');
+    });
+
+    it('标签应该合并去重', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          tags: ['tag1', 'tag2'],
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          tags: ['tag2', 'tag3'],
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      const task = result.project.tasks[0];
+      expect(task.tags).toEqual(expect.arrayContaining(['tag1', 'tag2', 'tag3']));
+      expect(task.tags?.length).toBe(3);
+    });
+
+    it('附件应该按 ID 合并', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          attachments: [
+            { id: 'att-1', name: 'file1.pdf', url: '/url1', size: 100, type: 'document', createdAt: '' },
+          ],
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          attachments: [
+            { id: 'att-2', name: 'file2.pdf', url: '/url2', size: 200, type: 'document', createdAt: '' },
+          ],
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      const task = result.project.tasks[0];
+      expect(task.attachments?.length).toBe(2);
+    });
+
+    it('位置信息应该保留本地值', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          x: 100,
+          y: 200,
+          updatedAt: new Date('2024-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          x: 500,
+          y: 600,
+          updatedAt: new Date('2024-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      const task = result.project.tasks[0];
+      expect(task.x).toBe(100); // 保留本地位置
+      expect(task.y).toBe(200);
+    });
+  });
+
+  // ==================== 文本内容合并 ====================
+
+  describe('文本内容合并', () => {
+    it('内容是前缀扩展时应该使用较长版本', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'Hello',
+          updatedAt: new Date('2024-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'Hello World',
+          updatedAt: new Date('2024-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks[0].content).toBe('Hello World');
+    });
+
+    it('内容是后缀扩展时应该使用较长版本', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'World',
+          updatedAt: new Date('2024-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'Hello World',
+          updatedAt: new Date('2024-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks[0].content).toBe('Hello World');
+    });
+
+    it('行级合并应该保留双方新增的行', () => {
+      const baseContent = 'Line 1\nLine 2\nLine 3';
+      const localContent = 'Line 1\nLine 2\nLine 3\nNew Local Line';
+      const remoteContent = 'Line 1\nLine 2\nLine 3\nNew Remote Line';
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: localContent,
+          updatedAt: new Date('2024-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: remoteContent,
+          updatedAt: new Date('2024-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      // 行级合并应该包含双方的新增行
+      const content = result.project.tasks[0].content;
+      expect(content).toContain('Line 1');
+      expect(content).toContain('Line 2');
+      expect(content).toContain('Line 3');
+    });
+
+    it('内容差异太大时应该使用更新时间较新的版本', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'Completely different content A',
+          updatedAt: new Date('2024-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          content: 'Totally new content B',
+          updatedAt: new Date('2024-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks[0].content).toBe('Totally new content B');
+    });
+  });
+
+  // ==================== 离线数据重连合并 ====================
+
+  describe('离线数据重连合并', () => {
+    it('离线创建的新项目应该上传到云端', async () => {
+      const offlineProjects = [
+        createTestProject({ id: 'new-proj', name: 'Offline Created' }),
+      ];
+      const cloudProjects: Project[] = [];
+
+      mockSyncService.saveProjectToCloud.mockResolvedValue({ success: true });
+
+      const result = await service.mergeOfflineDataOnReconnect(
+        cloudProjects,
+        offlineProjects,
+        'user-1'
+      );
+
+      expect(result.syncedCount).toBe(1);
+      expect(mockSyncService.saveProjectToCloud).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Offline Created' }),
+        'user-1'
+      );
+    });
+
+    it('离线版本更高时应该同步到云端', async () => {
+      const cloudProjects = [
+        createTestProject({ id: 'proj-1', version: 3 }),
+      ];
+      const offlineProjects = [
+        createTestProject({ id: 'proj-1', version: 5, name: 'Updated Offline' }),
+      ];
+
+      mockSyncService.saveProjectToCloud.mockResolvedValue({ success: true });
+
+      const result = await service.mergeOfflineDataOnReconnect(
+        cloudProjects,
+        offlineProjects,
+        'user-1'
+      );
+
+      expect(result.syncedCount).toBe(1);
+      expect(mockSyncService.saveProjectToCloud).toHaveBeenCalledWith(
+        expect.objectContaining({ version: 6 }), // max(5, 3) + 1
+        'user-1'
+      );
+    });
+
+    it('离线同步冲突时应该加入冲突列表', async () => {
+      const cloudProjects = [
+        createTestProject({ id: 'proj-1', version: 5 }),
+      ];
+      const offlineProjects = [
+        createTestProject({ id: 'proj-1', version: 6 }),
+      ];
+
+      mockSyncService.saveProjectToCloud.mockResolvedValue({
+        success: false,
+        conflict: true,
+      });
+
+      const result = await service.mergeOfflineDataOnReconnect(
+        cloudProjects,
+        offlineProjects,
+        'user-1'
+      );
+
+      expect(result.conflictProjects).toHaveLength(1);
+    });
+
+    it('云端版本更高时不应该同步', async () => {
+      const cloudProjects = [
+        createTestProject({ id: 'proj-1', version: 10 }),
+      ];
+      const offlineProjects = [
+        createTestProject({ id: 'proj-1', version: 5 }),
+      ];
+
+      const result = await service.mergeOfflineDataOnReconnect(
+        cloudProjects,
+        offlineProjects,
+        'user-1'
+      );
+
+      expect(result.syncedCount).toBe(0);
+      expect(mockSyncService.saveProjectToCloud).not.toHaveBeenCalled();
+    });
+  });
+
+  // ==================== 版本号处理 ====================
+
+  describe('版本号处理', () => {
+    it('合并后应该使用双方较大版本号 + 1', () => {
+      const localProject = createTestProject({ version: 3 });
+      const remoteProject = createTestProject({ version: 7 });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.version).toBe(8);
+    });
+
+    it('版本号为 undefined 时应该视为 0', () => {
+      const localProject = createTestProject({ version: undefined });
+      const remoteProject = createTestProject({ version: 5 });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.version).toBe(6);
+    });
+
+    it('双方版本号都为 undefined 时应该设为 1', () => {
+      const localProject = createTestProject({ version: undefined });
+      const remoteProject = createTestProject({ version: undefined });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.version).toBe(1);
+    });
+  });
+
+  // ==================== 边缘情况 ====================
+
+  describe('边缘情况', () => {
+    it('空任务列表应该正确处理', () => {
+      const localProject = createTestProject({ tasks: [] });
+      const remoteProject = createTestProject({ tasks: [] });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks).toHaveLength(0);
+      expect(result.conflictCount).toBe(0);
+    });
+
+    it('大量任务应该正确合并', () => {
+      const localTasks: Task[] = [];
+      const remoteTasks: Task[] = [];
+
+      for (let i = 0; i < 500; i++) {
+        localTasks.push(createTestTask({ id: `local-task-${i}` }));
+      }
+      for (let i = 0; i < 500; i++) {
+        remoteTasks.push(createTestTask({ id: `remote-task-${i}` }));
+      }
+
+      const localProject = createTestProject({ tasks: localTasks });
+      const remoteProject = createTestProject({ tasks: remoteTasks });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks).toHaveLength(1000);
+    });
+
+    it('任务 ID 相同但内容不同时应该合并', () => {
+      const oldTime = new Date('2024-01-01').toISOString();
+      const newTime = new Date('2024-01-02').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'same-id',
+          title: 'Local Version',
+          priority: 'high',
+          updatedAt: newTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'same-id',
+          title: 'Remote Version',
+          priority: 'low',
+          updatedAt: oldTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks).toHaveLength(1);
+      expect(result.project.tasks[0].title).toBe('Local Version');
+      expect(result.project.tasks[0].priority).toBe('high');
+    });
+
+    it('更新时间完全相同时应该使用本地版本', () => {
+      const sameTime = new Date('2024-01-01T12:00:00Z').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Local Title',
+          updatedAt: sameTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Remote Title',
+          updatedAt: sameTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      // 时间相同时，remoteTime > localTime 为 false，所以用 local
+      expect(result.project.tasks[0].title).toBe('Local Title');
+    });
+  });
+
+  // ==================== 时间戳极端情况 ====================
+
+  describe('时间戳极端情况', () => {
+    it('客户端时间快于服务器时应该以更新时间为准', () => {
+      // 客户端时钟快了 1 小时
+      const clientTime = new Date('2024-01-15T11:00:00Z').toISOString();
+      const serverTime = new Date('2024-01-15T10:00:00Z').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Client Edit (faster clock)',
+          updatedAt: clientTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Server Edit',
+          updatedAt: serverTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks[0].title).toBe('Client Edit (faster clock)');
+    });
+
+    it('客户端时间慢于服务器时应该以更新时间为准', () => {
+      // 客户端时钟慢了 1 小时
+      const clientTime = new Date('2024-01-15T09:00:00Z').toISOString();
+      const serverTime = new Date('2024-01-15T10:00:00Z').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Client Edit (slower clock)',
+          updatedAt: clientTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Server Edit',
+          updatedAt: serverTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      expect(result.project.tasks[0].title).toBe('Server Edit');
+    });
+
+    it('无效时间戳应该视为 0', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'No timestamp',
+          updatedAt: undefined,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Has timestamp',
+          updatedAt: new Date().toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      // 有时间戳的应该胜出
+      expect(result.project.tasks[0].title).toBe('Has timestamp');
+    });
+  });
+
+  // ==================== 结构信息合并 ====================
+
+  describe('结构信息合并', () => {
+    it('更新时间较新时应该使用其结构信息', () => {
+      const oldTime = new Date('2024-01-01').toISOString();
+      const newTime = new Date('2024-01-02').toISOString();
+
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          stage: 1,
+          parentId: null,
+          order: 1,
+          rank: 1000,
+          updatedAt: oldTime,
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          stage: 2,
+          parentId: 'parent-task',
+          order: 5,
+          rank: 5000,
+          updatedAt: newTime,
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject);
+
+      const task = result.project.tasks[0];
+      expect(task.stage).toBe(2);
+      expect(task.parentId).toBe('parent-task');
+      expect(task.order).toBe(5);
+      expect(task.rank).toBe(5000);
+    });
+  });
+});

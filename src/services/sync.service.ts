@@ -397,7 +397,15 @@ export class SyncService {
       );
     
     this.tasksChannel = tasksChannel;
-    tasksChannel.subscribe();
+    tasksChannel.subscribe((status, err) => {
+      if (status === 'SUBSCRIBED') {
+        this.logger.info('✅ Tasks Realtime channel ready');
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        this.logger.warn('⚠️ Tasks Realtime channel error:', err);
+        // 任务通道错误不触发完全离线模式，只记录警告
+        // 因为项目通道仍可能正常工作
+      }
+    });
   }
   
   /** 当前用户 ID（用于重连时检查） */

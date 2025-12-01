@@ -1,5 +1,5 @@
 import { Routes } from '@angular/router';
-import { authGuard, projectExistsGuard } from './services/guards';
+import { requireAuthGuard, projectExistsGuard } from './services/guards';
 
 /**
  * 应用路由配置
@@ -13,8 +13,14 @@ import { authGuard, projectExistsGuard } from './services/guards';
  * - /projects/:projectId/task/:taskId - 定位到特定任务
  * 
  * 路由守卫：
- * - authGuard: 认证检查（支持离线模式）
+ * - requireAuthGuard: 强制登录验证（数据归属权保障）
  * - projectExistsGuard: 项目存在性检查
+ * 
+ * 认证策略说明：
+ * 采用「强制登录」模式，所有数据操作都需要明确的 user_id：
+ * 1. 简化 Supabase RLS 策略 - 所有操作都有明确的数据归属
+ * 2. 避免「幽灵数据」问题 - 无需处理匿名数据到正式账户的迁移
+ * 3. 保障数据安全 - 防止未授权访问和垃圾数据注入
  */
 export const routes: Routes = [
   // 默认重定向到项目列表
@@ -23,7 +29,7 @@ export const routes: Routes = [
   // 项目列表/主视图 - AppComponent 作为布局容器
   { 
     path: 'projects', 
-    canActivate: [authGuard],
+    canActivate: [requireAuthGuard],
     children: [
       // 项目列表首页（无选中项目）
       { 
@@ -59,6 +65,10 @@ export const routes: Routes = [
   },
   
   // 密码重置回调页面 - 使用专门的组件处理 token
+  // 注意：此路由故意不添加 authGuard，因为：
+  // 1. 用户是通过邮箱链接跳转到此页面的，此时尚未登录
+  // 2. Supabase 的密码重置 token 会通过 URL fragment 传递
+  // 3. 该页面不涉及敏感数据，只用于设置新密码
   { 
     path: 'reset-password', 
     loadComponent: () => import('./components/reset-password.component').then(m => m.ResetPasswordComponent)

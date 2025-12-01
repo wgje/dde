@@ -3,6 +3,20 @@
  * 配置全局模拟和测试环境
  */
 import { vi } from 'vitest';
+import 'zone.js';
+import 'zone.js/testing';
+import { TestBed } from '@angular/core/testing';
+import { 
+  BrowserDynamicTestingModule, 
+  platformBrowserDynamicTesting 
+} from '@angular/platform-browser-dynamic/testing';
+
+// 初始化 Angular TestBed 环境 (全局只初始化一次)
+TestBed.initTestEnvironment(
+  BrowserDynamicTestingModule,
+  platformBrowserDynamicTesting(),
+  { teardown: { destroyAfterEach: true } }
+);
 
 // 模拟 localStorage
 const localStorageMock = (() => {

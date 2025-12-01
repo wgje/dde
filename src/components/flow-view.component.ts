@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, DestroyRef, Injector } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../services/store.service';
@@ -180,6 +180,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly logger = inject(LoggerService).category('FlowView');
   private readonly zone = inject(NgZone);
   private readonly elementRef = inject(ElementRef);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly injector = inject(Injector);
   
   // 暴露 window 给模板使用
   readonly window = typeof window !== 'undefined' ? window : { innerHeight: GOJS_CONFIG.SSR_DEFAULT_HEIGHT };
@@ -252,6 +254,24 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 性能优化：位置保存防抖定时器
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  // 组件销毁标志位 - 用于防止销毁后的异步回调执行
+  private isDestroyed = false;
+  
+  // 连接线删除提示定时器
+  private linkDeleteHintTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  // GoJS diagram listeners 追踪（用于销毁时清理）
+  private diagramListeners: Array<{ name: string; handler: (e: any) => void }> = [];
+  
+  /**
+   * 注册 GoJS diagram listener 并追踪以便销毁时清理
+   */
+  private addTrackedDiagramListener(name: string, handler: (e: any) => void): void {
+    if (!this.diagram) return;
+    this.diagram.addDiagramListener(name, handler);
+    this.diagramListeners.push({ name, handler });
+  }
 
   // 连接类型选择对话框状态
   linkTypeDialog = signal<{
@@ -290,7 +310,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.linkSourceTask.set(null);
       this.isLinkMode.set(false);
       // 刷新图表以显示新连接
-      setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+      setTimeout(() => {
+        if (this.isDestroyed) return;
+        this.updateDiagram(this.store.tasks());
+      }, 50);
     }
   }
   
@@ -304,6 +327,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 编辑器打开后自动调整 textarea 高度
     setTimeout(() => {
+      if (this.isDestroyed) return;
       const textarea = document.querySelector('#connectionDescTextarea') as HTMLTextAreaElement;
       if (textarea) {
         textarea.style.height = 'auto';
@@ -431,7 +455,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.store.updateConnectionDescription(data.sourceId, data.targetId, description);
       this.closeConnectionEditor();
       // 刷新图表以显示新描述
-      setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+      setTimeout(() => {
+        if (this.isDestroyed) return;
+        this.updateDiagram(this.store.tasks());
+      }, 50);
     }
   }
   
@@ -455,12 +482,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   constructor() {
       // 监听任务数据变化，更新图表
+      // 使用 injector 选项确保 effect 在组件销毁时自动清理
       effect(() => {
           const tasks = this.store.tasks();
           if (this.diagram) {
               this.updateDiagram(tasks);
           }
-      });
+      }, { injector: this.injector });
       
       // 监听搜索查询变化，更新图表高亮
       effect(() => {
@@ -469,7 +497,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           if (this.diagram) {
               this.updateDiagram(this.store.tasks(), true);
           }
-      });
+      }, { injector: this.injector });
       
       // 监听主题变化，更新图表节点颜色
       effect(() => {
@@ -478,7 +506,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           if (this.diagram) {
               this.updateDiagram(this.store.tasks(), true);
           }
-      });
+      }, { injector: this.injector });
       
       // 跨视图选中状态同步：监听外部选中任务的变化
       effect(() => {
@@ -494,7 +522,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                   }
               }
           }
-      });
+      }, { injector: this.injector });
   }
 
   public refreshLayout() {
@@ -520,6 +548,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       
       // 布局完成后保存所有位置并恢复为无操作布局
       setTimeout(() => {
+          if (this.isDestroyed || !this.diagram) return;
           this.saveAllNodePositions();
           this.diagram.layout = $(go.Layout); // 恢复无操作布局
           this.diagram.commitTransaction('auto-layout');
@@ -575,6 +604,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           this.selectedTaskId.set(result.value);
           // 延迟聚焦到标题输入框
           setTimeout(() => {
+              if (this.isDestroyed) return;
               this.focusTitleInput();
           }, UI_CONFIG.INPUT_FOCUS_DELAY);
       }
@@ -590,6 +620,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           this.selectedTaskId.set(result.value);
           // 延迟聚焦到标题输入框
           setTimeout(() => {
+              if (this.isDestroyed) return;
               this.focusTitleInput();
           }, UI_CONFIG.INPUT_FOCUS_DELAY);
       }
@@ -789,6 +820,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 长按 250ms 后开始拖拽（增加延迟避免误触）
     this.unassignedTouchState.longPressTimer = setTimeout(() => {
+      if (this.isDestroyed) return;
       this.unassignedTouchState.isDragging = true;
       this.unassignedDraggingId.set(task.id);
       this.createUnassignedGhost(task, touch.clientX, touch.clientY);
@@ -864,13 +896,21 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           if (parentTask) {
             const newStage = (parentTask.stage || 1) + 1;
             this.store.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
-            setTimeout(() => this.store.updateTaskPosition(task.id, loc.x, loc.y), UI_CONFIG.MEDIUM_DELAY);
+            const taskIdToUpdate = task.id;
+            setTimeout(() => {
+              if (this.isDestroyed) return;
+              this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
+            }, UI_CONFIG.MEDIUM_DELAY);
           }
         } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
           const refTask = this.store.tasks().find(t => t.id === (insertInfo.beforeTaskId || insertInfo.afterTaskId));
           if (refTask?.stage) {
             this.store.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
-            setTimeout(() => this.store.updateTaskPosition(task.id, loc.x, loc.y), UI_CONFIG.MEDIUM_DELAY);
+            const taskIdToUpdate = task.id;
+            setTimeout(() => {
+              if (this.isDestroyed) return;
+              this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
+            }, UI_CONFIG.MEDIUM_DELAY);
           }
         } else {
           // 没有靠近任何节点，只更新位置
@@ -899,6 +939,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.initDiagram();
       // 初始化完成后立即加载图表数据
       setTimeout(() => {
+          if (this.isDestroyed) return;
           if (this.diagram) {
               this.updateDiagram(this.store.tasks());
           }
@@ -909,6 +950,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   ngOnDestroy() {
+      // === 关键：首先设置销毁标志，防止任何异步回调执行 ===
+      this.isDestroyed = true;
+      
       // === 清理顺序很重要 ===
       // 1. 首先清理定时器，防止在组件销毁后执行回调
       // 2. 然后清理事件监听器，防止内存泄漏
@@ -926,6 +970,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       if (this.viewStateSaveTimer) {
           clearTimeout(this.viewStateSaveTimer);
           this.viewStateSaveTimer = null;
+      }
+      if (this.linkDeleteHintTimer) {
+          clearTimeout(this.linkDeleteHintTimer);
+          this.linkDeleteHintTimer = null;
       }
       if (this.unassignedTouchState.longPressTimer) {
           clearTimeout(this.unassignedTouchState.longPressTimer);
@@ -952,7 +1000,19 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           this.unassignedTouchState.ghost.remove();
       }
       
-      // 5. 最后清理 GoJS diagram 实例
+      // 5. 清理 GoJS diagram listeners
+      if (this.diagram) {
+          for (const listener of this.diagramListeners) {
+              try {
+                  this.diagram.removeDiagramListener(listener.name, listener.handler);
+              } catch (e) {
+                  // 忽略移除失败的错误
+              }
+          }
+          this.diagramListeners = [];
+      }
+      
+      // 6. 最后清理 GoJS diagram 实例
       if (this.diagram) {
           this.diagram.div = null;
           this.diagram.clear();
@@ -968,19 +1028,19 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               clearTimeout(this.resizeDebounceTimer);
           }
           this.resizeDebounceTimer = setTimeout(() => {
-              if (this.diagram) {
-                  // 获取新的容器尺寸
-                  const div = this.diagramDiv.nativeElement;
-                  const width = div.clientWidth;
-                  const height = div.clientHeight;
-                  
-                  // 如果尺寸有效，重新设置 diagram 的 div 并请求更新
-                  if (width > 0 && height > 0) {
-                      // 强制 GoJS 重新计算画布大小
-                      this.diagram.div = null;
-                      this.diagram.div = div;
-                      this.diagram.requestUpdate();
-                  }
+              if (this.isDestroyed || !this.diagram) return;
+              // 获取新的容器尺寸
+              const div = this.diagramDiv?.nativeElement;
+              if (!div) return;
+              const width = div.clientWidth;
+              const height = div.clientHeight;
+              
+              // 如果尺寸有效，重新设置 diagram 的 div 并请求更新
+              if (width > 0 && height > 0) {
+                  // 强制 GoJS 重新计算画布大小
+                  this.diagram.div = null;
+                  this.diagram.div = div;
+                  this.diagram.requestUpdate();
               }
           }, UI_CONFIG.RESIZE_DEBOUNCE_DELAY);
       });
@@ -1024,7 +1084,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       });
       
       // 监听节点移动完成（拖动结束时才保存，而非实时保存）
-      this.diagram.addDiagramListener('SelectionMoved', (e: any) => {
+      this.addTrackedDiagramListener('SelectionMoved', (e: any) => {
           // 捕获当前项目 ID，用于验证防抖回调执行时项目是否已切换
           const projectIdAtMove = this.store.activeProjectId();
           
@@ -1033,6 +1093,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               clearTimeout(this.positionSaveTimer);
           }
           this.positionSaveTimer = setTimeout(() => {
+              // 检查组件是否已销毁
+              if (this.isDestroyed) return;
               // 验证项目是否已切换，避免将旧项目的位置保存到新项目
               if (this.store.activeProjectId() !== projectIdAtMove) {
                   return;
@@ -1070,7 +1132,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       });
       
       // 监听节点拖拽结束
-      this.diagram.addDiagramListener('PartResized', (e: any) => {
+      this.addTrackedDiagramListener('PartResized', (e: any) => {
           // 保存所有节点位置
           this.saveAllNodePositions();
       });
@@ -1259,7 +1321,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       
       // 移动端: 连接线长按删除
       if (this.store.isMobile()) {
-        this.diagram.addDiagramListener('ObjectSingleClicked', (e: any) => {
+        this.addTrackedDiagramListener('ObjectSingleClicked', (e: any) => {
           const part = e.subject.part;
           if (part instanceof go.Link) {
             // 选中连接线时显示删除提示
@@ -1309,8 +1371,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                       const newStage = (parentTask.stage || 1) + 1;
                       this.store.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
                       // 更新拖放位置
+                      const taskIdToUpdate = task.id;
                       setTimeout(() => {
-                          this.store.updateTaskPosition(task.id, loc.x, loc.y);
+                          if (this.isDestroyed) return;
+                          this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
                       }, 100);
                   }
               } else if (insertInfo.beforeTaskId) {
@@ -1319,8 +1383,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                   if (beforeTask && beforeTask.stage) {
                       this.store.moveTaskToStage(task.id, beforeTask.stage, insertInfo.beforeTaskId, beforeTask.parentId);
                       // 更新拖放位置
+                      const taskIdToUpdate = task.id;
                       setTimeout(() => {
-                          this.store.updateTaskPosition(task.id, loc.x, loc.y);
+                          if (this.isDestroyed) return;
+                          this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
                       }, 100);
                   }
               } else if (insertInfo.afterTaskId) {
@@ -1335,8 +1401,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                       const nextSibling = siblings[afterIndex + 1];
                       this.store.moveTaskToStage(task.id, afterTask.stage, nextSibling?.id || null, afterTask.parentId);
                       // 更新拖放位置
+                      const taskIdToUpdate = task.id;
                       setTimeout(() => {
-                          this.store.updateTaskPosition(task.id, loc.x, loc.y);
+                          if (this.isDestroyed) return;
+                          this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
                       }, 100);
                   }
               } else {
@@ -1348,18 +1416,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           }
       });
 
-      this.diagram.addDiagramListener('LinkDrawn', (e: any) => this.handleLinkGesture(e));
-      this.diagram.addDiagramListener('LinkRelinked', (e: any) => this.handleLinkGesture(e));
+      this.addTrackedDiagramListener('LinkDrawn', (e: any) => this.handleLinkGesture(e));
+      this.addTrackedDiagramListener('LinkRelinked', (e: any) => this.handleLinkGesture(e));
       
       // 点击背景时关闭联系块编辑器
-      this.diagram.addDiagramListener('BackgroundSingleClicked', () => {
+      this.addTrackedDiagramListener('BackgroundSingleClicked', () => {
         this.zone.run(() => {
           this.closeConnectionEditor();
         });
       });
       
       // 监听视口变化，保存视图状态
-      this.diagram.addDiagramListener('ViewportBoundsChanged', (e: any) => {
+      this.addTrackedDiagramListener('ViewportBoundsChanged', (e: any) => {
         this.saveViewState();
       });
       
@@ -1398,6 +1466,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
     
     this.viewStateSaveTimer = setTimeout(() => {
+      if (this.isDestroyed || !this.diagram) return;
       const projectId = this.store.activeProjectId();
       if (!projectId) return;
       
@@ -1425,10 +1494,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 延迟恢复，确保图表已完全加载
     setTimeout(() => {
-      if (this.diagram) {
-        this.diagram.scale = viewState.scale;
-        this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-      }
+      if (this.isDestroyed || !this.diagram) return;
+      this.diagram.scale = viewState.scale;
+      this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
     }, 200);
   }
   
@@ -1683,8 +1751,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.store.insertTaskBetween(taskId, sourceId, targetId);
     
     // 更新拖放位置
+    const taskIdToUpdate = taskId;
     setTimeout(() => {
-      this.store.updateTaskPosition(taskId, loc.x, loc.y);
+      if (this.isDestroyed) return;
+      this.store.updateTaskPosition(taskIdToUpdate, loc.x, loc.y);
     }, 100);
     
     this.toast.success('任务已插入', '任务已插入到两个节点之间');
@@ -1954,7 +2024,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
               this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
               
               // 刷新图表
-              setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+              setTimeout(() => {
+                if (this.isDestroyed) return;
+                this.updateDiagram(this.store.tasks());
+              }, 50);
           }
       } catch (err) {
           this.logger.error('Drop to unassigned error:', err);
@@ -2071,7 +2144,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                       this.store.removeConnection(fromKey, toKey);
                   }
               });
-              setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+              setTimeout(() => {
+                if (this.isDestroyed) return;
+                this.updateDiagram(this.store.tasks());
+              }, 50);
           });
           return;
       }
@@ -2105,7 +2181,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                 this.zone.run(() => {
                     this.store.addCrossTreeConnection(parentId, childId);
                     this.toast.success('已创建关联', '目标任务已有父级，已创建关联连接');
-                    setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+                    setTimeout(() => {
+                      if (this.isDestroyed) return;
+                      this.updateDiagram(this.store.tasks());
+                    }, 50);
                 });
                 return;
             }
@@ -2137,7 +2216,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         
         this.store.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
         this.linkTypeDialog.set(null);
-        setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+        setTimeout(() => {
+          if (this.isDestroyed) return;
+          this.updateDiagram(this.store.tasks());
+        }, 50);
     }
     
     /**
@@ -2149,7 +2231,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         
         this.store.addCrossTreeConnection(dialog.sourceId, dialog.targetId);
         this.linkTypeDialog.set(null);
-        setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+        setTimeout(() => {
+          if (this.isDestroyed) return;
+          this.updateDiagram(this.store.tasks());
+        }, 50);
     }
     
     /**
@@ -2177,11 +2262,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
             y: diagramRect.top + viewPt.y
         });
         
-        // 3秒后自动隐藏
-        setTimeout(() => {
-            if (this.linkDeleteHint()?.link === link) {
+        // 3秒后自动隐藏 - 使用可取消的定时器
+        if (this.linkDeleteHintTimer) {
+            clearTimeout(this.linkDeleteHintTimer);
+        }
+        const currentLink = link;
+        this.linkDeleteHintTimer = setTimeout(() => {
+            if (this.isDestroyed) return;
+            if (this.linkDeleteHint()?.link === currentLink) {
                 this.linkDeleteHint.set(null);
             }
+            this.linkDeleteHintTimer = null;
         }, 3000);
     }
     
@@ -2216,7 +2307,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
                     this.store.detachTask(toKey);
                 }
                 // 刷新图表
-                setTimeout(() => this.updateDiagram(this.store.tasks()), 50);
+                setTimeout(() => {
+                  if (this.isDestroyed) return;
+                  this.updateDiagram(this.store.tasks());
+                }, 50);
             });
         }
     }
@@ -2291,6 +2385,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.diagramError.set(null);
         // 延迟执行以确保 DOM 已更新
         setTimeout(() => {
+            if (this.isDestroyed) return;
             this.initDiagram();
             if (this.diagram) {
                 this.updateDiagram(this.store.tasks());

@@ -222,6 +222,11 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     isSwiping: false
   };
   
+  // 组件销毁标志 - 用于取消待执行的递归 setTimeout
+  private isDestroyed = false;
+  // 任务深链接重试定时器 - 用于组件销毁时取消
+  private deepLinkRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  
   // 计算属性
   currentFilterLabel() {
     const filterId = this.store.filterMode();
@@ -285,6 +290,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     let retries = 0;
     
     const tryFocusTask = () => {
+      // 检查组件是否已销毁，停止递归
+      if (this.isDestroyed) return;
+      
       retries++;
       const tasks = this.store.tasks();
       const task = tasks.find(t => t.id === taskId);
@@ -296,7 +304,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
         this.store.activeView.set('flow');
         
         // 等待图表渲染后定位
-        setTimeout(() => {
+        this.deepLinkRetryTimer = setTimeout(() => {
+          if (this.isDestroyed) return;
           this.flowView?.centerOnNode(taskId, true);
           
           // 更新 URL 为常规流程图 URL（移除 task 路径）
@@ -308,7 +317,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       } else if (retries < maxRetries && (isLoading || !task)) {
         // 数据尚未加载，继续重试，使用指数退避
         const delay = Math.min(baseDelay * Math.pow(1.5, retries - 1), maxDelay);
-        setTimeout(tryFocusTask, delay);
+        this.deepLinkRetryTimer = setTimeout(tryFocusTask, delay);
       } else {
         // 超时未找到任务，导航到流程图视图并提示用户
         const projectId = this.store.activeProjectId();
@@ -324,10 +333,19 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     };
     
     // 开始尝试定位
-    setTimeout(tryFocusTask, 100);
+    this.deepLinkRetryTimer = setTimeout(tryFocusTask, 100);
   }
   
   ngOnDestroy() {
+    // 设置销毁标志，停止所有递归 setTimeout
+    this.isDestroyed = true;
+    
+    // 清理待执行的定时器
+    if (this.deepLinkRetryTimer) {
+      clearTimeout(this.deepLinkRetryTimer);
+      this.deepLinkRetryTimer = null;
+    }
+    
     this.destroy$.next();
     this.destroy$.complete();
   }
@@ -342,6 +360,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       void this.router.navigate(['/projects', projectId, 'flow'], { replaceUrl: true });
     }
     setTimeout(() => {
+      if (this.isDestroyed) return;
       this.flowView?.refreshLayout();
     }, 100);
   }

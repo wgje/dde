@@ -141,8 +141,11 @@ export class MigrationService {
         error: e?.message ?? String(e)
       };
     } finally {
+      // 清理迁移状态，释放大型数据对象防止内存泄漏
       this.needsMigration.set(false);
       this.showMigrationDialog.set(false);
+      this.localProjects.set([]);
+      this.remoteProjects.set([]);
     }
   }
   

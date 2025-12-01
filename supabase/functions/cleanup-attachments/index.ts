@@ -8,6 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // 配置常量 - 与前端 constants.ts 中的 ATTACHMENT_CLEANUP_CONFIG 保持一致
 const RETENTION_DAYS = 30; // 软删除附件保留天数
 const BATCH_SIZE = 100; // 每批处理的文件数
+const MAX_TASKS_PER_RUN = 500; // 每次执行最多处理的任务数（防止超时）
 
 interface AttachmentToDelete {
   taskId: string;
@@ -33,6 +34,10 @@ interface CleanupResult {
   storageErrors?: string[];
   dbErrors?: string[];
   error?: string;
+  /** 是否有更多数据需要处理（下次运行） */
+  hasMore?: boolean;
+  /** 处理的任务数 */
+  tasksProcessed?: number;
 }
 
 /**
@@ -96,6 +101,7 @@ Deno.serve(async (req: Request) => {
     const cutoffISOString = cutoffDate.toISOString();
 
     // 查找所有包含过期软删除附件的任务
+    // 使用分页防止超时
     const { data: tasks, error: fetchError } = await supabase
       .from("tasks")
       .select(`
@@ -104,11 +110,14 @@ Deno.serve(async (req: Request) => {
         attachments,
         projects!inner(owner_id)
       `)
-      .not("attachments", "is", null);
+      .not("attachments", "is", null)
+      .limit(MAX_TASKS_PER_RUN);
 
     if (fetchError) {
       throw new Error(`Failed to fetch tasks: ${fetchError.message}`);
     }
+
+    const hasMore = (tasks?.length ?? 0) >= MAX_TASKS_PER_RUN;
 
     const attachmentsToDelete: AttachmentToDelete[] = [];
     const taskUpdates: Map<string, TaskAttachment[]> = new Map();
@@ -165,8 +174,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // 批量从 Storage 删除文件
-    // 使用事务式处理：先尝试删除 Storage，成功后再更新数据库
-    // 如果 Storage 删除失败，跳过该批次的数据库更新
+    // 使用"尽力而为"模式：单个文件删除失败不影响其他文件
+    // 这确保了即使 Storage 服务抖动，也能最大程度清理文件
     const storagePaths = attachmentsToDelete.map(
       (a) => `${a.ownerId}/${a.projectId}/${a.taskId}/${a.fileName}`
     );
@@ -177,17 +186,26 @@ Deno.serve(async (req: Request) => {
 
     for (let i = 0; i < storagePaths.length; i += BATCH_SIZE) {
       const batch = storagePaths.slice(i, i + BATCH_SIZE);
-      const { error: storageError } = await supabase.storage
-        .from("attachments")
-        .remove(batch);
+      
+      // 逐个文件尝试删除，确保单个失败不影响整批
+      for (const path of batch) {
+        try {
+          const { error: storageError } = await supabase.storage
+            .from("attachments")
+            .remove([path]);
 
-      if (storageError) {
-        storageErrors.push(
-          `Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${storageError.message}`
-        );
-      } else {
-        storageDeletedCount += batch.length;
-        batch.forEach(path => successfullyDeletedPaths.add(path));
+          if (storageError) {
+            storageErrors.push(`${path}: ${storageError.message}`);
+          } else {
+            storageDeletedCount++;
+            successfullyDeletedPaths.add(path);
+          }
+        } catch (e) {
+          // 捕获单个文件删除的意外错误，继续处理下一个
+          const errorMsg = e instanceof Error ? e.message : String(e);
+          storageErrors.push(`${path}: ${errorMsg}`);
+          console.warn(`Failed to delete ${path}:`, errorMsg);
+        }
       }
     }
 
@@ -210,18 +228,25 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      const { error: updateError } = await supabase
-        .from("tasks")
-        .update({
-          attachments:
-            remainingAttachments.length > 0 ? remainingAttachments : null,
-        })
-        .eq("id", taskId);
+      try {
+        const { error: updateError } = await supabase
+          .from("tasks")
+          .update({
+            attachments:
+              remainingAttachments.length > 0 ? remainingAttachments : null,
+          })
+          .eq("id", taskId);
 
-      if (updateError) {
-        dbErrors.push(`Task ${taskId}: ${updateError.message}`);
-      } else {
-        dbUpdatedCount++;
+        if (updateError) {
+          dbErrors.push(`Task ${taskId}: ${updateError.message}`);
+        } else {
+          dbUpdatedCount++;
+        }
+      } catch (e) {
+        // 捕获单个任务更新的意外错误，继续处理下一个
+        const errorMsg = e instanceof Error ? e.message : String(e);
+        dbErrors.push(`Task ${taskId}: ${errorMsg}`);
+        console.warn(`Failed to update task ${taskId}:`, errorMsg);
       }
     }
 
@@ -233,6 +258,8 @@ Deno.serve(async (req: Request) => {
       dbUpdatedCount,
       storageErrors,
       dbErrors,
+      hasMore,
+      tasksProcessed: tasks?.length ?? 0,
     });
 
     const result: CleanupResult = {
@@ -243,6 +270,8 @@ Deno.serve(async (req: Request) => {
       dbUpdatedCount,
       storageErrors: storageErrors.length > 0 ? storageErrors : undefined,
       dbErrors: dbErrors.length > 0 ? dbErrors : undefined,
+      hasMore,
+      tasksProcessed: tasks?.length ?? 0,
     };
 
     return new Response(JSON.stringify(result), {

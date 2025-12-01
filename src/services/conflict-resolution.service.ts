@@ -422,17 +422,6 @@ export class ConflictResolutionService {
   // ========== 私有方法 ==========
 
   /**
-   * 检查两个任务是否有内容差异
-   */
-  private hasTaskContentDiff(local: Task, remote: Task): boolean {
-    return local.title !== remote.title ||
-           local.content !== remote.content ||
-           local.status !== remote.status ||
-           local.priority !== remote.priority ||
-           local.dueDate !== remote.dueDate;
-  }
-
-  /**
    * 合并连接
    * 支持软删除：如果两边都有同一连接，使用更新时间较新的版本
    */

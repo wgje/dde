@@ -38,6 +38,10 @@ export class GoJSDiagramService {
   private callbacks: DiagramCallbacks | null = null;
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
   
+  /** 保存监听器引用以便正确移除 */
+  private selectionMovedListener: ((e: go.DiagramEvent) => void) | null = null;
+  private partResizedListener: ((e: go.DiagramEvent) => void) | null = null;
+  
   /** 当前主题样式配置 */
   private readonly currentStyles = computed(() => {
     const theme = this.store.theme() as FlowTheme;
@@ -110,9 +114,15 @@ export class GoJSDiagramService {
     }
     
     if (this.diagram) {
-      // 移除所有事件监听器
-      this.diagram.removeDiagramListener('SelectionMoved', () => {});
-      this.diagram.removeDiagramListener('PartResized', () => {});
+      // 移除所有事件监听器（使用保存的引用）
+      if (this.selectionMovedListener) {
+        this.diagram.removeDiagramListener('SelectionMoved', this.selectionMovedListener);
+        this.selectionMovedListener = null;
+      }
+      if (this.partResizedListener) {
+        this.diagram.removeDiagramListener('PartResized', this.partResizedListener);
+        this.partResizedListener = null;
+      }
       
       // 清理图表内容
       this.diagram.clear();
@@ -325,8 +335,8 @@ export class GoJSDiagramService {
   private setupDiagramListeners() {
     if (!this.diagram) return;
     
-    // 监听节点移动完成
-    this.diagram.addDiagramListener('SelectionMoved', (e: any) => {
+    // 创建并保存监听器引用
+    this.selectionMovedListener = (e: go.DiagramEvent) => {
       if (this.positionSaveTimer) {
         clearTimeout(this.positionSaveTimer);
       }
@@ -340,11 +350,15 @@ export class GoJSDiagramService {
           }
         });
       }, GOJS_CONFIG.POSITION_SAVE_DEBOUNCE);
-    });
+    };
     
-    this.diagram.addDiagramListener('PartResized', () => {
+    this.partResizedListener = () => {
       this.saveAllNodePositions();
-    });
+    };
+    
+    // 监听节点移动完成
+    this.diagram.addDiagramListener('SelectionMoved', this.selectionMovedListener);
+    this.diagram.addDiagramListener('PartResized', this.partResizedListener);
   }
   
   private createNodeTemplate($: any): go.Node {

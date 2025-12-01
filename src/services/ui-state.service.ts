@@ -1,20 +1,25 @@
-import { Injectable, signal, computed } from '@angular/core';
+import { Injectable, signal, computed, DestroyRef, inject } from '@angular/core';
 
 /**
  * UI 状态服务
  * 从 StoreService 拆分出来，专门管理 UI 状态
- * 职责：
- * - 侧边栏宽度、展开状态
- * - 视图切换（text/flow）
- * - 搜索查询状态
- * - Loading 状态
- * - 移动端检测
- * - 文本视图分栏比例
+ * 
+ * 【职责边界】
+ * ✓ 侧边栏宽度、展开状态
+ * ✓ 视图切换（text/flow）
+ * ✓ 搜索查询状态（纯 UI 状态，不包含搜索逻辑）
+ * ✓ 移动端检测
+ * ✓ 文本视图分栏比例
+ * ✓ 筛选器状态
+ * ✗ 主题管理 → ThemeService
+ * ✗ 搜索逻辑 → SearchService（未来拆分）
  */
 @Injectable({
   providedIn: 'root'
 })
 export class UiStateService {
+  private destroyRef = inject(DestroyRef);
+  
   // ========== 响应式状态 ==========
   
   /** 是否为移动端 */
@@ -35,6 +40,17 @@ export class UiStateService {
   /** 当前视图 */
   readonly activeView = signal<'text' | 'flow' | null>('text');
   
+  // ========== 筛选器状态 ==========
+  
+  /** 筛选模式（根任务筛选） */
+  readonly filterMode = signal<'all' | string>('all');
+  
+  /** 阶段视图根筛选 */
+  readonly stageViewRootFilter = signal<'all' | string>('all');
+  
+  /** 阶段筛选 */
+  readonly stageFilter = signal<'all' | number>('all');
+  
   // ========== 面板展开状态 ==========
   
   /** 文本视图 - 未完成任务面板展开 */
@@ -52,7 +68,7 @@ export class UiStateService {
   /** 流程图视图 - 详情面板展开 */
   readonly isFlowDetailOpen = signal(false);
   
-  // ========== 搜索状态 ==========
+  // ========== 搜索状态（纯 UI 状态） ==========
   
   /** 统一搜索查询 */
   readonly searchQuery = signal<string>('');
@@ -61,10 +77,21 @@ export class UiStateService {
   readonly projectSearchQuery = signal<string>('');
   
   /** 防抖后的搜索查询 */
-  private readonly debouncedSearchQuery = signal<string>('');
+  readonly debouncedSearchQuery = signal<string>('');
   
   /** 搜索防抖定时器 */
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  // ========== 编辑状态 ==========
+  
+  /** 是否正在编辑 */
+  private _isEditing = false;
+  
+  /** 编辑状态定时器 */
+  private editingTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  /** 编辑超时时间（毫秒） */
+  private static readonly EDITING_TIMEOUT = 2000;
   
   // ========== 计算属性 ==========
   
@@ -74,6 +101,15 @@ export class UiStateService {
   constructor() {
     this.setupResizeListener();
     this.loadLocalPreferences();
+    
+    this.destroyRef.onDestroy(() => {
+      if (this.searchDebounceTimer) {
+        clearTimeout(this.searchDebounceTimer);
+      }
+      if (this.editingTimer) {
+        clearTimeout(this.editingTimer);
+      }
+    });
   }
   
   // ========== 公共方法 ==========
@@ -91,6 +127,20 @@ export class UiStateService {
    */
   ensureView(view: 'text' | 'flow') {
     this.activeView.set(view);
+  }
+  
+  /**
+   * 设置阶段筛选
+   */
+  setStageFilter(stage: number | 'all') {
+    this.stageFilter.set(stage);
+  }
+  
+  /**
+   * 设置筛选模式
+   */
+  setFilterMode(mode: 'all' | string) {
+    this.filterMode.set(mode);
   }
   
   /**
@@ -120,6 +170,15 @@ export class UiStateService {
       clearTimeout(this.searchDebounceTimer);
       this.searchDebounceTimer = null;
     }
+  }
+  
+  /**
+   * 重置筛选器状态
+   */
+  resetFilters(): void {
+    this.filterMode.set('all');
+    this.stageViewRootFilter.set('all');
+    this.stageFilter.set('all');
   }
   
   /**
@@ -159,6 +218,51 @@ export class UiStateService {
     this.isFlowDetailOpen.update(v => !v);
   }
   
+  /**
+   * 标记正在编辑
+   * 用于防止远程更新覆盖用户正在编辑的内容
+   */
+  markEditing(): void {
+    this._isEditing = true;
+    
+    if (this.editingTimer) {
+      clearTimeout(this.editingTimer);
+    }
+    
+    this.editingTimer = setTimeout(() => {
+      this._isEditing = false;
+      this.editingTimer = null;
+    }, UiStateService.EDITING_TIMEOUT);
+  }
+  
+  /**
+   * 是否正在编辑
+   */
+  get isEditing(): boolean {
+    return this._isEditing;
+  }
+  
+  /**
+   * 清除编辑状态
+   */
+  clearEditingState(): void {
+    this._isEditing = false;
+    if (this.editingTimer) {
+      clearTimeout(this.editingTimer);
+      this.editingTimer = null;
+    }
+  }
+  
+  /**
+   * 清空所有 UI 状态
+   */
+  clearAllState(): void {
+    this.clearSearch();
+    this.resetFilters();
+    this.clearEditingState();
+    this.isFlowDetailOpen.set(false);
+  }
+  
   // ========== 私有方法 ==========
   
   /**
@@ -167,8 +271,14 @@ export class UiStateService {
   private setupResizeListener() {
     if (typeof window === 'undefined') return;
     
-    window.addEventListener('resize', () => {
+    const handleResize = () => {
       this.isMobile.set(window.innerWidth < 768);
+    };
+    
+    window.addEventListener('resize', handleResize);
+    
+    this.destroyRef.onDestroy(() => {
+      window.removeEventListener('resize', handleResize);
     });
   }
   

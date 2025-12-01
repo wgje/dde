@@ -284,4 +284,18 @@ export class LoginModalComponent {
   setResetPasswordSent(sent: boolean) {
     this.resetPasswordSent.set(sent);
   }
+  
+  /**
+   * 重置所有表单状态
+   * 应在模态框关闭时调用，防止敏感信息残留
+   */
+  resetFormState() {
+    this.email.set('');
+    this.password.set('');
+    this.confirmPassword.set('');
+    this._internalError.set(null);
+    this.isSignupMode.set(false);
+    this.isResetPasswordMode.set(false);
+    this.resetPasswordSent.set(false);
+  }
 }

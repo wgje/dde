@@ -1,6 +1,7 @@
 import { inject } from '@angular/core';
 import { CanActivateFn, Router, ActivatedRouteSnapshot } from '@angular/router';
 import { StoreService } from '../store.service';
+import { AuthService } from '../auth.service';
 import { ToastService } from '../toast.service';
 
 /**
@@ -41,11 +42,16 @@ async function waitForDataInit(
 }
 
 /**
- * 项目存在性守卫
- * 检查访问的项目是否存在，防止访问无效项目 ID
+ * 项目存在性和权限守卫
+ * 检查访问的项目是否存在，并验证用户是否有权限访问
+ * 
+ * 权限检查逻辑：
+ * 1. 项目必须存在于用户的项目列表中（由 StoreService 加载的都是当前用户的项目）
+ * 2. 未来实现多用户/团队功能时，需要检查 owner_id 和协作者列表
  */
 export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSnapshot, state) => {
   const store = inject(StoreService);
+  const authService = inject(AuthService);
   const router = inject(Router);
   const toast = inject(ToastService);
   
@@ -68,31 +74,45 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   
   // 检查项目是否存在
   const projects = store.projects();
-  const projectExists = projects.some(p => p.id === projectId);
+  const project = projects.find(p => p.id === projectId);
   
-  if (projectExists) {
-    return true;
+  if (!project) {
+    // 项目确实不存在，重定向到项目列表并显示提示
+    toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
+    void router.navigate(['/projects']);
+    return false;
   }
   
-  // 项目确实不存在，重定向到项目列表并显示提示
-  // 注意：之前这里有一个"正在加载时返回 true"的逻辑，但这会导致竞态条件
-  // 现在我们已经等待了数据加载完成，所以可以确定项目确实不存在
-  toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
+  // 权限检查：验证当前用户是否有权限访问该项目
+  // 当前实现：StoreService 只加载当前用户的项目，所以如果项目存在于列表中，用户就有权限
+  // 未来实现多用户功能时，需要检查 project.ownerId === currentUserId 或 project.collaborators.includes(currentUserId)
+  const currentUserId = authService.currentUserId();
   
-  void router.navigate(['/projects']);
-  return false;
+  // 如果用户已登录但项目列表为空，可能是数据还未同步或项目真的不属于该用户
+  if (currentUserId && projects.length === 0) {
+    // 允许访问，因为可能是首次登录还没有项目
+    // 但如果指定了 projectId，则应该已经被上面的检查拦截
+  }
+  
+  // TODO: 未来多用户/团队功能实现时，在此处添加以下检查：
+  // const hasAccess = project.ownerId === currentUserId || 
+  //                   project.collaborators?.includes(currentUserId) ||
+  //                   project.isPublic;
+  // if (!hasAccess) {
+  //   toast.error('无权访问', '您没有权限访问此项目');
+  //   void router.navigate(['/projects']);
+  //   return false;
+  // }
+  
+  return true;
 };
 
 /**
- * 项目权限守卫（预留）
+ * 项目权限守卫
  * 用于未来的多用户/团队功能
  * 
  * @deprecated 当前版本此守卫等同于 projectExistsGuard。
- * 未来实现多用户/团队功能时会扩展为检查 owner_id 和协作者列表。
  * 新代码请直接使用 projectExistsGuard。
+ * 保留此导出仅为向后兼容。
  */
-export const projectAccessGuard: CanActivateFn = (route: ActivatedRouteSnapshot, state) => {
-  // 当前版本项目仅属于当前用户
-  // 未来可以扩展为检查项目的 owner_id 和协作者列表
-  return projectExistsGuard(route, state);
-};
+export const projectAccessGuard: CanActivateFn = projectExistsGuard;

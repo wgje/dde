@@ -5,6 +5,7 @@ import { StoreService } from '../../services/store.service';
 import { Task, Attachment } from '../../models';
 import { AttachmentManagerComponent } from '../attachment-manager.component';
 import { renderMarkdown } from '../../utils/markdown';
+import { FEATURE_FLAGS } from '../../config/feature-flags';
 
 /**
  * 任务详情面板组件
@@ -159,28 +160,30 @@ import { renderMarkdown } from '../../utils/markdown';
                   }
               </div>
               
-              <!-- 预览模式下的属性显示 -->
-              <div class="flex flex-wrap gap-2 text-[10px] pt-1">
-                  @if (task.priority) {
-                      <span class="px-1.5 py-0.5 rounded"
-                            [class.bg-red-100]="task.priority === 'urgent'"
-                            [class.text-red-700]="task.priority === 'urgent'"
-                            [class.bg-orange-100]="task.priority === 'high'"
-                            [class.text-orange-700]="task.priority === 'high'"
-                            [class.bg-yellow-100]="task.priority === 'medium'"
-                            [class.text-yellow-700]="task.priority === 'medium'"
-                            [class.bg-blue-100]="task.priority === 'low'"
-                            [class.text-blue-700]="task.priority === 'low'">
-                          {{ getPriorityLabel(task.priority) }}
-                      </span>
-                  }
-                  @if (task.dueDate) {
-                      <span class="text-stone-500">📅 {{ task.dueDate | date:'MM-dd' }}</span>
-                  }
-              </div>
+              <!-- 预览模式下的属性显示（Feature Flag 控制） -->
+              @if (featureFlags.ENABLE_PRIORITY || featureFlags.ENABLE_DUE_DATE) {
+                <div class="flex flex-wrap gap-2 text-[10px] pt-1">
+                    @if (featureFlags.ENABLE_PRIORITY && task.priority) {
+                        <span class="px-1.5 py-0.5 rounded"
+                              [class.bg-red-100]="task.priority === 'urgent'"
+                              [class.text-red-700]="task.priority === 'urgent'"
+                              [class.bg-orange-100]="task.priority === 'high'"
+                              [class.text-orange-700]="task.priority === 'high'"
+                              [class.bg-yellow-100]="task.priority === 'medium'"
+                              [class.text-yellow-700]="task.priority === 'medium'"
+                              [class.bg-blue-100]="task.priority === 'low'"
+                              [class.text-blue-700]="task.priority === 'low'">
+                            {{ getPriorityLabel(task.priority) }}
+                        </span>
+                    }
+                    @if (featureFlags.ENABLE_DUE_DATE && task.dueDate) {
+                        <span class="text-stone-500">📅 {{ task.dueDate | date:'MM-dd' }}</span>
+                    }
+                </div>
+              }
               
-              <!-- 预览模式下的标签 -->
-              @if (task.tags?.length) {
+              <!-- 预览模式下的标签（Feature Flag 控制） -->
+              @if (featureFlags.ENABLE_TAGS && task.tags?.length) {
                   <div class="flex flex-wrap gap-1">
                       @for (tag of task.tags; track tag) {
                           <span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">{{ tag }}</span>
@@ -197,56 +200,64 @@ import { renderMarkdown } from '../../utils/markdown';
                   class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono leading-relaxed"
                   placeholder="输入内容（支持 Markdown）..."></textarea>
 
-              <!-- 任务属性：优先级和截止日期 -->
-              <div class="flex gap-2">
-                  <div class="flex-1">
-                      <label class="text-[9px] text-stone-400 block mb-0.5">优先级</label>
-                      <select 
-                          [ngModel]="task.priority || ''"
-                          (ngModelChange)="priorityChange.emit({ taskId: task.id, priority: $event || undefined })"
-                          class="w-full text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
-                          <option value="">无</option>
-                          <option value="low">低</option>
-                          <option value="medium">中</option>
-                          <option value="high">高</option>
-                          <option value="urgent">紧急</option>
-                      </select>
-                  </div>
-                  <div class="flex-1">
-                      <label class="text-[9px] text-stone-400 block mb-0.5">截止日期</label>
-                      <input 
-                          type="date"
-                          [ngModel]="task.dueDate || ''"
-                          (ngModelChange)="dueDateChange.emit({ taskId: task.id, dueDate: $event || null })"
-                          class="w-full text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
-                  </div>
-              </div>
+              <!-- 任务属性：优先级和截止日期（Feature Flag 控制） -->
+              @if (featureFlags.ENABLE_PRIORITY || featureFlags.ENABLE_DUE_DATE) {
+                <div class="flex gap-2">
+                    @if (featureFlags.ENABLE_PRIORITY) {
+                      <div class="flex-1">
+                          <label class="text-[9px] text-stone-400 block mb-0.5">优先级</label>
+                          <select 
+                              [ngModel]="task.priority || ''"
+                              (ngModelChange)="priorityChange.emit({ taskId: task.id, priority: $event || undefined })"
+                              class="w-full text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
+                              <option value="">无</option>
+                              <option value="low">低</option>
+                              <option value="medium">中</option>
+                              <option value="high">高</option>
+                              <option value="urgent">紧急</option>
+                          </select>
+                      </div>
+                    }
+                    @if (featureFlags.ENABLE_DUE_DATE) {
+                      <div class="flex-1">
+                          <label class="text-[9px] text-stone-400 block mb-0.5">截止日期</label>
+                          <input 
+                              type="date"
+                              [ngModel]="task.dueDate || ''"
+                              (ngModelChange)="dueDateChange.emit({ taskId: task.id, dueDate: $event || null })"
+                              class="w-full text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
+                      </div>
+                    }
+                </div>
+              }
 
-              <!-- 标签 -->
-              <div>
-                  <label class="text-[9px] text-stone-400 block mb-0.5">标签</label>
-                  <div class="flex flex-wrap gap-1 mb-1">
-                      @for (tag of task.tags || []; track tag) {
-                          <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">
-                              {{ tag }}
-                              <button (click)="tagRemove.emit({ taskId: task.id, tag })" class="hover:text-indigo-900">×</button>
-                          </span>
-                      }
-                  </div>
-                  <div class="flex gap-1">
-                      <input 
-                          #tagInput
-                          type="text"
-                          placeholder="添加标签..."
-                          (keydown.enter)="addTag(task.id, tagInput)"
-                          class="flex-1 text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
-                      <button 
-                          (click)="addTag(task.id, tagInput)"
-                          class="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-[10px] transition-colors">
-                          +
-                      </button>
-                  </div>
-              </div>
+              <!-- 标签（Feature Flag 控制） -->
+              @if (featureFlags.ENABLE_TAGS) {
+                <div>
+                    <label class="text-[9px] text-stone-400 block mb-0.5">标签</label>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                        @for (tag of task.tags || []; track tag) {
+                            <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">
+                                {{ tag }}
+                                <button (click)="tagRemove.emit({ taskId: task.id, tag })" class="hover:text-indigo-900">×</button>
+                            </span>
+                        }
+                    </div>
+                    <div class="flex gap-1">
+                        <input 
+                            #tagInput
+                            type="text"
+                            placeholder="添加标签..."
+                            (keydown.enter)="addTag(task.id, tagInput)"
+                            class="flex-1 text-[10px] border border-stone-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white">
+                        <button 
+                            (click)="addTag(task.id, tagInput)"
+                            class="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded text-[10px] transition-colors">
+                            +
+                        </button>
+                    </div>
+                </div>
+              }
           }
 
           <div class="flex gap-1.5 pt-1">
@@ -458,6 +469,9 @@ import { renderMarkdown } from '../../utils/markdown';
 })
 export class FlowTaskDetailComponent {
   readonly store = inject(StoreService);
+  
+  // Feature Flags - 暴露给模板使用
+  readonly featureFlags = FEATURE_FLAGS;
   
   // 输入
   readonly task = input<Task | null>(null);

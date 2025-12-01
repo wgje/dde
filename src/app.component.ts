@@ -8,6 +8,7 @@ import { ToastService } from './services/toast.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { MigrationService } from './services/migration.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
+import { ModalService, type DeleteProjectData, type ConflictData } from './services/modal.service';
 import { ToastContainerComponent } from './components/toast-container.component';
 import { SyncStatusComponent } from './components/sync-status.component';
 import { OfflineBannerComponent } from './components/offline-banner.component';
@@ -60,6 +61,7 @@ export class AppComponent implements OnInit, OnDestroy {
   supabaseClient = inject(SupabaseClientService);
   migrationService = inject(MigrationService);
   errorHandler = inject(GlobalErrorHandler);
+  modal = inject(ModalService);
   
   private route = inject(ActivatedRoute);
   private router = inject(Router);
@@ -77,9 +79,6 @@ export class AppComponent implements OnInit, OnDestroy {
   isCheckingSession = signal(true);
   sessionEmail = signal<string | null>(null);
   isReloginMode = signal(false);
-  
-  // 配置错误提示对话框
-  showConfigHelp = signal(false);
   
   // 注册模式
   isSignupMode = signal(false);
@@ -178,13 +177,13 @@ export class AppComponent implements OnInit, OnDestroy {
 
   readonly showSettingsAuthForm = computed(() => !this.store.currentUserId() || this.isReloginMode());
   
-  // 冲突解决相关
-  showConflictModal = signal(false);
-  conflictData = signal<{
-    localProject: Project;
-    remoteProject: Project;
-    projectId: string;
-  } | null>(null);
+  // ========== 模态框状态（代理到 ModalService）==========
+  // 使用 ModalService 统一管理，以下为便捷访问器
+  
+  /** 冲突数据 - 从 ModalService 获取 */
+  readonly conflictData = computed(() => 
+    this.modal.getData('conflict') as ConflictData | undefined
+  );
   
   currentFilterLabel = computed(() => {
     const filterId = this.store.filterMode();
@@ -193,19 +192,20 @@ export class AppComponent implements OnInit, OnDestroy {
     return task ? task.title : '全部任务';
   });
 
-  showSettings = signal(false);
-  showNewProjectModal = signal(false);
-  showLoginModal = signal(false);
+  // 模态框开关状态 - 便捷访问器（代理到 ModalService）
+  readonly showSettings = computed(() => this.modal.isOpen('settings'));
+  readonly showNewProjectModal = computed(() => this.modal.isOpen('newProject'));
+  readonly showLoginModal = computed(() => this.modal.isOpen('login'));
+  readonly showDeleteProjectModal = computed(() => this.modal.isOpen('deleteProject'));
+  readonly showTrashModal = computed(() => this.modal.isOpen('trash'));
+  readonly showMigrationModal = computed(() => this.modal.isOpen('migration'));
+  readonly showConflictModal = computed(() => this.modal.isOpen('conflict'));
   
-  // 删除项目确认对话框
-  showDeleteProjectModal = signal(false);
-  deleteProjectTarget = signal<{ id: string; name: string } | null>(null);
-  
-  // 回收站模态框
-  showTrashModal = signal(false);
-  
-  // 数据迁移对话框
-  showMigrationModal = signal(false);
+  /** 删除项目目标 - 从 ModalService 获取 */
+  readonly deleteProjectTarget = computed(() => {
+    const data = this.modal.getData('deleteProject') as DeleteProjectData | undefined;
+    return data ? { id: data.projectId, name: data.projectName } : null;
+  });
   
   // 项目重命名状态
   renamingProjectId = signal<string | null>(null);
@@ -319,10 +319,9 @@ export class AppComponent implements OnInit, OnDestroy {
   }
   
   private setupConflictHandler() {
-    // 监听冲突事件
+    // 监听冲突事件 - 使用 ModalService 打开冲突模态框
     this.store.onConflict = (local, remote, projectId) => {
-      this.conflictData.set({ localProject: local, remoteProject: remote, projectId });
-      this.showConflictModal.set(true);
+      this.modal.show('conflict', { localProject: local, remoteProject: remote, projectId });
     };
   }
   
@@ -333,8 +332,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.store.resolveConflict(data.projectId, 'local');
       this.toast.success('已使用本地版本');
     }
-    this.showConflictModal.set(false);
-    this.conflictData.set(null);
+    this.modal.closeByType('conflict', { choice: 'local' });
   }
   
   // 解决冲突：使用远程版本
@@ -344,8 +342,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.store.resolveConflict(data.projectId, 'remote');
       this.toast.success('已使用云端版本');
     }
-    this.showConflictModal.set(false);
-    this.conflictData.set(null);
+    this.modal.closeByType('conflict', { choice: 'remote' });
   }
   
   // 解决冲突：智能合并
@@ -355,14 +352,12 @@ export class AppComponent implements OnInit, OnDestroy {
       this.store.resolveConflict(data.projectId, 'merge');
       this.toast.success('智能合并完成');
     }
-    this.showConflictModal.set(false);
-    this.conflictData.set(null);
+    this.modal.closeByType('conflict', { choice: 'merge' });
   }
   
   // 取消冲突解决（稍后处理）
   cancelConflictResolution() {
-    this.showConflictModal.set(false);
-    // 不清除 conflictData，以便稍后可以重新打开
+    this.modal.closeByType('conflict', { choice: 'cancel' });
     this.toast.info('冲突待解决，下次同步时会再次提示');
   }
   
@@ -521,9 +516,9 @@ export class AppComponent implements OnInit, OnDestroy {
       await this.checkMigrationAfterLogin();
       
       this.isReloginMode.set(false);
-      this.showLoginModal.set(false);
+      this.modal.closeByType('login', { success: true, userId: userId ?? undefined });
       if (opts?.closeSettings) {
-        this.showSettings.set(false);
+        this.modal.closeByType('settings');
       }
     } catch (e: any) {
       this.authError.set(e?.message ?? String(e));
@@ -568,7 +563,7 @@ export class AppComponent implements OnInit, OnDestroy {
         // 注册成功且自动登录
         this.sessionEmail.set(this.auth.sessionEmail());
         await this.store.setCurrentUser(this.auth.currentUserId());
-        this.showLoginModal.set(false);
+        this.modal.closeByType('login', { success: true, userId: this.auth.currentUserId() ?? undefined });
         this.isSignupMode.set(false);
       }
     } catch (e: any) {
@@ -631,18 +626,31 @@ export class AppComponent implements OnInit, OnDestroy {
     this.authError.set(null);
   }
 
-  async signOut() {
-    // 先清空本地敏感数据，防止数据泄露
+async signOut() {
+    // 先清空本地敏感数据，防止数据泄漏
     this.store.clearLocalData();
     
     if (this.auth.isConfigured) {
       await this.auth.signOut();
     }
+    
+    // 清除所有用户相关的 signals
     this.sessionEmail.set(null);
+    this.authEmail.set('');
     this.authPassword.set('');
+    this.authConfirmPassword.set('');
+    this.authError.set(null);
     this.isReloginMode.set(false);
     this.isSignupMode.set(false);
     this.isResetPasswordMode.set(false);
+    this.resetPasswordSent.set(false);
+    
+    // 清除项目相关状态
+    this.expandedProjectId.set(null);
+    this.isEditingDescription.set(false);
+    this.projectDrafts.set({});
+    this.unifiedSearchQuery.set('');
+    
     await this.store.setCurrentUser(null);
   }
 
@@ -784,7 +792,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   createNewProject() {
-    this.showNewProjectModal.set(true);
+    this.modal.show('newProject');
   }
   
   /**
@@ -813,7 +821,7 @@ export class AppComponent implements OnInit, OnDestroy {
           connections: []
       });
       if (result.success) {
-        this.showNewProjectModal.set(false);
+        this.modal.closeByType('newProject', { name, description: desc });
       }
       // 如果失败，模态框保持打开，错误消息由 store 通过 toast 显示
   }
@@ -821,8 +829,7 @@ export class AppComponent implements OnInit, OnDestroy {
   // 确认删除项目
   confirmDeleteProject(projectId: string, projectName: string, event: Event) {
     event.stopPropagation();
-    this.deleteProjectTarget.set({ id: projectId, name: projectName });
-    this.showDeleteProjectModal.set(true);
+    this.modal.show('deleteProject', { projectId, projectName });
   }
   
   // 执行删除项目
@@ -832,28 +839,25 @@ export class AppComponent implements OnInit, OnDestroy {
       const result = await this.store.deleteProject(target.id);
       if (result.success) {
         this.expandedProjectId.set(null);
-        this.showDeleteProjectModal.set(false);
-        this.deleteProjectTarget.set(null);
+        this.modal.closeByType('deleteProject', { confirmed: true });
       }
       // 如果失败，模态框保持打开，错误消息由 store 通过 toast 显示
     } else {
-      this.showDeleteProjectModal.set(false);
-      this.deleteProjectTarget.set(null);
+      this.modal.closeByType('deleteProject', { confirmed: false });
     }
   }
   
   // 取消删除项目
   cancelDeleteProject() {
-    this.showDeleteProjectModal.set(false);
-    this.deleteProjectTarget.set(null);
+    this.modal.closeByType('deleteProject', { confirmed: false });
   }
 
   openSettings() {
-    this.showSettings.set(true);
+    this.modal.show('settings');
   }
 
   closeSettings() {
-    this.showSettings.set(false);
+    this.modal.closeByType('settings');
     this.isReloginMode.set(false);
   }
 
@@ -908,7 +912,7 @@ export class AppComponent implements OnInit, OnDestroy {
     const needsMigration = this.migrationService.checkMigrationNeeded(remoteProjects);
     
     if (needsMigration) {
-      this.showMigrationModal.set(true);
+      this.modal.show('migration');
     }
   }
   
@@ -916,7 +920,7 @@ export class AppComponent implements OnInit, OnDestroy {
    * 迁移完成后的处理
    */
   handleMigrationComplete() {
-    this.showMigrationModal.set(false);
+    this.modal.closeByType('migration');
     // 刷新项目列表
     void this.store.loadProjects();
     this.toast.success('数据迁移完成');
@@ -926,7 +930,7 @@ export class AppComponent implements OnInit, OnDestroy {
    * 关闭迁移对话框（稍后处理）
    */
   closeMigrationModal() {
-    this.showMigrationModal.set(false);
+    this.modal.closeByType('migration');
     this.toast.info('您可以稍后在设置中处理数据迁移');
   }
 

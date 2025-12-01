@@ -1,6 +1,7 @@
 import { Injectable, signal, computed, inject } from '@angular/core';
 import { Project, Task, Connection, UnfinishedItem } from '../models';
 import { LayoutService } from './layout.service';
+import { UiStateService } from './ui-state.service';
 import { LAYOUT_CONFIG, LETTERS, SUPERSCRIPT_DIGITS } from '../config/constants';
 import {
   Result, OperationError, ErrorCodes, success, failure
@@ -9,26 +10,27 @@ import {
 /**
  * 项目状态服务
  * 从 StoreService 拆分出来，专注于项目和任务的状态管理
- * 职责：
- * - 项目/任务/连接的状态存储
- * - 计算属性（stages, unassignedTasks 等）
- * - 纯状态操作（不涉及同步）
+ * 
+ * 【职责边界】
+ * ✓ 项目/任务/连接的状态存储（signals）
+ * ✓ 计算属性（stages, unassignedTasks, deletedTasks 等）
+ * ✓ 纯状态读取操作
+ * ✓ displayId 压缩显示
+ * ✗ 数据修改操作 → TaskOperationService
+ * ✗ 数据持久化 → SyncCoordinatorService
+ * ✗ UI 状态 → UiStateService
  */
 @Injectable({
   providedIn: 'root'
 })
 export class ProjectStateService {
   private layoutService = inject(LayoutService);
+  private uiState = inject(UiStateService);
   
   // ========== 核心数据状态 ==========
   
   readonly projects = signal<Project[]>([]);
   readonly activeProjectId = signal<string | null>(null);
-  readonly activeView = signal<'text' | 'flow' | null>('text');
-  readonly filterMode = signal<'all' | string>('all');
-  readonly stageViewRootFilter = signal<'all' | string>('all');
-  readonly stageFilter = signal<'all' | number>('all');
-  readonly searchQuery = signal<string>('');
 
   // ========== 计算属性 ==========
 
@@ -70,7 +72,7 @@ export class ProjectStateService {
   readonly unfinishedItems = computed<UnfinishedItem[]>(() => {
     const items: UnfinishedItem[] = [];
     const tasks = this.tasks();
-    const filter = this.filterMode();
+    const filter = this.uiState.filterMode();
     
     let rootDisplayId = '';
     if (filter !== 'all') {
@@ -101,21 +103,6 @@ export class ProjectStateService {
       }
     });
     return items;
-  });
-  
-  readonly searchResults = computed(() => {
-    const query = this.searchQuery().toLowerCase().trim();
-    if (!query) return [];
-    
-    return this.tasks().filter(t => 
-      !t.deletedAt && (
-        t.title.toLowerCase().includes(query) ||
-        t.content.toLowerCase().includes(query) ||
-        t.displayId.toLowerCase().includes(query) ||
-        (t.attachments?.some(a => a.name.toLowerCase().includes(query)) ?? false) ||
-        (t.tags?.some(tag => tag.toLowerCase().includes(query)) ?? false)
-      )
-    );
   });
 
   readonly rootTasks = computed(() => {
@@ -171,28 +158,6 @@ export class ProjectStateService {
   }
 
   /**
-   * 设置阶段筛选
-   */
-  setStageFilter(stage: number | 'all') {
-    this.stageFilter.set(stage);
-  }
-
-  /**
-   * 切换视图
-   */
-  toggleView(view: 'text' | 'flow') {
-    const current = this.activeView();
-    this.activeView.set(current === view ? null : view);
-  }
-
-  /**
-   * 确保显示指定视图
-   */
-  ensureView(view: 'text' | 'flow') {
-    this.activeView.set(view);
-  }
-
-  /**
    * 获取任务的关联连接
    */
   getTaskConnections(taskId: string): { 
@@ -239,22 +204,6 @@ export class ProjectStateService {
     return project.viewState;
   }
 
-  // ========== 内部更新方法（供 StoreService 调用） ==========
-
-  /**
-   * 直接更新项目列表
-   */
-  setProjects(projects: Project[]) {
-    this.projects.set(projects);
-  }
-
-  /**
-   * 更新项目列表
-   */
-  updateProjects(updater: (projects: Project[]) => Project[]) {
-    this.projects.update(updater);
-  }
-
   /**
    * 获取项目（用于外部读取）
    */
@@ -262,15 +211,34 @@ export class ProjectStateService {
     return this.projects().find(p => p.id === projectId);
   }
 
+  // ========== 内部更新方法（供 StoreService 调用） ==========
+
+  /**
+   * 直接更新项目列表
+   */
+  setProjects(projects: Project[]): void {
+    this.projects.set(projects);
+  }
+
+  /**
+   * 更新项目列表
+   */
+  updateProjects(updater: (projects: Project[]) => Project[]): void {
+    this.projects.update(updater);
+  }
+
+  /**
+   * 设置活动项目 ID
+   */
+  setActiveProjectId(projectId: string | null): void {
+    this.activeProjectId.set(projectId);
+  }
+
   /**
    * 清空数据
    */
-  clearData() {
+  clearData(): void {
     this.projects.set([]);
     this.activeProjectId.set(null);
-    this.searchQuery.set('');
-    this.filterMode.set('all');
-    this.stageViewRootFilter.set('all');
-    this.stageFilter.set('all');
   }
 }
