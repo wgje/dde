@@ -746,6 +746,7 @@ export class SyncService {
   /**
    * 从云端加载项目列表
    * 从独立的 tasks 和 connections 表加载数据
+   * 添加超时保护，防止网络问题导致无限等待
    */
   async loadProjectsFromCloud(userId: string): Promise<Project[]> {
     if (!userId || !this.supabase.isConfigured) {
@@ -754,6 +755,39 @@ export class SyncService {
     
     this.isLoadingRemote.set(true);
     
+    // 超时保护
+    const timeoutMs = SYNC_CONFIG.CLOUD_LOAD_TIMEOUT;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`云端数据加载超时（${timeoutMs / 1000}秒）`));
+      }, timeoutMs);
+    });
+    
+    const loadPromise = this.loadProjectsFromCloudInternal(userId);
+    
+    try {
+      const projects = await Promise.race([loadPromise, timeoutPromise]);
+      return projects;
+    } catch (e: unknown) {
+      this.logger.error('Loading from Supabase failed', e);
+      this.syncState.update(s => ({
+        ...s,
+        syncError: extractErrorMessage(e),
+        offlineMode: true
+      }));
+      return [];
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      this.isLoadingRemote.set(false);
+    }
+  }
+  
+  /**
+   * 内部方法：实际执行云端数据加载
+   */
+  private async loadProjectsFromCloudInternal(userId: string): Promise<Project[]> {
     try {
       const { data, error } = await this.supabase.client()
         .from('projects')
@@ -781,15 +815,8 @@ export class SyncService {
       
       return projects;
     } catch (e: unknown) {
-      this.logger.error('Loading from Supabase failed', e);
-      this.syncState.update(s => ({
-        ...s,
-        syncError: extractErrorMessage(e),
-        offlineMode: true
-      }));
-      return [];
-    } finally {
-      this.isLoadingRemote.set(false);
+      // 重新抛出，让外层 loadProjectsFromCloud 统一处理
+      throw e;
     }
   }
 

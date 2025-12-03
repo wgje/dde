@@ -36,6 +36,8 @@ export const SYNC_CONFIG = {
   RECONNECT_BASE_DELAY: 1000,
   /** 重连最大延迟（毫秒） */
   RECONNECT_MAX_DELAY: 30000,
+  /** 云端数据加载超时（毫秒）- 防止网络问题导致无限等待 */
+  CLOUD_LOAD_TIMEOUT: 15000,
 } as const;
 
 /**
