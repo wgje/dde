@@ -120,6 +120,7 @@ export class UserSessionService {
   /**
    * 加载项目列表
    * 支持离线模式和在线模式
+   * 即使云端加载失败，也会尝试从本地缓存恢复
    */
   async loadProjects(): Promise<void> {
     const userId = this.currentUserId();
@@ -130,7 +131,17 @@ export class UserSessionService {
 
     const previousActive = this.projectState.activeProjectId();
     const offlineProjects = this.syncCoordinator.loadOfflineSnapshot();
-    const projects = await this.syncCoordinator.loadProjectsFromCloud(userId);
+    
+    let projects: Project[] = [];
+    try {
+      projects = await this.syncCoordinator.loadProjectsFromCloud(userId);
+    } catch (e) {
+      console.error('云端数据加载失败:', e);
+      // 加载失败时使用本地缓存
+      this.loadFromCacheOrSeed();
+      this.toastService.warning('网络问题', '无法连接云端，已加载本地缓存数据');
+      return;
+    }
 
     if (projects.length > 0) {
       const validatedProjects: Project[] = [];
@@ -202,14 +213,26 @@ export class UserSessionService {
 
   /**
    * 加载用户数据
+   * 
+   * 关键设计：loadProjects 是同步阻塞的（等待完成），
+   * 但 initRealtimeSubscription 和 tryReloadConflictData 是后台执行的。
+   * 这确保用户能尽快看到数据，而实时订阅在后台建立。
    */
   private async loadUserData(userId: string): Promise<void> {
+    // 先加载项目数据（这个需要等待）
     await this.loadProjects();
-    await this.syncCoordinator.initRealtimeSubscription(userId);
+    
+    // 实时订阅和冲突数据重载在后台执行，不阻塞 UI
+    // 使用 Promise 而非 await，让它们在后台运行
+    this.syncCoordinator.initRealtimeSubscription(userId).catch(e => {
+      console.warn('实时订阅初始化失败（后台）:', e);
+    });
 
-    await this.syncCoordinator.tryReloadConflictData(userId, (id) =>
+    this.syncCoordinator.tryReloadConflictData(userId, (id) =>
       this.projectState.projects().find(p => p.id === id)
-    );
+    ).catch(e => {
+      console.warn('冲突数据重载失败（后台）:', e);
+    });
   }
 
   /**
