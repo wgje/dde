@@ -7,40 +7,21 @@ import { AppComponent } from './src/app.component';
 import { routes } from './src/app.routes';
 import { GlobalErrorHandler } from './src/services/global-error-handler.service';
 
-// ============= BUILD ID: 2025-12-03-v11-FIX-OVERLAY =============
-const BUILD_ID = '2025-12-03-v11-FIX-OVERLAY';
+// ============= BUILD ID: 2025-12-03-v12-REMOVE-DEBUG =============
+const BUILD_ID = '2025-12-03-v12-REMOVE-DEBUG';
 const START_TIME = Date.now();
 
-// 🔥 移动端屏幕日志 - 始终显示（用于调试后移除）
-(function() {
-  const logDiv = document.createElement('div');
-  logDiv.id = 'screen-debug-log';
-  // 添加 pointer-events: none 确保不会阻挡用户交互
-  logDiv.style.cssText = 'position:fixed;bottom:0;left:0;right:0;height:150px;background:rgba(0,0,0,0.9);color:#0f0;font-size:11px;overflow:auto;z-index:999999;padding:4px;font-family:monospace;pointer-events:none;';
-  document.body.appendChild(logDiv);
+// 简化日志 - 仅输出到控制台，不创建屏幕浮层
+const log = (msg: string, color = '#0f0') => {
+  const elapsed = Date.now() - START_TIME;
+  console.log(`[NanoFlow +${elapsed}ms] ${msg}`);
+};
+const logError = (msg: string) => {
+  const elapsed = Date.now() - START_TIME;
+  console.error(`[NanoFlow +${elapsed}ms] ❌ ${msg}`);
+};
 
-  const log = (msg: string, color = '#0f0') => {
-    const p = document.createElement('div');
-    p.style.color = color;
-    p.style.marginBottom = '2px';
-    const elapsed = Date.now() - START_TIME;
-    p.textContent = `[+${elapsed}ms] ${msg}`;
-    logDiv.appendChild(p);
-    logDiv.scrollTop = logDiv.scrollHeight;
-    // 同时输出到控制台
-    console.log(`[+${elapsed}ms] ${msg}`);
-  };
-
-  (window as any).__LOG__ = log;
-  (window as any).__LOG_ERROR__ = (msg: string) => log(msg, '#f00');
-  
-  log('Build: ' + BUILD_ID);
-  log('UA: ' + navigator.userAgent.substring(0, 60));
-})();
-
-const log = (window as any).__LOG__ as (msg: string, color?: string) => void;
-const logError = (window as any).__LOG_ERROR__ as (msg: string) => void;
-
+log('Build: ' + BUILD_ID);
 log('🚀 main.ts 开始执行');
 log('Angular 版本: ' + VERSION.full);
 
@@ -56,8 +37,6 @@ if (!zoneLoaded) {
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 log('设备: ' + (isMobile ? (isIOS ? 'iOS' : 'Android') : 'Desktop'));
-
-log('🔧 变更检测: Zone.js (标准)');
 
 // 强制注销所有 Service Worker - 避免缓存问题
 if ('serviceWorker' in navigator) {
@@ -75,8 +54,6 @@ if ('serviceWorker' in navigator) {
 
 log('🏗️ 准备启动 Angular...');
 
-log('⏳ 开始 bootstrapApplication...');
-
 bootstrapApplication(AppComponent, {
   providers: [
     { provide: ErrorHandler, useClass: GlobalErrorHandler },
@@ -93,7 +70,7 @@ bootstrapApplication(AppComponent, {
   ]
 }).then((appRef) => {
   const elapsed = Date.now() - START_TIME;
-  log('✅ Angular 启动成功! 耗时: ' + elapsed + 'ms', '#0f0');
+  log('✅ Angular 启动成功! 耗时: ' + elapsed + 'ms');
   
   // 标记应用就绪
   (window as any).__NANOFLOW_READY__ = true;
@@ -102,51 +79,16 @@ bootstrapApplication(AppComponent, {
   const loader = document.getElementById('initial-loader');
   if (loader) loader.style.display = 'none';
   
-  // 检查应用状态
-  setTimeout(() => {
-    const appRoot = document.querySelector('app-root');
-    log('📊 app-root children: ' + (appRoot?.children.length ?? 0));
-    log('📊 body innerHTML length: ' + document.body.innerHTML.length);
-    
-    // 检测是否有遮挡层
-    const overlays = document.querySelectorAll('[style*="position:fixed"], [style*="position: fixed"]');
-    log('📊 Fixed overlays: ' + overlays.length);
-    
-    // 检测是否有 pointer-events:none
-    const appContainer = document.querySelector('[data-testid="app-container"]');
-    if (appContainer) {
-      const style = getComputedStyle(appContainer);
-      log('📊 app-container pointer-events: ' + style.pointerEvents);
-      log('📊 app-container display: ' + style.display);
-    }
-  }, 500);
-  
-  // 10秒后隐藏调试日志面板（生产环境）
-  setTimeout(() => {
-    const debugLog = document.getElementById('screen-debug-log');
-    if (debugLog) debugLog.style.display = 'none';
-  }, 10000);
-  
   log('🎉 应用完全就绪');
 }).catch(err => {
   logError('❌ 启动失败: ' + (err?.message || err));
-  logError('错误类型: ' + (err?.name || 'Unknown'));
   
   // 检查常见错误类型
   const errStr = String(err?.message || err);
   if (errStr.includes('NG0908')) {
     logError('诊断: Zone.js 冲突 (NG0908)');
-  } else if (errStr.includes('inject')) {
+  } else if (errStr.includes('inject') || errStr.includes('NullInjector')) {
     logError('诊断: 依赖注入错误');
-  } else if (errStr.includes('NullInjector')) {
-    logError('诊断: 缺少 Provider');
-    // 尝试从堆栈中获取更多信息
-    if (err?.stack) {
-      const stackLines = err.stack.split('\n').slice(0, 5);
-      stackLines.forEach((line: string, i: number) => {
-        logError(`Stack[${i}]: ${line.trim().substring(0, 80)}`);
-      });
-    }
   }
   
   // 显示用户可见的错误界面

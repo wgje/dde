@@ -148,22 +148,6 @@
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
 <body class="bg-slate-50 text-slate-900 h-screen w-screen overflow-hidden">
-  <!-- 最早执行的调试脚本 - 在任何其他 JS 之前 -->
-  <script>
-    // Build: 2025-12-03-v5 - 强制可见调试
-    console.log('[HTML] 页面加载开始');
-    
-    // 强制注销所有 Service Worker
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then(function(registrations) {
-        for(var i = 0; i < registrations.length; i++) {
-          console.log('[HTML] 注销 SW:', registrations[i].scope);
-          registrations[i].unregister();
-        }
-      });
-    }
-  </script>
-  
   <!-- 初始加载指示器 - Angular 加载完成后会被隐藏 -->
   <div id="initial-loader">
     <div class="spinner"></div>
@@ -180,7 +164,7 @@
   </noscript>
   
   <script>
-    // 简化加载检测 - Build v5
+    // 简化加载检测 - Build v12
     (function() {
       var startTime = Date.now();
       
@@ -197,8 +181,8 @@
         
         var elapsed = Date.now() - startTime;
         
-        // 最多等待 20 秒
-        if (elapsed < 20000) {
+        // 最多等待 30 秒
+        if (elapsed < 30000) {
           setTimeout(checkReady, 300);
         } else {
           // 超时 - 显示简单提示
@@ -206,8 +190,8 @@
           if (loader) {
             loader.innerHTML = '<div style="text-align:center;padding:2rem;">' +
               '<h2 style="color:#dc2626;">加载超时</h2>' +
-              '<p style="color:#666;margin:1rem 0;">请检查底部的调试日志</p>' +
-              '<button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;">刷新</button>' +
+              '<p style="color:#666;margin:1rem 0;">应用加载时间过长，请检查网络连接</p>' +
+              '<button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer;">刷新</button>' +
               '</div>';
           }
         }
