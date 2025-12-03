@@ -5,7 +5,6 @@
   "installCommand": "npm install",
   "outputDirectory": "dist/browser",
   "framework": null,
-  "ignoreCommand": "exit 0",
   "rewrites": [
     {
       "source": "/:path((?!.*\\.[a-zA-Z0-9]+$).*)",
