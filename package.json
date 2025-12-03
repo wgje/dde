@@ -6,7 +6,8 @@
   "scripts": {
     "ng": "ng",
     "start": "npm run config && ng serve",
-    "build": "node scripts/validate-env.cjs --production && npm run config && rm -rf dist .angular && ng build",
+    "build": "npm run config && rm -rf dist .angular && ng build",
+    "build:strict": "node scripts/validate-env.cjs --production && npm run config && rm -rf dist .angular && ng build",
     "build:dev": "npm run config && ng build",
     "watch": "ng build --watch --configuration development",
     "validate-env": "node scripts/validate-env.cjs",
