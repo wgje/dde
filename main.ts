@@ -7,15 +7,16 @@ import { AppComponent } from './src/app.component';
 import { routes } from './src/app.routes';
 import { GlobalErrorHandler } from './src/services/global-error-handler.service';
 
-// ============= BUILD ID: 2025-12-03-v10-DEBUG-STATE =============
-const BUILD_ID = '2025-12-03-v10-DEBUG-STATE';
+// ============= BUILD ID: 2025-12-03-v11-FIX-OVERLAY =============
+const BUILD_ID = '2025-12-03-v11-FIX-OVERLAY';
 const START_TIME = Date.now();
 
 // 🔥 移动端屏幕日志 - 始终显示（用于调试后移除）
 (function() {
   const logDiv = document.createElement('div');
   logDiv.id = 'screen-debug-log';
-  logDiv.style.cssText = 'position:fixed;bottom:0;left:0;right:0;height:150px;background:rgba(0,0,0,0.9);color:#0f0;font-size:11px;overflow:auto;z-index:999999;padding:4px;font-family:monospace;';
+  // 添加 pointer-events: none 确保不会阻挡用户交互
+  logDiv.style.cssText = 'position:fixed;bottom:0;left:0;right:0;height:150px;background:rgba(0,0,0,0.9);color:#0f0;font-size:11px;overflow:auto;z-index:999999;padding:4px;font-family:monospace;pointer-events:none;';
   document.body.appendChild(logDiv);
 
   const log = (msg: string, color = '#0f0') => {
