@@ -47,8 +47,9 @@ export class ThemeService {
       this.isSaving.set(true);
       try {
         await this.syncService.saveUserPreferences(userId, { theme });
-        this.toast.info('主题已保存', '', 1500);
+        // 主题保存成功不需要 Toast 提示（避免频繁打扰）
       } catch (error) {
+        // 只在失败时提示
         this.toast.warning('主题保存失败', '将在下次联网时同步');
       } finally {
         this.isSaving.set(false);

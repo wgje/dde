@@ -113,8 +113,10 @@ export class OfflineBannerComponent {
   
   /** 是否显示横幅 */
   readonly showBanner = computed(() => {
-    // 离线、连接中断、正在同步或有待同步操作时显示
-    return !this.isOnline() || this.offlineMode() || this.isSyncing() || this.pendingCount() > 0;
+    // 只在离线或服务中断时显示横幅
+    // 正在同步和待同步状态不再显示横幅（避免频繁闪烁干扰用户）
+    // 用户可以通过侧边栏的同步状态组件查看详细同步状态
+    return !this.isOnline() || this.offlineMode();
   });
   
   /** 状态类型 */
