@@ -150,15 +150,62 @@
 <body class="bg-slate-50 text-slate-900 h-screen w-screen overflow-hidden">
   <!-- 最早执行的调试脚本 - 在任何其他 JS 之前 -->
   <script>
-    console.log('%c[DEBUG] HTML 开始加载 - Build: 2025-12-03-v3', 'background:#4f46e5;color:white;padding:2px 6px;border-radius:3px;');
+    // 强制注销所有 Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(registrations) {
+        for(let registration of registrations) {
+          console.log('[DEBUG] 注销 Service Worker:', registration.scope);
+          registration.unregister();
+        }
+      });
+    }
+
+    console.log('%c[DEBUG] HTML 开始加载 - Build: 2025-12-03-v4-NO-SW', 'background:#dc2626;color:white;padding:2px 6px;border-radius:3px;');
     console.log('[DEBUG] 时间:', new Date().toISOString());
-    console.log('[DEBUG] URL:', location.href);
-    window.__DEBUG_START__ = Date.now();
     
-    // 监听所有脚本加载
-    window.addEventListener('error', function(e) {
-      console.error('[DEBUG] 资源加载错误:', e.target?.src || e.target?.href || e.message);
-    }, true);
+    // 移动端调试辅助：将日志输出到屏幕上
+    (function() {
+      var logDiv = document.createElement('div');
+      logDiv.style.cssText = 'position:fixed;top:0;left:0;right:0;height:100px;background:rgba(0,0,0,0.8);color:#0f0;font-size:10px;overflow:auto;z-index:999999;pointer-events:none;padding:4px;';
+      logDiv.id = 'mobile-debug-log';
+      // 默认隐藏，除非有错误或特定参数
+      if (location.search.includes('debug') || location.hash.includes('debug')) {
+        document.body.appendChild(logDiv);
+      }
+
+      var originalLog = console.log;
+      var originalError = console.error;
+
+      function appendLog(msg, color) {
+        if (!document.getElementById('mobile-debug-log')) return;
+        var p = document.createElement('div');
+        p.style.color = color || '#0f0';
+        p.style.marginBottom = '2px';
+        p.textContent = '> ' + msg;
+        logDiv.appendChild(p);
+        logDiv.scrollTop = logDiv.scrollHeight;
+      }
+
+      console.log = function() {
+        var args = Array.from(arguments);
+        appendLog(args.join(' '), '#0f0');
+        originalLog.apply(console, args);
+      };
+
+      console.error = function() {
+        var args = Array.from(arguments);
+        appendLog(args.join(' '), '#f00');
+        originalError.apply(console, args);
+      };
+      
+      window.onerror = function(msg, url, line) {
+        appendLog('ERROR: ' + msg + ' (' + line + ')', '#f00');
+        // 如果发生错误，强制显示日志面板
+        if (!document.getElementById('mobile-debug-log')) {
+          document.body.appendChild(logDiv);
+        }
+      };
+    })();
   </script>
   
   <!-- 初始加载指示器 - Angular 加载完成后会被隐藏 -->
