@@ -2,13 +2,13 @@ import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation } from '@angular/router';
-import { AppComponent } from './src/app.component';
 import { provideServiceWorker } from '@angular/service-worker';
+import { AppComponent } from './src/app.component';
 import { routes } from './src/app.routes';
 import { GlobalErrorHandler } from './src/services/global-error-handler.service';
 
-// ============= BUILD ID: 2025-12-03-v8-FIX-ROUTES =============
-const BUILD_ID = '2025-12-03-v8-FIX-ROUTES';
+// ============= BUILD ID: 2025-12-03-v9-FIX-SWUPDATE =============
+const BUILD_ID = '2025-12-03-v9-FIX-SWUPDATE';
 const START_TIME = Date.now();
 
 // 🔥 移动端屏幕日志 - 始终显示（用于调试后移除）
@@ -83,8 +83,12 @@ bootstrapApplication(AppComponent, {
       routes,
       withComponentInputBinding(),
       withHashLocation()
-    )
-    // 🚫 完全禁用 Service Worker - 排除缓存干扰
+    ),
+    // Service Worker: 提供 provider 但禁用功能，避免 SwUpdate 注入失败
+    provideServiceWorker('ngsw-worker.js', {
+      enabled: false,
+      registrationStrategy: 'registerWhenStable:30000'
+    })
   ]
 }).then((appRef) => {
   const elapsed = Date.now() - START_TIME;
