@@ -57,10 +57,13 @@ async function waitForSessionCheck(
 ): Promise<void> {
   // 如果已经完成检查，直接返回
   if (!authService.authState().isCheckingSession) {
+    console.log('[Guard] 会话检查已完成，直接返回');
     return;
   }
   
-  return new Promise<void>((resolve, reject) => {
+  console.log('[Guard] 开始等待会话检查...');
+  
+  return new Promise<void>((resolve) => {
     const startTime = Date.now();
     let resolved = false;
     
@@ -68,9 +71,12 @@ async function waitForSessionCheck(
       if (resolved) return;
       resolved = true;
       
+      const elapsed = Date.now() - startTime;
       if (timeout) {
         // 超时但仍允许继续，记录警告
-        console.warn('会话检查超时，继续处理（可能导致短暂的权限检查不准确）');
+        console.warn(`[Guard] 会话检查超时 (${elapsed}ms)，继续处理`);
+      } else {
+        console.log(`[Guard] 会话检查完成 (${elapsed}ms)`);
       }
       resolve();
     };
@@ -158,39 +164,48 @@ export const requireAuthGuard: CanActivateFn = async (route, state) => {
   const router = inject(Router);
   const modalService = inject(ModalService);
   
+  console.log('[Guard] requireAuthGuard 开始执行，目标路由:', state.url);
+  
   if (!authService.isConfigured) {
     // Supabase 未配置，允许完全离线模式访问
     // 数据存储在本地 IndexedDB，用户可以正常进行所有操作
     // 这不是"限制功能"的降级模式，而是完整的本地优先体验
-    console.info('离线模式：Supabase 未配置，数据仅保存在本地');
+    console.log('[Guard] Supabase 未配置，允许离线模式访问');
     return true;
   }
   
   // 等待会话检查完成（带超时保护）
   // 注意：checkSession 现在会自动尝试开发环境自动登录
   const authState = authService.authState();
+  console.log('[Guard] 当前认证状态:', { isCheckingSession: authState.isCheckingSession, userId: authState.userId });
+  
   if (authState.isCheckingSession) {
     await waitForSessionCheck(authService);
   }
   
   const userId = authService.currentUserId();
+  console.log('[Guard] 检查用户ID:', userId);
+  
   if (userId) {
     // 保存认证状态到本地缓存（用于离线模式）
     saveAuthCache(userId);
+    console.log('[Guard] 用户已登录，允许访问');
     return true;
   }
   
   // 检查本地缓存的认证状态（离线模式支持）
   // 这允许用户在网络恢复前继续使用应用的全部功能
   const localAuth = checkLocalAuthCache();
+  console.log('[Guard] 本地缓存认证:', localAuth);
+  
   if (localAuth.userId) {
-    console.info('离线模式：使用本地缓存的认证状态，允许完全读写访问');
+    console.log('[Guard] 使用本地缓存认证，允许离线访问');
     return true;
   }
   
   // 未登录且无本地缓存，这是阻断性场景：需要用户首次登录
   // 只有这种情况才需要显式的交互提示
-  console.info('首次访问：需要认证才能使用');
+  console.log('[Guard] 需要登录，重定向到首页并显示登录模态框');
   
   // 导航到首页并显示登录模态框
   void router.navigate(['/']);
@@ -201,6 +216,7 @@ export const requireAuthGuard: CanActivateFn = async (route, state) => {
     filter((event): event is NavigationEnd => event instanceof NavigationEnd),
     take(1)
   ).subscribe(() => {
+    console.log('[Guard] 导航完成，显示登录模态框');
     modalService.show('login', { returnUrl: state.url, message: '请登录以访问此页面' });
   });
   

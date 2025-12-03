@@ -69,7 +69,10 @@ export class AuthService {
    * 开发环境：如果没有现有会话且配置了 devAutoLogin，会自动登录
    */
   async checkSession(): Promise<{ userId: string | null; email: string | null }> {
+    console.log('[Auth] checkSession 开始');
+    
     if (!this.supabase.isConfigured) {
+      console.log('[Auth] Supabase 未配置，跳过会话检查');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
       return { userId: null, email: null };
     }
@@ -84,12 +87,14 @@ export class AuthService {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         if (!isSettled) {
+          console.warn('[Auth] 会话检查超时');
           reject(new Error('会话检查超时'));
         }
       }, SESSION_TIMEOUT);
     });
     
     try {
+      console.log('[Auth] 正在获取 Supabase 会话...');
       const sessionPromise = this.supabase.getSession();
       const { data, error } = await Promise.race([sessionPromise, timeoutPromise]);
       
@@ -99,12 +104,18 @@ export class AuthService {
       // 清理超时计时器
       if (timeoutId) clearTimeout(timeoutId);
       
-      if (error) throw error;
+      if (error) {
+        console.error('[Auth] 获取会话出错:', error);
+        throw error;
+      }
       
       const session = data?.session;
+      console.log('[Auth] 会话数据:', session ? '存在' : '不存在');
+      
       if (session?.user) {
         const userId = session.user.id;
         const email = session.user.email ?? null;
+        console.log('[Auth] 用户已登录:', { userId, email });
         
         this.currentUserId.set(userId);
         this.sessionEmail.set(email);
@@ -132,12 +143,15 @@ export class AuthService {
       // 确保超时计时器被清理
       if (timeoutId) clearTimeout(timeoutId);
       
+      console.error('[Auth] checkSession 异常:', e?.message ?? e);
+      
       this.authState.update(s => ({
         ...s,
         error: e?.message ?? String(e)
       }));
       return { userId: null, email: null };
     } finally {
+      console.log('[Auth] checkSession 完成，设置 isCheckingSession = false');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
     }
   }

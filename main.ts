@@ -1,6 +1,6 @@
 import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
-import { provideExperimentalZonelessChangeDetection, isDevMode, ErrorHandler } from '@angular/core';
+import { provideExperimentalZonelessChangeDetection, isDevMode, ErrorHandler, provideZoneChangeDetection } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation } from '@angular/router';
 import { AppComponent } from './src/app.component';
 import { provideServiceWorker } from '@angular/service-worker';
@@ -22,9 +22,19 @@ const browserInfo = {
 };
 console.log('[NanoFlow] 📱 浏览器信息:', browserInfo);
 
+// 检测是否应该使用 Zoneless 模式
+// 在某些移动端浏览器上可能有兼容性问题，所以我们保守地禁用
+const shouldUseZoneless = !browserInfo.isMobile && typeof Proxy !== 'undefined';
+console.log('[NanoFlow] ⚙️ 变更检测模式:', shouldUseZoneless ? 'Zoneless (实验性)' : 'Zone.js (标准)');
+
+// 根据环境选择变更检测策略
+const changeDetectionProvider = shouldUseZoneless 
+  ? provideExperimentalZonelessChangeDetection()
+  : provideZoneChangeDetection({ eventCoalescing: true });
+
 bootstrapApplication(AppComponent, {
   providers: [
-    provideExperimentalZonelessChangeDetection(),
+    changeDetectionProvider,
     { provide: ErrorHandler, useClass: GlobalErrorHandler },
     provideRouter(
       routes,
@@ -43,13 +53,16 @@ bootstrapApplication(AppComponent, {
   console.error('[NanoFlow] ❌ Angular 应用启动失败:', err);
   // 显示用户可见的错误信息
   const errorDiv = document.createElement('div');
-  errorDiv.style.cssText = 'position:fixed;inset:0;background:#fff;color:#333;padding:2rem;font-family:sans-serif;z-index:99999;';
+  errorDiv.style.cssText = 'position:fixed;inset:0;background:#fff;color:#333;padding:2rem;font-family:sans-serif;z-index:99999;overflow:auto;';
   errorDiv.innerHTML = `
-    <h1 style="color:#dc2626;">应用启动失败</h1>
-    <p>抱歉，应用加载时遇到问题。</p>
-    <pre style="background:#f5f5f5;padding:1rem;overflow:auto;font-size:12px;">${err?.message || err}</pre>
-    <button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer;">刷新页面</button>
-    <button onclick="caches.keys().then(k=>Promise.all(k.map(n=>caches.delete(n)))).then(()=>location.reload())" style="margin-left:1rem;padding:0.5rem 1rem;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;">清除缓存并刷新</button>
+    <h1 style="color:#dc2626;margin-bottom:1rem;">应用启动失败</h1>
+    <p style="margin-bottom:1rem;">抱歉，应用加载时遇到问题。</p>
+    <pre style="background:#f5f5f5;padding:1rem;overflow:auto;font-size:12px;max-height:200px;margin-bottom:1rem;">${err?.message || err}\n\n${err?.stack || ''}</pre>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+      <button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer;">刷新页面</button>
+      <button onclick="caches.keys().then(k=>Promise.all(k.map(n=>caches.delete(n)))).then(()=>location.reload())" style="padding:0.5rem 1rem;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;">清除缓存并刷新</button>
+    </div>
+    <p style="margin-top:1rem;color:#666;font-size:12px;">浏览器: ${navigator.userAgent}</p>
   `;
   document.body.appendChild(errorDiv);
 });
