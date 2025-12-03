@@ -148,6 +148,19 @@
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
 <body class="bg-slate-50 text-slate-900 h-screen w-screen overflow-hidden">
+  <!-- 最早执行的调试脚本 - 在任何其他 JS 之前 -->
+  <script>
+    console.log('%c[DEBUG] HTML 开始加载 - Build: 2025-12-03-v3', 'background:#4f46e5;color:white;padding:2px 6px;border-radius:3px;');
+    console.log('[DEBUG] 时间:', new Date().toISOString());
+    console.log('[DEBUG] URL:', location.href);
+    window.__DEBUG_START__ = Date.now();
+    
+    // 监听所有脚本加载
+    window.addEventListener('error', function(e) {
+      console.error('[DEBUG] 资源加载错误:', e.target?.src || e.target?.href || e.message);
+    }, true);
+  </script>
+  
   <!-- 初始加载指示器 - Angular 加载完成后会被隐藏 -->
   <div id="initial-loader">
     <div class="spinner"></div>
