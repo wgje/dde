@@ -322,10 +322,14 @@ export class TaskRepositoryService {
       .from('tasks')
       .select('attachments')
       .eq('id', taskId)
-      .single();
+      .maybeSingle();
 
     if (fetchError) {
       return { success: false, error: fetchError.message };
+    }
+    
+    if (!data) {
+      return { success: false, error: '任务不存在' };
     }
 
     const currentAttachments = data?.attachments || [];
@@ -379,10 +383,14 @@ export class TaskRepositoryService {
       .from('tasks')
       .select('attachments')
       .eq('id', taskId)
-      .single();
+      .maybeSingle();
 
     if (fetchError) {
       return { success: false, error: fetchError.message };
+    }
+    
+    if (!data) {
+      return { success: false, error: '任务不存在' };
     }
 
     const currentAttachments = data?.attachments || [];
@@ -608,16 +616,17 @@ export class TaskRepositoryService {
         .from('projects')
         .select('*')
         .eq('id', projectId)
-        .single(),
+        .maybeSingle(),
       this.loadTasks(projectId),
       this.loadConnections(projectId)
     ]);
 
     if (projectResult.error) {
-      if (projectResult.error.code === 'PGRST116') {
-        return null; // Project not found
-      }
       throw projectResult.error;
+    }
+    
+    if (!projectResult.data) {
+      return null; // Project not found
     }
 
     return {

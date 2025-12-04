@@ -841,14 +841,15 @@ export class SyncService {
         .select('*')
         .eq('id', projectId)
         .eq('owner_id', userId)
-        .single();
+        .maybeSingle(); // 使用 maybeSingle 避免 406 错误
       
       if (error) {
-        if (error.code === 'PGRST116') {
-          // 项目不存在
-          return null;
-        }
         throw error;
+      }
+      
+      if (!data) {
+        // 项目不存在
+        return null;
       }
       
       const projectRow = data as ProjectRow;
@@ -1282,9 +1283,14 @@ export class SyncService {
         .from('user_preferences')
         .select('*')
         .eq('user_id', userId)
-        .single();
+        .maybeSingle(); // 使用 maybeSingle 替代 single，避免 406 错误
       
-      if (error && error.code !== 'PGRST116') throw error;
+      if (error) {
+        // PGRST116 表示没有找到数据，不是错误
+        if (error.code !== 'PGRST116') {
+          throw error;
+        }
+      }
       
       if (data) {
         return {
