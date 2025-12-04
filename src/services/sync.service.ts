@@ -807,10 +807,17 @@ export class SyncService {
       // 并行加载所有项目的任务和连接
       const projects = await Promise.all((data || []).map(async row => {
         const projectRow = row as ProjectRow;
+        console.log('[Sync] 加载项目任务:', { projectId: projectRow.id, title: projectRow.title });
         const [tasks, connections] = await Promise.all([
           this.taskRepo.loadTasks(projectRow.id),
           this.taskRepo.loadConnections(projectRow.id)
         ]);
+        console.log('[Sync] 项目任务加载完成:', { 
+          projectId: projectRow.id, 
+          taskCount: tasks.length,
+          connectionCount: connections.length,
+          tasks: tasks.map(t => ({ id: t.id, title: t.title, content: t.content?.substring(0, 50) }))
+        });
         return this.mapRowToProject(projectRow, tasks, connections);
       }));
       

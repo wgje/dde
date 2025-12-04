@@ -165,6 +165,13 @@ export class UserSessionService {
       const failedProjects: string[] = [];
 
       for (const p of projects) {
+        console.log('[Session] 云端项目详情:', {
+          id: p.id,
+          name: p.name,
+          taskCount: p.tasks?.length ?? 0,
+          version: p.version,
+          updatedAt: p.updatedAt
+        });
         const result = this.syncCoordinator.validateAndRebalanceWithResult(p);
         if (result.ok) {
           validatedProjects.push(result.value);
@@ -184,12 +191,34 @@ export class UserSessionService {
       let rebalanced = validatedProjects;
 
       if (offlineProjects && offlineProjects.length > 0) {
+        // 记录离线缓存的详细信息
+        for (const op of offlineProjects) {
+          console.log('[Session] 离线缓存项目详情:', {
+            id: op.id,
+            name: op.name,
+            taskCount: op.tasks?.length ?? 0,
+            version: op.version,
+            updatedAt: op.updatedAt
+          });
+        }
+        
         const mergeResult = await this.syncCoordinator.mergeOfflineDataOnReconnect(
           rebalanced,
           offlineProjects,
           userId
         );
         rebalanced = mergeResult.projects;
+        
+        // 记录合并后的结果
+        console.log('[Session] 合并后项目数量:', rebalanced.length);
+        for (const rp of rebalanced) {
+          console.log('[Session] 合并后项目详情:', {
+            id: rp.id,
+            name: rp.name,
+            taskCount: rp.tasks?.length ?? 0,
+            version: rp.version
+          });
+        }
 
         if (mergeResult.syncedCount > 0) {
           this.toastService.success(
