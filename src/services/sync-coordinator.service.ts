@@ -491,98 +491,175 @@ export class SyncCoordinatorService {
   }
   
   private setupActionQueueProcessors() {
+    // 项目更新处理器
     this.actionQueue.registerProcessor('project:update', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('project:update 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { project: Project };
-      const result = await this.syncService.saveProjectToCloud(payload.project, userId);
-      if (result.success && result.newVersion !== undefined) {
-        this.projectState.updateProjects(ps => ps.map(p =>
-          p.id === payload.project.id ? { ...p, version: result.newVersion } : p
-        ));
+      try {
+        const result = await this.syncService.saveProjectToCloud(payload.project, userId);
+        if (result.success && result.newVersion !== undefined) {
+          this.projectState.updateProjects(ps => ps.map(p =>
+            p.id === payload.project.id ? { ...p, version: result.newVersion } : p
+          ));
+        }
+        if (result.conflict) {
+          this.logger.warn('project:update 冲突，需要用户解决', { projectId: payload.project.id });
+          // 冲突不算失败，由冲突解决流程处理
+          return true;
+        }
+        return result.success;
+      } catch (error) {
+        this.logger.error('project:update 异常', { error, projectId: payload.project.id });
+        return false;
       }
-      return result.success;
     });
     
+    // 项目删除处理器
     this.actionQueue.registerProcessor('project:delete', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('project:delete 失败：用户未登录');
+        return false;
+      }
       
-      return await this.syncService.deleteProjectFromCloud(action.entityId, userId);
+      try {
+        return await this.syncService.deleteProjectFromCloud(action.entityId, userId);
+      } catch (error) {
+        this.logger.error('project:delete 异常', { error, projectId: action.entityId });
+        return false;
+      }
     });
     
+    // 项目创建处理器
     this.actionQueue.registerProcessor('project:create', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('project:create 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { project: Project };
-      const result = await this.syncService.saveProjectToCloud(payload.project, userId);
-      if (result.success && result.newVersion !== undefined) {
-        this.projectState.updateProjects(ps => ps.map(p =>
-          p.id === payload.project.id ? { ...p, version: result.newVersion } : p
-        ));
+      try {
+        const result = await this.syncService.saveProjectToCloud(payload.project, userId);
+        if (result.success && result.newVersion !== undefined) {
+          this.projectState.updateProjects(ps => ps.map(p =>
+            p.id === payload.project.id ? { ...p, version: result.newVersion } : p
+          ));
+        }
+        return result.success;
+      } catch (error) {
+        this.logger.error('project:create 异常', { error, projectId: payload.project.id });
+        return false;
       }
-      return result.success;
     });
     
+    // 任务创建处理器
     this.actionQueue.registerProcessor('task:create', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('task:create 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { task: Task; projectId: string };
       const project = this.projectState.projects().find(p => p.id === payload.projectId);
-      if (!project) return false;
-      
-      const result = await this.syncService.saveProjectToCloud(project, userId);
-      if (result.success && result.newVersion !== undefined) {
-        this.projectState.updateProjects(ps => ps.map(p =>
-          p.id === project.id ? { ...p, version: result.newVersion } : p
-        ));
+      if (!project) {
+        this.logger.warn('task:create 失败：项目不存在', { projectId: payload.projectId });
+        return false;
       }
-      return result.success;
+      
+      try {
+        const result = await this.syncService.saveProjectToCloud(project, userId);
+        if (result.success && result.newVersion !== undefined) {
+          this.projectState.updateProjects(ps => ps.map(p =>
+            p.id === project.id ? { ...p, version: result.newVersion } : p
+          ));
+        }
+        return result.success;
+      } catch (error) {
+        this.logger.error('task:create 异常', { error, taskId: payload.task.id });
+        return false;
+      }
     });
     
+    // 任务更新处理器
     this.actionQueue.registerProcessor('task:update', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('task:update 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { task: Task; projectId: string };
       const project = this.projectState.projects().find(p => p.id === payload.projectId);
-      if (!project) return false;
-      
-      const result = await this.syncService.saveProjectToCloud(project, userId);
-      if (result.success && result.newVersion !== undefined) {
-        this.projectState.updateProjects(ps => ps.map(p =>
-          p.id === project.id ? { ...p, version: result.newVersion } : p
-        ));
+      if (!project) {
+        this.logger.warn('task:update 失败：项目不存在', { projectId: payload.projectId });
+        return false;
       }
-      return result.success;
+      
+      try {
+        const result = await this.syncService.saveProjectToCloud(project, userId);
+        if (result.success && result.newVersion !== undefined) {
+          this.projectState.updateProjects(ps => ps.map(p =>
+            p.id === project.id ? { ...p, version: result.newVersion } : p
+          ));
+        }
+        return result.success;
+      } catch (error) {
+        this.logger.error('task:update 异常', { error, taskId: payload.task.id });
+        return false;
+      }
     });
     
+    // 任务删除处理器
     this.actionQueue.registerProcessor('task:delete', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('task:delete 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { taskId: string; projectId: string };
       const project = this.projectState.projects().find(p => p.id === payload.projectId);
-      if (!project) return false;
-      
-      const result = await this.syncService.saveProjectToCloud(project, userId);
-      if (result.success && result.newVersion !== undefined) {
-        this.projectState.updateProjects(ps => ps.map(p =>
-          p.id === project.id ? { ...p, version: result.newVersion } : p
-        ));
+      if (!project) {
+        this.logger.warn('task:delete 失败：项目不存在', { projectId: payload.projectId });
+        return false;
       }
-      return result.success;
+      
+      try {
+        const result = await this.syncService.saveProjectToCloud(project, userId);
+        if (result.success && result.newVersion !== undefined) {
+          this.projectState.updateProjects(ps => ps.map(p =>
+            p.id === project.id ? { ...p, version: result.newVersion } : p
+          ));
+        }
+        return result.success;
+      } catch (error) {
+        this.logger.error('task:delete 异常', { error, taskId: payload.taskId });
+        return false;
+      }
     });
     
+    // 用户偏好更新处理器
     this.actionQueue.registerProcessor('preference:update', async (action) => {
       const userId = this.authService.currentUserId();
-      if (!userId) return false;
+      if (!userId) {
+        this.logger.warn('preference:update 失败：用户未登录');
+        return false;
+      }
       
       const payload = action.payload as { preferences: Partial<UserPreferences>; userId: string };
-      return await this.syncService.saveUserPreferences(userId, payload.preferences);
+      try {
+        return await this.syncService.saveUserPreferences(userId, payload.preferences);
+      } catch (error) {
+        this.logger.error('preference:update 异常', { error });
+        return false;
+      }
     });
   }
   
@@ -617,6 +694,7 @@ export class SyncCoordinatorService {
     const project = this.projectState.activeProject();
     const projects = this.projectState.projects();
     
+    // 始终先保存到本地离线快照（防止任何情况下的数据丢失）
     this.syncService.saveOfflineSnapshot(projects);
     
     if (!project) {
@@ -644,12 +722,25 @@ export class SyncCoordinatorService {
             : p
         ));
         console.log('[Sync] 本地版本号已更新', { projectId: project.id, newVersion: result.newVersion });
+      } else if (result.conflict && result.remoteData) {
+        // 版本冲突处理：发布冲突事件供 UI 层处理
+        this.conflict$.next({
+          localProject: project,
+          remoteProject: result.remoteData,
+          projectId: project.id
+        });
+        this.logger.warn('检测到数据冲突，等待用户解决', { projectId: project.id });
       }
     } catch (error) {
       this.logger.error('持久化项目时发生异常', { error });
       // 乐观UI：静默记录错误，不阻塞用户操作
       // 数据已保存到本地离线快照，网络恢复后会自动重试
       this.logger.warn('自动保存失败，更改已保存到本地', { error });
+      
+      // 增强：在离线模式下提示用户
+      if (!navigator.onLine) {
+        this.toastService.info('离线模式', '更改已保存到本地，联网后将自动同步');
+      }
     }
   }
 }

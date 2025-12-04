@@ -300,30 +300,67 @@ export class UserSessionService {
    */
   private async loadUserData(userId: string): Promise<void> {
     // 先加载项目数据（这个需要等待）
-    await this.loadProjects();
+    try {
+      await this.loadProjects();
+    } catch (error) {
+      // loadProjects 内部已有错误处理，这里是最后的防线
+      console.error('[Session] loadProjects 未捕获异常:', error);
+      this.loadFromCacheOrSeed();
+      this.toastService.error('数据加载失败', '已加载本地缓存数据');
+    }
     
     // 实时订阅和冲突数据重载在后台执行，不阻塞 UI
     // 使用 Promise 而非 await，让它们在后台运行
     this.syncCoordinator.initRealtimeSubscription(userId).catch(e => {
       console.warn('实时订阅初始化失败（后台）:', e);
+      // 实时订阅失败不影响核心功能，静默处理
     });
 
     this.syncCoordinator.tryReloadConflictData(userId, (id) =>
       this.projectState.projects().find(p => p.id === id)
     ).catch(e => {
       console.warn('冲突数据重载失败（后台）:', e);
+      // 冲突数据重载失败不影响核心功能，静默处理
     });
   }
 
   /**
    * 从缓存或种子数据加载
+   * 包含数据完整性检查
    */
   private loadFromCacheOrSeed(): void {
     const cached = this.syncCoordinator.loadOfflineSnapshot();
     let projects: Project[] = [];
 
     if (cached && cached.length > 0) {
-      projects = cached.map(p => this.migrateProject(p));
+      // 验证并迁移每个缓存的项目
+      const validProjects: Project[] = [];
+      const corruptedProjects: string[] = [];
+      
+      for (const p of cached) {
+        try {
+          const migrated = this.migrateProject(p);
+          // 基本完整性检查
+          if (migrated.id && Array.isArray(migrated.tasks)) {
+            validProjects.push(migrated);
+          } else {
+            corruptedProjects.push(p.name || p.id || '未知项目');
+          }
+        } catch (error) {
+          console.error('[Session] 项目迁移失败:', p.id, error);
+          corruptedProjects.push(p.name || p.id || '未知项目');
+        }
+      }
+      
+      if (corruptedProjects.length > 0) {
+        console.warn('[Session] 跳过损坏的项目:', corruptedProjects);
+        this.toastService.warning(
+          '部分数据已跳过',
+          `以下项目数据损坏已跳过: ${corruptedProjects.join(', ')}`
+        );
+      }
+      
+      projects = validProjects.length > 0 ? validProjects : this.seedProjects();
     } else {
       projects = this.seedProjects();
     }

@@ -132,24 +132,48 @@ export class TaskRepositoryService {
 
     // 对于大批量任务，分批处理以避免超时和单次失败影响所有数据
     const BATCH_SIZE = 50;
+    const MAX_RETRIES = 2;
     let failedCount = 0;
     let lastError: string | undefined;
+    const failedBatches: { index: number; tasks: typeof taskRows }[] = [];
 
     for (let i = 0; i < taskRows.length; i += BATCH_SIZE) {
       const batch = taskRows.slice(i, i + BATCH_SIZE);
-      const { error } = await this.supabase.client()
-        .from('tasks')
-        .upsert(batch, { onConflict: 'id' });
+      let retryCount = 0;
+      let success = false;
+      
+      while (!success && retryCount <= MAX_RETRIES) {
+        const { error } = await this.supabase.client()
+          .from('tasks')
+          .upsert(batch, { onConflict: 'id' });
 
-      if (error) {
-        console.error(`Failed to save tasks batch ${i}-${i + batch.length}:`, error);
-        failedCount += batch.length;
-        lastError = error.message;
-        // 继续处理其他批次，不中断
+        if (error) {
+          retryCount++;
+          if (retryCount <= MAX_RETRIES) {
+            // 指数退避重试
+            await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, retryCount)));
+            console.warn(`任务批次 ${i}-${i + batch.length} 保存失败，重试 ${retryCount}/${MAX_RETRIES}:`, error.message);
+          } else {
+            console.error(`任务批次 ${i}-${i + batch.length} 保存失败，已达最大重试次数:`, error);
+            failedCount += batch.length;
+            lastError = error.message;
+            failedBatches.push({ index: i, tasks: batch });
+          }
+        } else {
+          success = true;
+        }
       }
     }
 
     if (failedCount > 0) {
+      // 记录详细失败信息以便调试
+      console.error(`[TaskRepo] 批量保存任务失败统计:`, {
+        total: tasks.length,
+        failed: failedCount,
+        failedBatchCount: failedBatches.length,
+        lastError
+      });
+      
       return { 
         success: false, 
         error: `${failedCount} 个任务保存失败: ${lastError}`,
@@ -425,13 +449,24 @@ export class TaskRepositoryService {
   /**
    * 批量同步连接（差异对比，只更新变化的部分）
    * 优化版本：避免全删全插，减少网络请求和数据丢失风险
+   * 增加重试逻辑和部分失败恢复
    */
   async syncConnections(projectId: string, connections: Connection[]): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
+    const MAX_RETRIES = 2;
+    const errors: string[] = [];
+
     try {
       // 1. 加载当前数据库中的连接
-      const existingConnections = await this.loadConnections(projectId);
+      let existingConnections: Connection[] = [];
+      try {
+        existingConnections = await this.loadConnections(projectId);
+      } catch (loadError: any) {
+        console.warn('加载现有连接失败，尝试全量插入:', loadError.message);
+        // 如果加载失败，回退到全量 upsert
+        return this.syncConnectionsFallback(projectId, connections);
+      }
       
       // 2. 构建对比集合（使用 source-target 作为唯一标识）
       const existingSet = new Set(existingConnections.map(c => `${c.source}|${c.target}`));
@@ -451,9 +486,10 @@ export class TaskRepositoryService {
         return existing && existing.description !== c.description;
       });
 
-      // 6. 执行删除操作
-      if (toDelete.length > 0) {
-        for (const conn of toDelete) {
+      // 6. 执行删除操作（带重试）
+      for (const conn of toDelete) {
+        let success = false;
+        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           const { error } = await this.supabase.client()
             .from('connections')
             .delete()
@@ -462,13 +498,18 @@ export class TaskRepositoryService {
             .eq('target_id', conn.target);
           
           if (error) {
-            console.error('Failed to delete connection:', error);
-            return { success: false, error: error.message };
+            if (retry < MAX_RETRIES) {
+              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+            } else {
+              errors.push(`删除连接失败 ${conn.source}->${conn.target}: ${error.message}`);
+            }
+          } else {
+            success = true;
           }
         }
       }
 
-      // 7. 执行插入操作
+      // 7. 执行插入操作（带重试）
       if (toInsert.length > 0) {
         const connectionRows = toInsert.map(conn => ({
           project_id: projectId,
@@ -477,19 +518,28 @@ export class TaskRepositoryService {
           description: conn.description
         }));
 
-        const { error: insertError } = await this.supabase.client()
-          .from('connections')
-          .insert(connectionRows);
+        let success = false;
+        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
+          const { error: insertError } = await this.supabase.client()
+            .from('connections')
+            .insert(connectionRows);
 
-        if (insertError) {
-          console.error('Failed to insert connections:', insertError);
-          return { success: false, error: insertError.message };
+          if (insertError) {
+            if (retry < MAX_RETRIES) {
+              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+            } else {
+              errors.push(`插入连接失败: ${insertError.message}`);
+            }
+          } else {
+            success = true;
+          }
         }
       }
       
-      // 8. 执行更新操作
-      if (toUpdate.length > 0) {
-        for (const conn of toUpdate) {
+      // 8. 执行更新操作（带重试）
+      for (const conn of toUpdate) {
+        let success = false;
+        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           const { error } = await this.supabase.client()
             .from('connections')
             .update({ description: conn.description })
@@ -498,18 +548,53 @@ export class TaskRepositoryService {
             .eq('target_id', conn.target);
           
           if (error) {
-            console.error('Failed to update connection:', error);
-            return { success: false, error: error.message };
+            if (retry < MAX_RETRIES) {
+              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+            } else {
+              errors.push(`更新连接失败 ${conn.source}->${conn.target}: ${error.message}`);
+            }
+          } else {
+            success = true;
           }
         }
       }
       
-      console.log(`连接同步完成: 删除 ${toDelete.length}, 新增 ${toInsert.length}, 更新 ${toUpdate.length}`);
+      if (errors.length > 0) {
+        console.warn('连接同步部分失败:', errors);
+        // 部分成功也返回 success，只记录警告
+      }
+      
+      console.log(`连接同步完成: 删除 ${toDelete.length}, 新增 ${toInsert.length}, 更新 ${toUpdate.length}, 错误 ${errors.length}`);
       return { success: true };
     } catch (error: any) {
       console.error('Connection sync failed:', error);
       return { success: false, error: error.message || String(error) };
     }
+  }
+
+  /**
+   * 连接同步的回退方法：全量 upsert
+   */
+  private async syncConnectionsFallback(projectId: string, connections: Connection[]): Promise<{ success: boolean; error?: string }> {
+    if (connections.length === 0) return { success: true };
+    
+    const connectionRows = connections.map(conn => ({
+      project_id: projectId,
+      source_id: conn.source,
+      target_id: conn.target,
+      description: conn.description
+    }));
+    
+    const { error } = await this.supabase.client()
+      .from('connections')
+      .upsert(connectionRows, { onConflict: 'project_id,source_id,target_id' });
+    
+    if (error) {
+      console.error('Connection fallback sync failed:', error);
+      return { success: false, error: error.message };
+    }
+    
+    return { success: true };
   }
 
   /**

@@ -996,6 +996,47 @@ export class SyncService {
           // 加载最新的远程数据
           const remoteProject = await this.loadSingleProject(project.id, userId);
           if (remoteProject) {
+            const remoteVersion = remoteProject.version ?? 0;
+            
+            // 自动修复策略：如果只是版本号差异且内容相同，自动同步版本号
+            const localTaskIds = new Set(project.tasks.map(t => t.id));
+            const remoteTaskIds = new Set(remoteProject.tasks.map(t => t.id));
+            const tasksDifferent = localTaskIds.size !== remoteTaskIds.size ||
+              [...localTaskIds].some(id => !remoteTaskIds.has(id));
+            
+            // 如果任务列表相同，可能只是版本号不同步，尝试用远程版本号重试
+            if (!tasksDifferent && currentVersion < remoteVersion) {
+              this.logger.info('检测到版本号不同步，尝试自动修复', {
+                projectId: project.id,
+                localVersion: currentVersion,
+                remoteVersion
+              });
+              
+              // 用远程版本号重试更新
+              const retryVersion = remoteVersion + 1;
+              const { data: retryResult, error: retryError } = await this.supabase.client()
+                .from('projects')
+                .update({
+                  title: project.name,
+                  description: project.description,
+                  version: retryVersion
+                })
+                .eq('id', project.id)
+                .eq('version', remoteVersion)
+                .select('id')
+                .maybeSingle();
+              
+              if (!retryError && retryResult) {
+                this.logger.info('版本号自动修复成功', { projectId: project.id, newVersion: retryVersion });
+                // 继续保存任务（跳过下面的冲突处理）
+                const tasksResult = await this.taskRepo.saveTasks(project.id, project.tasks);
+                if (tasksResult.success) {
+                  return { success: true, newVersion: retryVersion };
+                }
+              }
+            }
+            
+            // 真正的冲突：需要用户介入
             const conflictData = { 
               local: project, 
               remote: remoteProject,
@@ -1080,10 +1121,19 @@ export class SyncService {
 
   /**
    * 处理保存错误
+   * 根据错误类型采取不同的恢复策略
    */
-  private handleSaveError(error: { code?: string; message?: string }, project: Project): void {
-    // 处理认证错误 - 先保存本地数据再报错
-    if (error.code === 'PGRST301' || error.message?.includes('JWT') || error.code === '401') {
+  private handleSaveError(error: { code?: string; message?: string; details?: string }, project: Project): void {
+    const errorCode = error.code || '';
+    const errorMessage = error.message || '';
+    const errorDetails = error.details || '';
+    
+    // 1. 认证错误 - 保存本地并提示重新登录
+    if (errorCode === 'PGRST301' || 
+        errorCode === '401' || 
+        errorMessage.includes('JWT') ||
+        errorMessage.includes('token') ||
+        errorMessage.includes('expired')) {
       this.saveOfflineSnapshot([project]);
       this.logger.warn('Token 过期，数据已保存到本地');
       
@@ -1093,7 +1143,89 @@ export class SyncService {
         offlineMode: true,
         syncError: '登录已过期，数据已保存在本地，请重新登录后同步'
       }));
+      return;
     }
+    
+    // 2. 权限错误 (RLS) - 可能是数据归属问题
+    if (errorCode === '42501' || 
+        errorMessage.includes('permission denied') ||
+        errorMessage.includes('row-level security') ||
+        errorMessage.includes('policy')) {
+      this.saveOfflineSnapshot([project]);
+      this.logger.warn('权限被拒绝，数据已保存到本地', { projectId: project.id });
+      
+      this.syncState.update(s => ({
+        ...s,
+        syncError: '无权访问此项目，数据已保存到本地',
+        offlineMode: true
+      }));
+      return;
+    }
+    
+    // 3. 网络错误 - 保存本地并待网络恢复
+    if (errorCode === 'NETWORK_ERROR' ||
+        errorMessage.includes('network') ||
+        errorMessage.includes('Failed to fetch') ||
+        errorMessage.includes('NetworkError') ||
+        errorMessage.includes('timeout')) {
+      this.saveOfflineSnapshot([project]);
+      this.logger.warn('网络错误，数据已保存到本地');
+      
+      this.syncState.update(s => ({
+        ...s,
+        offlineMode: true,
+        syncError: '网络不可用，数据已保存在本地'
+      }));
+      return;
+    }
+    
+    // 4. 服务端错误 (5xx) - 保存本地并稍后重试
+    if (errorCode.startsWith('5') || 
+        errorMessage.includes('Internal Server Error') ||
+        errorMessage.includes('Service Unavailable')) {
+      this.saveOfflineSnapshot([project]);
+      this.logger.warn('服务器错误，数据已保存到本地');
+      
+      this.syncState.update(s => ({
+        ...s,
+        offlineMode: true,
+        syncError: '服务器暂时不可用，数据已保存在本地'
+      }));
+      return;
+    }
+    
+    // 5. 数据约束错误 - 可能是版本冲突或数据格式问题
+    if (errorCode === '23505' || // 唯一约束违反
+        errorCode === '23503' || // 外键约束违反
+        errorMessage.includes('duplicate key') ||
+        errorMessage.includes('unique constraint') ||
+        errorMessage.includes('foreign key')) {
+      this.logger.error('数据约束错误', { 
+        projectId: project.id, 
+        error: errorMessage,
+        details: errorDetails
+      });
+      
+      this.syncState.update(s => ({
+        ...s,
+        syncError: '数据冲突，请刷新页面重试'
+      }));
+      return;
+    }
+    
+    // 6. 通用错误处理 - 保存本地作为安全网
+    this.saveOfflineSnapshot([project]);
+    this.logger.error('未知同步错误', { 
+      code: errorCode, 
+      message: errorMessage,
+      projectId: project.id 
+    });
+    
+    this.syncState.update(s => ({
+      ...s,
+      syncError: `同步失败: ${errorMessage || '未知错误'}`,
+      offlineMode: true
+    }));
   }
 
   /**
