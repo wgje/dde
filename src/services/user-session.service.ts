@@ -56,21 +56,32 @@ export class UserSessionService {
   /**
    * 设置当前用户
    * 用户登录/登出时调用
+   * 
+   * 注意：此方法总是会加载项目数据，即使 userId 相同
+   * 这是因为 AuthService.checkSession() 可能已经设置了 userId，
+   * 但项目数据还未加载
    */
   async setCurrentUser(userId: string | null): Promise<void> {
-    if (this.currentUserId() === userId) return;
-
+    const previousUserId = this.currentUserId();
+    const isUserChange = previousUserId !== userId;
+    
     // 清理旧用户的附件监控和回调，防止内存泄漏
-    this.attachmentService.clearMonitoredAttachments();
+    if (isUserChange) {
+      this.attachmentService.clearMonitoredAttachments();
+      this.projectState.setActiveProjectId(null);
+      this.projectState.setProjects([]);
+      this.undoService.clearHistory();
+      this.syncCoordinator.teardownRealtimeSubscription();
+    }
 
     this.authService.currentUserId.set(userId);
-    this.projectState.setActiveProjectId(null);
-    this.projectState.setProjects([]);
-    this.undoService.clearHistory();
-    this.syncCoordinator.teardownRealtimeSubscription();
 
     if (userId) {
-      await this.loadUserData(userId);
+      // 检查是否已经有项目数据（避免重复加载）
+      const hasProjects = this.projectState.projects().length > 0;
+      if (!hasProjects || isUserChange) {
+        await this.loadUserData(userId);
+      }
     } else {
       this.loadFromCacheOrSeed();
     }
