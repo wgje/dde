@@ -789,13 +789,20 @@ export class SyncService {
    */
   private async loadProjectsFromCloudInternal(userId: string): Promise<Project[]> {
     try {
+      console.log('[Sync] 开始从云端加载项目，userId:', userId);
+      
       const { data, error } = await this.supabase.client()
         .from('projects')
         .select('*')
         .eq('owner_id', userId)
         .order('created_date', { ascending: true });
       
-      if (error) throw error;
+      if (error) {
+        console.error('[Sync] 加载项目失败:', error);
+        throw error;
+      }
+      
+      console.log('[Sync] 云端返回项目数量:', data?.length ?? 0);
       
       // 并行加载所有项目的任务和连接
       const projects = await Promise.all((data || []).map(async row => {
@@ -941,6 +948,8 @@ export class SyncService {
    * 保存操作的内部实现（不带超时控制）
    */
   private async doSaveProjectToCloudInternal(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }> {
+    console.log('[Sync] 开始保存项目到云端', { projectId: project.id, projectName: project.name, userId });
+    
     try {
       const currentVersion = project.version ?? 0;
       const newVersion = currentVersion + 1;
@@ -953,10 +962,12 @@ export class SyncService {
         .maybeSingle();
       
       if (checkError && checkError.code !== 'PGRST116') {
+        console.error('[Sync] 检查项目是否存在时出错:', checkError);
         throw checkError;
       }
       
       const isUpdate = !!existingData;
+      console.log('[Sync] 项目操作类型:', isUpdate ? '更新' : '创建', { existingData });
       
       if (isUpdate) {
         // 使用乐观锁更新：只有版本号匹配时才更新
@@ -1001,6 +1012,8 @@ export class SyncService {
         }
       } else {
         // 创建新项目
+        console.log('[Sync] 创建新项目', { projectId: project.id, ownerId: userId });
+        
         const { error: insertError } = await this.supabase.client()
           .from('projects')
           .insert({
@@ -1013,22 +1026,30 @@ export class SyncService {
           });
         
         if (insertError) {
+          console.error('[Sync] 创建项目失败:', insertError);
           this.handleSaveError(insertError, project);
           throw insertError;
         }
+        
+        console.log('[Sync] 项目创建成功');
       }
       
       // 批量保存任务
+      console.log('[Sync] 保存任务，数量:', project.tasks.length);
       const tasksResult = await this.taskRepo.saveTasks(project.id, project.tasks);
       if (!tasksResult.success) {
+        console.error('[Sync] 保存任务失败:', tasksResult.error);
         throw new Error(tasksResult.error);
       }
       
       // 同步连接
       const connectionsResult = await this.taskRepo.syncConnections(project.id, project.connections);
       if (!connectionsResult.success) {
+        console.error('[Sync] 同步连接失败:', connectionsResult.error);
         throw new Error(connectionsResult.error);
       }
+      
+      console.log('[Sync] 项目保存完成', { projectId: project.id, newVersion });
       
       // 更新本地版本号
       project.version = newVersion;

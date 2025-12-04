@@ -128,13 +128,17 @@ export class UserSessionService {
    */
   async loadProjects(): Promise<void> {
     const userId = this.currentUserId();
+    console.log('[Session] loadProjects 开始, userId:', userId);
+    
     if (!userId) {
+      console.log('[Session] 无 userId，从缓存或种子加载');
       this.loadFromCacheOrSeed();
       return;
     }
 
     const previousActive = this.projectState.activeProjectId();
     const offlineProjects = this.syncCoordinator.loadOfflineSnapshot();
+    console.log('[Session] 离线缓存项目数量:', offlineProjects?.length ?? 0);
     
     let projects: Project[] = [];
     try {
@@ -146,8 +150,9 @@ export class UserSessionService {
       });
       
       projects = await Promise.race([loadPromise, timeoutPromise]);
+      console.log('[Session] 云端加载项目数量:', projects.length);
     } catch (e) {
-      console.error('云端数据加载失败:', e);
+      console.error('[Session] 云端数据加载失败:', e);
       // 加载失败时使用本地缓存
       this.loadFromCacheOrSeed();
       const errorMsg = e instanceof Error ? e.message : '未知错误';
@@ -211,22 +216,32 @@ export class UserSessionService {
 
       this.syncCoordinator.saveOfflineSnapshot(rebalanced);
     } else if (this.syncCoordinator.offlineMode()) {
+      console.log('[Session] 离线模式，从缓存加载');
       this.loadFromCacheOrSeed();
       this.toastService.warning('离线模式', '网络不可用，数据仅保存在本地');
     } else {
       // 云端没有数据但有离线缓存 - 首次登录时迁移本地数据
+      console.log('[Session] 云端无数据，检查离线缓存');
+      
       if (offlineProjects && offlineProjects.length > 0) {
+        console.log('[Session] 发现离线缓存，尝试迁移到云端');
         this.logger.info('首次登录，迁移本地离线数据到云端');
         
         let syncedCount = 0;
         const projectsToSync: Project[] = [];
+        const failedProjects: string[] = [];
         
         for (const offlineProject of offlineProjects) {
+          console.log('[Session] 迁移项目:', offlineProject.id, offlineProject.name);
           const rebalanced = this.layoutService.rebalance(offlineProject);
           const result = await this.syncCoordinator.saveProjectToCloud(rebalanced, userId);
           if (result.success) {
             projectsToSync.push(rebalanced);
             syncedCount++;
+            console.log('[Session] 项目迁移成功:', offlineProject.name);
+          } else {
+            failedProjects.push(offlineProject.name || offlineProject.id);
+            console.error('[Session] 项目迁移失败:', offlineProject.name, result);
           }
         }
         
@@ -241,13 +256,28 @@ export class UserSessionService {
               `已将 ${syncedCount} 个项目同步到云端`
             );
           }
+          
+          if (failedProjects.length > 0) {
+            this.toastService.warning(
+              '部分项目同步失败',
+              `以下项目无法同步: ${failedProjects.join(', ')}`
+            );
+          }
         } else {
           // 离线数据同步失败，回退到种子数据
+          console.error('[Session] 所有离线项目迁移失败，使用种子数据');
           this.logger.warn('离线数据同步失败，使用种子数据');
           this.loadFromCacheOrSeed();
+          
+          // 告知用户同步失败的原因
+          this.toastService.error(
+            '数据同步失败',
+            '无法将本地数据同步到云端，请检查网络连接后重试'
+          );
         }
       } else {
         // 云端和本地都没有数据，使用种子数据
+        console.log('[Session] 云端和本地都无数据，使用种子数据');
         this.logger.info('首次登录且无本地数据，初始化种子数据');
         this.loadFromCacheOrSeed();
       }
