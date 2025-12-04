@@ -94,6 +94,8 @@ export class GlobalErrorHandler implements ErrorHandler {
     { pattern: /abort|cancel|user.*cancel/i, severity: ErrorSeverity.SILENT },
     // 非活动标签页的更新
     { pattern: /not active|inactive tab/i, severity: ErrorSeverity.SILENT },
+    // 本地种子数据 ID 格式不符合 UUID（这是预期行为，不应显示）
+    { pattern: /invalid input syntax for type uuid/i, severity: ErrorSeverity.SILENT },
     
     // === 提示级错误 ===
     // 网络错误
