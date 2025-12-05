@@ -225,24 +225,30 @@ export class ProjectStateService {
    * 更新项目列表
    */
   updateProjects(updater: (projects: Project[]) => Project[]): void {
-    // 获取调用栈的第一行（调用者）
-    const stack = new Error().stack?.split('\n')[2]?.trim() || 'unknown';
+    // 获取调用栈的前几行（调用者）
+    const stackLines = new Error().stack?.split('\n').slice(2, 5).map(s => s.trim()) || [];
+    const caller = stackLines.join(' <- ');
     
     this.projects.update(currentProjects => {
+      // 检查更新前的状态
+      const activeId = this.activeProjectId();
+      const beforeProject = currentProjects.find(p => p.id === activeId);
+      const beforeInvalid = beforeProject?.tasks.filter(t => t.stage === 1 && !t.parentId && !t.deletedAt && (t.displayId === '?' || !t.displayId)) || [];
+      
       const result = updater(currentProjects);
       
-      // DEBUG: 检查更新后的项目是否有无效的 displayId
-      const activeId = this.activeProjectId();
-      const activeProject = result.find(p => p.id === activeId);
-      if (activeProject) {
-        const stage1Roots = activeProject.tasks.filter(t => t.stage === 1 && !t.parentId && !t.deletedAt);
-        const invalidRoots = stage1Roots.filter(t => t.displayId === '?' || !t.displayId);
-        if (invalidRoots.length > 0) {
-          console.warn('[updateProjects] Invalid displayId detected!', {
-            caller: stack,
-            taskIds: invalidRoots.map(t => t.id.slice(-4))
-          });
-        }
+      // 检查更新后的状态
+      const afterProject = result.find(p => p.id === activeId);
+      const afterInvalid = afterProject?.tasks.filter(t => t.stage === 1 && !t.parentId && !t.deletedAt && (t.displayId === '?' || !t.displayId)) || [];
+      
+      // 只在状态变化时报告（从有效变成无效，或新增无效）
+      if (afterInvalid.length > beforeInvalid.length) {
+        console.error('[updateProjects] NEW invalid displayId introduced!', {
+          caller,
+          beforeCount: beforeInvalid.length,
+          afterCount: afterInvalid.length,
+          newInvalid: afterInvalid.filter(a => !beforeInvalid.some(b => b.id === a.id)).map(t => t.id.slice(-4))
+        });
       }
       
       return result;
