@@ -508,6 +508,12 @@ export class SyncCoordinatorService {
    * 验证并重新平衡项目
    */
   validateAndRebalanceWithResult(project: Project): Result<Project, OperationError> {
+    // DEBUG: 检查输入
+    console.log('[validateAndRebalanceWithResult] INPUT:', {
+      projectId: project.id?.slice(-4),
+      taskCount: project.tasks?.length ?? 0
+    });
+    
     const validation = validateProject(project);
     
     const fatalErrors = validation.errors.filter(e => 
