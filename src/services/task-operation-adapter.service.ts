@@ -420,7 +420,7 @@ export class TaskOperationAdapterService {
         if (p.id === targetProjectId) {
           afterProject = mutator(p);
           // DEBUG: 检查 mutator 返回的结果
-          const stage1Roots = afterProject.tasks.filter(t => t.stage === 'stage1');
+          const stage1Roots = afterProject.tasks.filter(t => t.stage === 1);
           const invalidDisplayIds = stage1Roots.filter(t => t.displayId === '?');
           if (invalidDisplayIds.length > 0) {
             console.warn('[recordAndUpdate] MUTATOR returned project with invalid displayId!', {
