@@ -211,8 +211,8 @@ import { renderMarkdown } from '../../utils/markdown';
               </button>
           </div>
           
-          <!-- 附件管理 -->
-          @if (store.currentUserId()) {
+          <!-- 附件管理 - 暂时隐藏 -->
+          <!-- @if (store.currentUserId()) {
             <app-attachment-manager
               [userId]="store.currentUserId()!"
               [projectId]="store.activeProjectId()!"
@@ -224,7 +224,7 @@ import { renderMarkdown } from '../../utils/markdown';
               (attachmentsChange)="attachmentsChange.emit({ taskId: task.id, attachments: $event })"
               (error)="attachmentError.emit($event)">
             </app-attachment-manager>
-          }
+          } -->
       </div>
     </ng-template>
     
@@ -340,8 +340,8 @@ import { renderMarkdown } from '../../utils/markdown';
         </button>
       </div>
       
-      <!-- 附件管理（手机端） - 紧凑 -->
-      @if (store.currentUserId()) {
+      <!-- 附件管理（手机端） - 暂时隐藏 -->
+      <!-- @if (store.currentUserId()) {
         <app-attachment-manager
           [userId]="store.currentUserId()!"
           [projectId]="store.activeProjectId()!"
@@ -351,7 +351,7 @@ import { renderMarkdown } from '../../utils/markdown';
           (attachmentsChange)="attachmentsChange.emit({ taskId: task.id, attachments: $event })"
           (error)="attachmentError.emit($event)">
         </app-attachment-manager>
-      }
+      } -->
     </ng-template>
   `
 })

@@ -53,15 +53,15 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
         <!-- 内容编辑/预览 -->
         <div class="relative">
           <!-- 预览/编辑切换按钮 -->
-          <div class="absolute top-1 right-1 z-10 flex gap-1">
+          <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
             <button 
               (click)="togglePreview(); $event.stopPropagation()"
-              class="px-2 py-0.5 text-[9px] rounded transition-all"
+              class="px-1.5 py-0.5 text-[9px] rounded transition-all opacity-70 hover:opacity-100"
               [class.bg-indigo-500]="isPreview()"
               [class.text-white]="isPreview()"
-              [class.bg-stone-100]="!isPreview()"
+              [class.bg-stone-200]="!isPreview()"
               [class.text-stone-500]="!isPreview()"
-              [class.hover:bg-stone-200]="!isPreview()"
+              [class.hover:bg-stone-300]="!isPreview()"
               title="切换预览/编辑">
               {{ isPreview() ? '编辑' : '预览' }}
             </button>
@@ -85,7 +85,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
               (focus)="onInputFocus()"
               (blur)="onInputBlur()"
               class="w-full border border-stone-200 rounded-lg focus:ring-1 focus:ring-stone-400 focus:border-stone-400 outline-none font-mono text-stone-600 bg-white resize-none touch-manipulation"
-              [ngClass]="{'h-24 text-xs p-2 pt-6': !isMobile, 'h-28 text-[11px] p-2 pt-6': isMobile}"
+              [ngClass]="{'h-24 text-xs p-2 pr-14': !isMobile, 'h-28 text-[11px] p-2 pr-14': isMobile}"
               placeholder="输入 Markdown 内容..."></textarea>
           }
         </div>
@@ -118,8 +118,8 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
           </div>
         }
         
-        <!-- 桌面端：附件管理独立显示 -->
-        @if (!isMobile && userId && projectId) {
+        <!-- 桌面端：附件管理独立显示 - 暂时隐藏 -->
+        <!-- @if (!isMobile && userId && projectId) {
           <app-attachment-manager
             [userId]="userId"
             [projectId]="projectId"
@@ -129,7 +129,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
             (attachmentsChange)="onAttachmentsChange($event)"
             (error)="attachmentError.emit($event)">
           </app-attachment-manager>
-        }
+        } -->
         
         <!-- 操作按钮 - 仅在编辑模式下显示 -->
         @if (!isPreview()) {
@@ -157,8 +157,8 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
               </svg>
               下级
             </button>
-            <!-- 移动端：附件按钮放在同一行 -->
-            @if (isMobile && userId && projectId) {
+            <!-- 移动端：附件按钮放在同一行 - 暂时隐藏 -->
+            <!-- @if (isMobile && userId && projectId) {
               <label 
                 class="flex-1 cursor-pointer text-[10px] px-1.5 py-0.5 bg-stone-50 hover:bg-stone-100 text-stone-500 hover:text-stone-700 rounded-md border border-stone-200 transition-colors flex items-center justify-center gap-0.5"
                 [class.opacity-50]="isUploading()"
@@ -182,7 +182,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
                   (change)="onMobileFileSelect($event)"
                   [disabled]="isUploading()">
               </label>
-            }
+            } -->
             <button 
               (click)="deleteTask.emit()" 
               class="bg-stone-100 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-all"
@@ -195,8 +195,8 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
             </button>
           </div>
           
-          <!-- 移动端：附件列表折叠区（如果有附件） -->
-          @if (isMobile && task.attachments && task.attachments.length > 0) {
+          <!-- 移动端：附件列表折叠区（如果有附件）- 暂时隐藏 -->
+          <!-- @if (isMobile && task.attachments && task.attachments.length > 0) {
             <div class="mt-1.5">
               <button 
                 (click)="toggleAttachmentList()"
@@ -242,7 +242,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
                 </div>
               }
             </div>
-          }
+          } -->
         }
       </div>
       
@@ -283,6 +283,7 @@ export class TextTaskEditorComponent {
   @Output() deleteTask = new EventEmitter<void>();
   @Output() attachmentError = new EventEmitter<string>();
   @Output() openLinkedTask = new EventEmitter<{ task: Task; event: Event }>();
+  @Output() previewModeChange = new EventEmitter<boolean>();
   
   readonly isPreview = signal(true);
   readonly showAttachmentList = signal(false);
@@ -293,16 +294,28 @@ export class TextTaskEditorComponent {
   /** 最大文件大小 10MB */
   private readonly maxFileSize = 10 * 1024 * 1024;
   
-  /** 监听 document 点击事件，当点击组件外部时切换回预览模式 */
+  /** 
+   * 监听 document 点击事件
+   * 注意：任务卡片内的点击由 text-task-card 处理
+   * 这里只处理点击到组件完全外部的情况（如页面其他区域）
+   */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
     // 如果已经是预览模式，无需处理
     if (this.isPreview()) return;
     
-    // 检查点击是否在组件内部
+    // 检查点击是否在编辑器组件内部
     const clickedInside = this.elementRef.nativeElement.contains(event.target as Node);
     if (!clickedInside) {
-      this.isPreview.set(true);
+      // 检查是否点击在父任务卡片内（通过 data-task-id 属性判断）
+      const target = event.target as HTMLElement;
+      const clickedInTaskCard = target.closest(`[data-task-id="${this.task.id}"]`);
+      if (!clickedInTaskCard) {
+        // 点击完全在任务卡片外，切换到预览模式
+        this.isPreview.set(true);
+        this.previewModeChange.emit(true);
+      }
+      // 如果点击在任务卡片内但编辑器外，由 text-task-card 处理
     }
   }
   
@@ -311,7 +324,19 @@ export class TextTaskEditorComponent {
   }
   
   togglePreview() {
-    this.isPreview.update(v => !v);
+    const newValue = !this.isPreview();
+    this.isPreview.set(newValue);
+    this.previewModeChange.emit(newValue);
+  }
+  
+  /**
+   * 外部调用：强制切换到预览模式
+   */
+  setPreviewMode() {
+    if (!this.isPreview()) {
+      this.isPreview.set(true);
+      this.previewModeChange.emit(true);
+    }
   }
   
   renderMarkdown(content: string) {

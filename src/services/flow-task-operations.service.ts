@@ -94,6 +94,11 @@ export class FlowTaskOperationsService {
    * @returns 新任务ID，如果失败返回 null
    */
   addSiblingTask(task: Task): string | null {
+    // 如果是待分配任务，直接在待分配区域创建新任务
+    if (task.stage === null) {
+      this.toast.info('在待分配区域创建', '当前任务未分配阶段');
+    }
+    
     const result = this.store.addTask('', '', task.stage, task.parentId, true);
     if (isFailure(result)) {
       this.toast.error('添加任务失败', getErrorMessage(result.error));

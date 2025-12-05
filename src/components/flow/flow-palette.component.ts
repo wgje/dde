@@ -93,15 +93,25 @@ import { Task } from '../../models';
         </div>
     </div>
 
-    <!-- Resizer Handle -->
-    <div class="h-2 sm:h-3 bg-transparent hover:bg-stone-200 cursor-row-resize z-20 flex-shrink-0 relative group transition-all flex items-center justify-center touch-none"
-         [class.h-4]="store.isMobile()"
+    <!-- Resizer Handle / 手机端滑动手势区域 -->
+    <div class="h-2 sm:h-3 bg-transparent hover:bg-stone-200 cursor-row-resize z-20 flex-shrink-0 relative group transition-all flex items-center justify-center"
+         [class.h-6]="store.isMobile()"
          [class.bg-stone-100]="store.isMobile()"
+         [class.touch-none]="!store.isMobile()"
          (mousedown)="startResize($event)"
-         (touchstart)="startResizeTouch($event)">
+         (touchstart)="onGestureAreaTouchStart($event)"
+         (touchmove)="onGestureAreaTouchMove($event)"
+         (touchend)="onGestureAreaTouchEnd($event)">
          <div class="w-10 sm:w-12 h-0.5 sm:h-1 rounded-full bg-stone-300 group-hover:bg-stone-400 transition-colors"
               [class.w-14]="store.isMobile()"
               [class.h-1]="store.isMobile()"></div>
+         <!-- 手机端滑动提示 -->
+         @if (store.isMobile()) {
+           <div class="absolute inset-0 flex items-center justify-between px-4 pointer-events-none">
+             <span class="text-[8px] text-stone-400 opacity-60">← 侧边栏</span>
+             <span class="text-[8px] text-stone-400 opacity-60">文本 →</span>
+           </div>
+         }
     </div>
   `
 })
@@ -122,6 +132,10 @@ export class FlowPaletteComponent implements OnDestroy {
   readonly taskTouchStart = output<{ event: TouchEvent; task: Task }>();
   readonly taskTouchMove = output<{ event: TouchEvent }>();
   readonly taskTouchEnd = output<{ event: TouchEvent }>();
+  
+  // 手势滑动事件
+  readonly swipeToText = output<void>();      // 向右滑动切换到文本视图
+  readonly swipeToSidebar = output<void>();   // 向左滑动打开侧边栏
   
   // 内部状态
   readonly draggingId = signal<string | null>(null);
@@ -148,6 +162,14 @@ export class FlowPaletteComponent implements OnDestroy {
     isDragging: false,
     longPressTimer: null as ReturnType<typeof setTimeout> | null,
     ghost: null as HTMLElement | null
+  };
+  
+  // 手势区域滑动状态
+  private gestureState = {
+    startX: 0,
+    startY: 0,
+    isSwiping: false,
+    isResizing: false  // 是否进入调整大小模式
   };
   
   /**
@@ -342,7 +364,105 @@ export class FlowPaletteComponent implements OnDestroy {
     window.addEventListener('mouseup', this.resizeMouseUpHandler);
   }
   
-  startResizeTouch(e: TouchEvent) {
+  // ========== 手势区域滑动处理（手机端视图切换） ==========
+  
+  /**
+   * 手势区域触摸开始
+   * 手机端用于左右滑动切换视图/打开侧边栏
+   * 桌面端用于调整高度
+   */
+  onGestureAreaTouchStart(e: TouchEvent) {
+    if (e.touches.length !== 1) return;
+    
+    const touch = e.touches[0];
+    this.gestureState = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      isSwiping: false,
+      isResizing: false
+    };
+    
+    // 非手机端，使用原来的调整大小逻辑
+    if (!this.store.isMobile()) {
+      this.startResizeTouch(e);
+    }
+  }
+  
+  /**
+   * 手势区域触摸移动
+   * 判断是左右滑动还是上下拖动
+   */
+  onGestureAreaTouchMove(e: TouchEvent) {
+    if (e.touches.length !== 1) return;
+    
+    // 非手机端不处理滑动手势
+    if (!this.store.isMobile()) return;
+    
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - this.gestureState.startX;
+    const deltaY = touch.clientY - this.gestureState.startY;
+    const absDeltaX = Math.abs(deltaX);
+    const absDeltaY = Math.abs(deltaY);
+    
+    // 如果还没确定是水平滑动还是垂直拖动
+    if (!this.gestureState.isSwiping && !this.gestureState.isResizing) {
+      // 水平滑动距离大于垂直距离 1.5 倍，且超过 15px，认为是滑动手势
+      if (absDeltaX > 15 && absDeltaX > absDeltaY * 1.5) {
+        this.gestureState.isSwiping = true;
+      } 
+      // 垂直拖动距离大于水平距离，且超过 10px，认为是调整大小
+      else if (absDeltaY > 10 && absDeltaY > absDeltaX) {
+        this.gestureState.isResizing = true;
+        // 开始调整大小
+        this.isResizing = true;
+        this.startY = this.gestureState.startY;
+        this.startHeight = this.height();
+      }
+    }
+    
+    // 如果是调整大小模式
+    if (this.gestureState.isResizing && this.isResizing) {
+      e.preventDefault();
+      const delta = touch.clientY - this.startY;
+      const newHeight = Math.max(80, Math.min(500, this.startHeight + delta));
+      this.heightChange.emit(newHeight);
+    }
+  }
+  
+  /**
+   * 手势区域触摸结束
+   * 根据滑动方向触发相应事件
+   */
+  onGestureAreaTouchEnd(e: TouchEvent) {
+    // 非手机端不处理
+    if (!this.store.isMobile()) return;
+    
+    // 如果是调整大小模式，结束调整
+    if (this.gestureState.isResizing) {
+      this.isResizing = false;
+      this.gestureState.isResizing = false;
+      return;
+    }
+    
+    // 如果不是滑动手势，不处理
+    if (!this.gestureState.isSwiping) return;
+    
+    const touch = e.changedTouches[0];
+    const deltaX = touch.clientX - this.gestureState.startX;
+    const threshold = 50; // 滑动阈值
+    
+    if (deltaX > threshold) {
+      // 向右滑动 → 切换到文本视图
+      this.swipeToText.emit();
+    } else if (deltaX < -threshold) {
+      // 向左滑动 → 打开侧边栏
+      this.swipeToSidebar.emit();
+    }
+    
+    this.gestureState.isSwiping = false;
+  }
+  
+  private startResizeTouch(e: TouchEvent) {
     if (e.touches.length !== 1) return;
     e.preventDefault();
     this.isResizing = true;

@@ -33,7 +33,7 @@ import { FormsModule } from '@angular/forms';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
 import { filter, takeUntil } from 'rxjs/operators';
 import { Subject } from 'rxjs';
-import { getErrorMessage, isFailure, isSuccess } from './utils/result';
+import { getErrorMessage, isFailure, isSuccess, humanizeErrorMessage } from './utils/result';
 import { ThemeType, Project } from './models';
 import { UI_CONFIG, AUTH_CONFIG } from './config/constants';
 
@@ -632,7 +632,7 @@ export class AppComponent implements OnInit, OnDestroy {
       }
     } catch (e: any) {
       // 阻断性显式反馈：启动失败时不静默，让用户明确知道发生了什么
-      const errorMsg = e?.message ?? String(e);
+      const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
@@ -697,7 +697,7 @@ export class AppComponent implements OnInit, OnDestroy {
         void this.router.navigateByUrl(returnUrl);
       }
     } catch (e: any) {
-      this.authError.set(e?.message ?? String(e));
+      this.authError.set(humanizeErrorMessage(e?.message ?? String(e)));
     } finally {
       this.isAuthLoading.set(false);
       this.isCheckingSession.set(false);
@@ -744,7 +744,7 @@ export class AppComponent implements OnInit, OnDestroy {
         this.isSignupMode.set(false);
       }
     } catch (e: any) {
-      this.authError.set(e?.message ?? String(e));
+      this.authError.set(humanizeErrorMessage(e?.message ?? String(e)));
     } finally {
       this.isAuthLoading.set(false);
     }
@@ -772,7 +772,7 @@ export class AppComponent implements OnInit, OnDestroy {
       }
       this.resetPasswordSent.set(true);
     } catch (e: any) {
-      this.authError.set(e?.message ?? String(e));
+      this.authError.set(humanizeErrorMessage(e?.message ?? String(e)));
     } finally {
       this.isAuthLoading.set(false);
     }

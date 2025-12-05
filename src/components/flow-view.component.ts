@@ -76,7 +76,9 @@ import * as go from 'gojs';
         (taskDrop)="onUnassignedDrop($event.event)"
         (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
         (taskTouchMove)="onUnassignedTouchMove($event.event)"
-        (taskTouchEnd)="onUnassignedTouchEnd($event.event)">
+        (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
+        (swipeToText)="goBackToText.emit()"
+        (swipeToSidebar)="emitToggleSidebar()">
       </app-flow-palette>
 
       <!-- 流程图区域 -->

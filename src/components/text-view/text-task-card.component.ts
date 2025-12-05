@@ -131,12 +131,29 @@ export class TextTaskCardComponent implements OnChanges {
     return extractPlainText(content, 80);
   }
   
+  /**
+   * 处理卡片点击
+   * - 如果任务未选中：选中任务（展开）
+   * - 如果任务已选中：不做任何操作（避免意外收缩）
+   *   预览模式的切换由用户主动点击"预览"按钮或点击任务卡片外部空白区域触发
+   */
   onCardClick(event: Event) {
     const target = event.target as HTMLElement;
+    
+    // 如果点击的是输入框、文本框或按钮，直接阻止冒泡并返回
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.closest('input, textarea, button')) {
+      event.stopPropagation();
       return;
     }
-    this.select.emit(this.task);
+    
+    if (this.isSelected) {
+      // 任务已展开，阻止事件冒泡，避免触发父组件的收缩逻辑
+      // 不再自动切换预览模式，让用户通过点击"预览"按钮或点击卡片外部来控制
+      event.stopPropagation();
+    } else {
+      // 任务未展开，触发选中事件
+      this.select.emit(this.task);
+    }
   }
   
   onDragStart(event: DragEvent) {

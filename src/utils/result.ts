@@ -143,6 +143,72 @@ export function extractErrorMessage(error: unknown): string {
 }
 
 /**
+ * 网络错误消息映射表
+ * 将技术性错误消息转换为用户友好的提示
+ */
+const NETWORK_ERROR_MESSAGES: Array<{ pattern: RegExp; message: string }> = [
+  { pattern: /Failed to fetch|fetch.*fail/i, message: '网络连接失败，请检查网络后重试' },
+  { pattern: /NetworkError|network.*error/i, message: '网络错误，请检查网络连接' },
+  { pattern: /timeout|ETIMEDOUT/i, message: '请求超时，请稍后重试' },
+  { pattern: /ERR_CONNECTION_REFUSED|ECONNREFUSED/i, message: '无法连接到服务器' },
+  { pattern: /ERR_NETWORK|ERR_INTERNET/i, message: '网络不可用，请检查网络连接' },
+  { pattern: /offline/i, message: '当前处于离线状态' },
+  { pattern: /cors|cross-origin/i, message: '网络请求被阻止，请稍后重试' },
+  { pattern: /abort/i, message: '请求已取消' },
+  { pattern: /Invalid.*email|Email.*not.*confirmed/i, message: '邮箱格式不正确或未验证' },
+  { pattern: /Invalid.*password|Invalid.*credentials/i, message: '用户名或密码错误' },
+  { pattern: /User.*not.*found/i, message: '用户不存在' },
+  { pattern: /Email.*already.*registered/i, message: '该邮箱已被注册' },
+  { pattern: /rate.*limit|too.*many.*requests/i, message: '操作太频繁，请稍后再试' },
+  { pattern: /unauthorized|401/i, message: '登录已过期，请重新登录' },
+  { pattern: /forbidden|403/i, message: '没有权限执行此操作' },
+  { pattern: /not.*found|404/i, message: '请求的资源不存在' },
+  { pattern: /server.*error|500|502|503|504/i, message: '服务器繁忙，请稍后重试' },
+];
+
+/**
+ * 将技术性错误消息转换为用户友好的提示
+ * 用于在 UI 中显示错误时提供更好的用户体验
+ * 
+ * @example
+ * // 技术性消息会被转换
+ * humanizeErrorMessage('Failed to fetch') // => '网络连接失败，请检查网络后重试'
+ * 
+ * // 已经友好的消息会保持不变
+ * humanizeErrorMessage('密码长度至少8位') // => '密码长度至少8位'
+ */
+export function humanizeErrorMessage(errorMessage: string): string {
+  if (!errorMessage) {
+    return '操作失败，请稍后重试';
+  }
+  
+  // 检查是否匹配已知的技术性错误
+  for (const { pattern, message } of NETWORK_ERROR_MESSAGES) {
+    if (pattern.test(errorMessage)) {
+      return message;
+    }
+  }
+  
+  // 如果是 TypeError: xxx 格式，提取并转换
+  if (errorMessage.startsWith('TypeError:')) {
+    const innerMessage = errorMessage.replace(/^TypeError:\s*/i, '');
+    return humanizeErrorMessage(innerMessage);
+  }
+  
+  // 如果消息看起来是技术性的（包含特殊字符或很长的英文），返回通用消息
+  const looksLikeTechnical = 
+    /^[A-Z_]+:|Error:|Exception:|^\[.*\]|{.*}/.test(errorMessage) ||
+    (errorMessage.length > 100 && /^[a-zA-Z\s.,;:'"()[\]{}]+$/.test(errorMessage));
+  
+  if (looksLikeTechnical) {
+    return '操作失败，请稍后重试';
+  }
+  
+  // 返回原始消息（可能已经是用户友好的）
+  return errorMessage;
+}
+
+/**
  * 将可能抛出异常的操作包装为 Result
  */
 export function tryCatch<T>(

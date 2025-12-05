@@ -1,7 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { 
-  Result, OperationError, ErrorCodes, success, failure 
+  Result, OperationError, ErrorCodes, success, failure, humanizeErrorMessage 
 } from '../utils/result';
 import { environment } from '../environments/environment';
 
@@ -231,7 +231,7 @@ export class AuthService {
       const { data, error } = await this.supabase.signInWithPassword(email, password);
       
       if (error || !data.session?.user) {
-        const errorMsg = error?.message || '登录失败';
+        const errorMsg = humanizeErrorMessage(error?.message || '登录失败');
         this.authState.update(s => ({ ...s, error: errorMsg }));
         return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
       }
@@ -250,7 +250,7 @@ export class AuthService {
       
       return success({ userId, email: userEmail ?? undefined });
     } catch (e: any) {
-      const errorMsg = e?.message ?? String(e);
+      const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
       this.authState.update(s => ({ ...s, error: errorMsg }));
       return failure(ErrorCodes.UNKNOWN, errorMsg);
     } finally {
@@ -279,7 +279,7 @@ export class AuthService {
       });
       
       if (error) {
-        const errorMsg = error.message;
+        const errorMsg = humanizeErrorMessage(error.message);
         this.authState.update(s => ({ ...s, error: errorMsg }));
         return failure(ErrorCodes.UNKNOWN, errorMsg);
       }
@@ -308,7 +308,7 @@ export class AuthService {
       
       return success({});
     } catch (e: any) {
-      const errorMsg = e?.message ?? String(e);
+      const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
       this.authState.update(s => ({ ...s, error: errorMsg }));
       return failure(ErrorCodes.UNKNOWN, errorMsg);
     } finally {
@@ -333,14 +333,14 @@ export class AuthService {
       });
       
       if (error) {
-        const errorMsg = error.message;
+        const errorMsg = humanizeErrorMessage(error.message);
         this.authState.update(s => ({ ...s, error: errorMsg }));
         return failure(ErrorCodes.UNKNOWN, errorMsg);
       }
       
       return success(undefined);
     } catch (e: any) {
-      const errorMsg = e?.message ?? String(e);
+      const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
       this.authState.update(s => ({ ...s, error: errorMsg }));
       return failure(ErrorCodes.UNKNOWN, errorMsg);
     } finally {
