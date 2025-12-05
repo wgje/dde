@@ -250,7 +250,25 @@ export class ProjectStateService {
    * 更新项目列表
    */
   updateProjects(updater: (projects: Project[]) => Project[]): void {
-    this.projects.update(updater);
+    this.projects.update(currentProjects => {
+      const result = updater(currentProjects);
+      
+      // DEBUG: 检查更新后的项目是否有无效的 displayId
+      const activeId = this.activeProjectId();
+      const activeProject = result.find(p => p.id === activeId);
+      if (activeProject) {
+        const stage1Roots = activeProject.tasks.filter(t => t.stage === 1 && !t.parentId && !t.deletedAt);
+        const invalidRoots = stage1Roots.filter(t => t.displayId === '?' || !t.displayId);
+        if (invalidRoots.length > 0) {
+          console.warn('[updateProjects] AFTER updater - Stage 1 roots with invalid displayId:', {
+            invalidRoots: invalidRoots.map(t => ({ id: t.id.slice(-4), displayId: t.displayId, title: t.title || 'untitled' }))
+          });
+          console.trace('[updateProjects] Call stack');
+        }
+      }
+      
+      return result;
+    });
   }
 
   /**
