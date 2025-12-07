@@ -27,14 +27,15 @@ import { renderMarkdownSafe } from '../../utils/markdown';
       [ngClass]="{'mx-4 mt-2 mb-4': !isMobile, 'mx-2': isMobile}">
       
       <header 
-        (click)="store.isTextUnassignedOpen.set(!store.isTextUnassignedOpen())" 
-        class="py-2 cursor-pointer flex justify-between items-center group select-none">
-        <span class="font-bold text-retro-dark flex items-center gap-2 tracking-tight"
+        (click)="store.isTextUnassignedOpen.set(!store.isTextUnassignedOpen()); $event.stopPropagation()" 
+        class="py-2 cursor-pointer flex justify-between items-center group select-none touch-manipulation"
+        style="-webkit-tap-highlight-color: transparent;">
+        <span class="font-bold text-retro-dark flex items-center gap-2 tracking-tight pointer-events-none"
               [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}">
           <span class="w-1.5 h-1.5 rounded-full bg-retro-teal shadow-[0_0_6px_rgba(74,140,140,0.4)]"></span>
           待分配
         </span>
-        <span class="text-stone-300 text-xs group-hover:text-stone-500 transition-transform" 
+        <span class="text-stone-300 text-xs group-hover:text-stone-500 transition-transform pointer-events-none" 
               [class.rotate-180]="!store.isTextUnassignedOpen()">▼</span>
       </header>
 
@@ -143,7 +144,7 @@ import { renderMarkdownSafe } from '../../utils/markdown';
                   class="px-2 py-1 bg-panel/50 backdrop-blur-sm border border-retro-muted/30 rounded-md text-xs font-medium text-retro-muted hover:border-retro-teal hover:text-retro-teal cursor-grab active:cursor-grabbing transition-all"
                   [class.opacity-50]="draggingTaskId === task.id"
                   [class.touch-none]="draggingTaskId === task.id"
-                  (click)="onTaskClick(task, false)">
+                  (click)="onTaskClick(task, false); $event.stopPropagation()">
                   {{task.title || '点击编辑...'}}
                 </div>
               }
@@ -194,9 +195,17 @@ export class TextUnassignedComponent {
   /** 是否处于编辑模式（vs 预览模式） */
   readonly isEditMode = signal(false);
   
+  /** 标记是否正在打开新任务（防止立即被关闭） */
+  private isOpening = false;
+  
   /** 监听 document 点击事件，当点击组件外部时切换回预览模式 */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
+    // 如果正在打开新任务，跳过此次检查
+    if (this.isOpening) {
+      return;
+    }
+    
     // 如果没有展开的任务，无需处理
     if (!this.editingTaskId()) return;
     
@@ -225,10 +234,19 @@ export class TextUnassignedComponent {
   }
   
   onTaskClick(task: Task, isNewTask: boolean = false) {
+    // 标记正在打开任务，防止 document 点击事件立即关闭它
+    this.isOpening = true;
+    
     this.taskClick.emit(task);
     this.editingTaskId.set(task.id);
     // 新建任务时直接进入编辑模式，查阅已有任务时默认预览模式
     this.isEditMode.set(isNewTask);
+    
+    // 使用微任务延迟重置 isOpening 标记
+    // 确保当前事件循环中的所有同步代码（包括 document 点击处理器）都执行完毕
+    queueMicrotask(() => {
+      this.isOpening = false;
+    });
   }
   
   onDragStart(event: DragEvent, task: Task) {

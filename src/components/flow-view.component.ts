@@ -370,7 +370,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly paletteHeight = signal(this.store.isMobile() ? 120 : 180);
   
   /** 底部抽屉高度（vh） */
-  readonly drawerHeight = signal(35);
+  readonly drawerHeight = signal(25);
   readonly isResizingDrawerSignal = signal(false);
   
   /** 是否正在重试加载图表 */

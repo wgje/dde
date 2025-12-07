@@ -1,4 +1,4 @@
-import { Component, input, output, signal, inject, OnDestroy } from '@angular/core';
+import { Component, input, output, signal, computed, inject, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../../services/store.service';
@@ -87,31 +87,52 @@ import { renderMarkdown } from '../../utils/markdown';
     
     <!-- 移动端顶部下拉抽屉面板 -->
     @if (store.isMobile() && store.isFlowDetailOpen()) {
-      <div class="absolute top-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-xl border-b border-stone-200 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col"
-           [style.max-height.vh]="drawerHeight()"
+      <div class="absolute left-0 right-0 z-30 bg-white/95 backdrop-blur-xl border-b border-stone-200 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col transition-all duration-100"
+           [style.top.px]="0"
+           [style.height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
-        <!-- 标题栏 - 左边留出空间避开导航按钮 -->
-        <div class="pl-28 pr-3 pt-2 pb-1 flex justify-between items-center flex-shrink-0">
-          <h3 class="font-bold text-stone-700 text-xs">任务详情</h3>
-          <button (click)="store.isFlowDetailOpen.set(false)" class="text-stone-400 hover:text-stone-600 p-0.5">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <!-- 标题栏 - 左边留出空间避开导航按钮，紧凑布局 -->
+        <div class="pr-3 transition-all duration-200 flex justify-between items-center flex-shrink-0"
+             [class.pl-28]="drawerHeight() >= 20"
+             [class.pl-3]="drawerHeight() < 20"
+             [class.pt-1.5]="drawerHeight() >= 20"
+             [class.pt-0.5]="drawerHeight() < 20"
+             [class.pb-0.5]="drawerHeight() >= 20"
+             [class.pb-0]="drawerHeight() < 20">
+          @if (drawerHeight() >= 20) {
+            <h3 class="font-bold text-stone-700 text-xs">任务详情</h3>
+          }
+          <button (click)="store.isFlowDetailOpen.set(false)" 
+                  class="text-stone-400 hover:text-stone-600 transition-all"
+                  [class.p-0.5]="drawerHeight() >= 20"
+                  [class.p-0]="drawerHeight() < 20"
+                  [class.ml-auto]="drawerHeight() < 20">
+            <svg xmlns="http://www.w3.org/2000/svg" 
+                 class="transition-all"
+                 [class.h-4]="drawerHeight() >= 20"
+                 [class.w-4]="drawerHeight() >= 20"
+                 [class.h-3]="drawerHeight() < 20"
+                 [class.w-3]="drawerHeight() < 20"
+                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
         
-        <!-- 内容区域 -->
-        <div class="flex-1 overflow-y-auto px-3 pb-2 overscroll-contain"
+        <!-- 内容区域 - 更紧凑 -->
+        <div class="flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
+             (touchstart)="onContentTouchStart($event)"
+             (touchmove)="onContentTouchMove($event)"
              style="-webkit-overflow-scrolling: touch; touch-action: pan-y; transform: translateZ(0);">
           @if (task(); as t) {
             <ng-container *ngTemplateOutlet="mobileTaskContent; context: { $implicit: t }"></ng-container>
           } @else {
-            <div class="text-center text-stone-400 text-xs py-2">双击节点查看详情</div>
+            <div class="text-center text-stone-400 text-xs py-1">双击节点查看详情</div>
           }
         </div>
         
-        <!-- 拖动条 - 移到底部 -->
-        <div class="flex justify-center py-1.5 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
+        <!-- 拖动条 - 紧凑 -->
+        <div class="flex justify-center py-1 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
              (touchstart)="startDrawerResize($event)"
              (mousedown)="startDrawerResize($event)">
           <div class="w-10 h-1 bg-stone-300 rounded-full"></div>
@@ -231,7 +252,7 @@ import { renderMarkdown } from '../../utils/markdown';
     <!-- 移动端任务内容模板 -->
     <ng-template #mobileTaskContent let-task>
       <!-- 紧凑的任务信息头 - 单行布局 -->
-      <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
+      <div class="flex items-center gap-1.5 mb-1 flex-wrap">
         <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 px-1.5 py-0.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
         <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
         <span class="text-[9px] px-1 py-0.5 rounded"
@@ -255,18 +276,13 @@ import { renderMarkdown } from '../../utils/markdown';
       
       <!-- 预览模式 -->
       @if (!isEditMode()) {
-        <div class="space-y-1.5 cursor-pointer" (click)="toggleEditMode()">
+        <div class="cursor-pointer space-y-1" (click)="toggleEditMode()">
           <!-- 标题 -->
-          <h4 class="text-xs font-medium text-stone-800 leading-tight">{{ task.title || '无标题' }}</h4>
+          <h4 class="text-xs font-medium text-stone-800 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
           
           <!-- Markdown 预览内容 -->
           @if (task.content) {
-            <div 
-              class="text-[11px] text-stone-600 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-28 overflow-y-auto"
-              [innerHTML]="renderMarkdownContent(task.content)">
-            </div>
-          } @else {
-            <div class="text-[10px] text-stone-400 italic">点击编辑内容...</div>
+            <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="renderMarkdownContent(task.content)"></div>
           }
         </div>
       } @else {
@@ -300,45 +316,47 @@ import { renderMarkdown } from '../../utils/markdown';
         </div>
       }
       
-      <!-- 操作按钮 - 紧凑横排 -->
-      <div class="flex gap-1 mt-2">
-        <button (click)="addSibling.emit(task)"
-          class="flex-1 px-1.5 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[9px] font-medium rounded transition-all">
-          +同级
-        </button>
-        <button (click)="addChild.emit(task)"
-          class="flex-1 px-1.5 py-1 bg-retro-rust/10 text-retro-rust border border-retro-rust/30 text-[9px] font-medium rounded transition-all">
-          +下级
-        </button>
-        <button (click)="toggleStatus.emit(task)"
-          class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded border transition-all"
-          [class.bg-emerald-50]="task.status !== 'completed'"
-          [class.text-emerald-700]="task.status !== 'completed'"
-          [class.border-emerald-200]="task.status !== 'completed'"
-          [class.bg-stone-50]="task.status === 'completed'"
-          [class.text-stone-600]="task.status === 'completed'"
-          [class.border-stone-200]="task.status === 'completed'">
-          {{task.status === 'completed' ? '撤销' : '完成'}}
-        </button>
-      </div>
-      
-      <!-- 第二行：归档和删除 -->
-      <div class="flex gap-1 mt-1">
-        <button (click)="archiveTask.emit(task)"
-          class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded transition-all border"
-          [class.bg-violet-50]="task.status !== 'archived'"
-          [class.text-violet-600]="task.status !== 'archived'"
-          [class.border-violet-200]="task.status !== 'archived'"
-          [class.bg-stone-50]="task.status === 'archived'"
-          [class.text-stone-600]="task.status === 'archived'"
-          [class.border-stone-200]="task.status === 'archived'">
-          {{task.status === 'archived' ? '取消归档' : '归档'}}
-        </button>
-        <button (click)="deleteTask.emit(task)"
-          class="px-1.5 py-1 bg-stone-50 text-stone-400 border border-stone-200 text-[9px] font-medium rounded transition-all">
-          删除
-        </button>
-      </div>
+      <!-- 操作按钮 - 紧凑模式下隐藏 -->
+      @if (!isCompactMode()) {
+        <div class="flex gap-1 mt-2">
+          <button (click)="addSibling.emit(task)"
+            class="flex-1 px-1.5 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[9px] font-medium rounded transition-all">
+            +同级
+          </button>
+          <button (click)="addChild.emit(task)"
+            class="flex-1 px-1.5 py-1 bg-retro-rust/10 text-retro-rust border border-retro-rust/30 text-[9px] font-medium rounded transition-all">
+            +下级
+          </button>
+          <button (click)="toggleStatus.emit(task)"
+            class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded border transition-all"
+            [class.bg-emerald-50]="task.status !== 'completed'"
+            [class.text-emerald-700]="task.status !== 'completed'"
+            [class.border-emerald-200]="task.status !== 'completed'"
+            [class.bg-stone-50]="task.status === 'completed'"
+            [class.text-stone-600]="task.status === 'completed'"
+            [class.border-stone-200]="task.status === 'completed'">
+            {{task.status === 'completed' ? '撤销' : '完成'}}
+          </button>
+        </div>
+        
+        <!-- 第二行：归档和删除 -->
+        <div class="flex gap-1 mt-1">
+          <button (click)="archiveTask.emit(task)"
+            class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded transition-all border"
+            [class.bg-violet-50]="task.status !== 'archived'"
+            [class.text-violet-600]="task.status !== 'archived'"
+            [class.border-violet-200]="task.status !== 'archived'"
+            [class.bg-stone-50]="task.status === 'archived'"
+            [class.text-stone-600]="task.status === 'archived'"
+            [class.border-stone-200]="task.status === 'archived'">
+            {{task.status === 'archived' ? '取消归档' : '归档'}}
+          </button>
+          <button (click)="deleteTask.emit(task)"
+            class="px-1.5 py-1 bg-stone-50 text-stone-400 border border-stone-200 text-[9px] font-medium rounded transition-all">
+            删除
+          </button>
+        </div>
+      }
       
       <!-- 附件管理（手机端） - 暂时隐藏 -->
       <!-- @if (store.currentUserId()) {
@@ -365,6 +383,19 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   // 编辑模式状态（默认为预览模式）
   readonly isEditMode = signal(false);
+  
+  // 紧凑模式：只有当抽屉高度非常小（< 12vh）时才启用，隐藏操作按钮
+  // 日期和状态应该一直显示，除非抽屉几乎完全收起
+  readonly isCompactMode = computed(() => this.drawerHeight() < 12);
+  
+  // 内容预览最大高度：根据抽屉高度动态计算
+  readonly contentMaxHeight = computed(() => {
+    const height = this.drawerHeight();
+    if (height < 15) return 'max-h-8'; // 非常紧凑：只显示一行
+    if (height < 25) return 'max-h-16'; // 较小：显示约2行
+    if (height < 35) return 'max-h-24'; // 中等：显示约3行
+    return 'max-h-28'; // 正常：显示更多
+  });
   
   // 位置变更输出
   readonly positionChange = output<{ x: number; y: number }>();
@@ -514,18 +545,15 @@ export class FlowTaskDetailComponent implements OnDestroy {
       // 顶部抽屉：向下拖（正 deltaY）增大高度
       const deltaY = currentY - this.drawerStartY;
       const deltaVh = (deltaY / window.innerHeight) * 100;
-      const newHeight = Math.max(15, Math.min(70, this.drawerStartHeight + deltaVh));
+      const newHeight = Math.max(10, Math.min(70, this.drawerStartHeight + deltaVh));
       this.drawerHeightChange.emit(newHeight);
     };
     
     const onEnd = () => {
       this.isResizingDrawer = false;
       this.isResizingChange.emit(false);
-      // 如果高度太小，关闭抽屉
-      if (this.drawerHeight() < 20) {
-        this.store.isFlowDetailOpen.set(false);
-        this.drawerHeightChange.emit(35);
-      }
+      // 移除自动关闭逻辑，允许用户自由调整到最小高度
+      // 最小高度由 Math.max(10, ...) 控制
       window.removeEventListener('touchmove', onMove as EventListener);
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
@@ -540,6 +568,42 @@ export class FlowTaskDetailComponent implements OnDestroy {
     window.addEventListener('mouseup', onEnd);
   }
   
+  // 内容区域触摸处理 - 防止无限下拉
+  onContentTouchStart(event: TouchEvent): void {
+    const target = event.target as HTMLElement;
+    // 检查是否是内容区域本身或可滚动的子元素
+    const scrollableParent = target.closest('.overflow-y-auto') as HTMLElement;
+    if (scrollableParent) {
+      // 记录初始滚动位置
+      (scrollableParent as any)._touchStartScrollTop = scrollableParent.scrollTop;
+    }
+  }
+
+  onContentTouchMove(event: TouchEvent): void {
+    const target = event.target as HTMLElement;
+    const scrollableParent = target.closest('.overflow-y-auto') as HTMLElement;
+    
+    if (scrollableParent && !this.isResizingDrawer) {
+      const scrollTop = scrollableParent.scrollTop;
+      const scrollHeight = scrollableParent.scrollHeight;
+      const clientHeight = scrollableParent.clientHeight;
+      
+      // 获取触摸移动的方向
+      const touchStartScrollTop = (scrollableParent as any)._touchStartScrollTop || 0;
+      const touch = event.touches[0];
+      
+      // 阻止在顶部继续向下拉或在底部继续向上拉
+      if ((scrollTop === 0 && scrollTop >= touchStartScrollTop) || 
+          (scrollTop + clientHeight >= scrollHeight && scrollTop <= touchStartScrollTop)) {
+        // 允许内部滚动，不阻止事件
+        return;
+      }
+      
+      // 更新滚动位置记录
+      (scrollableParent as any)._touchStartScrollTop = scrollTop;
+    }
+  }
+
   // 快速待办
   addQuickTodo(taskId: string, inputEl: HTMLInputElement) {
     const text = inputEl.value.trim();

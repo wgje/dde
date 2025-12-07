@@ -259,6 +259,7 @@ export class TextViewComponent implements OnDestroy {
   // ========== 待分配区处理 ==========
   
   onUnassignedTaskClick(task: Task) {
+    // 子组件的 onTaskClick 已经处理了展开逻辑，这里只需发出事件
     this.focusFlowNode.emit(task.id);
   }
   

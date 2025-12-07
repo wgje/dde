@@ -1,8 +1,9 @@
 import { Component, inject, Input, Output, EventEmitter, ChangeDetectionStrategy, OnChanges, SimpleChanges, ViewChild } from '@angular/core';
 import { CommonModule, DatePipe } from '@angular/common';
+import { DomSanitizer } from '@angular/platform-browser';
 import { StoreService } from '../../services/store.service';
 import { Task } from '../../models';
-import { extractPlainText } from '../../utils/markdown';
+import { extractPlainText, renderMarkdownSafe } from '../../utils/markdown';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 
 /**
@@ -47,10 +48,17 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
              [ngClass]="{'text-sm mb-1': !isMobile, 'text-xs mb-0.5': isMobile}">
           {{task.title || '未命名任务'}}
         </div>
-        <div class="text-stone-500 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em]"
-             [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">
-          {{getContentPreview(task.content) || '暂无描述'}}
-        </div>
+        @if (task.content) {
+          <div class="text-stone-500 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em] markdown-preview-compact"
+               [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}"
+               [innerHTML]="renderMarkdown(task.content)">
+          </div>
+        } @else {
+          <div class="text-stone-400 italic font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em]"
+               [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">
+            暂无描述
+          </div>
+        }
       } @else {
         <!-- 展开编辑状态 -->
         <app-text-task-editor
@@ -72,6 +80,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 })
 export class TextTaskCardComponent implements OnChanges {
   readonly store = inject(StoreService);
+  private readonly sanitizer = inject(DomSanitizer);
   
   @ViewChild('taskEditor') taskEditor?: TextTaskEditorComponent;
   
@@ -130,8 +139,11 @@ export class TextTaskCardComponent implements OnChanges {
     };
   }
   
-  getContentPreview(content: string): string {
-    return extractPlainText(content, 80);
+  /**
+   * 渲染 Markdown 内容
+   */
+  renderMarkdown(content: string) {
+    return renderMarkdownSafe(content, this.sanitizer);
   }
   
   /**

@@ -227,14 +227,14 @@ export class FlowToolbarComponent {
   });
   
   // 计算移动端顶部按钮位置
-  // 当详情栏展开时，按钮跟随拽动条移动
+  // 当详情栏展开时，按钮紧贴拖动条底部
   readonly mobileTopPosition = computed(() => {
     if (!this.store.isFlowDetailOpen()) {
       return '8px'; // 详情栏关闭时，固定在顶部
     }
-    // 详情栏开启时，按钮位置 = 详情栏高度 - 32px（拽动条区域的高度）
+    // 详情栏开启时，按钮紧贴抽屉底部边缘
     const drawerHeightPx = (this.drawerHeightVh() / 100) * window.innerHeight;
-    return `${drawerHeightPx - 32}px`;
+    return `${drawerHeightPx}px`;
   });
   
   toggleExportMenu() {
