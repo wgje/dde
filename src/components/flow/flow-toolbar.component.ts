@@ -15,7 +15,8 @@ import { Task } from '../../models';
   template: `
     <!-- 移动端顶部工具栏：侧边栏切换按钮 + 返回文本视图 -->
     @if (store.isMobile()) {
-      <div class="absolute top-2 left-2 z-30 flex items-center gap-2">
+      <div class="absolute left-2 z-30 flex items-center gap-2 transition-all duration-200"
+           [style.top]="mobileTopPosition()">
         <!-- 侧边栏/项目列表切换按钮 -->
         <button 
           (click)="toggleSidebar.emit()"
@@ -223,6 +224,17 @@ export class FlowToolbarComponent {
   // 抽屉在顶部，工具栏固定在底部
   readonly mobileBottomPosition = computed(() => {
     return '8px'; // 固定在底部
+  });
+  
+  // 计算移动端顶部按钮位置
+  // 当详情栏展开时，按钮跟随拽动条移动
+  readonly mobileTopPosition = computed(() => {
+    if (!this.store.isFlowDetailOpen()) {
+      return '8px'; // 详情栏关闭时，固定在顶部
+    }
+    // 详情栏开启时，按钮位置 = 详情栏高度 - 32px（拽动条区域的高度）
+    const drawerHeightPx = (this.drawerHeightVh() / 100) * window.innerHeight;
+    return `${drawerHeightPx - 32}px`;
   });
   
   toggleExportMenu() {

@@ -112,7 +112,8 @@ import { renderMarkdown } from '../../utils/markdown';
         
         <!-- 拖动条 - 移到底部 -->
         <div class="flex justify-center py-1.5 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
-             (touchstart)="startDrawerResize($event)">
+             (touchstart)="startDrawerResize($event)"
+             (mousedown)="startDrawerResize($event)">
           <div class="w-10 h-1 bg-stone-300 rounded-full"></div>
         </div>
       </div>
@@ -480,19 +481,38 @@ export class FlowTaskDetailComponent implements OnDestroy {
   }
   
   // 移动端抽屉高度调整（顶部下拉：向下拖增大，向上拖减小）
-  startDrawerResize(event: TouchEvent) {
-    if (event.touches.length !== 1) return;
+  startDrawerResize(event: TouchEvent | MouseEvent) {
     event.preventDefault();
+    
+    // 获取起始位置
+    let startY: number;
+    if (event instanceof TouchEvent) {
+      if (event.touches.length !== 1) return;
+      startY = event.touches[0].clientY;
+    } else {
+      startY = event.clientY;
+    }
+    
     this.isResizingDrawer = true;
     this.isResizingChange.emit(true);
-    this.drawerStartY = event.touches[0].clientY;
+    this.drawerStartY = startY;
     this.drawerStartHeight = this.drawerHeight();
     
-    const onMove = (ev: TouchEvent) => {
-      if (!this.isResizingDrawer || ev.touches.length !== 1) return;
+    const onMove = (ev: TouchEvent | MouseEvent) => {
+      if (!this.isResizingDrawer) return;
       ev.preventDefault();
+      
+      // 获取当前位置
+      let currentY: number;
+      if (ev instanceof TouchEvent) {
+        if (ev.touches.length !== 1) return;
+        currentY = ev.touches[0].clientY;
+      } else {
+        currentY = ev.clientY;
+      }
+      
       // 顶部抽屉：向下拖（正 deltaY）增大高度
-      const deltaY = ev.touches[0].clientY - this.drawerStartY;
+      const deltaY = currentY - this.drawerStartY;
       const deltaVh = (deltaY / window.innerHeight) * 100;
       const newHeight = Math.max(15, Math.min(70, this.drawerStartHeight + deltaVh));
       this.drawerHeightChange.emit(newHeight);
@@ -506,14 +526,18 @@ export class FlowTaskDetailComponent implements OnDestroy {
         this.store.isFlowDetailOpen.set(false);
         this.drawerHeightChange.emit(35);
       }
-      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchmove', onMove as EventListener);
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
+      window.removeEventListener('mousemove', onMove as EventListener);
+      window.removeEventListener('mouseup', onEnd);
     };
     
-    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchmove', onMove as EventListener, { passive: false });
     window.addEventListener('touchend', onEnd);
     window.addEventListener('touchcancel', onEnd);
+    window.addEventListener('mousemove', onMove as EventListener);
+    window.addEventListener('mouseup', onEnd);
   }
   
   // 快速待办
