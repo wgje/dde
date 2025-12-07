@@ -1602,6 +1602,20 @@ export class SyncService {
     const totalTasks = project.tasks.length;
     const changeCount = changes.totalChanges;
     
+    // 记录同步决策信息
+    this.logger.debug('[Smart Sync] 同步决策', {
+      projectId: project.id,
+      hasChanges: changes.hasChanges,
+      changeCount,
+      totalTasks
+    });
+    
+    // 如果没有变更追踪，直接使用全量同步（保守策略）
+    if (!changes.hasChanges) {
+      this.logger.info('[Smart Sync] 无变更追踪记录，使用全量同步', { projectId: project.id });
+      return this.saveProjectToCloud(project, userId);
+    }
+    
     // 检测数据丢失风险
     const riskAnalysis = this.changeTracker.detectDataLossRisks(
       project.id,
@@ -1613,7 +1627,7 @@ export class SyncService {
     if (riskAnalysis.hasRisk) {
       const highRisks = riskAnalysis.risks.filter(r => r.severity === 'high');
       if (highRisks.length > 0) {
-        this.logger.warn('检测到高风险数据丢失风险，强制使用全量同步', {
+        this.logger.warn('[Smart Sync] 检测到高风险，强制使用全量同步', {
           projectId: project.id,
           risks: highRisks.map(r => r.description)
         });
@@ -1631,12 +1645,11 @@ export class SyncService {
     
     // 使用增量同步的条件
     const useIncremental = 
-      changes.hasChanges &&                                    // 有追踪到的变更
       changeCount > 0 &&                                       // 变更数量大于0
       (totalTasks === 0 || changeCount / totalTasks < INCREMENTAL_THRESHOLD_RATIO); // 变更比例小于阈值
     
     if (useIncremental) {
-      this.logger.debug('使用增量同步', {
+      this.logger.info('[Smart Sync] 使用增量同步', {
         projectId: project.id,
         changeCount,
         totalTasks,
@@ -1645,9 +1658,9 @@ export class SyncService {
       
       return this.saveProjectIncrementally(project, userId, changes);
     } else {
-      this.logger.debug('使用全量同步', {
+      this.logger.info('[Smart Sync] 使用全量同步', {
         projectId: project.id,
-        reason: !changes.hasChanges ? '无变更追踪' : `变更比例过高 (${changeCount}/${totalTasks})`
+        reason: `变更比例过高 (${changeCount}/${totalTasks})`
       });
       
       // 全量同步后清除变更追踪
