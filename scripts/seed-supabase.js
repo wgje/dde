@@ -16,8 +16,11 @@ if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
 const client = createClient(supabaseUrl, supabaseKey);
 const now = new Date().toISOString();
 
+// 使用有效的 UUID 格式而不是 'proj-seed-1'
+const seedProjectId = '550e8400-e29b-41d4-a716-446655440000';
+
 const seedProject = {
-  id: 'proj-seed-1',
+  id: seedProjectId,
   owner_id: ownerId,
   title: 'Alpha Protocol',
   description: 'NanoFlow core engine boot plan.',

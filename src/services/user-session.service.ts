@@ -443,9 +443,11 @@ export class UserSessionService {
    */
   private seedProjects(): Project[] {
     const now = new Date().toISOString();
+    // 使用有效的 UUID 格式
+    const seedProjectId = crypto.randomUUID();
     return [
       this.layoutService.rebalance({
-        id: 'proj-seed-1',
+        id: seedProjectId,
         name: 'Alpha Protocol',
         description: 'NanoFlow 核心引擎启动计划。',
         createdDate: now,

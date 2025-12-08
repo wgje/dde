@@ -287,10 +287,8 @@ export class GoJSDiagramService {
     }
     
     try {
-      // 过滤显示的任务
-      const tasksToShow = tasks.filter(t => 
-        t.status !== 'archived' && (t.stage != null || (t.x !== 0 || t.y !== 0))
-      );
+      // 过滤显示的任务：待分配任务（stage === null）也应该在流程图中显示
+      const tasksToShow = tasks.filter(t => t.status !== 'archived');
       
       // 保存当前选中状态
       const selectedKeys = new Set<string>();

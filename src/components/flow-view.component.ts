@@ -848,12 +848,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 待分配任务点击 ==========
   
   onUnassignedTaskClick(task: Task): void {
-    if (task.x !== 0 || task.y !== 0) {
-      this.centerOnNode(task.id);
-    } else {
-      this.selectedTaskId.set(task.id);
-      this.store.isFlowDetailOpen.set(true);
-    }
+    // 待分配任务也会在流程图中显示，直接定位到该节点
+    this.centerOnNode(task.id);
   }
   
   // ========== 连接线操作 ==========
