@@ -45,6 +45,7 @@ const mockSyncService = {
   clearOfflineCache: vi.fn(),
   loadProjectsFromCloud: vi.fn().mockResolvedValue([]),
   saveProjectToCloud: vi.fn().mockResolvedValue({ success: true }),
+  saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
   deleteProjectFromCloud: vi.fn().mockResolvedValue(true),
   loadSingleProject: vi.fn().mockResolvedValue(null),
   tryReloadConflictData: vi.fn().mockResolvedValue(undefined),
@@ -277,8 +278,10 @@ describe('SyncCoordinatorService', () => {
       // 前进 800ms（SYNC_CONFIG.DEBOUNCE_DELAY）
       await vi.advanceTimersByTimeAsync(800);
       
-      // 现在应该执行了
-      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
+      // 等待异步持久化操作完成
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
+      });
     });
 
     it('连续调用 schedulePersist 应该只触发一次持久化', async () => {
@@ -293,8 +296,11 @@ describe('SyncCoordinatorService', () => {
       service.schedulePersist();
       await vi.advanceTimersByTimeAsync(800); // 等待 DEBOUNCE_DELAY (800ms)
       
-      // 应该调用两次：一次在保存到云端前，一次在成功后同步版本号
-      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(2);
+      // 等待异步持久化操作完成
+      await vi.waitFor(() => {
+        // 应该调用两次：一次在保存到云端前，一次在成功后同步版本号
+        expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(2);
+      });
     });
   });
 
@@ -720,8 +726,11 @@ describe('SyncCoordinatorService', () => {
       // 等待防抖完成 (800ms)
       await vi.advanceTimersByTimeAsync(800);
       
-      // 应该触发两次保存：一次在保存到云端前，一次在成功后同步版本号
-      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(2);
+      // 等待异步持久化操作完成
+      await vi.waitFor(() => {
+        // 应该触发两次保存：一次在保存到云端前，一次在成功后同步版本号
+        expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(2);
+      });
     });
   });
 

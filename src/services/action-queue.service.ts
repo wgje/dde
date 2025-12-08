@@ -773,12 +773,11 @@ export class ActionQueueService {
     }
     
     // 业务错误（数据约束等）
-    if (msg.includes('unique constraint') ||
-        msg.includes('foreign key') ||
-        msg.includes('not found') ||
-        msg.includes('duplicate') ||
-        msg.includes('invalid')) {
-      return 'business';
+    // 使用配置中定义的业务错误模式进行匹配
+    for (const pattern of LOCAL_QUEUE_CONFIG.BUSINESS_ERROR_PATTERNS) {
+      if (msg.includes(pattern.toLowerCase())) {
+        return 'business';
+      }
     }
     
     return 'unknown';

@@ -420,7 +420,7 @@ export class ThreeWayMergeService {
     // 需要合并的任务属性
     const fieldsToMerge: (keyof Task)[] = [
       'title', 'content', 'stage', 'parentId', 'order', 'rank',
-      'status', 'x', 'y', 'priority', 'dueDate'
+      'status', 'x', 'y', 'priority', 'dueDate', 'deletedAt'
     ];
     
     const mergedTask: Task = { ...base };

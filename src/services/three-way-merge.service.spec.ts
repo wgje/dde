@@ -284,6 +284,94 @@ describe('ThreeWayMergeService', () => {
     });
   });
 
+  describe('软删除（deletedAt）合并', () => {
+    it('应该保留本地的软删除操作', () => {
+      const now = new Date().toISOString();
+      const task = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      const taskLocalDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now });
+      const taskRemote = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      
+      const base = createProject({ tasks: [task] });
+      const local = createProject({ tasks: [taskLocalDeleted] }); // 本地软删除
+      const remote = createProject({ tasks: [taskRemote], version: 2 }); // 远程未删除
+      
+      const result = service.merge(base, local, remote);
+      
+      const mergedTask = result.project.tasks.find(t => t.id === 'task-1');
+      expect(mergedTask?.deletedAt).toBe(now);
+    });
+
+    it('应该采纳远程的软删除操作（本地未修改）', () => {
+      const now = new Date().toISOString();
+      const task = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      const taskLocal = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      const taskRemoteDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now });
+      
+      const base = createProject({ tasks: [task] });
+      const local = createProject({ tasks: [taskLocal] }); // 本地未删除
+      const remote = createProject({ tasks: [taskRemoteDeleted], version: 2 }); // 远程软删除
+      
+      const result = service.merge(base, local, remote);
+      
+      const mergedTask = result.project.tasks.find(t => t.id === 'task-1');
+      expect(mergedTask?.deletedAt).toBe(now);
+    });
+
+    it('双方同时软删除应保留删除状态', () => {
+      const now1 = new Date().toISOString();
+      const now2 = new Date(Date.now() + 1000).toISOString();
+      const task = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      const taskLocalDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now1 });
+      const taskRemoteDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now2 });
+      
+      const base = createProject({ tasks: [task] });
+      const local = createProject({ tasks: [taskLocalDeleted] });
+      const remote = createProject({ tasks: [taskRemoteDeleted], version: 2 });
+      
+      const result = service.merge(base, local, remote);
+      
+      const mergedTask = result.project.tasks.find(t => t.id === 'task-1');
+      // 应该保留本地的删除时间（优先本地）
+      expect(mergedTask?.deletedAt).toBe(now1);
+    });
+
+    it('软删除与内容修改同时发生应保留本地状态', () => {
+      const now = new Date().toISOString();
+      const task = createTask({ id: 'task-1', title: 'Task 1', content: 'Original', deletedAt: null });
+      const taskLocalDeleted = createTask({ id: 'task-1', title: 'Task 1', content: 'Original', deletedAt: now });
+      const taskRemoteModified = createTask({ id: 'task-1', title: 'Task 1', content: 'Modified', deletedAt: null });
+      
+      const base = createProject({ tasks: [task] });
+      const local = createProject({ tasks: [taskLocalDeleted] }); // 本地软删除
+      const remote = createProject({ tasks: [taskRemoteModified], version: 2 }); // 远程修改内容
+      
+      const result = service.merge(base, local, remote);
+      
+      const mergedTask = result.project.tasks.find(t => t.id === 'task-1');
+      // 本地软删除应该被保留
+      expect(mergedTask?.deletedAt).toBe(now);
+      // 远程的内容修改也应该被保留（不同字段的修改）
+      expect(mergedTask?.content).toBe('Modified');
+    });
+
+    it('应该正确处理软删除的恢复操作', () => {
+      const now = new Date().toISOString();
+      const taskDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now });
+      const taskLocalRestored = createTask({ id: 'task-1', title: 'Task 1', deletedAt: null });
+      const taskRemoteDeleted = createTask({ id: 'task-1', title: 'Task 1', deletedAt: now });
+      
+      const base = createProject({ tasks: [taskDeleted] }); // Base 是已删除状态
+      const local = createProject({ tasks: [taskLocalRestored] }); // 本地恢复了
+      const remote = createProject({ tasks: [taskRemoteDeleted], version: 2 }); // 远程仍是删除状态
+      
+      const result = service.merge(base, local, remote);
+      
+      const mergedTask = result.project.tasks.find(t => t.id === 'task-1');
+      // 本地恢复操作应该被保留（本地有修改）
+      expect(mergedTask?.deletedAt).toBeNull();
+    });
+  });
+
   describe('标签合并', () => {
     it('应该合并双方新增的标签', () => {
       const task = createTask({ id: 'task-1', tags: ['tag1'] });

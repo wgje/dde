@@ -548,7 +548,8 @@ describe('ActionQueueService', () => {
       
       const actions = service.getActionsForEntity('task', 'task-1');
       
-      expect(actions).toHaveLength(2);
+      // 由于智能合并，同一实体的多个 update 操作会合并为一个
+      expect(actions).toHaveLength(1);
       expect(actions.every(a => a.entityId === 'task-1')).toBe(true);
     });
   });
