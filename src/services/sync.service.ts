@@ -726,6 +726,16 @@ export class SyncService {
     const taskId = (newRecord?.id || oldRecord?.id) as string;
     const projectId = (newRecord?.project_id || oldRecord?.project_id) as string;
     
+    // 调试日志：记录 DELETE 事件的详细信息
+    if (eventType === 'DELETE') {
+      this.logger.debug('收到任务删除事件', {
+        taskId,
+        projectId,
+        hasOldRecord: !!oldRecord,
+        oldRecordKeys: oldRecord ? Object.keys(oldRecord) : []
+      });
+    }
+    
     this.onTaskChangeCallback({
       eventType,
       taskId,

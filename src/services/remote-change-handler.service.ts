@@ -198,21 +198,34 @@ export class RemoteChangeHandlerService {
     const { eventType, taskId, projectId } = payload;
 
     if (projectId !== this.projectState.activeProjectId()) {
+      this.logger.debug('跳过非当前项目的任务更新', { eventType, taskId, projectId, activeProjectId: this.projectState.activeProjectId() });
       return;
     }
 
     switch (eventType) {
       case 'DELETE':
+        this.logger.info('处理远程任务删除', { taskId, projectId });
+        
         // 清理被删除任务相关的撤销历史，防止撤销操作引用已删除任务
         this.undoService.clearTaskHistory(taskId, projectId);
         
         this.projectState.updateProjects(projects =>
           projects.map(p => {
             if (p.id !== projectId) return p;
+            
+            const taskExists = p.tasks.some(t => t.id === taskId);
+            if (!taskExists) {
+              this.logger.debug('任务已不存在，跳过删除', { taskId });
+              return p;
+            }
+            
             const updatedProject = {
               ...p,
               tasks: p.tasks.filter(t => t.id !== taskId)
             };
+            
+            this.logger.debug('任务已从本地删除', { taskId, remainingTasks: updatedProject.tasks.length });
+            
             // 删除任务后需要重新计算 displayId，因为其他任务的编号可能会变化
             return this.syncCoordinator.validateAndRebalance(updatedProject);
           })

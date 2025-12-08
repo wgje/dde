@@ -555,7 +555,17 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- );
 
 -- ============================================
--- 11. 启用实时订阅
+-- 11. 配置 REPLICA IDENTITY（DELETE 事件所需）
+-- ============================================
+
+-- 设置 REPLICA IDENTITY FULL 以确保 DELETE 事件包含完整的旧数据
+-- 这对于 Realtime 订阅正确处理删除操作至关重要
+ALTER TABLE public.projects REPLICA IDENTITY FULL;
+ALTER TABLE public.tasks REPLICA IDENTITY FULL;
+ALTER TABLE public.connections REPLICA IDENTITY FULL;
+
+-- ============================================
+-- 12. 启用实时订阅
 -- ============================================
 
 DO $$
