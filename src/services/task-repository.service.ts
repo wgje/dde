@@ -583,7 +583,7 @@ export class TaskRepositoryService {
         // 部分成功也返回 success，只记录警告
       }
       
-      console.log(`连接同步完成: 删除 ${toDelete.length}, 新增 ${toInsert.length}, 更新 ${toUpdate.length}, 错误 ${errors.length}`);
+      // console.log(`连接同步完成: 删除 ${toDelete.length}, 新增 ${toInsert.length}, 更新 ${toUpdate.length}, 错误 ${errors.length}`);
       return { success: true };
     } catch (error: any) {
       console.error('Connection sync failed:', error);
@@ -858,7 +858,7 @@ export class TaskRepositoryService {
       };
     }
 
-    console.log('[TaskRepo] 增量保存任务完成', stats);
+    // console.log('[TaskRepo] 增量保存任务完成', stats);
     return { success: true, stats };
   }
 
@@ -979,7 +979,7 @@ export class TaskRepositoryService {
       };
     }
 
-    console.log('[TaskRepo] 增量同步连接完成', stats);
+    // console.log('[TaskRepo] 增量同步连接完成', stats);
     return { success: true, stats };
   }
 

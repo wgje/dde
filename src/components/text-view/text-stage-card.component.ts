@@ -49,9 +49,13 @@ import { TextTaskCardComponent } from './text-task-card.component';
       </header>
 
       <!-- 任务列表 -->
-      @if (isExpanded) {
-        <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-2 pb-2 task-stack animate-collapse-open"
-             [ngClass]="{'space-y-2 px-3 pb-3': !isMobile, 'space-y-1.5 max-h-[40vh]': isMobile}">
+      <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar task-stack transition-all duration-150 ease-out"
+           [ngClass]="{
+             'space-y-2 px-3 pb-3 max-h-[999px] opacity-100 animate-collapse-open': isExpanded && !isMobile,
+             'space-y-1.5 px-2 pb-2 max-h-[40vh] opacity-100 animate-collapse-open': isExpanded && isMobile,
+             'max-h-0 opacity-0 pointer-events-none overflow-hidden py-0 px-0': !isExpanded
+           }"
+           [attr.aria-hidden]="!isExpanded">
           @for (task of stage.tasks; track task.id) {
             <!-- 放置指示线（任务前） -->
             @if (dropTargetInfo?.stageNumber === stage.stageNumber && dropTargetInfo?.beforeTaskId === task.id) {
@@ -78,7 +82,8 @@ import { TextTaskCardComponent } from './text-task-card.component';
               (dragOver)="taskDragOver.emit($event)"
               (touchStart)="taskTouchStart.emit($event)"
               (touchMove)="taskTouchMove.emit($event)"
-              (touchEnd)="taskTouchEnd.emit($event)">
+              (touchEnd)="taskTouchEnd.emit($event)"
+              (touchCancel)="taskTouchCancel.emit($event)">
             </app-text-task-card>
           }
           
@@ -86,8 +91,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
           @if (dropTargetInfo?.stageNumber === stage.stageNumber && dropTargetInfo?.beforeTaskId === null) {
             <div class="h-0.5 bg-retro-teal rounded-full mx-1 animate-pulse"></div>
           }
-        </div>
-      }
+      </div>
     </article>
   `,
   styles: [`
@@ -134,6 +138,7 @@ export class TextStageCardComponent {
   @Output() taskTouchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
   @Output() taskTouchMove = new EventEmitter<TouchEvent>();
   @Output() taskTouchEnd = new EventEmitter<TouchEvent>();
+  @Output() taskTouchCancel = new EventEmitter<TouchEvent>();
   
   getConnections(taskId: string) {
     return this.store.getTaskConnections(taskId);

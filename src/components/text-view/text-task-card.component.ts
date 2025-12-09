@@ -21,11 +21,12 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       (click)="onCardClick($event)"
       [attr.draggable]="!isSelected"
       (dragstart)="onDragStart($event)"
-      (dragend)="dragEnd.emit()"
+      (dragend)="onDragEnd()"
       (dragover)="onDragOver($event)"
       (touchstart)="onTouchStart($event)"
-      (touchmove)="touchMove.emit($event)"
-      (touchend)="touchEnd.emit($event)"
+      (touchmove)="onTouchMove($event)"
+      (touchend)="onTouchEnd($event)"
+      (touchcancel)="onTouchCancel($event)"
       class="relative bg-canvas/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
       [ngClass]="cardClasses">
       
@@ -128,14 +129,17 @@ export class TextTaskCardComponent implements OnChanges {
   @Output() touchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
   @Output() touchMove = new EventEmitter<TouchEvent>();
   @Output() touchEnd = new EventEmitter<TouchEvent>();
+  @Output() touchCancel = new EventEmitter<TouchEvent>();
   
   get cardClasses() {
     return {
       'p-3': !this.isMobile,
       'p-2': this.isMobile,
-      'shadow-sm border-retro-muted/20': !this.isSelected,
+      'shadow-sm border-retro-muted/20': !this.isSelected && !this.isDragging,
       'ring-1 ring-retro-gold shadow-md': this.isSelected,
-      'opacity-50 touch-none': this.isDragging
+      // 拖拽时的视觉效果：半透明、缩小、虚线边框
+      // 注意：不使用 pointer-events-none，因为会阻止 touchend 事件
+      'opacity-40 scale-98 border-2 border-retro-teal border-dashed bg-retro-teal/5': this.isDragging
     };
   }
   
@@ -174,8 +178,17 @@ export class TextTaskCardComponent implements OnChanges {
   }
   
   onDragStart(event: DragEvent) {
+    // 只在未选中状态下允许鼠标拖拽
     if (!this.isSelected) {
       this.dragStart.emit({ event, task: this.task });
+    } else {
+      event.preventDefault();
+    }
+  }
+  
+  onDragEnd() {
+    if (!this.isSelected) {
+      this.dragEnd.emit();
     }
   }
   
@@ -184,8 +197,36 @@ export class TextTaskCardComponent implements OnChanges {
   }
   
   onTouchStart(event: TouchEvent) {
+    // 只在未选中状态下允许触摸拖拽（与待分配区域一致）
+    // 不在这里 preventDefault，让浏览器正常处理触摸开始
     if (!this.isSelected) {
       this.touchStart.emit({ event, task: this.task });
+    }
+  }
+  
+  onTouchMove(event: TouchEvent) {
+    if (!this.isSelected) {
+      // 在移动时阻止默认行为，防止滚动
+      event.preventDefault();
+      this.touchMove.emit(event);
+    }
+  }
+  
+  onTouchEnd(event: TouchEvent) {
+    // console.log('[TaskCard] touchend received', {
+    //   taskId: this.task.id.slice(-4),
+    //   isSelected: this.isSelected,
+    //   isDragging: this.isDragging
+    // });
+    if (!this.isSelected) {
+      // 不在这里 preventDefault，让事件正常冒泡到 document
+      this.touchEnd.emit(event);
+    }
+  }
+  
+  onTouchCancel(event: TouchEvent) {
+    if (!this.isSelected) {
+      this.touchCancel.emit(event);
     }
   }
 }

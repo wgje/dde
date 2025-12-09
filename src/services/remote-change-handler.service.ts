@@ -197,21 +197,48 @@ export class RemoteChangeHandlerService {
   private handleTaskLevelUpdate(payload: RemoteTaskChangePayload): void {
     const { eventType, taskId, projectId } = payload;
 
-    if (projectId !== this.projectState.activeProjectId()) {
-      this.logger.debug('跳过非当前项目的任务更新', { eventType, taskId, projectId, activeProjectId: this.projectState.activeProjectId() });
+    // 🔧 修复：如果缺少 projectId（REPLICA IDENTITY 未配置），尝试从所有项目中查找
+    let targetProjectId = projectId;
+    
+    if (!targetProjectId && eventType === 'DELETE') {
+      this.logger.warn('DELETE 事件缺少 projectId，在所有项目中查找任务', { taskId });
+      
+      // 在所有项目中查找该任务
+      for (const project of this.projectState.projects()) {
+        if (project.tasks.some(t => t.id === taskId)) {
+          targetProjectId = project.id;
+          this.logger.info('在项目中找到待删除任务', { taskId, projectId: targetProjectId });
+          break;
+        }
+      }
+      
+      if (!targetProjectId) {
+        this.logger.error('无法找到待删除任务所属项目', { taskId });
+        return;
+      }
+    }
+    
+    if (!targetProjectId) {
+      this.logger.warn('跳过任务更新（无 projectId）', { eventType, taskId });
+      return;
+    }
+
+    // 只处理当前活动项目的任务（对于非活动项目，等待切换项目时重新加载）
+    if (targetProjectId !== this.projectState.activeProjectId()) {
+      this.logger.debug('跳过非当前项目的任务更新', { eventType, taskId, projectId: targetProjectId, activeProjectId: this.projectState.activeProjectId() });
       return;
     }
 
     switch (eventType) {
       case 'DELETE':
-        this.logger.info('处理远程任务删除', { taskId, projectId });
+        this.logger.info('处理远程任务删除', { taskId, projectId: targetProjectId });
         
         // 清理被删除任务相关的撤销历史，防止撤销操作引用已删除任务
-        this.undoService.clearTaskHistory(taskId, projectId);
+        this.undoService.clearTaskHistory(taskId, targetProjectId);
         
         this.projectState.updateProjects(projects =>
           projects.map(p => {
-            if (p.id !== projectId) return p;
+            if (p.id !== targetProjectId) return p;
             
             const taskExists = p.tasks.some(t => t.id === taskId);
             if (!taskExists) {

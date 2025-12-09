@@ -1,4 +1,4 @@
-import { Component, inject, signal, Output, EventEmitter, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, signal, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StoreService } from '../../services/store.service';
 import { ToastService } from '../../services/toast.service';
@@ -32,7 +32,10 @@ import { DropTargetInfo } from './text-view.types';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div #scrollContainer class="flex flex-col h-full bg-canvas overflow-y-auto overflow-x-hidden text-view-scroll-container"
-         (click)="onContainerClick($event)">
+         (click)="onContainerClick($event)"
+         (touchmove)="onGlobalTouchMove($event)"
+         (touchend)="onGlobalTouchEnd($event)"
+         (touchcancel)="onGlobalTouchCancel($event)">
       
       @if (store.isLoadingRemote()) {
         <app-text-view-loading [isMobile]="isMobile()" />
@@ -56,6 +59,7 @@ import { DropTargetInfo } from './text-view.types';
           (touchStart)="onTouchStart($event)"
           (touchMove)="onTouchMove($event)"
           (touchEnd)="onTouchEnd($event)"
+          (touchCancel)="onTouchCancel($event)"
         />
         
         <!-- 阶段区 -->
@@ -84,6 +88,7 @@ import { DropTargetInfo } from './text-view.types';
           (taskTouchStart)="onTaskTouchStart($event)"
           (taskTouchMove)="onTouchMove($event)"
           (taskTouchEnd)="onTouchEnd($event)"
+          (taskTouchCancel)="onTouchCancel($event)"
         />
         
         <!-- 删除确认弹窗 -->
@@ -103,12 +108,16 @@ import { DropTargetInfo } from './text-view.types';
     </div>
   `
 })
-export class TextViewComponent implements OnDestroy {
+export class TextViewComponent implements OnInit, OnDestroy {
   readonly store = inject(StoreService);
   private readonly toast = inject(ToastService);
   readonly dragDropService = inject(TextViewDragDropService);
   private readonly elementRef = inject(ElementRef);
   private readonly ngZone = inject(NgZone);
+  
+  /** 全局触摸事件监听器的绑定引用 */
+  private boundGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
+  private boundGlobalTouchCancel = this.handleGlobalTouchCancel.bind(this);
   
   @ViewChild('scrollContainer', { static: true }) scrollContainerRef!: ElementRef<HTMLElement>;
   @ViewChild('stagesRef') stagesRef!: TextStagesComponent;
@@ -127,7 +136,133 @@ export class TextViewComponent implements OnDestroy {
   // 计算属性
   readonly isMobile = this.store.isMobile;
   
+  ngOnInit() {
+    // 在 document 上注册全局触摸事件监听器
+    // 这样即使被拖拽的元素有 pointer-events-none，也能捕获到 touchend
+    // 使用捕获阶段（第三个参数的 capture: true）
+    document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
+    document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
+    
+    // 添加 pointerup 作为备用（比 touchend 更可靠）
+    document.addEventListener('pointerup', this.handleGlobalPointerUp.bind(this), { capture: true });
+    document.addEventListener('pointercancel', this.handleGlobalPointerUp.bind(this), { capture: true });
+    
+    // 紧急清理：如果用户点击屏幕，强制清理残留的拖拽状态
+    document.addEventListener('click', this.handleEmergencyCleanup.bind(this), { capture: true });
+    
+    // 超时检测：如果 touchend 丢失，通过超时自动完成拖拽
+    document.addEventListener('touchDragTimeout', this.handleTouchDragTimeout.bind(this) as EventListener);
+    
+    // console.log('[TextView] Global touch listeners registered with capture=true');
+  }
+  
+  /** 处理 pointerup 事件 - 作为 touchend 的备用 */
+  private handleGlobalPointerUp(event: PointerEvent) {
+    // 只处理触摸类型的 pointer 事件
+    if (event.pointerType !== 'touch') return;
+    
+    // ⚠️ 如果正在 DOM 更新（折叠/展开阶段），忽略此事件
+    if (this.dragDropService.isDOMUpdating) {
+      // console.log('[GlobalPointerUp] Ignoring - DOM update in progress');
+      return;
+    }
+    
+    const hasTask = !!this.dragDropService.touchDragTask;
+    const isDragging = this.dragDropService.isTouchDragging;
+    
+    if (!hasTask && !isDragging) return;
+    
+    // console.log('[GlobalPointerUp] Captured', {
+    //   pointerType: event.pointerType,
+    //   hasTask,
+    //   isDragging,
+    //   targetStage: this.dragDropService['touchState']?.targetStage,
+    //   isPrimary: event.isPrimary
+    // });
+    
+    // ⚠️ 只有当触摸真正结束（没有其他手指在屏幕上）时才处理
+    // pointerup 可能在 DOM 变化后被过早触发
+    // 检查事件是否是主要触点
+    if (!event.isPrimary) {
+      // console.log('[GlobalPointerUp] Not primary pointer, ignoring');
+      return;
+    }
+    
+    // 执行与 touchend 相同的逻辑
+    this.ngZone.run(() => {
+      this.onTouchEnd(event as unknown as TouchEvent);
+    });
+  }
+  
+  /** 处理拖拽超时 - 当 touchend 丢失时自动完成拖拽 */
+  private handleTouchDragTimeout(event: CustomEvent) {
+    const { task, targetStage, targetBeforeId } = event.detail;
+    console.warn('[TextView] TouchDragTimeout received', {
+      taskId: task?.id.slice(-4),
+      targetStage,
+      targetBeforeId: targetBeforeId?.slice(-4) || null
+    });
+    
+    if (task && targetStage !== null) {
+      // 执行移动操作
+      this.ngZone.run(() => {
+        // console.log('[TouchDragTimeout] Auto-completing drag', {
+        //   from: task.stage,
+        //   to: targetStage,
+        //   beforeId: targetBeforeId?.slice(-4) || null
+        // });
+        
+        const result = this.store.moveTaskToStage(task.id, targetStage, targetBeforeId);
+        if (isFailure(result)) {
+          const errorDetail = getErrorMessage(result.error);
+          console.error('[TouchDragTimeout] Move failed:', errorDetail);
+          this.toast.error('移动任务失败', `无法将任务移动到阶段 ${targetStage}：${errorDetail}`);
+        } else {
+          // console.log('[TouchDragTimeout] Move succeeded');
+        }
+        
+        // 清理拖拽状态并恢复阶段折叠
+        const touchEndResult = this.dragDropService.endTouchDrag();
+        const mouseExpandedStages = this.dragDropService.endDrag();
+        this.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
+        this.restoreAutoCollapsedSourceStage();
+      });
+    } else {
+      // 只清理状态
+      const touchEndResult = this.dragDropService.endTouchDrag();
+      const mouseExpandedStages = this.dragDropService.endDrag();
+      this.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
+      this.restoreAutoCollapsedSourceStage();
+    }
+  }
+  
+  /** 紧急清理处理器：如果有残留的拖拽状态，强制清理 */
+  private handleEmergencyCleanup(event: MouseEvent) {
+    // ⚠️ 重要：如果正在触摸拖拽，不要清理！
+    // 移动端浏览器在 touchend 后会自动触发 click 事件
+    if (this.dragDropService.isTouchDragging) {
+      // console.log('[EmergencyCleanup] Ignoring - touch drag in progress');
+      return;
+    }
+    
+    const isDragging = this.dragDropService.draggingTaskId();
+    const hasGhost = !!this.dragDropService['touchState']?.dragGhost;
+    
+    if (isDragging || hasGhost) {
+      console.warn('[TextView] Emergency cleanup triggered - found orphaned drag state');
+      const touchEndResult = this.dragDropService.endTouchDrag();
+      const mouseExpandedStages = this.dragDropService.endDrag();
+      this.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
+      this.restoreAutoCollapsedSourceStage();
+    }
+  }
+  
   ngOnDestroy() {
+    // 移除全局触摸事件监听器
+    document.removeEventListener('touchend', this.boundGlobalTouchEnd);
+    document.removeEventListener('touchcancel', this.boundGlobalTouchCancel);
+    // console.log('[TextView] Global touch listeners removed');
+    
     this.dragDropService.cleanup();
     // 清理所有待处理的定时器，防止内存泄漏
     this.pendingTimers.forEach(timer => clearTimeout(timer));
@@ -209,6 +344,40 @@ export class TextViewComponent implements OnDestroy {
     if (index > -1) {
       this.pendingTimers.splice(index, 1);
     }
+  }
+
+  /** 折叠在拖拽过程中临时展开但尚未收起的阶段 */
+  private collapseAutoExpandedStages(...stageGroups: Array<number[] | null | undefined>): void {
+    if (!this.stagesRef) return;
+    const merged: number[] = [];
+    for (const group of stageGroups) {
+      if (!group?.length) continue;
+      merged.push(...group);
+    }
+    if (!merged.length) return;
+    const uniqueStages = Array.from(new Set(merged));
+    requestAnimationFrame(() => {
+      uniqueStages.forEach(stage => this.stagesRef?.collapseStage(stage));
+    });
+  }
+
+  /** 根据拖拽来源阶段状态决定是否需要立即折叠 */
+  private collapseSourceStageIfNeeded(currentStageNumber: number | null): void {
+    const stageToCollapse = this.dragDropService.requestSourceStageCollapse(currentStageNumber);
+    if (stageToCollapse !== null) {
+      const isExpanded = this.stagesRef?.isStageExpanded(stageToCollapse) ?? false;
+      if (isExpanded) {
+        this.dragDropService.markSourceStageAutoCollapsed(stageToCollapse);
+        this.collapseAutoExpandedStages([stageToCollapse]);
+      }
+    }
+  }
+
+  /** 在拖拽结束后恢复因拖拽自动折叠的阶段 */
+  private restoreAutoCollapsedSourceStage(): void {
+    const stageToRestore = this.dragDropService.consumeAutoCollapsedSourceStage();
+    if (stageToRestore === null) return;
+    requestAnimationFrame(() => this.stagesRef?.expandStage(stageToRestore));
   }
   
   // ========== 待办事项处理 ==========
@@ -383,7 +552,21 @@ export class TextViewComponent implements OnDestroy {
   }
   
   onDragEnd() {
-    this.dragDropService.endDrag();
+    // console.log('[DragEnd] Called', {
+    //   isTouchDragging: this.dragDropService.isTouchDragging,
+    //   draggingTaskId: this.dragDropService.draggingTaskId()?.slice(-4) || 'none'
+    // });
+    
+    // 如果是触摸拖拽，不在这里清除状态（由 touchend 处理）
+    if (this.dragDropService.isTouchDragging) {
+      // console.log('[DragEnd] Ignoring because touch drag is active');
+      return;
+    }
+    
+    // console.log('[DragEnd] Clearing drag state (mouse drag)');
+    const mouseExpandedStages = this.dragDropService.endDrag();
+    this.collapseAutoExpandedStages(mouseExpandedStages);
+    this.restoreAutoCollapsedSourceStage();
   }
   
   onTaskDragOver(data: { event: DragEvent; task: Task; stageNumber: number }) {
@@ -391,6 +574,20 @@ export class TextViewComponent implements OnDestroy {
     event.preventDefault();
     event.stopPropagation();
     
+    // 先触发阶段的拖拽处理，确保跨阶段拖拽时能正确更新目标阶段
+    const isCollapsed = !this.stagesRef?.isStageExpanded(stageNumber);
+    const result = this.dragDropService.handleStageDragOver(stageNumber, isCollapsed);
+    
+    if (result.collapse !== undefined) {
+      this.stagesRef?.collapseStage(result.collapse);
+    }
+    if (result.expand !== undefined) {
+      this.stagesRef?.expandStage(result.expand);
+    }
+
+    this.collapseSourceStageIfNeeded(stageNumber);
+    
+    // 然后处理任务级别的放置位置
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const isAbove = event.clientY < rect.top + rect.height / 2;
     
@@ -418,6 +615,8 @@ export class TextViewComponent implements OnDestroy {
     if (result.expand !== undefined) {
       this.stagesRef?.expandStage(result.expand);
     }
+
+    this.collapseSourceStageIfNeeded(stageNumber);
   }
   
   onStageDragLeave(data: { event: DragEvent; stageNumber: number }) {
@@ -430,12 +629,19 @@ export class TextViewComponent implements OnDestroy {
       if (collapseStage !== null) {
         this.stagesRef?.collapseStage(collapseStage);
       }
+      this.collapseSourceStageIfNeeded(null);
     }
   }
   
   onStageDrop(data: { event: DragEvent; stageNumber: number }) {
     const { event, stageNumber } = data;
     event.preventDefault();
+    
+    // 如果是触摸拖拽，不处理鼠标 drop 事件
+    if (this.dragDropService.isTouchDragging) {
+      // console.log('[StageDrop] Ignoring because touch drag is active');
+      return;
+    }
     
     const jsonData = event.dataTransfer?.getData('application/json');
     if (jsonData) {
@@ -449,9 +655,13 @@ export class TextViewComponent implements OnDestroy {
       } else {
         this.stagesRef?.expandStage(stageNumber);
       }
+
+      this.collapseSourceStageIfNeeded(stageNumber);
     }
     
-    this.dragDropService.endDrag();
+    const mouseExpandedStages = this.dragDropService.endDrag();
+    this.collapseAutoExpandedStages(mouseExpandedStages);
+    this.restoreAutoCollapsedSourceStage();
   }
   
   // ========== 触摸拖拽处理 ==========
@@ -496,34 +706,79 @@ export class TextViewComponent implements OnDestroy {
       const elements = document.elementsFromPoint(touch.clientX, touch.clientY);
       let foundStage = false;
       
+      // 获取当前拖拽的任务ID，用于过滤
+      const draggingTaskId = this.dragDropService.draggingTaskId();
+      
+      // 获取当前悬停的阶段（避免重复展开/折叠）
+      const currentHoverStage = this.dragDropService.dragOverStage();
+      
       for (const el of elements) {
         const stageEl = el.closest('[data-stage-number]');
         if (stageEl) {
           const stageNum = parseInt(stageEl.getAttribute('data-stage-number') || '0', 10);
           if (stageNum > 0) {
-            const collapseStage = this.dragDropService.updateTouchTarget(stageNum, null);
-            if (collapseStage !== null) {
-              this.stagesRef?.collapseStage(collapseStage);
+            // 🔧 重新启用触摸拖拽时的自动展开/折叠
+            // 当进入新阶段时：展开目标阶段，折叠之前的阶段（如果不是原始阶段）
+            if (currentHoverStage !== stageNum) {
+              const wasCollapsed = this.stagesRef ? !this.stagesRef.isStageExpanded(stageNum) : false;
+
+              // 标记开始 DOM 更新，忽略由此产生的 pointerup/pointercancel 事件
+              this.dragDropService.beginDOMUpdate();
+              
+              // 使用 requestAnimationFrame 延迟 DOM 更新，避免中断触摸序列
+              requestAnimationFrame(() => {
+                // 先更新目标状态，只折叠拖拽时临时展开的阶段
+                const collapseStage = this.dragDropService.updateTouchTarget(stageNum, null, { autoExpanded: wasCollapsed });
+                
+                if (collapseStage !== null) {
+                  this.stagesRef?.collapseStage(collapseStage);
+                }
+                
+                // 展开当前阶段
+                this.stagesRef?.expandStage(stageNum);
+              });
             }
-            this.stagesRef?.expandStage(stageNum);
+
+            this.collapseSourceStageIfNeeded(stageNum);
             
             // 检查是否在某个任务上方
             const taskEl = el.closest('[data-task-id]');
             if (taskEl) {
               const taskId = taskEl.getAttribute('data-task-id');
-              const rect = taskEl.getBoundingClientRect();
-              const isAbove = touch.clientY < rect.top + rect.height / 2;
               
-              if (isAbove) {
-                this.dragDropService.updateTouchTarget(stageNum, taskId);
-              } else {
-                const stages = this.store.stages();
-                const stage = stages.find(s => s.stageNumber === stageNum);
-                const idx = stage?.tasks.findIndex(t => t.id === taskId) ?? -1;
-                const nextTask = stage?.tasks[idx + 1];
-                this.dragDropService.updateTouchTarget(stageNum, nextTask?.id ?? null);
+              // 🔧 修复：跳过正在被拖拽的任务本身，但仍然标记找到了阶段
+              if (taskId && taskId !== draggingTaskId) {
+                const rect = taskEl.getBoundingClientRect();
+                const isAbove = touch.clientY < rect.top + rect.height / 2;
+                
+                if (isAbove) {
+                  // console.log('[TouchMove] Target: before task', { stageNum, taskId: taskId.slice(-4) });
+                  this.dragDropService.updateTouchTarget(stageNum, taskId);
+                } else {
+                  const stages = this.store.stages();
+                  const stage = stages.find(s => s.stageNumber === stageNum);
+                  const idx = stage?.tasks.findIndex(t => t.id === taskId) ?? -1;
+                  const nextTask = stage?.tasks[idx + 1];
+                  // console.log('[TouchMove] Target: after task', { 
+                  //   stageNum, 
+                  //   taskId: taskId.slice(-4), 
+                  //   nextTaskId: nextTask?.id.slice(-4) || 'end' 
+                  // });
+                  this.dragDropService.updateTouchTarget(stageNum, nextTask?.id ?? null);
+                }
+              } else if (taskId === draggingTaskId) {
+                // 手指在被拖拽任务本身上：设置目标为该任务所在阶段的末尾
+                // console.log('[TouchMove] On dragging task itself, setting target to stage end', { stageNum });
+                this.dragDropService.updateTouchTarget(stageNum, null);
               }
+            } else {
+              // console.log('[TouchMove] No task element, stage', stageNum);
+              // 没有任务元素：设置目标为阶段开头
+              this.dragDropService.updateTouchTarget(stageNum, null);
             }
+            
+            // 更新幽灵元素视觉反馈：在有效阶段上
+            this.dragDropService.updateGhostVisualFeedback(true);
             
             foundStage = true;
             break;
@@ -532,29 +787,199 @@ export class TextViewComponent implements OnDestroy {
       }
       
       if (!foundStage) {
+        // 更新幽灵元素视觉反馈：不在有效阶段上
+        this.dragDropService.updateGhostVisualFeedback(false);
+        
+        // 标记开始 DOM 更新
+        this.dragDropService.beginDOMUpdate();
+        
+        // 使用 requestAnimationFrame 延迟折叠，避免中断触摸事件
         const collapseStage = this.dragDropService.updateTouchTarget(null, null);
         if (collapseStage !== null) {
-          this.stagesRef?.collapseStage(collapseStage);
+          requestAnimationFrame(() => {
+            this.stagesRef?.collapseStage(collapseStage);
+          });
         }
+
+        this.collapseSourceStageIfNeeded(null);
       }
+      
+      // console.log('[TouchMove] Completed processing');
     }
   }
   
   onTouchEnd(event: TouchEvent) {
-    const { task, targetStage, targetBeforeId, wasDragging } = this.dragDropService.endTouchDrag();
+    // console.log('[onTouchEnd] Called');
+    const touchEndResult = this.dragDropService.endTouchDrag();
+    const mouseExpandedStages = this.dragDropService.endDrag();
+    const { task, targetStage, targetBeforeId, wasDragging, autoExpandedStages } = touchEndResult;
+    this.collapseAutoExpandedStages(autoExpandedStages, mouseExpandedStages);
+    this.restoreAutoCollapsedSourceStage();
     
-    if (!task) return;
+    // console.log('[TouchEnd] Drag ended:', {
+    //   taskId: task?.id.slice(-4),
+    //   targetStage,
+    //   targetBeforeId: targetBeforeId?.slice(-4) || null,
+    //   wasDragging,
+    //   taskStage: task?.stage
+    // });
     
-    if (wasDragging && targetStage) {
+    if (!task) {
+      console.warn('[TouchEnd] No task found');
+      return;
+    }
+    
+    // 只有在真正拖拽到有效目标时才执行移动
+    if (wasDragging && targetStage !== null) {
+      // console.log('[TouchEnd] Moving task:', {
+      //   taskId: task.id.slice(-4),
+      //   from: task.stage,
+      //   to: targetStage,
+      //   beforeId: targetBeforeId?.slice(-4) || null,
+      //   sameStage: task.stage === targetStage
+      // });
+      
+      // 即使是同一阶段，也要执行移动（可能改变位置）
       const result = this.store.moveTaskToStage(task.id, targetStage, targetBeforeId);
       if (isFailure(result)) {
         const errorDetail = getErrorMessage(result.error);
+        console.error('[TouchEnd] Move failed:', errorDetail);
         this.toast.error('移动任务失败', `无法将任务移动到阶段 ${targetStage}：${errorDetail}`);
       } else {
+        // console.log('[TouchEnd] Move succeeded');
         this.stagesRef?.expandStage(targetStage);
       }
+    } else {
+      // console.log('[TouchEnd] Not moving:', { wasDragging, targetStage });
+    }
+    // 如果 wasDragging 为 true 但 targetStage 为 null，说明松手时没在有效区域，不执行任何操作
+  }
+
+  /**
+   * 处理触摸取消事件（系统中断触摸，如来电、通知等）
+   * 注意：当阶段折叠时也可能触发 touchcancel，此时不应该结束拖拽
+   */
+  onTouchCancel(event: TouchEvent) {
+    // 检查是否仍在拖拽状态
+    // 如果是因为 DOM 变化（阶段折叠）导致的 touchcancel，不结束拖拽
+    // 只有在真正的系统中断时才结束
+    // console.log('[TouchCancel] received', {
+    //   isDragging: this.dragDropService.isTouchDragging,
+    //   hasGhost: !!this.dragDropService.touchDragTask
+    // });
+    
+    // 暂时忽略 touchcancel，让全局的 touchend 处理器来处理
+    // 如果真的需要取消，1.5秒超时检测器会清理
+  }
+  
+  /**
+   * 全局触摸移动处理器（在顶层容器捕获）
+   * 这样即使被拖拽的任务有 pointer-events-none，我们仍然能接收到触摸事件
+   */
+  onGlobalTouchMove(event: TouchEvent) {
+    // 如果当前没有拖拽，让事件正常传播
+    if (!this.dragDropService.draggingTaskId()) {
+      return;
     }
     
-    this.dragDropService.endDrag();
+    // 如果正在拖拽，处理触摸移动
+    this.onTouchMove(event);
+  }
+  
+  /**
+   * 全局触摸结束处理器
+   */
+  onGlobalTouchEnd(event: TouchEvent) {
+    if (!this.dragDropService.draggingTaskId()) {
+      return;
+    }
+    
+    this.onTouchEnd(event);
+  }
+  
+  /**
+   * 全局触摸取消处理器
+   */
+  onGlobalTouchCancel(event: TouchEvent) {
+    if (!this.dragDropService.draggingTaskId()) {
+      return;
+    }
+    
+    this.onTouchCancel(event);
+  }
+  
+  /**
+   * document 级别的全局 touchend 处理器
+   * 确保即使被拖拽元素有 pointer-events-none 也能捕获到事件
+   */
+  private handleGlobalTouchEnd(event: TouchEvent) {
+    // 无条件记录所有 touchend，确保监听器正常工作
+    // console.log('[GlobalTouchEnd] *** CAPTURED ***', {
+    //   timeStamp: event.timeStamp,
+    //   touches: event.touches.length,
+    //   changedTouches: event.changedTouches.length
+    // });
+    
+    // ⚠️ 如果正在 DOM 更新（折叠/展开阶段），忽略此事件
+    // 这是因为阶段折叠移除 DOM 元素时可能触发假的 touchend
+    if (this.dragDropService.isDOMUpdating) {
+      // console.log('[GlobalTouchEnd] Ignoring - DOM update in progress');
+      return;
+    }
+    
+    // console.log('[GlobalTouchEnd] RAW event received', {
+    //   type: event.type,
+    //   timeStamp: event.timeStamp,
+    //   target: (event.target as HTMLElement)?.tagName,
+    //   touchCount: event.touches.length,
+    //   changedTouchCount: event.changedTouches.length
+    // });
+    
+    const isTouchDragging = this.dragDropService.isTouchDragging;
+    const hasTask = !!this.dragDropService.touchDragTask;
+    
+    // console.log('[GlobalTouchEnd] State check', {
+    //   isTouchDragging,
+    //   hasTask,
+    //   draggingTaskId: this.dragDropService.draggingTaskId()?.slice(-4) || 'none'
+    // });
+    
+    // 检查是否有触摸任务（无论是否已完成 100ms 长按）
+    if (!hasTask) {
+      // console.log('[GlobalTouchEnd] No touch task, ignoring');
+      return;
+    }
+    
+    // console.log('[GlobalTouchEnd] Processing touch end', { isTouchDragging });
+    // 在 Angular zone 内执行
+    this.ngZone.run(() => {
+      this.onTouchEnd(event);
+    });
+  }
+  
+  /**
+   * document 级别的全局 touchcancel 处理器
+   */
+  private handleGlobalTouchCancel(event: TouchEvent) {
+    // console.log('[GlobalTouchCancel] *** CAPTURED ***', {
+    //   timeStamp: event.timeStamp,
+    //   touches: event.touches.length
+    // });
+    
+    // ⚠️ 如果正在 DOM 更新（折叠/展开阶段），忽略此事件
+    if (this.dragDropService.isDOMUpdating) {
+      // console.log('[GlobalTouchCancel] Ignoring - DOM update in progress');
+      return;
+    }
+    
+    if (!this.dragDropService.draggingTaskId()) {
+      // console.log('[GlobalTouchCancel] No dragging task, ignoring');
+      return;
+    }
+    
+    // console.log('[GlobalTouchCancel] Processing');
+    this.ngZone.run(() => {
+      this.onTouchCancel(event);
+    });
   }
 }

@@ -141,6 +141,7 @@ import { renderMarkdownSafe } from '../../utils/markdown';
                   (touchstart)="onTouchStart($event, task)"
                   (touchmove)="touchMove.emit($event)"
                   (touchend)="touchEnd.emit($event)"
+                  (touchcancel)="touchCancel.emit($event)"
                   class="px-2 py-1 bg-panel/50 backdrop-blur-sm border border-retro-muted/30 rounded-md text-xs font-medium text-retro-muted hover:border-retro-teal hover:text-retro-teal cursor-grab active:cursor-grabbing transition-all"
                   [class.opacity-50]="draggingTaskId === task.id"
                   [class.touch-none]="draggingTaskId === task.id"
@@ -188,6 +189,7 @@ export class TextUnassignedComponent {
   @Output() touchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
   @Output() touchMove = new EventEmitter<TouchEvent>();
   @Output() touchEnd = new EventEmitter<TouchEvent>();
+  @Output() touchCancel = new EventEmitter<TouchEvent>();
   
   /** 当前编辑的任务ID */
   readonly editingTaskId = signal<string | null>(null);

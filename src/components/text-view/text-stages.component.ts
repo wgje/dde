@@ -133,7 +133,8 @@ import { TextStageCardComponent } from './text-stage-card.component';
               (taskDragOver)="taskDragOver.emit($event)"
               (taskTouchStart)="taskTouchStart.emit($event)"
               (taskTouchMove)="taskTouchMove.emit($event)"
-              (taskTouchEnd)="taskTouchEnd.emit($event)">
+              (taskTouchEnd)="taskTouchEnd.emit($event)"
+              (taskTouchCancel)="taskTouchCancel.emit($event)">
             </app-text-stage-card>
           }
           
@@ -189,6 +190,7 @@ export class TextStagesComponent {
   @Output() taskTouchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
   @Output() taskTouchMove = new EventEmitter<TouchEvent>();
   @Output() taskTouchEnd = new EventEmitter<TouchEvent>();
+  @Output() taskTouchCancel = new EventEmitter<TouchEvent>();
   
   // 筛选状态
   readonly isStageFilterOpen = signal(false);

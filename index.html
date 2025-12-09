@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css" />
   <!-- 早期调试脚本 - 在任何模块加载前执行 -->
   <script>
-    console.log('[DEBUG v15] HTML 开始解析');
+    // console.log('[DEBUG v15] HTML 开始解析');
     window.__DEBUG_LOG__ = [];
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'HTML head 开始'});
     window.onerror = function(msg, url, line, col, err) {
@@ -163,7 +163,7 @@
 </head>
 <body class="bg-slate-50 text-slate-900 h-screen w-screen overflow-hidden">
   <script>
-    console.log('[DEBUG v15] body 开始解析');
+    // console.log('[DEBUG v15] body 开始解析');
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
   </script>
   <!-- 初始加载指示器 - Angular 加载完成后会被隐藏 -->
@@ -184,7 +184,7 @@
   
   <script>
     // 简化加载检测 - Build v15
-    console.log('[DEBUG v15] 检测脚本开始');
+    // console.log('[DEBUG v15] 检测脚本开始');
     window.__DEBUG_LOG__.push({t: Date.now(), m: '检测脚本开始'});
     
     (function() {
@@ -202,17 +202,17 @@
         var zoneLoaded = typeof window.Zone !== 'undefined';
         var elapsed = Date.now() - startTime;
         
-        console.log('[DEBUG v15] 检查状态:', {
-          hasContent: hasContent,
-          isReady: isReady,
-          zoneLoaded: zoneLoaded,
-          elapsed: elapsed
-        });
+        // console.log('[DEBUG v15] 检查状态:', {
+        //   hasContent: hasContent,
+        //   isReady: isReady,
+        //   zoneLoaded: zoneLoaded,
+        //   elapsed: elapsed
+        // });
         
         if (isReady || hasContent) {
           var loader = document.getElementById('initial-loader');
           if (loader) loader.style.display = 'none';
-          console.log('[DEBUG v15] ✅ 应用就绪');
+          // console.log('[DEBUG v15] ✅ 应用就绪');
           return;
         }
         
@@ -229,7 +229,7 @@
           setTimeout(checkReady, 1000);
         } else {
           console.error('[DEBUG v15] ❌ 加载超时');
-          console.log('[DEBUG v15] 调试日志:', window.__DEBUG_LOG__);
+          // console.log('[DEBUG v15] 调试日志:', window.__DEBUG_LOG__);
           // 超时 - 显示带缓存清理按钮的提示
           var loader = document.getElementById('initial-loader');
           if (loader) {

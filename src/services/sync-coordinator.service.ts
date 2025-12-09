@@ -861,7 +861,7 @@ export class SyncCoordinatorService {
         );
         // 同步成功后，再次保存快照以确保版本号同步
         this.syncService.saveOfflineSnapshot(this.projectState.projects());
-        console.log('[Sync] 本地版本号已更新', { projectId: project.id, newVersion: result.newVersion });
+        // console.log('[Sync] 本地版本号已更新', { projectId: project.id, newVersion: result.newVersion });
         
         // 如果有验证警告，记录日志但不打扰用户
         if (result.validationWarnings && result.validationWarnings.length > 0) {

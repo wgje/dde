@@ -581,11 +581,35 @@ export class SyncService {
           const oldRecord = payload.old as Record<string, unknown>;
           const projectId = (newRecord?.project_id || oldRecord?.project_id) as string;
           
-          // 如果没有 project_id，可能是删除事件，让 handler 处理
+          // 调试：记录接收到的事件详情
+          this.logger.debug('收到任务变更原始事件', { 
+            eventType: payload.eventType, 
+            hasNewRecord: !!newRecord,
+            hasOldRecord: !!oldRecord,
+            newRecordKeys: newRecord ? Object.keys(newRecord) : [],
+            oldRecordKeys: oldRecord ? Object.keys(oldRecord) : [],
+            projectId,
+            taskId: (newRecord?.id || oldRecord?.id)
+          });
+          
+          // 如果没有 project_id，可能是删除事件且表缺少 REPLICA IDENTITY FULL
+          if (!projectId && payload.eventType === 'DELETE') {
+            this.logger.warn('⚠️ DELETE 事件缺少 project_id！请检查数据库 REPLICA IDENTITY 配置', {
+              oldRecord,
+              hasId: !!(oldRecord?.id)
+            });
+          }
+          
+          // 允许 DELETE 事件即使没有 project_id 也通过（后续 handler 会处理）
           if (projectId || payload.eventType === 'DELETE') {
             this.logger.debug('收到任务变更', { eventType: payload.eventType, projectId });
             this.handleTaskChange(payload).catch(e => {
               this.logger.error('处理任务变更时发生错误', e);
+            });
+          } else {
+            this.logger.warn('跳过任务变更（无 project_id）', { 
+              eventType: payload.eventType,
+              taskId: (newRecord?.id || oldRecord?.id)
             });
           }
         }
@@ -724,7 +748,7 @@ export class SyncService {
     const newRecord = payload.new as Record<string, unknown>;
     const oldRecord = payload.old as Record<string, unknown>;
     const taskId = (newRecord?.id || oldRecord?.id) as string;
-    const projectId = (newRecord?.project_id || oldRecord?.project_id) as string;
+    let projectId = (newRecord?.project_id || oldRecord?.project_id) as string;
     
     // 调试日志：记录 DELETE 事件的详细信息
     if (eventType === 'DELETE') {
@@ -734,8 +758,16 @@ export class SyncService {
         hasOldRecord: !!oldRecord,
         oldRecordKeys: oldRecord ? Object.keys(oldRecord) : []
       });
+      
+      // 🔧 修复：如果 DELETE 事件缺少 project_id（REPLICA IDENTITY 未设置为 FULL）
+      // 这是一个权宜之计，理想情况下应该设置 REPLICA IDENTITY FULL
+      // 但为了向后兼容和健壮性，我们保留这个回退逻辑
+      if (!projectId) {
+        this.logger.warn('DELETE 事件缺少 project_id，将尝试从内存中查找', { taskId });
+      }
     }
     
+    // 即使没有 projectId，也要调用回调（let handler 决定如何处理）
     this.onTaskChangeCallback({
       eventType,
       taskId,
@@ -837,22 +869,22 @@ export class SyncService {
         throw error;
       }
       
-      console.log('[Sync] 云端返回项目数量:', data?.length ?? 0);
+      // console.log('[Sync] 云端返回项目数量:', data?.length ?? 0);
       
       // 并行加载所有项目的任务和连接
       const projects = await Promise.all((data || []).map(async row => {
         const projectRow = row as ProjectRow;
-        console.log('[Sync] 加载项目任务:', { projectId: projectRow.id, title: projectRow.title });
+        // console.log('[Sync] 加载项目任务:', { projectId: projectRow.id, title: projectRow.title });
         const [tasks, connections] = await Promise.all([
           this.taskRepo.loadTasks(projectRow.id),
           this.taskRepo.loadConnections(projectRow.id)
         ]);
-        console.log('[Sync] 项目任务加载完成:', { 
-          projectId: projectRow.id, 
-          taskCount: tasks.length,
-          connectionCount: connections.length,
-          tasks: tasks.map(t => ({ id: t.id, title: t.title, content: t.content?.substring(0, 50) }))
-        });
+        // console.log('[Sync] 项目任务加载完成:', { 
+        //   projectId: projectRow.id, 
+        //   taskCount: tasks.length,
+        //   connectionCount: connections.length,
+        //   tasks: tasks.map(t => ({ id: t.id, title: t.title, content: t.content?.substring(0, 50) }))
+        // });
         return this.mapRowToProject(projectRow, tasks, connections);
       }));
       
@@ -1001,7 +1033,7 @@ export class SyncService {
    * 保存操作的内部实现（不带超时控制）
    */
   private async doSaveProjectToCloudInternal(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number }> {
-    console.log('[Sync] 开始保存项目到云端', { projectId: project.id, projectName: project.name, userId });
+    // console.log('[Sync] 开始保存项目到云端', { projectId: project.id, projectName: project.name, userId });
     
     try {
       const currentVersion = project.version ?? 0;
@@ -1020,7 +1052,7 @@ export class SyncService {
       }
       
       const isUpdate = !!existingData;
-      console.log('[Sync] 项目操作类型:', isUpdate ? '更新' : '创建', { existingData });
+      // console.log('[Sync] 项目操作类型:', isUpdate ? '更新' : '创建', { existingData });
       
       if (isUpdate) {
         // 使用乐观锁更新：只有版本号匹配时才更新
@@ -1074,7 +1106,7 @@ export class SyncService {
         }
       } else {
         // 创建新项目
-        console.log('[Sync] 创建新项目', { projectId: project.id, ownerId: userId });
+        // console.log('[Sync] 创建新项目', { projectId: project.id, ownerId: userId });
         
         const { error: insertError } = await this.supabase.client()
           .from('projects')
@@ -1093,11 +1125,11 @@ export class SyncService {
           throw insertError;
         }
         
-        console.log('[Sync] 项目创建成功');
+        // console.log('[Sync] 项目创建成功');
       }
       
       // 批量保存任务
-      console.log('[Sync] 保存任务，数量:', project.tasks.length);
+      // console.log('[Sync] 保存任务，数量:', project.tasks.length);
       this.syncProgress.set({
         current: 0,
         total: project.tasks.length,
@@ -1113,7 +1145,7 @@ export class SyncService {
       }
       
       // 同步连接
-      console.log('[Sync] 保存连接，数量:', project.connections.length);
+      // console.log('[Sync] 保存连接，数量:', project.connections.length);
       this.syncProgress.set({
         current: 0,
         total: project.connections.length,
@@ -1128,7 +1160,7 @@ export class SyncService {
         throw new Error(connectionsResult.error);
       }
       
-      console.log('[Sync] 项目保存完成', { projectId: project.id, newVersion });
+      // console.log('[Sync] 项目保存完成', { projectId: project.id, newVersion });
       
       // 清除进度
       this.syncProgress.set({ current: 0, total: 0, phase: 'idle', message: '' });

@@ -21,6 +21,7 @@ export interface TouchDragState extends DragState {
   dragGhost: HTMLElement | null;
   previousHoverStage: number | null;
   expandedDuringDrag: Set<number>;
+  originalStage: number | null;  // 任务原始所在的阶段，拖拽期间不折叠
 }
 
 /** 拖拽展开状态（鼠标） */
