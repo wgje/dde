@@ -98,6 +98,7 @@ export class FlowDiagramService {
   
   // ========== 首次加载标志 ==========
   private isFirstLoad = true;
+  private _familyColorLogged = false;  // 避免重复打印日志
   
   // ========== 回调函数 ==========
   private nodeClickCallback: NodeClickCallback | null = null;
@@ -229,9 +230,15 @@ export class FlowDiagramService {
   /**
    * 初始化小地图 (Overview)
    * 
-   * 实现"硬实时连续自适应"：
-   * - 当拖动节点到边缘时，小地图实时缩小以适应扩大的世界边界
-   * - 零延迟，与鼠标移动同步
+   * ========== 核心设计理念：热力图效果 ==========
+   * 
+   * 问题：Overview 默认会用 GoJS 内部的灰色细线模板，导致缩小后模糊
+   * 
+   * 解决方案：Overview 是独立的图表实例，必须单独为它编写 nodeTemplate 和 linkTemplate
+   * - 连线是主角：极粗（10px）、高饱和度、半透明（叠加时加深形成热力效果）
+   * - 节点几乎消失：极小或不可见，只留下连线的颜色
+   * 
+   * 效果：多条线聚集时颜色叠加变深，形成"热力图"效果
    */
   initializeOverview(container: HTMLDivElement): void {
     if (!this.diagram || this.isDestroyed) return;
@@ -246,50 +253,61 @@ export class FlowDiagramService {
     try {
       const $ = go.GraphObject.make;
       
-      // 创建 Overview，使用简化的节点模板使节点更明显
+      // ========== 创建 Overview ==========
+      // 注意：先不设置 observed，等模板配置完成后再设置
       this.overview = $(go.Overview, container, {
-        observed: this.diagram,
         contentAlignment: go.Spot.Center,
         "animationManager.isEnabled": false,
-        // 让 Overview 完整渲染所有层
         drawsTemporaryLayers: false
       });
+      
+      // ========== 【核心】显式覆盖 Overview 的 LinkTemplate ==========
+      // 必须在设置 observed 之前配置模板！
+      // 把它做成"光束"效果，实现热力图感官
+      this.overview.linkTemplate = $(go.Link,
+        { 
+          selectable: false,  // 纯展示，不可选中
+          layerName: "Background"  // 放在背景层
+        },
+        $(go.Shape, 
+          { 
+            // 暴力加粗：10px，缩小10倍后看起来是1px
+            strokeWidth: 10, 
+            // 半透明：重叠时颜色叠加变深，模拟"热力"效果
+            opacity: 0.6,
+            // 圆头，让连接处更平滑
+            strokeCap: "round"
+          },
+          // 绑定 familyColor
+          new go.Binding("stroke", "familyColor", (color: string) => color || "#64748b")
+        )
+      );
+      
+      // ========== 【核心】显式覆盖 Overview 的 NodeTemplate ==========
+      // 让节点几乎消失，只留下连线的颜色脉络
+      this.overview.nodeTemplate = $(go.Node,
+        $(go.Shape, "Circle", 
+          { 
+            width: 2, 
+            height: 2, 
+            fill: "transparent",  // 完全透明
+            strokeWidth: 0        // 无边框
+          }
+        )
+      );
       
       // 修改 box（视口框）的视觉样式
       const boxShape = this.overview.box.findObject("BOXSHAPE") as go.Shape;
       if (boxShape) {
-        boxShape.stroke = "#4A8C8C";
-        boxShape.strokeWidth = 2;
-        boxShape.fill = "rgba(74, 140, 140, 0.15)";
+        boxShape.stroke = "#ffffff";
+        boxShape.strokeWidth = 3;
+        boxShape.fill = "rgba(255, 255, 255, 0.25)";
       }
       
-      // 为 Overview 设置简化的节点模板，使节点在缩小后仍然可见
-      // 使用纯色填充，不依赖原始模板的渐变或透明度
-      this.overview.nodeTemplate = $(go.Node, "Auto",
-        { locationSpot: go.Spot.Center },
-        $(go.Shape, "RoundedRectangle",
-          {
-            fill: "#44403C",  // retro.dark
-            stroke: "#44403C",
-            strokeWidth: 1,
-            minSize: new go.Size(8, 6)  // 最小尺寸，确保可见
-          },
-          new go.Binding("fill", "status", (status: string) => {
-            // 根据状态使用不同颜色
-            switch (status) {
-              case 'done': return "#8B9A46";     // retro.olive
-              case 'in-progress': return "#4A8C8C"; // retro.teal
-              case 'blocked': return "#C15B3E";  // retro.rust
-              default: return "#78716C";         // retro.muted
-            }
-          })
-        )
-      );
-      
-      // 简化的连接线模板
-      this.overview.linkTemplate = $(go.Link,
-        $(go.Shape, { stroke: "#78716C", strokeWidth: 1 })
-      );
+      // ========== 【关键】设置 observed ==========
+      // 必须在模板配置完成之后再设置 observed
+      // 这样 Overview 才会使用我们自定义的模板来渲染
+      this.overview.observed = this.diagram;
       
       // 关键：让 Overview 只显示实际的文档内容，不包含 scrollMargin
       // 这样视口框大小才能正确反映主图的缩放
@@ -1010,6 +1028,19 @@ export class FlowDiagramService {
       this.diagram.links.each((link: go.Link) => {
         link.invalidateRoute();
       });
+      
+      // ========== Debug: 检查 familyColor ==========
+      const linkData = model.linkDataArray;
+      if (linkData?.length > 0 && !this._familyColorLogged) {
+        this._familyColorLogged = true;
+        this.logger.info(`[LineageColor] First link: ${JSON.stringify(linkData[0])}`);
+      }
+      
+      // ========== 刷新 Overview ==========
+      // 数据更新后，Overview 需要重新渲染以显示新的 familyColor
+      if (this.overview) {
+        this.overview.updateAllTargetBindings();
+      }
       
       // 首次加载完成后，在移动端自动适应内容
       if (this.isFirstLoad && diagramData.nodeDataArray.length > 0) {

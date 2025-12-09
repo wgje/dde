@@ -3,6 +3,7 @@ import { ThemeService } from './theme.service';
 import { getFlowStyles, FlowStyleConfig, FlowTheme } from '../config/flow-styles';
 import { GOJS_CONFIG, SUPERSCRIPT_DIGITS } from '../config/constants';
 import { Task, Project } from '../models';
+import { LineageColorService, LineageNodeData, LineageLinkData } from './lineage-color.service';
 import * as go from 'gojs';
 
 /**
@@ -23,6 +24,10 @@ export interface GoJSNodeData {
   isUnassigned: boolean;
   isSearchMatch: boolean;
   isSelected: boolean;
+  /** 始祖节点索引（用于血缘聚类） */
+  rootAncestorIndex?: number;
+  /** 家族专属颜色（HSL 格式） */
+  familyColor?: string;
 }
 
 /**
@@ -34,6 +39,10 @@ export interface GoJSLinkData {
   to: string;
   isCrossTree: boolean;
   description?: string;
+  /** 始祖节点索引（用于血缘聚类） */
+  rootAncestorIndex?: number;
+  /** 家族专属颜色（HSL 格式） */
+  familyColor?: string;
 }
 
 /**
@@ -62,6 +71,7 @@ export interface GoJSDiagramData {
 })
 export class FlowDiagramConfigService {
   private readonly themeService = inject(ThemeService);
+  private readonly lineageColorService = inject(LineageColorService);
   
   /** 当前主题样式配置（响应式） */
   readonly currentStyles = computed(() => {
@@ -187,7 +197,16 @@ export class FlowDiagramConfigService {
       }
     }
     
-    return { nodeDataArray, linkDataArray };
+    // ========== 血缘追溯预处理 ==========
+    // 在数据加载进 GoJS Model 之前，为每个节点和连线注入始祖信息和家族颜色
+    // 这是"领地热力图"效果的数据基础
+    const enhancedData = this.lineageColorService.preprocessDiagramData(
+      nodeDataArray,
+      linkDataArray,
+      tasksToShow
+    );
+    
+    return enhancedData;
   }
   
   /**
@@ -393,6 +412,11 @@ export class FlowDiagramConfigService {
   
   /**
    * 获取连接线主体配置
+   * 
+   * 视觉设计：
+   * - 父子连线使用血缘追溯的家族颜色（familyColor）
+   * - 跨树连线保持紫色虚线样式以区分
+   * - 颜色来源于数据预处理阶段注入的 familyColor 属性
    */
   getLinkMainShapesConfig($: any, isMobile: boolean): go.Shape[] {
     return [
@@ -402,13 +426,20 @@ export class FlowDiagramConfigService {
         strokeWidth: isMobile ? this.linkConfig.mobileStrokeWidth : this.linkConfig.desktopStrokeWidth, 
         stroke: "transparent" 
       }),
-      // 可见线
+      // 可见线 - 使用家族颜色（血缘聚类）
       $(go.Shape, { isPanelMain: true, strokeWidth: this.linkConfig.visibleStrokeWidth },
-        new go.Binding("stroke", "isCrossTree", (isCross: boolean) => isCross ? "#6366f1" : "#94a3b8"),
+        // 绑定血缘家族颜色，跨树连线保持紫色
+        new go.Binding("stroke", "", (data: any) => {
+          if (data.isCrossTree) return "#6366f1"; // 跨树连线保持紫色
+          return data.familyColor || "#94a3b8"; // 使用预处理注入的家族颜色
+        }),
         new go.Binding("strokeDashArray", "isCrossTree", (isCross: boolean) => isCross ? [6, 3] : null)),
-      // 箭头
+      // 箭头 - 同样使用家族颜色
       $(go.Shape, { toArrow: "Standard", stroke: null, scale: 1.2 },
-        new go.Binding("fill", "isCrossTree", (isCross: boolean) => isCross ? "#6366f1" : "#94a3b8"))
+        new go.Binding("fill", "", (data: any) => {
+          if (data.isCrossTree) return "#6366f1";
+          return data.familyColor || "#94a3b8";
+        }))
     ];
   }
   
