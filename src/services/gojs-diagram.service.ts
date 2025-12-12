@@ -267,6 +267,37 @@ export class GoJSDiagramService {
   }
   
   /**
+   * 检测是否有结构性变化
+   */
+  private detectStructuralChange(currentNodeMap: Map<string, any>, newTasks: Task[]): boolean {
+    if (currentNodeMap.size !== newTasks.length) {
+      return true;
+    }
+    
+    for (const task of newTasks) {
+      const existing = currentNodeMap.get(task.id);
+      if (!existing) {
+        return true;
+      }
+      
+      if (existing.stage !== task.stage ||
+          existing.status !== task.status ||
+          existing.parentId !== task.parentId) {
+        return true;
+      }
+    }
+    
+    const newTaskIds = new Set(newTasks.map(t => t.id));
+    for (const key of currentNodeMap.keys()) {
+      if (!newTaskIds.has(key)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
    * 更新图表数据
    */
   updateDiagram(tasks: Task[]) {
@@ -280,9 +311,19 @@ export class GoJSDiagramService {
     const project = this.store.activeProject();
     if (!project) return;
     
-    // 位置更新跳过重建
+    // 位置更新跳过重建（但需要检查结构性变化）
     const lastUpdateType = this.store.getLastUpdateType();
-    if (lastUpdateType === 'position') {
+    
+    // 检查是否有结构性变化
+    const currentNodeMap = new Map<string, any>();
+    ((model as any).nodeDataArray || []).forEach((n: any) => {
+      if (n.key) currentNodeMap.set(n.key, n);
+    });
+    
+    const activeTasks = tasks.filter(t => !t.deletedAt && t.status !== 'archived');
+    const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
+    
+    if (lastUpdateType === 'position' && !hasStructuralChange) {
       return;
     }
     

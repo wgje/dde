@@ -932,6 +932,50 @@ export class FlowDiagramService {
   // ========== 图表数据更新 ==========
   
   /**
+   * 检测是否有结构性变化
+   * 用于判断是否需要完整重建图表数据（包括 familyColor 重新计算）
+   * 
+   * @param currentNodeMap 当前图表中的节点映射
+   * @param newTasks 新的任务列表
+   * @returns 是否有结构性变化
+   */
+  private detectStructuralChange(currentNodeMap: Map<string, any>, newTasks: Task[]): boolean {
+    // 1. 检查节点数量变化
+    if (currentNodeMap.size !== newTasks.length) {
+      return true;
+    }
+    
+    // 2. 检查每个任务的关键属性是否变化
+    for (const task of newTasks) {
+      const existing = currentNodeMap.get(task.id);
+      if (!existing) {
+        // 新任务
+        return true;
+      }
+      
+      // 检查影响显示的关键属性
+      // stage 变化会影响任务在图表中的位置和可见性
+      // status 变化会影响节点颜色
+      // parentId 变化会影响连线和 familyColor
+      if (existing.stage !== task.stage ||
+          existing.status !== task.status ||
+          existing.parentId !== task.parentId) {
+        return true;
+      }
+    }
+    
+    // 3. 检查是否有任务被删除（在 currentNodeMap 中存在但在 newTasks 中不存在）
+    const newTaskIds = new Set(newTasks.map(t => t.id));
+    for (const key of currentNodeMap.keys()) {
+      if (!newTaskIds.has(key)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
    * 更新图表数据
    * @param tasks 任务列表
    * @param forceRefresh 是否强制刷新
@@ -949,7 +993,20 @@ export class FlowDiagramService {
     try {
       // 检查更新类型
       const lastUpdateType = this.store.getLastUpdateType();
-      if (lastUpdateType === 'position' && !forceRefresh) {
+      
+      // 检查是否有结构性变化
+      // 这对于远程同步更新尤其重要，因为 lastUpdateType 可能是上次本地操作的状态
+      const model = this.diagram.model as any;
+      const currentNodeMap = new Map<string, any>();
+      (model.nodeDataArray || []).forEach((n: any) => {
+        if (n.key) currentNodeMap.set(n.key, n);
+      });
+      
+      const activeTasks = tasks.filter(t => !t.deletedAt);
+      const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
+      
+      // 如果仅是位置更新且没有结构性变化，跳过更新（优化拖动性能）
+      if (lastUpdateType === 'position' && !forceRefresh && !hasStructuralChange) {
         return;
       }
       
@@ -981,7 +1038,7 @@ export class FlowDiagramService {
       this.diagram.startTransaction('update');
       this.diagram.skipsUndoManager = true;
       
-      const model = this.diagram.model as any;
+      // 重用之前获取的 model 引用
       model.mergeNodeDataArray(diagramData.nodeDataArray);
       
       // ========== 确保所有连接线使用主端口（空字符串）==========

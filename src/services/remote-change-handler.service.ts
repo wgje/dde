@@ -54,8 +54,8 @@ export class RemoteChangeHandlerService {
   private authService = inject(AuthService);
   private destroyRef = inject(DestroyRef);
 
-  /** 用于防止在编辑期间处理远程变更的时间阈值 */
-  private static readonly EDIT_GUARD_THRESHOLD_MS = 800;
+  /** 用于防止在编辑期间处理远程变更的时间阈值（毫秒）*/
+  private static readonly EDIT_GUARD_THRESHOLD_MS = 300;
   
   /** 回调是否已设置（防止重复调用） */
   private callbacksInitialized = false;
@@ -96,7 +96,9 @@ export class RemoteChangeHandlerService {
     
     this.syncCoordinator.setupRemoteChangeCallbacks(
       async (payload) => {
+        // 项目级更新：如果用户正在编辑，跳过以防止冲突
         if (this.shouldSkipRemoteUpdate()) {
+          this.logger.debug('跳过项目级远程更新');
           return;
         }
 
@@ -111,7 +113,10 @@ export class RemoteChangeHandlerService {
         }
       },
       (payload) => {
-        if (this.shouldSkipRemoteUpdate()) {
+        // 任务级更新：更宽松的策略，只在刚刚有持久化操作时跳过
+        // 这允许不同任务的并发编辑
+        if (this.shouldSkipTaskUpdate()) {
+          this.logger.debug('跳过任务级远程更新（刚刚有持久化操作）');
           return;
         }
         this.handleTaskLevelUpdate(payload as RemoteTaskChangePayload);
@@ -122,15 +127,39 @@ export class RemoteChangeHandlerService {
   // ========== 私有方法 ==========
 
   /**
-   * 检查是否应跳过远程更新
-   * 当用户正在编辑或有待同步的本地变更时，跳过远程更新
+   * 检查是否应跳过远程项目级更新
+   * 当用户正在编辑或有待同步的本地变更时，跳过项目级更新
    */
   private shouldSkipRemoteUpdate(): boolean {
-    return (
-      this.uiState.isEditing ||
-      this.syncCoordinator.hasPendingLocalChanges() ||
-      Date.now() - this.syncCoordinator.getLastPersistAt() < RemoteChangeHandlerService.EDIT_GUARD_THRESHOLD_MS
-    );
+    const isEditing = this.uiState.isEditing;
+    const hasPending = this.syncCoordinator.hasPendingLocalChanges();
+    const timeSinceLastPersist = Date.now() - this.syncCoordinator.getLastPersistAt();
+    const inEditGuard = timeSinceLastPersist < RemoteChangeHandlerService.EDIT_GUARD_THRESHOLD_MS;
+    
+    const shouldSkip = isEditing || hasPending || inEditGuard;
+    
+    // 添加调试日志
+    if (shouldSkip) {
+      this.logger.debug('跳过远程项目更新', {
+        isEditing,
+        hasPendingLocalChanges: hasPending,
+        timeSinceLastPersist,
+        inEditGuard,
+        threshold: RemoteChangeHandlerService.EDIT_GUARD_THRESHOLD_MS
+      });
+    }
+    
+    return shouldSkip;
+  }
+  
+  /**
+   * 检查是否应跳过远程任务级更新
+   * 更宽松的策略：只在刚刚有持久化操作时跳过，允许不同任务的并发更新
+   */
+  private shouldSkipTaskUpdate(): boolean {
+    const timeSinceLastPersist = Date.now() - this.syncCoordinator.getLastPersistAt();
+    // 只在刚刚持久化后的短时间内跳过，避免本设备的更新被自己的回声覆盖
+    return timeSinceLastPersist < 200;
   }
 
   /**
@@ -193,9 +222,17 @@ export class RemoteChangeHandlerService {
 
   /**
    * 处理任务级别的实时更新
+   * 
+   * 🔧 关键修复点：
+   * 1. 任务删除需要正确处理 projectId 缺失的情况
+   * 2. 任务更新需要智能合并本地编辑和远程变更
+   * 3. 需要正确处理位置、状态、stage 等所有字段的同步
    */
   private handleTaskLevelUpdate(payload: RemoteTaskChangePayload): void {
     const { eventType, taskId, projectId } = payload;
+    
+    // 添加调试日志
+    this.logger.info('[TaskSync] 收到任务变更事件', { eventType, taskId, projectId });
 
     // 🔧 修复：如果缺少 projectId（REPLICA IDENTITY 未配置），尝试从所有项目中查找
     let targetProjectId = projectId;
@@ -271,6 +308,8 @@ export class RemoteChangeHandlerService {
         // 每次新请求都会使之前的请求结果被忽略
         const requestId = ++this.taskUpdateRequestId;
         
+        this.logger.info('开始加载远程任务更新', { eventType, taskId, projectId, requestId });
+        
         this.syncCoordinator.loadSingleProject(projectId, userId)
           .then(remoteProject => {
             // 检查是否已有更新的请求（当前请求已过时）
@@ -288,10 +327,30 @@ export class RemoteChangeHandlerService {
               return;
             }
             
-            if (!remoteProject) return;
+            if (!remoteProject) {
+              this.logger.warn('无法加载远程项目', { projectId });
+              return;
+            }
 
             const remoteTask = remoteProject.tasks.find(t => t.id === taskId);
-            if (!remoteTask) return;
+            if (!remoteTask) {
+              this.logger.warn('远程项目中未找到任务', { taskId, totalTasks: remoteProject.tasks.length });
+              return;
+            }
+            
+            // 调试：记录远程任务的关键字段
+            this.logger.info('[TaskSync] 成功加载远程任务完整数据', {
+              taskId,
+              title: remoteTask.title,
+              status: remoteTask.status,
+              stage: remoteTask.stage,
+              parentId: remoteTask.parentId,
+              rank: remoteTask.rank,
+              x: remoteTask.x,
+              y: remoteTask.y,
+              updatedAt: remoteTask.updatedAt,
+              deletedAt: remoteTask.deletedAt
+            });
 
             this.projectState.updateProjects(projects =>
               projects.map(p => {
@@ -300,10 +359,82 @@ export class RemoteChangeHandlerService {
                 const existingTaskIndex = p.tasks.findIndex(t => t.id === taskId);
                 let updatedProject: Project;
                 if (existingTaskIndex >= 0) {
+                  // 调试：对比本地和远程数据
+                  const localTask = p.tasks[existingTaskIndex];
+                  this.logger.debug('任务更新对比', {
+                    taskId,
+                    local: { 
+                      status: localTask.status, 
+                      stage: localTask.stage, 
+                      x: localTask.x, 
+                      y: localTask.y,
+                      updatedAt: localTask.updatedAt 
+                    },
+                    remote: { 
+                      status: remoteTask.status, 
+                      stage: remoteTask.stage, 
+                      x: remoteTask.x, 
+                      y: remoteTask.y,
+                      updatedAt: remoteTask.updatedAt 
+                    }
+                  });
+                  
+                  // 🔧 修复：智能合并策略
+                  // 原则：
+                  // 1. 结构性字段（stage, parentId, rank, x, y）始终使用远程值（因为这些是其他设备的操作）
+                  // 2. 状态字段（status, deletedAt）始终使用远程值（因为这些是其他设备的操作）
+                  // 3. 内容字段（title, content）只在用户正在编辑时保留本地值
+                  let mergedTask = remoteTask;
+                  
+                  const localUpdatedAt = localTask.updatedAt ? new Date(localTask.updatedAt).getTime() : 0;
+                  const remoteUpdatedAt = remoteTask.updatedAt ? new Date(remoteTask.updatedAt).getTime() : 0;
+                  
+                  // 只有当用户正在主动编辑这个任务时，才保留本地的内容字段
+                  if (this.uiState.isEditing) {
+                    this.logger.info('[TaskSync] 用户正在编辑，保留本地内容字段', {
+                      taskId,
+                      localTitle: localTask.title,
+                      remoteTitle: remoteTask.title
+                    });
+                    
+                    // 智能合并：使用远程的所有结构性和状态字段，只保留本地的内容字段
+                    mergedTask = {
+                      ...remoteTask, // 使用远程的所有字段（包括 status, stage, x, y 等）
+                      // 只保留本地的内容字段
+                      title: localTask.title,
+                      content: localTask.content
+                    };
+                    
+                    this.logger.debug('[TaskSync] 合并结果', {
+                      taskId,
+                      status: mergedTask.status,
+                      stage: mergedTask.stage,
+                      x: mergedTask.x,
+                      y: mergedTask.y,
+                      titleSource: '本地',
+                      contentSource: '本地',
+                      otherFieldsSource: '远程'
+                    });
+                  } else {
+                    // 用户未在编辑，直接使用远程数据（包括所有字段）
+                    this.logger.info('[TaskSync] 用户未编辑，使用远程数据', { 
+                      taskId,
+                      fieldsUpdated: {
+                        status: localTask.status !== remoteTask.status,
+                        stage: localTask.stage !== remoteTask.stage,
+                        x: localTask.x !== remoteTask.x,
+                        y: localTask.y !== remoteTask.y,
+                        title: localTask.title !== remoteTask.title
+                      }
+                    });
+                  }
+                  
                   const updatedTasks = [...p.tasks];
-                  updatedTasks[existingTaskIndex] = remoteTask;
+                  updatedTasks[existingTaskIndex] = mergedTask;
                   updatedProject = { ...p, tasks: updatedTasks };
                 } else {
+                  // 新任务，直接添加
+                  this.logger.info('添加新任务', { taskId });
                   updatedProject = { ...p, tasks: [...p.tasks, remoteTask] };
                 }
                 
@@ -312,6 +443,8 @@ export class RemoteChangeHandlerService {
                 return this.syncCoordinator.validateAndRebalance(updatedProject);
               })
             );
+            
+            this.logger.info('远程任务更新已应用', { taskId, eventType });
           })
           .catch(error => {
             // 如果请求已过时或服务已销毁，静默忽略错误
