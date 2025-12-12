@@ -30,24 +30,53 @@ function createTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
-describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
-  let service: TaskRepositoryService;
-
+function createSupabaseMock() {
   const upsert = vi.fn().mockResolvedValue({ error: null });
-  const from = vi.fn(() => ({ upsert }));
+  const del = vi.fn().mockResolvedValue({ error: null });
+  const rpc = vi.fn().mockResolvedValue({ data: 1, error: null });
+
+  const inFn = vi.fn().mockResolvedValue({ error: null });
+  const eqFn = vi.fn(() => {
+    const p = Promise.resolve({ error: null }) as any;
+    p.in = inFn;
+    return p;
+  });
+  const update = vi.fn(() => ({ eq: eqFn }));
+
+  const from = vi.fn((table: string) => {
+    if (table === 'tasks') {
+      return {
+        upsert,
+        update,
+        delete: del,
+        eq: eqFn,
+        in: inFn,
+      } as any;
+    }
+    return { upsert } as any;
+  });
+
   const mockSupabaseClientService = {
     get isConfigured() {
       return true;
     },
-    client: () => ({ from }),
+    client: () => ({ from, rpc }),
   } as unknown as SupabaseClientService;
+
+  return { mockSupabaseClientService, from, upsert, update, del, rpc };
+}
+
+describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
+  let service: TaskRepositoryService;
+  let supabaseMock: ReturnType<typeof createSupabaseMock>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    supabaseMock = createSupabaseMock();
     TestBed.configureTestingModule({
       providers: [
         TaskRepositoryService,
-        { provide: SupabaseClientService, useValue: mockSupabaseClientService },
+        { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
     service = TestBed.inject(TaskRepositoryService);
@@ -56,18 +85,12 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
   it('does not send deleted_at when deletedAt is null and not explicitly changed', async () => {
     const task = createTask({ id: 'task-1', deletedAt: null });
 
-    await service.saveTasksIncremental(
-      'project-1',
-      [],
-      [task],
-      [],
-      { 'task-1': ['title'] }
-    );
+    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-1': ['title'] });
 
-    expect(from).toHaveBeenCalledWith('tasks');
-    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(supabaseMock.from).toHaveBeenCalledWith('tasks');
+    expect(supabaseMock.upsert).toHaveBeenCalledTimes(1);
 
-    const payload = upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
+    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
     expect(payload).toHaveLength(1);
     expect(Object.prototype.hasOwnProperty.call(payload[0], 'deleted_at')).toBe(false);
   });
@@ -75,15 +98,9 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
   it('sends deleted_at null when deletedAt is null but explicitly changed (restore)', async () => {
     const task = createTask({ id: 'task-2', deletedAt: null });
 
-    await service.saveTasksIncremental(
-      'project-1',
-      [],
-      [task],
-      [],
-      { 'task-2': ['deletedAt'] }
-    );
+    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-2': ['deletedAt'] });
 
-    const payload = upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
+    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
     expect(payload).toHaveLength(1);
     expect(payload[0]).toHaveProperty('deleted_at', null);
   });
@@ -92,16 +109,45 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
     const ts = new Date().toISOString();
     const task = createTask({ id: 'task-3', deletedAt: ts });
 
-    await service.saveTasksIncremental(
-      'project-1',
-      [],
-      [task],
-      [],
-      { 'task-3': ['title'] }
-    );
+    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-3': ['title'] });
 
-    const payload = upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
+    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
     expect(payload).toHaveLength(1);
     expect(payload[0]).toHaveProperty('deleted_at', ts);
+  });
+});
+
+describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
+  let service: TaskRepositoryService;
+  let supabaseMock: ReturnType<typeof createSupabaseMock>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    supabaseMock = createSupabaseMock();
+    TestBed.configureTestingModule({
+      providers: [
+        TaskRepositoryService,
+        { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
+      ],
+    });
+    service = TestBed.inject(TaskRepositoryService);
+  });
+
+  it('prefers purge_tasks RPC and does not call physical delete', async () => {
+    await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
+
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('purge_tasks', { p_task_ids: ['task-1'] });
+    expect(supabaseMock.del).not.toHaveBeenCalled();
+    // purge 成功时也不应降级 update
+    expect(supabaseMock.update).not.toHaveBeenCalled();
+  });
+
+  it('falls back to soft delete when purge_tasks RPC fails', async () => {
+    supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
+
+    await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
+
+    expect(supabaseMock.update).toHaveBeenCalledTimes(1);
+    expect(supabaseMock.del).not.toHaveBeenCalled();
   });
 });

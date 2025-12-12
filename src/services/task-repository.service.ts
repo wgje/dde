@@ -196,14 +196,29 @@ export class TaskRepositoryService {
   }
 
   /**
-   * 删除任务（物理删除）
+   * 删除任务（永久删除 / purge）
+   *
+   * 设计说明：
+   * - 物理 DELETE 会导致旧端/离线端的 upsert 将任务“重新插回”（复活）。
+   * - 因此这里优先调用服务端 purge RPC（会写入 tombstone 并删除行），从根源阻断复活。
+   * - 若后端尚未部署该 RPC，则降级为软删除（deleted_at=now），保证跨端至少不会立刻复活。
    */
   async deleteTask(taskId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
+    // 1) 优先走 purge RPC（后端会记录 tombstone）
+    const purgeResult = await this.supabase.client().rpc('purge_tasks', {
+      p_task_ids: [taskId]
+    });
+
+    if (!purgeResult.error) {
+      return { success: true };
+    }
+
+    // 2) 降级：软删除
     const { error } = await this.supabase.client()
       .from('tasks')
-      .delete()
+      .update({ deleted_at: new Date().toISOString() })
       .eq('id', taskId);
 
     if (error) {
@@ -786,11 +801,19 @@ export class TaskRepositoryService {
         let success = false;
         
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.supabase.client()
-            .from('tasks')
-            .delete()
-            .eq('project_id', projectId)
-            .in('id', batch);
+          // 优先走 purge RPC（写入 tombstone + 删除行），阻断旧端 upsert 复活。
+          const purgeResult = await this.supabase.client().rpc('purge_tasks', {
+            p_task_ids: batch
+          });
+
+          // 后端未部署/权限不足时降级为软删除（不再使用物理 DELETE）。
+          const error = purgeResult.error
+            ? (await this.supabase.client()
+                .from('tasks')
+                .update({ deleted_at: new Date().toISOString() })
+                .eq('project_id', projectId)
+                .in('id', batch)).error
+            : null;
           
           if (error) {
             if (retry < MAX_RETRIES) {
@@ -1020,12 +1043,19 @@ export class TaskRepositoryService {
 
     for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
       const batch = taskIds.slice(i, i + BATCH_SIZE);
-      
-      const { error } = await this.supabase.client()
-        .from('tasks')
-        .delete()
-        .eq('project_id', projectId)
-        .in('id', batch);
+
+      // 同 deleteTask：优先 purge RPC，降级软删除。
+      const purgeResult = await this.supabase.client().rpc('purge_tasks', {
+        p_task_ids: batch
+      });
+
+      const error = purgeResult.error
+        ? (await this.supabase.client()
+            .from('tasks')
+            .update({ deleted_at: new Date().toISOString() })
+            .eq('project_id', projectId)
+            .in('id', batch)).error
+        : null;
       
       if (error) {
         errors.push(`批量删除任务失败（${i}-${i + batch.length}）: ${error.message}`);
