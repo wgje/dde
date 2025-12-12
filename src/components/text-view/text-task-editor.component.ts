@@ -190,6 +190,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
             } -->
             <button 
               (click)="deleteTask.emit()" 
+              data-testid="delete-task-btn"
               class="bg-stone-100 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-all"
               [ngClass]="{'px-2 py-1 text-xs': !isMobile, 'px-1.5 py-0.5 text-[10px]': isMobile}"
               title="删除任务">

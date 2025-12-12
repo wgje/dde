@@ -311,7 +311,7 @@ describe('SyncCoordinatorService', () => {
       const localProject = createTestProject({ id: 'proj-1', version: 2 });
       const remoteProject = createTestProject({ id: 'proj-1', version: 3 });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({
         success: false,
         conflict: true,
         remoteData: remoteProject,
@@ -327,7 +327,7 @@ describe('SyncCoordinatorService', () => {
     it('本地版本等于远程版本时应该正常保存', async () => {
       const project = createTestProject({ id: 'proj-1', version: 5 });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
       const result = await service.saveProjectToCloud(project, 'user-123');
       
@@ -849,7 +849,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       });
       
       // 设备 A 尝试保存时发现冲突
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({
         success: false,
         conflict: true,
         remoteData: remoteProject,
@@ -999,7 +999,7 @@ describe('SyncCoordinatorService 集成场景', () => {
     it('版本号为 0 时应该正确处理', async () => {
       const project = createTestProject({ id: 'proj-zero', version: 0 });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
       const result = await service.saveProjectToCloud(project, 'user-123');
       
@@ -1012,7 +1012,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         version: Number.MAX_SAFE_INTEGER - 1 
       });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
       const result = await service.saveProjectToCloud(project, 'user-123');
       

@@ -107,9 +107,9 @@ describe('LineageColorService', () => {
   });
 
   describe('HSL 颜色生成', () => {
-    it('应生成有效的 HSL 颜色字符串', () => {
+    it('应生成有效的颜色字符串（HEX 或 HSL）', () => {
       const color = service.generateFamilyColor(0, 5);
-      expect(color).toMatch(/^hsl\(\d+, 85%, 55%\)$/);
+      expect(color).toMatch(/^(#([0-9a-fA-F]{6})|hsl\(\d+,\s*85%,\s*55%\))$/);
     });
 
     it('颜色应具有确定性（同样的输入产生同样的输出）', () => {

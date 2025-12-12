@@ -490,19 +490,197 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     // 验证任务已创建（本地）
     await expect(page.locator(`[data-testid="task-card"]:has-text("${offlineTaskTitle}")`)).toBeVisible();
     
-    // 验证待同步指示器
-    await expect(page.locator('[data-testid="pending-sync-indicator"]')).toBeVisible();
+    // 验证待同步指示器（嵌入模式下在同一元素上通过 attribute 暴露）
+    await expect(page.locator('[data-testid="sync-status-indicator"][data-testid-pending="pending-sync-indicator"]')).toBeVisible();
     
     // 恢复在线
     await context.setOffline(false);
     
     // 等待同步完成
-    await expect(page.locator('[data-testid="sync-success-indicator"]')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('[data-testid="sync-status-indicator"][data-testid-success="sync-success-indicator"]')).toBeVisible({ timeout: 15000 });
     
     // 刷新页面验证数据已同步到云端
     await page.reload();
     await testHelpers.waitForAppReady(page);
     await expect(page.locator(`[data-testid="task-card"]:has-text("${offlineTaskTitle}")`)).toBeVisible({ timeout: 10000 });
+  });
+
+  test('多端一致性：完成/删除/拖拽后另一端不回滚', async ({ browser }) => {
+    const testEmail = process.env['TEST_USER_EMAIL'];
+    const testPassword = process.env['TEST_USER_PASSWORD'];
+
+    if (!testEmail || !testPassword) {
+      test.skip(true, '跳过：未配置测试账户');
+      return;
+    }
+
+    const contextA = await browser.newContext();
+    const pageA = await contextA.newPage();
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+
+    const login = async (page: Page) => {
+      await page.goto('/');
+      await testHelpers.waitForAppReady(page);
+
+      await page.click('[data-testid="login-btn"]');
+      await page.waitForSelector('[data-testid="login-modal"]');
+      await page.fill('[data-testid="email-input"]', testEmail);
+      await page.fill('[data-testid="password-input"]', testPassword);
+      await page.click('[data-testid="submit-login"]');
+      await expect(page.locator('[data-testid="login-modal"]')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('[data-testid="user-menu"]')).toBeVisible({ timeout: 10000 });
+    };
+
+    const waitCloudSaved = async (page: Page) => {
+      await expect(
+        page.locator('[data-testid="sync-status-indicator"][data-testid-success="sync-success-indicator"]')
+      ).toBeVisible({ timeout: 20000 });
+    };
+
+    const gotoFlowView = async (page: Page) => {
+      const flowViewTab = page.locator('[data-testid="flow-view-tab"]');
+      if (await flowViewTab.isVisible().catch(() => false)) {
+        await flowViewTab.click();
+      }
+      await page.waitForSelector('[data-testid="flow-diagram"]', { timeout: 15000 });
+    };
+
+    const clickDiagramAt = async (page: Page, xRatio: number, yRatio: number, options: { clickCount?: number } = {}) => {
+      const diagram = page.locator('[data-testid="flow-diagram"]');
+      const box = await diagram.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) throw new Error('无法获取 flow-diagram 的 bounding box');
+      await page.mouse.click(box.x + box.width * xRatio, box.y + box.height * yRatio, { clickCount: options.clickCount ?? 1 });
+    };
+
+    const ensureTaskSelected = async (page: Page) => {
+      // 通过在画布上多点点击，尽量选中一个节点并让详情面板出现可操作按钮
+      for (const [x, y] of [
+        [0.5, 0.5],
+        [0.35, 0.5],
+        [0.65, 0.5],
+        [0.5, 0.35],
+        [0.5, 0.65],
+      ] as const) {
+        await clickDiagramAt(page, x, y);
+        if (await page.locator('[data-testid="flow-edit-toggle-btn"]').isVisible().catch(() => false)) {
+          return;
+        }
+      }
+      // 最后尝试双击
+      await clickDiagramAt(page, 0.5, 0.5, { clickCount: 2 });
+    };
+
+    const setSelectedTaskTitle = async (page: Page, title: string) => {
+      await ensureTaskSelected(page);
+      // 切到编辑，填标题
+      await page.locator('[data-testid="flow-edit-toggle-btn"]').click();
+      const input = page.locator('[data-testid="flow-task-title-input"]');
+      await expect(input).toBeVisible({ timeout: 5000 });
+      await input.fill(title);
+      // 回到预览，确保标题渲染出来
+      await page.locator('[data-testid="flow-edit-toggle-btn"]').click();
+      await expect(page.locator('[data-testid="flow-task-title"]')).toContainText(title, { timeout: 5000 });
+    };
+
+    const selectTaskByTitle = async (page: Page, title: string) => {
+      for (const [x, y] of [
+        [0.35, 0.5],
+        [0.65, 0.5],
+        [0.5, 0.35],
+        [0.5, 0.65],
+        [0.5, 0.5],
+      ] as const) {
+        await clickDiagramAt(page, x, y);
+        const currentTitle = page.locator('[data-testid="flow-task-title"]');
+        if (await currentTitle.isVisible().catch(() => false)) {
+          const text = (await currentTitle.textContent())?.trim() ?? '';
+          if (text.includes(title)) return;
+        }
+      }
+      throw new Error(`未能在流程图中选中目标任务: ${title}`);
+    };
+
+    try {
+      // 登录两端
+      await login(pageA);
+      await login(pageB);
+
+      // A 端创建独立项目，避免污染/依赖既有数据
+      const projectName = `多端一致性-${testHelpers.uniqueId()}`;
+      const projectId = await testHelpers.createTestProject(pageA, projectName);
+      if (!projectId) throw new Error('创建测试项目失败：无法获取 projectId');
+
+      // B 端打开同名项目（等待云端同步出现）
+      await pageB.goto('/');
+      await testHelpers.waitForAppReady(pageB);
+      const projectItemB = pageB.locator(`[data-testid="project-item"]:has-text("${projectName}")`);
+      await expect(projectItemB).toBeVisible({ timeout: 20000 });
+      await projectItemB.click();
+
+      // 两端都进入 flow view
+      await gotoFlowView(pageA);
+      await gotoFlowView(pageB);
+
+      // A 端创建两个任务并命名
+      const title1 = `完成任务-${testHelpers.uniqueId()}`;
+      const title2 = `待删除任务-${testHelpers.uniqueId()}`;
+
+      await pageA.click('[data-testid="create-unassigned-btn"]');
+      await setSelectedTaskTitle(pageA, title1);
+      await waitCloudSaved(pageA);
+
+      await pageA.click('[data-testid="create-unassigned-btn"]');
+      await setSelectedTaskTitle(pageA, title2);
+      await waitCloudSaved(pageA);
+
+      // A 端：做一次拖拽（覆盖位置同步路径；不强依赖 DOM 节点元素）
+      {
+        const diagram = pageA.locator('[data-testid="flow-diagram"]');
+        const box = await diagram.boundingBox();
+        expect(box).not.toBeNull();
+        if (box) {
+          await pageA.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
+          await pageA.mouse.down();
+          await pageA.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.58);
+          await pageA.mouse.up();
+        }
+      }
+
+      // A 端：将 title1 设为完成
+      await selectTaskByTitle(pageA, title1);
+      await pageA.locator('[data-testid="toggle-task-status-btn"]').click();
+      await expect(pageA.locator('[data-testid="flow-task-status-badge"]')).toContainText('完成', { timeout: 5000 });
+      await waitCloudSaved(pageA);
+
+      // A 端：删除 title2
+      await selectTaskByTitle(pageA, title2);
+      await pageA.locator('[data-testid="delete-task-btn"]').click();
+      await waitCloudSaved(pageA);
+
+      // B 端：刷新并断言“不回滚”
+      await pageB.reload();
+      await testHelpers.waitForAppReady(pageB);
+      await gotoFlowView(pageB);
+
+      await selectTaskByTitle(pageB, title1);
+      await expect(pageB.locator('[data-testid="flow-task-status-badge"]')).toContainText('完成', { timeout: 20000 });
+
+      // 删除后的任务不应再出现（尝试在流程图中选中它应失败）
+      let deletedStillSelectable = true;
+      try {
+        await selectTaskByTitle(pageB, title2);
+      } catch {
+        deletedStillSelectable = false;
+      }
+      expect(deletedStillSelectable).toBe(false);
+    } finally {
+      await pageA.close().catch(() => undefined);
+      await contextA.close().catch(() => undefined);
+      await pageB.close().catch(() => undefined);
+      await contextB.close().catch(() => undefined);
+    }
   });
 });
 

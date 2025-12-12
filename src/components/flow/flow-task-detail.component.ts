@@ -148,7 +148,7 @@ import { renderMarkdown } from '../../utils/markdown';
               <div class="flex items-center gap-2 text-[10px]">
                   <span class="font-bold text-retro-muted bg-stone-100 px-1.5 py-0.5 rounded">{{store.compressDisplayId(task.displayId)}}</span>
                   <span class="text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
-                  <span class="px-1.5 py-0.5 rounded"
+                <span data-testid="flow-task-status-badge" class="px-1.5 py-0.5 rounded"
                         [class.bg-emerald-100]="task.status === 'completed'"
                         [class.text-emerald-700]="task.status === 'completed'"
                         [class.bg-amber-100]="task.status !== 'completed'"
@@ -158,6 +158,7 @@ import { renderMarkdown } from '../../utils/markdown';
               </div>
               <button 
                   (click)="toggleEditMode()"
+                data-testid="flow-edit-toggle-btn"
                   class="text-[9px] px-1.5 py-0.5 rounded transition-colors"
                   [class.bg-indigo-100]="isEditMode()"
                   [class.text-indigo-600]="isEditMode()"
@@ -171,7 +172,7 @@ import { renderMarkdown } from '../../utils/markdown';
           <!-- 预览模式 -->
           @if (!isEditMode()) {
               <div class="cursor-pointer" (click)="toggleEditMode()">
-                  <h4 class="text-xs font-medium text-stone-800 mb-1">{{ task.title || '无标题' }}</h4>
+                <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (task.content) {
                       <div 
                           class="text-[11px] text-stone-600 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto"
@@ -183,7 +184,7 @@ import { renderMarkdown } from '../../utils/markdown';
               </div>
           } @else {
               <!-- 编辑模式 -->
-              <input type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
+              <input data-testid="flow-task-title-input" type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
                   class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
                   placeholder="任务标题">
               
@@ -202,6 +203,7 @@ import { renderMarkdown } from '../../utils/markdown';
                   +下级
               </button>
               <button (click)="toggleStatus.emit(task)"
+                  data-testid="toggle-task-status-btn"
                   class="flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all border"
                   [class.bg-emerald-50]="task.status !== 'completed'"
                   [class.text-emerald-700]="task.status !== 'completed'"
@@ -226,7 +228,7 @@ import { renderMarkdown } from '../../utils/markdown';
                   title="归档后任务将从主视图隐藏，可在回收站中恢复">
                   {{task.status === 'archived' ? '取消归档' : '归档'}}
               </button>
-              <button (click)="deleteTask.emit(task)"
+                <button data-testid="delete-task-btn" (click)="deleteTask.emit(task)"
                   class="px-2 py-1 bg-stone-50 hover:bg-red-500 text-stone-400 hover:text-white border border-stone-200 text-[10px] font-medium rounded transition-all">
                   删除
               </button>

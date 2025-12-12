@@ -318,7 +318,8 @@ export class SyncCoordinatorService {
    * 保存项目到云端
    */
   async saveProjectToCloud(project: Project, userId: string) {
-    return this.syncService.saveProjectToCloud(project, userId);
+    // 使用智能同步：优先增量，避免全量 upsert 覆盖其他设备的任务状态/位置/删除标记
+    return this.syncService.saveProjectSmart(project, userId);
   }
   
   /**
@@ -627,7 +628,7 @@ export class SyncCoordinatorService {
       
       const payload = action.payload as { project: Project };
       try {
-        const result = await this.syncService.saveProjectToCloud(payload.project, userId);
+        const result = await this.syncService.saveProjectSmart(payload.project, userId);
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
@@ -671,7 +672,7 @@ export class SyncCoordinatorService {
       
       const payload = action.payload as { project: Project };
       try {
-        const result = await this.syncService.saveProjectToCloud(payload.project, userId);
+        const result = await this.syncService.saveProjectSmart(payload.project, userId);
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
@@ -700,7 +701,7 @@ export class SyncCoordinatorService {
       }
       
       try {
-        const result = await this.syncService.saveProjectToCloud(project, userId);
+        const result = await this.syncService.saveProjectSmart(project, userId);
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === project.id ? { ...p, version: result.newVersion } : p
@@ -729,7 +730,7 @@ export class SyncCoordinatorService {
       }
       
       try {
-        const result = await this.syncService.saveProjectToCloud(project, userId);
+        const result = await this.syncService.saveProjectSmart(project, userId);
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === project.id ? { ...p, version: result.newVersion } : p
@@ -758,7 +759,7 @@ export class SyncCoordinatorService {
       }
       
       try {
-        const result = await this.syncService.saveProjectToCloud(project, userId);
+        const result = await this.syncService.saveProjectSmart(project, userId);
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === project.id ? { ...p, version: result.newVersion } : p

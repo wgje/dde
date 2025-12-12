@@ -113,13 +113,16 @@ export class RemoteChangeHandlerService {
         }
       },
       (payload) => {
-        // 任务级更新：更宽松的策略，只在刚刚有持久化操作时跳过
-        // 这允许不同任务的并发编辑
-        if (this.shouldSkipTaskUpdate()) {
-          this.logger.debug('跳过任务级远程更新（刚刚有持久化操作）');
+        const taskPayload = payload as RemoteTaskChangePayload;
+
+        // 任务级更新：默认更宽松（允许不同任务并发编辑），但仍需避免在本机有未同步修改时被远程覆盖。
+        // - 用户正在编辑/有待同步本地变更：跳过 UPDATE/INSERT，避免覆盖本地状态
+        // - 刚刚持久化：短暂跳过，避免“自己的回声”覆盖
+        if (this.shouldSkipTaskUpdate(taskPayload)) {
+          this.logger.debug('跳过任务级远程更新', { eventType: taskPayload.eventType, taskId: taskPayload.taskId });
           return;
         }
-        this.handleTaskLevelUpdate(payload as RemoteTaskChangePayload);
+        this.handleTaskLevelUpdate(taskPayload);
       }
     );
   }
@@ -156,10 +159,18 @@ export class RemoteChangeHandlerService {
    * 检查是否应跳过远程任务级更新
    * 更宽松的策略：只在刚刚有持久化操作时跳过，允许不同任务的并发更新
    */
-  private shouldSkipTaskUpdate(): boolean {
+  private shouldSkipTaskUpdate(payload: RemoteTaskChangePayload): boolean {
     const timeSinceLastPersist = Date.now() - this.syncCoordinator.getLastPersistAt();
-    // 只在刚刚持久化后的短时间内跳过，避免本设备的更新被自己的回声覆盖
-    return timeSinceLastPersist < 200;
+    const inEchoGuard = timeSinceLastPersist < 200;
+
+    // DELETE 事件不需要加载远程项目，且对一致性很关键；仅应用回声保护。
+    if (payload.eventType === 'DELETE') {
+      return inEchoGuard;
+    }
+
+    const isEditing = this.uiState.isEditing;
+    const hasPending = this.syncCoordinator.hasPendingLocalChanges();
+    return isEditing || hasPending || inEchoGuard;
   }
 
   /**
