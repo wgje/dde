@@ -136,13 +136,16 @@ describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
   it('prefers purge_tasks RPC and does not call physical delete', async () => {
     await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
 
-    expect(supabaseMock.rpc).toHaveBeenCalledWith('purge_tasks', { p_task_ids: ['task-1'] });
+    expect(supabaseMock.rpc).toHaveBeenCalledWith('purge_tasks_v2', { p_project_id: 'project-1', p_task_ids: ['task-1'] });
     expect(supabaseMock.del).not.toHaveBeenCalled();
     // purge 成功时也不应降级 update
     expect(supabaseMock.update).not.toHaveBeenCalled();
   });
 
   it('falls back to soft delete when purge_tasks RPC fails', async () => {
+    // v2 不存在
+    supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
+    // 旧版也不存在/失败
     supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
 
     await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});

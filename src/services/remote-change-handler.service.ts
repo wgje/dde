@@ -370,6 +370,10 @@ export class RemoteChangeHandlerService {
                 if (p.id !== targetProjectId) return p;
 
                 const existingTaskIndex = p.tasks.findIndex(t => t.id === taskId);
+                const pending = this.changeTracker
+                  .exportPendingChanges()
+                  .find(r => r.entityType === 'task' && r.projectId === targetProjectId && r.entityId === taskId);
+
                 let updatedProject: Project;
                 if (existingTaskIndex >= 0) {
                   // 调试：对比本地和远程数据
@@ -396,10 +400,6 @@ export class RemoteChangeHandlerService {
                   // - 默认采用远程任务（避免丢失另一端的结构/状态更新）
                   // - 若本机对该任务存在待同步脏字段，则对这些字段采用本地值（避免“回滚”）
                   // - 软删除 tombstone（deletedAt 非空）优先，避免任务复活
-                  const pending = this.changeTracker
-                    .exportPendingChanges()
-                    .find(r => r.entityType === 'task' && r.projectId === targetProjectId && r.entityId === taskId);
-
                   let mergedTask = remoteTask;
 
                   if (pending?.changeType === 'delete') {
@@ -433,6 +433,13 @@ export class RemoteChangeHandlerService {
                   updatedTasks[existingTaskIndex] = mergedTask;
                   updatedProject = { ...p, tasks: updatedTasks };
                 } else {
+                  // 本地不存在该任务：
+                  // - 若本机对该任务存在 pending delete，说明用户刚删掉（或离线删除待同步），不要被远端实时更新“复活”。
+                  if (pending?.changeType === 'delete') {
+                    this.logger.debug('忽略远端任务更新（本机 pending delete）', { taskId });
+                    return p;
+                  }
+
                   // 新任务，直接添加
                   this.logger.info('添加新任务', { taskId });
                   updatedProject = { ...p, tasks: [...p.tasks, remoteTask] };
