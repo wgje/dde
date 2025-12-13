@@ -84,6 +84,8 @@ export class GlobalErrorHandler implements ErrorHandler {
     // === 静默级错误 ===
     // 图片加载失败
     { pattern: /load.*image|image.*load|img.*error|404.*image/i, severity: ErrorSeverity.SILENT },
+    // Supabase Auth 多标签页锁争用（不影响功能，但在 Zone.js 下可能被报告为未处理错误）
+    { pattern: /Navigator LockManager lock|lock:sb-.*-auth-token|Acquiring an exclusive Navigator LockManager lock/i, severity: ErrorSeverity.SILENT },
     // 字体加载失败
     { pattern: /font.*load|load.*font/i, severity: ErrorSeverity.SILENT },
     // 非关键资源 404

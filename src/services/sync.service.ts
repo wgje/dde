@@ -1144,7 +1144,7 @@ export class SyncService {
       
       if (isUpdate) {
         // 使用乐观锁更新：只有版本号匹配时才更新
-        const { data: updateResult, error: updateError } = await this.supabase.client()
+        const { data: updateRows, error: updateError } = await this.supabase.client()
           .from('projects')
           .update({
             title: project.name,
@@ -1153,16 +1153,16 @@ export class SyncService {
           })
           .eq('id', project.id)
           .eq('version', currentVersion) // 乐观锁：只有版本匹配才更新
-          .select('id')
-          .maybeSingle();
+          .select('id');
         
         if (updateError) {
           this.handleSaveError(updateError, project);
           throw updateError;
         }
         
-        // 如果没有返回数据，说明版本号不匹配（被其他客户端更新了）
-        if (!updateResult) {
+        // 如果没有更新到任何行，说明版本号不匹配（被其他客户端更新了）
+        const didUpdate = Array.isArray(updateRows) && updateRows.length > 0;
+        if (!didUpdate) {
           this.logger.warn('版本冲突：远端数据已被更新', { projectId: project.id, localVersion: currentVersion });
           
           // 【三路合并】进入自动变基流程
@@ -1495,7 +1495,7 @@ export class SyncService {
         const currentVersion = remoteVersion + retry;
         const targetVersion = currentVersion + 1;
         
-        const { data: updateResult, error: updateError } = await this.supabase.client()
+        const { data: updateRows, error: updateError } = await this.supabase.client()
           .from('projects')
           .update({
             title: mergedProject.name,
@@ -1504,10 +1504,10 @@ export class SyncService {
           })
           .eq('id', mergedProject.id)
           .eq('version', currentVersion)
-          .select('id')
-          .maybeSingle();
+          .select('id');
         
-        if (!updateError && updateResult) {
+        const didUpdate = !updateError && Array.isArray(updateRows) && updateRows.length > 0;
+        if (didUpdate) {
           // 保存任务和连接
           const tasksResult = await this.taskRepo.saveTasks(mergedProject.id, mergedProject.tasks);
           if (tasksResult.success) {
@@ -1566,7 +1566,7 @@ export class SyncService {
   ): Promise<{ success: boolean; newVersion?: number } | null> {
     const newVersion = baseVersion + 1;
     
-    const { data: result, error } = await this.supabase.client()
+    const { data: rows, error } = await this.supabase.client()
       .from('projects')
       .update({
         title: project.name,
@@ -1575,10 +1575,10 @@ export class SyncService {
       })
       .eq('id', project.id)
       .eq('version', baseVersion)
-      .select('id')
-      .maybeSingle();
+      .select('id');
     
-    if (!error && result) {
+    const didUpdate = !error && Array.isArray(rows) && rows.length > 0;
+    if (didUpdate) {
       const tasksResult = await this.taskRepo.saveTasks(project.id, project.tasks);
       if (tasksResult.success) {
         const connectionsResult = await this.taskRepo.syncConnections(project.id, project.connections);
@@ -1692,7 +1692,7 @@ export class SyncService {
 
       if (isUpdate) {
         // 使用乐观锁更新版本号
-        const { data: updateResult, error: updateError } = await this.supabase.client()
+        const { data: updateRows, error: updateError } = await this.supabase.client()
           .from('projects')
           .update({
             title: project.name,
@@ -1701,15 +1701,15 @@ export class SyncService {
           })
           .eq('id', project.id)
           .eq('version', currentVersion)
-          .select('id')
-          .maybeSingle();
+          .select('id');
 
         if (updateError) {
           throw updateError;
         }
 
         // 版本号不匹配 - 可能有冲突
-        if (!updateResult) {
+        const didUpdate = Array.isArray(updateRows) && updateRows.length > 0;
+        if (!didUpdate) {
           // 加载远程数据检查是否真的有冲突
           const remoteProject = await this.loadSingleProject(project.id, userId);
           if (remoteProject) {
