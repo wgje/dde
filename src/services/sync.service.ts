@@ -1176,6 +1176,11 @@ export class SyncService {
           // 自动变基失败，返回冲突状态
           const remoteProject = await this.loadSingleProject(project.id, userId);
           if (remoteProject) {
+            // 尝试在进入冲突流程前，把“本地明确删除(soft delete)”同步到远端。
+            // 这样可以避免：用户刚删除的任务因版本冲突而迟迟无法在其他设备上消失。
+            // 注意：这里只做 best-effort，不影响后续冲突解决。
+            await this.tryApplyLocalSoftDeletesToRemote(project, remoteProject);
+
             // 先保存到本地缓存确保数据不丢失
             this.saveOfflineSnapshot([project]);
             
@@ -1286,6 +1291,56 @@ export class SyncService {
         offlineMode: true
       }));
       return { success: false };
+    }
+  }
+
+  /**
+   * 冲突场景下的“安全同步”：把本地 soft-delete (deletedAt) 尽快写到远端。
+   *
+   * 设计目标：
+   * - 用户删除应优先级最高（tombstone-wins）；
+   * - 不依赖 projects.version 的乐观锁，避免被版本冲突卡住；
+   * - best-effort：失败不抛出，仍进入冲突解决流程。
+   */
+  private async tryApplyLocalSoftDeletesToRemote(localProject: Project, remoteProject: Project): Promise<void> {
+    try {
+      const localDeletedTasks = (localProject.tasks || []).filter(t => !!t.deletedAt);
+      if (localDeletedTasks.length === 0) return;
+
+      // remoteProject.tasks 已在加载阶段过滤了 deleted_at，因此这里的集合代表“远端仍可见/未删除”的任务。
+      const remoteActiveTaskIds = new Set((remoteProject.tasks || []).map(t => t.id));
+      const tasksToSoftDelete = localDeletedTasks.filter(t => remoteActiveTaskIds.has(t.id));
+      if (tasksToSoftDelete.length === 0) return;
+
+      const taskUpdateFieldsById: Record<string, string[]> = {};
+      for (const t of tasksToSoftDelete) {
+        taskUpdateFieldsById[t.id] = ['deletedAt'];
+      }
+
+      const result = await this.taskRepo.saveTasksIncremental(
+        localProject.id,
+        [],
+        tasksToSoftDelete,
+        [],
+        taskUpdateFieldsById
+      );
+
+      if (result.success) {
+        this.logger.info('[Sync] 已提前同步本地删除到远端', {
+          projectId: localProject.id,
+          deletedCount: tasksToSoftDelete.length
+        });
+      } else {
+        this.logger.warn('[Sync] 冲突前同步本地删除失败（将继续进入冲突流程）', {
+          projectId: localProject.id,
+          error: result.error
+        });
+      }
+    } catch (e: unknown) {
+      this.logger.warn('[Sync] 冲突前同步本地删除异常（忽略）', {
+        projectId: localProject.id,
+        error: extractErrorMessage(e)
+      });
     }
   }
 

@@ -302,6 +302,25 @@ describe('SyncCoordinatorService', () => {
         expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(2);
       });
     });
+
+    it('存在未解决冲突时应跳过云端持久化（避免重复弹窗）', async () => {
+      const project = createTestProject({ id: 'proj-1' });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+
+      mockSyncService.syncState.set(createMockSyncState({
+        hasConflict: true,
+        conflictData: { projectId: 'proj-1' } as any,
+      }));
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(800);
+
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    });
   });
 
   // ==================== 版本冲突检测 ====================

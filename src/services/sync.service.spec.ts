@@ -15,7 +15,12 @@ import { signal } from '@angular/core';
 import { SyncService } from './sync.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { TaskRepositoryService } from './task-repository.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import { LoggerService } from './logger.service';
+import { ToastService } from './toast.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { BaseSnapshotService } from './base-snapshot.service';
+import { ThreeWayMergeService } from './three-way-merge.service';
 import { Project, Task } from '../models';
 
 // ========== 模拟 Supabase Client ==========
@@ -64,11 +69,71 @@ const mockSupabaseClientService = {
 
 // 模拟 TaskRepositoryService
 const mockTaskRepository = {
-  loadProjectTasks: vi.fn().mockResolvedValue([]),
-  loadProjectConnections: vi.fn().mockResolvedValue([]),
-  saveProjectTasks: vi.fn().mockResolvedValue({ success: true }),
-  saveProjectConnections: vi.fn().mockResolvedValue({ success: true }),
-  deleteProjectData: vi.fn().mockResolvedValue({ success: true }),
+  loadTasks: vi.fn().mockResolvedValue([]),
+  loadConnections: vi.fn().mockResolvedValue([]),
+  saveTasks: vi.fn().mockResolvedValue({ success: true }),
+  syncConnections: vi.fn().mockResolvedValue({ success: true }),
+  saveTasksIncremental: vi.fn().mockResolvedValue({ success: true }),
+};
+
+// 模拟 ChangeTrackerService
+const mockChangeTracker = {
+  getProjectChanges: vi.fn().mockReturnValue({
+    projectId: 'proj-1',
+    tasksToCreate: [],
+    tasksToUpdate: [],
+    taskIdsToDelete: [],
+    connectionsToCreate: [],
+    connectionsToUpdate: [],
+    connectionsToDelete: [],
+    hasChanges: false,
+    totalChanges: 0,
+  }),
+  clearProjectChanges: vi.fn(),
+};
+
+// 模拟 ToastService
+const mockToastService = {
+  info: vi.fn(),
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+};
+
+// 模拟 ConflictStorageService
+const mockConflictStorage = {
+  saveConflict: vi.fn().mockResolvedValue(true),
+  getAllConflicts: vi.fn().mockResolvedValue([]),
+  deleteConflict: vi.fn().mockResolvedValue(true),
+  hasConflicts: vi.fn().mockResolvedValue(false),
+};
+
+// 模拟 BaseSnapshotService
+const mockBaseSnapshot = {
+  getProjectSnapshot: vi.fn().mockResolvedValue(null),
+  saveProjectSnapshot: vi.fn().mockResolvedValue(undefined),
+};
+
+// 模拟 ThreeWayMergeService
+const mockThreeWayMerge = {
+  needsMerge: vi.fn().mockReturnValue(false),
+  merge: vi.fn().mockReturnValue({
+    project: null,
+    hasRealConflicts: false,
+    conflicts: [],
+    autoResolvedCount: 0,
+    stats: {
+      localAddedTasks: 0,
+      remoteAddedTasks: 0,
+      localDeletedTasks: 0,
+      remoteDeletedTasks: 0,
+      bothModifiedTasks: 0,
+      localOnlyModifiedTasks: 0,
+      remoteOnlyModifiedTasks: 0,
+      fieldAutoMerged: 0,
+      fieldConflicts: 0,
+    },
+  }),
 };
 
 // 模拟 LoggerService
@@ -137,7 +202,12 @@ describe('SyncService', () => {
         SyncService,
         { provide: SupabaseClientService, useValue: mockSupabaseClientService },
         { provide: TaskRepositoryService, useValue: mockTaskRepository },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ToastService, useValue: mockToastService },
+        { provide: ConflictStorageService, useValue: mockConflictStorage },
+        { provide: BaseSnapshotService, useValue: mockBaseSnapshot },
+        { provide: ThreeWayMergeService, useValue: mockThreeWayMerge },
       ],
     });
 
@@ -231,6 +301,53 @@ describe('SyncService', () => {
 
     it('isLoadingRemote 初始值应该为 false', () => {
       expect(service.isLoadingRemote()).toBe(false);
+    });
+  });
+
+  describe('冲突场景安全同步', () => {
+    it('版本冲突时应尝试把本地 soft delete 提前写到远端', async () => {
+      const deletedTask = createTestTask({ id: 'task-1', deletedAt: new Date().toISOString() });
+      const localProject = createTestProject({ id: 'proj-1', version: 1, tasks: [deletedTask] });
+      const remoteProject = createTestProject({ id: 'proj-1', version: 2, tasks: [createTestTask({ id: 'task-1', deletedAt: null })] });
+
+      // 让 tryAutoRebase 走失败分支，进入冲突流程
+      (service as any).tryAutoRebase = vi.fn().mockResolvedValue(null);
+      // 避免真实持久化冲突数据（IndexedDB 等）
+      (service as any).persistConflictData = vi.fn();
+      vi.spyOn(service, 'loadSingleProject').mockResolvedValue(remoteProject);
+
+      // 构造 projects 表的链式调用，使 update 返回 0 行（触发版本冲突）
+      const projectsChain: any = {
+        __mode: 'check',
+        select: vi.fn((cols: string) => {
+          if (projectsChain.__mode === 'update' && cols === 'id') {
+            return Promise.resolve({ data: [], error: null });
+          }
+          return projectsChain;
+        }),
+        eq: vi.fn().mockReturnThis(),
+        maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'proj-1', version: 1 }, error: null }),
+        update: vi.fn(() => {
+          projectsChain.__mode = 'update';
+          return projectsChain;
+        }),
+        insert: vi.fn().mockReturnThis(),
+      };
+
+      mockSupabaseClient.from.mockImplementation((table: string) => {
+        if (table === 'projects') return projectsChain;
+        return mockFromChain;
+      });
+
+      await service.saveProjectToCloud(localProject, 'user-1');
+
+      expect(mockTaskRepository.saveTasksIncremental).toHaveBeenCalled();
+      const call = (mockTaskRepository.saveTasksIncremental as any).mock.calls[0];
+      expect(call[0]).toBe('proj-1');
+      const tasksToUpdate = call[2] as Task[];
+      expect(tasksToUpdate).toHaveLength(1);
+      expect(tasksToUpdate[0].id).toBe('task-1');
+      expect(tasksToUpdate[0].deletedAt).toBeTruthy();
     });
   });
 

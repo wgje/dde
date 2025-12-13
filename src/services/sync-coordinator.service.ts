@@ -848,6 +848,15 @@ export class SyncCoordinatorService {
       return;
     }
 
+    // 若该项目已有未解决的冲突：
+    // - 只做本地快照（上面已做），不再反复触发云端保存与冲突弹窗；
+    // - 让用户在合适时机进入冲突解决流程。
+    const existingConflict = this.conflictData();
+    if (this.hasConflict() && existingConflict && (existingConflict as any).projectId === project.id) {
+      this.logger.info('存在未解决冲突，跳过云端持久化', { projectId: project.id });
+      return;
+    }
+
     try {
       // 使用智能同步：根据变更量自动选择增量或全量同步
       const result = await this.syncService.saveProjectSmart(
