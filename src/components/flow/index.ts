@@ -8,4 +8,6 @@ export { FlowTaskDetailComponent } from './flow-task-detail.component';
 export { FlowDeleteConfirmComponent } from './flow-delete-confirm.component';
 export { FlowLinkTypeDialogComponent, type LinkTypeDialogData } from './flow-link-type-dialog.component';
 export { FlowConnectionEditorComponent, type ConnectionEditorData, type ConnectionTasks } from './flow-connection-editor.component';
-export { FlowLinkDeleteHintComponent, type LinkDeleteHint } from './flow-link-delete-hint.component';
+export { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
+
+export type { LinkDeleteHint } from '../../models/flow-view-state';
