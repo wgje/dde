@@ -375,7 +375,11 @@ export function sanitizeTask(task: any): Task {
   
   // 输出修复日志
   if (fixes.length > 0) {
-    console.warn(`[sanitizeTask] 任务 ${task.id || 'unknown'} 的以下字段已修复:`, fixes.join(', '));
+    // 仅在开发模式输出修复日志，避免生产环境控制台噪音。
+    const isNgDevMode = Boolean((globalThis as any).ngDevMode);
+    if (isNgDevMode) {
+      console.warn(`[sanitizeTask] 任务 ${task.id || 'unknown'} 的以下字段已修复:`, fixes.join(', '));
+    }
   }
 
   return {

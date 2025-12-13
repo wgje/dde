@@ -129,6 +129,18 @@ log('设备: ' + (isMobile ? (isIOS ? 'iOS' : 'Android') : 'Desktop'));
 
 // 全局错误捕获 - 在 Angular 启动前就开始捕获
 window.onerror = (message, source, lineno, colno, error) => {
+  // Supabase Auth 多标签页/多实例场景的 LockManager 锁争用：
+  // 不影响功能，但 Zone.js/浏览器默认处理会在控制台打印堆栈，造成噪音。
+  const messageText = String(message ?? '');
+  const isSupabaseAuthLockContention =
+    /Navigator LockManager lock/i.test(messageText) ||
+    /Acquiring an exclusive Navigator LockManager lock/i.test(messageText) ||
+    /lock:sb-.*-auth-token/i.test(messageText);
+
+  if (isSupabaseAuthLockContention) {
+    return true; // 阻止默认处理（避免控制台噪音）
+  }
+
   logError(`全局错误: ${message}`, { source, lineno, colno, error });
   return false; // 继续默认处理
 };
