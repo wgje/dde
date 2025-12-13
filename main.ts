@@ -134,6 +134,20 @@ window.onerror = (message, source, lineno, colno, error) => {
 };
 
 window.addEventListener('unhandledrejection', (event) => {
+  // Supabase Auth 在多标签页/多实例场景会用 Navigator LockManager 做互斥。
+  // 当锁被其他实例占用时会出现立即失败的 rejection；这通常不影响登录态本身，
+  // 但 Zone.js + 浏览器默认行为会把它打印成“未处理错误”，造成噪音。
+  const reasonText = String((event as any)?.reason?.message ?? (event as any)?.reason ?? '');
+  const isSupabaseAuthLockContention =
+    /Navigator LockManager lock/i.test(reasonText) ||
+    /Acquiring an exclusive Navigator LockManager lock/i.test(reasonText) ||
+    /lock:sb-.*-auth-token/i.test(reasonText);
+
+  if (isSupabaseAuthLockContention) {
+    event.preventDefault();
+    return;
+  }
+
   logError('未处理的 Promise 拒绝', event.reason);
 });
 

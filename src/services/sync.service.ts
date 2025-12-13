@@ -1163,13 +1163,15 @@ export class SyncService {
         // 如果没有更新到任何行，说明版本号不匹配（被其他客户端更新了）
         const didUpdate = Array.isArray(updateRows) && updateRows.length > 0;
         if (!didUpdate) {
-          this.logger.warn('版本冲突：远端数据已被更新', { projectId: project.id, localVersion: currentVersion });
-          
-          // 【三路合并】进入自动变基流程
+          // 【三路合并】优先尝试自动变基；成功则不需要打 warn（这是可预期的多端并发场景）
           const autoRebaseResult = await this.tryAutoRebase(project, userId, currentVersion);
           if (autoRebaseResult) {
+            this.logger.info('版本冲突已自动变基', { projectId: project.id, localVersion: currentVersion });
             return autoRebaseResult;
           }
+
+          // 自动变基失败：再输出 warn，提示需要用户介入
+          this.logger.warn('版本冲突：远端数据已被更新', { projectId: project.id, localVersion: currentVersion });
           
           // 自动变基失败，返回冲突状态
           const remoteProject = await this.loadSingleProject(project.id, userId);
