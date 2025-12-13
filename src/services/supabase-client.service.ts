@@ -61,6 +61,9 @@ export class SupabaseClientService {
         auth: {
           // 使用 localStorage 存储 session（更稳定，减少锁竞争）
           storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+          // 禁用 LockManager 锁机制，避免多标签页锁竞争错误
+          storageKey: `sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`,
+          lock: false,
           // 自动刷新 token
           autoRefreshToken: true,
           // 持久化 session
