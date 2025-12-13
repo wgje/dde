@@ -405,15 +405,15 @@ export function sanitizeTask(task: any): Task {
  * 安全地解析和验证项目数据
  */
 export function sanitizeProject(project: any): Project {
-  const tasks = Array.isArray(project.tasks)
+  const tasks: Task[] = Array.isArray(project.tasks)
     ? project.tasks.map(sanitizeTask)
     : [];
 
   // 修复因 tombstone/软删除过滤等原因导致的结构断裂：
   // - parentId 指向不存在的任务时，降级为根任务（parentId = null）
   // - 过滤掉引用不存在任务的连接
-  const taskIds = new Set(tasks.map(t => t.id));
-  const fixedTasks = tasks.map(t => {
+  const taskIds = new Set<string>(tasks.map(t => t.id));
+  const fixedTasks: Task[] = tasks.map(t => {
     if (t.parentId && !taskIds.has(t.parentId)) {
       return { ...t, parentId: null };
     }
@@ -423,17 +423,17 @@ export function sanitizeProject(project: any): Project {
     return t;
   });
 
-  const connections = Array.isArray(project.connections)
+  const connections: Connection[] = Array.isArray(project.connections)
     ? project.connections
         .filter((c: any) => c && c.source && c.target)
-        .map((c: any) => ({
+        .map((c: any): Connection => ({
           id: c.id ? String(c.id) : crypto.randomUUID(),
           source: String(c.source),
           target: String(c.target),
           description: c.description ? String(c.description) : undefined,
           deletedAt: c.deletedAt ? String(c.deletedAt) : undefined
         }))
-        .filter(c => taskIds.has(c.source) && taskIds.has(c.target) && c.source !== c.target)
+        .filter((c: Connection) => taskIds.has(c.source) && taskIds.has(c.target) && c.source !== c.target)
     : [];
 
   return {
