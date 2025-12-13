@@ -213,9 +213,16 @@ export class FlowLinkService {
   ): 'show-dialog' | 'create-cross-tree' | 'none' {
     // 检查目标节点是否已有父节点
     const childTask = this.store.tasks().find(t => t.id === targetId);
+    const sourceTask = this.store.tasks().find(t => t.id === sourceId);
     
     if (childTask?.parentId) {
       // 目标已有父节点，只能创建跨树连接
+      // 场景二：若目标是"待分配块"，先将其任务化
+      if (childTask.stage === null) {
+        const inferredStage = sourceTask?.stage ?? 1;
+        this.store.moveTaskToStage(targetId, inferredStage, undefined, null);
+      }
+      
       this.store.addCrossTreeConnection(sourceId, targetId);
       this.toast.success('已创建关联', '目标任务已有父级，已创建关联连接');
       return 'create-cross-tree';

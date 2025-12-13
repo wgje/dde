@@ -653,11 +653,23 @@ export class TextViewComponent implements OnInit, OnDestroy {
       // 关键逻辑：当把“待分配块”拖入阶段并插到某个块之前时，
       // 需要继承该参照块的 parentId，确保成为“同级任务块”并触发正确的编号重排。
       const beforeTaskId = dropInfo?.beforeTaskId ?? null;
-      const referenceTask = beforeTaskId
-        ? this.store.tasks().find(t => t.id === beforeTaskId) || null
-        : null;
-
-      const inferredParentId = referenceTask ? referenceTask.parentId : undefined;
+      let inferredParentId: string | null | undefined = undefined;
+      
+      if (beforeTaskId) {
+        // 有明确的插入位置（在某个任务之前）
+        const referenceTask = this.store.tasks().find(t => t.id === beforeTaskId) || null;
+        inferredParentId = referenceTask ? referenceTask.parentId : undefined;
+      } else {
+        // 没有 beforeTaskId，说明拖到阶段最后
+        // 查找该阶段的最后一个任务，将新任务放在它后面
+        const stages = this.store.stages();
+        const targetStage = stages.find(s => s.stageNumber === stageNumber);
+        if (targetStage && targetStage.tasks.length > 0) {
+          const lastTask = targetStage.tasks[targetStage.tasks.length - 1];
+          inferredParentId = lastTask.parentId;
+          // beforeTaskId 保持为 null，这样会插入到最后
+        }
+      }
 
       const result = this.store.moveTaskToStage(task.id, stageNumber, beforeTaskId, inferredParentId);
       
