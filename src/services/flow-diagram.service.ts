@@ -103,10 +103,8 @@ export class FlowDiagramService {
 
   private getOverviewBackgroundColor(): string {
     const styles = this.configService.currentStyles();
-    // 使用“中性偏深”的主题文字色作为预览图底色：
-    // - 对浅色/白色节点有对比度
-    // - 不至于像纯深色那样把部分冷色系/暗色系家族色压得看不清
-    return this.readCssColorVar('--theme-text') ?? styles.text.displayIdColor ?? '#475569';
+    // 概览图需要让“白色/浅色任务块”清晰可见，因此背景使用更深的主题色。
+    return this.readCssColorVar('--theme-text-dark') ?? styles.text.titleColor ?? '#292524';
   }
   
   // ========== 定时器 ==========
@@ -274,6 +272,7 @@ export class FlowDiagramService {
       const $ = go.GraphObject.make;
 
       const overviewBackground = this.getOverviewBackgroundColor();
+      const styles = this.configService.currentStyles();
       // 保底：即使 GoJS canvas 透明，也能有一致的背景。
       container.style.backgroundColor = overviewBackground;
       
@@ -297,13 +296,12 @@ export class FlowDiagramService {
             name: "SHAPE",
             width: 20,              // 强制固定大小，形成均匀的色块点
             height: 14,
-            strokeWidth: 0,         // 去掉边框，减少视觉噪点
-            opacity: 0.9
+            strokeWidth: 1,
+            opacity: 1
           },
-          // 绑定血缘家族颜色
-          new go.Binding("fill", "familyColor", (color: string) => {
-            return color || "#e2e8f0";
-          })
+          // 绑定任务节点颜色（白色/已完成色等），提高与深背景的对比度
+          new go.Binding("fill", "color", (color: string) => color || "#ffffff"),
+          new go.Binding("stroke", "borderColor", (color: string) => color || styles.node.defaultBorder)
         )
       );
       
@@ -318,10 +316,10 @@ export class FlowDiagramService {
             strokeWidth: 6,         // 【关键】极粗的线条
             opacity: 0.75           // 半透明，重叠时颜色加深
           },
-          // 连线也绑定家族颜色
-          new go.Binding("stroke", "familyColor", (color: string) => {
-            return color || "#e2e8f0";
-          })
+          // 连线用类型色（父子/跨树）
+          new go.Binding("stroke", "isCrossTree", (isCrossTree: boolean) =>
+            isCrossTree ? styles.link.crossTreeColor : styles.link.parentChildColor
+          )
         )
       );
       
