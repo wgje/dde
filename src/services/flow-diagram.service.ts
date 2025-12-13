@@ -437,6 +437,7 @@ export class FlowDiagramService {
     // 初始化：计算并设置固定的基准缩放
     let baseScale = calculateBaseScale();
     let lastExpansionFactor = 1;
+    let lastNodeDataCount = ((this.diagram.model as any)?.nodeDataArray?.length ?? 0);
     this.lastOverviewScale = baseScale;
     this.overview.scale = baseScale;
     
@@ -447,15 +448,25 @@ export class FlowDiagramService {
     // 监听文档变化：只在节点增删时重新计算基准缩放
     this.addTrackedListener('DocumentBoundsChanged', () => {
       if (!this.overview || !this.diagram) return;
+
+      const currentNodeDataCount = ((this.diagram.model as any)?.nodeDataArray?.length ?? 0);
+      const nodeCountChanged = currentNodeDataCount !== lastNodeDataCount;
       
       const newBaseScale = calculateBaseScale();
-      // 只有变化显著时才更新
-      if (Math.abs(newBaseScale - baseScale) > 0.02) {
+      // 只有变化显著、或节点数量发生变化（新增/删除）时才更新。
+      if (nodeCountChanged || Math.abs(newBaseScale - baseScale) > 0.02) {
         baseScale = newBaseScale;
         const factor = getExpansionFactor();
         this.overview.scale = baseScale / factor;
         this.lastOverviewScale = this.overview.scale;
         lastExpansionFactor = factor;
+
+        // 关键：新增/删除节点后，重新居中到所有节点边界，避免“新任务块在概览图里看不到”。
+        if (nodeCountChanged) {
+          const bounds = getNodesBounds();
+          this.overview.centerRect(bounds);
+          lastNodeDataCount = currentNodeDataCount;
+        }
       }
     });
     
