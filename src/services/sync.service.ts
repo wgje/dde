@@ -118,6 +118,10 @@ export class SyncService {
   /** 网络状态监听器引用（用于清理） */
   private onlineHandler: (() => void) | null = null;
   private offlineHandler: (() => void) | null = null;
+
+  /** 连通性探测定时器（用于 VPN/网络切换后的自愈） */
+  private connectivityTimer: ReturnType<typeof setInterval> | null = null;
+  private connectivityProbeInFlight = false;
   
   /** DestroyRef 用于自动清理 */
   private readonly destroyRef = inject(DestroyRef);
@@ -175,6 +179,7 @@ export class SyncService {
 
   constructor() {
     this.setupNetworkListeners();
+    this.startConnectivityProbe();
     // 恢复持久化的冲突数据
     this.restoreConflictData();
     // 初始化保存队列处理管道
@@ -418,6 +423,8 @@ export class SyncService {
     
     this.onlineHandler = () => {
       this.syncState.update(s => ({ ...s, isOnline: true }));
+      // 网络回来了不代表后端一定可用（VPN/代理/DNS 可能仍未就绪），立即做一次探测
+      void this.runConnectivityProbe('browser-online');
     };
     
     this.offlineHandler = () => {
@@ -442,6 +449,87 @@ export class SyncService {
     if (this.offlineHandler) {
       window.removeEventListener('offline', this.offlineHandler);
       this.offlineHandler = null;
+    }
+  }
+
+  /**
+   * 启动连通性探测：用于在 VPN 切换导致的 online/offline 事件不可靠时，自动纠正状态。
+   * 
+   * 设计原则：
+   * - 只要浏览器不抛“Failed to fetch”这类网络错误，就认为“网络在线”；
+   * - 后端不可达时不把 isOnline 置为 false，而是置 offlineMode=true（“网络在线但服务不可用”）。
+   */
+  private startConnectivityProbe(): void {
+    if (typeof window === 'undefined') return;
+    if (this.connectivityTimer) return;
+
+    // 延后到下一轮事件循环：避免影响服务的“初始状态”断言（单测/UI 启动期）
+    setTimeout(() => {
+      void this.runConnectivityProbe('startup');
+    }, 0);
+
+    this.connectivityTimer = setInterval(() => {
+      void this.runConnectivityProbe('interval');
+    }, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+  }
+
+  private stopConnectivityProbe(): void {
+    if (this.connectivityTimer) {
+      clearInterval(this.connectivityTimer);
+      this.connectivityTimer = null;
+    }
+  }
+
+  private async runConnectivityProbe(reason: string): Promise<void> {
+    if (this.isDestroyed) return;
+    if (!this.supabase.isConfigured) return;
+    if (typeof window === 'undefined') return;
+    if (this.connectivityProbeInFlight) return;
+
+    // 浏览器明确离线时，直接反映到状态；避免无意义请求
+    if (!navigator.onLine) {
+      this.syncState.update(s => ({ ...s, isOnline: false }));
+      return;
+    }
+
+    this.connectivityProbeInFlight = true;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT);
+
+      // 使用 HEAD 请求探测（最小流量）。即使返回 401/403/404 也视为“可达”。
+      // 只有网络层失败（Failed to fetch / aborted / DNS）才视为不可达。
+      const client = this.supabase.client();
+      const { error } = await client
+        .from('projects')
+        .select('id', { head: true })
+        .limit(1)
+        // supabase-js 目前不直接暴露 signal 参数，这里通过全局 fetch 的 signal 也无法注入；
+        // 因此仅用超时保护 setTimeout + abort 作为尽力而为（不会影响 supabase-js 内部）。
+        .abortSignal(controller.signal as unknown as AbortSignal);
+
+      clearTimeout(timeout);
+
+      if (error) {
+        const msg = String((error as any)?.message ?? error);
+        const isNetworkLike = /Failed to fetch|NetworkError|AbortError|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(msg);
+        if (isNetworkLike) {
+          // 浏览器在线但后端不可达：进入离线模式（服务不可用）
+          this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: true }));
+          this.logger.warn('连通性探测失败（服务不可达）', { reason, message: msg });
+          return;
+        }
+      }
+
+      // 可达：纠正状态
+      this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: false }));
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      const isAbort = msg.includes('aborted') || msg.includes('AbortError');
+      this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: true }));
+      this.logger.warn('连通性探测异常', { reason, aborted: isAbort, message: msg });
+    } finally {
+      this.connectivityProbeInFlight = false;
     }
   }
 
@@ -2119,6 +2207,7 @@ export class SyncService {
     
     this.teardownRealtimeSubscription();
     this.removeNetworkListeners();
+    this.stopConnectivityProbe();
     
     if (this.remoteChangeTimer) {
       clearTimeout(this.remoteChangeTimer);
@@ -2149,6 +2238,7 @@ export class SyncService {
     // 清理订阅和定时器
     this.teardownRealtimeSubscription();
     this.removeNetworkListeners();
+    this.stopConnectivityProbe();
     
     if (this.remoteChangeTimer) {
       clearTimeout(this.remoteChangeTimer);
@@ -2188,5 +2278,6 @@ export class SyncService {
     
     // 重新设置网络监听器（因为服务可能继续使用）
     this.setupNetworkListeners();
+    this.startConnectivityProbe();
   }
 }

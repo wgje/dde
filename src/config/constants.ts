@@ -45,6 +45,10 @@ export const SYNC_CONFIG = {
   CLOUD_LOAD_TIMEOUT: 30000,
   /** 本地缓存保存频率（毫秒）- 每1秒自动保存到本地，防止数据丢失 */
   LOCAL_AUTOSAVE_INTERVAL: 1000,
+  /** 连通性探测间隔（毫秒）- 用于在 VPN/网络切换后自动恢复在线状态 */
+  CONNECTIVITY_PROBE_INTERVAL: 15000,
+  /** 连通性探测超时（毫秒）- 避免弱网时长时间挂起 */
+  CONNECTIVITY_PROBE_TIMEOUT: 5000,
 } as const;
 
 /**

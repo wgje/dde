@@ -62,10 +62,12 @@ export class TaskRepositoryService {
 
   /**
    * 加载项目的所有任务
+   * 排除已被永久删除（在 task_tombstones 中）的任务
    */
   async loadTasks(projectId: string): Promise<Task[]> {
     if (!this.supabase.isConfigured) return [];
 
+    // 1. 加载所有任务
     const { data, error } = await this.supabase.client()
       .from('tasks')
       .select('*')
@@ -77,7 +79,31 @@ export class TaskRepositoryService {
       throw error;
     }
 
-    return (data || []).map(row => this.mapRowToTask(row as TaskRow));
+    if (!data || data.length === 0) {
+      return [];
+    }
+
+    // 2. 获取该项目的所有 tombstone 记录
+    const { data: tombstones, error: tombstoneError } = await this.supabase.client()
+      .from('task_tombstones')
+      .select('task_id')
+      .eq('project_id', projectId);
+
+    if (tombstoneError) {
+      console.warn('Failed to load tombstones (continuing without filtering):', tombstoneError);
+      // 即使 tombstone 查询失败，也返回任务（降级处理）
+      return data.map(row => this.mapRowToTask(row as TaskRow));
+    }
+
+    // 3. 过滤掉已 tombstone 的任务
+    const tombstoneIds = new Set((tombstones || []).map(t => t.task_id));
+    const filteredData = data.filter(row => !tombstoneIds.has(row.id));
+
+    if (tombstoneIds.size > 0) {
+      console.log(`Filtered out ${tombstoneIds.size} tombstoned tasks for project ${projectId}`);
+    }
+
+    return filteredData.map(row => this.mapRowToTask(row as TaskRow));
   }
 
   /**
