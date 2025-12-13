@@ -294,11 +294,16 @@ export class FlowDiagramService {
         $(go.Shape, "Rectangle",
           {
             name: "SHAPE",
-            width: 20,              // 强制固定大小，形成均匀的色块点
-            height: 14,
-            strokeWidth: 1,
+            // 注意：Overview 会整体缩放；如果这里使用太小的固定尺寸，
+            // 当图的边界很大/Overview 缩放很小时，节点会缩小到不可见。
+            height: 80,
+            strokeWidth: 2,
             opacity: 1
           },
+          // 宽度与主图保持一致（更利于在小缩放下保持可见）
+          new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
+            isUnassigned ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH : GOJS_CONFIG.ASSIGNED_NODE_WIDTH
+          ),
           // 绑定任务节点颜色（白色/已完成色等），提高与深背景的对比度
           new go.Binding("fill", "color", (color: string) => color || "#ffffff"),
           new go.Binding("stroke", "borderColor", (color: string) => color || styles.node.defaultBorder)
@@ -313,7 +318,7 @@ export class FlowDiagramService {
         },
         $(go.Shape,
           {
-            strokeWidth: 6,         // 【关键】极粗的线条
+            strokeWidth: 10,
             opacity: 0.75           // 半透明，重叠时颜色加深
           },
           // 连线用类型色（父子/跨树）
@@ -403,43 +408,17 @@ export class FlowDiagramService {
       
       return Math.min(scaleX, scaleY, 0.35);
     };
-    
-    // 计算视口超出节点边界的扩展因子
-    const getExpansionFactor = (): number => {
-      if (!this.diagram) return 1;
-      
-      const nodeBounds = getNodesBounds();
-      const viewBounds = this.diagram.viewportBounds;
-      
-      // 检查视口是否完全在节点边界内
-      if (viewBounds.x >= nodeBounds.x && 
-          viewBounds.y >= nodeBounds.y &&
-          viewBounds.right <= nodeBounds.right &&
-          viewBounds.bottom <= nodeBounds.bottom) {
-        return 1; // 完全在内部，不需要扩展
-      }
-      
-      // 计算需要显示的总范围
-      const totalMinX = Math.min(nodeBounds.x, viewBounds.x);
-      const totalMinY = Math.min(nodeBounds.y, viewBounds.y);
-      const totalMaxX = Math.max(nodeBounds.right, viewBounds.right);
-      const totalMaxY = Math.max(nodeBounds.bottom, viewBounds.bottom);
-      
-      const totalWidth = totalMaxX - totalMinX;
-      const totalHeight = totalMaxY - totalMinY;
-      
-      const widthFactor = totalWidth / nodeBounds.width;
-      const heightFactor = totalHeight / nodeBounds.height;
-      
-      return Math.max(widthFactor, heightFactor);
+
+    const clampScale = (scale: number): number => {
+      // 保证最小可见性：避免用户把主视口拖到很远的空白区域时，把概览图缩到“全黑看不到块”。
+      return Math.max(0.02, Math.min(0.5, scale));
     };
     
     // 初始化：计算并设置固定的基准缩放
     let baseScale = calculateBaseScale();
-    let lastExpansionFactor = 1;
     let lastNodeDataCount = ((this.diagram.model as any)?.nodeDataArray?.length ?? 0);
-    this.lastOverviewScale = baseScale;
-    this.overview.scale = baseScale;
+    this.lastOverviewScale = clampScale(baseScale);
+    this.overview.scale = this.lastOverviewScale;
     
     // 确保初始时 Overview 正确居中到文档内容
     const nodeBounds = getNodesBounds();
@@ -456,34 +435,16 @@ export class FlowDiagramService {
       // 只有变化显著、或节点数量发生变化（新增/删除）时才更新。
       if (nodeCountChanged || Math.abs(newBaseScale - baseScale) > 0.02) {
         baseScale = newBaseScale;
-        const factor = getExpansionFactor();
-        this.overview.scale = baseScale / factor;
+        this.overview.scale = clampScale(baseScale);
         this.lastOverviewScale = this.overview.scale;
-        lastExpansionFactor = factor;
 
-        // 关键：新增/删除节点后，重新居中到所有节点边界，避免“新任务块在概览图里看不到”。
+        // 关键：节点结构变化后，重新居中到所有节点边界，避免“新任务块在概览图里看不到”。
         if (nodeCountChanged) {
           const bounds = getNodesBounds();
           this.overview.centerRect(bounds);
           lastNodeDataCount = currentNodeDataCount;
         }
       }
-    });
-    
-    // 监听视口变化：只在超出边界时调整
-    this.addTrackedListener('ViewportBoundsChanged', () => {
-      if (!this.overview || !this.diagram) return;
-      
-      const factor = getExpansionFactor();
-      
-      // 只有扩展因子变化显著时才更新
-      if (Math.abs(factor - lastExpansionFactor) > 0.02) {
-        const newScale = baseScale / factor;
-        this.overview.scale = Math.max(0.01, Math.min(0.5, newScale));
-        this.lastOverviewScale = this.overview.scale;
-        lastExpansionFactor = factor;
-      }
-      // 否则保持 scale 不变，让视口框自然变化
     });
     
     this.logger.debug('Overview 自动缩放已启用');
