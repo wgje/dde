@@ -83,6 +83,8 @@ export class GlobalErrorHandler implements ErrorHandler {
   /** 错误分类规则（顺序敏感，优先匹配前面的规则） */
   private readonly classificationRules: ErrorClassificationRule[] = [
     // === 静默级错误 ===
+    // Angular NG0203 错误（inject()在错误上下文调用，通常由异步组件加载触发，不影响功能）
+    { pattern: /NG0203|inject.*must be called from an injection context/i, severity: ErrorSeverity.SILENT },
     // 图片加载失败
     { pattern: /load.*image|image.*load|img.*error|404.*image/i, severity: ErrorSeverity.SILENT },
     // Supabase Auth 多标签页锁争用（不影响功能，但在 Zone.js 下可能被报告为未处理错误）
