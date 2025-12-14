@@ -5,7 +5,8 @@ import {
   ViewChild, 
   OnInit, 
   OnDestroy,
-  HostListener 
+  HostListener,
+  effect 
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -14,6 +15,7 @@ import { takeUntil } from 'rxjs/operators';
 import { StoreService } from '../services/store.service';
 import { ToastService } from '../services/toast.service';
 import { TabSyncService } from '../services/tab-sync.service';
+import { FlowDiagramService } from '../services/flow-diagram.service';
 import { TextViewComponent } from './text-view/text-view.component';
 import { FlowViewComponent } from './flow-view.component';
 import { ErrorBoundaryComponent } from './error-boundary.component';
@@ -35,16 +37,69 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
       height: 100%;
       min-height: 0;
     }
+    
+    /* 流程图容器：僵尸模式样式 */
+    .flow-container {
+      /* 在移动端使用绝对定位实现视图切换 */
+      /* 移除 transition，避免过渡期间的白屏 */
+    }
+    
+    /* 移动端：僵尸模式 */
+    @media (max-width: 768px) {
+      .flow-container {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+      }
+      
+      .flow-container.zombie-mode {
+        /* 僵尸模式：使用 visibility 而非 opacity，避免浏览器跳过 canvas 渲染 */
+        visibility: hidden;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 0;
+      }
+      
+      .flow-container.active-mode {
+        /* 活跃模式：正常显示 */
+        visibility: visible;
+        position: relative;
+        pointer-events: auto;
+        z-index: 10;
+      }
+    }
+    
+    /* 桌面端：正常流式布局 */
+    @media (min-width: 769px) {
+      .flow-container.zombie-mode,
+      .flow-container.active-mode {
+        /* 桌面端不隐藏，保持正常显示 */
+        visibility: visible;
+        position: relative;
+        pointer-events: auto;
+      }
+    }
   `],
   template: `
-    <div class="flex h-full w-full min-h-0 overflow-hidden" style="background-color: var(--theme-bg);">
+    <div class="relative flex h-full w-full min-h-0 overflow-hidden" style="background-color: var(--theme-bg);">
       @if (store.activeProjectId()) {
         <!-- Text Column - 允许滑动手势切换 -->
-        <div class="flex flex-col border-r min-w-[300px] min-h-0" 
+        <div class="flex flex-col min-w-[300px] min-h-0" 
              style="background-color: var(--theme-bg); border-color: var(--theme-border);"
-             [class.hidden]="store.isMobile() && store.activeView() !== 'text'"
+             [class.border-r]="!store.isMobile()"
+             [class.absolute]="store.isMobile()"
+             [class.inset-0]="store.isMobile()"
              [class.w-full]="store.isMobile()"
              [class.flex-1]="store.isMobile()"
+             [class.opacity-0]="store.isMobile() && store.activeView() !== 'text'"
+             [class.opacity-100]="store.isMobile() && store.activeView() === 'text'"
+             [class.pointer-events-none]="store.isMobile() && store.activeView() !== 'text'"
+             [class.z-10]="store.isMobile() && store.activeView() === 'text'"
+             [class.z-0]="store.isMobile() && store.activeView() !== 'text'"
              [style.width.%]="store.isMobile() ? 100 : store.textColumnRatio()"
              (touchstart)="onTextViewTouchStart($event)"
              (touchmove)="onTextViewTouchMove($event)"
@@ -172,11 +227,11 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
           </div>
         }
 
-        <!-- Flow Column -->
-        <div class="flex-1 flex flex-col min-w-[300px] min-h-0 relative" 
+        <!-- Flow Column - 僵尸模式：始终保留在 DOM 中 -->
+           <div class="flow-container flex-1 flex flex-col min-w-[300px] min-h-0" 
              style="background-color: var(--theme-bg);"
-             [class.hidden]="store.isMobile() && store.activeView() !== 'flow'"
-             [class.w-full]="store.isMobile()">
+             [class.zombie-mode]="store.isMobile() && store.activeView() !== 'flow'"
+             [class.active-mode]="!store.isMobile() || store.activeView() === 'flow'">
            <div class="flex items-center justify-between shrink-0 z-10"
                 [ngClass]="{'h-14 mx-4 mt-4': !store.isMobile(), 'mx-2 mt-1.5 mb-0.5': store.isMobile()}">
               <span class="font-medium text-stone-700" [ngClass]="{'text-base font-bold text-stone-800': !store.isMobile(), 'text-xs': store.isMobile()}">
@@ -218,6 +273,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private destroy$ = new Subject<void>();
+  private diagram = inject(FlowDiagramService);
   
   @ViewChild(FlowViewComponent) flowView?: FlowViewComponent;
   
@@ -293,6 +349,31 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
           this.store.activeView.set('flow');
         }
       });
+      
+    // 僵尸模式：监听视图切换，自动暂停/恢复流程图
+    // 关键策略：visibility:hidden 不阻止 canvas 渲染，但需要手动触发重绘
+    effect(() => {
+      const activeView = this.store.activeView();
+      
+      if (activeView === 'flow') {
+        // 切换到流程图视图：立即恢复（在 CSS 显示前）
+        if (this.diagram.isInitialized && this.diagram.isSuspendedMode) {
+          // 恢复 GoJS（resume 内部会强制重绘 canvas）
+          this.diagram.resume();
+          // CSS 通过 [class.active-mode] 自动从 visibility:hidden 切换到 visible
+        }
+      } else if (activeView === 'text') {
+        // 切换到文本视图：延迟暂停（给用户留出返回时间）
+        if (this.diagram.isInitialized && !this.diagram.isSuspendedMode) {
+          // 延迟 500ms 暂停（避免快速切换时频繁暂停/恢复）
+          setTimeout(() => {
+            if (this.store.activeView() === 'text' && !this.isDestroyed) {
+              this.diagram.suspend();
+            }
+          }, 500);
+        }
+      }
+    });
   }
   
   /**
@@ -325,11 +406,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
           if (this.isDestroyed) return;
           this.flowView?.centerOnNode(taskId, true);
           
-          // 更新 URL 为常规流程图 URL（移除 task 路径）
-          const projectId = this.store.activeProjectId();
-          if (projectId) {
-            void this.router.navigate(['/projects', projectId, 'flow'], { replaceUrl: true });
-          }
+          // 🔥 不再更新 URL - 避免触发路由导航销毁组件
+          // 僵尸模式需要组件保持存活
         }, 100);
       } else if (retries < maxRetries && (isLoading || !task)) {
         // 数据尚未加载，继续重试，使用指数退避
@@ -337,42 +415,40 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
         this.deepLinkRetryTimer = setTimeout(tryFocusTask, delay);
       } else {
         // 超时未找到任务，导航到流程图视图并提示用户
-        const projectId = this.store.activeProjectId();
-        if (projectId) {
-          void this.router.navigate(['/projects', projectId, 'flow'], { replaceUrl: true });
-          
-          // 根据情况显示不同提示，并提供明确的下一步操作
-          if (!isLoading && !task) {
-            // 任务确实不存在 - 提供创建新任务的选项
-            this.toast.warning(
-              '任务不存在', 
-              '请求的任务可能已被删除或您没有访问权限',
-              {
-                duration: 10000,
-                action: {
-                  label: '新建任务',
-                  onClick: () => {
-                    // 触发创建新任务
-                    this.store.addFloatingTask('新任务', '', 100, 100);
-                    this.toast.success('已创建新任务');
-                  }
+        // 🔥 不再更新 URL - 避免触发路由导航销毁组件
+        this.store.activeView.set('flow');
+        
+        // 根据情况显示不同提示，并提供明确的下一步操作
+        if (!isLoading && !task) {
+          // 任务确实不存在 - 提供创建新任务的选项
+          this.toast.warning(
+            '任务不存在', 
+            '请求的任务可能已被删除或您没有访问权限',
+            {
+              duration: 10000,
+              action: {
+                label: '新建任务',
+                onClick: () => {
+                  // 触发创建新任务
+                  this.store.addFloatingTask('新任务', '', 100, 100);
+                  this.toast.success('已创建新任务');
                 }
               }
-            );
-          } else if (isLoading) {
-            // 加载超时 - 提供重试选项
-            this.toast.info(
-              '加载超时', 
-              '数据仍在加载中',
-              {
-                duration: 8000,
-                action: {
-                  label: '刷新页面',
-                  onClick: () => window.location.reload()
-                }
+            }
+          );
+        } else if (isLoading) {
+          // 加载超时 - 提供重试选项
+          this.toast.info(
+            '加载超时', 
+            '数据仍在加载中',
+            {
+              duration: 8000,
+              action: {
+                label: '刷新页面',
+                onClick: () => window.location.reload()
               }
-            );
-          }
+            }
+          );
         }
       }
     };
@@ -396,27 +472,33 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   }
   
   // ========== 视图切换 ==========
+
+  /**
+   * 切换到流程图后，等 DOM 可见且布局稳定再刷新 GoJS。
+   * 关键：不要在触摸事件的同一调用栈里触发 GoJS 更新，避免 Android Chrome 下的抖动/跳位。
+   */
+  private scheduleFlowRefreshAfterSwitch(): void {
+    if (this.isDestroyed) return;
+
+    // 只用一帧 rAF：切换本身已经通过 setTimeout(0) 脱离了 touchend 调用栈。
+    // 这样能更快触发 GoJS requestUpdate，减少切换瞬间的“空白帧”。
+    requestAnimationFrame(() => {
+      if (this.isDestroyed) return;
+      this.flowView?.refreshLayout();
+    });
+  }
   
   switchToFlow() {
     this.store.activeView.set('flow');
-    // 更新 URL
-    const projectId = this.store.activeProjectId();
-    if (projectId) {
-      void this.router.navigate(['/projects', projectId, 'flow'], { replaceUrl: true });
-    }
-    setTimeout(() => {
-      if (this.isDestroyed) return;
-      this.flowView?.refreshLayout();
-    }, 100);
+    // 🔥 关键修复：不调用 router.navigate()，避免销毁组件
+    // 僵尸模式需要组件保持存活，路由切换会销毁组件
+    this.scheduleFlowRefreshAfterSwitch();
   }
   
   switchToText() {
     this.store.activeView.set('text');
-    // 更新 URL
-    const projectId = this.store.activeProjectId();
-    if (projectId) {
-      void this.router.navigate(['/projects', projectId, 'text'], { replaceUrl: true });
-    }
+    // 🔥 关键修复：不调用 router.navigate()，避免销毁组件
+    // 僵尸模式需要组件保持存活，路由切换会销毁组件
   }
   
   // ========== 侧边栏控制 ==========
@@ -500,6 +582,11 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     // 向左滑动（deltaX < 0）切换到流程图
     if (deltaX < -30 && Math.abs(deltaX) > deltaY * 1.5) {
       this.textViewSwipeState.isSwiping = true;
+
+      // 重要：一旦判断为“切换手势”，立刻阻止默认滚动/事件穿透。
+      // 否则在切换到 Flow 后，同一触摸事件的后续阶段可能被 GoJS 捕获，引发画布抖动/跳位。
+      e.preventDefault();
+      e.stopPropagation();
     }
   }
   
@@ -512,7 +599,16 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     
     // 向左滑动切换到流程图
     if (deltaX < -threshold) {
-      this.switchToFlow();
+      // 只在事件可取消时才阻止默认行为（避免浏览器警告）
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+
+      setTimeout(() => {
+        if (this.isDestroyed) return;
+        this.switchToFlow();
+      }, 0);
     }
     
     this.textViewSwipeState.isSwiping = false;

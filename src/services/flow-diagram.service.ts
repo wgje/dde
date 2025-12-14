@@ -111,10 +111,19 @@ export class FlowDiagramService {
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private restoreViewStateTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ========== 视图切换稳定性 ==========
+  private pendingAutoFitToContents = false;
   
   // ========== 首次加载标志 ==========
   private isFirstLoad = true;
   private _familyColorLogged = false;  // 避免重复打印日志
+  
+  // ========== 僵尸模式：逻辑冻结 ==========
+  private isSuspended = false;  // 是否处于暂停状态
+  private suspendedResizeObserver: ResizeObserver | null = null;  // 暂停前的 ResizeObserver
   
   // ========== 回调函数 ==========
   private nodeClickCallback: NodeClickCallback | null = null;
@@ -137,6 +146,11 @@ export class FlowDiagramService {
   /** 是否已初始化 */
   get isInitialized(): boolean {
     return this.diagram !== null && !this.isDestroyed;
+  }
+  
+  /** 是否处于僵尸模式（暂停状态） */
+  get isSuspendedMode(): boolean {
+    return this.isSuspended;
   }
   
   // ========== 回调注册 ==========
@@ -240,6 +254,131 @@ export class FlowDiagramService {
     } catch (error) {
       this.handleError('流程图初始化失败', error);
       return false;
+    }
+  }
+  
+  /**
+   * 暂停图表（僵尸模式）
+   * 停止所有交互和动画，保留 DOM 但冻结逻辑
+   * 关键：不使用 isEnabled（会清空 canvas），改用更温和的方式
+   */
+  suspend(): void {
+    if (!this.diagram || this.isSuspended) return;
+    
+    try {
+      this.logger.info('进入僵尸模式：暂停 GoJS 图表');
+      
+      // 1. 设置为只读模式（保留渲染，但禁用编辑）
+      this.diagram.isReadOnly = true;
+      
+      // 2. 禁用动画管理器（停止所有动画）
+      this.diagram.animationManager.isEnabled = false;
+      
+      // 3. 停止 ResizeObserver（避免响应容器大小变化）
+      if (this.resizeObserver) {
+        this.suspendedResizeObserver = this.resizeObserver;
+        this.resizeObserver.disconnect();
+        this.resizeObserver = null;
+      }
+      
+      // 4. 清除所有定时器
+      if (this.positionSaveTimer) {
+        clearTimeout(this.positionSaveTimer);
+        this.positionSaveTimer = null;
+      }
+      if (this.resizeDebounceTimer) {
+        clearTimeout(this.resizeDebounceTimer);
+        this.resizeDebounceTimer = null;
+      }
+      if (this.viewStateSaveTimer) {
+        clearTimeout(this.viewStateSaveTimer);
+        this.viewStateSaveTimer = null;
+      }
+      if (this.restoreViewStateTimer) {
+        clearTimeout(this.restoreViewStateTimer);
+        this.restoreViewStateTimer = null;
+      }
+      if (this.autoFitTimer) {
+        clearTimeout(this.autoFitTimer);
+        this.autoFitTimer = null;
+      }
+      
+      // 5. 暂停 Overview（如果存在）
+      if (this.overview) {
+        this.overview.animationManager.isEnabled = false;
+      }
+      
+      // 6. 标记为已暂停
+      this.isSuspended = true;
+      
+    } catch (error) {
+      this.logger.error('暂停图表失败:', error);
+    }
+  }
+  
+  /**
+   * 恢复图表（退出僵尸模式）
+   * 重新启用交互和动画
+   */
+  resume(): void {
+    if (!this.diagram || !this.isSuspended) return;
+    
+    try {
+      this.logger.info('退出僵尸模式：恢复 GoJS 图表');
+      
+      // 1. 标记为已恢复（提前标记，避免中间状态）
+      this.isSuspended = false;
+      
+      // 2. 恢复只读模式
+      this.diagram.isReadOnly = false;
+      
+      // 3. 恢复动画管理器
+      this.diagram.animationManager.isEnabled = false; // 保持禁用（我们不使用 GoJS 动画）
+      
+      // 4. 恢复 ResizeObserver
+      if (this.suspendedResizeObserver && this.diagramDiv) {
+        this.resizeObserver = this.suspendedResizeObserver;
+        this.resizeObserver.observe(this.diagramDiv);
+        this.suspendedResizeObserver = null;
+      } else if (!this.resizeObserver && this.diagramDiv) {
+        // 如果没有保存的 observer，重新创建
+        this.setupResizeObserver();
+      }
+      
+      // 5. 恢复 Overview（如果存在）
+      if (this.overview) {
+        this.overview.animationManager.isEnabled = false; // 保持禁用
+        this.overview.requestUpdate();
+      }
+      
+      // 6. 强制重绘 canvas（修复 visibility:hidden 导致的渲染跳过）
+      // 当元素从 visibility:hidden 变为 visible 时，浏览器可能不会立即重绘 canvas
+      // 必须强制触发重绘
+      this.diagram.requestUpdate();
+      
+      // 使用 rAF 确保在下一帧强制重新布局和渲染
+      requestAnimationFrame(() => {
+        if (!this.diagram || this.isDestroyed) return;
+        
+        // 强制重新计算所有节点和链接的路由
+        this.diagram.nodes.each((node: go.Node) => {
+          node.invalidateLayout();
+        });
+        this.diagram.links.each((link: go.Link) => {
+          link.invalidateRoute();
+        });
+        
+        // 再次请求更新，确保所有变化被渲染
+        this.diagram.requestUpdate();
+        
+        // 如果有 Overview，也强制刷新
+        if (this.overview) {
+          this.overview.requestUpdate();
+        }
+      });
+      
+    } catch (error) {
+      this.logger.error('恢复图表失败:', error);
     }
   }
   
@@ -970,6 +1109,34 @@ export class FlowDiagramService {
       this.diagram.requestUpdate();
     }
   }
+
+  /**
+   * 由外部在 Flow 视图真正可见/激活时调用。
+   * 用于把被延后的 auto-fit（fitToContents）安全地执行一次，避免在 text 视图期间触发导致切换时跳动。
+   */
+  onFlowActivated(): void {
+    if (this.isDestroyed || !this.diagram) return;
+    if (this.store.activeView() !== 'flow') return;
+    if (!this.pendingAutoFitToContents) return;
+
+    // 若此时 viewState 已经可用，优先恢复 viewState（比 auto-fit 更稳定，也更符合用户上次视图）。
+    const viewState = this.store.getViewState();
+    if (viewState) {
+      this.pendingAutoFitToContents = false;
+      this.diagram.scale = viewState.scale;
+      this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
+      return;
+    }
+
+    this.pendingAutoFitToContents = false;
+    // 双 rAF：避免在同一帧里又被 resize/route 更新打断，导致“跳两次”。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (this.isDestroyed || !this.diagram) return;
+        this.fitToContents();
+      });
+    });
+  }
   
   /**
    * 保存所有节点位置到 store
@@ -1215,6 +1382,11 @@ export class FlowDiagramService {
           // 检查是否有保存的视图状态
           const viewState = this.store.getViewState();
           if (!viewState) {
+            // 如果当前不在 flow 视图，延后到 flow 激活时再执行一次，避免切换时“跳一下”。
+            if (this.store.activeView() !== 'flow') {
+              this.pendingAutoFitToContents = true;
+              return;
+            }
             this.fitToContents();
           }
         }, 100);
@@ -2161,8 +2333,9 @@ export class FlowDiagramService {
         const height = this.diagramDiv.clientHeight;
         
         if (width > 0 && height > 0) {
-          this.diagram.div = null;
-          this.diagram.div = this.diagramDiv;
+          // 重要：不要在 resize 时反复把 diagram.div 置空再重新绑定。
+          // 在移动端（尤其 Chrome 地址栏收起/展开触发的频繁 resize）这会导致视口位置/缩放出现“跳一下”。
+          // GoJS 会在 requestUpdate 时读取最新的 DIV 尺寸并重绘。
           this.diagram.requestUpdate();
         }
       }, UI_CONFIG.RESIZE_DEBOUNCE_DELAY);
@@ -2206,24 +2379,53 @@ export class FlowDiagramService {
    */
   private restoreViewState(): void {
     if (!this.diagram) return;
+
+    // 如果视图状态已可用，立即应用，避免后续定时器导致“切到 flow 再跳一下”。
+    const immediateViewState = this.store.getViewState();
+    if (immediateViewState) {
+      this.pendingAutoFitToContents = false;
+      this.diagram.scale = immediateViewState.scale;
+      this.diagram.position = new go.Point(immediateViewState.positionX, immediateViewState.positionY);
+      return;
+    }
     
-    const viewState = this.store.getViewState();
-    
-    setTimeout(() => {
+    if (this.restoreViewStateTimer) {
+      clearTimeout(this.restoreViewStateTimer);
+      this.restoreViewStateTimer = null;
+    }
+
+    this.restoreViewStateTimer = setTimeout(() => {
       if (this.isDestroyed || !this.diagram) return;
+
+      // 注意：不要在外部缓存 viewState。
+      // 项目/视图状态可能在初始化后的异步加载过程中才出现；这里必须读取“最新值”。
+      const viewState = this.store.getViewState();
       
       if (viewState) {
         // 恢复保存的视图状态
+        this.pendingAutoFitToContents = false;
         this.diagram.scale = viewState.scale;
         this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
       } else {
-        // 没有保存的视图状态，自动适应内容
-        // 稍后执行，确保节点已经加载
-        setTimeout(() => {
+        // 没有保存的视图状态：如果当前不在 flow 视图，延后到 flow 激活时再执行一次。
+        if (this.store.activeView() !== 'flow') {
+          this.pendingAutoFitToContents = true;
+          return;
+        }
+
+        // 当前就在 flow：稍后执行，确保节点已经加载
+        if (this.autoFitTimer) {
+          clearTimeout(this.autoFitTimer);
+          this.autoFitTimer = null;
+        }
+
+        this.autoFitTimer = setTimeout(() => {
           if (this.isDestroyed || !this.diagram) return;
           this.fitToContents();
+          this.autoFitTimer = null;
         }, 300);
       }
+      this.restoreViewStateTimer = null;
     }, 200);
   }
   
@@ -2242,6 +2444,14 @@ export class FlowDiagramService {
     if (this.viewStateSaveTimer) {
       clearTimeout(this.viewStateSaveTimer);
       this.viewStateSaveTimer = null;
+    }
+    if (this.restoreViewStateTimer) {
+      clearTimeout(this.restoreViewStateTimer);
+      this.restoreViewStateTimer = null;
+    }
+    if (this.autoFitTimer) {
+      clearTimeout(this.autoFitTimer);
+      this.autoFitTimer = null;
     }
   }
   

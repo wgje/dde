@@ -742,6 +742,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   refreshLayout(): void {
+    // 视图切换到 flow 后，触发一次“延后 auto-fit”的落地（若有）。
+    this.diagram.onFlowActivated();
     this.diagram.requestUpdate();
   }
   

@@ -118,6 +118,10 @@ export class TextViewComponent implements OnInit, OnDestroy {
   /** 全局触摸事件监听器的绑定引用 */
   private boundGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
   private boundGlobalTouchCancel = this.handleGlobalTouchCancel.bind(this);
+  /** pointer/click/自定义事件监听器绑定引用（必须复用同一函数引用，否则无法移除监听器） */
+  private boundGlobalPointerUp = this.handleGlobalPointerUp.bind(this);
+  private boundEmergencyCleanup = this.handleEmergencyCleanup.bind(this);
+  private boundTouchDragTimeout = this.handleTouchDragTimeout.bind(this) as EventListener;
   
   @ViewChild('scrollContainer', { static: true }) scrollContainerRef!: ElementRef<HTMLElement>;
   @ViewChild('stagesRef') stagesRef!: TextStagesComponent;
@@ -144,14 +148,14 @@ export class TextViewComponent implements OnInit, OnDestroy {
     document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
     
     // 添加 pointerup 作为备用（比 touchend 更可靠）
-    document.addEventListener('pointerup', this.handleGlobalPointerUp.bind(this), { capture: true });
-    document.addEventListener('pointercancel', this.handleGlobalPointerUp.bind(this), { capture: true });
+    document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
+    document.addEventListener('pointercancel', this.boundGlobalPointerUp, { capture: true });
     
     // 紧急清理：如果用户点击屏幕，强制清理残留的拖拽状态
-    document.addEventListener('click', this.handleEmergencyCleanup.bind(this), { capture: true });
+    document.addEventListener('click', this.boundEmergencyCleanup, { capture: true });
     
     // 超时检测：如果 touchend 丢失，通过超时自动完成拖拽
-    document.addEventListener('touchDragTimeout', this.handleTouchDragTimeout.bind(this) as EventListener);
+    document.addEventListener('touchDragTimeout', this.boundTouchDragTimeout);
     
     // console.log('[TextView] Global touch listeners registered with capture=true');
   }
@@ -259,8 +263,13 @@ export class TextViewComponent implements OnInit, OnDestroy {
   
   ngOnDestroy() {
     // 移除全局触摸事件监听器
-    document.removeEventListener('touchend', this.boundGlobalTouchEnd);
-    document.removeEventListener('touchcancel', this.boundGlobalTouchCancel);
+    // 注意：removeEventListener 必须与 addEventListener 的 capture 设置匹配
+    document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as any);
+    document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as any);
+    document.removeEventListener('pointerup', this.boundGlobalPointerUp, { capture: true } as any);
+    document.removeEventListener('pointercancel', this.boundGlobalPointerUp, { capture: true } as any);
+    document.removeEventListener('click', this.boundEmergencyCleanup, { capture: true } as any);
+    document.removeEventListener('touchDragTimeout', this.boundTouchDragTimeout);
     // console.log('[TextView] Global touch listeners removed');
     
     this.dragDropService.cleanup();

@@ -19,7 +19,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
       class="flex-1 min-h-0 overflow-hidden flex flex-col"
       [ngClass]="{'px-4 pb-6': !isMobile, 'px-2 pb-4': isMobile}">
       <div 
-        class="rounded-xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-2 py-2 shadow-inner w-full h-full flex flex-col overflow-hidden"
+        class="rounded-xl bg-panel/40 border border-retro-muted/20 backdrop-blur-md px-2 py-2 shadow-inner w-full flex-1 min-h-0 flex flex-col overflow-hidden"
         [ngClass]="{'rounded-2xl px-4 py-3': !isMobile}">
         
         <!-- 筛选栏 -->
