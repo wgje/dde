@@ -629,6 +629,7 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     
     console.log('[Bootstrap] ========== 启动会话检查 ==========');
+    const totalStartTime = Date.now(); // 移到 try 外部以便 finally 访问
     this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
@@ -679,7 +680,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
     } finally {
-      const totalElapsed = Date.now();
+      const totalElapsed = Date.now() - totalStartTime;
       console.log(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
       this.isCheckingSession.set(false);
     }
