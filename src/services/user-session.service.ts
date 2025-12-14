@@ -66,34 +66,48 @@ export class UserSessionService {
     const previousUserId = this.currentUserId();
     const isUserChange = previousUserId !== userId;
     
-    try {
-      // 清理旧用户的附件监控和回调，防止内存泄漏
-      if (isUserChange) {
+    // 清理旧用户的附件监控和回调，防止内存泄漏
+    if (isUserChange) {
+      try {
         this.attachmentService.clearMonitoredAttachments();
         this.projectState.setActiveProjectId(null);
         this.projectState.setProjects([]);
         this.undoService.clearHistory();
         this.syncCoordinator.teardownRealtimeSubscription();
+      } catch (cleanupError) {
+        console.error('[Session] 清理旧用户数据失败:', cleanupError);
+        // 继续执行，不阻断流程
       }
+    }
 
-      this.authService.currentUserId.set(userId);
+    this.authService.currentUserId.set(userId);
 
-      if (userId) {
-        // 检查是否已经有项目数据（避免重复加载）
-        const hasProjects = this.projectState.projects().length > 0;
-        if (!hasProjects || isUserChange) {
+    if (userId) {
+      // 检查是否已经有项目数据（避免重复加载）
+      const hasProjects = this.projectState.projects().length > 0;
+      if (!hasProjects || isUserChange) {
+        try {
           await this.loadUserData(userId);
+        } catch (error) {
+          // loadUserData 内部已有错误处理，这里是最后的防线
+          console.error('[Session] loadUserData 失败:', error);
+          // 降级处理：至少加载种子数据
+          try {
+            this.loadFromCacheOrSeed();
+          } catch (fallbackError) {
+            console.error('[Session] 降级加载种子数据也失败:', fallbackError);
+            // 即使种子数据加载失败，也不阻断应用启动
+          }
+          // 不重新抛出异常，避免阻断应用启动
         }
-      } else {
-        this.loadFromCacheOrSeed();
       }
-    } catch (error) {
-      // 确保即使出错也不影响用户 ID 的设置
-      console.error('[Session] setCurrentUser 异常:', error);
-      // 降级处理：至少加载种子数据
-      this.loadFromCacheOrSeed();
-      // 重新抛出异常让上层处理
-      throw error;
+    } else {
+      try {
+        this.loadFromCacheOrSeed();
+      } catch (error) {
+        console.error('[Session] loadFromCacheOrSeed 失败:', error);
+        // 不重新抛出异常
+      }
     }
   }
 

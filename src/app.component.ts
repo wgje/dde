@@ -629,6 +629,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
+    
     try {
       console.log('[Bootstrap] 开始会话检查...');
       const result = await this.auth.checkSession();
@@ -636,18 +637,10 @@ export class AppComponent implements OnInit, OnDestroy {
       
       if (result.userId) {
         this.sessionEmail.set(result.email);
-        try {
-          console.log('[Bootstrap] 开始加载用户数据...');
-          await this.store.setCurrentUser(result.userId);
-          console.log('[Bootstrap] 用户数据加载完成');
-        } catch (loadError: any) {
-          // 数据加载失败不应阻断应用启动
-          // 用户仍然是登录状态，只是数据可能未完全加载
-          console.error('[Bootstrap] 用户数据加载失败:', loadError);
-          const errorMsg = humanizeErrorMessage(loadError?.message ?? String(loadError));
-          this.toast.warning('数据加载失败', errorMsg);
-          // 不设置 bootstrapFailed，允许用户继续使用应用
-        }
+        console.log('[Bootstrap] 开始加载用户数据...');
+        // setCurrentUser 不会抛出异常，内部已处理所有错误
+        await this.store.setCurrentUser(result.userId);
+        console.log('[Bootstrap] 用户数据加载完成');
       }
     } catch (e: any) {
       // 只有会话检查失败才算启动失败
