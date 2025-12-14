@@ -394,8 +394,6 @@ export class UserSessionService {
       // 冲突数据重载失败不影响核心功能，静默处理
     });
   }
-    });
-  }
 
   /**
    * 从缓存或种子数据加载
