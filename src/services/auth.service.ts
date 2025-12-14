@@ -69,7 +69,7 @@ export class AuthService {
    * 开发环境：如果没有现有会话且配置了 devAutoLogin，会自动登录
    */
   async checkSession(): Promise<{ userId: string | null; email: string | null }> {
-    console.log('[Auth] checkSession 开始');
+    console.log('[Auth] ========== checkSession 开始 ==========');
     
     if (!this.supabase.isConfigured) {
       console.log('[Auth] Supabase 未配置，跳过会话检查');
@@ -83,12 +83,13 @@ export class AuthService {
     const SESSION_TIMEOUT = 10000;
     
     try {
-      console.log('[Auth] 正在获取 Supabase 会话...');
+      console.log('[Auth] 正在调用 supabase.getSession()...');
+      const callStartTime = Date.now();
       
       // 使用 AbortController 实现超时（如果支持）
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
       const timeoutId = setTimeout(() => {
-        console.warn('[Auth] 会话检查超时');
+        console.warn('[Auth] 会话检查超时警告 (10秒)');
         if (controller) controller.abort();
       }, SESSION_TIMEOUT);
       
@@ -102,6 +103,8 @@ export class AuthService {
         });
         
         sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
+        const callElapsed = Date.now() - callStartTime;
+        console.log(`[Auth] getSession() 返回 (耗时 ${callElapsed}ms)`);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -109,17 +112,25 @@ export class AuthService {
       const { data, error } = sessionResult;
       
       if (error) {
-        console.error('[Auth] 获取会话出错:', error);
+        console.error('[Auth] getSession() 返回错误:', {
+          message: error.message,
+          status: error.status,
+          name: error.name
+        });
+        // 不抛出异常，而是在 catch 块中统一处理
         throw error;
       }
       
       const session = data?.session;
-      console.log('[Auth] 会话数据:', session ? '存在' : '不存在');
+      console.log('[Auth] 会话状态:', session ? '✓ 存在' : '✗ 不存在');
       
       if (session?.user) {
         const userId = session.user.id;
         const email = session.user.email ?? null;
-        console.log('[Auth] 用户已登录:', { userId, email });
+        console.log('[Auth] 用户已登录:', { 
+          userId: userId.substring(0, 8) + '...', 
+          email 
+        });
         
         this.currentUserId.set(userId);
         this.sessionEmail.set(email);
@@ -130,18 +141,27 @@ export class AuthService {
           error: null
         }));
         
+        console.log('[Auth] ========== checkSession 成功 ==========');
         return { userId, email };
       }
       
       // 没有现有会话，尝试开发环境自动登录
+      console.log('[Auth] 无现有会话，尝试开发环境自动登录...');
       const autoLoginResult = await this.tryDevAutoLogin();
       if (autoLoginResult) {
+        console.log('[Auth] ========== 自动登录成功 ==========');
         return autoLoginResult;
       }
       
+      console.log('[Auth] ========== 无会话，未登录 ==========');
       return { userId: null, email: null };
     } catch (e: any) {
-      console.error('[Auth] checkSession 异常:', e?.message ?? e);
+      console.error('[Auth] ========== checkSession 异常 ==========');
+      console.error('[Auth] 异常详情:', {
+        message: e?.message,
+        stack: e?.stack?.split('\n').slice(0, 3).join('\n'),
+        isTimeout: e?.message?.includes('超时')
+      });
       
       // 超时不是致命错误，只是记录并继续
       const isTimeout = e?.message?.includes('超时');
@@ -151,9 +171,12 @@ export class AuthService {
           error: e?.message ?? String(e)
         }));
       }
+      
+      // 注意：这里不抛出异常，而是返回 null
+      console.log('[Auth] 返回空会话，不阻断应用启动');
       return { userId: null, email: null };
     } finally {
-      console.log('[Auth] checkSession 完成，设置 isCheckingSession = false');
+      console.log('[Auth] 设置 isCheckingSession = false');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
     }
   }

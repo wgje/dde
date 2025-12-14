@@ -623,34 +623,64 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async bootstrapSession() {
     if (!this.auth.isConfigured) {
+      console.log('[Bootstrap] Supabase 未配置，跳过会话检查');
       this.isCheckingSession.set(false);
       return;
     }
+    
+    console.log('[Bootstrap] ========== 启动会话检查 ==========');
     this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
     
     try {
-      console.log('[Bootstrap] 开始会话检查...');
+      console.log('[Bootstrap] 步骤 1/3: 调用 auth.checkSession()...');
+      const startTime = Date.now();
       const result = await this.auth.checkSession();
-      console.log('[Bootstrap] 会话检查完成，userId:', result.userId);
+      const elapsed = Date.now() - startTime;
+      console.log(`[Bootstrap] 步骤 1/3: checkSession 完成 (耗时 ${elapsed}ms)`, { 
+        userId: result.userId, 
+        hasEmail: !!result.email 
+      });
       
       if (result.userId) {
         this.sessionEmail.set(result.email);
-        console.log('[Bootstrap] 开始加载用户数据...');
+        console.log('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
+        const loadStartTime = Date.now();
+        
         // setCurrentUser 不会抛出异常，内部已处理所有错误
         await this.store.setCurrentUser(result.userId);
-        console.log('[Bootstrap] 用户数据加载完成');
+        
+        const loadElapsed = Date.now() - loadStartTime;
+        console.log(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
+        console.log('[Bootstrap] 步骤 3/3: 检查项目数据...', {
+          projectCount: this.store.projects().length,
+          activeProjectId: this.store.activeProjectId()
+        });
+      } else {
+        console.log('[Bootstrap] 步骤 2/3: 无现有会话，跳过数据加载');
       }
+      
+      console.log('[Bootstrap] ========== 启动成功 ==========');
     } catch (e: any) {
       // 只有会话检查失败才算启动失败
-      console.error('[Bootstrap] 会话检查失败:', e);
+      console.error('[Bootstrap] ========== 启动失败 ==========');
+      console.error('[Bootstrap] 错误详情:', {
+        message: e?.message,
+        stack: e?.stack,
+        name: e?.name,
+        cause: e?.cause
+      });
+      
       const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
+      console.error('[Bootstrap] 转换后的用户消息:', errorMsg);
+      
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
     } finally {
-      console.log('[Bootstrap] 完成，设置 isCheckingSession = false');
+      const totalElapsed = Date.now();
+      console.log(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
       this.isCheckingSession.set(false);
     }
   }
