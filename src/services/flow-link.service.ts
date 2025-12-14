@@ -37,7 +37,8 @@ export type LinkType = 'parent-child' | 'cross-tree';
 })
 export class FlowLinkService {
   private readonly store = inject(StoreService);
-  private readonly logger = inject(LoggerService).category('FlowLink');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowLink');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);

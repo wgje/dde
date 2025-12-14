@@ -67,7 +67,8 @@ export class SyncService {
   private supabase = inject(SupabaseClientService);
   private taskRepo = inject(TaskRepositoryService);
   private changeTracker = inject(ChangeTrackerService);
-  private logger = inject(LoggerService).category('Sync');
+  private readonly loggerService = inject(LoggerService);
+  private logger = this.loggerService.category('Sync');
   private toast = inject(ToastService);
   private conflictStorage = inject(ConflictStorageService);
   private baseSnapshot = inject(BaseSnapshotService);

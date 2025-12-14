@@ -63,7 +63,8 @@ const TAB_SYNC_CONFIG = {
   providedIn: 'root'
 })
 export class TabSyncService implements OnDestroy {
-  private readonly logger = inject(LoggerService).category('TabSync');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('TabSync');
   private readonly toast = inject(ToastService);
   
   /** 当前标签页唯一 ID */

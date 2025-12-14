@@ -32,7 +32,8 @@ export interface TouchDropCallback {
 })
 export class FlowTouchService {
   private readonly store = inject(StoreService);
-  private readonly logger = inject(LoggerService).category('FlowTouch');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowTouch');
   private readonly zone = inject(NgZone);
   private readonly dragDropService = inject(FlowDragDropService);
   

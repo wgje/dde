@@ -54,7 +54,8 @@ export class ConflictResolutionService {
   private syncService = inject(SyncService);
   private layoutService = inject(LayoutService);
   private toast = inject(ToastService);
-  private logger = inject(LoggerService).category('ConflictResolution');
+  private readonly loggerService = inject(LoggerService);
+  private logger = this.loggerService.category('ConflictResolution');
   private baseSnapshot = inject(BaseSnapshotService);
   private threeWayMerge = inject(ThreeWayMergeService);
 

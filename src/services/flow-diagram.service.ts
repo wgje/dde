@@ -73,7 +73,8 @@ export interface SelectionMovedCallback {
 })
 export class FlowDiagramService {
   private readonly store = inject(StoreService);
-  private readonly logger = inject(LoggerService).category('FlowDiagram');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowDiagram');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
   private readonly configService = inject(FlowDiagramConfigService);

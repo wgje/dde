@@ -60,7 +60,8 @@ interface PersistState {
   providedIn: 'root'
 })
 export class SyncCoordinatorService {
-  private readonly logger = inject(LoggerService).category('SyncCoordinator');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('SyncCoordinator');
   private syncService = inject(SyncService);
   private actionQueue = inject(ActionQueueService);
   private conflictService = inject(ConflictResolutionService);

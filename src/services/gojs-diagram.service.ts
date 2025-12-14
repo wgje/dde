@@ -132,7 +132,8 @@ export interface InsertPosition {
 })
 export class GoJSDiagramService {
   private readonly store = inject(StoreService);
-  private readonly logger = inject(LoggerService).category('GoJSDiagram');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('GoJSDiagram');
   private readonly zone = inject(NgZone);
   
   private diagram: go.Diagram | null = null;

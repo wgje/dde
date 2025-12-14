@@ -92,7 +92,8 @@ export interface TaskFieldChange {
   providedIn: 'root'
 })
 export class ChangeTrackerService {
-  private readonly logger = inject(LoggerService).category('ChangeTracker');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ChangeTracker');
   
   /** 
    * 待同步的变更记录

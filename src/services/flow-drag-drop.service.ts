@@ -49,7 +49,8 @@ export interface DropResultCallback {
 })
 export class FlowDragDropService {
   private readonly store = inject(StoreService);
-  private readonly logger = inject(LoggerService).category('FlowDragDrop');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowDragDrop');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
   

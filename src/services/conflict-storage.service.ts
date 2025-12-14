@@ -36,7 +36,8 @@ const STORE_NAME = 'conflicts';
   providedIn: 'root'
 })
 export class ConflictStorageService {
-  private readonly logger = inject(LoggerService).category('ConflictStorage');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ConflictStorage');
   private db: IDBDatabase | null = null;
   private dbPromise: Promise<IDBDatabase> | null = null;
   

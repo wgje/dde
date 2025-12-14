@@ -53,7 +53,8 @@ const SNAPSHOT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   providedIn: 'root'
 })
 export class BaseSnapshotService {
-  private readonly logger = inject(LoggerService).category('BaseSnapshot');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('BaseSnapshot');
   private db: IDBDatabase | null = null;
   private dbPromise: Promise<IDBDatabase> | null = null;
   

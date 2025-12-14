@@ -144,7 +144,8 @@ const LOCAL_QUEUE_CONFIG = {
   providedIn: 'root'
 })
 export class ActionQueueService {
-  private readonly logger = inject(LoggerService).category('ActionQueue');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ActionQueue');
   private readonly toast = inject(ToastService);
   private readonly destroyRef = inject(DestroyRef);
   

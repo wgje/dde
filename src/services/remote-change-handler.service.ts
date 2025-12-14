@@ -46,7 +46,8 @@ export interface RemoteTaskChangePayload {
   providedIn: 'root'
 })
 export class RemoteChangeHandlerService {
-  private readonly logger = inject(LoggerService).category('RemoteChangeHandler');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('RemoteChangeHandler');
   private syncCoordinator = inject(SyncCoordinatorService);
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);

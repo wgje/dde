@@ -350,7 +350,8 @@ export class StorageQuotaError extends Error {
   providedIn: 'root'
 })
 export class StorageAdapterService {
-  private logger = inject(LoggerService).category('Storage');
+  private readonly loggerService = inject(LoggerService);
+  private logger = this.loggerService.category('Storage');
   
   /** 当前使用的适配器 */
   private adapter: StorageAdapter | null = null;

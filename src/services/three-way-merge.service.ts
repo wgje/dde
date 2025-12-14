@@ -84,7 +84,8 @@ type ChangeType = 'unchanged' | 'local-only' | 'remote-only' | 'both-same' | 'bo
   providedIn: 'root'
 })
 export class ThreeWayMergeService {
-  private readonly logger = inject(LoggerService).category('ThreeWayMerge');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ThreeWayMerge');
   
   /**
    * 执行三路合并

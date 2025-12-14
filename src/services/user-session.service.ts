@@ -30,7 +30,8 @@ import { ToastService } from './toast.service';
   providedIn: 'root'
 })
 export class UserSessionService {
-  private readonly logger = inject(LoggerService).category('UserSession');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('UserSession');
   private authService = inject(AuthService);
   private syncCoordinator = inject(SyncCoordinatorService);
   private undoService = inject(UndoService);

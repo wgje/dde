@@ -65,7 +65,8 @@ const MAX_DIRTY_RECORDS = 50;
   providedIn: 'root'
 })
 export class PersistenceFailureHandlerService {
-  private readonly logger = inject(LoggerService).category('PersistenceFailure');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('PersistenceFailure');
   private readonly toast = inject(ToastService);
   private readonly destroyRef = inject(DestroyRef);
 

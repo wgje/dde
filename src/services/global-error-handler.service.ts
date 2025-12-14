@@ -71,7 +71,8 @@ interface ErrorClassificationRule {
   providedIn: 'root'
 })
 export class GlobalErrorHandler implements ErrorHandler {
-  private logger = inject(LoggerService).category('GlobalErrorHandler');
+  private readonly loggerService = inject(LoggerService);
+  private logger = this.loggerService.category('GlobalErrorHandler');
   private toast = inject(ToastService);
   private router = inject(Router);
   private zone = inject(NgZone);

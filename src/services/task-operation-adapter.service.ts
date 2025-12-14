@@ -56,7 +56,8 @@ export class TaskOperationAdapterService {
   private layoutService = inject(LayoutService);
   private optimisticState = inject(OptimisticStateService);
   private toastService = inject(ToastService);
-  private readonly logger = inject(LoggerService).category('TaskOpsAdapter');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('TaskOpsAdapter');
   
   /** 上次更新类型 */
   private lastUpdateType: 'content' | 'structure' | 'position' = 'structure';

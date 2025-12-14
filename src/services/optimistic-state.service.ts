@@ -156,7 +156,8 @@ const SNAPSHOT_CONFIG = {
   providedIn: 'root'
 })
 export class OptimisticStateService {
-  private readonly logger = inject(LoggerService).category('OptimisticState');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('OptimisticState');
   private projectState = inject(ProjectStateService);
   private toastService = inject(ToastService);
   private destroyRef = inject(DestroyRef);

@@ -64,7 +64,8 @@ import { TRASH_CONFIG } from '../config/constants';
 })
 export class StoreService {
   // ========== 注入子服务 ==========
-  private readonly logger = inject(LoggerService).category('Store');
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('Store');
   private authService = inject(AuthService);
   private undoService = inject(UndoService);
   private toastService = inject(ToastService);
