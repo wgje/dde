@@ -65,25 +65,34 @@ export class UserSessionService {
     const previousUserId = this.currentUserId();
     const isUserChange = previousUserId !== userId;
     
-    // 清理旧用户的附件监控和回调，防止内存泄漏
-    if (isUserChange) {
-      this.attachmentService.clearMonitoredAttachments();
-      this.projectState.setActiveProjectId(null);
-      this.projectState.setProjects([]);
-      this.undoService.clearHistory();
-      this.syncCoordinator.teardownRealtimeSubscription();
-    }
-
-    this.authService.currentUserId.set(userId);
-
-    if (userId) {
-      // 检查是否已经有项目数据（避免重复加载）
-      const hasProjects = this.projectState.projects().length > 0;
-      if (!hasProjects || isUserChange) {
-        await this.loadUserData(userId);
+    try {
+      // 清理旧用户的附件监控和回调，防止内存泄漏
+      if (isUserChange) {
+        this.attachmentService.clearMonitoredAttachments();
+        this.projectState.setActiveProjectId(null);
+        this.projectState.setProjects([]);
+        this.undoService.clearHistory();
+        this.syncCoordinator.teardownRealtimeSubscription();
       }
-    } else {
+
+      this.authService.currentUserId.set(userId);
+
+      if (userId) {
+        // 检查是否已经有项目数据（避免重复加载）
+        const hasProjects = this.projectState.projects().length > 0;
+        if (!hasProjects || isUserChange) {
+          await this.loadUserData(userId);
+        }
+      } else {
+        this.loadFromCacheOrSeed();
+      }
+    } catch (error) {
+      // 确保即使出错也不影响用户 ID 的设置
+      console.error('[Session] setCurrentUser 异常:', error);
+      // 降级处理：至少加载种子数据
       this.loadFromCacheOrSeed();
+      // 重新抛出异常让上层处理
+      throw error;
     }
   }
 
@@ -344,6 +353,11 @@ export class UserSessionService {
    * 关键设计：loadProjects 是同步阻塞的（等待完成），
    * 但 initRealtimeSubscription 和 tryReloadConflictData 是后台执行的。
    * 这确保用户能尽快看到数据，而实时订阅在后台建立。
+   * 
+   * 错误恢复策略：
+   * - loadProjects 失败时自动降级到本地缓存
+   * - 实时订阅失败不影响核心功能
+   * - 即使所有操作失败，也确保用户能看到种子数据
    */
   private async loadUserData(userId: string): Promise<void> {
     // 先加载项目数据（这个需要等待）
@@ -352,8 +366,18 @@ export class UserSessionService {
     } catch (error) {
       // loadProjects 内部已有错误处理，这里是最后的防线
       console.error('[Session] loadProjects 未捕获异常:', error);
-      this.loadFromCacheOrSeed();
-      this.toastService.error('数据加载失败', '已加载本地缓存数据');
+      // 确保至少有可用的数据
+      try {
+        this.loadFromCacheOrSeed();
+      } catch (fallbackError) {
+        console.error('[Session] 种子数据加载失败:', fallbackError);
+      }
+      
+      // 向用户显示友好的错误提示
+      this.toastService.error('数据加载失败', '已尝试加载本地数据，如问题持续请刷新页面');
+      
+      // 不重新抛出异常，避免阻断应用启动
+      return;
     }
     
     // 实时订阅和冲突数据重载在后台执行，不阻塞 UI
@@ -368,6 +392,8 @@ export class UserSessionService {
     ).catch(e => {
       console.warn('冲突数据重载失败（后台）:', e);
       // 冲突数据重载失败不影响核心功能，静默处理
+    });
+  }
     });
   }
 

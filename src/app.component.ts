@@ -630,18 +630,34 @@ export class AppComponent implements OnInit, OnDestroy {
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
     try {
+      console.log('[Bootstrap] 开始会话检查...');
       const result = await this.auth.checkSession();
+      console.log('[Bootstrap] 会话检查完成，userId:', result.userId);
+      
       if (result.userId) {
         this.sessionEmail.set(result.email);
-        await this.store.setCurrentUser(result.userId);
+        try {
+          console.log('[Bootstrap] 开始加载用户数据...');
+          await this.store.setCurrentUser(result.userId);
+          console.log('[Bootstrap] 用户数据加载完成');
+        } catch (loadError: any) {
+          // 数据加载失败不应阻断应用启动
+          // 用户仍然是登录状态，只是数据可能未完全加载
+          console.error('[Bootstrap] 用户数据加载失败:', loadError);
+          const errorMsg = humanizeErrorMessage(loadError?.message ?? String(loadError));
+          this.toast.warning('数据加载失败', errorMsg);
+          // 不设置 bootstrapFailed，允许用户继续使用应用
+        }
       }
     } catch (e: any) {
-      // 阻断性显式反馈：启动失败时不静默，让用户明确知道发生了什么
+      // 只有会话检查失败才算启动失败
+      console.error('[Bootstrap] 会话检查失败:', e);
       const errorMsg = humanizeErrorMessage(e?.message ?? String(e));
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
     } finally {
+      console.log('[Bootstrap] 完成，设置 isCheckingSession = false');
       this.isCheckingSession.set(false);
     }
   }
