@@ -1,4 +1,4 @@
-import { Component, input, output, signal, computed, inject, OnDestroy } from '@angular/core';
+import { Component, input, output, signal, computed, inject, OnDestroy, HostListener, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../../services/store.service';
@@ -171,7 +171,7 @@ import { renderMarkdown } from '../../utils/markdown';
           
           <!-- 预览模式 -->
           @if (!isEditMode()) {
-              <div class="cursor-pointer" (click)="toggleEditMode()">
+              <div class="cursor-pointer" (click)="toggleEditMode(); $event.stopPropagation()">
                 <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (task.content) {
                       <div 
@@ -185,10 +185,14 @@ import { renderMarkdown } from '../../utils/markdown';
           } @else {
               <!-- 编辑模式 -->
               <input data-testid="flow-task-title-input" type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
+                  (mousedown)="isSelecting = true"
+                  (mouseup)="isSelecting = false"
                   class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
                   placeholder="任务标题">
               
               <textarea [ngModel]="task.content" (ngModelChange)="contentChange.emit({ taskId: task.id, content: $event })" rows="4"
+                  (mousedown)="isSelecting = true"
+                  (mouseup)="isSelecting = false"
                   class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono leading-relaxed"
                   placeholder="输入内容（支持 Markdown）..."></textarea>
           }
@@ -278,7 +282,7 @@ import { renderMarkdown } from '../../utils/markdown';
       
       <!-- 预览模式 -->
       @if (!isEditMode()) {
-        <div class="cursor-pointer space-y-1" (click)="toggleEditMode()">
+        <div class="cursor-pointer space-y-1" (click)="toggleEditMode(); $event.stopPropagation()">
           <!-- 标题 -->
           <h4 class="text-xs font-medium text-stone-800 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
           
@@ -292,11 +296,15 @@ import { renderMarkdown } from '../../utils/markdown';
         <div class="space-y-1.5">
           <!-- 标题输入 -->
           <input type="text" [ngModel]="task.title" (ngModelChange)="titleChange.emit({ taskId: task.id, title: $event })"
+            (mousedown)="isSelecting = true"
+            (mouseup)="isSelecting = false"
             class="w-full text-xs font-medium text-stone-800 border border-stone-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
             placeholder="任务标题">
           
           <!-- 内容输入 -->
           <textarea [ngModel]="task.content" (ngModelChange)="contentChange.emit({ taskId: task.id, content: $event })" rows="3"
+            (mousedown)="isSelecting = true"
+            (mouseup)="isSelecting = false"
             class="w-full text-[11px] text-stone-600 border border-stone-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white resize-none font-mono"
             placeholder="任务内容（支持 Markdown）..."></textarea>
           
@@ -377,6 +385,7 @@ import { renderMarkdown } from '../../utils/markdown';
 })
 export class FlowTaskDetailComponent implements OnDestroy {
   readonly store = inject(StoreService);
+  private readonly elementRef = inject(ElementRef);
   
   // 输入
   readonly task = input<Task | null>(null);
@@ -385,6 +394,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   // 编辑模式状态（默认为预览模式）
   readonly isEditMode = signal(false);
+  
+  // 标记是否正在进行文本选择
+  private isSelecting = false;
   
   // 紧凑模式：只有当抽屉高度非常小（< 12vh）时才启用，隐藏操作按钮
   // 日期和状态应该一直显示，除非抽屉几乎完全收起
@@ -430,7 +442,112 @@ export class FlowTaskDetailComponent implements OnDestroy {
    * 切换编辑模式
    */
   toggleEditMode(): void {
+    const newMode = !this.isEditMode();
+    console.log('[FlowTaskDetail] toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
     this.isEditMode.update(v => !v);
+  }
+  
+  /**
+   * 监听 document 点击事件
+   * 编辑模式下，点击详情面板内的空白区域（非输入框、非按钮）或面板外部，切换回预览模式
+   */
+  @HostListener('document:click', ['$event'])
+  onDocumentClick(event: MouseEvent): void {
+    // 如果已经是预览模式，无需处理
+    if (!this.isEditMode()) return;
+    
+    // 如果正在进行文本选择，不处理
+    if (this.isSelecting) return;
+    
+    // 检查是否有文本被选中（用户可能刚完成选择操作）
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) {
+      return;
+    }
+    
+    const target = event.target as HTMLElement;
+    
+    // 检查是否点击了可交互元素（输入框、文本框、任何按钮、SVG图标）
+    const isInteractiveElement = target.tagName === 'INPUT' || 
+                                  target.tagName === 'TEXTAREA' ||
+                                  target.tagName === 'BUTTON' ||
+                                  target.tagName === 'svg' ||
+                                  target.tagName === 'path' ||
+                                  target.closest('input, textarea, button, svg') !== null;
+    
+    // 如果点击的是可交互元素，不切换模式（让元素正常工作）
+    if (isInteractiveElement) {
+      console.log('[FlowTaskDetail] 点击可交互元素，保持编辑模式');
+      return;
+    }
+    
+    // 检查点击是否在任务详情面板内部
+    const clickedInside = this.elementRef.nativeElement.contains(target);
+    
+    if (clickedInside) {
+      // 点击在面板内部但不是可交互元素（例如：标题栏、空白区域），切换到预览模式
+      console.log('[FlowTaskDetail] 点击详情面板空白区域，切换到预览模式');
+      this.isEditMode.set(false);
+    } else {
+      // 点击在面板外部，也切换到预览模式
+      console.log('[FlowTaskDetail] 点击面板外部，切换到预览模式');
+      this.isEditMode.set(false);
+    }
+  }
+  
+  /**
+   * 监听 document 触摸事件（移动端）
+   * 编辑模式下，触摸详情面板内的空白区域（非输入框、非按钮）或面板外部，切换回预览模式
+   */
+  @HostListener('document:touchstart', ['$event'])
+  onDocumentTouchStart(event: TouchEvent): void {
+    // 如果已经是预览模式，无需处理
+    if (!this.isEditMode()) return;
+    
+    // 如果正在进行文本选择，不处理
+    if (this.isSelecting) return;
+    
+    // 检查是否有文本被选中
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) {
+      return;
+    }
+    
+    // 检查是否有输入框或文本框正在获得焦点（用户正在输入）
+    const activeElement = document.activeElement;
+    if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+      console.log('[FlowTaskDetail] 输入框正在使用，保持编辑模式');
+      return;
+    }
+    
+    const target = event.target as HTMLElement;
+    
+    // 检查是否触摸了可交互元素（输入框、文本框、任何按钮、SVG图标）
+    const isInteractiveElement = target.tagName === 'INPUT' || 
+                                  target.tagName === 'TEXTAREA' ||
+                                  target.tagName === 'BUTTON' ||
+                                  target.tagName === 'svg' ||
+                                  target.tagName === 'path' ||
+                                  target.closest('input, textarea, button, svg') !== null;
+    
+    // 如果触摸的是可交互元素，不切换模式
+    if (isInteractiveElement) {
+      console.log('[FlowTaskDetail] 触摸可交互元素，保持编辑模式');
+      return;
+    }
+    
+    // 检查触摸是否在任务详情面板内部
+    const clickedInside = this.elementRef.nativeElement.contains(target);
+    
+    if (clickedInside) {
+      // 触摸在面板内部但不是可交互元素，切换到预览模式
+      console.log('[FlowTaskDetail] 触摸详情面板空白区域，切换到预览模式');
+      this.isEditMode.set(false);
+    } else {
+      // 触摸在面板外部，也切换到预览模式
+      console.log('[FlowTaskDetail] 触摸面板外部，切换到预览模式');
+      this.isEditMode.set(false);
+    }
   }
   
   /**
