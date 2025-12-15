@@ -49,6 +49,12 @@ export const SYNC_CONFIG = {
   CONNECTIVITY_PROBE_INTERVAL: 15000,
   /** 连通性探测超时（毫秒）- 避免弱网时长时间挂起 */
   CONNECTIVITY_PROBE_TIMEOUT: 5000,
+  /** 断路器：连续失败次数阈值 */
+  CIRCUIT_BREAKER_THRESHOLD: 5,
+  /** 断路器：打开状态持续时间（毫秒）- 2分钟 */
+  CIRCUIT_BREAKER_TIMEOUT: 2 * 60 * 1000,
+  /** 断路器：半开状态重试次数 */
+  CIRCUIT_BREAKER_HALF_OPEN_RETRIES: 3,
 } as const;
 
 /**

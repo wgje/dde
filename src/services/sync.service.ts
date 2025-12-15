@@ -134,6 +134,14 @@ export class SyncService {
     timer: null as ReturnType<typeof setTimeout> | null
   };
   
+  /** 断路器状态 */
+  private circuitBreaker = {
+    state: 'CLOSED' as 'CLOSED' | 'OPEN' | 'HALF_OPEN',
+    failureCount: 0,
+    lastFailureTime: 0,
+    nextRetryTime: 0,
+  };
+  
   /** 远程变更回调 - 支持增量更新 */
   private onRemoteChangeCallback: ((payload?: RemoteProjectChangePayload) => Promise<void>) | null = null;
   
@@ -492,6 +500,20 @@ export class SyncService {
       this.syncState.update(s => ({ ...s, isOnline: false }));
       return;
     }
+    
+    // 断路器打开时，检查是否可以尝试半开状态
+    if (this.circuitBreaker.state === 'OPEN') {
+      const now = Date.now();
+      if (now < this.circuitBreaker.nextRetryTime) {
+        this.logger.debug('断路器打开中，跳过探测', { 
+          remainingMs: this.circuitBreaker.nextRetryTime - now 
+        });
+        return;
+      }
+      // 尝试半开状态
+      this.circuitBreaker.state = 'HALF_OPEN';
+      this.logger.info('断路器进入半开状态，尝试恢复连接');
+    }
 
     this.connectivityProbeInFlight = true;
     try {
@@ -513,22 +535,37 @@ export class SyncService {
 
       if (error) {
         const msg = String((error as any)?.message ?? error);
-        const isNetworkLike = /Failed to fetch|NetworkError|AbortError|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(msg);
+        const isNetworkLike = /Failed to fetch|NetworkError|AbortError|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|Gateway Timeout|504/i.test(msg);
         if (isNetworkLike) {
+          // 记录失败
+          this.recordConnectivityFailure();
           // 浏览器在线但后端不可达：进入离线模式（服务不可用）
           this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: true }));
-          this.logger.warn('连通性探测失败（服务不可达）', { reason, message: msg });
+          this.logger.warn('连通性探测失败（服务不可达）', { 
+            reason, 
+            message: msg,
+            circuitBreakerState: this.circuitBreaker.state,
+            failureCount: this.circuitBreaker.failureCount
+          });
           return;
         }
       }
 
-      // 可达：纠正状态
+      // 可达：纠正状态并重置断路器
+      this.resetCircuitBreaker();
       this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: false }));
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       const isAbort = msg.includes('aborted') || msg.includes('AbortError');
+      this.recordConnectivityFailure();
       this.syncState.update(s => ({ ...s, isOnline: true, offlineMode: true }));
-      this.logger.warn('连通性探测异常', { reason, aborted: isAbort, message: msg });
+      this.logger.warn('连通性探测异常', { 
+        reason, 
+        aborted: isAbort, 
+        message: msg,
+        circuitBreakerState: this.circuitBreaker.state,
+        failureCount: this.circuitBreaker.failureCount
+      });
     } finally {
       this.connectivityProbeInFlight = false;
     }
@@ -774,6 +811,20 @@ export class SyncService {
         return;
       }
       
+      // 检查断路器状态
+      if (this.circuitBreaker.state === 'OPEN') {
+        const now = Date.now();
+        if (now < this.circuitBreaker.nextRetryTime) {
+          this.logger.info('⚡ 断路器打开，推迟重连', {
+            remainingMs: this.circuitBreaker.nextRetryTime - now
+          });
+          // 重新调度到断路器关闭后
+          const newDelay = this.circuitBreaker.nextRetryTime - now + 1000;
+          this.retryState.timer = setTimeout(() => this.scheduleReconnect(userId), newDelay);
+          return;
+        }
+      }
+      
       // 检查网络状态
       if (!this.syncState().isOnline) {
         this.logger.info('📶 网络离线，暂停重连');
@@ -783,14 +834,53 @@ export class SyncService {
       this.logger.info('🔄 正在尝试重新连接...');
       try {
         await this.initRealtimeSubscription(userId);
+        // 重连成功，重置断路器
+        this.resetCircuitBreaker();
       } catch (e) {
         this.logger.error('重连失败', e);
-        // 继续重试（如果用户仍然相同）
-        if (this.currentSubscribedUserId === userId) {
+        this.recordConnectivityFailure();
+        // 继续重试（如果用户仍然相同且未超过限制）
+        if (this.currentSubscribedUserId === userId && this.circuitBreaker.state !== 'OPEN') {
           this.scheduleReconnect(userId);
         }
       }
     }, delay);
+  }
+  
+  /**
+   * 记录连接失败，更新断路器状态
+   */
+  private recordConnectivityFailure(): void {
+    this.circuitBreaker.failureCount++;
+    this.circuitBreaker.lastFailureTime = Date.now();
+    
+    if (this.circuitBreaker.failureCount >= SYNC_CONFIG.CIRCUIT_BREAKER_THRESHOLD) {
+      if (this.circuitBreaker.state !== 'OPEN') {
+        this.circuitBreaker.state = 'OPEN';
+        this.circuitBreaker.nextRetryTime = Date.now() + SYNC_CONFIG.CIRCUIT_BREAKER_TIMEOUT;
+        this.logger.warn('⚡ 断路器打开，暂停重试', {
+          failureCount: this.circuitBreaker.failureCount,
+          nextRetryTime: new Date(this.circuitBreaker.nextRetryTime).toLocaleTimeString()
+        });
+        this.toast.warning(
+          '同步服务暂时不可用',
+          '检测到持续连接失败，将暂停重试以避免过载。系统会在稍后自动恢复。'
+        );
+      }
+    }
+  }
+  
+  /**
+   * 重置断路器状态
+   */
+  private resetCircuitBreaker(): void {
+    if (this.circuitBreaker.state !== 'CLOSED' || this.circuitBreaker.failureCount > 0) {
+      this.logger.info('✅ 连接恢复，重置断路器');
+      this.circuitBreaker.state = 'CLOSED';
+      this.circuitBreaker.failureCount = 0;
+      this.circuitBreaker.lastFailureTime = 0;
+      this.circuitBreaker.nextRetryTime = 0;
+    }
   }
 
   /**

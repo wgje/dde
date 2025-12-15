@@ -76,7 +76,31 @@ export class SupabaseClientService {
           detectSessionInUrl: true,
           // 流式会话（减少并发问题）
           flowType: 'pkce'
-        }
+        },
+        global: {
+          // 添加全局请求配置，设置超时和更好的错误处理
+          fetch: (url, options = {}) => {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
+            
+            return fetch(url, {
+              ...options,
+              signal: controller.signal,
+            }).finally(() => clearTimeout(timeoutId));
+          },
+        },
+        db: {
+          schema: 'public',
+        },
+        // Realtime 配置优化
+        realtime: {
+          params: {
+            eventsPerSecond: 10, // 限制事件频率，避免过载
+          },
+          // 心跳和超时配置
+          heartbeatIntervalMs: 30000, // 30秒心跳
+          timeout: 10000, // 10秒连接超时
+        },
       });
     } catch (e) {
       console.error('Failed to initialize Supabase client:', e);

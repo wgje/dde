@@ -1720,73 +1720,222 @@ export class FlowDiagramService {
       // ========== 多重策略查找实际节点 ==========
       let actualNode: go.Node | null = null;
       
+      // 🔍 调试信息：记录调用上下文
+      const debugInfo = {
+        from,
+        linkType: (this as any).constructor?.name || 'Unknown',
+        hasFromNode: !!this.fromNode,
+        hasToNode: !!this.toNode,
+        fromNodeData: this.fromNode ? (this.fromNode as any).data?.key : 'none',
+        toNodeData: this.toNode ? (this.toNode as any).data?.key : 'none',
+        nodeType: node ? node.constructor?.name : 'none',
+        portType: port ? (port as any).constructor?.name : 'none',
+        portId: port ? (port as any).portId : 'none',
+        activeTool: 'none'
+      };
+      
+      if (this.diagram) {
+        const linkingTool = this.diagram.toolManager.linkingTool;
+        const relinkingTool = this.diagram.toolManager.relinkingTool;
+        const reshapingTool = this.diagram.toolManager.linkReshapingTool;
+        
+        if (linkingTool.isActive) debugInfo.activeTool = 'LinkingTool';
+        else if (relinkingTool.isActive) debugInfo.activeTool = 'RelinkingTool';
+        else if (reshapingTool.isActive) debugInfo.activeTool = 'ReshapingTool';
+      }
+      
+      console.log('[getLinkPoint] 调用上下文:', debugInfo);
+      
       // 策略1: 从连接线的 fromNode/toNode 获取（永久连接线）
       // 注意：需要验证节点是否有效（有 data 或有 BODY 面板）
       if (from) {
+        console.log('[getLinkPoint] 策略1: from=true, 检查 this.fromNode');
         if (this.fromNode) {
           const hasData = !!(this.fromNode as any).data;
           const hasBody = !!(this.fromNode as any).findObject?.('BODY');
+          console.log('[getLinkPoint] 策略1检查:', { 
+            hasData, 
+            hasBody, 
+            dataType: typeof (this.fromNode as any).data,
+            dataValue: (this.fromNode as any).data
+          });
           if (hasData || hasBody) {
             actualNode = this.fromNode;
+            console.log('[getLinkPoint] ✓ 策略1成功: 使用 this.fromNode', (actualNode as any).data?.key);
+          } else {
+            console.log('[getLinkPoint] ✗ 策略1失败: hasData=false 且 hasBody=false');
           }
+        } else {
+          console.log('[getLinkPoint] ✗ 策略1跳过: this.fromNode 不存在');
         }
       } else {
+        console.log('[getLinkPoint] 策略1: from=false, 检查 this.toNode');
         if (this.toNode) {
           const hasData = !!(this.toNode as any).data;
           const hasBody = !!(this.toNode as any).findObject?.('BODY');
+          console.log('[getLinkPoint] 策略1检查:', { hasData, hasBody });
           if (hasData || hasBody) {
             actualNode = this.toNode;
+            console.log('[getLinkPoint] ✓ 策略1成功: 使用 this.toNode', (actualNode as any).data?.key);
+          } else {
+            console.log('[getLinkPoint] ✗ 策略1失败: hasData=false 且 hasBody=false');
           }
+        } else {
+          console.log('[getLinkPoint] ✗ 策略1跳过: this.toNode 不存在');
         }
       }
       
       // 策略2: 使用传入的 node 参数
       if (!actualNode && node instanceof go.Node) {
+        console.log('[getLinkPoint] 策略2: 检查传入的 node 参数');
         const hasData = !!(node as any).data;
         const hasBody = !!(node as any).findObject?.('BODY');
+        console.log('[getLinkPoint] 策略2检查:', { hasData, hasBody });
         if (hasData || hasBody) {
           actualNode = node;
+          console.log('[getLinkPoint] ✓ 策略2成功: 使用传入的 node 参数', (actualNode as any).data?.key);
+        } else {
+          console.log('[getLinkPoint] ✗ 策略2失败: hasData=false 且 hasBody=false');
         }
+      } else if (!actualNode) {
+        console.log('[getLinkPoint] ✗ 策略2跳过: node 不是 go.Node 类型');
       }
       
       // 策略3: 从 port.part 获取节点（port 是节点的一部分）
       if (!actualNode && port && (port as any).part instanceof go.Node) {
+        console.log('[getLinkPoint] 策略3: 检查 port.part');
         const partNode = (port as any).part;
         const hasData = !!(partNode as any).data;
         const hasBody = !!(partNode as any).findObject?.('BODY');
+        console.log('[getLinkPoint] 策略3检查:', { hasData, hasBody });
         if (hasData || hasBody) {
           actualNode = partNode;
+          console.log('[getLinkPoint] ✓ 策略3成功: 使用 port.part', (actualNode as any).data?.key);
+        } else {
+          console.log('[getLinkPoint] ✗ 策略3失败: hasData=false 且 hasBody=false');
         }
+      } else if (!actualNode) {
+        console.log('[getLinkPoint] ✗ 策略3跳过: port 不存在或 port.part 不是 go.Node');
       }
       
       // 策略4: 临时连接线的特殊处理 - 从 LinkingTool 获取原始节点
       if (!actualNode && this.diagram) {
+        console.log('[getLinkPoint] 策略4: 检查工具状态');
         const linkingTool = this.diagram.toolManager.linkingTool;
+        const relinkingTool = this.diagram.toolManager.relinkingTool;
+        
+        // 检查 LinkingTool 是否激活
         if (linkingTool.isActive) {
+          console.log('[getLinkPoint] 策略4-LinkingTool 激活');
           // 根据是起点还是终点，选择不同的端口
           let originalPort = from 
             ? ((linkingTool as any).originalFromPort || (linkingTool as any)._tempMainPort)
             : (linkingTool as any).originalToPort;
           
+          console.log('[getLinkPoint] 策略4-LinkingTool: originalPort =', originalPort, '类型:', typeof originalPort);
+          
           // 如果 originalPort 是字符串（节点key），需要查找节点
           if (typeof originalPort === 'string') {
             const foundNode = this.diagram.findNodeForKey(originalPort);
             actualNode = foundNode;
+            console.log('[getLinkPoint] ✓ 策略4成功: LinkingTool 通过 key 找到节点', originalPort);
           } else if (originalPort && originalPort.part instanceof go.Node) {
             // 如果是端口对象，获取其所属节点
             actualNode = originalPort.part;
+            console.log('[getLinkPoint] ✓ 策略4成功: LinkingTool 通过 port.part 找到节点', (actualNode as any).data?.key);
+          } else {
+            console.log('[getLinkPoint] ✗ 策略4-LinkingTool 失败: originalPort 无效');
           }
+        } else {
+          console.log('[getLinkPoint] ✗ 策略4-LinkingTool 未激活');
         }
+        
+        // 检查 RelinkingTool 是否激活（从连接线拖出新连接）
+        if (!actualNode && relinkingTool.isActive) {
+          console.log('[getLinkPoint] 策略4-RelinkingTool 激活, from =', from);
+          
+          // 尝试多种方式获取原始连接线
+          let adornedLink = (relinkingTool as any).adornedLink;
+          
+          // 如果 adornedLink 为空，尝试其他属性
+          if (!adornedLink) {
+            adornedLink = (relinkingTool as any).adornedObject;
+          }
+          if (!adornedLink) {
+            adornedLink = (relinkingTool as any).originalLink;
+          }
+          // 从 diagram.selection 获取选中的连接线
+          if (!adornedLink && this.diagram.selection) {
+            this.diagram.selection.each((part: any) => {
+              if (part instanceof go.Link && !adornedLink) {
+                adornedLink = part;
+              }
+            });
+          }
+          
+          console.log('[getLinkPoint] 策略4-RelinkingTool: adornedLink =', adornedLink);
+          
+          if (adornedLink instanceof go.Link) {
+            console.log('[getLinkPoint] adornedLink.fromNode =', adornedLink.fromNode ? (adornedLink.fromNode as any).data?.key : 'none');
+            console.log('[getLinkPoint] adornedLink.toNode =', adornedLink.toNode ? (adornedLink.toNode as any).data?.key : 'none');
+            
+            // 判断用户正在拖拽哪一端
+            const isRelinkingFrom = (relinkingTool as any).isForwards === false; // 拖拽起点
+            const isRelinkingTo = (relinkingTool as any).isForwards === true;   // 拖拽终点
+            
+            console.log('[getLinkPoint] RelinkingTool 状态: isForwards =', (relinkingTool as any).isForwards, 
+                        '拖拽起点:', isRelinkingFrom, '拖拽终点:', isRelinkingTo);
+            
+            if (from) {
+              // 计算起点位置
+              if (isRelinkingFrom) {
+                // 用户正在拖拽起点，此时起点应该跟随鼠标，不应该固定在节点上
+                // 返回 null，让 GoJS 使用默认行为（鼠标位置）
+                console.log('[getLinkPoint] ✓ 策略4: 拖拽起点，跳过固定节点，使用鼠标位置');
+                actualNode = null;
+              } else {
+                // 用户正在拖拽终点，起点保持不变
+                actualNode = adornedLink.fromNode;
+                console.log('[getLinkPoint] ✓ 策略4成功: 拖拽终点，起点固定为 adornedLink.fromNode', (actualNode as any)?.data?.key);
+              }
+            } else {
+              // 计算终点位置
+              if (isRelinkingTo) {
+                // 用户正在拖拽终点，此时终点应该跟随鼠标，不应该固定在节点上
+                // 返回 null，让 GoJS 使用默认行为（鼠标位置）
+                console.log('[getLinkPoint] ✓ 策略4: 拖拽终点，跳过固定节点，使用鼠标位置');
+                actualNode = null;
+              } else {
+                // 用户正在拖拽起点，终点保持不变
+                actualNode = adornedLink.toNode;
+                console.log('[getLinkPoint] ✓ 策略4成功: 拖拽起点，终点固定为 adornedLink.toNode', (actualNode as any)?.data?.key);
+              }
+            }
+          } else {
+            console.log('[getLinkPoint] ✗ 策略4-RelinkingTool 失败: adornedLink 不是 Link');
+          }
+        } else if (!actualNode) {
+          console.log('[getLinkPoint] ✗ 策略4-RelinkingTool 未激活');
+        }
+      } else if (!actualNode) {
+        console.log('[getLinkPoint] ✗ 策略4跳过: diagram 不存在');
       }
       
       if (!actualNode) {
-        // 后备方案：如果是终点且还在拖动，使用鼠标位置作为目标
-        if (!from && this.diagram?.lastInput?.documentPoint) {
+        console.warn('[getLinkPoint] ❌ 所有策略失败！actualNode = null');
+        console.log('[getLinkPoint] from =', from, '使用鼠标位置作为连接点');
+        // 当 actualNode 为 null 时，返回 null 让 GoJS 使用默认行为（鼠标位置）
+        // 这样拖拽端就能跟随鼠标自由移动
+        if (this.diagram?.lastInput?.documentPoint) {
+          console.log('[getLinkPoint] 返回鼠标位置:', this.diagram.lastInput.documentPoint);
           return this.diagram.lastInput.documentPoint;
         }
-        // 最终后备：返回默认点
+        // 如果连鼠标位置都获取不到，返回原点作为最终后备
+        console.warn('[getLinkPoint] 无法获取鼠标位置，返回原点');
         return new go.Point();
       }
+      
+      console.log('[getLinkPoint] ✅ 最终使用节点:', (actualNode as any).data?.key);
       
       const doc = actualNode.diagram;
       
@@ -2134,14 +2283,22 @@ export class FlowDiagramService {
         cursor: "pointer",
         click: (e: any, panel: any) => {
           e.handled = true;
-          const linkData = panel.part?.data;
-          if (linkData?.isCrossTree && self.diagramDiv) {
-            const rect = self.diagramDiv.getBoundingClientRect();
-            const clickX = e.event.pageX - rect.left;
-            const clickY = e.event.pageY - rect.top;
-            self.zone.run(() => {
-              self.linkClickCallback?.(linkData, clickX, clickY);
-            });
+          const link = panel.part;
+          const linkData = link?.data;
+          if (linkData?.isCrossTree && self.diagramDiv && self.diagram) {
+            // 获取连接线的起始节点位置
+            const fromNode = link.fromNode;
+            if (fromNode) {
+              // 使用起始节点的中心位置，而不是点击位置
+              const fromCenter = fromNode.getDocumentPoint(go.Spot.Center);
+              const viewPt = self.diagram.transformDocToView(fromCenter);
+              const rect = self.diagramDiv.getBoundingClientRect();
+              const clickX = rect.left + viewPt.x;
+              const clickY = rect.top + viewPt.y;
+              self.zone.run(() => {
+                self.linkClickCallback?.(linkData, clickX, clickY);
+              });
+            }
           }
         }
       },

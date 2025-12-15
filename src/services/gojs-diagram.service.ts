@@ -668,14 +668,27 @@ export class GoJSDiagramService {
         e.handled = true;
         const link = panel.part;
         if (link?.data) {
-          const midPoint = link.midPoint;
+          // 获取连接线的起始节点位置
+          const fromNode = link.fromNode;
+          let x = 0, y = 0;
+          if (fromNode) {
+            // 使用起始节点的中心位置，而不是连接线中点
+            const fromCenter = fromNode.getDocumentPoint(go.Spot.Center);
+            x = fromCenter.x;
+            y = fromCenter.y;
+          } else {
+            // 后备方案：使用连接线中点
+            const midPoint = link.midPoint;
+            x = midPoint.x;
+            y = midPoint.y;
+          }
           self.zone.run(() => {
             self.callbacks?.onConnectionEditorOpen(
               link.data.from,
               link.data.to,
               link.data.description || '',
-              midPoint.x,
-              midPoint.y
+              x,
+              y
             );
           });
         }
