@@ -22,6 +22,13 @@ export { ConflictResolutionService } from './conflict-resolution.service';
 export { ActionQueueService, type QueuedAction, type DeadLetterItem, type EnqueueParams } from './action-queue.service';
 export { ChangeTrackerService, type ChangeRecord, type ChangeType, type EntityType, type ProjectChangeSummary } from './change-tracker.service';
 
+// 新增：借鉴思源笔记的同步增强服务
+export { SyncModeService, type SyncMode, type SyncDirection, type SyncModeConfig } from './sync-mode.service';
+export { SyncPerceptionService, type SyncCompletedEvent, type DeviceHeartbeatEvent, type OnlineDevice } from './sync-perception.service';
+export { SyncCheckpointService, type SyncCheckpoint, type ProjectSnapshot, type CheckpointDiff } from './sync-checkpoint.service';
+export { ConflictHistoryService, type ConflictHistoryRecord, type ConflictReason, type ResolutionStrategy, type ConflictedField, type ConflictStats } from './conflict-history.service';
+export { ConflictStorageService, type ConflictRecord } from './conflict-storage.service';
+
 // 认证服务
 export { AuthService, type AuthResult, type AuthState } from './auth.service';
 export { SupabaseClientService } from './supabase-client.service';

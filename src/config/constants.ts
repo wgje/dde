@@ -58,6 +58,62 @@ export const SYNC_CONFIG = {
 } as const;
 
 /**
+ * 同步感知配置
+ * 借鉴思源笔记的多设备实时感知机制
+ */
+export const SYNC_PERCEPTION_CONFIG = {
+  /** 心跳间隔（毫秒） */
+  HEARTBEAT_INTERVAL: 30000,
+  /** 设备离线判定时间（毫秒）- 3分钟无心跳视为离线 */
+  DEVICE_OFFLINE_THRESHOLD: 180000,
+  /** 感知频道前缀 */
+  CHANNEL_PREFIX: 'sync-perception',
+} as const;
+
+/**
+ * 同步模式配置
+ * 支持自动/手动/完全手动三种模式
+ */
+export const SYNC_MODE_CONFIG = {
+  /** 默认同步间隔（秒） */
+  DEFAULT_INTERVAL: 30,
+  /** 最小同步间隔（秒） */
+  MIN_INTERVAL: 10,
+  /** 最大同步间隔（秒）- 12小时 */
+  MAX_INTERVAL: 43200,
+  /** 配置存储 key */
+  STORAGE_KEY: 'nanoflow.sync-mode-config',
+} as const;
+
+/**
+ * 同步检查点配置
+ * 基于快照的增量同步支持
+ */
+export const SYNC_CHECKPOINT_CONFIG = {
+  /** 最大保留检查点数量 */
+  MAX_CHECKPOINTS: 100,
+  /** IndexedDB 数据库名称 */
+  DB_NAME: 'nanoflow-checkpoints',
+  /** IndexedDB 存储名称 */
+  STORE_NAME: 'checkpoints',
+} as const;
+
+/**
+ * 冲突历史配置
+ * 冲突版本回溯支持
+ */
+export const CONFLICT_HISTORY_CONFIG = {
+  /** 最大保留历史数量 */
+  MAX_HISTORY_RECORDS: 500,
+  /** 自动归档天数 */
+  AUTO_ARCHIVE_DAYS: 30,
+  /** IndexedDB 数据库名称 */
+  DB_NAME: 'nanoflow-conflict-history',
+  /** IndexedDB 存储名称 */
+  STORE_NAME: 'history',
+} as const;
+
+/**
  * 缓存配置
  */
 export const CACHE_CONFIG = {

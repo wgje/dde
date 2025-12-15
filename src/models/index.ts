@@ -213,6 +213,76 @@ export interface UndoAction {
 }
 
 // ============================================
+// 同步相关类型定义
+// ============================================
+
+/**
+ * 同步模式
+ * - automatic: 自动模式 - 按间隔自动同步
+ * - manual: 手动模式 - 仅在用户手动触发或应用启动/退出时同步
+ * - completely-manual: 完全手动模式 - 用户必须明确选择"上传"或"下载"
+ */
+export type SyncMode = 'automatic' | 'manual' | 'completely-manual';
+
+/**
+ * 同步方向
+ */
+export type SyncDirection = 'upload' | 'download' | 'both';
+
+/**
+ * 设备信息
+ */
+export interface DeviceInfo {
+  /** 设备唯一ID */
+  deviceId: string;
+  /** 设备名称 */
+  deviceName: string;
+  /** 操作系统 */
+  os: string;
+  /** 应用版本 */
+  version: string;
+  /** 最后活跃时间 */
+  lastSeen: number;
+}
+
+/**
+ * 同步状态扩展
+ */
+export interface ExtendedSyncState extends SyncState {
+  /** 同步模式 */
+  mode: SyncMode;
+  /** 是否启用感知 */
+  perceptionEnabled: boolean;
+  /** 在线设备数量 */
+  onlineDeviceCount: number;
+  /** 最后同步时间 */
+  lastSyncAt: number | null;
+  /** 下次自动同步时间（仅自动模式） */
+  nextSyncAt: number | null;
+}
+
+/**
+ * 冲突原因
+ */
+export type ConflictReason = 
+  | 'version_mismatch'
+  | 'concurrent_edit'
+  | 'network_recovery'
+  | 'status_conflict'
+  | 'field_conflict'
+  | 'merge_conflict';
+
+/**
+ * 解决策略
+ */
+export type ResolutionStrategy = 
+  | 'use_local'
+  | 'use_remote'
+  | 'merge'
+  | 'manual'
+  | 'auto_rebase';
+
+// ============================================
 // GoJS 边界类型导出
 // ============================================
 export * from './gojs-boundary';

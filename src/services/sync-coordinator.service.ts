@@ -20,11 +20,18 @@ import { Subject } from 'rxjs';
 import { SyncService } from './sync.service';
 import { ActionQueueService } from './action-queue.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+// 借鉴思源笔记的同步增强服务
+import { SyncModeService, SyncDirection } from './sync-mode.service';
+import { SyncPerceptionService } from './sync-perception.service';
+import { SyncCheckpointService } from './sync-checkpoint.service';
+import { ConflictHistoryService } from './conflict-history.service';
 import { Project, Task, UserPreferences } from '../models';
 import { SYNC_CONFIG } from '../config/constants';
 import { validateProject, sanitizeProject } from '../utils/validation';
@@ -65,11 +72,19 @@ export class SyncCoordinatorService {
   private syncService = inject(SyncService);
   private actionQueue = inject(ActionQueueService);
   private conflictService = inject(ConflictResolutionService);
+  private conflictStorage = inject(ConflictStorageService);
+  private changeTracker = inject(ChangeTrackerService);
   private projectState = inject(ProjectStateService);
   private authService = inject(AuthService);
   private toastService = inject(ToastService);
   private layoutService = inject(LayoutService);
   private destroyRef = inject(DestroyRef);
+  
+  // 借鉴思源笔记的同步增强服务
+  private syncModeService = inject(SyncModeService);
+  private syncPerceptionService = inject(SyncPerceptionService);
+  private syncCheckpointService = inject(SyncCheckpointService);
+  private conflictHistoryService = inject(ConflictHistoryService);
   
   // ========== 同步状态 ==========
   
@@ -100,6 +115,35 @@ export class SyncCoordinatorService {
   /** 待处理的离线操作数量 */
   readonly pendingActionsCount = this.actionQueue.queueSize;
   
+  // ========== 借鉴思源笔记的同步增强状态 ==========
+  
+  /** 当前同步模式 */
+  readonly syncMode = computed(() => this.syncModeService.mode());
+  
+  /** 是否为自动同步模式 */
+  readonly isAutoSyncMode = computed(() => this.syncModeService.isAutomatic());
+  
+  /** 是否启用同步感知 */
+  readonly perceptionEnabled = computed(() => this.syncModeService.perceptionEnabled());
+  
+  /** 在线设备数量 */
+  readonly onlineDeviceCount = computed(() => this.syncPerceptionService.onlineDeviceCount());
+  
+  /** 是否有其他设备在线 */
+  readonly hasOtherDevicesOnline = computed(() => this.syncPerceptionService.hasOtherDevicesOnline());
+  
+  /** 在线设备列表 */
+  readonly onlineDevices = computed(() => this.syncPerceptionService.onlineDevices());
+  
+  /** 冲突历史数量 */
+  readonly conflictHistoryCount = computed(() => this.conflictHistoryService.historyCount());
+  
+  /** 未解决的冲突数量（来自历史服务） */
+  readonly unresolvedConflictCount = computed(() => this.conflictHistoryService.unresolvedCount());
+  
+  /** 同步检查点数量 */
+  readonly checkpointCount = computed(() => this.syncCheckpointService.checkpointCount());
+
   // ========== 持久化状态 ==========
   
   private persistState = signal<PersistState>({
@@ -137,6 +181,8 @@ export class SyncCoordinatorService {
     this.setupActionQueueProcessors();
     this.validateRequiredProcessors();
     this.startLocalAutosave();
+    this.setupSyncModeCallback();
+    this.setupPerceptionSubscription();
     
     this.destroyRef.onDestroy(() => {
       if (this.persistTimer) {
@@ -148,6 +194,199 @@ export class SyncCoordinatorService {
     });
   }
   
+  // ========== 借鉴思源笔记的同步增强方法 ==========
+  
+  /**
+   * 设置同步模式回调
+   * 当同步模式服务需要执行同步时，调用此回调
+   */
+  private setupSyncModeCallback(): void {
+    this.syncModeService.setSyncCallback(async (direction: SyncDirection) => {
+      await this.executeSyncByDirection(direction);
+    });
+  }
+  
+  /**
+   * 设置感知订阅
+   * 当收到其他设备的同步完成通知时，触发下载同步
+   */
+  private setupPerceptionSubscription(): void {
+    this.syncPerceptionService.onSyncCompleted$.subscribe(async (event) => {
+      this.logger.info('收到其他设备同步完成通知', { 
+        from: event.deviceName, 
+        projectIds: event.projectIds 
+      });
+      
+      // 如果当前没有正在进行的同步，触发下载
+      if (!this.isSyncing() && this.syncModeService.perceptionEnabled()) {
+        await this.executeSyncByDirection('download');
+      }
+    });
+  }
+  
+  /**
+   * 根据方向执行同步
+   */
+  private async executeSyncByDirection(direction: SyncDirection): Promise<void> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return;
+    
+    const projects = this.projectState.projects();
+    
+    switch (direction) {
+      case 'upload':
+        // 仅上传：保存所有项目到云端
+        for (const project of projects) {
+          await this.persistActiveProject();
+        }
+        // 广播同步完成
+        await this.syncPerceptionService.broadcastSyncCompleted(
+          projects.map(p => p.id),
+          'upload'
+        );
+        break;
+        
+      case 'download':
+        // 仅下载：从云端加载最新数据
+        await this.syncService.loadProjectsFromCloud(userId);
+        break;
+        
+      case 'both':
+        // 双向同步：先上传本地变更，再下载远程变更
+        await this.persistActiveProject();
+        await this.syncService.loadProjectsFromCloud(userId);
+        // 广播同步完成
+        await this.syncPerceptionService.broadcastSyncCompleted(
+          projects.map(p => p.id),
+          'both'
+        );
+        break;
+    }
+  }
+  
+  /**
+   * 初始化同步感知
+   * 应在用户登录后调用
+   */
+  async initSyncPerception(userId: string): Promise<void> {
+    if (this.syncModeService.perceptionEnabled()) {
+      await this.syncPerceptionService.enable(userId);
+      this.logger.info('同步感知已初始化');
+    }
+  }
+  
+  /**
+   * 停止同步感知
+   * 应在用户登出时调用
+   */
+  async stopSyncPerception(): Promise<void> {
+    await this.syncPerceptionService.disable();
+  }
+  
+  /**
+   * 创建同步检查点
+   * 在重要同步操作前后调用
+   */
+  async createSyncCheckpoint(memo?: string): Promise<void> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return;
+    
+    const projects = this.projectState.projects();
+    await this.syncCheckpointService.createCheckpoint(userId, projects, 'local', memo);
+  }
+  
+  /**
+   * 记录冲突到历史
+   * 当发生冲突时调用
+   */
+  async recordConflictToHistory(
+    projectId: string,
+    localProject: Project,
+    remoteProject: Project,
+    reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery' | 'status_conflict' | 'field_conflict' | 'merge_conflict'
+  ): Promise<void> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return;
+    
+    const conflictedFields = this.conflictHistoryService.compareProjects(localProject, remoteProject);
+    await this.conflictHistoryService.recordConflict(
+      userId,
+      projectId,
+      localProject,
+      remoteProject,
+      reason,
+      conflictedFields
+    );
+  }
+  
+  /**
+   * 设置同步模式
+   */
+  setSyncMode(mode: 'automatic' | 'manual' | 'completely-manual'): void {
+    this.syncModeService.setMode(mode);
+  }
+  
+  /**
+   * 设置是否启用感知
+   */
+  async setPerceptionEnabled(enabled: boolean): Promise<void> {
+    this.syncModeService.setPerceptionEnabled(enabled);
+    
+    const userId = this.authService.currentUserId();
+    if (userId) {
+      if (enabled) {
+        await this.syncPerceptionService.enable(userId);
+      } else {
+        await this.syncPerceptionService.disable();
+      }
+    }
+  }
+  
+  /**
+   * 手动触发同步（所有模式下可用）
+   */
+  async triggerManualSync(direction: SyncDirection = 'both'): Promise<void> {
+    await this.syncModeService.triggerSync(direction);
+  }
+  
+  /**
+   * 仅上传（完全手动模式下使用）
+   */
+  async uploadOnly(): Promise<void> {
+    await this.syncModeService.uploadOnly();
+  }
+  
+  /**
+   * 仅下载（完全手动模式下使用）
+   */
+  async downloadOnly(): Promise<void> {
+    await this.syncModeService.downloadOnly();
+  }
+  
+  /**
+   * 获取冲突历史统计
+   */
+  async getConflictStats(): Promise<{
+    total: number;
+    resolved: number;
+    unresolved: number;
+  }> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return { total: 0, resolved: 0, unresolved: 0 };
+    
+    return this.conflictHistoryService.getStats(userId);
+  }
+  
+  /**
+   * 获取检查点历史
+   */
+  async getCheckpointHistory(limit = 20): Promise<unknown[]> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return [];
+    
+    return this.syncCheckpointService.getCheckpointHistory(userId, limit);
+  }
+
   // ========== 公共方法 ==========
   
   /**
@@ -335,6 +574,138 @@ export class SyncCoordinatorService {
    */
   async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
     return this.syncService.loadSingleProject(projectId, userId);
+  }
+  
+  /**
+   * 重新同步当前活动项目
+   * 
+   * 【设计哲学】
+   * 这不是暴力的 Force Push/Pull，而是智能的重新同步：
+   * 1. 从云端拉取最新数据
+   * 2. 与本地数据进行智能合并（使用现有的 smartMerge 逻辑）
+   * 3. 如果发现真正的冲突，静默保存到冲突仓库
+   * 4. 更新本地状态
+   * 
+   * @returns 同步结果
+   */
+  async resyncActiveProject(): Promise<{
+    success: boolean;
+    message: string;
+    conflictDetected?: boolean;
+  }> {
+    const projectId = this.projectState.activeProjectId();
+    const userId = this.authService.currentUserId();
+    
+    if (!projectId || !userId) {
+      return { success: false, message: '无活动项目或未登录' };
+    }
+    
+    const localProject = this.projectState.activeProject();
+    if (!localProject) {
+      return { success: false, message: '本地项目不存在' };
+    }
+    
+    this.logger.info('开始重新同步项目', { projectId });
+    
+    try {
+      // 1. 从云端拉取最新数据
+      const remoteProject = await this.syncService.loadSingleProject(projectId, userId);
+      
+      if (!remoteProject) {
+        // 云端不存在，可能被删除了
+        return { success: false, message: '云端项目不存在' };
+      }
+      
+      const localVersion = localProject.version ?? 0;
+      const remoteVersion = remoteProject.version ?? 0;
+      
+      // 2. 版本相同，无需同步
+      if (localVersion === remoteVersion) {
+        // 但还是用远程数据刷新一下，确保任务状态一致
+        const validated = this.validateAndRebalance(remoteProject);
+        this.projectState.updateProjects(ps => 
+          ps.map(p => p.id === projectId ? validated : p)
+        );
+        return { success: true, message: '数据已是最新' };
+      }
+      
+      // 3. 远程版本更新，执行智能合并
+      if (remoteVersion > localVersion) {
+        const mergeResult = this.smartMerge(localProject, remoteProject);
+        
+        if (mergeResult.conflictCount > 0) {
+          // 发现冲突，静默保存到冲突仓库（不弹窗打扰用户）
+          // 使用 issues 作为冲突字段描述
+          await this.saveConflictSilently(localProject, remoteProject, mergeResult.issues);
+          this.logger.info('检测到冲突，已保存到冲突仓库', { 
+            projectId, 
+            conflictCount: mergeResult.conflictCount 
+          });
+        }
+        
+        const validated = this.validateAndRebalance(mergeResult.project);
+        this.projectState.updateProjects(ps => 
+          ps.map(p => p.id === projectId ? validated : p)
+        );
+        
+        // 清理字段锁（同步完成）
+        this.changeTracker.clearProjectFieldLocks(projectId);
+        
+        return { 
+          success: true, 
+          message: mergeResult.conflictCount > 0 
+            ? `已合并，${mergeResult.conflictCount} 处冲突已保存供稍后处理`
+            : '已与云端同步',
+          conflictDetected: mergeResult.conflictCount > 0
+        };
+      }
+      
+      // 4. 本地版本更新，推送到云端
+      const saveResult = await this.syncService.saveProjectSmart(localProject, userId);
+      
+      if (saveResult.success) {
+        // 清理字段锁
+        this.changeTracker.clearProjectFieldLocks(projectId);
+        return { success: true, message: '本地更改已推送到云端' };
+      } else if (saveResult.conflict) {
+        // 保存时发现冲突
+        if (saveResult.remoteData) {
+          await this.saveConflictSilently(localProject, saveResult.remoteData, []);
+        }
+        return { 
+          success: false, 
+          message: '发现版本冲突，已保存到冲突仓库',
+          conflictDetected: true
+        };
+      } else {
+        return { success: false, message: '同步失败' };
+      }
+      
+    } catch (error) {
+      this.logger.error('重新同步失败', error);
+      return { success: false, message: '同步时发生错误' };
+    }
+  }
+  
+  /**
+   * 静默保存冲突到仓库（不弹窗）
+   */
+  private async saveConflictSilently(
+    localProject: Project, 
+    remoteProject: Project,
+    conflictedFields: string[]
+  ): Promise<void> {
+    await this.conflictStorage.saveConflict({
+      projectId: localProject.id,
+      localProject,
+      remoteProject,
+      conflictedAt: new Date().toISOString(),
+      localVersion: localProject.version ?? 0,
+      remoteVersion: remoteProject.version ?? 0,
+      reason: 'version_mismatch',
+      conflictedFields,
+      acknowledged: false
+    });
   }
   
   /**
@@ -876,6 +1247,10 @@ export class SyncCoordinatorService {
         );
         // 同步成功后，再次保存快照以确保版本号同步
         this.syncService.saveOfflineSnapshot(this.projectState.projects());
+        
+        // 【关键】同步成功后，解锁该项目的所有字段锁
+        this.changeTracker.clearProjectFieldLocks(project.id);
+        
         // console.log('[Sync] 本地版本号已更新', { projectId: project.id, newVersion: result.newVersion });
         
         // 如果有验证警告，记录日志但不打扰用户
@@ -886,13 +1261,9 @@ export class SyncCoordinatorService {
           });
         }
       } else if (result.conflict && result.remoteData) {
-        // 版本冲突处理：发布冲突事件供 UI 层处理
-        this.conflict$.next({
-          localProject: project,
-          remoteProject: result.remoteData,
-          projectId: project.id
-        });
-        this.logger.warn('检测到数据冲突，等待用户解决', { projectId: project.id });
+        // 版本冲突处理：静默保存到冲突仓库，不弹窗打扰用户
+        await this.saveConflictSilently(project, result.remoteData, []);
+        this.logger.warn('检测到数据冲突，已保存到冲突仓库', { projectId: project.id });
       } else if (result.validationWarnings && result.validationWarnings.length > 0) {
         // 验证失败导致同步中止
         this.logger.error('同步验证失败', {

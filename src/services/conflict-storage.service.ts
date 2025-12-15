@@ -8,7 +8,7 @@
  * - 即使应用崩溃、网络断开，用户数据都在等待处理
  * - 只存元数据就像只留路标却清理了事故现场 —— 不负责任
  */
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
 
@@ -18,6 +18,8 @@ export interface ConflictRecord {
   projectId: string;
   /** 完整的本地项目数据（用户心血所在） */
   localProject: Project;
+  /** 完整的远程项目数据（用于对比和解决） */
+  remoteProject?: Project;
   /** 冲突发生时间 */
   conflictedAt: string;
   /** 本地版本号 */
@@ -25,7 +27,11 @@ export interface ConflictRecord {
   /** 远程版本号（如果已知） */
   remoteVersion?: number;
   /** 冲突原因 */
-  reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery';
+  reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery' | 'status_conflict' | 'field_conflict';
+  /** 冲突的字段列表（用于展示差异） */
+  conflictedFields?: string[];
+  /** 是否已读/已处理 */
+  acknowledged?: boolean;
 }
 
 const DB_NAME = 'nanoflow-conflicts';
@@ -40,6 +46,63 @@ export class ConflictStorageService {
   private readonly logger = this.loggerService.category('ConflictStorage');
   private db: IDBDatabase | null = null;
   private dbPromise: Promise<IDBDatabase> | null = null;
+  
+  /**
+   * 冲突数量信号
+   * 用于在 UI 中显示冲突红点提示
+   */
+  private _conflictCount = signal(0);
+  
+  /** 冲突数量（响应式） */
+  readonly conflictCount = this._conflictCount.asReadonly();
+  
+  /** 是否有未处理的冲突 */
+  readonly hasUnresolvedConflicts = computed(() => this._conflictCount() > 0);
+  
+  constructor() {
+    // 初始化时加载冲突数量
+    this.refreshConflictCount();
+  }
+  
+  /**
+   * 刷新冲突计数
+   * 应在保存/删除冲突后调用
+   */
+  async refreshConflictCount(): Promise<void> {
+    try {
+      const count = await this.getConflictCount();
+      this._conflictCount.set(count);
+    } catch (e) {
+      this.logger.warn('刷新冲突计数失败', e);
+    }
+  }
+  
+  /**
+   * 获取冲突数量
+   */
+  async getConflictCount(): Promise<number> {
+    try {
+      const db = await this.getDb();
+      
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME], 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        
+        const request = store.count();
+        
+        request.onsuccess = () => {
+          resolve(request.result);
+        };
+        
+        request.onerror = () => {
+          reject(request.error);
+        };
+      });
+    } catch {
+      // 检查 localStorage 降级
+      return this.countLocalStorageFallback();
+    }
+  }
   
   /**
    * 初始化数据库连接
@@ -106,6 +169,8 @@ export class ConflictStorageService {
             localVersion: record.localVersion,
             taskCount: record.localProject.tasks.length
           });
+          // 刷新冲突计数
+          void this.refreshConflictCount();
           resolve(true);
         };
         
@@ -195,6 +260,8 @@ export class ConflictStorageService {
           this.logger.info('冲突数据已从隔离区移除', { projectId });
           // 同时清理可能存在的 localStorage 降级数据
           this.clearLocalStorageFallback(projectId);
+          // 刷新冲突计数
+          void this.refreshConflictCount();
           resolve(true);
         };
         
@@ -282,6 +349,21 @@ export class ConflictStorageService {
       return false;
     } catch {
       return false;
+    }
+  }
+  
+  private countLocalStorageFallback(): number {
+    try {
+      let count = 0;
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(this.FALLBACK_KEY_PREFIX)) {
+          count++;
+        }
+      }
+      return count;
+    } catch {
+      return 0;
     }
   }
   

@@ -101,6 +101,20 @@ export class ChangeTrackerService {
    */
   private pendingChanges = new Map<string, ChangeRecord>();
   
+  /**
+   * 字段级操作锁
+   * 当用户正在操作某个任务的特定字段时（如拖拽改变 rank，点击改变 status），
+   * 锁定该字段，在操作完成并收到服务器 ACK 之前，忽略来自服务器的该字段推送。
+   * 这是基于逻辑状态的防抖，比基于时间阈值更可靠。
+   * 
+   * Key: `${projectId}:${taskId}:${field}`
+   * Value: 锁定时间戳（用于超时自动解锁）
+   */
+  private fieldLocks = new Map<string, number>();
+  
+  /** 字段锁超时时间（毫秒）- 防止死锁 */
+  private static readonly FIELD_LOCK_TIMEOUT_MS = 10000;
+  
   /** 
    * 变更计数器（用于监控）
    */
@@ -732,6 +746,142 @@ export class ChangeTrackerService {
   }
   
   // ========== 辅助方法 ==========
+  
+  // ========== 字段级操作锁 ==========
+  
+  /**
+   * 锁定任务的特定字段
+   * 当用户开始操作（如点击状态复选框、开始拖拽）时调用
+   * 
+   * @param taskId 任务ID
+   * @param projectId 项目ID  
+   * @param field 要锁定的字段名（如 'status', 'rank', 'stage'）
+   */
+  lockTaskField(taskId: string, projectId: string, field: string): void {
+    const key = this.makeFieldLockKey(projectId, taskId, field);
+    this.fieldLocks.set(key, Date.now());
+    this.logger.debug('锁定任务字段', { taskId, projectId, field });
+  }
+  
+  /**
+   * 解锁任务的特定字段
+   * 当操作完成并收到服务器 ACK 时调用
+   * 
+   * @param taskId 任务ID
+   * @param projectId 项目ID
+   * @param field 要解锁的字段名
+   */
+  unlockTaskField(taskId: string, projectId: string, field: string): void {
+    const key = this.makeFieldLockKey(projectId, taskId, field);
+    this.fieldLocks.delete(key);
+    this.logger.debug('解锁任务字段', { taskId, projectId, field });
+  }
+  
+  /**
+   * 解锁任务的所有字段
+   * 当同步成功后批量清理锁
+   * 
+   * @param taskId 任务ID
+   * @param projectId 项目ID
+   */
+  unlockAllTaskFields(taskId: string, projectId: string): void {
+    const prefix = `${projectId}:${taskId}:`;
+    const keysToDelete: string[] = [];
+    for (const key of this.fieldLocks.keys()) {
+      if (key.startsWith(prefix)) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.fieldLocks.delete(key);
+    }
+    if (keysToDelete.length > 0) {
+      this.logger.debug('解锁任务所有字段', { taskId, projectId, fieldCount: keysToDelete.length });
+    }
+  }
+  
+  /**
+   * 检查任务的特定字段是否被锁定
+   * 远程变更处理器在更新字段前应检查此方法
+   * 
+   * @param taskId 任务ID
+   * @param projectId 项目ID
+   * @param field 字段名
+   * @returns 是否被锁定（考虑超时自动解锁）
+   */
+  isTaskFieldLocked(taskId: string, projectId: string, field: string): boolean {
+    const key = this.makeFieldLockKey(projectId, taskId, field);
+    const lockTime = this.fieldLocks.get(key);
+    
+    if (!lockTime) {
+      return false;
+    }
+    
+    // 检查是否超时（防止死锁）
+    const elapsed = Date.now() - lockTime;
+    if (elapsed > ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS) {
+      this.fieldLocks.delete(key);
+      this.logger.warn('字段锁超时自动解锁', { taskId, projectId, field, elapsed });
+      return false;
+    }
+    
+    return true;
+  }
+  
+  /**
+   * 获取任务被锁定的字段列表
+   * 
+   * @param taskId 任务ID
+   * @param projectId 项目ID
+   * @returns 被锁定的字段名列表
+   */
+  getLockedFields(taskId: string, projectId: string): string[] {
+    const prefix = `${projectId}:${taskId}:`;
+    const lockedFields: string[] = [];
+    const now = Date.now();
+    
+    for (const [key, lockTime] of this.fieldLocks.entries()) {
+      if (key.startsWith(prefix)) {
+        // 检查超时
+        if (now - lockTime <= ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS) {
+          const field = key.substring(prefix.length);
+          lockedFields.push(field);
+        } else {
+          // 清理过期锁
+          this.fieldLocks.delete(key);
+        }
+      }
+    }
+    
+    return lockedFields;
+  }
+  
+  /**
+   * 清理所有项目的字段锁（用于同步完成后的清理）
+   * 
+   * @param projectId 项目ID
+   */
+  clearProjectFieldLocks(projectId: string): void {
+    const prefix = `${projectId}:`;
+    const keysToDelete: string[] = [];
+    for (const key of this.fieldLocks.keys()) {
+      if (key.startsWith(prefix)) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.fieldLocks.delete(key);
+    }
+    if (keysToDelete.length > 0) {
+      this.logger.debug('清理项目字段锁', { projectId, lockCount: keysToDelete.length });
+    }
+  }
+  
+  private makeFieldLockKey(projectId: string, taskId: string, field: string): string {
+    return `${projectId}:${taskId}:${field}`;
+  }
+  
+  // ========== 其他辅助方法 ==========
   
   private makeKey(projectId: string, entityType: EntityType, entityId: string): string {
     return `${projectId}:${entityType}:${entityId}`;

@@ -408,6 +408,14 @@ export class RemoteChangeHandlerService {
                     mergedTask = localTask;
                   } else {
                     const dirtyFields = new Set(pending?.changedFields ?? []);
+                    
+                    // 【关键改进】检查字段级操作锁
+                    // 如果用户正在操作某个字段（如刚点击了状态复选框），保护该字段不被远程覆盖
+                    const lockedFields = this.changeTracker.getLockedFields(taskId, targetProjectId);
+                    for (const field of lockedFields) {
+                      dirtyFields.add(field);
+                      this.logger.debug('字段被操作锁保护', { taskId, field });
+                    }
 
                     // 若用户正处于编辑态（全局），依旧保护内容字段。
                     if (this.uiState.isEditing) {
@@ -420,6 +428,7 @@ export class RemoteChangeHandlerService {
                       for (const field of dirtyFields) {
                         if (field in localTask) {
                           merged[field] = (localTask as any)[field];
+                          this.logger.debug('保护本地字段值', { taskId, field, localValue: (localTask as any)[field] });
                         }
                       }
                       // tombstone wins

@@ -134,7 +134,28 @@ export class TaskOperationAdapterService {
   
   // ========== 任务状态操作 ==========
   
+  /**
+   * 更新任务状态
+   * 
+   * 【关键修复】确保状态变更被正确追踪：
+   * 1. markEditing() - 通知 UiState 和 SyncCoordinator
+   * 2. lastUpdateType = 'content' - 触发内容同步
+   * 3. trackTaskStatusChange() - 通知 ChangeTracker 追踪变更字段
+   */
   updateTaskStatus(taskId: string, status: Task['status']): void {
+    this.markEditing();
+    this.lastUpdateType = 'content';
+    
+    // 通知 ChangeTracker 追踪状态字段变更
+    const project = this.projectState.activeProject();
+    if (project) {
+      const task = project.tasks.find(t => t.id === taskId);
+      if (task) {
+        // 先设置操作锁，防止远程推送覆盖正在进行的操作
+        this.changeTracker.lockTaskField(taskId, project.id, 'status');
+      }
+    }
+    
     this.taskOps.updateTaskStatus(taskId, status);
   }
   
