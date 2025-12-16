@@ -12,15 +12,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
+import { Subject } from 'rxjs';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SyncService } from './sync.service';
 import { ActionQueueService } from './action-queue.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+import { SyncModeService } from './sync-mode.service';
+import { SyncPerceptionService } from './sync-perception.service';
+import { SyncCheckpointService } from './sync-checkpoint.service';
+import { ConflictHistoryService } from './conflict-history.service';
 import { Project, Task, SyncState } from '../models';
 import { success, failure, ErrorCodes } from '../utils/result';
 
@@ -118,6 +125,75 @@ const mockLoggerService = {
   category: vi.fn(() => mockLoggerCategory),
 };
 
+// ========== 新增缺失的 mock 服务 ==========
+
+const mockConflictStorageService = {
+  saveConflict: vi.fn().mockResolvedValue(true),
+  getAllConflicts: vi.fn().mockResolvedValue([]),
+  getConflict: vi.fn().mockResolvedValue(null),
+  deleteConflict: vi.fn().mockResolvedValue(true),
+  hasConflicts: vi.fn().mockResolvedValue(false),
+};
+
+const mockChangeTrackerService = {
+  pendingChangesCount: signal(0),
+  trackTaskCreate: vi.fn(),
+  trackTaskUpdate: vi.fn(),
+  trackTaskDelete: vi.fn(),
+  trackConnectionCreate: vi.fn(),
+  trackConnectionDelete: vi.fn(),
+  getProjectChanges: vi.fn().mockReturnValue({
+    tasksToCreate: [],
+    tasksToUpdate: [],
+    taskIdsToDelete: [],
+    connectionsToCreate: [],
+    connectionsToUpdate: [],
+    connectionsToDelete: [],
+    hasChanges: false,
+    totalChanges: 0,
+  }),
+  clearProjectChanges: vi.fn(),
+  getChangedProjectIds: vi.fn().mockReturnValue([]),
+  clearAll: vi.fn(),
+};
+
+const mockSyncModeService = {
+  mode: signal('automatic'),
+  isAutomatic: vi.fn().mockReturnValue(true),
+  perceptionEnabled: vi.fn().mockReturnValue(false),
+  setMode: vi.fn(),
+  setSyncCallback: vi.fn(),
+  config: vi.fn().mockReturnValue({
+    mode: 'automatic',
+    syncOnBoot: true,
+    syncOnExit: true,
+    autoSyncInterval: 30000,
+    perceptionEnabled: false,
+  }),
+  triggerSync: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockSyncPerceptionService = {
+  enabled: signal(false),
+  onlineDeviceCount: vi.fn().mockReturnValue(0),
+  hasOtherDevicesOnline: vi.fn().mockReturnValue(false),
+  onlineDevices: vi.fn().mockReturnValue([]),
+  onSyncCompleted$: new Subject(),
+  enable: vi.fn().mockResolvedValue(undefined),
+  disable: vi.fn(),
+};
+
+const mockSyncCheckpointService = {
+  saveCheckpoint: vi.fn().mockResolvedValue(true),
+  getLatestCheckpoint: vi.fn().mockResolvedValue(null),
+  getCheckpointHistory: vi.fn().mockResolvedValue([]),
+};
+
+const mockConflictHistoryService = {
+  recordConflict: vi.fn().mockResolvedValue(undefined),
+  getConflictHistory: vi.fn().mockResolvedValue([]),
+};
+
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -177,11 +253,17 @@ describe('SyncCoordinatorService', () => {
         { provide: SyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
+        { provide: ConflictStorageService, useValue: mockConflictStorageService },
+        { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: SyncPerceptionService, useValue: mockSyncPerceptionService },
+        { provide: SyncCheckpointService, useValue: mockSyncCheckpointService },
+        { provide: ConflictHistoryService, useValue: mockConflictHistoryService },
       ],
     });
 
@@ -822,11 +904,17 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: SyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
+        { provide: ConflictStorageService, useValue: mockConflictStorageService },
+        { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: SyncPerceptionService, useValue: mockSyncPerceptionService },
+        { provide: SyncCheckpointService, useValue: mockSyncCheckpointService },
+        { provide: ConflictHistoryService, useValue: mockConflictHistoryService },
       ],
     });
 

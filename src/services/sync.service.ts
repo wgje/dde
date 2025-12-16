@@ -1,5 +1,5 @@
 import { Injectable, inject, signal, DestroyRef } from '@angular/core';
-import { Subject } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
 import { concatMap, tap } from 'rxjs/operators';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { SupabaseClientService } from './supabase-client.service';
@@ -116,6 +116,16 @@ export class SyncService {
   /** 远程变更处理定时器 */
   private remoteChangeTimer: ReturnType<typeof setTimeout> | null = null;
   
+  /** 
+   * 防抖期间累积的项目变更事件
+   * 使用 Map 确保每个项目只触发一次回调（取最新事件）
+   */
+  private pendingRemoteChanges = new Map<string, {
+    eventType: 'INSERT' | 'UPDATE' | 'DELETE';
+    projectId: string;
+    data: Record<string, unknown>;
+  }>();
+  
   /** 网络状态监听器引用（用于清理） */
   private onlineHandler: (() => void) | null = null;
   private offlineHandler: (() => void) | null = null;
@@ -182,6 +192,9 @@ export class SyncService {
     pendingCount: 0
   };
   
+  /** 保存队列处理管道的订阅（用于清理） */
+  private saveQueueSubscription: Subscription | null = null;
+  
   /** 是否暂停处理远程更新（队列同步期间） */
   private pauseRemoteUpdates = false;
 
@@ -204,7 +217,7 @@ export class SyncService {
    * 无需手动锁，彻底消除死锁风险
    */
   private setupSaveQueuePipeline(): void {
-    this.saveQueue$.pipe(
+    this.saveQueueSubscription = this.saveQueue$.pipe(
       // 限流：如果队列积压过多，丢弃中间状态
       tap(() => this.saveQueueStats.pendingCount++),
       
@@ -591,7 +604,9 @@ export class SyncService {
    */
   pauseRealtimeUpdates() {
     this.pauseRemoteUpdates = true;
-    this.logger.debug('远程更新已暂停');
+    // 清空已累积的远程变更，避免恢复后处理过时的事件
+    this.pendingRemoteChanges.clear();
+    this.logger.debug('远程更新已暂停，累积事件已清空');
   }
 
   /**
@@ -885,9 +900,38 @@ export class SyncService {
 
   /**
    * 处理远程变更
+   * 
+   * 改进：使用事件累积机制，防抖期间不丢弃早期事件
+   * - 在防抖窗口内累积所有项目的变更事件
+   * - 每个项目保留最新的事件（UPDATE 覆盖 INSERT，DELETE 最终状态）
+   * - 防抖结束后批量处理所有受影响的项目
    */
   private async handleRemoteChange(payload: RealtimePostgresChangesPayload<Record<string, unknown>>) {
     if (!this.onRemoteChangeCallback || this.pauseRemoteUpdates) return;
+    
+    const eventType = payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE';
+    const newRecord = payload.new as Record<string, unknown>;
+    const oldRecord = payload.old as Record<string, unknown>;
+    const projectId = (newRecord?.id || oldRecord?.id) as string;
+    
+    if (!projectId) {
+      this.logger.warn('远程变更事件缺少 projectId，忽略', { eventType });
+      return;
+    }
+    
+    // 累积事件：按项目 ID 存储，后续事件覆盖先前事件
+    const existingChange = this.pendingRemoteChanges.get(projectId);
+    
+    // 智能合并事件优先级：DELETE > UPDATE > INSERT
+    // 如果已有 DELETE，保持 DELETE（最终状态）
+    // 如果新事件是 DELETE，覆盖任何先前事件
+    if (existingChange?.eventType !== 'DELETE' || eventType === 'DELETE') {
+      this.pendingRemoteChanges.set(projectId, {
+        eventType,
+        projectId,
+        data: newRecord
+      });
+    }
     
     // 防抖处理
     if (this.remoteChangeTimer) {
@@ -896,24 +940,29 @@ export class SyncService {
     
     this.remoteChangeTimer = setTimeout(async () => {
       // 再次检查是否暂停
-      if (this.pauseRemoteUpdates) return;
-      
-      try {
-        const eventType = payload.eventType;
-        const newRecord = payload.new as Record<string, unknown>;
-        const oldRecord = payload.old as Record<string, unknown>;
-        const projectId = (newRecord?.id || oldRecord?.id) as string;
-        
-        await this.onRemoteChangeCallback!({
-          eventType,
-          projectId,
-          data: newRecord
-        });
-      } catch (e) {
-        this.logger.error('处理实时更新失败', e);
-      } finally {
-        this.remoteChangeTimer = null;
+      if (this.pauseRemoteUpdates) {
+        this.pendingRemoteChanges.clear();
+        return;
       }
+      
+      // 获取并清空累积的变更
+      const changes = Array.from(this.pendingRemoteChanges.values());
+      this.pendingRemoteChanges.clear();
+      
+      // 批量处理所有累积的变更
+      for (const change of changes) {
+        try {
+          await this.onRemoteChangeCallback!({
+            eventType: change.eventType,
+            projectId: change.projectId,
+            data: change.data
+          });
+        } catch (e) {
+          this.logger.error('处理实时更新失败', { projectId: change.projectId, error: e });
+        }
+      }
+      
+      this.remoteChangeTimer = null;
     }, SYNC_CONFIG.REMOTE_CHANGE_DELAY);
   }
 
@@ -2350,8 +2399,17 @@ export class SyncService {
     this.isDestroyed = true;
     this.currentSubscribedUserId = null;
     
+    // 取消保存队列订阅（先取消订阅，再 complete Subject）
+    if (this.saveQueueSubscription) {
+      this.saveQueueSubscription.unsubscribe();
+      this.saveQueueSubscription = null;
+    }
+    
     // 完成保存队列 Subject，释放所有订阅
     this.saveQueue$.complete();
+    
+    // 清理累积的远程变更事件
+    this.pendingRemoteChanges.clear();
     
     this.teardownRealtimeSubscription();
     this.removeNetworkListeners();

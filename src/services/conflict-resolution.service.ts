@@ -186,21 +186,38 @@ export class ConflictResolutionService {
   
   /**
    * 同步版本的三路合并
-   * 注意：这个方法会尝试同步获取 Base，如果失败则降级
+   * 
+   * ⚠️ 注意：此方法存在已知限制！
+   * - 无法异步获取历史 Base 版本
+   * - 使用 local 作为伪 Base，可能导致合并结果偏向本地
+   * - 建议在可能的情况下使用异步版本 smartMergeWithBaseAsync
+   * 
+   * 此方法仅应在以下情况使用：
+   * 1. 调用方无法使用 async/await
+   * 2. 已确认 Base 版本不重要（例如初始同步）
    */
   private smartMergeWithBase(local: Project, remote: Project): MergeResult {
-    // 尝试从缓存获取 Base（如果之前已加载）
-    // 这里我们假设调用方已确保 Base 存在或接受降级
-    // 实际使用中建议调用异步版本 smartMergeWithBaseAsync
-    this.logger.info('[ThreeWayMerge] 执行三路合并', { projectId: local.id });
+    // ⚠️ 降级警告：同步方法无法获取历史 Base
+    this.logger.warn('[ThreeWayMerge] ⚠️ 同步降级合并：使用 local 作为伪 Base', { 
+      projectId: local.id,
+      localVersion: local.version,
+      remoteVersion: remote.version,
+      recommendation: '建议使用 smartMergeWithBaseAsync 以获得更准确的合并结果'
+    });
     
     // 由于是同步方法，我们使用 local 作为伪 Base 进行降级合并
-    // 这样至少能保留本地修改
+    // 这意味着：
+    // - 本地的修改会被视为"从 Base 开始的变更"
+    // - 远程的修改可能被错误地视为"新增"而非"修改"
+    // - 合并结果可能偏向保留本地内容
     const result = this.threeWayMerge.merge(local, local, remote);
+    
+    // 标记这是一个降级合并的结果
+    const mergeIssues = ['⚠️ 此合并使用降级模式（local 作为伪 Base），结果可能不准确'];
     
     return {
       project: this.validateAndRebalance(result.project),
-      issues: [],
+      issues: mergeIssues,
       conflictCount: result.conflicts.filter(c => c.resolution === 'kept-local').length,
       threeWayResult: result
     };
@@ -218,15 +235,30 @@ export class ConflictResolutionService {
     const issues: string[] = [];
     let conflictCount = 0;
     
+    // 防御性检查：确保 tasks 数组存在
+    const localTasks = Array.isArray(local.tasks) ? local.tasks : [];
+    const remoteTasks = Array.isArray(remote.tasks) ? remote.tasks : [];
+    const localConnections = Array.isArray(local.connections) ? local.connections : [];
+    const remoteConnections = Array.isArray(remote.connections) ? remote.connections : [];
+    
+    if (!Array.isArray(local.tasks)) {
+      this.logger.warn('smartMerge: local.tasks 不是数组，使用空数组', { projectId: local.id });
+      issues.push('本地项目 tasks 数据异常，已使用空数组');
+    }
+    if (!Array.isArray(remote.tasks)) {
+      this.logger.warn('smartMerge: remote.tasks 不是数组，使用空数组', { projectId: remote.id });
+      issues.push('远程项目 tasks 数据异常，已使用空数组');
+    }
+    
     // 创建任务映射
-    const localTaskMap = new Map(local.tasks.map(t => [t.id, t]));
-    const remoteTaskMap = new Map(remote.tasks.map(t => [t.id, t]));
+    const localTaskMap = new Map(localTasks.map(t => [t.id, t]));
+    const remoteTaskMap = new Map(remoteTasks.map(t => [t.id, t]));
     
     const mergedTasks: Task[] = [];
     const processedIds = new Set<string>();
     
     // 处理本地任务
-    for (const localTask of local.tasks) {
+    for (const localTask of localTasks) {
       processedIds.add(localTask.id);
       const remoteTask = remoteTaskMap.get(localTask.id);
       
@@ -248,14 +280,14 @@ export class ConflictResolutionService {
     }
     
     // 处理远程新增的任务
-    for (const remoteTask of remote.tasks) {
+    for (const remoteTask of remoteTasks) {
       if (!processedIds.has(remoteTask.id)) {
         mergedTasks.push(remoteTask);
       }
     }
     
     // 合并 connections
-    const mergedConnections = this.mergeConnections(local.connections, remote.connections);
+    const mergedConnections = this.mergeConnections(localConnections, remoteConnections);
     
     // 构建合并后的项目
     let mergedProject: Project = {

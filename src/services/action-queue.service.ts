@@ -353,9 +353,25 @@ export class ActionQueueService {
           this.logger.debug(`淘汰了 ${toRemove.length} 个低优先级操作`);
         }
         
-        // 如果仍然超过限制，按 FIFO 淘汰
+        // 如果仍然超过限制，按 FIFO 淘汰（但保护 critical 优先级操作）
         if (newQueue.length > LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE) {
-          newQueue = newQueue.slice(-LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE);
+          // 分离 critical 和非 critical 操作
+          const criticalActions = newQueue.filter(a => a.priority === 'critical');
+          const nonCriticalActions = newQueue.filter(a => a.priority !== 'critical');
+          
+          // 计算需要保留的非 critical 操作数量
+          const maxNonCritical = LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE - criticalActions.length;
+          
+          if (maxNonCritical > 0) {
+            // 按 FIFO 保留最新的非 critical 操作
+            const keptNonCritical = nonCriticalActions.slice(-maxNonCritical);
+            newQueue = [...criticalActions, ...keptNonCritical];
+            this.logger.warn(`队列溢出：保护了 ${criticalActions.length} 个关键操作，淘汰了 ${nonCriticalActions.length - keptNonCritical.length} 个非关键操作`);
+          } else {
+            // 极端情况：critical 操作已超出限制，只保留 critical（永不丢弃关键数据）
+            newQueue = criticalActions;
+            this.logger.error(`队列严重溢出：仅保留 ${criticalActions.length} 个关键操作，用户数据将被保护`);
+          }
         }
       }
       return newQueue;

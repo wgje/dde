@@ -378,12 +378,12 @@ describe('SyncService', () => {
   // ==================== Realtime 订阅管理 ====================
 
   describe('Realtime 订阅管理', () => {
-    it('暂停更新应该记录日志', () => {
+    it('暂停更新应该记录日志并清空累积事件', () => {
       // 实际实现中 pauseRealtimeUpdates 设置内部 pauseRemoteUpdates 变量
-      // 而不是修改 syncState.offlineMode
+      // 并清空累积的远程变更事件，避免恢复后处理过时的数据
       service.pauseRealtimeUpdates();
 
-      expect(mockLoggerCategory.debug).toHaveBeenCalledWith('远程更新已暂停');
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith('远程更新已暂停，累积事件已清空');
     });
 
     it('恢复更新应该记录日志', () => {

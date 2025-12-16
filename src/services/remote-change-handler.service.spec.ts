@@ -105,6 +105,7 @@ const mockLoggerService = {
 
 const mockChangeTracker = {
   exportPendingChanges: vi.fn().mockReturnValue([]),
+  getLockedFields: vi.fn().mockReturnValue([]),
 };
 
 const destroyCallbacks: (() => void)[] = [];
