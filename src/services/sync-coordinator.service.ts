@@ -29,9 +29,6 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
-import { SyncPerceptionService } from './sync-perception.service';
-import { SyncCheckpointService } from './sync-checkpoint.service';
-import { ConflictHistoryService } from './conflict-history.service';
 import { Project, Task, UserPreferences } from '../models';
 import { SYNC_CONFIG } from '../config/constants';
 import { validateProject, sanitizeProject } from '../utils/validation';
@@ -82,9 +79,6 @@ export class SyncCoordinatorService {
   
   // 借鉴思源笔记的同步增强服务
   private syncModeService = inject(SyncModeService);
-  private syncPerceptionService = inject(SyncPerceptionService);
-  private syncCheckpointService = inject(SyncCheckpointService);
-  private conflictHistoryService = inject(ConflictHistoryService);
   
   // ========== 同步状态 ==========
   
@@ -123,26 +117,8 @@ export class SyncCoordinatorService {
   /** 是否为自动同步模式 */
   readonly isAutoSyncMode = computed(() => this.syncModeService.isAutomatic());
   
-  /** 是否启用同步感知 */
+  /** 是否启用同步感知（简化：默认 false） */
   readonly perceptionEnabled = computed(() => this.syncModeService.perceptionEnabled());
-  
-  /** 在线设备数量 */
-  readonly onlineDeviceCount = computed(() => this.syncPerceptionService.onlineDeviceCount());
-  
-  /** 是否有其他设备在线 */
-  readonly hasOtherDevicesOnline = computed(() => this.syncPerceptionService.hasOtherDevicesOnline());
-  
-  /** 在线设备列表 */
-  readonly onlineDevices = computed(() => this.syncPerceptionService.onlineDevices());
-  
-  /** 冲突历史数量 */
-  readonly conflictHistoryCount = computed(() => this.conflictHistoryService.historyCount());
-  
-  /** 未解决的冲突数量（来自历史服务） */
-  readonly unresolvedConflictCount = computed(() => this.conflictHistoryService.unresolvedCount());
-  
-  /** 同步检查点数量 */
-  readonly checkpointCount = computed(() => this.syncCheckpointService.checkpointCount());
 
   // ========== 持久化状态 ==========
   
@@ -207,116 +183,72 @@ export class SyncCoordinatorService {
   }
   
   /**
-   * 设置感知订阅
-   * 当收到其他设备的同步完成通知时，触发下载同步
+   * 设置感知订阅（简化：LWW 模式不需要设备感知）
    */
   private setupPerceptionSubscription(): void {
-    this.syncPerceptionService.onSyncCompleted$.subscribe(async (event) => {
-      this.logger.info('收到其他设备同步完成通知', { 
-        from: event.deviceName, 
-        projectIds: event.projectIds 
-      });
-      
-      // 如果当前没有正在进行的同步，触发下载
-      if (!this.isSyncing() && this.syncModeService.perceptionEnabled()) {
-        await this.executeSyncByDirection('download');
-      }
-    });
+    // LWW 简化：不再监听其他设备的同步完成通知
+    // 原因：个人应用场景中，设备感知增加复杂性但收益有限
   }
   
   /**
-   * 根据方向执行同步
+   * 根据方向执行同步（简化版）
    */
   private async executeSyncByDirection(direction: SyncDirection): Promise<void> {
     const userId = this.authService.currentUserId();
     if (!userId) return;
     
-    const projects = this.projectState.projects();
-    
     switch (direction) {
       case 'upload':
-        // 仅上传：保存所有项目到云端
-        for (const project of projects) {
-          await this.persistActiveProject();
-        }
-        // 广播同步完成
-        await this.syncPerceptionService.broadcastSyncCompleted(
-          projects.map(p => p.id),
-          'upload'
-        );
+        // 仅上传：保存活动项目到云端
+        await this.persistActiveProject();
         break;
         
       case 'download':
-        // 仅下载：从云端加载最新数据
-        await this.syncService.loadProjectsFromCloud(userId);
+        // 仅下载：从云端加载最新数据（静默模式，不影响 UI）
+        await this.syncService.loadProjectsFromCloud(userId, true);
         break;
         
       case 'both':
         // 双向同步：先上传本地变更，再下载远程变更
         await this.persistActiveProject();
-        await this.syncService.loadProjectsFromCloud(userId);
-        // 广播同步完成
-        await this.syncPerceptionService.broadcastSyncCompleted(
-          projects.map(p => p.id),
-          'both'
-        );
+        await this.syncService.loadProjectsFromCloud(userId, true);
         break;
     }
   }
   
   /**
-   * 初始化同步感知
-   * 应在用户登录后调用
+   * 初始化同步感知（简化：空实现）
    */
-  async initSyncPerception(userId: string): Promise<void> {
-    if (this.syncModeService.perceptionEnabled()) {
-      await this.syncPerceptionService.enable(userId);
-      this.logger.info('同步感知已初始化');
-    }
+  async initSyncPerception(_userId: string): Promise<void> {
+    // LWW 简化：不再需要设备感知功能
   }
   
   /**
-   * 停止同步感知
-   * 应在用户登出时调用
+   * 停止同步感知（简化：空实现）
    */
   async stopSyncPerception(): Promise<void> {
-    await this.syncPerceptionService.disable();
+    // LWW 简化：不再需要设备感知功能
   }
   
   /**
-   * 创建同步检查点
-   * 在重要同步操作前后调用
+   * 创建同步检查点（简化：空实现）
    */
-  async createSyncCheckpoint(memo?: string): Promise<void> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return;
-    
-    const projects = this.projectState.projects();
-    await this.syncCheckpointService.createCheckpoint(userId, projects, 'local', memo);
+  async createSyncCheckpoint(_memo?: string): Promise<void> {
+    // LWW 简化：不再需要检查点功能
+    // 原因：LWW 策略下，每次同步都是以时间戳为准，不需要历史快照
   }
   
   /**
-   * 记录冲突到历史
-   * 当发生冲突时调用
+   * 记录冲突到历史（简化：仅记录日志）
    */
   async recordConflictToHistory(
     projectId: string,
-    localProject: Project,
-    remoteProject: Project,
+    _localProject: Project,
+    _remoteProject: Project,
     reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery' | 'status_conflict' | 'field_conflict' | 'merge_conflict'
   ): Promise<void> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return;
-    
-    const conflictedFields = this.conflictHistoryService.compareProjects(localProject, remoteProject);
-    await this.conflictHistoryService.recordConflict(
-      userId,
-      projectId,
-      localProject,
-      remoteProject,
-      reason,
-      conflictedFields
-    );
+    // LWW 简化：仅记录日志，不再保存冲突历史
+    this.logger.info('检测到冲突（LWW 自动处理）', { projectId, reason });
   }
   
   /**
@@ -327,19 +259,10 @@ export class SyncCoordinatorService {
   }
   
   /**
-   * 设置是否启用感知
+   * 设置是否启用感知（简化：空实现）
    */
-  async setPerceptionEnabled(enabled: boolean): Promise<void> {
-    this.syncModeService.setPerceptionEnabled(enabled);
-    
-    const userId = this.authService.currentUserId();
-    if (userId) {
-      if (enabled) {
-        await this.syncPerceptionService.enable(userId);
-      } else {
-        await this.syncPerceptionService.disable();
-      }
-    }
+  async setPerceptionEnabled(_enabled: boolean): Promise<void> {
+    // LWW 简化：不再需要设备感知功能
   }
   
   /**
@@ -364,27 +287,23 @@ export class SyncCoordinatorService {
   }
   
   /**
-   * 获取冲突历史统计
+   * 获取冲突历史统计（简化：返回空统计）
    */
   async getConflictStats(): Promise<{
     total: number;
     resolved: number;
     unresolved: number;
   }> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return { total: 0, resolved: 0, unresolved: 0 };
-    
-    return this.conflictHistoryService.getStats(userId);
+    // LWW 简化：不再保存冲突历史
+    return { total: 0, resolved: 0, unresolved: 0 };
   }
   
   /**
-   * 获取检查点历史
+   * 获取检查点历史（简化：返回空数组）
    */
-  async getCheckpointHistory(limit = 20): Promise<unknown[]> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return [];
-    
-    return this.syncCheckpointService.getCheckpointHistory(userId, limit);
+  async getCheckpointHistory(_limit = 20): Promise<unknown[]> {
+    // LWW 简化：不再保存检查点历史
+    return [];
   }
 
   // ========== 公共方法 ==========
@@ -549,9 +468,11 @@ export class SyncCoordinatorService {
   
   /**
    * 从云端加载项目
+   * @param userId - 用户 ID
+   * @param silent - 是否静默加载（不显示加载状态），用于后台自动同步
    */
-  async loadProjectsFromCloud(userId: string): Promise<Project[]> {
-    return this.syncService.loadProjectsFromCloud(userId);
+  async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
+    return this.syncService.loadProjectsFromCloud(userId, silent);
   }
   
   /**

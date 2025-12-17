@@ -5,8 +5,7 @@ import {
   ViewChild, 
   OnInit, 
   OnDestroy,
-  HostListener,
-  effect 
+  HostListener
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -15,7 +14,6 @@ import { takeUntil } from 'rxjs/operators';
 import { StoreService } from '../services/store.service';
 import { ToastService } from '../services/toast.service';
 import { TabSyncService } from '../services/tab-sync.service';
-import { FlowDiagramService } from '../services/flow-diagram.service';
 import { TextViewComponent } from './text-view/text-view.component';
 import { FlowViewComponent } from './flow-view.component';
 import { ErrorBoundaryComponent } from './error-boundary.component';
@@ -24,6 +22,13 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
  * 项目视图外壳组件
  * 负责管理 text-view 和 flow-view 的切换显示
  * 对应路由: /projects/:projectId, /projects/:projectId/text, /projects/:projectId/flow
+ * 
+ * 【移动端策略】
+ * 使用 @if 条件渲染完全销毁/重建 FlowView 组件。
+ * 好处：
+ * - 释放 GoJS canvas 占用的内存
+ * - 避免僵尸模式下的 canvas 渲染问题
+ * - 简化代码，无需手动 suspend/resume
  */
 @Component({
   selector: 'app-project-shell',
@@ -36,52 +41,6 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
       width: 100%;
       height: 100%;
       min-height: 0;
-    }
-    
-    /* 流程图容器：僵尸模式样式 */
-    .flow-container {
-      /* 在移动端使用绝对定位实现视图切换 */
-      /* 移除 transition，避免过渡期间的白屏 */
-    }
-    
-    /* 移动端：僵尸模式 */
-    @media (max-width: 768px) {
-      .flow-container {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-      }
-      
-      .flow-container.zombie-mode {
-        /* 僵尸模式：使用 visibility 而非 opacity，避免浏览器跳过 canvas 渲染 */
-        visibility: hidden;
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        pointer-events: none;
-        z-index: 0;
-      }
-      
-      .flow-container.active-mode {
-        /* 活跃模式：正常显示 */
-        visibility: visible;
-        position: relative;
-        pointer-events: auto;
-        z-index: 10;
-      }
-    }
-    
-    /* 桌面端：正常流式布局 */
-    @media (min-width: 769px) {
-      .flow-container.zombie-mode,
-      .flow-container.active-mode {
-        /* 桌面端不隐藏，保持正常显示 */
-        visibility: visible;
-        position: relative;
-        pointer-events: auto;
-      }
     }
   `],
   template: `
@@ -227,11 +186,14 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
           </div>
         }
 
-        <!-- Flow Column - 僵尸模式：始终保留在 DOM 中 -->
-           <div class="flow-container flex-1 flex flex-col min-w-[300px] min-h-0" 
+        <!-- Flow Column - 移动端条件渲染，桌面端始终显示 -->
+        @if (!store.isMobile() || store.activeView() === 'flow') {
+           <div class="flex-1 flex flex-col min-w-[300px] min-h-0" 
              style="background-color: var(--theme-bg);"
-             [class.zombie-mode]="store.isMobile() && store.activeView() !== 'flow'"
-             [class.active-mode]="!store.isMobile() || store.activeView() === 'flow'">
+             [class.absolute]="store.isMobile()"
+             [class.inset-0]="store.isMobile()"
+             [class.w-full]="store.isMobile()"
+             [class.z-10]="store.isMobile()">
            <div class="flex items-center justify-between shrink-0 z-10"
                 [ngClass]="{'h-14 mx-4 mt-4': !store.isMobile(), 'mx-2 mt-1.5 mb-0.5': store.isMobile()}">
               <span class="font-medium text-stone-700" [ngClass]="{'text-base font-bold text-stone-800': !store.isMobile(), 'text-xs': store.isMobile()}">
@@ -251,7 +213,8 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
               [containerClass]="'compact'">
               <app-flow-view class="flex-1 min-h-0 overflow-hidden" (goBackToText)="switchToText()"></app-flow-view>
            </app-error-boundary>
-        </div>
+          </div>
+        }
       } @else {
         <!-- 无活动项目时的占位 -->
         <div class="flex-1 flex items-center justify-center text-stone-300 flex-col gap-6 p-4">
@@ -273,7 +236,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private destroy$ = new Subject<void>();
-  private diagram = inject(FlowDiagramService);
   
   @ViewChild(FlowViewComponent) flowView?: FlowViewComponent;
   
@@ -349,31 +311,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
           this.store.activeView.set('flow');
         }
       });
-      
-    // 僵尸模式：监听视图切换，自动暂停/恢复流程图
-    // 关键策略：visibility:hidden 不阻止 canvas 渲染，但需要手动触发重绘
-    effect(() => {
-      const activeView = this.store.activeView();
-      
-      if (activeView === 'flow') {
-        // 切换到流程图视图：立即恢复（在 CSS 显示前）
-        if (this.diagram.isInitialized && this.diagram.isSuspendedMode) {
-          // 恢复 GoJS（resume 内部会强制重绘 canvas）
-          this.diagram.resume();
-          // CSS 通过 [class.active-mode] 自动从 visibility:hidden 切换到 visible
-        }
-      } else if (activeView === 'text') {
-        // 切换到文本视图：延迟暂停（给用户留出返回时间）
-        if (this.diagram.isInitialized && !this.diagram.isSuspendedMode) {
-          // 延迟 500ms 暂停（避免快速切换时频繁暂停/恢复）
-          setTimeout(() => {
-            if (this.store.activeView() === 'text' && !this.isDestroyed) {
-              this.diagram.suspend();
-            }
-          }, 500);
-        }
-      }
-    });
   }
   
   /**
@@ -472,33 +409,17 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   }
   
   // ========== 视图切换 ==========
-
-  /**
-   * 切换到流程图后，等 DOM 可见且布局稳定再刷新 GoJS。
-   * 关键：不要在触摸事件的同一调用栈里触发 GoJS 更新，避免 Android Chrome 下的抖动/跳位。
-   */
-  private scheduleFlowRefreshAfterSwitch(): void {
-    if (this.isDestroyed) return;
-
-    // 只用一帧 rAF：切换本身已经通过 setTimeout(0) 脱离了 touchend 调用栈。
-    // 这样能更快触发 GoJS requestUpdate，减少切换瞬间的“空白帧”。
-    requestAnimationFrame(() => {
-      if (this.isDestroyed) return;
-      this.flowView?.refreshLayout();
-    });
-  }
   
+  /**
+   * 切换到流程图视图
+   * 移动端：使用条件渲染，FlowView 组件会被完全销毁/重建
+   */
   switchToFlow() {
     this.store.activeView.set('flow');
-    // 🔥 关键修复：不调用 router.navigate()，避免销毁组件
-    // 僵尸模式需要组件保持存活，路由切换会销毁组件
-    this.scheduleFlowRefreshAfterSwitch();
   }
   
   switchToText() {
     this.store.activeView.set('text');
-    // 🔥 关键修复：不调用 router.navigate()，避免销毁组件
-    // 僵尸模式需要组件保持存活，路由切换会销毁组件
   }
   
   // ========== 侧边栏控制 ==========

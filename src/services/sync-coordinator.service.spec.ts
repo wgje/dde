@@ -25,9 +25,6 @@ import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SyncModeService } from './sync-mode.service';
-import { SyncPerceptionService } from './sync-perception.service';
-import { SyncCheckpointService } from './sync-checkpoint.service';
-import { ConflictHistoryService } from './conflict-history.service';
 import { Project, Task, SyncState } from '../models';
 import { success, failure, ErrorCodes } from '../utils/result';
 
@@ -173,27 +170,6 @@ const mockSyncModeService = {
   triggerSync: vi.fn().mockResolvedValue(undefined),
 };
 
-const mockSyncPerceptionService = {
-  enabled: signal(false),
-  onlineDeviceCount: vi.fn().mockReturnValue(0),
-  hasOtherDevicesOnline: vi.fn().mockReturnValue(false),
-  onlineDevices: vi.fn().mockReturnValue([]),
-  onSyncCompleted$: new Subject(),
-  enable: vi.fn().mockResolvedValue(undefined),
-  disable: vi.fn(),
-};
-
-const mockSyncCheckpointService = {
-  saveCheckpoint: vi.fn().mockResolvedValue(true),
-  getLatestCheckpoint: vi.fn().mockResolvedValue(null),
-  getCheckpointHistory: vi.fn().mockResolvedValue([]),
-};
-
-const mockConflictHistoryService = {
-  recordConflict: vi.fn().mockResolvedValue(undefined),
-  getConflictHistory: vi.fn().mockResolvedValue([]),
-};
-
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -261,9 +237,6 @@ describe('SyncCoordinatorService', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
-        { provide: SyncPerceptionService, useValue: mockSyncPerceptionService },
-        { provide: SyncCheckpointService, useValue: mockSyncCheckpointService },
-        { provide: ConflictHistoryService, useValue: mockConflictHistoryService },
       ],
     });
 
@@ -706,7 +679,8 @@ describe('SyncCoordinatorService', () => {
       
       const result = await service.loadProjectsFromCloud('user-123');
       
-      expect(mockSyncService.loadProjectsFromCloud).toHaveBeenCalledWith('user-123');
+      // silent 参数默认为 false
+      expect(mockSyncService.loadProjectsFromCloud).toHaveBeenCalledWith('user-123', false);
       expect(result).toEqual(projects);
     });
 
@@ -912,9 +886,6 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
-        { provide: SyncPerceptionService, useValue: mockSyncPerceptionService },
-        { provide: SyncCheckpointService, useValue: mockSyncCheckpointService },
-        { provide: ConflictHistoryService, useValue: mockConflictHistoryService },
       ],
     });
 

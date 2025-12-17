@@ -3,17 +3,18 @@ import { SyncService } from './sync.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
-import { BaseSnapshotService } from './base-snapshot.service';
-import { ThreeWayMergeService, ThreeWayMergeResult } from './three-way-merge.service';
 import { Project, Task } from '../models';
 import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';
 
 /**
- * 冲突解决策略
+ * 冲突解决策略（LWW 简化版）
+ * - local: 使用本地版本（用户刚编辑的内容）
+ * - remote: 使用远程版本（其他设备的内容）
+ * - merge: 智能合并（保留双方新增的任务，冲突时本地优先）
  */
-export type ConflictResolutionStrategy = 'local' | 'remote' | 'merge' | 'three-way-merge';
+export type ConflictResolutionStrategy = 'local' | 'remote' | 'merge';
 
 /**
  * 冲突数据
@@ -31,20 +32,19 @@ export interface MergeResult {
   project: Project;
   issues: string[];
   conflictCount: number;
-  /** 三路合并详情（如果使用了三路合并） */
-  threeWayResult?: ThreeWayMergeResult;
 }
 
 /**
- * 冲突解决服务
- * 从 StoreService 拆分出来，专注于数据冲突解决
+ * 冲突解决服务（LWW 简化版）
  * 
- * 增强：支持基于 Base 快照的三路合并
+ * 采用 Last-Write-Wins 策略：
+ * - 默认使用本地版本（用户刚刚编辑的内容）
+ * - 用户可选择使用远程版本
+ * - 支持简单的智能合并（保留双方新增的任务）
  * 
  * 职责：
  * - 冲突检测
- * - 智能合并算法（含三路合并）
- * - 冲突解决策略执行
+ * - LWW 策略执行
  * - 离线数据重连合并
  */
 @Injectable({
@@ -56,8 +56,6 @@ export class ConflictResolutionService {
   private toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
   private logger = this.loggerService.category('ConflictResolution');
-  private baseSnapshot = inject(BaseSnapshotService);
-  private threeWayMerge = inject(ThreeWayMergeService);
 
   // ========== 冲突状态 ==========
   
@@ -70,11 +68,11 @@ export class ConflictResolutionService {
   // ========== 公共方法 ==========
 
   /**
-   * 解决冲突
+   * 解决冲突（LWW 简化版）
    * @param projectId 项目 ID
-   * @param strategy 解决策略
-   * @param localProject 本地项目（用于 merge）
-   * @param remoteProject 远程项目（用于 merge）
+   * @param strategy 解决策略: local（本地优先）, remote（远程优先）, merge（智能合并）
+   * @param localProject 本地项目
+   * @param remoteProject 远程项目
    * @returns 解决后的项目
    */
   resolveConflict(
@@ -83,18 +81,19 @@ export class ConflictResolutionService {
     localProject: Project,
     remoteProject?: Project
   ): Result<Project, OperationError> {
-    this.logger.info('解决冲突', { projectId, strategy });
+    this.logger.info('[LWW] 解决冲突', { projectId, strategy });
     
     let resolvedProject: Project;
     
     switch (strategy) {
       case 'local':
-        // 使用本地版本，递增版本号
+        // LWW：使用本地版本（用户刚编辑的内容），递增版本号
         resolvedProject = {
           ...localProject,
-          version: (localProject.version ?? 0) + 1
+          version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
         };
         this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+        this.toast.success('已使用本地版本', '您的编辑已保留');
         break;
         
       case 'remote':
@@ -104,41 +103,11 @@ export class ConflictResolutionService {
         }
         resolvedProject = this.validateAndRebalance(remoteProject);
         this.syncService.resolveConflict(projectId, resolvedProject, 'remote');
-        break;
-        
-      case 'three-way-merge':
-        // 三路合并（推荐）- 使用 Base 快照进行精确合并
-        if (!remoteProject) {
-          return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
-        }
-        const threeWayResult = this.smartMergeWithBase(localProject, remoteProject);
-        resolvedProject = threeWayResult.project;
-        
-        if (threeWayResult.threeWayResult) {
-          const stats = threeWayResult.threeWayResult.stats;
-          const autoResolved = threeWayResult.threeWayResult.autoResolvedCount;
-          
-          if (autoResolved > 0) {
-            this.toast.info(
-              '三路合并完成', 
-              `自动解决 ${autoResolved} 个变更，保留了双方的修改`
-            );
-          }
-          
-          if (stats.remoteAddedTasks > 0) {
-            this.toast.info('同步提示', `合并了其他设备新增的 ${stats.remoteAddedTasks} 个任务`);
-          }
-        }
-        
-        if (threeWayResult.conflictCount > 0) {
-          this.toast.warning('合并提示', `${threeWayResult.conflictCount} 个字段存在冲突，已使用本地版本`);
-        }
-        
-        this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+        this.toast.success('已使用远程版本', '已同步其他设备的内容');
         break;
         
       case 'merge':
-        // 智能合并（兼容旧逻辑，无 Base）
+        // 智能合并：保留双方新增的任务，冲突时本地优先
         if (!remoteProject) {
           return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
         }
@@ -154,77 +123,22 @@ export class ConflictResolutionService {
         
         this.syncService.resolveConflict(projectId, resolvedProject, 'local');
         break;
+      
+      default:
+        // 未知策略，默认使用本地
+        this.logger.warn('[LWW] 未知策略，默认使用本地', { strategy });
+        resolvedProject = {
+          ...localProject,
+          version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
+        };
+        this.syncService.resolveConflict(projectId, resolvedProject, 'local');
     }
     
     return success(resolvedProject);
   }
 
   /**
-   * 使用三路合并算法智能合并
-   * 优先使用 Base 快照，如果没有则降级到二路合并
-   */
-  async smartMergeWithBaseAsync(local: Project, remote: Project): Promise<MergeResult> {
-    const base = await this.baseSnapshot.getProjectSnapshot(local.id);
-    
-    if (base) {
-      // 有 Base 快照，使用三路合并
-      const result = this.threeWayMerge.merge(base, local, remote);
-      
-      return {
-        project: this.validateAndRebalance(result.project),
-        issues: result.conflicts
-          .filter(c => c.resolution !== 'kept-local')
-          .map(c => `自动合并: ${c.type} ${c.entityId || ''} ${c.field || ''}`),
-        conflictCount: result.conflicts.filter(c => c.resolution === 'kept-local').length,
-        threeWayResult: result
-      };
-    }
-    
-    // 无 Base，降级到二路合并
-    return this.smartMerge(local, remote);
-  }
-  
-  /**
-   * 同步版本的三路合并
-   * 
-   * ⚠️ 注意：此方法存在已知限制！
-   * - 无法异步获取历史 Base 版本
-   * - 使用 local 作为伪 Base，可能导致合并结果偏向本地
-   * - 建议在可能的情况下使用异步版本 smartMergeWithBaseAsync
-   * 
-   * 此方法仅应在以下情况使用：
-   * 1. 调用方无法使用 async/await
-   * 2. 已确认 Base 版本不重要（例如初始同步）
-   */
-  private smartMergeWithBase(local: Project, remote: Project): MergeResult {
-    // ⚠️ 降级警告：同步方法无法获取历史 Base
-    this.logger.warn('[ThreeWayMerge] ⚠️ 同步降级合并：使用 local 作为伪 Base', { 
-      projectId: local.id,
-      localVersion: local.version,
-      remoteVersion: remote.version,
-      recommendation: '建议使用 smartMergeWithBaseAsync 以获得更准确的合并结果'
-    });
-    
-    // 由于是同步方法，我们使用 local 作为伪 Base 进行降级合并
-    // 这意味着：
-    // - 本地的修改会被视为"从 Base 开始的变更"
-    // - 远程的修改可能被错误地视为"新增"而非"修改"
-    // - 合并结果可能偏向保留本地内容
-    const result = this.threeWayMerge.merge(local, local, remote);
-    
-    // 标记这是一个降级合并的结果
-    const mergeIssues = ['⚠️ 此合并使用降级模式（local 作为伪 Base），结果可能不准确'];
-    
-    return {
-      project: this.validateAndRebalance(result.project),
-      issues: mergeIssues,
-      conflictCount: result.conflicts.filter(c => c.resolution === 'kept-local').length,
-      threeWayResult: result
-    };
-  }
-
-  /**
-   * 智能合并两个项目（二路合并，无 Base）
+   * 智能合并两个项目（LWW 二路合并）
    * 策略：
    * 1. 新增任务：双方都保留
    * 2. 删除任务：双方都执行

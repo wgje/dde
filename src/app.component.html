@@ -430,7 +430,8 @@
       [sessionEmail]="sessionEmail()"
       (close)="closeSettings()"
       (signOut)="signOut()"
-      (themeChange)="updateTheme($event)">
+      (themeChange)="updateTheme($event)"
+      (openDashboard)="openDashboardFromSettings()">
     </app-settings-modal>
   }
   
@@ -508,6 +509,14 @@
     [data]="storageEscapeData()"
     (close)="closeStorageEscapeModal()">
   </app-storage-escape-modal>
+  
+  <!-- 系统仪表盘模态框 -->
+  @if (modal.isOpen('dashboard')) {
+    <app-dashboard-modal
+      (close)="modal.closeByType('dashboard')"
+      (openConflictCenter)="openConflictCenterFromDashboard()">
+    </app-dashboard-modal>
+  }
 
 </div>
   </app-error-boundary>

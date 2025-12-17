@@ -13,6 +13,26 @@ import { ThemeType } from '../../models';
         <h2 class="text-xl font-bold mb-5 text-slate-800">设置</h2>
         
         <div class="space-y-5">
+          <!-- 系统仪表盘入口 -->
+          <div class="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-purple-50 p-4 shadow-sm hover:shadow-md transition-shadow cursor-pointer" (click)="openDashboard.emit()">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                  <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                </div>
+                <div>
+                  <div class="text-sm font-semibold text-indigo-900">系统仪表盘</div>
+                  <div class="text-xs text-indigo-600">监控同步状态与数据冲突</div>
+                </div>
+              </div>
+              <svg class="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </div>
+          </div>
+          
           <!-- 主题设置 -->
           <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-4">
             <div>
@@ -127,6 +147,7 @@ export class SettingsModalComponent {
   @Output() close = new EventEmitter<void>();
   @Output() signOut = new EventEmitter<void>();
   @Output() themeChange = new EventEmitter<ThemeType>();
+  @Output() openDashboard = new EventEmitter<void>();
   
   updateTheme(theme: ThemeType) {
     this.themeChange.emit(theme);

@@ -145,11 +145,12 @@ describe('ConflictResolutionService', () => {
 
         expect(result.ok).toBe(true);
         if (result.ok) {
-          expect(result.value.version).toBe(6); // 本地版本 + 1
+          // LWW: max(local, remote) + 1 = max(5, 7) + 1 = 8
+          expect(result.value.version).toBe(8);
         }
         expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
           'proj-1',
-          expect.objectContaining({ version: 6 }),
+          expect.objectContaining({ version: 8 }),
           'local'
         );
       });

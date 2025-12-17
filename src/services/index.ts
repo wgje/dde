@@ -24,9 +24,6 @@ export { ChangeTrackerService, type ChangeRecord, type ChangeType, type EntityTy
 
 // 新增：借鉴思源笔记的同步增强服务
 export { SyncModeService, type SyncMode, type SyncDirection, type SyncModeConfig } from './sync-mode.service';
-export { SyncPerceptionService, type SyncCompletedEvent, type DeviceHeartbeatEvent, type OnlineDevice } from './sync-perception.service';
-export { SyncCheckpointService, type SyncCheckpoint, type ProjectSnapshot, type CheckpointDiff } from './sync-checkpoint.service';
-export { ConflictHistoryService, type ConflictHistoryRecord, type ConflictReason, type ResolutionStrategy, type ConflictedField, type ConflictStats } from './conflict-history.service';
 export { ConflictStorageService, type ConflictRecord } from './conflict-storage.service';
 
 // 认证服务

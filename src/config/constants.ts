@@ -204,7 +204,7 @@ export const GUARD_CONFIG = {
 
 /**
  * 乐观更新配置
- * 快照管理和 ID 漂移相关配置
+ * 快照管理配置（已移除临时 ID 相关配置 - 使用客户端 UUID）
  */
 export const OPTIMISTIC_CONFIG = {
   /** 快照最大保留时间（毫秒）- 5 分钟 */
@@ -213,10 +213,6 @@ export const OPTIMISTIC_CONFIG = {
   MAX_SNAPSHOTS: 20,
   /** 清理检查间隔（毫秒） */
   CLEANUP_INTERVAL_MS: 60 * 1000,
-  /** ID 映射最大保留时间（毫秒）- 1 小时 */
-  ID_MAPPING_MAX_AGE_MS: 60 * 60 * 1000,
-  /** 临时 ID 前缀 */
-  TEMP_ID_PREFIX: 'temp-',
 } as const;
 
 /**

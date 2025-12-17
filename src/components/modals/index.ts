@@ -11,3 +11,4 @@ export { ErrorRecoveryModalComponent } from './error-recovery-modal.component';
 export type { ErrorRecoveryOption, ErrorRecoveryResult } from './error-recovery-modal.component';
 export { StorageEscapeModalComponent } from './storage-escape-modal.component';
 export type { StorageEscapeData } from './storage-escape-modal.component';
+export { DashboardModalComponent } from './dashboard-modal.component';

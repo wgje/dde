@@ -26,7 +26,8 @@ import {
   MigrationModalComponent,
   ErrorRecoveryModalComponent,
   StorageEscapeModalComponent,
-  StorageEscapeData
+  StorageEscapeData,
+  DashboardModalComponent
 } from './components/modals';
 import { ErrorBoundaryComponent } from './components/error-boundary.component';
 import { FormsModule } from '@angular/forms';
@@ -78,7 +79,8 @@ import { UI_CONFIG, AUTH_CONFIG } from './config/constants';
     TrashModalComponent,
     MigrationModalComponent,
     ErrorRecoveryModalComponent,
-    StorageEscapeModalComponent
+    StorageEscapeModalComponent,
+    DashboardModalComponent
   ],
   templateUrl: './app.component.html',
 })
@@ -1107,6 +1109,24 @@ async signOut() {
   closeSettings() {
     this.modal.closeByType('settings');
     this.isReloginMode.set(false);
+  }
+  
+  /**
+   * 从设置页打开仪表盘
+   */
+  openDashboardFromSettings() {
+    this.modal.closeByType('settings'); // 先关闭设置
+    this.modal.show('dashboard');       // 再打开仪表盘
+  }
+  
+  /**
+   * 从仪表盘打开冲突解决中心
+   */
+  openConflictCenterFromDashboard() {
+    this.modal.closeByType('dashboard'); // 先关闭仪表盘
+    // 注意：冲突数据需要在外部准备，这里只是示例打开方式
+    // 实际应该检查是否有冲突，然后展示冲突列表让用户选择
+    this.toast.info('冲突解决中心', '请从项目列表中选择有冲突的项目进行处理');
   }
 
   updateLayoutDirection(e: Event) {

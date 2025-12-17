@@ -15,7 +15,8 @@ export type ModalType =
   | 'trash'
   | 'migration'
   | 'connectionEditor'
-  | 'linkTypeDialog';
+  | 'linkTypeDialog'
+  | 'dashboard';
 
 /**
  * 模态框状态

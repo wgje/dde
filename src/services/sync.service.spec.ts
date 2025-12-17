@@ -19,8 +19,6 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { ConflictStorageService } from './conflict-storage.service';
-import { BaseSnapshotService } from './base-snapshot.service';
-import { ThreeWayMergeService } from './three-way-merge.service';
 import { Project, Task } from '../models';
 
 // ========== 模拟 Supabase Client ==========
@@ -108,34 +106,6 @@ const mockConflictStorage = {
   hasConflicts: vi.fn().mockResolvedValue(false),
 };
 
-// 模拟 BaseSnapshotService
-const mockBaseSnapshot = {
-  getProjectSnapshot: vi.fn().mockResolvedValue(null),
-  saveProjectSnapshot: vi.fn().mockResolvedValue(undefined),
-};
-
-// 模拟 ThreeWayMergeService
-const mockThreeWayMerge = {
-  needsMerge: vi.fn().mockReturnValue(false),
-  merge: vi.fn().mockReturnValue({
-    project: null,
-    hasRealConflicts: false,
-    conflicts: [],
-    autoResolvedCount: 0,
-    stats: {
-      localAddedTasks: 0,
-      remoteAddedTasks: 0,
-      localDeletedTasks: 0,
-      remoteDeletedTasks: 0,
-      bothModifiedTasks: 0,
-      localOnlyModifiedTasks: 0,
-      remoteOnlyModifiedTasks: 0,
-      fieldAutoMerged: 0,
-      fieldConflicts: 0,
-    },
-  }),
-};
-
 // 模拟 LoggerService
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -206,8 +176,6 @@ describe('SyncService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: ConflictStorageService, useValue: mockConflictStorage },
-        { provide: BaseSnapshotService, useValue: mockBaseSnapshot },
-        { provide: ThreeWayMergeService, useValue: mockThreeWayMerge },
       ],
     });
 

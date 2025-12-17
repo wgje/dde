@@ -8,8 +8,6 @@ import { ChangeTrackerService, ProjectChangeSummary } from './change-tracker.ser
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { ConflictStorageService, ConflictRecord } from './conflict-storage.service';
-import { BaseSnapshotService } from './base-snapshot.service';
-import { ThreeWayMergeService, ThreeWayMergeResult } from './three-way-merge.service';
 import { Project, ProjectRow, SyncState, UserPreferences, ThemeType, Task, Connection } from '../models';
 import { SYNC_CONFIG, CACHE_CONFIG } from '../config/constants';
 import { nowISO } from '../utils/date';
@@ -71,8 +69,6 @@ export class SyncService {
   private logger = this.loggerService.category('Sync');
   private toast = inject(ToastService);
   private conflictStorage = inject(ConflictStorageService);
-  private baseSnapshot = inject(BaseSnapshotService);
-  private threeWayMerge = inject(ThreeWayMergeService);
   
   /** 冲突数据持久化 key */
   private readonly CONFLICT_STORAGE_KEY = 'nanoflow.pending-conflicts';
@@ -1042,13 +1038,19 @@ export class SyncService {
    * 从云端加载项目列表
    * 从独立的 tasks 和 connections 表加载数据
    * 添加超时保护，防止网络问题导致无限等待
+   * 
+   * @param userId - 用户 ID
+   * @param silent - 是否静默加载（不显示加载状态），用于后台自动同步
    */
-  async loadProjectsFromCloud(userId: string): Promise<Project[]> {
+  async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
     if (!userId || !this.supabase.isConfigured) {
       return [];
     }
     
-    this.isLoadingRemote.set(true);
+    // 只有非静默模式才显示加载状态
+    if (!silent) {
+      this.isLoadingRemote.set(true);
+    }
     
     // 超时保护
     const timeoutMs = SYNC_CONFIG.CLOUD_LOAD_TIMEOUT;
@@ -1075,7 +1077,10 @@ export class SyncService {
       return [];
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
-      this.isLoadingRemote.set(false);
+      // 只有非静默模式才重置加载状态
+      if (!silent) {
+        this.isLoadingRemote.set(false);
+      }
     }
   }
   
@@ -1116,14 +1121,8 @@ export class SyncService {
         return this.mapRowToProject(projectRow, tasks, connections);
       }));
       
-      // 【三路合并】Pull 成功后，保存 Base 快照
-      // 这些是当前的"共同祖先"，用于后续的三路合并
-      await Promise.all(projects.map(project => 
-        this.baseSnapshot.saveProjectSnapshot(project)
-      ));
-      this.logger.info('[ThreeWayMerge] Base 快照已更新', { 
-        projectCount: projects.length 
-      });
+      // LWW 策略：Pull 成功后直接返回，无需 Base 快照
+      this.logger.debug('[Sync] 项目加载完成', { projectCount: projects.length });
       
       this.syncState.update(s => ({
         ...s,
@@ -1400,13 +1399,8 @@ export class SyncService {
       // 清除进度
       this.syncProgress.set({ current: 0, total: 0, phase: 'idle', message: '' });
       
-      // 【三路合并】Push 成功后，更新 Base 快照
-      const projectWithNewVersion = { ...project, version: newVersion };
-      await this.baseSnapshot.saveProjectSnapshot(projectWithNewVersion);
-      this.logger.debug('[ThreeWayMerge] Base 快照已更新', { 
-        projectId: project.id, 
-        version: newVersion 
-      });
+      // LWW 策略：Push 成功后直接返回，无需 Base 快照
+      this.logger.debug('[Sync] 项目保存成功', { projectId: project.id, newVersion });
       
       this.syncState.update(s => ({
         ...s,
@@ -1593,168 +1587,51 @@ export class SyncService {
     }));
   }
 
-  // ========== 三路合并自动变基 ==========
+  // ========== LWW (Last-Write-Wins) 自动重试 ==========
 
   /**
-   * 尝试自动变基（Auto-Rebase）
+   * 尝试自动重试保存（LWW 策略）
    * 
-   * 当检测到版本冲突时，自动执行三路合并尝试解决冲突。
-   * 
-   * 流程：
-   * 1. 获取 Base 快照（上次成功同步时的状态）
-   * 2. 获取 Remote 数据（服务器当前最新状态）
-   * 3. 执行三路合并
-   * 4. 如果可以自动合并，重新尝试保存
-   * 5. 如果存在真正的冲突，返回 null 让调用方处理
+   * 当检测到版本冲突时，获取远程版本号并重新尝试保存。
+   * LWW 策略：本地数据优先，直接覆盖远程（因为这是用户刚刚编辑的内容）。
    * 
    * @param localProject 本地项目数据
    * @param userId 用户 ID
    * @param localVersion 本地版本号
-   * @returns 成功则返回保存结果，无法自动合并则返回 null
+   * @returns 成功则返回保存结果，无法重试则返回 null
    */
   private async tryAutoRebase(
     localProject: Project, 
     userId: string, 
     localVersion: number
   ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number } | null> {
-    this.logger.info('[ThreeWayMerge] 开始自动变基流程', { 
+    this.logger.info('[LWW] 版本冲突，尝试自动重试', { 
       projectId: localProject.id, 
       localVersion 
     });
     
     try {
-      // 1. 获取 Base 快照
-      const baseProject = await this.baseSnapshot.getProjectSnapshot(localProject.id);
-      
-      if (!baseProject) {
-        // 没有 Base 快照，无法进行三路合并
-        // 可能是新设备首次同步或数据清理后
-        this.logger.warn('[ThreeWayMerge] 无 Base 快照，无法自动变基', { 
-          projectId: localProject.id 
-        });
-        return null;
-      }
-      
-      // 2. 获取 Remote 数据
+      // 1. 获取 Remote 数据以获取最新版本号
       const remoteProject = await this.loadSingleProject(localProject.id, userId);
       
       if (!remoteProject) {
-        this.logger.warn('[ThreeWayMerge] 无法获取远程数据', { 
-          projectId: localProject.id 
-        });
+        this.logger.warn('[LWW] 无法获取远程数据', { projectId: localProject.id });
         return null;
       }
       
       const remoteVersion = remoteProject.version ?? 0;
       
-      // 3. 检查是否需要合并
-      if (!this.threeWayMerge.needsMerge(baseProject, localProject, remoteProject)) {
-        this.logger.info('[ThreeWayMerge] 无需合并', { projectId: localProject.id });
-        // 直接用远程版本号重试
-        return this.retryWithVersion(localProject, userId, remoteVersion);
-      }
-      
-      // 4. 执行三路合并
-      const mergeResult = this.threeWayMerge.merge(baseProject, localProject, remoteProject);
-      
-      this.logger.info('[ThreeWayMerge] 合并结果', {
-        projectId: localProject.id,
-        hasRealConflicts: mergeResult.hasRealConflicts,
-        autoResolvedCount: mergeResult.autoResolvedCount,
-        stats: mergeResult.stats
-      });
-      
-      // 5. 判断是否可以自动合并
-      if (mergeResult.hasRealConflicts) {
-        // 存在真正的冲突（双方都修改了同一字段且值不同）
-        // 但我们仍然可以自动解决：优先保留本地
-        this.logger.info('[ThreeWayMerge] 存在冲突，使用本地优先策略自动解决', {
-          projectId: localProject.id,
-          conflictCount: mergeResult.conflicts.filter(c => c.resolution === 'kept-local').length
-        });
-        
-        // 显示一个低调的提示，告知用户发生了自动合并
-        if (mergeResult.stats.remoteAddedTasks > 0 || 
-            mergeResult.stats.remoteOnlyModifiedTasks > 0) {
-          this.toast.info(
-            '数据已自动合并',
-            `合并了其他设备的 ${mergeResult.stats.remoteAddedTasks + mergeResult.stats.remoteOnlyModifiedTasks} 个变更`
-          );
-        }
-      }
-      
-      // 6. 使用合并后的项目数据重新保存
-      const mergedProject = mergeResult.project;
-      const newVersion = remoteVersion + 1;
-      
-      // 尝试保存合并后的数据
-      for (let retry = 0; retry < SyncService.AUTO_REBASE_MAX_RETRIES; retry++) {
-        const currentVersion = remoteVersion + retry;
-        const targetVersion = currentVersion + 1;
-        
-        const { data: updateRows, error: updateError } = await this.supabase.client()
-          .from('projects')
-          .update({
-            title: mergedProject.name,
-            description: mergedProject.description,
-            version: targetVersion
-          })
-          .eq('id', mergedProject.id)
-          .eq('version', currentVersion)
-          .select('id');
-        
-        const didUpdate = !updateError && Array.isArray(updateRows) && updateRows.length > 0;
-        if (didUpdate) {
-          // 保存任务和连接
-          const tasksResult = await this.taskRepo.saveTasks(mergedProject.id, mergedProject.tasks);
-          if (tasksResult.success) {
-            const connectionsResult = await this.taskRepo.syncConnections(
-              mergedProject.id, 
-              mergedProject.connections
-            );
-            if (connectionsResult.success) {
-              // 更新 Base 快照
-              const finalProject = { ...mergedProject, version: targetVersion };
-              await this.baseSnapshot.saveProjectSnapshot(finalProject);
-              
-              this.logger.info('[ThreeWayMerge] 自动变基成功', {
-                projectId: mergedProject.id,
-                newVersion: targetVersion,
-                autoResolvedCount: mergeResult.autoResolvedCount
-              });
-              
-              return { 
-                success: true, 
-                newVersion: targetVersion
-              };
-            }
-          }
-        }
-        
-        // 重试失败，等待后继续
-        if (retry < SyncService.AUTO_REBASE_MAX_RETRIES - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100 * (retry + 1)));
-        }
-      }
-      
-      // 所有重试都失败
-      this.logger.warn('[ThreeWayMerge] 自动变基重试失败', {
-        projectId: localProject.id,
-        retries: SyncService.AUTO_REBASE_MAX_RETRIES
-      });
-      
-      // 数据已保存到本地，等待下次同步
-      this.saveOfflineSnapshot([mergedProject]);
-      return { success: true }; // 返回成功，避免触发冲突弹窗
+      // 2. LWW 策略：直接用本地数据覆盖远程（基于远程版本号）
+      return this.retryWithVersion(localProject, userId, remoteVersion);
       
     } catch (e) {
-      this.logger.error('[ThreeWayMerge] 自动变基异常', e);
+      this.logger.error('[LWW] 自动重试异常', e);
       return null;
     }
   }
   
   /**
-   * 使用指定版本号重试保存
+   * 使用指定版本号重试保存（LWW 核心逻辑）
    */
   private async retryWithVersion(
     project: Project,
@@ -1780,31 +1657,13 @@ export class SyncService {
       if (tasksResult.success) {
         const connectionsResult = await this.taskRepo.syncConnections(project.id, project.connections);
         if (connectionsResult.success) {
-          // 更新 Base 快照
-          const updatedProject = { ...project, version: newVersion };
-          await this.baseSnapshot.saveProjectSnapshot(updatedProject);
+          this.logger.info('[LWW] 重试保存成功', { projectId: project.id, newVersion });
           return { success: true, newVersion };
         }
       }
     }
     
     return null;
-  }
-  
-  /**
-   * 获取 BaseSnapshotService 实例
-   * 供外部服务使用
-   */
-  getBaseSnapshotService(): BaseSnapshotService {
-    return this.baseSnapshot;
-  }
-  
-  /**
-   * 获取 ThreeWayMergeService 实例
-   * 供外部服务使用
-   */
-  getThreeWayMergeService(): ThreeWayMergeService {
-    return this.threeWayMerge;
   }
 
   // ========== 增量同步 ==========
