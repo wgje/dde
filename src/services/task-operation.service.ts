@@ -916,6 +916,196 @@ export class TaskOperationService {
     });
   }
   
+  // ========== 子树迁移操作 ==========
+  
+  /**
+   * 将整个子任务树迁移到新的父任务下
+   * 
+   * 功能说明：
+   * - 将指定任务及其所有后代迁移到新父任务下
+   * - 自动计算 stage 偏移量并批量更新所有后代的 stage
+   * - 为迁移的根任务计算新的 rank（放在新父任务的子节点末尾）
+   * - 更新 connections 以反映新的父子关系
+   * - 触发 rebalance 重算所有 displayId
+   * 
+   * @param taskId 要迁移的子树根节点 ID
+   * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
+   * @returns Result 包含成功或错误信息
+   */
+  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    const activeP = this.getActiveProject();
+    if (!activeP) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
+    }
+    
+    const targetTask = activeP.tasks.find(t => t.id === taskId);
+    if (!targetTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '要迁移的任务不存在');
+    }
+    
+    const oldParentId = targetTask.parentId;
+    
+    // 如果新旧父节点相同，无需操作
+    if (oldParentId === newParentId) {
+      return success(undefined);
+    }
+    
+    // 检查循环依赖：新父节点不能是目标任务的后代
+    if (newParentId && this.layoutService.detectCycle(taskId, newParentId, activeP.tasks)) {
+      return failure(ErrorCodes.LAYOUT_CYCLE_DETECTED, '无法迁移：目标父任务是当前任务的后代，会产生循环依赖');
+    }
+    
+    let operationResult: Result<void, OperationError> = success(undefined);
+    
+    this.recordAndUpdate(p => {
+      const tasks = p.tasks.map(t => ({ ...t }));
+      const target = tasks.find(t => t.id === taskId);
+      if (!target) {
+        operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
+        return p;
+      }
+      
+      const newParent = newParentId ? tasks.find(t => t.id === newParentId) : null;
+      
+      // 计算 stage 偏移量
+      const oldStage = target.stage ?? 1;
+      let newStage: number;
+      
+      if (newParentId === null) {
+        // 迁移到根节点（stage 1）
+        newStage = 1;
+      } else if (newParent) {
+        // 新父节点的下一级
+        newStage = (newParent.stage ?? 0) + 1;
+      } else {
+        operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '新父任务不存在');
+        return p;
+      }
+      
+      const stageOffset = newStage - oldStage;
+      
+      // 收集子树所有任务 ID
+      const subtreeIds = this.collectSubtreeIds(taskId, tasks);
+      
+      // 更新子树中所有任务的 stage
+      const now = new Date().toISOString();
+      subtreeIds.forEach(id => {
+        const t = tasks.find(task => task.id === id);
+        if (t && t.stage !== null) {
+          t.stage = t.stage + stageOffset;
+          t.updatedAt = now;
+        }
+      });
+      
+      // 更新目标任务的 parentId
+      target.parentId = newParentId;
+      target.updatedAt = now;
+      
+      // 计算新的 rank：放在新父任务的子节点末尾
+      const siblings = tasks.filter(t => 
+        t.parentId === newParentId && 
+        t.id !== taskId && 
+        !t.deletedAt
+      );
+      
+      if (newParentId === null) {
+        // 根节点：找 stage 1 的根任务
+        const stage1Roots = tasks.filter(t => 
+          t.stage === 1 && 
+          !t.parentId && 
+          t.id !== taskId && 
+          !t.deletedAt
+        ).sort((a, b) => a.rank - b.rank);
+        
+        if (stage1Roots.length > 0) {
+          const lastRoot = stage1Roots[stage1Roots.length - 1];
+          target.rank = lastRoot.rank + LAYOUT_CONFIG.RANK_STEP;
+        } else {
+          target.rank = LAYOUT_CONFIG.RANK_ROOT_BASE;
+        }
+      } else if (newParent) {
+        // 有父节点：rank 必须大于父节点，且放在兄弟节点末尾
+        const siblingsSorted = siblings.sort((a, b) => a.rank - b.rank);
+        const parentRank = newParent.rank;
+        
+        if (siblingsSorted.length > 0) {
+          const lastSibling = siblingsSorted[siblingsSorted.length - 1];
+          target.rank = Math.max(parentRank + LAYOUT_CONFIG.RANK_STEP, lastSibling.rank + LAYOUT_CONFIG.RANK_STEP);
+        } else {
+          target.rank = parentRank + LAYOUT_CONFIG.RANK_STEP;
+        }
+      }
+      
+      // 确保子树中所有任务的 rank 约束正确（子节点 rank > 父节点 rank）
+      this.fixSubtreeRanks(taskId, tasks);
+      
+      // 更新 connections：移除旧的父子连接，添加新的父子连接
+      let connections = [...p.connections];
+      
+      // 移除旧的父子连接（如果存在）
+      if (oldParentId) {
+        connections = connections.filter(c => 
+          !(c.source === oldParentId && c.target === taskId)
+        );
+      }
+      
+      // 添加新的父子连接（如果新父节点存在）
+      if (newParentId) {
+        const existingConn = connections.find(c => 
+          c.source === newParentId && c.target === taskId
+        );
+        if (!existingConn) {
+          connections.push({
+            id: crypto.randomUUID(),
+            source: newParentId,
+            target: taskId
+          });
+        }
+      }
+      
+      return this.layoutService.rebalance({ ...p, tasks, connections });
+    });
+    
+    return operationResult;
+  }
+  
+  /**
+   * 修复子树中所有任务的 rank 约束
+   * 确保子节点的 rank 始终大于父节点的 rank
+   */
+  private fixSubtreeRanks(rootId: string, tasks: Task[]): void {
+    const stack: { taskId: string; parentRank: number }[] = [];
+    const rootTask = tasks.find(t => t.id === rootId);
+    if (!rootTask) return;
+    
+    // 获取根任务的直接子节点
+    const rootChildren = tasks.filter(t => t.parentId === rootId && !t.deletedAt);
+    rootChildren.forEach(child => {
+      stack.push({ taskId: child.id, parentRank: rootTask.rank });
+    });
+    
+    let iterations = 0;
+    const maxIterations = tasks.length * 10;
+    
+    while (stack.length > 0 && iterations < maxIterations) {
+      iterations++;
+      const { taskId, parentRank } = stack.pop()!;
+      const task = tasks.find(t => t.id === taskId);
+      if (!task) continue;
+      
+      // 确保子节点 rank > 父节点 rank
+      if (task.rank <= parentRank) {
+        task.rank = parentRank + LAYOUT_CONFIG.RANK_STEP;
+      }
+      
+      // 将子节点加入栈中继续处理
+      const children = tasks.filter(t => t.parentId === taskId && !t.deletedAt);
+      children.forEach(child => {
+        stack.push({ taskId: child.id, parentRank: task.rank });
+      });
+    }
+  }
+  
   // ========== 连接操作 ==========
   
   /**

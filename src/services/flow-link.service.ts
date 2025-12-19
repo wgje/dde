@@ -263,6 +263,150 @@ export class FlowLinkService {
     return 'show-dialog';
   }
   
+  // ========== 子树迁移处理 ==========
+  
+  /**
+   * 处理父子连接的重连（子树迁移）
+   * 当用户拖动父子连接线的终点到新的父节点时调用
+   * 
+   * @param childTaskId 被迁移的子任务 ID（连接线的目标端）
+   * @param oldParentId 原父任务 ID（连接线的原始源端）
+   * @param newParentId 新父任务 ID（连接线的新源端）
+   * @returns 操作结果：'success' | 'cancelled' | 'error'
+   */
+  handleParentChildRelink(
+    childTaskId: string,
+    oldParentId: string,
+    newParentId: string
+  ): 'success' | 'cancelled' | 'error' {
+    // 防止自连接
+    if (childTaskId === newParentId) {
+      this.toast.warning('无法连接', '节点不能连接到自身');
+      return 'error';
+    }
+    
+    // 如果新旧父节点相同，无需操作
+    if (oldParentId === newParentId) {
+      this.logger.debug('父节点未变化，跳过迁移');
+      return 'cancelled';
+    }
+    
+    const tasks = this.store.tasks();
+    const childTask = tasks.find(t => t.id === childTaskId);
+    const newParentTask = tasks.find(t => t.id === newParentId);
+    
+    if (!childTask) {
+      this.toast.error('迁移失败', '找不到要迁移的任务');
+      return 'error';
+    }
+    
+    if (!newParentTask) {
+      this.toast.error('迁移失败', '找不到目标父任务');
+      return 'error';
+    }
+    
+    // 收集子树信息用于提示
+    const subtreeIds = this.collectSubtreeIds(childTaskId, tasks);
+    const subtreeCount = subtreeIds.size;
+    
+    this.logger.info('执行子树迁移', {
+      childTaskId,
+      childTitle: childTask.title,
+      oldParentId,
+      newParentId,
+      newParentTitle: newParentTask.title,
+      subtreeCount
+    });
+    
+    // 执行迁移
+    const result = this.store.moveSubtreeToNewParent(childTaskId, newParentId);
+    
+    if (result.ok) {
+      if (subtreeCount > 1) {
+        this.toast.success(
+          '子树迁移成功', 
+          `已将 "${childTask.title}" 及其 ${subtreeCount - 1} 个子任务移动到 "${newParentTask.title}" 下`
+        );
+      } else {
+        this.toast.success(
+          '任务迁移成功', 
+          `已将 "${childTask.title}" 移动到 "${newParentTask.title}" 下`
+        );
+      }
+      return 'success';
+    } else {
+      const errorMessage = result.error?.message || '未知错误';
+      this.toast.error('迁移失败', errorMessage);
+      return 'error';
+    }
+  }
+  
+  /**
+   * 处理将子树迁移到根节点（stage 1）
+   * @param childTaskId 被迁移的子任务 ID
+   * @param oldParentId 原父任务 ID
+   */
+  handleMoveSubtreeToRoot(childTaskId: string, oldParentId: string): 'success' | 'cancelled' | 'error' {
+    const tasks = this.store.tasks();
+    const childTask = tasks.find(t => t.id === childTaskId);
+    
+    if (!childTask) {
+      this.toast.error('迁移失败', '找不到要迁移的任务');
+      return 'error';
+    }
+    
+    // 收集子树信息
+    const subtreeIds = this.collectSubtreeIds(childTaskId, tasks);
+    const subtreeCount = subtreeIds.size;
+    
+    this.logger.info('执行子树迁移到根节点', {
+      childTaskId,
+      childTitle: childTask.title,
+      oldParentId,
+      subtreeCount
+    });
+    
+    // 执行迁移（newParentId = null 表示迁移到根节点）
+    const result = this.store.moveSubtreeToNewParent(childTaskId, null);
+    
+    if (result.ok) {
+      if (subtreeCount > 1) {
+        this.toast.success(
+          '子树迁移成功', 
+          `已将 "${childTask.title}" 及其 ${subtreeCount - 1} 个子任务提升为根任务`
+        );
+      } else {
+        this.toast.success(
+          '任务迁移成功', 
+          `已将 "${childTask.title}" 提升为根任务`
+        );
+      }
+      return 'success';
+    } else {
+      const errorMessage = result.error?.message || '未知错误';
+      this.toast.error('迁移失败', errorMessage);
+      return 'error';
+    }
+  }
+  
+  /**
+   * 收集指定任务及其所有后代的 ID
+   */
+  private collectSubtreeIds(taskId: string, tasks: Task[]): Set<string> {
+    const result = new Set<string>();
+    const stack = [taskId];
+    
+    while (stack.length > 0) {
+      const currentId = stack.pop()!;
+      result.add(currentId);
+      tasks.filter(t => t.parentId === currentId && !t.deletedAt).forEach(child => {
+        stack.push(child.id);
+      });
+    }
+    
+    return result;
+  }
+  
   // ========== 联系块编辑器方法 ==========
   
   /**

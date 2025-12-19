@@ -615,6 +615,22 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       }
     });
     
+    // 注册连接线重连回调（子树迁移）
+    this.diagram.onLinkRelink((linkType, childTaskId, oldParentId, newParentId, _x, _y, gojsLink) => {
+      console.log('[FlowView] onLinkRelink 回调触发', { linkType, childTaskId, oldParentId, newParentId });
+      
+      // 移除 GoJS 中的临时连接线（实际数据由 store 管理）
+      this.diagram.removeLink(gojsLink);
+      
+      if (linkType === 'parent-child' && oldParentId && newParentId && oldParentId && newParentId && oldParentId && newParentId) {
+        // 处理父子连接重连：将子任务树迁移到新父任务下
+        const result = this.link.handleParentChildRelink(childTaskId, oldParentId, newParentId);
+        if (result === 'success') {
+          this.refreshDiagram();
+        }
+      }
+    });
+    
     this.diagram.onSelectionMoved((movedNodes) => {
       movedNodes.forEach(node => {
         if (node.isUnassigned) {

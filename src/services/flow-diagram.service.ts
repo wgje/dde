@@ -65,6 +65,20 @@ export interface SelectionMovedCallback {
 }
 
 /**
+ * 连接线重连回调（子树迁移）
+ * @param linkType 连接类型 'parent-child' | 'cross-tree'
+ * @param childTaskId 子任务ID（被移动的任务）
+ * @param oldParentId 旧父任务ID（原连接起点）
+ * @param newParentId 新父任务ID（新连接起点）
+ * @param x 操作位置 X
+ * @param y 操作位置 Y
+ * @param gojsLink GoJS Link 对象
+ */
+export interface LinkRelinkCallback {
+  (linkType: 'parent-child' | 'cross-tree', childTaskId: string, oldParentId: string | null, newParentId: string | null, x: number, y: number, gojsLink: any): void;
+}
+
+/**
  * FlowDiagramService - GoJS 图表核心服务
  * 
  * 职责：
@@ -142,6 +156,7 @@ export class FlowDiagramService {
   private linkClickCallback: LinkClickCallback | null = null;
   private linkDeleteCallback: LinkDeleteCallback | null = null;
   private linkGestureCallback: LinkGestureCallback | null = null;
+  private linkRelinkCallback: LinkRelinkCallback | null = null;
   private selectionMovedCallback: SelectionMovedCallback | null = null;
   private backgroundClickCallback: (() => void) | null = null;
   
@@ -181,6 +196,11 @@ export class FlowDiagramService {
   /** 注册连接线删除回调（右键菜单） */
   onLinkDelete(callback: LinkDeleteCallback): void {
     this.linkDeleteCallback = callback;
+  }
+  
+  /** 注册连接线重连回调（子树迁移） */
+  onLinkRelink(callback: LinkRelinkCallback): void {
+    this.linkRelinkCallback = callback;
   }
   
   /** 注册连接手势回调（绘制/重连连接线） */
@@ -2248,21 +2268,6 @@ export class FlowDiagramService {
       $(go.Shape, { toArrow: "Standard", stroke: null, fill: "#78716C" })
     );
     
-    // ========== 配置 RelinkingTool（重连工具）==========
-    // 确保重新连接时也使用相同的动态边界滑动逻辑
-    (relinkingTool as any).fromHandleArchetype = $(go.Shape, "Diamond", {
-      desiredSize: new go.Size(10, 10),
-      fill: "#4A8C8C",
-      stroke: "#44403C",
-      cursor: "crosshair"
-    });
-    (relinkingTool as any).toHandleArchetype = $(go.Shape, "Diamond", {
-      desiredSize: new go.Size(10, 10),
-      fill: "#4A8C8C",
-      stroke: "#44403C",
-      cursor: "crosshair"
-    });
-    
     // 重连时使用相同的临时线配置（带边界滑动）
     relinkingTool.temporaryLink = $(go.Link,
       { 
@@ -2274,6 +2279,29 @@ export class FlowDiagramService {
       $(go.Shape, { toArrow: "Standard", stroke: null, fill: "#78716C" })
     );
     
+    // ========== 关键配置：RelinkingTool 的手柄原型 ==========
+    // 这些配置让 GoJS 创建独立的工具手柄 Adornment（类别为 "RelinkFrom"/"RelinkTo"）
+    // RelinkingTool.canStart() 会通过 findToolHandleAt() 查找这些手柄
+    // 当用户拖拽手柄时，连接线会"脱离"原端口，临时连接线跟随鼠标移动
+    console.log('[FlowDiagram] 配置 RelinkingTool 手柄原型...');
+    relinkingTool.fromHandleArchetype = $(go.Shape, "Diamond", {
+      desiredSize: new go.Size(14, 14),
+      fill: "#8b5cf6",      // 紫色填充
+      stroke: "#6d28d9",    // 深紫边框
+      strokeWidth: 2,
+      cursor: "pointer",
+      segmentIndex: 0       // 定位到连线起点
+    });
+    
+    relinkingTool.toHandleArchetype = $(go.Shape, "Diamond", {
+      desiredSize: new go.Size(14, 14),
+      fill: "#8b5cf6",      // 紫色填充
+      stroke: "#6d28d9",    // 深紫边框
+      strokeWidth: 2,
+      cursor: "pointer",
+      segmentIndex: -1      // 定位到连线终点
+    });
+    
     // ========== 最终连接线模板 ==========
     // 创建连接后的永久连接线，同样使用 getLinkPoint 保持边界滑动效果
     this.diagram.linkTemplate = $(go.Link,
@@ -2284,6 +2312,8 @@ export class FlowDiagramService {
         toShortLength: 4,
         fromEndSegmentLength: GOJS_CONFIG.LINK_END_SEGMENT_LENGTH,
         toEndSegmentLength: GOJS_CONFIG.LINK_END_SEGMENT_LENGTH,
+        selectable: true,        // 确保连接线可选择（显示重连手柄需要先选中）
+        selectionAdorned: true,  // 选中时显示装饰器（重连手柄）
         relinkableFrom: true,
         relinkableTo: true,
         reshapable: true,
@@ -2348,6 +2378,32 @@ export class FlowDiagramService {
       ...this.configService.getLinkMainShapesConfig($, isMobile),
       this.createConnectionLabelPanel($, self)
     );
+    
+    // ========== 调试：监听选择变化，验证 RelinkingTool 手柄是否显示 ==========
+    this.diagram.addDiagramListener("ChangedSelection", (e: any) => {
+      const selection = this.diagram?.selection;
+      if (!selection) return;
+      
+      selection.each((part: any) => {
+        if (part instanceof go.Link) {
+          console.log('[FlowDiagram] Link 被选中:', {
+            from: part.data?.from,
+            to: part.data?.to,
+            relinkableFrom: part.relinkableFrom,
+            relinkableTo: part.relinkableTo,
+            selectable: part.selectable,
+            selectionAdorned: part.selectionAdorned
+          });
+          
+          // 检查是否有 RelinkFrom/RelinkTo Adornment
+          const adornments: string[] = [];
+          part.adornments.each((ad: any) => {
+            adornments.push(ad.category);
+          });
+          console.log('[FlowDiagram] Link Adornments:', adornments);
+        }
+      });
+    });
   }
   
   /**
@@ -2486,7 +2542,9 @@ export class FlowDiagramService {
       }
       this.handleLinkGestureInternal(e);
     });
-    this.addTrackedListener('LinkRelinked', (e: any) => this.handleLinkGestureInternal(e));
+    
+    // 连接线重连事件（用户拖动重连手柄）
+    this.addTrackedListener('LinkRelinked', (e: any) => this.handleLinkRelinkedInternal(e));
     
     // 背景点击
     this.addTrackedListener('BackgroundSingleClicked', () => {
@@ -2574,6 +2632,103 @@ export class FlowDiagramService {
     this.zone.run(() => {
       this.linkGestureCallback?.(sourceId, targetId, x, y, link);
     });
+  }
+  
+  /**
+   * 处理连接线重连事件（内部）
+   * 当用户拖动重连手柄将连接线的一端移到新节点时触发
+   * 
+   * 重要：GoJS 在触发 LinkRelinked 事件之前就会更新 link.data.from/to，
+   * 所以我们需要从 e.parameter 获取被断开连接的原始端口来推断原始值。
+   * e.parameter 是被断开的 GraphObject port
+   */
+  private handleLinkRelinkedInternal(e: any): void {
+    if (!this.diagram || !this.diagramDiv) return;
+    
+    const link = e.subject;
+    // e.parameter 是被断开连接的原始端口
+    const disconnectedPort = e.parameter;
+    const disconnectedNodeId = disconnectedPort?.part?.data?.key;
+    
+    const fromNode = link?.fromNode;
+    const toNode = link?.toNode;
+    const newFromId = fromNode?.data?.key;
+    const newToId = toNode?.data?.key;
+    
+    // 从 link.data 获取当前（已更新后的）值
+    const linkData = link?.data;
+    const isCrossTree = linkData?.isCrossTree;
+    
+    console.log('[FlowDiagram] LinkRelinked 事件', {
+      disconnectedNodeId,
+      newFromId,
+      newToId,
+      isCrossTree
+    });
+    
+    if (!newFromId || !newToId) return;
+    
+    // 防止自连接
+    if (newFromId === newToId) {
+      if (link?.data) {
+        const model = this.diagram.model as go.GraphLinksModel;
+        this.diagram.startTransaction('reject-self-link');
+        model.removeLinkData(link.data);
+        this.diagram.commitTransaction('reject-self-link');
+      }
+      return;
+    }
+    
+    // 获取连接终点位置
+    const midPoint = link.midPoint || toNode.location;
+    const viewPt = this.diagram.transformDocToView(midPoint);
+    const diagramRect = this.diagramDiv.getBoundingClientRect();
+    const x = diagramRect.left + viewPt.x;
+    const y = diagramRect.top + viewPt.y;
+    
+    // 判断连接类型
+    const linkType: 'parent-child' | 'cross-tree' = isCrossTree ? 'cross-tree' : 'parent-child';
+    
+    // 确定是 from 端还是 to 端被重连
+    // 如果 disconnectedNodeId 不等于 newFromId，说明 from 端被改变了
+    // 如果 disconnectedNodeId 不等于 newToId，说明 to 端被改变了
+    const fromEndChanged = disconnectedNodeId && disconnectedNodeId !== newFromId;
+    const toEndChanged = disconnectedNodeId && disconnectedNodeId !== newToId;
+    
+    console.log('[FlowDiagram] LinkRelinked 分析', {
+      linkType,
+      fromEndChanged,
+      toEndChanged,
+      disconnectedNodeId,
+      childTaskId: newToId,
+      oldParentId: fromEndChanged ? disconnectedNodeId : newFromId,
+      newParentId: newFromId
+    });
+    
+    // 调用重连回调
+    if (this.linkRelinkCallback) {
+      if (fromEndChanged) {
+        // from 端被重连：父任务改变 -> 子任务树迁移
+        // childTaskId = newToId (子任务)
+        // oldParentId = disconnectedNodeId (断开的原父任务)
+        // newParentId = newFromId (新父任务)
+        this.zone.run(() => {
+          this.linkRelinkCallback!(linkType, newToId, disconnectedNodeId, newFromId, x, y, link);
+        });
+      } else if (toEndChanged) {
+        // to 端被重连：子任务改变 -> 通常是跨树连接目标改变
+        // 这种情况较少见，暂不处理子树迁移
+        console.log('[FlowDiagram] to 端重连，暂不处理子树迁移');
+        this.zone.run(() => {
+          this.linkGestureCallback?.(newFromId, newToId, x, y, link);
+        });
+      }
+    } else {
+      // 没有注册重连回调，降级为普通连接手势
+      this.zone.run(() => {
+        this.linkGestureCallback?.(newFromId, newToId, x, y, link);
+      });
+    }
   }
   
   /**

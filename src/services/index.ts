@@ -67,7 +67,7 @@ export { SearchService, type SearchResult, type ProjectSearchResult } from './se
 export { FlowDiagramConfigService, type GoJSNodeData, type GoJSLinkData, type GoJSDiagramData } from './flow-diagram-config.service';
 
 // 流程图相关服务
-export { FlowDiagramService, type NodeClickCallback, type LinkClickCallback, type LinkDeleteCallback, type LinkGestureCallback, type SelectionMovedCallback } from './flow-diagram.service';
+export { FlowDiagramService, type NodeClickCallback, type LinkClickCallback, type LinkDeleteCallback, type LinkGestureCallback, type LinkRelinkCallback, type SelectionMovedCallback } from './flow-diagram.service';
 export { FlowDragDropService, type InsertPositionInfo, type DropResultCallback } from './flow-drag-drop.service';
 export { FlowTouchService, type TouchDropCallback } from './flow-touch.service';
 export { FlowLinkService, type LinkType } from './flow-link.service';

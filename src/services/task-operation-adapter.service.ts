@@ -317,6 +317,27 @@ export class TaskOperationAdapterService {
     return result;
   }
   
+  /**
+   * 将整个子任务树迁移到新的父任务下
+   * @param taskId 要迁移的子树根节点 ID
+   * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
+   */
+  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    // 创建乐观更新快照
+    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
+    
+    const result = this.taskOps.moveSubtreeToNewParent(taskId, newParentId);
+    
+    if (result.ok) {
+      this.activeStructureSnapshot = snapshot.id;
+      this.setupSyncResultHandler(snapshot.id);
+    } else {
+      this.optimisticState.rollbackSnapshot(snapshot.id);
+    }
+    
+    return result;
+  }
+  
   reorderStage(stage: number, orderedIds: string[]): void {
     this.taskOps.reorderStage(stage, orderedIds);
   }

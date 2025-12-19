@@ -671,6 +671,15 @@ export class StoreService {
     return this.taskAdapter.insertTaskBetween(taskId, sourceId, targetId);
   }
 
+  /**
+   * 将整个子任务树迁移到新的父任务下
+   * @param taskId 要迁移的子树根节点 ID
+   * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
+   */
+  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    return this.taskAdapter.moveSubtreeToNewParent(taskId, newParentId);
+  }
+
   reorderStage(stage: number, orderedIds: string[]) {
     this.taskAdapter.reorderStage(stage, orderedIds);
   }
