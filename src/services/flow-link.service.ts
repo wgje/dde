@@ -275,17 +275,22 @@ export class FlowLinkService {
     x: number,
     y: number
   ): void {
+    console.log('[FlowLink] openConnectionEditor 被调用', { sourceId, targetId, description, x, y });
+    
     // 调整位置
     const adjustedX = Math.max(10, x - 100);
     const adjustedY = Math.max(10, y - 20);
     
-    this.connectionEditorData.set({
+    const editorData = {
       sourceId,
       targetId,
       description,
       x: adjustedX,
       y: adjustedY
-    });
+    };
+    console.log('[FlowLink] 设置 connectionEditorData', editorData);
+    
+    this.connectionEditorData.set(editorData);
     this.connectionEditorPos.set({ x: adjustedX, y: adjustedY });
     
     // 自动调整 textarea 高度
@@ -303,18 +308,38 @@ export class FlowLinkService {
    * 关闭联系块编辑器
    */
   closeConnectionEditor(): void {
+    console.log('[FlowLink] closeConnectionEditor 被调用', new Error().stack);
     this.connectionEditorData.set(null);
   }
   
   /**
-   * 保存联系块描述
+   * 保存联系块描述（实时保存，不关闭编辑器）
    */
   saveConnectionDescription(description: string): void {
     const data = this.connectionEditorData();
     if (data) {
       this.store.updateConnectionDescription(data.sourceId, data.targetId, description);
-      this.closeConnectionEditor();
+      // 更新本地数据，保持编辑器状态同步
+      this.connectionEditorData.set({
+        ...data,
+        description
+      });
     }
+  }
+  
+  /**
+   * 删除当前编辑的连接
+   * @returns 是否成功删除
+   */
+  deleteCurrentConnection(): boolean {
+    const data = this.connectionEditorData();
+    if (!data) return false;
+    
+    // 删除跨树连接
+    this.store.removeConnection(data.sourceId, data.targetId);
+    // 关闭编辑器
+    this.closeConnectionEditor();
+    return true;
   }
   
   /**
@@ -389,13 +414,17 @@ export class FlowLinkService {
   
   /**
    * 显示连接线删除提示（移动端）
+   * @param linkData GoJS 连接线数据对象（包含 from, to, isCrossTree 等属性）
+   * @param x 显示位置 X
+   * @param y 显示位置 Y
    */
-  showLinkDeleteHint(link: any, x: number, y: number): void {
+  showLinkDeleteHint(linkData: any, x: number, y: number): void {
+    // 注意：linkData 是连接线的数据对象，直接包含属性
     this.linkDeleteHint.set({
-      link,
+      link: { data: linkData }, // 包装成期望的格式
       x,
       y,
-      isCrossTree: !!link?.data?.isCrossTree
+      isCrossTree: !!linkData?.isCrossTree
     });
     
     // 3秒后自动隐藏
@@ -403,10 +432,11 @@ export class FlowLinkService {
       clearTimeout(this.linkDeleteHintTimer);
     }
     
-    const currentLink = link;
+    const currentLinkData = linkData;
     this.linkDeleteHintTimer = setTimeout(() => {
       if (this.isDestroyed) return;
-      if (this.linkDeleteHint()?.link === currentLink) {
+      const currentHint = this.linkDeleteHint();
+      if (currentHint?.link?.data === currentLinkData) {
         this.linkDeleteHint.set(null);
       }
       this.linkDeleteHintTimer = null;

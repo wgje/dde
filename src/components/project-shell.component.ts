@@ -419,6 +419,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   }
   
   switchToText() {
+    console.log('[ProjectShell] switchToText 被调用', new Error().stack);
     this.store.activeView.set('text');
   }
   

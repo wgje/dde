@@ -1247,6 +1247,21 @@ export class FlowDiagramService {
       }
     }
     
+    // 4. 检查跨树连接变化（这是之前遗漏的检查）
+    const project = this.store.activeProject();
+    if (project) {
+      const model = this.diagram?.model as any;
+      if (model) {
+        const currentLinkCount = (model.linkDataArray || []).length;
+        const parentChildCount = newTasks.filter(t => t.parentId).length;
+        const crossTreeCount = project.connections?.length || 0;
+        const expectedLinkCount = parentChildCount + crossTreeCount;
+        if (currentLinkCount !== expectedLinkCount) {
+          return true;
+        }
+      }
+    }
+    
     return false;
   }
 
@@ -1323,6 +1338,13 @@ export class FlowDiagramService {
         fromPortId: "",  // 空字符串 = 主节点端口
         toPortId: ""     // 空字符串 = 主节点端口
       }));
+      
+      // 调试：检查跨树连接数据
+      const crossTreeLinks = linkDataWithPorts.filter((l: any) => l.isCrossTree);
+      if (crossTreeLinks.length > 0) {
+        console.log('[FlowDiagram] 跨树连接数据:', crossTreeLinks);
+      }
+      
       model.mergeLinkDataArray(linkDataWithPorts);
       
       // 移除不存在的节点和连接线
@@ -2248,9 +2270,46 @@ export class FlowDiagramService {
         relinkableTo: true,
         reshapable: true,
         resegmentable: false,
-        click: (e: any, link: any) => {
-          e.diagram.select(link);
-        },
+        // 桌面端：允许直接点击“跨树关联线条”打开关联详情（联系块编辑器）。
+        // 注意：移动端已有 ObjectSingleClicked / ObjectDoubleClicked 统一处理，避免双触发。
+        // 同时标签面板自身会设置 e.handled=true，因此这里优先尊重已处理的事件。
+        click: isMobile
+          ? () => { /* 移动端空处理器，避免 undefined */ }
+          : (e: any, link: any) => {
+              console.log('[FlowDiagram] Link click 事件触发', { 
+                handled: e?.handled, 
+                linkData: link?.data,
+                isCrossTree: link?.data?.isCrossTree 
+              });
+
+              if (e?.handled) {
+                console.log('[FlowDiagram] Link click 已被标签面板处理，跳过');
+                return;
+              }
+
+              const linkData = link?.data;
+              if (!linkData) return;
+              if (!self.diagramDiv || !self.diagram) return;
+
+              const docPt = e.documentPoint;
+              const viewPt = self.diagram.transformDocToView(docPt);
+              const rect = self.diagramDiv.getBoundingClientRect();
+              const clickX = rect.left + viewPt.x;
+              const clickY = rect.top + viewPt.y;
+
+              console.log('[FlowDiagram] Link click 调用 linkClickCallback', { 
+                isCrossTree: linkData.isCrossTree,
+                from: linkData.from,
+                to: linkData.to
+              });
+
+              e.handled = true;
+              self.zone.run(() => {
+                self.linkClickCallback?.(linkData, clickX, clickY);
+              });
+            },
+        // 注意：不要在 Link 上设置 click，因为子 Panel 有自己的 click 处理
+        // 只选择在点击位置不是标签面板时进行选择
         contextMenu: $(go.Adornment, "Vertical",
           $("ContextMenuButton",
             $(go.TextBlock, "删除连接", { margin: 5 }),
@@ -2276,48 +2335,65 @@ export class FlowDiagramService {
    * 创建联系块标签面板
    */
   private createConnectionLabelPanel($: any, self: FlowDiagramService): go.Panel {
+    const handleCrossTreeLabelClick = (e: any, obj: any) => {
+      // obj 可能是 Shape/TextBlock/Panel；它们的 part 都应指向承载它们的 Link
+      const link = obj?.part;
+      const linkData = link?.data;
+
+      console.log('[FlowDiagram] 标签面板点击', { linkData, isCrossTree: linkData?.isCrossTree });
+
+      // 只处理跨树连接，否则不设置 handled，让连接线本身的处理器接管
+      if (!linkData?.isCrossTree || !self.diagramDiv || !self.diagram) return;
+      
+      e.handled = true;
+
+      const docPt = e.documentPoint;
+      const viewPt = self.diagram.transformDocToView(docPt);
+      const rect = self.diagramDiv.getBoundingClientRect();
+      const clickX = rect.left + viewPt.x;
+      const clickY = rect.top + viewPt.y;
+
+      console.log('[FlowDiagram] 触发 linkClickCallback', { clickX, clickY, from: linkData.from, to: linkData.to });
+
+      self.zone.run(() => {
+        self.linkClickCallback?.(linkData, clickX, clickY);
+      });
+    };
+
     return $(go.Panel, "Auto",
       {
         segmentIndex: NaN,
         segmentFraction: 0.5,
         cursor: "pointer",
-        click: (e: any, panel: any) => {
-          e.handled = true;
-          const link = panel.part;
-          const linkData = link?.data;
-          if (linkData?.isCrossTree && self.diagramDiv && self.diagram) {
-            // 获取连接线的起始节点位置
-            const fromNode = link.fromNode;
-            if (fromNode) {
-              // 使用起始节点的中心位置，而不是点击位置
-              const fromCenter = fromNode.getDocumentPoint(go.Spot.Center);
-              const viewPt = self.diagram.transformDocToView(fromCenter);
-              const rect = self.diagramDiv.getBoundingClientRect();
-              const clickX = rect.left + viewPt.x;
-              const clickY = rect.top + viewPt.y;
-              self.zone.run(() => {
-                self.linkClickCallback?.(linkData, clickX, clickY);
-              });
-            }
-          }
-        }
+        // 设置 isActionable 使面板能够接收点击事件
+        isActionable: true,
+        // 设置 background 确保整个面板区域都能接收点击
+        background: "transparent",
+        // 注意：GoJS 点击不会“冒泡”到父 Panel；因此下面还会在子 Shape/Text 上重复绑定。
+        click: handleCrossTreeLabelClick
       },
       new go.Binding("visible", "isCrossTree"),
       $(go.Shape, "RoundedRectangle", {
         fill: "#f5f3ff",
         stroke: "#8b5cf6",
         strokeWidth: 1,
-        parameter1: 4
+        parameter1: 4,
+        cursor: "pointer",
+        isActionable: true,
+        click: handleCrossTreeLabelClick
       }),
       $(go.Panel, "Horizontal",
-        { margin: 3, defaultAlignment: go.Spot.Center },
-        $(go.TextBlock, "🔗", { font: "8px \"LXGW WenKai Screen\", sans-serif" }),
+        { margin: 3, defaultAlignment: go.Spot.Center, cursor: "pointer", isActionable: true, click: handleCrossTreeLabelClick },
+        $(go.TextBlock, "🔗", { font: "8px \"LXGW WenKai Screen\", sans-serif", cursor: "pointer", isActionable: true, click: handleCrossTreeLabelClick }),
         $(go.TextBlock, {
           font: "500 8px \"LXGW WenKai Screen\", sans-serif",
           stroke: "#6d28d9",
           maxSize: new go.Size(50, 14),
           overflow: go.TextBlock.OverflowEllipsis,
-          margin: new go.Margin(0, 0, 0, 2)
+          margin: new go.Margin(0, 0, 0, 2),
+          cursor: "pointer",
+          isActionable: true,
+          click: handleCrossTreeLabelClick
         },
         new go.Binding("text", "description", (desc: string) => desc ? desc.substring(0, 6) : "..."))
       )
@@ -2405,11 +2481,12 @@ export class FlowDiagramService {
       self.saveViewState();
     });
     
-    // 移动端连接线点击
+    // 移动端连接线单击（显示删除提示）
     if (this.store.isMobile()) {
       this.addTrackedListener('ObjectSingleClicked', (e: any) => {
         const part = e.subject.part;
         if (part instanceof go.Link && part.data) {
+          // 单击用于显示删除提示（非跨树连接）或关联块编辑器（跨树连接）
           const midPoint = part.midPoint;
           if (midPoint && self.diagramDiv) {
             const viewPt = self.diagram!.transformDocToView(midPoint);
@@ -2417,6 +2494,24 @@ export class FlowDiagramService {
             self.zone.run(() => {
               self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y);
             });
+          }
+        }
+      });
+      
+      // 移动端连接线双击（打开关联块编辑器）
+      this.addTrackedListener('ObjectDoubleClicked', (e: any) => {
+        const part = e.subject.part;
+        if (part instanceof go.Link && part.data) {
+          // 双击用于打开跨树连接的关联块编辑器
+          if (part.data.isCrossTree) {
+            const midPoint = part.midPoint;
+            if (midPoint && self.diagramDiv) {
+              const viewPt = self.diagram!.transformDocToView(midPoint);
+              const rect = self.diagramDiv.getBoundingClientRect();
+              self.zone.run(() => {
+                self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y);
+              });
+            }
           }
         }
       });

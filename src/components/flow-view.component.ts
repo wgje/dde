@@ -251,6 +251,7 @@ import * as go from 'gojs';
         [connectionTasks]="link.getConnectionTasks()"
         (close)="link.closeConnectionEditor()"
         (save)="saveConnectionDescription($event)"
+        (delete)="deleteConnection()"
         (dragStart)="link.startDragConnEditor($event)">
       </app-flow-connection-editor>
       
@@ -444,6 +445,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       }
     }, { injector: this.injector });
     
+    // 监听跨树连接变化（connections 是在 project 中而非 tasks 中）
+    // 必须单独监听，否则添加/删除跨树连接不会触发图表更新
+    effect(() => {
+      const project = this.store.activeProject();
+      const connectionCount = project?.connections?.length ?? 0;
+      // 读取 connectionCount 来建立依赖关系
+      if (connectionCount >= 0 && this.diagram.isInitialized) {
+        this.scheduleRafDiagramUpdate(this.store.tasks(), true);
+      }
+    }, { injector: this.injector });
+    
     // 监听搜索查询变化，使用 rAF 更新图表高亮
     effect(() => {
       const query = this.store.searchQuery();
@@ -512,6 +524,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   ngOnDestroy() {
+    console.log('[FlowView] ngOnDestroy 被调用', new Error().stack);
     this.isDestroyed = true;
     
     // 清理所有待处理的定时器
@@ -554,7 +567,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.diagram.onLinkClick((linkData, x, y) => {
+      console.log('[FlowView] onLinkClick 回调触发', { 
+        linkData, 
+        isCrossTree: linkData?.isCrossTree,
+        x, 
+        y 
+      });
+      
       if (linkData?.isCrossTree) {
+        console.log('[FlowView] 打开联系块编辑器', { from: linkData.from, to: linkData.to });
         this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y);
       } else if (this.store.isMobile()) {
         this.link.showLinkDeleteHint(linkData, x, y);
@@ -587,6 +608,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.diagram.onBackgroundClick(() => {
+      console.log('[FlowView] backgroundClick 触发，关闭编辑器');
       this.link.closeConnectionEditor();
     });
     
@@ -892,6 +914,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   saveConnectionDescription(description: string): void {
     this.link.saveConnectionDescription(description);
     this.refreshDiagram();
+  }
+  
+  deleteConnection(): void {
+    const result = this.link.deleteCurrentConnection();
+    if (result) {
+      this.refreshDiagram();
+    }
   }
   
   confirmLinkDelete(): void {
@@ -1220,6 +1249,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.isRightPanelOpen.set(true);
     } else if (deltaX < -threshold) {
       // 向左滑动 → 切换到文本视图
+      console.log('[FlowView] 滑动触发 goBackToText', { deltaX, threshold, deltaTime });
       this.goBackToText.emit();
     }
     
