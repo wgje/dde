@@ -333,8 +333,12 @@ export class FlowLinkService {
    */
   deleteCurrentConnection(): boolean {
     const data = this.connectionEditorData();
-    if (!data) return false;
+    if (!data) {
+      this.logger.warn('deleteCurrentConnection: 没有当前编辑的连接数据');
+      return false;
+    }
     
+    this.logger.info('删除跨树连接', { sourceId: data.sourceId, targetId: data.targetId });
     // 删除跨树连接
     this.store.removeConnection(data.sourceId, data.targetId);
     // 关闭编辑器
@@ -449,9 +453,15 @@ export class FlowLinkService {
    */
   confirmLinkDelete(): { fromKey: string; toKey: string; isCrossTree: boolean } | null {
     const hint = this.linkDeleteHint();
-    if (!hint?.link) return null;
+    this.logger.info('confirmLinkDelete 被调用', { hint });
+    
+    if (!hint?.link) {
+      this.logger.warn('confirmLinkDelete: 没有删除提示数据');
+      return null;
+    }
     
     const result = this.deleteLinkInternal(hint.link);
+    this.logger.info('删除连接线完成', result);
     this.linkDeleteHint.set(null);
     return result;
   }
@@ -536,11 +546,18 @@ export class FlowLinkService {
     const toKey = link.data?.to;
     const isCrossTree = link.data?.isCrossTree;
     
-    if (!fromKey || !toKey) return null;
+    this.logger.info('deleteLinkInternal', { fromKey, toKey, isCrossTree, link });
+    
+    if (!fromKey || !toKey) {
+      this.logger.warn('deleteLinkInternal: 缺少 fromKey 或 toKey');
+      return null;
+    }
     
     if (isCrossTree) {
+      this.logger.info('删除跨树连接', { fromKey, toKey });
       this.store.removeConnection(fromKey, toKey);
     } else {
+      this.logger.info('解除父子关系', { toKey });
       this.store.detachTask(toKey);
     }
     

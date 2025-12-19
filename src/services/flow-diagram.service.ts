@@ -34,9 +34,20 @@ export interface NodeClickCallback {
 
 /**
  * 连接线点击回调
+ * @param linkData 连接线数据
+ * @param x 点击位置 X
+ * @param y 点击位置 Y
+ * @param isDoubleClick 是否是双击事件（默认 false）
  */
 export interface LinkClickCallback {
-  (linkData: any, x: number, y: number): void;
+  (linkData: any, x: number, y: number, isDoubleClick?: boolean): void;
+}
+
+/**
+ * 连接线删除回调（右键菜单删除）
+ */
+export interface LinkDeleteCallback {
+  (linkData: any): void;
 }
 
 /**
@@ -129,6 +140,7 @@ export class FlowDiagramService {
   // ========== 回调函数 ==========
   private nodeClickCallback: NodeClickCallback | null = null;
   private linkClickCallback: LinkClickCallback | null = null;
+  private linkDeleteCallback: LinkDeleteCallback | null = null;
   private linkGestureCallback: LinkGestureCallback | null = null;
   private selectionMovedCallback: SelectionMovedCallback | null = null;
   private backgroundClickCallback: (() => void) | null = null;
@@ -164,6 +176,11 @@ export class FlowDiagramService {
   /** 注册连接线点击回调 */
   onLinkClick(callback: LinkClickCallback): void {
     this.linkClickCallback = callback;
+  }
+  
+  /** 注册连接线删除回调（右键菜单） */
+  onLinkDelete(callback: LinkDeleteCallback): void {
+    this.linkDeleteCallback = callback;
   }
   
   /** 注册连接手势回调（绘制/重连连接线） */
@@ -851,6 +868,7 @@ export class FlowDiagramService {
     // 清理回调
     this.nodeClickCallback = null;
     this.linkClickCallback = null;
+    this.linkDeleteCallback = null;
     this.linkGestureCallback = null;
     this.selectionMovedCallback = null;
     this.backgroundClickCallback = null;
@@ -2317,8 +2335,9 @@ export class FlowDiagramService {
               click: (e: any, obj: any) => {
                 const link = obj.part?.adornedPart;
                 if (link?.data) {
+                  console.log('[FlowDiagram] 右键菜单删除连接', link.data);
                   self.zone.run(() => {
-                    self.linkClickCallback?.(link.data, 0, 0);
+                    self.linkDeleteCallback?.(link.data);
                   });
                 }
               }
@@ -2481,37 +2500,35 @@ export class FlowDiagramService {
       self.saveViewState();
     });
     
-    // 移动端连接线单击（显示删除提示）
+    // 移动端连接线单击（打开编辑器）
     if (this.store.isMobile()) {
       this.addTrackedListener('ObjectSingleClicked', (e: any) => {
         const part = e.subject.part;
         if (part instanceof go.Link && part.data) {
-          // 单击用于显示删除提示（非跨树连接）或关联块编辑器（跨树连接）
+          // 单击用于打开跨树连接的关联块编辑器
           const midPoint = part.midPoint;
           if (midPoint && self.diagramDiv) {
             const viewPt = self.diagram!.transformDocToView(midPoint);
             const rect = self.diagramDiv.getBoundingClientRect();
             self.zone.run(() => {
-              self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y);
+              self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y, false);
             });
           }
         }
       });
       
-      // 移动端连接线双击（打开关联块编辑器）
+      // 移动端连接线双击/长按（显示删除提示）
       this.addTrackedListener('ObjectDoubleClicked', (e: any) => {
         const part = e.subject.part;
         if (part instanceof go.Link && part.data) {
-          // 双击用于打开跨树连接的关联块编辑器
-          if (part.data.isCrossTree) {
-            const midPoint = part.midPoint;
-            if (midPoint && self.diagramDiv) {
-              const viewPt = self.diagram!.transformDocToView(midPoint);
-              const rect = self.diagramDiv.getBoundingClientRect();
-              self.zone.run(() => {
-                self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y);
-              });
-            }
+          // 双击用于显示删除提示（所有类型连接线）
+          const midPoint = part.midPoint;
+          if (midPoint && self.diagramDiv) {
+            const viewPt = self.diagram!.transformDocToView(midPoint);
+            const rect = self.diagramDiv.getBoundingClientRect();
+            self.zone.run(() => {
+              self.linkClickCallback?.(part.data, rect.left + viewPt.x, rect.top + viewPt.y, true);
+            });
           }
         }
       });

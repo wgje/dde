@@ -323,6 +323,9 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   onDeleteClick(event: Event): void {
     event.preventDefault();
     event.stopPropagation();
+    console.log('[ConnectionEditor] 删除按钮被点击');
+    // 设置忽略外部点击的保护窗口，防止 document:click 立即关闭编辑器
+    this.ignoreOutsideUntil = Date.now() + 300;
     this.delete.emit();
   }
 

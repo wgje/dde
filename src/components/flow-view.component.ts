@@ -566,19 +566,42 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       }
     });
     
-    this.diagram.onLinkClick((linkData, x, y) => {
+    this.diagram.onLinkClick((linkData, x, y, isDoubleClick = false) => {
       console.log('[FlowView] onLinkClick 回调触发', { 
         linkData, 
         isCrossTree: linkData?.isCrossTree,
         x, 
-        y 
+        y,
+        isMobile: this.store.isMobile(),
+        isDoubleClick
       });
       
-      if (linkData?.isCrossTree) {
-        console.log('[FlowView] 打开联系块编辑器', { from: linkData.from, to: linkData.to });
-        this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y);
-      } else if (this.store.isMobile()) {
-        this.link.showLinkDeleteHint(linkData, x, y);
+      // 移动端：单击打开编辑器（仅跨树连接），双击/长按显示删除提示
+      if (this.store.isMobile()) {
+        if (isDoubleClick) {
+          console.log('[FlowView] 移动端长按/双击：显示删除提示');
+          this.link.showLinkDeleteHint(linkData, x, y);
+        } else if (linkData?.isCrossTree) {
+          console.log('[FlowView] 移动端单击：打开跨树连接编辑器');
+          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y);
+        }
+        // 普通父子连接单击不做处理
+      } else {
+        // 桌面端：跨树连接线打开编辑器，普通连接线不处理（由右键菜单处理）
+        if (linkData?.isCrossTree) {
+          console.log('[FlowView] 桌面端：打开跨树连接编辑器', { from: linkData.from, to: linkData.to });
+          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y);
+        }
+      }
+    });
+    
+    // 注册连接线删除回调（右键菜单）
+    this.diagram.onLinkDelete((linkData) => {
+      console.log('[FlowView] onLinkDelete 回调触发（右键菜单）', { linkData });
+      const result = this.link.deleteLink(linkData);
+      if (result) {
+        console.log('[FlowView] 右键菜单删除成功', result);
+        this.refreshDiagram();
       }
     });
     
@@ -608,8 +631,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.diagram.onBackgroundClick(() => {
-      console.log('[FlowView] backgroundClick 触发，关闭编辑器');
+      console.log('[FlowView] backgroundClick 触发，关闭编辑器和删除提示');
       this.link.closeConnectionEditor();
+      // 移动端：同时关闭删除提示
+      if (this.store.isMobile()) {
+        this.link.cancelLinkDelete();
+      }
     });
     
     // 设置拖放处理
@@ -917,14 +944,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   deleteConnection(): void {
+    console.log('[FlowView] deleteConnection 被调用');
     const result = this.link.deleteCurrentConnection();
+    console.log('[FlowView] 删除结果:', result);
     if (result) {
       this.refreshDiagram();
     }
   }
   
   confirmLinkDelete(): void {
+    console.log('[FlowView] confirmLinkDelete 被调用');
     const result = this.link.confirmLinkDelete();
+    console.log('[FlowView] 删除连接线结果:', result);
     if (result) {
       this.refreshDiagram();
     }
