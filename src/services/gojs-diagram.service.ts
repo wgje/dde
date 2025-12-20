@@ -79,7 +79,7 @@ class DynamicLinkingTool extends go.LinkingTool {
         const edgePt = getClosestPointOnNodeBounds(node, mousePt);
 
         // 设置临时链接的起点（索引0）
-        this.temporaryLink.setPointAt(0, edgePt);
+        this.temporaryLink.setPointAt(0, edgePt.x, edgePt.y);
       }
     }
   }
@@ -202,7 +202,7 @@ export class GoJSDiagramService {
         $(go.Shape, {
           isPanelMain: true,
           stroke: "#78716C", 
-          strokeWidth: 3, 
+          strokeWidth: 6, 
           strokeDashArray: [4, 4],
           strokeCap: "round",
           strokeJoin: "round"
@@ -211,7 +211,7 @@ export class GoJSDiagramService {
           toArrow: "Standard",
           fill: "#78716C",
           stroke: "#78716C",     // 与 fill 一致
-          strokeWidth: 4,        // 粗描边让圆角效果明显
+          strokeWidth: 7,        // 粗描边让圆角效果明显
           strokeCap: "round",
           strokeJoin: "round",   // 让箭头顶点圆润
           scale: 0.9,            // 调小补偿描边膨胀
@@ -610,10 +610,8 @@ export class GoJSDiagramService {
         parameter1: 10,
         portId: "",              // 主体端口
         fromLinkable: false,     // 不能从主体拉线
-        toLinkable: false,       // 不能连到主体
-        cursor: "move",          // 移动光标
-        fromLinkable: false,     // 不能从主体拉线
         toLinkable: true,        // 允许连到主体
+        cursor: "move",          // 移动光标
         fromSpot: go.Spot.AllSides, // 允许从任意角度出线
         toSpot: go.Spot.AllSides    // 允许从任意角度入线
       },
@@ -683,16 +681,16 @@ export class GoJSDiagramService {
     // 可见线
     $(go.Shape, { 
       isPanelMain: true, 
-      strokeWidth: 3.5,
+      strokeWidth: 6,
       strokeCap: "round",
       strokeJoin: "round"
     },
       new go.Binding("stroke", "isCrossTree", (isCross: boolean) => isCross ? "#6366f1" : "#94a3b8"),
-      new go.Binding("strokeDashArray", "isCrossTree", (isCross: boolean) => isCross ? [10, 6] : null)),
+      new go.Binding("strokeDashArray", "isCrossTree", (isCross: boolean) => isCross ? [6, 10] : null)),
     // 箭头 - 使用粗描边 + strokeJoin: round 实现圆角效果
     $(go.Shape, { 
       toArrow: "Standard",
-      strokeWidth: 4,        // 粗描边让圆角效果明显
+      strokeWidth: 7,        // 粗描边让圆角效果明显
       strokeCap: "round",
       strokeJoin: "round",   // 让箭头顶点圆润
       scale: 0.9,            // 调小补偿描边膨胀

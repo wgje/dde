@@ -2287,7 +2287,7 @@ export class FlowDiagramService {
       },
       $(go.Shape, { 
         stroke: "#78716C", 
-        strokeWidth: 3.5, 
+        strokeWidth: 6, 
         strokeDashArray: [4, 4],
         strokeCap: "round",
         strokeJoin: "round"
@@ -2296,7 +2296,7 @@ export class FlowDiagramService {
         toArrow: "Standard",
         fill: "#78716C",
         stroke: "#78716C",     // 与 fill 一致
-        strokeWidth: 4,        // 粗描边让圆角效果明显
+        strokeWidth: 7,        // 粗描边让圆角效果明显
         strokeCap: "round",
         strokeJoin: "round",   // 让箭头顶点圆润
         scale: 0.9,            // 调小补偿描边膨胀
@@ -2315,7 +2315,7 @@ export class FlowDiagramService {
       },
       $(go.Shape, { 
         stroke: "#78716C", 
-        strokeWidth: 3.5, 
+        strokeWidth: 6, 
         strokeDashArray: [4, 4],
         strokeCap: "round",
         strokeJoin: "round"
@@ -2324,7 +2324,7 @@ export class FlowDiagramService {
         toArrow: "Standard",
         fill: "#78716C",
         stroke: "#78716C",     // 与 fill 一致
-        strokeWidth: 4,        // 粗描边让圆角效果明显
+        strokeWidth: 7,        // 粗描边让圆角效果明显
         strokeCap: "round",
         strokeJoin: "round",   // 让箭头顶点圆润
         scale: 0.9,            // 调小补偿描边膨胀

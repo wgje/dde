@@ -103,10 +103,10 @@ export class FlowDiagramConfigService {
     curviness: NaN,    // NaN = 让 GoJS 自动计算最佳曲率，避免固定值导致控制点异常
     mobileStrokeWidth: 24,   // 移动端透明触控区域
     desktopStrokeWidth: 14,  // 桌面端透明触控区域
-    visibleStrokeWidth: 3.5, // 可见线条粗度：比之前略粗但保持优雅（原 5 太粗）
+    visibleStrokeWidth: 6,   // 可见线条粗度：增加至6使其更明显
     arrowType: "Standard",   // 实心三角箭头
     arrowScale: 0.9,         // 调小补偿粗描边带来的视觉膨胀
-    arrowStrokeWidth: 4      // 粗描边让 strokeJoin: round 生效，呈现圆角效果
+    arrowStrokeWidth: 7      // 粗描边让 strokeJoin: round 生效，呈现圆角效果
   } as const;
 
   // ========== 数据构建方法 ==========
@@ -449,7 +449,7 @@ export class FlowDiagramConfigService {
           if (data.isCrossTree) return styles.link.crossTreeColor; // 使用主题定义的跨树连线颜色
           return data.familyColor || styles.link.parentChildColor; // 优先使用血缘颜色，否则使用主题定义的父子颜色
         }),
-        new go.Binding("strokeDashArray", "isCrossTree", (isCross: boolean) => isCross ? [6, 3] : null)),
+        new go.Binding("strokeDashArray", "isCrossTree", (isCross: boolean) => isCross ? [6, 10] : null)),
       // 箭头 - 使用粗描边 + strokeJoin: round 实现圆角效果
       // ========== 圆角箭头核心原理 ==========
       // 1. toArrow: "Standard" 是实心三角的几何基础
