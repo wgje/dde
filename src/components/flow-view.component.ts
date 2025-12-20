@@ -447,11 +447,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 监听跨树连接变化（connections 是在 project 中而非 tasks 中）
     // 必须单独监听，否则添加/删除跨树连接不会触发图表更新
+    // 注意：使用连接的"有效签名"而非数组长度，以检测软删除和恢复操作
     effect(() => {
       const project = this.store.activeProject();
-      const connectionCount = project?.connections?.length ?? 0;
-      // 读取 connectionCount 来建立依赖关系
-      if (connectionCount >= 0 && this.diagram.isInitialized) {
+      // 构建有效连接的签名（过滤掉 deletedAt，只统计活跃连接）
+      const activeConnections = project?.connections?.filter(c => !c.deletedAt) ?? [];
+      // 使用连接的 source-target 对作为签名，检测任何变化
+      const connectionSignature = activeConnections
+        .map(c => `${c.source}->${c.target}`)
+        .sort()
+        .join('|');
+      // 读取 connectionSignature 来建立依赖关系
+      if (connectionSignature !== undefined && this.diagram.isInitialized) {
         this.scheduleRafDiagramUpdate(this.store.tasks(), true);
       }
     }, { injector: this.injector });

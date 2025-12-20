@@ -1218,11 +1218,20 @@ export class FlowDiagramService {
   }
   
   /**
-   * 移除连接线
+   * 移除连接线（从视图和模型中同时移除）
    */
   removeLink(link: go.Link): void {
     if (this.diagram && link) {
-      this.diagram.remove(link);
+      const model = this.diagram.model as go.GraphLinksModel;
+      if (link.data && model.linkDataArray) {
+        // 从模型中移除数据，这会自动从视图中移除
+        this.diagram.startTransaction('remove-link');
+        model.removeLinkData(link.data);
+        this.diagram.commitTransaction('remove-link');
+      } else {
+        // 备用：直接从视图中移除
+        this.diagram.remove(link);
+      }
     }
   }
   
@@ -2745,17 +2754,54 @@ export class FlowDiagramService {
     const linkType: 'parent-child' | 'cross-tree' = isCrossTree ? 'cross-tree' : 'parent-child';
     
     // 确定是 from 端还是 to 端被重连
-    // 如果 disconnectedNodeId 不等于 newFromId，且 disconnectedNodeId 不等于 newToId
-    // 需要根据连接类型判断哪一端被改变
-    const fromEndChanged = disconnectedNodeId !== newFromId;
-    const toEndChanged = disconnectedNodeId !== newToId;
+    // disconnectedNodeId 是被断开的那个节点
+    // 如果 disconnectedNodeId 不等于 newFromId，说明 from 端被改变了（原来的 from 是 disconnectedNodeId）
+    // 如果 disconnectedNodeId 不等于 newToId，说明 to 端被改变了（原来的 to 是 disconnectedNodeId）
+    // 注意：只能有一端被改变，不可能两端同时改变
     
-    // 推断原始的 from/to ID
-    // 如果 from 端被改变：oldFromId = disconnectedNodeId, oldToId = newToId
-    // 如果 to 端被改变：oldFromId = newFromId, oldToId = disconnectedNodeId
-    const changedEnd: 'from' | 'to' = fromEndChanged ? 'from' : 'to';
-    const oldFromId = fromEndChanged ? disconnectedNodeId : newFromId;
-    const oldToId = toEndChanged ? disconnectedNodeId : newToId;
+    // 判断哪一端被改变：如果 disconnectedNodeId 等于 newToId，说明 to 没变，from 变了
+    // 如果 disconnectedNodeId 等于 newFromId，说明 from 没变，to 变了
+    // 如果都不等于，说明 disconnectedNodeId 是被替换掉的那个节点
+    let changedEnd: 'from' | 'to';
+    let oldFromId: string;
+    let oldToId: string;
+    
+    if (disconnectedNodeId === newToId) {
+      // disconnectedNodeId 现在变成了 to 端，这不可能，逻辑有问题
+      // 实际上这意味着 to 端没变，disconnectedNodeId 是原来的 from 端
+      changedEnd = 'from';
+      oldFromId = disconnectedNodeId;
+      oldToId = newToId;
+    } else if (disconnectedNodeId === newFromId) {
+      // disconnectedNodeId 现在变成了 from 端，这不可能，逻辑有问题
+      // 实际上这意味着 from 端没变，disconnectedNodeId 是原来的 to 端
+      changedEnd = 'to';
+      oldFromId = newFromId;
+      oldToId = disconnectedNodeId;
+    } else {
+      // disconnectedNodeId 既不等于 newFromId 也不等于 newToId
+      // 说明 disconnectedNodeId 是被完全替换掉的节点
+      // 需要判断它原来是 from 还是 to
+      // 由于 GoJS 会保持另一端不变，我们可以通过比较来判断
+      // 如果 newToId 还在原来的位置（没变），那么被替换的是 from 端
+      // 这里需要额外信息，暂时通过比较 relinkingTool 的信息来判断
+      
+      // 简化逻辑：检查 disconnectedNodeId 在原始连接中是哪一端
+      // 由于我们没有原始连接信息，使用启发式方法：
+      // 如果 relinkingTool.isForwards 为 true，说明是从 from 端开始拖的
+      const relinkingTool = this.diagram?.toolManager.relinkingTool;
+      if (relinkingTool?.isForwards) {
+        // 从 to 端拖动（重新连接 to 端）
+        changedEnd = 'to';
+        oldFromId = newFromId;
+        oldToId = disconnectedNodeId;
+      } else {
+        // 从 from 端拖动（重新连接 from 端）
+        changedEnd = 'from';
+        oldFromId = disconnectedNodeId;
+        oldToId = newToId;
+      }
+    }
     
     console.log('[FlowDiagram] LinkRelinked 分析', {
       linkType,
@@ -2763,7 +2809,8 @@ export class FlowDiagramService {
       oldFromId,
       oldToId,
       newFromId,
-      newToId
+      newToId,
+      disconnectedNodeId
     });
     
     // 构建重连信息

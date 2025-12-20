@@ -143,6 +143,7 @@ export class GoJSDiagramService {
   /** 保存监听器引用以便正确移除 */
   private selectionMovedListener: ((e: go.DiagramEvent) => void) | null = null;
   private partResizedListener: ((e: go.DiagramEvent) => void) | null = null;
+  private linkRelinkedListener: ((e: go.DiagramEvent) => void) | null = null;
   
   /** 当前主题样式配置 */
   private readonly currentStyles = computed(() => {
@@ -258,6 +259,10 @@ export class GoJSDiagramService {
       if (this.partResizedListener) {
         this.diagram.removeDiagramListener('PartResized', this.partResizedListener);
         this.partResizedListener = null;
+      }
+      if (this.linkRelinkedListener) {
+        this.diagram.removeDiagramListener('LinkRelinked', this.linkRelinkedListener);
+        this.linkRelinkedListener = null;
       }
       
       // 清理图表内容
@@ -536,9 +541,88 @@ export class GoJSDiagramService {
       this.saveAllNodePositions();
     };
     
+    // 监听连接线重新连接（拖动端点到新目标）
+    this.linkRelinkedListener = (e: go.DiagramEvent) => {
+      const link = e.subject as go.Link;
+      if (!link?.data) return;
+      
+      // 关键：通过 RelinkingTool 获取原始节点，而不是从 link.data
+      // 因为 GoJS 在 LinkRelinked 事件触发时可能已经更新了 link.data
+      const relinkingTool = e.diagram.toolManager.relinkingTool;
+      const originalFromNode = relinkingTool.originalFromNode;
+      const originalToNode = relinkingTool.originalToNode;
+      
+      // 获取新的连接节点
+      const newFromNode = link.fromNode;
+      const newToNode = link.toNode;
+      
+      if (!originalFromNode || !originalToNode || !newFromNode || !newToNode) return;
+      
+      const oldFromId = originalFromNode.data.key;
+      const oldToId = originalToNode.data.key;
+      const newFromId = newFromNode.data.key;
+      const newToId = newToNode.data.key;
+      
+      // 检查是否有实际变化
+      if (oldFromId === newFromId && oldToId === newToId) return;
+      
+      // 防止自连接
+      if (newFromId === newToId) {
+        // 回滚：重新加载数据
+        this.zone.run(() => {
+          const tasks = this.store.tasks();
+          this.updateDiagram(tasks);
+        });
+        return;
+      }
+      
+      this.zone.run(() => {
+        const isCrossTree = link.data.isCrossTree;
+        const description = link.data.description || '';
+        
+        // 重要：先更新 GoJS 模型中的 link.data，防止后续 updateDiagram 与当前数据不一致
+        this.diagram?.model.startTransaction('relink');
+        this.diagram?.model.setDataProperty(link.data, 'from', newFromId);
+        this.diagram?.model.setDataProperty(link.data, 'to', newToId);
+        this.diagram?.model.setDataProperty(link.data, 'key', 
+          isCrossTree 
+            ? `cross-${newFromId}-${newToId}` 
+            : `${newFromId}-${newToId}`
+        );
+        this.diagram?.model.commitTransaction('relink');
+        
+        // 然后更新 store
+        if (isCrossTree) {
+          // 跨树连接：更新 connections
+          // 1. 移除旧连接
+          this.store.removeConnection(oldFromId, oldToId);
+          // 2. 添加新连接
+          this.store.addCrossTreeConnection(newFromId, newToId);
+          // 3. 如果有描述，更新描述
+          if (description) {
+            this.store.updateConnectionDescription(newFromId, newToId, description);
+          }
+        } else {
+          // 父子连接：更新任务的 parentId
+          // 只有目标（子任务）可以改变
+          if (oldToId !== newToId) {
+            // 目标变了：原来的子任务不再是子任务，新目标成为子任务
+            // 移除原子任务的父关系（移到未分配或根节点）
+            this.store.moveSubtreeToNewParent(oldToId, null);
+            // 设置新子任务的父关系
+            this.store.moveSubtreeToNewParent(newToId, newFromId);
+          } else if (oldFromId !== newFromId) {
+            // 源变了：子任务换了父任务
+            this.store.moveSubtreeToNewParent(newToId, newFromId);
+          }
+        }
+      });
+    };
+    
     // 监听节点移动完成
     this.diagram.addDiagramListener('SelectionMoved', this.selectionMovedListener);
     this.diagram.addDiagramListener('PartResized', this.partResizedListener);
+    this.diagram.addDiagramListener('LinkRelinked', this.linkRelinkedListener);
   }
   
   private createNodeTemplate($: any): go.Node {
@@ -705,34 +789,89 @@ export class GoJSDiagramService {
       segmentIndex: NaN,
       segmentFraction: 0.5,
       cursor: "pointer",
-      click: (e: any, panel: any) => {
-        e.handled = true;
-        const link = panel.part;
-        if (link?.data) {
-          // 获取连接线的起始节点位置
-          const fromNode = link.fromNode;
-          let x = 0, y = 0;
-          if (fromNode) {
-            // 使用起始节点的中心位置，而不是连接线中点
-            const fromCenter = fromNode.getDocumentPoint(go.Spot.Center);
-            x = fromCenter.x;
-            y = fromCenter.y;
-          } else {
-            // 后备方案：使用连接线中点
-            const midPoint = link.midPoint;
-            x = midPoint.x;
-            y = midPoint.y;
-          }
-          self.zone.run(() => {
-            self.callbacks?.onConnectionEditorOpen(
-              link.data.from,
-              link.data.to,
-              link.data.description || '',
-              x,
-              y
-            );
-          });
+      // 使用 mouseDown + mouseUp 替代 click，避免与 relinkable 端点拖拽冲突
+      mouseDown: (e: go.InputEvent, panel: go.Panel) => {
+        // 记录鼠标按下时间和位置，用于区分拖拽和点击
+        (panel as any)._mouseDownTime = Date.now();
+        (panel as any)._mouseDownPoint = e.documentPoint.copy();
+      },
+      mouseUp: (e: go.InputEvent, panel: go.Panel) => {
+        const link = panel.part as go.Link;
+        if (!link?.data) return;
+        
+        // 检查是否是拖拽操作（移动距离超过阈值或按下时间过长）
+        const downTime = (panel as any)._mouseDownTime;
+        const downPoint = (panel as any)._mouseDownPoint as go.Point | undefined;
+        const elapsed = Date.now() - (downTime || 0);
+        
+        if (downPoint) {
+          const dist = Math.sqrt(
+            Math.pow(e.documentPoint.x - downPoint.x, 2) + 
+            Math.pow(e.documentPoint.y - downPoint.y, 2)
+          );
+          // 如果移动距离 > 5px，视为拖拽而非点击
+          if (dist > 5) return;
         }
+        
+        // 如果按下时间 > 300ms，视为长按/拖拽
+        if (elapsed > 300) return;
+        
+        // 检查点击位置是否靠近连接线端点（relinkable handles 区域）
+        const clickPt = e.documentPoint;
+        const fromNode = link.fromNode;
+        const toNode = link.toNode;
+        const handleRadius = self.store.isMobile() ? 20 : 15; // 端点感应区域
+        
+        // 检查是否接近起点
+        if (fromNode && link.pointsCount > 0) {
+          const fromPt = link.getPoint(0);
+          const distToFrom = Math.sqrt(
+            Math.pow(clickPt.x - fromPt.x, 2) + 
+            Math.pow(clickPt.y - fromPt.y, 2)
+          );
+          if (distToFrom < handleRadius) {
+            // 点击在起点附近，不打开详情页，让 relinking 处理
+            return;
+          }
+        }
+        
+        // 检查是否接近终点
+        if (toNode && link.pointsCount > 0) {
+          const toPt = link.getPoint(link.pointsCount - 1);
+          const distToTo = Math.sqrt(
+            Math.pow(clickPt.x - toPt.x, 2) + 
+            Math.pow(clickPt.y - toPt.y, 2)
+          );
+          if (distToTo < handleRadius) {
+            // 点击在终点附近，不打开详情页，让 relinking 处理
+            return;
+          }
+        }
+        
+        // 获取连接线的起始节点位置
+        let x = 0, y = 0;
+        if (fromNode) {
+          // 使用起始节点的中心位置，而不是连接线中点
+          const fromCenter = fromNode.getDocumentPoint(go.Spot.Center);
+          x = fromCenter.x;
+          y = fromCenter.y;
+        } else {
+          // 后备方案：使用连接线中点
+          const midPoint = link.midPoint;
+          x = midPoint.x;
+          y = midPoint.y;
+        }
+        
+        e.handled = true;
+        self.zone.run(() => {
+          self.callbacks?.onConnectionEditorOpen(
+            link.data.from,
+            link.data.to,
+            link.data.description || '',
+            x,
+            y
+          );
+        });
       }
     },
     new go.Binding("visible", "isCrossTree"),
@@ -856,8 +995,10 @@ export class GoJSDiagramService {
       }
     });
     
-    // 跨树连接
-    project.connections.forEach((conn: any) => {
+    // 跨树连接（过滤掉已软删除的连接）
+    project.connections
+      .filter((conn: any) => !conn.deletedAt)
+      .forEach((conn: any) => {
       const pairKey = `${conn.source}->${conn.target}`;
       if (!parentChildPairs.has(pairKey)) {
         const sourceExists = tasks.some(t => t.id === conn.source);

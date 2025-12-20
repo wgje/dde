@@ -1191,15 +1191,33 @@ export class TaskOperationService {
   
   /**
    * 添加跨树连接
+   * 如果连接已存在（未删除），则跳过
+   * 如果连接已存在但被软删除，则恢复它
    */
   addCrossTreeConnection(sourceId: string, targetId: string): void {
     const activeP = this.getActiveProject();
     if (!activeP) return;
     
-    const exists = activeP.connections.some(
+    // 检查是否存在相同的连接（包括软删除的）
+    const existingConn = activeP.connections.find(
       c => c.source === sourceId && c.target === targetId
     );
-    if (exists) return;
+    
+    // 如果存在且未删除，跳过
+    if (existingConn && !existingConn.deletedAt) return;
+    
+    // 如果存在但被软删除，恢复它
+    if (existingConn && existingConn.deletedAt) {
+      this.recordAndUpdate(p => ({
+        ...p,
+        connections: p.connections.map(c => 
+          (c.source === sourceId && c.target === targetId)
+            ? { ...c, deletedAt: undefined }
+            : c
+        )
+      }));
+      return;
+    }
     
     const sourceTask = activeP.tasks.find(t => t.id === sourceId);
     const targetTask = activeP.tasks.find(t => t.id === targetId);

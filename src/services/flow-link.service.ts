@@ -385,10 +385,10 @@ export class FlowLinkService {
       return 'error';
     }
     
-    // 检查是否已存在相同的跨树连接
+    // 检查是否已存在相同的跨树连接（排除已软删除的）
     const project = this.store.activeProject();
     const existingConnection = project?.connections?.find(
-      c => c.source === newSourceId && c.target === newTargetId
+      c => c.source === newSourceId && c.target === newTargetId && !c.deletedAt
     );
     
     if (existingConnection) {
