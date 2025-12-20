@@ -744,6 +744,7 @@ export class GoJSDiagramService {
       relinkableTo: true,
       reshapable: true,
       resegmentable: false,
+      layerName: "Background",  // 将连接线放到 Background 层，使其显示在节点下方，避免遮挡任务块内容
       click: (e: any, link: any) => {
         e.diagram.select(link);
       },

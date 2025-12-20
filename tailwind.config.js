@@ -7,7 +7,7 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['"LXGW WenKai"', 'sans-serif'],
+        sans: ['"LXGW WenKai Screen"', 'sans-serif'],
       },
       colors: {
         canvas: '#F5F2E9',

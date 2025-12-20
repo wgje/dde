@@ -625,8 +625,10 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async bootstrapSession() {
     if (!this.auth.isConfigured) {
-      console.log('[Bootstrap] Supabase 未配置，跳过会话检查');
+      console.log('[Bootstrap] Supabase 未配置，启用离线模式');
       this.isCheckingSession.set(false);
+      // 离线模式：加载本地数据（种子数据或缓存数据）
+      await this.store.setCurrentUser(null);
       return;
     }
     
