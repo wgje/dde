@@ -408,8 +408,17 @@ export class FlowDiagramService {
         baseBounds.height + expandTop + expandBottom
       );
 
-      // 确保最终边界仍然包含当前视口，防止视口框跑出导航图
-      return limited.unionRect(viewportBounds);
+      // 将视口位置限制在内容周围的最大溢出范围内，再合并，确保视口框不会被拉到无限远
+      const clampedViewportX = Math.max(limited.x, Math.min(viewportBounds.x, limited.right - viewportBounds.width));
+      const clampedViewportY = Math.max(limited.y, Math.min(viewportBounds.y, limited.bottom - viewportBounds.height));
+      const clampedViewport = new go.Rect(
+        clampedViewportX,
+        clampedViewportY,
+        viewportBounds.width,
+        viewportBounds.height
+      );
+
+      return limited.unionRect(clampedViewport);
     };
 
     const runViewportUpdate = () => {
