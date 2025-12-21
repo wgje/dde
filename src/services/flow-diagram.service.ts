@@ -389,24 +389,27 @@ export class FlowDiagramService {
     const nodeBounds = getNodesBounds();
     this.overview.centerRect(nodeBounds);
     
-    const limitDisplayBounds = (nodeBounds: go.Rect, viewportBounds: go.Rect): go.Rect => {
+    const limitDisplayBounds = (baseBounds: go.Rect, viewportBounds: go.Rect): go.Rect => {
       const maxOverflow = 1200; // 限制空白区域对缩放的影响，防止视口远离内容时过度缩小
-      const overflowLeft = Math.max(0, nodeBounds.x - viewportBounds.x);
-      const overflowRight = Math.max(0, viewportBounds.right - nodeBounds.right);
-      const overflowTop = Math.max(0, nodeBounds.y - viewportBounds.y);
-      const overflowBottom = Math.max(0, viewportBounds.bottom - nodeBounds.bottom);
+      const overflowLeft = Math.max(0, baseBounds.x - viewportBounds.x);
+      const overflowRight = Math.max(0, viewportBounds.right - baseBounds.right);
+      const overflowTop = Math.max(0, baseBounds.y - viewportBounds.y);
+      const overflowBottom = Math.max(0, viewportBounds.bottom - baseBounds.bottom);
 
       const expandLeft = Math.min(overflowLeft, maxOverflow);
       const expandRight = Math.min(overflowRight, maxOverflow);
       const expandTop = Math.min(overflowTop, maxOverflow);
       const expandBottom = Math.min(overflowBottom, maxOverflow);
 
-      return new go.Rect(
-        nodeBounds.x - expandLeft,
-        nodeBounds.y - expandTop,
-        nodeBounds.width + expandLeft + expandRight,
-        nodeBounds.height + expandTop + expandBottom
+      const limited = new go.Rect(
+        baseBounds.x - expandLeft,
+        baseBounds.y - expandTop,
+        baseBounds.width + expandLeft + expandRight,
+        baseBounds.height + expandTop + expandBottom
       );
+
+      // 确保最终边界仍然包含当前视口，防止视口框跑出导航图
+      return limited.unionRect(viewportBounds);
     };
 
     const runViewportUpdate = () => {
