@@ -230,7 +230,7 @@ export class SimpleSyncService {
           status: task.status,
           x: task.x,
           y: task.y,
-          display_id: task.displayId,
+          // displayId 由客户端动态计算，不存储到数据库
           short_id: task.shortId,
           deleted_at: task.deletedAt || null,
           updated_at: task.updatedAt || nowISO()
