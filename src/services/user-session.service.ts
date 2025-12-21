@@ -483,8 +483,11 @@ export class UserSessionService {
    */
   private seedProjects(): Project[] {
     const now = new Date().toISOString();
-    // 使用有效的 UUID 格式
+    // 使用有效的 UUID 格式（所有 ID 必须是 UUID，以便同步到 Supabase）
     const seedProjectId = crypto.randomUUID();
+    const task1Id = crypto.randomUUID();
+    const task2Id = crypto.randomUUID();
+    const conn1Id = crypto.randomUUID();
     return [
       this.layoutService.rebalance({
         id: seedProjectId,
@@ -493,7 +496,7 @@ export class UserSessionService {
         createdDate: now,
         tasks: [
           {
-            id: 't1',
+            id: task1Id,
             title: '阶段 1: 环境搭建',
             content: '初始化项目环境。\n- [ ] 初始化 git 仓库\n- [ ] 安装 Node.js 依赖',
             stage: 1,
@@ -507,11 +510,11 @@ export class UserSessionService {
             displayId: '1'
           },
           {
-            id: 't2',
+            id: task2Id,
             title: '核心逻辑实现',
             content: '交付核心业务逻辑。\n- [ ] 编写单元测试',
             stage: 2,
-            parentId: 't1',
+            parentId: task1Id,
             order: 1,
             rank: 10500,
             status: 'active',
@@ -522,7 +525,7 @@ export class UserSessionService {
           }
         ],
         connections: [
-          { id: 'conn-seed-1', source: 't1', target: 't2' }
+          { id: conn1Id, source: task1Id, target: task2Id }
         ]
       })
     ];

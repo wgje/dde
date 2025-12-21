@@ -76,7 +76,12 @@ describe('SimpleSyncService', () => {
       channel: vi.fn().mockReturnValue({
         on: vi.fn().mockReturnThis(),
         subscribe: vi.fn().mockReturnThis()
-      })
+      }),
+      auth: {
+        getSession: vi.fn().mockResolvedValue({
+          data: { session: { user: { id: 'test-user-id' } } }
+        })
+      }
     };
     
     mockSupabase = {

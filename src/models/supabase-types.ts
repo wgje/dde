@@ -62,6 +62,12 @@ export interface Database {
         Insert: CleanupLogInsert;
         Update: never; // 日志表不支持更新
       };
+      /** 任务墓碑表 - 记录已永久删除的任务 ID，防止已删除任务复活 */
+      task_tombstones: {
+        Row: TaskTombstoneRow;
+        Insert: TaskTombstoneInsert;
+        Update: never; // 墓碑记录不支持更新
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -203,6 +209,8 @@ export interface ConnectionRow {
   description: string | null;
   created_at: string;
   updated_at: string;
+  /** 软删除时间戳，存在表示已标记删除 */
+  deleted_at: string | null;
 }
 
 /** 连接插入数据 */
@@ -212,11 +220,13 @@ export interface ConnectionInsert {
   source_id: string;
   target_id: string;
   description?: string | null;
+  deleted_at?: string | null;
 }
 
 /** 连接更新数据 */
 export interface ConnectionUpdate {
   description?: string | null;
+  deleted_at?: string | null;
 }
 
 // ============================================
@@ -309,4 +319,27 @@ export interface CleanupLogInsert {
   id?: string;
   type: string;
   details?: Json;
+}
+
+// ============================================
+// 任务墓碑表 (task_tombstones)
+// ============================================
+
+/**
+ * 任务墓碑行数据
+ * 记录已被永久删除的任务 ID，防止已删除任务在同步时复活
+ */
+export interface TaskTombstoneRow {
+  task_id: string;
+  project_id: string;
+  deleted_at: string;
+  deleted_by: string | null;
+}
+
+/** 任务墓碑插入数据 */
+export interface TaskTombstoneInsert {
+  task_id: string;
+  project_id: string;
+  deleted_at?: string;
+  deleted_by?: string | null;
 }

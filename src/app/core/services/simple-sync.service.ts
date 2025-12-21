@@ -225,7 +225,7 @@ export class SimpleSyncService {
           content: task.content,
           stage: task.stage,
           parent_id: task.parentId,
-          order_num: task.order,
+          order: task.order,  // 数据库列名为 "order"
           rank: task.rank,
           status: task.status,
           x: task.x,
@@ -306,6 +306,7 @@ export class SimpleSyncService {
   
   /**
    * 推送项目到云端
+   * 注意：RLS 策略要求 owner_id = auth.uid()，所以需要设置 owner_id
    */
   async pushProject(project: Project): Promise<boolean> {
     const client = this.getSupabaseClient();
@@ -315,10 +316,19 @@ export class SimpleSyncService {
     }
     
     try {
+      // 获取当前用户 ID（RLS 策略需要 owner_id = auth.uid()）
+      const { data: { session } } = await client.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) {
+        this.logger.warn('推送项目失败：用户未登录');
+        return false;
+      }
+      
       const { error } = await client
         .from('projects')
         .upsert({
           id: project.id,
+          owner_id: userId,  // RLS 策略必需
           title: project.name,
           description: project.description,
           version: project.version || 1,
@@ -584,7 +594,8 @@ export class SimpleSyncService {
       id: row.id,
       source: row.source_id,
       target: row.target_id,
-      description: row.description || ''
+      description: row.description || '',
+      deletedAt: row.deleted_at ?? undefined
     };
   }
   
@@ -977,7 +988,7 @@ export class SimpleSyncService {
       const { data, error } = await client
         .from('projects')
         .select('*')
-        .eq('user_id', userId)
+        .eq('owner_id', userId)  // 数据库列名为 owner_id
         .is('deleted_at', null)
         .order('updated_at', { ascending: false });
       
@@ -1006,7 +1017,7 @@ export class SimpleSyncService {
         .from('projects')
         .update({ deleted_at: nowISO() })
         .eq('id', projectId)
-        .eq('user_id', userId);
+        .eq('owner_id', userId);  // 数据库列名为 owner_id
       
       if (error) throw error;
       return true;

@@ -171,6 +171,7 @@ export class TaskRepositoryService {
 
   /**
    * 加载项目的所有连接
+   * 注意：只加载未软删除的连接（deleted_at 为 null）
    */
   async loadConnections(projectId: string): Promise<Connection[]> {
     if (!this.supabase.isConfigured) return [];
@@ -178,7 +179,8 @@ export class TaskRepositoryService {
     const { data, error } = await this.supabase.client()
       .from('connections')
       .select('*')
-      .eq('project_id', projectId);
+      .eq('project_id', projectId)
+      .is('deleted_at', null);
 
     if (error) {
       console.error('Failed to load connections:', error);
@@ -527,6 +529,7 @@ export class TaskRepositoryService {
 
   /**
    * 保存连接
+   * 注意：使用连接 ID 作为冲突解决键，确保正确处理软删除状态
    */
   async saveConnection(projectId: string, connection: Connection): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
@@ -534,11 +537,13 @@ export class TaskRepositoryService {
     const { error } = await this.supabase.client()
       .from('connections')
       .upsert({
+        id: connection.id,
         project_id: projectId,
         source_id: connection.source,
         target_id: connection.target,
-        description: connection.description
-      }, { onConflict: 'project_id,source_id,target_id' });
+        description: connection.description ?? null,
+        deleted_at: connection.deletedAt ?? null
+      }, { onConflict: 'id' });
 
     if (error) {
       console.error('Failed to save connection:', error);

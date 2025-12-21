@@ -131,6 +131,7 @@ export function mapConnectionFromDb(row: ConnectionRow): Connection {
     source: row.source_id,
     target: row.target_id,
     description: row.description ?? undefined,
+    deletedAt: row.deleted_at ?? undefined,
   };
 }
 
