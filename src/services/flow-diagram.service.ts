@@ -71,6 +71,7 @@ export class FlowDiagramService {
   private lastOverviewScale: number = 0.1;
   private isNodeDragging: boolean = false;
   private overviewUpdatePending: boolean = false;
+  private overviewBoundsCache: string = '';
   
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -388,6 +389,26 @@ export class FlowDiagramService {
     const nodeBounds = getNodesBounds();
     this.overview.centerRect(nodeBounds);
     
+    const limitDisplayBounds = (nodeBounds: go.Rect, viewportBounds: go.Rect): go.Rect => {
+      const maxOverflow = 1200; // 限制空白区域对缩放的影响，防止视口远离内容时过度缩小
+      const overflowLeft = Math.max(0, nodeBounds.x - viewportBounds.x);
+      const overflowRight = Math.max(0, viewportBounds.right - nodeBounds.right);
+      const overflowTop = Math.max(0, nodeBounds.y - viewportBounds.y);
+      const overflowBottom = Math.max(0, viewportBounds.bottom - nodeBounds.bottom);
+
+      const expandLeft = Math.min(overflowLeft, maxOverflow);
+      const expandRight = Math.min(overflowRight, maxOverflow);
+      const expandTop = Math.min(overflowTop, maxOverflow);
+      const expandBottom = Math.min(overflowBottom, maxOverflow);
+
+      return new go.Rect(
+        nodeBounds.x - expandLeft,
+        nodeBounds.y - expandTop,
+        nodeBounds.width + expandLeft + expandRight,
+        nodeBounds.height + expandTop + expandBottom
+      );
+    };
+
     const runViewportUpdate = () => {
       if (!this.overview || !this.diagram) return;
 
@@ -408,7 +429,20 @@ export class FlowDiagramService {
         const containerHeight = this.overviewContainer.clientHeight;
         
         if (containerWidth > 0 && containerHeight > 0 && totalBounds.width > 0 && totalBounds.height > 0) {
-          const displayBounds = isViewportOutside ? totalBounds : nodeBounds;
+          const rawDisplayBounds = isViewportOutside
+            ? nodeBounds.copy().unionRect(viewportBounds)
+            : nodeBounds;
+          const displayBounds = isViewportOutside
+            ? limitDisplayBounds(rawDisplayBounds, viewportBounds)
+            : rawDisplayBounds;
+
+          const boundsKey = `${displayBounds.x}|${displayBounds.y}|${displayBounds.width}|${displayBounds.height}`;
+          if (boundsKey !== this.overviewBoundsCache) {
+            this.overviewBoundsCache = boundsKey;
+            this.setOverviewFixedBounds(displayBounds);
+            this.overview.centerRect(displayBounds);
+          }
+
           const currentScale = this.overview.scale;
           const viewportBoxWidth = viewportBounds.width * currentScale;
           const viewportBoxHeight = viewportBounds.height * currentScale;
@@ -503,6 +537,25 @@ export class FlowDiagramService {
         return;
       }
       scheduleViewportUpdate();
+    });
+    
+    // 监听滚动结束，确保 fixedBounds 清理（避免缩放被锁在极值）
+    this.diagram.addDiagramListener('ViewportBoundsChanged', (e: go.DiagramEvent) => {
+      if (!this.overview || !this.diagram || this.isNodeDragging) return;
+      if (e.diagram.lastInput.up) {
+        // 滚动停止后，如果视口重新进入内容区域，释放 fixedBounds
+        const viewport = this.diagram.viewportBounds;
+        const nodes = getNodesBounds();
+        const backInContent =
+          viewport.x >= nodes.x - 50 &&
+          viewport.y >= nodes.y - 50 &&
+          viewport.right <= nodes.right + 50 &&
+          viewport.bottom <= nodes.bottom + 50;
+        if (backInContent) {
+          this.overviewBoundsCache = '';
+          this.setOverviewFixedBounds(null);
+        }
+      }
     });
     
     this.logger.debug('Overview 自动缩放已启用');
@@ -1030,5 +1083,11 @@ export class FlowDiagramService {
     this.logger.error(`❌ Flow diagram error: ${userMessage}`, error);
     this.error.set(userMessage);
     this.toast.error('流程图错误', `${userMessage}。请刷新页面重试。`);
+  }
+
+  // TS 类型定义不允许 null，这里集中处理为 any 写入
+  private setOverviewFixedBounds(bounds: go.Rect | null): void {
+    if (!this.overview) return;
+    (this.overview as any).fixedBounds = bounds;
   }
 }
