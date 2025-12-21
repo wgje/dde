@@ -1014,16 +1014,18 @@ export class SimpleSyncService {
   
   /**
    * 从云端删除项目
+   * 注意：projects 表使用硬删除（没有 deleted_at 列）
    */
   async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
     const client = this.getSupabaseClient();
     if (!client) return false;
     
     try {
-      // 软删除：设置 deleted_at
+      // 硬删除：projects 表没有 deleted_at 列
+      // 关联的 tasks 和 connections 会通过外键 CASCADE 自动删除
       const { error } = await client
         .from('projects')
-        .update({ deleted_at: nowISO() })
+        .delete()
         .eq('id', projectId)
         .eq('owner_id', userId);  // 数据库列名为 owner_id
       
