@@ -70,6 +70,7 @@ export class FlowDiagramService {
   private overviewContainer: HTMLDivElement | null = null;
   private lastOverviewScale: number = 0.1;
   private isNodeDragging: boolean = false;
+  private overviewUpdatePending: boolean = false;
   
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -387,33 +388,9 @@ export class FlowDiagramService {
     const nodeBounds = getNodesBounds();
     this.overview.centerRect(nodeBounds);
     
-    // 监听文档变化
-    this.diagram.addDiagramListener('DocumentBoundsChanged', () => {
+    const runViewportUpdate = () => {
       if (!this.overview || !this.diagram) return;
 
-      const currentNodeDataCount = ((this.diagram.model as any)?.nodeDataArray?.length ?? 0);
-      const nodeCountChanged = currentNodeDataCount !== lastNodeDataCount;
-      
-      const newBaseScale = calculateBaseScale();
-      if (nodeCountChanged || Math.abs(newBaseScale - baseScale) > 0.02) {
-        baseScale = newBaseScale;
-        this.overview.scale = clampScale(baseScale);
-        this.lastOverviewScale = this.overview.scale;
-
-        if (nodeCountChanged) {
-          const bounds = getNodesBounds();
-          this.overview.centerRect(bounds);
-          lastNodeDataCount = currentNodeDataCount;
-        }
-      }
-    });
-    
-    // 监听视口变化
-    this.diagram.addDiagramListener('ViewportBoundsChanged', () => {
-      if (!this.overview || !this.diagram || this.isNodeDragging) {
-        return;
-      }
-      
       const viewportBounds = this.diagram.viewportBounds;
       if (!viewportBounds.isReal()) return;
       
@@ -486,6 +463,46 @@ export class FlowDiagramService {
           }
         }
       }
+    };
+
+    const scheduleViewportUpdate = () => {
+      if (this.overviewUpdatePending) return;
+      this.overviewUpdatePending = true;
+      requestAnimationFrame(() => {
+        this.overviewUpdatePending = false;
+        runViewportUpdate();
+      });
+    };
+    
+    // 监听文档变化
+    this.diagram.addDiagramListener('DocumentBoundsChanged', () => {
+      if (!this.overview || !this.diagram) return;
+
+      const currentNodeDataCount = ((this.diagram.model as any)?.nodeDataArray?.length ?? 0);
+      const nodeCountChanged = currentNodeDataCount !== lastNodeDataCount;
+      
+      const newBaseScale = calculateBaseScale();
+      if (nodeCountChanged || Math.abs(newBaseScale - baseScale) > 0.02) {
+        baseScale = newBaseScale;
+        this.overview.scale = clampScale(baseScale);
+        this.lastOverviewScale = this.overview.scale;
+
+        if (nodeCountChanged) {
+          const bounds = getNodesBounds();
+          this.overview.centerRect(bounds);
+          lastNodeDataCount = currentNodeDataCount;
+        }
+      }
+
+      scheduleViewportUpdate();
+    });
+    
+    // 监听视口变化
+    this.diagram.addDiagramListener('ViewportBoundsChanged', () => {
+      if (!this.overview || !this.diagram || this.isNodeDragging) {
+        return;
+      }
+      scheduleViewportUpdate();
     });
     
     this.logger.debug('Overview 自动缩放已启用');
