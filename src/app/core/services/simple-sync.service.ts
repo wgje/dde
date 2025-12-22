@@ -24,6 +24,25 @@ import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import * as Sentry from '@sentry/angular';
 
 /**
+ * 将 Supabase 错误对象转换为标准 Error 实例
+ * Supabase 返回的错误是普通对象 {code, details, hint, message}，需要转换才能被 Sentry 正确捕获
+ */
+function supabaseErrorToError(error: any): Error {
+  if (error instanceof Error) return error;
+  
+  const message = error?.message || 'Unknown Supabase error';
+  const err = new Error(message);
+  err.name = 'SupabaseError';
+  
+  // 保留原始错误信息
+  (err as any).code = error?.code;
+  (err as any).details = error?.details;
+  (err as any).hint = error?.hint;
+  
+  return err;
+}
+
+/**
  * 重试队列项
  */
 interface RetryQueueItem {
@@ -237,7 +256,7 @@ export class SimpleSyncService {
           updated_at: task.updatedAt || nowISO()
         });
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       
       this.state.update(s => ({ ...s, lastSyncTime: nowISO() }));
       return true;
@@ -269,7 +288,7 @@ export class SimpleSyncService {
       
       const { data, error } = await query;
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       
       // 转换为本地模型（data 类型为 TaskRow[]）
       return (data as TaskRow[] || []).map(row => this.rowToTask(row));
@@ -295,7 +314,7 @@ export class SimpleSyncService {
         .delete()
         .eq('id', taskId);
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
       this.logger.error('删除任务失败', e);
@@ -339,7 +358,7 @@ export class SimpleSyncService {
           migrated_to_v2: true
         });
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
       this.logger.error('推送项目失败', e);
@@ -367,7 +386,7 @@ export class SimpleSyncService {
       
       const { data, error } = await query;
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       
       return (data as ProjectRow[] || []).map(row => this.rowToProject(row));
     } catch (e) {
@@ -400,7 +419,7 @@ export class SimpleSyncService {
           deleted_at: connection.deletedAt || null
         });
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
       this.logger.error('推送连接失败', e);
@@ -733,7 +752,7 @@ export class SimpleSyncService {
           updated_at: nowISO()
         });
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
       this.logger.error('保存用户偏好失败', e);
@@ -1000,7 +1019,7 @@ export class SimpleSyncService {
         .eq('owner_id', userId)  // 数据库列名为 owner_id
         .order('updated_at', { ascending: false });
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       
       // 为每个项目加载完整数据（任务和连接）
       const projects: Project[] = [];
@@ -1038,7 +1057,7 @@ export class SimpleSyncService {
         .eq('id', projectId)
         .eq('owner_id', userId);  // 数据库列名为 owner_id
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
       this.logger.error('删除项目失败', e);
