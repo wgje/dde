@@ -49,6 +49,15 @@ export class ModalLoaderService {
   /** 已加载的模态框缓存 */
   private readonly loadedModals = new Map<ModalType, Type<unknown>>();
   
+  /** 模态框加载超时时间（毫秒）- 手机端网络较慢，给予更长时间 */
+  private readonly MODAL_LOAD_TIMEOUT = 15000;
+  
+  /** 最大重试次数 */
+  private readonly MAX_RETRIES = 2;
+  
+  /** 加载失败计数器（用于降级策略） */
+  private readonly failureCount = new Map<ModalType, number>();
+  
   /**
    * 加载设置模态框
    */
@@ -153,17 +162,68 @@ export class ModalLoaderService {
       return this.loadedModals.get(type) as Type<T>;
     }
     
-    try {
-      this.logger.debug(`加载模态框: ${type}`);
-      const component = await loader();
-      this.loadedModals.set(type, component as Type<unknown>);
-      this.logger.debug(`模态框加载成功: ${type}`);
-      return component;
-    } catch (error) {
-      this.logger.error(`模态框加载失败: ${type}`, error);
-      this.toast.error('加载失败', '无法加载组件，请刷新页面重试');
-      throw error;
+    // 带重试的加载逻辑
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        this.logger.debug(`加载模态框: ${type} (尝试 ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+        
+        // 添加超时保护
+        const component = await this.loadWithTimeout(loader(), type);
+        
+        // 加载成功，缓存并重置失败计数
+        this.loadedModals.set(type, component as Type<unknown>);
+        this.failureCount.delete(type);
+        this.logger.debug(`模态框加载成功: ${type}`);
+        return component;
+        
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`模态框加载失败 (尝试 ${attempt + 1}): ${type}`, error);
+        
+        // 如果还有重试机会，等待一段时间后重试
+        if (attempt < this.MAX_RETRIES) {
+          await this.delay(1000 * (attempt + 1)); // 递增延迟
+        }
+      }
     }
+    
+    // 所有重试都失败，记录失败次数并显示友好提示
+    const failures = (this.failureCount.get(type) || 0) + 1;
+    this.failureCount.set(type, failures);
+    
+    this.logger.error(`模态框加载失败 (已重试${this.MAX_RETRIES}次): ${type}`, lastError);
+    
+    // 根据失败次数显示不同提示
+    if (failures >= 3) {
+      this.toast.error('网络连接不稳定', '建议稍后重试或检查网络连接');
+    } else {
+      this.toast.error('加载失败', '正在重试，请稍候...');
+    }
+    
+    throw lastError;
+  }
+  
+  /**
+   * 带超时保护的加载
+   */
+  private async loadWithTimeout<T>(promise: Promise<T>, type: ModalType): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => 
+        setTimeout(
+          () => reject(new Error(`模态框 ${type} 加载超时 (>${this.MODAL_LOAD_TIMEOUT}ms)`)),
+          this.MODAL_LOAD_TIMEOUT
+        )
+      )
+    ]);
+  }
+  
+  /**
+   * 延迟辅助函数
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
   
   /**

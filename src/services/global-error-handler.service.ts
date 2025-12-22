@@ -99,6 +99,10 @@ export class GlobalErrorHandler implements ErrorHandler {
     { pattern: /abort|cancel|user.*cancel/i, severity: ErrorSeverity.SILENT },
     // 非活动标签页的更新
     { pattern: /not active|inactive tab/i, severity: ErrorSeverity.SILENT },
+    // 模态框加载超时（已由 ModalLoaderService 处理，静默记录）
+    { pattern: /模态框.*加载超时|modal.*load.*timeout/i, severity: ErrorSeverity.SILENT },
+    // Chunk 加载错误（动态导入失败，由重试机制处理）
+    { pattern: /ChunkLoadError|Failed to fetch.*chunk|Loading chunk.*failed/i, severity: ErrorSeverity.SILENT },
     
     // === 提示级错误 ===
     // UUID 格式错误
