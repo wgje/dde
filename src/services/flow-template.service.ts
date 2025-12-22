@@ -972,9 +972,9 @@ export class FlowTemplateService {
     if (box && box.elt(0)) {
       const shape = box.elt(0) as go.Shape;
       
-      // 移动端使用更粗的边框（因为 pixelRatio=1）
-      // 桌面端使用标准边框（因为 pixelRatio=devicePixelRatio）
-      shape.strokeWidth = isMobile ? 3 : 2;
+      // 统一使用 2px 边框宽度
+      // 由于现在所有设备都使用实际的 devicePixelRatio，边框会自动清晰
+      shape.strokeWidth = 2;
       
       // 使用更明显的白色边框
       shape.stroke = "#ffffff";

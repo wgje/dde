@@ -320,14 +320,23 @@ export class FlowDiagramService {
         // 检测是否为移动端
         const isMobile = containerWidth < 768 || 'ontouchstart' in window;
         
-        // 移动端使用固定 pixelRatio=1，避免高分屏（2x/3x）导致 Canvas 渲染尺寸问题
-        // 桌面端使用实际 devicePixelRatio 保证清晰度
-        const pixelRatio = isMobile ? 1 : (window.devicePixelRatio || 1);
+        // 使用实际的 devicePixelRatio 保证清晰度
+        // 通过正确的容器尺寸设置和 GoJS 配置来避免显示问题
+        const pixelRatio = window.devicePixelRatio || 1;
+        
+        // 确保容器有明确的尺寸设置
+        container.style.width = `${containerWidth}px`;
+        container.style.height = `${containerHeight}px`;
+        container.style.position = 'relative';
+        container.style.overflow = 'hidden';
         
         this.overview = $(go.Overview, container, {
           contentAlignment: go.Spot.Center,
           "animationManager.isEnabled": false,
-          "computePixelRatio": () => pixelRatio
+          "computePixelRatio": () => pixelRatio,
+          // 明确设置初始视口大小
+          "initialViewportSpot": go.Spot.Center,
+          "initialScale": 0.15
         });
         
         // 委托给 FlowTemplateService 设置 Overview 模板
@@ -580,25 +589,26 @@ export class FlowDiagramService {
 
             // 取整避免浮点抖动导致 boundsKey 高频变化（尤其在边界拖拽/缩放时）
             const q = (v: number) => Math.round(v);
-            const boundsKey = `${q(rawBounds.x)}|${q(rawBounds.y)}|${q(rawBounds.width)}|${q(rawBounds.height)}`;
+            const boundsKey = `${q(viewportBounds.x)}|${q(viewportBounds.y)}|${q(viewportBounds.width)}|${q(viewportBounds.height)}`;
+            
+            // 不设置 fixedBounds，让 Overview 自由跟随 observed diagram
+            // 这确保了节点内容会同步更新
+            
             if (boundsKey !== this.overviewBoundsCache) {
               this.overviewBoundsCache = boundsKey;
-              this.setOverviewFixedBounds(rawBounds);
-              // 重要：不要在 viewport 变化时频繁 centerRect，否则会抵消用户拖动造成“看起来不动/卡住”
-              // Overview 自身会根据 observed 内容 + contentAlignment 进行呈现。
 
               logOverview('apply:bounds', {
-                rawBounds: {
-                  x: q(rawBounds.x),
-                  y: q(rawBounds.y),
-                  w: q(rawBounds.width),
-                  h: q(rawBounds.height)
+                viewport: {
+                  x: q(viewportBounds.x),
+                  y: q(viewportBounds.y),
+                  w: q(viewportBounds.width),
+                  h: q(viewportBounds.height)
                 },
-                scaleBounds: {
-                  x: q(scaleBounds.x),
-                  y: q(scaleBounds.y),
-                  w: q(scaleBounds.width),
-                  h: q(scaleBounds.height)
+                nodeBounds: {
+                  x: q(nodeBounds.x),
+                  y: q(nodeBounds.y),
+                  w: q(nodeBounds.width),
+                  h: q(nodeBounds.height)
                 }
               });
             }
@@ -613,9 +623,10 @@ export class FlowDiagramService {
               viewportBoxHeight > containerHeight - boxPadding;
           
             if (isViewportOutside || needsShrinkForBox) {
+              // 当视口超出边界时，根据 totalBounds （包含节点+视口）计算缩放
               const padding = 0.15;
-              const scaleX = (containerWidth * (1 - padding * 2)) / scaleBounds.width;
-              const scaleY = (containerHeight * (1 - padding * 2)) / scaleBounds.height;
+              const scaleX = (containerWidth * (1 - padding * 2)) / totalBounds.width;
+              const scaleY = (containerHeight * (1 - padding * 2)) / totalBounds.height;
               let targetScale = clampScale(Math.min(scaleX, scaleY, 0.5));
             
               const newViewportBoxWidth = viewportBounds.width * targetScale;
@@ -737,22 +748,12 @@ export class FlowDiagramService {
       scheduleViewportUpdate('viewport');
     });
     
-    // 监听滚动结束，确保 fixedBounds 清理（避免缩放被锁在极值）
+    // 监听滚动结束，确保更新
     this.diagram.addDiagramListener('ViewportBoundsChanged', (e: go.DiagramEvent) => {
       if (!this.overview || !this.diagram || this.isNodeDragging) return;
       if (e.diagram.lastInput.up) {
-        // 滚动停止后，如果视口重新进入内容区域，释放 fixedBounds
-        const viewport = this.diagram.viewportBounds;
-        const nodes = getNodesBounds();
-        const backInContent =
-          viewport.x >= nodes.x - 50 &&
-          viewport.y >= nodes.y - 50 &&
-          viewport.right <= nodes.right + 50 &&
-          viewport.bottom <= nodes.bottom + 50;
-        if (backInContent) {
-          this.overviewBoundsCache = '';
-          this.setOverviewFixedBounds(null);
-        }
+        // 滚动停止后，触发一次更新
+        scheduleViewportUpdate('viewport');
       }
     });
     
