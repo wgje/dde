@@ -54,6 +54,7 @@ export interface Task {
   hasIncompleteTask?: boolean; // 是否包含未完成的待办项
   deletedAt?: string | null; // 软删除时间戳，null 表示未删除
   
+  // ⚠️ 以下字段仅用于客户端状态管理，不会同步到数据库
   // 删除任务时保存的连接，用于恢复时还原
   deletedConnections?: Connection[];
 

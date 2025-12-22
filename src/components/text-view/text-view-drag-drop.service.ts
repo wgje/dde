@@ -153,7 +153,7 @@ export class TextViewDragDropService {
   // ========== 触摸拖拽方法 ==========
   
   /** 长按延迟时间（毫秒）- 用于区分点击和拖拽 */
-  private readonly LONG_PRESS_DELAY = 200;
+  private readonly LONG_PRESS_DELAY = 500;
   
   /** 长按回调 - 用于通知组件拖拽已开始 */
   private onDragStartCallback: (() => void) | null = null;
@@ -255,12 +255,23 @@ export class TextViewDragDropService {
     if (!this.touchState.isDragging) {
       const deltaX = Math.abs(touch.clientX - this.touchState.startX);
       const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-      const moveThreshold = 10; // 移动超过10像素也激活拖拽
+      const moveThreshold = 15; // 移动超过15像素才考虑激活拖拽
       
-      if (deltaX > moveThreshold || deltaY > moveThreshold) {
-        // 取消长按定时器，直接激活拖拽
-        this.cancelLongPress();
-        this.activateDrag();
+      // 判断移动方向：如果主要是垂直移动，认为是滚动意图
+      const isVerticalScroll = deltaY > deltaX * 1.5; // 垂直移动超过水平移动的1.5倍
+      const totalDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+      
+      if (totalDistance > moveThreshold) {
+        if (isVerticalScroll) {
+          // 主要是垂直滚动，取消拖拽准备，允许正常滚动
+          this.cancelLongPress();
+          this.resetTouchState();
+          return false;
+        } else {
+          // 水平移动或斜向移动，激活拖拽
+          this.cancelLongPress();
+          this.activateDrag();
+        }
       } else {
         // 移动距离不够，继续等待长按
         return false;

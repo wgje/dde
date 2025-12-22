@@ -965,9 +965,9 @@ export class FlowTemplateService {
   /**
    * 设置 Overview 视口框样式
    * @param overview Overview 实例
-   * @param isMobile 是否为移动端
+   * @param _isMobile 是否为移动端（保留参数以保持接口兼容性）
    */
-  setupOverviewBoxStyle(overview: go.Overview, isMobile: boolean = false): void {
+  setupOverviewBoxStyle(overview: go.Overview, _isMobile: boolean = false): void {
     const box = overview.box;
     if (box && box.elt(0)) {
       const shape = box.elt(0) as go.Shape;

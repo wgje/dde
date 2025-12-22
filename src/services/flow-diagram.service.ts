@@ -583,7 +583,7 @@ export class FlowDiagramService {
               ? nodeBounds.copy().unionRect(viewportBounds)
               : nodeBounds;
             // scaleBounds：用于缩放计算的“展示边界”（限幅以避免过度缩小）
-            const scaleBounds = isViewportOutside
+            const _scaleBounds = isViewportOutside
               ? limitDisplayBounds(rawBounds, viewportBounds)
               : rawBounds;
 

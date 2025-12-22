@@ -145,6 +145,7 @@ export function mapConnectionToDbInsert(conn: Connection, projectId: string): Co
     source_id: conn.source,
     target_id: conn.target,
     description: conn.description,
+    deleted_at: conn.deletedAt ?? null,
   };
 }
 
