@@ -14,15 +14,18 @@ Sentry.init({
   integrations: [
     // 浏览器性能追踪
     Sentry.browserTracingIntegration(),
-    // 会话回放 - 对复现 Bug 极其有用
-    Sentry.replayIntegration(),
+    // 会话回放 - 对复现 Bug 极其有用（个人项目的"闭路监控"）
+    Sentry.replayIntegration({
+      maskAllText: false,    // 关闭文字遮蔽，方便调试时看清界面内容
+      blockAllMedia: false,  // 允许录制图片
+    }),
   ],
   // 只允许来自我们域名的请求被追踪
   tracePropagationTargets: ['localhost', /^https:\/\/dde-psi\.vercel\.app/],
   // 采样率：个人项目全量采集
   tracesSampleRate: 1.0,
-  // 正常会话抽样 10%
-  replaysSessionSampleRate: 0.1,
+  // 正常会话 100% 录制（个人项目，方便随时回看操作过程）
+  replaysSessionSampleRate: 1.0,
   // 报错时 100% 录屏
   replaysOnErrorSampleRate: 1.0,
   // 环境标识
