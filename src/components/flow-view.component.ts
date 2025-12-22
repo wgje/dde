@@ -94,7 +94,8 @@ import * as go from 'gojs';
           <!-- 小地图/导航器 -->
           @if (isOverviewVisible()) {
             <div 
-              class="absolute z-50 pointer-events-auto bg-white/90 backdrop-blur rounded-lg shadow-md border border-stone-200/60 overflow-hidden select-none"
+              class="absolute z-50 pointer-events-auto bg-white/90 backdrop-blur rounded-lg shadow-md border border-stone-200/60 select-none"
+              style="overflow: hidden;"
               [class.opacity-40]="isOverviewCollapsed()"
               [class.hover:opacity-100]="isOverviewCollapsed()"
               [style.right.px]="store.isMobile() ? 8 : 16"
@@ -105,7 +106,10 @@ import * as go from 'gojs';
               <!-- 小地图内容 -->
               @if (!isOverviewCollapsed()) {
                 <!-- 让 Overview 画布在更低层级渲染，避免覆盖右上角折叠按钮的点击区域 -->
-                <div #overviewDiv class="w-full h-full relative z-0"></div>
+                <!-- 添加明确的尺寸和 overflow 设置，确保 Canvas 正确渲染 -->
+                <div #overviewDiv 
+                  class="w-full h-full relative z-0"
+                  style="overflow: hidden; position: relative;"></div>
               }
               
               <!-- 折叠/展开按钮 -->
@@ -438,10 +442,43 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 是否有待处理的图表更新（用于 rAF 合并） */
   private diagramUpdatePending = false;
   
+  /** Overview 刷新定时器（防抖） */
+  private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
+  
   // ========== 调色板拖动状态 ==========
   private isResizingPalette = false;
   private startY = 0;
   private startHeight = 0;
+  
+  /**
+   * 监听窗口大小改变（处理屏幕旋转等情况）
+   */
+  @HostListener('window:resize')
+  onWindowResize(): void {
+    // 防抖处理，避免频繁刷新
+    if (this.overviewResizeTimer) {
+      clearTimeout(this.overviewResizeTimer);
+    }
+    
+    this.overviewResizeTimer = setTimeout(() => {
+      if (!this.isDestroyed && !this.isOverviewCollapsed()) {
+        this.diagram.refreshOverview();
+      }
+    }, 300);
+  }
+  
+  /**
+   * 监听屏幕方向改变（移动端）
+   */
+  @HostListener('window:orientationchange')
+  onOrientationChange(): void {
+    // 屏幕旋转后延迟刷新，确保布局完成
+    this.scheduleTimer(() => {
+      if (!this.isDestroyed && !this.isOverviewCollapsed()) {
+        this.diagram.refreshOverview();
+      }
+    }, 500);
+  }
   
   constructor() {
     // 监听任务数据变化，使用 rAF 对齐渲染帧更新图表
@@ -550,6 +587,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (this.pendingRafId !== null) {
       cancelAnimationFrame(this.pendingRafId);
       this.pendingRafId = null;
+    }
+    
+    // 清理 Overview 刷新定时器
+    if (this.overviewResizeTimer) {
+      clearTimeout(this.overviewResizeTimer);
+      this.overviewResizeTimer = null;
     }
     
     // 清理服务
@@ -726,11 +769,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 展开时需要重新初始化 Overview
     if (wasCollapsed) {
-      this.scheduleTimer(() => {
-        if (this.overviewDiv?.nativeElement && this.diagram.isInitialized) {
-          this.diagram.initializeOverview(this.overviewDiv.nativeElement);
-        }
-      }, 50);
+      // 使用 requestAnimationFrame + setTimeout 确保 DOM 完全渲染后再初始化
+      // 修复移动端展开小地图时只显示一半的问题
+      requestAnimationFrame(() => {
+        this.scheduleTimer(() => {
+          if (this.overviewDiv?.nativeElement && this.diagram.isInitialized) {
+            this.diagram.initializeOverview(this.overviewDiv.nativeElement);
+          }
+        }, 100); // 增加延迟时间，确保容器尺寸已确定
+      });
     } else {
       // 折叠时销毁 Overview
       this.diagram.disposeOverview();

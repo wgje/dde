@@ -296,46 +296,71 @@ export class FlowDiagramService {
     this.overviewInteractionLastApplyAt = 0;
     this.overviewScheduleUpdate = null;
     
-    try {
-      const $ = go.GraphObject.make;
-      const overviewBackground = this.getOverviewBackgroundColor();
-      container.style.backgroundColor = overviewBackground;
+    // 使用 requestAnimationFrame 确保 DOM 布局完成后再初始化
+    // 修复手机端容器尺寸未就绪导致的渲染问题
+    requestAnimationFrame(() => {
+      if (this.isDestroyed || !this.diagram) return;
       
-      this.overview = $(go.Overview, container, {
-        contentAlignment: go.Spot.Center,
-        "animationManager.isEnabled": false,
-        "computePixelRatio": () => window.devicePixelRatio || 1
-      });
+      // 检查容器尺寸是否有效
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
       
-      // 委托给 FlowTemplateService 设置 Overview 模板
-      this.templateService.setupOverviewNodeTemplate(this.overview);
-      this.templateService.setupOverviewLinkTemplate(this.overview);
-      
-      this.overview.observed = this.diagram;
-      
-      if (this.diagram) {
-        this.diagram.requestUpdate();
-      }
-      if (this.overview) {
-        this.overview.requestUpdate();
+      if (containerWidth <= 0 || containerHeight <= 0) {
+        this.logger.warn(`Overview 容器尺寸无效: ${containerWidth}x${containerHeight}，延迟重试`);
+        // 延迟重试
+        setTimeout(() => this.initializeOverview(container), 100);
+        return;
       }
       
-      // 设置视口框样式
-      this.templateService.setupOverviewBoxStyle(this.overview);
-      
-      this.overview.scale = 0.15;
-      this.lastOverviewScale = 0.15;
+      try {
+        const $ = go.GraphObject.make;
+        const overviewBackground = this.getOverviewBackgroundColor();
+        container.style.backgroundColor = overviewBackground;
+        
+        // 检测是否为移动端
+        const isMobile = containerWidth < 768 || 'ontouchstart' in window;
+        
+        // 移动端使用固定 pixelRatio=1，避免高分屏（2x/3x）导致 Canvas 渲染尺寸问题
+        // 桌面端使用实际 devicePixelRatio 保证清晰度
+        const pixelRatio = isMobile ? 1 : (window.devicePixelRatio || 1);
+        
+        this.overview = $(go.Overview, container, {
+          contentAlignment: go.Spot.Center,
+          "animationManager.isEnabled": false,
+          "computePixelRatio": () => pixelRatio
+        });
+        
+        // 委托给 FlowTemplateService 设置 Overview 模板
+        this.templateService.setupOverviewNodeTemplate(this.overview);
+        this.templateService.setupOverviewLinkTemplate(this.overview);
+        
+        this.overview.observed = this.diagram;
+        
+        // 设置视口框样式
+        this.templateService.setupOverviewBoxStyle(this.overview);
+        
+        this.overview.scale = 0.15;
+        this.lastOverviewScale = 0.15;
 
-      this.attachOverviewPointerListeners(container);
-      
-      this.setupOverviewAutoScale();
-      
-      const nodeCount = this.diagram.nodes.count;
-      const linkCount = this.diagram.links.count;
-      this.logger.info(`Overview 初始化成功 - 节点数: ${nodeCount}, 连接数: ${linkCount}`);
-    } catch (error) {
-      this.logger.error('Overview 初始化失败:', error);
-    }
+        this.attachOverviewPointerListeners(container);
+        
+        this.setupOverviewAutoScale();
+        
+        // 强制刷新一次，确保正确渲染
+        if (this.diagram) {
+          this.diagram.requestUpdate();
+        }
+        if (this.overview) {
+          this.overview.requestUpdate();
+        }
+        
+        const nodeCount = this.diagram.nodes.count;
+        const linkCount = this.diagram.links.count;
+        this.logger.info(`Overview 初始化成功 - 尺寸: ${containerWidth}x${containerHeight}, pixelRatio: ${pixelRatio}, 节点数: ${nodeCount}, 连接数: ${linkCount}`);
+      } catch (error) {
+        this.logger.error('Overview 初始化失败:', error);
+      }
+    });
   }
   
   private getOverviewBackgroundColor(): string {
@@ -763,6 +788,40 @@ export class FlowDiagramService {
       this.overview = null;
     }
     this.overviewContainer = null;
+  }
+  
+  /**
+   * 刷新 Overview 渲染
+   * 用于处理容器尺寸变化（如屏幕旋转、窗口缩放）
+   */
+  refreshOverview(): void {
+    if (!this.overview || !this.overviewContainer || this.isDestroyed) return;
+    
+    try {
+      // 强制刷新 Overview 的渲染
+      this.overview.requestUpdate();
+      
+      // 重新计算和设置缩放
+      const containerWidth = this.overviewContainer.clientWidth;
+      const containerHeight = this.overviewContainer.clientHeight;
+      
+      if (containerWidth > 0 && containerHeight > 0 && this.diagram) {
+        const docBounds = this.diagram.documentBounds;
+        if (docBounds.isReal() && docBounds.width > 0 && docBounds.height > 0) {
+          const padding = 0.1;
+          const scaleX = (containerWidth * (1 - padding * 2)) / docBounds.width;
+          const scaleY = (containerHeight * (1 - padding * 2)) / docBounds.height;
+          const newScale = Math.max(0.02, Math.min(0.5, Math.min(scaleX, scaleY)));
+          
+          this.overview.scale = newScale;
+          this.lastOverviewScale = newScale;
+          
+          this.logger.debug(`Overview 已刷新 - 容器尺寸: ${containerWidth}x${containerHeight}, scale: ${newScale}`);
+        }
+      }
+    } catch (error) {
+      this.logger.error('刷新 Overview 失败:', error);
+    }
   }
 
   private attachOverviewPointerListeners(container: HTMLDivElement): void {
