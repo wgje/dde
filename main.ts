@@ -1,11 +1,33 @@
 import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
-import { isDevMode, ErrorHandler, VERSION, NgZone } from '@angular/core';
-import { provideRouter, withComponentInputBinding, withHashLocation } from '@angular/router';
+import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
+import { provideRouter, withComponentInputBinding, withHashLocation, Router } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
+import * as Sentry from '@sentry/angular';
 import { AppComponent } from './src/app.component';
 import { routes } from './src/app.routes';
 import { GlobalErrorHandler } from './src/services/global-error-handler.service';
+
+// ============= Sentry 错误监控初始化 =============
+Sentry.init({
+  dsn: 'https://020afcbad58675a58fb58aa2e2cc8662@o4510578675941376.ingest.us.sentry.io/4510578712969216',
+  integrations: [
+    // 浏览器性能追踪
+    Sentry.browserTracingIntegration(),
+    // 会话回放 - 对复现 Bug 极其有用
+    Sentry.replayIntegration(),
+  ],
+  // 只允许来自我们域名的请求被追踪
+  tracePropagationTargets: ['localhost', /^https:\/\/dde-psi\.vercel\.app/],
+  // 采样率：个人项目全量采集
+  tracesSampleRate: 1.0,
+  // 正常会话抽样 10%
+  replaysSessionSampleRate: 0.1,
+  // 报错时 100% 录屏
+  replaysOnErrorSampleRate: 1.0,
+  // 环境标识
+  environment: isDevMode() ? 'development' : 'production',
+});
 
 // ============= BUILD ID: 2025-12-04-v15-CACHE-FIX =============
 const BUILD_ID = '2025-12-04-v15-CACHE-FIX';
@@ -200,7 +222,24 @@ async function startApplication() {
   try {
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
-        { provide: ErrorHandler, useClass: GlobalErrorHandler },
+        // Sentry 错误处理器 - 捕获所有 Angular 错误并上报
+        {
+          provide: ErrorHandler,
+          useValue: Sentry.createErrorHandler({
+            showDialog: false, // 不显示用户反馈对话框
+          }),
+        },
+        // Sentry 性能追踪 - 追踪路由变化
+        {
+          provide: Sentry.TraceService,
+          deps: [Router],
+        },
+        {
+          provide: APP_INITIALIZER,
+          useFactory: () => () => {},
+          deps: [Sentry.TraceService],
+          multi: true,
+        },
         provideRouter(
           routes,
           withComponentInputBinding(),
