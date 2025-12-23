@@ -228,16 +228,19 @@ export class SyncCoordinatorService {
     const localProjectMap = new Map(localProjects.map(p => [p.id, p]));
     
     // 智能合并每个项目
-    const mergedProjects = remoteProjects.map(remoteProject => {
+    const mergedProjects: Project[] = [];
+    for (const remoteProject of remoteProjects) {
       const localProject = localProjectMap.get(remoteProject.id);
       if (!localProject) {
         // 远程新增的项目，直接使用
-        return this.validateAndRebalance(remoteProject);
+        mergedProjects.push(this.validateAndRebalance(remoteProject));
+        continue;
       }
-      // 智能合并，保留本地的软删除状态
-      const mergeResult = this.smartMerge(localProject, remoteProject);
-      return this.validateAndRebalance(mergeResult.project);
-    });
+      // 【关键修复】获取 tombstoneIds 防止已删除任务在合并时复活
+      const tombstoneIds = await this.getTombstoneIds(remoteProject.id);
+      const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
+      mergedProjects.push(this.validateAndRebalance(mergeResult.project));
+    }
     
     // 更新本地状态
     this.projectState.setProjects(mergedProjects);
@@ -565,6 +568,9 @@ export class SyncCoordinatorService {
         return { success: false, message: '云端项目不存在' };
       }
       
+      // 【关键修复】获取 tombstoneIds，防止已删除任务在合并时复活
+      const tombstoneIds = await this.getTombstoneIds(projectId);
+      
       const localVersion = localProject.version ?? 0;
       const remoteVersion = remoteProject.version ?? 0;
       
@@ -573,7 +579,7 @@ export class SyncCoordinatorService {
       // 如果直接用远程数据覆盖，会丢失本地的 deletedAt 状态
       if (localVersion === remoteVersion) {
         // 执行智能合并，保留本地的软删除状态
-        const mergeResult = this.smartMerge(localProject, remoteProject);
+        const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
         const validated = this.validateAndRebalance(mergeResult.project);
         this.projectState.updateProjects(ps => 
           ps.map(p => p.id === projectId ? validated : p)
@@ -583,7 +589,7 @@ export class SyncCoordinatorService {
       
       // 3. 远程版本更新，执行智能合并
       if (remoteVersion > localVersion) {
-        const mergeResult = this.smartMerge(localProject, remoteProject);
+        const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
         
         if (mergeResult.conflictCount > 0) {
           // 发现冲突，静默保存到冲突仓库（不弹窗打扰用户）
@@ -673,12 +679,12 @@ export class SyncCoordinatorService {
   /**
    * 解决数据冲突
    */
-  resolveConflict(
+  async resolveConflict(
     projectId: string,
     choice: 'local' | 'remote' | 'merge',
     localProject: Project,
     remoteProject: Project | undefined
-  ): Result<Project, OperationError> {
+  ): Promise<Result<Project, OperationError>> {
     return this.conflictService.resolveConflict(
       projectId,
       choice,
@@ -689,9 +695,20 @@ export class SyncCoordinatorService {
   
   /**
    * 智能合并项目
+   * 
+   * @param localProject 本地项目
+   * @param remoteProject 远程项目  
+   * @param tombstoneIds 已永久删除的任务 ID 集合（可选）
    */
-  smartMerge(localProject: Project, remoteProject: Project) {
-    return this.conflictService.smartMerge(localProject, remoteProject);
+  smartMerge(localProject: Project, remoteProject: Project, tombstoneIds?: Set<string>) {
+    return this.conflictService.smartMerge(localProject, remoteProject, tombstoneIds);
+  }
+  
+  /**
+   * 获取项目的 tombstone IDs
+   */
+  async getTombstoneIds(projectId: string): Promise<Set<string>> {
+    return this.syncService.getTombstoneIds(projectId);
   }
   
   /**
@@ -758,12 +775,13 @@ export class SyncCoordinatorService {
               offlineTime: new Date(offlineTime).toISOString(),
               cloudTime: new Date(cloudTime).toISOString()
             });
-            // 使用智能合并来保留双方的修改
-            const mergedProject = this.conflictService.smartMerge(offlineProject, cloudProject);
+            // 【关键修复】使用智能合并时传入 tombstoneIds，防止已删除任务复活
+            const tombstoneIds = await this.getTombstoneIds(offlineProject.id);
+            const mergedProject = this.conflictService.smartMerge(offlineProject, cloudProject, tombstoneIds);
             shouldSyncOffline = true;
             reason = '智能合并本地和云端修改';
             // 替换 offlineProject 为合并后的版本
-            Object.assign(offlineProject, mergedProject);
+            Object.assign(offlineProject, mergedProject.project);
           }
         }
       }

@@ -225,7 +225,9 @@ export class RemoteChangeHandlerService {
             this.toastService.info('数据已更新', '其他设备的更改已同步，当前编辑内容将与远程合并');
           }
 
-          const mergeResult = this.syncCoordinator.smartMerge(localProject, remoteProject);
+          // 【关键修复】获取 tombstoneIds，防止已删除任务在合并时复活
+          const tombstoneIds = await this.syncCoordinator.getTombstoneIds(projectId);
+          const mergeResult = this.syncCoordinator.smartMerge(localProject, remoteProject, tombstoneIds);
 
           if (mergeResult.conflictCount > 0 && this.uiState.isEditing) {
             this.toastService.warning('合并提示', '检测到与远程更改的冲突，已自动合并');

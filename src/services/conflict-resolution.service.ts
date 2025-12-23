@@ -75,12 +75,12 @@ export class ConflictResolutionService {
    * @param remoteProject 远程项目
    * @returns 解决后的项目
    */
-  resolveConflict(
+  async resolveConflict(
     projectId: string,
     strategy: ConflictResolutionStrategy,
     localProject: Project,
     remoteProject?: Project
-  ): Result<Project, OperationError> {
+  ): Promise<Result<Project, OperationError>> {
     this.logger.info('[LWW] 解决冲突', { projectId, strategy });
     
     let resolvedProject: Project;
@@ -111,7 +111,11 @@ export class ConflictResolutionService {
         if (!remoteProject) {
           return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
         }
-        const mergeResult = this.smartMerge(localProject, remoteProject);
+        // 【关键修复】获取 tombstoneIds 防止已删除任务在合并时复活
+        // 注意：这里使用同步方法会阻塞，但 resolveConflict 通常在用户交互后调用
+        // 如果性能有问题，可以考虑将整个 resolveConflict 改为 async
+        const tombstoneIds = await this.syncService.getTombstoneIds(projectId);
+        const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
         resolvedProject = mergeResult.project;
         
         if (mergeResult.issues.length > 0) {
@@ -144,8 +148,16 @@ export class ConflictResolutionService {
    * 2. 删除任务：双方都执行
    * 3. 修改冲突：字段级合并 - 选择每个字段较新的版本
    * 4. 合并后执行完整性检查
+   * 
+   * 【关键修复】正确处理已删除任务：
+   * - 本地存在但远程不存在 + 在 tombstones 中 = 远程已删除，不保留
+   * - 本地存在但远程不存在 + 不在 tombstones 中 = 本地新增，保留
+   * 
+   * @param local 本地项目
+   * @param remote 远程项目
+   * @param tombstoneIds 已永久删除的任务 ID 集合（可选，如果不传则使用旧逻辑）
    */
-  smartMerge(local: Project, remote: Project): MergeResult {
+  smartMerge(local: Project, remote: Project, tombstoneIds?: Set<string>): MergeResult {
     const issues: string[] = [];
     let conflictCount = 0;
     
@@ -170,14 +182,30 @@ export class ConflictResolutionService {
     
     const mergedTasks: Task[] = [];
     const processedIds = new Set<string>();
+    let skippedTombstoneCount = 0;
     
     // 处理本地任务
     for (const localTask of localTasks) {
       processedIds.add(localTask.id);
+      
+      // 【关键修复】检查是否已被永久删除（在 tombstones 中）
+      if (tombstoneIds?.has(localTask.id)) {
+        this.logger.info('smartMerge: 跳过 tombstone 任务', { taskId: localTask.id });
+        skippedTombstoneCount++;
+        continue; // 不保留已永久删除的任务
+      }
+      
+      // 检查是否已软删除
+      if (localTask.deletedAt) {
+        this.logger.debug('smartMerge: 跳过软删除任务', { taskId: localTask.id });
+        continue;
+      }
+      
       const remoteTask = remoteTaskMap.get(localTask.id);
       
       if (!remoteTask) {
-        // 本地新增的任务，保留
+        // 本地存在但远程不存在
+        // 由于已经过滤了 tombstones，这里是真正的本地新增任务
         mergedTasks.push(localTask);
         continue;
       }
@@ -196,8 +224,20 @@ export class ConflictResolutionService {
     // 处理远程新增的任务
     for (const remoteTask of remoteTasks) {
       if (!processedIds.has(remoteTask.id)) {
-        mergedTasks.push(remoteTask);
+        // 远程任务不在 tombstones 中才添加（loadFullProject 已经过滤了）
+        // 但本地也可能有软删除状态
+        if (!remoteTask.deletedAt) {
+          mergedTasks.push(remoteTask);
+        }
       }
+    }
+    
+    if (skippedTombstoneCount > 0) {
+      this.logger.info('smartMerge: 已过滤 tombstone 任务', { 
+        count: skippedTombstoneCount, 
+        projectId: local.id 
+      });
+      issues.push(`已过滤 ${skippedTombstoneCount} 个已删除的任务`);
     }
     
     // 合并 connections

@@ -309,7 +309,7 @@ export class StoreService {
     
     const remoteProject = conflictData.remoteData as Project | undefined;
     
-    const result = this.syncCoordinator.resolveConflict(
+    const result = await this.syncCoordinator.resolveConflict(
       projectId,
       choice,
       localProject,

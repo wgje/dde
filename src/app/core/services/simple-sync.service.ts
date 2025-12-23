@@ -367,27 +367,52 @@ export class SimpleSyncService {
   /**
    * 从云端拉取任务
    * LWW：只更新 updated_at 更新的数据
+   * 
+   * 【关键修复】检查 task_tombstones 表，防止已删除任务复活
    */
   async pullTasks(projectId: string, since?: string): Promise<Task[]> {
     const client = this.getSupabaseClient();
     if (!client) return [];
     
     try {
-      let query = client
+      // 1. 并行查询任务和 tombstones
+      let tasksQuery = client
         .from('tasks')
         .select('*')
         .eq('project_id', projectId);
       
       if (since) {
-        query = query.gt('updated_at', since);
+        tasksQuery = tasksQuery.gt('updated_at', since);
       }
       
-      const { data, error } = await query;
+      const [tasksResult, tombstonesResult] = await Promise.all([
+        tasksQuery,
+        client.from('task_tombstones').select('task_id').eq('project_id', projectId)
+      ]);
       
-      if (error) throw supabaseErrorToError(error);
+      if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
       
-      // 转换为本地模型（data 类型为 TaskRow[]）
-      return (data as TaskRow[] || []).map(row => this.rowToTask(row));
+      // 2. 构建 tombstone ID 集合
+      const tombstoneIds = new Set<string>();
+      if (!tombstonesResult.error && tombstonesResult.data) {
+        for (const t of tombstonesResult.data) {
+          tombstoneIds.add(t.task_id);
+        }
+      }
+      
+      // 3. 转换为本地模型并过滤已删除的任务
+      const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
+      return allTasks.filter(task => {
+        if (tombstoneIds.has(task.id)) {
+          this.logger.debug('pullTasks: 跳过 tombstone 任务', { taskId: task.id });
+          return false;
+        }
+        if (task.deletedAt) {
+          this.logger.debug('pullTasks: 跳过软删除任务', { taskId: task.id });
+          return false;
+        }
+        return true;
+      });
     } catch (e) {
       this.logger.error('拉取任务失败', e);
       return [];
@@ -417,6 +442,32 @@ export class SimpleSyncService {
       Sentry.captureException(e, { tags: { operation: 'deleteTask' } });
       this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
       return false;
+    }
+  }
+  
+  /**
+   * 获取项目的所有 tombstone 任务 ID
+   * 用于检查任务是否已被永久删除
+   */
+  async getTombstoneIds(projectId: string): Promise<Set<string>> {
+    const client = this.getSupabaseClient();
+    if (!client) return new Set();
+    
+    try {
+      const { data, error } = await client
+        .from('task_tombstones')
+        .select('task_id')
+        .eq('project_id', projectId);
+      
+      if (error) {
+        this.logger.warn('获取 tombstones 失败', error);
+        return new Set();
+      }
+      
+      return new Set((data || []).map(t => t.task_id));
+    } catch (e) {
+      this.logger.warn('获取 tombstones 异常', e);
+      return new Set();
     }
   }
   
@@ -958,6 +1009,8 @@ export class SimpleSyncService {
    * 批量推送优化：
    * - 在连续请求之间添加 100ms 延迟，防止触发服务器速率限制
    * - 每个请求自动重试（pushTask/pushConnection 内置重试机制）
+   * 
+   * 【关键修复】推送前检查 tombstones，防止已删除任务复活
    */
   async saveProjectToCloud(
     project: Project,
@@ -972,15 +1025,38 @@ export class SimpleSyncService {
     this.syncState.update(s => ({ ...s, isSyncing: true }));
     
     try {
+      // 【关键防护】先获取 tombstones，过滤已删除的任务
+      const tombstoneIds = await this.getTombstoneIds(project.id);
+      const tasksToSync = project.tasks.filter(task => {
+        if (tombstoneIds.has(task.id)) {
+          this.logger.info('saveProjectToCloud: 跳过 tombstone 任务', { taskId: task.id });
+          return false;
+        }
+        // 也跳过软删除的任务（不推送到云端）
+        if (task.deletedAt) {
+          this.logger.debug('saveProjectToCloud: 跳过软删除任务', { taskId: task.id });
+          return false;
+        }
+        return true;
+      });
+      
+      if (tasksToSync.length !== project.tasks.length) {
+        this.logger.info('saveProjectToCloud: 过滤了已删除任务', {
+          original: project.tasks.length,
+          filtered: tasksToSync.length,
+          tombstoneCount: tombstoneIds.size
+        });
+      }
+      
       // 1. 保存项目元数据
       await this.pushProject(project);
       
       // 2. 批量保存任务（请求间延迟 100ms 防止速率限制）
-      for (let i = 0; i < project.tasks.length; i++) {
+      for (let i = 0; i < tasksToSync.length; i++) {
         if (i > 0) {
           await this.delay(100); // 防止连续请求触发 504/429
         }
-        await this.pushTask(project.tasks[i], project.id);
+        await this.pushTask(tasksToSync[i], project.id);
       }
       
       // 3. 批量保存连接（请求间延迟 100ms 防止速率限制）
