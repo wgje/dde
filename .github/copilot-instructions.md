@@ -1,6 +1,6 @@
 # NanoFlow AI 编码指南
 
-> **核心哲学**：不要造轮子。利用 Supabase Realtime 做同步，利用 UUID 做 ID，利用 PWA 做离线。
+> **核心哲学**：不要造轮子。利用 Supabase Realtime 做同步，利用 UUID 做 ID，利用 PWA 做离线，利用 Sentry 做错误监控。
 
 ## 极简架构原则
 
@@ -79,66 +79,169 @@ private readonly MAX_RETRIES = 5;
 private readonly RETRY_INTERVAL = 5000;
 ```
 
-## 目录结构（新架构）
+### 6. 错误监控（Sentry 集成）
+
+```typescript
+// main.ts - 应用启动时初始化 Sentry
+import * as Sentry from '@sentry/angular';
+
+Sentry.init({
+  dsn: 'your-sentry-dsn',
+  integrations: [
+    Sentry.browserTracingIntegration(),   // 性能追踪
+    Sentry.replayIntegration({             // 会话回放
+      maskAllText: false,
+      blockAllMedia: false,
+    }),
+  ],
+  tracesSampleRate: 1.0,                   // 个人项目全量采集
+  replaysSessionSampleRate: 1.0,           // 正常会话 100% 录制
+  replaysOnErrorSampleRate: 1.0,           // 报错时 100% 录屏
+});
+
+// 业务代码中捕获错误
+import * as Sentry from '@sentry/angular';
+try {
+  await riskyOperation();
+} catch (error) {
+  Sentry.captureException(error, { tags: { operation: 'operationName' } });
+}
+```
+
+**Sentry 集成点**：
+- `main.ts`：全局初始化 + Angular ErrorHandler 集成
+- `SimpleSyncService`：同步操作错误上报
+- `FlowDiagramService`：GoJS 相关错误上报
+- `ModalLoaderService`：模态框加载错误上报
+- `StorePersistenceService`：本地存储错误上报
+
+**Supabase 错误转换**（`src/utils/supabase-error.ts`）：
+```typescript
+// Supabase 返回的错误是普通对象，需要转换才能被 Sentry 正确捕获
+const enhanced = supabaseErrorToError(error);
+Sentry.captureException(enhanced, { 
+  tags: { operation: 'syncTask' },
+  level: enhanced.isRetryable ? 'warning' : 'error'
+});
+```
+
+## 目录结构（实际架构）
 
 ```
 src/
 ├── app/
-│   ├── core/              # 核心基础设施（单例服务）
-│   │   ├── services/      # SimpleSyncService, ModalLoaderService
-│   │   └── state/         # TaskStore, ProjectStore, ConnectionStore (Signals)
-│   ├── features/          # 业务功能
-│   │   ├── flow/          # 流程图视图
-│   │   └── text/          # 文本列表视图
-│   └── shared/            # 共享 UI 组件
-│       ├── ui/            # Toast, ErrorBoundary, OfflineBanner
-│       └── services/      # ThemeService, UiStateService
-├── components/            # 遗留组件（逐步迁移到 features/）
-├── services/              # 遗留服务（逐步迁移到 core/）
-│   ├── flow-diagram.service.ts      # GoJS 主服务（~1016 行）
-│   ├── flow-event.service.ts        # 事件处理（新拆分）
-│   ├── flow-template.service.ts     # 模板配置（新拆分）
-│   ├── flow-template-events.ts      # 事件总线（新拆分）
-│   ├── flow-selection.service.ts    # 选择管理（新拆分）
-│   ├── flow-zoom.service.ts         # 缩放控制（新拆分）
-│   ├── flow-layout.service.ts       # 布局计算（新拆分）
+│   ├── core/                    # 核心基础设施（单例服务）
+│   │   ├── services/            # SimpleSyncService, ModalLoaderService
+│   │   └── state/               # stores.ts, store-persistence.service.ts
+│   ├── features/                # 业务功能（待迁移）
+│   │   ├── flow/                # 流程图视图（index.ts）
+│   │   └── text/                # 文本列表视图（index.ts）
+│   └── shared/                  # 共享 UI 组件
+│       ├── ui/                  # index.ts
+│       └── services/            # index.ts
+├── components/                  # 组件（主要存放位置）
+│   ├── flow/                    # 流程图相关组件
+│   │   ├── flow-palette.component.ts
+│   │   ├── flow-toolbar.component.ts
+│   │   ├── flow-task-detail.component.ts
+│   │   ├── flow-connection-editor.component.ts
+│   │   └── flow-link-type-dialog.component.ts
+│   ├── modals/                  # 模态框组件
+│   │   ├── login-modal.component.ts
+│   │   ├── settings-modal.component.ts
+│   │   ├── new-project-modal.component.ts
+│   │   ├── trash-modal.component.ts
+│   │   ├── conflict-modal.component.ts
+│   │   └── dashboard-modal.component.ts
+│   ├── text-view/               # 文本视图组件
+│   │   ├── text-stages.component.ts
+│   │   ├── text-unfinished.component.ts
+│   │   ├── text-unassigned.component.ts
+│   │   ├── text-task-editor.component.ts
+│   │   └── text-task-card.component.ts
+│   ├── flow-view.component.ts   # 流程图主视图
+│   ├── text-view.component.ts   # 文本主视图
+│   ├── project-shell.component.ts # 项目容器/视图切换
+│   ├── error-boundary.component.ts
+│   ├── error-page.component.ts
+│   └── offline-banner.component.ts
+├── services/                    # 服务层（主要存放位置）
+│   ├── flow-diagram.service.ts        # GoJS 主服务
+│   ├── flow-event.service.ts          # 事件处理
+│   ├── flow-template.service.ts       # 模板配置
+│   ├── flow-template-events.ts        # 事件总线
+│   ├── flow-selection.service.ts      # 选择管理
+│   ├── flow-zoom.service.ts           # 缩放控制
+│   ├── flow-layout.service.ts         # 布局计算
+│   ├── flow-drag-drop.service.ts      # 拖放逻辑
+│   ├── global-error-handler.service.ts # 全局错误处理（分级 + Sentry）
+│   ├── task-operation.service.ts      # 任务 CRUD
+│   ├── store.service.ts               # 状态管理
+│   ├── auth.service.ts                # 认证服务
+│   ├── supabase-client.service.ts     # Supabase 客户端
+│   ├── toast.service.ts               # Toast 提示
+│   ├── logger.service.ts              # 日志服务
+│   ├── theme.service.ts               # 主题服务
 │   └── ...
-├── models/                # 数据模型
-├── config/                # 配置常量
-└── utils/                 # 工具函数
+├── models/                      # 数据模型
+│   ├── index.ts                 # Task, Project, Connection 类型导出
+│   ├── supabase-types.ts        # Supabase 数据库类型
+│   └── supabase-mapper.ts       # 类型转换
+├── config/                      # 配置常量
+│   ├── constants.ts             # 全局配置
+│   └── flow-styles.ts           # GoJS 样式
+├── utils/                       # 工具函数
+│   ├── result.ts                # Result 类型
+│   ├── supabase-error.ts        # Supabase 错误转换（Sentry 友好）
+│   ├── date.ts                  # 日期工具
+│   └── validation.ts            # 验证工具
+└── environments/                # 环境配置
+    ├── environment.ts
+    └── environment.development.ts
 ```
 
 ## 核心服务架构
 
 ```
-新架构（精简版）- 2024-12-21 更新
-├── core/
-│   ├── SimpleSyncService        # 简化同步（LWW + 持久化 RetryQueue）
-│   ├── ModalLoaderService       # 模态框动态加载
+服务架构 - 2024-12 更新
+├── core/ (src/app/core/)
+│   ├── services/
+│   │   ├── SimpleSyncService        # 简化同步（LWW + 持久化 RetryQueue + Sentry 错误上报）
+│   │   └── ModalLoaderService       # 模态框动态加载 + Sentry 错误上报
 │   └── state/
-│       ├── TaskStore            # 任务状态 (Map<id, Task>) - O(1) 查找
-│       ├── ProjectStore         # 项目状态 (Map<id, Project>)
-│       └── ConnectionStore      # 连接状态 (Map<id, Connection>)
+│       ├── stores.ts                # 状态管理 (Signal-based Map<id, Entity>)
+│       └── StorePersistenceService  # 本地持久化 + Sentry 错误上报
 │
-├── flow/                        # GoJS 流程图服务（已完全拆分）
-│   ├── FlowDiagramService       # 主服务：初始化、生命周期、导出 (~1016 行)
-│   ├── FlowEventService         # 事件处理：回调注册、事件代理 (~638 行)
-│   ├── FlowTemplateService      # 模板配置：节点/连接线/Overview (~983 行)
-│   ├── FlowSelectionService     # 选择管理：选中/多选/高亮
-│   ├── FlowZoomService          # 缩放控制：放大/缩小/适应内容
-│   ├── FlowLayoutService        # 布局计算：自动布局/位置保存
-│   ├── FlowDragDropService      # 拖放逻辑
-│   └── flow-template-events.ts  # 事件总线（解耦桥梁）
+├── services/ (src/services/) - 主服务层
+│   ├── GoJS 流程图服务（已完全拆分）
+│   │   ├── FlowDiagramService       # 主服务：初始化、生命周期、导出 + Sentry 错误上报
+│   │   ├── FlowEventService         # 事件处理：回调注册、事件代理
+│   │   ├── FlowTemplateService      # 模板配置：节点/连接线/Overview
+│   │   ├── FlowSelectionService     # 选择管理：选中/多选/高亮
+│   │   ├── FlowZoomService          # 缩放控制：放大/缩小/适应内容
+│   │   ├── FlowLayoutService        # 布局计算：自动布局/位置保存
+│   │   ├── FlowDragDropService      # 拖放逻辑
+│   │   └── flow-template-events.ts  # 事件总线（解耦桥梁）
+│   │
+│   ├── 业务服务
+│   │   ├── TaskOperationService     # 任务 CRUD
+│   │   ├── AttachmentService        # 附件管理
+│   │   ├── SearchService            # 搜索
+│   │   └── StoreService             # 状态管理
+│   │
+│   ├── 错误处理
+│   │   └── GlobalErrorHandler       # 全局错误处理（分级 + Sentry 集成）
+│   │
+│   └── 基础设施
+│       ├── AuthService              # 认证
+│       ├── SupabaseClientService    # Supabase 客户端
+│       ├── ToastService             # Toast 提示
+│       ├── LoggerService            # 日志
+│       └── ThemeService             # 主题
 │
-├── features/
-│   ├── TaskOperationService     # 任务 CRUD
-│   ├── AttachmentService        # 附件管理
-│   └── SearchService            # 搜索
-│
-└── shared/
-    ├── ToastService             # Toast 提示
-    ├── LoggerService            # 日志
-    └── ThemeService             # 主题
+└── utils/ (src/utils/)
+    ├── result.ts                    # Result 类型统一错误处理
+    └── supabase-error.ts            # Supabase 错误转换为 Sentry 友好的 Error
 ```
 
 ### 事件代理模式（FlowTemplateService ↔ FlowEventService）
@@ -181,6 +284,7 @@ npm run lint:fix       # ESLint 自动修复
 2. **GoJS 内存泄漏**：组件销毁时调用 `diagram.clear()` 和移除事件监听
 3. **递归栈溢出**：所有树遍历使用迭代算法 + 深度限制（MAX_TREE_DEPTH: 500）
 4. **离线数据丢失**：失败操作必须进入 RetryQueue
+5. **Sentry 错误丢失**：Supabase 错误是普通对象，需使用 `supabaseErrorToError()` 转换
 
 ## 关键配置（src/config/constants.ts）
 
@@ -262,14 +366,16 @@ async pullTasks(projectId: string, since?: string): Promise<Task[]> {
 
 ### 服务拆分（2024-12 优化后）
 
-| 服务 | 职责 | 行数 |
-|------|------|------|
-| **FlowDiagramService** | 主服务：初始化、模板、事件监听 | ~2500 |
-| **FlowSelectionService** | 选择/多选/取消选择 | ~180 |
-| **FlowZoomService** | 缩放/居中/视图状态 | ~230 |
-| **FlowLayoutService** | 自动布局/位置保存 | ~220 |
-| **FlowDragDropService** | 拖放逻辑 | ~300 |
-| **FlowTemplateService** | 节点/连接线模板 | ~200 |
+| 服务 | 职责 |
+|------|------|
+| **FlowDiagramService** | 主服务：初始化、生命周期、导出 + Sentry 错误上报 |
+| **FlowEventService** | 事件处理：回调注册、事件代理 |
+| **FlowTemplateService** | 模板配置：节点/连接线/Overview |
+| **FlowSelectionService** | 选择管理：选中/多选/高亮 |
+| **FlowZoomService** | 缩放控制：放大/缩小/适应内容 |
+| **FlowLayoutService** | 布局计算：自动布局/位置保存 |
+| **FlowDragDropService** | 拖放逻辑 |
+| **flow-template-events.ts** | 事件总线（解耦桥梁） |
 
 ### 布局算法
 
@@ -335,11 +441,26 @@ function doSomething(): Result<Project, OperationError> {
 }
 ```
 
-错误严重级别：
-- `SILENT`：仅记录日志
-- `NOTIFY`：Toast 提示
-- `RECOVERABLE`：恢复对话框
-- `FATAL`：跳转错误页面
+### 错误严重级别（GlobalErrorHandler）
+
+| 级别 | 说明 | 处理方式 |
+|------|------|----------|
+| `SILENT` | 无关紧要的错误 | 仅记录日志 |
+| `NOTIFY` | 需要告知用户 | Toast 提示 |
+| `RECOVERABLE` | 可恢复错误 | 恢复对话框 |
+| `FATAL` | 致命错误 | 跳转错误页面 |
+
+### Sentry 错误上报
+
+关键操作失败时会自动上报到 Sentry，包含 `tags.operation` 标识操作类型。
+
+```typescript
+// 示例：同步操作错误上报
+Sentry.captureException(enhanced, { 
+  tags: { operation: 'syncTask', projectId },
+  level: enhanced.isRetryable ? 'warning' : 'error'
+});
+```
 
 ---
 

@@ -243,27 +243,29 @@ export class SimpleSyncService {
       this.state.update(s => ({ ...s, lastSyncTime: nowISO() }));
       return true;
     } catch (e) {
-      const err = e as any;
-      const isRetryable = err.isRetryable || false;
-      const errorName = err.name || 'Error';
+      const enhanced = supabaseErrorToError(e);
       
       // 根据错误类型选择日志级别
-      if (isRetryable) {
+      if (enhanced.isRetryable) {
         // 网络相关错误：静默处理，仅 debug 日志
-        this.logger.debug(`推送任务失败 (${errorName})，已加入重试队列`, err.message);
+        this.logger.debug(`推送任务失败 (${enhanced.errorType})，已加入重试队列`, enhanced.message);
       } else {
         // 非网络错误：记录完整错误
-        this.logger.error('推送任务失败', e);
+        this.logger.error('推送任务失败', enhanced);
       }
       
       // 报告到 Sentry，但标记可重试错误的级别
-      Sentry.captureException(e, { 
+      Sentry.captureException(enhanced, { 
         tags: { 
           operation: 'pushTask',
-          errorType: errorName,
-          isRetryable: isRetryable.toString()
+          errorType: enhanced.errorType,
+          isRetryable: String(enhanced.isRetryable)
         },
-        level: isRetryable ? 'info' : 'error'
+        level: enhanced.isRetryable ? 'info' : 'error',
+        extra: {
+          taskId: task.id,
+          projectId
+        }
       });
       
       this.addToRetryQueue('task', 'upsert', task, projectId);
@@ -364,8 +366,28 @@ export class SimpleSyncService {
       if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
-      this.logger.error('推送项目失败', e);
-      Sentry.captureException(e, { tags: { operation: 'pushProject' } });
+      const enhanced = supabaseErrorToError(e);
+      
+      // 根据错误类型选择日志级别
+      if (enhanced.isRetryable) {
+        this.logger.debug(`推送项目失败 (${enhanced.errorType})，已加入重试队列`, enhanced.message);
+      } else {
+        this.logger.error('推送项目失败', enhanced);
+      }
+      
+      Sentry.captureException(enhanced, { 
+        tags: { 
+          operation: 'pushProject',
+          errorType: enhanced.errorType,
+          isRetryable: String(enhanced.isRetryable)
+        },
+        level: enhanced.isRetryable ? 'info' : 'error',
+        extra: {
+          projectId: project.id,
+          projectName: project.name
+        }
+      });
+      
       this.addToRetryQueue('project', 'upsert', project);
       return false;
     }
@@ -425,8 +447,31 @@ export class SimpleSyncService {
       if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
-      this.logger.error('推送连接失败', e);
-      Sentry.captureException(e, { tags: { operation: 'pushConnection' } });
+      const enhanced = supabaseErrorToError(e);
+      this.logger.error('推送连接失败', {
+        error: enhanced,
+        connectionId: connection.id,
+        projectId,
+        source: connection.source,
+        target: connection.target,
+        isRetryable: enhanced.isRetryable,
+        errorType: enhanced.errorType
+      });
+      
+      Sentry.captureException(enhanced, {
+        tags: { 
+          operation: 'pushConnection',
+          errorType: enhanced.errorType,
+          isRetryable: String(enhanced.isRetryable)
+        },
+        extra: {
+          connectionId: connection.id,
+          projectId,
+          source: connection.source,
+          target: connection.target
+        }
+      });
+      
       this.addToRetryQueue('connection', 'upsert', connection, projectId);
       return false;
     }

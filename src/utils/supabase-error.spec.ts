@@ -98,6 +98,30 @@ describe('supabase-error', () => {
       expect(result.errorType).toBeDefined();
     });
     
+    it('应该识别 Error 实例中的 "Failed to fetch" 错误', () => {
+      const error = new Error('TypeError: Failed to fetch');
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('NetworkError');
+      expect(result.isRetryable).toBe(true);
+    });
+    
+    it('应该识别 Error 实例中的 "Network error" 错误', () => {
+      const error = new Error('Network error occurred');
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('NetworkError');
+      expect(result.isRetryable).toBe(true);
+    });
+    
+    it('应该识别 Error 实例中的 timeout 错误', () => {
+      const error = new Error('Request timed out');
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('TimeoutError');
+      expect(result.isRetryable).toBe(true);
+    });
+    
     it('应该处理 Unknown Supabase error', () => {
       const error = {};
       const result = supabaseErrorToError(error);

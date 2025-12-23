@@ -512,8 +512,8 @@ export class TextViewDragDropService {
     const ghostWidth = Math.min(200, viewportWidth - 20);
     const ghostHeight = 48;
     
-    let ghostX = Math.max(10, Math.min(x - ghostWidth / 2, viewportWidth - ghostWidth - 10));
-    let ghostY = Math.max(10, Math.min(y, viewportHeight - ghostHeight - 10)); // 手指位置（垂直下方 0px）
+    const ghostX = Math.max(10, Math.min(x - ghostWidth / 2, viewportWidth - ghostWidth - 10));
+    const ghostY = Math.max(10, Math.min(y, viewportHeight - ghostHeight - 10)); // 手指位置（垂直下方 0px）
     
     // 创建 Ghost 元素
     const ghost = document.createElement('div');

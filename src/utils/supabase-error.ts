@@ -40,13 +40,31 @@ const RETRYABLE_ERROR_TYPES = new Set([
 export function supabaseErrorToError(error: any): EnhancedError {
   if (error instanceof Error) {
     const enhanced = error as EnhancedError;
-    // 如果已经是 Error 实例，但缺少扩展属性，补充它们
-    if (!enhanced.isRetryable) {
-      enhanced.isRetryable = RETRYABLE_ERROR_TYPES.has(enhanced.name);
+    const lowerMsg = enhanced.message.toLowerCase();
+    
+    // 识别 Error 实例中的网络错误模式
+    if (lowerMsg.includes('failed to fetch')) {
+      enhanced.errorType = 'NetworkError';
+      enhanced.isRetryable = true;
+    } else if (lowerMsg.includes('network error') || lowerMsg.includes('networkerror')) {
+      enhanced.errorType = 'NetworkError';
+      enhanced.isRetryable = true;
+    } else if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out')) {
+      enhanced.errorType = 'TimeoutError';
+      enhanced.isRetryable = true;
+    } else if (lowerMsg.includes('offline') || lowerMsg.includes('no connection')) {
+      enhanced.errorType = 'OfflineError';
+      enhanced.isRetryable = true;
+    } else {
+      // 如果没有识别出具体类型，使用 name 属性
+      if (!enhanced.isRetryable) {
+        enhanced.isRetryable = RETRYABLE_ERROR_TYPES.has(enhanced.name);
+      }
+      if (!enhanced.errorType) {
+        enhanced.errorType = enhanced.name;
+      }
     }
-    if (!enhanced.errorType) {
-      enhanced.errorType = enhanced.name;
-    }
+    
     return enhanced;
   }
   
@@ -140,7 +158,7 @@ export function getFriendlyErrorMessage(error: any): string {
       case 'GatewayError':
         return '网关错误，已加入重试队列';
       case 'NetworkError':
-        return '网络连接失败，已加入重试队列';
+        return '网络连接失败，数据将自动重试同步';
       case 'OfflineError':
         return '当前离线，数据将在恢复连接后同步';
       default:

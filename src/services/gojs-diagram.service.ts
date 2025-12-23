@@ -253,15 +253,27 @@ export class GoJSDiagramService {
     if (this.diagram) {
       // 移除所有事件监听器（使用保存的引用）
       if (this.selectionMovedListener) {
-        this.diagram.removeDiagramListener('SelectionMoved', this.selectionMovedListener);
+        try {
+          this.diagram.removeDiagramListener('SelectionMoved', this.selectionMovedListener);
+        } catch (error) {
+          console.warn('[GoJSDiagram] 移除 SelectionMoved 监听器失败', error);
+        }
         this.selectionMovedListener = null;
       }
       if (this.partResizedListener) {
-        this.diagram.removeDiagramListener('PartResized', this.partResizedListener);
+        try {
+          this.diagram.removeDiagramListener('PartResized', this.partResizedListener);
+        } catch (error) {
+          console.warn('[GoJSDiagram] 移除 PartResized 监听器失败', error);
+        }
         this.partResizedListener = null;
       }
       if (this.linkRelinkedListener) {
-        this.diagram.removeDiagramListener('LinkRelinked', this.linkRelinkedListener);
+        try {
+          this.diagram.removeDiagramListener('LinkRelinked', this.linkRelinkedListener);
+        } catch (error) {
+          console.warn('[GoJSDiagram] 移除 LinkRelinked 监听器失败', error);
+        }
         this.linkRelinkedListener = null;
       }
       

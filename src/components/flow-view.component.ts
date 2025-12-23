@@ -782,7 +782,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (!diagramInstance) return;
 
     if (this.diagramSelectionMovedListener) {
-      diagramInstance.removeDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
+      try {
+        diagramInstance.removeDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
+      } catch (error) {
+        // 忽略移除监听器时的错误（图表可能已经被销毁）
+        console.warn('[FlowView] 移除 SelectionMoved 监听器失败', error);
+      }
       this.diagramSelectionMovedListener = null;
     }
   }
