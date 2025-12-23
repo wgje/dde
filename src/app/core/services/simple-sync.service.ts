@@ -1046,22 +1046,23 @@ export class SimpleSyncService {
         { deduplicate: true, priority: 'normal' }
       );
       
-      // 2. 并行加载任务和连接（但通过限流服务控制总并发数）
-      const [tasks, connectionsData] = await Promise.all([
-        this.pullTasksThrottled(projectId),
-        this.throttle.execute(
-          `connections:${projectId}`,
-          async () => {
-            const { data } = await client
-              .from('connections')
-              .select('*')
-              .eq('project_id', projectId)
-              .is('deleted_at', null);
-            return data || [];
-          },
-          { deduplicate: true, priority: 'normal' }
-        )
-      ]);
+      // 【修复】顺序加载任务和连接，避免绕过限流服务的并发控制
+      // 原来使用 Promise.all 会同时发起多个请求，可能导致连接池耗尽
+      // 虽然每个请求都通过 throttle.execute 包装，但 Promise.all 会同时触发它们
+      // 限流服务会把它们都加入队列，但如果队列处理速度快，仍可能同时发起多个 HTTP 请求
+      const tasks = await this.pullTasksThrottled(projectId);
+      const connectionsData = await this.throttle.execute(
+        `connections:${projectId}`,
+        async () => {
+          const { data } = await client
+            .from('connections')
+            .select('*')
+            .eq('project_id', projectId)
+            .is('deleted_at', null);
+          return data || [];
+        },
+        { deduplicate: true, priority: 'normal' }
+      );
       
       const connections = connectionsData.map((row: any) => ({
         id: row.id,
@@ -1104,17 +1105,18 @@ export class SimpleSyncService {
     return this.throttle.execute(
       `tasks:${projectId}`,
       async () => {
-        // 1. 并行加载任务和 tombstones
-        const [tasksResult, tombstonesResult] = await Promise.all([
-          client
-            .from('tasks')
-            .select('*')
-            .eq('project_id', projectId),
-          client
-            .from('task_tombstones')
-            .select('task_id')
-            .eq('project_id', projectId)
-        ]);
+        // 【修复】顺序加载任务和 tombstones，避免绕过限流服务的并发控制
+        // 原来使用 Promise.all 会导致限流服务认为只有 1 个请求，实际发起 2 个 HTTP 请求
+        // 这会导致连接池耗尽，出现 "Failed to fetch" 错误
+        const tasksResult = await client
+          .from('tasks')
+          .select('*')
+          .eq('project_id', projectId);
+        
+        const tombstonesResult = await client
+          .from('task_tombstones')
+          .select('task_id')
+          .eq('project_id', projectId);
         
         if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
         
