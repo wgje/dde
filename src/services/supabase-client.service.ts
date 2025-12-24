@@ -79,9 +79,12 @@ export class SupabaseClientService {
         },
         global: {
           // 添加全局请求配置，设置超时和更好的错误处理
+          // ⚠️ 重要：此超时必须大于 RequestThrottleService 的最大超时（90s）+ 实际请求执行缓冲
+          // 否则请求在队列中等待时 AbortController 会提前触发，导致 "signal is aborted without reason" 错误
+          // 参考：REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT = 90000ms
           fetch: (url, options = {}) => {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30秒超时
+            const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 秒超时（90s 队列 + 30s 执行缓冲）
             
             return fetch(url, {
               ...options,
