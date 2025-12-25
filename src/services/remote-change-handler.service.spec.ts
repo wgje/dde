@@ -62,6 +62,7 @@ const mockSyncCoordinator = {
   hasPendingLocalChanges: vi.fn().mockReturnValue(false),
   getLastPersistAt: vi.fn().mockReturnValue(0),
   validateAndRebalance: vi.fn((project: Project) => project),
+  getTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
 };
 
 const mockUndoService = {
@@ -152,9 +153,9 @@ describe('RemoteChangeHandlerService', () => {
 
   describe('请求 ID 机制', () => {
     it('快速连续请求应只处理最后一个', async () => {
-      const task1 = createTestTask({ id: 'task-1', title: 'Task 1' });
-      const task2 = createTestTask({ id: 'task-1', title: 'Task 2' });
-      const task3 = createTestTask({ id: 'task-1', title: 'Task 3 (Final)' });
+      const task1 = createTestTask({ id: 'task-1', title: 'Task 1', updatedAt: new Date().toISOString() });
+      const task2 = createTestTask({ id: 'task-1', title: 'Task 2', updatedAt: new Date().toISOString() });
+      const task3 = createTestTask({ id: 'task-1', title: 'Task 3 (Final)', updatedAt: new Date().toISOString() });
 
       // 模拟三个连续的远程加载，每个返回不同的任务版本
       let resolveFirst: (value: Project) => void;
@@ -178,19 +179,20 @@ describe('RemoteChangeHandlerService', () => {
       taskChangeHandler({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'test-project-1' });
 
       // 等待一下让所有请求都发出
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise(resolve => setTimeout(resolve, 20));
 
       // 第一个请求完成（应该被忽略，因为已经有更新的请求）
       resolveFirst!(createTestProject({ tasks: [task1] }));
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise(resolve => setTimeout(resolve, 20));
 
       // 第二个请求完成（也应该被忽略）
       resolveSecond!(createTestProject({ tasks: [task2] }));
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise(resolve => setTimeout(resolve, 20));
 
       // 第三个请求完成（应该被处理）
       resolveThird!(createTestProject({ tasks: [task3] }));
-      await new Promise(resolve => setTimeout(resolve, 10));
+      // 等待更长时间，因为有 getTombstoneIds 的异步调用
+      await new Promise(resolve => setTimeout(resolve, 50));
 
       // 验证只有最后一个请求的结果被应用
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
@@ -258,13 +260,15 @@ describe('RemoteChangeHandlerService', () => {
     it('用户编辑中仍会处理远程 UPDATE（按字段合并保护本地）', async () => {
       mockUiState.isEditing = true;
 
-      // 本地已有任务
-      const localTask = createTestTask({ id: 'task-1', title: 'Local Title', content: 'local', deletedAt: null });
+      // 本地已有任务（较早的 updatedAt）
+      const localUpdatedAt = '2025-01-01T00:00:00Z';
+      const localTask = createTestTask({ id: 'task-1', title: 'Local Title', content: 'local', deletedAt: null, updatedAt: localUpdatedAt });
       mockProjects.set([createTestProject({ tasks: [localTask] })]);
 
-      // 远程将任务软删除（通过 UPDATE 传播）
+      // 远程将任务软删除（通过 UPDATE 传播，较新的 updatedAt）
       const tombstone = new Date().toISOString();
-      const remoteTask = createTestTask({ id: 'task-1', title: 'Remote Title', content: 'remote', deletedAt: tombstone });
+      const remoteUpdatedAt = new Date().toISOString(); // 远程更新更晚
+      const remoteTask = createTestTask({ id: 'task-1', title: 'Remote Title', content: 'remote', deletedAt: tombstone, updatedAt: remoteUpdatedAt });
       mockSyncCoordinator.loadSingleProject.mockResolvedValue(
         createTestProject({ tasks: [remoteTask] })
       );
@@ -273,10 +277,11 @@ describe('RemoteChangeHandlerService', () => {
       const taskChangeHandler = mockSyncCoordinator.setupRemoteChangeCallbacks.mock.calls[0][1];
 
       taskChangeHandler({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'test-project-1' });
-      await new Promise(resolve => setTimeout(resolve, 10));
+      // 等待更长时间，因为有 getTombstoneIds 的异步调用
+      await new Promise(resolve => setTimeout(resolve, 50));
 
       expect(mockSyncCoordinator.loadSingleProject).toHaveBeenCalledTimes(1);
-      // tombstone wins：即使编辑中也要应用 deletedAt，避免复活
+      // 远程 deletedAt 应该被应用（因为 remoteTask 更新时间更晚，且"任一方删除则删除"规则）
       expect(mockProjects()[0].tasks[0].deletedAt).toBe(tombstone);
       // 编辑中保护内容字段
       expect(mockProjects()[0].tasks[0].title).toBe('Local Title');
@@ -308,7 +313,8 @@ describe('RemoteChangeHandlerService', () => {
       const taskChangeHandler = mockSyncCoordinator.setupRemoteChangeCallbacks.mock.calls[0][1];
 
       taskChangeHandler({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'test-project-1' });
-      await new Promise(resolve => setTimeout(resolve, 10));
+      // 等待更长时间，因为有 getTombstoneIds 的异步调用
+      await new Promise(resolve => setTimeout(resolve, 50));
 
       expect(mockSyncCoordinator.loadSingleProject).toHaveBeenCalledTimes(1);
       expect(mockProjects()[0].tasks[0].x).toBe(123);

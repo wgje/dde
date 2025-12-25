@@ -1129,18 +1129,18 @@ export class SimpleSyncService {
     this.syncState.update(s => ({ ...s, isSyncing: true }));
     
     try {
-      // 【关键防护】先获取 tombstones，过滤已删除的任务
+      // 【关键防护】先获取 tombstones，过滤已永久删除的任务
+      // 【修复】软删除任务（有 deletedAt）必须推送到云端，让其他设备知道任务已被删除
+      // 否则云端保留旧数据，Realtime 同步时任务会"复活"
       const tombstoneIds = await this.getTombstoneIds(project.id);
       const tasksToSync = project.tasks.filter(task => {
         if (tombstoneIds.has(task.id)) {
           this.logger.info('saveProjectToCloud: 跳过 tombstone 任务', { taskId: task.id });
           return false;
         }
-        // 也跳过软删除的任务（不推送到云端）
-        if (task.deletedAt) {
-          this.logger.debug('saveProjectToCloud: 跳过软删除任务', { taskId: task.id });
-          return false;
-        }
+        // 【关键修复】不再跳过软删除任务！
+        // 软删除任务必须推送 deletedAt 到云端，防止任务复活
+        // 服务器端用 pg_cron 定期清理 30 天前的软删除记录
         return true;
       });
       

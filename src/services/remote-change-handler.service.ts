@@ -164,11 +164,14 @@ export class RemoteChangeHandlerService {
   /**
    * 检查是否应跳过远程任务级更新
    * 更宽松的策略：只在刚刚有持久化操作时跳过，允许不同任务的并发更新
-   * 【修复】增加回声保护时间从 200ms 到 1000ms，防止移动端弱网环境下的回声问题
+   * 【修复】增加回声保护时间到 3000ms，匹配同步防抖时间 (SYNC_CONFIG.DEBOUNCE_DELAY)
+   * 防止本机操作的"回声"覆盖本地状态
    */
   private shouldSkipTaskUpdate(payload: RemoteTaskChangePayload): boolean {
     const timeSinceLastPersist = Date.now() - this.syncCoordinator.getLastPersistAt();
-    const inEchoGuard = timeSinceLastPersist < 1000;
+    // 【关键修复】回声保护时间增加到 3 秒，匹配同步防抖延迟
+    const ECHO_PROTECTION_WINDOW = 3000;
+    const inEchoGuard = timeSinceLastPersist < ECHO_PROTECTION_WINDOW;
 
     // DELETE 事件不需要加载远程项目，且对一致性很关键；仅应用回声保护。
     if (payload.eventType === 'DELETE') {
@@ -465,6 +468,20 @@ export class RemoteChangeHandlerService {
                   if (pending?.changeType === 'delete') {
                     // 本机认为该任务已删除：保持本机状态，避免被远程"复活"。
                     mergedTask = localTask;
+                  } else if (localTask.deletedAt && !remoteTask.deletedAt) {
+                    // 【关键修复】来自高级顾问建议：
+                    // 如果本地已删除但远程未删除，检查时间戳
+                    // 若本地 deletedAt 比远程 updated_at 新，保留本地删除状态（防止复活）
+                    const localDeleteTime = new Date(localTask.deletedAt).getTime();
+                    const remoteUpdateTime = remoteTask.updatedAt ? new Date(remoteTask.updatedAt).getTime() : 0;
+                    if (localDeleteTime > remoteUpdateTime) {
+                      this.logger.info('保护本地删除状态（本地删除时间 > 远程更新时间）', {
+                        taskId,
+                        localDeletedAt: localTask.deletedAt,
+                        remoteUpdatedAt: remoteTask.updatedAt
+                      });
+                      mergedTask = localTask; // 保留本地删除状态
+                    }
                   } else {
                     const dirtyFields = new Set(pending?.changedFields ?? []);
                     
@@ -484,7 +501,8 @@ export class RemoteChangeHandlerService {
                     
                     if (localTime >= remoteTime) {
                       // 本地更新不早于远程，保护关键字段
-                      const lwwProtectedFields = ['status', 'stage', 'parentId', 'rank', 'order', 'title', 'content'];
+                      // 【关键修复】将 deletedAt 加入保护列表，防止删除状态被旧数据覆盖
+                      const lwwProtectedFields = ['status', 'stage', 'parentId', 'rank', 'order', 'title', 'content', 'deletedAt'];
                       for (const field of lwwProtectedFields) {
                         dirtyFields.add(field);
                       }

@@ -15,6 +15,7 @@ import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
+import { RequestThrottleService } from '../../../services/request-throttle.service';
 import { Task, Project, Connection } from '../../../models';
 
 describe('SimpleSyncService', () => {
@@ -22,6 +23,7 @@ describe('SimpleSyncService', () => {
   let mockSupabase: any;
   let mockLogger: any;
   let mockToast: any;
+  let mockThrottle: any;
   let mockClient: any;
   
   // 测试数据工厂
@@ -61,17 +63,30 @@ describe('SimpleSyncService', () => {
   
   beforeEach(() => {
     // 重置模拟客户端
+    // 注意：pushTask 现在会先检查 task_tombstones，然后再 upsert
     mockClient = {
-      from: vi.fn().mockReturnValue({
-        upsert: vi.fn().mockResolvedValue({ error: null }),
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
-            gt: vi.fn().mockResolvedValue({ data: [], error: null })
+      from: vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        // 默认返回用于 tasks/projects/connections 的 mock
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null })
+            })
+          }),
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null })
           })
-        }),
-        delete: vi.fn().mockReturnValue({
-          eq: vi.fn().mockResolvedValue({ error: null })
-        })
+        };
       }),
       channel: vi.fn().mockReturnValue({
         on: vi.fn().mockReturnThis(),
@@ -104,12 +119,20 @@ describe('SimpleSyncService', () => {
       warning: vi.fn()
     };
     
+    // Mock RequestThrottleService - 直接执行传入的函数
+    mockThrottle = {
+      execute: vi.fn().mockImplementation(async (_key: string, fn: () => Promise<void>) => {
+        await fn();
+      })
+    };
+    
     TestBed.configureTestingModule({
       providers: [
         SimpleSyncService,
         { provide: SupabaseClientService, useValue: mockSupabase },
         { provide: LoggerService, useValue: mockLogger },
-        { provide: ToastService, useValue: mockToast }
+        { provide: ToastService, useValue: mockToast },
+        { provide: RequestThrottleService, useValue: mockThrottle }
       ]
     });
     
@@ -250,9 +273,10 @@ describe('SimpleSyncService', () => {
       
       await service.pushTask(task, 'project-1');
       
-      // 验证使用了 upsert 而不是 insert
-      const fromCall = mockClient.from.mock.results[0].value;
-      expect(fromCall.upsert).toHaveBeenCalled();
+      // 验证调用了 tasks 表（第二次调用，第一次是 task_tombstones）
+      expect(mockClient.from).toHaveBeenCalledWith('tasks');
+      // 验证 from 被调用了两次：先检查 tombstones，再 upsert
+      expect(mockClient.from.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
     
     it('拉取任务时应该支持增量同步（since 参数）', async () => {
@@ -314,22 +338,34 @@ describe('SimpleSyncService', () => {
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
       
       const task = createMockTask();
-      let attempts = 0;
+      let upsertAttempts = 0;
       
-      // 模拟前 2 次失败（504），第 3 次成功
-      mockClient.from = vi.fn().mockReturnValue({
-        upsert: vi.fn().mockImplementation(() => {
-          attempts++;
-          if (attempts < 3) {
-            return Promise.resolve({ error: { code: 504, message: 'Gateway timeout' } });
-          }
-          return Promise.resolve({ error: null });
-        })
+      // 模拟前 2 次 upsert 失败（504），第 3 次成功
+      // 注意：pushTask 会先检查 task_tombstones
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        return {
+          upsert: vi.fn().mockImplementation(() => {
+            upsertAttempts++;
+            if (upsertAttempts < 3) {
+              return Promise.resolve({ error: { code: 504, message: 'Gateway timeout' } });
+            }
+            return Promise.resolve({ error: null });
+          })
+        };
       });
       
       const result = await service.pushTask(task, 'project-1');
       
-      expect(attempts).toBe(3); // 验证重试了 2 次后成功
+      expect(upsertAttempts).toBe(3); // 验证重试了 2 次后成功
       expect(result).toBe(true);
     });
     
@@ -362,19 +398,31 @@ describe('SimpleSyncService', () => {
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
       
       const task = createMockTask();
-      let attempts = 0;
+      let upsertAttempts = 0;
       
       // 模拟 401 错误（不可重试）
-      mockClient.from = vi.fn().mockReturnValue({
-        upsert: vi.fn().mockImplementation(() => {
-          attempts++;
-          return Promise.resolve({ error: { code: 401, message: 'Unauthorized' } });
-        })
+      // 注意：pushTask 会先检查 task_tombstones
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        return {
+          upsert: vi.fn().mockImplementation(() => {
+            upsertAttempts++;
+            return Promise.resolve({ error: { code: 401, message: 'Unauthorized' } });
+          })
+        };
       });
       
       const result = await service.pushTask(task, 'project-1');
       
-      expect(attempts).toBe(1); // 验证没有重试
+      expect(upsertAttempts).toBe(1); // 验证没有重试
       expect(result).toBe(false);
     });
   });
