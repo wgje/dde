@@ -607,16 +607,17 @@ export class TaskRepositoryService {
       // 4. 找出需要新增的连接（在本地存在但数据库中不存在）
       const toInsert = connections.filter((c: Connection) => !existingSet.has(`${c.source}|${c.target}`));
       
-      // 5. 找出需要更新的连接（两边都存在但 description 或 deletedAt 有变化）
+      // 5. 找出需要更新的连接（两边都存在但 title、description 或 deletedAt 有变化）
       const toUpdate = connections.filter((c: Connection) => {
         const key = `${c.source}|${c.target}`;
         if (!existingSet.has(key)) return false;
         const existing = existingConnections.find((e: Connection) => e.source === c.source && e.target === c.target);
         if (!existing) return false;
-        // 检查 description 或 deletedAt 是否变化
+        // 检查 title、description 或 deletedAt 是否变化
+        const titleChanged = existing.title !== c.title;
         const descChanged = existing.description !== c.description;
         const deletedAtChanged = existing.deletedAt !== c.deletedAt;
-        return descChanged || deletedAtChanged;
+        return titleChanged || descChanged || deletedAtChanged;
       });
 
       // 6. 批量删除操作（提升性能）
@@ -658,6 +659,7 @@ export class TaskRepositoryService {
             project_id: projectId,
             source_id: conn.source,
             target_id: conn.target,
+            title: conn.title || null,
             description: conn.description,
             deleted_at: conn.deletedAt || null
           }));
@@ -688,6 +690,7 @@ export class TaskRepositoryService {
           const { error } = await this.supabase.client()
             .from('connections')
             .update({ 
+              title: conn.title || null,
               description: conn.description,
               deleted_at: conn.deletedAt || null  // 同步软删除状态
             })
@@ -730,6 +733,7 @@ export class TaskRepositoryService {
       project_id: projectId,
       source_id: conn.source,
       target_id: conn.target,
+      title: conn.title || null,
       description: conn.description,
       deleted_at: conn.deletedAt || null
     }));
@@ -1075,6 +1079,7 @@ export class TaskRepositoryService {
           project_id: projectId,
           source_id: conn.source,
           target_id: conn.target,
+          title: conn.title || null,
           description: conn.description,
           deleted_at: conn.deletedAt || null
         }));
@@ -1107,6 +1112,7 @@ export class TaskRepositoryService {
           project_id: projectId,
           source_id: conn.source,
           target_id: conn.target,
+          title: conn.title || null,
           description: conn.description,
           deleted_at: conn.deletedAt || null  // 包含软删除状态
         }));

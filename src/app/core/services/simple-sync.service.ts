@@ -18,6 +18,7 @@ import { SupabaseClientService } from '../../../services/supabase-client.service
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
+import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
@@ -82,6 +83,7 @@ export class SimpleSyncService {
   private readonly logger = this.loggerService.category('SimpleSync');
   private readonly toast = inject(ToastService);
   private readonly throttle = inject(RequestThrottleService);
+  private readonly changeTracker = inject(ChangeTrackerService);
   private readonly destroyRef = inject(DestroyRef);
   
   /**
@@ -496,6 +498,70 @@ export class SimpleSyncService {
     }
   }
   
+  /**
+   * 永久删除云端任务（写入 tombstone + 物理删除）
+   * 
+   * 【关键】这是防止已删除任务复活的核心方法
+   * - 调用 purge_tasks_v2 RPC 写入 tombstone 并删除任务
+   * - 如果 RPC 不可用，降级为软删除
+   * - tombstone 记录会阻止任何后续的 upsert 复活该任务
+   */
+  async purgeTasksFromCloud(projectId: string, taskIds: string[]): Promise<boolean> {
+    if (taskIds.length === 0) return true;
+    
+    const client = this.getSupabaseClient();
+    if (!client) {
+      this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
+      // 离线时加入重试队列
+      for (const taskId of taskIds) {
+        this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
+      }
+      return false;
+    }
+    
+    try {
+      // 优先使用 purge_tasks_v2（支持在 tasks 行不存在时也能写 tombstone）
+      const purgeV2Result = await client.rpc('purge_tasks_v2', {
+        p_project_id: projectId,
+        p_task_ids: taskIds
+      });
+      
+      // 如果 v2 失败，降级到 v1
+      const purgeResult = purgeV2Result.error
+        ? await client.rpc('purge_tasks', { p_task_ids: taskIds })
+        : purgeV2Result;
+      
+      if (purgeResult.error) {
+        // RPC 不可用时降级为软删除
+        this.logger.warn('purge RPC 失败，降级为软删除', purgeResult.error);
+        const { error } = await client
+          .from('tasks')
+          .update({ deleted_at: new Date().toISOString() })
+          .eq('project_id', projectId)
+          .in('id', taskIds);
+        
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
+      }
+      
+      this.logger.info('purgeTasksFromCloud: 成功删除任务', { 
+        projectId, 
+        taskCount: taskIds.length,
+        taskIds 
+      });
+      
+      return true;
+    } catch (e) {
+      this.logger.error('purgeTasksFromCloud 失败', e);
+      Sentry.captureException(e, { 
+        tags: { operation: 'purgeTasksFromCloud' },
+        extra: { projectId, taskIds }
+      });
+      return false;
+    }
+  }
+  
   // ==================== 项目同步 ====================
   
   /**
@@ -622,6 +688,7 @@ export class SimpleSyncService {
                 project_id: projectId,
                 source_id: connection.source,
                 target_id: connection.target,
+                title: connection.title || null,
                 description: connection.description || null,
                 deleted_at: connection.deletedAt || null
               });
@@ -1150,6 +1217,16 @@ export class SimpleSyncService {
           filtered: tasksToSync.length,
           tombstoneCount: tombstoneIds.size
         });
+      }
+      
+      // 【关键修复】处理永久删除的任务
+      // 从 ChangeTracker 获取需要删除的任务 ID，调用 purge RPC 写入 tombstone
+      const changes = this.changeTracker.getProjectChanges(project.id);
+      if (changes.taskIdsToDelete.length > 0) {
+        this.logger.info('saveProjectToCloud: 检测到永久删除任务', { 
+          taskIds: changes.taskIdsToDelete 
+        });
+        await this.purgeTasksFromCloud(project.id, changes.taskIdsToDelete);
       }
       
       // 1. 保存项目元数据
