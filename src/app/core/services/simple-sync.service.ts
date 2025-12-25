@@ -1409,11 +1409,21 @@ export class SimpleSyncService {
       }
       
       // 3. 批量保存连接（请求间延迟 100ms 防止速率限制）
-      for (let i = 0; i < project.connections.length; i++) {
+      // 【修复数据漂移】过滤软删除的连接，与远程查询逻辑保持一致
+      const connectionsToSync = project.connections.filter(conn => !conn.deletedAt);
+      
+      if (connectionsToSync.length !== project.connections.length) {
+        this.logger.info('saveProjectToCloud: 过滤了软删除连接', {
+          original: project.connections.length,
+          filtered: connectionsToSync.length
+        });
+      }
+      
+      for (let i = 0; i < connectionsToSync.length; i++) {
         if (i > 0) {
           await this.delay(100); // 防止连续请求触发 504/429
         }
-        await this.pushConnection(project.connections[i], project.id);
+        await this.pushConnection(connectionsToSync[i], project.id);
       }
       
       this.syncState.update(s => ({
@@ -1424,9 +1434,10 @@ export class SimpleSyncService {
       
       // 【数据漂移检测】来自高级顾问建议
       // 每 50 次同步检查本地和远程行数差异，上报 Sentry 警告
+      // 【修复】使用过滤后的连接数，与远程查询逻辑保持一致
       this.syncCounter++;
       if (this.syncCounter % 50 === 0) {
-        this.checkDataDrift(project.id, tasksToSync.length, project.connections.length);
+        this.checkDataDrift(project.id, tasksToSync.length, connectionsToSync.length);
       }
       
       return { success: true, newVersion: project.version };
