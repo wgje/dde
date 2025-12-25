@@ -141,6 +141,12 @@ export interface UserPreferences {
   theme: ThemeType;
   layoutDirection: 'ltr' | 'rtl';
   floatingWindowPref: 'auto' | 'fixed';
+  /** 
+   * 自动解决冲突开关
+   * true: 使用 LWW (Last-Write-Wins) 自动解决冲突
+   * false: 所有冲突进入仪表盘由用户手动处理
+   */
+  autoResolveConflicts?: boolean;
 }
 
 /**

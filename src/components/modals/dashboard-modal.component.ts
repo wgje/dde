@@ -1,21 +1,52 @@
-import { Component, inject, Output, EventEmitter, computed, signal } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { Component, inject, Output, EventEmitter, computed, signal, OnInit, OnDestroy } from '@angular/core';
+import { CommonModule, DatePipe } from '@angular/common';
 import { ActionQueueService } from '../../services/action-queue.service';
 import { SimpleSyncService } from '../../app/core/services/simple-sync.service';
 import { AuthService } from '../../services/auth.service';
-import { ConflictStorageService } from '../../services/conflict-storage.service';
+import { ConflictStorageService, ConflictRecord } from '../../services/conflict-storage.service';
+import { ConflictResolutionService } from '../../services/conflict-resolution.service';
 import { ToastService } from '../../services/toast.service';
 import { SyncCoordinatorService } from '../../services/sync-coordinator.service';
+import { Task } from '../../models';
+
+/** 任务差异项 */
+interface TaskDiff {
+  id: string;
+  title: string;
+  localValue?: string;
+  remoteValue?: string;
+  status: 'same' | 'modified' | 'local-only' | 'remote-only';
+  field?: string; // 冲突字段名
+}
+
+/** 冲突展示项 */
+interface ConflictItem {
+  projectId: string;
+  projectName: string;
+  reason: string;
+  reasonLabel: string;
+  conflictedAt: string;
+  localTaskCount: number;
+  remoteTaskCount: number;
+  taskDiffs: TaskDiff[];
+  isExpanded: boolean;
+  isResolving: boolean;
+}
 
 /**
  * 仪表盘模态框组件
  * 集中展示数据冲突、同步状态、焦点通知等重要信息
- * 从项目栏底部的 SyncStatusComponent 迁移而来
+ * 支持内联冲突解决，无需跳转到独立模态框
+ * 
+ * 设计原则：
+ * - 移动端优先：差异视图使用垂直堆叠布局
+ * - 内联操作：直接在仪表盘内解决冲突
+ * - 简化策略：使用本地 / 使用云端 / 保留两者
  */
 @Component({
   selector: 'app-dashboard-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, DatePipe],
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden animate-scale-in" (click)="$event.stopPropagation()">
@@ -116,41 +147,209 @@ import { SyncCoordinatorService } from '../../services/sync-coordinator.service'
                       [class.text-red-600]="conflictCount() > 0">
                   {{ conflictCount() }}
                 </span>
-                @if (conflictCount() > 0) {
+                @if (conflictCount() > 0 && !showConflictList()) {
                   <button 
-                    (click)="openConflictCenter.emit()"
+                    (click)="showConflictList.set(true)"
                     class="px-3 py-1.5 text-xs font-medium bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition-colors">
-                    解决冲突
+                    查看详情
                   </button>
                 }
               </div>
             </div>
           </div>
           
-          <!-- 冲突详情区域 -->
-          @if (conflictCount() > 0) {
-            <div class="p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
-              <div class="flex items-start gap-3">
-                <div class="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0">
-                  <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <!-- ========== 内联冲突解决区域 ========== -->
+          @if (conflictCount() > 0 && showConflictList()) {
+            <div class="space-y-4">
+              <div class="flex items-center justify-between">
+                <h3 class="text-sm font-semibold text-stone-700 flex items-center gap-2">
+                  <svg class="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
+                  冲突解决中心
+                </h3>
+                <button 
+                  (click)="showConflictList.set(false)"
+                  class="text-xs text-stone-500 hover:text-stone-700">
+                  收起
+                </button>
+              </div>
+              
+              <!-- 冲突列表 -->
+              @for (conflict of conflictItems(); track conflict.projectId) {
+                <div class="border border-red-200 rounded-lg overflow-hidden bg-white">
+                  <!-- 冲突卡片头部 -->
+                  <div class="p-4 bg-red-50 border-b border-red-100">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="text-sm font-semibold text-stone-800 truncate">{{ conflict.projectName }}</span>
+                          <span class="px-1.5 py-0.5 text-[9px] font-medium rounded"
+                                [class.bg-amber-100]="conflict.reason === 'concurrent_edit'"
+                                [class.text-amber-700]="conflict.reason === 'concurrent_edit'"
+                                [class.bg-blue-100]="conflict.reason === 'network_recovery'"
+                                [class.text-blue-700]="conflict.reason === 'network_recovery'"
+                                [class.bg-red-100]="conflict.reason === 'version_mismatch'"
+                                [class.text-red-700]="conflict.reason === 'version_mismatch'">
+                            {{ conflict.reasonLabel }}
+                          </span>
+                        </div>
+                        <div class="text-[10px] text-stone-500 flex items-center gap-3">
+                          <span>本地 {{ conflict.localTaskCount }} 个任务</span>
+                          <span>·</span>
+                          <span>云端 {{ conflict.remoteTaskCount }} 个任务</span>
+                          <span>·</span>
+                          <span>{{ formatRelativeTime(conflict.conflictedAt) }}</span>
+                        </div>
+                      </div>
+                      <button 
+                        (click)="toggleConflictExpand(conflict.projectId)"
+                        class="p-1 rounded hover:bg-red-100 transition-colors">
+                        <svg class="w-4 h-4 text-stone-500 transition-transform" 
+                             [class.rotate-180]="conflict.isExpanded"
+                             fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                    </div>
+                    
+                    <!-- 快速操作按钮 -->
+                    <div class="mt-3 flex flex-wrap gap-2">
+                      <button 
+                        (click)="resolveUseLocal(conflict.projectId)"
+                        [disabled]="conflict.isResolving"
+                        class="flex-1 min-w-[100px] px-3 py-2 text-xs font-medium bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                        @if (conflict.isResolving) {
+                          <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                          </svg>
+                        } @else {
+                          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="4" width="18" height="16" rx="2"/>
+                            <path d="M7 8h10M7 12h6"/>
+                          </svg>
+                        }
+                        使用本地
+                      </button>
+                      <button 
+                        (click)="resolveUseRemote(conflict.projectId)"
+                        [disabled]="conflict.isResolving"
+                        class="flex-1 min-w-[100px] px-3 py-2 text-xs font-medium bg-teal-500 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/>
+                        </svg>
+                        使用云端
+                      </button>
+                      <button 
+                        (click)="resolveKeepBoth(conflict.projectId)"
+                        [disabled]="conflict.isResolving"
+                        class="flex-1 min-w-[100px] px-3 py-2 text-xs font-medium bg-violet-500 hover:bg-violet-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"/>
+                        </svg>
+                        保留两者
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <!-- 差异详情（展开时显示） -->
+                  @if (conflict.isExpanded) {
+                    <div class="p-4 space-y-3 bg-white">
+                      <div class="text-xs font-medium text-stone-600 mb-2">任务差异对比</div>
+                      
+                      <!-- 响应式差异网格：移动端垂直堆叠，桌面端三列 -->
+                      <div class="space-y-2 max-h-64 overflow-y-auto">
+                        @for (diff of conflict.taskDiffs.slice(0, 10); track diff.id) {
+                          <div class="diff-grid grid gap-2 p-2 rounded-lg text-[11px]"
+                               [class.bg-green-50]="diff.status === 'same'"
+                               [class.bg-amber-50]="diff.status === 'modified'"
+                               [class.bg-indigo-50]="diff.status === 'local-only'"
+                               [class.bg-teal-50]="diff.status === 'remote-only'">
+                            <!-- 移动端：垂直堆叠布局 -->
+                            <div class="md:hidden space-y-1">
+                              <div class="font-medium text-stone-700 flex items-center gap-2">
+                                <span class="px-1.5 py-0.5 rounded text-[9px]"
+                                      [class.bg-green-200]="diff.status === 'same'"
+                                      [class.text-green-700]="diff.status === 'same'"
+                                      [class.bg-amber-200]="diff.status === 'modified'"
+                                      [class.text-amber-700]="diff.status === 'modified'"
+                                      [class.bg-indigo-200]="diff.status === 'local-only'"
+                                      [class.text-indigo-700]="diff.status === 'local-only'"
+                                      [class.bg-teal-200]="diff.status === 'remote-only'"
+                                      [class.text-teal-700]="diff.status === 'remote-only'">
+                                  {{ getStatusLabel(diff.status) }}
+                                </span>
+                                {{ diff.title }}
+                              </div>
+                              @if (diff.status === 'modified' && diff.localValue && diff.remoteValue) {
+                                <div class="pl-2 border-l-2 border-indigo-300">
+                                  <span class="text-indigo-600">本地:</span> {{ diff.localValue }}
+                                </div>
+                                <div class="pl-2 border-l-2 border-teal-300">
+                                  <span class="text-teal-600">云端:</span> {{ diff.remoteValue }}
+                                </div>
+                              }
+                            </div>
+                            
+                            <!-- 桌面端：三列网格布局 -->
+                            <div class="hidden md:grid md:grid-cols-[1fr_1fr_1fr] md:gap-3 md:items-center">
+                              <div class="font-medium text-stone-700 truncate">{{ diff.title }}</div>
+                              <div class="text-indigo-600 truncate">
+                                @if (diff.status === 'local-only' || diff.status === 'modified') {
+                                  {{ diff.localValue || '(本地)' }}
+                                } @else if (diff.status === 'remote-only') {
+                                  <span class="text-stone-300">—</span>
+                                } @else {
+                                  <span class="text-green-600">✓ 一致</span>
+                                }
+                              </div>
+                              <div class="text-teal-600 truncate">
+                                @if (diff.status === 'remote-only' || diff.status === 'modified') {
+                                  {{ diff.remoteValue || '(云端)' }}
+                                } @else if (diff.status === 'local-only') {
+                                  <span class="text-stone-300">—</span>
+                                } @else {
+                                  <span class="text-green-600">✓ 一致</span>
+                                }
+                              </div>
+                            </div>
+                          </div>
+                        }
+                        
+                        @if (conflict.taskDiffs.length > 10) {
+                          <div class="text-center text-[10px] text-stone-400 py-2">
+                            还有 {{ conflict.taskDiffs.length - 10 }} 个任务差异未显示
+                          </div>
+                        }
+                      </div>
+                      
+                      <!-- 差异统计 -->
+                      <div class="flex flex-wrap gap-2 pt-2 border-t border-stone-100">
+                        <span class="px-2 py-1 bg-green-100 text-green-700 rounded text-[10px]">
+                          一致: {{ countByStatus(conflict.taskDiffs, 'same') }}
+                        </span>
+                        <span class="px-2 py-1 bg-amber-100 text-amber-700 rounded text-[10px]">
+                          有修改: {{ countByStatus(conflict.taskDiffs, 'modified') }}
+                        </span>
+                        <span class="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-[10px]">
+                          仅本地: {{ countByStatus(conflict.taskDiffs, 'local-only') }}
+                        </span>
+                        <span class="px-2 py-1 bg-teal-100 text-teal-700 rounded text-[10px]">
+                          仅云端: {{ countByStatus(conflict.taskDiffs, 'remote-only') }}
+                        </span>
+                      </div>
+                    </div>
+                  }
                 </div>
-                <div class="flex-1">
-                  <h3 class="text-sm font-semibold text-amber-800 mb-1">检测到数据冲突</h3>
-                  <p class="text-xs text-amber-700">
-                    发现 <span class="font-bold">{{ conflictCount() }}</span> 个项目存在本地和云端数据不一致的情况。
-                    这可能是由于在多设备间编辑同一项目导致的。
-                  </p>
-                  <button 
-                    (click)="openConflictCenter.emit()"
-                    class="mt-3 w-full px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    前往冲突解决中心
-                  </button>
-                </div>
+              }
+              
+              <!-- 提示信息 -->
+              <div class="text-[10px] text-stone-400 p-2 bg-stone-50 rounded-lg">
+                💡 <span class="font-medium">提示：</span>
+                「使用本地」保留您在此设备的编辑；
+                「使用云端」同步其他设备的内容；
+                「保留两者」将云端版本作为新任务添加（标题加「(副本)」后缀）。
               </div>
             </div>
           }
@@ -277,11 +476,12 @@ import { SyncCoordinatorService } from '../../services/sync-coordinator.service'
     </div>
   `
 })
-export class DashboardModalComponent {
+export class DashboardModalComponent implements OnInit, OnDestroy {
   private actionQueue = inject(ActionQueueService);
   private syncService = inject(SimpleSyncService);
   private authService = inject(AuthService);
   private conflictStorage = inject(ConflictStorageService);
+  private conflictResolution = inject(ConflictResolutionService);
   private syncCoordinator = inject(SyncCoordinatorService);
   private toastService = inject(ToastService);
   
@@ -293,8 +493,12 @@ export class DashboardModalComponent {
   
   // 本地状态
   showDeadLetters = signal(false);
+  showConflictList = signal(false);
   isRetrying = signal(false);
   isResyncing = signal(false);
+  
+  /** 冲突展示项列表 */
+  conflictItems = signal<ConflictItem[]>([]);
   
   // 从服务获取状态
   readonly pendingCount = this.actionQueue.queueSize;
@@ -451,5 +655,248 @@ export class DashboardModalComponent {
     
     const diffDays = Math.floor(diffHours / 24);
     return `${diffDays} 天前`;
+  }
+  
+  // ========== 生命周期 ==========
+  
+  ngOnInit(): void {
+    // 初始加载冲突数据
+    this.loadConflicts();
+  }
+  
+  ngOnDestroy(): void {
+    // 清理资源（如果需要）
+  }
+  
+  // ========== 冲突解决方法 ==========
+  
+  /**
+   * 加载所有冲突数据
+   */
+  async loadConflicts(): Promise<void> {
+    const conflicts = await this.conflictStorage.getAllConflicts();
+    const items: ConflictItem[] = conflicts.map(conflict => this.mapConflictToItem(conflict));
+    this.conflictItems.set(items);
+    
+    // 如果有冲突，自动展开列表
+    if (items.length > 0) {
+      this.showConflictList.set(true);
+    }
+  }
+  
+  /**
+   * 将冲突记录映射为展示项
+   */
+  private mapConflictToItem(record: ConflictRecord): ConflictItem {
+    const localTasks: Task[] = record.localProject?.tasks || [];
+    const remoteTasks: Task[] = record.remoteProject?.tasks || [];
+    
+    return {
+      projectId: record.projectId,
+      projectName: record.localProject?.name || record.remoteProject?.name || '未知项目',
+      reason: record.reason,
+      reasonLabel: this.getReasonLabel(record.reason),
+      conflictedAt: record.conflictedAt,
+      localTaskCount: localTasks.length,
+      remoteTaskCount: remoteTasks.length,
+      taskDiffs: this.calculateTaskDiffs(localTasks, remoteTasks),
+      isExpanded: false,
+      isResolving: false
+    };
+  }
+  
+  /**
+   * 计算任务差异
+   */
+  private calculateTaskDiffs(localTasks: Task[], remoteTasks: Task[]): TaskDiff[] {
+    const localMap = new Map<string, Task>(localTasks.map(t => [t.id, t]));
+    const remoteMap = new Map<string, Task>(remoteTasks.map(t => [t.id, t]));
+    const allIds = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
+    
+    const diffs: TaskDiff[] = [];
+    
+    allIds.forEach(id => {
+      const localTask = localMap.get(id);
+      const remoteTask = remoteMap.get(id);
+      
+      let status: TaskDiff['status'];
+      let title: string;
+      let localValue: string | undefined;
+      let remoteValue: string | undefined;
+      
+      if (localTask && remoteTask) {
+        const isSame = localTask.title === remoteTask.title && 
+                       localTask.content === remoteTask.content &&
+                       localTask.status === remoteTask.status;
+        status = isSame ? 'same' : 'modified';
+        title = localTask.title || remoteTask.title || '未命名';
+        if (!isSame) {
+          localValue = localTask.title !== remoteTask.title ? localTask.title : undefined;
+          remoteValue = localTask.title !== remoteTask.title ? remoteTask.title : undefined;
+        }
+      } else if (localTask) {
+        status = 'local-only';
+        title = localTask.title || '未命名';
+        localValue = localTask.title;
+      } else {
+        status = 'remote-only';
+        title = remoteTask!.title || '未命名';
+        remoteValue = remoteTask!.title;
+      }
+      
+      diffs.push({ id, title, localValue, remoteValue, status });
+    });
+    
+    // 按状态排序：modified > local-only > remote-only > same
+    const order = { 'modified': 0, 'local-only': 1, 'remote-only': 2, 'same': 3 };
+    return diffs.sort((a, b) => order[a.status] - order[b.status]);
+  }
+  
+  /**
+   * 获取冲突原因标签
+   */
+  private getReasonLabel(reason: string): string {
+    const labels: Record<string, string> = {
+      'version_mismatch': '版本不匹配',
+      'concurrent_edit': '并发编辑',
+      'network_recovery': '网络恢复',
+      'status_conflict': '状态冲突',
+      'field_conflict': '字段冲突'
+    };
+    return labels[reason] || reason;
+  }
+  
+  /**
+   * 切换冲突项展开状态
+   */
+  toggleConflictExpand(projectId: string): void {
+    this.conflictItems.update(items => 
+      items.map(item => 
+        item.projectId === projectId 
+          ? { ...item, isExpanded: !item.isExpanded }
+          : item
+      )
+    );
+  }
+  
+  /**
+   * 使用本地版本解决冲突
+   */
+  async resolveUseLocal(projectId: string): Promise<void> {
+    await this.resolveConflictWithStrategy(projectId, 'local');
+  }
+  
+  /**
+   * 使用云端版本解决冲突
+   */
+  async resolveUseRemote(projectId: string): Promise<void> {
+    await this.resolveConflictWithStrategy(projectId, 'remote');
+  }
+  
+  /**
+   * 保留两者（将云端版本作为副本添加）
+   */
+  async resolveKeepBoth(projectId: string): Promise<void> {
+    this.setResolving(projectId, true);
+    
+    try {
+      const conflict = await this.conflictStorage.getConflict(projectId);
+      if (!conflict) {
+        this.toastService.error('错误', '未找到冲突数据');
+        return;
+      }
+      
+      // 调用 keepBoth 策略
+      const result = await this.conflictResolution.resolveKeepBoth(
+        projectId,
+        conflict.localProject,
+        conflict.remoteProject
+      );
+      
+      if (result.ok) {
+        await this.conflictStorage.deleteConflict(projectId);
+        this.toastService.success('已保留两者', '云端版本的任务已作为副本添加');
+        await this.loadConflicts();
+      } else {
+        this.toastService.error('解决失败', result.error.message);
+      }
+    } catch (e) {
+      this.toastService.error('错误', '解决冲突时发生意外错误');
+    } finally {
+      this.setResolving(projectId, false);
+    }
+  }
+  
+  /**
+   * 通用冲突解决方法
+   */
+  private async resolveConflictWithStrategy(projectId: string, strategy: 'local' | 'remote'): Promise<void> {
+    this.setResolving(projectId, true);
+    
+    try {
+      const conflict = await this.conflictStorage.getConflict(projectId);
+      if (!conflict) {
+        this.toastService.error('错误', '未找到冲突数据');
+        return;
+      }
+      
+      const result = await this.conflictResolution.resolveConflict(
+        projectId,
+        strategy,
+        conflict.localProject,
+        conflict.remoteProject
+      );
+      
+      if (result.ok) {
+        await this.conflictStorage.deleteConflict(projectId);
+        await this.loadConflicts();
+      } else {
+        this.toastService.error('解决失败', result.error.message);
+      }
+    } catch (e) {
+      this.toastService.error('错误', '解决冲突时发生意外错误');
+    } finally {
+      this.setResolving(projectId, false);
+    }
+  }
+  
+  /**
+   * 设置解决中状态
+   */
+  private setResolving(projectId: string, isResolving: boolean): void {
+    this.conflictItems.update(items => 
+      items.map(item => 
+        item.projectId === projectId 
+          ? { ...item, isResolving }
+          : item
+      )
+    );
+  }
+  
+  /**
+   * 获取状态标签
+   */
+  getStatusLabel(status: string): string {
+    const labels: Record<string, string> = {
+      'same': '一致',
+      'modified': '有修改',
+      'local-only': '仅本地',
+      'remote-only': '仅云端'
+    };
+    return labels[status] || status;
+  }
+  
+  /**
+   * 按状态统计差异数量
+   */
+  countByStatus(diffs: TaskDiff[], status: TaskDiff['status']): number {
+    return diffs.filter(d => d.status === status).length;
+  }
+  
+  /**
+   * 格式化相对时间
+   */
+  formatRelativeTime(isoString: string): string {
+    return this.formatDate(isoString);
   }
 }

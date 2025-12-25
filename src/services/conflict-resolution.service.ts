@@ -142,6 +142,119 @@ export class ConflictResolutionService {
   }
 
   /**
+   * 保留两者策略 - 简化版合并
+   * 
+   * 策略：
+   * 1. 使用远程版本作为"有效"记录
+   * 2. 将本地版本中仅存在于本地的任务保留
+   * 3. 对于冲突的任务（双方都有但不同），创建副本
+   * 
+   * 这比复杂的智能合并更简单、更安全，适合个人应用场景。
+   * 
+   * @param projectId 项目 ID
+   * @param localProject 本地项目
+   * @param remoteProject 远程项目（可选）
+   * @returns 解决后的项目
+   */
+  async resolveKeepBoth(
+    projectId: string,
+    localProject: Project,
+    remoteProject?: Project
+  ): Promise<Result<Project, OperationError>> {
+    this.logger.info('[KeepBoth] 保留两者', { projectId });
+    
+    if (!remoteProject) {
+      // 没有远程版本，直接使用本地
+      return this.resolveConflict(projectId, 'local', localProject);
+    }
+    
+    const localTasks = Array.isArray(localProject.tasks) ? localProject.tasks : [];
+    const remoteTasks = Array.isArray(remoteProject.tasks) ? remoteProject.tasks : [];
+    
+    const remoteTaskMap = new Map(remoteTasks.map(t => [t.id, t]));
+    const mergedTasks: Task[] = [...remoteTasks]; // 从远程任务开始
+    let copiedCount = 0;
+    
+    for (const localTask of localTasks) {
+      const remoteTask = remoteTaskMap.get(localTask.id);
+      
+      if (!remoteTask) {
+        // 本地独有的任务，保留
+        mergedTasks.push(localTask);
+      } else {
+        // 双方都有的任务，检查是否有冲突
+        const isSame = localTask.title === remoteTask.title && 
+                       localTask.content === remoteTask.content &&
+                       localTask.status === remoteTask.status;
+        
+        if (!isSame) {
+          // 有冲突，创建本地版本的副本
+          const copyTask: Task = {
+            ...localTask,
+            id: crypto.randomUUID(), // 新 ID
+            title: `${localTask.title} (副本)`,
+            displayId: '', // 将由布局服务重新计算
+            shortId: this.generateShortId(), // 生成新的永久短 ID
+            updatedAt: new Date().toISOString()
+          };
+          mergedTasks.push(copyTask);
+          copiedCount++;
+        }
+        // 如果相同，远程版本已经在 mergedTasks 中了
+      }
+    }
+    
+    // 合并 connections（简单去重）
+    const localConnections = Array.isArray(localProject.connections) ? localProject.connections : [];
+    const remoteConnections = Array.isArray(remoteProject.connections) ? remoteProject.connections : [];
+    const connectionMap = new Map(remoteConnections.map(c => [c.id, c]));
+    for (const localConn of localConnections) {
+      if (!connectionMap.has(localConn.id)) {
+        connectionMap.set(localConn.id, localConn);
+      }
+    }
+    
+    // 构建合并后的项目
+    let resolvedProject: Project = {
+      ...remoteProject, // 使用远程项目元数据
+      tasks: mergedTasks,
+      connections: Array.from(connectionMap.values()),
+      updatedAt: new Date().toISOString(),
+      version: Math.max(localProject.version ?? 0, remoteProject.version ?? 0) + 1
+    };
+    
+    // 执行完整性检查和布局修复
+    const { project: validatedProject, issues } = this.layoutService.validateAndFixTree(resolvedProject);
+    resolvedProject = validatedProject;
+    
+    if (issues.length > 0) {
+      this.logger.info('[KeepBoth] 修复了数据问题', { count: issues.length });
+    }
+    
+    this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+    
+    if (copiedCount > 0) {
+      this.toast.success('已保留两者', `创建了 ${copiedCount} 个副本任务`);
+    } else {
+      this.toast.success('已保留两者', '本地独有的任务已保留');
+    }
+    
+    return success(resolvedProject);
+  }
+  
+  /**
+   * 生成永久短 ID（如 "NF-A1B2"）
+   */
+  private generateShortId(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = 'NF-';
+    for (let i = 0; i < 4; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  }
+
+  /**
    * 智能合并两个项目（LWW 二路合并）
    * 策略：
    * 1. 新增任务：双方都保留

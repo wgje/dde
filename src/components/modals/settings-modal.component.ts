@@ -1,6 +1,7 @@
 import { Component, inject, Output, EventEmitter, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StoreService } from '../../services/store.service';
+import { PreferenceService } from '../../services/preference.service';
 import { ThemeType } from '../../models';
 
 @Component({
@@ -98,6 +99,39 @@ import { ThemeType } from '../../models';
             </div>
           </div>
           
+          <!-- 同步设置 -->
+          <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-4">
+            <div>
+              <div class="text-[11px] font-semibold text-stone-400 uppercase tracking-wide mb-1">同步</div>
+              <div class="text-sm font-semibold text-stone-800">冲突处理</div>
+            </div>
+            
+            <!-- 自动解决冲突开关 -->
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <div class="text-sm text-stone-700">自动解决冲突</div>
+                <div class="text-[11px] text-stone-500 mt-0.5">
+                  开启后使用「最后写入优先」策略自动解决冲突；关闭后所有冲突将进入仪表盘由您手动处理
+                </div>
+              </div>
+              <button 
+                type="button"
+                (click)="toggleAutoResolve()"
+                class="relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                [class.bg-indigo-500]="preferenceService.autoResolveConflicts()"
+                [class.bg-stone-300]="!preferenceService.autoResolveConflicts()">
+                <span 
+                  class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200"
+                  [class.translate-x-5]="preferenceService.autoResolveConflicts()">
+                </span>
+              </button>
+            </div>
+            
+            <div class="text-[10px] text-stone-400 p-2 bg-stone-100 rounded-lg">
+              💡 个人应用中冲突较少，建议保持开启以获得更流畅的体验
+            </div>
+          </div>
+          
           <!-- 账户信息 (只读显示) -->
           <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
@@ -141,6 +175,7 @@ import { ThemeType } from '../../models';
 })
 export class SettingsModalComponent {
   store = inject(StoreService);
+  preferenceService = inject(PreferenceService);
   
   /** 当前登录用户邮箱 */
   sessionEmail = input<string | null>(null);
@@ -151,5 +186,10 @@ export class SettingsModalComponent {
   
   updateTheme(theme: ThemeType) {
     this.themeChange.emit(theme);
+  }
+  
+  toggleAutoResolve() {
+    const current = this.preferenceService.autoResolveConflicts();
+    this.preferenceService.setAutoResolveConflicts(!current);
   }
 }
