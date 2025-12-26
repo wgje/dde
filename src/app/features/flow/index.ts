@@ -21,8 +21,8 @@ export { FlowLinkDeleteHintComponent } from '../../../components/flow/flow-link-
 export { FlowLinkTypeDialogComponent } from '../../../components/flow/flow-link-type-dialog.component';
 
 // 流程图服务
-export { GoJSDiagramService } from '../../../services/gojs-diagram.service';
 export { FlowDiagramService } from '../../../services/flow-diagram.service';
+export { FlowOverviewService } from '../../../services/flow-overview.service';
 export { FlowDragDropService } from '../../../services/flow-drag-drop.service';
 export { FlowTouchService } from '../../../services/flow-touch.service';
 export { FlowLinkService } from '../../../services/flow-link.service';

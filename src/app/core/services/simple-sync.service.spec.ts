@@ -8,6 +8,7 @@
  * - LWW (Last-Write-Wins) 冲突策略
  * - RetryQueue 重试逻辑
  * - 网络恢复回调
+ * - Sentry 错误上报守卫测试
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TestBed, fakeAsync, tick, flush } from '@angular/core/testing';
@@ -17,6 +18,21 @@ import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
 import { Task, Project, Connection } from '../../../models';
+
+// Mock Sentry 模块 - 使用闭包捕获 mock 函数
+vi.mock('@sentry/angular', () => {
+  const captureException = vi.fn().mockReturnValue('mock-event-id');
+  return {
+    captureException,
+    init: vi.fn(),
+    browserTracingIntegration: vi.fn(),
+    replayIntegration: vi.fn(),
+  };
+});
+
+// 获取 mocked Sentry 以便在测试中访问
+import * as Sentry from '@sentry/angular';
+const mockCaptureException = vi.mocked(Sentry.captureException);
 
 describe('SimpleSyncService', () => {
   let service: SimpleSyncService;
@@ -537,6 +553,137 @@ describe('SimpleSyncService', () => {
     
     it('isLoadingRemote signal 应该存在', () => {
       expect(service.isLoadingRemote()).toBe(false);
+    });
+  });
+  
+  describe('Sentry 错误上报守卫测试', () => {
+    /**
+     * Phase 0 Sentry 守卫测试
+     * 验证同步失败时 Sentry.captureException 被正确调用
+     * 这是重构前的安全网，确保错误上报逻辑不会被意外删除
+     */
+    
+    beforeEach(() => {
+      // 清除之前的调用记录
+      mockCaptureException.mockClear();
+      
+      // 配置为在线模式
+      mockSupabase.isConfigured = true;
+      mockSupabase.client = vi.fn().mockReturnValue(mockClient);
+    });
+    
+    it('pushTask 失败时应该调用 Sentry.captureException 并包含正确的 tags', async () => {
+      const task = createMockTask({ id: 'fail-task' });
+      const networkError = new Error('Network error');
+      
+      // 模拟 pushTask 过程中发生错误
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        // tasks 表的 upsert 失败
+        return {
+          upsert: vi.fn().mockRejectedValue(networkError)
+        };
+      });
+      
+      const result = await service.pushTask(task, 'project-1');
+      
+      // 验证返回失败
+      expect(result).toBe(false);
+      
+      // 验证 Sentry 被调用
+      expect(mockCaptureException).toHaveBeenCalled();
+      
+      // 验证调用参数包含正确的 tags
+      const callArgs = mockCaptureException.mock.calls[0];
+      expect(callArgs[1]).toMatchObject({
+        tags: expect.objectContaining({
+          operation: 'pushTask'
+        })
+      });
+    });
+    
+    it('pushTask 失败时应该将任务加入 RetryQueue', async () => {
+      const task = createMockTask({ id: 'retry-task' });
+      const networkError = new Error('Network error');
+      
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        return {
+          upsert: vi.fn().mockRejectedValue(networkError)
+        };
+      });
+      
+      await service.pushTask(task, 'project-1');
+      
+      // 验证 pendingCount 增加（任务被加入重试队列）
+      expect(service.state().pendingCount).toBeGreaterThan(0);
+    });
+    
+    it('deleteTask 失败时应该调用 Sentry.captureException', async () => {
+      const deleteError = new Error('Delete failed');
+      
+      // 正确模拟 deleteTask 的调用链: from('tasks').delete().eq('id', taskId)
+      mockClient.from = vi.fn().mockReturnValue({
+        delete: vi.fn().mockReturnValue({
+          eq: vi.fn().mockRejectedValue(deleteError)
+        })
+      });
+      
+      await service.deleteTask('task-to-delete', 'project-1');
+      
+      expect(mockCaptureException).toHaveBeenCalled();
+      const callArgs = mockCaptureException.mock.calls[0];
+      expect(callArgs[1]).toMatchObject({
+        tags: expect.objectContaining({
+          operation: 'deleteTask'
+        })
+      });
+    });
+    
+    it('Sentry 上报应该区分可重试和不可重试错误', async () => {
+      const task = createMockTask({ id: 'level-test-task' });
+      
+      // 模拟一个可重试的网络错误
+      const retryableError = new Error('fetch failed');
+      (retryableError as any).code = 'NETWORK_ERROR';
+      
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        return {
+          upsert: vi.fn().mockRejectedValue(retryableError)
+        };
+      });
+      
+      await service.pushTask(task, 'project-1');
+      
+      expect(mockCaptureException).toHaveBeenCalled();
+      // 验证包含 isRetryable 标签
+      const callArgs = mockCaptureException.mock.calls[0];
+      expect(callArgs[1]?.tags).toHaveProperty('isRetryable');
     });
   });
 });

@@ -62,7 +62,6 @@ export { GlobalErrorHandler, ErrorSeverity, CatchError } from './global-error-ha
 export { AttachmentService } from './attachment.service';
 export { MigrationService } from './migration.service';
 export { LoggerService } from './logger.service';
-export { GoJSDiagramService, type DiagramCallbacks, type InsertPosition } from './gojs-diagram.service';
 export { SearchService, type SearchResult, type ProjectSearchResult } from './search.service';
 export { FlowDiagramConfigService, type GoJSNodeData, type GoJSLinkData, type GoJSDiagramData } from './flow-diagram-config.service';
 
@@ -75,6 +74,8 @@ export { FlowTaskOperationsService } from './flow-task-operations.service';
 export { FlowSelectionService, type SelectedNodeInfo } from './flow-selection.service';
 export { FlowZoomService, type ViewState } from './flow-zoom.service';
 export { FlowLayoutService, type NodePosition, type LayoutOptions } from './flow-layout.service';
+export { FlowOverviewService, type OverviewOptions, type OverviewState } from './flow-overview.service';
+export { TaskTrashService, type DeletedTaskMeta, type DeleteResult, type RestoreResult, type TrashServiceCallbacks } from './task-trash.service';
 export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBounds, type MinimapState, type DragSession, type RealTimeScaleResult, type VirtualBoundsResult } from './minimap-math.service';
 export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from './reactive-minimap.service';
 export { LineageColorService, type LineageData, type LineageNodeData, type LineageLinkData } from './lineage-color.service';

@@ -18,7 +18,6 @@ export { TextUnassignedComponent } from '../../../components/text-view/text-unas
 export { TextUnfinishedComponent } from '../../../components/text-view/text-unfinished.component';
 export { TextViewLoadingComponent } from '../../../components/text-view/text-view-loading.component';
 export { TextDeleteDialogComponent } from '../../../components/text-view/text-delete-dialog.component';
-export { DeleteConfirmModalComponent } from '../../../components/text-view/delete-confirm-modal.component';
 
 // 文本视图服务
 export { TextViewDragDropService } from '../../../components/text-view/text-view-drag-drop.service';
