@@ -978,9 +978,10 @@ describe('SyncCoordinatorService 集成场景', () => {
       expect(result.remoteData).toEqual(remoteProject);
       
       // 用户选择合并
-      const mergeResult = service.smartMerge(localProject, remoteProject, new Set());
+      const tombstoneIds = new Set<string>();
+      const mergeResult = service.smartMerge(localProject, remoteProject, tombstoneIds);
       
-      expect(mockConflictService.smartMerge).toHaveBeenCalledWith(localProject, remoteProject);
+      expect(mockConflictService.smartMerge).toHaveBeenCalledWith(localProject, remoteProject, tombstoneIds);
     });
   });
 
@@ -1140,12 +1141,14 @@ describe('SyncCoordinatorService 集成场景', () => {
       const remoteProject = createTestProject({ id: 'proj-1', version: 1000 });
       
       // 调用智能合并
-      service.smartMerge(localProject, remoteProject, new Set());
+      const tombstoneIds = new Set<string>();
+      service.smartMerge(localProject, remoteProject, tombstoneIds);
       
       // 验证调用参数
       expect(mockConflictService.smartMerge).toHaveBeenCalledWith(
         localProject,
-        remoteProject
+        remoteProject,
+        tombstoneIds
       );
     });
   });

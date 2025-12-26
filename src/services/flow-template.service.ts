@@ -871,8 +871,6 @@ export class FlowTemplateService {
     // 创建悬停提示（仅桌面端，移动端不显示 tooltip）
     // 智能定位：基于连接线角度决定 Tooltip 位置（O(1) 操作，无节点遍历）
     const createTooltip = () => {
-      if (isMobile) return undefined;
-      
       return $(go.Adornment, "Auto",
         {
           background: null,
@@ -923,15 +921,23 @@ export class FlowTemplateService {
       );
     };
     
+    // 构建面板配置对象，只在桌面端添加 toolTip 属性
+    const panelConfig: any = {
+      segmentIndex: NaN,
+      segmentFraction: 0.5,
+      cursor: "pointer",
+      isActionable: true,
+      background: "transparent",
+    };
+    
+    // 只在非移动端设置 toolTip，避免 GoJS 验证错误
+    if (!isMobile) {
+      panelConfig.toolTip = createTooltip();
+    }
+    
     return $(go.Panel, "Auto",
       {
-        segmentIndex: NaN,
-        segmentFraction: 0.5,
-        cursor: "pointer",
-        isActionable: true,
-        background: "transparent",
-        // 悬停提示 - 只显示描述内容
-        toolTip: createTooltip(),
+        ...panelConfig,
         // 事件代理：点击时通过全局事件总线发送信号（使用 any 类型）
         click: (e: any, obj: any) => {
           const link = obj?.part;
@@ -1013,8 +1019,10 @@ export class FlowTemplateService {
       )
     );
     
-    // 降低 Overview 更新频率，防抖
-    overview.updateDelay = 100;
+    // Overview 更新延迟
+    // 设置为 0 表示每帧都更新，确保小地图与主视图同步
+    // GoJS 内部会自动进行合理的批处理
+    overview.updateDelay = 0;
     
     this.logger.debug('Overview 节点模板已设置（简化版）');
   }

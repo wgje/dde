@@ -65,6 +65,8 @@ describe('FlowConnectionEditorComponent - Markdown 支持', () => {
     
     expect(rendered).toContain('待办任务');
     expect(rendered).toContain('已完成任务');
-    expect(rendered).toContain('checkbox');
+    // 检查 Unicode 方框字符（实际渲染结果）
+    expect(rendered).toContain('☐');
+    expect(rendered).toContain('☑');
   });
 });

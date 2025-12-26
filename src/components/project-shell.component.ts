@@ -213,7 +213,7 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
                 [showRetry]="true"
                 [onRetry]="retryFlowView.bind(this)"
                 [containerClass]="'compact'">
-                <app-flow-view class="flex-1 min-h-0 overflow-hidden" (goBackToText)="switchToText()"></app-flow-view>
+                <app-flow-view #flowView class="flex-1 min-h-0 overflow-hidden" (goBackToText)="switchToText()"></app-flow-view>
              </app-error-boundary>
            } @placeholder {
              <div class="flex-1 flex items-center justify-center">
@@ -248,7 +248,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private router = inject(Router);
   private destroy$ = new Subject<void>();
   
-  @ViewChild(FlowViewComponent) flowView?: FlowViewComponent;
+  // FlowViewComponent 通过 @defer 延迟加载，所以在运行时才能访问
+  // ViewChild 会在组件实例化后自动绑定
+  @ViewChild('flowView', { read: undefined }) flowView?: any;
   
   // UI 状态
   isFilterOpen = signal(false);
@@ -563,8 +565,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   retryFlowView(): void {
     // 触发流程图重新初始化
     this.store.activeView.set('flow');
-    if (this.flowView) {
-      this.flowView.retryInitDiagram();
-    }
+    // flowView 通过 @defer 延迟加载，可能尚未初始化
+    // 使用 setTimeout 确保在下一个变更检测周期后访问
+    setTimeout(() => {
+      if (this.flowView && typeof this.flowView.retryInitDiagram === 'function') {
+        this.flowView.retryInitDiagram();
+      }
+    }, 0);
   }
 }

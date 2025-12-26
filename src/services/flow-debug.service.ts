@@ -246,4 +246,156 @@ export class FlowDebugService {
     console.log('  flowDebug.test()             - 显示测试说明');
     console.log('========================================');
   }
+
+  /**
+   * 启用小地图调试模式
+   * 在控制台执行：flowDebug.enableMinimapDebug()
+   * 
+   * 调试信息包括：
+   * - fixedBounds: 小地图的世界边界
+   * - viewportBounds: 主图视口边界
+   * - overview.scale: 当前缩放比例
+   * - isViewportOutside: 视口是否超出内容边界
+   * - box.actualBounds: 视口框在小地图中的实际位置
+   */
+  enableMinimapDebug(overview?: any, diagram?: any): void {
+    // 启用 Overview 调试日志
+    (globalThis as any).__NF_OVERVIEW_DEBUG = true;
+    
+    console.log('========== 小地图调试模式已启用 ==========');
+    console.log('调试日志将在 Overview 更新时输出（每 1000ms 最多一次）');
+    console.log('');
+    console.log('手动检查当前状态：');
+    console.log('  flowDebug.inspectMinimap()');
+    console.log('');
+    console.log('禁用调试模式：');
+    console.log('  flowDebug.disableMinimapDebug()');
+    console.log('==========================================');
+    
+    // 如果提供了 overview 和 diagram，立即输出当前状态
+    if (overview && diagram) {
+      this.inspectMinimap(overview, diagram);
+    }
+  }
+
+  /**
+   * 禁用小地图调试模式
+   */
+  disableMinimapDebug(): void {
+    (globalThis as any).__NF_OVERVIEW_DEBUG = false;
+    console.log('小地图调试模式已禁用');
+  }
+
+  /**
+   * 检查小地图当前状态
+   * 输出关键诊断信息
+   */
+  inspectMinimap(overview?: any, diagram?: any): void {
+    console.log('========== 小地图状态检查 ==========');
+    
+    if (!overview || !diagram) {
+      console.log('使用方法：flowDebug.inspectMinimap(overview, diagram)');
+      console.log('或者：在 FlowDiagramService 中调用 exposeMinimapToDebug()');
+      console.log('');
+      console.log('快捷方式（如果已暴露）：');
+      console.log('  flowDebug.inspectMinimap(flowDebug.overview, flowDebug.diagram)');
+      return;
+    }
+    
+    try {
+      const viewportBounds = diagram.viewportBounds;
+      const documentBounds = diagram.documentBounds;
+      const fixedBounds = overview.fixedBounds;
+      const scale = overview.scale;
+      const box = overview.box;
+      
+      console.log('1. 主图视口 (viewportBounds):');
+      console.log(`   x: ${Math.round(viewportBounds.x)}, y: ${Math.round(viewportBounds.y)}`);
+      console.log(`   width: ${Math.round(viewportBounds.width)}, height: ${Math.round(viewportBounds.height)}`);
+      
+      console.log('');
+      console.log('2. 主图内容边界 (documentBounds):');
+      console.log(`   x: ${Math.round(documentBounds.x)}, y: ${Math.round(documentBounds.y)}`);
+      console.log(`   width: ${Math.round(documentBounds.width)}, height: ${Math.round(documentBounds.height)}`);
+      
+      console.log('');
+      console.log('3. 小地图世界边界 (fixedBounds):');
+      if (fixedBounds && fixedBounds.isReal()) {
+        console.log(`   x: ${Math.round(fixedBounds.x)}, y: ${Math.round(fixedBounds.y)}`);
+        console.log(`   width: ${Math.round(fixedBounds.width)}, height: ${Math.round(fixedBounds.height)}`);
+      } else {
+        console.log('   未设置或无效');
+      }
+      
+      console.log('');
+      console.log('4. 小地图缩放 (scale):');
+      console.log(`   ${scale.toFixed(6)}`);
+      console.log(`   最小允许值: 1e-4 (0.0001)`);
+      console.log(`   当前是否接近下限: ${scale < 0.001 ? '⚠️ 是，可能导致视口框消失' : '否'}`);
+      
+      console.log('');
+      console.log('5. 视口框位置 (box):');
+      if (box) {
+        const boxBounds = box.actualBounds;
+        console.log(`   x: ${Math.round(boxBounds.x)}, y: ${Math.round(boxBounds.y)}`);
+        console.log(`   width: ${Math.round(boxBounds.width)}, height: ${Math.round(boxBounds.height)}`);
+      } else {
+        console.log('   box 未找到');
+      }
+      
+      console.log('');
+      console.log('6. 视口超界检测:');
+      const isOutside = 
+        viewportBounds.x < documentBounds.x - 50 ||
+        viewportBounds.y < documentBounds.y - 50 ||
+        viewportBounds.right > documentBounds.right + 50 ||
+        viewportBounds.bottom > documentBounds.bottom + 50;
+      console.log(`   isViewportOutside: ${isOutside ? '⚠️ 是' : '否'}`);
+      if (isOutside) {
+        console.log('   超界方向:');
+        if (viewportBounds.x < documentBounds.x - 50) console.log('     - 左侧超界');
+        if (viewportBounds.y < documentBounds.y - 50) console.log('     - 顶部超界');
+        if (viewportBounds.right > documentBounds.right + 50) console.log('     - 右侧超界');
+        if (viewportBounds.bottom > documentBounds.bottom + 50) console.log('     - 底部超界');
+      }
+      
+      console.log('');
+      console.log('=========================================');
+    } catch (error) {
+      console.error('检查失败:', error);
+    }
+  }
+
+  /**
+   * 扩展 exposeToWindow，添加小地图调试功能
+   */
+  exposeToWindowWithMinimap(diagram: any, overview?: any): void {
+    (window as any).flowDebug = {
+      inspectLinks: () => this.inspectLinks(diagram),
+      fixAllLinks: () => this.fixAllLinks(diagram),
+      inspectNodePorts: () => this.inspectNodePorts(diagram),
+      test: () => this.showTestInstructions(),
+      diagram: diagram,
+      overview: overview,
+      // 小地图调试
+      enableMinimapDebug: () => this.enableMinimapDebug(overview, diagram),
+      disableMinimapDebug: () => this.disableMinimapDebug(),
+      inspectMinimap: () => this.inspectMinimap(overview, diagram)
+    };
+    
+    console.log('========== 调试工具已加载（含小地图） ==========');
+    console.log('可用命令（在浏览器控制台运行）：');
+    console.log('');
+    console.log('连接线调试：');
+    console.log('  flowDebug.inspectLinks()     - 检查所有连接线');
+    console.log('  flowDebug.fixAllLinks()      - 修复所有连接线端口');
+    console.log('  flowDebug.inspectNodePorts() - 检查节点端口配置');
+    console.log('');
+    console.log('小地图调试：');
+    console.log('  flowDebug.enableMinimapDebug()  - 启用调试日志');
+    console.log('  flowDebug.disableMinimapDebug() - 禁用调试日志');
+    console.log('  flowDebug.inspectMinimap()      - 检查当前状态');
+    console.log('');
+    console.log('=====================================================');
+  }
 }
