@@ -57,7 +57,7 @@
 | **Phase 2** | 目录结构重组 | ✅ 完成 | 16h | 100% |
 | **Phase 3** | 配置文件拆分 | ✅ 完成 | 2h | 100% |
 | **Phase 4** | 类型安全增强 | 🔄 进行中 | 4h | 30% |
-| **Phase 5** | 测试覆盖补充 | 🔄 进行中 | 16h | 65% |
+| **Phase 5** | 测试覆盖补充 | 🔄 进行中 | 16h | 75% |
 
 ---
 
@@ -306,6 +306,8 @@ src/config/
 | `GlobalErrorHandler` | ✅ 完成 | 错误分级处理 | 21 个测试 |
 | `LoggerService` | ✅ 完成 | 日志级别/持久化 | 17 个测试 |
 | `UndoService` | ✅ 完成 | 撤销/重做 | 16 个测试 |
+| `ToastService` | ✅ 完成 | 通知/去重 | 17 个测试 |
+| `SearchService` | ✅ 完成 | 任务/项目搜索 | 10 个测试 |
 | `TaskOperationService` | ✅ 已有 | 补充边界用例 | 5 个测试 |
 | `SimpleSyncService` | ✅ 已有 | 补充 Sentry 测试 | 完整 |
 | `LayoutService` | ✅ 已有 | 保持 | 完整 |
