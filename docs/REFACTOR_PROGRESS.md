@@ -54,7 +54,7 @@
 |------|------|------|--------|------|
 | **Phase 0** | 清理废弃/重复代码 | ✅ 完成 | 2h | 100% |
 | **Phase 1** | 巨型服务拆分 | ✅ 完成 | 6h | 100% |
-| **Phase 2** | 目录结构重组 | 🔄 进行中 | 16h | 75% |
+| **Phase 2** | 目录结构重组 | ✅ 完成 | 16h | 100% |
 | **Phase 3** | 配置文件拆分 | ⏳ 待开始 | 2h | 0% |
 | **Phase 4** | 类型安全增强 | ⏳ 待开始 | 4h | 0% |
 | **Phase 5** | 测试覆盖补充 | ⏳ 待开始 | 16h | 0% |
@@ -219,14 +219,20 @@ src/
 - [x] 保留 src/components/flow/index.ts 作为兼容层
 - [x] TypeScript 编译通过
 
-**第三批: modals（低风险）**
-- [ ] 创建 `src/app/features/project/components/modals/`
-- [ ] 迁移 `src/components/modals/*.component.ts`
-- [ ] 更新 `ModalLoaderService` 导入路径
+**第三批: modals（低风险）✅**
+- [x] 创建 `src/app/shared/modals/` 目录
+- [x] 迁移 `src/components/modals/*.component.ts` (12 个 modal 文件)
+- [x] 更新 `ModalLoaderService` 动态导入路径
+- [x] 更新 `shared/ui/index.ts` 导出
+- [x] TypeScript 编译通过
 
-**第四批: shared（清理）**
-- [ ] 迁移通用组件到 `src/app/shared/components/`
-- [ ] 删除空的 `src/components/` 目录
+**第四批: shared（清理）✅**
+- [x] 创建 `src/app/shared/components/` 目录
+- [x] 迁移通用组件 (8 个): attachment-manager, error-boundary, error-page, not-found, offline-banner, reset-password, sync-status, toast-container
+- [x] 更新 `app.component.ts` 和 `app.routes.ts` 导入路径
+- [x] 删除旧的 `src/components/flow/index.ts` 和 `src/components/text-view.component.ts`
+- [x] `src/components/` 仅保留 `project-shell.component.ts` (根组件)
+- [x] TypeScript 编译通过
 
 ---
 
@@ -310,6 +316,41 @@ src/config/
 ---
 
 ## 变更日志
+
+### 2024-12-26 (Phase 2 完成)
+
+**Phase 2.3-2.4 modals 和 shared 组件迁移完成**:
+- ✅ 创建 `src/app/shared/modals/` 目录
+- ✅ 迁移 12 个 modal 组件:
+  - `settings-modal.component.ts`
+  - `login-modal.component.ts`
+  - `conflict-modal.component.ts`
+  - `new-project-modal.component.ts`
+  - `delete-confirm-modal.component.ts`
+  - `config-help-modal.component.ts`
+  - `trash-modal.component.ts`
+  - `migration-modal.component.ts`
+  - `error-recovery-modal.component.ts`
+  - `storage-escape-modal.component.ts`
+  - `dashboard-modal.component.ts`
+  - `index.ts` (barrel)
+- ✅ 创建 `src/app/shared/components/` 目录
+- ✅ 迁移 8 个通用组件:
+  - `attachment-manager.component.ts`
+  - `error-boundary.component.ts`
+  - `error-page.component.ts`
+  - `not-found.component.ts`
+  - `offline-banner.component.ts`
+  - `reset-password.component.ts`
+  - `sync-status.component.ts`
+  - `toast-container.component.ts`
+- ✅ 更新 `modal-loader.service.ts` 动态导入路径
+- ✅ 更新 `app.component.ts` 和 `app.routes.ts` 导入
+- ✅ 更新 `shared/ui/index.ts` 导出
+- ✅ 删除旧的 `src/components/flow/index.ts` 和 `src/components/text-view.component.ts`
+- ✅ `src/components/` 仅保留 `project-shell.component.ts`
+- ✅ TypeScript 编译通过
+- 📝 提交: 8459823
 
 ### 2024-12-26 (第三轮)
 
