@@ -15,7 +15,6 @@ import { StoreService } from '../services/store.service';
 import { ToastService } from '../services/toast.service';
 import { TabSyncService } from '../services/tab-sync.service';
 import { TextViewComponent } from './text-view/text-view.component';
-import { FlowViewComponent } from './flow-view.component';
 import { ErrorBoundaryComponent } from './error-boundary.component';
 
 /**
@@ -33,7 +32,7 @@ import { ErrorBoundaryComponent } from './error-boundary.component';
 @Component({
   selector: 'app-project-shell',
   standalone: true,
-  imports: [CommonModule, TextViewComponent, FlowViewComponent, ErrorBoundaryComponent],
+  imports: [CommonModule, TextViewComponent, ErrorBoundaryComponent],
   styles: [`
     :host {
       display: flex;
@@ -248,8 +247,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private router = inject(Router);
   private destroy$ = new Subject<void>();
   
-  // FlowViewComponent 通过 @defer 延迟加载，所以在运行时才能访问
-  // ViewChild 会在组件实例化后自动绑定
+  // FlowViewComponent 通过 @defer 延迟加载，无静态导入
+  // ViewChild 会在 defer 块加载完成后自动绑定，加载前为 undefined
+  // 注意：由于是延迟加载，类型检查时无法获得强类型，使用 any
   @ViewChild('flowView', { read: undefined }) flowView?: any;
   
   // UI 状态
@@ -561,6 +561,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   /**
    * 重试加载流程图视图
+   * FlowViewComponent 通过 @defer 延迟加载，需等待组件实例化
    */
   retryFlowView(): void {
     // 触发流程图重新初始化
@@ -570,6 +571,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     setTimeout(() => {
       if (this.flowView && typeof this.flowView.retryInitDiagram === 'function') {
         this.flowView.retryInitDiagram();
+      } else {
+        console.warn('[ProjectShell] FlowView 尚未加载完成，无法执行重试');
       }
     }, 0);
   }
