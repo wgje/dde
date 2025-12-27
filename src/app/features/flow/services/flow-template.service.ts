@@ -277,19 +277,55 @@ export class FlowTemplateService {
         click: (e: any, node: any) => {
           if (e.diagram.lastInput.dragging) return;
           if (e.diagram.lastInput.clickCount >= 2) return;
+          if (e.handled) return; // 已由 ClickSelectingTool 处理
           
-          // 支持 Shift+点击多选：检测 Shift 键状态
-          const shift = e.diagram.lastInput.shift;
-          if (shift) {
-            // Shift+点击：切换节点选中状态（添加/移除）
-            // 使用事务确保 UI 正确更新
-            e.diagram.startTransaction('shift-select');
+          // 支持多选：检测 Shift/Ctrl/Cmd 键或框选模式
+          const input = e as go.InputEvent;
+          const lastInput = e.diagram.lastInput as go.InputEvent;
+          const domEvent = (input as any)?.event as (MouseEvent | PointerEvent | KeyboardEvent | undefined);
+
+          const shift = Boolean(input?.shift || lastInput?.shift || domEvent?.shiftKey);
+          const ctrl = Boolean(input?.control || lastInput?.control || (domEvent as any)?.ctrlKey);
+          const meta = Boolean(input?.meta || lastInput?.meta || (domEvent as any)?.metaKey); // Mac 的 Cmd 键
+          const isSelectModifierPressed = shift || ctrl || meta;
+          
+          // 框选模式（移动端切换）
+          const dragSelectTool = e.diagram.toolManager.dragSelectingTool;
+          const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+
+          console.log('[FlowTemplate] 节点点击事件', {
+            isSelectModeActive,
+            dragSelectToolEnabled: dragSelectTool?.isEnabled,
+            nodeSelected: node.isSelected,
+            nodeKey: node.key
+          });
+
+          // 移动端框选模式：点击节点立即切换选中状态
+          if (isSelectModeActive) {
+            console.log('[FlowTemplate] 框选模式激活 - 切换节点选中状态', { from: node.isSelected, to: !node.isSelected });
+            e.handled = true;
+            // 在事务中切换选中状态
+            e.diagram.startTransaction('toggle-selection');
             node.isSelected = !node.isSelected;
-            e.diagram.commitTransaction('shift-select');
-          } else {
-            // 普通点击：调用事件处理器（单选逻辑由事件服务处理）
-            flowTemplateEventHandlers.onNodeClick?.(node);
+            e.diagram.commitTransaction('toggle-selection');
+            // 手动触发 ChangedSelection 事件
+            e.diagram.raiseDiagramEvent('ChangedSelection');
+            console.log('[FlowTemplate] 选中状态已更新', { 
+              nodeKey: node.key, 
+              isSelected: node.isSelected,
+              totalSelected: e.diagram.selection.count
+            });
+            return;
           }
+
+          // 桌面端修饰键多选：阻止详情面板，具体切换由 ClickSelectingTool 处理
+          if (isSelectModifierPressed) {
+            e.handled = true;
+            return;
+          }
+
+          // 普通点击：调用事件处理器（单选逻辑由事件服务处理）
+          flowTemplateEventHandlers.onNodeClick?.(node);
         },
         doubleClick: (e: any, node: any) => {
           e.handled = true;

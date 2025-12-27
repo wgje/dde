@@ -110,8 +110,10 @@ import { Task } from '../../../../models';
         
         <!-- 移动端：框选模式切换按钮 -->
         @if (store.isMobile()) {
-          <button (click)="toggleSelectMode.emit()" 
-                  class="backdrop-blur rounded-lg shadow-sm border transition-all hover:bg-stone-50 p-1.5" 
+          <button
+            type="button"
+            (pointerdown)="onToggleSelectModePointerDown($event)"
+            class="backdrop-blur rounded-lg shadow-sm border transition-all hover:bg-stone-50 p-1.5" 
                   [class.bg-amber-500]="isSelectMode()" 
                   [class.text-white]="isSelectMode()" 
                   [class.border-amber-500]="isSelectMode()" 
@@ -280,6 +282,13 @@ export class FlowToolbarComponent {
   
   setUploadComplete() {
     this.isUploading = false;
+  }
+
+  onToggleSelectModePointerDown(event: PointerEvent): void {
+    // 移动端：避免 GoJS/浏览器默认手势吞掉 click，使用 pointerdown 立即响应
+    event.preventDefault();
+    event.stopPropagation();
+    this.toggleSelectMode.emit();
   }
   
   // 点击外部区域关闭菜单

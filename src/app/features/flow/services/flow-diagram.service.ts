@@ -197,6 +197,15 @@ export class FlowDiagramService {
       this.templateService.setupNodeTemplate(this.diagram);
       this.templateService.setupLinkTemplate(this.diagram);
       
+      // 配置工具行为：默认禁用框选工具，启用平移工具
+      // 移动端可以通过工具栏按钮切换到框选模式
+      // 桌面端通过 Shift/Ctrl/Cmd + 点击实现多选
+      this.diagram.toolManager.dragSelectingTool.isEnabled = false;
+      this.diagram.toolManager.panningTool.isEnabled = true;
+      // 禁用 GoJS 默认的上下文菜单（移动端长按会出现 Copy/Cut/Select All 等按钮）
+      this.diagram.toolManager.contextMenuTool.isEnabled = false;
+      this.setupMultiSelectClickTool(this.diagram);
+      
       // 初始化模型
       this.diagram!.model = new go.GraphLinksModel([], [], {
         linkKeyProperty: 'key',
@@ -236,6 +245,85 @@ export class FlowDiagramService {
       Sentry.captureException(error, { tags: { operation: 'initDiagram' } });
       this.handleError('流程图初始化失败', error);
       return false;
+    }
+  }
+
+  /**
+   * 自定义点击选择行为
+   * - 在 GoJS 默认选择逻辑之前处理多选（Shift/Ctrl/Cmd 或移动端框选模式）
+   * - 解决默认 ClickSelectingTool 先清空选择、再触发节点 click 导致无法多选的问题
+   */
+  private setupMultiSelectClickTool(diagram: go.Diagram): void {
+    const clickTool = diagram.toolManager.clickSelectingTool;
+    // GoJS 类型声明将 standardMouseSelect 定义为无参方法，但实际会以 (e, obj) 调用
+    const originalStandardMouseSelect = (clickTool.standardMouseSelect as any).bind(clickTool);
+    const originalStandardTouchSelect = ((clickTool as any).standardTouchSelect as any)?.bind(clickTool);
+
+    (clickTool as any).standardMouseSelect = (e: go.InputEvent, obj: go.GraphObject | null) => {
+      const dragSelectTool = diagram.toolManager.dragSelectingTool;
+      const lastInput = diagram.lastInput as go.InputEvent | null;
+      const domEvent = (e as any)?.event as MouseEvent | PointerEvent | KeyboardEvent | undefined;
+
+      // 移动端框选模式：点击节点时禁用默认单选，交给节点模板或下方逻辑处理
+      const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+      if (isSelectModeActive && obj?.part instanceof go.Node) {
+        console.log('[FlowDiagram] standardMouseSelect - 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
+        e.handled = true;
+        // 在事务中切换选中状态
+        diagram.startTransaction('toggle-selection');
+        obj.part.isSelected = !obj.part.isSelected;
+        diagram.commitTransaction('toggle-selection');
+        // 手动触发 ChangedSelection 事件
+        diagram.raiseDiagramEvent('ChangedSelection');
+        console.log('[FlowDiagram] 切换选中状态完成', { 
+          nodeKey: obj.part.key, 
+          newState: obj.part.isSelected,
+          totalSelected: diagram.selection.count
+        });
+        return;
+      }
+
+      const shift = Boolean(e?.shift || lastInput?.shift || domEvent?.shiftKey);
+      const ctrl = Boolean(e?.control || lastInput?.control || (domEvent as any)?.ctrlKey);
+      const meta = Boolean(e?.meta || lastInput?.meta || (domEvent as any)?.metaKey);
+      // 桌面端：仅修饰键触发多选；移动端框选模式的点选在模板事件中处理
+      const wantsMultiSelect = shift || ctrl || meta;
+
+      if (wantsMultiSelect && obj?.part instanceof go.Node) {
+        e.handled = true;
+        diagram.startTransaction('multi-select');
+        obj.part.isSelected = !obj.part.isSelected;
+        diagram.commitTransaction('multi-select');
+        return;
+      }
+
+      originalStandardMouseSelect(e, obj);
+    };
+
+    // 移动端：触摸点击也会走 standardTouchSelect（不重写会导致先清空 selection，从而无法“点击追加多选”）
+    if (typeof originalStandardTouchSelect === 'function') {
+      (clickTool as any).standardTouchSelect = (e: go.InputEvent, obj: go.GraphObject | null) => {
+        const dragSelectTool = diagram.toolManager.dragSelectingTool;
+        const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+
+        // 仅在移动端框选模式下启用"点选多选"
+        if (isSelectModeActive && obj?.part instanceof go.Node) {
+          e.handled = true;
+          // 在事务中切换选中状态
+          diagram.startTransaction('toggle-selection');
+          obj.part.isSelected = !obj.part.isSelected;
+          diagram.commitTransaction('toggle-selection');
+          // 手动触发 ChangedSelection 事件
+          diagram.raiseDiagramEvent('ChangedSelection');
+          console.log('[FlowDiagram] Touch 切换完成', { 
+            nodeKey: obj.part.key, 
+            newState: obj.part.isSelected,
+            totalSelected: diagram.selection.count
+          });
+          return;
+        }
+        originalStandardTouchSelect(e, obj);
+      };
     }
   }
   
