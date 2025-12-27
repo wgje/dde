@@ -6,12 +6,14 @@
  * - 多选管理
  * - 选择高亮
  * - 获取选中任务
+ * - 暴露选中状态 Signal 供 UI 绑定
  * 
  * 从 FlowDiagramService 拆分
  */
 
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
+import { flowTemplateEventHandlers } from './flow-template-events';
 import * as go from 'gojs';
 
 /**
@@ -34,12 +36,75 @@ export class FlowSelectionService {
   /** 外部注入的 Diagram 引用 */
   private diagram: go.Diagram | null = null;
   
+  /** ChangedSelection 监听器引用（用于清理） */
+  private selectionChangedHandler: ((e: go.DiagramEvent) => void) | null = null;
+  
+  // ========== 公开 Signals ==========
+  
+  /** 选中的任务 ID 集合（实时同步自 GoJS） */
+  readonly selectedTaskIds = signal<Set<string>>(new Set());
+  
+  /** 选中数量 */
+  readonly selectionCount = computed(() => this.selectedTaskIds().size);
+  
+  /** 是否有多个选中（用于显示批量操作工具栏） */
+  readonly hasMultipleSelection = computed(() => this.selectionCount() > 1);
+  
   /**
    * 设置 Diagram 引用
    * 由 FlowDiagramService 在初始化时调用
    */
   setDiagram(diagram: go.Diagram | null): void {
+    // 清理旧监听器
+    if (this.diagram && this.selectionChangedHandler) {
+      this.diagram.removeDiagramListener('ChangedSelection', this.selectionChangedHandler);
+      this.selectionChangedHandler = null;
+    }
+    
     this.diagram = diagram;
+    this.selectedTaskIds.set(new Set());
+    
+    // 注册新监听器
+    if (diagram) {
+      this.initSelectionListener();
+    }
+  }
+  
+  /**
+   * 初始化选择变化监听
+   * 同步 GoJS 选择状态到 Angular Signal
+   */
+  private initSelectionListener(): void {
+    if (!this.diagram) return;
+    
+    this.selectionChangedHandler = () => {
+      this.syncSelectionState();
+    };
+    
+    this.diagram.addDiagramListener('ChangedSelection', this.selectionChangedHandler);
+    this.logger.debug('选择变化监听已初始化');
+  }
+  
+  /**
+   * 同步 GoJS 选择状态到 Signal
+   * 由 ChangedSelection 事件触发
+   */
+  private syncSelectionState(): void {
+    if (!this.diagram) return;
+    
+    const keys = new Set<string>();
+    this.diagram.selection.each((part: go.Part) => {
+      if (part instanceof go.Node && (part.data as { key?: string })?.key) {
+        keys.add((part.data as { key: string }).key);
+      }
+    });
+    
+    this.selectedTaskIds.set(keys);
+    
+    // 通过事件总线通知其他服务
+    flowTemplateEventHandlers.onSelectionChanged?.(Array.from(keys));
+    
+    this.logger.debug(`选择变化: ${keys.size} 个节点`, Array.from(keys));
   }
   
   /**

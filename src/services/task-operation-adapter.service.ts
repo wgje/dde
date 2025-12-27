@@ -322,6 +322,32 @@ export class TaskOperationAdapterService {
     this.setupSyncResultHandler(snapshot.id);
   }
   
+  /**
+   * 批量删除任务（原子操作）
+   * @param explicitIds 用户显式选中的任务 ID 列表
+   * @returns 实际删除的任务数量（含级联子任务）
+   */
+  deleteTasksBatch(explicitIds: string[]): number {
+    if (explicitIds.length === 0) return 0;
+    
+    // 创建乐观更新快照（使用第一个任务 ID，标记为删除操作）
+    const snapshot = this.optimisticState.createTaskSnapshot(explicitIds[0], '删除');
+    
+    const deletedCount = this.taskOps.deleteTasksBatch(explicitIds);
+    
+    this.activeStructureSnapshot = snapshot.id;
+    this.setupSyncResultHandler(snapshot.id);
+    
+    return deletedCount;
+  }
+  
+  /**
+   * 计算批量删除将影响的任务数量（含级联子任务）
+   */
+  calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
+    return this.taskOps.calculateBatchDeleteImpact(explicitIds);
+  }
+  
   restoreTask(taskId: string): void {
     this.taskOps.restoreTask(taskId);
   }

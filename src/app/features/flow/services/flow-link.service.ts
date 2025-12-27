@@ -185,6 +185,14 @@ export class FlowLinkService {
       return;
     }
     
+    // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
+    if (dialog.sourceTask && dialog.sourceTask.stage === null && 
+        dialog.targetTask && dialog.targetTask.stage !== null) {
+      this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
+      this.linkTypeDialog.set(null);
+      return;
+    }
+    
     const parentTask = dialog.sourceTask;
     const parentStage = parentTask?.stage ?? null;
     const nextStage = parentStage !== null ? parentStage + 1 : 1;
@@ -247,6 +255,14 @@ export class FlowLinkService {
     // 检查目标节点是否已有父节点
     const childTask = this.store.tasks().find(t => t.id === targetId);
     const sourceTask = this.store.tasks().find(t => t.id === sourceId);
+    
+    // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
+    // 待分配块 (stage === null) 可以成为其他待分配块的父节点
+    // 但不能成为已分配任务 (stage !== null) 的父节点
+    if (sourceTask && sourceTask.stage === null && childTask && childTask.stage !== null) {
+      this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
+      return 'none';
+    }
     
     if (childTask?.parentId) {
       // 🔴 浮动任务树特殊处理：待分配子任务可以被“认领”
@@ -314,6 +330,12 @@ export class FlowLinkService {
     
     if (!newParentTask) {
       this.toast.error('迁移失败', '找不到目标父任务');
+      return 'error';
+    }
+    
+    // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
+    if (newParentTask.stage === null && childTask.stage !== null) {
+      this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
       return 'error';
     }
     

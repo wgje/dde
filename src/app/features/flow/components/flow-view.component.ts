@@ -24,6 +24,8 @@ import { FlowLinkTypeDialogComponent } from './flow-link-type-dialog.component';
 import { FlowConnectionEditorComponent } from './flow-connection-editor.component';
 import { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
 import { FlowCascadeAssignDialogComponent, CascadeAssignDialogData } from './flow-cascade-assign-dialog.component';
+import { FlowBatchDeleteDialogComponent, BatchDeleteDialogData, BatchDeleteImpact } from './flow-batch-delete-dialog.component';
+import { flowTemplateEventHandlers } from '../services/flow-template-events';
 import * as go from 'gojs';
 
 /**
@@ -56,7 +58,8 @@ import * as go from 'gojs';
     FlowLinkTypeDialogComponent,
     FlowConnectionEditorComponent,
     FlowLinkDeleteHintComponent,
-    FlowCascadeAssignDialogComponent
+    FlowCascadeAssignDialogComponent,
+    FlowBatchDeleteDialogComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: [`
@@ -67,6 +70,21 @@ import * as go from 'gojs';
       min-height: 0;
       position: relative;
       background-color: #F5F2E9;
+    }
+    
+    @keyframes slide-up {
+      from {
+        opacity: 0;
+        transform: translate(-50%, 20px);
+      }
+      to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+    }
+    
+    .animate-slide-up {
+      animation: slide-up 0.2s ease-out;
     }
   `],
   template: `
@@ -92,6 +110,57 @@ import * as go from 'gojs';
       <div class="flex-1 min-h-0 relative overflow-hidden bg-[#F5F2E9] md:border-t md:border-[#78716C]/50">
         @if (!diagram.error()) {
           <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+          
+          <!-- 批量操作浮动工具栏（放在流程图画布内部） -->
+          @if (selectionService.hasMultipleSelection()) {
+            @if (store.isMobile()) {
+              <!-- 移动端：左下角，工具栏上方（不遮挡工具框） -->
+              <div class="absolute left-2 z-40 animate-slide-up" style="bottom: 56px;">
+                <div class="bg-white/95 backdrop-blur rounded-lg shadow-lg border border-stone-200 px-2.5 py-1.5 flex items-center gap-1.5">
+                  <span class="text-xs text-stone-600">
+                    已选 <span class="font-semibold text-stone-800">{{ selectionService.selectionCount() }}</span>
+                  </span>
+                  <div class="w-px h-3 bg-stone-200"></div>
+                  <button 
+                    (click)="requestBatchDelete()"
+                    class="flex items-center gap-1 px-1.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 rounded transition-colors">
+                    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    删除
+                  </button>
+                  <button 
+                    (click)="selectionService.clearSelection()"
+                    class="px-1.5 py-1 text-xs font-medium text-stone-500 hover:bg-stone-100 rounded transition-colors">
+                    取消
+                  </button>
+                </div>
+              </div>
+            } @else {
+              <!-- 桌面端：流程图画布左上角 -->
+              <div class="absolute left-4 top-4 z-40 animate-slide-up">
+                <div class="bg-white/95 backdrop-blur rounded-xl shadow-lg border border-stone-200 px-4 py-2.5 flex items-center gap-3">
+                  <span class="text-sm text-stone-600">
+                    已选择 <span class="font-semibold text-stone-800">{{ selectionService.selectionCount() }}</span> 个任务
+                  </span>
+                  <div class="w-px h-4 bg-stone-200"></div>
+                  <button 
+                    (click)="requestBatchDelete()"
+                    class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    删除
+                  </button>
+                  <button 
+                    (click)="selectionService.clearSelection()"
+                    class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-stone-500 hover:bg-stone-100 rounded-lg transition-colors">
+                    取消选择
+                  </button>
+                </div>
+              </div>
+            }
+          }
           
           <!-- 小地图/导航器 -->
           @if (isOverviewVisible()) {
@@ -195,6 +264,7 @@ import * as go from 'gojs';
           [linkSourceTask]="link.linkSourceTask()"
           [isResizingDrawer]="isResizingDrawerSignal()"
           [drawerHeightVh]="drawerHeight()"
+          [isSelectMode]="isSelectMode()"
           (zoomIn)="zoomIn()"
           (zoomOut)="zoomOut()"
           (autoLayout)="applyAutoLayout()"
@@ -204,7 +274,8 @@ import * as go from 'gojs';
           (goBackToText)="goBackToText.emit()"
           (exportPng)="exportToPng()"
           (exportSvg)="exportToSvg()"
-          (saveToCloud)="saveToCloud()">
+          (saveToCloud)="saveToCloud()"
+          (toggleSelectMode)="toggleSelectMode()">
         </app-flow-toolbar>
 
         <!-- 任务详情面板 -->
@@ -244,6 +315,14 @@ import * as go from 'gojs';
         (confirm)="confirmDelete($event)"
         (keepChildrenChange)="deleteKeepChildren.set($event)">
       </app-flow-delete-confirm>
+      
+      <!-- 批量删除确认弹窗 -->
+      <app-flow-batch-delete-dialog
+        [data]="batchDeleteDialog()"
+        [isMobile]="store.isMobile()"
+        (cancel)="batchDeleteDialog.set(null)"
+        (confirm)="confirmBatchDelete()">
+      </app-flow-batch-delete-dialog>
       
       <!-- 移动端连接线删除提示 -->
       @if (store.isMobile()) {
@@ -375,7 +454,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly diagram = inject(FlowDiagramService);
   private readonly eventService = inject(FlowEventService);
   private readonly zoomService = inject(FlowZoomService);
-  private readonly selectionService = inject(FlowSelectionService);
+  readonly selectionService = inject(FlowSelectionService);
   private readonly layoutService = inject(FlowLayoutService);
   readonly dragDrop = inject(FlowDragDropService);
   readonly touch = inject(FlowTouchService);
@@ -390,6 +469,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 删除确认状态 */
   readonly deleteConfirmTask = signal<Task | null>(null);
   readonly deleteKeepChildren = signal(false);
+  
+  /** 批量删除确认状态 */
+  readonly batchDeleteDialog = signal<BatchDeleteDialogData | null>(null);
   
   /** 级联分配确认对话框状态 */
   readonly cascadeAssignDialog = signal<CascadeAssignDialogData | null>(null);
@@ -413,6 +495,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 右侧滑出面板状态（移动端） */
   readonly isRightPanelOpen = signal(false);
+  
+  /** 移动端：框选模式（区分平移和框选） */
+  readonly isSelectMode = signal(false);
   
   /** 小地图尺寸（移动端使用更小尺寸） */
   readonly overviewSize = computed(() => {
@@ -665,6 +750,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.link.dispose();
     this.dragDrop.dispose();
     this.taskOps.dispose();
+    
+    // 清理 Delete 键事件处理器
+    flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
   }
   
   // ========== 图表初始化 ==========
@@ -830,6 +918,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
 
     // 移动端：节点拖拽幽灵反馈（避免触摸时节点被手指遮挡导致“像没拖动”）
+    // 注册 Delete 键事件处理（由 GoJS commandHandler 拦截后触发）
+    // 通过事件总线解耦，确保单向数据流：Store -> Signal -> Diagram
+    flowTemplateEventHandlers.onDeleteKeyPressed = () => {
+      this.zone.run(() => {
+        this.handleDeleteKeyPressed();
+      });
+    };
+
     this.installMobileDiagramDragGhostListeners();
     
     // 设置拖放处理
@@ -1370,6 +1466,92 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       if (this.diagram.isInitialized) {
         this.diagram.updateDiagram(this.store.tasks(), true);
       }
+    }
+  }
+  
+  // ========== 批量删除操作 ==========
+  
+  /**
+   * 请求批量删除（由 Delete 键或工具栏按钮触发）
+   * 计算删除影响并显示确认弹窗
+   */
+  requestBatchDelete(): void {
+    const selectedIds = Array.from(this.selectionService.selectedTaskIds());
+    if (selectedIds.length === 0) return;
+    
+    // 单选时走单任务删除流程
+    if (selectedIds.length === 1) {
+      const task = this.store.tasks().find(t => t.id === selectedIds[0]);
+      if (task) {
+        this.deleteTask(task);
+      }
+      return;
+    }
+    
+    // 多选时计算删除影响并显示批量确认弹窗
+    const impact = this.taskOps.calculateBatchDeleteImpact(selectedIds);
+    
+    this.batchDeleteDialog.set({
+      selectedIds,
+      impact
+    });
+  }
+  
+  /**
+   * 确认批量删除
+   */
+  confirmBatchDelete(): void {
+    const dialogData = this.batchDeleteDialog();
+    if (!dialogData) return;
+    
+    // 清空选择和详情面板
+    this.selectedTaskId.set(null);
+    this.selectionService.clearSelection();
+    
+    // 执行批量删除
+    const deletedCount = this.taskOps.deleteTasksBatch(dialogData.selectedIds);
+    
+    // 关闭弹窗
+    this.batchDeleteDialog.set(null);
+    
+    // 显示成功提示
+    if (deletedCount > 0) {
+      this.toast.success('操作成功', `已删除 ${deletedCount} 个任务`);
+    }
+    
+    // 强制刷新图表
+    if (this.diagram.isInitialized) {
+      this.diagram.updateDiagram(this.store.tasks(), true);
+    }
+  }
+  
+  /**
+   * 处理 Delete 键删除事件（由 GoJS commandHandler 拦截后触发）
+   */
+  private handleDeleteKeyPressed(): void {
+    const selectedIds = Array.from(this.selectionService.selectedTaskIds());
+    if (selectedIds.length === 0) return;
+    
+    this.logger.debug(`Delete 键删除: ${selectedIds.length} 个选中任务`);
+    this.requestBatchDelete();
+  }
+  
+  /**
+   * 切换移动端框选模式（框选 vs 平移）
+   * - 框选模式：dragSelectingTool 启用，panningTool 禁用
+   * - 平移模式：panningTool 启用，dragSelectingTool 禁用
+   */
+  toggleSelectMode(): void {
+    const newMode = !this.isSelectMode();
+    this.isSelectMode.set(newMode);
+    
+    const diagramInstance = this.diagram.diagramInstance;
+    if (diagramInstance) {
+      // 切换工具启用状态
+      diagramInstance.toolManager.dragSelectingTool.isEnabled = newMode;
+      diagramInstance.toolManager.panningTool.isEnabled = !newMode;
+      
+      this.logger.debug(`移动端模式切换: ${newMode ? '框选模式' : '平移模式'}`);
     }
   }
   

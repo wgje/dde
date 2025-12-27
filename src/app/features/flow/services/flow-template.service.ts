@@ -277,7 +277,19 @@ export class FlowTemplateService {
         click: (e: any, node: any) => {
           if (e.diagram.lastInput.dragging) return;
           if (e.diagram.lastInput.clickCount >= 2) return;
-          flowTemplateEventHandlers.onNodeClick?.(node);
+          
+          // 支持 Shift+点击多选：检测 Shift 键状态
+          const shift = e.diagram.lastInput.shift;
+          if (shift) {
+            // Shift+点击：切换节点选中状态（添加/移除）
+            // 使用事务确保 UI 正确更新
+            e.diagram.startTransaction('shift-select');
+            node.isSelected = !node.isSelected;
+            e.diagram.commitTransaction('shift-select');
+          } else {
+            // 普通点击：调用事件处理器（单选逻辑由事件服务处理）
+            flowTemplateEventHandlers.onNodeClick?.(node);
+          }
         },
         doubleClick: (e: any, node: any) => {
           e.handled = true;

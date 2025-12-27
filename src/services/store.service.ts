@@ -685,6 +685,22 @@ export class StoreService {
     this.taskAdapter.deleteTask(taskId);
   }
 
+  /**
+   * 批量删除任务（原子操作）
+   * @param explicitIds 用户显式选中的任务 ID 列表
+   * @returns 实际删除的任务数量（含级联子任务）
+   */
+  deleteTasksBatch(explicitIds: string[]): number {
+    return this.taskAdapter.deleteTasksBatch(explicitIds);
+  }
+
+  /**
+   * 计算批量删除将影响的任务数量（含级联子任务）
+   */
+  calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
+    return this.taskAdapter.calculateBatchDeleteImpact(explicitIds);
+  }
+
   permanentlyDeleteTask(taskId: string) {
     this.taskAdapter.permanentlyDeleteTask(taskId);
   }

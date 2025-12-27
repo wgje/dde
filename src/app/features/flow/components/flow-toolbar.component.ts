@@ -108,6 +108,23 @@ import { Task } from '../../../../models';
             </svg>
         </button>
         
+        <!-- 移动端：框选模式切换按钮 -->
+        @if (store.isMobile()) {
+          <button (click)="toggleSelectMode.emit()" 
+                  class="backdrop-blur rounded-lg shadow-sm border transition-all hover:bg-stone-50 p-1.5" 
+                  [class.bg-amber-500]="isSelectMode()" 
+                  [class.text-white]="isSelectMode()" 
+                  [class.border-amber-500]="isSelectMode()" 
+                  [class.bg-white]="!isSelectMode()" 
+                  [class.text-stone-600]="!isSelectMode()" 
+                  [class.border-stone-200]="!isSelectMode()" 
+                  title="框选模式">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" class="h-4 w-4">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 010 2H5a1 1 0 01-1-1zM3 10a1 1 0 011-1h10a1 1 0 110 2H4a1 1 0 01-1-1zM14 14a1 1 0 011-1h5a1 1 0 110 2h-5a1 1 0 01-1-1zM15 19a1 1 0 011-1h4a1 1 0 110 2h-4a1 1 0 01-1-1zM5 14a1 1 0 011-1h5a1 1 0 110 2H6a1 1 0 01-1-1z" />
+              </svg>
+          </button>
+        }
+        
         <!-- 导出按钮 -->
         <div class="relative" #exportMenu>
           <button 
@@ -203,6 +220,8 @@ export class FlowToolbarComponent {
   readonly linkSourceTask = input<Task | null>(null);
   readonly isResizingDrawer = input<boolean>(false);
   readonly drawerHeightVh = input<number>(35);
+  /** 移动端：是否处于框选模式 */
+  readonly isSelectMode = input<boolean>(false);
   
   // 输出事件
   readonly zoomIn = output<void>();
@@ -215,6 +234,8 @@ export class FlowToolbarComponent {
   readonly exportPng = output<void>();
   readonly exportSvg = output<void>();
   readonly saveToCloud = output<void>();
+  /** 移动端：切换框选模式 */
+  readonly toggleSelectMode = output<void>();
   
   // 导出菜单状态
   isExportMenuOpen = false;

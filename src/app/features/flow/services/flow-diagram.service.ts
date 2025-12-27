@@ -8,6 +8,7 @@ import { FlowSelectionService } from './flow-selection.service';
 import { FlowZoomService } from './flow-zoom.service';
 import { FlowEventService } from './flow-event.service';
 import { FlowTemplateService } from './flow-template.service';
+import { flowTemplateEventHandlers } from './flow-template-events';
 import { MinimapMathService } from '../../../../services/minimap-math.service';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
@@ -203,6 +204,10 @@ export class FlowDiagramService {
         linkFromPortIdProperty: 'fromPortId',
         linkToPortIdProperty: 'toPortId'
       });
+      
+      // 【关键】拦截 GoJS 默认删除行为，强制单向数据流 (Store -> Signal -> Diagram)
+      // 这可以防止“脑裂”——GoJS 认为节点删了，但 Store 还没反应过来
+      this.setupDeleteKeyInterception();
       
       // 委托给 FlowEventService 设置事件监听
       this.eventService.setDiagram(this.diagram, this.diagramDiv);
@@ -2008,6 +2013,40 @@ export class FlowDiagramService {
   }
   
   // ========== 私有方法 ==========
+  
+  /**
+   * 【关键】拦截 GoJS 默认删除行为
+   * 
+   * 设计原则：强制单向数据流 (Store -> Signal -> Diagram)
+   * - 禁止 GoJS 直接删除节点，避免"脑裂"问题
+   * - Delete/Backspace 键触发自定义事件，由 Angular Service 处理
+   * - 所有删除操作必须先更新 Store，再由 Store 变化驱动 GoJS 刷新
+   */
+  private setupDeleteKeyInterception(): void {
+    if (!this.diagram) return;
+    
+    const diagram = this.diagram;
+    const originalDoKeyDown = diagram.commandHandler.doKeyDown.bind(diagram.commandHandler);
+    
+    // 禁止 GoJS 默认的删除选中项行为
+    diagram.commandHandler.canDeleteSelection = () => false;
+    
+    // 拦截 Delete/Backspace 键
+    diagram.commandHandler.doKeyDown = () => {
+      const e = diagram.lastInput;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // 触发自定义删除事件，由 FlowEventService 处理
+        // 通过事件总线解耦，避免循环依赖
+        this.logger.debug('拦截 Delete 键，触发自定义删除事件');
+        flowTemplateEventHandlers.onDeleteKeyPressed?.();
+        return; // 阻止 GoJS 默认删除
+      }
+      // 其他按键走默认逻辑
+      originalDoKeyDown();
+    };
+    
+    this.logger.info('Delete 键拦截已配置，GoJS 默认删除行为已禁用');
+  }
   
   private setupResizeObserver(): void {
     if (!this.diagramDiv) return;

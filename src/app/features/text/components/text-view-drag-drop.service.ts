@@ -156,8 +156,8 @@ export class TextViewDragDropService {
   // ========== 触摸拖拽方法 ==========
   
   /** 长按延迟时间（毫秒）- 用于区分点击和拖拽 */
-  // 🔧 修复：缩短长按时间到 300ms，让用户更快进入拖拽状态
-  private readonly LONG_PRESS_DELAY = 300;
+  // 🔧 优化：延长到 500ms，降低滚动时误触拖拽的概率
+  private readonly LONG_PRESS_DELAY = 500;
   
   /** 长按回调 - 用于通知组件拖拽已开始 */
   private onDragStartCallback: (() => void) | null = null;
@@ -280,11 +280,11 @@ export class TextViewDragDropService {
     if (!this.touchState.isDragging) {
       const deltaX = Math.abs(touch.clientX - this.touchState.startX);
       const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-      const moveThreshold = 10; // 🔧 降低阈值：移动超过10像素就考虑激活拖拽
+      const moveThreshold = 15; // 🔧 优化：提高到15像素，降低滚动时误触拖拽
       
       // 判断移动方向：如果主要是垂直移动，认为是滚动意图
-      // 🔧 修复：提高垂直滚动检测阈值，让用户更容易触发水平拖拽
-      const isVerticalScroll = deltaY > deltaX * 2.5; // 垂直移动超过水平移动的2.5倍才认为是滚动
+      // 🔧 优化：提高到3.5倍，让垂直滚动更容易被识别（避免阶段内滚动时误触拖拽）
+      const isVerticalScroll = deltaY > deltaX * 3.5; // 垂直移动超过水平移动的3.5倍才认为是滚动
       const totalDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
       
       console.log('[TouchDrag] Move check:', {

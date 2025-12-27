@@ -600,6 +600,139 @@ export class TaskOperationService {
   }
   
   /**
+   * 批量软删除任务（原子操作）
+   * 
+   * 【核心算法】
+   * 1. 级联收集：从显式选中的 ID 出发，收集所有后代任务 ID
+   * 2. 去重：使用 Set 防止"选中父节点 + 选中子节点"导致的重复处理
+   * 3. 一次性更新：合并为单个 Store 更新，避免同步风暴
+   * 
+   * @param explicitIds 用户显式选中的任务 ID 列表
+   * @returns 实际删除的任务数量（含级联子任务）
+   */
+  deleteTasksBatch(explicitIds: string[]): number {
+    const activeP = this.getActiveProject();
+    if (!activeP || explicitIds.length === 0) return 0;
+    
+    // 1. 级联收集与去重（使用迭代算法，避免栈溢出）
+    const allIdsToDelete = new Set<string>();
+    const stack = [...explicitIds];
+    
+    while (stack.length > 0) {
+      const currentId = stack.pop()!;
+      if (allIdsToDelete.has(currentId)) continue; // 已收集，跳过（去重）
+      
+      // 检查任务是否存在且未被删除
+      const task = activeP.tasks.find(t => t.id === currentId && !t.deletedAt);
+      if (!task) continue;
+      
+      allIdsToDelete.add(currentId);
+      
+      // 收集直接子任务
+      activeP.tasks
+        .filter(t => t.parentId === currentId && !t.deletedAt)
+        .forEach(child => stack.push(child.id));
+    }
+    
+    if (allIdsToDelete.size === 0) return 0;
+    
+    const now = new Date().toISOString();
+    
+    // 2. 找出所有涉及被删除任务的连接
+    const deletedConnections = activeP.connections.filter(
+      c => allIdsToDelete.has(c.source) || allIdsToDelete.has(c.target)
+    );
+    
+    // 3. 确定"主任务"列表（用户显式选中的任务，用于存储 deletedConnections）
+    const explicitIdsSet = new Set(explicitIds);
+    
+    // 4. 一次性批量更新
+    this.recordAndUpdate(p => this.layoutService.rebalance({
+      ...p,
+      tasks: p.tasks.map(t => {
+        if (!allIdsToDelete.has(t.id)) return t;
+        
+        // 构建 deletedMeta 用于恢复
+        const deletedMeta = {
+          parentId: t.parentId,
+          stage: t.stage,
+          order: t.order,
+          rank: t.rank,
+          x: t.x,
+          y: t.y,
+        };
+        
+        // 只有用户显式选中的"主任务"才保存 deletedConnections
+        // 级联删除的子任务不保存，避免数据冗余
+        if (explicitIdsSet.has(t.id)) {
+          const taskConnections = deletedConnections.filter(
+            c => c.source === t.id || c.target === t.id
+          );
+          return {
+            ...t,
+            deletedAt: now,
+            deletedMeta,
+            deletedConnections: taskConnections,
+            stage: null
+          };
+        }
+        
+        return {
+          ...t,
+          deletedAt: now,
+          deletedMeta,
+          stage: null
+        };
+      }),
+      connections: p.connections.filter(
+        c => !allIdsToDelete.has(c.source) && !allIdsToDelete.has(c.target)
+      )
+    }));
+    
+    return allIdsToDelete.size;
+  }
+  
+  /**
+   * 计算批量删除将影响的任务数量（含级联子任务）
+   * 用于删除确认弹窗显示
+   * 
+   * @param explicitIds 用户显式选中的任务 ID 列表
+   * @returns { total: 总删除数, explicit: 显式选中数, cascaded: 级联子任务数 }
+   */
+  calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
+    const activeP = this.getActiveProject();
+    if (!activeP || explicitIds.length === 0) {
+      return { total: 0, explicit: 0, cascaded: 0 };
+    }
+    
+    const allIdsToDelete = new Set<string>();
+    const stack = [...explicitIds];
+    
+    while (stack.length > 0) {
+      const currentId = stack.pop()!;
+      if (allIdsToDelete.has(currentId)) continue;
+      
+      const task = activeP.tasks.find(t => t.id === currentId && !t.deletedAt);
+      if (!task) continue;
+      
+      allIdsToDelete.add(currentId);
+      
+      activeP.tasks
+        .filter(t => t.parentId === currentId && !t.deletedAt)
+        .forEach(child => stack.push(child.id));
+    }
+    
+    const explicitCount = explicitIds.filter(id => allIdsToDelete.has(id)).length;
+    const cascadedCount = allIdsToDelete.size - explicitCount;
+    
+    return {
+      total: allIdsToDelete.size,
+      explicit: explicitCount,
+      cascaded: cascadedCount
+    };
+  }
+  
+  /**
    * 永久删除任务
    */
   permanentlyDeleteTask(taskId: string): void {

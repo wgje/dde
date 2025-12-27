@@ -24,6 +24,10 @@ export interface FlowTemplateEventHandlers {
   onCrossTreeLabelClick?: (link: go.Link, viewX: number, viewY: number) => void;
   onPortMouseEnter?: (port: go.GraphObject) => void;
   onPortMouseLeave?: (port: go.GraphObject) => void;
+  /** Delete/Backspace 键被按下时触发（GoJS commandHandler 拦截后调用） */
+  onDeleteKeyPressed?: () => void;
+  /** 选择变化时触发 */
+  onSelectionChanged?: (selectedNodeKeys: string[]) => void;
 }
 
 /**
@@ -45,4 +49,6 @@ export const FLOW_TEMPLATE_EVENTS = {
   LINK_DOUBLE_CLICKED: 'LinkDoubleClicked',
   LINK_DELETE_REQUESTED: 'LinkDeleteRequested',
   CROSS_TREE_LABEL_CLICKED: 'CrossTreeLabelClicked',
+  DELETE_KEY_PRESSED: 'DeleteKeyPressed',
+  SELECTION_CHANGED: 'SelectionChanged',
 } as const;
