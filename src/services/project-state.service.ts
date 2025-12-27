@@ -239,11 +239,13 @@ export class ProjectStateService {
     this.projectStore.setProjects(projects);
     
     // 同步任务和连接到对应 Store
+    // 注意：使用 Array.isArray 而非 length 检查，确保空数组也能正确同步
+    // 这对于撤销操作恢复到空连接状态至关重要
     for (const project of projects) {
-      if (project.tasks?.length) {
+      if (Array.isArray(project.tasks)) {
         this.taskStore.setTasks(project.tasks, project.id);
       }
-      if (project.connections?.length) {
+      if (Array.isArray(project.connections)) {
         this.connectionStore.setConnections(project.connections, project.id);
       }
     }

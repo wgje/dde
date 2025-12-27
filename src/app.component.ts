@@ -531,17 +531,17 @@ export class AppComponent implements OnInit, OnDestroy {
     // Ctrl+Z / Cmd+Z: 撤销
     if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
       event.preventDefault();
-      this.undoService.undo();
+      this.store.undo();
     }
     // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
     if ((event.ctrlKey || event.metaKey) && event.key === 'z' && event.shiftKey) {
       event.preventDefault();
-      this.undoService.redo();
+      this.store.redo();
     }
     // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
     if ((event.ctrlKey || event.metaKey) && event.key === 'y') {
       event.preventDefault();
-      this.undoService.redo();
+      this.store.redo();
     }
   }
   
