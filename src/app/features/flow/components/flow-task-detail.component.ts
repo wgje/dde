@@ -92,23 +92,23 @@ import { renderMarkdown } from '../../../../utils/markdown';
            [style.height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
         <!-- 标题栏 - 左边留出空间避开导航按钮，紧凑布局 -->
-        <div class="pr-3 transition-all duration-200 flex justify-between items-center flex-shrink-0"
+        <div class="pr-3 flex justify-between items-center flex-shrink-0"
              [class.pl-28]="drawerHeight() >= 20"
              [class.pl-3]="drawerHeight() < 20"
              [class.pt-1.5]="drawerHeight() >= 20"
              [class.pt-0.5]="drawerHeight() < 20"
              [class.pb-0.5]="drawerHeight() >= 20"
              [class.pb-0]="drawerHeight() < 20">
-          @if (drawerHeight() >= 20) {
-            <h3 class="font-bold text-stone-700 text-xs">任务详情</h3>
-          }
+          <h3 class="font-bold text-stone-700 text-xs transition-opacity duration-100"
+              [class.opacity-0]="drawerHeight() < 20"
+              [class.opacity-100]="drawerHeight() >= 20">任务详情</h3>
         </div>
         
         <!-- 内容区域 - 更紧凑 -->
         <div class="flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
              (touchstart)="onContentTouchStart($event)"
              (touchmove)="onContentTouchMove($event)"
-             style="-webkit-overflow-scrolling: touch; touch-action: pan-y; transform: translateZ(0);">
+             style="-webkit-overflow-scrolling: touch; touch-action: pan-y; transform: translateZ(0); contain: layout style paint;">
           @if (task(); as t) {
             <ng-container *ngTemplateOutlet="mobileTaskContent; context: { $implicit: t }"></ng-container>
           } @else {
@@ -119,7 +119,8 @@ import { renderMarkdown } from '../../../../utils/markdown';
         <!-- 拖动条 - 紧凑 -->
         <div class="relative flex justify-center py-1 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
              (touchstart)="startDrawerResize($event)"
-             (mousedown)="startDrawerResize($event)">
+             (mousedown)="startDrawerResize($event)"
+             style="transform: translateZ(0); will-change: transform;">
           <div class="w-10 h-1 bg-stone-300 rounded-full"></div>
           <button (click)="store.isFlowDetailOpen.set(false); $event.stopPropagation()" 
                   (touchstart)="$event.stopPropagation()"
@@ -343,8 +344,13 @@ import { renderMarkdown } from '../../../../utils/markdown';
         </div>
       }
       
-      <!-- 操作按钮 - 紧凑模式下隐藏 -->
-      @if (!isCompactMode()) {
+      <!-- 操作按钮 - 紧凑模式下使用透明度和高度渐变，避免抖动 -->
+      <div class="overflow-hidden transition-all duration-150"
+           [class.max-h-0]="isCompactMode()"
+           [class.opacity-0]="isCompactMode()"
+           [class.pointer-events-none]="isCompactMode()"
+           [class.max-h-32]="!isCompactMode()"
+           [class.opacity-100]="!isCompactMode()">
         <div class="flex gap-1 mt-2">
           <button (click)="addSibling.emit(task)"
             class="flex-1 px-1.5 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[9px] font-medium rounded transition-all">
@@ -383,7 +389,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
             删除
           </button>
         </div>
-      }
+      </div>
       
       <!-- 附件管理（手机端） - 暂时隐藏 -->
       <!-- @if (store.currentUserId()) {
@@ -789,6 +795,17 @@ export class FlowTaskDetailComponent implements OnDestroy {
     this.isResizingChange.emit(true);
     this.drawerStartY = startY;
     this.drawerStartHeight = this.drawerHeight();
+
+    // 固定最小高度为 8vh，避免频繁的 DOM 查询
+    const minHeight = 8;
+    
+    // 添加 will-change 提示浏览器优化
+    const drawerEl = this.elementRef.nativeElement.querySelector('.absolute.z-30') as HTMLElement;
+    if (drawerEl) {
+      drawerEl.style.willChange = 'height';
+    }
+    
+    let rafId: number | null = null;
     
     const onMove = (ev: TouchEvent | MouseEvent) => {
       if (!this.isResizingDrawer) return;
@@ -803,18 +820,37 @@ export class FlowTaskDetailComponent implements OnDestroy {
         currentY = ev.clientY;
       }
       
-      // 顶部抽屉：向下拖（正 deltaY）增大高度
-      const deltaY = currentY - this.drawerStartY;
-      const deltaVh = (deltaY / window.innerHeight) * 100;
-      const newHeight = Math.max(6.47, Math.min(70, this.drawerStartHeight + deltaVh));
-      this.drawerHeightChange.emit(newHeight);
+      // 使用 requestAnimationFrame 节流，确保滑动丝滑
+      if (rafId) return;
+      
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (!this.isResizingDrawer) return;
+
+        // 顶部抽屉：向下拖（正 deltaY）增大高度
+        const deltaY = currentY - this.drawerStartY;
+        const deltaVh = (deltaY / window.innerHeight) * 100;
+        
+        const newHeight = Math.max(minHeight, Math.min(70, this.drawerStartHeight + deltaVh));
+        this.drawerHeightChange.emit(newHeight);
+      });
     };
     
     const onEnd = () => {
       this.isResizingDrawer = false;
       this.isResizingChange.emit(false);
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      
+      // 移除 will-change，释放资源
+      if (drawerEl) {
+        drawerEl.style.willChange = 'auto';
+      }
+      
       // 移除自动关闭逻辑，允许用户自由调整到最小高度
-      // 最小高度由 Math.max(10, ...) 控制
+      // 最小高度由 Math.max(8, ...) 控制
       window.removeEventListener('touchmove', onMove as EventListener);
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
