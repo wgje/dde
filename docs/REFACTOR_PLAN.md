@@ -64,7 +64,7 @@
 |----|------|------|--------|
 | P2-1 | StoreService 门面渐进式迁移 | ✅ 完成 | 高 |
 | P2-1.6 | 创建 ProjectOperationService 精简门面 | ✅ 完成 | 中 |
-| P2-2 | 合并 Flow 服务（14→5） | ⏳ 待定 | 高 |
+| P2-2 | 合并 Flow 服务（13→11） | ✅ 完成 | 中 |
 | P2-3 | 清理更多 deprecated 代码 | ✅ 完成 | 低 |
 | P2-4 | 移除未使用的导出 | ✅ 完成 | 低 |
 | P2-5 | 移除无效的 authGuard 导出 | ✅ 完成 | 低 |
@@ -79,8 +79,8 @@
 ```
 Phase 1: ████████████████████ 100% (3/3)
 Phase 2: ████████████████████ 100% (3/3)  
-Phase 3: ████████████████████ 100% (8/8)
-Overall: ████████████████████ 100% (14/14)
+Phase 3: ████████████████████ 100% (9/9)
+Overall: ████████████████████ 100% (15/15)
 ```
 
 ---
@@ -256,6 +256,31 @@ store.setTheme → preferenceService.setTheme
 - ✅ StoreService 现在仅作为向后兼容的门面存在
 - ✅ 340 个单元测试全部通过
 
+#### 12. P2-2 Flow 服务合并 (2024-12-30)
+
+**删除的服务**：
+- `FlowOverviewService` (423行) - 未完成的提取尝试，从未被注入
+- `FlowDebugService` (439行) - 仅调试用，从未被注入
+
+**结果**：
+- 13 个服务 → 11 个服务
+- 8297 行 → 7436 行（减少 861 行，-10.4%）
+
+**保留的 11 个服务（职责清晰）**：
+| 服务 | 行数 | 职责 |
+|------|------|------|
+| FlowDiagramService | 2265 | 核心协调器（含 Overview 小地图） |
+| FlowTemplateService | 1207 | GoJS 模板定义 |
+| FlowLinkService | 892 | 连接线管理 |
+| FlowEventService | 622 | 事件处理与分发 |
+| FlowDiagramConfigService | 517 | GoJS 配置 |
+| FlowTouchService | 451 | 触摸手势 |
+| FlowDragDropService | 391 | 拖放交互 |
+| FlowZoomService | 281 | 缩放与视口 |
+| FlowTaskOperationsService | 275 | 任务操作 |
+| FlowSelectionService | 272 | 选择管理 |
+| FlowLayoutService | 263 | 布局算法 |
+
 ---
 
 ## 🚫 明确不做的事项
@@ -265,9 +290,10 @@ store.setTheme → preferenceService.setTheme
    - ✅ 新代码直接注入子服务，旧代码已迁移
    - ✅ 阶段6: 创建 ProjectOperationService，实现零直接依赖
 
-2. **不合并 Flow 服务**
-   - 原因：GoJS 集成复杂，需专门规划
-   - 策略：作为 Phase 3 长期任务
+2. **~~不合并 Flow 服务~~** → 已完成清理
+   - ~~原因：GoJS 集成复杂，需专门规划~~
+   - ✅ 移除 2 个未使用服务（FlowOverviewService, FlowDebugService）
+   - 剩余 11 个服务职责清晰，不再进一步合并
 
 3. **不实现复杂冲突解决**
    - 顾问建议：单用户应用 LWW 足够
