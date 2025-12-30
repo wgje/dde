@@ -66,7 +66,17 @@ interface PersistState {
 export class SyncCoordinatorService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncCoordinator');
-  private syncService = inject(SimpleSyncService);
+  
+  // ========== 公开子服务（减少代理方法） ==========
+  
+  /** 
+   * 底层同步服务 - 可直接访问以减少代理方法
+   * 调用方可使用 sync.core.xxx 替代 sync.proxyMethod()
+   */
+  readonly core = inject(SimpleSyncService);
+  /** @deprecated 使用 this.core 替代 */
+  private syncService = this.core;
+  
   private actionQueue = inject(ActionQueueService);
   private conflictService = inject(ConflictResolutionService);
   private conflictStorage = inject(ConflictStorageService);
@@ -464,6 +474,7 @@ export class SyncCoordinatorService {
   
   /**
    * 初始化实时订阅
+   * @deprecated 使用 this.core.initRealtimeSubscription() 替代
    */
   async initRealtimeSubscription(userId: string) {
     await this.syncService.initRealtimeSubscription(userId);
@@ -471,6 +482,7 @@ export class SyncCoordinatorService {
   
   /**
    * 清理实时订阅
+   * @deprecated 使用 this.core.teardownRealtimeSubscription() 替代
    */
   teardownRealtimeSubscription() {
     this.syncService.teardownRealtimeSubscription();
@@ -478,6 +490,7 @@ export class SyncCoordinatorService {
   
   /**
    * 保存离线快照
+   * @deprecated 使用 this.core.saveOfflineSnapshot() 替代
    */
   saveOfflineSnapshot(projects: Project[]) {
     this.syncService.saveOfflineSnapshot(projects);
@@ -485,6 +498,7 @@ export class SyncCoordinatorService {
   
   /**
    * 加载离线快照
+   * @deprecated 使用 this.core.loadOfflineSnapshot() 替代
    */
   loadOfflineSnapshot(): Project[] | null {
     return this.syncService.loadOfflineSnapshot();
@@ -492,6 +506,7 @@ export class SyncCoordinatorService {
   
   /**
    * 清除离线缓存
+   * @deprecated 使用 this.core.clearOfflineCache() 替代
    */
   clearOfflineCache() {
     this.syncService.clearOfflineCache();
@@ -501,6 +516,7 @@ export class SyncCoordinatorService {
    * 从云端加载项目
    * @param userId - 用户 ID
    * @param silent - 是否静默加载（不显示加载状态），用于后台自动同步
+   * @deprecated 使用 this.core.loadProjectsFromCloud() 替代
    */
   async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
     return this.syncService.loadProjectsFromCloud(userId, silent);
@@ -508,6 +524,7 @@ export class SyncCoordinatorService {
   
   /**
    * 保存项目到云端
+   * @deprecated 使用 this.core.saveProjectSmart() 替代
    */
   async saveProjectToCloud(project: Project, userId: string) {
     // 使用智能同步：优先增量，避免全量 upsert 覆盖其他设备的任务状态/位置/删除标记
@@ -516,6 +533,7 @@ export class SyncCoordinatorService {
   
   /**
    * 从云端删除项目
+   * @deprecated 使用 this.core.deleteProjectFromCloud() 替代
    */
   async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
     return this.syncService.deleteProjectFromCloud(projectId, userId);
@@ -523,6 +541,7 @@ export class SyncCoordinatorService {
   
   /**
    * 加载单个项目
+   * @deprecated 使用 this.core.loadSingleProject() 替代
    */
   async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
     return this.syncService.loadSingleProject(projectId, userId);

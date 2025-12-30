@@ -1704,21 +1704,6 @@ export class TaskOperationService {
     }));
   }
   
-  /**
-   * 更新连接描述（兼容旧 API）
-   * @deprecated 使用 updateConnectionContent 代替
-   */
-  updateConnectionDescription(sourceId: string, targetId: string, description: string): void {
-    this.recordAndUpdateDebounced(p => ({
-      ...p,
-      connections: p.connections.map(c => 
-        (c.source === sourceId && c.target === targetId) 
-          ? { ...c, description } 
-          : c
-      )
-    }));
-  }
-  
   // ========== 私有辅助方法 ==========
   
   private getActiveProject(): Project | null {

@@ -122,8 +122,10 @@ describe('RequestThrottleService', () => {
       await Promise.all([blockingRequest, ...lowPriorityRequests, highPriorityRequest]);
 
       // 高优先级请求应该在低优先级之前执行（第一个阻塞请求除外）
-      const highIndex = executionOrder.indexOf(100);
-      const firstLowIndex = executionOrder.findIndex(v => v >= 1 && v <= 3);
+      // 注意：由于并发执行，索引值仅用于调试，不作为断言条件
+      const _highIndex = executionOrder.indexOf(100);
+      const _firstLowIndex = executionOrder.findIndex(v => v >= 1 && v <= 3);
+      void _highIndex; void _firstLowIndex; // 标记为有意未使用
       
       // 由于并发执行，我们只验证高优先级请求确实执行了
       expect(executionOrder).toContain(100);
@@ -157,10 +159,11 @@ describe('RequestThrottleService', () => {
         return `result-${callCount}`;
       });
 
-      const [result1, result2] = await Promise.all([
+      const [_result1, _result2] = await Promise.all([
         service.execute('same-key', executor),
         service.execute('same-key', executor)
       ]);
+      void _result1; void _result2; // 仅验证 callCount
 
       expect(callCount).toBe(2);
     });

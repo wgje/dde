@@ -34,10 +34,8 @@ const mockUiState = {
 };
 
 describe('撤销功能集成测试', () => {
-  let taskOps: TaskOperationService;
   let taskAdapter: TaskOperationAdapterService;
   let undoService: UndoService;
-  let projectState: ProjectStateService;
   let layoutService: LayoutService;
   
   // 测试项目
@@ -102,10 +100,11 @@ describe('撤销功能集成测试', () => {
       ]
     });
     
-    taskOps = TestBed.inject(TaskOperationService);
+    // 这些服务仅用于 DI 设置，不直接在测试中使用
+    TestBed.inject(TaskOperationService);
     taskAdapter = TestBed.inject(TaskOperationAdapterService);
     undoService = TestBed.inject(UndoService);
-    projectState = TestBed.inject(ProjectStateService);
+    TestBed.inject(ProjectStateService);
     layoutService = TestBed.inject(LayoutService);
   });
 

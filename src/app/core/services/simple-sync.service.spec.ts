@@ -11,7 +11,7 @@
  * - Sentry 错误上报守卫测试
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestBed, fakeAsync, tick, flush } from '@angular/core/testing';
+import { TestBed } from '@angular/core/testing';
 import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
@@ -683,7 +683,7 @@ describe('SimpleSyncService', () => {
       expect(mockCaptureException).toHaveBeenCalled();
       // 验证包含 isRetryable 标签
       const callArgs = mockCaptureException.mock.calls[0];
-      expect(callArgs[1]?.tags).toHaveProperty('isRetryable');
+      expect((callArgs[1] as any)?.tags).toHaveProperty('isRetryable');
     });
   });
 });

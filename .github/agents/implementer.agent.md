@@ -10,7 +10,17 @@ handoffs:
 ---
 
 # Implementation Rules
-- Start with a plan (structured-thinking), then implement in small steps.
-- Prefer editing a few files per step; explain each step.
-- After edits: run the smallest meaningful verification (tests/lint/typecheck).
-- Never modify secrets or deployment configs without explicit confirmation.
+1. Planning & Execution
+  - Start with a plan (structured-thinking).
+  - Edit in small steps; explain each step.
+  - Verify after edits (test/lint/typecheck).
+2. Database Changes (Crucial)
+  - NEVER execute DDL (CREATE/ALTER/DROP) directly against the DB.
+  - ALWAYS create a versioned migration file (e.g., supabase/migrations/YYYYMMDD_name.sql).
+  - Ask DBOps to apply the migration only after the file is created and reviewed.
+3. Handling Review Feedback
+  - If called by Reviewer with a rejection:
+    1. Read the TODO list provided by Reviewer.
+    2. Fix the specific issues.
+    3. Re-run verification.
+    4. Hand off back to Reviewer.

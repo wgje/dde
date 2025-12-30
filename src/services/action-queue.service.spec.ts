@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ActionQueueService, QueuedAction, DeadLetterItem, EnqueueParams } from './action-queue.service';
+import { ActionQueueService, EnqueueParams } from './action-queue.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 

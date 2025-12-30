@@ -610,22 +610,6 @@ export class FlowLinkService {
   }
   
   /**
-   * 保存联系块描述（兼容旧 API）
-   * @deprecated 使用 saveConnectionContent 代替
-   */
-  saveConnectionDescription(description: string): void {
-    const data = this.connectionEditorData();
-    if (data) {
-      this.store.updateConnectionContent(data.sourceId, data.targetId, data.title, description);
-      // 更新本地数据，保持编辑器状态同步
-      this.connectionEditorData.set({
-        ...data,
-        description
-      });
-    }
-  }
-  
-  /**
    * 删除当前编辑的连接
    * @returns 是否成功删除
    */

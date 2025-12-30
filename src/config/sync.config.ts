@@ -45,47 +45,6 @@ export const SYNC_CONFIG = {
 } as const;
 
 /**
- * 撤销操作同步配置
- * 防止连续撤销产生同步风暴
- */
-export const UNDO_SYNC_CONFIG = {
-  /** 撤销后同步延迟（毫秒）- 比正常操作稍长，允许用户连续撤销 */
-  UNDO_SYNC_DELAY: 1500,
-  /** 连续撤销检测窗口（毫秒）- 在此时间内的撤销被视为连续操作 */
-  CONSECUTIVE_UNDO_WINDOW: 500,
-  /** 连续撤销时延长的防抖窗口（毫秒）- 用户狂按 Ctrl+Z 时延长同步延迟 */
-  EXTENDED_DEBOUNCE_DELAY: 5000,
-} as const;
-
-/**
- * 同步感知配置
- * 借鉴思源笔记的多设备实时感知机制
- */
-export const SYNC_PERCEPTION_CONFIG = {
-  /** 心跳间隔（毫秒） */
-  HEARTBEAT_INTERVAL: 30000,
-  /** 设备离线判定时间（毫秒）- 3分钟无心跳视为离线 */
-  DEVICE_OFFLINE_THRESHOLD: 180000,
-  /** 感知频道前缀 */
-  CHANNEL_PREFIX: 'sync-perception',
-} as const;
-
-/**
- * 同步模式配置
- * 支持自动/手动/完全手动三种模式
- */
-export const SYNC_MODE_CONFIG = {
-  /** 默认同步间隔（秒） */
-  DEFAULT_INTERVAL: 30,
-  /** 最小同步间隔（秒） */
-  MIN_INTERVAL: 10,
-  /** 最大同步间隔（秒）- 12小时 */
-  MAX_INTERVAL: 43200,
-  /** 配置存储 key */
-  STORAGE_KEY: 'nanoflow.sync-mode-config',
-} as const;
-
-/**
  * 请求限流配置
  * 解决并发 Supabase API 调用耗尽连接池的问题
  * 
@@ -133,34 +92,6 @@ export const CIRCUIT_BREAKER_CONFIG = {
   HALF_OPEN_REQUESTS: 1,
   /** 触发熔断的错误类型（服务端超时/网关错误） */
   TRIGGER_ERROR_TYPES: ['NetworkTimeoutError', 'GatewayError', 'ServiceUnavailableError'] as readonly string[],
-} as const;
-
-/**
- * 同步检查点配置
- * 基于快照的增量同步支持
- */
-export const SYNC_CHECKPOINT_CONFIG = {
-  /** 最大保留检查点数量 */
-  MAX_CHECKPOINTS: 100,
-  /** IndexedDB 数据库名称 */
-  DB_NAME: 'nanoflow-checkpoints',
-  /** IndexedDB 存储名称 */
-  STORE_NAME: 'checkpoints',
-} as const;
-
-/**
- * 冲突历史配置
- * 冲突版本回溯支持
- */
-export const CONFLICT_HISTORY_CONFIG = {
-  /** 最大保留历史数量 */
-  MAX_HISTORY_RECORDS: 500,
-  /** 自动归档天数 */
-  AUTO_ARCHIVE_DAYS: 30,
-  /** IndexedDB 数据库名称 */
-  DB_NAME: 'nanoflow-conflict-history',
-  /** IndexedDB 存储名称 */
-  STORE_NAME: 'history',
 } as const;
 
 /**

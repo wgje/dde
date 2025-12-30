@@ -2,7 +2,7 @@
 name: triage
 description: "Triage a request and choose the safest tool/agent workflow."
 agent: Router
-tools: ["read", "search", "structured-thinking/*"]
+tools: ['execute', 'read', 'tavily/search', 'filesystem/*', 'memory/*', 'puppeteer/*', 'structured-thinking/*', 'search', 'com.supabase/mcp/*', 'todo']
 argument-hint: "paste issue, goal, constraints"
 ---
 

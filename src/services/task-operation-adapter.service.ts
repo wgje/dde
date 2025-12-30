@@ -47,7 +47,18 @@ import { Result, OperationError } from '../utils/result';
   providedIn: 'root'
 })
 export class TaskOperationAdapterService {
-  private taskOps = inject(TaskOperationService);
+  // ========== 公开子服务（减少代理方法） ==========
+  
+  /**
+   * 底层任务操作服务 - 可直接访问纯 CRUD 方法
+   * 调用方可使用 taskOps.core.xxx 替代某些代理方法
+   * 
+   * 注意：直接调用 core 不会触发撤销记录、乐观更新和 Toast 反馈
+   */
+  readonly core = inject(TaskOperationService);
+  /** @deprecated 使用 this.core 替代 */
+  private taskOps = this.core;
+  
   private syncCoordinator = inject(SyncCoordinatorService);
   private changeTracker = inject(ChangeTrackerService);
   private undoService = inject(UndoService);
@@ -117,7 +128,10 @@ export class TaskOperationAdapterService {
     this.markEditing();
     this.taskOps.addTodoItem(taskId, itemText);
   }
-  
+
+  /**
+   * @deprecated 使用 this.core.completeUnfinishedItem() 替代
+   */
   completeUnfinishedItem(taskId: string, itemText: string): void {
     this.taskOps.completeUnfinishedItem(taskId, itemText);
   }
@@ -128,7 +142,10 @@ export class TaskOperationAdapterService {
     this.lastUpdateType = 'position';
     this.taskOps.updateTaskPosition(taskId, x, y);
   }
-  
+
+  /**
+   * @deprecated 使用 this.core.updateTaskPositionWithRankSync() 替代
+   */
   updateTaskPositionWithRankSync(taskId: string, x: number, y: number): void {
     this.taskOps.updateTaskPositionWithRankSync(taskId, x, y);
   }
@@ -255,11 +272,17 @@ export class TaskOperationAdapterService {
     this.lastUpdateType = 'content';
     this.taskOps.updateTaskTags(taskId, tags);
   }
-  
+
+  /**
+   * @deprecated 使用 this.core.addTaskTag() 替代
+   */
   addTaskTag(taskId: string, tag: string): void {
     this.taskOps.addTaskTag(taskId, tag);
   }
-  
+
+  /**
+   * @deprecated 使用 this.core.removeTaskTag() 替代
+   */
   removeTaskTag(taskId: string, tag: string): void {
     this.taskOps.removeTaskTag(taskId, tag);
   }
@@ -710,15 +733,6 @@ export class TaskOperationAdapterService {
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
     this.markEditing();
     this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
-  }
-  
-  /**
-   * 更新连接描述（兼容旧 API）
-   * @deprecated 使用 updateConnectionContent 代替
-   */
-  updateConnectionDescription(sourceId: string, targetId: string, description: string): void {
-    this.markEditing();
-    this.taskOps.updateConnectionContent(sourceId, targetId, '', description);
   }
   
   // ========== 查询方法 ==========

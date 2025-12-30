@@ -101,7 +101,8 @@ const createIndexedDBMock = () => {
       const request = {
         result: {
           objectStoreNames: { contains: vi.fn(() => true) },
-          transaction: vi.fn((storeNames: string[]) => ({
+          // _storeNames 用于类型签名，表示可操作多个存储
+          transaction: vi.fn((_storeNames: string[]) => ({
             objectStore: vi.fn((name: string) => mockStore(name)),
           })),
           close: vi.fn(),

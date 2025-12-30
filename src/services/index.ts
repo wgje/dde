@@ -64,17 +64,8 @@ export { MigrationService } from './migration.service';
 export { LoggerService } from './logger.service';
 export { SearchService, type SearchResult, type ProjectSearchResult } from './search.service';
 
-// 流程图相关服务 - 已迁移到 features/flow
-export { FlowDiagramConfigService, type GoJSNodeData, type GoJSLinkData, type GoJSDiagramData } from '../app/features/flow/services/flow-diagram-config.service';
-export { FlowDiagramService, type NodeClickCallback, type LinkClickCallback, type LinkDeleteCallback, type LinkGestureCallback, type LinkRelinkCallback, type SelectionMovedCallback } from '../app/features/flow/services/flow-diagram.service';
-export { FlowDragDropService, type InsertPositionInfo, type DropResultCallback } from '../app/features/flow/services/flow-drag-drop.service';
-export { FlowTouchService, type TouchDropCallback } from '../app/features/flow/services/flow-touch.service';
-export { FlowLinkService, type LinkType } from '../app/features/flow/services/flow-link.service';
-export { FlowTaskOperationsService } from '../app/features/flow/services/flow-task-operations.service';
-export { FlowSelectionService, type SelectedNodeInfo } from '../app/features/flow/services/flow-selection.service';
-export { FlowZoomService, type ViewState } from '../app/features/flow/services/flow-zoom.service';
-export { FlowLayoutService, type NodePosition, type LayoutOptions } from '../app/features/flow/services/flow-layout.service';
-export { FlowOverviewService, type OverviewOptions, type OverviewState } from '../app/features/flow/services/flow-overview.service';
+// 流程图相关服务 - 请从 '@app/features/flow/services' 导入
+// FlowDiagramService, FlowDragDropService, FlowLinkService 等已迁移
 export { FlowCommandService, FlowCommandType, type FlowCommand, type CenterNodePayload } from './flow-command.service';
 
 export { TaskTrashService, type DeletedTaskMeta, type DeleteResult, type RestoreResult, type TrashServiceCallbacks } from './task-trash.service';
@@ -82,6 +73,6 @@ export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBound
 export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from './reactive-minimap.service';
 export { LineageColorService, type LineageData, type LineageNodeData, type LineageLinkData } from './lineage-color.service';
 
-// Guards
-export { authGuard, saveAuthCache, getDataIsolationId } from './guards/auth.guard';
+// Guards (注意：authGuard 已移除，请使用 requireAuthGuard)
+export { saveAuthCache, getDataIsolationId } from './guards/auth.guard';
 export { projectExistsGuard } from './guards/project.guard';

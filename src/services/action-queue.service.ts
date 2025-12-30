@@ -4,6 +4,7 @@ import { Project, Task, UserPreferences } from '../models';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { extractErrorMessage } from '../utils/result';
+import * as Sentry from '@sentry/angular';
 
 // ========== IndexedDB 备份支持 ==========
 const QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
@@ -380,6 +381,21 @@ export class ActionQueueService {
     this.queueSize.set(this.pendingActions().length);
     this.saveQueueToStorage();
     
+    // Sentry breadcrumb: 记录入队操作
+    Sentry.addBreadcrumb({
+      category: 'sync',
+      message: `Action enqueued: ${action.type} ${action.entityType}`,
+      level: 'info',
+      data: {
+        actionId: queuedAction.id,
+        entityType: action.entityType,
+        entityId: action.entityId,
+        type: action.type,
+        priority: queuedAction.priority,
+        queueSize: this.pendingActions().length
+      }
+    });
+    
     // 如果在线，立即尝试处理
     if (this.isOnline) {
       void this.processQueue();
@@ -419,6 +435,19 @@ export class ActionQueueService {
     if (this.isProcessing() || !this.isOnline) {
       return { processed: 0, failed: 0, movedToDeadLetter: 0 };
     }
+    
+    const queueSnapshot = this.pendingActions();
+    
+    // Sentry breadcrumb: 记录队列处理开始
+    Sentry.addBreadcrumb({
+      category: 'sync',
+      message: `Queue processing started`,
+      level: 'info',
+      data: {
+        queueSize: queueSnapshot.length,
+        actionTypes: queueSnapshot.map(a => `${a.entityType}:${a.type}`).join(', ')
+      }
+    });
     
     this.isProcessing.set(true);
     
@@ -480,6 +509,14 @@ export class ActionQueueService {
       this.isProcessing.set(false);
       // 通知处理结束 - 恢复 Realtime 更新
       this.onQueueProcessEnd?.();
+      
+      // Sentry breadcrumb: 记录队列处理完成
+      Sentry.addBreadcrumb({
+        category: 'sync',
+        message: `Queue processing completed`,
+        level: processed > 0 ? 'info' : (failed > 0 ? 'warning' : 'info'),
+        data: { processed, failed, movedToDeadLetter }
+      });
     }
     
     return { processed, failed, movedToDeadLetter };
@@ -641,6 +678,22 @@ export class ActionQueueService {
         });
       }
     }
+    
+    // Sentry breadcrumb: 记录死信转移
+    Sentry.addBreadcrumb({
+      category: 'sync',
+      message: `Action moved to dead letter`,
+      level: 'warning',
+      data: {
+        actionId: action.id,
+        entityType: action.entityType,
+        entityId: action.entityId,
+        type: action.type,
+        priority: action.priority,
+        reason,
+        deadLetterSize: this.deadLetterQueue().length
+      }
+    });
     
     this.logger.warn('Action moved to dead letter queue:', {
       actionId: action.id,
@@ -815,14 +868,6 @@ export class ActionQueueService {
       preference: '偏好设置'
     };
     return `${typeLabels[action.type]}${entityLabels[action.entityType]}`;
-  }
-
-  /**
-   * 旧的业务错误检测（保留兼容性）
-   * @deprecated 使用 classifyError 替代
-   */
-  private isBusinessError(error: string): boolean {
-    return this.classifyError(error) === 'business';
   }
   
   /** 重试调度定时器 */

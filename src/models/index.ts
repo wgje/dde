@@ -303,14 +303,15 @@ export * from './gojs-boundary';
 export * from './flow-view-state';
 
 // ============================================
-// API 类型定义导出（边境防御）
+// API 类型定义（边境防御）
+// 注意：api-types.ts 中的类型当前未被使用
+// 如需类型守卫功能，可从 './api-types' 直接导入
 // ============================================
-export * from './api-types';
 
 // ============================================
-// Supabase 映射器导出（仅供 Service 层使用）
+// Supabase 映射器（仅供 Service 层使用）
 // ============================================
-// 注意：supabase-types.ts 不在此导出
-// Service 层如需访问原始数据库类型，应直接 import from './supabase-types'
-// 这保持了"数据库协议层"与"领域模型层"的边界
-export * from './supabase-mapper';
+// 注意：supabase-mapper.ts 中的映射函数当前未被使用
+// simple-sync.service.ts 有自己的私有 mapper 方法
+// 如需统一映射逻辑，可从 './supabase-mapper' 直接导入
+// supabase-types.ts 不在此导出，应直接 import from './supabase-types'

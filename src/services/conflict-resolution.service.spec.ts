@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { ConflictResolutionService, ConflictResolutionStrategy, MergeResult } from './conflict-resolution.service';
+import { ConflictResolutionService } from './conflict-resolution.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
@@ -684,7 +684,9 @@ describe('ConflictResolutionService', () => {
     });
 
     it('行级合并应该保留双方新增的行', () => {
-      const baseContent = 'Line 1\nLine 2\nLine 3';
+      // baseContent 用于说明测试场景的基础状态
+      const _baseContent = 'Line 1\nLine 2\nLine 3';
+      void _baseContent; // 仅作为文档说明
       const localContent = 'Line 1\nLine 2\nLine 3\nNew Local Line';
       const remoteContent = 'Line 1\nLine 2\nLine 3\nNew Remote Line';
 

@@ -12,7 +12,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { Subject } from 'rxjs';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
@@ -26,7 +25,7 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SyncModeService } from './sync-mode.service';
 import { Project, Task, SyncState } from '../models';
-import { success, failure, ErrorCodes } from '../utils/result';
+import { success } from '../utils/result';
 
 // ========== 模拟依赖服务 ==========
 
@@ -979,7 +978,8 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       // 用户选择合并
       const tombstoneIds = new Set<string>();
-      const mergeResult = service.smartMerge(localProject, remoteProject, tombstoneIds);
+      const _mergeResult = service.smartMerge(localProject, remoteProject, tombstoneIds);
+      void _mergeResult; // 仅验证调用
       
       expect(mockConflictService.smartMerge).toHaveBeenCalledWith(localProject, remoteProject, tombstoneIds);
     });

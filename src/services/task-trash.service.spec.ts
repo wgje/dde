@@ -10,7 +10,7 @@
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { TaskTrashService, TrashServiceCallbacks, DeleteResult } from './task-trash.service';
+import { TaskTrashService, TrashServiceCallbacks } from './task-trash.service';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
 import { Project, Task } from '../models';

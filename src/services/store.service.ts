@@ -35,7 +35,6 @@
  * └─────────────────┘   └─────────────────┘   └─────────────────┘
  */
 import { Injectable, inject, DestroyRef } from '@angular/core';
-import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
@@ -65,19 +64,34 @@ import { TRASH_CONFIG } from '../config';
 })
 export class StoreService {
   // ========== 注入子服务 ==========
+  // 【重构优化】将常用子服务暴露为 readonly，调用方可直接访问
+  // 减少透传方法，降低维护成本
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Store');
-  private authService = inject(AuthService);
   private undoService = inject(UndoService);
   private toastService = inject(ToastService);
   private actionQueue = inject(ActionQueueService);
-  private uiState = inject(UiStateService);
-  private projectState = inject(ProjectStateService);
+  
+  /** UI 状态服务 - 可直接访问以减少透传 */
+  readonly ui = inject(UiStateService);
+  
+  /** 项目状态服务 - 可直接访问以减少透传 */
+  readonly project = inject(ProjectStateService);
+  
   private searchService = inject(SearchService);
-  private syncCoordinator = inject(SyncCoordinatorService);
-  private userSession = inject(UserSessionService);
-  private preference = inject(PreferenceService);
-  private taskAdapter = inject(TaskOperationAdapterService);
+  
+  /** 同步协调服务 - 可直接访问以减少透传 */
+  readonly sync = inject(SyncCoordinatorService);
+  
+  /** 用户会话服务 - 可直接访问以减少透传 */
+  readonly session = inject(UserSessionService);
+  
+  /** 偏好设置服务 - 可直接访问以减少透传 */
+  readonly pref = inject(PreferenceService);
+  
+  /** 任务操作服务 - 可直接访问以减少透传 */
+  readonly taskOps = inject(TaskOperationAdapterService);
+  
   private remoteChangeHandler = inject(RemoteChangeHandlerService);
   private attachmentService = inject(AttachmentService);
   private layoutService = inject(LayoutService);
@@ -91,31 +105,31 @@ export class StoreService {
   // ========== 代理访问其他服务的状态（只读） ==========
   
   /** 当前用户 ID */
-  readonly currentUserId = this.userSession.currentUserId;
+  readonly currentUserId = this.session.currentUserId;
   
   /** 是否正在同步 */
-  readonly isSyncing = this.syncCoordinator.isSyncing;
+  readonly isSyncing = this.sync.isSyncing;
   
   /** 是否在线 */
-  readonly isOnline = this.syncCoordinator.isOnline;
+  readonly isOnline = this.sync.isOnline;
   
   /** 离线模式 */
-  readonly offlineMode = this.syncCoordinator.offlineMode;
+  readonly offlineMode = this.sync.offlineMode;
   
   /** 会话是否过期 */
-  readonly sessionExpired = this.syncCoordinator.sessionExpired;
+  readonly sessionExpired = this.sync.sessionExpired;
   
   /** 同步错误 */
-  readonly syncError = this.syncCoordinator.syncError;
+  readonly syncError = this.sync.syncError;
   
   /** 是否有冲突 */
-  readonly hasConflict = this.syncCoordinator.hasConflict;
+  readonly hasConflict = this.sync.hasConflict;
   
   /** 冲突数据 */
-  readonly conflictData = this.syncCoordinator.conflictData;
+  readonly conflictData = this.sync.conflictData;
   
   /** 是否正在加载远程数据 */
-  readonly isLoadingRemote = this.syncCoordinator.isLoadingRemote;
+  readonly isLoadingRemote = this.sync.isLoadingRemote;
   
   /** 是否可以撤销 */
   readonly canUndo = this.undoService.canUndo;
@@ -124,44 +138,44 @@ export class StoreService {
   readonly canRedo = this.undoService.canRedo;
   
   /** 待处理的离线操作数量 */
-  readonly pendingActionsCount = this.syncCoordinator.pendingActionsCount;
+  readonly pendingActionsCount = this.sync.pendingActionsCount;
   
   // ========== UI 状态透传 → UiStateService ==========
   
-  get isMobile() { return this.uiState.isMobile; }
-  get sidebarWidth() { return this.uiState.sidebarWidth; }
-  get textColumnRatio() { return this.uiState.textColumnRatio; }
-  get layoutDirection() { return this.uiState.layoutDirection; }
-  get floatingWindowPref() { return this.uiState.floatingWindowPref; }
-  get isTextUnfinishedOpen() { return this.uiState.isTextUnfinishedOpen; }
-  get isTextUnassignedOpen() { return this.uiState.isTextUnassignedOpen; }
-  get isFlowUnfinishedOpen() { return this.uiState.isFlowUnfinishedOpen; }
-  get isFlowUnassignedOpen() { return this.uiState.isFlowUnassignedOpen; }
-  get isFlowDetailOpen() { return this.uiState.isFlowDetailOpen; }
-  get searchQuery() { return this.uiState.searchQuery; }
-  get projectSearchQuery() { return this.uiState.projectSearchQuery; }
-  get activeView() { return this.uiState.activeView; }
-  get filterMode() { return this.uiState.filterMode; }
-  get stageViewRootFilter() { return this.uiState.stageViewRootFilter; }
-  get stageFilter() { return this.uiState.stageFilter; }
+  get isMobile() { return this.ui.isMobile; }
+  get sidebarWidth() { return this.ui.sidebarWidth; }
+  get textColumnRatio() { return this.ui.textColumnRatio; }
+  get layoutDirection() { return this.ui.layoutDirection; }
+  get floatingWindowPref() { return this.ui.floatingWindowPref; }
+  get isTextUnfinishedOpen() { return this.ui.isTextUnfinishedOpen; }
+  get isTextUnassignedOpen() { return this.ui.isTextUnassignedOpen; }
+  get isFlowUnfinishedOpen() { return this.ui.isFlowUnfinishedOpen; }
+  get isFlowUnassignedOpen() { return this.ui.isFlowUnassignedOpen; }
+  get isFlowDetailOpen() { return this.ui.isFlowDetailOpen; }
+  get searchQuery() { return this.ui.searchQuery; }
+  get projectSearchQuery() { return this.ui.projectSearchQuery; }
+  get activeView() { return this.ui.activeView; }
+  get filterMode() { return this.ui.filterMode; }
+  get stageViewRootFilter() { return this.ui.stageViewRootFilter; }
+  get stageFilter() { return this.ui.stageFilter; }
   
   // ========== 主题透传 → PreferenceService ==========
   
-  readonly theme = this.preference.theme;
+  readonly theme = this.pref.theme;
   
   // ========== 核心数据状态透传 → ProjectStateService ==========
   
-  get projects() { return this.projectState.projects; }
-  get activeProjectId() { return this.projectState.activeProjectId; }
+  get projects() { return this.project.projects; }
+  get activeProjectId() { return this.project.activeProjectId; }
   
-  readonly activeProject = this.projectState.activeProject;
-  readonly tasks = this.projectState.tasks;
-  readonly stages = this.projectState.stages;
-  readonly unassignedTasks = this.projectState.unassignedTasks;
-  readonly deletedTasks = this.projectState.deletedTasks;
-  readonly unfinishedItems = this.projectState.unfinishedItems;
-  readonly rootTasks = this.projectState.rootTasks;
-  readonly allStage1Tasks = this.projectState.allStage1Tasks;
+  readonly activeProject = this.project.activeProject;
+  readonly tasks = this.project.tasks;
+  readonly stages = this.project.stages;
+  readonly unassignedTasks = this.project.unassignedTasks;
+  readonly deletedTasks = this.project.deletedTasks;
+  readonly unfinishedItems = this.project.unfinishedItems;
+  readonly rootTasks = this.project.rootTasks;
+  readonly allStage1Tasks = this.project.allStage1Tasks;
   
   // ========== 搜索结果透传 → SearchService ==========
   
@@ -185,11 +199,11 @@ export class StoreService {
    * });
    * ```
    */
-  readonly onConflict$ = this.syncCoordinator.onConflict$;
+  readonly onConflict$ = this.sync.onConflict$;
 
   constructor() {
     // 初始化远程变更处理
-    this.remoteChangeHandler.setupCallbacks(() => this.userSession.loadProjects());
+    this.remoteChangeHandler.setupCallbacks(() => this.session.loadProjects());
     
     // 设置附件 URL 刷新回调
     this.setupAttachmentUrlRefresh();
@@ -203,37 +217,37 @@ export class StoreService {
       if (this.trashCleanupTimer) clearInterval(this.trashCleanupTimer);
       this.attachmentService.clearUrlRefreshCallback();
       this.attachmentService.clearMonitoredAttachments();
-      this.syncCoordinator.destroy();
+      this.sync.destroy();
     });
   }
   
   // ========== 用户会话：委托给 UserSessionService ==========
 
   async setCurrentUser(userId: string | null) {
-    await this.userSession.setCurrentUser(userId);
+    await this.session.setCurrentUser(userId);
     if (userId) {
-      await this.preference.loadUserPreferences();
+      await this.pref.loadUserPreferences();
     } else {
-      this.preference.loadLocalPreferences();
+      this.pref.loadLocalPreferences();
     }
   }
   
   switchActiveProject(projectId: string | null) {
-    this.userSession.switchActiveProject(projectId);
+    this.session.switchActiveProject(projectId);
   }
 
   async loadProjects() {
-    await this.userSession.loadProjects();
+    await this.session.loadProjects();
   }
 
   clearLocalData() {
-    this.userSession.clearLocalData();
+    this.session.clearLocalData();
   }
   
   // ========== 主题设置：委托给 PreferenceService ==========
   
   async setTheme(theme: ThemeType) {
-    await this.preference.setTheme(theme);
+    await this.pref.setTheme(theme);
   }
   
   // ========== 撤销/重做：包装 UndoService ==========
@@ -311,7 +325,7 @@ export class StoreService {
     
     const remoteProject = conflictData.remoteData as Project | undefined;
     
-    const result = await this.syncCoordinator.resolveConflict(
+    const result = await this.sync.resolveConflict(
       projectId,
       choice,
       localProject,
@@ -323,9 +337,9 @@ export class StoreService {
       return;
     }
     
-    const resolvedProject = this.syncCoordinator.validateAndRebalance(result.value);
+    const resolvedProject = this.sync.validateAndRebalance(result.value);
     
-    this.projectState.updateProjects(ps => ps.map(p => 
+    this.project.updateProjects(ps => ps.map(p => 
       p.id === projectId ? resolvedProject : p
     ));
     
@@ -337,7 +351,7 @@ export class StoreService {
       const userId = this.currentUserId();
       if (userId) {
         try {
-          const syncResult = await this.syncCoordinator.saveProjectToCloud(resolvedProject, userId);
+          const syncResult = await this.sync.saveProjectToCloud(resolvedProject, userId);
           if (!syncResult.success && !syncResult.conflict) {
             this.actionQueue.enqueue({
               type: 'update',
@@ -360,7 +374,7 @@ export class StoreService {
       }
     }
     
-    this.syncCoordinator.saveOfflineSnapshot(this.projects());
+    this.sync.saveOfflineSnapshot(this.projects());
   }
 
   // ========== 项目操作 ==========
@@ -372,13 +386,13 @@ export class StoreService {
     const snapshot = this.optimisticState.createSnapshot('project-create', '创建项目');
     
     // 乐观更新：立即显示新项目
-    this.projectState.updateProjects(p => [...p, balanced]);
-    this.projectState.setActiveProjectId(balanced.id);
+    this.project.updateProjects(p => [...p, balanced]);
+    this.project.setActiveProjectId(balanced.id);
     
     const userId = this.currentUserId();
     if (userId) {
       try {
-        const result = await this.syncCoordinator.saveProjectToCloud(balanced, userId);
+        const result = await this.sync.saveProjectToCloud(balanced, userId);
         
         if (!result.success && !result.conflict) {
           if (!this.isOnline()) {
@@ -417,7 +431,7 @@ export class StoreService {
       this.optimisticState.commitSnapshot(snapshot.id);
     }
     
-    this.syncCoordinator.schedulePersist();
+    this.sync.schedulePersist();
     return { success: true };
   }
 
@@ -428,16 +442,16 @@ export class StoreService {
     const snapshot = this.optimisticState.createSnapshot('project-delete', '删除项目');
     
     // 乐观更新：立即从列表中移除
-    this.projectState.updateProjects(p => p.filter(proj => proj.id !== projectId));
+    this.project.updateProjects(p => p.filter(proj => proj.id !== projectId));
     
     if (this.activeProjectId() === projectId) {
       const remaining = this.projects();
-      this.projectState.setActiveProjectId(remaining[0]?.id ?? null);
+      this.project.setActiveProjectId(remaining[0]?.id ?? null);
     }
     
     if (userId) {
       try {
-        const success = await this.syncCoordinator.deleteProjectFromCloud(projectId, userId);
+        const success = await this.sync.deleteProjectFromCloud(projectId, userId);
         
         if (!success) {
           if (!this.isOnline()) {
@@ -472,31 +486,31 @@ export class StoreService {
       this.optimisticState.commitSnapshot(snapshot.id);
     }
     
-    this.syncCoordinator.saveOfflineSnapshot(this.projects());
+    this.sync.saveOfflineSnapshot(this.projects());
     return { success: true };
   }
 
   updateProjectMetadata(projectId: string, metadata: { description?: string; createdDate?: string }) {
-    this.projectState.updateProjects(projects => projects.map(p => p.id === projectId ? {
+    this.project.updateProjects(projects => projects.map(p => p.id === projectId ? {
       ...p,
       description: metadata.description ?? p.description,
       createdDate: metadata.createdDate ?? p.createdDate
     } : p));
     if (this.activeProjectId() === projectId) {
-      this.syncCoordinator.schedulePersist();
+      this.sync.schedulePersist();
     }
   }
 
   renameProject(projectId: string, newName: string) {
     if (!newName.trim()) return;
-    this.projectState.updateProjects(projects => projects.map(p => 
+    this.project.updateProjects(projects => projects.map(p => 
       p.id === projectId ? { ...p, name: newName.trim() } : p
     ));
-    this.syncCoordinator.schedulePersist();
+    this.sync.schedulePersist();
   }
 
   updateViewState(projectId: string, viewState: { scale?: number; positionX?: number; positionY?: number }) {
-    this.projectState.updateProjects(projects => projects.map(p => {
+    this.project.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return {
           ...p,
@@ -509,7 +523,7 @@ export class StoreService {
       }
       return p;
     }));
-    this.syncCoordinator.schedulePersist();
+    this.sync.schedulePersist();
   }
 
   /**
@@ -519,7 +533,7 @@ export class StoreService {
    * @param thumbnailUrl 流程图缩略图 URL（可选）
    */
   updateProjectFlowchartUrl(projectId: string, flowchartUrl: string, thumbnailUrl?: string) {
-    this.projectState.updateProjects(projects => projects.map(p => {
+    this.project.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return {
           ...p,
@@ -529,25 +543,25 @@ export class StoreService {
       }
       return p;
     }));
-    this.syncCoordinator.schedulePersist();
+    this.sync.schedulePersist();
   }
 
   getViewState(): { scale: number; positionX: number; positionY: number } | null {
-    return this.projectState.getViewState();
+    return this.project.getViewState();
   }
 
   // ========== 任务操作：委托给 TaskOperationAdapterService ==========
 
   compressDisplayId(displayId: string): string {
-    return this.projectState.compressDisplayId(displayId);
+    return this.project.compressDisplayId(displayId);
   }
 
   markEditing() {
-    this.taskAdapter.markEditing();
+    this.taskOps.markEditing();
   }
   
   get isUserEditing(): boolean {
-    return this.taskAdapter.isUserEditing;
+    return this.taskOps.isUserEditing;
   }
 
   // ========== 字段锁操作（Split-Brain 模式支持）==========
@@ -561,7 +575,7 @@ export class StoreService {
    * @param durationMs 锁定时长，默认 1 小时（文本输入场景）
    */
   lockTaskFields(taskId: string, fields: string[], durationMs?: number): void {
-    const projectId = this.projectState.activeProjectId();
+    const projectId = this.project.activeProjectId();
     if (!projectId) return;
     
     const duration = durationMs ?? ChangeTrackerService.TEXT_INPUT_LOCK_TIMEOUT_MS;
@@ -578,7 +592,7 @@ export class StoreService {
    * @param fields 要解锁的字段列表
    */
   unlockTaskFields(taskId: string, fields: string[]): void {
-    const projectId = this.projectState.activeProjectId();
+    const projectId = this.project.activeProjectId();
     if (!projectId) return;
     
     for (const field of fields) {
@@ -587,27 +601,27 @@ export class StoreService {
   }
 
   updateTaskContent(taskId: string, newContent: string) {
-    this.taskAdapter.updateTaskContent(taskId, newContent);
+    this.taskOps.updateTaskContent(taskId, newContent);
   }
 
   addTodoItem(taskId: string, itemText: string) {
-    this.taskAdapter.addTodoItem(taskId, itemText);
+    this.taskOps.addTodoItem(taskId, itemText);
   }
   
   completeUnfinishedItem(taskId: string, itemText: string) {
-    this.taskAdapter.completeUnfinishedItem(taskId, itemText);
+    this.taskOps.completeUnfinishedItem(taskId, itemText);
   }
 
   updateTaskTitle(taskId: string, title: string) {
-    this.taskAdapter.updateTaskTitle(taskId, title);
+    this.taskOps.updateTaskTitle(taskId, title);
   }
 
   updateTaskPosition(taskId: string, x: number, y: number) {
-    this.taskAdapter.updateTaskPosition(taskId, x, y);
+    this.taskOps.updateTaskPosition(taskId, x, y);
   }
   
   updateTaskPositionWithRankSync(taskId: string, x: number, y: number) {
-    this.taskAdapter.updateTaskPositionWithRankSync(taskId, x, y);
+    this.taskOps.updateTaskPositionWithRankSync(taskId, x, y);
   }
   
   /**
@@ -615,7 +629,7 @@ export class StoreService {
    * 用于单个节点拖拽完成后的位置更新
    */
   updateTaskPositionWithUndo(taskId: string, x: number, y: number) {
-    this.taskAdapter.updateTaskPositionWithUndo(taskId, x, y);
+    this.taskOps.updateTaskPositionWithUndo(taskId, x, y);
   }
   
   /**
@@ -623,7 +637,7 @@ export class StoreService {
    * 在拖拽开始时调用，记录初始状态用于撤销
    */
   beginPositionBatch() {
-    this.taskAdapter.beginPositionBatch();
+    this.taskOps.beginPositionBatch();
   }
   
   /**
@@ -631,58 +645,58 @@ export class StoreService {
    * 在拖拽结束时调用，将所有位置变更作为单个撤销单元记录
    */
   endPositionBatch() {
-    this.taskAdapter.endPositionBatch();
+    this.taskOps.endPositionBatch();
   }
   
   /**
    * 取消位置拖拽批次（不记录撤销）
    */
   cancelPositionBatch() {
-    this.taskAdapter.cancelPositionBatch();
+    this.taskOps.cancelPositionBatch();
   }
   
   getLastUpdateType(): 'content' | 'structure' | 'position' {
-    return this.taskAdapter.getLastUpdateType();
+    return this.taskOps.getLastUpdateType();
   }
 
   updateTaskStatus(taskId: string, status: Task['status']) {
-    this.taskAdapter.updateTaskStatus(taskId, status);
+    this.taskOps.updateTaskStatus(taskId, status);
   }
   
   updateTaskAttachments(taskId: string, attachments: Attachment[]) {
-    this.taskAdapter.updateTaskAttachments(taskId, attachments);
+    this.taskOps.updateTaskAttachments(taskId, attachments);
   }
 
   addTaskAttachment(taskId: string, attachment: Attachment) {
-    this.taskAdapter.addTaskAttachment(taskId, attachment);
+    this.taskOps.addTaskAttachment(taskId, attachment);
   }
 
   removeTaskAttachment(taskId: string, attachmentId: string) {
-    this.taskAdapter.removeTaskAttachment(taskId, attachmentId);
+    this.taskOps.removeTaskAttachment(taskId, attachmentId);
   }
 
   updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined) {
-    this.taskAdapter.updateTaskPriority(taskId, priority);
+    this.taskOps.updateTaskPriority(taskId, priority);
   }
 
   updateTaskDueDate(taskId: string, dueDate: string | null) {
-    this.taskAdapter.updateTaskDueDate(taskId, dueDate);
+    this.taskOps.updateTaskDueDate(taskId, dueDate);
   }
 
   updateTaskTags(taskId: string, tags: string[]) {
-    this.taskAdapter.updateTaskTags(taskId, tags);
+    this.taskOps.updateTaskTags(taskId, tags);
   }
 
   addTaskTag(taskId: string, tag: string) {
-    this.taskAdapter.addTaskTag(taskId, tag);
+    this.taskOps.addTaskTag(taskId, tag);
   }
 
   removeTaskTag(taskId: string, tag: string) {
-    this.taskAdapter.removeTaskTag(taskId, tag);
+    this.taskOps.removeTaskTag(taskId, tag);
   }
 
   deleteTask(taskId: string) {
-    this.taskAdapter.deleteTask(taskId);
+    this.taskOps.deleteTask(taskId);
   }
 
   /**
@@ -691,26 +705,26 @@ export class StoreService {
    * @returns 实际删除的任务数量（含级联子任务）
    */
   deleteTasksBatch(explicitIds: string[]): number {
-    return this.taskAdapter.deleteTasksBatch(explicitIds);
+    return this.taskOps.deleteTasksBatch(explicitIds);
   }
 
   /**
    * 计算批量删除将影响的任务数量（含级联子任务）
    */
   calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
-    return this.taskAdapter.calculateBatchDeleteImpact(explicitIds);
+    return this.taskOps.calculateBatchDeleteImpact(explicitIds);
   }
 
   permanentlyDeleteTask(taskId: string) {
-    this.taskAdapter.permanentlyDeleteTask(taskId);
+    this.taskOps.permanentlyDeleteTask(taskId);
   }
 
   restoreTask(taskId: string) {
-    this.taskAdapter.restoreTask(taskId);
+    this.taskOps.restoreTask(taskId);
   }
 
   emptyTrash() {
-    this.taskAdapter.emptyTrash();
+    this.taskOps.emptyTrash();
   }
 
   addTask(
@@ -720,15 +734,15 @@ export class StoreService {
     parentId: string | null, 
     isSibling: boolean
   ): Result<string, OperationError> {
-    return this.taskAdapter.addTask(title, content, targetStage, parentId, isSibling);
+    return this.taskOps.addTask(title, content, targetStage, parentId, isSibling);
   }
 
   addCrossTreeConnection(sourceId: string, targetId: string) {
-    this.taskAdapter.addCrossTreeConnection(sourceId, targetId);
+    this.taskOps.addCrossTreeConnection(sourceId, targetId);
   }
 
   removeConnection(sourceId: string, targetId: string) {
-    this.taskAdapter.removeConnection(sourceId, targetId);
+    this.taskOps.removeConnection(sourceId, targetId);
   }
 
   /**
@@ -741,30 +755,22 @@ export class StoreService {
     newSourceId: string,
     newTargetId: string
   ) {
-    this.taskAdapter.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    this.taskOps.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
   }
 
   /**
    * 更新连接内容（标题和描述）
    */
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string) {
-    this.taskAdapter.updateConnectionContent(sourceId, targetId, title, description);
-  }
-
-  /**
-   * 更新连接描述（兼容旧 API）
-   * @deprecated 使用 updateConnectionContent 代替
-   */
-  updateConnectionDescription(sourceId: string, targetId: string, description: string) {
-    this.taskAdapter.updateConnectionContent(sourceId, targetId, '', description);
+    this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
   }
 
   getTaskConnections(taskId: string) {
-    return this.projectState.getTaskConnections(taskId);
+    return this.project.getTaskConnections(taskId);
   }
 
   addFloatingTask(title: string, content: string, x: number, y: number) {
-    this.taskAdapter.addFloatingTask(title, content, x, y);
+    this.taskOps.addFloatingTask(title, content, x, y);
   }
   
   moveTaskToStage(
@@ -773,11 +779,11 @@ export class StoreService {
     beforeTaskId?: string | null, 
     newParentId?: string | null
   ): Result<void, OperationError> {
-    return this.taskAdapter.moveTaskToStage(taskId, newStage, beforeTaskId, newParentId);
+    return this.taskOps.moveTaskToStage(taskId, newStage, beforeTaskId, newParentId);
   }
 
   insertTaskBetween(taskId: string, sourceId: string, targetId: string): Result<void, OperationError> {
-    return this.taskAdapter.insertTaskBetween(taskId, sourceId, targetId);
+    return this.taskOps.insertTaskBetween(taskId, sourceId, targetId);
   }
 
   /**
@@ -786,15 +792,15 @@ export class StoreService {
    * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
    */
   moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
-    return this.taskAdapter.moveSubtreeToNewParent(taskId, newParentId);
+    return this.taskOps.moveSubtreeToNewParent(taskId, newParentId);
   }
 
   reorderStage(stage: number, orderedIds: string[]) {
-    this.taskAdapter.reorderStage(stage, orderedIds);
+    this.taskOps.reorderStage(stage, orderedIds);
   }
 
   detachTask(taskId: string) {
-    this.taskAdapter.detachTask(taskId);
+    this.taskOps.detachTask(taskId);
   }
   
   /**
@@ -804,45 +810,45 @@ export class StoreService {
    * 保留子树内部父子关系，仅断开根节点与外部的连接
    */
   detachTaskWithSubtree(taskId: string) {
-    return this.taskAdapter.detachTaskWithSubtree(taskId);
+    return this.taskOps.detachTaskWithSubtree(taskId);
   }
   
   deleteTaskKeepChildren(taskId: string) {
-    this.taskAdapter.deleteTaskKeepChildren(taskId);
+    this.taskOps.deleteTaskKeepChildren(taskId);
   }
 
   isStageRebalancing(stage: number): boolean {
-    return this.taskAdapter.isStageRebalancing(stage);
+    return this.taskOps.isStageRebalancing(stage);
   }
 
   // ========== 视图控制：委托给 UiStateService ==========
 
   toggleView(view: 'text' | 'flow') {
-    this.uiState.toggleView(view);
+    this.ui.toggleView(view);
   }
 
   ensureView(view: 'text' | 'flow') {
-    this.uiState.ensureView(view);
+    this.ui.ensureView(view);
   }
 
   setStageFilter(stage: number | 'all') {
-    this.uiState.setStageFilter(stage);
+    this.ui.setStageFilter(stage);
   }
 
   // ========== 搜索辅助方法：委托给 UiStateService ==========
   
   setSearchQueryDebounced(query: string, delay: number = 300): void {
-    this.uiState.setSearchQueryDebounced(query, delay);
+    this.ui.setSearchQueryDebounced(query, delay);
   }
   
   clearSearch(): void {
-    this.uiState.clearSearch();
+    this.ui.clearSearch();
   }
 
   // ========== 私有辅助方法 ==========
 
   private applyProjectSnapshot(projectId: string, snapshot: Partial<Project>) {
-    this.projectState.updateProjects(projects => projects.map(p => {
+    this.project.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return this.layoutService.rebalance({
           ...p,
@@ -852,21 +858,21 @@ export class StoreService {
       }
       return p;
     }));
-    this.syncCoordinator.markLocalChanges('structure');
-    this.syncCoordinator.schedulePersist();
+    this.sync.markLocalChanges('structure');
+    this.sync.schedulePersist();
   }
 
   private startTrashCleanupTimer() {
-    const cleanedCount = this.taskAdapter.cleanupOldTrashItems();
+    const cleanedCount = this.taskOps.cleanupOldTrashItems();
     if (cleanedCount > 0) {
       this.logger.info(`启动时清理了 ${cleanedCount} 个超期回收站任务`);
     }
     
     this.trashCleanupTimer = setInterval(() => {
-      const count = this.taskAdapter.cleanupOldTrashItems();
+      const count = this.taskOps.cleanupOldTrashItems();
       if (count > 0) {
         this.logger.info(`定期清理了 ${count} 个超期回收站任务`);
-        this.syncCoordinator.schedulePersist();
+        this.sync.schedulePersist();
       }
     }, TRASH_CONFIG.CLEANUP_INTERVAL);
   }
@@ -875,7 +881,7 @@ export class StoreService {
     this.attachmentService.setUrlRefreshCallback((refreshedUrls) => {
       if (refreshedUrls.size === 0) return;
       
-      this.projectState.updateProjects(projects => projects.map(project => {
+      this.project.updateProjects(projects => projects.map(project => {
         let hasChanges = false;
         const updatedTasks = project.tasks.map(task => {
           if (!task.attachments || task.attachments.length === 0) return task;

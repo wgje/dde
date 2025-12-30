@@ -428,21 +428,4 @@ export class AuthService {
       error: null
     });
   }
-  
-  // ========== 向后兼容的属性访问器 ==========
-  // 这些属性用于旧代码的向后兼容，新代码应使用 Result 类型
-  
-  /**
-   * @deprecated 使用 signIn() 返回的 Result 替代
-   */
-  get success(): boolean {
-    return this.authState().userId !== null;
-  }
-  
-  /**
-   * @deprecated 使用 signIn() 返回的 Result 替代
-   */
-  get error(): string | null {
-    return this.authState().error;
-  }
 }

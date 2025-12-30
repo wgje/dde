@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ChangeTrackerService } from './change-tracker.service';
-import { Task, Connection, Project } from '../models';
+import { Task, Connection } from '../models';
 
 describe('数据丢失检测集成测试', () => {
   let changeTracker: ChangeTrackerService;
