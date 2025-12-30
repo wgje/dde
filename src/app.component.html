@@ -182,9 +182,9 @@
                (click)="selectProject(proj.id)" (dblclick)="handleProjectDoubleClick(proj.id, $event)" 
                class="rounded-lg cursor-pointer transition-all duration-200 group hover:bg-stone-100" 
                [ngClass]="{'px-4 py-3': !isMobile(), 'px-2 py-2': isMobile()}"
-               [class.bg-indigo-100]="store.activeProjectId() === proj.id" 
-               [class.text-indigo-900]="store.activeProjectId() === proj.id" 
-               [class.text-stone-500]="store.activeProjectId() !== proj.id">
+               [class.bg-indigo-100]="activeProjectId() === proj.id" 
+               [class.text-indigo-900]="activeProjectId() === proj.id" 
+               [class.text-stone-500]="activeProjectId() !== proj.id">
             <div class="flex items-center justify-between gap-1 min-w-0">
               @if (renamingProjectId() === proj.id) {
                 <!-- 重命名输入框 -->
@@ -203,7 +203,7 @@
               } @else {
                 <div class="font-medium transition-colors flex-1 min-w-0 truncate"
                      [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">{{ proj.name }}</div>
-                @if (store.activeProjectId() === proj.id) {
+                @if (activeProjectId() === proj.id) {
                   <button 
                     (click)="startRenameProject(proj.id, proj.name, $event)"
                     class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-indigo-200/50 transition-all flex-shrink-0"
@@ -216,7 +216,7 @@
                 }
               }
             </div>
-            @if (store.activeProjectId() === proj.id) {
+            @if (activeProjectId() === proj.id) {
               <div class="text-[10px] text-indigo-400 mt-1 animate-fade-in leading-relaxed font-mono">
                 {{ proj.createdDate | date:'MM/dd' }}
               </div>
