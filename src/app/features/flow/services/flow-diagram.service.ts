@@ -198,6 +198,8 @@ export class FlowDiagramService {
         "toolManager.hoverDelay": 200
       });
 
+      const isMobile = this.uiState.isMobile();
+
       // 【关键】在设置模板之前先配置 ToolManager
       // 某些移动端环境（Android 6.0 / Chrome Mobile）在 setupLinkTemplate 创建 contextMenu 时
       // 会内部访问 contextMenuTool.isEnabled，如果此时未初始化会抛出错误
@@ -211,11 +213,13 @@ export class FlowDiagramService {
       this.templateService.setupNodeTemplate(this.diagram);
       this.templateService.setupLinkTemplate(this.diagram);
       
-      // 配置工具行为：默认禁用框选工具，启用平移工具
-      // 移动端可以通过工具栏按钮切换到框选模式
-      // 桌面端通过 Shift/Ctrl/Cmd + 点击实现多选
-      this.diagram.toolManager.dragSelectingTool.isEnabled = false;
-      this.diagram.toolManager.panningTool.isEnabled = true;
+      // 配置工具行为：桌面端左键平移、右键框选；移动端保持原策略
+      if (isMobile) {
+        this.diagram.toolManager.dragSelectingTool.isEnabled = false;
+        this.diagram.toolManager.panningTool.isEnabled = true;
+      } else {
+        this.setupDesktopPanAndSelectTools(this.diagram);
+      }
       this.setupMultiSelectClickTool(this.diagram);
       
       // 初始化模型
@@ -261,12 +265,58 @@ export class FlowDiagramService {
   }
 
   /**
+   * 桌面端交互：左键平移视口、右键框选
+   */
+  private setupDesktopPanAndSelectTools(diagram: go.Diagram): void {
+    const panningTool = diagram.toolManager.panningTool;
+    const dragSelectTool = diagram.toolManager.dragSelectingTool;
+
+    // 左键在空白处拖拽视口
+    panningTool.isEnabled = true;
+    panningTool.canStart = function () {
+      if (!this.diagram || !this.isEnabled || this.diagram.isReadOnly) return false;
+
+      const e = this.diagram.lastInput;
+      if (!e || !e.left) return false;
+      if (e.shift || e.control || e.meta || e.alt) return false;
+      if (e.targetDiagram !== this.diagram) return false;
+
+      // 避免拦截节点/连线的拖动
+      const part = this.diagram.findPartAt(e.documentPoint, true);
+      if (part && (part instanceof go.Node || part instanceof go.Link)) {
+        return false;
+      }
+
+      return this.diagram.allowHorizontalScroll || this.diagram.allowVerticalScroll;
+    };
+
+    // 右键拖拽框选
+    dragSelectTool.isEnabled = true;
+    dragSelectTool.isPartialInclusion = true;
+    dragSelectTool.canStart = function () {
+      if (!this.diagram || !this.isEnabled || this.diagram.isReadOnly) return false;
+
+      const e = this.diagram.lastInput;
+      if (!e || !e.right) return false;
+      if (e.targetDiagram !== this.diagram) return false;
+
+      const part = this.diagram.findPartAt(e.documentPoint, true);
+      if (part && (part instanceof go.Node || part instanceof go.Link)) {
+        return false;
+      }
+
+      return true;
+    };
+  }
+
+  /**
    * 自定义点击选择行为
    * - 在 GoJS 默认选择逻辑之前处理多选（Shift/Ctrl/Cmd 或移动端框选模式）
    * - 解决默认 ClickSelectingTool 先清空选择、再触发节点 click 导致无法多选的问题
    */
   private setupMultiSelectClickTool(diagram: go.Diagram): void {
     const clickTool = diagram.toolManager.clickSelectingTool;
+    const isMobileMode = this.uiState.isMobile();
     // GoJS 类型声明将 standardMouseSelect 定义为无参方法，但实际会以 (e, obj) 调用
     const originalStandardMouseSelect = (clickTool.standardMouseSelect as (e?: go.InputEvent, obj?: go.GraphObject | null) => void).bind(clickTool);
     const originalStandardTouchSelect = ((clickTool as unknown as { standardTouchSelect?: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect)?.bind(clickTool);
@@ -277,7 +327,7 @@ export class FlowDiagramService {
       const domEvent = (e as go.InputEvent & { event?: MouseEvent | PointerEvent | KeyboardEvent })?.event;
 
       // 移动端框选模式：点击节点时禁用默认单选，交给节点模板或下方逻辑处理
-      const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+      const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
       if (isSelectModeActive && obj?.part instanceof go.Node) {
         console.log('[FlowDiagram] standardMouseSelect - 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
         e.handled = true;
@@ -316,7 +366,7 @@ export class FlowDiagramService {
     if (typeof originalStandardTouchSelect === 'function') {
       (clickTool as unknown as { standardTouchSelect: (e: go.InputEvent, obj: go.GraphObject | null) => void }).standardTouchSelect = (e: go.InputEvent, obj: go.GraphObject | null) => {
         const dragSelectTool = diagram.toolManager.dragSelectingTool;
-        const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+        const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
 
         // 仅在移动端框选模式下启用"点选多选"
         if (isSelectModeActive && obj?.part instanceof go.Node) {

@@ -493,8 +493,11 @@ export class TaskOperationAdapterService {
       const taskAfter = projectAfter?.tasks.find(t => t.id === taskId);
       
       // 检查任务是否真正发生了移动（stage 或 parentId 改变）
-      const stageChanged = taskAfter?.stage !== stageBefore;
-      const parentChanged = taskAfter?.parentId !== parentIdBefore;
+      // 使用 ?? null 规范化 undefined 和 null，避免 undefined !== null 的误判
+      const stageAfter = taskAfter?.stage ?? null;
+      const parentIdAfter = taskAfter?.parentId ?? null;
+      const stageChanged = stageAfter !== stageBefore;
+      const parentChanged = parentIdAfter !== parentIdBefore;
       const actuallyMoved = stageChanged || parentChanged;
       
       // 只有真正移动时才显示 Toast 和设置快照
@@ -523,9 +526,9 @@ export class TaskOperationAdapterService {
         this.logger.debug('任务未发生实际移动，跳过 Toast 提示', { 
           taskId, 
           stageBefore, 
-          stageAfter: taskAfter?.stage,
+          stageAfter,
           parentIdBefore,
-          parentIdAfter: taskAfter?.parentId
+          parentIdAfter
         });
       }
     } else {

@@ -239,6 +239,28 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     );
   });
 
+  it('should not show toast when parentId is undefined vs null (edge case)', () => {
+    // 边缘情况：任务的 parentId 是 undefined（而不是 null）
+    // 移动后 parentId 仍然是 undefined，应该被视为"没有变化"
+    const taskWithUndefinedParent = createTask({ id: 'task-3', stage: 1, parentId: null });
+    // 强制将 parentId 设置为 undefined 来模拟边缘情况
+    (taskWithUndefinedParent as { parentId: unknown }).parentId = undefined;
+    
+    const projectWithEdgeCase = createProject({ 
+      id: 'proj-1', 
+      tasks: [taskWithUndefinedParent] 
+    });
+    mockProjectsSignal.set([projectWithEdgeCase]);
+    
+    mockTaskOperationService.moveTaskToStage.mockReturnValue(success(undefined));
+    
+    const result = service.moveTaskToStage('task-3', 1, null, null);
+    
+    expect(result.ok).toBe(true);
+    expect(mockToastService.success).not.toHaveBeenCalled();
+    expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+  });
+
   it('should rollback snapshot when operation fails', () => {
     // 模拟操作失败
     const failureResult = { ok: false, error: { code: 'ERROR', message: '操作失败' } };

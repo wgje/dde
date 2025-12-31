@@ -334,13 +334,15 @@ export class FlowTemplateService {
           const ctrl = Boolean(input?.control || lastInput?.control || (domEvent as MouseEvent | undefined)?.ctrlKey);
           const meta = Boolean(input?.meta || lastInput?.meta || (domEvent as MouseEvent | undefined)?.metaKey); // Mac 的 Cmd 键
           const isSelectModifierPressed = shift || ctrl || meta;
+          const isMobileMode = this.uiState.isMobile();
           
           // 框选模式（移动端切换）
           const dragSelectTool = e.diagram?.toolManager.dragSelectingTool;
-          const isSelectModeActive = Boolean(dragSelectTool && dragSelectTool.isEnabled);
+          const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
 
           console.log('[FlowTemplate] 节点点击事件', {
             isSelectModeActive,
+            isMobileMode,
             dragSelectToolEnabled: dragSelectTool?.isEnabled,
             nodeSelected: (node as go.Node).isSelected,
             nodeKey: (node as go.Node).key

@@ -1568,6 +1568,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
    * - 平移模式：panningTool 启用，dragSelectingTool 禁用，点击节点单选并显示详情
    */
   toggleSelectMode(): void {
+    if (!this.uiState.isMobile()) {
+      this.logger.debug('跳过桌面端框选模式切换');
+      return;
+    }
+
     const newMode = !this.isSelectMode();
     this.isSelectMode.set(newMode);
     
