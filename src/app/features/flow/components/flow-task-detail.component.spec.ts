@@ -38,6 +38,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       markEditing: vi.fn(),
       isMobile: signal(false),
       isFlowDetailOpen: signal(true),
+      activeView: signal<'text' | 'flow' | null>('flow'),
     };
 
     mockProjectState = {
@@ -164,6 +165,68 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledWith('task-a', 'project-1', 'title');
       expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledWith('task-a', 'project-1', 'content');
     });
+    
+    it('🔴 关键测试：任务切换期间不应发射变更事件（防止数据丢失）', () => {
+      const taskA = createMockTask('task-a', 'Task A', 'Content A');
+      const taskB = createMockTask('task-b', '', ''); // 空任务
+
+      // 设置任务 A
+      (component as any)['task'] = signal(taskA);
+      fixture.detectChanges();
+
+      // 订阅变更事件
+      let titleEmitCount = 0;
+      let contentEmitCount = 0;
+      let lastTitleEvent: any;
+      let lastContentEvent: any;
+      
+      component.titleChange.subscribe((event) => {
+        titleEmitCount++;
+        lastTitleEvent = event;
+      });
+      component.contentChange.subscribe((event) => {
+        contentEmitCount++;
+        lastContentEvent = event;
+      });
+
+      // 切换到空任务 B - 这会在 effect 中设置 isTaskSwitching = true
+      // 然后设置 localTitle = '' 和 localContent = ''
+      // 如果没有保护机制，ngModelChange 会发射 { taskId: 'task-b', title: '' }
+      (component as any)['task'].set(taskB);
+      fixture.detectChanges();
+
+      // 验证：在任务切换期间，不应该发射任何变更事件
+      // 如果这个测试失败，说明任务切换时空值被错误地发射给了新任务
+      expect(titleEmitCount).toBe(0);
+      expect(contentEmitCount).toBe(0);
+    });
+    
+    it('🔴 关键测试：任务切换完成后应正常发射变更事件', async () => {
+      const taskA = createMockTask('task-a', 'Task A', 'Content A');
+      const taskB = createMockTask('task-b', 'Task B', 'Content B');
+
+      // 设置任务 A
+      (component as any)['task'] = signal(taskA);
+      fixture.detectChanges();
+
+      // 切换到任务 B
+      (component as any)['task'].set(taskB);
+      fixture.detectChanges();
+      
+      // 等待 queueMicrotask 完成
+      await Promise.resolve();
+
+      // 订阅变更事件
+      let emittedEvent: any;
+      component.titleChange.subscribe((event) => {
+        emittedEvent = event;
+      });
+
+      // 现在应该可以正常发射事件
+      component.onLocalTitleChange('User Input');
+
+      expect(emittedEvent).toEqual({ taskId: 'task-b', title: 'User Input' });
+    });
   });
 
   describe('同一任务的更新', () => {
@@ -240,10 +303,13 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   });
 
   describe('输入处理', () => {
-    it('应该在标题变更时发射事件', () => {
+    it('应该在标题变更时发射事件', async () => {
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (component as any)['task'] = signal(task);
       fixture.detectChanges();
+      
+      // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
+      await Promise.resolve();
 
       let emittedEvent: any;
       component.titleChange.subscribe((event) => {
@@ -256,10 +322,13 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       expect(component['localTitle']()).toBe('New Title');
     });
 
-    it('应该在内容变更时发射事件', () => {
+    it('应该在内容变更时发射事件', async () => {
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (component as any)['task'] = signal(task);
       fixture.detectChanges();
+      
+      // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
+      await Promise.resolve();
 
       let emittedEvent: any;
       component.contentChange.subscribe((event) => {

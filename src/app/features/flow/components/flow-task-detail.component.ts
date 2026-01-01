@@ -1,4 +1,4 @@
-import { Component, input, output, signal, computed, inject, OnDestroy, HostListener, ElementRef, effect } from '@angular/core';
+import { Component, input, output, signal, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -90,12 +90,16 @@ import { renderMarkdown } from '../../../../utils/markdown';
     
     <!-- 移动端顶部下拉抽屉面板 -->
     @if (uiState.isMobile() && uiState.isFlowDetailOpen()) {
-      <div class="absolute left-0 right-0 z-30 bg-white/95 backdrop-blur-xl border-b border-stone-200 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col transition-all duration-100"
+       <div
+         #mobileDrawer
+         class="absolute left-0 right-0 z-30 bg-white/95 backdrop-blur-xl border-b border-stone-200 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col transition-all duration-100"
            [style.top.px]="0"
            [style.height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
         <!-- 标题栏 - 左边留出空间避开导航按钮，紧凑布局 -->
-        <div class="pr-3 flex justify-between items-center flex-shrink-0"
+         <div
+           #mobileDrawerTitle
+           class="pr-3 flex justify-between items-center flex-shrink-0"
              [class.pl-28]="drawerHeight() >= 20"
              [class.pl-3]="drawerHeight() < 20"
              [class.pt-1.5]="drawerHeight() >= 20"
@@ -108,7 +112,9 @@ import { renderMarkdown } from '../../../../utils/markdown';
         </div>
         
         <!-- 内容区域 - 更紧凑 -->
-        <div class="flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
+        <div
+             #mobileDrawerContent
+             class="flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
              (touchstart)="onContentTouchStart($event)"
              (touchmove)="onContentTouchMove($event)"
              style="-webkit-overflow-scrolling: touch; touch-action: pan-y; transform: translateZ(0); contain: layout style paint;">
@@ -120,7 +126,9 @@ import { renderMarkdown } from '../../../../utils/markdown';
         </div>
         
         <!-- 拖动条 - 紧凑 -->
-        <div class="relative flex justify-center py-1 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
+           <div
+             #mobileDrawerHandle
+             class="relative flex justify-center py-1 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
              (touchstart)="startDrawerResize($event)"
              (mousedown)="startDrawerResize($event)"
              style="transform: translateZ(0); will-change: transform;">
@@ -421,11 +429,21 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly userSession = inject(UserSessionService);
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly elementRef = inject(ElementRef);
+
+  @ViewChild('mobileDrawer') private mobileDrawer?: ElementRef<HTMLDivElement>;
+  @ViewChild('mobileDrawerTitle') private mobileDrawerTitle?: ElementRef<HTMLDivElement>;
+  @ViewChild('mobileDrawerContent') private mobileDrawerContent?: ElementRef<HTMLDivElement>;
+  @ViewChild('mobileDrawerHandle') private mobileDrawerHandle?: ElementRef<HTMLDivElement>;
+
+  private static readonly MOBILE_DRAWER_MIN_VISIBLE_PX = 84;
+  private static readonly MOBILE_DRAWER_MEASURE_BUFFER_PX = 12;
   
   // 输入
   readonly task = input<Task | null>(null);
   readonly position = input<{ x: number; y: number }>({ x: -1, y: -1 });
   readonly drawerHeight = input<number>(35); // vh 单位
+  // 当用户手动拖拽抽屉时，父组件可关闭自动高度补偿，避免“弹回”
+  readonly autoHeightEnabled = input<boolean>(true);
   
   // ========== Split-Brain 本地状态 ==========
   /** 本地标题（与 Store 解耦，仅在非聚焦时同步） */
@@ -491,6 +509,22 @@ export class FlowTaskDetailComponent implements OnDestroy {
   // 跟踪当前任务 ID，用于检测任务切换
   private currentTaskId: string | null = null;
   
+  /** 
+   * 🔴 关键修复：任务切换保护标志
+   * 在任务切换期间阻止 ngModelChange 事件发射，防止旧任务的值被错误地发射到新任务
+   * 
+   * 问题场景：
+   * 1. 用户在任务 A 输入内容
+   * 2. 用户快速切换到任务 B
+   * 3. effect 触发，localContent.set(B.content || '') 被调用
+   * 4. 这触发 ngModelChange -> onLocalContentChange(B.content)
+   * 5. 此时 task() 已是 B，发射 { taskId: B.id, content: '' } 
+   * 6. 任务 B 的内容被错误清空！
+   * 
+   * 解决方案：设置标志阻止发射，在下一个 microtask 重置
+   */
+  private isTaskSwitching = false;
+  
   constructor() {
     // Split-Brain 核心逻辑：仅在输入框非聚焦时从 Store 同步到本地
     effect(() => {
@@ -499,6 +533,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
         // 检测任务切换：如果任务 ID 变化，强制重置本地状态（清除聚焦锁定）
         const taskChanged = this.currentTaskId !== task.id;
         if (taskChanged) {
+          // 🔴 设置切换保护标志，阻止 ngModelChange 发射
+          this.isTaskSwitching = true;
+          
           // 显式解锁旧任务的字段（避免依赖自动超时）
           if (this.currentTaskId) {
             const projectId = this.projectState.activeProjectId();
@@ -517,6 +554,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
           // 清理所有解锁定时器
           this.unlockTimers.forEach(timer => clearTimeout(timer));
           this.unlockTimers.clear();
+          
+          // 🔴 在下一个 microtask 重置标志
+          // 这确保当前 Angular 变更检测周期中的 ngModelChange 被阻止
+          // 但后续用户输入的 ngModelChange 正常工作
+          queueMicrotask(() => {
+            this.isTaskSwitching = false;
+          });
         } else {
           // 同一任务：仅当输入框未聚焦时才同步
           if (!this.isTitleFocused) {
@@ -528,6 +572,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
         }
       } else {
         // 任务为 null，显式解锁并重置状态
+        // 🔴 设置切换保护标志
+        this.isTaskSwitching = true;
+        
         if (this.currentTaskId) {
           const projectId = this.projectState.activeProjectId();
           if (projectId) {
@@ -542,6 +589,32 @@ export class FlowTaskDetailComponent implements OnDestroy {
         this.isContentFocused = false;
         this.unlockTimers.forEach(timer => clearTimeout(timer));
         this.unlockTimers.clear();
+        
+        // 🔴 在下一个 microtask 重置标志
+        queueMicrotask(() => {
+          this.isTaskSwitching = false;
+        });
+      }
+    });
+
+    // 🔴 移动端：当任务、编辑模式或面板打开状态变化时，自动调整高度
+    effect(() => {
+      this.task();
+      this.isEditMode();
+      const isOpen = this.uiState.isFlowDetailOpen();
+      
+      if (this.uiState.isMobile() && isOpen) {
+        untracked(() => this.requestAutoHeight());
+      }
+    });
+
+    // 🔴 移动端：切回 Flow 视图后，强制校准一次抽屉高度（防止提示语被挤没）
+    effect(() => {
+      const view = this.uiState.activeView();
+      const isOpen = this.uiState.isFlowDetailOpen();
+
+      if (this.uiState.isMobile() && view === 'flow' && isOpen) {
+        untracked(() => this.requestAutoHeight());
       }
     });
   }
@@ -570,6 +643,56 @@ export class FlowTaskDetailComponent implements OnDestroy {
     for (const field of fields) {
       this.changeTracker.unlockTaskField(taskId, projectId, field);
     }
+  }
+
+  /**
+   * 🔴 移动端：请求自动调整高度以适应内容
+   * 测量标题、内容和拖动条的总高度，并转换为 vh 发射
+   */
+  private requestAutoHeight() {
+    if (!this.uiState.isMobile() || !this.uiState.isFlowDetailOpen()) return;
+    if (!this.autoHeightEnabled()) return; // 手动覆盖时不自动调整
+
+    const measureOnce = () => {
+      const container = this.mobileDrawer?.nativeElement
+        ?? this.elementRef.nativeElement.querySelector('.absolute.left-0.right-0.z-30');
+      const title = this.mobileDrawerTitle?.nativeElement
+        ?? container?.querySelector('.flex-shrink-0');
+      const content = this.mobileDrawerContent?.nativeElement
+        ?? container?.querySelector('.overflow-y-auto');
+      const handle = this.mobileDrawerHandle?.nativeElement
+        ?? container?.querySelector('.touch-none.flex-shrink-0');
+
+      if (!container || !title || !content || !handle) return;
+      if (typeof window === 'undefined' || window.innerHeight <= 0) return;
+
+      const titleH = (title as HTMLElement).offsetHeight || 0;
+      const handleH = (handle as HTMLElement).offsetHeight || 0;
+
+      // 关键：不要用 content.scrollHeight 做自适应。
+      // 否则在点击任务块自动展开时，会把抽屉撑到“内容全量可见”，导致遮挡过大。
+      // 这里仅做“最小可见校准”：确保标题栏/拖动条不会被挤没。
+      const minPx = Math.max(
+        // 即使测量为 0，也至少保证拖动条可用
+        handleH + 12,
+        // 标题 + 拖动条 + 少量缓冲（避免 vh 四舍五入导致抖动）
+        titleH + handleH + FlowTaskDetailComponent.MOBILE_DRAWER_MEASURE_BUFFER_PX
+      );
+
+      const minVh = (minPx / window.innerHeight) * 100;
+      const desiredVh = Math.min(Math.max(minVh, 5), 70);
+
+      // 只做“向上补齐”，不主动缩小（避免用户手动调大后被自动收回）
+      if (this.drawerHeight() + 0.5 < desiredVh) {
+        this.drawerHeightChange.emit(desiredVh);
+      }
+    };
+
+    // 两段式测量：rAF 等待布局稳定，再补一次 timeout 防止字体/内容延迟导致高度为 0
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => measureOnce());
+    });
+    setTimeout(() => measureOnce(), 200);
   }
   
   /**
@@ -631,8 +754,16 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   /**
    * 本地标题变更（同时更新本地状态和发射事件）
+   * 
+   * 🔴 关键修复：在任务切换期间阻止发射，防止数据丢失
    */
   onLocalTitleChange(value: string) {
+    // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
+    if (this.isTaskSwitching) {
+      console.debug('[FlowTaskDetail] 任务切换中，跳过 titleChange 发射');
+      return;
+    }
+    
     this.localTitle.set(value);
     const task = this.task();
     if (task) {
@@ -642,8 +773,16 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   /**
    * 本地内容变更（同时更新本地状态和发射事件）
+   * 
+   * 🔴 关键修复：在任务切换期间阻止发射，防止数据丢失
    */
   onLocalContentChange(value: string) {
+    // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
+    if (this.isTaskSwitching) {
+      console.debug('[FlowTaskDetail] 任务切换中，跳过 contentChange 发射');
+      return;
+    }
+    
     this.localContent.set(value);
     const task = this.task();
     if (task) {
@@ -883,6 +1022,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
     
     let rafId: number | null = null;
+    let lastCalculatedHeight: number = this.drawerStartHeight; // 缓存最后计算的高度，用于磁吸
     
     const onMove = (ev: TouchEvent | MouseEvent) => {
       if (!this.isResizingDrawer) return;
@@ -909,6 +1049,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
         const deltaVh = (deltaY / window.innerHeight) * 100;
         
         const newHeight = Math.max(minHeight, Math.min(70, this.drawerStartHeight + deltaVh));
+        lastCalculatedHeight = newHeight; // 更新缓存值
         this.drawerHeightChange.emit(newHeight);
       });
     };

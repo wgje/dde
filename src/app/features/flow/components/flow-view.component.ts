@@ -287,6 +287,7 @@ import * as go from 'gojs';
           [task]="selectedTask()"
           [position]="taskDetailPos()"
           [drawerHeight]="drawerHeight()"
+          [autoHeightEnabled]="!drawerManualOverride()"
           (positionChange)="taskDetailPos.set($event)"
           (drawerHeightChange)="drawerHeight.set($event)"
           (isResizingChange)="isResizingDrawerSignal.set($event)"
@@ -488,10 +489,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly taskDetailPos = signal<{ x: number; y: number }>({ x: -1, y: -1 });
   
   /** 调色板高度 - 移动端默认更小 */
-  readonly paletteHeight = signal(this.uiState.isMobile() ? 120 : 180);
+  readonly paletteHeight = signal(this.uiState.isMobile() ? 80 : 180);
   
-  /** 底部抽屉高度（vh） */
-  readonly drawerHeight = signal(25);
+  /** 底部抽屉高度（vh） - 移动端顶部抽屉 */
+  // 默认给一个安全值，真正的“最佳高度”由下面的 effect 在移动端动态校准。
+  readonly drawerHeight = signal(this.uiState.isMobile() ? 8.62 : 25);
+  /** 用户手动拖拽后，阻止预设高度覆盖，直到详情关闭 */
+  readonly drawerManualOverride = signal(false);
   readonly isResizingDrawerSignal = signal(false);
   
   /** 是否正在重试加载图表 */
@@ -595,11 +599,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   constructor() {
-    // 初始化抽屉高度：如果是移动端且详情面板已打开，则设为 4.27
-    if (this.uiState.isMobile() && this.uiState.isFlowDetailOpen()) {
-      this.drawerHeight.set(4.27);
-    }
-
     // 监听任务数据变化，使用 rAF 对齐渲染帧更新图表
     // 核心原则：眼睛看到的（UI）用 rAF，硬盘存的（Data）用 debounce
     effect(() => {
@@ -675,6 +674,144 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         untracked(() => {
           this.retryInitDiagram();
         });
+      }
+    }, { injector: this.injector });
+    
+    // 🎯 移动端：基于“调色板高度”为参考系，设置详情抽屉的最佳高度（vh）
+    // 基准屏幕：高度 667px；调色板：80px。
+    // - 场景一：在流程图内从“关闭 -> 打开”（直接点任务块自动展开） => 抽屉 24.88vh
+    // - 场景二：从文本视图切回流程图时，详情本来就是打开状态         => 抽屉 8.62vh
+    // 注意：移动端切换视图会销毁/重建 FlowView，因此“初次挂载且已打开”视为场景二。
+    let isInitialized = false;
+    let previousIsOpen = false;
+    let lastDrawerPreset: 'none' | 'direct' | 'reenter' = 'none';
+    effect(() => {
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      const justOpened = isDetailOpen && !previousIsOpen;
+      const openedOnMount = !isInitialized && isDetailOpen;
+
+      if (this.uiState.isMobile() && activeView === 'flow' && (justOpened || openedOnMount)) {
+        untracked(() => {
+          // 用户手动拖拽过则尊重手动高度，直到面板关闭
+          if (this.drawerManualOverride()) return;
+          if (typeof window === 'undefined' || window.innerHeight <= 0) return;
+
+          const REFERENCE_SCREEN_HEIGHT = 667;
+          const REFERENCE_PALETTE_HEIGHT_PX = 80;
+          const DRAWER_VH_DIRECT_CLICK = 24.88; // 场景一：直接点击（基准屏幕）
+          const DRAWER_VH_REENTER = 8.62;       // 场景二：切回 flow 且已打开（基准屏幕）
+
+          // 把“基准 vh”转为基准像素，再换算成“抽屉像素 / 调色板像素”的比例
+          const refDrawerPxDirect = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_DIRECT_CLICK) / 100;
+          const refDrawerPxReenter = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_REENTER) / 100;
+          const ratioDirect = refDrawerPxDirect / REFERENCE_PALETTE_HEIGHT_PX;   // ≈ 2.074
+          const ratioReenter = refDrawerPxReenter / REFERENCE_PALETTE_HEIGHT_PX; // ≈ 0.719
+
+          // 场景判定：
+          // - 组件首次挂载且详情已开：属于“从文本切回来的复现场景”（场景二）
+          // - 运行中从关到开：属于“直接点击任务块展开”（场景一）
+          const isScenarioTwo = openedOnMount;
+          const targetRatio = isScenarioTwo ? ratioReenter : ratioDirect;
+
+          const palettePx = this.paletteHeight();
+          const targetDrawerPx = palettePx * targetRatio;
+          const targetVh = (targetDrawerPx / window.innerHeight) * 100;
+
+          // 合理范围保护：避免极端屏幕把抽屉顶满
+          const clampedVh = Math.max(5, Math.min(targetVh, 70));
+
+          // 只有在差异明显时才更新，避免信号抖动
+          if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
+            this.drawerHeight.set(clampedVh);
+          }
+
+          lastDrawerPreset = isScenarioTwo ? 'reenter' : 'direct';
+        });
+      }
+
+      // 更新追踪状态
+      previousIsOpen = isDetailOpen;
+      isInitialized = true;
+
+      // 详情关闭后，释放手动覆盖与预设标记
+      if (!isDetailOpen) {
+        lastDrawerPreset = 'none';
+        this.drawerManualOverride.set(false);
+      }
+    }, { injector: this.injector });
+
+    // 🎯 场景二之后：当详情已开且点击任务块时，自动切回“场景一”最佳高度
+    effect(() => {
+      const selectedId = this.selectedTaskId();
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      if (!this.uiState.isMobile() || activeView !== 'flow' || !isDetailOpen || !selectedId) return;
+      if (this.drawerManualOverride()) return; // 手动拖拽时不覆盖
+      if (lastDrawerPreset === 'direct') return; // 已经在场景一高度，无需重复
+      if (typeof window === 'undefined' || window.innerHeight <= 0) return;
+
+      const REFERENCE_SCREEN_HEIGHT = 667;
+      const REFERENCE_PALETTE_HEIGHT_PX = 80;
+      const DRAWER_VH_DIRECT_CLICK = 24.88;
+
+      const refDrawerPxDirect = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_DIRECT_CLICK) / 100;
+      const ratioDirect = refDrawerPxDirect / REFERENCE_PALETTE_HEIGHT_PX;
+
+      const palettePx = this.paletteHeight();
+      const targetDrawerPx = palettePx * ratioDirect;
+      const targetVh = (targetDrawerPx / window.innerHeight) * 100;
+      const clampedVh = Math.max(5, Math.min(targetVh, 70));
+
+      if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
+        this.drawerHeight.set(clampedVh);
+      }
+      lastDrawerPreset = 'direct';
+    }, { injector: this.injector });
+
+    // 监听拖拽标记，用户一旦开始拖拽则启用手动覆盖
+    effect(() => {
+      if (this.isResizingDrawerSignal()) {
+        this.drawerManualOverride.set(true);
+      }
+    }, { injector: this.injector });
+    
+    // 🎯 移动端：场景2（小抽屉）后，点击任务块应自动扩展到场景1的最佳位置
+    effect(() => {
+      const activeView = this.uiState.activeView();
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const selectedTaskId = this.selectedTaskId();
+      const isResizing = this.isResizingDrawerSignal();
+
+      if (!this.uiState.isMobile()) return;
+      if (activeView !== 'flow') return;
+      if (!isDetailOpen) return;
+      if (!selectedTaskId) return;
+      if (isResizing) return;
+      // 用户手动拖拽过则尊重手动高度，直到详情关闭
+      if (this.drawerManualOverride()) return;
+
+      if (typeof window === 'undefined' || window.innerHeight <= 0) return;
+
+      const REFERENCE_SCREEN_HEIGHT = 667;
+      const REFERENCE_PALETTE_HEIGHT_PX = 80;
+      const DRAWER_VH_DIRECT_CLICK = 24.88;
+      const refDrawerPxDirect = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_DIRECT_CLICK) / 100;
+      const ratioDirect = refDrawerPxDirect / REFERENCE_PALETTE_HEIGHT_PX; // ≈ 2.074
+
+      const palettePx = this.paletteHeight();
+      const targetDrawerPx = palettePx * ratioDirect;
+      const targetVh = (targetDrawerPx / window.innerHeight) * 100;
+      const clampedVh = Math.max(5, Math.min(targetVh, 70));
+
+      // 仅在“明显偏小”（典型为 8.62 场景）时提升，避免覆盖用户手动调大的高度
+      // 注意：这里不要把 drawerHeight 作为依赖（否则用户拖拽到小高度会触发回弹）
+      const currentVh = untracked(() => this.drawerHeight());
+      const SMALL_DRAWER_THRESHOLD_VH = 12;
+      if (currentVh < SMALL_DRAWER_THRESHOLD_VH && clampedVh - currentVh > 0.2) {
+        this.drawerHeight.set(clampedVh);
       }
     }, { injector: this.injector });
   }
@@ -799,10 +936,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.selectionService.toggleNodeSelection(taskId);
       } else {
         this.selectedTaskId.set(taskId);
-        // 移动端：点击任务块时，调整抽屉高度到 22.63
-        if (this.uiState.isMobile()) {
-          this.drawerHeight.set(22.63);
-        }
         if (isDoubleClick) {
           this.uiState.isFlowDetailOpen.set(true);
         }
@@ -1178,10 +1311,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
     this.zoomService.centerOnNode(taskId);
     this.selectedTaskId.set(taskId);
-    // 移动端：居中到节点时，调整抽屉高度到 22.63
-    if (this.uiState.isMobile()) {
-      this.drawerHeight.set(22.63);
-    }
     if (openDetail) {
       this.uiState.isFlowDetailOpen.set(true);
     }

@@ -1,4 +1,4 @@
-import { Component, input, output, computed, inject, HostListener, ElementRef, ViewChild } from '@angular/core';
+import { Component, input, output, computed, inject, HostListener, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -218,7 +218,17 @@ export class FlowToolbarComponent {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
-  private readonly elementRef = inject(ElementRef);
+
+  /**
+   * 基准高度：手机端 667px 设备上实测的最佳详情抽屉高度（转换为 vh），用于归一化
+   * 调色板高度为 80px 时：
+   * - 场景一（重新进入）: 24.73vh - 详情抽屉高度
+   * - 场景二（直接点击）: 8.5vh - 详情抽屉高度
+   * 工具栏top = 抽屉高度vh × 屏幕高度px
+   */
+  private static readonly MOBILE_BASE_HEIGHT_PX = 667;
+  private static readonly MOBILE_OPTIMAL_VH_REENTER = 24.73;
+  private static readonly MOBILE_OPTIMAL_VH_DIRECT = 8.5;
   
   @ViewChild('exportMenu') exportMenuRef!: ElementRef;
   
@@ -247,6 +257,14 @@ export class FlowToolbarComponent {
   // 导出菜单状态
   isExportMenuOpen = false;
   isUploading = false;
+
+  /** 当前视口高度（回退到基准高度） */
+  private viewportHeight(): number {
+    if (typeof window !== 'undefined' && window.innerHeight > 0) {
+      return window.innerHeight;
+    }
+    return FlowToolbarComponent.MOBILE_BASE_HEIGHT_PX;
+  }
   
   // 计算移动端工具栏底部位置
   // 抽屉在顶部，工具栏固定在底部
@@ -255,14 +273,25 @@ export class FlowToolbarComponent {
   });
   
   // 计算移动端顶部按钮位置
-  // 当详情栏展开时，按钮紧贴拖动条底部
+  // 当详情栏展开时，按钮紧贴抽屉底部边缘
   readonly mobileTopPosition = computed(() => {
     if (!this.uiState.isFlowDetailOpen()) {
       return '8px'; // 详情栏关闭时，固定在顶部
     }
-    // 详情栏开启时，按钮紧贴抽屉底部边缘
-    const drawerHeightPx = (this.drawerHeightVh() / 100) * window.innerHeight;
-    return `${drawerHeightPx}px`;
+    
+    // 详情栏开启时，工具栏位置 = 抽屉高度的像素值
+    // 抽屉从顶部 top:0 向下延伸 height.vh，所以工具栏 top = 抽屉高度转px
+    const drawerVh = this.drawerHeightVh();
+    const vh = this.viewportHeight();
+    
+    // 如果传入的高度无效，使用场景二的默认最优值
+    if (!drawerVh || Number.isNaN(drawerVh)) {
+      return `${(FlowToolbarComponent.MOBILE_OPTIMAL_VH_DIRECT / 100) * vh}px`;
+    }
+    
+    // 将抽屉的 vh 高度转换为像素值，作为工具栏的 top 位置
+    // 这样无论屏幕高度如何，工具栏始终紧贴抽屉底部，保持相对位置一致
+    return `${(drawerVh / 100) * vh}px`;
   });
   
   toggleExportMenu() {
