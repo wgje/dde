@@ -1933,4 +1933,296 @@ export class TaskOperationService {
     
     return success(undefined);
   }
+
+  // ========== 子树替换操作（流程图逻辑链条功能） ==========
+
+  /**
+   * 将任务块的特定子任务替换为待分配块子树
+   * 
+   * 【核心功能】流程图逻辑链条拖拽（连接线重连）
+   * 当用户将父子连接线的下游端点拖到待分配块上时：
+   * 1. 待分配块及其所有子待分配块转换为任务块，分配对应的阶段和编号
+   * 2. 被替换的特定子任务（如果指定）被剥离为待分配块
+   * 3. 其他子任务保持不变
+   * 
+   * @param sourceTaskId 源任务块 ID（连接线起点/父任务）
+   * @param targetUnassignedId 目标待分配块 ID（将被分配）
+   * @param specificChildId 要被替换的特定子任务 ID（可选，如果不指定则替换所有子任务）
+   * @returns Result 包含操作信息或错误
+   */
+  replaceChildSubtreeWithUnassigned(
+    sourceTaskId: string,
+    targetUnassignedId: string,
+    specificChildId?: string
+  ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
+    const activeP = this.getActiveProject();
+    if (!activeP) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
+    }
+
+    const sourceTask = activeP.tasks.find(t => t.id === sourceTaskId);
+    const targetTask = activeP.tasks.find(t => t.id === targetUnassignedId);
+
+    if (!sourceTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '源任务不存在');
+    }
+    if (!targetTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '目标待分配块不存在');
+    }
+    if (sourceTask.stage === null) {
+      return failure(ErrorCodes.VALIDATION_ERROR, '源任务必须是已分配的任务块');
+    }
+    if (targetTask.stage !== null) {
+      return failure(ErrorCodes.VALIDATION_ERROR, '目标必须是待分配块');
+    }
+
+    // 计算目标阶段：源任务的下一阶段
+    const targetStage = sourceTask.stage + 1;
+
+    // 阶段溢出预检查
+    const capacityCheck = this.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
+    if (!capacityCheck.ok) {
+      return capacityCheck as Result<{ detachedSubtreeRootId: string | null }, OperationError>;
+    }
+
+    let operationResult: Result<{ detachedSubtreeRootId: string | null }, OperationError> = success({ detachedSubtreeRootId: null });
+    let detachedRootId: string | null = null;
+
+    this.recordAndUpdate(p => {
+      const tasks = p.tasks.map(t => ({ ...t }));
+      const source = tasks.find(t => t.id === sourceTaskId)!;
+      const target = tasks.find(t => t.id === targetUnassignedId)!;
+      const now = new Date().toISOString();
+
+      // 1. 获取要被剥离的子任务
+      // 如果指定了 specificChildId，只剥离该子任务
+      // 否则剥离所有直接子任务
+      const allChildren = tasks.filter(t => t.parentId === sourceTaskId && !t.deletedAt);
+      const childrenToDetach = specificChildId
+        ? allChildren.filter(t => t.id === specificChildId)
+        : allChildren;
+
+      // 2. 将目标待分配块从其原父节点剥离（如果有）
+      const oldParentId = target.parentId;
+      
+      // 3. 将目标待分配块的子树整体分配到目标阶段
+      const targetSubtreeIds = this.collectSubtreeIds(targetUnassignedId, tasks);
+      const queue: { task: Task; depth: number }[] = [{ task: target, depth: 0 }];
+      const visited = new Set<string>();
+
+      while (queue.length > 0) {
+        const { task, depth } = queue.shift()!;
+        if (visited.has(task.id)) continue;
+        visited.add(task.id);
+
+        // 设置阶段：根节点为 targetStage，子节点递增
+        task.stage = targetStage + depth;
+        task.updatedAt = now;
+
+        // 根节点设置新的父节点为源任务
+        if (depth === 0) {
+          task.parentId = sourceTaskId;
+        }
+
+        // 收集子节点（限制深度防止无限循环）
+        if (depth < FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
+          const children = tasks.filter(t => t.parentId === task.id && !t.deletedAt);
+          children.forEach(child => {
+            if (targetSubtreeIds.has(child.id)) {
+              queue.push({ task: child, depth: depth + 1 });
+            }
+          });
+        }
+      }
+
+      // 4. 计算新子树根节点的 rank
+      const stageTasks = tasks.filter(t => t.stage === targetStage && t.id !== targetUnassignedId && !targetSubtreeIds.has(t.id));
+      const candidateRank = this.computeInsertRank(targetStage, stageTasks, null, source.rank);
+      const placed = this.applyRefusalStrategy(target, candidateRank, source.rank, Infinity, tasks);
+      if (!placed.ok) {
+        operationResult = failure(ErrorCodes.LAYOUT_NO_SPACE, '无法在该位置放置任务');
+        return p;
+      }
+      target.rank = placed.rank;
+
+      // 5. 修复新子树的 rank 约束
+      this.fixSubtreeRanks(targetUnassignedId, tasks);
+
+      // 6. 将要被替换的子任务剥离为待分配块
+      // 注意：只剥离 childrenToDetach，保留其他子任务不变
+      if (childrenToDetach.length > 0) {
+        // 选择第一个子节点作为剥离子树的根
+        const detachedRoot = childrenToDetach[0];
+        detachedRootId = detachedRoot.id;
+
+        // 收集被剥离子任务的子树
+        childrenToDetach.forEach(child => {
+          const childSubtreeIds = this.collectSubtreeIds(child.id, tasks);
+          childSubtreeIds.forEach(id => {
+            const t = tasks.find(task => task.id === id);
+            if (t) {
+              t.stage = null;
+              t.updatedAt = now;
+              t.displayId = '?';
+            }
+          });
+          // 断开与源任务的父子关系
+          child.parentId = null;
+        });
+
+        // 计算待分配区的位置
+        const unassignedCount = tasks.filter(t => t.stage === null && !childrenToDetach.some(c => this.collectSubtreeIds(c.id, tasks).has(t.id))).length;
+        childrenToDetach.forEach((child, index) => {
+          child.order = unassignedCount + index + 1;
+          const pos = this.layoutService.getUnassignedPosition(unassignedCount + index);
+          child.x = pos.x;
+          child.y = pos.y;
+          child.rank = LAYOUT_CONFIG.RANK_ROOT_BASE + (unassignedCount + index) * LAYOUT_CONFIG.RANK_STEP;
+        });
+      }
+
+      operationResult = success({ detachedSubtreeRootId: detachedRootId });
+      return this.layoutService.rebalance({ ...p, tasks });
+    });
+
+    return operationResult;
+  }
+
+  /**
+   * 将待分配块（可能有父待分配块）分配为任务块的子节点
+   * 
+   * 【场景】用户从任务块拖线到已有父节点的待分配块
+   * 此时将待分配块从其父待分配块剥离，只将该块及其子树分配给任务块
+   * 
+   * @param sourceTaskId 源任务块 ID
+   * @param targetUnassignedId 目标待分配块 ID（将被分配）
+   * @returns Result
+   */
+  assignUnassignedToTask(
+    sourceTaskId: string,
+    targetUnassignedId: string
+  ): Result<void, OperationError> {
+    const activeP = this.getActiveProject();
+    if (!activeP) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
+    }
+
+    const sourceTask = activeP.tasks.find(t => t.id === sourceTaskId);
+    const targetTask = activeP.tasks.find(t => t.id === targetUnassignedId);
+
+    if (!sourceTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '源任务不存在');
+    }
+    if (!targetTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '目标待分配块不存在');
+    }
+    if (sourceTask.stage === null) {
+      return failure(ErrorCodes.VALIDATION_ERROR, '源任务必须是已分配的任务块');
+    }
+    if (targetTask.stage !== null) {
+      return failure(ErrorCodes.VALIDATION_ERROR, '目标必须是待分配块');
+    }
+
+    // 计算目标阶段：源任务的下一阶段
+    const targetStage = sourceTask.stage + 1;
+
+    // 阶段溢出预检查
+    const capacityCheck = this.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
+    if (!capacityCheck.ok) {
+      return capacityCheck;
+    }
+
+    let operationResult: Result<void, OperationError> = success(undefined);
+
+    this.recordAndUpdate(p => {
+      const tasks = p.tasks.map(t => ({ ...t }));
+      const source = tasks.find(t => t.id === sourceTaskId)!;
+      const target = tasks.find(t => t.id === targetUnassignedId)!;
+      const now = new Date().toISOString();
+
+      // 1. 从原父待分配块剥离（如果有）
+      // target.parentId 会在下面被重新设置，所以这里不需要显式清除
+
+      // 2. 将目标待分配块的子树整体分配到目标阶段
+      const targetSubtreeIds = this.collectSubtreeIds(targetUnassignedId, tasks);
+      const queue: { task: Task; depth: number }[] = [{ task: target, depth: 0 }];
+      const visited = new Set<string>();
+
+      while (queue.length > 0) {
+        const { task, depth } = queue.shift()!;
+        if (visited.has(task.id)) continue;
+        visited.add(task.id);
+
+        // 设置阶段：根节点为 targetStage，子节点递增
+        task.stage = targetStage + depth;
+        task.updatedAt = now;
+
+        // 根节点设置新的父节点为源任务
+        if (depth === 0) {
+          task.parentId = sourceTaskId;
+        }
+
+        // 收集子节点（限制深度防止无限循环）
+        if (depth < FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
+          const children = tasks.filter(t => t.parentId === task.id && !t.deletedAt);
+          children.forEach(child => {
+            if (targetSubtreeIds.has(child.id)) {
+              queue.push({ task: child, depth: depth + 1 });
+            }
+          });
+        }
+      }
+
+      // 3. 计算新子树根节点的 rank
+      const stageTasks = tasks.filter(t => t.stage === targetStage && t.id !== targetUnassignedId && !targetSubtreeIds.has(t.id));
+      const candidateRank = this.computeInsertRank(targetStage, stageTasks, null, source.rank);
+      const placed = this.applyRefusalStrategy(target, candidateRank, source.rank, Infinity, tasks);
+      if (!placed.ok) {
+        operationResult = failure(ErrorCodes.LAYOUT_NO_SPACE, '无法在该位置放置任务');
+        return p;
+      }
+      target.rank = placed.rank;
+
+      // 4. 修复新子树的 rank 约束
+      this.fixSubtreeRanks(targetUnassignedId, tasks);
+
+      return this.layoutService.rebalance({ ...p, tasks });
+    });
+
+    return operationResult;
+  }
+
+  /**
+   * 检查待分配块是否有父待分配块
+   * @param taskId 待分配块 ID
+   * @returns 父待分配块 ID 或 null
+   */
+  getUnassignedParent(taskId: string): string | null {
+    const activeP = this.getActiveProject();
+    if (!activeP) return null;
+
+    const task = activeP.tasks.find(t => t.id === taskId);
+    if (!task || task.stage !== null) return null;
+
+    if (task.parentId) {
+      const parent = activeP.tasks.find(t => t.id === task.parentId);
+      if (parent && parent.stage === null) {
+        return parent.id;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 获取任务的直接子任务
+   * @param taskId 任务 ID
+   * @returns 子任务数组
+   */
+  getDirectChildren(taskId: string): Task[] {
+    const activeP = this.getActiveProject();
+    if (!activeP) return [];
+
+    return activeP.tasks.filter(t => t.parentId === taskId && !t.deletedAt);
+  }
 }

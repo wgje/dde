@@ -197,8 +197,19 @@ export class FlowLinkService {
     
     const parentTask = dialog.sourceTask;
     const parentStage = parentTask?.stage ?? null;
+
+    // 待分配 → 待分配：仅调整层级，不进入阶段分配
+    if (parentStage === null && dialog.targetTask?.stage === null) {
+      const result = this.taskOps.moveTaskToStage(dialog.targetId, null, undefined, dialog.sourceId);
+      if (!result.ok) {
+        this.toast.error('连接失败', result.error?.message || '未知错误');
+      }
+      this.linkTypeDialog.set(null);
+      return;
+    }
+
     const nextStage = parentStage !== null ? parentStage + 1 : 1;
-    
+
     this.taskOps.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
     this.linkTypeDialog.set(null);
   }
@@ -247,7 +258,7 @@ export class FlowLinkService {
     targetId: string,
     x: number,
     y: number
-  ): 'show-dialog' | 'create-cross-tree' | 'create-parent-child' | 'none' {
+  ): 'show-dialog' | 'create-cross-tree' | 'create-parent-child' | 'replace-subtree' | 'none' {
     // 防止自连接
     if (sourceId === targetId) {
       this.toast.warning('无法连接', '节点不能连接到自身');
@@ -258,6 +269,15 @@ export class FlowLinkService {
     const childTask = this.projectState.tasks().find(t => t.id === targetId);
     const sourceTask = this.projectState.tasks().find(t => t.id === sourceId);
     
+    this.logger.info('handleLinkGesture 调用', {
+      sourceId,
+      targetId,
+      sourceStage: sourceTask?.stage,
+      targetStage: childTask?.stage,
+      sourceHasChildren: this.taskOps.getDirectChildren(sourceId).length > 0,
+      targetHasParent: !!childTask?.parentId
+    });
+    
     // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
     // 待分配块 (stage === null) 可以成为其他待分配块的父节点
     // 但不能成为已分配任务 (stage !== null) 的父节点
@@ -265,8 +285,27 @@ export class FlowLinkService {
       this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
       return 'none';
     }
+
+    // ========== 场景1：任务块 → 待分配块（从普通端口拖出新线条） ==========
+    // 当任务块连接到待分配块时，将待分配块及其子树分配给任务块
+    // 使用添加模式（replaceMode = false）：保留源任务原有的子任务
+    if (sourceTask && sourceTask.stage !== null && childTask && childTask.stage === null) {
+      this.logger.info('进入场景1：任务块 → 待分配块（添加模式，保留原有子任务）');
+      return this.handleTaskToUnassignedLink(sourceId, targetId, childTask, false);
+    }
     
     if (childTask?.parentId) {
+      // 待分配 → 待分配：允许在浮动树中重新挂载
+      if (childTask.stage === null && sourceTask?.stage === null) {
+        const result = this.taskOps.moveTaskToStage(childTask.id, null, undefined, sourceTask.id);
+        if (!result.ok) {
+          this.toast.error('连接失败', result.error?.message || '未知错误');
+          return 'none';
+        }
+        this.toast.success('已建立待分配层级', '待分配块已挂载到新的父节点');
+        return 'create-parent-child';
+      }
+
       // 🔴 浮动任务树特殊处理：待分配子任务可以被“认领”
       // 如果目标是待分配区的子任务，允许将其分配到已分配区成为新父任务的子任务
       if (sourceTask && childTask.stage === null && sourceTask.stage !== null && sourceTask.stage !== undefined) {
@@ -291,6 +330,81 @@ export class FlowLinkService {
     // 目标没有父节点，显示选择对话框
     this.showLinkTypeDialog(sourceId, targetId, x, y);
     return 'show-dialog';
+  }
+
+  /**
+   * 处理任务块连接到待分配块的场景（流程图逻辑链条核心）
+   * 
+   * 【行为说明 - 根据 replaceMode 区分】
+   * 
+   * replaceMode = false（从普通端口拖出新线条）：
+   * - 将待分配块及其子树添加为源任务的子节点
+   * - 保留源任务原有的子任务
+   * 
+   * replaceMode = true（连接线重连，拖动下游端点）：
+   * - 只替换 specificChildId 指定的子任务（剥离为待分配块）
+   * - 其他子任务保持不变
+   * - 源任务没有子任务时：直接分配待分配块
+   * 
+   * @param sourceId 源任务块 ID
+   * @param targetId 目标待分配块 ID
+   * @param targetTask 目标待分配块任务对象
+   * @param replaceMode 是否为替换模式（默认 false，即添加模式）
+   * @param specificChildId 要被替换的特定子任务 ID（仅在 replaceMode=true 时使用）
+   * @returns 操作结果
+   */
+  private handleTaskToUnassignedLink(
+    sourceId: string,
+    targetId: string,
+    targetTask: Task,
+    replaceMode: boolean = false,
+    specificChildId?: string
+  ): 'replace-subtree' | 'create-parent-child' | 'none' {
+    // 检查源任务是否已有子任务
+    const existingChildren = this.taskOps.getDirectChildren(sourceId);
+    
+    // 替换模式：当有子任务时执行替换（只替换特定的子任务）
+    if (replaceMode && existingChildren.length > 0 && specificChildId) {
+      // 源任务已有子任务：执行子树替换
+      // 只将 specificChildId 对应的子任务剥离为待分配块
+      // 其他子任务保持不变
+      this.logger.info('执行子树替换（重连模式，只替换特定子任务）', {
+        sourceId,
+        targetId,
+        specificChildId,
+        existingChildrenCount: existingChildren.length,
+        targetHasParent: !!targetTask.parentId
+      });
+
+      const result = this.taskOps.replaceChildSubtreeWithUnassigned(sourceId, targetId, specificChildId);
+      
+      if (result.ok) {
+        // Toast 由 TaskOperationAdapterService 显示，这里不重复
+        return 'replace-subtree';
+      } else {
+        // 错误 Toast 也由 TaskOperationAdapterService 处理
+        return 'none';
+      }
+    } else {
+      // 添加模式 或 源任务没有子任务：直接分配待分配块（保留原有子任务）
+      this.logger.info('分配待分配块给任务（添加模式）', {
+        sourceId,
+        targetId,
+        targetHasParent: !!targetTask.parentId,
+        existingChildrenCount: existingChildren.length,
+        replaceMode
+      });
+
+      const result = this.taskOps.assignUnassignedToTask(sourceId, targetId);
+      
+      if (result.ok) {
+        // Toast 由 TaskOperationAdapterService 显示，这里不重复
+        return 'create-parent-child';
+      } else {
+        // 错误 Toast 也由 TaskOperationAdapterService 处理
+        return 'none';
+      }
+    }
   }
   
   // ========== 子树迁移处理 ==========
@@ -340,6 +454,17 @@ export class FlowLinkService {
       this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
       return 'error';
     }
+
+    // 待分配 → 待分配：仅调整层级，不进入阶段分配
+    if (newParentTask.stage === null && childTask.stage === null) {
+      const moveResult = this.taskOps.moveTaskToStage(childTaskId, null, undefined, newParentId);
+      if (!moveResult.ok) {
+        this.toast.error('迁移失败', moveResult.error?.message || '未知错误');
+        return 'error';
+      }
+      this.toast.success('已建立待分配层级', `已将 "${childTask.title}" 挂载到新的待分配父节点`);
+      return 'success';
+    }
     
     // 收集子树信息用于提示
     const subtreeIds = this.collectSubtreeIds(childTaskId, tasks);
@@ -375,6 +500,112 @@ export class FlowLinkService {
       this.toast.error('迁移失败', errorMessage);
       return 'error';
     }
+  }
+
+  /**
+   * 处理父子连接下游端点（to端）的重连
+   * 
+   * 【场景】用户拖动父子连接线的下游端点到新的目标节点
+   * 
+   * 例如：原连接 A → B，用户将下游端点从 B 拖到 C
+   * - 如果 C 是待分配块：执行子树替换（B 变成待分配，C 成为 A 的新子节点）
+   * - 如果 C 是已分配任务：拒绝操作（一个任务不能有两个父节点）
+   * 
+   * @param parentId 父任务 ID（连接线的 from 端，保持不变）
+   * @param oldChildId 原子任务 ID（被断开的节点）
+   * @param newTargetId 新目标节点 ID（连接线被拖到的节点）
+   * @returns 操作结果
+   */
+  handleParentChildRelinkToEnd(
+    parentId: string,
+    oldChildId: string,
+    newTargetId: string
+  ): 'success' | 'cancelled' | 'error' | 'replace-subtree' {
+    // 防止自连接
+    if (parentId === newTargetId) {
+      this.toast.warning('无法连接', '节点不能连接到自身');
+      return 'error';
+    }
+    
+    // 如果目标相同，无需操作
+    if (oldChildId === newTargetId) {
+      this.logger.debug('目标节点未变化，跳过操作');
+      return 'cancelled';
+    }
+    
+    const tasks = this.projectState.tasks();
+    const parentTask = tasks.find(t => t.id === parentId);
+    const oldChildTask = tasks.find(t => t.id === oldChildId);
+    const newTargetTask = tasks.find(t => t.id === newTargetId);
+    
+    if (!parentTask) {
+      this.toast.error('操作失败', '找不到父任务');
+      return 'error';
+    }
+    
+    if (!newTargetTask) {
+      this.toast.error('操作失败', '找不到目标节点');
+      return 'error';
+    }
+
+    this.logger.info('handleParentChildRelinkToEnd 调用', {
+      parentId,
+      oldChildId,
+      newTargetId,
+      parentStage: parentTask.stage,
+      oldChildStage: oldChildTask?.stage,
+      newTargetStage: newTargetTask.stage
+    });
+    
+    // ========== 场景1：目标是待分配块 ==========
+    // 这是核心功能：将待分配块及其子树分配给父任务
+    // 只替换 oldChildId 对应的子任务（剥离为待分配块），其他子任务保持不变
+    if (newTargetTask.stage === null && parentTask.stage !== null) {
+      this.logger.info('场景1：父子连接下游端点拖到待分配块（替换模式，只替换特定子任务）', {
+        parentId,
+        parentTitle: parentTask.title,
+        oldChildId,
+        newTargetId,
+        newTargetTitle: newTargetTask.title
+      });
+      
+      // 使用 replaceMode = true，并传递 oldChildId 作为要被替换的特定子任务
+      const linkResult = this.handleTaskToUnassignedLink(parentId, newTargetId, newTargetTask, true, oldChildId);
+      // 转换返回类型
+      if (linkResult === 'replace-subtree') return 'replace-subtree';
+      if (linkResult === 'create-parent-child') return 'success';
+      return 'error';
+    }
+    
+    // ========== 场景2：目标是已分配任务块 ==========
+    // 已分配任务已经有自己的父节点（或是根任务），不能再建立父子关系
+    if (newTargetTask.stage !== null) {
+      // 检查目标任务是否已有父节点
+      if (newTargetTask.parentId) {
+        this.toast.warning('无法连接', '目标任务已有父节点，无法建立新的父子关系');
+        return 'error';
+      }
+      
+      // 目标是根任务（没有父节点）
+      // 这种情况可以考虑将目标任务移动到父任务下，但这是一个复杂操作
+      // 暂时不支持，提示用户使用其他方式
+      this.toast.warning('无法连接', '无法将已分配的根任务设为子任务，请使用拖拽节点的方式');
+      return 'error';
+    }
+    
+    // ========== 场景3：父任务是待分配块 ==========
+    // 待分配块之间可以建立父子关系
+    if (parentTask.stage === null && newTargetTask.stage === null) {
+      const result = this.taskOps.moveTaskToStage(newTargetId, null, undefined, parentId);
+      if (!result.ok) {
+        this.toast.error('连接失败', result.error?.message || '未知错误');
+        return 'error';
+      }
+      this.toast.success('已建立待分配层级', '待分配块已挂载到新的父节点');
+      return 'success';
+    }
+    
+    return 'error';
   }
   
   /**

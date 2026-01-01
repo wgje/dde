@@ -853,7 +853,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.diagram.removeLink(gojsLink);
       
       const action = this.link.handleLinkGesture(sourceId, targetId, x, y);
-      if (action === 'create-cross-tree' || action === 'create-parent-child') {
+      if (action === 'create-cross-tree' || action === 'create-parent-child' || action === 'replace-subtree') {
         this.refreshDiagram();
       }
     });
@@ -868,18 +868,26 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       const { changedEnd, oldFromId, oldToId, newFromId, newToId } = relinkInfo;
       
       if (linkType === 'parent-child') {
-        // 父子连接重连：将子任务树迁移到新父任务下
-        // 只处理 from 端（父端）被改变的情况
+        // 父子连接重连
         if (changedEnd === 'from') {
+          // from 端（父端）被改变：将子任务树迁移到新父任务下
           const result = this.link.handleParentChildRelink(newToId, oldFromId, newFromId);
           if (result === 'success') {
             this.refreshDiagram();
           }
         } else {
-          // to 端被改变：这意味着要把连接指向不同的子任务
-          // 对于父子连接，这相当于断开旧子任务的父子关系，建立新的父子关系
-          // 这是一个复杂操作，暂时用警告提示
-          console.warn('[FlowView] 父子连接 to 端重连暂不支持');
+          // to 端（子端/下游端点）被改变：
+          // 这是核心功能 - 用户将连接线下游端点拖到新的目标节点
+          // 常见场景：将父子连接的下游端点拖到待分配块，触发子树替换
+          console.log('[FlowView] 父子连接 to 端重连', { 
+            parentId: newFromId, 
+            oldChildId: oldToId, 
+            newTargetId: newToId 
+          });
+          const result = this.link.handleParentChildRelinkToEnd(newFromId, oldToId, newToId);
+          if (result === 'success' || result === 'replace-subtree') {
+            this.refreshDiagram();
+          }
         }
       } else if (linkType === 'cross-tree') {
         // 跨树连接重连：删除旧连接，创建新连接

@@ -625,6 +625,122 @@ export class TaskOperationAdapterService {
     
     return result;
   }
+
+  // ========== 子树替换操作（流程图逻辑链条功能） ==========
+
+  /**
+   * 将任务块的子树替换为待分配块子树
+   * 
+   * 【核心功能】流程图逻辑链条拖拽
+   * 当用户将任务块的下游连线端点拖到待分配块上时：
+   * 1. 待分配块及其所有子待分配块转换为任务块，分配对应的阶段和编号
+   * 2. 被替换的特定子任务（如果有）被剥离为待分配块，其他子任务保持不变
+   * 
+   * @param sourceTaskId 源任务块 ID（连接线起点/父任务）
+   * @param targetUnassignedId 目标待分配块 ID（将被分配）
+   * @param specificChildId 要被替换的特定子任务 ID（可选，如果不指定则替换所有子任务）
+   * @returns Result 包含操作信息或错误
+   */
+  replaceChildSubtreeWithUnassigned(
+    sourceTaskId: string,
+    targetUnassignedId: string,
+    specificChildId?: string
+  ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
+    // 创建乐观更新快照
+    const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
+    
+    const result = this.taskOps.replaceChildSubtreeWithUnassigned(sourceTaskId, targetUnassignedId, specificChildId);
+    
+    if (result.ok) {
+      const detachedInfo = result.value.detachedSubtreeRootId 
+        ? '，原子任务已移到待分配区' 
+        : '';
+      
+      this.toastService.success(
+        `已分配待分配块${detachedInfo}`,
+        undefined,
+        {
+          duration: 5000,
+          action: {
+            label: '撤销',
+            onClick: () => {
+              this.logger.info('用户撤回子树替换操作', { sourceTaskId, targetUnassignedId, specificChildId });
+              this.performUndo();
+            }
+          }
+        }
+      );
+      
+      this.activeStructureSnapshot = snapshot.id;
+      this.setupSyncResultHandler(snapshot.id);
+    } else {
+      this.optimisticState.rollbackSnapshot(snapshot.id);
+    }
+    
+    return result;
+  }
+
+  /**
+   * 将待分配块（可能有父待分配块）分配为任务块的子节点
+   * 
+   * 【场景】用户从任务块拖线到已有父节点的待分配块
+   * 此时将待分配块从其父待分配块剥离，只将该块及其子树分配给任务块
+   * 
+   * @param sourceTaskId 源任务块 ID
+   * @param targetUnassignedId 目标待分配块 ID（将被分配）
+   * @returns Result
+   */
+  assignUnassignedToTask(
+    sourceTaskId: string,
+    targetUnassignedId: string
+  ): Result<void, OperationError> {
+    // 创建乐观更新快照
+    const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
+    
+    const result = this.taskOps.assignUnassignedToTask(sourceTaskId, targetUnassignedId);
+    
+    if (result.ok) {
+      this.toastService.success(
+        '已分配待分配块',
+        undefined,
+        {
+          duration: 5000,
+          action: {
+            label: '撤销',
+            onClick: () => {
+              this.logger.info('用户撤回待分配块分配操作', { sourceTaskId, targetUnassignedId });
+              this.performUndo();
+            }
+          }
+        }
+      );
+      
+      this.activeStructureSnapshot = snapshot.id;
+      this.setupSyncResultHandler(snapshot.id);
+    } else {
+      this.optimisticState.rollbackSnapshot(snapshot.id);
+    }
+    
+    return result;
+  }
+
+  /**
+   * 检查待分配块是否有父待分配块
+   * @param taskId 待分配块 ID
+   * @returns 父待分配块 ID 或 null
+   */
+  getUnassignedParent(taskId: string): string | null {
+    return this.taskOps.getUnassignedParent(taskId);
+  }
+
+  /**
+   * 获取任务的直接子任务
+   * @param taskId 任务 ID
+   * @returns 子任务数组
+   */
+  getDirectChildren(taskId: string): Task[] {
+    return this.taskOps.getDirectChildren(taskId);
+  }
   
   deleteTaskKeepChildren(taskId: string): void {
     // 获取任务信息用于 Toast 显示
