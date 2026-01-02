@@ -204,6 +204,62 @@ describe('supabase-error', () => {
       expect(result.name).toBe('NetworkTimeoutError');
       expect(result.isRetryable).toBe(true);
     });
+
+    it('应该识别外键约束错误（23503）', () => {
+      const error = { code: '23503', message: 'foreign_key_violation' };
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('ForeignKeyError');
+      expect(result.isRetryable).toBe(false);
+    });
+
+    it('应该识别版本冲突错误（P0001 + version regression）', () => {
+      const error = { 
+        code: 'P0001', 
+        message: 'Version regression not allowed: 5471 -> 5467 (table: projects, id: xxx)' 
+      };
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('VersionConflictError');
+      expect(result.isRetryable).toBe(false);
+      expect(result.message).toContain('版本冲突');
+    });
+
+    it('应该识别任务验证错误（P0001 + task validation）', () => {
+      const error = { 
+        code: 'P0001', 
+        message: 'Task must have either title or content (task_id: 58911898-4099-43c4-8d9f-d45bf5ff7a28)' 
+      };
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('ValidationError');
+      expect(result.isRetryable).toBe(false);
+      // 应该保留原始消息
+      expect(result.message).toContain('Task must have either title or content');
+    });
+
+    it('应该识别其他数据验证错误（P0001 + invalid stage）', () => {
+      const error = { 
+        code: 'P0001', 
+        message: 'Invalid stage value: -1 (must be >= 0)' 
+      };
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('ValidationError');
+      expect(result.isRetryable).toBe(false);
+      expect(result.message).toContain('Invalid stage value');
+    });
+
+    it('应该将其他 P0001 错误归类为 BusinessRuleError', () => {
+      const error = { 
+        code: 'P0001', 
+        message: 'Custom business rule violation' 
+      };
+      const result = supabaseErrorToError(error);
+      
+      expect(result.errorType).toBe('BusinessRuleError');
+      expect(result.isRetryable).toBe(false);
+    });
   });
   
   describe('isRetryableError', () => {

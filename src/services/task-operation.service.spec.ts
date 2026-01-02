@@ -328,3 +328,106 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
     expect(movedChild.parentId).toBeNull();
   });
 });
+
+describe('TaskOperationService (database constraint validation)', () => {
+  let service: TaskOperationService;
+  let project: Project;
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      providers: [TaskOperationService, LayoutService, ToastService],
+    });
+
+    service = TestBed.inject(TaskOperationService);
+    project = createProject({});
+
+    service.setCallbacks({
+      getActiveProject: () => project,
+      onProjectUpdate: (mutator) => {
+        project = mutator(project);
+      },
+      onProjectUpdateDebounced: (mutator) => {
+        project = mutator(project);
+      },
+    });
+  });
+
+  it('addTask 当 title 和 content 都为空时应设置默认 title', () => {
+    const result = service.addTask({
+      title: '',
+      content: '',
+      targetStage: 1,
+      parentId: null,
+      isSibling: false
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const newTask = project.tasks.find(t => t.id === result.value);
+      expect(newTask).toBeDefined();
+      expect(newTask!.title).toBe('新任务');
+    }
+  });
+
+  it('updateTaskTitle 当 title 为空且 content 为空时应设置默认 title', () => {
+    const task = createTask({ id: 'task-1', title: '原标题', content: '' });
+    project = createProject({ tasks: [task] });
+
+    service.updateTaskTitle('task-1', '');
+
+    const updatedTask = project.tasks.find(t => t.id === 'task-1')!;
+    expect(updatedTask.title).toBe('新任务');
+  });
+
+  it('updateTaskContent 当 content 为空且 title 为空时应设置默认 title', () => {
+    const task = createTask({ id: 'task-1', title: '', content: '原内容' });
+    project = createProject({ tasks: [task] });
+
+    service.updateTaskContent('task-1', '');
+
+    const updatedTask = project.tasks.find(t => t.id === 'task-1')!;
+    expect(updatedTask.title).toBe('新任务');
+  });
+
+  it('addTask 当 title 有值但 content 为空时不应修改 title', () => {
+    const result = service.addTask({
+      title: '我的标题',
+      content: '',
+      targetStage: 1,
+      parentId: null,
+      isSibling: false
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const newTask = project.tasks.find(t => t.id === result.value);
+      expect(newTask!.title).toBe('我的标题');
+    }
+  });
+
+  it('addFloatingTask 当 title 和 content 都为空时应设置默认 title', () => {
+    service.addFloatingTask('', '', 100, 200);
+
+    const floatingTasks = project.tasks.filter(t => t.stage === null);
+    expect(floatingTasks.length).toBeGreaterThan(0);
+    const newTask = floatingTasks[floatingTasks.length - 1];
+    expect(newTask.title).toBe('新任务');
+    expect(newTask.x).toBe(100);
+    expect(newTask.y).toBe(200);
+  });
+
+  it('updateTaskTitle 和 updateTaskContent 组合清空时应设置默认 title', () => {
+    const task = createTask({ id: 'task-combo', title: '有标题', content: '有内容' });
+    project = createProject({ tasks: [task] });
+
+    // 先清空 content
+    service.updateTaskContent('task-combo', '');
+    let updatedTask = project.tasks.find(t => t.id === 'task-combo')!;
+    expect(updatedTask.title).toBe('有标题'); // title 还有值，不应修改
+
+    // 再清空 title，此时两者都为空
+    service.updateTaskTitle('task-combo', '');
+    updatedTask = project.tasks.find(t => t.id === 'task-combo')!;
+    expect(updatedTask.title).toBe('新任务'); // 应设置默认值
+  });
+});

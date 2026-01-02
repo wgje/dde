@@ -23,7 +23,9 @@ import { CircuitBreakerService } from '../../../services/circuit-breaker.service
 import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
-import { supabaseErrorToError } from '../../../utils/supabase-error';
+import { supabaseErrorToError, EnhancedError } from '../../../utils/supabase-error';
+import { supabaseWithRetry } from '../../../utils/timeout';
+import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG, SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import * as Sentry from '@sentry/angular';
@@ -206,6 +208,41 @@ export class SimpleSyncService {
   
   /** Realtime 是否启用（运行时可切换） */
   readonly isRealtimeEnabled = signal<boolean>(SYNC_CONFIG.REALTIME_ENABLED);
+  
+  /**
+   * 处理会话过期错误（统一入口，防止重复 Toast）
+   * @param context 操作上下文（用于日志）
+   * @param details 详细信息（用于日志）
+   * @returns 始终返回 false（表示操作失败）
+   */
+  private handleSessionExpired(context: string, details?: Record<string, unknown>): never {
+    // 幂等性保护：只在首次检测时设置标志和显示提示
+    if (!this.syncState().sessionExpired) {
+      this.syncState.update(s => ({ ...s, sessionExpired: true }));
+      this.logger.warn(`检测到会话过期: ${context}`, details);
+      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+    } else {
+      // 已经标记过期，仅记录日志
+      this.logger.debug(`会话已过期（已标记）: ${context}`, details);
+    }
+    // 抛出永久失败异常，防止重试
+    throw new PermanentFailureError(
+      'Session expired',
+      undefined,
+      { context, ...details }
+    );
+  }
+  
+  /**
+   * 检查错误是否为会话过期错误（401, 42501 RLS, AuthError）
+   */
+  private isSessionExpiredError(error: EnhancedError): boolean {
+    return (
+      error.errorType === 'AuthError' ||
+      error.code === 401 || error.code === '401' ||
+      error.code === 42501 || error.code === '42501'
+    );
+  }
   
   constructor() {
     this.loadRetryQueueFromStorage(); // 恢复持久化的重试队列
@@ -647,16 +684,17 @@ export class SimpleSyncService {
    * - 使用限流服务控制并发请求数量，避免连接池耗尽
    * 
    * 【关键防护】防止已删除任务复活
-   * - 推送前检查 task_tombstones 表
+   * - 推送前检查 task_tombstones 表（除非调用方已完成批量过滤）
    * - 如果任务已在 tombstones 中，跳过推送避免复活
+   * 
+   * @param skipTombstoneCheck 跳过 tombstone 检查（调用方已批量过滤时使用）
+   * @returns Promise<boolean> 成功返回 true，失败返回 false
+   * @throws {PermanentFailureError} 版本冲突或会话过期时抛出，不应重试
    */
-  async pushTask(task: Task, projectId: string): Promise<boolean> {
+  async pushTask(task: Task, projectId: string, skipTombstoneCheck = false): Promise<boolean> {
     // 【Critical #1】会话过期检查 - 阻止在会话过期后继续同步
     if (this.syncState().sessionExpired) {
-      this.logger.warn('会话已过期，同步被阻止', { taskId: task.id });
-      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      // 不加入 RetryQueue（会话过期后重试无意义，需要重新登录）
-      return false;
+      this.handleSessionExpired('pushTask', { taskId: task.id, projectId });
     }
     
     // Circuit Breaker 检查：如果熔断中，直接加入重试队列
@@ -672,29 +710,39 @@ export class SimpleSyncService {
       return false;
     }
     
-    // 【关键修复】用于跟踪 tombstone 跳过情况，避免将未推送的任务标记为成功
-    let skippedDueToTombstone = false;
-    
     try {
+      // 【Critical】验证用户会话，防止 RLS 策略违规
+      const { data: { session } } = await client.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) {
+        // 检测到会话丢失，设置 sessionExpired 标志并停止同步
+        this.syncState.update(s => ({ ...s, sessionExpired: true }));
+        this.logger.warn('检测到会话丢失', { taskId: task.id, operation: 'pushTask' });
+        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        // 不加入重试队列（会话过期后重试无意义，需要重新登录）
+        return false;
+      }
+      
       await this.throttle.execute(
         `push-task:${task.id}`,
         async () => {
-          // 【关键防护】检查任务是否已被永久删除（在 tombstones 中）
-          const { data: tombstone } = await client
-            .from('task_tombstones')
-            .select('task_id')
-            .eq('task_id', task.id)
-            .maybeSingle();
-          
-          if (tombstone) {
-            // 任务已被永久删除，跳过推送，防止复活
-            // 【关键修复】标记为 tombstone 跳过，外层应返回 false 以防止连接推送
-            this.logger.info('跳过推送已删除任务（tombstone 保护）', { 
-              taskId: task.id, 
-              projectId 
-            });
-            skippedDueToTombstone = true;
-            return; // 直接返回，不执行 upsert
+          // 【防御层 #1】tombstone 检查（除非调用方已批量过滤）
+          // skipTombstoneCheck=true: 调用方已通过批量查询过滤，跳过单独检查（性能优化）
+          // skipTombstoneCheck=false: 调用方未过滤，执行单独检查（防止复活，fail-safe）
+          if (!skipTombstoneCheck) {
+            const { data: tombstone } = await client
+              .from('task_tombstones')
+              .select('task_id')
+              .eq('task_id', task.id)
+              .maybeSingle();
+            
+            if (tombstone) {
+              this.logger.info('pushTask: 跳过已删除任务（tombstone 防护）', { 
+                taskId: task.id, 
+                projectId 
+              });
+              return; // 直接返回，不执行 upsert
+            }
           }
           
           await this.retryWithBackoff(async () => {
@@ -723,18 +771,17 @@ export class SimpleSyncService {
         { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }  // 30秒超时，平衡用户体验
       );
       
-      // 【关键修复】tombstone 跳过时返回 false，防止该任务被标记为成功
-      // 这样连接过滤器会跳过引用此任务的连接，避免外键约束违规
-      if (skippedDueToTombstone) {
-        return false;
-      }
-      
       // Circuit Breaker: 记录成功
       this.recordCircuitSuccess();
       this.state.update(s => ({ ...s, lastSyncTime: nowISO() }));
       return true;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
+      
+      // 【修复】检测会话过期错误，使用统一处理
+      if (this.isSessionExpiredError(enhanced)) {
+        this.handleSessionExpired('pushTask', { taskId: task.id, projectId, errorCode: enhanced.code });
+      }
       
       // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
       if (enhanced.errorType === 'VersionConflictError') {
@@ -745,8 +792,12 @@ export class SimpleSyncService {
           tags: { operation: 'pushTask', taskId: task.id, projectId },
           extra: { taskUpdatedAt: task.updatedAt }
         });
-        // 不加入重试队列，返回 false 让调用者处理
-        return false;
+        // 抛出永久失败错误，让 processRetryQueue 知道不要重试
+        throw new PermanentFailureError(
+          'Version conflict',
+          enhanced,
+          { operation: 'pushTask', taskId: task.id, projectId }
+        );
       }
       
       // Circuit Breaker: 记录失败（仅网络错误）
@@ -775,7 +826,17 @@ export class SimpleSyncService {
         }
       });
       
-      this.addToRetryQueue('task', 'upsert', task, projectId);
+      // 【关键修复】只有可重试的错误才加入重试队列
+      // 数据验证错误（如 "Task must have either title or content"）是不可重试的
+      if (enhanced.isRetryable) {
+        this.addToRetryQueue('task', 'upsert', task, projectId);
+      } else {
+        this.logger.warn('不可重试的错误，不加入重试队列', {
+          taskId: task.id,
+          errorType: enhanced.errorType,
+          message: enhanced.message
+        });
+      }
       return false;
     }
   }
@@ -845,6 +906,11 @@ export class SimpleSyncService {
    * 删除云端任务
    */
   async deleteTask(taskId: string, projectId: string): Promise<boolean> {
+    // 【Critical】会话过期检查 - 阻止在会话过期后继续同步
+    if (this.syncState().sessionExpired) {
+      this.handleSessionExpired('deleteTask', { taskId, projectId });
+    }
+    
     const client = this.getSupabaseClient();
     if (!client) {
       this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
@@ -865,9 +931,33 @@ export class SimpleSyncService {
       
       return true;
     } catch (e) {
-      this.logger.error('删除任务失败', e);
-      Sentry.captureException(e, { tags: { operation: 'deleteTask' } });
-      this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
+      const enhanced = supabaseErrorToError(e);
+      
+      // 【修复】检测会话过期错误
+      if (this.isSessionExpiredError(enhanced)) {
+        this.handleSessionExpired('deleteTask', { taskId, projectId, errorCode: enhanced.code });
+      }
+      
+      this.logger.error('删除任务失败', enhanced);
+      Sentry.captureException(enhanced, { 
+        tags: { 
+          operation: 'deleteTask',
+          errorType: enhanced.errorType,
+          isRetryable: String(enhanced.isRetryable)
+        },
+        level: enhanced.isRetryable ? 'info' : 'error'
+      });
+      
+      // 【关键修复】只有可重试的错误才加入重试队列
+      if (enhanced.isRetryable) {
+        this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
+      } else {
+        this.logger.warn('不可重试的删除错误，不加入重试队列', {
+          taskId,
+          errorType: enhanced.errorType,
+          message: enhanced.message
+        });
+      }
       return false;
     }
   }
@@ -1012,7 +1102,7 @@ export class SimpleSyncService {
     const client = this.getSupabaseClient();
     if (!client) {
       this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
-      // 离线时加入重试队列
+      // 【关键修复】离线时加入重试队列（离线是可重试的网络问题）
       for (const taskId of taskIds) {
         this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
       }
@@ -1231,10 +1321,7 @@ export class SimpleSyncService {
   async pushProject(project: Project): Promise<boolean> {
     // 【Critical #6】会话过期检查 - 阻止在会话过期后继续同步
     if (this.syncState().sessionExpired) {
-      this.logger.warn('会话已过期，项目同步被阻止', { projectId: project.id });
-      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      // 不加入 RetryQueue（会话过期后重试无意义，需要重新登录）
-      return false;
+      this.handleSessionExpired('pushProject', { projectId: project.id });
     }
     
     const client = this.getSupabaseClient();
@@ -1251,7 +1338,8 @@ export class SimpleSyncService {
           const { data: { session } } = await client.auth.getSession();
           const userId = session?.user?.id;
           if (!userId) {
-            throw new Error('用户未登录');
+            // 【修复】检测到会话丢失，handleSessionExpired 会抛出永久失败异常
+            this.handleSessionExpired('pushProject.getSession', { projectId: project.id });
           }
           
           const { error } = await client
@@ -1274,6 +1362,12 @@ export class SimpleSyncService {
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
       
+      // 【修复】会话过期标记错误 - 已经处理过，直接返回
+      // 检测会话过期错误（401, 42501）
+      if (this.isSessionExpiredError(enhanced)) {
+        this.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
+      }
+      
       // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
       if (enhanced.errorType === 'VersionConflictError') {
         this.logger.warn('推送项目版本冲突', { projectId: project.id });
@@ -1283,8 +1377,12 @@ export class SimpleSyncService {
           tags: { operation: 'pushProject', projectId: project.id },
           extra: { projectVersion: project.version }
         });
-        // 不加入重试队列，返回 false 让调用者处理
-        return false;
+        // 抛出永久失败错误，让 processRetryQueue 知道不要重试
+        throw new PermanentFailureError(
+          'Version conflict',
+          enhanced,
+          { operation: 'pushProject', projectId: project.id }
+        );
       }
       
       // 根据错误类型选择日志级别
@@ -1307,7 +1405,17 @@ export class SimpleSyncService {
         }
       });
       
-      this.addToRetryQueue('project', 'upsert', project);
+      // 【关键修复】只有可重试的错误才加入重试队列
+      // 版本回退错误（"Version regression not allowed"）是不可重试的
+      if (enhanced.isRetryable) {
+        this.addToRetryQueue('project', 'upsert', project);
+      } else {
+        this.logger.warn('不可重试的错误，不加入重试队列', {
+          projectId: project.id,
+          errorType: enhanced.errorType,
+          message: enhanced.message
+        });
+      }
       return false;
     }
   }
@@ -1355,7 +1463,14 @@ export class SimpleSyncService {
    * 【关键修复】推送前验证引用的任务存在，防止外键约束违规
    * 【P0 防复活】推送前检查 connection_tombstones 表，防止已删除连接复活
    */
-  async pushConnection(connection: Connection, projectId: string): Promise<boolean> {
+  async pushConnection(connection: Connection, projectId: string, skipTombstoneCheck = false): Promise<boolean> {
+    // 【Critical】会话过期检查 - 阻止在会话过期后继续同步
+    if (this.syncState().sessionExpired) {
+      this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
+      // 不加入 RetryQueue（会话过期后重试无意义，需要重新登录）
+      return false;
+    }
+    
     const client = this.getSupabaseClient();
     if (!client) {
       this.addToRetryQueue('connection', 'upsert', connection, projectId);
@@ -1363,42 +1478,52 @@ export class SimpleSyncService {
     }
     
     try {
-      // 【P0 防复活】检查连接是否已被永久删除（在 connection_tombstones 中）
-      const { data: tombstone } = await client
-        .from('connection_tombstones')
-        .select('connection_id')
-        .eq('connection_id', connection.id)
-        .maybeSingle();
-      
-      if (tombstone) {
-        // 连接已被永久删除，跳过推送，防止复活
-        this.logger.info('跳过推送已删除连接（tombstone 保护）', { 
-          connectionId: connection.id, 
-          projectId 
-        });
+      // 【Critical】验证用户会话，防止 RLS 策略违规
+      const { data: { session } } = await client.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) {
+        // 检测到会话丢失，设置 sessionExpired 标志并停止同步
+        this.syncState.update(s => ({ ...s, sessionExpired: true }));
+        this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
+        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        // 不加入重试队列（会话过期后重试无意义，需要重新登录）
         return false;
       }
       
+      // 【防御层 #1】tombstone 检查（除非调用方已批量过滤）
+      if (!skipTombstoneCheck) {
+        const { data: tombstone } = await client
+          .from('connection_tombstones')
+          .select('connection_id')
+          .eq('connection_id', connection.id)
+          .maybeSingle();
+        
+        if (tombstone) {
+          this.logger.info('pushConnection: 跳过已删除连接（tombstone 防护）', { 
+            connectionId: connection.id, 
+            projectId 
+          });
+          return false;
+        }
+      }
+      
       // 【关键修复】推送前验证引用的任务存在性，防止外键约束违规
-      // 【超时保护】5秒超时，防止数据库查询挂起阻塞同步
+      // 【超时保护】使用 supabaseWithRetry 实现 10 秒超时 + 自动重试（最多3次）
       // 【重要】不过滤 deleted_at，因为数据库外键约束只检查任务行是否存在，不管软删除状态
       // 软删除的任务仍然在 tasks 表中，满足外键约束
-      const queryPromise = client
-        .from('tasks')
-        .select('id')
-        .in('id', [connection.source, connection.target])
-        .eq('project_id', projectId);
-      
-      const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Task existence check timeout')), 5000)
-      );
-      
       let existingTasks: Array<{ id: string }> | null = null;
       try {
-        const result = await Promise.race([
-          queryPromise,
-          timeoutPromise
-        ]) as { data: Array<{ id: string }> | null; error: unknown };
+        const result = await supabaseWithRetry(
+          () => client
+            .from('tasks')
+            .select('id')
+            .in('id', [connection.source, connection.target])
+            .eq('project_id', projectId),
+          {
+            timeout: 'STANDARD', // 10秒超时
+            maxRetries: 3        // 最多重试3次（指数退避：500ms, 1s, 2s）
+          }
+        );
         
         // 【关键修复】检查 Supabase 查询错误
         if (result.error) {
@@ -1412,27 +1537,31 @@ export class SimpleSyncService {
         }
         
         existingTasks = result.data;
-      } catch (timeoutError) {
-        // 【超时处理】查询超时视为任务不存在（fail-safe），不推送连接
-        this.logger.warn('任务存在性查询超时，跳过连接推送', {
+      } catch (error) {
+        // 【错误处理】查询超时或失败视为任务不存在（fail-safe），不推送连接
+        this.logger.warn('任务存在性查询失败（超时或错误），跳过连接推送', {
           connectionId: connection.id,
           source: connection.source,
           target: connection.target,
-          error: timeoutError instanceof Error ? timeoutError.message : String(timeoutError)
+          error: error instanceof Error ? error.message : String(error)
         });
         
-        Sentry.captureMessage('任务存在性查询超时', {
+        Sentry.captureMessage('任务存在性查询失败', {
           level: 'warning',
-          tags: { operation: 'pushConnection', errorType: 'QUERY_TIMEOUT' },
+          tags: { 
+            operation: 'pushConnection', 
+            errorType: error instanceof Error && error.message.includes('timeout') ? 'QUERY_TIMEOUT' : 'QUERY_ERROR'
+          },
           extra: {
             connectionId: connection.id,
             projectId,
             source: connection.source,
-            target: connection.target
+            target: connection.target,
+            errorMessage: error instanceof Error ? error.message : String(error)
           }
         });
         
-        return false; // 超时不加入重试队列，避免累积
+        return false; // 失败不加入重试队列，避免累积
       }
       
       const existingTaskIds = new Set((existingTasks || []).map(t => t.id));
@@ -1500,8 +1629,12 @@ export class SimpleSyncService {
           level: 'warning',
           tags: { operation: 'pushConnection', connectionId: connection.id, projectId }
         });
-        // 不加入重试队列，返回 false 让调用者处理
-        return false;
+        // 抛出永久失败错误，让 processRetryQueue 知道不要重试
+        throw new PermanentFailureError(
+          'Version conflict',
+          enhanced,
+          { operation: 'pushConnection', connectionId: connection.id, projectId }
+        );
       }
       
       // 【关键修复】外键约束错误不可重试
@@ -1573,7 +1706,16 @@ export class SimpleSyncService {
         }
       });
       
-      this.addToRetryQueue('connection', 'upsert', connection, projectId);
+      // 【关键修复】只有可重试的错误才加入重试队列
+      if (enhanced.isRetryable) {
+        this.addToRetryQueue('connection', 'upsert', connection, projectId);
+      } else {
+        this.logger.warn('不可重试的错误，不加入重试队列', {
+          connectionId: connection.id,
+          errorType: enhanced.errorType,
+          message: enhanced.message
+        });
+      }
       return false;
     }
   }
@@ -1971,9 +2113,85 @@ export class SimpleSyncService {
       return order[a.type] - order[b.type];
     });
     
+    // 【性能优化 v2026-01】批量过滤已在 tombstone 中的任务和连接
+    // 避免在 pushTask/pushConnection 中逐个查询 tombstones
+    let filteredItems = sortedItems;
+    const client = this.getSupabaseClient();
+    if (client) {
+      try {
+        // 收集所有需要检查的任务和连接ID
+        const taskIdsToCheck = new Set<string>();
+        const connectionIdsToCheck = new Set<string>();
+        const projectIds = new Set<string>();
+        
+        for (const item of sortedItems) {
+          if (item.type === 'task' && item.operation === 'upsert') {
+            taskIdsToCheck.add(item.data.id);
+            if (item.projectId) projectIds.add(item.projectId);
+          } else if (item.type === 'connection' && item.operation === 'upsert') {
+            connectionIdsToCheck.add(item.data.id);
+            if (item.projectId) projectIds.add(item.projectId);
+          }
+        }
+        
+        // 批量查询 tombstones（按项目）
+        const allTaskTombstones = new Set<string>();
+        const allConnectionTombstones = new Set<string>();
+        
+        for (const projectId of projectIds) {
+          if (taskIdsToCheck.size > 0) {
+            const taskTombstones = await this.getTombstoneIds(projectId);
+            for (const id of taskTombstones) {
+              allTaskTombstones.add(id);
+            }
+          }
+          if (connectionIdsToCheck.size > 0) {
+            const connTombstones = await this.getConnectionTombstoneIds(projectId);
+            for (const id of connTombstones) {
+              allConnectionTombstones.add(id);
+            }
+          }
+        }
+        
+        // 过滤掉 tombstone 中的项
+        filteredItems = sortedItems.filter(item => {
+          if (item.type === 'task' && item.operation === 'upsert') {
+            if (allTaskTombstones.has(item.data.id)) {
+              this.logger.info('processRetryQueue: 跳过 tombstone 任务', { taskId: item.data.id });
+              return false;
+            }
+          } else if (item.type === 'connection' && item.operation === 'upsert') {
+            if (allConnectionTombstones.has(item.data.id)) {
+              this.logger.info('processRetryQueue: 跳过 tombstone 连接', { connectionId: item.data.id });
+              return false;
+            }
+          }
+          return true;
+        });
+        
+        if (filteredItems.length < sortedItems.length) {
+          this.logger.info('processRetryQueue: 过滤了 tombstone 项', {
+            original: sortedItems.length,
+            filtered: filteredItems.length
+          });
+        }
+      } catch (e) {
+        this.logger.warn('processRetryQueue: 批量查询 tombstones 失败，依赖单独检查', e);
+        // 【关键】失败时不跳过单独检查，让 pushTask/pushConnection 执行 tombstone 验证
+        Sentry.captureException(e, {
+          level: 'warning',
+          tags: { operation: 'processRetryQueue', phase: 'batch_tombstone_filter' },
+          extra: { itemCount: sortedItems.length }
+        });
+      }
+    }
+    
+    // 【防御层 #2】追踪批量过滤是否成功
+    const batchFilterSucceeded = filteredItems !== sortedItems;
+    
     // 【关键修复】追踪本批次尝试同步的任务 ID
     const taskIdsInBatch = new Set<string>(
-      sortedItems
+      filteredItems
         .filter(item => item.type === 'task' && item.operation === 'upsert')
         .map(item => item.data.id)
     );
@@ -1982,7 +2200,7 @@ export class SimpleSyncService {
     const successfulTaskIds = new Set<string>();
     
     // 【性能优化】批量查询所有连接引用的任务是否存在
-    const connectionItems = sortedItems.filter(item => item.type === 'connection');
+    const connectionItems = filteredItems.filter(item => item.type === 'connection');
     const allReferencedTaskIds = new Set<string>();
     for (const item of connectionItems) {
       const conn = item.data as Connection;
@@ -2024,13 +2242,14 @@ export class SimpleSyncService {
       }
     }
     
-    for (const item of sortedItems) {
+    for (const item of filteredItems) {
       let success = false;
       
       try {
         if (item.type === 'task') {
           if (item.operation === 'upsert') {
-            success = await this.pushTask(item.data as Task, item.projectId!);
+            // 仅当批量过滤成功时才跳过单独 tombstone 检查
+            success = await this.pushTask(item.data as Task, item.projectId!, batchFilterSucceeded);
             if (success) {
               successfulTaskIds.add(item.data.id);
             }
@@ -2102,11 +2321,36 @@ export class SimpleSyncService {
             continue;
           }
           
-          success = await this.pushConnection(conn, item.projectId!);
+          // 仅当批量过滤成功时才跳过单独 tombstone 检查
+          success = await this.pushConnection(conn, item.projectId!, batchFilterSucceeded);
         }
       } catch (e) {
+        // 【关键修复】检查是否为永久失败（如版本冲突、会话过期）
+        if (isPermanentFailureError(e)) {
+          this.logger.warn('检测到永久失败，移除队列项', {
+            type: item.type,
+            id: item.data.id,
+            error: e.getFullMessage(),
+            context: e.context,
+            stack: e.stack
+          });
+          continue; // 跳过，不加回队列
+        }
+        
         this.logger.error('重试失败', e);
         Sentry.captureException(e, { tags: { operation: 'retryQueue', type: item.type } });
+        // 检查是否为不可重试的错误
+        const enhanced = supabaseErrorToError(e);
+        if (!enhanced.isRetryable) {
+          // 不可重试的错误（如数据验证错误），直接丢弃
+          this.logger.warn('检测到不可重试错误，移除队列项', {
+            type: item.type,
+            id: item.data.id,
+            errorType: enhanced.errorType,
+            message: enhanced.message
+          });
+          continue; // 跳过，不加回队列
+        }
       }
       
       if (!success) {
@@ -2686,6 +2930,24 @@ export class SimpleSyncService {
       return { success: false };
     }
     
+    // 【性能优化】在批量操作开始前进行一次 session 验证
+    // 避免在每个 pushTask/pushConnection 中重复检查（40+ 次 → 1 次）
+    try {
+      const { data: { session } } = await client.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) {
+        this.syncState.update(s => ({ ...s, sessionExpired: true }));
+        this.logger.warn('批量推送前检测到会话丢失', { projectId: project.id, operation: 'saveProjectToCloud' });
+        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        return { success: false };
+      }
+    } catch (e) {
+      this.logger.error('Session 验证失败', e);
+      this.syncState.update(s => ({ ...s, sessionExpired: true }));
+      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+      return { success: false };
+    }
+    
     this.syncState.update(s => ({ ...s, isSyncing: true }));
     
     try {
@@ -2741,19 +3003,44 @@ export class SimpleSyncService {
       const successfulTaskIds = new Set<string>();
       for (let i = 0; i < sortedTasks.length; i++) {
         if (i > 0) {
-          await this.delay(100); // 防止连续请求触发 504/429
+          // 【优化 v2026-01】增加到200ms，降低后端累积压力，减少504超时
+          await this.delay(200);
         }
-        const success = await this.pushTask(sortedTasks[i], project.id);
-        if (success) {
-          successfulTaskIds.add(sortedTasks[i].id);
+        // skipTombstoneCheck=true: 已在上方通过 getTombstoneIds 批量过滤
+        try {
+          const success = await this.pushTask(sortedTasks[i], project.id, true);
+          if (success) {
+            successfulTaskIds.add(sortedTasks[i].id);
+          }
+        } catch (e) {
+          // 【Critical】永久失败（版本冲突、会话过期）不应中断整个批量同步
+          if (isPermanentFailureError(e)) {
+            this.logger.warn('跳过永久失败的任务，继续批量同步', {
+              taskId: sortedTasks[i].id,
+              error: e.getFullMessage(),
+              context: e.context
+            });
+            // 不加入成功集合，继续下一个任务
+            continue;
+          }
+          // 非永久失败的错误，重新抛出（会话初始化失败等）
+          throw e;
         }
       }
       
       // 3. 批量保存连接（请求间延迟 100ms 防止速率限制）
+      // 【性能优化 v2026-01】批量获取连接 tombstones，避免 pushConnection 中的逐个查询
+      const connectionTombstoneIds = await this.getConnectionTombstoneIds(project.id);
+      
       // 【修复数据漂移】过滤软删除的连接，与远程查询逻辑保持一致
       // 【关键修复】过滤引用未同步成功任务的连接，防止外键约束违反
+      // 【P0 防复活】过滤已在 tombstone 中的连接
       const connectionsToSync = project.connections.filter(conn => {
         if (conn.deletedAt) return false;
+        if (connectionTombstoneIds.has(conn.id)) {
+          this.logger.info('saveProjectToCloud: 跳过 tombstone 连接', { connectionId: conn.id });
+          return false;
+        }
         if (!successfulTaskIds.has(conn.source) || !successfulTaskIds.has(conn.target)) {
           this.logger.warn('跳过连接（引用的任务未同步成功）', {
             connectionId: conn.id,
@@ -2768,17 +3055,35 @@ export class SimpleSyncService {
       });
       
       if (connectionsToSync.length !== project.connections.length) {
-        this.logger.info('saveProjectToCloud: 过滤了软删除连接', {
+        this.logger.info('saveProjectToCloud: 过滤了软删除/tombstone 连接', {
           original: project.connections.length,
-          filtered: connectionsToSync.length
+          filtered: connectionsToSync.length,
+          tombstoneCount: connectionTombstoneIds.size
         });
       }
       
       for (let i = 0; i < connectionsToSync.length; i++) {
         if (i > 0) {
-          await this.delay(100); // 防止连续请求触发 504/429
+          // 【优化 v2026-01】增加到200ms，降低后端累积压力，减少504超时
+          await this.delay(200);
         }
-        await this.pushConnection(connectionsToSync[i], project.id);
+        // skipTombstoneCheck=true: 已在上方通过 getConnectionTombstoneIds 批量过滤
+        try {
+          await this.pushConnection(connectionsToSync[i], project.id, true);
+        } catch (e) {
+          // 【Critical】永久失败（版本冲突、会话过期）不应中断整个批量同步
+          if (isPermanentFailureError(e)) {
+            this.logger.warn('跳过永久失败的连接，继续批量同步', {
+              connectionId: connectionsToSync[i].id,
+              error: e.getFullMessage(),
+              context: e.context
+            });
+            // 继续下一个连接
+            continue;
+          }
+          // 非永久失败的错误，重新抛出（会话初始化失败等）
+          throw e;
+        }
       }
       
       this.syncState.update(s => ({

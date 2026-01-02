@@ -255,8 +255,10 @@ export class TaskTrashService {
         if (idsToRestore.has(t.id)) {
           const meta = t.deletedMeta as DeletedTaskMeta | undefined;
           const { deletedConnections: _deletedConnections, deletedMeta: _deletedMeta, ...rest } = t;
+          
+          let restored;
           if (meta) {
-            return {
+            restored = {
               ...rest,
               deletedAt: null,
               parentId: meta.parentId,
@@ -266,8 +268,17 @@ export class TaskTrashService {
               x: meta.x,
               y: meta.y,
             };
+          } else {
+            restored = { ...rest, deletedAt: null };
           }
-          return { ...rest, deletedAt: null };
+          
+          // 🔴 数据库约束：确保 title 和 content 不能同时为空
+          if ((!restored.title || restored.title.trim() === '') && 
+              (!restored.content || restored.content.trim() === '')) {
+            restored.title = '新任务';
+          }
+          
+          return restored;
         }
         return t;
       });

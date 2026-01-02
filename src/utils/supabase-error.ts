@@ -116,16 +116,36 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
   } else if (code === 403 || code === '403') {
     message = '权限不足 (403 Forbidden)';
     errorType = 'PermissionError';
+  } else if (code === '42501' || code === 42501) {
+    // Postgres RLS (Row-Level Security) policy violation
+    message = '权限不足或登录已过期 (RLS Policy Violation)';
+    errorType = 'AuthError';
   } else if (code === '23503' || code === 23503) {
     // Postgres 外键约束错误
     message = '关联数据尚未同步 (Foreign Key Violation)';
     errorType = 'ForeignKeyError';
-  } else if (code === 'P0001' || code === 'PGRST' || 
-             (message && typeof message === 'string' && 
-              message.toLowerCase().includes('version regression not allowed'))) {
-    // Postgres raise_exception - 乐观锁版本冲突
-    message = '版本冲突：数据已被修改，请刷新后重试';
-    errorType = 'VersionConflictError';
+  } else if (code === 'P0001' || code === 'PGRST') {
+    // Postgres raise_exception - 需要根据消息内容进一步识别
+    const lowerMsg = (message && typeof message === 'string') ? message.toLowerCase() : '';
+    
+    if (lowerMsg.includes('version regression not allowed')) {
+      // 乐观锁版本冲突
+      message = '版本冲突：数据已被修改，请刷新后重试';
+      errorType = 'VersionConflictError';
+    } else if (lowerMsg.includes('task must have either title or content')) {
+      // 任务数据验证错误
+      errorType = 'ValidationError';
+      // 保持原始消息
+    } else if (lowerMsg.includes('invalid stage value') || 
+               lowerMsg.includes('invalid rank value')) {
+      // 其他数据验证错误
+      errorType = 'ValidationError';
+      // 保持原始消息
+    } else {
+      // 其他 P0001 错误，使用通用业务规则错误类型
+      errorType = 'BusinessRuleError';
+      // 保持原始消息
+    }
   } else if (message && typeof message === 'string') {
     // 如果没有状态码，尝试从消息中识别错误类型
     const lowerMsg = message.toLowerCase();

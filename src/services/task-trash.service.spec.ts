@@ -219,6 +219,44 @@ describe('TaskTrashService', () => {
       expect(restoredTask?.deletedAt).toBeNull();
       expect(restoredTask?.stage).toBe(1);
     });
+
+    it('恢复 title 和 content 都为空的任务应设置默认 title', () => {
+      const task = createTask({ 
+        id: 'task-empty', 
+        title: '',
+        content: '',
+        deletedAt: new Date().toISOString(),
+        stage: null 
+      });
+      // 模拟 deletedMeta
+      (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
+      currentProject = createProject([task]);
+      
+      const result = service.restoreTask('task-empty');
+      
+      expect(result.restoredTaskIds.has('task-empty')).toBe(true);
+      const restoredTask = currentProject.tasks.find(t => t.id === 'task-empty');
+      expect(restoredTask?.title).toBe('新任务');
+      expect(restoredTask?.deletedAt).toBeNull();
+    });
+
+    it('恢复有 content 的任务不应修改空 title', () => {
+      const task = createTask({ 
+        id: 'task-content', 
+        title: '',
+        content: '有内容',
+        deletedAt: new Date().toISOString(),
+        stage: null 
+      });
+      (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
+      currentProject = createProject([task]);
+      
+      const result = service.restoreTask('task-content');
+      
+      const restoredTask = currentProject.tasks.find(t => t.id === 'task-content');
+      expect(restoredTask?.title).toBe('');
+      expect(restoredTask?.content).toBe('有内容');
+    });
   });
   
   describe('获取回收站任务', () => {

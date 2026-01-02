@@ -154,7 +154,14 @@ export class TaskOperationService {
    * @returns Result 包含新任务 ID 或错误信息
    */
   addTask(params: CreateTaskParams): Result<string, OperationError> {
-    const { title, content, targetStage, parentId, isSibling: _isSibling } = params;
+    let { title } = params;
+    const { content, targetStage, parentId, isSibling: _isSibling } = params;
+    
+    // 🔴 确保符合数据库约束：title 和 content 不能同时为空
+    // 如果两者都为空或空字符串，设置默认 title
+    if ((!title || title.trim() === '') && (!content || content.trim() === '')) {
+      title = '新任务';
+    }
     
     const activeP = this.getActiveProject();
     if (!activeP) {
@@ -246,6 +253,11 @@ export class TaskOperationService {
    * 添加浮动任务（未分配阶段的任务）
    */
   addFloatingTask(title: string, content: string, x: number, y: number): void {
+    // 🔴 确保符合数据库约束：title 和 content 不能同时为空
+    if ((!title || title.trim() === '') && (!content || content.trim() === '')) {
+      title = '新任务';
+    }
+    
     const activeP = this.getActiveProject();
     if (!activeP) return;
     
@@ -281,10 +293,24 @@ export class TaskOperationService {
    */
   updateTaskContent(taskId: string, newContent: string): void {
     const now = new Date().toISOString();
-    this.recordAndUpdateDebounced(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.map(t => t.id === taskId ? { ...t, content: newContent, updatedAt: now } : t)
-    }));
+    this.recordAndUpdateDebounced(p => {
+      // 🔴 数据库约束：如果 content 为空，确保 title 不为空
+      const updatedTasks = p.tasks.map(t => {
+        if (t.id !== taskId) return t;
+        
+        const updatedTask = { ...t, content: newContent, updatedAt: now };
+        // 如果 content 和 title 都为空，给 title 设置默认值
+        if ((!newContent || newContent.trim() === '') && (!t.title || t.title.trim() === '')) {
+          updatedTask.title = '新任务';
+        }
+        return updatedTask;
+      });
+      
+      return this.layoutService.rebalance({
+        ...p,
+        tasks: updatedTasks
+      });
+    });
   }
   
   /**
@@ -292,10 +318,24 @@ export class TaskOperationService {
    */
   updateTaskTitle(taskId: string, title: string): void {
     const now = new Date().toISOString();
-    this.recordAndUpdateDebounced(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.map(t => t.id === taskId ? { ...t, title, updatedAt: now } : t)
-    }));
+    this.recordAndUpdateDebounced(p => {
+      // 🔴 数据库约束：如果 title 为空，确保 content 不为空
+      const updatedTasks = p.tasks.map(t => {
+        if (t.id !== taskId) return t;
+        
+        let finalTitle = title;
+        // 如果 title 和 content 都为空，给 title 设置默认值
+        if ((!title || title.trim() === '') && (!t.content || t.content.trim() === '')) {
+          finalTitle = '新任务';
+        }
+        return { ...t, title: finalTitle, updatedAt: now };
+      });
+      
+      return this.layoutService.rebalance({
+        ...p,
+        tasks: updatedTasks
+      });
+    });
   }
   
   /**
@@ -779,8 +819,10 @@ export class TaskOperationService {
         if (idsToRestore.has(t.id)) {
           const meta = t.deletedMeta;
           const { deletedConnections: _deletedConnections, deletedMeta: _deletedMeta, ...rest } = t;
+          
+          let restored;
           if (meta) {
-            return {
+            restored = {
               ...rest,
               deletedAt: null,
               parentId: meta.parentId,
@@ -790,8 +832,17 @@ export class TaskOperationService {
               x: meta.x,
               y: meta.y,
             };
+          } else {
+            restored = { ...rest, deletedAt: null };
           }
-          return { ...rest, deletedAt: null };
+          
+          // 🔴 数据库约束：确保 title 和 content 不能同时为空
+          if ((!restored.title || restored.title.trim() === '') && 
+              (!restored.content || restored.content.trim() === '')) {
+            restored.title = '新任务';
+          }
+          
+          return restored;
         }
         return t;
       });

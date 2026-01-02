@@ -321,7 +321,7 @@ export class FlowDiagramService {
     const originalStandardMouseSelect = (clickTool.standardMouseSelect as (e?: go.InputEvent, obj?: go.GraphObject | null) => void).bind(clickTool);
     const originalStandardTouchSelect = ((clickTool as unknown as { standardTouchSelect?: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect)?.bind(clickTool);
 
-    (clickTool as unknown as { standardMouseSelect: (e: go.InputEvent, obj: go.GraphObject | null) => void }).standardMouseSelect = (e: go.InputEvent, obj: go.GraphObject | null) => {
+    (clickTool as unknown as { standardMouseSelect: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardMouseSelect = (e?: go.InputEvent, obj?: go.GraphObject | null) => {
       const dragSelectTool = diagram.toolManager.dragSelectingTool;
       const lastInput = diagram.lastInput as go.InputEvent | null;
       const domEvent = (e as go.InputEvent & { event?: MouseEvent | PointerEvent | KeyboardEvent })?.event;
@@ -330,7 +330,11 @@ export class FlowDiagramService {
       const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
       if (isSelectModeActive && obj?.part instanceof go.Node) {
         console.log('[FlowDiagram] standardMouseSelect - 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
-        e.handled = true;
+        if (e) {
+          e.handled = true;
+        } else {
+          console.warn('[FlowDiagram] 事件对象为 undefined，无法标记为已处理');
+        }
         // 在事务中切换选中状态
         diagram.startTransaction('toggle-selection');
         obj.part.isSelected = !obj.part.isSelected;
@@ -352,25 +356,38 @@ export class FlowDiagramService {
       const wantsMultiSelect = shift || ctrl || meta;
 
       if (wantsMultiSelect && obj?.part instanceof go.Node) {
-        e.handled = true;
+        if (e) {
+          e.handled = true;
+        } else {
+          console.warn('[FlowDiagram] 多选模式下事件对象为 undefined');
+        }
         diagram.startTransaction('multi-select');
         obj.part.isSelected = !obj.part.isSelected;
         diagram.commitTransaction('multi-select');
         return;
       }
 
-      originalStandardMouseSelect(e, obj);
+      // 防御性检查：避免将 undefined 传递给 GoJS 原始方法
+      if (e) {
+        originalStandardMouseSelect(e, obj);
+      } else {
+        console.warn('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
+      }
     };
 
     // 移动端：触摸点击也会走 standardTouchSelect（不重写会导致先清空 selection，从而无法“点击追加多选”）
     if (typeof originalStandardTouchSelect === 'function') {
-      (clickTool as unknown as { standardTouchSelect: (e: go.InputEvent, obj: go.GraphObject | null) => void }).standardTouchSelect = (e: go.InputEvent, obj: go.GraphObject | null) => {
+      (clickTool as unknown as { standardTouchSelect: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect = (e?: go.InputEvent, obj?: go.GraphObject | null) => {
         const dragSelectTool = diagram.toolManager.dragSelectingTool;
         const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
 
         // 仅在移动端框选模式下启用"点选多选"
         if (isSelectModeActive && obj?.part instanceof go.Node) {
-          e.handled = true;
+          if (e) {
+            e.handled = true;
+          } else {
+            console.warn('[FlowDiagram] Touch 事件对象为 undefined');
+          }
           // 在事务中切换选中状态
           diagram.startTransaction('toggle-selection');
           obj.part.isSelected = !obj.part.isSelected;
@@ -384,7 +401,12 @@ export class FlowDiagramService {
           });
           return;
         }
-        originalStandardTouchSelect(e, obj);
+        // 防御性检查：避免将 undefined 传递给 GoJS 原始方法
+        if (e) {
+          originalStandardTouchSelect(e, obj);
+        } else {
+          console.warn('[FlowDiagram] 跳过 originalStandardTouchSelect 调用（事件为 undefined）');
+        }
       };
     }
   }
