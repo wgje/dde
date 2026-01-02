@@ -310,7 +310,7 @@ import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
                   <div class="flex items-center justify-between gap-4 pt-2 border-t border-amber-200">
                     <div class="flex-1">
                       <div class="text-sm text-amber-900">自动定时备份</div>
-                      <div class="text-[11px] text-amber-700">间隔 {{ selectedBackupInterval }}</div>
+                      <div class="text-[11px] text-amber-700">间隔 {{ selectedBackupInterval() }}</div>
                     </div>
                     <button 
                       type="button"

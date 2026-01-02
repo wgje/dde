@@ -22,6 +22,7 @@ import { Task, Project, Connection } from '../../../models';
 // 使用全局 Sentry mock（来自 test-setup.ts）
 import * as Sentry from '@sentry/angular';
 const mockCaptureException = vi.mocked(Sentry.captureException);
+const mockCaptureMessage = vi.mocked(Sentry.captureMessage);
 
 describe('SimpleSyncService', () => {
   let service: SimpleSyncService;
@@ -819,6 +820,107 @@ describe('SimpleSyncService', () => {
       // tombstone 跳过返回 false，但不应加入重试队列
       expect(result).toBe(false);
       expect(service.state().pendingCount).toBe(0);
+    });
+
+    it('pushTask 遇到版本冲突时不加入重试队列', async () => {
+      const task = createMockTask({ id: 'version-conflict-task', updatedAt: '2024-01-01T00:00:00Z' });
+      
+      // 模拟版本冲突错误 (P0001 - raise_exception)
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        return {
+          upsert: vi.fn().mockResolvedValue({ 
+            error: { 
+              code: 'P0001', 
+              message: 'Version regression not allowed: 2 -> 1 (table: tasks, id: version-conflict-task)' 
+            } 
+          })
+        };
+      });
+      
+      const result = await service.pushTask(task, 'project-1');
+      
+      // 版本冲突应返回 false 且不加入重试队列
+      expect(result).toBe(false);
+      expect(service.state().pendingCount).toBe(0);
+      expect(mockToast.warning).toHaveBeenCalledWith('版本冲突', '数据已被修改，请刷新后重试');
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Optimistic lock conflict in pushTask',
+        expect.objectContaining({
+          level: 'warning',
+          tags: expect.objectContaining({ 
+            operation: 'pushTask',
+            taskId: 'version-conflict-task'
+          })
+        })
+      );
+    });
+
+    it('pushConnection 遇到版本冲突时不加入重试队列', async () => {
+      const connection = createMockConnection({ 
+        id: 'version-conflict-conn',
+        source: 'task-1',
+        target: 'task-2'
+      });
+      
+      // 模拟任务存在性检查成功
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'connection_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        if (table === 'tasks') {
+          return {
+            select: vi.fn().mockReturnValue({
+              in: vi.fn().mockReturnValue({
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ id: 'task-1' }, { id: 'task-2' }],
+                  error: null
+                })
+              })
+            })
+          };
+        }
+        // 模拟版本冲突错误
+        return {
+          upsert: vi.fn().mockResolvedValue({ 
+            error: { 
+              code: 'P0001', 
+              message: 'Version regression not allowed' 
+            } 
+          })
+        };
+      });
+      
+      const result = await service.pushConnection(connection, 'project-1');
+      
+      // 版本冲突应返回 false 且不加入重试队列
+      expect(result).toBe(false);
+      expect(service.state().pendingCount).toBe(0);
+      expect(mockToast.warning).toHaveBeenCalledWith('版本冲突', '数据已被修改，请刷新后重试');
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        'Optimistic lock conflict in pushConnection',
+        expect.objectContaining({
+          level: 'warning',
+          tags: expect.objectContaining({ 
+            operation: 'pushConnection',
+            connectionId: 'version-conflict-conn'
+          })
+        })
+      );
     });
   });
   

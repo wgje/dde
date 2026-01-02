@@ -736,7 +736,20 @@ export class SimpleSyncService {
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
       
-      // Circuit Breaker: 记录失败
+      // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
+      if (enhanced.errorType === 'VersionConflictError') {
+        this.logger.warn('推送任务版本冲突', { taskId: task.id, projectId });
+        this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+        Sentry.captureMessage('Optimistic lock conflict in pushTask', {
+          level: 'warning',
+          tags: { operation: 'pushTask', taskId: task.id, projectId },
+          extra: { taskUpdatedAt: task.updatedAt }
+        });
+        // 不加入重试队列，返回 false 让调用者处理
+        return false;
+      }
+      
+      // Circuit Breaker: 记录失败（仅网络错误）
       this.recordCircuitFailure(enhanced.errorType);
       
       // 根据错误类型选择日志级别
@@ -1478,6 +1491,18 @@ export class SimpleSyncService {
       return true;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
+      
+      // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
+      if (enhanced.errorType === 'VersionConflictError') {
+        this.logger.warn('推送连接版本冲突', { connectionId: connection.id, projectId });
+        this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+        Sentry.captureMessage('Optimistic lock conflict in pushConnection', {
+          level: 'warning',
+          tags: { operation: 'pushConnection', connectionId: connection.id, projectId }
+        });
+        // 不加入重试队列，返回 false 让调用者处理
+        return false;
+      }
       
       // 【关键修复】外键约束错误不可重试
       const isForeignKeyError = enhanced.errorType === 'ForeignKeyError' ||
