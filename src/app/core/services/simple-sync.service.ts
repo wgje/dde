@@ -1607,6 +1607,11 @@ export class SimpleSyncService {
         `push-connection:${connection.id}`,
         async () => {
           await this.retryWithBackoff(async () => {
+            // 【关键修复 v2026-01】使用 onConflict 处理复合唯一约束冲突
+            // 数据库有两个唯一约束：
+            //   1. 主键 id
+            //   2. 复合唯一约束 (project_id, source_id, target_id)
+            // 默认 upsert 只按主键冲突处理，需要显式指定 onConflict
             const { error } = await client
               .from('connections')
               .upsert({
@@ -1617,9 +1622,28 @@ export class SimpleSyncService {
                 title: connection.title || null,
                 description: connection.description || null,
                 deleted_at: connection.deletedAt || null
+              }, {
+                // 按主键冲突时更新
+                onConflict: 'id',
+                // 忽略复合唯一约束冲突（相同 source/target 已存在时跳过）
+                ignoreDuplicates: false
               });
             
-            if (error) throw supabaseErrorToError(error);
+            // 【关键修复】处理复合唯一约束冲突（23505 = unique_violation）
+            // 如果冲突是因为已存在相同的 source/target 连接，视为幂等成功
+            if (error) {
+              const code = error.code || (error as { code?: string }).code;
+              if (code === '23505' && error.message?.includes('connections_project_id_source_id_target_id')) {
+                // 已存在相同连接，幂等成功，无需重复插入
+                this.logger.info('连接已存在（幂等成功）', {
+                  connectionId: connection.id,
+                  source: connection.source,
+                  target: connection.target
+                });
+                return; // 不抛出错误，视为成功
+              }
+              throw supabaseErrorToError(error);
+            }
           });
         },
         { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }  // 30秒超时，平衡用户体验
