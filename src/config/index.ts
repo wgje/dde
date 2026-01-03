@@ -26,8 +26,10 @@ export {
   PERMISSION_DENIED_CONFIG,
   INDEXEDDB_HEALTH_CONFIG,
   CLOCK_SYNC_CONFIG,
-  TAB_CONCURRENCY_CONFIG
+  TAB_CONCURRENCY_CONFIG,
+  MOBILE_SYNC_CONFIG
 } from './sync.config';
+export type { ConcurrentEditStrategy } from './sync.config';
 
 // UI 配置
 export {

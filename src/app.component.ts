@@ -11,6 +11,7 @@ import { AuthService } from './services/auth.service';
 import { UndoService } from './services/undo.service';
 import { ToastService } from './services/toast.service';
 import { ActionQueueService } from './services/action-queue.service';
+import { StoreService } from './services/store.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { MigrationService } from './services/migration.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
@@ -102,6 +103,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly searchService = inject(SearchService);
+  private readonly store = inject(StoreService);
 
   // ========== 模板所需的公共 getter（暴露给 HTML 模板）==========
   
@@ -348,9 +350,48 @@ export class AppComponent implements OnInit, OnDestroy {
       // 不再静默处理，确保用户感知启动失败
     });
   }
+
+  /**
+   * 全局撤销/重做快捷键（capture 阶段）
+   *
+   * 背景：某些聚焦组件（如 GoJS Canvas / 第三方控件）会在 bubble 阶段 stopPropagation，
+   * 导致 HostListener('document:keydown') 偶发收不到 Ctrl/Cmd+Z，从而表现为“撤回失效”。
+   *
+   * 解决：在 capture 阶段优先处理快捷键，并在 bubble 阶段用 defaultPrevented 去重。
+   */
+  private readonly keyboardShortcutCaptureListener = (event: KeyboardEvent) => {
+    // 避免重复触发（例如 HMR 或其他监听器已处理）
+    if (event.defaultPrevented) return;
+
+    const key = event.key.toLowerCase();
+
+    // Ctrl+Z / Cmd+Z: 撤销
+    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      this.store.undo();
+      return;
+    }
+
+    // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
+    if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
+      event.preventDefault();
+      this.store.redo();
+      return;
+    }
+
+    // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
+    if ((event.ctrlKey || event.metaKey) && key === 'y') {
+      event.preventDefault();
+      this.store.redo();
+      return;
+    }
+  };
   
   ngOnInit() {
     this.setupRouteSync();
+
+    // capture 阶段注册全局快捷键，避免被聚焦组件吞掉
+    document.addEventListener('keydown', this.keyboardShortcutCaptureListener, { capture: true });
     
     // 标记应用已加载完成，用于隐藏初始加载指示器
     (window as unknown as { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
@@ -374,6 +415,7 @@ export class AppComponent implements OnInit, OnDestroy {
     
     // 移除全局事件监听器
     window.removeEventListener('toggle-sidebar', this.handleToggleSidebar);
+    document.removeEventListener('keydown', this.keyboardShortcutCaptureListener, { capture: true } as AddEventListenerOptions);
     
     // 取消注册 beforeunload 回调
     // 注意：BeforeUnloadManagerService 是 providedIn: 'root'，不会随组件销毁
@@ -585,20 +627,25 @@ export class AppComponent implements OnInit, OnDestroy {
   // 撤销/重做快捷键
   @HostListener('document:keydown', ['$event'])
   handleKeyboardShortcut(event: KeyboardEvent) {
+    // 如果 capture 阶段已处理（或其他逻辑已处理），不要重复执行
+    if (event.defaultPrevented) return;
+
+    const key = event.key.toLowerCase();
+    
     // Ctrl+Z / Cmd+Z: 撤销
-    if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
+    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
       event.preventDefault();
-      this.undoService.undo();
+      this.store.undo();
     }
     // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
-    if ((event.ctrlKey || event.metaKey) && event.key === 'z' && event.shiftKey) {
+    if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
       event.preventDefault();
-      this.undoService.redo();
+      this.store.redo();
     }
     // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
-    if ((event.ctrlKey || event.metaKey) && event.key === 'y') {
+    if ((event.ctrlKey || event.metaKey) && key === 'y') {
       event.preventDefault();
-      this.undoService.redo();
+      this.store.redo();
     }
   }
   

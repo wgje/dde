@@ -1,5 +1,22 @@
 /// <reference types="vitest" />
+import os from 'node:os';
 import { defineConfig } from 'vitest/config';
+
+const parsePositiveInt = (value: string | undefined): number | undefined => {
+  if (!value) return undefined;
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+};
+
+// Vitest 会在每个 worker 都执行一次 setupFiles（Angular/zone 初始化等）
+// 当测试本身很快时，worker 过多会导致 setup/environment 时间占比暴涨。
+// 默认更保守：最多 4 个 threads，同时允许通过环境变量覆盖。
+const cpuCount = Math.max(1, os.cpus()?.length ?? 1);
+const defaultMaxThreads = Math.min(4, cpuCount >= 4 ? cpuCount - 1 : cpuCount);
+const envMaxThreads = parsePositiveInt(process.env.VITEST_MAX_THREADS);
+const maxThreads = Math.max(1, envMaxThreads ?? defaultMaxThreads);
+const envMinThreads = parsePositiveInt(process.env.VITEST_MIN_THREADS);
+const minThreads = Math.max(1, Math.min(envMinThreads ?? Math.min(2, maxThreads), maxThreads));
 
 export default defineConfig({
   // 使用 cacheDir 替代弃用的 cache.dir
@@ -50,8 +67,9 @@ export default defineConfig({
     poolOptions: {
       threads: {
         // 并行模式：充分利用多核 CPU
-        minThreads: 4,
-        maxThreads: 8,
+        // 默认偏小，避免重复初始化成本；必要时用 VITEST_MAX_THREADS/VITEST_MIN_THREADS 覆盖
+        minThreads,
+        maxThreads,
         // 隔离：共享 worker 减少初始化开销
         isolate: false,
         // 单线程模式可提高稳定性

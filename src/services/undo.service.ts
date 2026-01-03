@@ -2,6 +2,7 @@ import { Injectable, signal, computed, inject } from '@angular/core';
 import { UndoAction, Project } from '../models';
 import { UNDO_CONFIG } from '../config';
 import { ToastService } from './toast.service';
+import { UiStateService } from './ui-state.service';
 
 /**
  * 持久化数据结构
@@ -42,6 +43,7 @@ export type UndoResult =
 })
 export class UndoService {
   private readonly toast = inject(ToastService);
+  private readonly uiState = inject(UiStateService);
   
   /** 撤销栈 */
   private undoStack = signal<UndoAction[]>([]);
@@ -85,6 +87,43 @@ export class UndoService {
   /** 防抖配置 */
   private readonly DEBOUNCE_DELAY = 800; // 800ms 内的连续编辑合并
   private readonly MERGE_WINDOW = 2000; // 2s 内同类型操作可合并
+
+  /**
+   * 根据设备类型返回历史上限
+   * 桌面端按配置（默认 50 步且不受时间限制），移动端保持现有上限
+   */
+  private getMaxHistorySize(): number {
+    return this.uiState.isMobile()
+      ? UNDO_CONFIG.MOBILE_HISTORY_SIZE
+      : UNDO_CONFIG.DESKTOP_HISTORY_SIZE;
+  }
+
+  /** 与撤销栈同上限，未来如需可独立配置 */
+  private getMaxRedoHistorySize(): number {
+    return this.getMaxHistorySize();
+  }
+
+  /**
+   * 按上限裁剪撤销栈并触发截断提示
+   */
+  private limitUndoStack(stack: UndoAction[], notify: boolean = true): UndoAction[] {
+    const maxSize = this.getMaxHistorySize();
+    if (stack.length <= maxSize) return stack;
+    const truncatedCount = stack.length - maxSize;
+    if (notify) {
+      this.notifyTruncation(truncatedCount);
+    }
+    return stack.slice(-maxSize);
+  }
+
+  /**
+   * 按上限裁剪重做栈（不提示，避免噪声）
+   */
+  private limitRedoStack(stack: UndoAction[]): UndoAction[] {
+    const maxSize = this.getMaxRedoHistorySize();
+    if (stack.length <= maxSize) return stack;
+    return stack.slice(-maxSize);
+  }
   
   /** 
    * 批处理状态
@@ -231,13 +270,7 @@ export class UndoService {
       
       this.undoStack.update(stack => {
         const newStack = [...stack, fullAction];
-        // 限制栈大小
-        if (newStack.length > UNDO_CONFIG.MAX_HISTORY_SIZE) {
-          const truncatedCount = newStack.length - UNDO_CONFIG.MAX_HISTORY_SIZE;
-          this.notifyTruncation(truncatedCount);
-          return newStack.slice(-UNDO_CONFIG.MAX_HISTORY_SIZE);
-        }
-        return newStack;
+        return this.limitUndoStack(newStack);
       });
     }
     
@@ -353,7 +386,7 @@ export class UndoService {
     // 这里不阻止撤销，只记录可能的警告供日志使用
     
     this.undoStack.update(s => s.slice(0, -1));
-    this.redoStack.update(s => [...s, action]);
+    this.redoStack.update(s => this.limitRedoStack([...s, action]));
     
     this.isUndoRedoing = false;
     
@@ -376,7 +409,7 @@ export class UndoService {
     this.isUndoRedoing = true;
     
     this.undoStack.update(s => s.slice(0, -1));
-    this.redoStack.update(s => [...s, action]);
+    this.redoStack.update(s => this.limitRedoStack([...s, action]));
     
     this.isUndoRedoing = false;
     
@@ -414,7 +447,7 @@ export class UndoService {
     this.isUndoRedoing = true;
     
     this.redoStack.update(s => s.slice(0, -1));
-    this.undoStack.update(s => [...s, action]);
+    this.undoStack.update(s => this.limitUndoStack([...s, action]));
     
     this.isUndoRedoing = false;
     
@@ -642,6 +675,9 @@ export class UndoService {
     if (this.currentProjectId === projectId) return;
     
     this.currentProjectId = projectId;
+    // 进入新项目时统一按设备上限裁剪历史，避免桌面端保留超过 20 步的旧记录
+    this.undoStack.update(stack => this.limitUndoStack(stack, false));
+    this.redoStack.update(stack => this.limitRedoStack(stack));
     this.restoreFromStorage(projectId);
   }
   
@@ -674,10 +710,10 @@ export class UndoService {
     
     try {
       const undoItems = this.undoStack();
-      // 只保存最近的 N 条
-      const itemsToPersist = undoItems.slice(
-        -UNDO_CONFIG.PERSISTENCE.MAX_PERSISTED_ITEMS
-      );
+      // 只保存最近的 N 条（受设备上限约束）
+      const itemsToPersist = undoItems
+        .slice(-this.getMaxHistorySize())
+        .slice(-UNDO_CONFIG.PERSISTENCE.MAX_PERSISTED_ITEMS);
       
       const data: PersistedUndoData = {
         version: 1,
@@ -719,11 +755,13 @@ export class UndoService {
         return;
       }
       
-      // 检查数据是否过期（5分钟内有效）
-      const age = Date.now() - new Date(data.timestamp).getTime();
-      if (age > 5 * 60 * 1000) {
-        sessionStorage.removeItem(UNDO_CONFIG.PERSISTENCE.STORAGE_KEY);
-        return;
+      // 移动端保留原有 5 分钟有效期，桌面端不设时间限制
+      if (this.uiState.isMobile()) {
+        const age = Date.now() - new Date(data.timestamp).getTime();
+        if (age > 5 * 60 * 1000) {
+          sessionStorage.removeItem(UNDO_CONFIG.PERSISTENCE.STORAGE_KEY);
+          return;
+        }
       }
       
       // 恢复撤销栈
@@ -732,7 +770,7 @@ export class UndoService {
         .filter((item): item is UndoAction => item !== null);
       
       if (restoredActions.length > 0) {
-        this.undoStack.set(restoredActions);
+        this.undoStack.set(this.limitUndoStack(restoredActions, false));
         // 不恢复重做栈，因为刷新后重做无意义
       }
     } catch {

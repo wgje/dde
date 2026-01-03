@@ -49,50 +49,50 @@ interface ConflictItem {
   imports: [CommonModule],
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
-      <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden animate-scale-in" (click)="$event.stopPropagation()">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden animate-scale-in flex flex-col" (click)="$event.stopPropagation()">
         <!-- 标题栏 -->
-        <div class="px-6 py-4 border-b border-stone-200 flex items-center justify-between bg-gradient-to-r from-stone-50 to-white">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-              <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50/50">
+          <div class="flex items-center gap-2.5">
+            <div class="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center shadow-sm">
+              <svg class="w-4.5 h-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
             </div>
             <div>
-              <h2 class="text-lg font-bold text-stone-800">系统仪表盘</h2>
-              <p class="text-xs text-stone-500">监控同步状态与数据冲突</p>
+              <h2 class="text-sm font-bold text-slate-800">系统仪表盘</h2>
+              <p class="text-[10px] text-slate-500">监控同步状态与数据冲突</p>
             </div>
           </div>
-          <button (click)="close.emit()" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-stone-100 text-stone-400 hover:text-stone-600 transition-colors">
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <button (click)="close.emit()" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-slate-200/60 text-slate-400 hover:text-slate-600 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
             </svg>
           </button>
         </div>
         
         <!-- 内容区域 -->
-        <div class="p-6 space-y-6 overflow-y-auto max-h-[calc(90vh-80px)]">
+        <div class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
           
           <!-- 状态概览卡片 -->
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
             <!-- 同步状态 -->
-            <div class="p-4 rounded-lg border-2 transition-all"
+            <div class="p-3 rounded-xl border transition-all"
                  [class.border-green-200]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
                  [class.bg-green-50]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
                  [class.border-amber-200]="!isOnline() || offlineMode() || !isLoggedIn()"
                  [class.bg-amber-50]="!isOnline() || offlineMode() || !isLoggedIn()"
                  [class.border-blue-200]="isSyncing()"
                  [class.bg-blue-50]="isSyncing()">
-              <div class="flex items-center gap-2 mb-2">
-                <div class="w-2.5 h-2.5 rounded-full" 
+              <div class="flex items-center gap-2 mb-1.5">
+                <div class="w-2 h-2 rounded-full" 
                      [class.bg-green-500]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
                      [class.bg-amber-500]="!isOnline() || offlineMode() || !isLoggedIn()"
                      [class.bg-blue-500]="isSyncing()"
                      [class.animate-pulse]="isSyncing()">
                 </div>
-                <span class="text-xs font-semibold text-stone-600">同步状态</span>
+                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">同步状态</span>
               </div>
-              <div class="text-sm font-medium"
+              <div class="text-xs font-semibold"
                    [class.text-green-700]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
                    [class.text-amber-700]="!isOnline() || offlineMode() || !isLoggedIn()"
                    [class.text-blue-700]="isSyncing()">
@@ -101,20 +101,20 @@ interface ConflictItem {
             </div>
             
             <!-- 待处理操作 -->
-            <div class="p-4 rounded-lg border-2 transition-all"
-                 [class.border-stone-200]="pendingCount() === 0"
-                 [class.bg-stone-50]="pendingCount() === 0"
+            <div class="p-3 rounded-xl border transition-all"
+                 [class.border-slate-200]="pendingCount() === 0"
+                 [class.bg-slate-50]="pendingCount() === 0"
                  [class.border-amber-200]="pendingCount() > 0"
                  [class.bg-amber-50]="pendingCount() > 0">
-              <div class="flex items-center gap-2 mb-2">
-                <svg class="w-4 h-4 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <div class="flex items-center gap-2 mb-1.5">
+                <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
-                <span class="text-xs font-semibold text-stone-600">待处理操作</span>
+                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">待处理操作</span>
               </div>
               <div class="flex items-center justify-between">
-                <span class="text-2xl font-bold" 
-                      [class.text-stone-400]="pendingCount() === 0"
+                <span class="text-xl font-bold" 
+                      [class.text-slate-300]="pendingCount() === 0"
                       [class.text-amber-600]="pendingCount() > 0">
                   {{ pendingCount() }}
                 </span>
@@ -122,7 +122,7 @@ interface ConflictItem {
                   <button 
                     (click)="retryAll()"
                     [disabled]="isProcessing()"
-                    class="px-3 py-1.5 text-xs font-medium bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-lg transition-colors disabled:opacity-50">
+                    class="px-2 py-1 text-[10px] font-bold bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-lg transition-colors disabled:opacity-50 shadow-sm">
                     {{ isProcessing() ? '同步中...' : '立即同步' }}
                   </button>
                 }
@@ -130,20 +130,20 @@ interface ConflictItem {
             </div>
             
             <!-- 数据冲突 -->
-            <div class="p-4 rounded-lg border-2 transition-all"
-                 [class.border-stone-200]="conflictCount() === 0"
-                 [class.bg-stone-50]="conflictCount() === 0"
+            <div class="p-3 rounded-xl border transition-all"
+                 [class.border-slate-200]="conflictCount() === 0"
+                 [class.bg-slate-50]="conflictCount() === 0"
                  [class.border-red-200]="conflictCount() > 0"
                  [class.bg-red-50]="conflictCount() > 0">
-              <div class="flex items-center gap-2 mb-2">
-                <svg class="w-4 h-4 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <div class="flex items-center gap-2 mb-1.5">
+                <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                <span class="text-xs font-semibold text-stone-600">数据冲突</span>
+                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">数据冲突</span>
               </div>
               <div class="flex items-center justify-between">
-                <span class="text-2xl font-bold" 
-                      [class.text-stone-400]="conflictCount() === 0"
+                <span class="text-xl font-bold" 
+                      [class.text-slate-300]="conflictCount() === 0"
                       [class.text-red-600]="conflictCount() > 0">
                   {{ conflictCount() }}
                 </span>

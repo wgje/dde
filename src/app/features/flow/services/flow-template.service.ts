@@ -368,7 +368,13 @@ export class FlowTemplateService {
 
           // 桌面端修饰键多选：阻止详情面板，具体切换由 ClickSelectingTool 处理
           if (isSelectModifierPressed) {
+            // 兼容：不同 GoJS 版本/工具链下，ClickSelectingTool 与 node.click 的执行顺序可能变化。
+            // 若仅设置 e.handled=true 可能导致多选完全不生效；这里直接切换选中状态，保证 Shift/Ctrl/Cmd 点选稳定。
             e.handled = true;
+            e.diagram?.startTransaction('toggle-selection');
+            (node as go.Node).isSelected = !(node as go.Node).isSelected;
+            e.diagram?.commitTransaction('toggle-selection');
+            e.diagram?.raiseDiagramEvent('ChangedSelection');
             return;
           }
 
@@ -1089,7 +1095,7 @@ export class FlowTemplateService {
         $(go.TextBlock, {
           font: `500 ${isMobile ? '10px' : '8px'} "LXGW WenKai Screen", sans-serif`,
           stroke: "#6d28d9",
-          maxSize: new go.Size(isMobile ? 60 : 50, 14),
+          maxSize: new go.Size(isMobile ? 100 : 120, 14),
           overflow: go.TextBlock.OverflowEllipsis,
           margin: new go.Margin(0, 0, 0, 2),
           cursor: "pointer",
@@ -1098,8 +1104,8 @@ export class FlowTemplateService {
         // 优先显示 title，若无则显示截断的 description
         new go.Binding("text", "", (data: go.ObjectData) => {
           const d = data as { title?: string; description?: string };
-          if (d.title) return d.title.substring(0, 8);
-          if (d.description) return d.description.substring(0, 6);
+          if (d.title) return d.title.substring(0, 32);
+          if (d.description) return d.description.substring(0, 64);
           return "...";
         }))
       )

@@ -9,15 +9,18 @@
  * - 队列管理
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { RequestThrottleService } from './request-throttle.service';
 import { LoggerService } from './logger.service';
 
 describe('RequestThrottleService', () => {
   let service: RequestThrottleService;
   let mockLogger: any;
+  let destroyCallbacks: Array<() => void>;
 
   beforeEach(() => {
+    destroyCallbacks = [];
+
     mockLogger = {
       category: vi.fn().mockReturnValue({
         debug: vi.fn(),
@@ -27,18 +30,26 @@ describe('RequestThrottleService', () => {
       })
     };
 
-    TestBed.configureTestingModule({
+    const destroyRef: Pick<DestroyRef, 'onDestroy'> = {
+      onDestroy: (cb: () => void) => {
+        destroyCallbacks.push(cb);
+      },
+    };
+
+    const injector = Injector.create({
       providers: [
-        RequestThrottleService,
-        { provide: LoggerService, useValue: mockLogger }
-      ]
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: DestroyRef, useValue: destroyRef },
+      ],
     });
 
-    service = TestBed.inject(RequestThrottleService);
+    service = runInInjectionContext(injector, () => new RequestThrottleService());
   });
 
   afterEach(() => {
     service.clearAll();
+    // 清理 RequestThrottleService 构造函数里注册的定时器清理逻辑
+    for (const cb of destroyCallbacks) cb();
     vi.clearAllMocks();
   });
 

@@ -236,7 +236,10 @@ describe('SimpleSyncService', () => {
       expect(mockClient.from).toHaveBeenCalledWith('tasks');
     });
     
-    it('pushTask 失败时应该加入重试队列', { timeout: 10000 }, async () => {
+    it('pushTask 失败时应该加入重试队列', async () => {
+      // 避免 retryWithBackoff 的真实指数退避等待（Zone.js 下 fake timers 不稳定）
+      (service as any).delay = vi.fn().mockResolvedValue(undefined);
+
       const task = createMockTask();
       // 保留 auth mock，只修改 from 的返回值
       mockClient.from = vi.fn().mockImplementation((table: string) => {
@@ -324,9 +327,8 @@ describe('SimpleSyncService', () => {
         if (table === 'connections') return connectionsQueryMock;
         return {};
       });
-      
       const result = await service.pushConnection(connection, 'project-1');
-      
+
       expect(result).toBe(true);
       expect(mockClient.from).toHaveBeenCalledWith('tasks');
       expect(mockClient.from).toHaveBeenCalledWith('connections');
@@ -813,7 +815,10 @@ describe('SimpleSyncService', () => {
       expect(mockClient.from).toHaveBeenCalledWith('task_tombstones');
     });
     
-    it('pushTask 推送失败时加入重试队列（tombstone 检查已移至调用方）', { timeout: 10000 }, async () => {
+    it('pushTask 推送失败时加入重试队列（tombstone 检查已移至调用方）', async () => {
+      // 避免 retryWithBackoff 的真实指数退避等待（Zone.js 下 fake timers 不稳定）
+      (service as any).delay = vi.fn().mockResolvedValue(undefined);
+
       // 验证推送失败会加入重试队列
       const task = createMockTask({ id: 'failed-task' });
       
@@ -996,8 +1001,9 @@ describe('SimpleSyncService', () => {
     });
     
     it('pushTask 失败时应该调用 Sentry.captureException 并包含正确的 tags', async () => {
-      // 使用 fake timers 加速重试延迟
-      vi.useFakeTimers();
+      // Zone.js 环境下 Vitest fake timers 对 setTimeout 拦截不稳定，
+      // 这里直接 stub 服务内部 delay()，避免指数退避造成真实 1+2+4 秒等待。
+      (service as any).delay = vi.fn().mockResolvedValue(undefined);
       
       const task = createMockTask({ id: 'fail-task' });
       const networkError = new Error('Network error');
@@ -1019,12 +1025,7 @@ describe('SimpleSyncService', () => {
         };
       });
       
-      const resultPromise = service.pushTask(task, 'project-1');
-      
-      // 快进所有重试延迟 (1s + 2s + 4s = 7s)
-      await vi.advanceTimersByTimeAsync(8000);
-      
-      const result = await resultPromise;
+      const result = await service.pushTask(task, 'project-1');
       
       // 验证返回失败
       expect(result).toBe(false);
@@ -1039,13 +1040,11 @@ describe('SimpleSyncService', () => {
           operation: 'pushTask'
         })
       });
-      
-      vi.useRealTimers();
     });
     
     it('pushTask 失败时应该将任务加入 RetryQueue', async () => {
-      // 使用 fake timers 加速重试延迟
-      vi.useFakeTimers();
+      // 同上：stub delay() 避免真实等待
+      (service as any).delay = vi.fn().mockResolvedValue(undefined);
       
       const task = createMockTask({ id: 'retry-task' });
       const networkError = new Error('Network error');
@@ -1065,17 +1064,10 @@ describe('SimpleSyncService', () => {
         };
       });
       
-      const resultPromise = service.pushTask(task, 'project-1');
-      
-      // 快进所有重试延迟
-      await vi.advanceTimersByTimeAsync(8000);
-      
-      await resultPromise;
+      await service.pushTask(task, 'project-1');
       
       // 验证 pendingCount 增加（任务被加入重试队列）
       expect(service.state().pendingCount).toBeGreaterThan(0);
-      
-      vi.useRealTimers();
     });
     
     it('deleteTask 失败时应该调用 Sentry.captureException', async () => {

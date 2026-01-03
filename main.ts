@@ -38,8 +38,9 @@ Sentry.init({
   environment: IS_DEV ? 'development' : 'production',
 });
 
-// ============= BUILD ID: 2025-12-04-v15-CACHE-FIX =============
-const BUILD_ID = '2025-12-04-v15-CACHE-FIX';
+// ============= BUILD ID: 2025-12-04-v19-TOGGLE-ALIGN =============
+const BUILD_ID = '2025-12-04-v19-TOGGLE-ALIGN';
+console.log('%c [NanoFlow] Main.ts Loaded: ' + BUILD_ID, 'background: #222; color: #bada55; font-size: 20px');
 const START_TIME = Date.now();
 const VERSION_STORAGE_KEY = 'nanoflow.app-version';
 const FORCE_CLEAR_KEY = 'nanoflow.force-clear-cache';

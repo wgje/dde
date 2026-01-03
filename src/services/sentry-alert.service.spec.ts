@@ -1,15 +1,10 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { SentryAlertService, AlertStats } from './sentry-alert.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { SENTRY_EVENT_TYPES, SENTRY_ALERT_CONFIG } from '../config/sentry-alert.config';
 import * as Sentry from '@sentry/angular';
-
-// Mock Sentry
-vi.mock('@sentry/angular', () => ({
-  captureMessage: vi.fn(),
-}));
 
 describe('SentryAlertService', () => {
   let service: SentryAlertService;
@@ -39,16 +34,16 @@ describe('SentryAlertService', () => {
     const mockLogger = {
       category: () => loggerMethods,
     };
-    
-    TestBed.configureTestingModule({
+
+    const injector = Injector.create({
       providers: [
-        SentryAlertService,
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
-    
-    service = TestBed.inject(SentryAlertService);
+
+    // SentryAlertService 内部使用 inject()，必须在注入上下文中实例化。
+    service = runInInjectionContext(injector, () => new SentryAlertService());
   });
   
   afterEach(() => {

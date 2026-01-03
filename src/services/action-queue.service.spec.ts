@@ -39,6 +39,8 @@ const mockToastService = {
 
 describe('ActionQueueService', () => {
   let service: ActionQueueService;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   // 辅助函数：模拟网络状态（不触发事件）
   function setNetworkStatus(online: boolean) {
@@ -105,6 +107,10 @@ describe('ActionQueueService', () => {
     // 重置 localStorage
     localStorage.clear();
     vi.clearAllMocks();
+
+    // 测试默认静默：避免业务错误分支写入 stderr。
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     
     // 设置初始网络状态为 true（在服务初始化之前）
     Object.defineProperty(navigator, 'onLine', {
@@ -129,6 +135,9 @@ describe('ActionQueueService', () => {
   afterEach(() => {
     service.reset();
     TestBed.resetTestingModule();
+
+    consoleWarnSpy?.mockRestore();
+    consoleErrorSpy?.mockRestore();
   });
 
   // ==================== 基本队列操作 ====================

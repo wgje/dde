@@ -7,11 +7,15 @@ import { TestBed } from '@angular/core/testing';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { Project, Task } from '../models';
+import { UiStateService } from './ui-state.service';
+import { UNDO_CONFIG } from '../config';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 describe('UndoService', () => {
   let service: UndoService;
   let mockToastService: { show: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
+  let mockUiState: { isMobile: ReturnType<typeof vi.fn> };
+  const DESKTOP_HISTORY_LIMIT = UNDO_CONFIG.DESKTOP_HISTORY_SIZE;
   
   const now = new Date().toISOString();
   
@@ -48,11 +52,15 @@ describe('UndoService', () => {
       show: vi.fn(),
       info: vi.fn(),
     };
+    mockUiState = {
+      isMobile: vi.fn(() => false)
+    };
     
     TestBed.configureTestingModule({
       providers: [
         UndoService,
         { provide: ToastService, useValue: mockToastService },
+        { provide: UiStateService, useValue: mockUiState },
       ]
     });
     service = TestBed.inject(UndoService);
@@ -362,10 +370,9 @@ describe('UndoService', () => {
     });
     
     it('栈溢出时应该增加截断计数', () => {
-      // 记录超过 MAX_HISTORY_SIZE 的操作
-      // UNDO_CONFIG.MAX_HISTORY_SIZE = 50
+      // 记录超过桌面端上限的操作（上限取自配置 DESKTOP_HISTORY_LIMIT）
       // 使用不同的 projectId 避免合并逻辑
-      for (let i = 0; i < 55; i++) {
+      for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 15; i++) {
         const project = createTestProject({ id: `project-${i}` });
         const beforeSnapshot = service.createProjectSnapshot(project);
         const afterSnapshot = service.createProjectSnapshot({
@@ -382,8 +389,37 @@ describe('UndoService', () => {
       
       // 应该触发截断
       expect(service.truncatedCount()).toBeGreaterThan(0);
-      // 栈大小不应超过 MAX_HISTORY_SIZE
-      expect(service.undoCount()).toBeLessThanOrEqual(50);
+      // 栈大小不应超过桌面端上限
+      expect(service.undoCount()).toBeLessThanOrEqual(DESKTOP_HISTORY_LIMIT);
+    });
+
+    it('重做栈同样遵循桌面端上限', () => {
+      // 构造超过上限的撤销记录
+      for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 8; i++) {
+        const project = createTestProject({ id: `redo-project-${i}` });
+        const beforeSnapshot = service.createProjectSnapshot(project);
+        const afterSnapshot = service.createProjectSnapshot({
+          ...project,
+          tasks: [createTask({ id: `redo-task-${i}`, title: `任务${i}` })]
+        });
+
+        service.recordAction({
+          type: 'task-update',
+          projectId: project.id,
+          data: { before: beforeSnapshot, after: afterSnapshot }
+        });
+      }
+
+      // 全部撤销以填充重做栈
+      let undoCount = 0;
+      while (service.canUndo()) {
+        const action = service.undo();
+        expect(action).not.toBeNull();
+        undoCount++;
+      }
+
+      expect(undoCount).toBe(DESKTOP_HISTORY_LIMIT);
+      expect(service.redoCount()).toBeLessThanOrEqual(DESKTOP_HISTORY_LIMIT);
     });
     
     it('登出后应重置截断计数', () => {

@@ -1,10 +1,22 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 
 import { TaskOperationService } from './task-operation.service';
 import { LayoutService } from './layout.service';
+import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Project, Task, Connection } from '../models';
+
+const mockLoggerCategory = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+};
+
+const mockLoggerService = {
+  category: vi.fn(() => mockLoggerCategory),
+};
 
 function createTask(overrides: Partial<Task>): Task {
   const now = new Date().toISOString();
@@ -54,10 +66,23 @@ function createProject(overrides: Partial<Project>): Project {
 describe('TaskOperationService (deletedMeta restore)', () => {
   let service: TaskOperationService;
   let project: Project;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
+    // 测试默认静默：避免内部调试日志写入 stdout。
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
     TestBed.configureTestingModule({
-      providers: [TaskOperationService, LayoutService, ToastService],
+      providers: [
+        TaskOperationService,
+        LayoutService,
+        ToastService,
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
     });
 
     service = TestBed.inject(TaskOperationService);
@@ -74,6 +99,12 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         project = mutator(project);
       },
     });
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleInfoSpy?.mockRestore();
+    consoleDebugSpy?.mockRestore();
   });
 
   it('deleteTask() 会写入 deletedMeta，restoreTask() 会消费并清除 deletedMeta', () => {
@@ -189,10 +220,22 @@ describe('TaskOperationService (deletedMeta restore)', () => {
 describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
   let service: TaskOperationService;
   let project: Project;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
     TestBed.configureTestingModule({
-      providers: [TaskOperationService, LayoutService, ToastService],
+      providers: [
+        TaskOperationService,
+        LayoutService,
+        ToastService,
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
     });
 
     service = TestBed.inject(TaskOperationService);
@@ -207,6 +250,12 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         project = mutator(project);
       },
     });
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleInfoSpy?.mockRestore();
+    consoleDebugSpy?.mockRestore();
   });
 
   it('移动任务到远距离阶段时应清除无效的 parentId', () => {
@@ -332,10 +381,22 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
 describe('TaskOperationService (database constraint validation)', () => {
   let service: TaskOperationService;
   let project: Project;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
     TestBed.configureTestingModule({
-      providers: [TaskOperationService, LayoutService, ToastService],
+      providers: [
+        TaskOperationService,
+        LayoutService,
+        ToastService,
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
     });
 
     service = TestBed.inject(TaskOperationService);
@@ -350,6 +411,12 @@ describe('TaskOperationService (database constraint validation)', () => {
         project = mutator(project);
       },
     });
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleInfoSpy?.mockRestore();
+    consoleDebugSpy?.mockRestore();
   });
 
   it('addTask 当 title 和 content 都为空时应设置默认 title', () => {

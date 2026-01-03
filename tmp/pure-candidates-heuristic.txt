@@ -1,0 +1,2 @@
+src/app/core/services/simple-sync.topological.spec.ts
+src/utils/supabase-error.spec.ts

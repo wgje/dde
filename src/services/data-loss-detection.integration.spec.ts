@@ -8,7 +8,7 @@
  * 4. 高风险场景强制使用全量同步
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ChangeTrackerService } from './change-tracker.service';
 import { Task, Connection } from '../models';
@@ -16,11 +16,26 @@ import { Task, Connection } from '../models';
 describe('数据丢失检测集成测试', () => {
   let changeTracker: ChangeTrackerService;
 
+  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
+
   beforeEach(() => {
+    // 测试默认静默：避免在 CI / split suites 中产生大量 stdout/stderr 噪音。
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
     TestBed.configureTestingModule({
       providers: [ChangeTrackerService]
     });
     changeTracker = TestBed.inject(ChangeTrackerService);
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleWarnSpy?.mockRestore();
+    consoleErrorSpy?.mockRestore();
   });
 
   describe('场景1: 更新不存在的任务（高风险）', () => {

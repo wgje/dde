@@ -389,3 +389,64 @@ export const TAB_CONCURRENCY_CONFIG = {
   /** 并发编辑警告冷却时间（毫秒）- 避免频繁提示 */
   WARNING_COOLDOWN: 30000,
 } as const;
+
+/**
+ * 【Stingy Hoarder Protocol】移动端同步策略配置
+ * 
+ * 根据网络状况动态调整同步行为，最大化节省流量
+ * 
+ * @see docs/plan_save.md Phase 4.5
+ */
+export const MOBILE_SYNC_CONFIG = {
+  /** 后台标签页暂停同步 */
+  PAUSE_WHEN_BACKGROUND: true,
+  
+  /** 电池低于此百分比时减少同步频率 */
+  LOW_BATTERY_THRESHOLD: 20,
+  
+  /** 低电量时同步间隔（毫秒）- 5 分钟 */
+  LOW_BATTERY_SYNC_INTERVAL: 5 * 60 * 1000,
+  
+  /** 移动网络下禁止自动同步附件 */
+  DISABLE_ATTACHMENT_SYNC_ON_CELLULAR: true,
+  
+  /** 移动网络下单次请求最大 payload（字节）- 50 KB */
+  MAX_PAYLOAD_ON_CELLULAR: 50 * 1024,
+  
+  /** 启用请求合并（批量推送代替多次请求） */
+  BATCH_REQUESTS: true,
+  
+  /** 批量请求最大等待时间（毫秒）- 5 秒 */
+  BATCH_WAIT_MS: 5000,
+  
+  /** 弱网时请求超时（毫秒）- 45 秒 */
+  WEAK_NETWORK_TIMEOUT: 45000,
+  
+  /** 弱网重试次数 */
+  WEAK_NETWORK_RETRIES: 2,
+  
+  /** Data Saver 模式下禁用 Realtime */
+  DISABLE_REALTIME_ON_DATA_SAVER: true,
+  
+  /** 
+   * 网络质量阈值配置
+   * - high: WiFi/4G，正常同步
+   * - medium: 3G，延迟同步
+   * - low: 2G/弱网，仅手动同步
+   */
+  NETWORK_QUALITY_THRESHOLDS: {
+    /** effective type 为 '4g' 视为 high */
+    HIGH: ['4g', 'wifi'] as readonly string[],
+    /** effective type 为 '3g' 视为 medium */
+    MEDIUM: ['3g'] as readonly string[],
+    /** effective type 为 '2g', 'slow-2g' 视为 low */
+    LOW: ['2g', 'slow-2g'] as readonly string[],
+  },
+  
+  /** medium 网络质量时的同步延迟（毫秒）- 30 秒 */
+  MEDIUM_QUALITY_SYNC_DELAY: 30000,
+  
+  /** low 网络质量时完全禁用自动同步 */
+  DISABLE_AUTO_SYNC_ON_LOW_QUALITY: true,
+} as const;
+

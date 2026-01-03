@@ -278,7 +278,9 @@ export class FlowDiagramService {
 
       const e = this.diagram.lastInput;
       if (!e || !e.left) return false;
-      if (e.shift || e.control || e.meta || e.alt) return false;
+      // 允许 Ctrl/Cmd 按下时仍可拖动画布（常见“按住 Ctrl 临时平移/查看”的习惯）
+      // 保留 Shift/Alt：避免与其他修饰键交互冲突
+      if (e.shift || e.alt) return false;
       if (e.targetDiagram !== this.diagram) return false;
 
       // 避免拦截节点/连线的拖动
@@ -322,6 +324,9 @@ export class FlowDiagramService {
     const originalStandardTouchSelect = ((clickTool as unknown as { standardTouchSelect?: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect)?.bind(clickTool);
 
     (clickTool as unknown as { standardMouseSelect: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardMouseSelect = (e?: go.InputEvent, obj?: go.GraphObject | null) => {
+      // 如果事件已经被模板 click（或其他工具）处理过，避免重复切换导致“选中闪烁/失效”
+      if (e?.handled) return;
+
       const dragSelectTool = diagram.toolManager.dragSelectingTool;
       const lastInput = diagram.lastInput as go.InputEvent | null;
       const domEvent = (e as go.InputEvent & { event?: MouseEvent | PointerEvent | KeyboardEvent })?.event;
@@ -364,6 +369,8 @@ export class FlowDiagramService {
         diagram.startTransaction('multi-select');
         obj.part.isSelected = !obj.part.isSelected;
         diagram.commitTransaction('multi-select');
+        // 显式触发 ChangedSelection，确保 FlowSelectionService 同步（避免某些路径下事件不触发）
+        diagram.raiseDiagramEvent('ChangedSelection');
         return;
       }
 
@@ -2126,7 +2133,7 @@ export class FlowDiagramService {
       const jsonData = e.dataTransfer?.getData("application/json");
       const textData = e.dataTransfer?.getData("text");
       const data = jsonData || textData;
-      if (!data || !this.diagram) return;
+      if (!data || !this.diagram || !this.diagramDiv) return;
       
       const trimmed = data.trim();
       if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
@@ -2135,7 +2142,12 @@ export class FlowDiagramService {
       
       try {
         const task = JSON.parse(data);
-        const pt = this.diagram.lastInput.viewPoint;
+        // 使用 DragEvent 的坐标计算准确的拖放位置
+        // diagram.lastInput.viewPoint 在拖放场景下可能不准确
+        const rect = this.diagramDiv.getBoundingClientRect();
+        const viewX = e.clientX - rect.left;
+        const viewY = e.clientY - rect.top;
+        const pt = new go.Point(viewX, viewY);
         const loc = this.diagram.transformViewToDoc(pt);
         onDrop(task, loc);
       } catch (err) {

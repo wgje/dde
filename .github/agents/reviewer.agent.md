@@ -1,7 +1,7 @@
 ---
 name: Reviewer
 description: "Read-only review for security/quality/regression."
-tools: ['read', 'tavily/search', 'structured-thinking/*', 'search']
+tools: ['read', 'search', 'com.supabase/mcp/*']
 handoffs:
   - label: Fix Issues
     agent: Implementer

@@ -31,7 +31,8 @@ const mockOptimisticState = {
 
 const mockUiState = {
   markEditing: vi.fn(),
-  isEditing: false
+  isEditing: false,
+  isMobile: vi.fn(() => false)
 };
 
 describe('撤销功能集成测试', () => {

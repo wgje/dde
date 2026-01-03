@@ -521,6 +521,102 @@ export class SyncCoordinatorService {
   async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
     return this.syncService.loadProjectsFromCloud(userId, silent);
   }
+
+  // ============================================================
+  // 【Stingy Hoarder Protocol】Delta Sync 增量同步入口
+  // @see docs/plan_save.md Phase 3
+  // ============================================================
+
+  /**
+   * Delta Sync 增量同步
+   * 
+   * 【核心优化】从 MB 级全量拉取降至 ~1 KB 增量检查
+   * 
+   * 流程：
+   * 1. 调用 SimpleSyncService.checkForDrift() 获取增量变更
+   * 2. 将增量数据合并到当前项目
+   * 3. 更新 ProjectStateService
+   * 
+   * @param projectId 项目 ID
+   * @returns 变更数量，0 表示无变更
+   */
+  async performDeltaSync(projectId: string): Promise<{ taskChanges: number; connectionChanges: number }> {
+    if (!SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+      return { taskChanges: 0, connectionChanges: 0 };
+    }
+
+    this.logger.debug('开始 Delta Sync 增量同步', { projectId });
+
+    try {
+      const { tasks, connections } = await this.syncService.checkForDrift(projectId);
+      
+      if (tasks.length === 0 && connections.length === 0) {
+        this.logger.debug('Delta Sync 无变更', { projectId });
+        return { taskChanges: 0, connectionChanges: 0 };
+      }
+
+      // 获取当前项目
+      const currentProject = this.projectState.projects().find(p => p.id === projectId);
+      if (!currentProject) {
+        this.logger.warn('Delta Sync 项目不存在', { projectId });
+        return { taskChanges: 0, connectionChanges: 0 };
+      }
+
+      // 合并任务增量
+      const taskMap = new Map(currentProject.tasks.map(t => [t.id, t]));
+      for (const deltaTask of tasks) {
+        const existing = taskMap.get(deltaTask.id);
+        // LWW: 只有新数据更新时才覆盖
+        // 【修复】使用 Date.getTime() 比较，避免字符串比较在跨时区场景的问题
+        const deltaTime = deltaTask.updatedAt ? new Date(deltaTask.updatedAt).getTime() : 0;
+        const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+        if (!existing || deltaTime > existingTime) {
+          if (deltaTask.deletedAt) {
+            // 远程已删除
+            taskMap.delete(deltaTask.id);
+          } else {
+            taskMap.set(deltaTask.id, deltaTask);
+          }
+        }
+      }
+
+      // 合并连接增量 - 连接按 ID 直接覆盖（无 updatedAt 字段）
+      const connectionMap = new Map(currentProject.connections.map(c => [c.id, c]));
+      for (const deltaConn of connections) {
+        if (deltaConn.deletedAt) {
+          connectionMap.delete(deltaConn.id);
+        } else {
+          // 直接覆盖或插入
+          connectionMap.set(deltaConn.id, deltaConn);
+        }
+      }
+
+      // 更新项目
+      const updatedProject: Project = {
+        ...currentProject,
+        tasks: Array.from(taskMap.values()),
+        connections: Array.from(connectionMap.values()),
+        updatedAt: new Date().toISOString()
+      };
+
+      // 更新状态
+      this.projectState.updateProjects(projects => 
+        projects.map(p => p.id === updatedProject.id ? updatedProject : p)
+      );
+
+      this.logger.info('Delta Sync 完成', {
+        projectId,
+        taskChanges: tasks.length,
+        connectionChanges: connections.length
+      });
+
+      return { taskChanges: tasks.length, connectionChanges: connections.length };
+
+    } catch (error) {
+      this.logger.error('Delta Sync 失败', error);
+      return { taskChanges: 0, connectionChanges: 0 };
+    }
+  }
   
   /**
    * 保存项目到云端

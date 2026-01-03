@@ -1,16 +1,32 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { ChangeTrackerService } from './change-tracker.service';
+import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 
 describe('ChangeTrackerService', () => {
   let service: ChangeTrackerService;
 
   beforeEach(() => {
-    TestBed.configureTestingModule({
-      providers: [ChangeTrackerService]
+    const mockLogger = {
+      debug: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    const injector = Injector.create({
+      providers: [
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => mockLogger,
+          },
+        },
+      ],
     });
-    service = TestBed.inject(ChangeTrackerService);
+
+    // ChangeTrackerService 内部使用 inject()，必须在注入上下文中实例化。
+    service = runInInjectionContext(injector, () => new ChangeTrackerService());
   });
 
   describe('任务变更追踪', () => {

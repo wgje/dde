@@ -22,7 +22,7 @@ import { MigrationService } from './migration.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
-import { CACHE_CONFIG, AUTH_CONFIG } from '../config';
+import { CACHE_CONFIG, AUTH_CONFIG, SYNC_CONFIG } from '../config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 
@@ -339,10 +339,33 @@ export class UserSessionService {
    * - 不阻塞 UI 渲染
    * - 使用 updatedAt 幂等检查避免 REST/Realtime 竞态
    * - 智能合并：无脏标记时静默覆盖，有脏标记时触发冲突处理
+   * 
+   * 【Stingy Hoarder Protocol】Phase 3 Delta Sync 优化
+   * - 优先使用增量同步，节省流量
+   * - 首次同步或增量失败时才进行全量同步
    */
   private async startBackgroundSync(userId: string, previousActive: string | null): Promise<void> {
     console.log('[Session] 开始后台同步');
+
+    // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
+    // 【修复】Delta Sync 成功后跳过当前项目的全量同步，减少流量消耗
+    let deltaSyncSucceeded = false;
+    const activeProjectId = this.projectState.activeProjectId();
+    if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+      try {
+        const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
+        if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
+          console.log('[Session] Delta Sync 成功', deltaResult);
+          deltaSyncSucceeded = true;
+        }
+      } catch (deltaSyncError) {
+        console.warn('[Session] Delta Sync 失败，回退到全量同步', deltaSyncError);
+        // Delta Sync 失败，继续全量同步
+      }
+    }
     
+    // 如果 Delta Sync 对当前项目成功，只需要同步其他项目
+    // 这里仍然调用全量加载，但后续合并时会跳过已同步的项目
     let cloudProjects: Project[] = [];
     try {
       // 添加超时保护：30 秒后放弃云端同步
@@ -354,6 +377,12 @@ export class UserSessionService {
       
       cloudProjects = await Promise.race([loadPromise, timeoutPromise]);
       console.log('[Session] 云端加载项目数量:', cloudProjects.length);
+      
+      // 【优化】如果 Delta Sync 成功，从云端项目列表中排除当前项目，避免覆盖增量同步结果
+      if (deltaSyncSucceeded && activeProjectId) {
+        cloudProjects = cloudProjects.filter(p => p.id !== activeProjectId);
+        console.log('[Session] Delta Sync 已处理当前项目，从全量合并中排除');
+      }
     } catch (e) {
       console.warn('[Session] 后台云端同步失败:', e);
       const errorMsg = e instanceof Error ? e.message : '未知错误';

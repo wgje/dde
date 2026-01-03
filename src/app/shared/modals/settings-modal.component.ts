@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
 import { ExportService } from '../../../services/export.service';
-import { ImportService, ImportOptions, ImportPreview } from '../../../services/import.service';
+import { ImportService, ImportOptions } from '../../../services/import.service';
 import { AttachmentExportService } from '../../../services/attachment-export.service';
 import { LocalBackupService } from '../../../services/local-backup.service';
 import { ThemeType, Project } from '../../../models';
@@ -14,367 +14,279 @@ import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
-      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 animate-scale-in max-h-[90vh] overflow-y-auto" (click)="$event.stopPropagation()">
-        <h2 class="text-xl font-bold mb-5 text-slate-800">设置</h2>
+    <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
+      <div class="bg-slate-50 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5" (click)="$event.stopPropagation()">
+        <!-- 头部 -->
+        <div class="px-4 py-3 border-b border-slate-200/60 flex items-center justify-between bg-white sticky top-0 z-10">
+          <h2 class="text-base font-bold text-slate-800">系统设置</h2>
+          <button (click)="close.emit()" class="p-1.5 hover:bg-slate-100 rounded-full transition-colors text-slate-400 hover:text-slate-600">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
         
-        <div class="space-y-5">
-          <!-- 系统仪表盘入口 -->
-          <div class="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-purple-50 p-4 shadow-sm hover:shadow-md transition-shadow cursor-pointer" (click)="openDashboard.emit()">
+        <div class="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
+          
+          <!-- 账户信息 (置顶) -->
+          <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-3">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-                  <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <div class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 ring-1 ring-slate-200">
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                </div>
+                <div>
+                  <div class="text-xs font-bold text-slate-700">
+                    {{ userSession.currentUserId() ? (sessionEmail() || "已登录用户") : "访客模式" }}
+                  </div>
+                  <div class="text-[10px] flex items-center gap-1.5" [class.text-emerald-600]="userSession.currentUserId()" [class.text-slate-400]="!userSession.currentUserId()">
+                    <span class="w-1.5 h-1.5 rounded-full" [class.bg-emerald-500]="userSession.currentUserId()" [class.bg-slate-300]="!userSession.currentUserId()"></span>
+                    {{ userSession.currentUserId() ? "云端同步中" : "仅本地存储" }}
+                  </div>
+                </div>
+              </div>
+              @if (userSession.currentUserId()) {
+                <button (click)="signOut.emit()" class="px-2.5 py-1 text-[10px] font-bold text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors">退出</button>
+              }
+            </div>
+          </section>
+
+          <!-- 系统仪表盘入口 -->
+          <section>
+            <div class="group rounded-xl border border-indigo-100 bg-indigo-50/40 p-2.5 hover:bg-indigo-50 transition-all cursor-pointer flex items-center justify-between" (click)="openDashboard.emit()">
+              <div class="flex items-center gap-2.5">
+                <div class="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center shadow-sm shadow-indigo-200 group-hover:scale-105 transition-transform">
+                  <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                   </svg>
                 </div>
                 <div>
-                  <div class="text-sm font-semibold text-indigo-900">系统仪表盘</div>
-                  <div class="text-xs text-indigo-600">监控同步状态与数据冲突</div>
+                  <div class="text-xs font-bold text-indigo-900">系统仪表盘</div>
+                  <div class="text-[10px] text-indigo-600/70">查看同步状态与冲突</div>
                 </div>
               </div>
-              <svg class="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <svg class="w-3 h-3 text-indigo-300 group-hover:text-indigo-500 group-hover:translate-x-0.5 transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
               </svg>
             </div>
-          </div>
+          </section>
           
           <!-- 主题设置 -->
-          <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-4">
-            <div>
-              <div class="text-[11px] font-semibold text-stone-400 uppercase tracking-wide mb-1">外观</div>
-              <div class="text-sm font-semibold text-stone-800">主题风格</div>
-            </div>
-            
-            <div class="grid grid-cols-5 gap-2">
-              <!-- 默认主题 -->
-              <button (click)="updateTheme('default')" 
-                      class="flex flex-col items-center gap-1.5 p-2 rounded-lg border-2 transition-all"
-                      [class.border-indigo-500]="preferenceService.theme() === 'default'"
-                      [class.bg-indigo-50]="preferenceService.theme() === 'default'"
-                      [class.border-stone-200]="preferenceService.theme() !== 'default'"
-                      [class.hover:border-stone-300]="preferenceService.theme() !== 'default'">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-stone-100 to-stone-300 border border-stone-300"></div>
-                <span class="text-[10px] text-stone-600">默认</span>
-              </button>
-              
-              <!-- 海洋主题 -->
-              <button (click)="updateTheme('ocean')" 
-                      class="flex flex-col items-center gap-1.5 p-2 rounded-lg border-2 transition-all"
-                      [class.border-sky-500]="preferenceService.theme() === 'ocean'"
-                      [class.bg-sky-50]="preferenceService.theme() === 'ocean'"
-                      [class.border-stone-200]="preferenceService.theme() !== 'ocean'"
-                      [class.hover:border-stone-300]="preferenceService.theme() !== 'ocean'">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-sky-200 to-cyan-400 border border-sky-300"></div>
-                <span class="text-[10px] text-stone-600">海洋</span>
-              </button>
-              
-              <!-- 森林主题 -->
-              <button (click)="updateTheme('forest')" 
-                      class="flex flex-col items-center gap-1.5 p-2 rounded-lg border-2 transition-all"
-                      [class.border-green-500]="preferenceService.theme() === 'forest'"
-                      [class.bg-green-50]="preferenceService.theme() === 'forest'"
-                      [class.border-stone-200]="preferenceService.theme() !== 'forest'"
-                      [class.hover:border-stone-300]="preferenceService.theme() !== 'forest'">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-green-200 to-emerald-400 border border-green-300"></div>
-                <span class="text-[10px] text-stone-600">森林</span>
-              </button>
-              
-              <!-- 日落主题 -->
-              <button (click)="updateTheme('sunset')" 
-                      class="flex flex-col items-center gap-1.5 p-2 rounded-lg border-2 transition-all"
-                      [class.border-orange-500]="preferenceService.theme() === 'sunset'"
-                      [class.bg-orange-50]="preferenceService.theme() === 'sunset'"
-                      [class.border-stone-200]="preferenceService.theme() !== 'sunset'"
-                      [class.hover:border-stone-300]="preferenceService.theme() !== 'sunset'">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-orange-200 to-red-400 border border-orange-300"></div>
-                <span class="text-[10px] text-stone-600">日落</span>
-              </button>
-              
-              <!-- 薰衣草主题 -->
-              <button (click)="updateTheme('lavender')" 
-                      class="flex flex-col items-center gap-1.5 p-2 rounded-lg border-2 transition-all"
-                      [class.border-purple-500]="preferenceService.theme() === 'lavender'"
-                      [class.bg-purple-50]="preferenceService.theme() === 'lavender'"
-                      [class.border-stone-200]="preferenceService.theme() !== 'lavender'"
-                      [class.hover:border-stone-300]="preferenceService.theme() !== 'lavender'">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-200 to-fuchsia-400 border border-purple-300"></div>
-                <span class="text-[10px] text-stone-600">薰衣草</span>
-              </button>
-            </div>
-          </div>
-          
-          <!-- 同步设置 -->
-          <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-4">
-            <div>
-              <div class="text-[11px] font-semibold text-stone-400 uppercase tracking-wide mb-1">同步</div>
-              <div class="text-sm font-semibold text-stone-800">冲突处理</div>
-            </div>
-            
-            <!-- 自动解决冲突开关 -->
-            <div class="flex items-center justify-between gap-4">
-              <div class="flex-1">
-                <div class="text-sm text-stone-700">自动解决冲突</div>
-                <div class="text-[11px] text-stone-500 mt-0.5">
-                  开启后使用「最后写入优先」策略自动解决冲突；关闭后所有冲突将进入仪表盘由您手动处理
-                </div>
+          <section class="space-y-1.5">
+            <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">外观风格</h3>
+            <div class="bg-white border border-slate-200 rounded-xl p-2.5 shadow-sm">
+              <div class="grid grid-cols-5 gap-2">
+                <!-- 默认主题 -->
+                <button (click)="updateTheme('default')" 
+                        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50"
+                        [class.bg-slate-50]="preferenceService.theme() === 'default'">
+                  <div class="w-5 h-5 rounded-full bg-gradient-to-br from-slate-100 to-slate-300 border-2 group-hover:scale-110 transition-transform shadow-sm"
+                       [class.border-indigo-500]="preferenceService.theme() === 'default'"
+                       [class.border-transparent]="preferenceService.theme() !== 'default'"></div>
+                  <span class="text-[9px] font-medium" [class.text-indigo-600]="preferenceService.theme() === 'default'" [class.text-slate-500]="preferenceService.theme() !== 'default'">默认</span>
+                </button>
+                
+                <!-- 海洋主题 -->
+                <button (click)="updateTheme('ocean')" 
+                        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50"
+                        [class.bg-slate-50]="preferenceService.theme() === 'ocean'">
+                  <div class="w-5 h-5 rounded-full bg-gradient-to-br from-sky-200 to-cyan-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+                       [class.border-sky-500]="preferenceService.theme() === 'ocean'"
+                       [class.border-transparent]="preferenceService.theme() !== 'ocean'"></div>
+                  <span class="text-[9px] font-medium" [class.text-sky-600]="preferenceService.theme() === 'ocean'" [class.text-slate-500]="preferenceService.theme() !== 'ocean'">海洋</span>
+                </button>
+                
+                <!-- 森林主题 -->
+                <button (click)="updateTheme('forest')" 
+                        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50"
+                        [class.bg-slate-50]="preferenceService.theme() === 'forest'">
+                  <div class="w-5 h-5 rounded-full bg-gradient-to-br from-green-200 to-emerald-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+                       [class.border-green-500]="preferenceService.theme() === 'forest'"
+                       [class.border-transparent]="preferenceService.theme() !== 'forest'"></div>
+                  <span class="text-[9px] font-medium" [class.text-green-600]="preferenceService.theme() === 'forest'" [class.text-slate-500]="preferenceService.theme() !== 'forest'">森林</span>
+                </button>
+                
+                <!-- 日落主题 -->
+                <button (click)="updateTheme('sunset')" 
+                        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50"
+                        [class.bg-slate-50]="preferenceService.theme() === 'sunset'">
+                  <div class="w-5 h-5 rounded-full bg-gradient-to-br from-orange-200 to-red-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+                       [class.border-orange-500]="preferenceService.theme() === 'sunset'"
+                       [class.border-transparent]="preferenceService.theme() !== 'sunset'"></div>
+                  <span class="text-[9px] font-medium" [class.text-orange-600]="preferenceService.theme() === 'sunset'" [class.text-slate-500]="preferenceService.theme() !== 'sunset'">日落</span>
+                </button>
+                
+                <!-- 薰衣草主题 -->
+                <button (click)="updateTheme('lavender')" 
+                        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50"
+                        [class.bg-slate-50]="preferenceService.theme() === 'lavender'">
+                  <div class="w-5 h-5 rounded-full bg-gradient-to-br from-purple-200 to-fuchsia-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+                       [class.border-purple-500]="preferenceService.theme() === 'lavender'"
+                       [class.border-transparent]="preferenceService.theme() !== 'lavender'"></div>
+                  <span class="text-[9px] font-medium" [class.text-purple-600]="preferenceService.theme() === 'lavender'" [class.text-slate-500]="preferenceService.theme() !== 'lavender'">薰衣草</span>
+                </button>
               </div>
-              <button 
-                type="button"
-                (click)="toggleAutoResolve()"
-                class="relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-                [class.bg-indigo-500]="preferenceService.autoResolveConflicts()"
-                [class.bg-stone-300]="!preferenceService.autoResolveConflicts()">
-                <span 
-                  class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200"
-                  [class.translate-x-5]="preferenceService.autoResolveConflicts()">
-                </span>
-              </button>
             </div>
-            
-            <div class="text-[10px] text-stone-400 p-2 bg-stone-100 rounded-lg">
-              💡 个人应用中冲突较少，建议保持开启以获得更流畅的体验
-            </div>
-          </div>
+          </section>
           
           <!-- 数据管理 -->
-          <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-4">
-            <div>
-              <div class="text-[11px] font-semibold text-stone-400 uppercase tracking-wide mb-1">备份</div>
-              <div class="text-sm font-semibold text-stone-800">数据管理</div>
-            </div>
+          <section class="space-y-1.5">
+            <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">数据管理</h3>
             
-            <!-- 导出按钮 -->
-            <div class="space-y-3">
-              <button 
-                type="button"
-                (click)="handleExport()"
-                [disabled]="exportService.isExporting()"
-                class="w-full flex items-center gap-3 p-3 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                <div class="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <svg class="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                  </svg>
+            <div class="bg-white border border-slate-200 rounded-xl shadow-sm divide-y divide-slate-100 overflow-hidden">
+              <!-- 自动解决冲突 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700">自动解决冲突</div>
+                  <div class="text-[10px] text-slate-400">使用 LWW 策略自动合并</div>
                 </div>
-                <div class="flex-1 text-left">
-                  <div class="text-sm font-medium text-stone-800">
-                    @if (exportService.isExporting()) {
-                      导出中...
-                    } @else {
-                      导出数据
-                    }
-                  </div>
-                  <div class="text-[11px] text-stone-500">导出所有项目到 JSON 文件</div>
-                </div>
-                @if (exportService.isExporting()) {
-                  <div class="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                }
-              </button>
-              
-              <!-- 导入按钮 -->
-              <button 
-                type="button"
-                (click)="triggerImportFileSelect()"
-                [disabled]="importService.isImporting()"
-                class="w-full flex items-center gap-3 p-3 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                <div class="w-9 h-9 rounded-lg bg-green-100 flex items-center justify-center">
-                  <svg class="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                </div>
-                <div class="flex-1 text-left">
-                  <div class="text-sm font-medium text-stone-800">
-                    @if (importService.isImporting()) {
-                      导入中... {{ importService.progress().percentage | number:'1.0-0' }}%
-                    } @else {
-                      导入数据
-                    }
-                  </div>
-                  <div class="text-[11px] text-stone-500">从备份文件恢复</div>
-                </div>
-                @if (importService.isImporting()) {
-                  <div class="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
-                }
-              </button>
-              
-              <!-- 隐藏的文件输入 -->
-              <input 
-                #fileInput
-                type="file" 
-                accept=".json,application/json"
-                class="hidden"
-                (change)="handleFileSelected($event)" />
-            </div>
-            
-            <!-- 上次导出时间 -->
-            @if (exportService.lastExportTime()) {
-              <div class="text-[11px] text-stone-500 pt-1">
-                上次导出：{{ exportService.lastExportTime() | date:'yyyy-MM-dd HH:mm' }}
-              </div>
-            }
-            
-            <!-- 导出提醒开关 -->
-            <div class="flex items-center justify-between gap-4 pt-2 border-t border-stone-200">
-              <div class="flex-1">
-                <div class="text-sm text-stone-700">定期备份提醒</div>
-                <div class="text-[11px] text-stone-500">每 7 天提醒导出数据</div>
-              </div>
-              <button 
-                type="button"
-                (click)="toggleExportReminder()"
-                class="relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                [class.bg-blue-500]="exportReminderEnabled()"
-                [class.bg-stone-300]="!exportReminderEnabled()">
-                <span 
-                  class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200"
-                  [class.translate-x-5]="exportReminderEnabled()">
-                </span>
-              </button>
-            </div>
-          </div>
-          
-          <!-- 本地自动备份（坚果云等） -->
-          @if (localBackupService.isAvailable()) {
-            <div class="rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 to-orange-50 p-4 shadow-sm space-y-4">
-              <div>
-                <div class="text-[11px] font-semibold text-amber-600 uppercase tracking-wide mb-1">增强</div>
-                <div class="text-sm font-semibold text-amber-900">本地自动备份</div>
-                <div class="text-[11px] text-amber-700 mt-1">
-                  将数据备份到本地目录，配合坚果云/Dropbox 等同步盘使用
-                </div>
-              </div>
-              
-              @if (!localBackupService.isAuthorized()) {
-                <!-- 未授权状态 -->
                 <button 
                   type="button"
-                  (click)="handleSetupLocalBackup()"
-                  class="w-full flex items-center gap-3 p-3 rounded-lg border border-amber-200 bg-white hover:bg-amber-50 transition-colors">
-                  <div class="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center">
-                    <svg class="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                    </svg>
-                  </div>
-                  <div class="flex-1 text-left">
-                    <div class="text-sm font-medium text-amber-900">选择备份目录</div>
-                    <div class="text-[11px] text-amber-700">推荐选择坚果云同步文件夹</div>
-                  </div>
+                  (click)="toggleAutoResolve()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
+                  [class.bg-indigo-500]="preferenceService.autoResolveConflicts()"
+                  [class.bg-slate-200]="!preferenceService.autoResolveConflicts()">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="preferenceService.autoResolveConflicts()">
+                  </span>
                 </button>
-              } @else {
-                <!-- 已授权状态 -->
-                <div class="space-y-3">
-                  <!-- 目录信息 -->
-                  <div class="flex items-center gap-3 p-3 rounded-lg bg-white/70 border border-amber-100">
-                    <div class="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center">
-                      <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <div class="text-sm font-medium text-amber-900 truncate">{{ localBackupService.directoryName() }}</div>
-                      @if (formattedLastBackupTime()) {
-                        <div class="text-[11px] text-amber-700">上次备份：{{ formattedLastBackupTime() }}</div>
-                      }
-                    </div>
-                    <button 
-                      type="button"
-                      (click)="handleRevokeLocalBackup()"
-                      class="text-[11px] text-amber-600 hover:text-amber-800 underline">
-                      取消
-                    </button>
-                  </div>
-                  
-                  <!-- 立即备份按钮 -->
-                  <button 
-                    type="button"
-                    (click)="handleManualBackup()"
-                    [disabled]="localBackupService.isBackingUp()"
-                    class="w-full flex items-center gap-3 p-3 rounded-lg border border-amber-200 bg-white hover:bg-amber-50 transition-colors disabled:opacity-50">
-                    <div class="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center">
-                      @if (localBackupService.isBackingUp()) {
-                        <div class="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
-                      } @else {
-                        <svg class="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                        </svg>
-                      }
-                    </div>
-                    <div class="flex-1 text-left">
-                      <div class="text-sm font-medium text-amber-900">
-                        @if (localBackupService.isBackingUp()) { 备份中... } @else { 立即备份 }
-                      </div>
-                    </div>
-                  </button>
-                  
-                  <!-- 自动备份开关 -->
-                  <div class="flex items-center justify-between gap-4 pt-2 border-t border-amber-200">
-                    <div class="flex-1">
-                      <div class="text-sm text-amber-900">自动定时备份</div>
-                      <div class="text-[11px] text-amber-700">间隔 {{ selectedBackupInterval() }}</div>
-                    </div>
-                    <button 
-                      type="button"
-                      (click)="toggleAutoBackup()"
-                      class="relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2"
-                      [class.bg-amber-500]="localBackupService.autoBackupEnabled()"
-                      [class.bg-stone-300]="!localBackupService.autoBackupEnabled()">
-                      <span 
-                        class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transform transition-transform duration-200"
-                        [class.translate-x-5]="localBackupService.autoBackupEnabled()">
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              }
+              </div>
               
-              <div class="text-[10px] text-amber-700 p-2 bg-amber-100/50 rounded-lg">
-                💡 浏览器重启后需重新授权目录访问权限
+              <!-- 备份与恢复 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 transition-colors">
+                <div class="flex-1">
+                  <div class="text-xs font-semibold text-slate-700">备份与恢复</div>
+                  <div class="text-[10px] text-slate-400">JSON 格式数据</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button 
+                    (click)="handleExport()"
+                    [disabled]="exportService.isExporting()"
+                    class="px-2.5 py-1 bg-white border border-slate-200 rounded-md text-[10px] font-bold text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                    @if (exportService.isExporting()) {
+                      <div class="w-2.5 h-2.5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                    } @else {
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                    }
+                    <span>导出</span>
+                  </button>
+                  <button 
+                    (click)="triggerImportFileSelect()"
+                    [disabled]="importService.isImporting()"
+                    class="px-2.5 py-1 bg-white border border-slate-200 rounded-md text-[10px] font-bold text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                    @if (importService.isImporting()) {
+                      <div class="w-2.5 h-2.5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
+                    } @else {
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                    }
+                    <span>导入</span>
+                  </button>
+                  <input #fileInput type="file" accept=".json,application/json" class="hidden" (change)="handleFileSelected($event)" />
+                </div>
+              </div>
+
+              <!-- 导出提醒 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700">定期备份提醒</div>
+                  <div class="text-[10px] text-slate-400">每 7 天提醒一次</div>
+                </div>
+                <button 
+                  (click)="toggleExportReminder()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200"
+                  [class.bg-blue-500]="exportReminderEnabled()"
+                  [class.bg-slate-200]="!exportReminderEnabled()">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="exportReminderEnabled()">
+                  </span>
+                </button>
               </div>
             </div>
-          }
+          </section>
           
-          <!-- 账户信息 (只读显示) -->
-          <div class="rounded-xl border border-stone-200 bg-stone-50/60 p-4 shadow-sm space-y-3">
-            <div class="flex items-center justify-between">
-              <div>
-                <div class="text-[11px] font-semibold text-stone-400 uppercase tracking-wide">账户</div>
-                <div class="text-sm font-semibold text-stone-800">同步状态</div>
-              </div>
-              <span class="px-2.5 py-1 text-[11px] rounded-full border"
-                    [class.bg-emerald-50]="userSession.currentUserId()"
-                    [class.border-emerald-100]="userSession.currentUserId()"
-                    [class.text-emerald-700]="userSession.currentUserId()"
-                    [class.bg-amber-50]="!userSession.currentUserId()"
-                    [class.border-amber-100]="!userSession.currentUserId()"
-                    [class.text-amber-700]="!userSession.currentUserId()">
-                @if (userSession.currentUserId()) { 已登录 } @else { 未登录 }
-              </span>
-            </div>
+          <!-- 本地自动备份 -->
+          @if (localBackupService.isAvailable()) {
+            <section class="space-y-1.5">
+              <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">本地增强备份</h3>
+              
+              <div class="bg-amber-50/40 border border-amber-100 rounded-xl p-3 space-y-3">
+                @if (!localBackupService.isAuthorized()) {
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="flex-1">
+                      <div class="text-xs font-bold text-amber-900">开启本地自动备份</div>
+                      <div class="text-[10px] text-amber-700/70 mt-0.5">配合坚果云/Dropbox 实现自动同步</div>
+                    </div>
+                    <button 
+                      (click)="handleSetupLocalBackup()"
+                      class="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-[10px] font-bold hover:bg-amber-600 transition-colors shadow-sm shadow-amber-200">
+                      选择目录
+                    </button>
+                  </div>
+                } @else {
+                  <div class="space-y-2.5">
+                    <div class="flex items-center justify-between bg-white/50 p-2 rounded-lg border border-amber-100">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <div class="w-6 h-6 rounded bg-amber-100 flex items-center justify-center flex-shrink-0">
+                          <svg class="w-3.5 h-3.5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                        </div>
+                        <div class="min-w-0">
+                          <div class="text-[11px] font-bold text-amber-900 truncate max-w-[120px]">{{ localBackupService.directoryName() }}</div>
+                        </div>
+                      </div>
+                      <button (click)="handleRevokeLocalBackup()" class="text-[10px] font-bold text-amber-600 hover:text-amber-800 px-2">取消</button>
+                    </div>
+                    
+                    <div class="flex items-center justify-between px-1 gap-3">
+                      <div>
+                        <div class="text-[11px] font-semibold text-amber-800">自动定时备份</div>
+                        <div class="text-[10px] text-amber-600/80">间隔 {{ selectedBackupInterval() }}</div>
+                      </div>
+                      <button 
+                        (click)="toggleAutoBackup()"
+                        class="relative w-9 h-5 rounded-full transition-colors duration-200"
+                        [class.bg-amber-500]="localBackupService.autoBackupEnabled()"
+                        [class.bg-amber-200]="!localBackupService.autoBackupEnabled()">
+                        <span 
+                          class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                          [class.translate-x-4]="localBackupService.autoBackupEnabled()">
+                        </span>
+                      </button>
+                    </div>
 
-            <div class="text-xs text-stone-500">
-              @if (userSession.currentUserId()) {
-                当前账号：{{ sessionEmail() || "Supabase 用户" }}
-              } @else {
-                点击侧边栏底部的"登录同步"按钮进行登录。
-              }
-            </div>
-
-            @if (userSession.currentUserId()) {
-              <div class="flex flex-wrap gap-2 pt-1">
-                <button type="button" (click)="signOut.emit()" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 border border-red-100 hover:bg-red-100 transition">退出登录</button>
+                    <button 
+                      (click)="handleManualBackup()"
+                      [disabled]="localBackupService.isBackingUp()"
+                      class="w-full py-1.5 bg-white border border-amber-200 rounded-lg text-[10px] font-bold text-amber-700 hover:bg-amber-50 transition-all flex items-center justify-center gap-2 shadow-sm">
+                      @if (localBackupService.isBackingUp()) {
+                        <div class="w-2.5 h-2.5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                        <span>备份中...</span>
+                      } @else {
+                        <span>立即执行备份</span>
+                      }
+                    </button>
+                  </div>
+                }
               </div>
-            }
-          </div>
+            </section>
+          }
         </div>
         
-        <div class="mt-6 flex justify-end">
-          <button (click)="close.emit()" class="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors text-sm font-medium">关闭</button>
+        <!-- 底部操作 -->
+        <div class="p-3 bg-slate-50 border-t border-slate-200/60 flex justify-end">
+          <button (click)="close.emit()" class="px-5 py-1.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-all text-xs font-bold shadow-md shadow-slate-200 active:scale-95">
+            完成
+          </button>
         </div>
       </div>
     </div>
   `
 })
 export class SettingsModalComponent {
+  constructor() {
+    console.log('SettingsModalComponent initialized (v16-REDESIGN)');
+  }
   readonly userSession = inject(UserSessionService);
   readonly preferenceService = inject(PreferenceService);
   readonly exportService = inject(ExportService);

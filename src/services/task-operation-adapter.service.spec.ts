@@ -114,7 +114,7 @@ const mockSyncCoordinatorService = {
 
 const mockChangeTrackerService = {};
 const mockUndoService = {};
-const mockUiStateService = { isEditing: false };
+const mockUiStateService = { isEditing: false, isMobile: vi.fn(() => false) };
 const mockLayoutService = {};
 
 describe('TaskOperationAdapterService - moveTaskToStage', () => {
@@ -186,14 +186,12 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(true);
+    // 桌面端 (isMobile = false) 使用 duration: 3000，无撤销按钮
     expect(mockToastService.success).toHaveBeenCalledWith(
       '已移动到阶段 2',
       undefined,
       expect.objectContaining({
-        duration: 5000,
-        action: expect.objectContaining({
-          label: '撤销',
-        }),
+        duration: 3000,
       })
     );
     expect(mockOptimisticStateService.discardSnapshot).not.toHaveBeenCalled();

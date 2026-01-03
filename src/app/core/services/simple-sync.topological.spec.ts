@@ -3,13 +3,23 @@
  * 测试 SimpleSyncService.topologicalSortTasks 方法
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { describe, it, expect } from 'vitest';
 import { SimpleSyncService } from './simple-sync.service';
 import { Task } from '../../../models';
 
 describe('SimpleSyncService - topologicalSortTasks', () => {
-  let service: SimpleSyncService;
+  const mockLogger = {
+    warn: () => undefined,
+    debug: () => undefined,
+  };
+
+  const topologicalSortTasks = (tasks: Task[]): Task[] => {
+    const fn = (SimpleSyncService as unknown as { prototype: Record<string, unknown> }).prototype[
+      'topologicalSortTasks'
+    ] as (this: { logger: typeof mockLogger }, tasks: Task[]) => Task[];
+
+    return fn.call({ logger: mockLogger }, tasks);
+  };
 
   // 创建测试任务的辅助函数
   const createTask = (id: string, parentId: string | null = null): Task => ({
@@ -27,22 +37,15 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
     createdDate: new Date().toISOString()
   });
 
-  beforeEach(() => {
-    TestBed.configureTestingModule({
-      providers: [SimpleSyncService]
-    });
-    service = TestBed.inject(SimpleSyncService);
-  });
-
   describe('基础功能', () => {
     it('应该返回空数组当输入为空', () => {
-      const result = (service as any).topologicalSortTasks([]);
+      const result = topologicalSortTasks([]);
       expect(result).toEqual([]);
     });
 
     it('应该保持单个任务不变', () => {
       const task = createTask('task-1');
-      const result = (service as any).topologicalSortTasks([task]);
+      const result = topologicalSortTasks([task]);
       
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('task-1');
@@ -55,7 +58,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
         createTask('task-3')
       ];
       
-      const result = (service as any).topologicalSortTasks(tasks);
+      const result = topologicalSortTasks(tasks);
       
       expect(result).toHaveLength(3);
       const resultIds = result.map((t: Task) => t.id).sort();
@@ -68,7 +71,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const parent = createTask('parent');
       const child = createTask('child', 'parent');
       
-      const result = (service as any).topologicalSortTasks([child, parent]);
+      const result = topologicalSortTasks([child, parent]);
       
       expect(result).toHaveLength(2);
       expect(result[0].id).toBe('parent');
@@ -82,7 +85,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const taskD = createTask('D', 'C');
       
       // 乱序输入
-      const result = (service as any).topologicalSortTasks([taskD, taskB, taskA, taskC]);
+      const result = topologicalSortTasks([taskD, taskB, taskA, taskC]);
       
       expect(result).toHaveLength(4);
       // 验证顺序：A 在 B 前，B 在 C 前，C 在 D 前
@@ -98,7 +101,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const parent2 = createTask('parent-2');
       const child2 = createTask('child-2', 'parent-2');
       
-      const result = (service as any).topologicalSortTasks([
+      const result = topologicalSortTasks([
         child2, child1, parent2, parent1
       ]);
       
@@ -118,7 +121,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const taskA = createTask('A', 'B');
       const taskB = createTask('B', 'A');
       
-      const result = (service as any).topologicalSortTasks([taskA, taskB]);
+      const result = topologicalSortTasks([taskA, taskB]);
       
       // 关键：确保没有数据丢失
       expect(result).toHaveLength(2);
@@ -129,7 +132,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
     it('应该处理自引用循环', () => {
       const taskA = createTask('A', 'A'); // 自己引用自己
       
-      const result = (service as any).topologicalSortTasks([taskA]);
+      const result = topologicalSortTasks([taskA]);
       
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('A');
@@ -140,7 +143,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const taskB = createTask('B', 'A');
       const taskC = createTask('C', 'B');
       
-      const result = (service as any).topologicalSortTasks([taskA, taskB, taskC]);
+      const result = topologicalSortTasks([taskA, taskB, taskC]);
       
       // 确保所有任务都在结果中
       expect(result).toHaveLength(3);
@@ -154,7 +157,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const orphan = createTask('orphan', 'non-existent-parent');
       const normal = createTask('normal');
       
-      const result = (service as any).topologicalSortTasks([orphan, normal]);
+      const result = topologicalSortTasks([orphan, normal]);
       
       expect(result).toHaveLength(2);
       const resultIds = result.map((t: Task) => t.id).sort();
@@ -168,7 +171,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
       const cyclicA = createTask('cyclic-A', 'cyclic-B');
       const cyclicB = createTask('cyclic-B', 'cyclic-A');
       
-      const result = (service as any).topologicalSortTasks([
+      const result = topologicalSortTasks([
         cyclicB, child, orphan, cyclicA, parent
       ]);
       
@@ -190,7 +193,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
         tasks.push(createTask(`task-${i}`, i > 0 ? `task-${i - 1}` : null));
       }
       
-      const result = (service as any).topologicalSortTasks(tasks);
+      const result = topologicalSortTasks(tasks);
       
       expect(result).toHaveLength(1000);
       // 验证链式顺序
@@ -210,7 +213,7 @@ describe('SimpleSyncService - topologicalSortTasks', () => {
         createTask('root-3')
       ];
       
-      const result = (service as any).topologicalSortTasks(tasks);
+      const result = topologicalSortTasks(tasks);
       
       expect(result).toHaveLength(3);
       const resultIds = result.map((t: Task) => t.id).sort();

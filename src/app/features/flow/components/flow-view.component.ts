@@ -1345,10 +1345,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const diagramInstance = this.diagram.diagramInstance;
     if (!diagramInstance) return;
 
-    // 场景二：从流程图的待分配区域拖入画布时，不应立刻“任务化”。
-    // 仅更新位置，待后续“拉线”时再根据连接关系赋予阶段/序号。
+    // 场景二：从待分配区域拖放到画布时，不应立刻"任务化"。
+    // 仅更新位置，待后续"拉线"时再根据连接关系赋予阶段/序号。
     if (taskData?.stage === null) {
+      // 同时更新 Store 和 GoJS 中的节点位置
+      // Store 更新确保数据持久化，GoJS 更新确保视觉即时反馈
       this.taskOpsAdapter.updateTaskPosition(taskData.id, docPoint.x, docPoint.y);
+      this.layoutService.setNodePosition(taskData.id, docPoint.x, docPoint.y);
       return;
     }
     
@@ -1416,7 +1419,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private handleTouchDrop(task: Task, insertInfo: InsertPositionInfo, docPoint: go.Point): void {
     // 场景二（移动端）：待分配块拖入画布仅更新位置，不立刻任务化
     if (task.stage === null) {
+      // 同时更新 Store 和 GoJS 中的节点位置
+      // Store 更新确保数据持久化，GoJS 更新确保视觉即时反馈
       this.taskOpsAdapter.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+      this.layoutService.setNodePosition(task.id, docPoint.x, docPoint.y);
       return;
     }
 

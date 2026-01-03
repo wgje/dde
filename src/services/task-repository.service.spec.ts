@@ -1,8 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { TaskRepositoryService } from './task-repository.service';
 import { SupabaseClientService } from './supabase-client.service';
+import { LoggerService } from './logger.service';
 import type { Task } from '../models';
+
+const mockLoggerCategory = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+};
+
+const mockLoggerService = {
+  category: vi.fn(() => mockLoggerCategory),
+};
 
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -69,9 +81,16 @@ function createSupabaseMock() {
 describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
   let service: TaskRepositoryService;
   let supabaseMock: ReturnType<typeof createSupabaseMock>;
+  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // 测试默认静默：避免实现细节日志写入 stdout。
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     supabaseMock = createSupabaseMock();
     TestBed.configureTestingModule({
       providers: [
@@ -80,6 +99,12 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
       ],
     });
     service = TestBed.inject(TaskRepositoryService);
+  });
+
+  afterEach(() => {
+    consoleLogSpy?.mockRestore();
+    consoleInfoSpy?.mockRestore();
+    consoleDebugSpy?.mockRestore();
   });
 
   it('does not send deleted_at when deletedAt is null and not explicitly changed', async () => {
@@ -127,6 +152,7 @@ describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
     TestBed.configureTestingModule({
       providers: [
         TaskRepositoryService,
+          { provide: LoggerService, useValue: mockLoggerService },
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
@@ -157,6 +183,7 @@ describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
 
 describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
   it('promotes child to replace deleted parent stage/order/rank/position', async () => {
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const tasksData = [
       {
         id: 'parent',
@@ -232,11 +259,14 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
       providers: [
         TaskRepositoryService,
         { provide: SupabaseClientService, useValue: mockSupabaseClientService },
+        { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
     const service = TestBed.inject(TaskRepositoryService);
     const loaded = await service.loadTasks('project-1');
+
+    consoleLogSpy.mockRestore();
 
     expect(loaded).toHaveLength(1);
     expect(loaded[0].id).toBe('child');

@@ -10,7 +10,7 @@
 // ============================================
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   CircuitBreakerService, 
   CLIENT_CIRCUIT_BREAKER_CONFIG,
@@ -20,11 +20,6 @@ import {
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Project, Task } from '../models';
-
-// Mock Sentry
-vi.mock('@sentry/angular', () => ({
-  captureMessage: vi.fn(),
-}));
 
 describe('CircuitBreakerService', () => {
   let service: CircuitBreakerService;
@@ -88,10 +83,9 @@ describe('CircuitBreakerService', () => {
       warn: vi.fn(),
       error: vi.fn(),
     };
-    
-    TestBed.configureTestingModule({
+
+    const injector = Injector.create({
       providers: [
-        CircuitBreakerService,
         {
           provide: ToastService,
           useValue: mockToast,
@@ -104,8 +98,9 @@ describe('CircuitBreakerService', () => {
         },
       ],
     });
-    
-    service = TestBed.inject(CircuitBreakerService);
+
+    // CircuitBreakerService 内部使用 inject()，必须在注入上下文中实例化。
+    service = runInInjectionContext(injector, () => new CircuitBreakerService());
   });
   
   describe('validateBeforeSync - 空数据检测', () => {

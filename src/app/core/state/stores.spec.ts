@@ -3,7 +3,6 @@
  * 
  * 测试 O(1) 查找、批量操作和状态管理
  */
-import { TestBed } from '@angular/core/testing';
 import { TaskStore, ProjectStore, ConnectionStore } from './stores';
 import { Task, Project, Connection } from '../../../models';
 
@@ -11,10 +10,7 @@ describe('TaskStore', () => {
   let store: TaskStore;
   
   beforeEach(() => {
-    TestBed.configureTestingModule({
-      providers: [TaskStore]
-    });
-    store = TestBed.inject(TaskStore);
+    store = new TaskStore();
   });
   
   afterEach(() => {
@@ -148,10 +144,7 @@ describe('ProjectStore', () => {
   let store: ProjectStore;
   
   beforeEach(() => {
-    TestBed.configureTestingModule({
-      providers: [ProjectStore]
-    });
-    store = TestBed.inject(ProjectStore);
+    store = new ProjectStore();
   });
   
   afterEach(() => {
@@ -230,10 +223,7 @@ describe('ConnectionStore', () => {
   let store: ConnectionStore;
   
   beforeEach(() => {
-    TestBed.configureTestingModule({
-      providers: [ConnectionStore]
-    });
-    store = TestBed.inject(ConnectionStore);
+    store = new ConnectionStore();
   });
   
   afterEach(() => {

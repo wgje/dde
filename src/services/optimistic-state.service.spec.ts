@@ -110,9 +110,16 @@ const mockLoggerService = {
 
 describe('OptimisticStateService', () => {
   let service: OptimisticStateService;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // 测试默认静默：避免实现细节日志写入 stderr。
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
     mockProjectsSignal = signal<Project[]>(createMockProjects());
     mockActiveProjectIdSignal = signal<string | null>('proj-1');
 
@@ -131,6 +138,9 @@ describe('OptimisticStateService', () => {
   afterEach(() => {
     service.reset();
     TestBed.resetTestingModule();
+
+    consoleWarnSpy?.mockRestore();
+    consoleErrorSpy?.mockRestore();
   });
 
   // ==================== 快照生命周期 ====================

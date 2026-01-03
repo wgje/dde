@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { TabSyncService, TabEditLock, ConcurrentEditEvent } from './tab-sync.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -70,16 +70,16 @@ describe('TabSyncService', () => {
     mockLogger = {
       category: () => loggerMethods
     };
-    
-    TestBed.configureTestingModule({
+
+    const injector = Injector.create({
       providers: [
-        TabSyncService,
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
-      ]
+      ],
     });
-    
-    service = TestBed.inject(TabSyncService);
+
+    // TabSyncService 内部使用 inject()，必须在注入上下文中实例化。
+    service = runInInjectionContext(injector, () => new TabSyncService());
   });
   
   afterEach(() => {
