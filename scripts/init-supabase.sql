@@ -58,6 +58,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+ALTER FUNCTION public.update_updated_at_column()
+  SET search_path = pg_catalog, public;
+
 -- ============================================
 -- 1. 项目表 (projects)
 -- ============================================
@@ -275,6 +278,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER FUNCTION public.prevent_tombstoned_task_writes()
+  SET search_path = pg_catalog, public;
 
 DROP TRIGGER IF EXISTS trg_prevent_tombstoned_task_writes ON public.tasks;
 CREATE TRIGGER trg_prevent_tombstoned_task_writes
@@ -932,57 +938,7 @@ DROP POLICY IF EXISTS "cleanup_logs_select_policy" ON cleanup_logs;
 CREATE POLICY "cleanup_logs_select_policy" ON cleanup_logs
   FOR SELECT USING (false); -- 普通用户不能读取
 
--- 3. 创建清理过期软删除任务的函数
-CREATE OR REPLACE FUNCTION cleanup_old_deleted_tasks()
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  deleted_count integer;
-BEGIN
-  -- 删除超过 30 天的软删除任务
-  WITH deleted AS (
-    DELETE FROM tasks
-    WHERE deleted_at IS NOT NULL
-      AND deleted_at < NOW() - INTERVAL '30 days'
-    RETURNING id
-  )
-  SELECT count(*) INTO deleted_count FROM deleted;
-  
-  -- 记录清理日志
-  IF deleted_count > 0 THEN
-    INSERT INTO cleanup_logs (type, details)
-    VALUES ('deleted_tasks_cleanup', jsonb_build_object(
-      'deleted_count', deleted_count,
-      'cleanup_time', NOW()
-    ));
-  END IF;
-  
-  RETURN deleted_count;
-END;
-$$;
-
--- 4. 创建清理旧日志的函数
-CREATE OR REPLACE FUNCTION cleanup_old_logs()
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  deleted_count integer;
-BEGIN
-  -- 删除超过 90 天的日志
-  WITH deleted AS (
-    DELETE FROM cleanup_logs
-    WHERE created_at < NOW() - INTERVAL '90 days'
-    RETURNING id
-  )
-  SELECT count(*) INTO deleted_count FROM deleted;
-  
-  RETURN deleted_count;
-END;
-$$;
+-- 注意：cleanup_old_deleted_tasks 和 cleanup_old_logs 函数已在前面定义（第 455 和 468 行）
 
 -- 5. 为 tasks 表的 deleted_at 添加索引（加速清理查询）
 CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON tasks (deleted_at)
@@ -1049,50 +1005,6 @@ CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id
 
 -- 2) 安全：为函数显式设置 search_path（避免 search_path 可变引发的劫持风险）
 -- 说明：优先 pg_catalog，确保内建函数解析更安全。
-ALTER FUNCTION public.update_updated_at_column()
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.cleanup_old_deleted_tasks()
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.cleanup_old_logs()
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.migrate_project_data_to_v2(p_project_id uuid)
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.migrate_all_projects_to_v2()
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.purge_tasks(p_task_ids uuid[])
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.purge_tasks_v2(p_project_id uuid, p_task_ids uuid[])
-  SET search_path = pg_catalog, public;
-
-ALTER FUNCTION public.prevent_tombstoned_task_writes()
-  SET search_path = pg_catalog, public;
-
--- 3) 性能：RLS policy 使用 (select auth.uid())，避免每行重复计算（initplan）
-
--- projects
-DROP POLICY IF EXISTS "owner select" ON public.projects;
-CREATE POLICY "owner select" ON public.projects
-  FOR SELECT
-  TO public
-  USING ((select auth.uid()) = owner_id);
-
-DROP POLICY IF EXISTS "owner insert" ON public.projects;
-CREATE POLICY "owner insert" ON public.projects
-  FOR INSERT
-  TO public
-  WITH CHECK ((select auth.uid()) = owner_id);
-
-DROP POLICY IF EXISTS "owner update" ON public.projects;
-CREATE POLICY "owner update" ON public.projects
-  FOR UPDATE
-  TO public
-  USING ((select auth.uid()) = owner_id);
 
 DROP POLICY IF EXISTS "owner delete" ON public.projects;
 CREATE POLICY "owner delete" ON public.projects
@@ -1362,6 +1274,7 @@ CREATE OR REPLACE FUNCTION public.purge_tasks(p_task_ids uuid[])
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
 AS $$
 DECLARE
   purged_count integer;
@@ -1444,59 +1357,9 @@ EXECUTE FUNCTION public.prevent_tombstoned_task_writes();
 -- - 客户端“永久删除”时，优先写入不可逆 tombstone，阻断旧端/离线端 upsert 复活。
 -- - 即使 tasks 行已不存在（例如历史物理删除），也能通过 project_id 强制落 tombstone。
 
-CREATE OR REPLACE FUNCTION public.purge_tasks_v2(p_project_id uuid, p_task_ids uuid[])
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  purged_count integer;
-BEGIN
-  IF p_project_id IS NULL THEN
-    RAISE EXCEPTION 'p_project_id is required';
-  END IF;
+-- 注意：purge_tasks_v2 函数已在前面定义（第 708 行）
 
-  IF p_task_ids IS NULL OR array_length(p_task_ids, 1) IS NULL THEN
-    RETURN 0;
-  END IF;
-
-  -- 授权校验：仅项目 owner 可 purge
-  IF NOT EXISTS (
-    SELECT 1
-    FROM public.projects p
-    WHERE p.id = p_project_id
-      AND p.owner_id = auth.uid()
-  ) THEN
-    RAISE EXCEPTION 'not authorized';
-  END IF;
-
-  -- 先落 tombstone（即使 tasks 行已不存在也会生效）
-  INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
-  ON CONFLICT (task_id)
-  DO UPDATE SET
-    project_id = EXCLUDED.project_id,
-    deleted_at = EXCLUDED.deleted_at,
-    deleted_by = EXCLUDED.deleted_by;
-
-  -- 删除相关连接
-  DELETE FROM public.connections c
-  WHERE c.project_id = p_project_id
-    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids));
-
-  -- 删除 tasks 行（如果存在）
-  WITH del AS (
-    DELETE FROM public.tasks t
-    WHERE t.project_id = p_project_id
-      AND t.id = ANY(p_task_ids)
-    RETURNING t.id
-  )
-  SELECT count(*) INTO purged_count FROM del;
-
-  RETURN COALESCE(purged_count, 0);
-END;
-$$;
-
+-- 授予额外的权限
 GRANT EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) TO service_role;
 -- ============================================================
