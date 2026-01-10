@@ -268,6 +268,110 @@ CREATE POLICY "task_tombstones_insert_owner" ON public.task_tombstones FOR INSER
   EXISTS (SELECT 1 FROM public.projects p WHERE p.id = task_tombstones.project_id AND p.owner_id = auth.uid())
 );
 
+-- ============================================
+-- 6.2 连接 Tombstone 表 (connection_tombstones)
+-- 用于永久删除连接后防止复活
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.connection_tombstones (
+  connection_id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+  deleted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  deleted_by UUID REFERENCES auth.users(id) ON DELETE SET NULL
+);
+
+ALTER TABLE public.connection_tombstones ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_id ON public.connection_tombstones(project_id);
+CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_at ON public.connection_tombstones(deleted_at);
+
+-- RLS 策略
+DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;
+DROP POLICY IF EXISTS "connection_tombstones_insert" ON public.connection_tombstones;
+
+CREATE POLICY "connection_tombstones_select" ON public.connection_tombstones FOR SELECT USING (
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connection_tombstones.project_id AND (
+    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid())
+  ))
+);
+
+CREATE POLICY "connection_tombstones_insert" ON public.connection_tombstones FOR INSERT WITH CHECK (
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connection_tombstones.project_id AND p.owner_id = auth.uid())
+);
+
+-- 防止 tombstone 连接复活的触发器
+CREATE OR REPLACE FUNCTION prevent_tombstoned_connection_writes()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.connection_tombstones WHERE connection_id = NEW.id) THEN
+    -- 静默忽略，防止旧客户端数据复活
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_prevent_connection_resurrection ON public.connections;
+CREATE TRIGGER trg_prevent_connection_resurrection
+  BEFORE INSERT OR UPDATE ON public.connections
+  FOR EACH ROW
+  EXECUTE FUNCTION prevent_tombstoned_connection_writes();
+
+-- 自动记录 Connection Tombstone 的触发器
+CREATE OR REPLACE FUNCTION record_connection_tombstone()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- 只在真正删除时记录（不是软删除）
+  IF OLD.deleted_at IS NOT NULL THEN
+    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_by)
+    VALUES (OLD.id, OLD.project_id, auth.uid())
+    ON CONFLICT (connection_id) DO NOTHING;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_record_connection_tombstone ON public.connections;
+CREATE TRIGGER trg_record_connection_tombstone
+  BEFORE DELETE ON public.connections
+  FOR EACH ROW
+  EXECUTE FUNCTION record_connection_tombstone();
+
+-- 检查连接是否已被 tombstone
+CREATE OR REPLACE FUNCTION is_connection_tombstoned(p_connection_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+  -- 权限校验：无权访问时返回 false
+  IF NOT EXISTS (
+    SELECT 1 FROM public.connections c
+    JOIN public.projects p ON c.project_id = p.id
+    WHERE c.id = p_connection_id
+      AND (
+        p.owner_id = auth.uid() 
+        OR EXISTS (
+          SELECT 1 FROM public.project_members pm 
+          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
+        )
+      )
+  ) THEN
+    RETURN false;
+  END IF;
+  
+  -- 检查是否在 tombstone 表中
+  RETURN EXISTS (
+    SELECT 1 FROM public.connection_tombstones
+    WHERE connection_id = p_connection_id
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION is_connection_tombstoned(UUID) TO authenticated;
+GRANT SELECT, INSERT ON public.connection_tombstones TO service_role;
+GRANT SELECT, INSERT ON public.connection_tombstones TO authenticated;
+
 -- 防止 tombstone 任务复活的触发器
 CREATE OR REPLACE FUNCTION prevent_tombstoned_task_writes()
 RETURNS TRIGGER AS $$
@@ -922,31 +1026,16 @@ EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
 
--- 2. 创建清理日志表
-CREATE TABLE IF NOT EXISTS cleanup_logs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  type varchar(50) NOT NULL,
-  details jsonb DEFAULT '{}'::jsonb,
-  created_at timestamptz DEFAULT now()
-);
-
--- 为清理日志表启用 RLS
-ALTER TABLE cleanup_logs ENABLE ROW LEVEL SECURITY;
-
--- 清理日志表的 RLS 策略（仅允许系统写入，无用户直接访问）
-DROP POLICY IF EXISTS "cleanup_logs_select_policy" ON cleanup_logs;
-CREATE POLICY "cleanup_logs_select_policy" ON cleanup_logs
-  FOR SELECT USING (false); -- 普通用户不能读取
-
--- 注意：cleanup_old_deleted_tasks 和 cleanup_old_logs 函数已在前面定义（第 455 和 468 行）
+-- 2. 清理日志表已在文件早期（第 232 行）创建
+-- 注意：cleanup_old_deleted_tasks 和 cleanup_old_logs 函数已在前面定义（第 459 和 474 行）
 
 -- 5. 为 tasks 表的 deleted_at 添加索引（加速清理查询）
-CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON tasks (deleted_at)
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON public.tasks (deleted_at)
   WHERE deleted_at IS NOT NULL;
 
 -- 6. 为 cleanup_logs 表添加索引
-CREATE INDEX IF NOT EXISTS idx_cleanup_logs_created_at ON cleanup_logs (created_at);
-CREATE INDEX IF NOT EXISTS idx_cleanup_logs_type ON cleanup_logs (type);
+CREATE INDEX IF NOT EXISTS idx_cleanup_logs_created_at ON public.cleanup_logs (created_at);
+CREATE INDEX IF NOT EXISTS idx_cleanup_logs_type ON public.cleanup_logs (type);
 
 -- 7. 授予必要的权限
 GRANT SELECT, INSERT ON cleanup_logs TO service_role;
@@ -1232,41 +1321,6 @@ CREATE POLICY "task_tombstones_insert_owner" ON public.task_tombstones
 --    - trigger：拦截对 tombstoned task_id 的 INSERT/UPDATE，直接丢弃写入，避免复活。
 
 -- 1) Tombstone 表
-CREATE TABLE IF NOT EXISTS public.task_tombstones (
-  task_id uuid PRIMARY KEY,
-  project_id uuid NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
-  deleted_at timestamptz NOT NULL DEFAULT now(),
-  deleted_by uuid NULL
-);
-
-ALTER TABLE public.task_tombstones ENABLE ROW LEVEL SECURITY;
-
--- 允许项目 owner 读取 tombstones（用于诊断/未来同步增强）
-DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
-CREATE POLICY "task_tombstones_select_owner" ON public.task_tombstones
-  FOR SELECT
-  TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1
-      FROM public.projects p
-      WHERE p.id = project_id
-        AND p.owner_id = auth.uid()
-    )
-  );
-
--- 仅允许项目 owner 写入 tombstones（通过 RPC 调用）
-DROP POLICY IF EXISTS "task_tombstones_insert_owner" ON public.task_tombstones;
-CREATE POLICY "task_tombstones_insert_owner" ON public.task_tombstones
-  FOR INSERT
-  TO authenticated
-  WITH CHECK (
-    EXISTS (
-      SELECT 1
-      FROM public.projects p
-      WHERE p.id = project_id
-        AND p.owner_id = auth.uid()
-    )
   );
 
 -- 2) purge RPC：批量永久删除任务（写 tombstone + 删除 tasks + 删除相关 connections）
@@ -2351,160 +2405,10 @@ COMMENT ON FUNCTION public.validate_task_data() IS
 COMMENT ON TABLE public.circuit_breaker_logs IS 
   '熔断操作审计日志。记录所有批量删除操作（包括被阻止和成功的）。';
 -- ============================================================
--- [MIGRATION] 20260101000001_connection_tombstones.sql
+-- [MIGRATION] 20260101000001_connection_tombstones.sql (已移至早期位置)
 -- ============================================================
--- ============================================
--- Connection Tombstone 防复活机制
--- 日期：2026-01-01
--- 
--- 问题背景：
--- - 连接删除后，如果旧客户端尝试同步旧数据，可能导致已删除连接复活
--- - 参考 task_tombstones 实现相同的防复活机制
--- ============================================
-
--- 创建连接 tombstone 表
-CREATE TABLE IF NOT EXISTS public.connection_tombstones (
-  connection_id uuid PRIMARY KEY,
-  project_id uuid NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
-  deleted_at timestamptz NOT NULL DEFAULT now(),
-  deleted_by uuid NULL REFERENCES auth.users(id) ON DELETE SET NULL
-);
-
--- 添加索引优化查询
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project 
-  ON public.connection_tombstones(project_id);
-
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_at 
-  ON public.connection_tombstones(deleted_at);
-
--- 表注释
-COMMENT ON TABLE public.connection_tombstones IS 
-  '连接 Tombstone 表，记录已永久删除的连接，用于防止数据复活';
-
-COMMENT ON COLUMN public.connection_tombstones.connection_id IS '被删除的连接 ID';
-COMMENT ON COLUMN public.connection_tombstones.project_id IS '连接所属项目 ID';
-COMMENT ON COLUMN public.connection_tombstones.deleted_at IS '删除时间';
-COMMENT ON COLUMN public.connection_tombstones.deleted_by IS '执行删除的用户 ID';
-
--- ==================== RLS 策略 ====================
--- 启用 RLS
-ALTER TABLE public.connection_tombstones ENABLE ROW LEVEL SECURITY;
-
--- 读取策略：用户只能读取自己项目的 tombstone
-CREATE POLICY "connection_tombstones_select" ON public.connection_tombstones
-  FOR SELECT TO authenticated
-  USING (
-    project_id IN (
-      SELECT id FROM public.projects WHERE owner_id = auth.uid()
-      UNION
-      SELECT project_id FROM public.project_members WHERE user_id = auth.uid()
-    )
-  );
-
--- 插入策略：用户只能为自己的项目创建 tombstone
-CREATE POLICY "connection_tombstones_insert" ON public.connection_tombstones
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    project_id IN (
-      SELECT id FROM public.projects WHERE owner_id = auth.uid()
-      UNION
-      SELECT project_id FROM public.project_members WHERE user_id = auth.uid()
-    )
-  );
-
--- 🔴 关键：不允许删除 tombstone（防复活机制的核心）
--- 不创建 DELETE 策略，这样任何删除操作都会被 RLS 拒绝
-
--- ==================== 防复活触发器 ====================
--- 防止已 tombstone 的连接被重新插入或更新
-CREATE OR REPLACE FUNCTION public.prevent_tombstoned_connection_writes()
-RETURNS trigger AS $$
-BEGIN
-  -- 检查是否存在 tombstone 记录
-  IF EXISTS (
-    SELECT 1 FROM public.connection_tombstones ct
-    WHERE ct.connection_id = NEW.id
-  ) THEN
-    -- 静默忽略该操作，避免旧客户端数据复活
-    RETURN NULL;
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- 在 connections 表上创建触发器
-DROP TRIGGER IF EXISTS trg_prevent_connection_resurrection ON public.connections;
-CREATE TRIGGER trg_prevent_connection_resurrection
-  BEFORE INSERT OR UPDATE ON public.connections
-  FOR EACH ROW
-  EXECUTE FUNCTION public.prevent_tombstoned_connection_writes();
-
--- ==================== 自动记录 Tombstone ====================
--- 当连接被永久删除时，自动记录到 tombstone 表
--- 注意：这需要在 purge 操作时调用，而不是软删除
-
-CREATE OR REPLACE FUNCTION public.record_connection_tombstone()
-RETURNS trigger AS $$
-BEGIN
-  -- 只在真正删除时记录（不是软删除）
-  IF OLD.deleted_at IS NOT NULL THEN
-    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_by)
-    VALUES (OLD.id, OLD.project_id, auth.uid())
-    ON CONFLICT (connection_id) DO NOTHING;
-  END IF;
-  RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_record_connection_tombstone ON public.connections;
-CREATE TRIGGER trg_record_connection_tombstone
-  BEFORE DELETE ON public.connections
-  FOR EACH ROW
-  EXECUTE FUNCTION public.record_connection_tombstone();
-
--- ==================== 授权 ====================
--- service_role 需要完整权限用于管理操作
-GRANT SELECT, INSERT ON public.connection_tombstones TO service_role;
-GRANT SELECT, INSERT ON public.connection_tombstones TO authenticated;
-
--- ==================== 检查函数 ====================
--- 用于客户端检查连接是否已被 tombstone
-CREATE OR REPLACE FUNCTION public.is_connection_tombstoned(p_connection_id UUID)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-BEGIN
-  -- 权限校验：无权访问时返回 false（避免信息泄露）
-  IF NOT EXISTS (
-    SELECT 1 FROM public.connections c
-    JOIN public.projects p ON c.project_id = p.id
-    WHERE c.id = p_connection_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
-  ) THEN
-    -- 无权访问时返回 false（与连接不存在行为一致）
-    RETURN false;
-  END IF;
-  
-  -- 检查是否在 tombstone 表中
-  RETURN EXISTS (
-    SELECT 1 FROM public.connection_tombstones
-    WHERE connection_id = p_connection_id
-  );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.is_connection_tombstoned(UUID) TO authenticated;
-
-COMMENT ON FUNCTION public.is_connection_tombstoned(UUID) IS 
-  '检查连接是否已被永久删除（带权限校验）。无权访问时返回 false 以避免信息泄露。';
+-- 注意：connection_tombstones 表及相关函数已在文件早期（第 271 行附近）创建
+-- 此处保留迁移标记以维护版本历史完整性
 -- ============================================================
 -- [MIGRATION] 20260101000002_batch_upsert_tasks_attachments.sql
 -- ============================================================
