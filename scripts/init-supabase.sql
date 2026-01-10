@@ -586,7 +586,7 @@ BEGIN
   END LOOP;
   
   RETURN QUERY SELECT total_deleted, paths_to_delete;
-END; $$ LANGUAGE plpgsql SECURITY DEFINER;
+END; $$;
 
 GRANT EXECUTE ON FUNCTION cleanup_deleted_attachments TO service_role;
 
