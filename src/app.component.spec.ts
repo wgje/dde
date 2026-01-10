@@ -7,13 +7,14 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
  * 这些测试不依赖 Angular TestBed，而是直接验证类型和行为
  * 避免了模板编译问题，专注于核心修复的验证
  */
-export class AppComponent {
+
+
+describe('AppComponent activeProjectId 修复', () => {
+  class AppComponent {
   public throwTestError(): void {
     throw new Error("Sentry Test Error");
   }
 }
-
-describe('AppComponent activeProjectId 修复', () => {
   let mockProjectState: any;
   let mockActiveProjectId: WritableSignal<string | null>;
 
