@@ -28,7 +28,7 @@ import { nowISO } from '../../../utils/date';
 import { supabaseErrorToError, EnhancedError } from '../../../utils/supabase-error';
 import { supabaseWithRetry } from '../../../utils/timeout';
 import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
-import { REQUEST_THROTTLE_CONFIG, SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
+import { REQUEST_THROTTLE_CONFIG, SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../config';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import * as Sentry from '@sentry/angular';
 
@@ -4113,6 +4113,12 @@ export class SimpleSyncService {
    * 【流量优化】使用字段筛选
    */
   async loadProjectsFromCloud(userId: string, _silent?: boolean): Promise<Project[]> {
+    // 【修复】本地模式不查询 Supabase，防止无效 UUID 错误
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      console.log('[SimpleSync] 本地模式，跳过云端加载');
+      return [];
+    }
+
     const client = this.getSupabaseClient();
     if (!client) return [];
     

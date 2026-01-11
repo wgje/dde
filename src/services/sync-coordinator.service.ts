@@ -30,7 +30,7 @@ import { LoggerService } from './logger.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
 import { Project, Task, UserPreferences } from '../models';
-import { SYNC_CONFIG } from '../config';
+import { SYNC_CONFIG, AUTH_CONFIG } from '../config';
 import { validateProject, sanitizeProject } from '../utils/validation';
 import { Result, success, failure, ErrorCodes, OperationError, isFailure } from '../utils/result';
 
@@ -519,6 +519,12 @@ export class SyncCoordinatorService {
    * @deprecated 使用 this.core.loadProjectsFromCloud() 替代
    */
   async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
+    // 【修复】本地模式不从云端加载，防止将 'local-user' 传递给 Supabase
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      console.log('[SyncCoordinator] 本地模式，返回空项目列表');
+      return [];
+    }
+
     return this.syncService.loadProjectsFromCloud(userId, silent);
   }
 

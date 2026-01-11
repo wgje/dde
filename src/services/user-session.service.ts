@@ -345,6 +345,12 @@ export class UserSessionService {
    * - 首次同步或增量失败时才进行全量同步
    */
   private async startBackgroundSync(userId: string, previousActive: string | null): Promise<void> {
+    // 【修复】本地模式不启动后台同步，防止将 'local-user' 传递给 Supabase
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      console.log('[Session] 本地模式，跳过后台同步');
+      return;
+    }
+
     console.log('[Session] 开始后台同步');
 
     // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
