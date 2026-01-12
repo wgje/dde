@@ -1,5 +1,5 @@
 import { Injectable, signal, computed, effect } from '@angular/core';
-import { LoggerService } from './logger.service';
+import { LoggerService } from '../../../../services/logger.service';
 
 /**
  * 流程图命令类型枚举

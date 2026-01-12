@@ -156,7 +156,6 @@
                 (click)="setActiveProjectId(activeProject()?.id ?? null); onFocusFlowNode(task.id)"
                 class="px-2 py-1.5 bg-white dark:bg-stone-700 rounded-md text-xs cursor-pointer hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors group">
                 <div class="flex items-center gap-1.5">
-                  <span class="font-mono text-[9px] text-indigo-400 dark:text-indigo-300">{{task.shortId || compressDisplayId(task.displayId)}}</span>
                   <span class="font-medium text-stone-700 dark:text-stone-200 truncate group-hover:text-indigo-700 dark:group-hover:text-indigo-300">{{task.title || '未命名'}}</span>
                 </div>
               </div>
@@ -179,7 +178,7 @@
       @for (proj of filteredProjects(); track proj.id) {
         <div class="space-y-2">
           <div data-testid="project-item" [attr.data-project-id]="proj.id"
-               (click)="selectProject(proj.id)" (dblclick)="handleProjectDoubleClick(proj.id, $event)" 
+               (click)="selectProject(proj.id); $event.stopPropagation()" (dblclick)="handleProjectDoubleClick(proj.id, $event)" 
                class="rounded-lg cursor-pointer transition-all duration-200 group px-2 py-2"
                [ngClass]="{
                  'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-900 dark:text-indigo-200': activeProjectId() === proj.id,
@@ -227,9 +226,10 @@
 
           @if (expandedProjectId() === proj.id) {
             @if (projectDraft(proj.id); as draft) {
-              <div class="mt-1 mb-2 rounded-lg border border-stone-200 dark:border-stone-700 bg-white/90 dark:bg-stone-800/90 text-stone-600 dark:text-stone-300 shadow-sm cursor-default animate-fade-in" 
+              <div data-testid="project-intro-card" 
+                   class="mt-1 mb-2 rounded-lg border border-stone-200 dark:border-stone-700 bg-white/90 dark:bg-stone-800/90 text-stone-600 dark:text-stone-300 shadow-sm cursor-default animate-fade-in" 
                    [ngClass]="{'mx-4 p-3 space-y-2 text-xs rounded-xl': !isMobile(), 'mx-1 p-2 space-y-1.5 text-[10px]': isMobile()}"
-                   (click)="$event.stopPropagation()"
+                   (click)="onProjectCardClick($event, proj.id)"
                    (touchstart)="$event.stopPropagation()">
                 <!-- 创建时间和简介合并为紧凑布局 -->
                 <div class="flex items-start gap-2 text-stone-400 dark:text-stone-500">

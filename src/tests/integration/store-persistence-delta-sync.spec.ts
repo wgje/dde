@@ -12,10 +12,10 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { StorePersistenceService } from '../app/core/state/store-persistence.service';
-import { TaskStore, ProjectStore, ConnectionStore } from '../app/core/state/stores';
-import { LoggerService } from './logger.service';
-import { Task } from '../models';
+import { StorePersistenceService } from '../../app/core/state/store-persistence.service';
+import { TaskStore, ProjectStore, ConnectionStore } from '../../app/core/state/stores';
+import { LoggerService } from '../../services/logger.service';
+import { Task } from '../../models';
 
 // Mock IndexedDB
 const mockIDBData: Map<string, Map<string, unknown>> = new Map();

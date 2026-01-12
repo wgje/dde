@@ -1102,6 +1102,58 @@ export class SimpleSyncService {
   }
   
   /**
+   * 【流量优化 2026-01-12】推送任务位置到云端（增量更新）
+   * 
+   * 仅更新 x, y 坐标，不上传 content 等大字段
+   * 拖拽节点时从 ~5KB（全量任务）降低到 ~100B（仅坐标）
+   * 
+   * @param taskId 任务 ID
+   * @param x X 坐标
+   * @param y Y 坐标
+   * @returns Promise<boolean> 成功返回 true
+   */
+  async pushTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
+    // 会话过期检查
+    if (this.syncState().sessionExpired) {
+      this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
+      return false;
+    }
+    
+    // Circuit Breaker 检查
+    if (!this.checkCircuitBreaker()) {
+      this.logger.debug('Circuit Breaker: 熔断中，跳过位置推送', { taskId });
+      return false;
+    }
+    
+    const client = this.getSupabaseClient();
+    if (!client) {
+      return false;
+    }
+    
+    try {
+      const { error } = await client
+        .from('tasks')
+        .update({ 
+          x, 
+          y, 
+          updated_at: new Date().toISOString()  // LWW 时间戳，确保多设备同步正确
+        })
+        .eq('id', taskId);
+      
+      if (error) {
+        this.logger.debug('pushTaskPosition 失败', { taskId, error: error.message });
+        return false;
+      }
+      
+      this.recordCircuitSuccess();
+      return true;
+    } catch (e) {
+      this.logger.debug('pushTaskPosition 异常', { taskId, error: e });
+      return false;
+    }
+  }
+  
+  /**
    * 从云端拉取任务
    * LWW：只更新 updated_at 更新的数据
    * 
@@ -3653,6 +3705,9 @@ export class SimpleSyncService {
       // 【关键修复】拓扑排序确保父任务在子任务之前推送，防止外键约束违反
       const sortedTasks = this.topologicalSortTasks(tasksToSync);
       
+      // 【流量优化 2026-01-12】获取每个任务的变更字段，用于增量更新
+      const taskUpdateFieldsById = changes.taskUpdateFieldsById;
+      
       // 【关键修复】收集成功推送的任务 ID，用于后续连接验证
       const successfulTaskIds = new Set<string>();
       for (let i = 0; i < sortedTasks.length; i++) {
@@ -3662,9 +3717,27 @@ export class SimpleSyncService {
         }
         // skipTombstoneCheck=true: 已在上方通过 getTombstoneIds 批量过滤
         try {
-          const success = await this.pushTask(sortedTasks[i], project.id, true);
+          const task = sortedTasks[i];
+          const changedFields = taskUpdateFieldsById[task.id];
+          
+          // 【流量优化】如果仅有位置变更（x, y），使用增量更新
+          // 从 ~5KB（全量任务含 content）降低到 ~100B（仅坐标）
+          const isPositionOnlyUpdate = changedFields && 
+            changedFields.length > 0 &&
+            changedFields.every(f => f === 'x' || f === 'y' || f === 'rank');
+          
+          let success: boolean;
+          if (isPositionOnlyUpdate) {
+            // 增量位置更新
+            success = await this.pushTaskPosition(task.id, task.x, task.y);
+            this.logger.debug('使用增量位置更新', { taskId: task.id, changedFields });
+          } else {
+            // 全量更新
+            success = await this.pushTask(task, project.id, true);
+          }
+          
           if (success) {
-            successfulTaskIds.add(sortedTasks[i].id);
+            successfulTaskIds.add(task.id);
           }
         } catch (e) {
           // 【Critical】永久失败（版本冲突、会话过期）不应中断整个批量同步

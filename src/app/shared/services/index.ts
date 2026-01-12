@@ -19,7 +19,8 @@ export { LoggerService, LogLevel, type LogCategory } from '../../../services/log
 // 模态框服务
 export { ModalService } from '../../../services/modal.service';
 export { DynamicModalService } from '../../../services/dynamic-modal.service';
-export { BaseModalComponent } from '../../../services/base-modal.component';
+// 模态框基类现在从 shared/modals 导出
+export { BaseModalComponent, ConfirmModalComponent, EditableModalComponent } from '../modals/base-modal.component';
 
 // 偏好设置服务
 export { PreferenceService } from '../../../services/preference.service';

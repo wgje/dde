@@ -35,7 +35,7 @@ export const routes: Routes = [
       { 
         path: '', 
         pathMatch: 'full',
-        loadComponent: () => import('./components/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       },
       // 特定项目视图 - ProjectShellComponent 管理 text/flow 视图切换
       // 所有子路由都由同一个 ProjectShellComponent 处理，组件内部根据 URL 判断视图模式
@@ -43,28 +43,28 @@ export const routes: Routes = [
         path: ':projectId', 
         canActivate: [projectExistsGuard],
         canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./components/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       },
       // 文本视图模式
       { 
         path: ':projectId/text',
         canActivate: [projectExistsGuard],
         canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./components/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       },
       // 流程图模式
       { 
         path: ':projectId/flow',
         canActivate: [projectExistsGuard],
         canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./components/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       },
       // 定位到特定任务（深度链接）
       { 
         path: ':projectId/task/:taskId',
         canActivate: [projectExistsGuard],
         canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./components/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       }
     ]
   },

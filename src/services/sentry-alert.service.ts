@@ -71,6 +71,19 @@ export class SentryAlertService {
   private eventCountThisMinute = 0;
   private currentMinuteStart = Date.now();
   
+  // 同步状态上下文 - 用于 Sentry 错误报告
+  private syncContext: {
+    actionQueueLength: number;
+    lastSyncTimestamp: string | null;
+    pendingActions: number;
+    deadLetterCount: number;
+  } = {
+    actionQueueLength: 0,
+    lastSyncTimestamp: null,
+    pendingActions: 0,
+    deadLetterCount: 0,
+  };
+  
   // 告警统计
   private stats: AlertStats = {
     totalAlerts: 0,
@@ -92,6 +105,46 @@ export class SentryAlertService {
     if (typeof window !== 'undefined') {
       setInterval(() => this.resetRateLimiter(), 60000);
     }
+    
+    // 配置 Sentry 全局上下文
+    this.updateSentryContext();
+  }
+  
+  /**
+   * 更新同步状态上下文
+   * 应该由 ActionQueueService 和 SyncCoordinatorService 调用
+   * 
+   * @param context 同步状态上下文
+   */
+  updateSyncContext(context: Partial<typeof this.syncContext>): void {
+    this.syncContext = { ...this.syncContext, ...context };
+    this.updateSentryContext();
+  }
+  
+  /**
+   * 更新 Sentry 全局上下文
+   * 确保每个错误报告都包含同步状态信息
+   */
+  private updateSentryContext(): void {
+    Sentry.setContext('sync_state', {
+      action_queue_length: this.syncContext.actionQueueLength,
+      last_sync_timestamp: this.syncContext.lastSyncTimestamp,
+      pending_actions: this.syncContext.pendingActions,
+      dead_letter_count: this.syncContext.deadLetterCount,
+    });
+    
+    // 也设置为标签，方便在 Sentry 中筛选
+    Sentry.setTag('action_queue_length', String(this.syncContext.actionQueueLength));
+    if (this.syncContext.deadLetterCount > 0) {
+      Sentry.setTag('has_dead_letters', 'true');
+    }
+  }
+  
+  /**
+   * 获取当前同步状态上下文（用于测试和调试）
+   */
+  getSyncContext(): typeof this.syncContext {
+    return { ...this.syncContext };
   }
   
   /**
@@ -430,6 +483,13 @@ export class SentryAlertService {
     level: AlertLevel, 
     fingerprint: readonly string[]
   ): void {
+    // 【流量优化 2026-01-12】info 级别只记录本地日志，不上报 Sentry
+    // 理由：网络断开/重连、备份成功等事件是常态，不需要消耗流量上报
+    if (level === ALERT_LEVELS.LOW) {
+      this.logger.info(`[Local Only] ${event.type}: ${event.message}`, event.extra);
+      return;
+    }
+    
     try {
       Sentry.captureMessage(event.message, {
         level: level as Sentry.SeverityLevel,

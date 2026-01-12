@@ -16,12 +16,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ExportService, ExportData, ExportProject, ExportTask, ExportConnection, ExportAttachment } from './export.service';
-import { ImportService } from './import.service';
-import { LoggerService } from './logger.service';
-import { ToastService } from './toast.service';
-import { PreferenceService } from './preference.service';
-import { Project, Task, Connection, Attachment, TaskStatus, AttachmentType } from '../models';
+import { ExportService, ExportData, ExportProject, ExportTask, ExportConnection, ExportAttachment } from '../../services/export.service';
+import { ImportService } from '../../services/import.service';
+import { LoggerService } from '../../services/logger.service';
+import { ToastService } from '../../services/toast.service';
+import { PreferenceService } from '../../services/preference.service';
+import { Project, Task, Connection, Attachment, TaskStatus, AttachmentType } from '../../models';
 
 describe('数据完整性验证', () => {
   let exportService: ExportService;

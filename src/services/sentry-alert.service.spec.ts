@@ -64,13 +64,17 @@ describe('SentryAlertService', () => {
       );
     });
     
-    it('应报告熔断关闭事件', () => {
+    it('应报告熔断关闭事件（本地日志）', () => {
+      // 【流量优化 2026-01-12】熔断关闭是 LOW 级别，只记录本地日志不上报 Sentry
+      // 这是预期行为：熔断恢复是常态操作，不需要消耗流量上报
       service.reportCircuitBreakerClose();
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
-        expect.stringContaining('Circuit breaker closed'),
-        expect.any(Object)
-      );
+      // LOW 级别事件不会调用 Sentry.captureMessage
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      
+      // 但统计数据仍应更新
+      const stats = service.getStats();
+      expect(stats.totalAlerts).toBe(1);
     });
     
     it('应报告空数据阻止事件', () => {
@@ -255,10 +259,13 @@ describe('SentryAlertService', () => {
     });
     
     it('应区分不同的事件类型', () => {
+      // 【流量优化 2026-01-12】reportCircuitBreakerClose 使用 LOW 级别
+      // LOW 级别事件只记录本地日志，不上报 Sentry，所以只有 Open 会被上报
       service.reportCircuitBreakerOpen();
       service.reportCircuitBreakerClose();
       
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      // Open 是 HIGH 级别，会上报；Close 是 LOW 级别，被拦截
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
     
     it('应区分不同的标签', () => {

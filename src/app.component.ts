@@ -1014,9 +1014,17 @@ async signOut() {
   selectProject(id: string) {
     // 如果点击的是当前展开的项目，则收起详情
     if (this.expandedProjectId() === id) {
+      if (this.isEditingDescription()) {
+        this.saveProjectDetails(id);
+      }
       this.expandedProjectId.set(null);
       this.isEditingDescription.set(false);
       return;
+    }
+    
+    // 如果之前有展开的项目且正在编辑，先保存
+    if (this.expandedProjectId() && this.isEditingDescription()) {
+      this.saveProjectDetails(this.expandedProjectId()!);
     }
     
     // 展开新项目的详情
@@ -1031,6 +1039,39 @@ async signOut() {
       void this.router.navigate(['/projects', id, currentView]);
     }
     // 其他情况：只展开详情，不自动导航，让用户可以先看项目简介
+  }
+
+  /**
+   * 点击项目卡片（详情区域）的处理
+   * 如果正在编辑简介，点击卡片其他区域则完成编辑并保存
+   */
+  onProjectCardClick(event: MouseEvent, projectId: string) {
+    event.stopPropagation();
+    if (this.isEditingDescription()) {
+      this.saveProjectDetails(projectId);
+    }
+  }
+
+  /**
+   * 全局点击监听，用于点击外部时自动保存并收起详情
+   */
+  @HostListener('document:click', ['$event'])
+  onGlobalClick(event: MouseEvent) {
+    const expandedId = this.expandedProjectId();
+    if (!expandedId) return;
+
+    const target = event.target as HTMLElement;
+    // 如果点击的是项目列表项或详情卡片内部，由其自身的 handler 处理
+    const isProjectItem = target.closest('[data-testid="project-item"]');
+    const isProjectCard = target.closest('[data-testid="project-intro-card"]');
+    
+    if (!isProjectItem && !isProjectCard) {
+      if (this.isEditingDescription()) {
+        this.saveProjectDetails(expandedId);
+      }
+      this.expandedProjectId.set(null);
+      this.isEditingDescription.set(false);
+    }
   }
   
   // 进入项目视图（双击或点击进入按钮）

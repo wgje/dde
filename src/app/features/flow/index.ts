@@ -11,11 +11,9 @@
 // 组件
 export * from './components';
 
-// 服务
+// 服务（所有 flow 相关服务现在从 services 目录导出）
 export * from './services';
 
 // 其他相关服务（仍在 src/services/ 目录）
 export { LayoutService } from '../../../services/layout.service';
 export { LineageColorService } from '../../../services/lineage-color.service';
-export { MinimapMathService } from '../../../services/minimap-math.service';
-export { ReactiveMinimapService } from '../../../services/reactive-minimap.service';

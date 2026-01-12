@@ -41,7 +41,7 @@ import {
   OnInit,
   signal
 } from '@angular/core';
-import { MODAL_DATA, MODAL_REF } from './dynamic-modal.service';
+import { MODAL_DATA, MODAL_REF } from '../../../services/dynamic-modal.service';
 
 /**
  * 模态框基类指令

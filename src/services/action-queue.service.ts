@@ -1,8 +1,9 @@
-import { Injectable, inject, signal, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef, effect } from '@angular/core';
 import { QUEUE_CONFIG } from '../config';
 import { Project, Task, UserPreferences } from '../models';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SentryAlertService } from './sentry-alert.service';
 import { extractErrorMessage } from '../utils/result';
 import * as Sentry from '@sentry/angular';
 
@@ -148,6 +149,7 @@ export class ActionQueueService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ActionQueue');
   private readonly toast = inject(ToastService);
+  private readonly sentryAlert = inject(SentryAlertService);
   private readonly destroyRef = inject(DestroyRef);
   
   /** 待处理队列 */
@@ -177,6 +179,18 @@ export class ActionQueueService {
    * 传递当前内存中的数据供用户手动备份
    */
   private storageFailureCallback: ((data: { queue: QueuedAction[]; deadLetter: DeadLetterItem[] }) => void) | null = null;
+  
+  // 【Sentry 上下文】使用 effect 自动同步队列状态到 Sentry
+  private readonly syncContextEffect = effect(() => {
+    const queueLength = this.pendingActions().length;
+    const deadLetterCount = this.deadLetterQueue().length;
+    
+    this.sentryAlert.updateSyncContext({
+      actionQueueLength: queueLength,
+      pendingActions: queueLength,
+      deadLetterCount: deadLetterCount,
+    });
+  });
   
   /** 网络状态 */
   private isOnline = true;
@@ -430,6 +444,12 @@ export class ActionQueueService {
   
   /**
    * 处理队列中的所有操作
+   * 
+   * 【依赖顺序控制】
+   * 确保操作按正确顺序执行：
+   * - Create 操作必须在对应实体的 Update/Delete 操作之前成功
+   * - 如果 Create 失败，后续对同一实体的操作将被暂停
+   * - 这防止了尝试 Update 一个服务器还不知道的实体
    */
   async processQueue(): Promise<{ processed: number; failed: number; movedToDeadLetter: number }> {
     if (this.isProcessing() || !this.isOnline) {
@@ -458,10 +478,45 @@ export class ActionQueueService {
     let failed = 0;
     let movedToDeadLetter = 0;
     
+    // 【依赖顺序控制】跟踪失败的 Create 操作
+    // 如果 Create 失败，后续对同一实体的 Update/Delete 将被跳过
+    const failedCreateEntities = new Set<string>();
+    
     try {
       const queue = [...this.pendingActions()];
       
       for (const action of queue) {
+        // 【依赖顺序检查】如果该实体的 Create 操作失败，跳过后续操作
+        const entityKey = `${action.entityType}:${action.entityId}`;
+        if (action.type !== 'create' && failedCreateEntities.has(entityKey)) {
+          this.logger.debug('跳过操作：依赖的 Create 尚未成功', { 
+            actionId: action.id, 
+            type: action.type,
+            entityKey 
+          });
+          // 不计入失败，等待 Create 成功后再处理
+          continue;
+        }
+        
+        // 【依赖顺序检查】检查队列中是否有该实体的 Create 操作尚未处理
+        // 如果有，跳过当前的 Update/Delete 操作
+        if (action.type !== 'create') {
+          const hasUnprocessedCreate = queue.some(a => 
+            a.entityType === action.entityType && 
+            a.entityId === action.entityId && 
+            a.type === 'create' &&
+            a.id !== action.id
+          );
+          if (hasUnprocessedCreate) {
+            this.logger.debug('跳过操作：队列中有未处理的 Create', { 
+              actionId: action.id, 
+              type: action.type,
+              entityKey 
+            });
+            continue;
+          }
+        }
+        
         const processorKey = `${action.entityType}:${action.type}`;
         const processor = this.processors.get(processorKey);
         
@@ -473,6 +528,11 @@ export class ActionQueueService {
             this.logger.warn(`Action ${action.id} has no processor and timed out (${Math.round(waitTime / 1000)}s), moving to dead letter`);
             this.moveToDeadLetter(action, `无处理器且等待超时 (${Math.round(waitTime / 60000)}分钟)`);
             movedToDeadLetter++;
+            
+            // 如果是 Create 操作超时，标记实体
+            if (action.type === 'create') {
+              failedCreateEntities.add(entityKey);
+            }
           } else {
             // 没有处理器的操作保留在队列中等待，但记录重试次数
             if (action.retryCount > 2) {
@@ -493,6 +553,11 @@ export class ActionQueueService {
             const result = this.handleRetry(action, 'Operation returned false');
             if (result === 'dead-letter') {
               movedToDeadLetter++;
+              // 【依赖顺序控制】Create 失败移入死信队列，标记实体
+              if (action.type === 'create') {
+                failedCreateEntities.add(entityKey);
+                this.pauseDependentActions(action.entityType, action.entityId, queue);
+              }
             }
             failed++;
           }
@@ -501,6 +566,11 @@ export class ActionQueueService {
           const result = this.handleRetry(action, errorMessage);
           if (result === 'dead-letter') {
             movedToDeadLetter++;
+            // 【依赖顺序控制】Create 失败移入死信队列，标记实体
+            if (action.type === 'create') {
+              failedCreateEntities.add(entityKey);
+              this.pauseDependentActions(action.entityType, action.entityId, queue);
+            }
           }
           failed++;
         }
@@ -603,8 +673,93 @@ export class ActionQueueService {
     return this.deadLetterQueue().length > 0;
   }
   
+  /**
+   * 检查指定实体是否有未完成的 Create 操作
+   * 用于依赖顺序检查
+   */
+  hasUncompletedCreate(entityType: string, entityId: string): boolean {
+    return this.pendingActions().some(a => 
+      a.entityType === entityType && 
+      a.entityId === entityId && 
+      a.type === 'create'
+    );
+  }
+  
+  /**
+   * 获取被阻塞的操作（等待 Create 成功）
+   */
+  getBlockedActions(): QueuedAction[] {
+    const queue = this.pendingActions();
+    const blocked: QueuedAction[] = [];
+    
+    for (const action of queue) {
+      if (action.type === 'create') continue;
+      
+      // 检查是否有对应的 Create 操作
+      const hasCreate = queue.some(a => 
+        a.entityType === action.entityType && 
+        a.entityId === action.entityId && 
+        a.type === 'create'
+      );
+      
+      if (hasCreate) {
+        blocked.push(action);
+      }
+    }
+    
+    return blocked;
+  }
+
   // ========== 私有方法 ==========
   
+  /**
+   * 暂停依赖于失败 Create 的操作
+   * 将这些操作的优先级标记，并记录日志
+   * 
+   * @param entityType 实体类型
+   * @param entityId 实体 ID
+   * @param queue 当前队列快照
+   */
+  private pauseDependentActions(entityType: string, entityId: string, queue: QueuedAction[]): void {
+    const dependentActions = queue.filter(a => 
+      a.entityType === entityType && 
+      a.entityId === entityId && 
+      a.type !== 'create'
+    );
+    
+    if (dependentActions.length > 0) {
+      this.logger.warn('Create 失败，暂停依赖操作', {
+        entityType,
+        entityId,
+        dependentCount: dependentActions.length,
+        dependentTypes: dependentActions.map(a => a.type)
+      });
+      
+      // 发送 Sentry 事件
+      Sentry.captureMessage('Create failed, dependent actions paused', {
+        level: 'warning',
+        tags: { 
+          operation: 'pauseDependentActions',
+          entityType 
+        },
+        extra: {
+          entityId,
+          dependentCount: dependentActions.length,
+          dependentActions: dependentActions.map(a => ({ id: a.id, type: a.type }))
+        }
+      });
+      
+      // 通知用户（仅当有关键操作被阻塞时）
+      const hasCriticalBlocked = dependentActions.some(a => a.priority === 'critical');
+      if (hasCriticalBlocked) {
+        this.toast.warning(
+          '同步受阻', 
+          '有操作因前置操作失败而暂停，请检查网络连接'
+        );
+      }
+    }
+  }
+
   /**
    * 移动操作到死信队列
    * 根据操作优先级采取不同策略：

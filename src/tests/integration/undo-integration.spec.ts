@@ -5,15 +5,15 @@
 
 import { TestBed } from '@angular/core/testing';
 import { signal, WritableSignal } from '@angular/core';
-import { TaskOperationService } from './task-operation.service';
-import { TaskOperationAdapterService } from './task-operation-adapter.service';
-import { UndoService } from './undo.service';
-import { ProjectStateService } from './project-state.service';
-import { SyncCoordinatorService } from './sync-coordinator.service';
-import { LayoutService } from './layout.service';
-import { OptimisticStateService } from './optimistic-state.service';
-import { UiStateService } from './ui-state.service';
-import { Project, Task } from '../models';
+import { TaskOperationService } from '../../services/task-operation.service';
+import { TaskOperationAdapterService } from '../../services/task-operation-adapter.service';
+import { UndoService } from '../../services/undo.service';
+import { ProjectStateService } from '../../services/project-state.service';
+import { SyncCoordinatorService } from '../../services/sync-coordinator.service';
+import { LayoutService } from '../../services/layout.service';
+import { OptimisticStateService } from '../../services/optimistic-state.service';
+import { UiStateService } from '../../services/ui-state.service';
+import { Project, Task } from '../../models';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // Mock services

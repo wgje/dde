@@ -15,7 +15,7 @@ import { TextUnfinishedComponent } from './text-unfinished.component';
 import { TextUnassignedComponent } from './text-unassigned.component';
 import { TextStagesComponent } from './text-stages.component';
 import { TextDeleteDialogComponent } from './text-delete-dialog.component';
-import { TextViewDragDropService } from './text-view-drag-drop.service';
+import { TextViewDragDropService } from '../services/text-view-drag-drop.service';
 
 /**
  * 文本视图容器组件

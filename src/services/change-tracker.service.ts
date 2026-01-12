@@ -75,6 +75,11 @@ export interface ProjectChangeSummary {
   hasChanges: boolean;
   /** 总变更数量 */
   totalChanges: number;
+  /** 
+   * 【流量优化 2026-01-12】每个任务的变更字段映射
+   * 用于增量更新：仅更新变化的字段，而非全量推送
+   */
+  taskUpdateFieldsById: Record<string, string[] | undefined>;
 }
 
 /**
@@ -348,6 +353,8 @@ export class ChangeTrackerService {
     const connectionsToCreate: Connection[] = [];
     const connectionsToUpdate: Connection[] = [];
     const connectionsToDelete: { source: string; target: string }[] = [];
+    // 【流量优化 2026-01-12】收集每个任务的变更字段
+    const taskUpdateFieldsById: Record<string, string[] | undefined> = {};
     
     for (const [_key, record] of this.pendingChanges.entries()) {
       if (record.projectId !== projectId) continue;
@@ -358,7 +365,11 @@ export class ChangeTrackerService {
             if (record.data) tasksToCreate.push(record.data as Task);
             break;
           case 'update':
-            if (record.data) tasksToUpdate.push(record.data as Task);
+            if (record.data) {
+              tasksToUpdate.push(record.data as Task);
+              // 记录该任务变更的字段
+              taskUpdateFieldsById[record.entityId] = record.changedFields;
+            }
             break;
           case 'delete':
             taskIdsToDelete.push(record.entityId);
@@ -393,7 +404,8 @@ export class ChangeTrackerService {
       connectionsToUpdate,
       connectionsToDelete,
       hasChanges: totalChanges > 0,
-      totalChanges
+      totalChanges,
+      taskUpdateFieldsById
     };
   }
   

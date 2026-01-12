@@ -61,10 +61,18 @@ export const SYNC_CONFIG = {
    * 对于个人 PWA，轮询足够且更节省流量
    */
   REALTIME_ENABLED: false,
-  /** 轮询间隔（毫秒）- 替代 Realtime 的轮询频率 */
-  POLLING_INTERVAL: 30000,
-  /** 轮询活跃状态判定时间（毫秒）- 用户活跃时使用较短间隔 */
-  POLLING_ACTIVE_INTERVAL: 15000,
+  /** 
+   * 轮询间隔（毫秒）- 替代 Realtime 的轮询频率
+   * 【流量优化 2026-01-12】从 30s 增加到 5 分钟
+   * 理由：单人应用主要依赖乐观更新 + 操作触发同步，轮询只是兜底
+   */
+  POLLING_INTERVAL: 300_000,
+  /** 
+   * 轮询活跃状态判定时间（毫秒）- 用户活跃时使用较短间隔
+   * 【流量优化 2026-01-12】从 15s 增加到 60s
+   * 理由：减少待机流量 4-10 倍
+   */
+  POLLING_ACTIVE_INTERVAL: 60_000,
   /** 用户活跃超时（毫秒）- 用户无操作后视为不活跃 */
   USER_ACTIVE_TIMEOUT: 60000,
   

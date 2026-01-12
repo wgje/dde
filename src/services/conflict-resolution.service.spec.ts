@@ -1077,4 +1077,197 @@ describe('ConflictResolutionService', () => {
       expect(task.rank).toBe(5000);
     });
   });
+
+  // ==================== 内容冲突检测测试 ====================
+
+  describe('内容冲突检测 (isRealContentConflict)', () => {
+    /**
+     * 通过 smartMerge 间接测试 isRealContentConflict 行为
+     * 
+     * 冲突副本被直接添加到 project.tasks 中，通过 title 包含 '(冲突副本)' 来识别
+     * 
+     * 规则：
+     * - 相似度 > 90%：不创建冲突副本
+     * - 相似度 < 30%：不创建冲突副本（按 LWW）
+     * - 相似度 30%-90%：创建冲突副本
+     * - 内容长度 < 20：不创建冲突副本
+     */
+    
+    // 辅助函数：查找冲突副本
+    function findConflictCopies(tasks: Task[]): Task[] {
+      return tasks.filter(t => t.title.includes('(冲突副本)'));
+    }
+    
+    it('短内容（<20字符）不应触发冲突副本', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Short Task',
+          content: 'Short',  // 5 字符
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Short Task',
+          content: 'Different',  // 9 字符
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      // 内容太短，不应创建副本
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(0);
+    });
+
+    it('内容完全不同（<30% 相似度）应使用 LWW，不创建副本', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAA',  // 28 个 A
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: 'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZ',  // 28 个 Z，完全不同
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      // 完全不同的内容，按 LWW 使用远程版本，不创建副本
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(0);
+      
+      // 验证使用了远程版本（LWW）
+      const mainTask = result.project.tasks.find(t => t.id === 'task-1');
+      expect(mainTask?.content).toBe('ZZZZZZZZZZZZZZZZZZZZZZZZZZZZ');
+    });
+
+    it('高度相似内容（>90% 相似度）不应创建副本', () => {
+      const baseContent = 'This is a long enough content for testing similarity detection.';
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: baseContent,
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: baseContent + '!',  // 只添加一个感叹号
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      // 高度相似，不创建副本
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(0);
+    });
+
+    it('中等相似度（30%-90%）应创建冲突副本', () => {
+      // 构造中等相似度内容：共享部分字符但有明显差异
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: '原任务',
+          content: 'This is the local version with some unique local content here.',
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: '原任务',
+          content: 'This is the remote version with different remote content here.',
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      // 中等相似度，应创建冲突副本
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(1);
+      expect(conflictCopies[0].title).toBe('原任务 (冲突副本)');
+      expect(conflictCopies[0].content).toBe(
+        'This is the local version with some unique local content here.'
+      );
+    });
+
+    it('一方内容是另一方前缀时不应创建副本', () => {
+      const baseContent = 'This is a base content with enough length for testing.';
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: baseContent,
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: 'Test Task',
+          content: baseContent + ' And this is additional content.',
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      // 远程是本地的扩展，不创建副本
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(0);
+    });
+
+    it('冲突副本应有正确的元数据', () => {
+      const localProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: '原任务标题',
+          content: 'Local unique content that is different from remote version.',
+          x: 100,
+          y: 200,
+          updatedAt: new Date('2025-01-01').toISOString(),
+        })],
+      });
+      const remoteProject = createTestProject({
+        tasks: [createTestTask({
+          id: 'task-1',
+          title: '原任务标题',
+          content: 'Remote unique content that is different from local version.',
+          updatedAt: new Date('2025-01-02').toISOString(),
+        })],
+      });
+
+      const result = service.smartMerge(localProject, remoteProject, new Set());
+
+      const conflictCopies = findConflictCopies(result.project.tasks);
+      expect(conflictCopies).toHaveLength(1);
+      
+      const copy = conflictCopies[0];
+      
+      // 验证副本元数据
+      expect(copy.id).not.toBe('task-1');  // 新 ID
+      expect(copy.title).toBe('原任务标题 (冲突副本)');
+      expect(copy.x).toBe(150);  // 原位置 + 50
+      expect(copy.y).toBe(250);  // 原位置 + 50
+      expect(copy.shortId).toBeDefined();  // 应有短 ID
+      expect(copy.content).toBe('Local unique content that is different from remote version.');
+    });
+  });
 });

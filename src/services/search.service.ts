@@ -57,8 +57,6 @@ export class SearchService {
       !t.deletedAt && (
         this.fuzzyMatch(t.title, query) ||
         this.fuzzyMatch(t.content, query) ||
-        this.fuzzyMatch(t.displayId, query) ||
-        (t.shortId && this.fuzzyMatch(t.shortId, query)) ||
         (t.attachments?.some(a => this.fuzzyMatch(a.name, query)) ?? false) ||
         (t.tags?.some(tag => this.fuzzyMatch(tag, query)) ?? false)
       )
@@ -108,8 +106,6 @@ export class SearchService {
       !t.deletedAt && (
         this.fuzzyMatch(t.title, normalizedQuery) ||
         this.fuzzyMatch(t.content, normalizedQuery) ||
-        this.fuzzyMatch(t.displayId, normalizedQuery) ||
-        (t.shortId && this.fuzzyMatch(t.shortId, normalizedQuery)) ||
         (t.attachments?.some(a => this.fuzzyMatch(a.name, normalizedQuery)) ?? false) ||
         (t.tags?.some(tag => this.fuzzyMatch(tag, normalizedQuery)) ?? false)
       )

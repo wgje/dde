@@ -43,11 +43,20 @@
 
 ## 目录结构（必须遵守）
 - src/app/core/：核心单例（SimpleSyncService, stores.ts）
-- src/app/features/：业务组件（Flow, Text）
-- src/app/shared/：共享组件/模态框
-- src/services/：主服务层（大量服务）
+  - src/app/core/shell/：应用容器组件（ProjectShellComponent）
+- src/app/features/：业务组件
+  - src/app/features/flow/components/：Flow 视图组件
+  - src/app/features/flow/services/：Flow 相关服务（GoJS、缩放、导出等）
+  - src/app/features/text/components/：Text 视图组件
+  - src/app/features/text/services/：Text 相关服务
+- src/app/shared/：共享资源
+  - src/app/shared/components/：通用 UI 组件
+  - src/app/shared/modals/：模态框组件（含 base-modal.component.ts 基类）
+- src/services/：主服务层（核心业务逻辑）
 - src/config/：配置常量（按职责拆分）
 - src/utils/：工具函数（result.ts, supabase-error.ts）
+- src/tests/integration/：集成测试文件
+- scripts/legacy/：历史脚本（已被 init-supabase.sql 取代）
 
 ## 关键配置（保持一致，不随意改语义）
 - SYNC_CONFIG.DEBOUNCE_DELAY = 3000ms

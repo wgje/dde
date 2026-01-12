@@ -10,8 +10,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { ChangeTrackerService } from './change-tracker.service';
-import { Task, Connection } from '../models';
+import { ChangeTrackerService } from '../../services/change-tracker.service';
+import { Task, Connection } from '../../models';
 
 describe('数据丢失检测集成测试', () => {
   let changeTracker: ChangeTrackerService;

@@ -14,6 +14,9 @@
  * - FlowTouchService: 触摸手势
  * - FlowLinkService: 连接线管理
  * - FlowTaskOperationsService: 任务操作
+ * - FlowCommandService: Shell 与 FlowView 的解耦通信
+ * - MinimapMathService: 小地图数学计算
+ * - ReactiveMinimapService: 响应式小地图
  */
 
 // 核心服务
@@ -36,3 +39,10 @@ export type { InsertPositionInfo } from './flow-drag-drop.service';
 export { FlowTouchService } from './flow-touch.service';
 export { FlowLinkService } from './flow-link.service';
 export { FlowTaskOperationsService } from './flow-task-operations.service';
+
+// 命令与通信服务
+export { FlowCommandService, FlowCommandType, type FlowCommand, type CenterNodePayload } from './flow-command.service';
+
+// 小地图服务
+export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBounds, type MinimapState, type DragSession, type RealTimeScaleResult, type VirtualBoundsResult } from './minimap-math.service';
+export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from './reactive-minimap.service';

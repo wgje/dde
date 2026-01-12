@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 
-import { TaskOperationService } from './task-operation.service';
-import { LayoutService } from './layout.service';
-import { ToastService } from './toast.service';
-import { Project, Task } from '../models';
-import { isSuccess, isFailure, ErrorCodes } from '../utils/result';
+import { TaskOperationService } from '../../services/task-operation.service';
+import { LayoutService } from '../../services/layout.service';
+import { ToastService } from '../../services/toast.service';
+import { Project, Task } from '../../models';
+import { isSuccess, isFailure, ErrorCodes } from '../../utils/result';
 
 function createTask(overrides: Partial<Task>): Task {
   const now = new Date().toISOString();

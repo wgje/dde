@@ -49,6 +49,9 @@ src/
 │   │       ├── stores.ts                  # Signals 状态（Map<id, Task>）
 │   │       └── store-persistence.service.ts
 │   │
+│   ├── shell/                     # 应用容器
+│   │   └── project-shell.component.ts   # 项目容器/视图切换
+│   │
 │   ├── features/
 │   │   ├── flow/                  # 流程图视图
 │   │   │   ├── components/        # 11 组件
@@ -58,7 +61,7 @@ src/
 │   │   │   │   ├── flow-task-detail.component.ts
 │   │   │   │   ├── flow-connection-editor.component.ts
 │   │   │   │   └── flow-*-dialog.component.ts    # 批量删除/级联分配/删除确认/链接
-│   │   │   └── services/          # 12 GoJS 服务
+│   │   │   └── services/          # 16 GoJS 服务
 │   │   │       ├── flow-diagram.service.ts        # 图表核心
 │   │   │       ├── flow-template.service.ts       # 节点/链接模板
 │   │   │       ├── flow-template-events.ts        # 事件代理（解耦）
@@ -69,30 +72,31 @@ src/
 │   │   │       ├── flow-link.service.ts
 │   │   │       ├── flow-layout.service.ts
 │   │   │       ├── flow-zoom.service.ts
-│   │   │       └── flow-touch.service.ts
+│   │   │       ├── flow-touch.service.ts
+│   │   │       ├── flow-command.service.ts        # 快捷键命令
+│   │   │       ├── minimap-math.service.ts        # 小地图数学
+│   │   │       └── reactive-minimap.service.ts    # 响应式小地图
 │   │   │
 │   │   └── text/                  # 文本视图（移动端默认）
-│   │       └── components/        # 12 组件
-│   │           ├── text-view.component.ts
-│   │           ├── text-stages.component.ts
-│   │           ├── text-stage-card.component.ts
-│   │           ├── text-task-card.component.ts
-│   │           ├── text-task-editor.component.ts
-│   │           ├── text-task-connections.component.ts
-│   │           ├── text-unassigned.component.ts
-│   │           ├── text-unfinished.component.ts
+│   │       ├── components/        # 12 组件
+│   │       │   ├── text-view.component.ts
+│   │       │   ├── text-stages.component.ts
+│   │       │   ├── text-stage-card.component.ts
+│   │       │   ├── text-task-card.component.ts
+│   │       │   ├── text-task-editor.component.ts
+│   │       │   ├── text-task-connections.component.ts
+│   │       │   ├── text-unassigned.component.ts
+│   │       │   └── text-unfinished.component.ts
+│   │       └── services/          # Text 相关服务
 │   │           └── text-view-drag-drop.service.ts
 │   │
 │   └── shared/
-│       ├── components/            # 8 通用组件
+│       ├── components/            # 8 通用组件（含 index.ts barrel）
 │       │   └── attachment-manager | error-boundary | error-page | not-found
 │       │       offline-banner | reset-password | sync-status | toast-container
-│       └── modals/                # 13 模态框
+│       └── modals/                # 13 模态框 + base-modal.component.ts 基类
 │           └── login | settings | new-project | dashboard | trash | delete-confirm
 │               conflict | error-recovery | migration | config-help | storage-escape | recovery
-│
-├── components/
-│   └── project-shell.component.ts   # 项目容器/视图切换
 │
 ├── services/                      # 主服务层（60+ 服务）
 │   ├── store.service.ts           # 门面 Facade ※ 禁止业务逻辑

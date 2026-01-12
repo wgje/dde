@@ -14,7 +14,7 @@ import { FlowEventService } from './flow-event.service';
 import { FlowTemplateService } from './flow-template.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
 import { getFlowStyles, FlowTheme, FlowColorMode } from '../../../../config/flow-styles';
-import { MinimapMathService } from '../../../../services/minimap-math.service';
+import { MinimapMathService } from './minimap-math.service';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
 import { UI_CONFIG } from '../../../../config';

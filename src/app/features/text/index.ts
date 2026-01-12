@@ -19,8 +19,8 @@ export { TextUnfinishedComponent } from './components/text-unfinished.component'
 export { TextViewLoadingComponent } from './components/text-view-loading.component';
 export { TextDeleteDialogComponent } from './components/text-delete-dialog.component';
 
-// 文本视图服务
-export { TextViewDragDropService } from './components/text-view-drag-drop.service';
+// 文本视图服务（已迁移到 services 目录）
+export { TextViewDragDropService } from './services/text-view-drag-drop.service';
 
 // 类型定义
 export type { 
@@ -34,3 +34,4 @@ export type {
   TaskConnection,
   TaskConnections
 } from './components/text-view.types';
+

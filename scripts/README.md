@@ -8,25 +8,6 @@
   - 用途：统一的「一次性初始化脚本」，包含当前 NanoFlow 所需的全部数据库对象（表 / RPC / 触发器 / RLS / Realtime / Storage 策略）。
   - 执行时机：新建 Supabase 项目后，在 Dashboard → SQL Editor 中一次性执行。
 
-## 旧版初始化（兼容保留）
-
-- `init-database.sql`
-  - 用途：旧版一次性初始化脚本（历史兼容）。
-  - 说明：功能覆盖不如 `init-supabase.sql` 完整；新项目请优先使用 `init-supabase.sql`。
-
-## 分步脚本（了解/排查时用）
-
-- `supabase-setup.sql`
-  - 核心表结构 + RLS（较早版本拆分脚本）。
-- `storage-setup.sql`
-  - Storage `attachments` 桶的 RLS 策略（桶本身仍需在 Dashboard 创建）。
-- `attachment-rpc.sql`
-  - 附件相关 RPC（部分能力已被 `init-supabase.sql` 覆盖）。
-- `attachment-soft-delete.sql`
-  - 附件软删除相关 SQL（历史脚本）。
-- `add-connection-title.sql`
-  - connections 标题字段相关的历史补丁脚本。
-
 ## 迁移 / 清理 / 维护
 
 - `migrate-to-v2.sql`
@@ -54,4 +35,15 @@
 - `setup-storage-bucket.cjs`
   - Storage 桶初始化辅助（如果使用脚本方式创建桶）。
 
-> 说明：如果你只是想让新项目“能跑起来”，优先执行 `init-supabase.sql` 即可。
+## legacy/ 目录
+
+旧版/历史脚本（保留用于参考，新项目无需使用）：
+
+- `init-database.sql` - 旧版一次性初始化脚本
+- `supabase-setup.sql` - 核心表结构 + RLS（早期版本）
+- `storage-setup.sql` - Storage bucket RLS 策略（早期版本）
+- `attachment-rpc.sql` - 附件相关 RPC
+- `attachment-soft-delete.sql` - 附件软删除
+- `add-connection-title.sql` - connections 标题字段补丁
+
+> 说明：如果你只是想让新项目"能跑起来"，优先执行 `init-supabase.sql` 即可。

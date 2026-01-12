@@ -10,15 +10,15 @@ import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { UiStateService } from '../services/ui-state.service';
-import { ProjectStateService } from '../services/project-state.service';
-import { TaskOperationAdapterService } from '../services/task-operation-adapter.service';
-import { SyncCoordinatorService } from '../services/sync-coordinator.service';
-import { ToastService } from '../services/toast.service';
-import { TabSyncService } from '../services/tab-sync.service';
-import { FlowCommandService } from '../services/flow-command.service';
-import { TextViewComponent } from '../app/features/text';
-import { FlowViewComponent } from '../app/features/flow';
+import { UiStateService } from '../../../services/ui-state.service';
+import { ProjectStateService } from '../../../services/project-state.service';
+import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
+import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
+import { ToastService } from '../../../services/toast.service';
+import { TabSyncService } from '../../../services/tab-sync.service';
+import { FlowCommandService } from '../../features/flow/services/flow-command.service';
+import { TextViewComponent } from '../../features/text';
+import { FlowViewComponent } from '../../features/flow';
 
 /**
  * 项目视图外壳组件

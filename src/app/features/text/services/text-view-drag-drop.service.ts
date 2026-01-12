@@ -1,6 +1,6 @@
 import { Injectable, signal } from '@angular/core';
 import { Task } from '../../../../models';
-import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from './text-view.types';
+import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from '../components/text-view.types';
 
 /**
  * 拖拽服务

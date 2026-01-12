@@ -592,4 +592,131 @@ describe('ActionQueueService', () => {
       expect(processor).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ==================== 依赖操作暂停测试 ====================
+
+  describe('依赖操作暂停 (pauseDependentActions)', () => {
+    /**
+     * 测试场景：当 Create 操作失败时，同一实体的后续操作应被暂停
+     * 
+     * 规则：
+     * - Create 失败后，同一 entityId 的 Update/Delete 操作应被标记
+     * - 应发送 Sentry 警告
+     * - 关键操作被阻塞时应显示 Toast
+     */
+
+    it('Create 失败后应暂停同一实体的 Update 操作', async () => {
+      // 注册一个总是失败的 create 处理器
+      const createProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
+      const updateProcessor = vi.fn().mockResolvedValue(true);
+      
+      service.registerProcessor('task:create', createProcessor);
+      service.registerProcessor('task:update', updateProcessor);
+      
+      setNetworkStatus(false);
+      
+      // 入队 create 操作
+      service.enqueue({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-1',
+        payload: { task: { id: 'task-1', title: 'New Task' } as any, projectId: 'proj-1' },
+      });
+      
+      // 入队同一实体的 update 操作
+      service.enqueue({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-1',
+        payload: { task: { id: 'task-1', title: 'Updated Task' } as any, projectId: 'proj-1' },
+      });
+      
+      expect(service.pendingActions().length).toBe(2);
+      
+      setNetworkStatus(true);
+      
+      // 处理队列 - create 会失败
+      await service.processQueue();
+      
+      // create 处理器应被调用
+      expect(createProcessor).toHaveBeenCalled();
+      
+      // 应该有日志记录暂停操作
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        expect.stringContaining('暂停依赖操作'),
+        expect.objectContaining({
+          entityType: 'task',
+          entityId: 'task-1',
+        })
+      );
+    });
+
+    it('Create 失败不应影响其他实体的操作', async () => {
+      const createProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
+      const updateProcessor = vi.fn().mockResolvedValue(true);
+      
+      service.registerProcessor('task:create', createProcessor);
+      service.registerProcessor('task:update', updateProcessor);
+      
+      setNetworkStatus(false);
+      
+      // 入队 task-1 的 create（会失败）
+      service.enqueue({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-1',
+        payload: { task: { id: 'task-1', title: 'Task 1' } as any, projectId: 'proj-1' },
+      });
+      
+      // 入队 task-2 的 update（应该正常处理）
+      service.enqueue({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-2',
+        payload: { task: { id: 'task-2', title: 'Task 2 Updated' } as any, projectId: 'proj-1' },
+      });
+      
+      setNetworkStatus(true);
+      
+      await service.processQueue();
+      
+      // task-2 的 update 应该被处理
+      expect(updateProcessor).toHaveBeenCalledWith(
+        expect.objectContaining({ entityId: 'task-2' })
+      );
+    });
+
+    it('不同实体类型的操作互不影响', async () => {
+      const taskCreateProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
+      const projectUpdateProcessor = vi.fn().mockResolvedValue(true);
+      
+      service.registerProcessor('task:create', taskCreateProcessor);
+      service.registerProcessor('project:update', projectUpdateProcessor);
+      
+      setNetworkStatus(false);
+      
+      // 入队 task 的 create（会失败）
+      service.enqueue({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-1',
+        payload: { task: { id: 'task-1', title: 'Task 1' } as any, projectId: 'proj-1' },
+      });
+      
+      // 入队 project 的 update（应该正常处理）
+      service.enqueue({
+        type: 'update',
+        entityType: 'project',
+        entityId: 'proj-1',
+        payload: { project: { id: 'proj-1', name: 'Updated' } as any },
+      });
+      
+      setNetworkStatus(true);
+      
+      await service.processQueue();
+      
+      // project update 应该被处理
+      expect(projectUpdateProcessor).toHaveBeenCalled();
+    });
+  });
 });

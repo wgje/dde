@@ -8,7 +8,7 @@ import { SyncCoordinatorService } from '../../../../services/sync-coordinator.se
 import { PreferenceService } from '../../../../services/preference.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
-import { FlowCommandService } from '../../../../services/flow-command.service';
+import { FlowCommandService } from '../services/flow-command.service';
 import { FlowDiagramService } from '../services/flow-diagram.service';
 import { FlowEventService } from '../services/flow-event.service';
 import { FlowZoomService } from '../services/flow-zoom.service';

@@ -54,7 +54,8 @@ export {
   type ModalConfig, 
   type ModalRef 
 } from './dynamic-modal.service';
-export { BaseModalComponent, ConfirmModalComponent } from './base-modal.component';
+// 模态框基类已迁移到 src/app/shared/modals/
+export { BaseModalComponent, ConfirmModalComponent, EditableModalComponent } from '../app/shared/modals/base-modal.component';
 export { UiStateService } from './ui-state.service';
 export { BeforeUnloadManagerService, type BeforeUnloadCallback } from './before-unload-manager.service';
 
@@ -133,13 +134,13 @@ export {
   RECOVERY_CONFIG 
 } from './recovery.service';
 
-// 流程图相关服务 - 请从 '@app/features/flow/services' 导入
-// FlowDiagramService, FlowDragDropService, FlowLinkService 等已迁移
-export { FlowCommandService, FlowCommandType, type FlowCommand, type CenterNodePayload } from './flow-command.service';
+// 流程图相关服务 - 已迁移到 '@app/features/flow/services'
+// 以下重导出用于保持向后兼容性（建议直接从 flow/services 导入）
+export { FlowCommandService, FlowCommandType, type FlowCommand, type CenterNodePayload } from '../app/features/flow/services/flow-command.service';
+export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBounds, type MinimapState, type DragSession, type RealTimeScaleResult, type VirtualBoundsResult } from '../app/features/flow/services/minimap-math.service';
+export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from '../app/features/flow/services/reactive-minimap.service';
 
 export { TaskTrashService, type DeletedTaskMeta, type DeleteResult, type RestoreResult, type TrashServiceCallbacks } from './task-trash.service';
-export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBounds, type MinimapState, type DragSession, type RealTimeScaleResult, type VirtualBoundsResult } from './minimap-math.service';
-export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from './reactive-minimap.service';
 export { LineageColorService, type LineageData, type LineageNodeData, type LineageLinkData } from './lineage-color.service';
 
 // Guards (注意：authGuard 已移除，请使用 requireAuthGuard)

@@ -405,7 +405,7 @@ export class ConflictResolutionService {
       }
       
       // 双方都有的任务，执行字段级合并（传入 projectId 用于字段锁检查）
-      const { mergedTask, hasConflict } = this.mergeTaskFields(localTask, remoteTask, local.id);
+      const { mergedTask, hasConflict, contentConflictCopy } = this.mergeTaskFields(localTask, remoteTask, local.id);
       
       if (hasConflict) {
         conflictCount++;
@@ -413,6 +413,18 @@ export class ConflictResolutionService {
       }
       
       mergedTasks.push(mergedTask);
+      
+      // 【LWW 缺陷修复】如果 content 存在真正冲突，创建冲突副本
+      // 而不是尝试自动合并 - 让用户手动处理
+      if (contentConflictCopy) {
+        mergedTasks.push(contentConflictCopy);
+        this.logger.info('smartMerge: 创建 content 冲突副本', { 
+          originalId: localTask.id,
+          copyId: contentConflictCopy.id,
+          copyTitle: contentConflictCopy.title
+        });
+        issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
+      }
     }
     
     // 处理远程新增的任务
@@ -491,11 +503,22 @@ export class ConflictResolutionService {
    * 如果某个字段被锁定（用户正在编辑），则始终使用本地版本
    * 这防止了在状态切换后同步导致的状态回滚问题
    * 
+   * 【LWW 缺陷修复】content 冲突处理
+   * 对于 content 字段的真正冲突（双方都有有意义的不同修改），
+   * 不再尝试自动合并，而是：
+   * - 使用远程版本作为主版本
+   * - 创建本地版本的冲突副本供用户手动合并
+   * 
    * @param local 本地任务
    * @param remote 远程任务
    * @param projectId 项目 ID（用于字段锁检查）
+   * @returns mergedTask: 合并后的任务, hasConflict: 是否存在冲突, contentConflictCopy: 如果 content 存在真正冲突则创建的副本
    */
-  private mergeTaskFields(local: Task, remote: Task, projectId: string): { mergedTask: Task; hasConflict: boolean } {
+  private mergeTaskFields(local: Task, remote: Task, projectId: string): { 
+    mergedTask: Task; 
+    hasConflict: boolean; 
+    contentConflictCopy?: Task 
+  } {
     const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : 0;
     const remoteTime = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
     
@@ -504,6 +527,7 @@ export class ConflictResolutionService {
     const _otherTask = remoteTime > localTime ? local : remote;
     
     let hasConflict = false;
+    let contentConflictCopy: Task | undefined = undefined;
     
     // 字段级合并：检查每个可编辑字段
     const mergedTask: Task = { ...baseTask };
@@ -524,7 +548,7 @@ export class ConflictResolutionService {
       }
     }
     
-    // 内容：如果不同，尝试合并或使用较新版本
+    // 内容：如果不同，检测是否需要创建冲突副本
     if (local.content !== remote.content) {
       hasConflict = true;
       // 【字段锁检查】如果 content 被锁定，始终使用本地版本
@@ -532,9 +556,49 @@ export class ConflictResolutionService {
         mergedTask.content = local.content;
         this.logger.debug('mergeTaskFields: content 被锁定，使用本地版本', { taskId: local.id });
       } else {
-        // 对于内容，尝试智能合并（如果两边都有添加）
-        const mergedContent = this.mergeTextContent(local.content, remote.content, localTime, remoteTime);
-        mergedTask.content = mergedContent;
+        // 【LWW 缺陷修复】检测是否是真正的冲突
+        // 真正冲突的定义：双方内容都有实质性修改，且不是简单的扩展关系
+        const isRealConflict = this.isRealContentConflict(local.content, remote.content);
+        
+        if (isRealConflict) {
+          // 真正冲突：使用远程版本，创建本地版本的副本
+          mergedTask.content = remote.content;
+          
+          // 创建冲突副本 - 包含本地的 content
+          contentConflictCopy = {
+            ...local,
+            id: crypto.randomUUID(),
+            title: `${local.title || '未命名任务'} (冲突副本)`,
+            displayId: '', // 将由布局服务重新计算
+            shortId: this.generateShortId(),
+            content: local.content, // 保留本地内容
+            updatedAt: new Date().toISOString(),
+            // 将副本放在原任务附近
+            x: local.x + 50,
+            y: local.y + 50,
+          };
+          
+          this.logger.warn('mergeTaskFields: content 真正冲突，创建副本', { 
+            taskId: local.id, 
+            localContentLength: local.content?.length,
+            remoteContentLength: remote.content?.length
+          });
+          
+          // 发送 Sentry 事件
+          Sentry.captureMessage('Content conflict detected, created copy', {
+            level: 'info',
+            tags: { operation: 'mergeTaskFields', taskId: local.id },
+            extra: { 
+              localContentLength: local.content?.length,
+              remoteContentLength: remote.content?.length,
+              copyId: contentConflictCopy.id
+            }
+          });
+        } else {
+          // 非真正冲突：尝试智能合并（如果两边都有添加）
+          const mergedContent = this.mergeTextContent(local.content, remote.content, localTime, remoteTime);
+          mergedTask.content = mergedContent;
+        }
       }
     }
     
@@ -639,7 +703,84 @@ export class ConflictResolutionService {
     // 更新合并时间戳
     mergedTask.updatedAt = new Date().toISOString();
     
-    return { mergedTask, hasConflict };
+    return { mergedTask, hasConflict, contentConflictCopy };
+  }
+
+  /**
+   * 检测是否是真正的 content 冲突
+   * 
+   * 真正冲突的定义：
+   * - 双方内容都有实质性的、不同的修改
+   * - 内容不是简单的扩展关系（一方是另一方的前缀/后缀）
+   * - 内容长度都足够长（避免对空内容创建副本）
+   * 
+   * 非真正冲突（可自动合并）：
+   * - 一方是空的，另一方有内容
+   * - 一方是另一方的扩展
+   * - 内容很短（可能是误操作）
+   * 
+   * @param localContent 本地内容
+   * @param remoteContent 远程内容
+   * @returns 是否是真正的冲突
+   */
+  private isRealContentConflict(localContent: string, remoteContent: string): boolean {
+    const local = localContent || '';
+    const remote = remoteContent || '';
+    
+    // 1. 如果任一方为空或很短，不是真正冲突
+    const MIN_CONTENT_LENGTH = 20; // 至少 20 个字符才算实质内容
+    if (local.length < MIN_CONTENT_LENGTH || remote.length < MIN_CONTENT_LENGTH) {
+      return false;
+    }
+    
+    // 2. 如果一方是另一方的前缀/后缀，不是真正冲突
+    if (local.startsWith(remote) || remote.startsWith(local)) {
+      return false;
+    }
+    if (local.endsWith(remote) || remote.endsWith(local)) {
+      return false;
+    }
+    
+    // 3. 计算相似度 - 如果相似度太高说明改动很小，不是真正冲突
+    const similarity = this.calculateSimilarity(local, remote);
+    if (similarity > 0.9) { // 90% 相似度以上
+      return false;
+    }
+    
+    // 4. 如果差异太大，但仍有共同基础，说明是真正的冲突
+    // 共同基础：至少有 30% 的内容相同
+    if (similarity < 0.3) {
+      // 差异太大，可能是完全不同的内容，按 LWW 处理
+      return false;
+    }
+    
+    // 5. 中等相似度（30%-90%）：这是真正的冲突场景
+    // 用户在两个设备上都进行了有意义的编辑
+    return true;
+  }
+
+  /**
+   * 计算两个字符串的相似度（0-1）
+   * 使用简单的字符匹配算法
+   */
+  private calculateSimilarity(str1: string, str2: string): number {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    
+    if (longer.length === 0) {
+      return 1.0;
+    }
+    
+    // 计算共同字符数（简化的 LCS 近似）
+    const shorterSet = new Set(shorter.split(''));
+    let commonChars = 0;
+    for (const char of longer) {
+      if (shorterSet.has(char)) {
+        commonChars++;
+      }
+    }
+    
+    return commonChars / longer.length;
   }
 
   /**
