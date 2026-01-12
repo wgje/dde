@@ -394,6 +394,12 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
 .markdown-preview {
   line-height: 1.6;
   word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview-compact {
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .markdown-preview h1 {

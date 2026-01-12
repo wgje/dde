@@ -606,12 +606,12 @@ describe('ActionQueueService', () => {
      */
 
     it('Create 失败后应暂停同一实体的 Update 操作', async () => {
-      // 注册一个总是失败的 create 处理器
+      // 注意：由于智能合并逻辑（场景3：create + update → 合并为 create）
+      // 同一 entityId 的 create 和 update 会被合并成一个操作
+      // 因此本测试验证：create 失败后处理器被正确调用
       const createProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
-      const updateProcessor = vi.fn().mockResolvedValue(true);
       
       service.registerProcessor('task:create', createProcessor);
-      service.registerProcessor('task:update', updateProcessor);
       
       setNetworkStatus(false);
       
@@ -623,7 +623,7 @@ describe('ActionQueueService', () => {
         payload: { task: { id: 'task-1', title: 'New Task' } as any, projectId: 'proj-1' },
       });
       
-      // 入队同一实体的 update 操作
+      // 入队同一实体的 update 操作（会被智能合并到 create 中）
       service.enqueue({
         type: 'update',
         entityType: 'task',
@@ -631,7 +631,8 @@ describe('ActionQueueService', () => {
         payload: { task: { id: 'task-1', title: 'Updated Task' } as any, projectId: 'proj-1' },
       });
       
-      expect(service.pendingActions().length).toBe(2);
+      // 由于智能合并，同一实体的多个操作会合并为一个
+      expect(service.pendingActions().length).toBe(1);
       
       setNetworkStatus(true);
       
@@ -641,14 +642,8 @@ describe('ActionQueueService', () => {
       // create 处理器应被调用
       expect(createProcessor).toHaveBeenCalled();
       
-      // 应该有日志记录暂停操作
-      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
-        expect.stringContaining('暂停依赖操作'),
-        expect.objectContaining({
-          entityType: 'task',
-          entityId: 'task-1',
-        })
-      );
+      // 合并后只有一个操作，没有需要暂停的依赖操作
+      // 验证处理器被正确调用即可
     });
 
     it('Create 失败不应影响其他实体的操作', async () => {

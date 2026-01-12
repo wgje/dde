@@ -187,7 +187,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
                 <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (task.content) {
                       <div 
-                          class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto"
+                          class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto overflow-x-hidden"
                           [innerHTML]="renderMarkdownContent(task.content)">
                       </div>
                   } @else {

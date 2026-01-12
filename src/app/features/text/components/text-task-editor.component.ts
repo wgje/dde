@@ -32,7 +32,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
          [ngClass]="{'mt-2 flex gap-3': !isMobile, 'mt-1.5': isMobile}">
       
       <!-- 主编辑区域 -->
-      <div [ngClass]="{'flex-1 space-y-2': !isMobile, 'space-y-1.5': isMobile}">
+      <div [ngClass]="{'flex-1 min-w-0 space-y-2': !isMobile, 'space-y-1.5': isMobile}">
         
           <!-- 标题编辑 -->
         <input
@@ -75,7 +75,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
             <!-- Markdown 预览 - 点击切换到编辑模式 -->
             <div 
               (click)="togglePreview(); $event.stopPropagation()"
-              class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
+              class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
               [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile, 'min-h-28 max-h-40 p-2 text-[11px]': isMobile}"
               [innerHTML]="localContent() ? renderMarkdown(localContent()) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
               title="点击编辑">

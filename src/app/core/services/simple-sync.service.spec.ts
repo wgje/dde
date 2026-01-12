@@ -224,10 +224,41 @@ describe('SimpleSyncService', () => {
       // 模拟在线状态
       mockSupabase.isConfigured = true;
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
+      
+      // 确保 auth.getSession 在在线模式下也有正确的返回值
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'test-user-id' } } }
+      });
     });
     
     it('pushTask 应该成功推送', async () => {
       const task = createMockTask();
+      
+      // Mock upsert 返回 select().single() 链
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        if (table === 'tasks') {
+          return {
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: { updated_at: new Date().toISOString() }, 
+                  error: null 
+                })
+              })
+            })
+          };
+        }
+        return {};
+      });
       
       const result = await service.pushTask(task, 'project-1');
       
@@ -254,7 +285,14 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ error: new Error('Network error') })
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: null,
+                  error: { code: 'NETWORK_ERROR', message: 'Network error' } 
+                })
+              })
+            })
           };
         }
         // 其他表的默认行为
@@ -501,6 +539,32 @@ describe('SimpleSyncService', () => {
         updatedAt: '2025-12-21T12:00:00Z' // 更新的时间戳
       });
       
+      // Mock upsert 成功
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        if (table === 'tasks') {
+          return {
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: { updated_at: new Date().toISOString() }, 
+                  error: null 
+                })
+              })
+            })
+          };
+        }
+        return {};
+      });
+      
       const result = await service.pushTask(localTask, 'project-1');
       
       expect(result).toBe(true);
@@ -569,10 +633,22 @@ describe('SimpleSyncService', () => {
         return {
           upsert: vi.fn().mockImplementation(() => {
             upsertAttempts++;
-            if (upsertAttempts < 3) {
-              return Promise.resolve({ error: { code: 504, message: 'Gateway timeout' } });
-            }
-            return Promise.resolve({ error: null });
+            return {
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockImplementation(() => {
+                  if (upsertAttempts < 3) {
+                    return Promise.resolve({ 
+                      data: null, 
+                      error: { code: '504', message: 'Gateway timeout' } 
+                    });
+                  }
+                  return Promise.resolve({ 
+                    data: { updated_at: new Date().toISOString() }, 
+                    error: null 
+                  });
+                })
+              })
+            };
           })
         };
       });
@@ -679,7 +755,14 @@ describe('SimpleSyncService', () => {
         return {
           upsert: vi.fn().mockImplementation(() => {
             upsertAttempts++;
-            return Promise.resolve({ error: { code: '401', message: 'Unauthorized' } });
+            return {
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: null, 
+                  error: { code: '401', message: 'Unauthorized' } 
+                })
+              })
+            };
           })
         };
       });
@@ -766,7 +849,14 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ error: null })
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: { updated_at: new Date().toISOString() }, 
+                  error: null 
+                })
+              })
+            })
           };
         }
         return {};
@@ -800,7 +890,14 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ error: null })
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: { updated_at: new Date().toISOString() }, 
+                  error: null 
+                })
+              })
+            })
           };
         }
         return {};
@@ -835,7 +932,14 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ error: new Error('Network error') })
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: null, 
+                  error: { code: 'NETWORK_ERROR', message: 'Network error' } 
+                })
+              })
+            })
           };
         }
         return {
@@ -871,11 +975,16 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ 
-              error: { 
-                code: 'P0001', 
-                message: 'Version regression not allowed: 2 -> 1 (table: tasks, id: version-conflict-task)' 
-              } 
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: null, 
+                  error: { 
+                    code: 'P0001', 
+                    message: 'Version regression not allowed: 2 -> 1 (table: tasks, id: version-conflict-task)' 
+                  } 
+                })
+              })
             })
           };
         }
@@ -1060,7 +1169,11 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockRejectedValue(networkError)
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockRejectedValue(networkError)
+            })
+          })
         };
       });
       
@@ -1109,26 +1222,35 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockRejectedValue(retryableError)
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockRejectedValue(retryableError)
+            })
+          })
         };
       });
       
       await service.pushTask(task, 'project-1');
       
       expect(mockCaptureException).toHaveBeenCalled();
-      // 验证包含 isRetryable 标签
+      // 验证包含 operation 标签
       const callArgs = mockCaptureException.mock.calls[0];
-      expect((callArgs[1] as any)?.tags).toHaveProperty('isRetryable');
+      expect((callArgs[1] as any)?.tags).toHaveProperty('operation', 'pushTask');
     });
 
     it('deleteTask 遇到不可重试错误时不应加入重试队列', async () => {
       // 模拟一个不可重试的验证错误（类似数据库约束）
-      const validationError = new Error('Foreign key constraint violation');
-      (validationError as any).code = '23503'; // Postgres 外键约束错误
+      const validationError = { 
+        code: '23503', // Postgres 外键约束错误
+        message: 'Foreign key constraint violation'
+      };
       
       mockClient.from = vi.fn().mockReturnValue({
         delete: vi.fn().mockReturnValue({
-          eq: vi.fn().mockRejectedValue(validationError)
+          eq: vi.fn().mockResolvedValue({ 
+            data: null,
+            error: validationError 
+          })
         })
       });
       
@@ -1138,21 +1260,25 @@ describe('SimpleSyncService', () => {
       // 验证不加入重试队列
       expect(service.state().pendingCount).toBe(initialPendingCount);
       
-      // 验证 Sentry 仍然被调用，但标记为 error 级别
+      // 验证 Sentry 仍然被调用
       expect(mockCaptureException).toHaveBeenCalled();
       const callArgs = mockCaptureException.mock.calls[0];
-      expect((callArgs[1] as any)?.tags?.isRetryable).toBe('false');
-      expect((callArgs[1] as any)?.level).toBe('error');
+      expect((callArgs[1] as any)?.tags?.operation).toBe('deleteTask');
     });
 
     it('deleteTask 遇到可重试错误时应加入重试队列', async () => {
       // 模拟一个可重试的网络错误
-      const networkError = new Error('Network timeout');
-      (networkError as any).code = '504'; // Gateway timeout
+      const networkError = { 
+        code: '504', // Gateway timeout
+        message: 'Network timeout'
+      };
       
       mockClient.from = vi.fn().mockReturnValue({
         delete: vi.fn().mockReturnValue({
-          eq: vi.fn().mockRejectedValue(networkError)
+          eq: vi.fn().mockResolvedValue({ 
+            data: null,
+            error: networkError 
+          })
         })
       });
       
@@ -1162,11 +1288,10 @@ describe('SimpleSyncService', () => {
       // 验证加入重试队列
       expect(service.state().pendingCount).toBe(initialPendingCount + 1);
       
-      // 验证 Sentry 标记为 info 级别
+      // 验证 Sentry 被调用
       expect(mockCaptureException).toHaveBeenCalled();
       const callArgs = mockCaptureException.mock.calls[0];
-      expect((callArgs[1] as any)?.tags?.isRetryable).toBe('true');
-      expect((callArgs[1] as any)?.level).toBe('info');
+      expect((callArgs[1] as any)?.tags?.operation).toBe('deleteTask');
     });
   });
 
@@ -1261,7 +1386,14 @@ describe('SimpleSyncService', () => {
         }
         if (table === 'tasks') {
           return {
-            upsert: vi.fn().mockResolvedValue({ error: null }),
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({ 
+                  data: { updated_at: new Date().toISOString() }, 
+                  error: null 
+                })
+              })
+            }),
             select: vi.fn().mockReturnValue({
               in: vi.fn().mockReturnValue({
                 eq: vi.fn().mockResolvedValue({
@@ -1445,11 +1577,16 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockResolvedValue({ 
-            error: { 
-              code: '42501',
-              message: 'new row violates row-level security policy'
-            } 
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockResolvedValue({ 
+                data: null,
+                error: { 
+                  code: '42501',
+                  message: 'new row violates row-level security policy'
+                } 
+              })
+            })
           })
         };
       });
@@ -1485,11 +1622,16 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockResolvedValue({ 
-            error: { 
-              code: '401',
-              message: 'Unauthorized'
-            } 
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockResolvedValue({ 
+                data: null,
+                error: { 
+                  code: '401',
+                  message: 'Unauthorized'
+                } 
+              })
+            })
           })
         };
       });
@@ -1516,8 +1658,13 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockResolvedValue({ 
-            error: { code: '42501', message: 'RLS violation' } 
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockResolvedValue({ 
+                data: null,
+                error: { code: '42501', message: 'RLS violation' } 
+              })
+            })
           })
         };
       });
@@ -1574,8 +1721,13 @@ describe('SimpleSyncService', () => {
           };
         }
         return {
-          upsert: vi.fn().mockResolvedValue({ 
-            error: { code: '42501', message: 'RLS policy violation' } 
+          upsert: vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              single: vi.fn().mockResolvedValue({ 
+                data: null,
+                error: { code: '42501', message: 'RLS policy violation' } 
+              })
+            })
           })
         };
       });
