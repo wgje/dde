@@ -49,8 +49,10 @@ import { TRASH_CONFIG } from '../../../config';
               (click)="activeTab.set('deleted')"
               class="flex-1 py-2.5 text-sm font-medium transition-colors"
               [class.text-stone-800]="activeTab() === 'deleted'"
+              [class.dark:text-stone-200]="activeTab() === 'deleted'"
               [class.border-b-2]="activeTab() === 'deleted'"
               [class.border-stone-800]="activeTab() === 'deleted'"
+              [class.dark:border-stone-200]="activeTab() === 'deleted'"
               [class.text-stone-400]="activeTab() !== 'deleted'">
               已删除 ({{ deletedTasks().length }})
             </button>
@@ -58,8 +60,10 @@ import { TRASH_CONFIG } from '../../../config';
               (click)="activeTab.set('archived')"
               class="flex-1 py-2.5 text-sm font-medium transition-colors"
               [class.text-violet-700]="activeTab() === 'archived'"
+              [class.dark:text-violet-400]="activeTab() === 'archived'"
               [class.border-b-2]="activeTab() === 'archived'"
               [class.border-violet-600]="activeTab() === 'archived'"
+              [class.dark:border-violet-500]="activeTab() === 'archived'"
               [class.text-stone-400]="activeTab() !== 'archived'">
               已归档 ({{ archivedTasks().length }})
             </button>

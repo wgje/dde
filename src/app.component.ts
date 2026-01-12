@@ -45,7 +45,7 @@ import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
 import { filter, takeUntil } from 'rxjs/operators';
 import { Subject } from 'rxjs';
 import { getErrorMessage, isFailure, humanizeErrorMessage } from './utils/result';
-import { ThemeType } from './models';
+import { ThemeType, Project } from './models';
 import { UI_CONFIG, AUTH_CONFIG } from './config';
 
 /**
@@ -1245,6 +1245,33 @@ async signOut() {
   openDashboardFromSettings() {
     this.modal.closeByType('settings'); // 先关闭设置
     this.modal.show('dashboard');       // 再打开仪表盘
+  }
+  
+  /**
+   * 处理导入完成的项目
+   * 当用户从设置页导入备份文件时，将项目添加到应用状态
+   * 支持新建和覆盖两种场景
+   */
+  async handleImportComplete(project: Project) {
+    // 检查项目是否已存在
+    const existingProjects = this.projects();
+    const existingProject = existingProjects.find(p => p.id === project.id);
+    
+    if (existingProject) {
+      // 覆盖场景：更新现有项目
+      this.projectState.updateProjects(projects => 
+        projects.map(p => p.id === project.id ? project : p)
+      );
+      this.toast.success('导入成功', `项目 "${project.name}" 已更新`);
+    } else {
+      // 新建场景：添加新项目
+      const result = await this.projectOps.addProject(project);
+      if (result.success) {
+        this.toast.success('导入成功', `项目 "${project.name}" 已导入`);
+      } else {
+        this.toast.error('导入失败', `无法导入项目 "${project.name}"`);
+      }
+    }
   }
   
   /**

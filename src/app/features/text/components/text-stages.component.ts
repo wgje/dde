@@ -28,7 +28,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
              [ngClass]="{'mb-3': !isMobile, 'mb-2': isMobile}">
           <!-- 阶段筛选 -->
           <div class="flex items-center gap-1 relative">
-            <span class="font-medium text-retro-muted" 
+            <span class="font-medium text-retro-muted dark:text-stone-400" 
                   [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">阶段</span>
             <button 
               (click)="toggleFilter('stage', $event)"
@@ -67,7 +67,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
           
           <!-- 延伸筛选 -->
           <div class="flex items-center gap-1 relative">
-            <span class="font-medium text-retro-muted"
+            <span class="font-medium text-retro-muted dark:text-stone-400"
                   [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">延伸</span>
             <button 
               (click)="toggleFilter('root', $event)"
@@ -143,7 +143,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
           <div class="flex items-center justify-center rounded-xl border-2 border-dashed border-stone-200 dark:border-stone-700 hover:border-stone-300 dark:hover:border-stone-600 transition-all cursor-pointer min-h-[60px]"
                [ngClass]="{'py-6': !isMobile, 'py-4': isMobile}"
                (click)="addNewStage.emit()">
-            <span class="text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-400 text-lg font-light">+ 新阶段</span>
+            <span class="text-stone-400 dark:text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 text-lg font-light">+ 新阶段</span>
           </div>
         </div>
       </div>

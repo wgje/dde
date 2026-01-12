@@ -298,6 +298,40 @@ CREATE POLICY "connection_tombstones_insert" ON public.connection_tombstones FOR
   EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connection_tombstones.project_id AND p.owner_id = auth.uid())
 );
 
+-- 11. purge_rate_limits 表（速率限制）
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.purge_rate_limits (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  call_count INTEGER DEFAULT 0,
+  window_start TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE public.purge_rate_limits ENABLE ROW LEVEL SECURITY;
+
+-- RLS 策略
+DROP POLICY IF EXISTS "purge_rate_limits_own" ON public.purge_rate_limits;
+
+CREATE POLICY "purge_rate_limits_own" ON public.purge_rate_limits
+  FOR ALL
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+
+-- ============================================
+-- 自定义类型
+-- ============================================
+
+-- purge_result 复合类型
+DROP TYPE IF EXISTS purge_result CASCADE;
+CREATE TYPE purge_result AS (
+  purged_count INTEGER,
+  attachment_paths TEXT[]
+);
+
+-- ============================================
+-- 触发器和函数
+-- ============================================
+
 -- 防止 tombstone 连接复活的触发器
 CREATE OR REPLACE FUNCTION prevent_tombstoned_connection_writes()
 RETURNS TRIGGER AS $$
@@ -373,23 +407,7 @@ GRANT SELECT, INSERT ON public.connection_tombstones TO service_role;
 GRANT SELECT, INSERT ON public.connection_tombstones TO authenticated;
 
 -- 防止 tombstone 任务复活的触发器
-CREATE OR REPLACE FUNCTION prevent_tombstoned_task_writes()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM public.task_tombstones WHERE task_id = NEW.id) THEN
-    RAISE EXCEPTION 'Task % has been permanently deleted and cannot be restored', NEW.id;
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-ALTER FUNCTION public.prevent_tombstoned_task_writes()
-  SET search_path = pg_catalog, public;
-
-DROP TRIGGER IF EXISTS trg_prevent_tombstoned_task_writes ON public.tasks;
-CREATE TRIGGER trg_prevent_tombstoned_task_writes
-  BEFORE INSERT OR UPDATE ON public.tasks
-  FOR EACH ROW EXECUTE FUNCTION prevent_tombstoned_task_writes();
+-- prevent_tombstoned_task_writes 函数已在后面的 MIGRATION 20251212_prevent_task_resurrection.sql 中定义（第 1379 行）
 
 -- ============================================
 -- 7. RLS 策略 - Projects
@@ -1320,8 +1338,7 @@ CREATE POLICY "task_tombstones_insert_owner" ON public.task_tombstones
 --    - purge RPC：写入 tombstone + 删除 tasks 行（以及相关 connections）。
 --    - trigger：拦截对 tombstoned task_id 的 INSERT/UPDATE，直接丢弃写入，避免复活。
 
--- 1) Tombstone 表
-  );
+-- 注意：task_tombstones 表及相关 RLS 策略已在文件早期（第 248 行附近）创建
 
 -- 2) purge RPC：批量永久删除任务（写 tombstone + 删除 tasks + 删除相关 connections）
 CREATE OR REPLACE FUNCTION public.purge_tasks(p_task_ids uuid[])
@@ -1375,6 +1392,197 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.purge_tasks(uuid[]) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.purge_tasks(uuid[]) TO service_role;
+
+-- safe_delete_tasks: 安全删除任务（软删除+限制）
+CREATE OR REPLACE FUNCTION public.safe_delete_tasks(p_task_ids uuid[], p_project_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+  deleted_count integer;
+  total_tasks integer;
+BEGIN
+  -- 参数校验
+  IF p_task_ids IS NULL OR array_length(p_task_ids, 1) IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  IF p_project_id IS NULL THEN
+    RAISE EXCEPTION 'p_project_id is required';
+  END IF;
+
+  -- 授权检查
+  IF NOT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id AND p.owner_id = auth.uid()
+  ) THEN
+    RAISE EXCEPTION 'not authorized';
+  END IF;
+
+  -- 获取项目总任务数
+  SELECT count(*) INTO total_tasks
+  FROM public.tasks
+  WHERE project_id = p_project_id AND deleted_at IS NULL;
+
+  -- 限制：单次最多删除 50 条或 50% 的任务
+  IF array_length(p_task_ids, 1) > 50 THEN
+    RAISE EXCEPTION 'Cannot delete more than 50 tasks at once';
+  END IF;
+
+  IF array_length(p_task_ids, 1) > (total_tasks * 0.5) THEN
+    RAISE EXCEPTION 'Cannot delete more than 50%% of tasks at once';
+  END IF;
+
+  -- 软删除任务
+  WITH del AS (
+    UPDATE public.tasks
+    SET deleted_at = now()
+    WHERE id = ANY(p_task_ids)
+      AND project_id = p_project_id
+      AND deleted_at IS NULL
+    RETURNING id
+  )
+  SELECT count(*) INTO deleted_count FROM del;
+
+  RETURN COALESCE(deleted_count, 0);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.safe_delete_tasks(uuid[], uuid) TO authenticated;
+
+-- purge_tasks_v3: 永久删除任务并返回附件路径（带速率限制）
+CREATE OR REPLACE FUNCTION public.purge_tasks_v3(p_project_id uuid, p_task_ids uuid[])
+RETURNS purge_result
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+  result purge_result;
+  v_owner_id uuid;
+  task_record RECORD;
+  attachment jsonb;
+  attachment_paths text[] := ARRAY[]::text[];
+  file_ext text;
+  current_user_id uuid;
+  rate_limit_record RECORD;
+  max_calls_per_minute CONSTANT integer := 10;
+  max_tasks_per_call CONSTANT integer := 100;
+BEGIN
+  result.purged_count := 0;
+  result.attachment_paths := ARRAY[]::text[];
+  current_user_id := auth.uid();
+
+  IF p_project_id IS NULL THEN
+    RAISE EXCEPTION 'p_project_id is required';
+  END IF;
+
+  IF p_task_ids IS NULL OR array_length(p_task_ids, 1) IS NULL THEN
+    RETURN result;
+  END IF;
+  
+  -- 速率限制检查
+  IF array_length(p_task_ids, 1) > max_tasks_per_call THEN
+    RAISE EXCEPTION 'Too many tasks in single request. Maximum: %', max_tasks_per_call;
+  END IF;
+  
+  -- 检查并更新调用次数
+  INSERT INTO public.purge_rate_limits (user_id, call_count, window_start)
+  VALUES (current_user_id, 1, now())
+  ON CONFLICT (user_id) DO UPDATE SET
+    call_count = CASE 
+      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
+      THEN 1 
+      ELSE purge_rate_limits.call_count + 1 
+    END,
+    window_start = CASE 
+      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
+      THEN now() 
+      ELSE purge_rate_limits.window_start 
+    END
+  RETURNING call_count INTO rate_limit_record;
+  
+  IF rate_limit_record.call_count > max_calls_per_minute THEN
+    RAISE EXCEPTION 'Rate limit exceeded. Maximum % calls per minute', max_calls_per_minute;
+  END IF;
+
+  -- 授权校验：仅项目 owner 可 purge
+  SELECT p.owner_id INTO v_owner_id
+  FROM public.projects p
+  WHERE p.id = p_project_id
+    AND p.owner_id = auth.uid();
+
+  IF v_owner_id IS NULL THEN
+    RAISE EXCEPTION 'not authorized';
+  END IF;
+
+  -- 收集附件路径
+  FOR task_record IN
+    SELECT t.id AS task_id, t.attachments
+    FROM public.tasks t
+    WHERE t.project_id = p_project_id
+      AND t.id = ANY(p_task_ids)
+      AND t.attachments IS NOT NULL
+      AND jsonb_array_length(t.attachments) > 0
+  LOOP
+    FOR attachment IN SELECT * FROM jsonb_array_elements(task_record.attachments)
+    LOOP
+      file_ext := COALESCE(
+        NULLIF(SUBSTRING((attachment->>'name') FROM '\\.([^.]+)$'), ''),
+        'bin'
+      );
+      
+      attachment_paths := array_append(
+        attachment_paths,
+        v_owner_id::text || '/' || 
+        p_project_id::text || '/' || 
+        task_record.task_id::text || '/' || 
+        (attachment->>'id') || '.' || file_ext
+      );
+      
+      IF attachment->>'thumbnailUrl' IS NOT NULL THEN
+        attachment_paths := array_append(
+          attachment_paths,
+          v_owner_id::text || '/' || 
+          p_project_id::text || '/' || 
+          task_record.task_id::text || '/' || 
+          (attachment->>'id') || '_thumb.webp'
+        );
+      END IF;
+    END LOOP;
+  END LOOP;
+
+  -- 落 tombstone
+  INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
+  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
+  ON CONFLICT (task_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  -- 删除相关连接
+  DELETE FROM public.connections c
+  WHERE c.project_id = p_project_id
+    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids));
+
+  -- 删除 tasks 行
+  WITH del AS (
+    DELETE FROM public.tasks t
+    WHERE t.project_id = p_project_id
+      AND t.id = ANY(p_task_ids)
+    RETURNING t.id
+  )
+  SELECT count(*) INTO result.purged_count FROM del;
+
+  result.attachment_paths := attachment_paths;
+  RETURN result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.purge_tasks_v3(uuid, uuid[]) TO authenticated;
 
 -- 3) 防复活触发器：拦截对已 tombstone task_id 的 INSERT/UPDATE
 CREATE OR REPLACE FUNCTION public.prevent_tombstoned_task_writes()
@@ -1698,633 +1906,6 @@ CREATE INDEX IF NOT EXISTS idx_connections_deleted_at_cleanup
   WHERE deleted_at IS NOT NULL;
 
 -- 4. 创建清理过期软删除连接的函数
-CREATE OR REPLACE FUNCTION cleanup_old_deleted_connections()
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  deleted_count integer;
-BEGIN
-  -- 删除超过 30 天的软删除连接
-  WITH deleted AS (
-    DELETE FROM connections
-    WHERE deleted_at IS NOT NULL
-      AND deleted_at < NOW() - INTERVAL '30 days'
-    RETURNING id
-  )
-  SELECT count(*) INTO deleted_count FROM deleted;
-  
-  -- 记录清理日志
-  IF deleted_count > 0 THEN
-    INSERT INTO cleanup_logs (type, details)
-    VALUES ('deleted_connections_cleanup', jsonb_build_object(
-      'deleted_count', deleted_count,
-      'cleanup_time', NOW()
-    ));
-  END IF;
-  
-  RETURN deleted_count;
-END;
-$$;
-
--- 5. 添加注释说明
-COMMENT ON COLUMN public.connections.deleted_at IS '软删除时间戳，存在表示已标记删除，等待恢复或永久清理';
--- ============================================================
--- [MIGRATION] 20251223_fix_rls_role.sql
--- ============================================================
--- ============================================
--- 修复 RLS 策略角色：public -> authenticated
--- 日期: 2025-12-23
--- 问题: RLS 策略使用了 'TO public'，但 Supabase 认证用户属于 'authenticated' 角色
--- 症状: 认证用户请求返回 "Failed to fetch" 错误（底层是 403/权限被拒）
--- ============================================
-
--- 1. 修复 projects 表 RLS 策略
-DROP POLICY IF EXISTS "owner select" ON public.projects;
-CREATE POLICY "owner select" ON public.projects
-  FOR SELECT TO authenticated
-  USING ((select auth.uid()) = owner_id);
-
-DROP POLICY IF EXISTS "owner insert" ON public.projects;
-CREATE POLICY "owner insert" ON public.projects
-  FOR INSERT TO authenticated
-  WITH CHECK ((select auth.uid()) = owner_id);
-
-DROP POLICY IF EXISTS "owner update" ON public.projects;
-CREATE POLICY "owner update" ON public.projects
-  FOR UPDATE TO authenticated
-  USING ((select auth.uid()) = owner_id);
-
-DROP POLICY IF EXISTS "owner delete" ON public.projects;
-CREATE POLICY "owner delete" ON public.projects
-  FOR DELETE TO authenticated
-  USING ((select auth.uid()) = owner_id);
-
--- 2. 修复 project_members 表 RLS 策略
-DROP POLICY IF EXISTS "project_members select" ON public.project_members;
-CREATE POLICY "project_members select" ON public.project_members
-  FOR SELECT TO authenticated
-  USING (user_id = (select auth.uid()));
-
-DROP POLICY IF EXISTS "project_members insert" ON public.project_members;
-CREATE POLICY "project_members insert" ON public.project_members
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = project_members.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "project_members update" ON public.project_members;
-CREATE POLICY "project_members update" ON public.project_members
-  FOR UPDATE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = project_members.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "project_members delete" ON public.project_members;
-CREATE POLICY "project_members delete" ON public.project_members
-  FOR DELETE TO authenticated
-  USING (
-    (user_id = (select auth.uid()))
-    OR EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = project_members.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
--- 3. 修复 tasks 表 RLS 策略
-DROP POLICY IF EXISTS "tasks owner select" ON public.tasks;
-CREATE POLICY "tasks owner select" ON public.tasks
-  FOR SELECT TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = tasks.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "tasks owner insert" ON public.tasks;
-CREATE POLICY "tasks owner insert" ON public.tasks
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = tasks.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "tasks owner update" ON public.tasks;
-CREATE POLICY "tasks owner update" ON public.tasks
-  FOR UPDATE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = tasks.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "tasks owner delete" ON public.tasks;
-CREATE POLICY "tasks owner delete" ON public.tasks
-  FOR DELETE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = tasks.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
--- 4. 修复 connections 表 RLS 策略
-DROP POLICY IF EXISTS "connections owner select" ON public.connections;
-CREATE POLICY "connections owner select" ON public.connections
-  FOR SELECT TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = connections.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "connections owner insert" ON public.connections;
-CREATE POLICY "connections owner insert" ON public.connections
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = connections.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "connections owner update" ON public.connections;
-CREATE POLICY "connections owner update" ON public.connections
-  FOR UPDATE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = connections.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "connections owner delete" ON public.connections;
-CREATE POLICY "connections owner delete" ON public.connections
-  FOR DELETE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = connections.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
--- 5. 修复 task_tombstones 表 RLS 策略
--- 兼容：早期脚本使用 task_tombstones_* 命名
-DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
-DROP POLICY IF EXISTS "task_tombstones_insert_owner" ON public.task_tombstones;
-
-DROP POLICY IF EXISTS "tombstones owner select" ON public.task_tombstones;
-CREATE POLICY "tombstones owner select" ON public.task_tombstones
-  FOR SELECT TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = task_tombstones.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "tombstones owner insert" ON public.task_tombstones;
-CREATE POLICY "tombstones owner insert" ON public.task_tombstones
-  FOR INSERT TO authenticated
-  WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = task_tombstones.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
-DROP POLICY IF EXISTS "tombstones owner delete" ON public.task_tombstones;
-CREATE POLICY "tombstones owner delete" ON public.task_tombstones
-  FOR DELETE TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.projects p
-      WHERE p.id = task_tombstones.project_id
-        AND p.owner_id = (select auth.uid())
-    )
-  );
-
--- 6. 修复 cleanup_logs 表 RLS 策略
-DROP POLICY IF EXISTS "cleanup_logs select" ON public.cleanup_logs;
-CREATE POLICY "cleanup_logs select" ON public.cleanup_logs
-  FOR SELECT TO authenticated
-  USING (true);
-
-DROP POLICY IF EXISTS "cleanup_logs insert" ON public.cleanup_logs;
-CREATE POLICY "cleanup_logs insert" ON public.cleanup_logs
-  FOR INSERT TO authenticated
-  WITH CHECK (true);
-
--- 7. 修复 user_preferences 表 RLS 策略
--- 兼容：旧版脚本使用 "Users can ... preferences" 命名
-DROP POLICY IF EXISTS "Users can view own preferences" ON public.user_preferences;
-DROP POLICY IF EXISTS "Users can insert own preferences" ON public.user_preferences;
-DROP POLICY IF EXISTS "Users can update own preferences" ON public.user_preferences;
-DROP POLICY IF EXISTS "Users can delete own preferences" ON public.user_preferences;
-
-DROP POLICY IF EXISTS "user_preferences select" ON public.user_preferences;
-CREATE POLICY "user_preferences select" ON public.user_preferences
-  FOR SELECT TO authenticated
-  USING (user_id = (select auth.uid()));
-
-DROP POLICY IF EXISTS "user_preferences insert" ON public.user_preferences;
-CREATE POLICY "user_preferences insert" ON public.user_preferences
-  FOR INSERT TO authenticated
-  WITH CHECK (user_id = (select auth.uid()));
-
-DROP POLICY IF EXISTS "user_preferences update" ON public.user_preferences;
-CREATE POLICY "user_preferences update" ON public.user_preferences
-  FOR UPDATE TO authenticated
-  USING (user_id = (select auth.uid()));
-
-DROP POLICY IF EXISTS "user_preferences delete" ON public.user_preferences;
-CREATE POLICY "user_preferences delete" ON public.user_preferences
-  FOR DELETE TO authenticated
-  USING (user_id = (select auth.uid()));
--- ============================================================
--- [MIGRATION] 20260101000000_fix_security_definer_functions.sql
--- ============================================================
--- ============================================
--- 安全加固迁移：修复 SECURITY DEFINER 函数权限校验
--- 日期：2026-01-01
--- 修复问题：
---   - Critical #2: append_task_attachment/remove_task_attachment 无权限校验
---   - Critical #5: is_task_tombstoned 无权限校验
--- ============================================
-
--- 【Critical #2】修复 append_task_attachment 函数 - 添加权限校验
-CREATE OR REPLACE FUNCTION append_task_attachment(
-  p_task_id UUID,
-  p_attachment JSONB
-)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-DECLARE
-  v_current_attachments JSONB;
-  v_attachment_id TEXT;
-BEGIN
-  -- 🔴【关键修复】权限校验：验证调用者是否有权操作该任务
-  IF NOT EXISTS (
-    SELECT 1 FROM tasks t
-    JOIN projects p ON t.project_id = p.id
-    WHERE t.id = p_task_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
-  ) THEN
-    RAISE EXCEPTION 'Not authorized to modify task %', p_task_id;
-  END IF;
-
-  -- 获取附件 ID
-  v_attachment_id := p_attachment->>'id';
-  
-  IF v_attachment_id IS NULL THEN
-    RAISE EXCEPTION 'Attachment must have an id';
-  END IF;
-  
-  -- 使用 FOR UPDATE 锁定行，防止并发修改
-  SELECT attachments INTO v_current_attachments
-  FROM tasks
-  WHERE id = p_task_id
-  FOR UPDATE;
-  
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Task not found: %', p_task_id;
-  END IF;
-  
-  -- 如果附件列为 NULL，初始化为空数组
-  IF v_current_attachments IS NULL THEN
-    v_current_attachments := '[]'::JSONB;
-  END IF;
-  
-  -- 检查附件是否已存在（避免重复添加）
-  IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(v_current_attachments) AS elem
-    WHERE elem->>'id' = v_attachment_id
-  ) THEN
-    -- 已存在，直接返回成功
-    RETURN TRUE;
-  END IF;
-  
-  -- 追加新附件
-  UPDATE tasks
-  SET 
-    attachments = v_current_attachments || p_attachment,
-    updated_at = NOW()
-  WHERE id = p_task_id;
-  
-  RETURN TRUE;
-END;
-$$;
-
--- 【Critical #2】修复 remove_task_attachment 函数 - 添加权限校验
-CREATE OR REPLACE FUNCTION remove_task_attachment(
-  p_task_id UUID,
-  p_attachment_id TEXT
-)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-DECLARE
-  v_current_attachments JSONB;
-  v_new_attachments JSONB;
-BEGIN
-  -- 🔴【关键修复】权限校验：验证调用者是否有权操作该任务
-  IF NOT EXISTS (
-    SELECT 1 FROM tasks t
-    JOIN projects p ON t.project_id = p.id
-    WHERE t.id = p_task_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
-  ) THEN
-    RAISE EXCEPTION 'Not authorized to modify task %', p_task_id;
-  END IF;
-
-  -- 使用 FOR UPDATE 锁定行
-  SELECT attachments INTO v_current_attachments
-  FROM tasks
-  WHERE id = p_task_id
-  FOR UPDATE;
-  
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Task not found: %', p_task_id;
-  END IF;
-  
-  -- 如果附件列为 NULL 或空，直接返回
-  IF v_current_attachments IS NULL OR jsonb_array_length(v_current_attachments) = 0 THEN
-    RETURN TRUE;
-  END IF;
-  
-  -- 过滤掉要删除的附件
-  SELECT COALESCE(jsonb_agg(elem), '[]'::JSONB)
-  INTO v_new_attachments
-  FROM jsonb_array_elements(v_current_attachments) AS elem
-  WHERE elem->>'id' != p_attachment_id;
-  
-  -- 更新附件列表
-  UPDATE tasks
-  SET 
-    attachments = v_new_attachments,
-    updated_at = NOW()
-  WHERE id = p_task_id;
-  
-  RETURN TRUE;
-END;
-$$;
-
--- 【Critical #5】修复 is_task_tombstoned 函数 - 添加权限校验
--- 🔴 v5.3 修正：无权访问时返回 false（与任务不存在行为一致）
--- 避免通过 NULL vs false 区分任务存在性（信息泄露）
-CREATE OR REPLACE FUNCTION is_task_tombstoned(p_task_id UUID)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-BEGIN
-  -- 🔴【关键修复】权限校验：无权访问时返回 false，与任务不存在行为一致
-  IF NOT EXISTS (
-    SELECT 1 FROM tasks t
-    JOIN projects p ON t.project_id = p.id
-    WHERE t.id = p_task_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
-  ) THEN
-    -- 无权访问时返回 false（与任务不存在行为一致，避免信息泄露）
-    RETURN false;
-  END IF;
-  
-  -- 检查任务是否在 tombstone 表中
-  RETURN EXISTS (
-    SELECT 1 FROM task_tombstones
-    WHERE task_id = p_task_id
-  );
-END;
-$$;
-
--- 重新授予权限
-GRANT EXECUTE ON FUNCTION append_task_attachment(UUID, JSONB) TO authenticated;
-GRANT EXECUTE ON FUNCTION remove_task_attachment(UUID, TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION is_task_tombstoned(UUID) TO authenticated;
-
--- 添加注释说明安全措施
-COMMENT ON FUNCTION append_task_attachment(UUID, JSONB) IS 
-  '安全地添加任务附件（带权限校验）。只有任务所属项目的 owner 或成员才能操作。';
-COMMENT ON FUNCTION remove_task_attachment(UUID, TEXT) IS 
-  '安全地移除任务附件（带权限校验）。只有任务所属项目的 owner 或成员才能操作。';
-COMMENT ON FUNCTION is_task_tombstoned(UUID) IS 
-  '检查任务是否已被永久删除（带权限校验）。无权访问时返回 false 以避免信息泄露。';
--- ============================================================
--- [MIGRATION] 20260101000001_circuit_breaker_rules.sql
--- ============================================================
--- ============================================
--- 熔断机制：服务端批量删除防护
--- 日期：2026-01-01
--- 
--- 功能：
---   1. safe_delete_tasks() - 安全批量删除 RPC
---   2. validate_task_data() - 任务数据校验触发器
---   3. circuit_breaker_logs - 熔断操作日志表
--- ============================================
-
--- ============================================
--- 规则 1: 安全批量删除 RPC
--- 
--- 设计原则：
--- - RLS 无法直接限制删除数量，需通过 RPC 包装
--- - 单次删除不能超过 50%，且不能超过 50 条
--- - 项目任务数 > 10 时，不允许删到 0
--- ============================================
-CREATE OR REPLACE FUNCTION public.safe_delete_tasks(
-  p_task_ids uuid[],
-  p_project_id uuid
-)
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-DECLARE
-  task_count integer;
-  total_tasks integer;
-  delete_ratio float;
-  affected_count integer;
-BEGIN
-  -- 【权限校验】验证调用者是否有权操作该项目
-  IF NOT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
-  ) THEN
-    RAISE EXCEPTION 'Not authorized to delete tasks in project %', p_project_id;
-  END IF;
-
-  -- 获取待删除数量
-  task_count := array_length(p_task_ids, 1);
-  IF task_count IS NULL OR task_count = 0 THEN
-    RETURN 0;
-  END IF;
-  
-  -- 获取项目总任务数（未删除的）
-  SELECT COUNT(*) INTO total_tasks
-  FROM public.tasks
-  WHERE project_id = p_project_id AND deleted_at IS NULL;
-  
-  -- 计算删除比例
-  delete_ratio := task_count::float / GREATEST(total_tasks, 1);
-  
-  -- 规则 1：单次删除不能超过 50%
-  IF delete_ratio > 0.5 THEN
-    -- 记录到审计日志
-    INSERT INTO public.circuit_breaker_logs (user_id, operation, blocked, reason, details)
-    VALUES (
-      auth.uid(),
-      'safe_delete_tasks',
-      true,
-      'Delete ratio exceeded 50%',
-      jsonb_build_object(
-        'task_ids', p_task_ids,
-        'project_id', p_project_id,
-        'task_count', task_count,
-        'total_tasks', total_tasks,
-        'delete_ratio', delete_ratio
-      )
-    );
-    
-    RAISE EXCEPTION 'Bulk delete blocked: attempting to delete % tasks (%.1f%% of total %)', 
-      task_count, delete_ratio * 100, total_tasks;
-  END IF;
-  
-  -- 规则 2：单次删除不能超过 50 条
-  IF task_count > 50 THEN
-    -- 记录到审计日志
-    INSERT INTO public.circuit_breaker_logs (user_id, operation, blocked, reason, details)
-    VALUES (
-      auth.uid(),
-      'safe_delete_tasks',
-      true,
-      'Delete count exceeded 50',
-      jsonb_build_object(
-        'task_ids', p_task_ids,
-        'project_id', p_project_id,
-        'task_count', task_count,
-        'total_tasks', total_tasks
-      )
-    );
-    
-    RAISE EXCEPTION 'Bulk delete blocked: attempting to delete % tasks (max 50 allowed)', 
-      task_count;
-  END IF;
-  
-  -- 规则 3：如果总任务数 > 10，不允许删到 0
-  IF total_tasks > 10 AND task_count >= total_tasks THEN
-    -- 记录到审计日志
-    INSERT INTO public.circuit_breaker_logs (user_id, operation, blocked, reason, details)
-    VALUES (
-      auth.uid(),
-      'safe_delete_tasks',
-      true,
-      'Cannot delete all tasks from large project',
-      jsonb_build_object(
-        'task_ids', p_task_ids,
-        'project_id', p_project_id,
-        'task_count', task_count,
-        'total_tasks', total_tasks
-      )
-    );
-    
-    RAISE EXCEPTION 'Cannot delete all tasks from a project with more than 10 tasks';
-  END IF;
-  
-  -- 执行软删除
-  UPDATE public.tasks
-  SET deleted_at = NOW(), updated_at = NOW()
-  WHERE id = ANY(p_task_ids)
-    AND project_id = p_project_id
-    AND deleted_at IS NULL;  -- 只删除未删除的任务
-  
-  GET DIAGNOSTICS affected_count = ROW_COUNT;
-  
-  -- 记录成功的删除操作到审计日志
-  IF affected_count > 0 THEN
-    INSERT INTO public.circuit_breaker_logs (user_id, operation, blocked, reason, details)
-    VALUES (
-      auth.uid(),
-      'safe_delete_tasks',
-      false,
-      'Delete completed successfully',
-      jsonb_build_object(
-        'task_ids', p_task_ids,
-        'project_id', p_project_id,
-        'requested_count', task_count,
-        'affected_count', affected_count,
-        'total_tasks', total_tasks,
-        'delete_ratio', delete_ratio
-      )
-    );
-  END IF;
-  
-  RETURN affected_count;
-END;
-$$;
-
--- ============================================
--- 规则 2: 任务数据校验触发器
--- 
--- 确保任务数据的基本完整性：
--- - title 和 content 不能同时为空（除非是软删除）
--- - stage 必须非负（如果有值）
--- ============================================
 CREATE OR REPLACE FUNCTION public.validate_task_data()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -2518,71 +2099,6 @@ COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Batch upsert tasks with transa
 -- 2. 版本回退时直接抛出异常，拒绝更新
 -- 3. 记录到 circuit_breaker_logs 以便调试
 
-CREATE OR REPLACE FUNCTION public.check_version_increment()
-RETURNS TRIGGER AS $$
-BEGIN
-  -- 只在版本号存在且被修改时检查
-  IF OLD.version IS NOT NULL AND NEW.version IS NOT NULL THEN
-    -- 检测版本回退
-    IF NEW.version < OLD.version THEN
-      -- 记录版本回退事件到 circuit_breaker_logs
-      BEGIN
-        INSERT INTO public.circuit_breaker_logs (user_id, operation, blocked, reason, details)
-        VALUES (
-          auth.uid(),
-          'version_regression',
-          true,  -- 已阻止
-          'Version regression detected and blocked',
-          jsonb_build_object(
-            'table', TG_TABLE_NAME,
-            'record_id', NEW.id,
-            'old_version', OLD.version,
-            'new_version', NEW.version,
-            'timestamp', NOW()
-          )
-        );
-      EXCEPTION WHEN OTHERS THEN
-        -- 日志记录失败不应影响主流程
-        NULL;
-      END;
-      
-      -- 严格模式：拒绝版本回退
-      RAISE EXCEPTION 'Version regression not allowed: % -> % (table: %, id: %)', 
-        OLD.version, NEW.version, TG_TABLE_NAME, NEW.id
-        USING ERRCODE = 'P0001'; -- raise_exception
-    END IF;
-  END IF;
-  
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- 确保触发器存在于 projects 表
-DROP TRIGGER IF EXISTS check_version_increment ON public.projects;
-CREATE TRIGGER check_version_increment
-  BEFORE UPDATE ON public.projects
-  FOR EACH ROW
-  EXECUTE FUNCTION public.check_version_increment();
-
--- 为 tasks 表添加版本检查（如果有 version 字段）
--- 注意：tasks 表可能没有 version 字段，需要根据实际情况调整
-DO $$
-BEGIN
-  -- 检查 tasks 表是否有 version 列
-  IF EXISTS (
-    SELECT 1 FROM information_schema.columns 
-    WHERE table_schema = 'public' 
-    AND table_name = 'tasks' 
-    AND column_name = 'version'
-  ) THEN
-    DROP TRIGGER IF EXISTS check_version_increment ON public.tasks;
-    CREATE TRIGGER check_version_increment
-      BEFORE UPDATE ON public.tasks
-      FOR EACH ROW
-      EXECUTE FUNCTION public.check_version_increment();
-  END IF;
-END $$;
-
 COMMENT ON FUNCTION public.check_version_increment IS 'Strict optimistic lock: rejects version regression instead of just warning. Logs to circuit_breaker_logs.';
 -- ============================================================
 -- [MIGRATION] 20260101000004_attachment_count_limit.sql
@@ -2616,286 +2132,6 @@ BEGIN
 END $$;
 
 -- 更新 append_task_attachment 函数，添加数量限制检查
-CREATE OR REPLACE FUNCTION append_task_attachment(
-  p_task_id UUID,
-  p_attachment JSONB
-)
-RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-DECLARE
-  v_current_attachments JSONB;
-  v_attachment_id TEXT;
-  v_project_id UUID;
-  v_user_id UUID;
-  v_max_attachments INTEGER;
-  v_current_count INTEGER;
-BEGIN
-  -- 🔴 安全检查：验证当前用户身份
-  IF auth.uid() IS NULL THEN
-    RAISE EXCEPTION 'Authentication required';
-  END IF;
-
-  -- 获取最大附件数量限制（默认 20）
-  SELECT COALESCE((value)::INTEGER, 20) INTO v_max_attachments
-  FROM public.app_config
-  WHERE key = 'max_attachments_per_task';
-  
-  IF v_max_attachments IS NULL THEN
-    v_max_attachments := 20;
-  END IF;
-
-  -- 获取附件 ID
-  v_attachment_id := p_attachment->>'id';
-  
-  IF v_attachment_id IS NULL THEN
-    RAISE EXCEPTION 'Attachment must have an id';
-  END IF;
-  
-  -- 使用 FOR UPDATE 锁定行，同时获取 project_id
-  SELECT attachments, project_id INTO v_current_attachments, v_project_id
-  FROM public.tasks
-  WHERE id = p_task_id
-  FOR UPDATE;
-  
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Task not found: %', p_task_id;
-  END IF;
-  
-  -- 🔴 安全检查：验证用户对该项目的所有权
-  SELECT user_id INTO v_user_id
-  FROM public.projects
-  WHERE id = v_project_id;
-  
-  IF v_user_id IS NULL OR v_user_id != auth.uid() THEN
-    RAISE EXCEPTION 'Permission denied: you do not own this project';
-  END IF;
-  
-  -- 如果附件列为 NULL，初始化为空数组
-  IF v_current_attachments IS NULL THEN
-    v_current_attachments := '[]'::JSONB;
-  END IF;
-  
-  -- 检查附件是否已存在（避免重复添加）
-  IF EXISTS (
-    SELECT 1 FROM jsonb_array_elements(v_current_attachments) AS elem
-    WHERE elem->>'id' = v_attachment_id
-  ) THEN
-    -- 已存在，直接返回成功
-    RETURN TRUE;
-  END IF;
-  
-  -- 🔴 新增：检查附件数量限制
-  v_current_count := jsonb_array_length(v_current_attachments);
-  IF v_current_count >= v_max_attachments THEN
-    RAISE EXCEPTION 'Attachment limit exceeded: maximum % attachments per task (current: %)', 
-      v_max_attachments, v_current_count;
-  END IF;
-  
-  -- 追加新附件
-  UPDATE public.tasks
-  SET 
-    attachments = v_current_attachments || p_attachment,
-    updated_at = NOW()
-  WHERE id = p_task_id;
-  
-  RETURN TRUE;
-END;
-$$;
-
--- 添加注释
-COMMENT ON FUNCTION append_task_attachment(UUID, JSONB) IS 
-  '原子添加附件到任务，包含权限校验和数量限制检查（最大 20 个）';
-
--- 授权
-GRANT EXECUTE ON FUNCTION append_task_attachment(UUID, JSONB) TO authenticated;
-
--- 为配置表添加 RLS
-ALTER TABLE public.app_config ENABLE ROW LEVEL SECURITY;
-
--- 只读策略（所有认证用户可读取配置）
-CREATE POLICY "app_config_select" ON public.app_config
-  FOR SELECT TO authenticated
-  USING (true);
-
--- 表注释
-COMMENT ON TABLE public.app_config IS '应用配置表，存储全局配置参数';
--- ============================================================
--- [MIGRATION] 20260101000005_purge_tasks_with_attachments.sql
--- ============================================================
--- ============================================
--- purge_tasks_v3: 永久删除任务并返回附件路径
--- 日期: 2026-01-01
--- ============================================
--- 目的：
--- - 在 purge_tasks_v2 基础上，返回被删除任务的附件存储路径
--- - 客户端收到路径后调用 Storage API 删除文件
--- - 防止任务删除后附件变成孤儿文件
--- - 添加速率限制防止 DoS 攻击
-
--- 返回类型：包含删除数量和附件路径
-DROP TYPE IF EXISTS purge_result CASCADE;
-CREATE TYPE purge_result AS (
-  purged_count integer,
-  attachment_paths text[]
-);
-
--- 速率限制配置
--- 每用户每分钟最多 10 次 purge 调用，每次最多 100 个任务
-CREATE TABLE IF NOT EXISTS public.purge_rate_limits (
-  user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  call_count integer DEFAULT 0,
-  window_start timestamptz DEFAULT now()
-);
-
-ALTER TABLE public.purge_rate_limits ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "users_manage_own_rate_limit" ON public.purge_rate_limits
-  FOR ALL TO authenticated
-  USING (user_id = (select auth.uid()))
-  WITH CHECK (user_id = (select auth.uid()));
-
-CREATE OR REPLACE FUNCTION public.purge_tasks_v3(
-  p_project_id uuid, 
-  p_task_ids uuid[]
-)
-RETURNS purge_result
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-DECLARE
-  result purge_result;
-  owner_id uuid;
-  task_record RECORD;
-  attachment jsonb;
-  attachment_paths text[] := ARRAY[]::text[];
-  file_ext text;
-  current_user_id uuid;
-  rate_limit_record RECORD;
-  max_calls_per_minute CONSTANT integer := 10;
-  max_tasks_per_call CONSTANT integer := 100;
-BEGIN
-  result.purged_count := 0;
-  result.attachment_paths := ARRAY[]::text[];
-  current_user_id := auth.uid();
-
-  IF p_project_id IS NULL THEN
-    RAISE EXCEPTION 'p_project_id is required';
-  END IF;
-
-  IF p_task_ids IS NULL OR array_length(p_task_ids, 1) IS NULL THEN
-    RETURN result;
-  END IF;
-  
-  -- 速率限制检查
-  IF array_length(p_task_ids, 1) > max_tasks_per_call THEN
-    RAISE EXCEPTION 'Too many tasks in single request. Maximum: %', max_tasks_per_call;
-  END IF;
-  
-  -- 检查并更新调用次数
-  INSERT INTO public.purge_rate_limits (user_id, call_count, window_start)
-  VALUES (current_user_id, 1, now())
-  ON CONFLICT (user_id) DO UPDATE SET
-    call_count = CASE 
-      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
-      THEN 1 
-      ELSE purge_rate_limits.call_count + 1 
-    END,
-    window_start = CASE 
-      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
-      THEN now() 
-      ELSE purge_rate_limits.window_start 
-    END
-  RETURNING call_count INTO rate_limit_record;
-  
-  IF rate_limit_record.call_count > max_calls_per_minute THEN
-    RAISE EXCEPTION 'Rate limit exceeded. Maximum % calls per minute', max_calls_per_minute;
-  END IF;
-
-  -- 授权校验：仅项目 owner 可 purge
-  SELECT p.owner_id INTO owner_id
-  FROM public.projects p
-  WHERE p.id = p_project_id
-    AND p.owner_id = auth.uid();
-
-  IF owner_id IS NULL THEN
-    RAISE EXCEPTION 'not authorized';
-  END IF;
-
-  -- 收集附件路径（在删除前）
-  -- 路径格式: {owner_id}/{project_id}/{task_id}/{attachment_id}.{ext}
-  FOR task_record IN
-    SELECT t.id AS task_id, t.attachments
-    FROM public.tasks t
-    WHERE t.project_id = p_project_id
-      AND t.id = ANY(p_task_ids)
-      AND t.attachments IS NOT NULL
-      AND jsonb_array_length(t.attachments) > 0
-  LOOP
-    FOR attachment IN SELECT * FROM jsonb_array_elements(task_record.attachments)
-    LOOP
-      -- 提取文件扩展名
-      file_ext := COALESCE(
-        NULLIF(SUBSTRING((attachment->>'name') FROM '\.([^.]+)$'), ''),
-        'bin'
-      );
-      
-      -- 构建完整路径
-      attachment_paths := array_append(
-        attachment_paths,
-        owner_id::text || '/' || 
-        p_project_id::text || '/' || 
-        task_record.task_id::text || '/' || 
-        (attachment->>'id') || '.' || file_ext
-      );
-      
-      -- 如果有缩略图，也加入删除列表
-      IF attachment->>'thumbnailUrl' IS NOT NULL THEN
-        attachment_paths := array_append(
-          attachment_paths,
-          owner_id::text || '/' || 
-          p_project_id::text || '/' || 
-          task_record.task_id::text || '/' || 
-          (attachment->>'id') || '_thumb.webp'
-        );
-      END IF;
-    END LOOP;
-  END LOOP;
-
-  -- 先落 tombstone（即使 tasks 行已不存在也会生效）
-  INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
-  ON CONFLICT (task_id)
-  DO UPDATE SET
-    project_id = EXCLUDED.project_id,
-    deleted_at = EXCLUDED.deleted_at,
-    deleted_by = EXCLUDED.deleted_by;
-
-  -- 删除相关连接
-  DELETE FROM public.connections c
-  WHERE c.project_id = p_project_id
-    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids));
-
-  -- 删除 tasks 行（如果存在）
-  WITH del AS (
-    DELETE FROM public.tasks t
-    WHERE t.project_id = p_project_id
-      AND t.id = ANY(p_task_ids)
-    RETURNING t.id
-  )
-  SELECT count(*) INTO result.purged_count FROM del;
-
-  result.attachment_paths := attachment_paths;
-  RETURN result;
-END;
-$$;
-
--- 授权
-GRANT EXECUTE ON FUNCTION public.purge_tasks_v3(uuid, uuid[]) TO authenticated;
-
 COMMENT ON FUNCTION public.purge_tasks_v3 IS 
 '永久删除任务并返回附件存储路径。客户端需要调用 Storage API 删除返回的路径。';
 -- ============================================================
@@ -3008,6 +2244,7 @@ SET search_path TO 'pg_catalog', 'public'
 AS $$
 DECLARE
   deleted_count INTEGER;
+  tmp_count INTEGER;
 BEGIN
   -- 删除 30 天前的扫描记录（保留威胁检测记录更长时间）
   DELETE FROM public.attachment_scans
@@ -3020,13 +2257,15 @@ BEGIN
   DELETE FROM public.attachment_scans
   WHERE scanned_at < NOW() - INTERVAL '90 days';
   
-  GET DIAGNOSTICS deleted_count = deleted_count + ROW_COUNT;
+  GET DIAGNOSTICS tmp_count = ROW_COUNT;
+  deleted_count := deleted_count + tmp_count;
   
   -- 删除过期的隔离文件记录
   DELETE FROM public.quarantined_files
   WHERE expires_at < NOW() AND restored = FALSE;
   
-  GET DIAGNOSTICS deleted_count = deleted_count + ROW_COUNT;
+  GET DIAGNOSTICS tmp_count = ROW_COUNT;
+  deleted_count := deleted_count + tmp_count;
   
   -- 记录清理日志
   INSERT INTO public.cleanup_logs (type, details)

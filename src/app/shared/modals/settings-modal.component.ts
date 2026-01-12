@@ -1,4 +1,4 @@
-import { Component, inject, Output, EventEmitter, input, signal, computed } from '@angular/core';
+import { Component, inject, Output, EventEmitter, input, signal, computed, viewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
@@ -421,8 +421,8 @@ export class SettingsModalComponent {
     });
   });
   
-  /** 文件输入引用 */
-  private fileInput: HTMLInputElement | null = null;
+  /** 文件输入引用 - 使用 viewChild signal 引用模板中的 #fileInput */
+  private readonly fileInputRef = viewChild<ElementRef<HTMLInputElement>>('fileInput');
   
   updateTheme(theme: ThemeType) {
     this.themeChange.emit(theme);
@@ -458,10 +458,12 @@ export class SettingsModalComponent {
    * 触发文件选择
    */
   triggerImportFileSelect(): void {
-    // 查找隐藏的文件输入
-    const input = document.querySelector('input[type="file"][accept*=".json"]') as HTMLInputElement;
-    if (input) {
-      input.click();
+    // 使用 viewChild 引用获取文件输入元素
+    const inputRef = this.fileInputRef();
+    if (inputRef?.nativeElement) {
+      inputRef.nativeElement.click();
+    } else {
+      console.error('[SettingsModal] 文件输入元素未找到');
     }
   }
   

@@ -151,7 +151,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
           <!-- 头部信息栏 + 编辑切换 -->
           <div class="flex items-center justify-between">
               <div class="flex items-center gap-2 text-[10px]">
-                  <span class="font-bold text-retro-muted bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
+                  <span class="font-bold text-retro-muted dark:text-stone-400 bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
                   <span class="text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
                 <span data-testid="flow-task-status-badge" class="px-1.5 py-0.5 rounded"
                         [ngClass]="{
@@ -184,10 +184,10 @@ import { renderMarkdown } from '../../../../utils/markdown';
           <!-- 预览模式 -->
           @if (!isEditMode()) {
               <div class="cursor-pointer" (click)="toggleEditMode(); $event.stopPropagation()">
-                <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 mb-1">{{ task.title || '无标题' }}</h4>
+                <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (task.content) {
                       <div 
-                          class="text-[11px] text-stone-600 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto"
+                          class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto"
                           [innerHTML]="renderMarkdownContent(task.content)">
                       </div>
                   } @else {
@@ -278,7 +278,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
     <ng-template #mobileTaskContent let-task>
       <!-- 紧凑的任务信息头 - 单行布局 -->
       <div class="flex items-center gap-1.5 mb-1 flex-wrap">
-        <span class="font-bold text-retro-muted text-[8px] tracking-wider bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
+        <span class="font-bold text-retro-muted dark:text-stone-400 text-[8px] tracking-wider bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
         <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
         <span class="text-[9px] px-1 py-0.5 rounded"
               [ngClass]="{

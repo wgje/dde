@@ -33,7 +33,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       <!-- 头部信息 -->
       <div class="flex justify-between items-start"
            [ngClass]="{'mb-1': !isMobile, 'mb-0.5': isMobile}">
-        <span class="font-mono font-medium text-retro-muted"
+        <span class="font-mono font-medium text-retro-muted dark:text-stone-400"
               [ngClass]="{'text-[10px]': !isMobile, 'text-[9px]': isMobile}">
           {{projectState.compressDisplayId(task.displayId)}}
         </span>
