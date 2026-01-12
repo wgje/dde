@@ -1179,12 +1179,14 @@ describe('ConflictResolutionService', () => {
     });
 
     it('中等相似度（30%-90%）应创建冲突副本', () => {
-      // 构造中等相似度内容：共享部分字符但有明显差异
+      // 构造中等相似度内容：
+      // 算法使用字符集合匹配，需要构造两个有部分不同字符的字符串
+      // 第一个使用大量数字，第二个使用大量特殊符号
       const localProject = createTestProject({
         tasks: [createTestTask({
           id: 'task-1',
           title: '原任务',
-          content: 'This is the local version with some unique local content here.',
+          content: 'Common prefix here 111222333444555666777888999000 unique local numbers',
           updatedAt: new Date('2025-01-01').toISOString(),
         })],
       });
@@ -1192,7 +1194,7 @@ describe('ConflictResolutionService', () => {
         tasks: [createTestTask({
           id: 'task-1',
           title: '原任务',
-          content: 'This is the remote version with different remote content here.',
+          content: 'Common prefix here @@##$$%%^^&&**()!!~~``|| unique remote symbols',
           updatedAt: new Date('2025-01-02').toISOString(),
         })],
       });
@@ -1204,7 +1206,7 @@ describe('ConflictResolutionService', () => {
       expect(conflictCopies).toHaveLength(1);
       expect(conflictCopies[0].title).toBe('原任务 (冲突副本)');
       expect(conflictCopies[0].content).toBe(
-        'This is the local version with some unique local content here.'
+        'Common prefix here 111222333444555666777888999000 unique local numbers'
       );
     });
 
@@ -1235,11 +1237,12 @@ describe('ConflictResolutionService', () => {
     });
 
     it('冲突副本应有正确的元数据', () => {
+      // 使用不同字符集构造中等相似度
       const localProject = createTestProject({
         tasks: [createTestTask({
           id: 'task-1',
           title: '原任务标题',
-          content: 'Local unique content that is different from remote version.',
+          content: 'Shared base text 111222333444555666777888999 local unique numbers here',
           x: 100,
           y: 200,
           updatedAt: new Date('2025-01-01').toISOString(),
@@ -1249,7 +1252,7 @@ describe('ConflictResolutionService', () => {
         tasks: [createTestTask({
           id: 'task-1',
           title: '原任务标题',
-          content: 'Remote unique content that is different from local version.',
+          content: 'Shared base text @@##$$%%^^&&**(())!!~~``| remote unique symbols here',
           updatedAt: new Date('2025-01-02').toISOString(),
         })],
       });
@@ -1267,7 +1270,7 @@ describe('ConflictResolutionService', () => {
       expect(copy.x).toBe(150);  // 原位置 + 50
       expect(copy.y).toBe(250);  // 原位置 + 50
       expect(copy.shortId).toBeDefined();  // 应有短 ID
-      expect(copy.content).toBe('Local unique content that is different from remote version.');
+      expect(copy.content).toBe('Shared base text 111222333444555666777888999 local unique numbers here');
     });
   });
 });
