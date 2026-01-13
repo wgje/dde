@@ -158,7 +158,8 @@ export class TextTaskCardComponent implements OnChanges {
   
   /**
    * 处理卡片点击
-   * - 连续两次点击非编辑区域：切换展开/收起状态
+   * - 桌面端：单击非编辑区域切换展开/收起状态
+   * - 手机端：连续两次点击非编辑区域切换展开/收起状态
    * - 点击编辑区域：不处理（让用户正常编辑）
    */
   onCardClick(event: Event) {
@@ -188,6 +189,14 @@ export class TextTaskCardComponent implements OnChanges {
     }
     
     // 点击了非编辑区域
+    // 桌面端：单击直接切换
+    if (!this.isMobile) {
+      this.select.emit(this.task);
+      event.stopPropagation();
+      return;
+    }
+    
+    // 手机端：需要双击才切换
     const currentTime = Date.now();
     const timeSinceLastClick = currentTime - this.lastClickTime;
     
