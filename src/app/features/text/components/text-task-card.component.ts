@@ -86,6 +86,11 @@ export class TextTaskCardComponent implements OnChanges {
   @ViewChild('taskEditor') taskEditor?: TextTaskEditorComponent;
   @ViewChild('taskEditor', { read: ElementRef }) taskEditorElement?: ElementRef<HTMLElement>;
   
+  // 双击检测
+  private lastClickTime = 0;
+  private lastClickWasNonEdit = false;
+  private readonly DOUBLE_CLICK_DELAY = 300; // 300ms 内的连续点击视为双击
+  
   @Input({ required: true }) task!: Task;
   @Input() isMobile = false;
   @Input() isSelected = false;
@@ -153,8 +158,8 @@ export class TextTaskCardComponent implements OnChanges {
   
   /**
    * 处理卡片点击
-   * - 如果任务未选中：选中任务（展开）
-   * - 如果任务已选中且点击卡片头部：切换到预览模式
+   * - 连续两次点击非编辑区域：切换展开/收起状态
+   * - 点击编辑区域：不处理（让用户正常编辑）
    */
   onCardClick(event: Event) {
     const targetElement = event.target instanceof HTMLElement ? event.target : null;
@@ -167,23 +172,39 @@ export class TextTaskCardComponent implements OnChanges {
         targetElement.closest('input, textarea, button'))
     ) {
       event.stopPropagation();
+      // 重置双击状态（点击了编辑区域）
+      this.lastClickWasNonEdit = false;
       return;
     }
     
-    if (this.isSelected) {
-      // 任务已展开，检查是否点击在编辑器区域内
-      const clickedInEditor = this.isClickInsideEditor(event.target);
-      
-      // 只有点击在编辑器区域外部（如卡片头部）时才切换到预览模式
-      if (!clickedInEditor) {
-        this.taskEditor?.setPreviewMode();
-      }
-      // 无论如何都阻止事件冒泡，避免触发父组件的收缩逻辑
+    // 检查是否点击在编辑器区域内
+    const clickedInEditor = this.isSelected && this.isClickInsideEditor(event.target);
+    
+    if (clickedInEditor) {
+      // 点击了编辑区域，重置双击状态
       event.stopPropagation();
-    } else {
-      // 任务未展开，触发选中事件
-      this.select.emit(this.task);
+      this.lastClickWasNonEdit = false;
+      return;
     }
+    
+    // 点击了非编辑区域
+    const currentTime = Date.now();
+    const timeSinceLastClick = currentTime - this.lastClickTime;
+    
+    // 检测是否为有效的双击（连续两次点击非编辑区域，且在时间窗口内）
+    if (this.lastClickWasNonEdit && timeSinceLastClick < this.DOUBLE_CLICK_DELAY) {
+      // 双击成功，切换状态
+      this.select.emit(this.task);
+      // 重置状态
+      this.lastClickWasNonEdit = false;
+      this.lastClickTime = 0;
+    } else {
+      // 第一次点击或超时，记录状态
+      this.lastClickWasNonEdit = true;
+      this.lastClickTime = currentTime;
+    }
+    
+    event.stopPropagation();
   }
 
   private isClickInsideEditor(target: EventTarget | null): boolean {

@@ -17,8 +17,8 @@ export const TRASH_CONFIG = {
  * 撤销/重做配置
  */
 export const UNDO_CONFIG = {
-  /** 桌面端最大撤销/重做历史数 */
-  DESKTOP_HISTORY_SIZE: 50,
+  /** 桌面端最大撤销/重做历史数（从50增加到150，避免频繁触发截断提示） */
+  DESKTOP_HISTORY_SIZE: 150,
   /** 移动端最大撤销/重做历史数（保持原有上限） */
   MOBILE_HISTORY_SIZE: 50,
   /** 版本容差：当远程版本超过记录版本这么多时，拒绝撤销 */

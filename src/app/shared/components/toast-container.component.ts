@@ -1,10 +1,11 @@
 import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ToastService, ToastMessage } from '../../../services/toast.service';
+import { UiStateService } from '../../../services/ui-state.service';
 
 /**
  * Toast 通知组件
- * 在应用右上角显示全局通知消息
+ * 统一在右上角显示，移动端使用紧凑样式
  */
 @Component({
   selector: 'app-toast-container',
@@ -12,12 +13,20 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
   imports: [CommonModule],
   template: `
     @if (toast.hasMessages()) {
-      <div class="fixed top-4 right-4 z-[9999] flex flex-col gap-2 max-w-sm w-full pointer-events-none">
+      <!-- 右上角显示，移动端紧凑宽度 -->
+      <div 
+        class="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none"
+        [ngClass]="{
+          'max-w-[280px]': uiState.isMobile(),
+          'max-w-sm': !uiState.isMobile()
+        }">
         @for (message of toast.messages(); track message.id) {
           <div 
-            class="pointer-events-auto animate-toast-in rounded-lg shadow-lg border backdrop-blur-sm p-4 flex items-start gap-3 transition-all duration-300"
+            class="pointer-events-auto animate-toast-in rounded-lg shadow-lg border backdrop-blur-sm flex items-start transition-all duration-300"
             [attr.data-testid]="message.type === 'error' ? 'error-toast' : null"
             [ngClass]="{
+              'p-3 gap-2 text-xs': uiState.isMobile(),
+              'p-4 gap-3': !uiState.isMobile(),
               'bg-emerald-50 dark:bg-emerald-950 border-emerald-200 dark:border-emerald-800': message.type === 'success',
               'bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-800': message.type === 'error',
               'bg-amber-50 dark:bg-amber-950 border-amber-200 dark:border-amber-800': message.type === 'warning',
@@ -26,25 +35,53 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
             role="alert">
             
             <!-- Icon -->
-            <div class="flex-shrink-0 mt-0.5">
+            <div class="flex-shrink-0"
+                 [ngClass]="{
+                   'mt-0.5': !uiState.isMobile(),
+                   'mt-0': uiState.isMobile()
+                 }">
               @switch (message.type) {
                 @case ('success') {
-                  <svg class="w-5 h-5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <svg 
+                    class="text-emerald-500"
+                    [ngClass]="{
+                      'w-4 h-4': uiState.isMobile(),
+                      'w-5 h-5': !uiState.isMobile()
+                    }"
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                   </svg>
                 }
                 @case ('error') {
-                  <svg class="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <svg 
+                    class="text-red-500"
+                    [ngClass]="{
+                      'w-4 h-4': uiState.isMobile(),
+                      'w-5 h-5': !uiState.isMobile()
+                    }"
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
                   </svg>
                 }
                 @case ('warning') {
-                  <svg class="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <svg 
+                    class="text-amber-500"
+                    [ngClass]="{
+                      'w-4 h-4': uiState.isMobile(),
+                      'w-5 h-5': !uiState.isMobile()
+                    }"
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                   </svg>
                 }
                 @case ('info') {
-                  <svg class="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <svg 
+                    class="text-blue-500"
+                    [ngClass]="{
+                      'w-4 h-4': uiState.isMobile(),
+                      'w-5 h-5': !uiState.isMobile()
+                    }"
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                   </svg>
                 }
@@ -53,22 +90,28 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
             
             <!-- Content -->
             <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium"
-                 [ngClass]="{
-                   'text-emerald-800 dark:text-emerald-200': message.type === 'success',
-                   'text-red-800 dark:text-red-200': message.type === 'error',
-                   'text-amber-800 dark:text-amber-200': message.type === 'warning',
-                   'text-blue-800 dark:text-blue-200': message.type === 'info'
+              <p 
+                class="font-medium"
+                [ngClass]="{
+                  'text-xs': uiState.isMobile(),
+                  'text-sm': !uiState.isMobile(),
+                  'text-emerald-800 dark:text-emerald-200': message.type === 'success',
+                  'text-red-800 dark:text-red-200': message.type === 'error',
+                  'text-amber-800 dark:text-amber-200': message.type === 'warning',
+                  'text-blue-800 dark:text-blue-200': message.type === 'info'
                  }">
                 {{ message.title }}
               </p>
               @if (message.message) {
-                <p class="mt-1 text-xs"
-                   [ngClass]="{
-                     'text-emerald-600 dark:text-emerald-300': message.type === 'success',
-                     'text-red-600 dark:text-red-300': message.type === 'error',
-                     'text-amber-600 dark:text-amber-300': message.type === 'warning',
-                     'text-blue-600 dark:text-blue-300': message.type === 'info'
+                <p 
+                  class="mt-1"
+                  [ngClass]="{
+                    'text-[10px]': uiState.isMobile(),
+                    'text-xs': !uiState.isMobile(),
+                    'text-emerald-600 dark:text-emerald-300': message.type === 'success',
+                    'text-red-600 dark:text-red-300': message.type === 'error',
+                    'text-amber-600 dark:text-amber-300': message.type === 'warning',
+                    'text-blue-600 dark:text-blue-300': message.type === 'info'
                    }">
                   {{ message.message }}
                 </p>
@@ -76,8 +119,10 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
               @if (message.action) {
                 <button
                   (click)="handleAction(message)"
-                  class="mt-2 text-xs font-medium px-3 py-1 rounded-md transition-colors"
+                  class="mt-2 font-medium rounded-md transition-colors"
                   [ngClass]="{
+                    'text-[10px] px-2 py-0.5': uiState.isMobile(),
+                    'text-xs px-3 py-1': !uiState.isMobile(),
                     'bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-800': message.type === 'success',
                     'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-800': message.type === 'error',
                     'bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-800': message.type === 'warning',
@@ -91,15 +136,23 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
             <!-- Close Button -->
             <button 
               (click)="toast.dismiss(message.id)"
-              class="flex-shrink-0 p-1 rounded-full transition-colors"
+              class="flex-shrink-0 rounded-full transition-colors"
               [ngClass]="{
+                'p-0.5': uiState.isMobile(),
+                'p-1': !uiState.isMobile(),
                 'text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900': message.type === 'success',
                 'text-red-400 hover:bg-red-100 dark:hover:bg-red-900': message.type === 'error',
                 'text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900': message.type === 'warning',
                 'text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900': message.type === 'info'
               }"
               aria-label="关闭">
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <svg 
+                class="text-current"
+                [ngClass]="{
+                  'w-3 h-3': uiState.isMobile(),
+                  'w-4 h-4': !uiState.isMobile()
+                }"
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
               </svg>
             </button>
@@ -127,6 +180,7 @@ import { ToastService, ToastMessage } from '../../../services/toast.service';
 })
 export class ToastContainerComponent {
   readonly toast = inject(ToastService);
+  readonly uiState = inject(UiStateService);
   
   /**
    * 处理 Toast 操作按钮点击

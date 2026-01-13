@@ -485,9 +485,51 @@ export class TextViewComponent implements OnInit, OnDestroy {
     const wasSelected = this.selectedTaskId() === task.id;
     this.selectedTaskId.update(id => id === task.id ? null : task.id);
     
-    if (!wasSelected && this.selectedTaskId() === task.id && !this.isMobile()) {
-      this.focusFlowNode.emit(task.id);
+    // 任务从未选中变为选中时的处理
+    if (!wasSelected && this.selectedTaskId() === task.id) {
+      // PC端：聚焦到流程图节点
+      if (!this.isMobile()) {
+        this.focusFlowNode.emit(task.id);
+      }
+      // 手机端：滚动任务卡片到视图中心
+      // 这样能确保详情页完整展开时，即使被拖拽到极限位置也能看到内容
+      else {
+        this.scrollToTaskAfterExpand(task.id);
+      }
     }
+  }
+  
+  /**
+   * 任务展开后滚动到合适位置（仅手机端）
+   * 
+   * 关键时机控制：
+   * 1. 双重 rAF：确保 Angular 变更检测完成 + 浏览器完成初始布局
+   * 2. 延迟 200ms：等待详情页展开动画完成（CSS animate-collapse-open: 150ms）
+   * 3. 再次 rAF：确保动画后的最终布局完成
+   * 
+   * 这样能避免在详情页还在展开动画时就触发滚动，导致滚动到错误的位置
+   */
+  private scrollToTaskAfterExpand(taskId: string): void {
+    this.ngZone.runOutsideAngular(() => {
+      // 第一阶段：等待 DOM 更新
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          // 第二阶段：等待展开动画完成（150ms + 50ms 缓冲）
+          const timer = setTimeout(() => {
+            // 第三阶段：确保动画后的布局完成
+            requestAnimationFrame(() => {
+              const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`) 
+                ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            });
+            this.removeTimer(timer);
+          }, 200);
+          this.pendingTimers.push(timer);
+        });
+      });
+    });
   }
   
   onAddSibling(task: Task) {

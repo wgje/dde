@@ -93,14 +93,22 @@ export const SYNC_CONFIG = {
 /**
  * 字段筛选配置 - 替代 SELECT * 节省流量
  * 
- * 【流量优化】2024-12-31
- * - 任务列表查询只返回元数据，不包含 content
- * - content 仅在查看任务详情时按需加载
+ * 【P0 修复】2026-01-13
+ * - 【重要】同步查询必须包含 content 字段，否则会导致任务内容丢失！
+ * - 原设计的流量优化导致 content 在同步过程中被空字符串覆盖
+ * - 问题路径：pullTasks → rowToTask(content: undefined → '') → 合并时覆盖本地内容
+ * 
+ * 【历史】2024-12-31 流量优化尝试
+ * - 原计划：任务列表查询只返回元数据，不包含 content
+ * - 结果：导致严重的数据丢失 Bug，已回滚
  */
 export const FIELD_SELECT_CONFIG = {
-  /** 任务列表字段（不含 content，节省 60-70% 流量） */
-  TASK_LIST_FIELDS: 'id,title,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id',
-  /** 任务详情字段（包含 content） */
+  /** 
+   * 任务列表字段
+   * 【P0 修复】必须包含 content，否则同步时会丢失任务内容
+   */
+  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id',
+  /** 任务详情字段（包含 content 和 attachments） */
   TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments',
   /** 连接字段 */
   CONNECTION_FIELDS: 'id,source_id,target_id,title,description,deleted_at,updated_at',

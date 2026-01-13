@@ -2842,14 +2842,50 @@ export class SimpleSyncService {
    * 数据库行转换为 Task 模型
    * 使用 TaskRow 类型确保类型安全
    * 
-   * 【流量优化】支持不包含 content 的行（列表查询时不加载 content）
+   * 【P0 修复 2026-01-13】content 字段处理
+   * - 查询必须包含 content 字段（已在 FIELD_SELECT_CONFIG.TASK_LIST_FIELDS 中添加）
+   * - 如果 content 未定义且不为 null，记录警告日志（用于检测配置问题）
    */
   private rowToTask(row: TaskRow | Partial<TaskRow>): Task {
+    // 【P0 防护】检测 content 字段是否缺失
+    // 如果缺失说明查询配置有问题，需要立即修复
+    if (!('content' in row)) {
+      this.logger.warn('rowToTask: content 字段缺失，可能导致数据丢失！', { 
+        taskId: row.id,
+        hasTitle: 'title' in row,
+        hasStage: 'stage' in row
+      });
+      
+      // 【Sentry 监控】采样率 10% 上报，避免大量重复告警
+      // 但在开发模式下始终上报，方便调试
+      const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
+      const shouldReport = isDev || Math.random() < 0.1;
+      
+      if (shouldReport) {
+        Sentry.captureMessage('Sync Warning: Task content field missing in payload', {
+          level: 'warning',
+          tags: { 
+            operation: 'rowToTask', 
+            taskId: row.id || 'unknown',
+            severity: 'p0-data-integrity'
+          },
+          extra: { 
+            rowKeys: Object.keys(row),
+            hasTitle: 'title' in row,
+            hasStage: 'stage' in row,
+            hasUpdatedAt: 'updated_at' in row,
+            source: 'content-field-protection',
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+    
     return {
       id: row.id || '',
       title: row.title || '',
-      // 【流量优化】content 可能不存在（列表查询不加载）
-      // 不存在时设为 undefined，由调用方按需加载
+      // 【P0 修复】content 必须从查询中加载，不能默认为空字符串
+      // 如果确实是空内容，row.content 会是 '' 或 null
       content: row.content ?? '',
       stage: row.stage ?? null,
       parentId: row.parent_id ?? null,

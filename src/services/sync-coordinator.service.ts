@@ -33,6 +33,7 @@ import { Project, Task, UserPreferences } from '../models';
 import { SYNC_CONFIG, AUTH_CONFIG } from '../config';
 import { validateProject, sanitizeProject } from '../utils/validation';
 import { Result, success, failure, ErrorCodes, OperationError, isFailure } from '../utils/result';
+import * as Sentry from '@sentry/angular';
 
 /**
  * 冲突事件数据
@@ -581,7 +582,40 @@ export class SyncCoordinatorService {
             // 远程已删除
             taskMap.delete(deltaTask.id);
           } else {
-            taskMap.set(deltaTask.id, deltaTask);
+            // 【P0 修复 2026-01-13】保护 content 字段
+            // 如果远程 content 为空但本地有内容，保留本地内容
+            // 防止因查询配置错误导致的内容丢失
+            let mergedTask = deltaTask;
+            if (existing && existing.content && !deltaTask.content) {
+              this.logger.warn('Delta Sync: 检测到远程 content 为空，保留本地内容', {
+                taskId: deltaTask.id,
+                localContentLength: existing.content.length
+              });
+              
+              // 【Sentry 监控】上报 content 保护事件（采样率 10%）
+              // 这个告警表示保护机制生效，说明可能存在配置问题
+              if (Math.random() < 0.1) {
+                Sentry.captureMessage('Delta Sync: Content protection triggered', {
+                  level: 'warning',
+                  tags: { 
+                    operation: 'performDeltaSync', 
+                    taskId: deltaTask.id,
+                    severity: 'p0-data-integrity'
+                  },
+                  extra: { 
+                    localContentLength: existing.content.length,
+                    remoteContent: deltaTask.content,
+                    remoteUpdatedAt: deltaTask.updatedAt,
+                    localUpdatedAt: existing.updatedAt,
+                    projectId,
+                    source: 'delta-sync-content-protection'
+                  }
+                });
+              }
+              
+              mergedTask = { ...deltaTask, content: existing.content };
+            }
+            taskMap.set(deltaTask.id, mergedTask);
           }
         }
       }

@@ -74,7 +74,7 @@ export class UndoService {
   
   /** 上次截断提示时间（防止频繁提示） */
   private lastTruncationNotifyTime = 0;
-  private readonly TRUNCATION_NOTIFY_COOLDOWN = 30000; // 30秒内不重复提示
+  private readonly TRUNCATION_NOTIFY_COOLDOWN = 5 * 60 * 1000; // 从30秒增加到5分钟
   
   /** 是否正在执行撤销/重做操作（防止循环记录） */
   private isUndoRedoing = false;

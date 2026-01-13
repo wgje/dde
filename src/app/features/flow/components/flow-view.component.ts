@@ -944,6 +944,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.selectedTaskId.set(taskId);
         if (isDoubleClick) {
           this.uiState.isFlowDetailOpen.set(true);
+          // 手机端：双击打开详情时，自动展开到最佳观看高度
+          if (this.uiState.isMobile()) {
+            this.expandDrawerToOptimalHeight();
+          }
         }
       }
     });
@@ -1645,6 +1649,36 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   // ========== 批量删除操作 ==========
+  
+  /**
+   * 展开抽屉到最佳观看高度（仅手机端）
+   * 双击任务块打开详情时调用，使用与现有 effect 相同的计算逻辑
+   */
+  private expandDrawerToOptimalHeight(): void {
+    if (typeof window === 'undefined' || window.innerHeight <= 0) return;
+
+    // 使用与场景一（直接点击）相同的计算逻辑
+    const REFERENCE_SCREEN_HEIGHT = 667;
+    const REFERENCE_PALETTE_HEIGHT_PX = 80;
+    const DRAWER_VH_DIRECT_CLICK = 24.88; // 直接点击场景的最佳高度
+    
+    const refDrawerPxDirect = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_DIRECT_CLICK) / 100;
+    const ratioDirect = refDrawerPxDirect / REFERENCE_PALETTE_HEIGHT_PX;
+
+    const palettePx = this.paletteHeight();
+    const targetDrawerPx = palettePx * ratioDirect;
+    const targetVh = (targetDrawerPx / window.innerHeight) * 100;
+    const clampedVh = Math.max(5, Math.min(targetVh, 70));
+
+    // 延迟设置，等待详情面板完全渲染
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
+          this.drawerHeight.set(clampedVh);
+        }
+      });
+    });
+  }
   
   /**
    * 请求批量删除（由 Delete 键或工具栏按钮触发）
