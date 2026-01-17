@@ -643,12 +643,19 @@ export class UndoService {
    * 通知撤销历史被截断
    * 
    * 使用冷却时间防止频繁提示打扰用户
+   * 移动端禁用此提示：移动端有 Toast 撤销按钮作为即时撤销方式，
+   * 截断提示对移动端用户没有实际价值，反而造成干扰
    */
   private notifyTruncation(count: number): void {
-    const now = Date.now();
-    
-    // 累计截断数量
+    // 累计截断数量（始终更新，用于调试/监控）
     this._truncatedCount.update(c => c + count);
+    
+    // 移动端不显示截断提示
+    if (this.uiState.isMobile()) {
+      return;
+    }
+    
+    const now = Date.now();
     
     // 检查冷却时间
     if (now - this.lastTruncationNotifyTime < this.TRUNCATION_NOTIFY_COOLDOWN) {

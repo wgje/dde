@@ -110,14 +110,23 @@ export class ClockSyncService {
   private isChecking = false;
   
   constructor() {
-    // 启动时检测
+    // 启动时检测 - 延迟到应用空闲时执行，避免阻塞首屏渲染
     if (CLOCK_SYNC_CONFIG.CHECK_ON_INIT) {
-      // 延迟执行，避免阻塞启动
-      setTimeout(() => {
-        this.checkClockDrift().catch(err => {
-          this.logger.debug('启动时时钟检测失败', err);
-        });
-      }, 2000);
+      // 使用 requestIdleCallback 在浏览器空闲时执行，避免阻塞关键渲染路径
+      // Fallback 到 setTimeout(5000ms) 确保首屏完成后才检测
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(() => {
+          this.checkClockDrift().catch(err => {
+            this.logger.debug('启动时时钟检测失败', err);
+          });
+        }, { timeout: 10000 }); // 最多延迟 10 秒
+      } else {
+        setTimeout(() => {
+          this.checkClockDrift().catch(err => {
+            this.logger.debug('启动时时钟检测失败', err);
+          });
+        }, 5000); // 延迟 5 秒，确保首屏渲染完成
+      }
     }
   }
   

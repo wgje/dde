@@ -392,6 +392,35 @@ describe('UndoService', () => {
       // 栈大小不应超过桌面端上限
       expect(service.undoCount()).toBeLessThanOrEqual(DESKTOP_HISTORY_LIMIT);
     });
+    
+    it('移动端不应显示截断提示，但应更新截断计数', () => {
+      // 模拟移动端
+      mockUiState.isMobile.mockReturnValue(true);
+      
+      // 记录超过移动端上限的操作
+      const MOBILE_LIMIT = UNDO_CONFIG.MOBILE_HISTORY_SIZE;
+      for (let i = 0; i < MOBILE_LIMIT + 10; i++) {
+        const project = createTestProject({ id: `mobile-project-${i}` });
+        const beforeSnapshot = service.createProjectSnapshot(project);
+        const afterSnapshot = service.createProjectSnapshot({
+          ...project,
+          tasks: [createTask({ id: `mobile-task-${i}`, title: `任务${i}` })]
+        });
+        
+        service.recordAction({
+          type: 'task-update',
+          projectId: project.id,
+          data: { before: beforeSnapshot, after: afterSnapshot }
+        });
+      }
+      
+      // 截断计数应更新
+      expect(service.truncatedCount()).toBeGreaterThan(0);
+      // 栈大小不应超过移动端上限
+      expect(service.undoCount()).toBeLessThanOrEqual(MOBILE_LIMIT);
+      // 但不应显示 Toast
+      expect(mockToastService.info).not.toHaveBeenCalled();
+    });
 
     it('重做栈同样遵循桌面端上限', () => {
       // 构造超过上限的撤销记录
@@ -424,7 +453,8 @@ describe('UndoService', () => {
     
     it('登出后应重置截断计数', () => {
       // 触发截断 - 使用不同的 projectId 避免合并逻辑
-      for (let i = 0; i < 55; i++) {
+      // 需要超过 DESKTOP_HISTORY_LIMIT 才能触发截断
+      for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 10; i++) {
         const project = createTestProject({ id: `project-${i}` });
         const beforeSnapshot = service.createProjectSnapshot(project);
         const afterSnapshot = service.createProjectSnapshot({

@@ -105,6 +105,55 @@ function createOptimizedRequest(request, saveData) {
   return request;
 }
 
+// ========== 字体缓存策略 ==========
+const FONT_CACHE_NAME = 'nanoflow-fonts-v1';
+const FONT_MAX_AGE = 365 * 24 * 60 * 60 * 1000; // 1年
+
+/**
+ * 判断是否为字体请求
+ * @param {URL} url 
+ * @returns {boolean}
+ */
+function isFontRequest(url) {
+  return url.pathname.endsWith('.woff2') || 
+         url.pathname.endsWith('.woff') || 
+         url.pathname.endsWith('.ttf') ||
+         url.hostname.includes('fonts.gstatic.com') ||
+         (url.hostname.includes('jsdelivr.net') && url.pathname.includes('lxgw'));
+}
+
+/**
+ * 缓存优先的字体获取策略
+ * @param {Request} request 
+ * @returns {Promise<Response>}
+ */
+async function fetchFontWithCache(request) {
+  const cache = await caches.open(FONT_CACHE_NAME);
+  const cachedResponse = await cache.match(request);
+  
+  if (cachedResponse) {
+    // 字体已缓存，直接返回
+    return cachedResponse;
+  }
+  
+  // 字体未缓存，从网络获取并缓存
+  try {
+    const networkResponse = await fetch(request);
+    
+    if (networkResponse.ok) {
+      // 克隆响应用于缓存
+      const responseToCache = networkResponse.clone();
+      cache.put(request, responseToCache);
+    }
+    
+    return networkResponse;
+  } catch (error) {
+    // 网络失败，返回错误
+    console.error('[SW] Font fetch failed:', error);
+    throw error;
+  }
+}
+
 /**
  * 网络优化 fetch 处理器
  * 
@@ -125,6 +174,13 @@ function createOptimizedRequest(request, saveData) {
  * @returns {Promise<Response>}
  */
 self.optimizedFetch = async function(request) {
+  const url = new URL(request.url);
+  
+  // 字体请求：缓存优先策略
+  if (isFontRequest(url)) {
+    return fetchFontWithCache(request);
+  }
+  
   const saveData = isSaveDataEnabled(request);
   
   if (saveData) {
@@ -142,6 +198,12 @@ self.optimizedFetch = async function(request) {
  */
 self.shouldOptimize = function(request) {
   const url = new URL(request.url);
+  
+  // 字体请求始终需要优化（缓存）
+  if (isFontRequest(url)) {
+    return true;
+  }
+  
   return isSupabaseRequest(url) && isSaveDataEnabled(request);
 };
 
@@ -149,6 +211,7 @@ self.shouldOptimize = function(request) {
 self._networkOptimizerStats = {
   totalRequests: 0,
   optimizedRequests: 0,
+  fontCacheHits: 0,
 };
 
-console.log('[SW Network Optimizer] Loaded');
+console.log('[SW Network Optimizer] Loaded with font caching');

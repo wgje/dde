@@ -13,7 +13,24 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css" />
+  
+  <!-- ========== 性能优化：Preconnect 提示 ========== -->
+  <!-- 提前建立 CDN 连接，减少字体加载延迟 -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+  <!-- Supabase API 预连接（如果启用云同步） -->
+  <link rel="preconnect" href="https://fkhihclpghmmtbbywvoj.supabase.co" crossorigin>
+  <link rel="dns-prefetch" href="https://fkhihclpghmmtbbywvoj.supabase.co">
+  
+  <!-- ========== 性能优化：关键字体 Preload ========== -->
+  <!-- 预加载最常用的中文字体子集，避免渲染阻塞 -->
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-118.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-117.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-119.woff2" as="font" type="font/woff2" crossorigin>
+  
+  <!-- 字体样式表 - 异步加载避免渲染阻塞 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css"></noscript>
   
   <!-- ========== 防闪屏脚本 (Anti-FOUC) ========== -->
   <!-- 必须是同步阻塞脚本，在 Angular 启动前确定颜色模式 -->
@@ -70,7 +87,7 @@
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
   <style>
-    /* 初始加载状态 - 支持深色模式，防止白屏 */
+    /* ========== 骨架屏加载器 - 提升 LCP 感知性能 ========== */
     #initial-loader {
       position: fixed;
       inset: 0;
@@ -89,28 +106,101 @@
     #initial-loader.hidden {
       display: none;
     }
-    #initial-loader .spinner {
+    
+    /* 骨架屏容器 */
+    .skeleton-container {
+      width: 100%;
+      max-width: 800px;
+      padding: 2rem;
+    }
+    
+    /* 骨架屏头部 */
+    .skeleton-header {
+      height: 48px;
+      background: linear-gradient(90deg, #e7e5e4 25%, #d6d3d1 50%, #e7e5e4 75%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.5s infinite;
+      border-radius: 8px;
+      margin-bottom: 1.5rem;
+    }
+    [data-color-mode="dark"] .skeleton-header {
+      background: linear-gradient(90deg, #374151 25%, #4b5563 50%, #374151 75%);
+      background-size: 200% 100%;
+    }
+    
+    /* 骨架屏内容行 */
+    .skeleton-content {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .skeleton-row {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+    }
+    .skeleton-avatar {
       width: 40px;
       height: 40px;
-      border: 3px solid #e7e5e4;
-      border-top-color: #4f46e5;
       border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      background: linear-gradient(90deg, #e7e5e4 25%, #d6d3d1 50%, #e7e5e4 75%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.5s infinite;
+      flex-shrink: 0;
     }
-    [data-color-mode="dark"] #initial-loader .spinner {
-      border-color: #374151;
-      border-top-color: #818cf8;
+    [data-color-mode="dark"] .skeleton-avatar {
+      background: linear-gradient(90deg, #374151 25%, #4b5563 50%, #374151 75%);
+      background-size: 200% 100%;
     }
+    .skeleton-text {
+      flex: 1;
+      height: 20px;
+      background: linear-gradient(90deg, #e7e5e4 25%, #d6d3d1 50%, #e7e5e4 75%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.5s infinite;
+      border-radius: 4px;
+    }
+    [data-color-mode="dark"] .skeleton-text {
+      background: linear-gradient(90deg, #374151 25%, #4b5563 50%, #374151 75%);
+      background-size: 200% 100%;
+    }
+    .skeleton-text.short { width: 60%; }
+    .skeleton-text.medium { width: 80%; }
+    
+    /* 骨架屏卡片 */
+    .skeleton-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+    .skeleton-card {
+      height: 120px;
+      background: linear-gradient(90deg, #e7e5e4 25%, #d6d3d1 50%, #e7e5e4 75%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.5s infinite;
+      border-radius: 12px;
+    }
+    [data-color-mode="dark"] .skeleton-card {
+      background: linear-gradient(90deg, #374151 25%, #4b5563 50%, #374151 75%);
+      background-size: 200% 100%;
+    }
+    
+    /* 闪烁动画 */
+    @keyframes skeleton-shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    
+    /* 加载提示文字 */
     #initial-loader .text {
-      margin-top: 1rem;
+      margin-top: 1.5rem;
       color: #57534e;
       font-size: 14px;
+      text-align: center;
     }
     [data-color-mode="dark"] #initial-loader .text {
       color: #9ca3af;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
     }
 
     /* Custom Scrollbar - 支持深色模式 */
@@ -236,10 +326,34 @@
     // console.log('[DEBUG v15] body 开始解析');
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
   </script>
-  <!-- 初始加载指示器 - Angular 加载完成后会被隐藏 -->
+  <!-- 初始加载指示器 - 骨架屏提升 LCP 感知性能 -->
   <div id="initial-loader">
-    <div class="spinner"></div>
-    <div class="text">正在加载 NanoFlow... (v15)</div>
+    <div class="skeleton-container">
+      <!-- 头部骨架 -->
+      <div class="skeleton-header"></div>
+      <!-- 内容骨架 -->
+      <div class="skeleton-content">
+        <div class="skeleton-row">
+          <div class="skeleton-avatar"></div>
+          <div class="skeleton-text medium"></div>
+        </div>
+        <div class="skeleton-row">
+          <div class="skeleton-avatar"></div>
+          <div class="skeleton-text short"></div>
+        </div>
+        <div class="skeleton-row">
+          <div class="skeleton-avatar"></div>
+          <div class="skeleton-text"></div>
+        </div>
+      </div>
+      <!-- 卡片骨架 -->
+      <div class="skeleton-cards">
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+      </div>
+    </div>
+    <div class="text">正在加载 NanoFlow...</div>
     <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#999;"></div>
   </div>
   

@@ -114,7 +114,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
         <!-- 内容区域 - 更紧凑 -->
         <div
              #mobileDrawerContent
-             class="flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
+             class="mobile-drawer-content flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
              (touchstart)="onContentTouchStart($event)"
              (touchmove)="onContentTouchMove($event)"
              style="-webkit-overflow-scrolling: touch; touch-action: pan-y; transform: translateZ(0); contain: layout style paint;">

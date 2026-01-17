@@ -241,6 +241,11 @@ export class TextUnassignedComponent implements OnDestroy {
   }
   
   ngOnDestroy(): void {
+    // 清理编辑状态
+    this.editingTaskId.set(null);
+    this.isEditMode.set(false);
+    
+    // 清理定时器
     for (const timer of this.unlockTimers.values()) {
       clearTimeout(timer);
     }

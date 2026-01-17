@@ -100,6 +100,10 @@ export class ReactiveMinimapService {
   private elements: MinimapElements | null = null;
   private readonly minimapMath = inject(MinimapMathService);
   
+  // ========== 性能优化：缓存容器尺寸，避免强制重排 ==========
+  private cachedContainerSize: { width: number; height: number } | null = null;
+  private containerSizeObserver: ResizeObserver | null = null;
+  
   // ==================== 初始化 ====================
   
   /**
@@ -115,6 +119,54 @@ export class ReactiveMinimapService {
     
     // 初始化 CSS 属性
     this.initializeStyles();
+    
+    // 性能优化：使用 ResizeObserver 缓存容器尺寸，避免读取 clientWidth/clientHeight 导致强制重排
+    this.initContainerSizeCache();
+  }
+  
+  /**
+   * 初始化容器尺寸缓存
+   * 使用 ResizeObserver 监听尺寸变化，避免频繁读取几何属性导致强制重排
+   */
+  private initContainerSizeCache(): void {
+    if (!this.elements) return;
+    
+    const container = this.elements.container;
+    
+    // 首次读取尺寸（只在初始化时读取一次）
+    this.cachedContainerSize = {
+      width: container.clientWidth,
+      height: container.clientHeight
+    };
+    
+    // 使用 ResizeObserver 监听尺寸变化
+    this.containerSizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target === container) {
+          const { width, height } = entry.contentRect;
+          this.cachedContainerSize = { width, height };
+        }
+      }
+    });
+    
+    this.containerSizeObserver.observe(container);
+  }
+  
+  /**
+   * 获取缓存的容器尺寸（避免强制重排）
+   */
+  private getContainerSize(): { width: number; height: number } {
+    if (this.cachedContainerSize) {
+      return this.cachedContainerSize;
+    }
+    // Fallback: 如果缓存不存在，读取真实值
+    if (this.elements) {
+      return {
+        width: this.elements.container.clientWidth,
+        height: this.elements.container.clientHeight
+      };
+    }
+    return { width: 200, height: 150 }; // 默认值
   }
   
   /**
@@ -147,6 +199,14 @@ export class ReactiveMinimapService {
    */
   unregisterElements(): void {
     this.endDragSession();
+    
+    // 清理 ResizeObserver
+    if (this.containerSizeObserver) {
+      this.containerSizeObserver.disconnect();
+      this.containerSizeObserver = null;
+    }
+    this.cachedContainerSize = null;
+    
     this.elements = null;
   }
   
@@ -186,13 +246,16 @@ export class ReactiveMinimapService {
     const staticNodesBounds = this.calculateNodesBounds(staticNodes);
     const movingNodesBounds = this.calculateNodesBounds(movingNodes);
     
+    // 使用缓存的容器尺寸，避免强制重排
+    const containerSize = this.getContainerSize();
+    
     this.currentSession = {
       movingNodeIds: movingSet,
       staticNodesBounds,
       movingNodesBounds,
       dragStartPos,
-      containerWidth: this.elements.container.clientWidth,
-      containerHeight: this.elements.container.clientHeight
+      containerWidth: containerSize.width,
+      containerHeight: containerSize.height
     };
   }
   
@@ -430,9 +493,12 @@ export class ReactiveMinimapService {
   ): MinimapTransform | null {
     if (!this.elements) return null;
     
-    const { container, contentLayer, viewportRect } = this.elements;
-    const containerWidth = container.clientWidth;
-    const containerHeight = container.clientHeight;
+    const { container: _container, contentLayer, viewportRect } = this.elements;
+    
+    // 使用缓存的容器尺寸，避免强制重排
+    const containerSize = this.getContainerSize();
+    const containerWidth = containerSize.width;
+    const containerHeight = containerSize.height;
     
     if (containerWidth <= 0 || containerHeight <= 0) return null;
     

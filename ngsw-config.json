@@ -42,6 +42,18 @@
       }
     },
     {
+      "name": "supabase-api",
+      "urls": [
+        "https://*.supabase.co/rest/v1/*"
+      ],
+      "cacheConfig": {
+        "strategy": "freshness",
+        "maxSize": 100,
+        "maxAge": "1h",
+        "timeout": "10s"
+      }
+    },
+    {
       "name": "external-fonts",
       "urls": [
         "https://fonts.googleapis.com/**",
@@ -50,6 +62,17 @@
       "cacheConfig": {
         "strategy": "performance",
         "maxSize": 30,
+        "maxAge": "365d"
+      }
+    },
+    {
+      "name": "jsdelivr-cdn-fonts",
+      "urls": [
+        "https://cdn.jsdelivr.net/npm/lxgw-wenkai*/**"
+      ],
+      "cacheConfig": {
+        "strategy": "performance",
+        "maxSize": 50,
         "maxAge": "365d"
       }
     },

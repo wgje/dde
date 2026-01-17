@@ -1,7 +1,7 @@
 ---
 name: Implementer
 description: "Make code changes safely, verify, and keep diffs small."
-tools: ['vscode', 'execute', 'read', 'structured-thinking/*', 'tavily/search', 'edit', 'search', 'todo']
+tools: ['vscode', 'execute', 'read', 'structured-thinking/*', 'tavily/search', 'edit', 'search', 'todo', 'chrome-devtools/*']
 handoffs:
   - label: Review
     agent: Reviewer
@@ -24,3 +24,6 @@ handoffs:
     2. Fix the specific issues.
     3. Re-run verification.
     4. Hand off back to Reviewer.
+4. Browser-Based Debugging & UI Verification
+  - Use `chrome-dev-tools` when troubleshooting frontend issues, inspecting the DOM, or analyzing network/performance data.
+  - Call this tool specifically to verify visual changes or debug client-side JavaScript execution errors.

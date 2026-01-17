@@ -2,6 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ========== 性能优化：字体显示策略 ========== */
+/* 确保字体加载不阻塞首屏渲染，使用 swap 策略 */
+@font-face {
+  font-family: "LXGW WenKai Screen";
+  font-display: swap; /* 先用系统字体，加载完成后切换 */
+}
+
 /* 全局字体设置 - 强制使用霞鹜文楷屏幕阅读版 */
 *, *::before, *::after,
 input, button, select, textarea {

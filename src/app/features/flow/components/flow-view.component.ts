@@ -563,6 +563,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** rAF 调度 ID（用于取消） */
   private pendingRafId: number | null = null;
   
+  /** 节点选中重试的 rAF ID 列表（用于取消） */
+  private pendingRetryRafIds: number[] = [];
+  
   /** 是否有待处理的图表更新（用于 rAF 合并） */
   private diagramUpdatePending = false;
   
@@ -649,10 +652,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }, { injector: this.injector });
     
     // 跨视图选中状态同步
+    // 当新任务创建后，GoJS 图表可能还未更新，需要延迟重试
     effect(() => {
       const selectedId = this.selectedTaskId();
       if (selectedId && this.diagram.isInitialized) {
-        this.diagram.selectNode(selectedId);
+        // 尝试选中节点，使用增强的重试逻辑
+        this.selectNodeWithRetry(selectedId);
       }
     }, { injector: this.injector });
     
@@ -895,6 +900,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       cancelAnimationFrame(this.pendingRafId);
       this.pendingRafId = null;
     }
+    
+    // 清理节点选中重试的 rAF
+    this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
+    this.pendingRetryRafIds = [];
     
     // 清理 Overview 刷新定时器
     if (this.overviewResizeTimer) {
@@ -1609,6 +1618,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   addSiblingTask(task: Task): void {
     const newTaskId = this.taskOps.addSiblingTask(task);
     if (newTaskId) {
+      // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）
       this.selectedTaskId.set(newTaskId);
       this.taskOps.focusTitleInput(this.elementRef);
     }
@@ -1617,6 +1627,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   addChildTask(task: Task): void {
     const newTaskId = this.taskOps.addChildTask(task);
     if (newTaskId) {
+      // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）
       this.selectedTaskId.set(newTaskId);
       this.taskOps.focusTitleInput(this.elementRef);
     }
@@ -2085,6 +2096,59 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   // ========== 私有辅助方法 ==========
+  
+  /**
+   * 带重试逻辑的节点选中方法
+   * 
+   * 解决问题：创建任务后，GoJS 图表可能还未完成更新，节点不存在
+   * 方案：使用多次重试 + 递增延迟，确保节点存在后再选中
+   * 
+   * @param taskId 要选中的任务 ID
+   * @param retryCount 当前重试次数（内部使用）
+   */
+  private selectNodeWithRetry(taskId: string, retryCount = 0): void {
+    const MAX_RETRIES = 5;
+    const RETRY_DELAYS = [0, 16, 50, 100, 200]; // 渐进延迟：立即、1帧、50ms、100ms、200ms
+    
+    if (this.isDestroyed) return;
+    
+    const diagramInstance = this.diagram.diagramInstance;
+    if (!diagramInstance) return;
+    
+    const node = diagramInstance.findNodeForKey(taskId);
+    if (node) {
+      // 节点存在，直接选中
+      this.diagram.selectNode(taskId);
+      return;
+    }
+    
+    // 节点不存在，重试
+    if (retryCount < MAX_RETRIES) {
+      const delay = RETRY_DELAYS[retryCount] ?? 200;
+      this.logger.debug('节点选中重试', { taskId, retryCount, delay });
+      
+      if (delay === 0) {
+        // 使用 rAF 等待下一帧，追踪 ID 以便销毁时取消
+        const rafId = requestAnimationFrame(() => {
+          // 从追踪列表中移除
+          const idx = this.pendingRetryRafIds.indexOf(rafId);
+          if (idx > -1) this.pendingRetryRafIds.splice(idx, 1);
+          // 再次检查销毁状态
+          if (this.isDestroyed) return;
+          this.selectNodeWithRetry(taskId, retryCount + 1);
+        });
+        this.pendingRetryRafIds.push(rafId);
+      } else {
+        // 使用定时器延迟重试
+        this.scheduleTimer(() => {
+          this.selectNodeWithRetry(taskId, retryCount + 1);
+        }, delay);
+      }
+    } else {
+      // 所有重试失败，记录警告
+      this.logger.warn('节点选中失败：节点不存在（已重试 ' + MAX_RETRIES + ' 次）', { taskId });
+    }
+  }
   
   /**
    * 安全调度定时器，自动追踪并在组件销毁时清理

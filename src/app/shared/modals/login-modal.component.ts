@@ -45,6 +45,7 @@ import { FormsModule } from '@angular/forms';
           } @else {
             <form (submit)="handleResetPassword($event)" class="space-y-4">
               <input type="email" placeholder="邮箱" 
+                     id="reset-email"
                      [ngModel]="email()" (ngModelChange)="email.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="resetEmail" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 
@@ -68,16 +69,19 @@ import { FormsModule } from '@angular/forms';
           <form (submit)="handleSignup($event)" class="space-y-4">
             <div class="space-y-3">
               <input type="email" placeholder="邮箱" 
+                     id="signup-email"
                      [ngModel]="email()" (ngModelChange)="email.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupEmail" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 
                      autocomplete="email" required>
               <input type="password" placeholder="密码（至少8位）" 
+                     id="signup-password"
                      [ngModel]="password()" (ngModelChange)="password.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupPassword" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 
                      autocomplete="new-password" required minlength="8">
               <input type="password" placeholder="确认密码" 
+                     id="signup-confirm-password"
                      [ngModel]="confirmPassword()" (ngModelChange)="confirmPassword.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="signupConfirmPassword" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 
@@ -105,11 +109,13 @@ import { FormsModule } from '@angular/forms';
           <form (submit)="handleLogin($event)" class="space-y-4">
             <div class="space-y-3">
               <input data-testid="email-input" type="email" placeholder="邮箱" 
+                     id="login-email"
                      [ngModel]="email()" (ngModelChange)="email.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="authEmailModal" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 
                      autocomplete="email" required>
               <input data-testid="password-input" type="password" placeholder="密码" 
+                     id="login-password"
                      [ngModel]="password()" (ngModelChange)="password.set($event)" 
                      [ngModelOptions]="{standalone: true}" name="authPasswordModal" 
                      class="w-full border border-stone-200 dark:border-stone-600 rounded-lg px-4 py-3 text-sm text-stone-700 dark:text-stone-200 bg-white dark:bg-stone-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-500 transition-all" 

@@ -160,6 +160,9 @@ export class TextViewComponent implements OnInit, OnDestroy {
   });
   
   ngOnInit() {
+    // 重置所有编辑状态，防止从其他页面返回时仍处于编辑状态
+    this.selectedTaskId.set(null);
+    
     // 在 document 上注册全局触摸事件监听器
     // 这样即使被拖拽的元素有 pointer-events-none，也能捕获到 touchend
     // 使用捕获阶段（第三个参数的 capture: true）
@@ -290,6 +293,9 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
   
   ngOnDestroy() {
+    // 清理编辑状态
+    this.selectedTaskId.set(null);
+    
     // 移除全局触摸事件监听器
     // 注意：removeEventListener 必须与 addEventListener 的 capture 设置匹配
     document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);

@@ -39,9 +39,32 @@
               "serviceWorker": "ngsw-config.json",
               "optimization": {
                 "scripts": true,
-                "styles": true,
-                "fonts": true
-              }
+                "styles": {
+                  "minify": true,
+                  "inlineCritical": true
+                },
+                "fonts": {
+                  "inline": false
+                }
+              },
+              "budgets": [
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kb",
+                  "maximumError": "2.5mb"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "10kb",
+                  "maximumError": "20kb"
+                },
+                {
+                  "type": "bundle",
+                  "name": "main",
+                  "maximumWarning": "550kb",
+                  "maximumError": "1.2mb"
+                }
+              ]
             },
             "development": {
               "optimization": false,
