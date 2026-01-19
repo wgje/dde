@@ -1,5 +1,10 @@
+/**
+ * OfflineIntegrityService 单元测试
+ * 
+ * 使用 Injector 隔离模式，无需 TestBed
+ */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   OfflineIntegrityService, 
   IntegrityReport,
@@ -31,15 +36,14 @@ describe('OfflineIntegrityService', () => {
       category: () => loggerMethods
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        OfflineIntegrityService,
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
       ]
     });
     
-    service = TestBed.inject(OfflineIntegrityService);
+    service = runInInjectionContext(injector, () => new OfflineIntegrityService());
   });
   
   // 辅助函数：创建测试项目

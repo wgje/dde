@@ -1,5 +1,6 @@
 /// <reference types="vitest" />
 import os from 'node:os';
+import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 const parsePositiveInt = (value: string | undefined): number | undefined => {
@@ -128,6 +129,9 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': '/src',
+      // GoJS 空壳 Mock - 阻止真实 GoJS 加载（Canvas API 不完整）
+      // @see docs/test-architecture-modernization-plan.md Section 2.3.1
+      'gojs': resolve(__dirname, 'src/tests/mocks/gojs-mock.ts'),
     },
     // 减少模块解析尝试
     extensions: ['.ts', '.js', '.json'],

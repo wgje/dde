@@ -1,9 +1,11 @@
 /**
  * UndoService 撤销功能测试
  * 验证撤销/重做核心功能
+ *
+ * @fileoverview Injector 隔离模式测试 - 无 TestBed 依赖
  */
 
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { Project, Task } from '../models';
@@ -56,14 +58,13 @@ describe('UndoService', () => {
       isMobile: vi.fn(() => false)
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        UndoService,
         { provide: ToastService, useValue: mockToastService },
         { provide: UiStateService, useValue: mockUiState },
       ]
     });
-    service = TestBed.inject(UndoService);
+    service = runInInjectionContext(injector, () => new UndoService());
   });
 
   afterEach(() => {

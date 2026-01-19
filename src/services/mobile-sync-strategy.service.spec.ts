@@ -1,6 +1,8 @@
 /**
  * MobileSyncStrategyService 单元测试
  * 
+ * 测试模式：Injector 隔离模式（无 TestBed 依赖）
+ * 
  * 测试场景：
  * - 同步策略计算
  * - 请求批量合并
@@ -10,8 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal, DestroyRef } from '@angular/core';
 import { MobileSyncStrategyService, SyncStrategyConfig } from './mobile-sync-strategy.service';
 import { NetworkAwarenessService, NetworkQuality, DataSaverMode } from './network-awareness.service';
 import { LoggerService } from './logger.service';
@@ -45,22 +46,28 @@ const mockLogger = {
   }),
 };
 
+// Mock DestroyRef
+const mockDestroyRef = {
+  onDestroy: vi.fn((callback: () => void) => callback),
+};
+
 describe('MobileSyncStrategyService', () => {
   let service: MobileSyncStrategyService;
   let mockNetworkService: ReturnType<typeof createMockNetworkService>;
+  let injector: Injector;
   
   beforeEach(() => {
     mockNetworkService = createMockNetworkService();
     
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        MobileSyncStrategyService,
         { provide: NetworkAwarenessService, useValue: mockNetworkService },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
     
-    service = TestBed.inject(MobileSyncStrategyService);
+    service = runInInjectionContext(injector, () => new MobileSyncStrategyService());
   });
   
   afterEach(() => {

@@ -1,8 +1,8 @@
 import { Component, inject, Input, Output, EventEmitter, ChangeDetectionStrategy, OnChanges, SimpleChanges, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule, DatePipe } from '@angular/common';
 import { DomSanitizer } from '@angular/platform-browser';
-import { ProjectStateService } from '../../../../services/project-state.service';
-import { Task, Connection } from '../../../../models';
+import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
+import { Task } from '../../../../models';
 import { renderMarkdownSafe } from '../../../../utils/markdown';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 
@@ -97,7 +97,7 @@ export class TextTaskCardComponent implements OnChanges {
   @Input() isDragging = false;
   @Input() userId: string | null = null;
   @Input() projectId: string | null = null;
-  @Input() connections: Connection[] | null = null;
+  @Input() connections: TaskConnectionInfo | null = null;
   @Input() stageNumber = 0;
   
   ngOnChanges(changes: SimpleChanges) {

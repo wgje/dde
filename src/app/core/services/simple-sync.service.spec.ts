@@ -9,14 +9,20 @@
  * - RetryQueue 重试逻辑
  * - 网络恢复回调
  * - Sentry 错误上报守卫测试
+ * 
+ * 架构：Injector 隔离模式（避免 TestBed 全局状态污染）
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
 import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
+import { ChangeTrackerService } from '../../../services/change-tracker.service';
+import { CircuitBreakerService } from '../../../services/circuit-breaker.service';
+import { ClockSyncService } from '../../../services/clock-sync.service';
+import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
@@ -137,17 +143,79 @@ describe('SimpleSyncService', () => {
       })
     };
     
-    TestBed.configureTestingModule({
+    // Mock ChangeTrackerService
+    const mockChangeTracker = {
+      trackChange: vi.fn(),
+      getChanges: vi.fn().mockReturnValue([]),
+      clearChanges: vi.fn(),
+      getProjectChanges: vi.fn().mockReturnValue({ 
+        taskIdsToDelete: [], 
+        connectionIdsToDelete: [],
+        taskUpdateFieldsById: {}  // 添加缺失的属性
+      }),
+      clearTaskChange: vi.fn()
+    };
+    
+    // Mock CircuitBreakerService
+    const mockCircuitBreaker = {
+      isOpen: vi.fn().mockReturnValue(false),
+      recordSuccess: vi.fn(),
+      recordFailure: vi.fn(),
+      execute: vi.fn().mockImplementation(async (_key: string, fn: () => Promise<unknown>) => fn()),
+      validateBeforeSync: vi.fn().mockReturnValue({ passed: true, shouldBlock: false, violations: [] }),
+      validateTask: vi.fn().mockReturnValue([]),
+      validateConnection: vi.fn().mockReturnValue([]),
+      updateLastKnownTaskCount: vi.fn(),
+      getLastKnownTaskCount: vi.fn().mockReturnValue(undefined),
+      resetCircuitState: vi.fn(),
+      clearAllCircuitStates: vi.fn()
+    };
+    
+    // Mock ClockSyncService
+    const mockClockSync = {
+      getServerTime: vi.fn().mockReturnValue(new Date()),
+      getClockOffset: vi.fn().mockReturnValue(0),
+      sync: vi.fn().mockResolvedValue(undefined),
+      checkClockDrift: vi.fn().mockResolvedValue({ status: 'synced', offset: 0, reliable: true }),
+      correctTimestamp: vi.fn().mockImplementation((ts: unknown) => typeof ts === 'string' ? ts : new Date().toISOString()),
+      getEstimatedServerTime: vi.fn().mockReturnValue(new Date()),
+      recordServerTimestamp: vi.fn()
+    };
+    
+    // Mock MobileSyncStrategyService
+    const mockMobileSync = {
+      isMobile: vi.fn().mockReturnValue(false),
+      shouldUseReducedSync: vi.fn().mockReturnValue(false),
+      getSyncInterval: vi.fn().mockReturnValue(30000),
+      shouldAllowSync: vi.fn().mockReturnValue(true),
+      shouldForceManualSync: vi.fn().mockReturnValue(false),
+      getSyncConfig: vi.fn().mockReturnValue({}),
+      registerBatchFlushCallback: vi.fn(),
+      flushBatchQueue: vi.fn().mockResolvedValue(undefined),
+      currentStrategy: vi.fn().mockReturnValue('normal')
+    };
+    
+    // DestroyRef mock（用于 onDestroy 回调）
+    const destroyCallbacks: Array<() => void> = [];
+    const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
+      onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); }
+    };
+    
+    const injector = Injector.create({
       providers: [
-        SimpleSyncService,
         { provide: SupabaseClientService, useValue: mockSupabase },
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
-        { provide: RequestThrottleService, useValue: mockThrottle }
+        { provide: RequestThrottleService, useValue: mockThrottle },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
+        { provide: CircuitBreakerService, useValue: mockCircuitBreaker },
+        { provide: ClockSyncService, useValue: mockClockSync },
+        { provide: MobileSyncStrategyService, useValue: mockMobileSync },
+        { provide: DestroyRef, useValue: mockDestroyRef }
       ]
     });
     
-    service = TestBed.inject(SimpleSyncService);
+    service = runInInjectionContext(injector, () => new SimpleSyncService());
   });
   
   afterEach(() => {
@@ -1751,6 +1819,11 @@ describe('SimpleSyncService', () => {
     beforeEach(() => {
       mockSupabase.isConfigured = true;
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
+      
+      // 确保 session 有效
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'test-user-id' } } }
+      });
     });
 
     it('saveProjectToCloud 应该在版本冲突时继续处理其他任务', async () => {
@@ -1775,6 +1848,7 @@ describe('SimpleSyncService', () => {
       });
 
       vi.spyOn(service as any, 'pushProject').mockResolvedValue(true);
+      vi.spyOn(service as any, 'delay').mockResolvedValue(undefined);
 
       // 调用 saveProjectToCloud
       await service.saveProjectToCloud(project, 'test-user-id');

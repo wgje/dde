@@ -69,7 +69,7 @@ import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { ActionQueueService } from './action-queue.service';
 import { UiStateService } from './ui-state.service';
-import { ProjectStateService } from './project-state.service';
+import { ProjectStateService, TaskConnectionInfo } from './project-state.service';
 import { SearchService } from './search.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UserSessionService } from './user-session.service';
@@ -797,7 +797,7 @@ export class StoreService {
     this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
   }
 
-  getTaskConnections(taskId: string) {
+  getTaskConnections(taskId: string): TaskConnectionInfo {
     return this.project.getTaskConnections(taskId);
   }
 

@@ -1,6 +1,8 @@
 /**
  * AttachmentImportService 单元测试
  * 
+ * 测试模式：Injector 隔离模式（无 effect() 依赖）
+ * 
  * 覆盖场景：
  * - 配额检查
  * - 批量导入
@@ -9,7 +11,7 @@
  * - 取消操作
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   AttachmentImportService, 
   AttachmentImportItem,
@@ -69,9 +71,8 @@ describe('AttachmentImportService', () => {
       warning: vi.fn(),
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        AttachmentImportService,
         { provide: AttachmentService, useValue: mockAttachmentService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
@@ -79,7 +80,7 @@ describe('AttachmentImportService', () => {
       ],
     });
     
-    service = TestBed.inject(AttachmentImportService);
+    service = runInInjectionContext(injector, () => new AttachmentImportService());
   });
   
   afterEach(() => {

@@ -1,13 +1,12 @@
 /**
- * TaskOperationAdapterService 单元测试 (Vitest + Angular TestBed)
+ * TaskOperationAdapterService 单元测试 (Vitest + Injector 隔离模式)
  * 
  * 测试覆盖：
  * 1. moveTaskToStage - Toast 显示逻辑
  * 2. 边缘情况 - 项目切换竞态条件
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { TaskOperationService } from './task-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
@@ -114,7 +113,11 @@ const mockSyncCoordinatorService = {
 
 const mockChangeTrackerService = {};
 const mockUndoService = {};
-const mockUiStateService = { isEditing: false, isMobile: vi.fn(() => false) };
+const mockUiStateService = { 
+  isEditing: false, 
+  isMobile: vi.fn(() => false),
+  markEditing: vi.fn(),  // 【关键修复】添加 markEditing mock
+};
 const mockLayoutService = {};
 
 describe('TaskOperationAdapterService - moveTaskToStage', () => {
@@ -127,9 +130,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     // 重置所有 mock
     vi.clearAllMocks();
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskOperationAdapterService,
         { provide: TaskOperationService, useValue: mockTaskOperationService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: OptimisticStateService, useValue: mockOptimisticStateService },
@@ -143,7 +145,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
       ],
     });
 
-    service = TestBed.inject(TaskOperationAdapterService);
+    service = runInInjectionContext(injector, () => new TaskOperationAdapterService());
 
     // 初始化项目和任务
     task1 = createTask({ id: 'task-1', stage: 1, parentId: null });

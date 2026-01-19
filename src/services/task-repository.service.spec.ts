@@ -1,5 +1,9 @@
+/**
+ * TaskRepositoryService 单元测试
+ * 使用 Injector 隔离模式，无需 TestBed
+ */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { TaskRepositoryService } from './task-repository.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
@@ -92,13 +96,12 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     supabaseMock = createSupabaseMock();
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskRepositoryService,
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
-    service = TestBed.inject(TaskRepositoryService);
+    service = runInInjectionContext(injector, () => new TaskRepositoryService());
   });
 
   afterEach(() => {
@@ -149,14 +152,13 @@ describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     supabaseMock = createSupabaseMock();
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskRepositoryService,
-          { provide: LoggerService, useValue: mockLoggerService },
+        { provide: LoggerService, useValue: mockLoggerService },
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
-    service = TestBed.inject(TaskRepositoryService);
+    service = runInInjectionContext(injector, () => new TaskRepositoryService());
   });
 
   it('prefers purge_tasks RPC and does not call physical delete', async () => {
@@ -255,15 +257,14 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
       client: () => ({ from }),
     } as unknown as SupabaseClientService;
 
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskRepositoryService,
         { provide: SupabaseClientService, useValue: mockSupabaseClientService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
-    const service = TestBed.inject(TaskRepositoryService);
+    const service = runInInjectionContext(injector, () => new TaskRepositoryService());
     const loaded = await service.loadTasks('project-1');
 
     consoleLogSpy.mockRestore();

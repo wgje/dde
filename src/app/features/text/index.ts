@@ -30,8 +30,6 @@ export type {
   AutoScrollState,
   DropTargetInfo,
   UnfinishedItem,
-  StageData,
-  TaskConnection,
-  TaskConnections
+  StageData
 } from './components/text-view.types';
 

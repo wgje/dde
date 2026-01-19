@@ -1,6 +1,8 @@
 /**
  * AuthService 认证服务测试
  * 
+ * 测试模式：Injector 隔离模式（无 TestBed 依赖）
+ * 
  * 覆盖场景：
  * - onAuthStateChange 监听
  * - Token 刷新成功/失败处理
@@ -8,7 +10,7 @@
  * - 手动登出 vs Token 过期区分
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { AuthService } from './auth.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { ToastService } from './toast.service';
@@ -16,6 +18,7 @@ import { LoggerService } from './logger.service';
 
 describe('AuthService', () => {
   let service: AuthService;
+  let injector: Injector;
   let mockToastService: { show: ReturnType<typeof vi.fn>; warning: ReturnType<typeof vi.fn> };
   let mockSupabaseClient: {
     isConfigured: boolean;
@@ -65,16 +68,15 @@ describe('AuthService', () => {
       signOut: vi.fn().mockResolvedValue(undefined),
     };
     
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        AuthService,
         { provide: SupabaseClientService, useValue: mockSupabaseClient },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
     
-    service = TestBed.inject(AuthService);
+    service = runInInjectionContext(injector, () => new AuthService());
   });
   
   afterEach(() => {

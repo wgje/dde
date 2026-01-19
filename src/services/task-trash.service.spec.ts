@@ -1,6 +1,8 @@
 /**
  * TaskTrashService 单元测试
  * 
+ * 模式：Injector 隔离模式（无 TestBed 依赖）
+ * 
  * 测试覆盖：
  * - 软删除任务（移动到回收站）
  * - 永久删除任务
@@ -9,7 +11,7 @@
  * - keepChildren 参数（保留子任务）
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { TaskTrashService, TrashServiceCallbacks } from './task-trash.service';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
@@ -85,15 +87,14 @@ describe('TaskTrashService', () => {
       },
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskTrashService,
         { provide: LoggerService, useValue: mockLogger },
         { provide: LayoutService, useValue: mockLayoutService },
       ],
     });
     
-    service = TestBed.inject(TaskTrashService);
+    service = runInInjectionContext(injector, () => new TaskTrashService());
     service.setCallbacks(mockCallbacks);
   });
   

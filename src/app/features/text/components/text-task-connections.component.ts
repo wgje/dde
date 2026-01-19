@@ -1,7 +1,6 @@
 import { Component, inject, Input, Output, EventEmitter, signal, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ProjectStateService } from '../../../../services/project-state.service';
-import { TaskConnections } from './text-view.types';
+import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
 
 /**
@@ -120,9 +119,9 @@ import { Task } from '../../../../models';
   `]
 })
 export class TextTaskConnectionsComponent {
-  private readonly projectState = inject(ProjectStateService);
+  readonly projectState = inject(ProjectStateService);
   
-  @Input() connections: TaskConnections | null = null;
+  @Input() connections: TaskConnectionInfo | null = null;
   @Input() isMobile = false;
   
   @Output() openTask = new EventEmitter<{ task: Task; event: Event }>();

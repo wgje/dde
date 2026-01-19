@@ -4,10 +4,10 @@ import { DomSanitizer } from '@angular/platform-browser';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { UiStateService } from '../../../../services/ui-state.service';
-import { ProjectStateService } from '../../../../services/project-state.service';
+import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
-import { Task, Attachment, Connection } from '../../../../models';
+import { Task, Attachment } from '../../../../models';
 import { renderMarkdownSafe } from '../../../../utils/markdown';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
 
@@ -289,7 +289,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   @Input() isMobile = false;
   @Input() userId: string | null = null;
   @Input() projectId: string | null = null;
-  @Input() connections: Connection[] | null = null;
+  @Input() connections: TaskConnectionInfo | null = null;
   @Input() initialPreview = true;
   
   @Output() addSibling = new EventEmitter<void>();

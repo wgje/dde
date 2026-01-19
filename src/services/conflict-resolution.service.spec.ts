@@ -1,5 +1,5 @@
 /**
- * ConflictResolutionService 单元测试 (Vitest + Angular TestBed)
+ * ConflictResolutionService 单元测试 (Vitest + Injector 隔离模式)
  * 
  * 测试覆盖：
  * 1. 冲突解决策略 - local/remote/merge
@@ -9,9 +9,8 @@
  * 5. 离线数据重连合并
  * 6. 边缘情况 - 空数据、大数据量
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { LayoutService } from './layout.service';
@@ -134,9 +133,8 @@ describe('ConflictResolutionService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        ConflictResolutionService,
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: ToastService, useValue: mockToastService },
@@ -145,11 +143,8 @@ describe('ConflictResolutionService', () => {
       ],
     });
 
-    service = TestBed.inject(ConflictResolutionService);
-  });
-
-  afterEach(() => {
-    TestBed.resetTestingModule();
+    // ConflictResolutionService 内部使用 inject()，必须在注入上下文中实例化
+    service = runInInjectionContext(injector, () => new ConflictResolutionService());
   });
 
   // ==================== 冲突解决策略 ====================

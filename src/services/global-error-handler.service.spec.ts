@@ -1,4 +1,8 @@
-import { TestBed } from '@angular/core/testing';
+/**
+ * GlobalErrorHandler 服务测试
+ * 使用 Injector 隔离模式，无需 TestBed
+ */
+import { Injector, runInInjectionContext, NgZone } from '@angular/core';
 import { GlobalErrorHandler, ErrorSeverity } from './global-error-handler.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -10,6 +14,8 @@ describe('GlobalErrorHandler', () => {
   let loggerSpy: any;
   let toastSpy: any;
   let routerSpy: any;
+  let zoneSpy: any;
+  let injector: Injector;
 
   beforeEach(() => {
     loggerSpy = {
@@ -27,16 +33,21 @@ describe('GlobalErrorHandler', () => {
       navigate: vi.fn()
     };
 
-    TestBed.configureTestingModule({
+    zoneSpy = {
+      run: vi.fn((fn: () => void) => fn()),
+      runOutsideAngular: vi.fn((fn: () => void) => fn())
+    };
+
+    injector = Injector.create({
       providers: [
-        GlobalErrorHandler,
         { provide: LoggerService, useValue: loggerSpy },
         { provide: ToastService, useValue: toastSpy },
-        { provide: Router, useValue: routerSpy }
+        { provide: Router, useValue: routerSpy },
+        { provide: NgZone, useValue: zoneSpy }
       ]
     });
 
-    service = TestBed.inject(GlobalErrorHandler);
+    service = runInInjectionContext(injector, () => new GlobalErrorHandler());
     
     // Mock sessionStorage
     const store: {[key: string]: string} = {};

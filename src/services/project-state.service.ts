@@ -6,6 +6,15 @@ import { TaskStore, ProjectStore, ConnectionStore } from '../app/core/state/stor
 import { SUPERSCRIPT_DIGITS } from '../config';
 
 /**
+ * 任务连接信息（缓存用）
+ * 用于 O(1) 查询任务的出入连接
+ */
+export interface TaskConnectionInfo {
+  outgoing: { targetId: string; targetTask: Task | undefined; description?: string }[];
+  incoming: { sourceId: string; sourceTask: Task | undefined; description?: string }[];
+}
+
+/**
  * 项目状态服务
  * 从 StoreService 拆分出来，专注于项目和任务的状态管理
  * 
@@ -139,6 +148,70 @@ export class ProjectStateService {
       .sort((a, b) => a.rank - b.rank);
   });
 
+  /**
+   * 【性能优化】所有任务的连接关系缓存
+   * 
+   * 将 O(n²) 的逐任务查询优化为 O(n) 的一次性计算 + O(1) 查找
+   * 返回 Map<taskId, { outgoing, incoming }>
+   * 
+   * 只在 tasks 或 connections 变化时重新计算
+   */
+  readonly taskConnectionsMap = computed(() => {
+    const project = this.activeProject();
+    if (!project) return new Map<string, TaskConnectionInfo>();
+    
+    const tasks = project.tasks;
+    const connections = project.connections;
+    
+    // 构建父子关系 Set（O(n)）
+    const parentChildPairs = new Set<string>();
+    for (const t of tasks) {
+      if (t.parentId) {
+        parentChildPairs.add(`${t.parentId}->${t.id}`);
+      }
+    }
+    
+    // 构建任务 ID -> Task 映射（O(n)）
+    const taskMap = new Map<string, Task>();
+    for (const t of tasks) {
+      taskMap.set(t.id, t);
+    }
+    
+    // 初始化结果 Map
+    const result = new Map<string, TaskConnectionInfo>();
+    for (const t of tasks) {
+      result.set(t.id, { outgoing: [], incoming: [] });
+    }
+    
+    // 一次遍历 connections 构建所有连接关系（O(m)）
+    for (const conn of connections) {
+      const pairKey = `${conn.source}->${conn.target}`;
+      if (parentChildPairs.has(pairKey)) continue; // 跳过父子关系
+      
+      // 添加到 source 的 outgoing
+      const sourceInfo = result.get(conn.source);
+      if (sourceInfo) {
+        sourceInfo.outgoing.push({
+          targetId: conn.target,
+          targetTask: taskMap.get(conn.target),
+          description: conn.description
+        });
+      }
+      
+      // 添加到 target 的 incoming
+      const targetInfo = result.get(conn.target);
+      if (targetInfo) {
+        targetInfo.incoming.push({
+          sourceId: conn.source,
+          sourceTask: taskMap.get(conn.source),
+          description: conn.description
+        });
+      }
+    }
+    
+    return result;
+  });
+
   // ========== 公共方法 ==========
 
   /**
@@ -176,40 +249,16 @@ export class ProjectStateService {
 
   /**
    * 获取任务的关联连接
+   * 
+   * 【性能优化】使用 taskConnectionsMap 缓存，O(1) 查找
+   * 只有在 tasks 或 connections 变化时才重新计算缓存
    */
-  getTaskConnections(taskId: string): { 
-    outgoing: { targetId: string; targetTask: Task | undefined; description?: string }[];
-    incoming: { sourceId: string; sourceTask: Task | undefined; description?: string }[];
-  } {
-    const project = this.activeProject();
-    if (!project) return { outgoing: [], incoming: [] };
+  getTaskConnections(taskId: string): TaskConnectionInfo {
+    const cached = this.taskConnectionsMap().get(taskId);
+    if (cached) return cached;
     
-    const tasks = project.tasks;
-    const connections = project.connections;
-    
-    // 排除父子关系的连接
-    const parentChildPairs = new Set<string>();
-    tasks.filter(t => t.parentId).forEach(t => {
-      parentChildPairs.add(`${t.parentId}->${t.id}`);
-    });
-    
-    const outgoing = connections
-      .filter(c => c.source === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
-      .map(c => ({
-        targetId: c.target,
-        targetTask: tasks.find(t => t.id === c.target),
-        description: c.description
-      }));
-    
-    const incoming = connections
-      .filter(c => c.target === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
-      .map(c => ({
-        sourceId: c.source,
-        sourceTask: tasks.find(t => t.id === c.source),
-        description: c.description
-      }));
-    
-    return { outgoing, incoming };
+    // 如果缓存中没有（可能是新任务还未进入缓存），返回空结果
+    return { outgoing: [], incoming: [] };
   }
 
   /**

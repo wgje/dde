@@ -1,6 +1,8 @@
 /**
  * AttachmentExportService 单元测试
  * 
+ * 测试模式：Injector 隔离模式（无 TestBed）
+ * 
  * 覆盖场景：
  * - 附件收集和去重
  * - 下载处理（超时、重试、错误处理）
@@ -13,7 +15,7 @@
  * - 测试执行时间从 9s+ 降至 <1s
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   AttachmentExportService, 
   ATTACHMENT_EXPORT_CONFIG,
@@ -26,6 +28,7 @@ import { Project, Task, Attachment } from '../models';
 describe('AttachmentExportService', () => {
   let service: AttachmentExportService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let injector: Injector;
   
   const mockLogger = {
     category: () => ({
@@ -48,15 +51,14 @@ describe('AttachmentExportService', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        AttachmentExportService,
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
       ],
     });
     
-    service = TestBed.inject(AttachmentExportService);
+    service = runInInjectionContext(injector, () => new AttachmentExportService());
     
     // Mock fetch
     fetchSpy = vi.spyOn(globalThis, 'fetch');

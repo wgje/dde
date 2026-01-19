@@ -1,5 +1,10 @@
+/**
+ * ExportService 单元测试
+ * 
+ * 使用 Injector 隔离模式，避免 TestBed 全局状态污染
+ */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   ExportService, 
   ExportResult, 
@@ -46,16 +51,15 @@ describe('ExportService', () => {
       category: () => loggerMethods,
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        ExportService,
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
         { provide: PreferenceService, useValue: mockPreference },
       ],
     });
     
-    service = TestBed.inject(ExportService);
+    service = runInInjectionContext(injector, () => new ExportService());
   });
   
   // 辅助函数：创建测试项目

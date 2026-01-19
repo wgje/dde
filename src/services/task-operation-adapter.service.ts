@@ -291,6 +291,9 @@ export class TaskOperationAdapterService {
   
   /**
    * 添加任务（带乐观更新）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   * 这防止了刚创建的任务被远程数据覆盖导致"丢失"的问题
    */
   addTask(
     title: string, 
@@ -299,6 +302,10 @@ export class TaskOperationAdapterService {
     parentId: string | null, 
     isSibling: boolean
   ): Result<string, OperationError> {
+    // 【关键修复】标记编辑状态，防止远程更新覆盖新创建的任务
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
     
@@ -335,7 +342,16 @@ export class TaskOperationAdapterService {
     return result;
   }
   
+  /**
+   * 添加浮动任务（Flow 视图中双击创建）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   addFloatingTask(title: string, content: string, x: number, y: number): void {
+    // 【关键修复】标记编辑状态，防止远程更新覆盖新创建的任务
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
     
@@ -364,7 +380,16 @@ export class TaskOperationAdapterService {
     );
   }
   
+  /**
+   * 删除任务（带乐观更新）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   deleteTask(taskId: string): void {
+    // 【关键修复】标记编辑状态，防止远程更新覆盖本地删除状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 获取任务信息用于 Toast 显示
     const project = this.projectState.activeProject();
     const task = project?.tasks.find(t => t.id === taskId);
@@ -398,7 +423,16 @@ export class TaskOperationAdapterService {
     this.setupSyncResultHandler(snapshot.id);
   }
   
+  /**
+   * 永久删除任务（从回收站中删除）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   permanentlyDeleteTask(taskId: string): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '删除');
     
@@ -416,6 +450,8 @@ export class TaskOperationAdapterService {
    * 2. 后台异步调用 safe_delete_tasks RPC 进行服务端保护
    * 3. 如果服务端拒绝，回滚本地状态并显示错误
    * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   * 
    * @param explicitIds 用户显式选中的任务 ID 列表
    * @returns 实际删除的任务数量（含级联子任务）
    */
@@ -424,6 +460,10 @@ export class TaskOperationAdapterService {
     
     const projectId = this.projectState.activeProjectId();
     if (!projectId) return 0;
+    
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
     
     // 创建乐观更新快照（使用第一个任务 ID，标记为删除操作）
     const snapshot = this.optimisticState.createTaskSnapshot(explicitIds[0], '删除');
@@ -536,11 +576,29 @@ export class TaskOperationAdapterService {
     return this.taskOps.calculateBatchDeleteImpact(explicitIds);
   }
   
+  /**
+   * 恢复已删除的任务
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   restoreTask(taskId: string): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     this.taskOps.restoreTask(taskId);
   }
   
+  /**
+   * 清空回收站
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   emptyTrash(): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot('', '删除');
     
@@ -552,12 +610,21 @@ export class TaskOperationAdapterService {
   
   // ========== 任务结构操作 ==========
   
+  /**
+   * 移动任务到指定阶段
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   moveTaskToStage(
     taskId: string, 
     newStage: number | null, 
     beforeTaskId?: string | null, 
     newParentId?: string | null
   ): Result<void, OperationError> {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 获取移动前的项目和任务状态，用于检查是否真正发生了移动
     const projectIdBefore = this.projectState.activeProjectId();
     const project = this.projectState.activeProject();
@@ -638,7 +705,16 @@ export class TaskOperationAdapterService {
     return result;
   }
   
+  /**
+   * 将任务插入到两个任务之间
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   insertTaskBetween(taskId: string, sourceId: string, targetId: string): Result<void, OperationError> {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
     
@@ -658,8 +734,14 @@ export class TaskOperationAdapterService {
    * 将整个子任务树迁移到新的父任务下
    * @param taskId 要迁移的子树根节点 ID
    * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
    */
   moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
     
@@ -694,11 +776,28 @@ export class TaskOperationAdapterService {
     return result;
   }
   
+  /**
+   * 重排阶段内任务顺序
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   reorderStage(stage: number, orderedIds: string[]): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     this.taskOps.reorderStage(stage, orderedIds);
   }
   
+  /**
+   * 分离任务（移回待分配区）
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   detachTask(taskId: string): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
     this.taskOps.detachTask(taskId);
   }
   
@@ -706,8 +805,13 @@ export class TaskOperationAdapterService {
    * 分离任务及其整个子树（移回待分配区）
    * 
    * 【浮动任务树方法】
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
    */
   detachTaskWithSubtree(taskId: string) {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     const result = this.taskOps.detachTaskWithSubtree(taskId);
     
     // 桌面端：简单提示（使用 Ctrl+Z 撤销）
@@ -752,6 +856,10 @@ export class TaskOperationAdapterService {
     targetUnassignedId: string,
     specificChildId?: string
   ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
     
@@ -804,6 +912,10 @@ export class TaskOperationAdapterService {
     sourceTaskId: string,
     targetUnassignedId: string
   ): Result<void, OperationError> {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 创建乐观更新快照
     const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
     
@@ -856,7 +968,16 @@ export class TaskOperationAdapterService {
     return this.taskOps.getDirectChildren(taskId);
   }
   
+  /**
+   * 删除任务但保留子任务
+   * 
+   * 【关键修复】调用 markEditing() 确保在同步防抖期间远程更新被跳过
+   */
   deleteTaskKeepChildren(taskId: string): void {
+    // 【关键修复】标记编辑状态
+    this.markEditing();
+    this.lastUpdateType = 'structure';
+    
     // 获取任务信息用于 Toast 显示
     const project = this.projectState.activeProject();
     const task = project?.tasks.find(t => t.id === taskId);

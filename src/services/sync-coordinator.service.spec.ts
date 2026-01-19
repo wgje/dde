@@ -1,5 +1,5 @@
 /**
- * SyncCoordinatorService 单元测试 (Vitest + Angular TestBed)
+ * SyncCoordinatorService 单元测试 (Vitest + Injector 隔离模式)
  * 
  * 测试覆盖：
  * 1. 持久化状态管理 - 防抖、标记本地变更
@@ -8,10 +8,12 @@
  * 4. 同步状态机流转 - 在线/离线/同步中/会话过期
  * 5. 边缘情况 - 网络抖动、并发请求
  * 6. 验证与重平衡 - 数据完整性检查
+ * 
+ * 迁移说明：使用 Injector.create + runInInjectionContext 替代 TestBed，
+ * 实现更轻量级的依赖注入隔离测试。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
@@ -207,12 +209,20 @@ function createTestTask(overrides?: Partial<Task>): Task {
 
 // ========== 测试用例 ==========
 
+// DestroyRef mock（服务内部使用 inject(DestroyRef)）
+const destroyCallbacks: Array<() => void> = [];
+const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
+  onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); },
+};
+
 describe('SyncCoordinatorService', () => {
   let service: SyncCoordinatorService;
+  let injector: Injector;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    destroyCallbacks.length = 0;
     
     // 重置 mock signals
     mockSyncService.syncState.set(createMockSyncState());
@@ -222,9 +232,8 @@ describe('SyncCoordinatorService', () => {
     mockProjectStateService.activeProject.set(null);
     mockProjectStateService.activeProjectId.set(null);
 
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        SyncCoordinatorService,
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
@@ -236,15 +245,15 @@ describe('SyncCoordinatorService', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
 
-    service = TestBed.inject(SyncCoordinatorService);
+    service = runInInjectionContext(injector, () => new SyncCoordinatorService());
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    TestBed.resetTestingModule();
   });
 
   // ==================== 同步状态派生 ====================
@@ -863,10 +872,12 @@ describe('SyncCoordinatorService', () => {
 
 describe('SyncCoordinatorService 集成场景', () => {
   let service: SyncCoordinatorService;
+  let injector: Injector;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    destroyCallbacks.length = 0;
     
     mockSyncService.syncState.set(createMockSyncState());
     mockSyncService.isLoadingRemote.set(false);
@@ -875,9 +886,8 @@ describe('SyncCoordinatorService 集成场景', () => {
     mockProjectStateService.activeProject.set(null);
     mockProjectStateService.activeProjectId.set(null);
 
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        SyncCoordinatorService,
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
@@ -889,15 +899,15 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
 
-    service = TestBed.inject(SyncCoordinatorService);
+    service = runInInjectionContext(injector, () => new SyncCoordinatorService());
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    TestBed.resetTestingModule();
   });
 
   describe('场景：网络断开后恢复', () => {

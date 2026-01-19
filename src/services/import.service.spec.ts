@@ -1,6 +1,8 @@
 /**
  * ImportService 单元测试
  * 
+ * 测试模式：Injector 隔离模式（无 TestBed）
+ * 
  * 覆盖场景：
  * - 文件验证（大小、类型、结构、版本）
  * - 校验和验证
@@ -10,7 +12,7 @@
  * - 数据转换
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   ImportService, 
   IMPORT_CONFIG,
@@ -24,6 +26,7 @@ import { Project, Task, Connection } from '../models';
 
 describe('ImportService', () => {
   let service: ImportService;
+  let injector: Injector;
   
   const mockLogger = {
     category: () => ({
@@ -44,15 +47,14 @@ describe('ImportService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        ImportService,
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
       ],
     });
     
-    service = TestBed.inject(ImportService);
+    service = runInInjectionContext(injector, () => new ImportService());
   });
   
   // ==================== 辅助函数 ====================

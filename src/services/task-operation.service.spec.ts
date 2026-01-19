@@ -1,5 +1,10 @@
+/**
+ * TaskOperationService 单元测试
+ *
+ * 使用 Injector 隔离模式，无需 TestBed。
+ */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 
 import { TaskOperationService } from './task-operation.service';
 import { LayoutService } from './layout.service';
@@ -76,16 +81,15 @@ describe('TaskOperationService (deletedMeta restore)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskOperationService,
-        LayoutService,
-        ToastService,
+        { provide: LayoutService, useClass: LayoutService },
+        { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
-    service = TestBed.inject(TaskOperationService);
+    service = runInInjectionContext(injector, () => new TaskOperationService());
 
     // 默认项目会在每个测试里初始化
     project = createProject({});
@@ -229,16 +233,15 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskOperationService,
-        LayoutService,
-        ToastService,
+        { provide: LayoutService, useClass: LayoutService },
+        { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
-    service = TestBed.inject(TaskOperationService);
+    service = runInInjectionContext(injector, () => new TaskOperationService());
     project = createProject({});
 
     service.setCallbacks({
@@ -390,16 +393,15 @@ describe('TaskOperationService (database constraint validation)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
-        TaskOperationService,
-        LayoutService,
-        ToastService,
+        { provide: LayoutService, useClass: LayoutService },
+        { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
-    service = TestBed.inject(TaskOperationService);
+    service = runInInjectionContext(injector, () => new TaskOperationService());
     project = createProject({});
 
     service.setCallbacks({

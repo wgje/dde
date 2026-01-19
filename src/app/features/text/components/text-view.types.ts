@@ -55,18 +55,3 @@ export interface StageData {
   stageNumber: number;
   tasks: Task[];
 }
-
-/** 任务关联 */
-export interface TaskConnection {
-  sourceId: string;
-  targetId: string;
-  description?: string;
-  sourceTask?: Task;
-  targetTask?: Task;
-}
-
-/** 任务关联集合 */
-export interface TaskConnections {
-  outgoing: TaskConnection[];
-  incoming: TaskConnection[];
-}

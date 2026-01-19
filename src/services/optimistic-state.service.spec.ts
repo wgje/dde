@@ -1,5 +1,5 @@
 /**
- * OptimisticStateService 单元测试 (Vitest + Angular TestBed)
+ * OptimisticStateService 单元测试 (Vitest + Injector 隔离模式)
  * 
  * 测试覆盖：
  * 1. 快照生命周期 - 创建/提交/回滚
@@ -10,10 +10,13 @@
  * 【重构说明】
  * 已移除临时 ID（temp-）相关测试。
  * 新架构使用客户端生成的 UUID，无需 ID 转换逻辑。
+ * 
+ * 【测试模式】
+ * 使用 Injector.create + runInInjectionContext 替代 TestBed，
+ * 提供更快的测试执行和更好的隔离性。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { OptimisticStateService, OptimisticSnapshot } from './optimistic-state.service';
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
@@ -110,6 +113,7 @@ const mockLoggerService = {
 
 describe('OptimisticStateService', () => {
   let service: OptimisticStateService;
+  let injector: Injector;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
@@ -123,21 +127,19 @@ describe('OptimisticStateService', () => {
     mockProjectsSignal = signal<Project[]>(createMockProjects());
     mockActiveProjectIdSignal = signal<string | null>('proj-1');
 
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        OptimisticStateService,
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
-    service = TestBed.inject(OptimisticStateService);
+    service = runInInjectionContext(injector, () => new OptimisticStateService());
   });
 
   afterEach(() => {
     service.reset();
-    TestBed.resetTestingModule();
 
     consoleWarnSpy?.mockRestore();
     consoleErrorSpy?.mockRestore();

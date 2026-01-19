@@ -1,6 +1,8 @@
 /**
  * ActionQueueService 单元测试 (Vitest + Angular TestBed)
  * 
+ * 注意：该服务使用 effect()，需要 Angular 调度器上下文，因此保留 TestBed 模式。
+ * 
  * 测试覆盖：
  * 1. 基本入队/出队操作
  * 2. 断网时操作队列化
@@ -16,6 +18,7 @@ import { TestBed } from '@angular/core/testing';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SentryAlertService } from './sentry-alert.service';
 
 // 模拟 LoggerService
 const mockLoggerCategory = {
@@ -35,6 +38,14 @@ const mockToastService = {
   error: vi.fn(),
   warning: vi.fn(),
   info: vi.fn(),
+};
+
+// 模拟 SentryAlertService
+const mockSentryAlertService = {
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+  setContext: vi.fn(),
+  updateSyncContext: vi.fn(),
 };
 
 describe('ActionQueueService', () => {
@@ -125,6 +136,7 @@ describe('ActionQueueService', () => {
         ActionQueueService,
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
+        { provide: SentryAlertService, useValue: mockSentryAlertService },
       ],
     });
     

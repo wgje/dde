@@ -1,6 +1,8 @@
 /**
  * NetworkAwarenessService 单元测试
  * 
+ * 测试模式：Injector 隔离模式（无 effect() 依赖）
+ * 
  * 测试场景：
  * - 网络状态检测
  * - Data Saver 模式检测
@@ -11,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { NetworkAwarenessService, NetworkQuality, DataSaverMode } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 
@@ -27,6 +29,7 @@ const mockLogger = {
 
 describe('NetworkAwarenessService', () => {
   let service: NetworkAwarenessService;
+  let injector: Injector;
   
   beforeEach(() => {
     // Mock navigator
@@ -36,14 +39,13 @@ describe('NetworkAwarenessService', () => {
       configurable: true,
     });
     
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        NetworkAwarenessService,
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
     
-    service = TestBed.inject(NetworkAwarenessService);
+    service = runInInjectionContext(injector, () => new NetworkAwarenessService());
   });
   
   afterEach(() => {
