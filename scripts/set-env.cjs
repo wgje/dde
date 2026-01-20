@@ -7,6 +7,7 @@ const localEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.local') 
 const supabaseUrl = process.env.NG_APP_SUPABASE_URL || localEnv.NG_APP_SUPABASE_URL;
 const supabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY || localEnv.NG_APP_SUPABASE_ANON_KEY;
 const gojsLicenseKey = process.env.NG_APP_GOJS_LICENSE_KEY || localEnv.NG_APP_GOJS_LICENSE_KEY || '';
+const sentryDsn = process.env.NG_APP_SENTRY_DSN || localEnv.NG_APP_SENTRY_DSN || '';
 
 // 开发环境自动登录配置
 // 设置后，应用启动时会自动登录，无需手动输入凭据
@@ -50,6 +51,8 @@ export const environment = {
   production: false,
   supabaseUrl: '${finalUrl}',
   supabaseAnonKey: '${finalKey}',
+  // Sentry DSN - 用于错误监控
+  sentryDsn: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
   // 开发环境自动登录（仅开发环境生效）
@@ -65,6 +68,8 @@ export const environment = {
   production: true,
   supabaseUrl: '${finalUrl}',
   supabaseAnonKey: '${finalKey}',
+  // Sentry DSN - 用于错误监控
+  sentryDsn: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
   // 生产环境始终禁用自动登录

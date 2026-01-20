@@ -6,6 +6,9 @@ export const environment = {
   production: false,
   supabaseUrl: 'YOUR_SUPABASE_URL',
   supabaseAnonKey: 'YOUR_SUPABASE_ANON_KEY',
+  // Sentry DSN - 用于错误监控
+  // 在 .env.local 中设置 NG_APP_SENTRY_DSN
+  sentryDsn: '',
   // GoJS License Key - 生产环境需要配置以移除水印
   // 在 .env.local 中设置 NG_APP_GOJS_LICENSE_KEY
   gojsLicenseKey: '',
