@@ -16,7 +16,7 @@
 
 无需注册，数据存储在浏览器本地，体验核心功能：
 
-> 🎮 **[立即体验 Demo →](https://dde-zeta.vercel.app)** （离线模式，无需登录）
+> 🎮 **[立即体验 Demo →](https://demo-sigma-kohl.vercel.app/#/projects)** （离线模式，无需登录）
 
 ### 一键部署私有实例
 
