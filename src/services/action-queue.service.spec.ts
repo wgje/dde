@@ -1,7 +1,7 @@
 /**
- * ActionQueueService 单元测试 (Vitest + Angular TestBed)
+ * ActionQueueService 单元测试（Vitest + Injector 隔离模式）
  * 
- * 注意：该服务使用 effect()，需要 Angular 调度器上下文，因此保留 TestBed 模式。
+ * 注意：该服务使用 effect()，需要注入上下文，因此使用 runInInjectionContext。
  * 
  * 测试覆盖：
  * 1. 基本入队/出队操作
@@ -14,11 +14,12 @@
  * 8. 死信队列的 TTL 清理
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
+import { createMockDestroyRef } from '../test-setup.mocks';
 
 // 模拟 LoggerService
 const mockLoggerCategory = {
@@ -52,6 +53,7 @@ describe('ActionQueueService', () => {
   let service: ActionQueueService;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let destroyRefCleanup: (() => void) | undefined;
 
   // 辅助函数：模拟网络状态（不触发事件）
   function setNetworkStatus(online: boolean) {
@@ -130,23 +132,27 @@ describe('ActionQueueService', () => {
       configurable: true,
     });
     
-    // 配置 Angular TestBed
-    TestBed.configureTestingModule({
+    const { destroyRef, destroy } = createMockDestroyRef();
+    destroyRefCleanup = destroy;
+
+    const injector = Injector.create({
       providers: [
         ActionQueueService,
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryAlertService, useValue: mockSentryAlertService },
+        { provide: DestroyRef, useValue: destroyRef },
       ],
     });
-    
-    // 获取服务实例
-    service = TestBed.inject(ActionQueueService);
+
+    runInInjectionContext(injector, () => {
+      service = injector.get(ActionQueueService);
+    });
   });
 
   afterEach(() => {
     service.reset();
-    TestBed.resetTestingModule();
+    destroyRefCleanup?.();
 
     consoleWarnSpy?.mockRestore();
     consoleErrorSpy?.mockRestore();

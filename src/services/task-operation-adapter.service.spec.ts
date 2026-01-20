@@ -273,6 +273,16 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
+  it('should rollback snapshot on conflict error (LWW 冲突)', () => {
+    const conflictResult = { ok: false, error: { code: 'CONFLICT', message: '版本冲突' } };
+    mockTaskOperationService.moveTaskToStage.mockReturnValue(conflictResult);
+
+    const result = service.moveTaskToStage('task-1', 2, null, null);
+
+    expect(result.ok).toBe(false);
+    expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
+  });
+
   it('should show toast when moving to unassigned area', () => {
     // 模拟移动到待分配区
     mockTaskOperationService.moveTaskToStage.mockImplementation(() => {

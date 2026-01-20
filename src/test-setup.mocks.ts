@@ -4,7 +4,8 @@
  * 目的：让不同的 Vitest 配置可以选择不同的 Angular TestBed 初始化方式，
  * 但共享同一套 Supabase/Sentry/浏览器 API mocks。
  */
-import { vi, beforeEach } from 'vitest';
+import { vi, beforeEach, afterEach } from 'vitest';
+import 'fake-indexeddb/auto';
 
 // ============================================
 // 🔒 全局模块 Mock（在任何导入之前）
@@ -251,66 +252,69 @@ if (!globalThis.crypto.randomUUID) {
 }
 
 // ============================================
-// IndexedDB Mock（轻量级）
+// IndexedDB Mock（轻量级 fallback）
 // ============================================
 
 const indexedDBStores: Record<string, Record<string, unknown>> = {};
+const isIndexedDbFallback = typeof indexedDB === 'undefined';
 
-const createMockStore = (storeName: string) => ({
-  put: vi.fn((record: { projectId: string }) => {
-    const key = record.projectId;
-    if (!indexedDBStores[storeName]) indexedDBStores[storeName] = {};
-    indexedDBStores[storeName][key] = record;
-    return { onsuccess: null, onerror: null };
-  }),
-  get: vi.fn((key: string) => {
-    const result = indexedDBStores[storeName]?.[key] || null;
-    return { onsuccess: null, onerror: null, result };
-  }),
-  getAll: vi.fn(() => {
-    const result = Object.values(indexedDBStores[storeName] || {});
-    return { onsuccess: null, onerror: null, result };
-  }),
-  delete: vi.fn((key: string) => {
-    if (indexedDBStores[storeName]) delete indexedDBStores[storeName][key];
-    return { onsuccess: null, onerror: null };
-  }),
-  count: vi.fn(() => {
-    const result = Object.keys(indexedDBStores[storeName] || {}).length;
-    return { onsuccess: null, onerror: null, result };
-  }),
-});
+if (isIndexedDbFallback) {
+  const createMockStore = (storeName: string) => ({
+    put: vi.fn((record: { projectId: string }) => {
+      const key = record.projectId;
+      if (!indexedDBStores[storeName]) indexedDBStores[storeName] = {};
+      indexedDBStores[storeName][key] = record;
+      return { onsuccess: null, onerror: null };
+    }),
+    get: vi.fn((key: string) => {
+      const result = indexedDBStores[storeName]?.[key] || null;
+      return { onsuccess: null, onerror: null, result };
+    }),
+    getAll: vi.fn(() => {
+      const result = Object.values(indexedDBStores[storeName] || {});
+      return { onsuccess: null, onerror: null, result };
+    }),
+    delete: vi.fn((key: string) => {
+      if (indexedDBStores[storeName]) delete indexedDBStores[storeName][key];
+      return { onsuccess: null, onerror: null };
+    }),
+    count: vi.fn(() => {
+      const result = Object.keys(indexedDBStores[storeName] || {}).length;
+      return { onsuccess: null, onerror: null, result };
+    }),
+  });
 
-const indexedDBMock = {
-  open: vi.fn(() => {
-    const request = {
-      result: {
-        objectStoreNames: { contains: vi.fn(() => true) },
-        transaction: vi.fn((_storeNames: string[]) => ({
-          objectStore: vi.fn((name: string) => createMockStore(name)),
-        })),
-        close: vi.fn(),
-      },
-      error: null,
-      onsuccess: null as (() => void) | null,
-      onerror: null as (() => void) | null,
-      onupgradeneeded: null as ((event: { target: { result: unknown } }) => void) | null,
-    };
+  const indexedDBMock = {
+    open: vi.fn(() => {
+      const request = {
+        result: {
+          objectStoreNames: { contains: vi.fn(() => true) },
+          transaction: vi.fn((_storeNames: string[]) => ({
+            objectStore: vi.fn((name: string) => createMockStore(name)),
+          })),
+          close: vi.fn(),
+        },
+        error: null,
+        onsuccess: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        onupgradeneeded: null as ((event: { target: { result: unknown } }) => void) | null,
+      };
 
-    if (typeof queueMicrotask === 'function') {
-      queueMicrotask(() => request.onsuccess?.());
-    } else {
-      Promise.resolve().then(() => request.onsuccess?.());
-    }
-    return request;
-  }),
-};
+      if (typeof queueMicrotask === 'function') {
+        queueMicrotask(() => request.onsuccess?.());
+      } else {
+        Promise.resolve().then(() => request.onsuccess?.());
+      }
+      return request;
+    }),
+  };
 
-Object.defineProperty(globalThis, 'indexedDB', {
-  value: indexedDBMock,
-  writable: true,
-  configurable: true,
-});
+  Object.defineProperty(globalThis, 'indexedDB', {
+    value: indexedDBMock,
+    writable: true,
+    configurable: true,
+  });
+}
 
 // ============================================
 // DestroyRef Mock 工厂
@@ -365,7 +369,21 @@ export const mockDestroyRef = {
 
 export function resetMocks() {
   localStorageMock.clear();
-  Object.keys(indexedDBStores).forEach(k => delete indexedDBStores[k]);
+  if (isIndexedDbFallback) {
+    Object.keys(indexedDBStores).forEach(k => delete indexedDBStores[k]);
+  } else if (typeof indexedDB !== 'undefined') {
+    const dbFactory = indexedDB as IDBFactory & {
+      databases?: () => Promise<Array<{ name?: string | null }>>;
+    };
+
+    if (typeof dbFactory.databases === 'function') {
+      dbFactory.databases()
+        .then(dbs => dbs.forEach(db => {
+          if (db?.name) indexedDB.deleteDatabase(db.name);
+        }))
+        .catch(() => undefined);
+    }
+  }
 
   // 只清理 setup 内部的全局 mock（Sentry/Supabase），避免全局 clearAllMocks 的性能开销。
   sentryMock.captureException.mockClear();
@@ -400,4 +418,137 @@ export function resetMocks() {
 
 beforeEach(() => {
   resetMocks();
+});
+
+// ============================================
+// 全局污染检测（事件监听/定时器）
+// ============================================
+
+type ListenerRegistry = Map<string, Set<EventListenerOrEventListenerObject>>;
+
+const POLLUTION_GUARD_ENABLED = process.env.VITEST_POLLUTION_GUARD !== '0';
+const POLLUTION_GUARD_STRICT = process.env.VITEST_POLLUTION_STRICT === '1';
+
+type PollutionGuardConfig = {
+  disabled: boolean;
+  ignoreEventTypes: Set<string>;
+  ignoreTargets: Set<EventTarget>;
+};
+
+const pollutionGuardConfig: PollutionGuardConfig = {
+  disabled: false,
+  ignoreEventTypes: new Set<string>(),
+  ignoreTargets: new Set<EventTarget>(),
+};
+
+export const disablePollutionGuard = () => {
+  pollutionGuardConfig.disabled = true;
+};
+
+export const enablePollutionGuard = () => {
+  pollutionGuardConfig.disabled = false;
+};
+
+export const ignorePollutionEventTypes = (types: string[]) => {
+  types.forEach(type => pollutionGuardConfig.ignoreEventTypes.add(type));
+};
+
+export const ignorePollutionTarget = (target: EventTarget) => {
+  pollutionGuardConfig.ignoreTargets.add(target);
+};
+
+const listenerRegistry = new Map<EventTarget, ListenerRegistry>();
+const eventPatches = new Map<EventTarget, { add: EventTarget['addEventListener']; remove: EventTarget['removeEventListener'] }>();
+
+const patchEventTarget = (target: EventTarget | null | undefined) => {
+  if (!target || eventPatches.has(target)) return;
+  if (!('addEventListener' in (target as object)) || !('removeEventListener' in (target as object))) return;
+  const originalAdd = target.addEventListener.bind(target);
+  const originalRemove = target.removeEventListener.bind(target);
+
+  eventPatches.set(target, { add: originalAdd, remove: originalRemove });
+
+  target.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) => {
+    if (listener && POLLUTION_GUARD_ENABLED && !pollutionGuardConfig.disabled) {
+      if (pollutionGuardConfig.ignoreEventTypes.has(type) || pollutionGuardConfig.ignoreTargets.has(target)) {
+        return originalAdd(type, listener as EventListenerOrEventListenerObject, options as AddEventListenerOptions);
+      }
+      const registry = listenerRegistry.get(target) ?? new Map();
+      const listeners = registry.get(type) ?? new Set();
+      listeners.add(listener);
+      registry.set(type, listeners);
+      listenerRegistry.set(target, registry);
+    }
+    return originalAdd(type, listener as EventListenerOrEventListenerObject, options as AddEventListenerOptions);
+  }) as EventTarget['addEventListener'];
+
+  target.removeEventListener = ((type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) => {
+    if (listener && POLLUTION_GUARD_ENABLED && !pollutionGuardConfig.disabled) {
+      if (pollutionGuardConfig.ignoreEventTypes.has(type) || pollutionGuardConfig.ignoreTargets.has(target)) {
+        return originalRemove(type, listener as EventListenerOrEventListenerObject, options as EventListenerOptions);
+      }
+      const registry = listenerRegistry.get(target);
+      const listeners = registry?.get(type);
+      listeners?.delete(listener);
+      if (listeners && listeners.size === 0) registry?.delete(type);
+    }
+    return originalRemove(type, listener as EventListenerOrEventListenerObject, options as EventListenerOptions);
+  }) as EventTarget['removeEventListener'];
+};
+
+if (typeof window !== 'undefined') {
+  patchEventTarget(window);
+}
+if (typeof document !== 'undefined') {
+  patchEventTarget(document);
+}
+patchEventTarget(globalThis as unknown as EventTarget);
+
+const cleanupEventListeners = () => {
+  if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) return;
+  for (const [target, registry] of listenerRegistry.entries()) {
+    const patch = eventPatches.get(target);
+    if (!patch) continue;
+    for (const [type, listeners] of registry.entries()) {
+      listeners.forEach(listener => {
+        try {
+          patch.remove(type, listener);
+        } catch {
+          // noop
+        }
+      });
+    }
+  }
+  listenerRegistry.clear();
+};
+
+const checkLeakWarning = (message: string) => {
+  if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) return;
+  if (POLLUTION_GUARD_STRICT) {
+    throw new Error(message);
+  }
+  console.warn(message);
+};
+
+afterEach(() => {
+  if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) return;
+
+  const leakedListeners = Array.from(listenerRegistry.values())
+    .reduce((count, registry) => {
+      for (const listeners of registry.values()) count += listeners.size;
+      return count;
+    }, 0);
+
+  if (leakedListeners > 0) {
+    checkLeakWarning(`[PollutionGuard] 检测到 ${leakedListeners} 个未清理的事件监听器`);
+  }
+
+  if (typeof vi.isFakeTimers === 'function' && vi.isFakeTimers()) {
+    const pendingTimers = typeof vi.getTimerCount === 'function' ? vi.getTimerCount() : 0;
+    if (pendingTimers > 0) {
+      checkLeakWarning(`[PollutionGuard] 检测到 ${pendingTimers} 个未清理的定时器`);
+    }
+  }
+
+  cleanupEventListeners();
 });

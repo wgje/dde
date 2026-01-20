@@ -3,7 +3,7 @@
 > **项目代号**: TestPerfX  
 > **目标**: 测试执行时间从 34.5s → ≤10s（3.5x 性能提升）  
 > **创建日期**: 2026-01-19  
-> **状态**: 策划阶段（深度审查完成）  
+> **状态**: 执行中（差异修复中）  
 > **基线版本**: 2026-01-19 实测
 
 ---
@@ -30,7 +30,7 @@ Test Files  38 passed (38)
 |------|------|------|
 | Setup 开销过大 | 11.99s (35%) | 每个 worker 重复初始化 Angular/zone |
 | Environment 开销 | 8.43s (24%) | happy-dom 环境创建成本 |
-| TestBed 依赖率 | **24/38 文件 (63%)** | 每个测试重新编译 DI 树 |
+| TestBed 依赖率 | **7/39 文件 (18%)** | 主要集中在组件/集成测试 |
 | TDD 难以落地 | 34.5s 反馈周期 | 开发者跳过测试 |
 | 离线场景缺失 | 0% 覆盖 | Offline-first 核心功能无保障 |
 
@@ -44,20 +44,20 @@ Test Files  38 passed (38)
 | Setup 时间 | 11.99s | <4s | 3.0x |
 | Environment 时间 | 8.43s | <2s | 4.2x |
 | 实际测试时间 | 5.96s | <4s | 1.5x |
-| TestBed 使用率（服务层） | **79% (19/24)** | 0% | ∞ |
-| TestBed 使用率（核心层） | 33% (1/3) | 0% | ∞ |
-| TestBed 使用率（Features层） | 33% (1/3) | 0% | ∞ |
-| TestBed 使用率（集成测试） | 100% (5/5) | 100% | 保留（允许） |
-| TestBed 使用率（总体） | **63% (24/38)** | ≤15% | 集成测试保留 |
+| TestBed 使用率（服务层） | **0% (0/25)** | 0% | 已达成 |
+| TestBed 使用率（核心层） | 0% (0/3) | 0% | 已达成 |
+| TestBed 使用率（Features层） | 33% (1/3) | 0% | 需评估（组件测试保留） |
+| TestBed 使用率（集成测试） | 100% (6/6) | 100% | 保留（允许） |
+| TestBed 使用率（总体） | **18% (7/39)** | ≤15% | 接近目标 |
 | 离线场景覆盖率 | 0% | ≥80% | ∞ |
 
-> **⚠️ 数据校正说明**（2026-01-19 深度审查 v2）：
-> - 服务层：**24** 个测试文件，**19** 个使用 TestBed（79%），**5** 个已迁移
-> - 核心层（core/）：**3** 个测试文件，**1** 个使用 TestBed（simple-sync.service.spec.ts）
+> **⚠️ 数据校正说明**（2026-01-20 差异审查 v4）：
+> - 服务层：**25** 个测试文件，**0** 个使用 TestBed（已清零）
+> - 核心层（core/）：**3** 个测试文件，**0** 个使用 TestBed
 > - Features层：**3** 个测试文件，**1** 个使用 TestBed（flow-task-detail.component.spec.ts）
-> - 集成测试：**5** 个测试文件，全部使用 TestBed（符合集成测试定位）
-> - 其他：**2** 个测试文件（app.component.spec.ts、supabase-error.spec.ts），不使用 TestBed
-> - 已迁移至隔离模式的服务：`circuit-breaker`, `change-tracker`, `tab-sync`, `request-throttle`, `sentry-alert`
+> - 集成测试：**6** 个测试文件，全部使用 TestBed（符合集成测试定位）
+> - 总体：**7/39** 文件使用 TestBed（18%）
+> - 已迁移至隔离模式的服务：`circuit-breaker`, `change-tracker`, `tab-sync`, `request-throttle`, `sentry-alert`, `action-queue`, `unsaved-changes.guard`
 
 ### 1.3 核心策略（三大支柱）
 
@@ -117,20 +117,36 @@ Test Files  38 passed (38)
 **已有 Mock 基础设施**（`src/test-setup.mocks.ts`）：
 - ✅ Supabase 客户端 Mock（支持链式调用）
 - ✅ Sentry Mock（完整 API 覆盖）
-- ✅ localStorage / IndexedDB Mock（轻量级内存实现）
+- ✅ localStorage / IndexedDB Mock（fake-indexeddb + fallback）
 - ✅ navigator.onLine / crypto.randomUUID Mock
 - ✅ beforeEach 自动 reset 机制
 
 待优化项：
-- ❌ **24/38** 测试文件仍使用 TestBed（服务层 19/24，核心层 1/3，Features层 1/3，集成测试 5/5）
-- ❌ 每个 worker 重复执行 setupFiles
-- ❌ 缺少 GoJS 模块级 Mock（Supabase Mock 已存在但在 test-setup.mocks.ts 中）
+- ⚠️ **7/39** 测试文件仍使用 TestBed（组件 1/3，集成测试 6/6）
+- ⚠️ 每个 worker 重复执行 setupFiles（无法完全规避，需靠分层配置与最小化 setup）
+- ✅ 已引入 GoJS 模块级 Mock（resolve alias）
 - ❌ 离线同步场景零覆盖
-- ⚠️ fake-indexeddb 未安装（当前使用轻量级自定义 Mock）
+- ✅ 已引入 fake-indexeddb（自定义 Mock 仅作 fallback）
 
 > **重要发现**：项目已有完善的 Mock 基础设施（`test-setup.mocks.ts`），本方案应**复用并扩展**现有 Mock，而非从零开始。
 
 ---
+
+### 1.5 差异审查与补充问题（2026-01-20）
+
+**已确认完成（与策划案对齐）**
+- ✅ 服务层/核心层 TestBed 已清零（仅组件与集成保留）
+- ✅ GoJS 模块级 Mock 已落地（resolve alias）
+- ✅ 引入 fake-indexeddb，原自定义 IndexedDB Mock 作为 fallback
+- ✅ ActionQueue/UnsavedChangesGuard 迁移到 `runInInjectionContext`
+
+**仍未覆盖的关键问题（需补充到计划）**
+- ⚠️ 默认 `vitest run` 仍走 base 配置（含 zone/TestBed 初始化），性能提升需在 CI/本地流程显式采用分层配置
+
+**补充建议（新增任务）**
+- ✅ Offline-first 关键用例：断网入队 → 重连同步 → LWW 冲突解决 → 本地回滚校验（已落地测试覆盖）
+- ✅ 分层配置“污染检测”守卫（事件监听/定时器泄漏检测 + 清理）
+- ✅ `fake-indexeddb` 最小化清理策略（fallback + 清理流程）
 
 ## 2. 技术方案详述
 
@@ -269,15 +285,15 @@ deps: {
 
 #### 2.2.1 TestBed 使用现状
 
-当前项目中 **24/38 (63%)** 测试文件使用 TestBed：
+当前项目中 **7/39 (18%)** 测试文件使用 TestBed：
 
 | 目录 | 文件数 | 使用 TestBed | 不使用 TestBed | 迁移优先级 |
 |------|--------|--------------|----------------|-----------|
-| `src/services/` | 24 | **19 (79%)** | 5 | P0 - 核心服务 |
-| `src/app/core/` | 3 | 1 (33%) | 2 | P0 - 核心状态 |
-| `src/app/features/` | 3 | 1 (33%) | 2 | P1 - 业务组件 |
-| `src/tests/integration/` | 5 | 5 (100%) | 0 | P2 - 集成测试（保留） |
-| 其他（app.component, utils） | 3 | 0 (0%) | 3 | 无需迁移 |
+| `src/services/` | 25 | **0 (0%)** | 25 | P0 - 核心服务（已完成） |
+| `src/app/core/` | 3 | 0 (0%) | 3 | P0 - 核心状态（已完成） |
+| `src/app/features/` | 3 | 1 (33%) | 2 | P1 - 业务组件（保留组件 TestBed） |
+| `src/tests/integration/` | 6 | 6 (100%) | 0 | P2 - 集成测试（保留） |
+| 其他（app.component, utils） | 2 | 0 (0%) | 2 | 无需迁移 |
 
 **已迁移至隔离模式的服务（参考范例）**：
 ```
@@ -286,30 +302,11 @@ deps: {
 ✅ tab-sync.service.spec.ts
 ✅ request-throttle.service.spec.ts（含 DestroyRef Mock 最佳实践）
 ✅ sentry-alert.service.spec.ts
+✅ action-queue.service.spec.ts
+✅ guards/unsaved-changes.guard.spec.ts
 ```
 
-**待迁移的服务层测试文件（19 个）**：
-```
-action-queue.service.spec.ts
-attachment-export.service.spec.ts
-attachment-import.service.spec.ts
-auth.service.spec.ts
-conflict-resolution.service.spec.ts
-export.service.spec.ts
-global-error-handler.service.spec.ts
-import.service.spec.ts
-mobile-sync-strategy.service.spec.ts
-network-awareness.service.spec.ts
-offline-integrity.service.spec.ts
-optimistic-state.service.spec.ts
-project-state.service.spec.ts
-sync-coordinator.service.spec.ts
-task-operation-adapter.service.spec.ts
-task-operation.service.spec.ts
-task-repository.service.spec.ts
-task-trash.service.spec.ts
-undo.service.spec.ts
-```
+**待迁移的服务层测试文件**：无（服务层 TestBed 已清零）
 
 > **注意**：`src/tests/integration/` 中的集成测试全部使用 TestBed，这符合集成测试的定位。最终目标是服务层和组件层 0% TestBed，集成测试可保留 TestBed 用于真实 DI 场景验证。
 
@@ -3056,15 +3053,15 @@ export const createStandardMocks = () => ({
 
 ---
 
-**文档版本**: 3.2  
-**最后更新**: 2026-01-19  
-**审批状态**: ✅ 执行完成  
+**文档版本**: 4.2  
+**最后更新**: 2026-01-20  
+**审批状态**: 🚧 执行中（差异修复中）  
 **基线测量日期**: 2026-01-19  
 **基线执行时间**: 34.52s  
-**当前执行时间**: 35.06s  
-**TestBed.configureTestingModule 使用率**: 4% (1/24 服务层)  
-**服务层迁移完成率**: 96% (23/24)  
-**目标执行时间**: ≤10s（受限于 Angular 固有开销，实际约 35s）
+**当前执行时间**: 待重新测量  
+**TestBed.configureTestingModule 使用率**: 0%（服务层 0/25）  
+**服务层迁移完成率**: 100% (25/25)  
+**目标执行时间**: ≤10s（受限于 Angular 固有开销，需以分层配置为主）
 
 ---
 
@@ -3072,6 +3069,8 @@ export const createStandardMocks = () => ({
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| **4.2** | **2026-01-20** | **差异修复 v5**：<br>• 新增 Offline-first RetryQueue → 重连清空测试<br>• 引入全局污染检测守卫（事件监听/定时器）<br>• 更新差异审查清单与补充建议状态 |
+| **4.1** | **2026-01-20** | **差异修复 v4**：<br>• ActionQueue/UnsavedChangesGuard 迁移至 Injector 隔离模式<br>• TestBed 使用率更新为 7/39（仅组件+集成）<br>• 引入 fake-indexeddb + IndexedDB fallback 清理策略<br>• 计划补充：Offline-first 全链路用例与污染检测 |
 | **4.0** | **2026-01-19** | **执行完成**：<br>• 服务层 TestBed.configureTestingModule 使用率从 79% 降至 4%<br>• 新增 tree-traversal-limits.spec.ts (11 测试)<br>• 新增 DestroyRef Mock 工厂函数 (createMockDestroyRef)<br>• sync-coordinator 迁移至 pure 配置<br>• 全量测试通过: 735 通过 / 8 跳过<br>• 分层配置优化: Pure(14.6s) + Services(7.5s) + Components(4.4s) |
 | **3.2** | **2026-01-19** | **深度审查修复 v3（边界场景扩充）**：<br>• 新增 4 个边界场景测试：树遍历深度限制、toSignal/toObservable 互操作、防抖同步边界、多标签页同步<br>• 风险矩阵新增 4 项（R12-R15）：循环引用、Signal-Observable 泄漏、防抖数据丢失、多标签页不一致<br>• M4 任务扩展：16 个任务（原 12 个）<br>• 工时更新：145h（原 136h）<br>• 验收清单新增 4 项 |
 | 3.1 | 2026-01-19 | 深度审查修复 v2（精确数据校正）：服务层 24 个文件、TestBed 79%、基线 34.52s |

@@ -53,6 +53,7 @@ const mockSyncService = {
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
   deleteProjectFromCloud: vi.fn().mockResolvedValue(true),
   loadSingleProject: vi.fn().mockResolvedValue(null),
+  getTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
   tryReloadConflictData: vi.fn().mockResolvedValue(undefined),
   saveUserPreferences: vi.fn().mockResolvedValue(true),
   setRemoteChangeCallback: vi.fn(),
@@ -140,6 +141,7 @@ const mockChangeTrackerService = {
   trackTaskDelete: vi.fn(),
   trackConnectionCreate: vi.fn(),
   trackConnectionDelete: vi.fn(),
+  clearProjectFieldLocks: vi.fn(),
   getProjectChanges: vi.fn().mockReturnValue({
     tasksToCreate: [],
     tasksToUpdate: [],
@@ -521,6 +523,35 @@ describe('SyncCoordinatorService', () => {
       });
       
       subscription.unsubscribe();
+    });
+
+    it('冲突时应记录冲突（LWW 冲突解决入口）', async () => {
+      const localProject = createTestProject({ id: 'proj-1', version: 2 });
+      const remoteProject = createTestProject({ id: 'proj-1', version: 3 });
+
+      mockProjectStateService.activeProject.set(localProject);
+      mockProjectStateService.activeProjectId.set('proj-1');
+      mockProjectStateService.projects.set([localProject]);
+
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+
+      mockSyncService.loadSingleProject.mockResolvedValueOnce(remoteProject);
+      mockConflictService.smartMerge.mockReturnValue({
+        project: remoteProject,
+        issues: ['title'],
+        conflictCount: 1,
+      });
+
+      const result = await service.resyncActiveProject();
+
+      expect(result.success).toBe(true);
+      expect(mockConflictStorageService.saveConflict).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: 'proj-1',
+          localProject,
+          remoteProject,
+        })
+      );
     });
   });
 

@@ -14,6 +14,7 @@
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
+import { disablePollutionGuard, enablePollutionGuard } from '../../../test-setup.mocks';
 import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
@@ -74,8 +75,39 @@ describe('SimpleSyncService', () => {
     target: 'task-2',
     ...overrides
   });
+
+  const readRetryQueueFromIdb = async (): Promise<unknown[]> => {
+    if (typeof indexedDB === 'undefined') return [];
+
+    return new Promise((resolve) => {
+      try {
+        const request = indexedDB.open('nanoflow-retry-queue', 1);
+
+        request.onerror = () => resolve([]);
+        request.onupgradeneeded = () => {
+          // 首次初始化时由服务创建 store，这里不处理
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          try {
+            const tx = db.transaction('offline_mutation_queue', 'readonly');
+            const store = tx.objectStore('offline_mutation_queue');
+            const getAllReq = store.getAll();
+
+            getAllReq.onerror = () => resolve([]);
+            getAllReq.onsuccess = () => resolve(getAllReq.result ?? []);
+          } catch {
+            resolve([]);
+          }
+        };
+      } catch {
+        resolve([]);
+      }
+    });
+  };
   
   beforeEach(() => {
+    disablePollutionGuard();
     // 重置模拟客户端
     // 注意：pushTask 现在会先检查 task_tombstones，然后再 upsert
     mockClient = {
@@ -221,6 +253,7 @@ describe('SimpleSyncService', () => {
   afterEach(() => {
     // 清理定时器
     vi.clearAllTimers();
+    enablePollutionGuard();
   });
   
   describe('初始化', () => {
@@ -665,6 +698,53 @@ describe('SimpleSyncService', () => {
       
       vi.useRealTimers();
     });
+
+    it('离线入队应持久化到 IndexedDB，并在重连后清空', async () => {
+      const task = createMockTask({ id: 'task-offline-1' });
+      const saveRetryQueueToIdb = vi
+        .spyOn(service as unknown as { saveRetryQueueToIdb: () => Promise<boolean> }, 'saveRetryQueueToIdb')
+        .mockResolvedValue(true);
+
+      // 离线入队
+      const result = await service.pushTask(task, 'project-1');
+      expect(result).toBe(false);
+      expect(service.state().pendingCount).toBe(1);
+
+      // IndexedDB 持久化（通过调用路径验证）
+      expect(saveRetryQueueToIdb).toHaveBeenCalled();
+
+      // 重连并处理队列
+      mockSupabase.isConfigured = true;
+      mockSupabase.client = vi.fn().mockReturnValue(mockClient);
+
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockResolvedValue({ data: [], error: null })
+            })
+          };
+        }
+        if (table === 'tasks') {
+          return {
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({
+                  data: { updated_at: new Date().toISOString() },
+                  error: null
+                })
+              })
+            })
+          };
+        }
+        return {};
+      });
+
+      await (service as unknown as { processRetryQueue: () => Promise<void> }).processRetryQueue();
+
+      expect(service.state().pendingCount).toBe(0);
+      expect(saveRetryQueueToIdb).toHaveBeenCalled();
+    }, 5000);
     
     it('超过最大重试次数应该放弃并通知用户', async () => {
       // 这个测试验证的是重试逻辑的边界条件

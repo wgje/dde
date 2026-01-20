@@ -43,6 +43,8 @@ export default defineConfig({
       'src/services/task-operation-adapter.service.spec.ts',
       'src/services/attachment-export.service.spec.ts',
       'src/services/attachment-import.service.spec.ts',
+      'src/services/action-queue.service.spec.ts',
+      'src/services/guards/unsaved-changes.guard.spec.ts',
       // 以下服务已迁移到 Injector 隔离模式
       'src/services/sync-coordinator.service.spec.ts',
       // 注：以下文件因依赖需要 JIT 编译器的服务，保留在此配置中：

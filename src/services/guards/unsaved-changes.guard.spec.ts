@@ -15,7 +15,7 @@
  * - 测试执行时间从 20s+ 降至 <1s
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
+import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   UnsavedChangesGuard, 
   BeforeUnloadGuardService,
@@ -56,7 +56,7 @@ describe('UnsavedChangesGuard', () => {
       }),
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
         UnsavedChangesGuard,
         { provide: SimpleSyncService, useValue: mockSyncService },
@@ -64,7 +64,9 @@ describe('UnsavedChangesGuard', () => {
       ],
     });
     
-    guard = TestBed.inject(UnsavedChangesGuard);
+    runInInjectionContext(injector, () => {
+      guard = injector.get(UnsavedChangesGuard);
+    });
   });
   
   afterEach(() => {
@@ -282,7 +284,7 @@ describe('BeforeUnloadGuardService', () => {
       unregister: vi.fn(),
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
         BeforeUnloadGuardService,
         { provide: SimpleSyncService, useValue: mockSyncService },
@@ -291,7 +293,9 @@ describe('BeforeUnloadGuardService', () => {
       ],
     });
     
-    service = TestBed.inject(BeforeUnloadGuardService);
+    runInInjectionContext(injector, () => {
+      service = injector.get(BeforeUnloadGuardService);
+    });
   });
   
   afterEach(() => {
@@ -381,7 +385,7 @@ describe('ProjectSwitchGuardService', () => {
       }),
     };
     
-    TestBed.configureTestingModule({
+    const injector = Injector.create({
       providers: [
         ProjectSwitchGuardService,
         { provide: SimpleSyncService, useValue: mockSyncService },
@@ -389,7 +393,9 @@ describe('ProjectSwitchGuardService', () => {
       ],
     });
     
-    service = TestBed.inject(ProjectSwitchGuardService);
+    runInInjectionContext(injector, () => {
+      service = injector.get(ProjectSwitchGuardService);
+    });
   });
   
   afterEach(() => {
