@@ -23,12 +23,30 @@
 
 2. 配置环境变量 (可选):
    
-   创建 `.env.local` 文件并添加以下内容（如不配置将以离线模式运行）:
+   复制模板文件并填入你的实际配置：
+   ```bash
+   cp .env.template .env.local
    ```
+   
+   编辑 `.env.local` 文件：
+   ```bash
    # Supabase 配置（云端同步功能）
    NG_APP_SUPABASE_URL=your_supabase_url
    NG_APP_SUPABASE_ANON_KEY=your_supabase_anon_key
+   
+   # Sentry 错误监控（可选）
+   NG_APP_SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
+   
+   # GoJS License（可选，移除水印）
+   NG_APP_GOJS_LICENSE_KEY=your_license_key
    ```
+   
+   然后生成环境文件：
+   ```bash
+   npm run config
+   ```
+   
+   > ⚠️ `.env.local` 已在 `.gitignore` 中，不会被提交到代码仓库
 
 3. 运行应用:
    ```bash
