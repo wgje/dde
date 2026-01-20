@@ -333,8 +333,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly SEARCH_DEBOUNCE_DELAY = 300; // 300ms 搜索防抖
 
   constructor() {
-    // 启动流程：先执行必要的同步初始化，再异步恢复会话
-    // 关键：bootstrapSession 失败不应阻止基础 UI 运行，但应阻止某些功能
+    // 启动流程：仅执行必要的同步初始化
+    // 关键：bootstrapSession 移到 ngOnInit + setTimeout，避免阻塞 TTFB
     this.checkMobile();
     this.setupSwUpdateListener();
     // 主题初始化在 StoreService 构造函数中完成
@@ -343,12 +343,6 @@ export class AppComponent implements OnInit, OnDestroy {
     this.setupSidebarToggleListener();
     this.setupStorageFailureHandler();
     this.setupBeforeUnloadHandler();
-    
-    // 异步恢复会话 - 失败会设置 bootstrapFailed 状态，模板层负责显示错误 UI
-    this.bootstrapSession().catch(_e => {
-      // 错误已在 bootstrapSession 内部处理并设置 bootstrapFailed 状态
-      // 不再静默处理，确保用户感知启动失败
-    });
   }
 
   /**
@@ -395,7 +389,17 @@ export class AppComponent implements OnInit, OnDestroy {
     
     // 标记应用已加载完成，用于隐藏初始加载指示器
     (window as unknown as { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
-    // console.log('[NanoFlow] ✅ ngOnInit 完成，应用已就绪');
+    
+    // ⚡ 性能优化：延迟会话检查到下一个事件循环，避免阻塞 TTFB
+    // 参考: Sentry Alert 2026-01-20 - TTFB 3114ms (poor)
+    // 原因: bootstrapSession() 在构造函数中调用，阻塞了首屏渲染
+    // 解决: 使用 setTimeout(..., 0) 将会话检查延迟到首屏 UI 渲染后
+    setTimeout(() => {
+      this.bootstrapSession().catch(_e => {
+        // 错误已在 bootstrapSession 内部处理并设置 bootstrapFailed 状态
+        // 不再静默处理，确保用户感知启动失败
+      });
+    }, 0);
     
     // 🔍 调试：输出关键状态
     // console.log('[NanoFlow] 📊 初始状态:', {
