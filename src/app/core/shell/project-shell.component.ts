@@ -205,7 +205,7 @@ import { FlowViewComponent } from '../../features/flow';
 
         <!-- Flow Column - 移动端条件渲染，桌面端始终显示 -->
         <!-- 使用 @defer 实现 GoJS 懒加载，减少首屏加载体积 -->
-        <!-- 【性能优化 2026-01-17】使用 idle 触发器代替 immediate，让浏览器有空闲时再加载 GoJS -->
+        <!-- 【性能优化 2026-01-20】使用 viewport 触发器，仅在流程图进入视口时加载，避免干扰 LCP -->
         @if (!uiState.isMobile() || uiState.activeView() === 'flow') {
            <div class="flex-1 flex flex-col min-w-[300px] min-h-0" 
              style="background-color: var(--theme-bg);"
@@ -227,7 +227,7 @@ import { FlowViewComponent } from '../../features/flow';
            <!-- @defer 块用于懒加载流程图组件 -->
            <!-- prefetch: 当浏览器空闲时预取 GoJS 代码，但不立即执行 -->
            <!-- 这样首屏时不会阻塞主线程，同时保证用户需要时能快速显示 -->
-           @defer (on idle; prefetch on idle) {
+           @defer (on viewport; prefetch on idle) {
              <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
            } @placeholder {
              <div class="flex-1 flex items-center justify-center text-stone-400">

@@ -26,6 +26,7 @@ import { enableLocalMode, disableLocalMode, BeforeUnloadGuardService } from './s
 import { ToastContainerComponent } from './app/shared/components/toast-container.component';
 import { SyncStatusComponent } from './app/shared/components/sync-status.component';
 import { OfflineBannerComponent } from './app/shared/components/offline-banner.component';
+import { DemoBannerComponent } from './app/shared/components/demo-banner.component';
 import { 
   SettingsModalComponent, 
   LoginModalComponent, 
@@ -80,6 +81,7 @@ import { UI_CONFIG, AUTH_CONFIG } from './config';
     ToastContainerComponent,
     SyncStatusComponent,
     OfflineBannerComponent,
+    DemoBannerComponent,
     ErrorBoundaryComponent,
     SettingsModalComponent,
     LoginModalComponent,
@@ -164,7 +166,12 @@ export class AppComponent implements OnInit, OnDestroy {
   authPassword = signal('');
   authError = signal<string | null>(null);
   isAuthLoading = signal(false);
-  isCheckingSession = signal(true);
+  /** 
+   * 会话检查状态
+   * 【优化】初始值改为 false，让 UI 立即渲染
+   * 会话检查在 ngOnInit 中异步进行，不阻塞首屏
+   */
+  isCheckingSession = signal(false);
   
   /** 启动失败状态 - 用于阻断性显式反馈 */
   bootstrapFailed = signal(false);
@@ -390,16 +397,11 @@ export class AppComponent implements OnInit, OnDestroy {
     // 标记应用已加载完成，用于隐藏初始加载指示器
     (window as unknown as { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
     
-    // ⚡ 性能优化：延迟会话检查到下一个事件循环，避免阻塞 TTFB
+    // ⚡ 性能优化：延迟会话检查到浏览器空闲时段，避免阻塞首屏渲染
     // 参考: Sentry Alert 2026-01-20 - TTFB 3114ms (poor)
     // 原因: bootstrapSession() 在构造函数中调用，阻塞了首屏渲染
-    // 解决: 使用 setTimeout(..., 0) 将会话检查延迟到首屏 UI 渲染后
-    setTimeout(() => {
-      this.bootstrapSession().catch(_e => {
-        // 错误已在 bootstrapSession 内部处理并设置 bootstrapFailed 状态
-        // 不再静默处理，确保用户感知启动失败
-      });
-    }, 0);
+    // 解决: requestIdleCallback / setTimeout 在首屏渲染后执行
+    this.scheduleSessionBootstrap();
     
     // 🔍 调试：输出关键状态
     // console.log('[NanoFlow] 📊 初始状态:', {
@@ -408,6 +410,21 @@ export class AppComponent implements OnInit, OnDestroy {
     //   currentUserId: this.userSession.currentUserId(),
     //   authConfigured: this.auth.isConfigured
     // });
+  }
+
+  private scheduleSessionBootstrap(): void {
+    const run = () => {
+      this.bootstrapSession().catch(_e => {
+        // 错误已在 bootstrapSession 内部处理并设置 bootstrapFailed 状态
+        // 不再静默处理，确保用户感知启动失败
+      });
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => run());
+    } else {
+      setTimeout(run, 0);
+    }
   }
   
   ngOnDestroy() {

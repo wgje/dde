@@ -108,8 +108,9 @@ async function waitForSessionCheck(
       
       const elapsed = Date.now() - startTime;
       if (timeout) {
-        // 超时但仍允许继续，记录警告
-        console.warn(`[Guard] 会话检查超时 (${elapsed}ms)，继续处理`);
+        // 【优化】超时后立即放行，不再阻塞 UI 渲染
+        // 会话检查会在后台继续，用户可以先看到页面
+        console.log(`[Guard] 会话检查超时 (${elapsed}ms)，立即放行以渲染 UI`);
       } else {
         console.log(`[Guard] 会话检查完成 (${elapsed}ms)`);
       }

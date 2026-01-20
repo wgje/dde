@@ -2,6 +2,80 @@
 
 一个高效的项目追踪应用，具有双视图（文本/流程图）、Markdown 支持、离线优先、云端同步。
 
+---
+
+## 🚀 快速开始
+
+| 方式 | 适用场景 | 时间 |
+|------|----------|------|
+| [**🎯 在线体验**](#在线-demo) | 快速了解产品功能 | 即刻开始 |
+| [**🔒 一键部署**](#一键部署私有实例) | 长期使用、数据私有 | 5 分钟 |
+| [**💻 本地开发**](#本地运行) | 二次开发、贡献代码 | 10 分钟 |
+
+### 在线 Demo
+
+无需注册，数据存储在浏览器本地，体验核心功能：
+
+> 🎮 **[立即体验 Demo →](https://dde-zeta.vercel.app)** （离线模式，无需登录）
+
+### 一键部署私有实例
+
+**5 分钟拥有自己的 NanoFlow，数据完全在你的掌控中！**
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fdydyde%2Fdde&env=NG_APP_SUPABASE_URL,NG_APP_SUPABASE_ANON_KEY&envDescription=Supabase%20%E9%85%8D%E7%BD%AE%EF%BC%88%E4%BB%8E%20Supabase%20Dashboard%20%3E%20Settings%20%3E%20API%20%E8%8E%B7%E5%8F%96%EF%BC%89&envLink=https%3A%2F%2Fgithub.com%2Fdydyde%2Fdde%23supabase-%E9%83%A8%E7%BD%B2%E9%85%8D%E7%BD%AE&project-name=my-nanoflow&repository-name=my-nanoflow)
+
+<details>
+<summary>📋 部署前准备：创建 Supabase 数据库（点击展开）</summary>
+
+1. **创建 Supabase 项目**（约 2 分钟）
+   - 打开 [supabase.com](https://supabase.com)，用 GitHub 登录
+   - 点击「New project」，填写项目名称，选择区域
+   - 等待项目初始化完成
+
+2. **创建 Storage 存储桶**（约 30 秒）
+   - 左侧菜单 → Storage → New bucket
+   - 名称填 `attachments`，**不要**勾选 Public bucket
+   - 点击 Create bucket
+
+3. **执行数据库初始化脚本**（约 1 分钟）
+   - 左侧菜单 → SQL Editor → New query
+   - 打开本仓库 [`scripts/init-supabase.sql`](scripts/init-supabase.sql)，复制全部内容
+   - 粘贴到 SQL Editor，点击 Run
+   - 看到 ✅ Success 即可
+
+4. **获取 API 密钥**
+   - 左侧菜单 → Project Settings → API
+   - 复制 **Project URL** 和 **anon public** key
+   - ⚠️ 注意：只用 `anon public`，不要用 `service_role`！
+
+</details>
+
+<details>
+<summary>🔧 更多部署选项</summary>
+
+#### Netlify
+
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/dydyde/dde)
+
+部署后在 Site Settings → Environment variables 添加：
+- `NG_APP_SUPABASE_URL`
+- `NG_APP_SUPABASE_ANON_KEY`
+
+#### Railway
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/github?repo=https://github.com/dydyde/dde)
+
+部署后在 Variables 中添加：
+- `NG_APP_SUPABASE_URL`
+- `NG_APP_SUPABASE_ANON_KEY`
+
+
+</details>
+
+> 📚 **详细教程**：[完整部署指南](docs/deploy-private-instance.md) | [故障排查](docs/deploy-private-instance.md#故障排查指南)
+
+---
+
 ## 技术栈
 
 | 技术 | 版本 | 用途 |

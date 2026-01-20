@@ -562,6 +562,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** rAF 调度 ID（用于取消） */
   private pendingRafId: number | null = null;
+
+  /** 抽屉高度更新的 rAF（合并多次高度变更） */
+  private pendingDrawerHeightRafId: number | null = null;
+  private pendingDrawerHeightTarget: number | null = null;
   
   /** 节点选中重试的 rAF ID 列表（用于取消） */
   private pendingRetryRafIds: number[] = [];
@@ -571,6 +575,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** Overview 刷新定时器（防抖） */
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Idle 初始化句柄（用于取消） */
+  private idleInitHandle: number | null = null;
+
+  /** Idle 小地图初始化句柄（用于取消） */
+  private idleOverviewInitHandle: number | null = null;
   
   // ========== 调色板拖动状态 ==========
   private isResizingPalette = false;
@@ -734,9 +744,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           const clampedVh = Math.max(5, Math.min(targetVh, 70));
 
           // 只有在差异明显时才更新，避免信号抖动
-          if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
-            this.drawerHeight.set(clampedVh);
-          }
+          this.scheduleDrawerHeightUpdate(clampedVh);
 
           lastDrawerPreset = isScenarioTwo ? 'reenter' : 'direct';
         });
@@ -776,9 +784,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       const targetVh = (targetDrawerPx / window.innerHeight) * 100;
       const clampedVh = Math.max(5, Math.min(targetVh, 70));
 
-      if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
-        this.drawerHeight.set(clampedVh);
-      }
+      this.scheduleDrawerHeightUpdate(clampedVh);
       lastDrawerPreset = 'direct';
     }, { injector: this.injector });
 
@@ -822,7 +828,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       const currentVh = untracked(() => this.drawerHeight());
       const SMALL_DRAWER_THRESHOLD_VH = 12;
       if (currentVh < SMALL_DRAWER_THRESHOLD_VH && clampedVh - currentVh > 0.2) {
-        this.drawerHeight.set(clampedVh);
+        this.scheduleDrawerHeightUpdate(clampedVh);
       }
     }, { injector: this.injector });
   }
@@ -855,30 +861,31 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.diagramUpdatePending = false;
     });
   }
+
+  /**
+   * 合并抽屉高度更新，避免短时间内多次触发布局变化
+   */
+  private scheduleDrawerHeightUpdate(targetVh: number): void {
+    if (this.isDestroyed) return;
+
+    this.pendingDrawerHeightTarget = targetVh;
+    if (this.pendingDrawerHeightRafId !== null) return;
+
+    this.pendingDrawerHeightRafId = requestAnimationFrame(() => {
+      this.pendingDrawerHeightRafId = null;
+      const nextVh = this.pendingDrawerHeightTarget;
+      this.pendingDrawerHeightTarget = null;
+      if (nextVh === null) return;
+      if (Math.abs(this.drawerHeight() - nextVh) > 0.2) {
+        this.drawerHeight.set(nextVh);
+      }
+    });
+  }
   
   // ========== 生命周期 ==========
   
   ngAfterViewInit() {
-    this.initDiagram();
-    
-    // 初始化完成后立即加载图表数据
-    this.scheduleTimer(() => {
-      if (this.diagram.isInitialized) {
-        this.diagram.updateDiagram(this.projectState.tasks());
-        
-        // 标记 View 已就绪
-        this.flowCommand.markViewReady();
-        
-        // 检查并执行待处理的命令
-        const pendingCmd = this.flowCommand.consumePendingCenterCommand();
-        if (pendingCmd) {
-          // 延迟执行，确保图表完全渲染
-          this.scheduleTimer(() => {
-            this.executeCenterOnNode(pendingCmd.taskId, pendingCmd.openDetail);
-          }, 100);
-        }
-      }
-    }, UI_CONFIG.MEDIUM_DELAY);
+    this.scheduleDiagramInit();
   }
   
   ngOnDestroy() {
@@ -900,6 +907,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       cancelAnimationFrame(this.pendingRafId);
       this.pendingRafId = null;
     }
+
+    if (this.pendingDrawerHeightRafId !== null) {
+      cancelAnimationFrame(this.pendingDrawerHeightRafId);
+      this.pendingDrawerHeightRafId = null;
+      this.pendingDrawerHeightTarget = null;
+    }
     
     // 清理节点选中重试的 rAF
     this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
@@ -909,6 +922,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (this.overviewResizeTimer) {
       clearTimeout(this.overviewResizeTimer);
       this.overviewResizeTimer = null;
+    }
+
+    // 清理 idle 初始化句柄
+    if (typeof cancelIdleCallback !== 'undefined' && this.idleInitHandle !== null) {
+      cancelIdleCallback(this.idleInitHandle);
+      this.idleInitHandle = null;
+    }
+
+    if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
+      cancelIdleCallback(this.idleOverviewInitHandle);
+      this.idleOverviewInitHandle = null;
     }
     
     // 清理服务
@@ -923,6 +947,49 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   // ========== 图表初始化 ==========
+
+  private scheduleDiagramInit(): void {
+    const startInit = () => {
+      if (this.isDestroyed) return;
+      this.initDiagram();
+      if (this.diagram.isInitialized) {
+        this.onDiagramInitialized();
+      }
+    };
+
+    // 使用 requestIdleCallback 延迟重任务，避免阻塞 LCP
+    if (typeof requestIdleCallback !== 'undefined') {
+      this.idleInitHandle = requestIdleCallback(() => {
+        this.idleInitHandle = null;
+        this.zone.run(() => startInit());
+      }, { timeout: 5000 });
+    } else {
+      this.scheduleTimer(() => {
+        this.zone.run(() => startInit());
+      }, 1200);
+    }
+  }
+
+  private onDiagramInitialized(delayMs: number = UI_CONFIG.MEDIUM_DELAY): void {
+    // 初始化完成后加载图表数据
+    this.scheduleTimer(() => {
+      if (this.diagram.isInitialized) {
+        this.diagram.updateDiagram(this.projectState.tasks());
+
+        // 标记 View 已就绪
+        this.flowCommand.markViewReady();
+
+        // 检查并执行待处理的命令
+        const pendingCmd = this.flowCommand.consumePendingCenterCommand();
+        if (pendingCmd) {
+          // 延迟执行，确保图表完全渲染
+          this.scheduleTimer(() => {
+            this.executeCenterOnNode(pendingCmd.taskId, pendingCmd.openDetail);
+          }, 100);
+        }
+      }
+    }, delayMs);
+  }
   
   private initDiagram(): void {
     // 防御性检查：确保 DOM 元素已准备好
@@ -1157,14 +1224,31 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /**
    * 初始化小地图
    */
-  private initOverview(): void {
+  private initOverview(immediate = false): void {
     if (!this.isOverviewVisible() || this.isOverviewCollapsed()) return;
-    
-    this.scheduleTimer(() => {
+
+    const runInit = () => {
       if (this.overviewDiv?.nativeElement && this.diagram.isInitialized) {
         this.diagram.initializeOverview(this.overviewDiv.nativeElement);
       }
-    }, 100);
+    };
+
+    if (immediate) {
+      this.scheduleTimer(() => runInit(), 0);
+      return;
+    }
+
+    if (typeof requestIdleCallback !== 'undefined') {
+      if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
+        cancelIdleCallback(this.idleOverviewInitHandle);
+      }
+      this.idleOverviewInitHandle = requestIdleCallback(() => {
+        this.idleOverviewInitHandle = null;
+        this.zone.run(() => runInit());
+      }, { timeout: 3000 });
+    } else {
+      this.scheduleTimer(() => runInit(), 300);
+    }
   }
   
   /**
@@ -1180,9 +1264,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       // 修复移动端展开小地图时只显示一半的问题
       requestAnimationFrame(() => {
         this.scheduleTimer(() => {
-          if (this.overviewDiv?.nativeElement && this.diagram.isInitialized) {
-            this.diagram.initializeOverview(this.overviewDiv.nativeElement);
-          }
+          this.initOverview(true);
         }, 100); // 增加延迟时间，确保容器尺寸已确定
       });
     } else {
@@ -1239,7 +1321,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
         this.initDiagram();
         if (this.diagram.isInitialized) {
-          this.diagram.updateDiagram(this.projectState.tasks());
+          this.onDiagramInitialized(0);
           // 成功后重置重试计数
           this.diagramRetryCount = 0;
           this.hasReachedRetryLimit.set(false);
@@ -1274,7 +1356,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
         this.initDiagram();
         if (this.diagram.isInitialized) {
-          this.diagram.updateDiagram(this.projectState.tasks());
+          this.onDiagramInitialized(0);
           this.toast.success('重置成功', '流程图已就绪');
         } else {
           // 重置后仍然失败，显示错误但允许再次重试
@@ -1684,9 +1766,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     // 延迟设置，等待详情面板完全渲染
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (Math.abs(this.drawerHeight() - clampedVh) > 0.2) {
-          this.drawerHeight.set(clampedVh);
-        }
+        this.scheduleDrawerHeightUpdate(clampedVh);
       });
     });
   }

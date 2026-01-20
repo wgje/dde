@@ -81,6 +81,15 @@ const logError = (msg: string, err?: any) => {
   console.error(`[NanoFlow +${elapsed}ms] ❌ ${msg}`, err || '');
 };
 
+// 在浏览器空闲时执行任务，避免阻塞首屏渲染
+const scheduleIdleTask = (task: () => void) => {
+  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(() => task());
+  } else {
+    setTimeout(task, 0);
+  }
+};
+
 // ========== 版本检测与缓存清理 ==========
 async function checkAndClearCacheIfNeeded(): Promise<boolean> {
   try {
@@ -223,30 +232,6 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // ========== 应用启动函数 ==========
 async function startApplication() {
-  // 1. 先检查版本并清理缓存（如果需要）
-  const needsRefresh = await checkAndClearCacheIfNeeded();
-  if (needsRefresh) {
-    log('等待页面刷新...');
-    return; // 页面即将刷新，不继续启动
-  }
-  
-  // 2. 注销所有 Service Worker（作为额外保障）
-  if ('serviceWorker' in navigator) {
-    log('🧹 注销所有 Service Worker...');
-    try {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      for (const reg of registrations) {
-        log('注销 SW: ' + reg.scope);
-        await reg.unregister();
-      }
-      if (registrations.length === 0) {
-        log('无 Service Worker 需要注销');
-      }
-    } catch (e) {
-      logError('注销 SW 失败', e);
-    }
-  }
-  
   log('🏗️ 准备启动 Angular...');
   
   // 3. 添加启动超时保护（15秒）
@@ -315,10 +300,42 @@ async function startApplication() {
     } catch (e) {
       logError('Zone.js 运行时检查失败', e);
     }
+
+    // 启动后维护任务：版本检查/缓存清理/SW 注销
+    scheduleIdleTask(() => {
+      void runPostBootstrapMaintenance();
+    });
   } catch (err: any) {
     clearTimeout(startupTimeout);
     logError('❌ 启动失败', err);
     showStartupError('启动失败', '应用无法正常启动', err);
+  }
+}
+
+async function runPostBootstrapMaintenance(): Promise<void> {
+  try {
+    const needsRefresh = await checkAndClearCacheIfNeeded();
+    if (needsRefresh) {
+      log('等待页面刷新...');
+      return;
+    }
+    await unregisterAllServiceWorkers();
+  } catch (e) {
+    logError('启动后维护任务失败', e);
+  }
+}
+
+async function unregisterAllServiceWorkers(): Promise<void> {
+  if (!('serviceWorker' in navigator)) return;
+  log('🧹 注销所有 Service Worker...');
+  try {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map(reg => reg.unregister()));
+    if (registrations.length === 0) {
+      log('无 Service Worker 需要注销');
+    }
+  } catch (e) {
+    logError('注销 SW 失败', e);
   }
 }
 

@@ -539,6 +539,7 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   /* 防止文本选择 */
   -webkit-user-select: none;
   user-select: none;
+  contain: layout paint;
 }
 
 /* ========== 拖拽幽灵元素样式 ========== */

@@ -89,8 +89,8 @@ import { CommonModule } from '@angular/common';
         </div>
         
         <div class="px-6 py-4 bg-stone-50 dark:bg-stone-800/50 border-t border-stone-200 dark:border-stone-700 flex justify-end gap-3">
-          <a href="https://github.com/your-repo/nanoflow#readme" target="_blank" class="px-4 py-2 text-stone-600 dark:text-stone-300 hover:text-stone-800 dark:hover:text-stone-100 text-sm font-medium transition-colors">
-            查看文档
+          <a href="https://github.com/dydyde/dde#一键部署私有实例" target="_blank" class="px-4 py-2 text-stone-600 dark:text-stone-300 hover:text-stone-800 dark:hover:text-stone-100 text-sm font-medium transition-colors">
+            部署指南
           </a>
           <button (click)="close.emit()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors text-sm font-medium">
             我知道了

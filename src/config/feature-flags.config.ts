@@ -25,6 +25,14 @@ export const FEATURE_FLAGS = {
   /** 是否启用 L3 硬熔断（可单独关闭硬熔断） */
   CIRCUIT_BREAKER_L3_ENABLED: true,
   
+  // ==================== Demo 模式 ====================
+  /** 是否启用 Demo 模式（显示 Demo Banner，限制功能） */
+  DEMO_MODE_ENABLED: false,
+  /** Demo 模式最大项目数限制 */
+  DEMO_PROJECT_LIMIT: 3,
+  /** Demo 数据保留天数（用于共享实例方案） */
+  DEMO_DATA_RETENTION_DAYS: 7,
+  
   // ==================== 安全功能 ====================
   /** 是否启用会话过期检查 */
   SESSION_EXPIRED_CHECK_ENABLED: true,
@@ -59,16 +67,18 @@ export const FEATURE_FLAGS = {
 } as const;
 
 /**
- * 特性开关类型
+ * 特性开关类型（仅布尔类型的开关）
  */
-export type FeatureFlag = keyof typeof FEATURE_FLAGS;
+export type FeatureFlag = {
+  [K in keyof typeof FEATURE_FLAGS]: typeof FEATURE_FLAGS[K] extends boolean ? K : never
+}[keyof typeof FEATURE_FLAGS];
 
 /**
  * 检查特性是否启用
  * 
- * @param flag 特性开关名称
+ * @param flag 特性开关名称（仅布尔类型）
  * @returns 是否启用
  */
 export function isFeatureEnabled(flag: FeatureFlag): boolean {
-  return FEATURE_FLAGS[flag];
+  return FEATURE_FLAGS[flag] as boolean;
 }

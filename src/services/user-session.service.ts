@@ -326,10 +326,20 @@ export class UserSessionService {
     // === 阶段 2: 后台静默同步云端数据 ===
     // 【关键改动】不阻塞，使用 .then() 而非 await
     
-    this.startBackgroundSync(userId, previousActive).catch(error => {
-      console.warn('[Session] 后台同步失败:', error);
-      // 后台同步失败不影响用户操作，静默处理
+    this.runIdleTask(() => {
+      this.startBackgroundSync(userId, previousActive).catch(error => {
+        console.warn('[Session] 后台同步失败:', error);
+        // 后台同步失败不影响用户操作，静默处理
+      });
     });
+  }
+
+  private runIdleTask(task: () => void): void {
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => task());
+    } else {
+      setTimeout(task, 0);
+    }
   }
   
   /**

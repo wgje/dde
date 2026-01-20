@@ -22,6 +22,10 @@ export const AUTH_CONFIG = {
 /**
  * Guard 配置
  * 路由守卫的超时和重试配置
+ * 
+ * 【性能优化 2026-01-20】
+ * 会话检查超时从 10s 减少到 2s，优先渲染 UI
+ * 策略：先放行路由让 UI 渲染，会话检查异步进行
  */
 export const GUARD_CONFIG = {
   /** 数据初始化最大等待时间（毫秒）- 弱网环境建议增加 */
@@ -30,8 +34,11 @@ export const GUARD_CONFIG = {
   CHECK_INTERVAL: 100,
   /** 慢网络警告阈值（毫秒）- 超过此时间显示网络警告 */
   SLOW_NETWORK_THRESHOLD: 3000,
-  /** 会话检查最大等待时间（毫秒） */
-  SESSION_CHECK_TIMEOUT: 10000,
+  /** 
+   * 会话检查最大等待时间（毫秒）
+   * 【优化】从 10s 减少到 2s，超时后立即放行让 UI 渲染
+   */
+  SESSION_CHECK_TIMEOUT: 2000,
   /** 会话检查轮询初始间隔（毫秒） */
   SESSION_CHECK_POLL_INTERVAL: 50,
   /** 会话检查轮询最大间隔（毫秒） */

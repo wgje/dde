@@ -6,6 +6,9 @@
 // 附件管理器
 export { AttachmentManagerComponent } from './attachment-manager.component';
 
+// Demo 模式横幅
+export { DemoBannerComponent } from './demo-banner.component';
+
 // 错误边界
 export { ErrorBoundaryComponent } from './error-boundary.component';
 

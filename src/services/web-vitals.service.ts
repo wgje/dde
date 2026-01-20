@@ -33,6 +33,13 @@ export const WEB_VITALS_THRESHOLDS = {
   TTFB: { good: 800, needsImprovement: 1800 },
 } as const;
 
+/**
+ * 开发环境 TTFB 阈值（放宽）
+ * 原因：GitHub Codespaces / 本地开发服务器的网络延迟是正常的
+ * TTFB 是服务器响应时间，不是客户端代码问题
+ */
+const DEV_TTFB_THRESHOLDS = { good: 3000, needsImprovement: 5000 };
+
 /** 指标评级 */
 export type MetricRating = 'good' | 'needs-improvement' | 'poor';
 
@@ -63,11 +70,11 @@ export class WebVitalsService {
     
     // 注册 Core Web Vitals 回调
     // 注意：FID 已在 web-vitals v4 中被 INP 替代
-    onLCP(metric => this.handleMetric(metric));
-    onFCP(metric => this.handleMetric(metric));
-    onCLS(metric => this.handleMetric(metric));
-    onINP(metric => this.handleMetric(metric));
-    onTTFB(metric => this.handleMetric(metric));
+    onLCP((metric: Metric) => this.handleMetric(metric));
+    onFCP((metric: Metric) => this.handleMetric(metric));
+    onCLS((metric: Metric) => this.handleMetric(metric));
+    onINP((metric: Metric) => this.handleMetric(metric));
+    onTTFB((metric: Metric) => this.handleMetric(metric));
     
     this.logger.info('Web Vitals 监控已启动');
   }
@@ -95,8 +102,18 @@ export class WebVitalsService {
   
   /**
    * 根据指标值计算评级
+   * 注意：开发环境下 TTFB 使用放宽的阈值
    */
   private getRating(name: string, value: number): MetricRating {
+    // 开发环境下 TTFB 使用放宽的阈值
+    // TTFB 是服务器响应时间（网络延迟），不是客户端代码问题
+    // GitHub Codespaces / 本地开发服务器的延迟是正常的
+    if (name === 'TTFB' && isDevMode()) {
+      if (value <= DEV_TTFB_THRESHOLDS.good) return 'good';
+      if (value <= DEV_TTFB_THRESHOLDS.needsImprovement) return 'needs-improvement';
+      return 'poor';
+    }
+    
     const thresholds = WEB_VITALS_THRESHOLDS[name as keyof typeof WEB_VITALS_THRESHOLDS];
     if (!thresholds) return 'good';
     
@@ -127,6 +144,12 @@ export class WebVitalsService {
     // 使用 Sentry 的 transaction 记录性能指标
     Sentry.setMeasurement(metric.name, metric.value, metric.name === 'CLS' ? '' : 'millisecond');
     
+    // 开发环境下不对 TTFB 发送告警
+    // TTFB 是服务器响应时间，开发环境的网络延迟是正常的
+    if (metric.name === 'TTFB' && isDevMode()) {
+      return;
+    }
+    
     // 如果评级差，额外发送告警消息
     if (rating === 'poor') {
       Sentry.captureMessage(`性能告警: ${metric.name} 超出阈值`, {
@@ -140,7 +163,7 @@ export class WebVitalsService {
           id: metric.id,
           delta: metric.delta,
           navigationType: metric.navigationType,
-          entries: metric.entries?.map(e => ({
+          entries: metric.entries?.map((e: PerformanceEntry) => ({
             name: e.name,
             startTime: e.startTime,
             duration: (e as PerformanceEntry & { duration?: number }).duration,

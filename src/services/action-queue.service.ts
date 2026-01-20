@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, DestroyRef, effect } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { QUEUE_CONFIG } from '../config';
 import { Project, Task, UserPreferences } from '../models';
 import { LoggerService } from './logger.service';
@@ -180,8 +180,8 @@ export class ActionQueueService {
    */
   private storageFailureCallback: ((data: { queue: QueuedAction[]; deadLetter: DeadLetterItem[] }) => void) | null = null;
   
-  // 【Sentry 上下文】使用 effect 自动同步队列状态到 Sentry
-  private readonly syncContextEffect = effect(() => {
+  // 【Sentry 上下文】手动同步队列状态到 Sentry（避免测试环境注入缺失）
+  private syncSentryContext(): void {
     const queueLength = this.pendingActions().length;
     const deadLetterCount = this.deadLetterQueue().length;
     
@@ -190,7 +190,7 @@ export class ActionQueueService {
       pendingActions: queueLength,
       deadLetterCount: deadLetterCount,
     });
-  });
+  }
   
   /** 网络状态 */
   private isOnline = true;
@@ -394,6 +394,7 @@ export class ActionQueueService {
     
     this.queueSize.set(this.pendingActions().length);
     this.saveQueueToStorage();
+    this.syncSentryContext();
     
     // Sentry breadcrumb: 记录入队操作
     Sentry.addBreadcrumb({
@@ -425,6 +426,7 @@ export class ActionQueueService {
     this.pendingActions.update(queue => queue.filter(a => a.id !== actionId));
     this.queueSize.set(this.pendingActions().length);
     this.saveQueueToStorage();
+    this.syncSentryContext();
   }
   
   /** 队列处理开始前的回调 - 用于暂停 Realtime 更新 */
@@ -599,6 +601,7 @@ export class ActionQueueService {
     this.pendingActions.set([]);
     this.queueSize.set(0);
     this.saveQueueToStorage();
+    this.syncSentryContext();
   }
   
   /**
@@ -608,6 +611,7 @@ export class ActionQueueService {
     this.deadLetterQueue.set([]);
     this.deadLetterSize.set(0);
     this.saveDeadLetterToStorage();
+    this.syncSentryContext();
   }
   
   /**
@@ -634,6 +638,7 @@ export class ActionQueueService {
     this.pendingActions.update(q => [...q, resetAction]);
     this.queueSize.set(this.pendingActions().length);
     this.saveQueueToStorage();
+    this.syncSentryContext();
     
     // 立即尝试处理
     if (this.isOnline) {
@@ -648,6 +653,7 @@ export class ActionQueueService {
     this.deadLetterQueue.update(q => q.filter(d => d.action.id !== itemId));
     this.deadLetterSize.set(this.deadLetterQueue().length);
     this.saveDeadLetterToStorage();
+    this.syncSentryContext();
   }
   
   /**
@@ -796,6 +802,7 @@ export class ActionQueueService {
     
     this.deadLetterSize.set(this.deadLetterQueue().length);
     this.saveDeadLetterToStorage();
+    this.syncSentryContext();
     
     // 通知监听者
     this.failureCallbacks.forEach(cb => {
@@ -1119,6 +1126,7 @@ export class ActionQueueService {
             );
             this.pendingActions.set(reducedQueue);
             this.queueSize.set(reducedQueue.length);
+            this.syncSentryContext();
             this.toast.warning('存储空间不足', `已清理 ${currentQueue.length - reducedQueue.length} 个较早的操作记录`);
             return;
           } catch {
@@ -1282,6 +1290,7 @@ export class ActionQueueService {
         if (Array.isArray(queue)) {
           this.pendingActions.set(queue);
           this.queueSize.set(queue.length);
+          this.syncSentryContext();
           return;
         }
       }
@@ -1291,6 +1300,7 @@ export class ActionQueueService {
         if (backupQueue && backupQueue.length > 0) {
           this.pendingActions.set(backupQueue);
           this.queueSize.set(backupQueue.length);
+          this.syncSentryContext();
           this.toast.info('队列恢复', `从备用存储恢复了 ${backupQueue.length} 个待处理操作`);
           // 恢复后尝试保存回 localStorage
           this.saveQueueToStorage();
@@ -1338,6 +1348,7 @@ export class ActionQueueService {
           
           this.deadLetterQueue.set(validQueue);
           this.deadLetterSize.set(validQueue.length);
+          this.syncSentryContext();
           
           // 如果有条目被清理，更新存储
           if (validQueue.length < queue.length) {
@@ -1376,6 +1387,7 @@ export class ActionQueueService {
     this.queueSize.set(0);
     this.deadLetterSize.set(0);
     this.isProcessing.set(false);
+    this.syncSentryContext();
     
     // 清空处理器和回调
     this.processors.clear();

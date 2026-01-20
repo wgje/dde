@@ -1,0 +1,68 @@
+# Netlify 部署配置
+# 部署教程：https://github.com/dydyde/dde/docs/deploy-private-instance.md
+
+[build]
+  # 构建命令
+  command = "npm run build"
+  
+  # 发布目录
+  publish = "dist/browser"
+
+[build.environment]
+  # Node.js 版本
+  NODE_VERSION = "20"
+
+# SPA 路由重写规则
+# 所有非静态文件请求重定向到 index.html（Angular 路由处理）
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# 安全头配置
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "SAMEORIGIN"
+    X-XSS-Protection = "1; mode=block"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# JavaScript 文件缓存策略
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Content-Type = "application/javascript"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# 静态资源缓存策略
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# CSS 和其他静态文件缓存
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.ico"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.png"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.svg"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.woff2"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

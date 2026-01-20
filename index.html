@@ -386,31 +386,24 @@
         var zoneLoaded = typeof window.Zone !== 'undefined';
         var elapsed = Date.now() - startTime;
         
-        // console.log('[DEBUG v15] 检查状态:', {
-        //   hasContent: hasContent,
-        //   isReady: isReady,
-        //   zoneLoaded: zoneLoaded,
-        //   elapsed: elapsed
-        // });
-        
+        // 【优化】只要有内容就立即隐藏加载器，不等待完全就绪
         if (isReady || hasContent) {
           var loader = document.getElementById('initial-loader');
           if (loader) loader.style.display = 'none';
-          // console.log('[DEBUG v15] ✅ 应用就绪');
           return;
         }
         
-        // 更新加载状态提示
-        if (elapsed > 5000) {
-          updateStatus('加载时间较长，请稍候...');
+        // 更新加载状态提示 - 更早显示提示
+        if (elapsed > 3000) {
+          updateStatus('加载中，请稍候...');
         }
-        if (elapsed > 10000) {
-          updateStatus('仍在加载中...');
+        if (elapsed > 6000) {
+          updateStatus('加载时间较长，可能是网络问题...');
         }
         
-        // 最多等待 25 秒（给版本检测和缓存清理留时间）
+        // 【优化】更频繁检查（100ms），更快响应
         if (elapsed < 25000) {
-          setTimeout(checkReady, 1000);
+          setTimeout(checkReady, 100);
         } else {
           console.error('[DEBUG v15] ❌ 加载超时');
           // console.log('[DEBUG v15] 调试日志:', window.__DEBUG_LOG__);
@@ -430,7 +423,8 @@
         }
       };
       
-      setTimeout(checkReady, 500);
+      // 【优化】更早开始检测，50ms 后开始
+      setTimeout(checkReady, 50);
     })();
   </script>
 </body>
