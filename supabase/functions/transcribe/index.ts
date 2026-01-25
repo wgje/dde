@@ -25,8 +25,18 @@ const GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions'
 const MAX_FILE_SIZE = 25 * 1024 * 1024
 
 serve(async (req: Request) => {
+  // 📊 请求入口日志 - 帮助确认请求是否到达
+  console.log('🎤 [Transcribe] Request received:', {
+    method: req.method,
+    url: req.url,
+    hasAuth: !!req.headers.get('Authorization'),
+    contentType: req.headers.get('Content-Type'),
+    timestamp: new Date().toISOString()
+  });
+
   // 处理跨域预检
   if (req.method === 'OPTIONS') {
+    console.log('🎤 [Transcribe] CORS preflight request');
     return new Response('ok', { headers: corsHeaders })
   }
 
@@ -34,11 +44,14 @@ serve(async (req: Request) => {
     // 1. 认证检查
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
+      console.error('🎤 [Transcribe] No Authorization header');
       return new Response(
         JSON.stringify({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }), 
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    
+    console.log('🎤 [Transcribe] Auth header present, validating user...');
 
     // 使用 SUPABASE_SERVICE_ROLE_KEY 查询配额（绕过 RLS）
     const supabaseAdmin = createClient(
@@ -55,11 +68,14 @@ serve(async (req: Request) => {
 
     const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
     if (authError || !user) {
+      console.error('🎤 [Transcribe] Auth validation failed:', authError?.message || 'No user');
       return new Response(
         JSON.stringify({ error: 'Invalid token', code: 'AUTH_INVALID' }), 
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    
+    console.log('🎤 [Transcribe] User authenticated:', user.id.slice(0, 8) + '...');
 
     // 2. 配额检查（使用 service_role 查询，确保准确）
     const today = new Date().toISOString().split('T')[0]
@@ -70,28 +86,39 @@ serve(async (req: Request) => {
       .eq('date', today)
 
     if (countError) {
-      console.error('Quota check error:', countError)
+      console.error('🎤 [Transcribe] Quota check error:', countError)
       // 配额检查失败时仍允许请求，避免影响正常使用
     } else if ((count ?? 0) >= DAILY_QUOTA_PER_USER) {
+      console.warn('🎤 [Transcribe] Quota exceeded for user:', user.id.slice(0, 8));
       return new Response(
         JSON.stringify({ error: '今日转写次数已达上限', code: 'QUOTA_EXCEEDED' }), 
         { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    
+    console.log('🎤 [Transcribe] Quota check passed, today usage:', count ?? 0);
 
     // 3. 从请求中获取 FormData（包含录音文件）
     const formData = await req.formData()
     const audioFile = formData.get('file')
 
     if (!audioFile || !(audioFile instanceof File)) {
+      console.error('🎤 [Transcribe] No audio file in request');
       return new Response(
         JSON.stringify({ error: 'No audio file uploaded', code: 'FILE_MISSING' }), 
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    
+    console.log('🎤 [Transcribe] Audio file received:', {
+      name: audioFile.name,
+      size: audioFile.size,
+      type: audioFile.type
+    });
 
     // 4. 检查文件大小
     if (audioFile.size > MAX_FILE_SIZE) {
+      console.error('🎤 [Transcribe] File too large:', audioFile.size);
       return new Response(
         JSON.stringify({ error: '音频文件过大，请控制在 25MB 以内', code: 'FILE_TOO_LARGE' }), 
         { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -109,12 +136,14 @@ serve(async (req: Request) => {
     // 6. 调用 Groq API
     const groqApiKey = Deno.env.get('GROQ_API_KEY')
     if (!groqApiKey) {
-      console.error('GROQ_API_KEY not configured')
+      console.error('🎤 [Transcribe] GROQ_API_KEY not configured')
       return new Response(
         JSON.stringify({ error: '转写服务未配置', code: 'SERVICE_NOT_CONFIGURED' }), 
         { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    
+    console.log('🎤 [Transcribe] Calling Groq API with whisper-large-v3...');
 
     const groqResponse = await fetch(GROQ_API_ENDPOINT, {
       method: 'POST',
@@ -126,7 +155,7 @@ serve(async (req: Request) => {
 
     if (!groqResponse.ok) {
       const errorText = await groqResponse.text()
-      console.error('Groq Error:', groqResponse.status, errorText)
+      console.error('🎤 [Transcribe] Groq API Error:', groqResponse.status, errorText)
       
       // 根据 Groq 错误码返回合适的响应
       if (groqResponse.status === 429) {
@@ -143,6 +172,12 @@ serve(async (req: Request) => {
     }
 
     const data = await groqResponse.json()
+    
+    console.log('🎤 [Transcribe] Groq response received:', {
+      textLength: data.text?.length || 0,
+      duration: data.duration,
+      language: data.language
+    });
 
     // 7. 记录使用量（异步，不阻塞响应）
     const recordUsage = async () => {

@@ -7,6 +7,7 @@
 
 import { Injectable, inject, signal } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
+import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
@@ -25,6 +26,7 @@ import { OfflineAudioCacheEntry } from '../models/focus';
 })
 export class SpeechToTextService {
   private supabaseClient = inject(SupabaseClientService);
+  private auth = inject(AuthService);
   private toast = inject(ToastService);
   private network = inject(NetworkAwarenessService);
   private logger = inject(LoggerService);
@@ -259,8 +261,21 @@ export class SpeechToTextService {
   
   /**
    * 实际调用 Edge Function 进行转写
+   * 
+   * ⚠️ 注意：调用前需确保用户已登录，否则请求会被 Supabase 网关拦截
    */
   private async transcribeBlob(audioBlob: Blob): Promise<string> {
+    // 🔐 认证检查：确保用户已登录
+    const userId = this.auth.currentUserId();
+    if (!userId) {
+      this.logger.error('SpeechToText', 'Transcription aborted: user not authenticated');
+      this.toast.error('认证失败', '请先登录后再使用语音转写功能');
+      throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
+    }
+    
+    // 📊 详细日志：帮助调试生产环境问题
+    this.logger.info('SpeechToText', `Starting transcription: size=${audioBlob.size}, type=${audioBlob.type}, userId=${userId.slice(0, 8)}...`);
+    
     const formData = new FormData();
     // 根据 mimeType 设置正确的文件扩展名
     const ext = audioBlob.type.includes('mp4') ? 'mp4' : 
@@ -270,6 +285,8 @@ export class SpeechToTextService {
 
     // 📝 关键：Supabase Functions SDK 需要特殊配置来处理 multipart/form-data
     // 不设置 Content-Type header，让浏览器自动生成（包含正确的 boundary）
+    this.logger.debug('SpeechToText', `Invoking Edge Function: ${this.config.EDGE_FUNCTION_NAME}`);
+    
     const { data, error } = await this.supabaseClient.client().functions.invoke(
       this.config.EDGE_FUNCTION_NAME, 
       { 
@@ -308,6 +325,9 @@ export class SpeechToTextService {
       
       throw error;
     }
+    
+    // ✅ 成功日志
+    this.logger.info('SpeechToText', `Transcription successful: ${data.text?.length || 0} chars, duration=${data.duration}s`);
     
     // 更新剩余配额
     remainingQuota.update(q => Math.max(0, q - 1));
