@@ -100,7 +100,12 @@ import { UI_CONFIG, AUTH_CONFIG } from './config';
   ],
   templateUrl: './app.component.html',
 })
+
 export class AppComponent implements OnInit, OnDestroy {
+  
+  public throwTestError(): void {
+    throw new Error("Sentry Test Error");
+  }
 
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
