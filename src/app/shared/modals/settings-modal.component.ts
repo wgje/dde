@@ -1,4 +1,4 @@
-import { Component, inject, Output, EventEmitter, input, signal, computed, viewChild, ElementRef } from '@angular/core';
+import { Component, inject, Output, EventEmitter, input, signal, computed, viewChild, ElementRef, isDevMode } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
@@ -7,6 +7,8 @@ import { ImportService, ImportOptions } from '../../../services/import.service';
 import { AttachmentExportService } from '../../../services/attachment-export.service';
 import { LocalBackupService } from '../../../services/local-backup.service';
 import { ThemeService } from '../../../services/theme.service';
+import { FocusPreferenceService } from '../../../services/focus-preference.service';
+import { GateService } from '../../../services/gate.service';
 import { ThemeType, ColorMode, Project } from '../../../models';
 import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
 
@@ -265,6 +267,122 @@ import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
             </div>
           </section>
           
+          <!-- 专注模式设置 -->
+          <section class="space-y-1.5">
+            <h3 class="text-[10px] font-bold text-slate-400 dark:text-stone-500 uppercase tracking-wider px-1">专注模式</h3>
+            
+            <div class="bg-white dark:bg-stone-800 border border-slate-200 dark:border-stone-700 rounded-xl shadow-sm divide-y divide-slate-100 dark:divide-stone-700 overflow-hidden">
+              <!-- 大门功能 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">🚪 大门</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">强制处理昨日遗留</div>
+                </div>
+                <button 
+                  type="button"
+                  (click)="toggleGateEnabled()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
+                  [class.bg-indigo-500]="focusPreferenceService.preferences().gateEnabled"
+                  [class.bg-slate-200]="!focusPreferenceService.preferences().gateEnabled">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="focusPreferenceService.preferences().gateEnabled">
+                  </span>
+                </button>
+              </div>
+              
+              <!-- 聚光灯功能 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">🔦 聚光灯</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">单任务专注模式</div>
+                </div>
+                <button 
+                  type="button"
+                  (click)="toggleSpotlightEnabled()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
+                  [class.bg-indigo-500]="focusPreferenceService.preferences().spotlightEnabled"
+                  [class.bg-slate-200]="!focusPreferenceService.preferences().spotlightEnabled">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="focusPreferenceService.preferences().spotlightEnabled">
+                  </span>
+                </button>
+              </div>
+              
+              <!-- 黑匣子功能 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">📦 黑匣子</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">语音/文字快速捕捉</div>
+                </div>
+                <button 
+                  type="button"
+                  (click)="toggleBlackBoxEnabled()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
+                  [class.bg-indigo-500]="focusPreferenceService.preferences().blackBoxEnabled"
+                  [class.bg-slate-200]="!focusPreferenceService.preferences().blackBoxEnabled">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="focusPreferenceService.preferences().blackBoxEnabled">
+                  </span>
+                </button>
+              </div>
+              
+              <!-- 地质层功能 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">🗻 地质层</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">已完成任务堆叠显示</div>
+                </div>
+                <button 
+                  type="button"
+                  (click)="toggleStrataEnabled()"
+                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
+                  [class.bg-indigo-500]="focusPreferenceService.preferences().strataEnabled"
+                  [class.bg-slate-200]="!focusPreferenceService.preferences().strataEnabled">
+                  <span 
+                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
+                    [class.translate-x-4]="focusPreferenceService.preferences().strataEnabled">
+                  </span>
+                </button>
+              </div>
+              
+              <!-- 每日跳过次数 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">跳过限制</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">每日最多跳过大门次数</div>
+                </div>
+                <select 
+                  (change)="updateMaxSnooze($event)"
+                  class="px-2 py-1 text-xs bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-slate-700 dark:text-stone-300">
+                  <option [value]="1" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 1">1 次</option>
+                  <option [value]="2" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 2">2 次</option>
+                  <option [value]="3" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 3">3 次</option>
+                  <option [value]="5" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 5">5 次</option>
+                </select>
+              </div>
+              
+              <!-- 开发工具（仅开发模式可见） -->
+              @if (isDev) {
+                <div class="px-3 py-2.5 bg-orange-50 dark:bg-orange-900/20 border-t border-orange-200/50 dark:border-orange-800/30">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <div class="text-xs font-semibold text-orange-700 dark:text-orange-300">🛠️ 开发测试</div>
+                      <div class="text-[10px] text-orange-500 dark:text-orange-400/70">触发大门界面（带模拟数据）</div>
+                    </div>
+                    <button 
+                      (click)="triggerDevGate()"
+                      class="px-2.5 py-1 text-[10px] font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors shadow-sm">
+                      测试大门
+                    </button>
+                  </div>
+                </div>
+              }
+            </div>
+          </section>
+          
           <!-- 本地自动备份 -->
           @if (localBackupService.isAvailable()) {
             <section class="space-y-1.5">
@@ -376,6 +494,11 @@ export class SettingsModalComponent {
   readonly attachmentExportService = inject(AttachmentExportService);
   readonly localBackupService = inject(LocalBackupService);
   readonly themeService = inject(ThemeService);
+  readonly focusPreferenceService = inject(FocusPreferenceService);
+  readonly gateService = inject(GateService);
+  
+  /** 是否开发模式（用于显示开发工具） */
+  readonly isDev = isDevMode();
   
   /** 当前登录用户邮箱 */
   sessionEmail = input<string | null>(null);
@@ -596,5 +719,61 @@ export class SettingsModalComponent {
         LOCAL_BACKUP_CONFIG.DEFAULT_INTERVAL_MS
       );
     }
+  }
+  
+  // ============================================
+  // 专注模式设置方法
+  // ============================================
+  
+  /**
+   * 切换大门功能
+   */
+  toggleGateEnabled(): void {
+    const current = this.focusPreferenceService.preferences().gateEnabled;
+    this.focusPreferenceService.update({ gateEnabled: !current });
+  }
+  
+  /**
+   * 切换聚光灯功能
+   */
+  toggleSpotlightEnabled(): void {
+    const current = this.focusPreferenceService.preferences().spotlightEnabled;
+    this.focusPreferenceService.update({ spotlightEnabled: !current });
+  }
+  
+  /**
+   * 切换黑匣子功能
+   */
+  toggleBlackBoxEnabled(): void {
+    const current = this.focusPreferenceService.preferences().blackBoxEnabled;
+    this.focusPreferenceService.update({ blackBoxEnabled: !current });
+  }
+  
+  /**
+   * 切换地质层功能
+   */
+  toggleStrataEnabled(): void {
+    const current = this.focusPreferenceService.preferences().strataEnabled;
+    this.focusPreferenceService.update({ strataEnabled: !current });
+  }
+  
+  /**
+   * 更新每日最大跳过次数
+   */
+  updateMaxSnooze(event: Event): void {
+    const select = event.target as HTMLSelectElement;
+    const value = parseInt(select.value, 10);
+    if (!isNaN(value) && value > 0) {
+      this.focusPreferenceService.update({ maxSnoozePerDay: value });
+    }
+  }
+  
+  /**
+   * [DEV] 触发大门测试界面
+   * 关闭设置模态框并显示大门（带模拟数据）
+   */
+  triggerDevGate(): void {
+    this.gateService.devForceShowGate();
+    this.close.emit();
   }
 }

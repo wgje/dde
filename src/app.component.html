@@ -94,6 +94,9 @@
     [fatal]="true"
     [containerClass]="'full-page'">
     
+  <!-- Focus Mode 覆盖层 - 大门、聚光灯、黑匣子、地质层 -->
+  <app-focus-mode></app-focus-mode>
+    
   <div data-testid="app-container" class="flex flex-1 w-full min-h-0 overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
   
   <!-- Toast 通知容器 -->
@@ -322,6 +325,12 @@
     <!-- Sidebar Footer -->
     <div class="mb-4 shrink-0 space-y-2"
          [ngClass]="{'mx-4': !isMobile(), 'mx-2': isMobile()}">
+      
+      <!-- Focus Mode 工具栏 -->
+      <div class="flex items-center justify-center gap-2 py-2 border-b border-stone-200/50 dark:border-stone-700/50 mb-2">
+        <app-spotlight-trigger></app-spotlight-trigger>
+      </div>
+      
       <!-- 嵌入式同步状态组件 -->
       <app-sync-status data-testid="sync-status" [embedded]="true"></app-sync-status>
       

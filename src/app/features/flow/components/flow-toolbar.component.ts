@@ -43,13 +43,15 @@ import { Task } from '../../../../models';
     }
 
     <!-- Zoom Controls -->
-    <div class="absolute z-10 flex gap-2"
+    <div class="absolute z-10 flex gap-2 transition-all duration-300 ease-in-out"
          [class.flex-col-reverse]="!uiState.isMobile()"
          [class.flex-row]="uiState.isMobile()"
-         [class.bottom-4]="!uiState.isMobile()"
-         [class.left-4]="!uiState.isMobile()"
+         [class.bottom-4]="!uiState.isMobile() && !isPaletteOpen()"
+         [class.bottom-[170px]]="!uiState.isMobile() && isPaletteOpen()"
+         [class.left-4]="!uiState.isMobile() && !isPaletteOpen()"
+         [class.right-4]="!uiState.isMobile() && isPaletteOpen()"
          [class.left-2]="uiState.isMobile()"
-         [style.bottom]="mobileBottomPosition()">
+         [style.bottom]="uiState.isMobile() ? mobileBottomPosition() : null">
         
         <!-- 折叠/展开切换按钮 -->
         <button (click)="isCollapsed.set(!isCollapsed())" 
@@ -252,6 +254,7 @@ export class FlowToolbarComponent {
   
   // 输入
   readonly isLinkMode = input<boolean>(false);
+  readonly isPaletteOpen = input<boolean>(true);
   readonly linkSourceTask = input<Task | null>(null);
   readonly isResizingDrawer = input<boolean>(false);
   readonly drawerHeightVh = input<number>(35);

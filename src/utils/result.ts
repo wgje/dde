@@ -44,7 +44,20 @@ export const ErrorCodes = {
   PERMISSION_DENIED: 'PERMISSION_DENIED',
   
   // 通用错误
-  UNKNOWN: 'UNKNOWN'
+  UNKNOWN: 'UNKNOWN',
+  OPERATION_FAILED: 'OPERATION_FAILED',
+  
+  // Focus 模式错误码
+  FOCUS_QUOTA_EXCEEDED: 'FOCUS_QUOTA_EXCEEDED',
+  FOCUS_TRANSCRIBE_FAILED: 'FOCUS_TRANSCRIBE_FAILED',
+  FOCUS_RECORDING_NOT_SUPPORTED: 'FOCUS_RECORDING_NOT_SUPPORTED',
+  FOCUS_RECORDING_PERMISSION_DENIED: 'FOCUS_RECORDING_PERMISSION_DENIED',
+  FOCUS_RECORDING_TOO_SHORT: 'FOCUS_RECORDING_TOO_SHORT',
+  FOCUS_RECORDING_TOO_LONG: 'FOCUS_RECORDING_TOO_LONG',
+  FOCUS_NETWORK_ERROR: 'FOCUS_NETWORK_ERROR',
+  FOCUS_ENTRY_NOT_FOUND: 'FOCUS_ENTRY_NOT_FOUND',
+  FOCUS_SNOOZE_LIMIT_EXCEEDED: 'FOCUS_SNOOZE_LIMIT_EXCEEDED',
+  FOCUS_SERVICE_UNAVAILABLE: 'FOCUS_SERVICE_UNAVAILABLE',
 } as const;
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
@@ -88,7 +101,19 @@ export const ErrorMessages: Record<ErrorCode, string> = {
   [ErrorCodes.SYNC_OFFLINE]: '当前离线，数据将在恢复连接后同步',
   [ErrorCodes.SYNC_AUTH_EXPIRED]: '登录已过期，请重新登录',
   [ErrorCodes.PERMISSION_DENIED]: '没有权限执行此操作',
-  [ErrorCodes.UNKNOWN]: '未知错误'
+  [ErrorCodes.UNKNOWN]: '未知错误',
+  [ErrorCodes.OPERATION_FAILED]: '操作失败',
+  // Focus 模式错误消息
+  [ErrorCodes.FOCUS_QUOTA_EXCEEDED]: '今日转写次数已达上限',
+  [ErrorCodes.FOCUS_TRANSCRIBE_FAILED]: '语音转写失败，请重试',
+  [ErrorCodes.FOCUS_RECORDING_NOT_SUPPORTED]: '当前浏览器不支持录音功能',
+  [ErrorCodes.FOCUS_RECORDING_PERMISSION_DENIED]: '请允许麦克风权限后重试',
+  [ErrorCodes.FOCUS_RECORDING_TOO_SHORT]: '录音太短，请按住久一点',
+  [ErrorCodes.FOCUS_RECORDING_TOO_LONG]: '录音超过最大时长限制',
+  [ErrorCodes.FOCUS_NETWORK_ERROR]: '网络连接失败，已保存待重试',
+  [ErrorCodes.FOCUS_ENTRY_NOT_FOUND]: '条目不存在',
+  [ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED]: '今日跳过次数已达上限',
+  [ErrorCodes.FOCUS_SERVICE_UNAVAILABLE]: '转写服务暂不可用',
 };
 
 /**

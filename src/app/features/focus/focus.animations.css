@@ -1,0 +1,520 @@
+/**
+ * Focus Mode 动画样式
+ * 
+ * 包含所有四个模块的动画效果
+ */
+
+/* ============================================================
+ * 通用动画基础
+ * ============================================================ */
+
+/* 淡入 */
+@keyframes focus-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 淡出 */
+@keyframes focus-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 缩放淡入 */
+@keyframes focus-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 缩放淡出 */
+@keyframes focus-scale-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+/* ============================================================
+ * Gate (大门) 动画
+ * ============================================================ */
+
+/* 大门进场 */
+@keyframes gate-enter {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    backdrop-filter: blur(8px);
+  }
+}
+
+/* 大门退场 */
+@keyframes gate-leave {
+  from {
+    opacity: 1;
+    backdrop-filter: blur(8px);
+  }
+  to {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+}
+
+/* 卡片弹出 */
+@keyframes gate-card-pop {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 卡片滑走（已读） */
+@keyframes gate-card-slide-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+/* 卡片完成动画 */
+@keyframes gate-card-complete {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+}
+
+/* 卡片贪睡（缩小收起） */
+@keyframes gate-card-snooze {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.9);
+  }
+}
+
+/* 进度条动画 */
+@keyframes gate-progress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: var(--progress-percent, 100%);
+  }
+}
+
+.gate-overlay {
+  animation: gate-enter 0.3s ease-out forwards;
+}
+
+.gate-overlay.leaving {
+  animation: gate-leave 0.3s ease-out forwards;
+}
+
+.gate-card {
+  animation: gate-card-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.gate-card.slide-out {
+  animation: gate-card-slide-out 0.3s ease-in forwards;
+}
+
+.gate-card.completing {
+  animation: gate-card-complete 0.4s ease-out forwards;
+}
+
+.gate-card.snoozing {
+  animation: gate-card-snooze 0.3s ease-out forwards;
+}
+
+/* ============================================================
+ * Black Box (黑匣子) 动画
+ * ============================================================ */
+
+/* 录音按钮脉冲 */
+@keyframes blackbox-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 15px rgba(239, 68, 68, 0);
+  }
+}
+
+/* 录音波形 */
+@keyframes blackbox-wave {
+  0% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+  100% {
+    transform: scaleY(0.4);
+  }
+}
+
+/* 转录进度旋转 */
+@keyframes blackbox-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 条目淡入 */
+@keyframes blackbox-entry-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 条目删除 */
+@keyframes blackbox-entry-delete {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+    height: var(--entry-height, auto);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-100%);
+    height: 0;
+    padding: 0;
+    margin: 0;
+  }
+}
+
+.blackbox-recorder.recording {
+  animation: blackbox-pulse 1.5s ease-in-out infinite;
+}
+
+.blackbox-wave-bar {
+  animation: blackbox-wave 0.5s ease-in-out infinite;
+}
+
+.blackbox-wave-bar:nth-child(1) { animation-delay: 0s; }
+.blackbox-wave-bar:nth-child(2) { animation-delay: 0.1s; }
+.blackbox-wave-bar:nth-child(3) { animation-delay: 0.2s; }
+.blackbox-wave-bar:nth-child(4) { animation-delay: 0.3s; }
+.blackbox-wave-bar:nth-child(5) { animation-delay: 0.4s; }
+
+.blackbox-spinner {
+  animation: blackbox-spin 1s linear infinite;
+}
+
+.blackbox-entry {
+  animation: blackbox-entry-in 0.3s ease-out forwards;
+}
+
+.blackbox-entry.deleting {
+  animation: blackbox-entry-delete 0.3s ease-out forwards;
+}
+
+/* ============================================================
+ * Spotlight (聚光灯) 动画
+ * ============================================================ */
+
+/* 聚光灯进场 */
+@keyframes spotlight-enter {
+  from {
+    opacity: 0;
+    background: rgba(0, 0, 0, 0);
+  }
+  to {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.85);
+  }
+}
+
+/* 聚光灯退场 */
+@keyframes spotlight-leave {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 任务卡片聚焦 */
+@keyframes spotlight-card-focus {
+  from {
+    opacity: 0;
+    transform: translateY(30px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 任务完成庆祝 */
+@keyframes spotlight-celebrate {
+  0% {
+    transform: scale(1);
+  }
+  25% {
+    transform: scale(1.1) rotate(-2deg);
+  }
+  50% {
+    transform: scale(1.15) rotate(2deg);
+  }
+  75% {
+    transform: scale(1.1) rotate(-1deg);
+  }
+  100% {
+    transform: scale(0) rotate(0);
+  }
+}
+
+/* 切换到下一个任务 */
+@keyframes spotlight-next {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-100px);
+  }
+}
+
+/* 呼吸动画（任务进行中） */
+@keyframes spotlight-breathe {
+  0%, 100% {
+    box-shadow: 0 0 30px rgba(251, 191, 36, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 60px rgba(251, 191, 36, 0.4);
+  }
+}
+
+.spotlight-view {
+  animation: spotlight-enter 0.4s ease-out forwards;
+}
+
+.spotlight-view.leaving {
+  animation: spotlight-leave 0.3s ease-out forwards;
+}
+
+.spotlight-card {
+  animation: spotlight-card-focus 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.spotlight-card.active {
+  animation: spotlight-breathe 3s ease-in-out infinite;
+}
+
+.spotlight-card.completing {
+  animation: spotlight-celebrate 0.6s ease-out forwards;
+}
+
+.spotlight-card.skipping {
+  animation: spotlight-next 0.3s ease-out forwards;
+}
+
+/* ============================================================
+ * Strata (地质层) 动画
+ * ============================================================ */
+
+/* 地层面板展开 */
+@keyframes strata-expand {
+  from {
+    max-height: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: var(--strata-max-height, 300px);
+    opacity: 1;
+  }
+}
+
+/* 地层面板收起 */
+@keyframes strata-collapse {
+  from {
+    max-height: var(--strata-max-height, 300px);
+    opacity: 1;
+  }
+  to {
+    max-height: 0;
+    opacity: 0;
+  }
+}
+
+/* 新层沉淀 */
+@keyframes strata-sink {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 层级压缩（越老越薄） */
+@keyframes strata-compress {
+  from {
+    padding-top: var(--original-padding);
+    padding-bottom: var(--original-padding);
+  }
+  to {
+    padding-top: calc(var(--original-padding) * var(--age-factor, 1));
+    padding-bottom: calc(var(--original-padding) * var(--age-factor, 1));
+  }
+}
+
+/* 悬停恢复 */
+@keyframes strata-hover-expand {
+  from {
+    opacity: var(--layer-opacity);
+    transform: scale(1);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+.strata-panel {
+  overflow: hidden;
+}
+
+.strata-panel.expanded {
+  animation: strata-expand 0.3s ease-out forwards;
+}
+
+.strata-panel.collapsed {
+  animation: strata-collapse 0.3s ease-out forwards;
+}
+
+.strata-layer {
+  animation: strata-sink 0.3s ease-out forwards;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.strata-layer:hover {
+  animation: strata-hover-expand 0.2s ease-out forwards;
+}
+
+/* ============================================================
+ * 通用工具类
+ * ============================================================ */
+
+/* 禁用动画（无障碍） */
+@media (prefers-reduced-motion: reduce) {
+  .gate-overlay,
+  .gate-card,
+  .blackbox-recorder,
+  .blackbox-entry,
+  .spotlight-view,
+  .spotlight-card,
+  .strata-panel,
+  .strata-layer {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* 加载骨架屏 */
+@keyframes skeleton-shimmer {
+  from {
+    background-position: -200px 0;
+  }
+  to {
+    background-position: calc(200px + 100%) 0;
+  }
+}
+
+.focus-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 200px 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+}
+
+/* 成功闪烁 */
+@keyframes focus-success-flash {
+  0% {
+    background-color: transparent;
+  }
+  50% {
+    background-color: rgba(34, 197, 94, 0.2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.focus-success {
+  animation: focus-success-flash 0.5s ease-out;
+}
+
+/* 错误抖动 */
+@keyframes focus-error-shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  20%, 60% {
+    transform: translateX(-5px);
+  }
+  40%, 80% {
+    transform: translateX(5px);
+  }
+}
+
+.focus-error {
+  animation: focus-error-shake 0.4s ease-out;
+}

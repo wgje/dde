@@ -97,6 +97,7 @@ import * as go from 'gojs';
       <app-flow-palette
         [height]="paletteHeight()"
         [isDropTargetActive]="dragDrop.isDropTargetActive()"
+        (isOpenChange)="onPaletteOpenChange($event)"
         (heightChange)="paletteHeight.set($event)"
         (centerOnNode)="centerOnNode($event)"
         (createUnassigned)="createUnassigned()"
@@ -114,6 +115,26 @@ import * as go from 'gojs';
       <div class="flex-1 min-h-0 relative overflow-hidden dark:bg-stone-950 md:border-t md:border-[#78716C]/50" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
         @if (!diagram.error()) {
           <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+          
+          <!-- 移动端导航按钮 -->
+          @if (uiState.isMobile()) {
+            <!-- 左下角：前往文本视图 -->
+            <button
+              (click)="goBackToText.emit()"
+              class="absolute left-0 bottom-16 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-l-0 border-stone-200 dark:border-stone-700 rounded-r-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
+              title="返回文本">
+              <span class="text-[8px] text-stone-400 group-hover:text-stone-600 dark:group-hover:text-stone-300 transform transition-transform duration-300">◀</span>
+            </button>
+
+            <!-- 右侧小地图上方：展开项目列表 -->
+            <button
+              (click)="toggleRightPanel()"
+              class="absolute right-0 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-r-0 border-stone-200 dark:border-stone-700 rounded-l-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
+              style="bottom: 96px;" 
+              title="项目列表">
+              <span class="text-[8px] text-stone-400 group-hover:text-stone-600 dark:group-hover:text-stone-300 transform transition-transform duration-300">◀</span>
+            </button>
+          }
           
           <!-- 批量操作浮动工具栏（放在流程图画布内部） -->
           @if (selectionService.hasMultipleSelection()) {
@@ -266,6 +287,7 @@ import * as go from 'gojs';
         <!-- 工具栏 -->
         <app-flow-toolbar
           [isLinkMode]="link.isLinkMode()"
+          [isPaletteOpen]="isPaletteOpen()"
           [linkSourceTask]="link.linkSourceTask()"
           [isResizingDrawer]="isResizingDrawerSignal()"
           [drawerHeightVh]="drawerHeight()"
@@ -510,6 +532,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 小地图状态 */
   readonly isOverviewVisible = signal(true);
   readonly isOverviewCollapsed = signal(false);
+  
+  /** 侧边栏（调色板）展开状态 */
+  readonly isPaletteOpen = signal(true);
   
   /** 右侧滑出面板状态（移动端） */
   readonly isRightPanelOpen = signal(false);
@@ -1163,6 +1188,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       // 移动端：同时关闭删除提示
       if (this.uiState.isMobile()) {
         this.link.cancelLinkDelete();
+        // 移动端：点击流程图画布时收缩左侧调色板（黑匣子栏）
+        if (this.isPaletteOpen()) {
+          this.isPaletteOpen.set(false);
+        }
       }
     });
 
@@ -2003,11 +2032,25 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   emitToggleSidebar(): void {
     window.dispatchEvent(new CustomEvent('toggle-sidebar'));
   }
+
+  /** 处理调色板展开状态变更 */
+  onPaletteOpenChange(isOpen: boolean): void {
+    this.isPaletteOpen.set(isOpen);
+    // 互斥逻辑：左侧展开时，收起右侧面板
+    if (isOpen && this.uiState.isMobile()) {
+      this.isRightPanelOpen.set(false);
+    }
+  }
   
   /** 切换右侧面板（移动端） */
   toggleRightPanel(): void {
     if (this.uiState.isMobile()) {
-      this.isRightPanelOpen.update(v => !v);
+      const willOpen = !this.isRightPanelOpen();
+      // 互斥逻辑：先收起左侧调色板，再展开右侧面板（丝滑过渡）
+      if (willOpen && this.isPaletteOpen()) {
+        this.isPaletteOpen.set(false);
+      }
+      this.isRightPanelOpen.set(willOpen);
     }
   }
   

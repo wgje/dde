@@ -102,5 +102,12 @@ export {
   type LocalBackupCompatibility
 } from './local-backup.config';
 
+// Focus Mode 配置
+export {
+  FOCUS_CONFIG,
+  FocusErrorCodes,
+  FocusErrorMessages
+} from './focus.config';
+
 // 流程图样式（独立文件，保持不变）
 export * from './flow-styles';

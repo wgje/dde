@@ -1,10 +1,11 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.2.0
--- 最后验证: 2026-01-09 (MCP 深度审计通过)
+-- 版本: 3.3.0
+-- 最后验证: 2026-01-25
 --
 -- 更新日志：
+--   3.3.0 (2026-01-25): 添加专注模式支持：black_box_entries 表和 transcription_usage 表
 --   3.2.0 (2026-01-09): 修复 batch_upsert_tasks 函数：移除不存在的 owner_id 列引用，
 --                       使用 project.owner_id + project_members 进行权限校验；
 --                       添加 SET search_path；修复 rank/x/y 类型为 numeric
@@ -224,6 +225,123 @@ CREATE TRIGGER update_user_preferences_updated_at
 ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON public.user_preferences(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_preferences_updated_at ON public.user_preferences(updated_at);
+
+-- ============================================
+-- 5.1 黑匣子条目表 (black_box_entries) - 专注模式
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.black_box_entries (
+  -- 主键：由客户端 crypto.randomUUID() 生成
+  id UUID PRIMARY KEY,
+  
+  -- 外键关联
+  project_id UUID REFERENCES public.projects(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  
+  -- 内容
+  content TEXT NOT NULL,
+  
+  -- 时间字段
+  date DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  -- 状态字段
+  is_read BOOLEAN DEFAULT FALSE,
+  is_completed BOOLEAN DEFAULT FALSE,
+  is_archived BOOLEAN DEFAULT FALSE,
+  
+  -- 跳过/稍后提醒
+  snooze_until DATE DEFAULT NULL,
+  snooze_count INTEGER DEFAULT 0,
+  
+  -- 软删除
+  deleted_at TIMESTAMPTZ DEFAULT NULL
+);
+
+-- 添加表注释
+COMMENT ON TABLE public.black_box_entries IS '黑匣子条目表 - 语音转写记录，用于紧急捕捉想法';
+COMMENT ON COLUMN public.black_box_entries.id IS '由客户端 crypto.randomUUID() 生成';
+COMMENT ON COLUMN public.black_box_entries.content IS '语音转写后的文本内容';
+COMMENT ON COLUMN public.black_box_entries.date IS 'YYYY-MM-DD 格式，用于按日分组';
+COMMENT ON COLUMN public.black_box_entries.is_read IS '是否已读，已读条目不会在大门中出现';
+COMMENT ON COLUMN public.black_box_entries.is_completed IS '是否已完成，计入地质层';
+COMMENT ON COLUMN public.black_box_entries.is_archived IS '是否已归档，不显示在主列表';
+COMMENT ON COLUMN public.black_box_entries.snooze_until IS '跳过至该日期，在此之前不会在大门中出现';
+COMMENT ON COLUMN public.black_box_entries.snooze_count IS '已跳过次数';
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_black_box_user_date ON public.black_box_entries(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_black_box_project ON public.black_box_entries(project_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_black_box_pending ON public.black_box_entries(user_id, is_read, is_completed) WHERE deleted_at IS NULL AND is_archived = FALSE;
+CREATE INDEX IF NOT EXISTS idx_black_box_updated_at ON public.black_box_entries(updated_at);
+
+-- updated_at 自动更新触发器
+DROP TRIGGER IF EXISTS update_black_box_entries_updated_at ON public.black_box_entries;
+CREATE TRIGGER update_black_box_entries_updated_at
+  BEFORE UPDATE ON public.black_box_entries
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- RLS 策略
+ALTER TABLE public.black_box_entries ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "black_box_select_policy" ON public.black_box_entries;
+CREATE POLICY "black_box_select_policy" ON public.black_box_entries 
+  FOR SELECT USING (
+    auth.uid() = user_id OR
+    project_id IN (
+      SELECT id FROM public.projects WHERE owner_id = auth.uid()
+      UNION
+      SELECT project_id FROM public.project_members WHERE user_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "black_box_insert_policy" ON public.black_box_entries;
+CREATE POLICY "black_box_insert_policy" ON public.black_box_entries
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "black_box_update_policy" ON public.black_box_entries;
+CREATE POLICY "black_box_update_policy" ON public.black_box_entries
+  FOR UPDATE USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "black_box_delete_policy" ON public.black_box_entries;
+CREATE POLICY "black_box_delete_policy" ON public.black_box_entries
+  FOR DELETE USING (auth.uid() = user_id);
+
+-- ============================================
+-- 5.2 转写使用量表 (transcription_usage) - 专注模式
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.transcription_usage (
+  -- 主键：由 Edge Function 使用 crypto.randomUUID() 生成
+  id UUID PRIMARY KEY,
+  
+  -- 外键关联
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  
+  -- 使用量数据
+  date DATE NOT NULL DEFAULT CURRENT_DATE,
+  audio_seconds INTEGER DEFAULT 0,
+  
+  -- 时间戳
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 添加表注释
+COMMENT ON TABLE public.transcription_usage IS '转写 API 使用量追踪表 - 用于配额控制';
+COMMENT ON COLUMN public.transcription_usage.audio_seconds IS '估算的音频秒数';
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_transcription_usage_user_date ON public.transcription_usage(user_id, date);
+
+-- RLS 策略
+ALTER TABLE public.transcription_usage ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "transcription_usage_select_policy" ON public.transcription_usage;
+CREATE POLICY "transcription_usage_select_policy" ON public.transcription_usage 
+  FOR SELECT USING (auth.uid() = user_id);
+
+-- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
 
 -- ============================================
 -- 6. 清理日志表 (cleanup_logs)

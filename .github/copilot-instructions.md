@@ -1,14 +1,15 @@
 # NanoFlow AI 编码指南
 
-> **核心哲学**：不要造轮子。Supabase 做同步，UUID 做 ID，PWA 做离线，Sentry 做监控。
+> **核心哲学**：不要造轮子。Supabase 做同步，UUID 做 ID，PWA 做离线，Sentry 做监控，Groq 做语音转写。
 
 ## 技术栈
 
 | 技术 | 用途 |
 |------|------|
 | Angular 19.x | Signals + 独立组件 + OnPush |
-| Supabase | 认证 + PostgreSQL + Storage |
+| Supabase | 认证 + PostgreSQL + Storage + Edge Functions |
 | GoJS | 流程图渲染 |
+| Groq | whisper-large-v3 语音转写（Edge Function 代理） |
 | Sentry | 错误监控 + 会话回放 |
 | Vitest / Playwright | 单元 / E2E 测试 |
 
@@ -47,6 +48,7 @@ src/
 │   │   │   └── modal-loader.service.ts    # 模态框懒加载
 │   │   └── state/
 │   │       ├── stores.ts                  # Signals 状态（Map<id, Task>）
+│   │       ├── focus-stores.ts            # 专注模式状态（Gate/Spotlight/Strata/BlackBox）
 │   │       └── store-persistence.service.ts
 │   │
 │   ├── shell/                     # 应用容器
@@ -77,18 +79,42 @@ src/
 │   │   │       ├── minimap-math.service.ts        # 小地图数学
 │   │   │       └── reactive-minimap.service.ts    # 响应式小地图
 │   │   │
-│   │   └── text/                  # 文本视图（移动端默认）
-│   │       ├── components/        # 12 组件
-│   │       │   ├── text-view.component.ts
-│   │       │   ├── text-stages.component.ts
-│   │       │   ├── text-stage-card.component.ts
-│   │       │   ├── text-task-card.component.ts
-│   │       │   ├── text-task-editor.component.ts
-│   │       │   ├── text-task-connections.component.ts
-│   │       │   ├── text-unassigned.component.ts
-│   │       │   └── text-unfinished.component.ts
-│   │       └── services/          # Text 相关服务
-│   │           └── text-view-drag-drop.service.ts
+│   │   ├── text/                  # 文本视图（移动端默认）
+│   │   │   ├── components/        # 12 组件
+│   │   │   │   ├── text-view.component.ts
+│   │   │   │   ├── text-stages.component.ts
+│   │   │   │   ├── text-stage-card.component.ts
+│   │   │   │   ├── text-task-card.component.ts
+│   │   │   │   ├── text-task-editor.component.ts
+│   │   │   │   ├── text-task-connections.component.ts
+│   │   │   │   ├── text-unassigned.component.ts
+│   │   │   │   └── text-unfinished.component.ts
+│   │   │   └── services/          # Text 相关服务
+│   │   │       └── text-view-drag-drop.service.ts
+│   │   │
+│   │   └── focus/                 # 🆕 专注模式
+│   │       ├── focus-mode.component.ts      # 专注模式入口
+│   │       ├── focus.animations.css         # 动画样式（521 行）
+│   │       └── components/
+│   │           ├── gate/                    # 大门模块
+│   │           │   ├── gate-overlay.component.ts    # 全屏遮罩 + 键盘快捷键
+│   │           │   ├── gate-card.component.ts       # 条目卡片
+│   │           │   └── gate-actions.component.ts    # 操作按钮组
+│   │           ├── spotlight/               # 聚光灯模块
+│   │           │   ├── spotlight-view.component.ts  # 聚光灯视图
+│   │           │   ├── spotlight-card.component.ts  # 任务卡片
+│   │           │   └── spotlight-trigger.component.ts
+│   │           ├── strata/                  # 地质层模块
+│   │           │   ├── strata-view.component.ts     # 地质层视图
+│   │           │   ├── strata-layer.component.ts    # 单日层
+│   │           │   └── strata-item.component.ts     # 单个条目
+│   │           └── black-box/               # 黑匣子模块
+│   │               ├── black-box-panel.component.ts     # 面板
+│   │               ├── black-box-recorder.component.ts  # 录音按钮
+│   │               ├── black-box-entry.component.ts     # 条目
+│   │               ├── black-box-text-input.component.ts
+│   │               ├── black-box-trigger.component.ts
+│   │               └── black-box-date-group.component.ts
 │   │
 │   └── shared/
 │       ├── components/            # 8 通用组件（含 index.ts barrel）
@@ -98,7 +124,7 @@ src/
 │           └── login | settings | new-project | dashboard | trash | delete-confirm
 │               conflict | error-recovery | migration | config-help | storage-escape | recovery
 │
-├── services/                      # 主服务层（60+ 服务）
+├── services/                      # 主服务层（70+ 服务）
 │   ├── store.service.ts           # 门面 Facade ※ 禁止业务逻辑
 │   │
 │   ├── # 业务服务
@@ -114,6 +140,15 @@ src/
 │   ├── search.service.ts
 │   ├── layout.service.ts
 │   ├── lineage-color.service.ts
+│   │
+│   ├── # 🆕 专注模式服务
+│   ├── gate.service.ts                 # 大门逻辑
+│   ├── spotlight.service.ts            # 聚光灯逻辑
+│   ├── strata.service.ts               # 地质层逻辑
+│   ├── black-box.service.ts            # 黑匣子 CRUD
+│   ├── black-box-sync.service.ts       # 黑匣子同步
+│   ├── speech-to-text.service.ts       # 语音转写（调用 Edge Function）
+│   ├── focus-preference.service.ts     # 专注模式偏好
 │   │
 │   ├── # 状态服务
 │   ├── project-state.service.ts    # 项目/任务状态
@@ -171,6 +206,7 @@ src/
 │   ├── layout.config.ts           # LAYOUT_CONFIG, FLOATING_TREE_CONFIG, GOJS_CONFIG
 │   ├── timeout.config.ts          # TIMEOUT_CONFIG, RETRY_POLICY
 │   ├── auth.config.ts             # AUTH_CONFIG, GUARD_CONFIG
+│   ├── focus.config.ts            # 🆕 FOCUS_CONFIG（配额、跳过限制等）
 │   ├── ui.config.ts
 │   ├── task.config.ts
 │   ├── attachment.config.ts
@@ -182,6 +218,7 @@ src/
 │
 ├── models/
 │   ├── index.ts                   # Task, Project, Connection, Attachment, ColorMode
+│   ├── focus.ts                   # 🆕 BlackBoxEntry, StrataItem, GateState, FocusPreferences
 │   ├── supabase-types.ts
 │   ├── supabase-mapper.ts
 │   ├── api-types.ts
@@ -204,6 +241,13 @@ src/
     ├── environment.ts             # 生产
     ├── environment.development.ts # 开发
     └── environment.template.ts
+
+supabase/
+├── functions/
+│   └── transcribe/                # 🆕 语音转写 Edge Function
+│       └── index.ts               # Groq whisper-large-v3 代理
+└── migrations/
+    └── 20260123000000_focus_mode.sql  # 🆕 专注模式数据库迁移
 ```
 
 ---
@@ -239,6 +283,8 @@ FlowTemplateService → flow-template-events.ts → FlowEventService
 | `TIMEOUT_CONFIG.HEAVY` | 30000ms | timeout.config.ts |
 | `FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH` | 100 | layout.config.ts |
 | `AUTH_CONFIG.LOCAL_MODE_USER_ID` | 'local-user' | auth.config.ts |
+| `FOCUS_CONFIG.DAILY_TRANSCRIPTION_LIMIT` | 50 | focus.config.ts |
+| `FOCUS_CONFIG.MAX_SNOOZE_PER_DAY` | 3 | focus.config.ts |
 
 ---
 
@@ -272,6 +318,30 @@ interface Connection {
   id: string; source: string; target: string;
   title?: string; description?: string;
   deletedAt?: string | null;
+}
+
+// 🆕 专注模式数据模型
+interface BlackBoxEntry {
+  id: string;                    // UUID 客户端生成
+  projectId?: string;
+  userId: string;
+  content: string;               // 语音转写文本
+  date: string;                  // YYYY-MM-DD
+  createdAt: string;
+  updatedAt: string;
+  isRead: boolean;
+  isCompleted: boolean;
+  isArchived: boolean;
+  snoozeUntil?: string;          // 跳过至该日期
+  snoozeCount?: number;
+  deletedAt?: string | null;
+}
+
+interface FocusPreferences {
+  gateEnabled: boolean;          // 是否启用大门（默认 true）
+  spotlightEnabled: boolean;     // 是否启用聚光灯
+  blackBoxEnabled: boolean;      // 是否启用黑匣子
+  maxSnoozePerDay: number;       // 每日最大跳过次数（默认 3）
 }
 ```
 
@@ -331,6 +401,26 @@ npm run lint:fix        # ESLint 修复
 | 递归栈溢出 | 迭代 + `MAX_SUBTREE_DEPTH: 100` |
 | 离线数据丢失 | 失败进 RetryQueue |
 | Sentry 错误丢失 | `supabaseErrorToError()` |
+| Edge Function API Key 泄露 | 使用 `supabase secrets set`，禁止硬编码 |
+| iOS Safari 录音不支持 webm | 动态检测 mimeType，回退到 mp4 |
+
+---
+
+## 专注模式架构
+
+```
+┌─────────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
+│  Angular 前端    │     │  Supabase Edge Function  │     │    Groq API     │
+│  ─────────────  │ ──► │  ──────────────────────  │ ──► │  ─────────────  │
+│  采集麦克风数据   │     │  持有 GROQ_API_KEY       │     │  whisper-large  │
+│  打包成 Blob     │     │  接收 Blob，转发给 Groq   │     │  -v3 转写       │
+└─────────────────┘     └──────────────────────────┘     └─────────────────┘
+```
+
+**三明治架构优势**：
+- ✅ **安全**：API Key 永不暴露在前端
+- ✅ **极速**：Groq 转写响应通常 1-2 秒
+- ✅ **配额控制**：Edge Function 检查每用户每日 50 次限额
 
 ---
 

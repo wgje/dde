@@ -1012,8 +1012,44 @@ export class TextViewComponent implements OnInit, OnDestroy {
       //   sameStage: task.stage === targetStage
       // });
       
+      // 推断父任务ID，确保自动编号逻辑正确应用
+      let inferredParentId: string | null | undefined = undefined;
+      if (targetBeforeId) {
+        // 有明确的插入位置（在某个任务之前）
+        const referenceTask = this.projectState.tasks().find(t => t.id === targetBeforeId) || null;
+        if (referenceTask?.parentId) {
+          // 验证参照任务的父任务是否在正确的阶段
+          const parentTask = this.projectState.tasks().find(t => t.id === referenceTask.parentId);
+          if (parentTask && parentTask.stage === targetStage - 1) {
+            inferredParentId = referenceTask.parentId;
+          } else {
+            inferredParentId = null;
+          }
+        } else {
+          inferredParentId = null;
+        }
+      } else {
+        // 没有 beforeTaskId，说明拖到阶段最后
+        const stages = this.projectState.stages();
+        const targetStageData = stages.find(s => s.stageNumber === targetStage);
+        if (targetStageData && targetStageData.tasks.length > 0) {
+          const lastTask = targetStageData.tasks[targetStageData.tasks.length - 1];
+          if (lastTask.parentId) {
+            // 验证最后一个任务的父任务是否在正确的阶段
+            const parentTask = this.projectState.tasks().find(t => t.id === lastTask.parentId);
+            if (parentTask && parentTask.stage === targetStage - 1) {
+              inferredParentId = lastTask.parentId;
+            } else {
+              inferredParentId = null;
+            }
+          } else {
+            inferredParentId = null;
+          }
+        }
+      }
+      
       // 即使是同一阶段，也要执行移动（可能改变位置）
-      const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId);
+      const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId, inferredParentId);
       if (isFailure(result)) {
         const errorDetail = getErrorMessage(result.error);
         console.error('[TouchEnd] Move failed:', errorDetail);

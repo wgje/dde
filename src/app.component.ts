@@ -27,6 +27,8 @@ import { ToastContainerComponent } from './app/shared/components/toast-container
 import { SyncStatusComponent } from './app/shared/components/sync-status.component';
 import { OfflineBannerComponent } from './app/shared/components/offline-banner.component';
 import { DemoBannerComponent } from './app/shared/components/demo-banner.component';
+import { FocusModeComponent } from './app/features/focus/focus-mode.component';
+import { SpotlightTriggerComponent } from './app/features/focus/components/spotlight/spotlight-trigger.component';
 import { 
   SettingsModalComponent, 
   LoginModalComponent, 
@@ -83,6 +85,8 @@ import { UI_CONFIG, AUTH_CONFIG } from './config';
     OfflineBannerComponent,
     DemoBannerComponent,
     ErrorBoundaryComponent,
+    FocusModeComponent,
+    SpotlightTriggerComponent,
     SettingsModalComponent,
     LoginModalComponent,
     ConflictModalComponent,

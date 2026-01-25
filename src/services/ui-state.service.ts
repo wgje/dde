@@ -58,6 +58,9 @@ export class UiStateService {
   
   /** 文本视图 - 未分配任务面板展开 */
   readonly isTextUnassignedOpen = signal(true);
+
+  /** 文本视图 - 侧边栏可见性 */
+  readonly isTextSidebarVisible = signal(true);
   
   /** 流程图视图 - 未完成任务面板展开 */
   readonly isFlowUnfinishedOpen = signal(true);

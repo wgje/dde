@@ -1,6 +1,6 @@
 # NanoFlow Project Tracker
 
-一个高效的项目追踪应用，具有双视图（文本/流程图）、Markdown 支持、离线优先、云端同步。
+一个高效的项目追踪应用，具有双视图（文本/流程图）、专注模式、Markdown 支持、离线优先、云端同步。
 
 ---
 
@@ -43,7 +43,15 @@
    - 粘贴到 SQL Editor，点击 Run
    - 看到 ✅ Success 即可
 
-4. **获取 API 密钥**
+4. **部署语音转写 Edge Function**（专注模式语音功能）
+   ```bash
+   # 设置 Groq API Key（从 console.groq.com 获取）
+   supabase secrets set GROQ_API_KEY=gsk_your_actual_key_here
+   # 部署转写函数
+   supabase functions deploy transcribe
+   ```
+
+5. **获取 API 密钥**
    - 左侧菜单 → Project Settings → API
    - 复制 **Project URL** 和 **anon public** key
    - ⚠️ 注意：只用 `anon public`，不要用 `service_role`！
@@ -81,10 +89,91 @@
 | 技术 | 版本 | 用途 |
 |------|------|------|
 | Angular | 19.x | 前端框架（Signals + 独立组件） |
-| Supabase | ^2.84.0 | BaaS（认证 + 数据库 + 存储） |
+| Supabase | ^2.84.0 | BaaS（认证 + 数据库 + 存储 + Edge Functions） |
 | GoJS | ^3.1.1 | 流程图渲染 |
+| Groq | whisper-large-v3 | 语音转写（专注模式黑匣子） |
 | Sentry | ^10.32.1 | 错误监控 |
 | Vitest / Playwright | - | 单元测试 / E2E 测试 |
+
+---
+
+## ⌨️ 键盘快捷键
+
+### 全局快捷键
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| `Ctrl/⌘ + Z` | 撤销 | 撤销上一步操作 |
+| `Ctrl/⌘ + Shift + Z` | 重做 | 重做撤销的操作 |
+| `Ctrl/⌘ + F` | 搜索 | 打开全局搜索 |
+| `Ctrl/⌘ + B` | 黑匣子 | 打开/关闭黑匣子面板 |
+| `Ctrl/⌘ + .` | 聚光灯 | 进入聚光灯专注模式 |
+
+### 流程图视图快捷键
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| `Delete / Backspace` | 删除 | 删除选中的任务或连接 |
+| `Alt + Z` | 解除父子关系 | 将选中任务从父任务中分离 |
+| `Alt + X` | 删除跨树连接 | 删除选中的跨树连接线 |
+| `Ctrl/⌘ + 拖拽` | 多选 | 框选多个节点 |
+| `滚轮` | 缩放 | 放大/缩小画布 |
+| `拖拽空白区域` | 平移 | 移动画布视图 |
+
+### 专注模式 - 大门 (Gate)
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| `1` | 已读 | 标记当前条目为已读 |
+| `2` | 完成 | 标记当前条目为完成 |
+| `3` | 稍后 | 跳过当前条目，稍后提醒 |
+
+### 专注模式 - 聚光灯 (Spotlight)
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| `Enter` | 完成 | 完成当前任务 |
+| `→` (右箭头) | 跳过 | 跳过当前任务 |
+| `Escape` | 退出 | 退出聚光灯模式 |
+
+### 黑匣子 (Black Box)
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| `Enter` | 提交 | 提交文本输入 |
+| `1` / `2` / `3` | 操作 | 条目操作快捷键 |
+
+---
+
+## 🎯 专注模式 (Focus Mode)
+
+专注模式是 NanoFlow 的核心特性，帮助你摆脱任务堆积的焦虑，建立持续的工作节奏。
+
+### 四大模块
+
+| 模块 | 图标 | 功能 |
+|------|------|------|
+| **大门 (Gate)** | 🚪 | 每日首次打开时，强制处理昨日遗留条目 |
+| **聚光灯 (Spotlight)** | 🔦 | 屏幕正中央只显示一件事，极简单任务执行 |
+| **地质层 (Strata)** | 🗻 | 已完成任务按日堆叠，历史即地基 |
+| **黑匣子 (Black Box)** | 📦 | 语音转文字的紧急捕捉，随时记录灵感 |
+
+### 工作流程
+
+```
+启动应用 → 🚪 大门（处理昨日遗留）→ 🔦 聚光灯（专注当前任务）→ 🗻 地质层（查看成就）
+                                          ↑
+                                    📦 黑匣子（随时记录）
+```
+
+### 黑匣子语音功能
+
+- **按住说话**：类似对讲机的交互，按住录音按钮说话
+- **极速转写**：使用 Groq whisper-large-v3，1-2 秒内完成转写
+- **离线支持**：断网时自动保存，联网后自动转写
+- **配额控制**：每用户每日 50 次转写（可自定义）
+
+---
 
 ## 本地运行
 
@@ -141,12 +230,15 @@ npm run build          # 生产构建
 ## 功能特性
 
 - 📝 **双视图模式**: 文本视图与流程图视图无缝切换
+- 🎯 **专注模式**: 大门强制结算 + 聚光灯单任务聚焦 + 地质层成就感 + 黑匣子语音记录
 - 🔄 **云端同步**: 通过 Supabase 实现多设备数据同步（LWW 冲突解决）
 - 📱 **离线优先**: 本地 IndexedDB 存储，断网可用，联网自动同步
+- 🎙️ **语音转写**: Groq whisper-large-v3 极速语音转文字（1-2 秒响应）
 - 🎨 **主题系统**: 5 种精心设计的主题风格
 - 📦 **PWA 支持**: 可安装，响应式设计
 - 📝 **Markdown 支持**: 任务内容支持 Markdown 格式渲染
 - 🔒 **附件支持**: 支持文件附件上传与管理
+- ⌨️ **键盘友好**: 全面的快捷键支持，高效操作
 
 ---
 
@@ -319,12 +411,20 @@ NanoFlow 支持手机和电脑双平台使用，但由于浏览器 API 限制，
 src/
 ├── app/
 │   ├── core/           # 核心单例（状态、同步）
-│   ├── features/       # 业务模块（flow、text）
+│   ├── features/       # 业务模块
+│   │   ├── flow/       # 流程图视图（GoJS）
+│   │   ├── text/       # 文本视图（移动端默认）
+│   │   └── focus/      # 专注模式（Gate/Spotlight/Strata/BlackBox）
 │   └── shared/         # 共享组件与模态框
-├── services/           # 主服务层（50+ 服务）
+├── services/           # 主服务层（70+ 服务）
 ├── config/             # 配置常量
 ├── models/             # 数据模型
 └── utils/              # 工具函数
+
+supabase/
+├── functions/
+│   └── transcribe/     # 语音转写 Edge Function（Groq whisper-large-v3）
+└── migrations/         # 数据库迁移脚本
 ```
 
 ---
@@ -446,6 +546,23 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 | `REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT` | 4 | 最大并发请求 |
 | `TIMEOUT_CONFIG.STANDARD` | 10000ms | API 超时 |
 | `AUTH_CONFIG.LOCAL_MODE_USER_ID` | 'local-user' | 离线模式 |
+| `FOCUS_CONFIG.DAILY_TRANSCRIPTION_LIMIT` | 50 | 每日转写配额 |
+| `FOCUS_CONFIG.MAX_SNOOZE_PER_DAY` | 3 | 大门每日最大跳过次数 |
+
+---
+
+## 浏览器支持
+
+| 浏览器 | 版本 | 说明 |
+|--------|------|------|
+| Chrome | 90+ | ✅ 完整支持（推荐） |
+| Edge | 90+ | ✅ 完整支持 |
+| Firefox | 90+ | ✅ 完整支持 |
+| Safari | 15+ | ✅ 支持（语音功能使用 mp4 格式） |
+| iOS Safari | 15+ | ✅ 支持（语音需用户手势触发） |
+| Android Chrome | 90+ | ✅ 完整支持 |
+
+> ⚠️ **本地自动备份功能**仅支持桌面 Chrome/Edge（使用 File System Access API）
 
 ## License
 
