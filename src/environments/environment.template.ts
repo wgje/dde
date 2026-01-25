@@ -10,7 +10,7 @@
 // 环境变量说明：
 // - NG_APP_SUPABASE_URL: Supabase 项目 URL（必需）
 // - NG_APP_SUPABASE_ANON_KEY: Supabase 匿名密钥（必需）
-// - NG_APP_SENTRY_DSN: Sentry 错误监控 DSN（可选）
+// - NG_APP_SENTRY_DSN / SENTRY_DSN: Sentry 错误监控 DSN（可选）
 // - NG_APP_GOJS_LICENSE_KEY: GoJS 许可证（可选，移除水印）
 // - NG_APP_DEV_AUTO_LOGIN_EMAIL: 开发环境自动登录邮箱（可选）
 // - NG_APP_DEV_AUTO_LOGIN_PASSWORD: 开发环境自动登录密码（可选）
@@ -19,7 +19,7 @@ export const environment = {
   production: false,
   supabaseUrl: 'YOUR_SUPABASE_URL',
   supabaseAnonKey: 'YOUR_SUPABASE_ANON_KEY',
-  SENTRY_DSN: '',
+  sentryDsn: '',
   gojsLicenseKey: '',
   devAutoLogin: null as { email: string; password: string } | null
 };

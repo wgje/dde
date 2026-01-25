@@ -7,7 +7,11 @@ const localEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.local') 
 const supabaseUrl = process.env.NG_APP_SUPABASE_URL || localEnv.NG_APP_SUPABASE_URL;
 const supabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY || localEnv.NG_APP_SUPABASE_ANON_KEY;
 const gojsLicenseKey = process.env.NG_APP_GOJS_LICENSE_KEY || localEnv.NG_APP_GOJS_LICENSE_KEY || '';
-const sentryDsn = process.env.NG_APP_SENTRY_DSN || localEnv.NG_APP_SENTRY_DSN || '';
+const sentryDsn = process.env.NG_APP_SENTRY_DSN
+  || process.env.SENTRY_DSN
+  || localEnv.NG_APP_SENTRY_DSN
+  || localEnv.SENTRY_DSN
+  || '';
 
 // 开发环境自动登录配置
 // 设置后，应用启动时会自动登录，无需手动输入凭据
