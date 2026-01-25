@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>语音转写功能诊断工具</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 20px;
+      max-width: 800px;
+      margin: 0 auto;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .section {
+      margin-bottom: 25px;
+      padding: 20px;
+      background: #f9f9f9;
+      border-radius: 8px;
+      border-left: 4px solid #4CAF50;
+    }
+    .section h2 {
+      font-size: 18px;
+      margin-bottom: 15px;
+      color: #333;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-bottom: 10px;
+      font-family: monospace;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+    button:hover:not(:disabled) { background: #45a049; }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .result {
+      margin-top: 15px;
+      padding: 15px;
+      border-radius: 6px;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      display: none;
+    }
+    .success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    .error {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    .info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+    .code {
+      background: #f4f4f4;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .status-item {
+      display: flex;
+      align-items: center;
+      margin: 10px 0;
+      padding: 10px;
+      background: white;
+      border-radius: 6px;
+    }
+    .status-icon {
+      font-size: 24px;
+      margin-right: 12px;
+    }
+    .recorder {
+      text-align: center;
+      padding: 20px;
+    }
+    .record-btn {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      font-size: 40px;
+      border: 4px solid #4CAF50;
+      background: white;
+      color: #4CAF50;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .record-btn:active { transform: scale(0.95); }
+    .record-btn.recording {
+      background: #f44336;
+      color: white;
+      border-color: #f44336;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎙️ 语音转写功能诊断工具</h1>
+    <p class="subtitle">测试 NanoFlow 语音转写功能是否正常工作</p>
+
+    <!-- 配置输入 -->
+    <div class="section">
+      <h2>1️⃣ 配置信息</h2>
+      <input type="text" id="supabaseUrl" placeholder="Supabase URL (例: https://xxx.supabase.co)">
+      <input type="text" id="supabaseKey" placeholder="Supabase Anon Key">
+      <input type="email" id="email" placeholder="测试用户邮箱">
+      <input type="password" id="password" placeholder="测试用户密码">
+      <button onclick="saveConfig()">保存配置</button>
+      <div id="configResult" class="result"></div>
+    </div>
+
+    <!-- 连接测试 -->
+    <div class="section">
+      <h2>2️⃣ 连接测试</h2>
+      <button onclick="testConnection()">测试 Supabase 连接</button>
+      <div id="connectionResult" class="result"></div>
+    </div>
+
+    <!-- 认证测试 -->
+    <div class="section">
+      <h2>3️⃣ 用户认证</h2>
+      <button onclick="testAuth()">登录测试</button>
+      <div id="authResult" class="result"></div>
+    </div>
+
+    <!-- 数据库测试 -->
+    <div class="section">
+      <h2>4️⃣ 数据库检查</h2>
+      <button onclick="testDatabase()">检查数据库表</button>
+      <div id="dbResult" class="result"></div>
+    </div>
+
+    <!-- Edge Function 测试 -->
+    <div class="section">
+      <h2>5️⃣ Edge Function 测试</h2>
+      <input type="file" id="audioFile" accept="audio/*">
+      <button onclick="testEdgeFunction()">测试转写 API</button>
+      <div id="edgeFunctionResult" class="result"></div>
+    </div>
+
+    <!-- 录音测试 -->
+    <div class="section">
+      <h2>6️⃣ 完整录音转写测试</h2>
+      <div class="recorder">
+        <button id="recordBtn" class="record-btn" onclick="toggleRecording()">🎙️</button>
+        <p id="recordStatus">点击开始录音</p>
+      </div>
+      <div id="recordResult" class="result"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    let supabase = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+
+    function showResult(elementId, message, type = 'info') {
+      const el = document.getElementById(elementId);
+      el.textContent = message;
+      el.className = `result ${type}`;
+      el.style.display = 'block';
+    }
+
+    function saveConfig() {
+      const url = document.getElementById('supabaseUrl').value;
+      const key = document.getElementById('supabaseKey').value;
+      
+      if (!url || !key) {
+        showResult('configResult', '❌ 请填写完整的 Supabase 配置', 'error');
+        return;
+      }
+      
+      try {
+        supabase = window.supabase.createClient(url, key);
+        localStorage.setItem('supabaseUrl', url);
+        localStorage.setItem('supabaseKey', key);
+        localStorage.setItem('email', document.getElementById('email').value);
+        localStorage.setItem('password', document.getElementById('password').value);
+        showResult('configResult', '✅ 配置已保存', 'success');
+      } catch (err) {
+        showResult('configResult', `❌ 配置错误: ${err.message}`, 'error');
+      }
+    }
+
+    async function testConnection() {
+      if (!supabase) {
+        showResult('connectionResult', '❌ 请先保存配置', 'error');
+        return;
+      }
+      
+      try {
+        const { data, error } = await supabase.from('projects').select('count').limit(1);
+        if (error) throw error;
+        showResult('connectionResult', '✅ Supabase 连接成功', 'success');
+      } catch (err) {
+        showResult('connectionResult', `❌ 连接失败: ${err.message}`, 'error');
+      }
+    }
+
+    async function testAuth() {
+      if (!supabase) {
+        showResult('authResult', '❌ 请先保存配置', 'error');
+        return;
+      }
+      
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      
+      if (!email || !password) {
+        showResult('authResult', '❌ 请填写邮箱和密码', 'error');
+        return;
+      }
+      
+      try {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        showResult('authResult', `✅ 登录成功\n用户 ID: ${data.user.id}\nToken: ${data.session.access_token.substring(0, 50)}...`, 'success');
+      } catch (err) {
+        showResult('authResult', `❌ 登录失败: ${err.message}`, 'error');
+      }
+    }
+
+    async function testDatabase() {
+      if (!supabase) {
+        showResult('dbResult', '❌ 请先保存配置', 'error');
+        return;
+      }
+      
+      try {
+        // 检查 transcription_usage 表
+        const { data, error } = await supabase.from('transcription_usage').select('count').limit(1);
+        if (error && error.message.includes('does not exist')) {
+          showResult('dbResult', '❌ 表 transcription_usage 不存在\n请在 Supabase SQL Editor 执行 scripts/init-supabase.sql', 'error');
+        } else if (error) {
+          showResult('dbResult', `⚠️ 权限检查: ${error.message}`, 'info');
+        } else {
+          showResult('dbResult', '✅ 数据库表 transcription_usage 存在且可访问', 'success');
+        }
+      } catch (err) {
+        showResult('dbResult', `❌ 数据库检查失败: ${err.message}`, 'error');
+      }
+    }
+
+    async function testEdgeFunction() {
+      if (!supabase) {
+        showResult('edgeFunctionResult', '❌ 请先保存配置', 'error');
+        return;
+      }
+      
+      const fileInput = document.getElementById('audioFile');
+      const file = fileInput.files[0];
+      
+      if (!file) {
+        showResult('edgeFunctionResult', '❌ 请选择音频文件', 'error');
+        return;
+      }
+      
+      try {
+        showResult('edgeFunctionResult', '⏳ 正在调用 Edge Function...', 'info');
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        const { data, error } = await supabase.functions.invoke('transcribe', { body: formData });
+        
+        if (error) {
+          throw error;
+        }
+        
+        showResult('edgeFunctionResult', 
+          `✅ 转写成功！\n\n转写文本: ${data.text}\n时长: ${data.duration}秒\n语言: ${data.language}`, 
+          'success');
+      } catch (err) {
+        const errorMsg = typeof err === 'object' ? JSON.stringify(err, null, 2) : err.message || String(err);
+        showResult('edgeFunctionResult', `❌ Edge Function 调用失败:\n${errorMsg}`, 'error');
+      }
+    }
+
+    async function toggleRecording() {
+      if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+        await startRecording();
+      } else {
+        await stopRecording();
+      }
+    }
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) audioChunks.push(event.data);
+        };
+        
+        mediaRecorder.onstop = async () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          document.getElementById('recordStatus').textContent = '⏳ 正在转写...';
+          await transcribeAudio(audioBlob);
+          stream.getTracks().forEach(track => track.stop());
+        };
+        
+        mediaRecorder.start(1000);
+        document.getElementById('recordBtn').classList.add('recording');
+        document.getElementById('recordStatus').textContent = '🔴 录音中... 点击停止';
+      } catch (err) {
+        showResult('recordResult', `❌ 录音失败: ${err.message}`, 'error');
+      }
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        document.getElementById('recordBtn').classList.remove('recording');
+        document.getElementById('recordStatus').textContent = '处理中...';
+      }
+    }
+
+    async function transcribeAudio(audioBlob) {
+      if (!supabase) {
+        showResult('recordResult', '❌ 请先保存配置', 'error');
+        return;
+      }
+      
+      try {
+        const formData = new FormData();
+        formData.append('file', audioBlob, 'recording.webm');
+        
+        const { data, error } = await supabase.functions.invoke('transcribe', { body: formData });
+        
+        if (error) throw error;
+        
+        document.getElementById('recordStatus').textContent = '✅ 转写完成';
+        showResult('recordResult', `✅ 转写结果:\n\n${data.text}`, 'success');
+      } catch (err) {
+        document.getElementById('recordStatus').textContent = '❌ 转写失败';
+        const errorMsg = typeof err === 'object' ? JSON.stringify(err, null, 2) : err.message || String(err);
+        showResult('recordResult', `❌ 转写失败:\n${errorMsg}`, 'error');
+      }
+    }
+
+    // 页面加载时恢复配置
+    window.onload = () => {
+      const url = localStorage.getItem('supabaseUrl');
+      const key = localStorage.getItem('supabaseKey');
+      const email = localStorage.getItem('email');
+      const password = localStorage.getItem('password');
+      
+      if (url) document.getElementById('supabaseUrl').value = url;
+      if (key) document.getElementById('supabaseKey').value = key;
+      if (email) document.getElementById('email').value = email;
+      if (password) document.getElementById('password').value = password;
+      
+      if (url && key) {
+        supabase = window.supabase.createClient(url, key);
+      }
+    };
+  </script>
+</body>
+</html>

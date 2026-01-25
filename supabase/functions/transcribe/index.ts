@@ -12,6 +12,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
 /** 每用户每日转写限额 */
@@ -179,6 +180,16 @@ serve(async (req: Request) => {
 
   } catch (error: unknown) {
     console.error('Transcribe Error:', error)
+    
+    // 详细错误日志（帮助诊断生产环境问题）
+    if (error instanceof Error) {
+      console.error('Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n') // 只记录前3行堆栈
+      });
+    }
+    
     const message = error instanceof Error ? error.message : 'Unknown error'
     return new Response(JSON.stringify({ error: message, code: 'INTERNAL_ERROR' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

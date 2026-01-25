@@ -30,7 +30,7 @@ const IS_DEV = isDevMode();
 const TRACES_SAMPLE_RATE = IS_DEV ? 0.1 : 0;             // 生产 0%，开发 10%
 
 sentryInit({
-  dsn: environment.sentryDsn,
+  dsn: environment.SENTRY_DSN,
   integrations: [
     // 【性能优化 2026-01-17】仅保留轻量级性能追踪
     // 已移除: replayIntegration（节省 ~150KB）

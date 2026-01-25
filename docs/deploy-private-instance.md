@@ -319,6 +319,7 @@ SELECT cron.schedule('cleanup-old-logs', '0 4 * * 0', $$SELECT cleanup_old_logs(
 | `NG_APP_SUPABASE_URL` | ✅ | Supabase 项目 URL | 无 |
 | `NG_APP_SUPABASE_ANON_KEY` | ✅ | Supabase 匿名公钥 | 无 |
 | `NG_APP_SENTRY_DSN` | ❌ | Sentry 错误监控 DSN | 空（禁用） |
+| `SENTRY_DSN` | ❌ | Sentry 错误监控 DSN（别名，常用于 Vercel） | 空（禁用） |
 | `NG_APP_GOJS_LICENSE_KEY` | ❌ | GoJS 许可证（移除水印）| 空（显示水印） |
 | `NG_APP_DEMO_MODE` | ❌ | 启用 Demo 模式限制 | `false` |
 

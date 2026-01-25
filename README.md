@@ -49,6 +49,17 @@
    supabase secrets set GROQ_API_KEY=gsk_your_actual_key_here
    # 部署转写函数
    supabase functions deploy transcribe
+   
+   # 🔍 验证部署是否成功
+   supabase functions list  # 应该看到 'transcribe'
+   
+   # 🧪 测试转写功能（可选）
+   # 方法 1: 使用验证脚本
+   chmod +x scripts/verify-transcribe-setup.sh
+   ./scripts/verify-transcribe-setup.sh
+   
+   # 方法 2: 使用诊断工具
+   # 打开 docs/transcribe-diagnostic-tool.html 在浏览器中测试
    ```
 
 5. **获取 API 密钥**
@@ -81,6 +92,18 @@
 </details>
 
 > 📚 **详细教程**：[完整部署指南](docs/deploy-private-instance.md) | [故障排查](docs/deploy-private-instance.md#故障排查指南)
+
+### ✅ Vercel 环境变量设置（新手不翻车版）
+
+1. 打开 Vercel → 你的项目 → Settings → Environment Variables
+2. 必填变量：
+   - `NG_APP_SUPABASE_URL`
+   - `NG_APP_SUPABASE_ANON_KEY`
+3. 可选变量（Sentry）：
+   - `NG_APP_SENTRY_DSN` **或** `SENTRY_DSN`（二选一即可，脚本已兼容）
+4. 保存后回到 Deployments → 重新部署（Redeploy）
+
+> ⚠️ 说明：构建时会执行 `npm run config`，它会读取这些变量并生成环境文件。
 
 ---
 
@@ -198,7 +221,10 @@
    NG_APP_SUPABASE_ANON_KEY=your_supabase_anon_key
    
    # Sentry 错误监控（可选）
+   # 推荐：NG_APP_SENTRY_DSN（本地/自建环境）
    NG_APP_SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
+   # 如果你在 Vercel 里习惯用 SENTRY_DSN，也可以直接用它（脚本已支持）
+   # SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
    
    # GoJS License（可选，移除水印）
    NG_APP_GOJS_LICENSE_KEY=your_license_key

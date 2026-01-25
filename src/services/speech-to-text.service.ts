@@ -268,18 +268,44 @@ export class SpeechToTextService {
                 audioBlob.type.includes('wav') ? 'wav' : 'webm';
     formData.append('file', audioBlob, `recording.${ext}`);
 
+    // 📝 关键：Supabase Functions SDK 需要特殊配置来处理 multipart/form-data
+    // 不设置 Content-Type header，让浏览器自动生成（包含正确的 boundary）
     const { data, error } = await this.supabaseClient.client().functions.invoke(
       this.config.EDGE_FUNCTION_NAME, 
-      { body: formData }
+      { 
+        body: formData,
+        // ⚠️ 重要：不要手动设置 headers，否则会破坏 multipart boundary
+      }
     );
 
     if (error) {
+      // 详细记录错误信息，便于生产环境调试
+      this.logger.error('SpeechToText', 'Transcription failed', JSON.stringify({
+        message: error.message,
+        context: error.context,
+        status: error.status,
+        name: error.name
+      }));
+      
       // 处理特定错误
       if (error.message?.includes('QUOTA_EXCEEDED')) {
         this.toast.warning('配额已用完', ErrorMessages[ErrorCodes.FOCUS_QUOTA_EXCEEDED]);
         remainingQuota.set(0);
         throw new Error(ErrorCodes.FOCUS_QUOTA_EXCEEDED);
       }
+      
+      // 处理认证错误
+      if (error.message?.includes('AUTH_INVALID') || error.message?.includes('Unauthorized')) {
+        this.toast.error('认证失败', '请重新登录后再试');
+        throw new Error(ErrorCodes.FOCUS_AUTH_ERROR);
+      }
+      
+      // 处理服务配置错误
+      if (error.message?.includes('SERVICE_NOT_CONFIGURED')) {
+        this.toast.error('服务未配置', '语音转写服务未正确配置，请联系管理员');
+        throw new Error(ErrorCodes.FOCUS_SERVICE_ERROR);
+      }
+      
       throw error;
     }
     
