@@ -297,13 +297,13 @@ export class SpeechToTextService {
       // 处理认证错误
       if (error.message?.includes('AUTH_INVALID') || error.message?.includes('Unauthorized')) {
         this.toast.error('认证失败', '请重新登录后再试');
-        throw new Error(ErrorCodes.FOCUS_AUTH_ERROR);
+        throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
       }
       
       // 处理服务配置错误
       if (error.message?.includes('SERVICE_NOT_CONFIGURED')) {
         this.toast.error('服务未配置', '语音转写服务未正确配置，请联系管理员');
-        throw new Error(ErrorCodes.FOCUS_SERVICE_ERROR);
+        throw new Error(ErrorCodes.FOCUS_SERVICE_UNAVAILABLE);
       }
       
       throw error;
