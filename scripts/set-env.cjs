@@ -56,7 +56,7 @@ export const environment = {
   supabaseUrl: '${finalUrl}',
   supabaseAnonKey: '${finalKey}',
   // Sentry DSN - 用于错误监控
-  sentryDsn: '${sentryDsn}',
+  SENTRY_DSN: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
   // 开发环境自动登录（仅开发环境生效）
@@ -73,7 +73,7 @@ export const environment = {
   supabaseUrl: '${finalUrl}',
   supabaseAnonKey: '${finalKey}',
   // Sentry DSN - 用于错误监控
-  sentryDsn: '${sentryDsn}',
+  SENTRY_DSN: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
   // 生产环境始终禁用自动登录
