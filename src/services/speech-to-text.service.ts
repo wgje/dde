@@ -13,6 +13,7 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { ErrorCodes, ErrorMessages } from '../utils/result';
+import { environment } from '../environments/environment';
 import { 
   isRecording, 
   isTranscribing, 
@@ -263,6 +264,9 @@ export class SpeechToTextService {
    * 实际调用 Edge Function 进行转写
    * 
    * ⚠️ 注意：调用前需确保用户已登录，否则请求会被 Supabase 网关拦截
+   * 
+   * 🔧 2026-01-25 修复：直接使用 fetch 调用，绕过 SDK 的 JWT 验证问题
+   *    Supabase 使用 ES256 签名的 JWT，但 Edge Functions 网关可能不支持
    */
   private async transcribeBlob(audioBlob: Blob): Promise<string> {
     // 🔐 认证检查：确保用户已登录
@@ -283,48 +287,73 @@ export class SpeechToTextService {
                 audioBlob.type.includes('wav') ? 'wav' : 'webm';
     formData.append('file', audioBlob, `recording.${ext}`);
 
-    // 📝 关键：Supabase Functions SDK 需要特殊配置来处理 multipart/form-data
-    // 不设置 Content-Type header，让浏览器自动生成（包含正确的 boundary）
     this.logger.debug('SpeechToText', `Invoking Edge Function: ${this.config.EDGE_FUNCTION_NAME}`);
     
-    const { data, error } = await this.supabaseClient.client().functions.invoke(
-      this.config.EDGE_FUNCTION_NAME, 
-      { 
-        body: formData,
-        // ⚠️ 重要：不要手动设置 headers，否则会破坏 multipart boundary
-      }
-    );
-
-    if (error) {
-      // 详细记录错误信息，便于生产环境调试
+    // 🔧 获取当前 session 的 access_token
+    const { data: sessionData } = await this.supabaseClient.client().auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    
+    if (!accessToken) {
+      this.logger.error('SpeechToText', 'No access token available');
+      this.toast.error('认证失败', '请重新登录后再试');
+      throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
+    }
+    
+    // 🔧 直接使用 fetch 调用 Edge Function
+    // 同时发送 Authorization header 和 apikey header
+    const functionUrl = `${environment.supabaseUrl}/functions/v1/${this.config.EDGE_FUNCTION_NAME}`;
+    
+    this.logger.debug('SpeechToText', `Calling: ${functionUrl}`);
+    
+    const response = await fetch(functionUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': environment.supabaseAnonKey,
+      },
+      body: formData
+    });
+    
+    const responseText = await response.text();
+    
+    if (!response.ok) {
+      // 详细记录错误信息
       this.logger.error('SpeechToText', 'Transcription failed', JSON.stringify({
-        message: error.message,
-        context: error.context,
-        status: error.status,
-        name: error.name
+        status: response.status,
+        statusText: response.statusText,
+        body: responseText
       }));
       
+      let errorData: { error?: string; code?: string; message?: string } = {};
+      try {
+        errorData = JSON.parse(responseText);
+      } catch {
+        // 响应不是 JSON
+      }
+      
       // 处理特定错误
-      if (error.message?.includes('QUOTA_EXCEEDED')) {
+      if (errorData.code === 'QUOTA_EXCEEDED' || responseText.includes('QUOTA_EXCEEDED')) {
         this.toast.warning('配额已用完', ErrorMessages[ErrorCodes.FOCUS_QUOTA_EXCEEDED]);
         remainingQuota.set(0);
         throw new Error(ErrorCodes.FOCUS_QUOTA_EXCEEDED);
       }
       
       // 处理认证错误
-      if (error.message?.includes('AUTH_INVALID') || error.message?.includes('Unauthorized')) {
+      if (response.status === 401 || errorData.code === 'AUTH_INVALID') {
         this.toast.error('认证失败', '请重新登录后再试');
         throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
       }
       
       // 处理服务配置错误
-      if (error.message?.includes('SERVICE_NOT_CONFIGURED')) {
+      if (errorData.code === 'SERVICE_NOT_CONFIGURED') {
         this.toast.error('服务未配置', '语音转写服务未正确配置，请联系管理员');
         throw new Error(ErrorCodes.FOCUS_SERVICE_UNAVAILABLE);
       }
       
-      throw error;
+      throw new Error(errorData.error || errorData.message || `HTTP ${response.status}: ${response.statusText}`);
     }
+    
+    const data = JSON.parse(responseText);
     
     // ✅ 成功日志
     this.logger.info('SpeechToText', `Transcription successful: ${data.text?.length || 0} chars, duration=${data.duration}s`);

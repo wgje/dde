@@ -51,7 +51,9 @@ serve(async (req: Request) => {
       )
     }
     
-    console.log('🎤 [Transcribe] Auth header present, validating user...');
+    // 从 Authorization header 提取 token
+    const token = authHeader.replace('Bearer ', '');
+    console.log('🎤 [Transcribe] Token present, validating user...');
 
     // 使用 SUPABASE_SERVICE_ROLE_KEY 查询配额（绕过 RLS）
     const supabaseAdmin = createClient(
@@ -59,14 +61,9 @@ serve(async (req: Request) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     )
     
-    // 用户认证使用传入的 authHeader
-    const supabaseUser = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_ANON_KEY')!,
-      { global: { headers: { Authorization: authHeader } } }
-    )
-
-    const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
+    // 🔧 修复：直接使用 token 验证用户，而不是依赖 header 配置
+    // auth.getUser(token) 会直接验证传入的 JWT token
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token)
     if (authError || !user) {
       console.error('🎤 [Transcribe] Auth validation failed:', authError?.message || 'No user');
       return new Response(
