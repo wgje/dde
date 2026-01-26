@@ -30,6 +30,7 @@
     "lint": "eslint 'src/**/*.ts' --no-warn-ignored",
     "lint:fix": "eslint 'src/**/*.ts' --fix --no-warn-ignored",
     "config": "node scripts/set-env.cjs",
+    "db:types": "npx supabase gen types typescript --linked > src/types/supabase.ts",
     "seed:supabase": "node scripts/seed-supabase.js",
     "setup:storage": "node scripts/setup-storage-bucket.cjs"
   },

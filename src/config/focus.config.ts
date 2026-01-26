@@ -80,8 +80,8 @@ export const FOCUS_CONFIG = {
     IDB_PREFIX: 'focus_',
     /** IndexedDB 数据库名称 */
     IDB_NAME: 'focus_mode',
-    /** IndexedDB 版本 */
-    IDB_VERSION: 1,
+    /** IndexedDB 版本 - 增加版本号以添加 sync_metadata store */
+    IDB_VERSION: 2,
   },
   
   // IndexedDB Object Store 名称
@@ -89,6 +89,7 @@ export const FOCUS_CONFIG = {
     BLACK_BOX_ENTRIES: 'black_box_entries',
     FOCUS_PREFERENCES: 'focus_preferences',
     OFFLINE_AUDIO_CACHE: 'offline_audio_cache',
+    SYNC_METADATA: 'sync_metadata',
   },
   
   // 键盘快捷键

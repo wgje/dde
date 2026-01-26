@@ -8,7 +8,8 @@ import {
   Component, 
   ChangeDetectionStrategy, 
   inject,
-  signal
+  signal,
+  OnInit
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { BlackBoxService } from '../../../../../services/black-box.service';
@@ -167,7 +168,7 @@ import { BlackBoxDateGroupComponent } from './black-box-date-group.component';
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class BlackBoxPanelComponent {
+export class BlackBoxPanelComponent implements OnInit {
   private blackBoxService = inject(BlackBoxService);
   speechService = inject(SpeechToTextService);
   focusPrefs = inject(FocusPreferenceService);
@@ -176,6 +177,14 @@ export class BlackBoxPanelComponent {
   pendingDeleteId = signal<string | null>(null);
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
+  
+  /**
+   * 组件初始化时从服务器加载数据
+   */
+  ngOnInit(): void {
+    // 加载黑匣子数据（如果尚未加载）
+    this.blackBoxService.loadFromServer();
+  }
   
   /**
    * 切换展开状态

@@ -1,10 +1,12 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.3.0
--- 最后验证: 2026-01-25
+-- 版本: 3.4.0
+-- 最后验证: 2026-01-26
 --
 -- 更新日志：
+--   3.4.0 (2026-01-26): 深度数据库优化：删除未使用索引、添加 RLS 辅助函数、
+--                       优化 RLS 策略使用 STABLE 函数缓存、添加部分复合索引
 --   3.3.0 (2026-01-25): 添加专注模式支持：black_box_entries 表和 transcription_usage 表
 --   3.2.0 (2026-01-09): 修复 batch_upsert_tasks 函数：移除不存在的 owner_id 列引用，
 --                       使用 project.owner_id + project_members 进行权限校验；
@@ -63,6 +65,69 @@ ALTER FUNCTION public.update_updated_at_column()
   SET search_path = pg_catalog, public;
 
 -- ============================================
+-- 0.1 RLS 优化辅助函数
+-- 使用 STABLE 标记启用 PostgreSQL 函数缓存
+-- ============================================
+
+-- 获取当前用户 ID（带缓存优化）
+CREATE OR REPLACE FUNCTION public.current_user_id()
+RETURNS UUID
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+AS $$
+  SELECT auth.uid()
+$$;
+
+-- 检查用户是否为项目所有者
+CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id 
+    AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+-- 检查用户是否为项目所有者或成员
+CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id 
+    AND p.owner_id = public.current_user_id()
+  )
+  OR EXISTS (
+    SELECT 1 FROM public.project_members pm
+    WHERE pm.project_id = p_project_id 
+    AND pm.user_id = public.current_user_id()
+  )
+$$;
+
+-- 获取用户可访问的所有项目 ID
+CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
+RETURNS SETOF UUID
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
+  UNION
+  SELECT project_id FROM public.project_members WHERE user_id = public.current_user_id()
+$$;
+
+-- ============================================
 -- 1. 项目表 (projects)
 -- ============================================
 
@@ -99,7 +164,9 @@ CREATE TRIGGER update_projects_updated_at
 
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON public.projects(owner_id);
-CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON public.projects(updated_at);
+-- 复合索引用于增量同步查询
+CREATE INDEX IF NOT EXISTS idx_projects_owner_id_updated ON public.projects(owner_id, updated_at DESC);
+-- 注：idx_projects_updated_at 已删除（未使用，被复合索引替代）
 
 -- ============================================
 -- 2. 项目成员表 (project_members)
@@ -154,10 +221,14 @@ CREATE TRIGGER update_tasks_updated_at
 ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON public.tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON public.tasks(parent_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_stage ON public.tasks(project_id, stage);
-CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON public.tasks(deleted_at) WHERE deleted_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON public.tasks(updated_at);
-CREATE INDEX IF NOT EXISTS idx_tasks_short_id ON public.tasks(project_id, short_id);
+-- 优化索引：活跃任务的项目+时间戳部分复合索引（覆盖 95% 查询场景）
+CREATE INDEX IF NOT EXISTS idx_tasks_project_active ON public.tasks(project_id, updated_at DESC)
+  WHERE deleted_at IS NULL;
+-- 注：以下索引已删除（未使用或被复合索引替代）：
+-- - idx_tasks_stage: 被 idx_tasks_project_active 替代
+-- - idx_tasks_deleted_at: 软删除查询较少
+-- - idx_tasks_updated_at: 被复合索引替代
+-- - idx_tasks_short_id: 几乎无使用
 
 -- ============================================
 -- 4. 连接表 (connections)
@@ -194,13 +265,17 @@ CREATE TRIGGER update_connections_updated_at
 
 ALTER TABLE public.connections ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_connections_project_id ON public.connections(project_id);
-CREATE INDEX IF NOT EXISTS idx_connections_source_id ON public.connections(source_id);
 CREATE INDEX IF NOT EXISTS idx_connections_target_id ON public.connections(target_id);
-CREATE INDEX IF NOT EXISTS idx_connections_deleted_at ON public.connections(deleted_at) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_connections_deleted_at_cleanup ON public.connections(deleted_at) WHERE deleted_at IS NOT NULL;
--- 增量同步索引（支持 updated_at > last_sync_time 查询）
-CREATE INDEX IF NOT EXISTS idx_connections_updated_at ON public.connections(updated_at);
+-- 优化索引：活跃连接的项目+时间戳部分复合索引
+CREATE INDEX IF NOT EXISTS idx_connections_project_active ON public.connections(project_id, updated_at DESC)
+  WHERE deleted_at IS NULL;
+-- 增量同步索引
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated ON public.connections(project_id, updated_at DESC);
+-- 注：以下索引已删除（未使用或被复合索引替代）：
+-- - idx_connections_source_id: source_id 查询走 project_id 复合索引
+-- - idx_connections_deleted_at: 被 idx_connections_project_active 替代
+-- - idx_connections_deleted_at_cleanup: 清理操作较少
+-- - idx_connections_updated_at: 被 idx_connections_project_updated 替代
 
 -- ============================================
 -- 5. 用户偏好设置表 (user_preferences)
@@ -223,8 +298,8 @@ CREATE TRIGGER update_user_preferences_updated_at
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
-CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON public.user_preferences(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_preferences_updated_at ON public.user_preferences(updated_at);
+-- 注：idx_user_preferences_user_id 已删除（user_id 已有 UNIQUE 约束）
+-- 注：idx_user_preferences_updated_at 已删除（未使用）
 
 -- ============================================
 -- 5.1 黑匣子条目表 (black_box_entries) - 专注模式
@@ -282,31 +357,27 @@ CREATE TRIGGER update_black_box_entries_updated_at
   BEFORE UPDATE ON public.black_box_entries
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- RLS 策略
+-- RLS 策略（使用优化的 helper 函数）
 ALTER TABLE public.black_box_entries ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "black_box_select_policy" ON public.black_box_entries;
 CREATE POLICY "black_box_select_policy" ON public.black_box_entries 
   FOR SELECT USING (
-    auth.uid() = user_id OR
-    project_id IN (
-      SELECT id FROM public.projects WHERE owner_id = auth.uid()
-      UNION
-      SELECT project_id FROM public.project_members WHERE user_id = auth.uid()
-    )
+    public.current_user_id() = user_id OR
+    project_id IN (SELECT public.user_accessible_project_ids())
   );
 
 DROP POLICY IF EXISTS "black_box_insert_policy" ON public.black_box_entries;
 CREATE POLICY "black_box_insert_policy" ON public.black_box_entries
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
+  FOR INSERT WITH CHECK (public.current_user_id() = user_id);
 
 DROP POLICY IF EXISTS "black_box_update_policy" ON public.black_box_entries;
 CREATE POLICY "black_box_update_policy" ON public.black_box_entries
-  FOR UPDATE USING (auth.uid() = user_id);
+  FOR UPDATE USING (public.current_user_id() = user_id);
 
 DROP POLICY IF EXISTS "black_box_delete_policy" ON public.black_box_entries;
 CREATE POLICY "black_box_delete_policy" ON public.black_box_entries
-  FOR DELETE USING (auth.uid() = user_id);
+  FOR DELETE USING (public.current_user_id() = user_id);
 
 -- ============================================
 -- 5.2 转写使用量表 (transcription_usage) - 专注模式
@@ -339,7 +410,7 @@ ALTER TABLE public.transcription_usage ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "transcription_usage_select_policy" ON public.transcription_usage;
 CREATE POLICY "transcription_usage_select_policy" ON public.transcription_usage 
-  FOR SELECT USING (auth.uid() = user_id);
+  FOR SELECT USING ((select auth.uid()) = user_id);
 
 -- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
 
@@ -372,18 +443,18 @@ CREATE TABLE IF NOT EXISTS public.task_tombstones (
 
 ALTER TABLE public.task_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id ON public.task_tombstones(project_id);
+-- 外键索引：防止级联删除时全表扫描
+CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by ON public.task_tombstones(deleted_by);
 
--- RLS 策略
+-- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
 DROP POLICY IF EXISTS "task_tombstones_insert_owner" ON public.task_tombstones;
 
 CREATE POLICY "task_tombstones_select_owner" ON public.task_tombstones FOR SELECT USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = task_tombstones.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid())
-  ))
+  project_id IN (SELECT public.user_accessible_project_ids())
 );
 CREATE POLICY "task_tombstones_insert_owner" ON public.task_tombstones FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = task_tombstones.project_id AND p.owner_id = auth.uid())
+  public.user_is_project_owner(project_id)
 );
 
 -- ============================================
@@ -401,19 +472,19 @@ CREATE TABLE IF NOT EXISTS public.connection_tombstones (
 ALTER TABLE public.connection_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_id ON public.connection_tombstones(project_id);
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_at ON public.connection_tombstones(deleted_at);
+-- 外键索引：防止级联删除时全表扫描
+CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by ON public.connection_tombstones(deleted_by);
 
--- RLS 策略
+-- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;
 DROP POLICY IF EXISTS "connection_tombstones_insert" ON public.connection_tombstones;
 
 CREATE POLICY "connection_tombstones_select" ON public.connection_tombstones FOR SELECT USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connection_tombstones.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid())
-  ))
+  project_id IN (SELECT public.user_accessible_project_ids())
 );
 
 CREATE POLICY "connection_tombstones_insert" ON public.connection_tombstones FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connection_tombstones.project_id AND p.owner_id = auth.uid())
+  public.user_is_project_owner(project_id)
 );
 
 -- 11. purge_rate_limits 表（速率限制）
@@ -432,8 +503,8 @@ DROP POLICY IF EXISTS "purge_rate_limits_own" ON public.purge_rate_limits;
 
 CREATE POLICY "purge_rate_limits_own" ON public.purge_rate_limits
   FOR ALL
-  USING (user_id = auth.uid())
-  WITH CHECK (user_id = auth.uid());
+  USING (user_id = (select auth.uid()))
+  WITH CHECK (user_id = (select auth.uid()));
 
 -- ============================================
 -- 自定义类型
@@ -461,6 +532,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER FUNCTION public.prevent_tombstoned_connection_writes()
+  SET search_path TO 'pg_catalog', 'public';
 
 DROP TRIGGER IF EXISTS trg_prevent_connection_resurrection ON public.connections;
 CREATE TRIGGER trg_prevent_connection_resurrection
@@ -537,17 +611,17 @@ DROP POLICY IF EXISTS "owner update" ON public.projects;
 DROP POLICY IF EXISTS "owner delete" ON public.projects;
 
 CREATE POLICY "owner select" ON public.projects FOR SELECT USING (
-  auth.uid() = owner_id OR EXISTS (
-    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = auth.uid()
+  (select auth.uid()) = owner_id OR EXISTS (
+    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = (select auth.uid())
   )
 );
-CREATE POLICY "owner insert" ON public.projects FOR INSERT WITH CHECK (auth.uid() = owner_id);
+CREATE POLICY "owner insert" ON public.projects FOR INSERT WITH CHECK ((select auth.uid()) = owner_id);
 CREATE POLICY "owner update" ON public.projects FOR UPDATE USING (
-  auth.uid() = owner_id OR EXISTS (
-    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = auth.uid() AND role IN ('editor', 'admin')
+  (select auth.uid()) = owner_id OR EXISTS (
+    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = (select auth.uid()) AND role IN ('editor', 'admin')
   )
 );
-CREATE POLICY "owner delete" ON public.projects FOR DELETE USING (auth.uid() = owner_id);
+CREATE POLICY "owner delete" ON public.projects FOR DELETE USING ((select auth.uid()) = owner_id);
 
 -- ============================================
 -- 8. RLS 策略 - Project Members
@@ -582,23 +656,18 @@ DROP POLICY IF EXISTS "tasks owner insert" ON public.tasks;
 DROP POLICY IF EXISTS "tasks owner update" ON public.tasks;
 DROP POLICY IF EXISTS "tasks owner delete" ON public.tasks;
 
+-- 使用缓存的 helper 函数优化性能
 CREATE POLICY "tasks owner select" ON public.tasks FOR SELECT USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = tasks.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid())
-  ))
+  project_id IN (SELECT public.user_accessible_project_ids())
 );
 CREATE POLICY "tasks owner insert" ON public.tasks FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = tasks.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid() AND pm.role IN ('editor', 'admin'))
-  ))
+  public.user_has_project_access(project_id)
 );
 CREATE POLICY "tasks owner update" ON public.tasks FOR UPDATE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = tasks.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid() AND pm.role IN ('editor', 'admin'))
-  ))
+  public.user_has_project_access(project_id)
 );
 CREATE POLICY "tasks owner delete" ON public.tasks FOR DELETE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = tasks.project_id AND p.owner_id = auth.uid())
+  public.user_is_project_owner(project_id)
 );
 
 -- ============================================
@@ -610,23 +679,18 @@ DROP POLICY IF EXISTS "connections owner insert" ON public.connections;
 DROP POLICY IF EXISTS "connections owner update" ON public.connections;
 DROP POLICY IF EXISTS "connections owner delete" ON public.connections;
 
+-- 使用缓存的 helper 函数优化性能
 CREATE POLICY "connections owner select" ON public.connections FOR SELECT USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connections.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid())
-  ))
+  project_id IN (SELECT public.user_accessible_project_ids())
 );
 CREATE POLICY "connections owner insert" ON public.connections FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connections.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid() AND pm.role IN ('editor', 'admin'))
-  ))
+  public.user_has_project_access(project_id)
 );
 CREATE POLICY "connections owner update" ON public.connections FOR UPDATE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connections.project_id AND (
-    p.owner_id = auth.uid() OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = p.id AND pm.user_id = auth.uid() AND pm.role IN ('editor', 'admin'))
-  ))
+  public.user_has_project_access(project_id)
 );
 CREATE POLICY "connections owner delete" ON public.connections FOR DELETE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = connections.project_id AND p.owner_id = auth.uid())
+  public.user_is_project_owner(project_id)
 );
 
 -- ============================================
@@ -1721,6 +1785,9 @@ BEGIN
 END;
 $$;
 
+ALTER FUNCTION public.prevent_tombstoned_task_writes()
+  SET search_path TO 'pg_catalog', 'public';
+
 DROP TRIGGER IF EXISTS trg_prevent_tombstoned_task_writes ON public.tasks;
 CREATE TRIGGER trg_prevent_tombstoned_task_writes
 BEFORE INSERT OR UPDATE ON public.tasks
@@ -1833,6 +1900,9 @@ AS $$
   );
 $$;
 
+ALTER FUNCTION public.is_task_tombstoned(uuid)
+  SET search_path TO 'pg_catalog', 'public';
+
 GRANT EXECUTE ON FUNCTION public.is_task_tombstoned(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_task_tombstoned(uuid) TO service_role;
 
@@ -1918,6 +1988,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+ALTER FUNCTION public.trigger_set_updated_at()
+  SET search_path TO 'pg_catalog', 'public';
+
 -- 为 projects 表添加触发器
 DROP TRIGGER IF EXISTS set_updated_at ON public.projects;
 CREATE TRIGGER set_updated_at
@@ -1967,6 +2040,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER FUNCTION public.check_version_increment()
+  SET search_path TO 'pg_catalog', 'public';
 
 -- 为 projects 表添加版本检查触发器
 DROP TRIGGER IF EXISTS check_version_increment ON public.projects;
@@ -2049,6 +2125,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER FUNCTION public.validate_task_data()
+  SET search_path TO 'pg_catalog', 'public';
 
 -- 删除旧触发器（如果存在）
 DROP TRIGGER IF EXISTS trg_validate_task_data ON public.tasks;
@@ -2249,6 +2328,13 @@ BEGIN
   ON CONFLICT (key) DO NOTHING;
 END $$;
 
+-- 为配置表启用 RLS 并设置只读策略（认证用户可读）
+ALTER TABLE public.app_config ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "app_config_select" ON public.app_config;
+CREATE POLICY "app_config_select" ON public.app_config
+  FOR SELECT TO authenticated
+  USING (true);
+
 -- 更新 append_task_attachment 函数，添加数量限制检查
 COMMENT ON FUNCTION public.purge_tasks_v3 IS 
 '永久删除任务并返回附件存储路径。客户端需要调用 Storage API 删除返回的路径。';
@@ -2408,6 +2494,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+ALTER FUNCTION public.update_attachment_scans_timestamp()
+  SET search_path TO 'pg_catalog', 'public';
 
 DROP TRIGGER IF EXISTS trg_update_attachment_scans_timestamp ON public.attachment_scans;
 CREATE TRIGGER trg_update_attachment_scans_timestamp

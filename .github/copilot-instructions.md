@@ -1,6 +1,6 @@
 # NanoFlow AI 编码指南
 
-> **核心哲学**：不要造轮子。Supabase 做同步，UUID 做 ID，PWA 做离线，Sentry 做监控，Groq 做语音转写。
+> **核心哲学**：不要造轮子。Supabase 做同步，UUID 做 ID，PWA 做离线，Sentry 做监控，Groq 做语音转写。npm run update-types 定期更新 Supabase 类型定义。
 
 ## 技术栈
 

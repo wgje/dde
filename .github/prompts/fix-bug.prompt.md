@@ -2,7 +2,7 @@
 name: fix-bug
 description: "Fix a bug with minimal-risk workflow (diagnose -> plan -> implement -> verify -> review)."
 agent: Implementer
-tools: ['vscode', 'execute', 'read', 'tavily/search', 'structured-thinking/*', 'edit', 'search','todo']
+tools: ['vscode', 'execute', 'read', 'edit', 'search', 'todo']
 argument-hint: "bug description + reproduction steps"
 ---
 

@@ -3624,6 +3624,12 @@ export class SimpleSyncService {
     project: Project,
     _userId: string
   ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number }> {
+    // 【性能优化 2026-01-26】本地模式快速退出，避免不必要的会话检查
+    if (_userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.debug('本地模式，跳过云端同步');
+      return { success: false };
+    }
+
     // 【Stingy Hoarder Protocol】Phase 4.5 - 网络感知检查
     // 在弱网或节省流量模式下，将同步操作加入队列而非立即执行
     // @see docs/plan_save.md Phase 4.5
@@ -3672,21 +3678,28 @@ export class SimpleSyncService {
       return { success: false };
     }
     
-    // 【性能优化】在批量操作开始前进行一次 session 验证
+    // 【性能优化 2026-01-26】在批量操作开始前进行一次 session 验证
     // 避免在每个 pushTask/pushConnection 中重复检查（40+ 次 → 1 次）
+    // 注意：本地模式已在函数开始时提前返回，此处不会执行
     try {
       const { data: { session } } = await client.auth.getSession();
       const userId = session?.user?.id;
       if (!userId) {
         this.syncState.update(s => ({ ...s, sessionExpired: true }));
         this.logger.warn('批量推送前检测到会话丢失', { projectId: project.id, operation: 'saveProjectToCloud' });
-        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        // 【修复】本地模式不显示 Toast，避免误导用户
+        if (_userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        }
         return { success: false };
       }
     } catch (e) {
       this.logger.error('Session 验证失败', e);
       this.syncState.update(s => ({ ...s, sessionExpired: true }));
-      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+      // 【修复】本地模式不显示 Toast
+      if (_userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+      }
       return { success: false };
     }
     

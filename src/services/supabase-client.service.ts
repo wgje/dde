@@ -1,6 +1,7 @@
 import { Injectable, signal } from '@angular/core';
 import { createClient, type AuthResponse, type Session, type SupabaseClient } from '@supabase/supabase-js';
 import { environment } from '../environments/environment'; // 引入环境文件
+import type { Database } from '../types/supabase';
 
 /**
  * 敏感密钥检测模式
@@ -17,7 +18,7 @@ const SENSITIVE_KEY_PATTERNS = [
   providedIn: 'root'
 })
 export class SupabaseClientService {
-  private supabase: SupabaseClient | null = null;
+  private supabase: SupabaseClient<Database> | null = null;
   
   // 配置状态信号，UI 可以响应式订阅
   readonly configurationError = signal<string | null>(null);
@@ -57,7 +58,7 @@ export class SupabaseClientService {
     }
 
     try {
-      this.supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      this.supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
         auth: {
           // 使用 localStorage 存储 session（更稳定，减少锁竞争）
           storage: typeof window !== 'undefined' ? window.localStorage : undefined,
@@ -147,7 +148,7 @@ export class SupabaseClientService {
     return this.supabase !== null;
   }
 
-  client(): SupabaseClient {
+  client(): SupabaseClient<Database> {
     if (!this.supabase) {
       throw new Error('Supabase 未配置，请提供 NG_APP_SUPABASE_URL 与 NG_APP_SUPABASE_ANON_KEY');
     }

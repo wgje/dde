@@ -52,6 +52,8 @@ export class BlackBoxSyncService {
     // 监听网络状态变化
     this.setupNetworkListener();
   }
+  private readonly SYNC_METADATA_STORE = FOCUS_CONFIG.IDB_STORES.SYNC_METADATA;
+  private readonly LAST_SYNC_TIME_KEY = 'black_box_last_sync_time';
   
   /**
    * 初始化 IndexedDB
@@ -65,9 +67,13 @@ export class BlackBoxSyncService {
         reject(request.error);
       };
       
-      request.onsuccess = () => {
+      request.onsuccess = async () => {
         this.db = request.result;
         this.logger.debug('BlackBoxSync', 'IndexedDB opened for focus mode');
+        
+        // 从 IndexedDB 恢复上次同步时间
+        await this.loadLastSyncTime();
+        
         resolve();
       };
       
@@ -91,7 +97,62 @@ export class BlackBoxSyncService {
         if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES)) {
           db.createObjectStore(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES, { keyPath: 'key' });
         }
+        
+        // 同步元数据存储（v2 新增）
+        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
+          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
+        }
       };
+    });
+  }
+  
+  /**
+   * 从 IndexedDB 加载上次同步时间
+   */
+  private async loadLastSyncTime(): Promise<void> {
+    if (!this.db) return;
+    
+    return new Promise((resolve) => {
+      try {
+        const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readonly');
+        const store = tx.objectStore(this.SYNC_METADATA_STORE);
+        const request = store.get(this.LAST_SYNC_TIME_KEY);
+        
+        request.onsuccess = () => {
+          if (request.result) {
+            this.lastSyncTime = request.result.value;
+            this.logger.debug('BlackBoxSync', `Loaded lastSyncTime: ${this.lastSyncTime}`);
+          }
+          resolve();
+        };
+        
+        request.onerror = () => {
+          this.logger.warn('BlackBoxSync', 'Failed to load lastSyncTime');
+          resolve();
+        };
+      } catch {
+        // Store 可能不存在（首次升级前）
+        resolve();
+      }
+    });
+  }
+  
+  /**
+   * 保存上次同步时间到 IndexedDB
+   */
+  private async saveLastSyncTime(): Promise<void> {
+    if (!this.db || !this.lastSyncTime) return;
+    
+    return new Promise((resolve) => {
+      try {
+        const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readwrite');
+        const store = tx.objectStore(this.SYNC_METADATA_STORE);
+        store.put({ key: this.LAST_SYNC_TIME_KEY, value: this.lastSyncTime });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch {
+        resolve();
+      }
     });
   }
   
@@ -274,6 +335,7 @@ export class BlackBoxSyncService {
       
       // 获取上次同步时间
       const lastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
+      this.logger.debug('BlackBoxSync', `Pulling changes since: ${lastSync}`);
       
       // 增量拉取
       const { data, error } = await client
@@ -294,9 +356,10 @@ export class BlackBoxSyncService {
         await this.mergeWithLocal(entry);
       }
       
-      // 更新同步时间
+      // 更新同步时间并持久化
       if (data && data.length > 0) {
         this.lastSyncTime = data[data.length - 1].updated_at;
+        await this.saveLastSyncTime();
       }
       
       // 处理本地待同步的条目

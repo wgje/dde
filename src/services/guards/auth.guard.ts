@@ -205,6 +205,7 @@ export function getDataIsolationId(authService: AuthService): string | null {
  * - 用户设置页面
  */
 export const requireAuthGuard: CanActivateFn = async (route, state) => {
+  const perfStart = performance.now();
   const authService = inject(AuthService);
   const modalService = inject(ModalService);
   
@@ -215,12 +216,14 @@ export const requireAuthGuard: CanActivateFn = async (route, state) => {
     // 数据存储在本地 IndexedDB，用户可以正常进行所有操作
     // 这不是"限制功能"的降级模式，而是完整的本地优先体验
     console.log('[Guard] Supabase 未配置，允许离线模式访问');
+    console.log(`[Guard] ⚡ 守卫检查完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
     return true;
   }
   
-  // 检查是否已启用本地模式（用户选择跳过登录）
+  // 【性能优化 2026-01-26】本地模式立即放行，避免等待会话检查
   if (isLocalModeEnabled()) {
-    console.log('[Guard] 本地模式已启用，允许访问');
+    console.log('[Guard] 本地模式已启用，立即允许访问');
+    console.log(`[Guard] ⚡ 守卫检查完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
     return true;
   }
   

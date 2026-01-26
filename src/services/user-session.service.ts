@@ -257,6 +257,7 @@ export class UserSessionService {
    * 这消除了首屏加载的 15 秒等待时间，TTI 降至 <100ms
    */
   async loadProjects(): Promise<void> {
+    const perfStart = performance.now();
     const userId = this.currentUserId();
     console.log('[Session] loadProjects 开始（本地优先模式）, userId:', userId);
     
@@ -265,13 +266,17 @@ export class UserSessionService {
     if (!userId) {
       console.log('[Session] 无 userId，从缓存或种子加载');
       this.loadFromCacheOrSeed();
+      console.log(`[Session] ⚡ 数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       return;
     }
     
-    // 如果是本地模式用户，直接从缓存加载，不尝试云端同步
+    // 【性能优化 2026-01-26】如果是本地模式用户，直接从缓存加载，不尝试云端同步
+    // 立即返回，避免触发任何网络请求或会话检查
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       console.log('[Session] 本地模式，从缓存或种子加载');
       this.loadFromCacheOrSeed();
+      console.log(`[Session] ⚡ 本地模式数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
+      // 确保不启动后台同步任务
       return;
     }
 

@@ -16,11 +16,18 @@
   
   <!-- ========== 性能优化：Preconnect 提示 ========== -->
   <!-- 提前建立 CDN 连接，减少字体加载延迟 -->
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <!-- 【TTFB 优化 2026-01-25】移除 crossorigin 避免不必要的 CORS preflight 请求 -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+  
   <!-- Supabase API 预连接（如果启用云同步） -->
+  <!-- 【TTFB 优化】使用 crossorigin 因为 Supabase 需要携带认证头 -->
   <link rel="preconnect" href="https://fkhihclpghmmtbbywvoj.supabase.co" crossorigin>
   <link rel="dns-prefetch" href="https://fkhihclpghmmtbbywvoj.supabase.co">
+  
+  <!-- 【TTFB 优化】Sentry 预连接 - 减少错误上报延迟 -->
+  <link rel="preconnect" href="https://o4508391513718784.ingest.us.sentry.io">
+  <link rel="dns-prefetch" href="https://o4508391513718784.ingest.us.sentry.io">
   
   <!-- ========== 性能优化：关键字体 Preload ========== -->
   <!-- 预加载最常用的中文字体子集，避免渲染阻塞 -->

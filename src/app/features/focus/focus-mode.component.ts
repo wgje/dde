@@ -73,12 +73,32 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     this.logger.debug('FocusMode', '初始化');
     
     // FocusPreferenceService 在构造函数中已自动加载偏好
-    // 检查大门状态
-    this.checkGateOnStartup();
+    // 先从服务器加载黑匣子数据，然后检查大门状态
+    this.initializeAndCheckGate();
   }
 
   ngOnDestroy(): void {
     this.logger.debug('FocusMode', '销毁');
+  }
+
+  /**
+   * 初始化：加载黑匣子数据并检查大门
+   * 必须先加载数据，否则 pendingBlackBoxEntries 为空
+   */
+  private async initializeAndCheckGate(): Promise<void> {
+    try {
+      // ⚠️ 关键：先从服务器/IndexedDB 加载黑匣子条目
+      this.logger.debug('FocusMode', '加载黑匣子数据...');
+      await this.blackBoxSyncService.pullChanges();
+      this.logger.debug('FocusMode', '黑匣子数据加载完成');
+      
+      // 然后检查大门状态
+      this.checkGateOnStartup();
+    } catch (error) {
+      this.logger.error('FocusMode', '初始化失败', error instanceof Error ? error.message : String(error));
+      // 即使加载失败，也尝试检查大门（可能有本地缓存）
+      this.checkGateOnStartup();
+    }
   }
 
   /**

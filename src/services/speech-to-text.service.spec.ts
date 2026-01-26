@@ -125,16 +125,74 @@ describe('SpeechToTextService', () => {
     });
   });
 
-  describe('startRecording', () => {
-    it('浏览器不支持时应该抛出错误', async () => {
-      // Mock navigator.mediaDevices 为 undefined
+  describe('checkMicrophoneAvailability', () => {
+    it('当没有音频输入设备时应该返回 false', async () => {
+      const mockEnumerateDevices = vi.fn().mockResolvedValue([
+        { kind: 'videoinput', deviceId: 'test1' }
+      ]);
+      
+      const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
+      navigator.mediaDevices.enumerateDevices = mockEnumerateDevices;
+
+      const result = await service.checkMicrophoneAvailability();
+      expect(result).toBe(false);
+      
+      // 恢复
+      navigator.mediaDevices.enumerateDevices = originalEnumerateDevices;
+    });
+
+    it('当有音频输入设备时应该返回 true', async () => {
+      const mockEnumerateDevices = vi.fn().mockResolvedValue([
+        { kind: 'audioinput', deviceId: 'test1' },
+        { kind: 'videoinput', deviceId: 'test2' }
+      ]);
+      
+      const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
+      navigator.mediaDevices.enumerateDevices = mockEnumerateDevices;
+
+      const result = await service.checkMicrophoneAvailability();
+      expect(result).toBe(true);
+      
+      // 恢复
+      navigator.mediaDevices.enumerateDevices = originalEnumerateDevices;
+    });
+
+    it('当 mediaDevices API 不可用时应该返回 false', async () => {
       const originalMediaDevices = navigator.mediaDevices;
       Object.defineProperty(navigator, 'mediaDevices', {
         value: undefined,
         configurable: true
       });
 
-      await expect(service.startRecording()).rejects.toThrow();
+      const result = await service.checkMicrophoneAvailability();
+      expect(result).toBe(false);
+
+      // 恢复
+      Object.defineProperty(navigator, 'mediaDevices', {
+        value: originalMediaDevices,
+        configurable: true
+      });
+    });
+  });
+
+  describe('startRecording', () => {
+    it('设备不可用时应该优雅返回而不抛出错误', async () => {
+      // Mock checkMicrophoneAvailability 返回 false
+      vi.spyOn(service, 'checkMicrophoneAvailability').mockResolvedValue(false);
+
+      // 不应该抛出错误
+      await expect(service.startRecording()).resolves.toBeUndefined();
+    });
+
+    it('浏览器不支持时应该优雅返回', async () => {
+      const originalMediaDevices = navigator.mediaDevices;
+      Object.defineProperty(navigator, 'mediaDevices', {
+        value: undefined,
+        configurable: true
+      });
+
+      // 不应该抛出错误
+      await expect(service.startRecording()).resolves.toBeUndefined();
 
       // 恢复
       Object.defineProperty(navigator, 'mediaDevices', {

@@ -121,12 +121,49 @@ export class SpeechToTextService {
   }
   
   /**
+   * 检查麦克风设备是否可用
+   * 在测试环境或无麦克风设备时返回 false
+   */
+  async checkMicrophoneAvailability(): Promise<boolean> {
+    try {
+      // 检查是否支持 mediaDevices API
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        this.logger.debug('SpeechToText', 'MediaDevices API not supported');
+        return false;
+      }
+
+      // 检查是否有音频输入设备
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const hasAudioInput = devices.some(device => device.kind === 'audioinput');
+      
+      if (!hasAudioInput) {
+        this.logger.debug('SpeechToText', 'No audio input devices found');
+        return false;
+      }
+
+      return true;
+    } catch (err) {
+      this.logger.debug('SpeechToText', 'Failed to check microphone availability', err instanceof Error ? err.message : String(err));
+      return false;
+    }
+  }
+  
+  /**
    * 开始录音
    * ⚠️ iOS Safari 兼容性：需要在用户手势内调用
    */
   async startRecording(): Promise<void> {
     if (this.isRecording()) {
       return;
+    }
+    
+    // 预检查设备可用性
+    const isAvailable = await this.checkMicrophoneAvailability();
+    if (!isAvailable) {
+      const errorMsg = '未找到麦克风设备或不支持录音功能';
+      this.logger.warn('SpeechToText', errorMsg);
+      this.toast.warning('录音不可用', errorMsg);
+      return; // 优雅返回，不抛出异常
     }
     
     try {
@@ -175,9 +212,15 @@ export class SpeechToTextService {
           this.toast.error('录音失败', ErrorMessages[ErrorCodes.FOCUS_RECORDING_PERMISSION_DENIED]);
         } else if (err.name === 'NotFoundError') {
           this.toast.error('录音失败', '未找到麦克风设备');
+        } else {
+          this.toast.error('录音失败', `设备错误: ${err.message}`);
         }
+      } else {
+        this.toast.error('录音失败', '无法启动录音');
       }
-      throw err;
+      
+      // 不抛出异常，避免中断应用流程
+      // throw err;
     }
   }
   

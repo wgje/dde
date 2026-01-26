@@ -34,6 +34,14 @@ export const WEB_VITALS_THRESHOLDS = {
 } as const;
 
 /**
+ * 生产环境弱网 TTFB 阈值（移动端 3G/2G 网络）
+ * 背景: Sentry Alert - 2861ms TTFB on 3G (downlink 1.35Mbps, RTT 350ms)
+ * 原因: TTFB 主要受网络延迟影响，弱网条件下 3s 是可接受的
+ * 参考: WebPageTest 建议 - 3G 网络 TTFB < 3000ms 为 "Good"
+ */
+const MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS = { good: 3000, needsImprovement: 5000 };
+
+/**
  * 开发环境 TTFB 阈值（放宽）
  * 原因：GitHub Codespaces / 本地开发服务器的网络延迟是正常的
  * TTFB 是服务器响应时间，不是客户端代码问题
@@ -42,6 +50,16 @@ const DEV_TTFB_THRESHOLDS = { good: 3000, needsImprovement: 5000 };
 
 /** 指标评级 */
 export type MetricRating = 'good' | 'needs-improvement' | 'poor';
+
+/** 网络质量等级 */
+type NetworkQuality = 'fast' | 'moderate' | 'slow' | 'offline' | 'unknown';
+
+/** 网络信息（来自 NetworkInformation API） */
+interface NetworkInfo {
+  effectiveType: string;  // '4g', '3g', '2g', 'slow-2g'
+  downlink: number;       // Mbps
+  rtt: number;            // ms
+}
 
 @Injectable({
   providedIn: 'root'
@@ -55,6 +73,60 @@ export class WebVitalsService {
   
   /** 收集到的指标缓存 */
   private metricsCache = new Map<string, Metric>();
+  
+  /** 当前网络质量（缓存，避免重复计算） */
+  private cachedNetworkQuality: NetworkQuality | null = null;
+  
+  /**
+   * 检测当前网络质量
+   * 使用 Network Information API (navigator.connection)
+   */
+  private detectNetworkQuality(): NetworkQuality {
+    if (this.cachedNetworkQuality) return this.cachedNetworkQuality;
+    
+    // 尝试使用 Network Information API
+    const nav = navigator as Navigator & { connection?: NetworkInfo; mozConnection?: NetworkInfo; webkitConnection?: NetworkInfo };
+    const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+    
+    if (!connection) {
+      this.cachedNetworkQuality = 'unknown';
+      return 'unknown';
+    }
+    
+    const effectiveType = connection.effectiveType || '';
+    const downlink = connection.downlink || 0;
+    const rtt = connection.rtt || 0;
+    
+    // 分类网络质量
+    // 参考: Chrome DevTools Network Throttling Presets
+    if (effectiveType === '4g' && downlink > 5 && rtt < 100) {
+      this.cachedNetworkQuality = 'fast'; // 4G 快速网络
+    } else if (effectiveType === '4g' || (effectiveType === '3g' && downlink > 1.5)) {
+      this.cachedNetworkQuality = 'moderate'; // 4G 慢速 或 3G 快速
+    } else if (effectiveType === '3g' || effectiveType === '2g') {
+      this.cachedNetworkQuality = 'slow'; // 3G 慢速 或 2G
+    } else if (effectiveType === 'slow-2g') {
+      this.cachedNetworkQuality = 'offline'; // 极慢网络
+    } else {
+      this.cachedNetworkQuality = 'unknown';
+    }
+    
+    this.logger.info(`网络质量检测: ${this.cachedNetworkQuality}`, { effectiveType, downlink, rtt });
+    return this.cachedNetworkQuality;
+  }
+  
+  /**
+   * 获取网络信息（用于 Sentry 上下文）
+   */
+  private getNetworkInfo(): NetworkInfo | null {
+    const nav = navigator as Navigator & { connection?: NetworkInfo; mozConnection?: NetworkInfo; webkitConnection?: NetworkInfo };
+    const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+    return connection ? {
+      effectiveType: connection.effectiveType || 'unknown',
+      downlink: connection.downlink || 0,
+      rtt: connection.rtt || 0,
+    } : null;
+  }
   
   /**
    * 初始化 Web Vitals 监控
@@ -102,7 +174,7 @@ export class WebVitalsService {
   
   /**
    * 根据指标值计算评级
-   * 注意：开发环境下 TTFB 使用放宽的阈值
+   * 注意：TTFB 根据环境和网络条件使用不同阈值
    */
   private getRating(name: string, value: number): MetricRating {
     // 开发环境下 TTFB 使用放宽的阈值
@@ -112,6 +184,19 @@ export class WebVitalsService {
       if (value <= DEV_TTFB_THRESHOLDS.good) return 'good';
       if (value <= DEV_TTFB_THRESHOLDS.needsImprovement) return 'needs-improvement';
       return 'poor';
+    }
+    
+    // 生产环境下，根据网络条件调整 TTFB 阈值
+    // 背景: Sentry Alert 2861ms TTFB on 3G - 这是网络条件导致的，不应该告警
+    if (name === 'TTFB' && !isDevMode()) {
+      const networkQuality = this.detectNetworkQuality();
+      
+      // 慢速网络（3G/2G）使用放宽的阈值
+      if (networkQuality === 'slow' || networkQuality === 'offline') {
+        if (value <= MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS.good) return 'good';
+        if (value <= MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS.needsImprovement) return 'needs-improvement';
+        return 'poor';
+      }
     }
     
     const thresholds = WEB_VITALS_THRESHOLDS[name as keyof typeof WEB_VITALS_THRESHOLDS];
@@ -150,19 +235,37 @@ export class WebVitalsService {
       return;
     }
     
+    // 生产环境下，过滤弱网环境的 TTFB 告警噪音
+    // 背景: 移动端 3G 网络 TTFB 2861ms 是正常的，不应该告警
+    if (metric.name === 'TTFB' && !isDevMode() && rating === 'poor') {
+      const networkQuality = this.detectNetworkQuality();
+      const networkInfo = this.getNetworkInfo();
+      
+      // 慢速网络下，TTFB 不符合标准阈值是预期的，不发送告警
+      if (networkQuality === 'slow' || networkQuality === 'offline') {
+        this.logger.info(`TTFB ${metric.value}ms (弱网环境 ${networkQuality}，跳过告警)`, networkInfo);
+        return;
+      }
+    }
+    
     // 如果评级差，额外发送告警消息
     if (rating === 'poor') {
+      const networkInfo = this.getNetworkInfo();
+      const networkQuality = this.detectNetworkQuality();
+      
       Sentry.captureMessage(`性能告警: ${metric.name} 超出阈值`, {
         level: 'warning',
         tags: {
           'web-vital': metric.name,
           'rating': rating,
+          'network-quality': networkQuality,
         },
         extra: {
           value: metric.value,
           id: metric.id,
           delta: metric.delta,
           navigationType: metric.navigationType,
+          networkInfo: networkInfo, // 添加网络上下文
           entries: metric.entries?.map((e: PerformanceEntry) => ({
             name: e.name,
             startTime: e.startTime,

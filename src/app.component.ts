@@ -373,6 +373,9 @@ export class AppComponent implements OnInit, OnDestroy {
     // 避免重复触发（例如 HMR 或其他监听器已处理）
     if (event.defaultPrevented) return;
 
+    // 防御：某些特殊键盘事件可能没有 key 属性
+    if (!event.key) return;
+
     const key = event.key.toLowerCase();
 
     // Ctrl+Z / Cmd+Z: 撤销
@@ -659,8 +662,8 @@ export class AppComponent implements OnInit, OnDestroy {
   handleKeyboardShortcut(event: KeyboardEvent) {
     // 如果 capture 阶段已处理（或其他逻辑已处理），不要重复执行
     if (event.defaultPrevented) return;
-
-    const key = event.key.toLowerCase();
+    const key = event.key?.toLowerCase();
+    if (!key) return;
     
     // Ctrl+Z / Cmd+Z: 撤销
     if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
