@@ -1,3 +1,4 @@
+Initialising login role...
 export type Json =
   | string
   | number
@@ -784,7 +785,12 @@ export type Database = {
       cleanup_old_logs: { Args: never; Returns: number }
       current_user_id: { Args: never; Returns: string }
       get_dashboard_stats: { Args: never; Returns: Json }
+      get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
       get_server_time: { Args: never; Returns: string }
+      get_user_projects_meta: {
+        Args: { p_since_timestamp?: string }
+        Returns: Json
+      }
       is_connection_tombstoned: {
         Args: { p_connection_id: string }
         Returns: boolean

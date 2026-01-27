@@ -25,8 +25,7 @@
   <link rel="preconnect" href="https://fkhihclpghmmtbbywvoj.supabase.co" crossorigin>
   <link rel="dns-prefetch" href="https://fkhihclpghmmtbbywvoj.supabase.co">
   
-  <!-- 【TTFB 优化】Sentry 预连接 - 减少错误上报延迟 -->
-  <link rel="preconnect" href="https://o4508391513718784.ingest.us.sentry.io">
+  <!-- Sentry: 仅使用 dns-prefetch，因为首屏不会触发错误上报（P3 优化 2026-01-26）-->
   <link rel="dns-prefetch" href="https://o4508391513718784.ingest.us.sentry.io">
   
   <!-- ========== 性能优化：关键字体 Preload ========== -->
@@ -94,24 +93,111 @@
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
   <style>
-    /* ========== 骨架屏加载器 - 提升 LCP 感知性能 ========== */
+    /* ========== 增强版骨架屏 - P1 优化 2026-01-26 ========== */
+    
+    /* CSS 变量：支持浅色/深色模式 */
+    :root {
+      --skeleton-base: #e7e5e4;
+      --skeleton-highlight: #d6d3d1;
+      --skeleton-bg: #f5f5f4;
+      --skeleton-card-bg: #ffffff;
+    }
+    [data-color-mode="dark"] {
+      --skeleton-base: #374151;
+      --skeleton-highlight: #4b5563;
+      --skeleton-bg: #0f172a;
+      --skeleton-card-bg: #1f2937;
+    }
+    
     #initial-loader {
       position: fixed;
       inset: 0;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      background: #f5f5f4;
+      background: var(--skeleton-bg);
       z-index: 99999;
       font-family: "LXGW WenKai Screen", system-ui, -apple-system, sans-serif;
+      /* 淡出动画 */
+      transition: opacity 0.2s ease-out;
     }
-    /* 深色模式下的加载器样式 */
-    [data-color-mode="dark"] #initial-loader {
-      background: #1a1a1a;
+    #initial-loader.fade-out {
+      opacity: 0;
+      pointer-events: none;
     }
     #initial-loader.hidden {
       display: none;
+    }
+    
+    /* 骨架屏闪烁动画 */
+    @keyframes skeleton-shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    
+    .skeleton-shimmer {
+      background: linear-gradient(90deg, 
+        var(--skeleton-base) 0%, 
+        var(--skeleton-highlight) 50%, 
+        var(--skeleton-base) 100%);
+      background-size: 200% 100%;
+      animation: skeleton-shimmer 1.5s ease-in-out infinite;
+    }
+    
+    /* 骨架屏布局：模拟真实 UI */
+    .skeleton-layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: 56px 1fr;
+      height: 100%;
+      flex: 1;
+    }
+    
+    /* 移动端响应式：单列布局 */
+    @media (max-width: 768px) {
+      .skeleton-layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: 56px auto 1fr;
+      }
+      .skeleton-sidebar {
+        display: none;
+      }
+    }
+    
+    .skeleton-nav {
+      grid-column: 1 / -1;
+      height: 56px;
+      background: var(--skeleton-card-bg);
+      display: flex;
+      align-items: center;
+      padding: 0 1rem;
+      border-bottom: 1px solid var(--skeleton-base);
+    }
+    
+    .skeleton-sidebar {
+      background: var(--skeleton-card-bg);
+      padding: 1rem;
+      border-right: 1px solid var(--skeleton-base);
+    }
+    
+    .skeleton-main {
+      background: var(--skeleton-bg);
+      padding: 1.5rem;
+      overflow: hidden;
+    }
+    
+    .skeleton-footer {
+      padding: 1rem;
+      text-align: center;
+      background: var(--skeleton-card-bg);
+      border-top: 1px solid var(--skeleton-base);
+    }
+    
+    .skeleton-footer .text {
+      color: #57534e;
+      font-size: 14px;
+    }
+    [data-color-mode="dark"] .skeleton-footer .text {
+      color: #9ca3af;
     }
     
     /* 骨架屏容器 */
@@ -333,35 +419,44 @@
     // console.log('[DEBUG v15] body 开始解析');
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
   </script>
-  <!-- 初始加载指示器 - 骨架屏提升 LCP 感知性能 -->
+  <!-- 初始加载指示器 - 增强版骨架屏（P1 优化 2026-01-26） -->
   <div id="initial-loader">
-    <div class="skeleton-container">
-      <!-- 头部骨架 -->
-      <div class="skeleton-header"></div>
-      <!-- 内容骨架 -->
-      <div class="skeleton-content">
-        <div class="skeleton-row">
-          <div class="skeleton-avatar"></div>
-          <div class="skeleton-text medium"></div>
-        </div>
-        <div class="skeleton-row">
-          <div class="skeleton-avatar"></div>
-          <div class="skeleton-text short"></div>
-        </div>
-        <div class="skeleton-row">
-          <div class="skeleton-avatar"></div>
-          <div class="skeleton-text"></div>
-        </div>
+    <!-- 模拟真实 UI 布局的骨架屏 -->
+    <div class="skeleton-layout">
+      <!-- 顶部导航栏骨架 -->
+      <div class="skeleton-nav">
+        <div class="skeleton-shimmer" style="width:120px;height:28px;border-radius:6px;"></div>
+        <div class="skeleton-shimmer" style="width:200px;height:36px;border-radius:6px;margin-left:auto;"></div>
+        <div class="skeleton-shimmer" style="width:36px;height:36px;border-radius:50%;margin-left:1rem;"></div>
       </div>
-      <!-- 卡片骨架 -->
-      <div class="skeleton-cards">
-        <div class="skeleton-card"></div>
-        <div class="skeleton-card"></div>
-        <div class="skeleton-card"></div>
+      
+      <!-- 侧边栏骨架 -->
+      <div class="skeleton-sidebar">
+        <div class="skeleton-shimmer" style="width:100%;height:40px;border-radius:8px;margin-bottom:1rem;"></div>
+        <div class="skeleton-shimmer" style="width:85%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
+        <div class="skeleton-shimmer" style="width:65%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
+        <div class="skeleton-shimmer" style="width:75%;height:24px;border-radius:4px;margin-bottom:1.5rem;"></div>
+        <div class="skeleton-shimmer" style="width:50%;height:20px;border-radius:4px;margin-bottom:0.5rem;opacity:0.6;"></div>
+        <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;margin-bottom:0.5rem;"></div>
+        <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;"></div>
+      </div>
+      
+      <!-- 主内容区骨架 -->
+      <div class="skeleton-main">
+        <div class="skeleton-shimmer" style="width:250px;height:32px;border-radius:6px;margin-bottom:1.5rem;"></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
+          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
+          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
+          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;opacity:0.7;"></div>
+        </div>
       </div>
     </div>
-    <div class="text">正在加载 NanoFlow...</div>
-    <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#999;"></div>
+    
+    <!-- 加载状态提示 -->
+    <div class="skeleton-footer">
+      <div class="text">正在加载 NanoFlow...</div>
+      <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#9ca3af;"></div>
+    </div>
   </div>
   
   <app-root></app-root>

@@ -109,5 +109,14 @@ export {
   FocusErrorMessages
 } from './focus.config';
 
+// 性能优化配置（P0-P3 优化 2026-01-26）
+export {
+  PERFORMANCE_FLAGS,
+  BATCH_LOAD_CONFIG,
+  GOJS_PERF_CONFIG,
+  SKELETON_CONFIG,
+  PERF_MONITORING_CONFIG
+} from './performance.config';
+
 // 流程图样式（独立文件，保持不变）
 export * from './flow-styles';
