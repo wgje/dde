@@ -21,7 +21,8 @@ import { AttachmentService } from './attachment.service';
 import { MigrationService } from './migration.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
-import { Project } from '../models';
+import { SupabaseClientService } from './supabase-client.service';
+import { Project, Task, Connection } from '../models';
 import { CACHE_CONFIG, AUTH_CONFIG, SYNC_CONFIG } from '../config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
@@ -41,6 +42,7 @@ export class UserSessionService {
   private migrationService = inject(MigrationService);
   private layoutService = inject(LayoutService);
   private toastService = inject(ToastService);
+  private supabase = inject(SupabaseClientService);
   private destroyRef = inject(DestroyRef);
 
   /** 当前用户 ID (代理 AuthService) */
@@ -350,10 +352,11 @@ export class UserSessionService {
   /**
    * 后台静默同步云端数据
    * 
-   * 【设计原则】来自高级顾问审查：
-   * - 不阻塞 UI 渲染
+   * 【设计原则】来自高级顾问审查 2026-01-27：
+   * - 不阻塞 UI 渲染（Render-First）
    * - 使用 updatedAt 幂等检查避免 REST/Realtime 竞态
    * - 智能合并：无脏标记时静默覆盖，有脏标记时触发冲突处理
+   * - 【新增】按需加载：只同步当前项目，其他项目在用户导航时再加载
    * 
    * 【Stingy Hoarder Protocol】Phase 3 Delta Sync 优化
    * - 优先使用增量同步，节省流量
@@ -368,66 +371,200 @@ export class UserSessionService {
 
     console.log('[Session] 开始后台同步');
 
-    // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
-    // 【修复】Delta Sync 成功后跳过当前项目的全量同步，减少流量消耗
-    let deltaSyncSucceeded = false;
     const activeProjectId = this.projectState.activeProjectId();
+    
+    // === 策略 1: 优先使用 Delta Sync（增量同步）===
+    // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
+    let currentProjectSynced = false;
     if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
       try {
         const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
         if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
           console.log('[Session] Delta Sync 成功', deltaResult);
-          deltaSyncSucceeded = true;
+          currentProjectSynced = true;
         }
       } catch (deltaSyncError) {
-        console.warn('[Session] Delta Sync 失败，回退到全量同步', deltaSyncError);
-        // Delta Sync 失败，继续全量同步
+        console.warn('[Session] Delta Sync 失败，尝试全量同步当前项目', deltaSyncError);
       }
     }
     
-    // 如果 Delta Sync 对当前项目成功，只需要同步其他项目
-    // 这里仍然调用全量加载，但后续合并时会跳过已同步的项目
-    let cloudProjects: Project[] = [];
+    // === 策略 2: 如果 Delta Sync 失败，只加载当前项目（按需加载）===
+    // 【优化 2026-01-27】不自动加载其他项目，节省带宽
+    // 其他项目在用户切换项目时再加载
+    if (!currentProjectSynced && activeProjectId) {
+      try {
+        console.log('[Session] 按需加载当前项目:', activeProjectId);
+        const currentProject = await this.syncCoordinator.loadSingleProjectFromCloud(activeProjectId);
+        if (currentProject) {
+          await this.mergeSingleProject(currentProject, userId);
+          currentProjectSynced = true;
+        }
+      } catch (e) {
+        console.warn('[Session] 当前项目同步失败:', e);
+      }
+    }
+    
+    // === 策略 3: 后台增量更新项目列表元数据（不加载完整数据）===
+    // 只获取项目列表的 id/title/updated_at，不加载 tasks/connections
     try {
-      // 添加超时保护：30 秒后放弃云端同步
-      const LOAD_TIMEOUT = 30000;
-      const loadPromise = this.syncCoordinator.loadProjectsFromCloud(userId);
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('云端数据加载超时')), LOAD_TIMEOUT);
-      });
-      
-      cloudProjects = await Promise.race([loadPromise, timeoutPromise]);
-      console.log('[Session] 云端加载项目数量:', cloudProjects.length);
-      
-      // 【优化】如果 Delta Sync 成功，从云端项目列表中排除当前项目，避免覆盖增量同步结果
-      if (deltaSyncSucceeded && activeProjectId) {
-        cloudProjects = cloudProjects.filter(p => p.id !== activeProjectId);
-        console.log('[Session] Delta Sync 已处理当前项目，从全量合并中排除');
-      }
+      await this.syncProjectListMetadata(userId);
     } catch (e) {
-      console.warn('[Session] 后台云端同步失败:', e);
-      const errorMsg = e instanceof Error ? e.message : '未知错误';
-      // 只在网络恢复后用户继续操作时才显示提示
-      if (navigator.onLine) {
-        this.toastService.info('后台同步', `${errorMsg}，将在网络恢复后重试`);
-      }
+      console.warn('[Session] 项目列表元数据同步失败:', e);
+    }
+    
+    console.log('[Session] 后台同步完成', { currentProjectSynced });
+  }
+  
+  /**
+   * 同步项目列表元数据（不加载完整数据）
+   * 【优化 2026-01-27】只获取项目元数据，不下载完整任务数据
+   */
+  private async syncProjectListMetadata(userId: string): Promise<void> {
+    const client = this.supabase.client();
+    if (!client) return;
+    
+    const { data, error } = await client
+      .from('projects')
+      .select('id,title,description,created_date,updated_at,version')
+      .eq('owner_id', userId)
+      .order('updated_at', { ascending: false });
+    
+    if (error) {
+      console.warn('[Session] 获取项目列表失败:', error.message);
       return;
     }
-
-    // 获取当前本地项目（可能已被用户修改）
+    
+    // 更新本地项目列表的元数据（不覆盖 tasks/connections）
     const localProjects = this.projectState.projects();
+    const updatedProjects = [...localProjects];
+    let hasChanges = false;
     
-    if (cloudProjects.length === 0) {
-      // 云端无数据 - 可能是首次登录
-      if (localProjects.length > 0) {
-        console.log('[Session] 云端无数据，尝试将本地数据迁移到云端');
-        await this.migrateLocalToCloud(localProjects, userId);
+    for (const remote of data || []) {
+      const localIndex = updatedProjects.findIndex(p => p.id === remote.id);
+      if (localIndex === -1) {
+        // 新项目：创建空壳，完整数据在用户切换时加载
+        updatedProjects.push({
+          id: remote.id,
+          name: remote.title || 'Untitled Project',
+          description: remote.description || '',
+          createdDate: remote.created_date || new Date().toISOString(),
+          updatedAt: remote.updated_at || new Date().toISOString(),
+          version: remote.version || 1,
+          tasks: [],
+          connections: []
+        });
+        hasChanges = true;
+      } else {
+        // 已有项目：只更新元数据，不覆盖 tasks
+        const local = updatedProjects[localIndex];
+        if (remote.updated_at && remote.updated_at > (local.updatedAt || '')) {
+          updatedProjects[localIndex] = {
+            ...local,
+            name: remote.title || local.name,
+            description: remote.description || local.description,
+            version: remote.version || local.version
+          };
+          hasChanges = true;
+        }
       }
+    }
+    
+    if (hasChanges) {
+      this.projectState.setProjects(updatedProjects);
+      console.log('[Session] 项目列表元数据已更新');
+    }
+  }
+  
+  /**
+   * 合并单个项目数据
+   * 【LWW 竞态保护】确保用户编辑不会被旧数据覆盖
+   */
+  private async mergeSingleProject(cloudProject: Project, userId: string): Promise<void> {
+    const localProjects = this.projectState.projects();
+    const localProject = localProjects.find(p => p.id === cloudProject.id);
+    
+    if (!localProject) {
+      // 新项目，直接添加
+      this.projectState.setProjects([...localProjects, cloudProject]);
       return;
     }
     
-    // 智能合并云端数据和本地数据
-    await this.mergeCloudData(cloudProjects, localProjects, userId, previousActive);
+    // 【LWW 竞态保护 2026-01-27】
+    // 检查是否有本地未同步的修改（脏数据）
+    const hasPendingChanges = this.syncCoordinator.hasPendingChangesForProject(cloudProject.id);
+    
+    if (hasPendingChanges) {
+      console.log('[Session] 检测到本地未同步修改，使用 LWW 合并');
+      // 逐个任务比较 updatedAt，保留最新的
+      const mergedTasks = this.mergeTasksWithLWW(localProject.tasks, cloudProject.tasks);
+      const mergedConnections = this.mergeConnectionsWithLWW(
+        localProject.connections, 
+        cloudProject.connections
+      );
+      
+      const mergedProject: Project = {
+        ...cloudProject,
+        tasks: mergedTasks,
+        connections: mergedConnections
+      };
+      
+      const updatedProjects = localProjects.map(p => 
+        p.id === cloudProject.id ? mergedProject : p
+      );
+      this.projectState.setProjects(updatedProjects);
+    } else {
+      // 无本地修改，直接覆盖
+      const updatedProjects = localProjects.map(p => 
+        p.id === cloudProject.id ? cloudProject : p
+      );
+      this.projectState.setProjects(updatedProjects);
+    }
+  }
+  
+  /**
+   * LWW 合并任务列表
+   */
+  private mergeTasksWithLWW(localTasks: Task[], cloudTasks: Task[]): Task[] {
+    const taskMap = new Map<string, Task>();
+    
+    // 先添加云端任务
+    for (const task of cloudTasks) {
+      taskMap.set(task.id, task);
+    }
+    
+    // 用本地更新的任务覆盖
+    for (const task of localTasks) {
+      const cloudTask = taskMap.get(task.id);
+      if (!cloudTask) {
+        // 本地新建的任务
+        taskMap.set(task.id, task);
+      } else if (task.updatedAt && cloudTask.updatedAt && task.updatedAt > cloudTask.updatedAt) {
+        // 本地任务更新时间更晚，保留本地
+        taskMap.set(task.id, task);
+      }
+      // 否则保留云端（已在 map 中）
+    }
+    
+    return Array.from(taskMap.values());
+  }
+  
+  /**
+   * LWW 合并连接列表
+   */
+  private mergeConnectionsWithLWW(localConns: Connection[], cloudConns: Connection[]): Connection[] {
+    const connMap = new Map<string, Connection>();
+    
+    for (const conn of cloudConns) {
+      connMap.set(conn.id, conn);
+    }
+    
+    // Connection 类型没有 updatedAt 字段，简化为优先使用本地连接
+    // 这是保守策略，避免本地编辑丢失
+    for (const conn of localConns) {
+      connMap.set(conn.id, conn);
+    }
+    
+    return Array.from(connMap.values());
   }
   
   /**

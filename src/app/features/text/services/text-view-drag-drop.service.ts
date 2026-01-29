@@ -638,6 +638,34 @@ export class TextViewDragDropService {
     this.autoScrollState.lastClientY = clientY;
     this.ensureAutoScrollLoop();
   }
+
+  /** 执行嵌套容器自动滚动（例如阶段内的任务列表） */
+  performNestedAutoScroll(nestedContainer: HTMLElement, clientY: number): boolean {
+    const rect = nestedContainer.getBoundingClientRect();
+    const edgeSize = 80; // 边缘检测区域（更大以便触发）
+    const maxScrollSpeed = 12;
+    let scrollAmount = 0;
+
+    // 检查是否在容器的上边缘
+    if (clientY >= rect.top && clientY < rect.top + edgeSize) {
+      const distance = edgeSize - (clientY - rect.top);
+      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
+      scrollAmount = -maxScrollSpeed * ratio * ratio;
+    }
+    // 检查是否在容器的下边缘
+    else if (clientY > rect.bottom - edgeSize && clientY <= rect.bottom) {
+      const distance = edgeSize - (rect.bottom - clientY);
+      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
+      scrollAmount = maxScrollSpeed * ratio * ratio;
+    }
+
+    if (scrollAmount !== 0) {
+      nestedContainer.scrollTop += scrollAmount;
+      return true; // 已处理滚动
+    }
+
+    return false; // 未处理滚动
+  }
   
   private handleDragAutoScroll(e: DragEvent) {
     this.autoScrollState.lastClientY = e.clientY;

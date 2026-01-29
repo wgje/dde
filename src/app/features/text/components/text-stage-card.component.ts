@@ -50,6 +50,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
 
       <!-- 任务列表 -->
       <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar task-stack transition-all duration-150 ease-out"
+           [attr.data-stage-task-list]="stage.stageNumber"
            [ngClass]="{
              'space-y-2 px-3 pb-3 max-h-[999px] opacity-100 animate-collapse-open': isExpanded && !isMobile,
              'space-y-1.5 px-2 pb-2 max-h-[40vh] opacity-100 animate-collapse-open': isExpanded && isMobile,

@@ -528,6 +528,39 @@ export class SyncCoordinatorService {
 
     return this.syncService.loadProjectsFromCloud(userId, silent);
   }
+  
+  // ============================================================
+  // 【按需加载优化 2026-01-27】单项目加载与待同步检测
+  // ============================================================
+  
+  /**
+   * 从云端加载单个项目（按需加载策略）
+   * 
+   * 【优化目的】避免加载所有项目，只加载用户需要的
+   * - 首次同步只加载当前项目
+   * - 用户切换项目时再加载目标项目
+   * 
+   * @param projectId 项目 ID
+   * @returns 完整的项目数据
+   */
+  async loadSingleProjectFromCloud(projectId: string): Promise<Project | null> {
+    return this.syncService.loadFullProjectOptimized(projectId);
+  }
+  
+  /**
+   * 检查项目是否有待同步的本地修改
+   * 
+   * 【LWW 竞态保护】如果有未同步的本地修改，合并时需要使用 LWW 策略
+   * 避免云端旧数据覆盖本地新编辑
+   * 
+   * @param projectId 项目 ID
+   * @returns 是否有待同步修改
+   */
+  hasPendingChangesForProject(projectId: string): boolean {
+    // 检查 ActionQueue 中是否有该项目的待处理操作
+    const pendingActions = this.actionQueue.getPendingActionsForProject(projectId);
+    return pendingActions.length > 0;
+  }
 
   // ============================================================
   // 【Stingy Hoarder Protocol】Delta Sync 增量同步入口

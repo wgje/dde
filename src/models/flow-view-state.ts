@@ -145,6 +145,7 @@ export interface FlowViewState {
 
 /**
  * 创建初始状态
+ * @deprecated 此函数当前未被使用，FlowViewComponent 直接初始化状态
  */
 export function createInitialFlowViewState(): FlowViewState {
   return {

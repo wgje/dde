@@ -11,6 +11,8 @@ import { UserSessionService } from '../../services/user-session.service';
 import { requireAuthGuard } from '../../services/guards/auth.guard';
 import { AUTH_CONFIG } from '../../config';
 import type { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
+import { AuthService } from '../../services/auth.service';
+import { ModalService } from '../../services/modal.service';
 
 describe('本地模式性能优化 (2026-01-26)', () => {
   describe('SimpleSyncService - 本地模式快速退出', () => {
@@ -70,6 +72,31 @@ describe('本地模式性能优化 (2026-01-26)', () => {
         }
       });
 
+      vi.spyOn((service as any).mobileSync, 'shouldAllowSync').mockReturnValue(true);
+      vi.spyOn((service as any).circuitBreaker, 'validateBeforeSync').mockReturnValue({
+        passed: true,
+        violations: [],
+        level: 'L0',
+        severity: 'low',
+        shouldBlock: false,
+        suggestedAction: 'none'
+      });
+      vi.spyOn(service as any, 'getTombstoneIds').mockResolvedValue(new Set());
+      vi.spyOn(service as any, 'getConnectionTombstoneIds').mockResolvedValue(new Set());
+      vi.spyOn(service as any, 'pushProject').mockResolvedValue(true);
+      vi.spyOn((service as any).changeTracker, 'getProjectChanges').mockReturnValue({
+        projectId: project.id,
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: [],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: false,
+        totalChanges: 0,
+        taskUpdateFieldsById: {}
+      });
+
       await service.saveProjectToCloud(project, 'real-user-id');
 
       // 断言：真实用户应该调用 getSession
@@ -107,24 +134,27 @@ describe('本地模式性能优化 (2026-01-26)', () => {
 
   describe('AuthGuard - 本地模式立即放行', () => {
     it('应该在本地模式下立即返回 true，不等待会话检查', async () => {
-      // Mock 本地模式环境
-      vi.mock('../config/auth.config', () => ({
-        AUTH_CONFIG: {
-          LOCAL_MODE_USER_ID: 'local-user'
-        }
-      }));
-
-      vi.spyOn(Storage.prototype, 'getItem').mockReturnValue('true');
+      localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
 
       TestBed.configureTestingModule({
-        providers: []
+        providers: [
+          {
+            provide: AuthService,
+            useValue: {
+              isConfigured: true,
+              authState: vi.fn().mockReturnValue({ isCheckingSession: false, userId: null }),
+              currentUserId: vi.fn().mockReturnValue(null)
+            }
+          },
+          { provide: ModalService, useValue: { open: vi.fn() } }
+        ]
       });
 
       const mockRoute = {} as ActivatedRouteSnapshot;
       const mockState = { url: '/projects' } as RouterStateSnapshot;
 
       const perfStart = performance.now();
-      const result = await requireAuthGuard(mockRoute, mockState);
+      const result = await TestBed.runInInjectionContext(() => requireAuthGuard(mockRoute, mockState));
       const perfEnd = performance.now();
 
       // 断言：立即放行

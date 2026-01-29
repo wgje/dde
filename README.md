@@ -251,6 +251,7 @@ npm run test:run       # 单次运行测试
 npm run test:e2e       # Playwright E2E
 npm run lint:fix       # ESLint 自动修复
 npm run build          # 生产构建
+npx knip               # 检测未使用代码
 ```
 
 ## 功能特性

@@ -127,7 +127,7 @@ export class SpeechToTextService {
   async checkMicrophoneAvailability(): Promise<boolean> {
     try {
       // 检查是否支持 mediaDevices API
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !navigator.mediaDevices.enumerateDevices) {
         this.logger.debug('SpeechToText', 'MediaDevices API not supported');
         return false;
       }

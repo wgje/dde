@@ -664,7 +664,29 @@ export class ActionQueueService {
       a => a.entityType === entityType && a.entityId === entityId
     );
   }
-  
+
+  /**
+   * 获取特定项目的所有待处理操作
+   * 用于 LWW 竞态检测：合并云端数据前检查本地是否有待同步的更改
+   * 包含该项目本身的操作以及该项目下所有任务的操作
+   */
+  getPendingActionsForProject(projectId: string): QueuedAction[] {
+    return this.pendingActions().filter(action => {
+      // 项目本身的操作
+      if (action.entityType === 'project' && action.entityId === projectId) {
+        return true;
+      }
+      // 任务操作：检查 payload 中的 projectId
+      if (action.entityType === 'task') {
+        const payload = action.payload as TaskPayload | TaskDeletePayload;
+        if ('projectId' in payload && payload.projectId === projectId) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
   /**
    * 检查是否有待处理的操作
    */

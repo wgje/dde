@@ -1,11 +1,21 @@
 /**
  * GoJS 边界类型定义
  * 
+ * @status 类型定义正在使用，但转换函数未被集成
+ * 
  * "边境检查站"策略：
  * - 对外严格：业务数据进入 GoJS 之前必须是强类型接口
  * - 对内宽容：GoJS 内部操作允许使用 any 或简单类型断言
  * 
  * 这个文件定义了业务层与 GoJS 层之间的数据转换接口
+ * 
+ * 注意：以下转换函数当前未被使用，保留作为参考：
+ * - taskToGojsNode
+ * - connectionToGojsLink
+ * - parentChildToGojsLink
+ * - extractNodeMoveData
+ * - extractLinkCreateData
+ * - extractSelectionData
  */
 
 import * as go from 'gojs';

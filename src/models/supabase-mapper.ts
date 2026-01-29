@@ -1,4 +1,11 @@
 /**
+ * @deprecated 此文件当前未被使用
+ * 
+ * simple-sync.service.ts 有自己的私有 mapper 方法
+ * 如需统一映射逻辑，请评估后决定：
+ * 1. 重构 simple-sync.service 使用这些函数
+ * 2. 或删除此文件 (推荐)
+ * 
  * Supabase 数据库类型到前端领域模型的映射器
  * 
  * 【架构边界】

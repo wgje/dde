@@ -173,17 +173,13 @@ src/
 │   ├── network-awareness.service.ts
 │   ├── circuit-breaker.service.ts
 │   ├── offline-integrity.service.ts
-│   ├── indexeddb-health.service.ts
-│   ├── storage-quota.service.ts
 │   │
 │   ├── # 基础设施
 │   ├── auth.service.ts
 │   ├── user-session.service.ts
 │   ├── supabase-client.service.ts
 │   ├── preference.service.ts
-│   ├── storage-adapter.service.ts
 │   ├── local-backup.service.ts
-│   ├── recovery.service.ts
 │   ├── migration.service.ts
 │   ├── toast.service.ts
 │   ├── logger.service.ts
@@ -191,7 +187,6 @@ src/
 │   ├── global-error-handler.service.ts
 │   ├── sentry-alert.service.ts
 │   ├── permission-denied-handler.service.ts
-│   ├── persistence-failure-handler.service.ts
 │   ├── before-unload-manager.service.ts
 │   ├── file-type-validator.service.ts
 │   ├── virus-scan.service.ts
@@ -218,12 +213,10 @@ src/
 │
 ├── models/
 │   ├── index.ts                   # Task, Project, Connection, Attachment, ColorMode
-│   ├── focus.ts                   # 🆕 BlackBoxEntry, StrataItem, GateState, FocusPreferences
-│   ├── supabase-types.ts
-│   ├── supabase-mapper.ts
-│   ├── api-types.ts
+│   ├── focus.ts                   # BlackBoxEntry, StrataItem, GateState, FocusPreferences
+│   ├── supabase-types.ts          # 数据库类型定义
 │   ├── flow-view-state.ts
-│   └── gojs-boundary.ts
+│   └── gojs-boundary.ts           # GoJS 边界类型
 │
 ├── utils/
 │   ├── result.ts                  # Result<T,E> + ErrorCodes
@@ -238,9 +231,8 @@ src/
 │   └── gojs-extended.d.ts
 │
 └── environments/
-    ├── environment.ts             # 生产
-    ├── environment.development.ts # 开发
-    └── environment.template.ts
+    ├── environment.ts             # 生产（自动生成）
+    └── environment.development.ts # 开发（自动生成）
 
 supabase/
 ├── functions/
@@ -378,6 +370,7 @@ npm run test            # Vitest watch
 npm run test:run        # 单次测试
 npm run test:e2e        # Playwright E2E
 npm run lint:fix        # ESLint 修复
+npx knip                # 检测未使用代码
 ```
 
 ---

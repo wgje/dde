@@ -1,4 +1,8 @@
 /**
+ * @status 待集成 - 此组件已实现但尚未集成到应用中
+ * @see docs/data-protection-plan.md 数据保护计划
+ * @see ErrorRecoveryModalComponent 当前使用的错误恢复模态框
+ * 
  * 备份恢复模态框组件
  * 
  * 功能：

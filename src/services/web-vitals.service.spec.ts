@@ -13,6 +13,17 @@ import { describe, it, expect, beforeEach, afterEach, vi, type Mock, type Mocked
 import { WebVitalsService, WEB_VITALS_THRESHOLDS } from './web-vitals.service';
 import { LoggerService } from './logger.service';
 import * as Sentry from '@sentry/angular';
+import { isDevMode } from '@angular/core';
+
+vi.mock('@angular/core', async () => {
+  const actual = await vi.importActual<typeof import('@angular/core')>('@angular/core');
+  return {
+    ...actual,
+    isDevMode: vi.fn(),
+  };
+});
+
+const isDevModeMock = vi.mocked(isDevMode);
 
 // Mock Sentry
 vi.mock('@sentry/angular', () => ({
@@ -43,6 +54,8 @@ describe('WebVitalsService - TTFB 优化测试', () => {
   };
 
   beforeEach(() => {
+    isDevModeMock.mockReturnValue(true);
+
     // Reset Sentry mocks
     (Sentry.setMeasurement as Mock).mockClear();
     (Sentry.captureMessage as Mock).mockClear();
@@ -121,7 +134,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
   describe('TTFB 阈值计算（生产环境）', () => {
     beforeEach(async () => {
       // Mock 生产环境
-      vi.spyOn(await import('@angular/core'), 'isDevMode').mockReturnValue(false);
+      isDevModeMock.mockReturnValue(false);
     });
 
     it('4G 网络应该使用标准阈值', () => {
@@ -173,7 +186,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
   describe('Sentry 告警过滤', () => {
     beforeEach(async () => {
       // Mock 生产环境
-      vi.spyOn(await import('@angular/core'), 'isDevMode').mockReturnValue(false);
+      isDevModeMock.mockReturnValue(false);
     });
 
     it('3G 网络下的 poor TTFB 不应该触发告警', () => {

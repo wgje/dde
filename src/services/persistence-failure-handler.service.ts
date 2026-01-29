@@ -1,4 +1,7 @@
 /**
+ * @status 待集成 - 此服务已实现但尚未集成到应用中
+ * @see docs/data-protection-plan.md 数据保护计划
+ * 
  * PersistenceFailureHandlerService - 持久化失败处理服务
  * 
  * 【设计理念】

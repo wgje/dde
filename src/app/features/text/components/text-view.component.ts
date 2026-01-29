@@ -851,14 +851,35 @@ export class TextViewComponent implements OnInit, OnDestroy {
     if (isActiveDragging) {
       event.preventDefault();
       
-      // 自动滚动
-      const container = this.getScrollContainer();
-      if (container) {
-        this.dragDropService.performTouchAutoScroll(container, touch.clientY);
+      // 自动滚动 - 优先处理嵌套容器（阶段内任务列表），其次处理主容器
+      let handledNestedScroll = false;
+      const elements = document.elementsFromPoint(touch.clientX, touch.clientY);
+      
+      // 查找是否在某个阶段的任务列表容器内
+      for (const el of elements) {
+        const stageEl = el.closest('[data-stage-number]');
+        if (stageEl) {
+          // 找到阶段内的任务列表容器
+          const taskListContainer = stageEl.querySelector('.task-stack') as HTMLElement;
+          if (taskListContainer && taskListContainer.classList.contains('overflow-y-auto')) {
+            // 尝试对任务列表容器进行自动滚动
+            handledNestedScroll = this.dragDropService.performNestedAutoScroll(taskListContainer, touch.clientY);
+            if (handledNestedScroll) {
+              break; // 已处理嵌套滚动，跳出循环
+            }
+          }
+        }
       }
       
-      // 查找目标阶段
-      const elements = document.elementsFromPoint(touch.clientX, touch.clientY);
+      // 如果没有处理嵌套滚动，则对主容器进行自动滚动
+      if (!handledNestedScroll) {
+        const container = this.getScrollContainer();
+        if (container) {
+          this.dragDropService.performTouchAutoScroll(container, touch.clientY);
+        }
+      }
+      
+      // 查找目标阶段（复用已获取的 elements）
       let foundStage = false;
       
       // 获取当前拖拽的任务ID，用于过滤

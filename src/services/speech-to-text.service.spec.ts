@@ -14,6 +14,7 @@ import { isRecording, isTranscribing } from '../app/core/state/focus-stores';
 
 describe('SpeechToTextService', () => {
   let service: SpeechToTextService;
+  let originalMediaDevices: MediaDevices | undefined;
   let mockLoggerService: {
     debug: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
@@ -35,7 +36,17 @@ describe('SpeechToTextService', () => {
     networkQuality: ReturnType<typeof signal<string>>;
   };
 
+  const setMediaDevices = (value: MediaDevices | undefined) => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value,
+      configurable: true,
+      writable: true
+    });
+  };
+
   beforeEach(() => {
+    originalMediaDevices = navigator.mediaDevices;
+
     // 重置 signals
     isRecording.set(false);
     isTranscribing.set(false);
@@ -91,6 +102,7 @@ describe('SpeechToTextService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    setMediaDevices(originalMediaDevices);
   });
 
   describe('isRecording', () => {
@@ -131,14 +143,13 @@ describe('SpeechToTextService', () => {
         { kind: 'videoinput', deviceId: 'test1' }
       ]);
       
-      const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
-      navigator.mediaDevices.enumerateDevices = mockEnumerateDevices;
+      setMediaDevices({
+        enumerateDevices: mockEnumerateDevices,
+        getUserMedia: vi.fn()
+      } as MediaDevices);
 
       const result = await service.checkMicrophoneAvailability();
       expect(result).toBe(false);
-      
-      // 恢复
-      navigator.mediaDevices.enumerateDevices = originalEnumerateDevices;
     });
 
     it('当有音频输入设备时应该返回 true', async () => {
@@ -147,31 +158,20 @@ describe('SpeechToTextService', () => {
         { kind: 'videoinput', deviceId: 'test2' }
       ]);
       
-      const originalEnumerateDevices = navigator.mediaDevices.enumerateDevices;
-      navigator.mediaDevices.enumerateDevices = mockEnumerateDevices;
+      setMediaDevices({
+        enumerateDevices: mockEnumerateDevices,
+        getUserMedia: vi.fn()
+      } as MediaDevices);
 
       const result = await service.checkMicrophoneAvailability();
       expect(result).toBe(true);
-      
-      // 恢复
-      navigator.mediaDevices.enumerateDevices = originalEnumerateDevices;
     });
 
     it('当 mediaDevices API 不可用时应该返回 false', async () => {
-      const originalMediaDevices = navigator.mediaDevices;
-      Object.defineProperty(navigator, 'mediaDevices', {
-        value: undefined,
-        configurable: true
-      });
+      setMediaDevices(undefined);
 
       const result = await service.checkMicrophoneAvailability();
       expect(result).toBe(false);
-
-      // 恢复
-      Object.defineProperty(navigator, 'mediaDevices', {
-        value: originalMediaDevices,
-        configurable: true
-      });
     });
   });
 
@@ -185,20 +185,10 @@ describe('SpeechToTextService', () => {
     });
 
     it('浏览器不支持时应该优雅返回', async () => {
-      const originalMediaDevices = navigator.mediaDevices;
-      Object.defineProperty(navigator, 'mediaDevices', {
-        value: undefined,
-        configurable: true
-      });
+      setMediaDevices(undefined);
 
       // 不应该抛出错误
       await expect(service.startRecording()).resolves.toBeUndefined();
-
-      // 恢复
-      Object.defineProperty(navigator, 'mediaDevices', {
-        value: originalMediaDevices,
-        configurable: true
-      });
     });
   });
 

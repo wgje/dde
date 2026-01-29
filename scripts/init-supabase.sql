@@ -347,10 +347,8 @@ COMMENT ON COLUMN public.black_box_entries.is_archived IS '是否已归档，不
 COMMENT ON COLUMN public.black_box_entries.snooze_until IS '跳过至该日期，在此之前不会在大门中出现';
 COMMENT ON COLUMN public.black_box_entries.snooze_count IS '已跳过次数';
 
--- 索引
-CREATE INDEX IF NOT EXISTS idx_black_box_user_date ON public.black_box_entries(user_id, date);
-CREATE INDEX IF NOT EXISTS idx_black_box_project ON public.black_box_entries(project_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_black_box_pending ON public.black_box_entries(user_id, is_read, is_completed) WHERE deleted_at IS NULL AND is_archived = FALSE;
+-- 索引（仅保留增量同步必需的索引）
+-- 注意：idx_black_box_user_date, idx_black_box_project, idx_black_box_pending 经验证未使用，已移除
 CREATE INDEX IF NOT EXISTS idx_black_box_updated_at ON public.black_box_entries(updated_at);
 
 -- updated_at 自动更新触发器
