@@ -26,6 +26,7 @@ import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SyncModeService } from './sync-mode.service';
+import { PersistSchedulerService } from './persist-scheduler.service';
 import { Project, Task, SyncState } from '../models';
 import { success } from '../utils/result';
 
@@ -173,6 +174,28 @@ const mockSyncModeService = {
   triggerSync: vi.fn().mockResolvedValue(undefined),
 };
 
+// Sprint 4 新增：PersistSchedulerService mock
+const mockPersistSchedulerService = {
+  state: signal({
+    isPersisting: false,
+    hasPending: false,
+    lastPersistAt: 0,
+    hasPendingLocalChanges: false,
+    lastUpdateType: 'structure' as const
+  }),
+  setCallbacks: vi.fn(),
+  startLocalAutosave: vi.fn(),
+  stopLocalAutosave: vi.fn(),
+  markLocalChanges: vi.fn(),
+  clearLocalChanges: vi.fn(),
+  getLastUpdateType: vi.fn().mockReturnValue('structure'),
+  hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+  getLastPersistAt: vi.fn().mockReturnValue(0),
+  isPersisting: vi.fn().mockReturnValue(false),
+  schedulePersist: vi.fn(),
+  flushPendingPersist: vi.fn().mockResolvedValue(undefined)
+};
+
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -247,6 +270,7 @@ describe('SyncCoordinatorService', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
@@ -942,6 +966,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
+        { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });

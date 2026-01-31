@@ -27,6 +27,8 @@ import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+// Sprint 4 技术债务修复：提取的子服务
+import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
 import { Project, Task, UserPreferences } from '../models';
@@ -87,6 +89,9 @@ export class SyncCoordinatorService {
   private toastService = inject(ToastService);
   private layoutService = inject(LayoutService);
   private destroyRef = inject(DestroyRef);
+  
+  // Sprint 4 技术债务修复：提取的持久化调度服务
+  private persistScheduler = inject(PersistSchedulerService);
   
   // 借鉴思源笔记的同步增强服务
   private syncModeService = inject(SyncModeService);
