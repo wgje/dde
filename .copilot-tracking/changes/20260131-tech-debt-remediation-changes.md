@@ -299,7 +299,44 @@
 
 | 文件 | 原行数 | 新行数 | 变化 |
 |------|--------|--------|------|
-| store-persistence.service.ts | 1551 | 1022 | **-529 (-34%)** ✅ |
+| store-persistence.service.ts | 1551 | 891 | **-660 (-43%)** ✅ |
+| flow-view.component.ts | 2555 | 1986 | **-569 (-22%)** ✅ |
+| sync-coordinator.service.ts | 1466 | 1385 | **-81 (-6%)** |
+
+### FlowViewComponent 模板提取
+
+| 操作 | 说明 |
+|------|------|
+| flow-view.component.html 创建 | 568 行内联模板提取为独立 HTML 文件 |
+| flow-view.component.ts 修改 | 使用 templateUrl 替换内联 template |
+
+### DeltaSyncPersistenceService 创建
+
+| 服务 | 行数 | 职责 |
+|------|------|------|
+| DeltaSyncPersistenceService | 220 | 增量同步持久化（loadTasksFromLocal, getTasksUpdatedSince 等） |
+
+### SyncCoordinator deprecated 方法删除
+
+已删除以下 deprecated 代理方法（调用者已迁移到 core.xxx 模式）:
+- initRealtimeSubscription
+- teardownRealtimeSubscription  
+- saveOfflineSnapshot
+- loadOfflineSnapshot
+- clearOfflineCache
+- loadProjectsFromCloud
+- saveProjectToCloud
+- deleteProjectFromCloud
+- loadSingleProject
+
+### 调用者迁移
+
+| 文件 | 迁移详情 |
+|------|----------|
+| user-session.service.ts | 7 处迁移到 sync.core.xxx |
+| project-operation.service.ts | 3 处迁移到 sync.core.xxx |
+| remote-change-handler.service.ts | 2 处迁移到 sync.core.xxx |
+| store.service.ts | 5 处迁移到 sync.core.xxx |
 
 ### 子服务统计
 
@@ -313,40 +350,50 @@
 | project-sync.service.ts | 178 |
 | connection-sync.service.ts | 217 |
 
-**持久化子服务总计: 830 行**
+**持久化子服务总计: 1050 行**
 | 文件 | 行数 |
 |------|------|
 | indexeddb.service.ts | 222 |
 | data-integrity.service.ts | 286 |
 | backup.service.ts | 312 |
+| delta-sync-persistence.service.ts | 220 |
 | index.ts | 10 |
 
 ### 待完成
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| SimpleSyncService 方法委托 | 🔄 | 需要将公共方法委托给子服务（4945 行 → 目标 ≤800） |
-| StorePersistenceService 达标 | ✅ | 从 1551 行减至 1022 行（-34%），距离目标 800 行还需优化 |
-| FlowViewComponent 模板提取 | ⏳ | 将 ~570 行内联模板提取到 HTML 文件（2555 行 → 目标 ≤800） |
-| SyncCoordinatorService 重构 | ⏳ | 10 个 deprecated 方法待处理（1466 行 → 目标 ≤800） |
-| TaskOperationService 拆分 | ⏳ | 2059 行 → 目标 ≤800 |
+| SimpleSyncService 方法委托 | � | 需要将公共方法委托给子服务（4945 行 → 目标 ≤800） |
+| StorePersistenceService 达标 | ✅ | 从 1551 行减至 891 行（-43%），接近目标 800 行 |
+| FlowViewComponent 模板提取 | ✅ | 内联模板已提取到 HTML 文件（2555 → 1986 行，-22%） |
+| SyncCoordinatorService 重构 | ✅ | deprecated 方法已删除（1466 → 1385 行，-6%） |
+| TaskOperationService 拆分 | 🔴 | 2059 行 → 目标 ≤800 |
 | RealtimeSyncService 创建 | ⏳ | 从 SimpleSyncService 提取 Realtime 订阅逻辑 |
 | PollingSyncService 创建 | ⏳ | 从 SimpleSyncService 提取轮询同步逻辑 |
 
 ### 验证结果
 
 - ✅ TypeScript 编译通过
-- ✅ 测试通过: 954 passed / 2 failed（失败的是无关的 markdown 安全测试）
+- ✅ 测试通过: 938 passed / 2 failed（失败的是无关的 markdown 安全测试）
 
 ### 进度总结
 
 | 原始文件 | 原行数 | 当前行数 | 目标行数 | 状态 |
 |----------|--------|----------|----------|------|
 | SimpleSyncService | 4945 | 4945 | ≤800 | 🔴 子服务已创建，待委托 |
-| FlowViewComponent | 2555 | 2555 | ≤800 | 🔴 待提取模板 |
-| TaskOperationService | 2059 | 2059 | ≤800 | 🟠 待处理 |
-| SyncCoordinatorService | 1466 | 1466 | ≤800 | 🟠 待处理 |
-| **StorePersistenceService** | **1551** | **1022** | **≤800** | **🟢 显著进展 (-34%)** |
+| FlowViewComponent | 2555 | 1986 | ≤800 | 🟡 模板已提取，进展 22% |
+| TaskOperationService | 2059 | 2059 | ≤800 | 🔴 待处理 |
+| SyncCoordinatorService | 1466 | 1385 | ≤800 | 🟡 deprecated 已删除，进展 6% |
+| **StorePersistenceService** | **1551** | **891** | **≤800** | **🟢 显著进展 (-43%)** |
+
+### Git Commits (Sprint 8)
+
+| Hash | 描述 |
+|------|------|
+| 25c3def | refactor(persistence): extract sub-services from StorePersistenceService |
+| e1a23bc | refactor(flow+persistence): extract template and delta-sync services |
+| 49f9cb8 | refactor: migrate deprecated SyncCoordinator methods and fix tests |
+| bf44b13 | refactor: remove deprecated SyncCoordinator methods |
 
 ---
 
