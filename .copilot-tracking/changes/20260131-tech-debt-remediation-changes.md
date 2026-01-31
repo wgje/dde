@@ -3,13 +3,13 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ Sprint 1-4 实施完成
+**执行状态**: ✅ Sprint 1-6 实施完成
 
 ---
 
 ## 变更摘要
 
-本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，并执行了 Sprint 1-4 的实施工作。
+本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，并执行了 Sprint 1-6 的实施工作。
 
 ---
 
@@ -54,19 +54,39 @@
 
 ---
 
+## Sprint 6 实施完成 ✅ (S-01)
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| console.* 批量替换为 LoggerService | ✅ | 25 个文件修改 |
+| ESLint no-console 错误清零 | ✅ | 189 → 0 |
+| LoggerService eslint-disable 更新 | ✅ | 使用块级禁用语法 |
+
+### 修改文件清单 (Sprint 6)
+
+| 文件 | 操作 |
+|------|------|
+| src/app.component.ts | 添加 LoggerService，替换 10 处 console.log |
+| src/app/features/text/components/text-view.component.ts | 添加 LoggerService，替换 10+ 处 |
+| src/services/user-session.service.ts | 替换 20+ 处 console.log |
+| src/services/auth.service.ts | 替换 11 处 console.log |
+| src/services/guards/auth.guard.ts | 添加 LoggerService，替换 12 处 |
+| src/app/features/text/services/text-view-drag-drop.service.ts | 添加 LoggerService，替换 15 处 |
+| src/app/features/flow/components/flow-view.component.ts | 替换 16 处 console.log |
+| src/app/features/flow/components/flow-task-detail.component.ts | 添加 LoggerService，替换 10 处 |
+| src/app/features/flow/components/flow-connection-editor.component.ts | 添加 LoggerService，替换 6 处 |
+| src/services/migration.service.ts | 替换 5 处 console.log |
+| src/services/task-repository.service.ts | 添加 LoggerService，替换 1 处 |
+| + 14 个其他文件 | 小幅修改 |
+
+---
+
 ## 待完成的 Sprints
 
-### Sprint 5: Flow/Task 服务拆分 (未开始)
-- FlowDiagramService 拆分
-- TaskOperationService 拆分
-
-### Sprint 6: console.* 清理 (进行中)
-- 当前状态：318 个 console.* 调用
-- 主要文件：
-  - text-view.component.ts (47)
-  - user-session.service.ts (40)
-  - task-repository.service.ts (28)
-  - auth.service.ts (22)
+### Sprint 5: Flow/Task 服务拆分 (延后)
+- FlowDiagramService 拆分 (2385 行)
+- TaskOperationService 拆分 (2279 行)
+- TaskOperationAdapterService 拆分 (1438 行)
 
 ---
 
@@ -89,6 +109,8 @@
 | d3eec3a | Sprint 1-2: 工具链/基础规范 + EventBusService |
 | fffbeed | Sprint 3: 同步子服务创建 |
 | b2bea97 | Sprint 4: PersistSchedulerService 创建 |
+| a23aee8 | docs: 更新技术债务修复变更记录 |
+| 33ffa84 | Sprint 6: console.* 批量替换为 LoggerService |
 
 ---
 
