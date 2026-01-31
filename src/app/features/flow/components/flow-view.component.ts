@@ -1269,7 +1269,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.eventService.onLinkClick((linkData, x, y, isDoubleClick = false) => {
-      console.log('[FlowView] onLinkClick 回调触发', { 
+      this.logger.debug('onLinkClick 回调触发', { 
         linkData, 
         isCrossTree: linkData?.isCrossTree,
         x, 
@@ -1281,17 +1281,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       // 移动端：单击打开编辑器（仅跨树连接），双击/长按显示删除提示
       if (this.uiState.isMobile()) {
         if (isDoubleClick) {
-          console.log('[FlowView] 移动端长按/双击：显示删除提示');
+          this.logger.debug('移动端长按/双击：显示删除提示');
           this.link.showLinkDeleteHint(linkData, x, y);
         } else if (linkData?.isCrossTree) {
-          console.log('[FlowView] 移动端单击：打开跨树连接编辑器');
+          this.logger.debug('移动端单击：打开跨树连接编辑器');
           this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
         }
         // 普通父子连接单击不做处理
       } else {
         // 桌面端：跨树连接线打开编辑器，普通连接线不处理（由右键菜单处理）
         if (linkData?.isCrossTree) {
-          console.log('[FlowView] 桌面端：打开跨树连接编辑器', { from: linkData.from, to: linkData.to });
+          this.logger.debug('桌面端：打开跨树连接编辑器', { from: linkData.from, to: linkData.to });
           this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
         }
       }
@@ -1299,10 +1299,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 注册连接线删除回调（右键菜单）
     this.eventService.onLinkDelete((linkData) => {
-      console.log('[FlowView] onLinkDelete 回调触发（右键菜单）', { linkData });
+      this.logger.debug('onLinkDelete 回调触发（右键菜单）', { linkData });
       const result = this.link.deleteLink(linkData);
       if (result) {
-        console.log('[FlowView] 右键菜单删除成功', result);
+        this.logger.debug('右键菜单删除成功', result);
         this.refreshDiagram();
       }
     });
@@ -1319,7 +1319,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 注册连接线重连回调（子树迁移/跨树连接重连）
     this.eventService.onLinkRelink((linkType, relinkInfo, _x, _y, gojsLink) => {
-      console.log('[FlowView] onLinkRelink 回调触发', { linkType, relinkInfo });
+      this.logger.debug('onLinkRelink 回调触发', { linkType, relinkInfo });
       
       // 移除 GoJS 中的临时连接线（实际数据由 store 管理）
       this.diagram.removeLink(gojsLink);
@@ -1338,7 +1338,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           // to 端（子端/下游端点）被改变：
           // 这是核心功能 - 用户将连接线下游端点拖到新的目标节点
           // 常见场景：将父子连接的下游端点拖到待分配块，触发子树替换
-          console.log('[FlowView] 父子连接 to 端重连', { 
+          this.logger.debug('父子连接 to 端重连', { 
             parentId: newFromId, 
             oldChildId: oldToId, 
             newTargetId: newToId 
@@ -1398,7 +1398,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.eventService.onBackgroundClick(() => {
-      console.log('[FlowView] backgroundClick 触发，关闭编辑器和删除提示');
+      this.logger.debug('backgroundClick 触发，关闭编辑器和删除提示');
       this.link.closeConnectionEditor();
       // 移动端：同时关闭删除提示
       if (this.uiState.isMobile()) {
@@ -1918,18 +1918,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   deleteConnection(): void {
-    console.log('[FlowView] deleteConnection 被调用');
+    this.logger.debug('deleteConnection 被调用');
     const result = this.link.deleteCurrentConnection();
-    console.log('[FlowView] 删除结果:', result);
+    this.logger.debug('删除结果:', result);
     if (result) {
       this.refreshDiagram();
     }
   }
   
   confirmLinkDelete(): void {
-    console.log('[FlowView] confirmLinkDelete 被调用');
+    this.logger.debug('confirmLinkDelete 被调用');
     const result = this.link.confirmLinkDelete();
-    console.log('[FlowView] 删除连接线结果:', result);
+    this.logger.debug('删除连接线结果:', result);
     if (result) {
       this.refreshDiagram();
     }
@@ -2094,7 +2094,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const newMode = !this.isSelectMode();
     this.isSelectMode.set(newMode);
     
-    console.log('[FlowView] 切换框选模式', { newMode, isMobile: this.uiState.isMobile() });
+    this.logger.debug('切换框选模式', { newMode, isMobile: this.uiState.isMobile() });
     
     const diagramInstance = this.diagram.diagramInstance;
     if (diagramInstance) {
@@ -2102,7 +2102,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       diagramInstance.toolManager.dragSelectingTool.isEnabled = newMode;
       diagramInstance.toolManager.panningTool.isEnabled = !newMode;
 
-      console.log('[FlowView] 工具状态更新', {
+      this.logger.debug('工具状态更新', {
         dragSelectingToolEnabled: diagramInstance.toolManager.dragSelectingTool.isEnabled,
         panningToolEnabled: diagramInstance.toolManager.panningTool.isEnabled
       });
@@ -2467,7 +2467,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.isRightPanelOpen.set(true);
     } else if (deltaX < -threshold) {
       // 向左滑动 → 切换到文本视图
-      console.log('[FlowView] 滑动触发 goBackToText', { deltaX, threshold, deltaTime });
+      this.logger.debug('滑动触发 goBackToText', { deltaX, threshold, deltaTime });
       this.goBackToText.emit();
     }
     

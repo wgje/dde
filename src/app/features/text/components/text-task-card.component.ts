@@ -116,7 +116,6 @@ export class TextTaskCardComponent implements OnChanges {
           parentId: curr.parentId?.slice(-4) || null,
           isFirstChange: changes['task'].isFirstChange()
         });
-        console.trace('[TextTaskCard] Stack trace');
       }
     }
   }
@@ -275,11 +274,6 @@ export class TextTaskCardComponent implements OnChanges {
   }
   
   onTouchEnd(event: TouchEvent) {
-    // console.log('[TaskCard] touchend received', {
-    //   taskId: this.task.id.slice(-4),
-    //   isSelected: this.isSelected,
-    //   isDragging: this.isDragging
-    // });
     if (!this.isSelected) {
       // 不在这里 preventDefault，让事件正常冒泡到 document
       this.touchEnd.emit(event);

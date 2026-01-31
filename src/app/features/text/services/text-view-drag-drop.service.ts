@@ -1,5 +1,6 @@
-import { Injectable, signal } from '@angular/core';
+import { inject, Injectable, signal } from '@angular/core';
 import { Task } from '../../../../models';
+import { LoggerService } from '../../../../services/logger.service';
 import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from '../components/text-view.types';
 
 /**
@@ -8,6 +9,8 @@ import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from
  */
 @Injectable({ providedIn: 'root' })
 export class TextViewDragDropService {
+  private readonly logger = inject(LoggerService).category('TextDragDrop');
+  
   // ========== 公共状态（信号） ==========
   
   /** 当前拖拽的任务ID */
@@ -164,7 +167,7 @@ export class TextViewDragDropService {
   
   /** 开始触摸拖拽准备（长按检测） */
   startTouchDrag(task: Task, touch: Touch, onDragStart: () => void): void {
-    console.log('[TouchDrag] 🟢 startTouchDrag called', {
+    this.logger.debug('🟢 startTouchDrag called', {
       taskId: task.id.slice(-4),
       position: { x: touch.clientX, y: touch.clientY },
       originalStage: task.stage
@@ -182,7 +185,7 @@ export class TextViewDragDropService {
     
     // 使用长按延迟来区分点击和拖拽
     this.touchState.longPressTimer = setTimeout(() => {
-      console.log('[TouchDrag] ⏰ Long press timer fired, task exists:', !!this.touchState.task);
+      this.logger.debug('⏰ Long press timer fired, task exists:', !!this.touchState.task);
       if (this.touchState.task) {
         this.activateDrag();
       }
@@ -191,14 +194,14 @@ export class TextViewDragDropService {
   
   /** 激活拖拽状态（长按后或移动距离足够后） */
   private activateDrag(): void {
-    console.log('[TouchDrag] 🔵 activateDrag called', {
+    this.logger.debug('🔵 activateDrag called', {
       isDragging: this.touchState.isDragging,
       hasTask: !!this.touchState.task,
       currentPos: { x: this.touchState.currentX, y: this.touchState.currentY }
     });
     
     if (this.touchState.isDragging || !this.touchState.task) {
-      console.log('[TouchDrag] ❌ activateDrag early return');
+      this.logger.debug('❌ activateDrag early return');
       return;
     }
     
@@ -217,7 +220,7 @@ export class TextViewDragDropService {
       this.touchState.expandedDuringDrag.add(this.touchState.originalStage);
     }
     
-    console.log('[TouchDrag] ✅ Creating ghost at', {
+    this.logger.debug('✅ Creating ghost at', {
       x: this.touchState.currentX,
       y: this.touchState.currentY,
       task: this.touchState.task.title
@@ -268,7 +271,7 @@ export class TextViewDragDropService {
   /** 处理触摸移动 */
   handleTouchMove(touch: Touch): boolean {
     if (!this.touchState.task) {
-      console.log('[TouchDrag] handleTouchMove: no task');
+      this.logger.debug('handleTouchMove: no task');
       return false;
     }
     
@@ -287,7 +290,7 @@ export class TextViewDragDropService {
       const isVerticalScroll = deltaY > deltaX * 3.5; // 垂直移动超过水平移动的3.5倍才认为是滚动
       const totalDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
       
-      console.log('[TouchDrag] Move check:', {
+      this.logger.debug('Move check:', {
         deltaX: deltaX.toFixed(1),
         deltaY: deltaY.toFixed(1),
         totalDistance: totalDistance.toFixed(1),
@@ -339,7 +342,7 @@ export class TextViewDragDropService {
         this.touchState.dragGhost.style.top = `${newTop}px`;
       } else {
         // 如果幽灵元素不存在，重新创建它
-        console.warn('[TouchDrag] Ghost missing during move, recreating at', {
+        this.logger.warn('Ghost missing during move, recreating at', {
           x: touch.clientX,
           y: touch.clientY
         });
@@ -419,7 +422,7 @@ export class TextViewDragDropService {
   
   /** 结束触摸拖拽，返回目标信息以及需要折叠的阶段 */
   endTouchDrag(): { task: Task | null; targetStage: number | null; targetBeforeId: string | null; wasDragging: boolean; autoExpandedStages: number[] } {
-    console.log('[TouchDrag] 🟣 endTouchDrag called', {
+    this.logger.debug('🟣 endTouchDrag called', {
       hadTask: !!this.touchState.task,
       wasDragging: this.touchState.isDragging,
       hadGhost: !!this.touchState.dragGhost,
@@ -446,13 +449,6 @@ export class TextViewDragDropService {
       wasDragging: this.touchState.isDragging,
       autoExpandedStages
     };
-    
-    // console.log('[TouchDrag] endTouchDrag called', {
-    //   taskId: result.task?.id.slice(-4) || 'none',
-    //   targetStage: result.targetStage,
-    //   targetBeforeId: result.targetBeforeId?.slice(-4) || null,
-    //   wasDragging: result.wasDragging
-    // });
     
     // 强制清理幽灵元素（必须在重置状态之前）
     this.removeDragGhost();
@@ -557,7 +553,7 @@ export class TextViewDragDropService {
     document.body.appendChild(ghost);
     this.touchState.dragGhost = ghost;
     
-    console.log('[TouchDrag] 🎯 Ghost created:', {
+    this.logger.debug('🎯 Ghost created:', {
       taskId: task.id.slice(-4),
       ghostId,
       position: { x: ghostX, y: ghostY }
@@ -580,7 +576,7 @@ export class TextViewDragDropService {
   }
   
   private removeDragGhost() {
-    console.log('[TouchDrag] 🗑️ removeDragGhost called', {
+    this.logger.debug('🗑️ removeDragGhost called', {
       hasGhost: !!this.touchState.dragGhost,
       stack: new Error().stack?.split('\n').slice(1, 5).join(' <- ')
     });
@@ -610,7 +606,7 @@ export class TextViewDragDropService {
           return;
         }
         try {
-          console.log('[TouchDrag] 🧹 Cleaning orphaned ghost:', ghost.id);
+          this.logger.debug('🧹 Cleaning orphaned ghost:', ghost.id);
           (ghost as HTMLElement).style.display = 'none';
           (ghost as HTMLElement).style.opacity = '0';
           ghost.remove();
@@ -778,7 +774,7 @@ export class TextViewDragDropService {
   }
 
   private resetTouchState() {
-    console.log('[TouchDrag] 🔴 resetTouchState called', {
+    this.logger.debug('🔴 resetTouchState called', {
       hadTask: !!this.touchState.task,
       wasDragging: this.touchState.isDragging,
       hadGhost: !!this.touchState.dragGhost,
@@ -787,7 +783,7 @@ export class TextViewDragDropService {
     this.cancelLongPress();
     // 在重置前先确保幽灵元素被清理
     if (this.touchState.dragGhost) {
-      console.warn('[TouchDrag] Ghost still exists during resetTouchState, removing it');
+      this.logger.warn('Ghost still exists during resetTouchState, removing it');
       this.removeDragGhost();
     }
     this.onDragStartCallback = null;

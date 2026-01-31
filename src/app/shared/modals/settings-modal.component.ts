@@ -483,7 +483,7 @@ import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
 })
 export class SettingsModalComponent {
   constructor() {
-    console.log('SettingsModalComponent initialized (v16-REDESIGN)');
+    // 组件初始化 - 开发日志已移除
     // 设置项目提供者，用于自动备份恢复
     this.localBackupService.setProjectsProvider(() => this.projects());
   }

@@ -764,7 +764,7 @@ export class FlowLinkService {
     y: number,
     title?: string
   ): void {
-    console.log('[FlowLink] openConnectionEditor 被调用', { sourceId, targetId, title, description, x, y });
+    this.logger.debug('openConnectionEditor 被调用', { sourceId, targetId, title, description, x, y });
     
     // 编辑器尺寸
     const editorWidth = 176;  // w-44 = 11rem = 176px
@@ -800,7 +800,7 @@ export class FlowLinkService {
       x: adjustedX,
       y: adjustedY
     };
-    console.log('[FlowLink] 设置 connectionEditorData', editorData);
+    this.logger.debug('设置 connectionEditorData', editorData);
     
     this.connectionEditorData.set(editorData);
     this.connectionEditorPos.set({ x: adjustedX, y: adjustedY });
@@ -820,7 +820,7 @@ export class FlowLinkService {
    * 关闭联系块编辑器
    */
   closeConnectionEditor(): void {
-    console.log('[FlowLink] closeConnectionEditor 被调用', new Error().stack);
+    this.logger.debug('closeConnectionEditor 被调用');
     this.connectionEditorData.set(null);
   }
   

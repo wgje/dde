@@ -101,10 +101,10 @@ export class AuthService {
    * 开发环境：如果没有现有会话且配置了 devAutoLogin，会自动登录
    */
   async checkSession(): Promise<{ userId: string | null; email: string | null }> {
-    console.log('[Auth] ========== checkSession 开始 ==========');
+    this.logger.debug('========== checkSession 开始 ==========');
     
     if (!this.supabase.isConfigured) {
-      console.log('[Auth] Supabase 未配置，跳过会话检查');
+      this.logger.debug('Supabase 未配置，跳过会话检查');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
       return { userId: null, email: null };
     }
@@ -115,7 +115,7 @@ export class AuthService {
     const SESSION_TIMEOUT = 10000;
     
     try {
-      console.log('[Auth] 正在调用 supabase.getSession()...');
+      this.logger.debug('正在调用 supabase.getSession()...');
       const callStartTime = Date.now();
       
       // 使用 AbortController 实现超时（如果支持）
@@ -136,7 +136,7 @@ export class AuthService {
         
         sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
         const callElapsed = Date.now() - callStartTime;
-        console.log(`[Auth] getSession() 返回 (耗时 ${callElapsed}ms)`);
+        this.logger.debug(`getSession() 返回 (耗时 ${callElapsed}ms)`);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -144,7 +144,7 @@ export class AuthService {
       const { data, error } = sessionResult;
       
       if (error) {
-        console.error('[Auth] getSession() 返回错误:', {
+        this.logger.error('getSession() 返回错误', {
           message: error.message,
           status: error.status,
           name: error.name
@@ -154,12 +154,12 @@ export class AuthService {
       }
       
       const session = data?.session;
-      console.log('[Auth] 会话状态:', session ? '✓ 存在' : '✗ 不存在');
+      this.logger.debug('会话状态', { exists: !!session });
       
       if (session?.user) {
         const userId = session.user.id;
         const email = session.user.email ?? null;
-        console.log('[Auth] 用户已登录:', { 
+        this.logger.debug('用户已登录', { 
           userId: userId.substring(0, 8) + '...', 
           email 
         });
@@ -173,24 +173,23 @@ export class AuthService {
           error: null
         }));
         
-        console.log('[Auth] ========== checkSession 成功 ==========');
+        this.logger.debug('========== checkSession 成功 ==========');
         return { userId, email };
       }
       
       // 没有现有会话，尝试开发环境自动登录
-      console.log('[Auth] 无现有会话，尝试开发环境自动登录...');
+      this.logger.debug('无现有会话，尝试开发环境自动登录...');
       const autoLoginResult = await this.tryDevAutoLogin();
       if (autoLoginResult) {
-        console.log('[Auth] ========== 自动登录成功 ==========');
+        this.logger.debug('========== 自动登录成功 ==========');
         return autoLoginResult;
       }
       
-      console.log('[Auth] ========== 无会话，未登录 ==========');
+      this.logger.debug('========== 无会话，未登录 ==========');
       return { userId: null, email: null };
     } catch (e: unknown) {
       const err = e as Error | undefined;
-      console.error('[Auth] ========== checkSession 异常 ==========');
-      console.error('[Auth] 异常详情:', {
+      this.logger.error('========== checkSession 异常 ==========', {
         message: err?.message,
         stack: err?.stack?.split('\n').slice(0, 3).join('\n'),
         isTimeout: err?.message?.includes('超时')
@@ -206,10 +205,10 @@ export class AuthService {
       }
       
       // 注意：这里不抛出异常，而是返回 null
-      console.log('[Auth] 返回空会话，不阻断应用启动');
+      this.logger.debug('返回空会话，不阻断应用启动');
       return { userId: null, email: null };
     } finally {
-      console.log('[Auth] 设置 isCheckingSession = false');
+      this.logger.debug('设置 isCheckingSession = false');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
     }
   }
@@ -245,14 +244,14 @@ export class AuthService {
     }
     
     // 开发环境日志：不泄露凭据
-    console.log('🔐 开发环境自动登录中...');
+    this.logger.debug('🔐 开发环境自动登录中...');
     
     try {
       const result = await this.signIn(devAutoLogin.email, devAutoLogin.password);
       
       if (result.ok && result.value.userId) {
         // 安全：只记录登录成功，不记录具体邮箱
-        console.log('✅ 开发环境自动登录成功');
+        this.logger.info('✅ 开发环境自动登录成功');
         return { 
           userId: result.value.userId, 
           email: result.value.email ?? null 
@@ -260,12 +259,12 @@ export class AuthService {
       } else {
         // 开发环境凭据问题：使用 info 而非 warn，避免在控制台产生混淆
         // 这是预期的静默降级，不是真正的错误
-        console.info('ℹ️ 开发环境自动登录未成功，将以未登录状态运行');
+        this.logger.info('ℹ️ 开发环境自动登录未成功，将以未登录状态运行');
         return null;
       }
     } catch (e) {
       // 网络异常等：静默降级为未登录状态
-      console.info('ℹ️ 开发环境自动登录异常，静默降级:', e);
+      this.logger.info('ℹ️ 开发环境自动登录异常，静默降级', e);
       return null;
     }
   }

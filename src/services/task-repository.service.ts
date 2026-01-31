@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
+import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
@@ -63,6 +64,7 @@ export interface ProjectRow {
 })
 export class TaskRepositoryService {
   private supabase = inject(SupabaseClientService);
+  private readonly logger = inject(LoggerService).category('TaskRepository');
 
   /**
    * 加载项目的所有任务
@@ -166,7 +168,7 @@ export class TaskRepositoryService {
     const tombstoneCount = tombstoneIds.size;
     const softDeleteCount = allTasks.filter(t => t.deletedAt && !tombstoneIds.has(t.id)).length;
     if (tombstoneCount > 0 || softDeleteCount > 0) {
-      console.log(`Filtered out ${tombstoneCount} tombstoned and ${softDeleteCount} soft-deleted tasks for project ${projectId}`);
+      this.logger.debug(`Filtered out ${tombstoneCount} tombstoned and ${softDeleteCount} soft-deleted tasks`, { projectId, tombstoneCount, softDeleteCount });
     }
 
     return keptTasks;
@@ -720,7 +722,6 @@ export class TaskRepositoryService {
         // 部分成功也返回 success，只记录警告
       }
       
-      // console.log(`连接同步完成: 删除 ${toDelete.length}, 新增 ${toInsert.length}, 更新 ${toUpdate.length}, 错误 ${errors.length}`);
       return { success: true };
     } catch (error: unknown) {
       const err = error as Error | undefined;
@@ -1029,7 +1030,6 @@ export class TaskRepositoryService {
       };
     }
 
-    // console.log('[TaskRepo] 增量保存任务完成', stats);
     return { success: true, stats };
   }
 
@@ -1154,7 +1154,6 @@ export class TaskRepositoryService {
       };
     }
 
-    // console.log('[TaskRepo] 增量同步连接完成', stats);
     return { success: true, stats };
   }
 

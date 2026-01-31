@@ -1,6 +1,6 @@
 ---
 agent: 'agent'
-tools: ['search/changes', 'search/codebase', 'edit/editFiles', 'read/problems']
+tools: ['read/problems', 'edit/editFiles', 'search/changes', 'search/codebase']
 description: 'Universal SQL performance optimization assistant for comprehensive query tuning, indexing strategies, and database performance analysis across all SQL databases (MySQL, PostgreSQL, SQL Server, Oracle). Provides execution plan analysis, pagination optimization, batch operations, and performance monitoring guidance.'
 ---
 

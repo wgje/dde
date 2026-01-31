@@ -527,7 +527,7 @@ export class SyncCoordinatorService {
   async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
     // 【修复】本地模式不从云端加载，防止将 'local-user' 传递给 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      console.log('[SyncCoordinator] 本地模式，返回空项目列表');
+      this.logger.debug('本地模式，返回空项目列表');
       return [];
     }
 
@@ -1428,8 +1428,6 @@ export class SyncCoordinatorService {
         
         // 【关键】同步成功后，解锁该项目的所有字段锁
         this.changeTracker.clearProjectFieldLocks(project.id);
-        
-        // console.log('[Sync] 本地版本号已更新', { projectId: project.id, newVersion: result.newVersion });
         
         // 如果有验证警告，记录日志但不打扰用户
         if (result.validationWarnings && result.validationWarnings.length > 0) {

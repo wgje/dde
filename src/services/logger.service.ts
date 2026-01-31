@@ -143,10 +143,11 @@ export class LoggerService {
       }
     }
     
-    // 控制台输出
+    // 控制台输出 - LoggerService 是唯一允许使用 console 的地方
     const prefix = `[${this.getLevelName(level)}] [${category}]`;
     const args = sanitizedData !== undefined ? [prefix, message, sanitizedData] : [prefix, message];
     
+    /* eslint-disable no-console -- LoggerService 是唯一合法的 console 输出入口 */
     switch (level) {
       case LogLevel.DEBUG:
         console.debug(...args);
@@ -161,6 +162,7 @@ export class LoggerService {
         console.error(...args);
         break;
     }
+    /* eslint-enable no-console */
   }
   
   /**

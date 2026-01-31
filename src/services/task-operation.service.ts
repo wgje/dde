@@ -1,6 +1,7 @@
 import { Injectable, inject, DestroyRef } from '@angular/core';
 import { Task, Project, Attachment } from '../models';
 import { LayoutService } from './layout.service';
+import { LoggerService } from './logger.service';
 import { LAYOUT_CONFIG, TRASH_CONFIG, FLOATING_TREE_CONFIG } from '../config';
 import {
   Result, OperationError, ErrorCodes, success, failure
@@ -56,6 +57,8 @@ export interface InsertBetweenParams {
 export class TaskOperationService {
   private layoutService = inject(LayoutService);
   private destroyRef = inject(DestroyRef);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('TaskOperation');
   
   /** 重平衡锁定的阶段 */
   private rebalancingStages = new Set<number>();
@@ -1197,7 +1200,7 @@ export class TaskOperationService {
         // 验证原 parentId：父任务必须存在且在 newStage - 1 阶段
         const parent = tasks.find(t => t.id === target.parentId);
         if (!parent || parent.stage !== newStage - 1) {
-          console.log('[MoveTask] 清除无效 parentId:', {
+          this.logger.debug('清除无效 parentId', {
             taskId: taskId.slice(-4),
             oldParentId: target.parentId?.slice(-4),
             newStage,
@@ -1585,7 +1588,7 @@ export class TaskOperationService {
       
       const expectedStage = parentStage + 1;
       if (child.stage !== expectedStage) {
-        console.log('[CascadeStage] 更新子任务 stage:', {
+        this.logger.debug('级联更新子任务 stage', {
           taskId: taskId.slice(-4),
           oldStage: child.stage,
           newStage: expectedStage

@@ -11,6 +11,7 @@ import { AuthService } from './services/auth.service';
 import { UndoService } from './services/undo.service';
 import { ToastService } from './services/toast.service';
 import { ActionQueueService } from './services/action-queue.service';
+import { LoggerService } from './services/logger.service';
 import { StoreService } from './services/store.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { MigrationService } from './services/migration.service';
@@ -107,6 +108,7 @@ export class AppComponent implements OnInit, OnDestroy {
     throw new Error("Sentry Test Error");
   }
 
+  private readonly logger = inject(LoggerService).category('App');
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
@@ -415,13 +417,6 @@ export class AppComponent implements OnInit, OnDestroy {
     // 解决: requestIdleCallback / setTimeout 在首屏渲染后执行
     this.scheduleSessionBootstrap();
     
-    // 🔍 调试：输出关键状态
-    // console.log('[NanoFlow] 📊 初始状态:', {
-    //   isCheckingSession: this.isCheckingSession(),
-    //   bootstrapFailed: this.bootstrapFailed(),
-    //   currentUserId: this.userSession.currentUserId(),
-    //   authConfigured: this.auth.isConfigured
-    // });
   }
 
   private scheduleSessionBootstrap(): void {
@@ -774,48 +769,48 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async bootstrapSession() {
     if (!this.auth.isConfigured) {
-      console.log('[Bootstrap] Supabase 未配置，启用离线模式');
+      this.logger.debug('[Bootstrap] Supabase 未配置，启用离线模式');
       this.isCheckingSession.set(false);
       // 离线模式：加载本地数据（种子数据或缓存数据）
       await this.userSession.setCurrentUser(null);
       return;
     }
     
-    console.log('[Bootstrap] ========== 启动会话检查 ==========');
+    this.logger.debug('[Bootstrap] ========== 启动会话检查 ==========');
     const totalStartTime = Date.now(); // 移到 try 外部以便 finally 访问
     this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
     
     try {
-      console.log('[Bootstrap] 步骤 1/3: 调用 auth.checkSession()...');
+      this.logger.debug('[Bootstrap] 步骤 1/3: 调用 auth.checkSession()...');
       const startTime = Date.now();
       const result = await this.auth.checkSession();
       const elapsed = Date.now() - startTime;
-      console.log(`[Bootstrap] 步骤 1/3: checkSession 完成 (耗时 ${elapsed}ms)`, { 
+      this.logger.debug(`[Bootstrap] 步骤 1/3: checkSession 完成 (耗时 ${elapsed}ms)`, { 
         userId: result.userId, 
         hasEmail: !!result.email 
       });
       
       if (result.userId) {
         this.sessionEmail.set(result.email);
-        console.log('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
+        this.logger.debug('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
         const loadStartTime = Date.now();
         
         // setCurrentUser 不会抛出异常，内部已处理所有错误
         await this.userSession.setCurrentUser(result.userId);
         
         const loadElapsed = Date.now() - loadStartTime;
-        console.log(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
-        console.log('[Bootstrap] 步骤 3/3: 检查项目数据...', {
+        this.logger.debug(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
+        this.logger.debug('[Bootstrap] 步骤 3/3: 检查项目数据...', {
           projectCount: this.projectState.projects().length,
           activeProjectId: this.projectState.activeProjectId()
         });
       } else {
-        console.log('[Bootstrap] 步骤 2/3: 无现有会话，跳过数据加载');
+        this.logger.debug('[Bootstrap] 步骤 2/3: 无现有会话，跳过数据加载');
       }
       
-      console.log('[Bootstrap] ========== 启动成功 ==========');
+      this.logger.debug('[Bootstrap] ========== 启动成功 ==========');
     } catch (e: unknown) {
       // 只有会话检查失败才算启动失败
       const err = e as Error | undefined;
@@ -835,7 +830,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.authError.set(errorMsg);
     } finally {
       const totalElapsed = Date.now() - totalStartTime;
-      console.log(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
+      this.logger.debug(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
       this.isCheckingSession.set(false);
     }
   }

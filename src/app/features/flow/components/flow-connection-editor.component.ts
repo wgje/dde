@@ -1,8 +1,9 @@
-import { Component, input, output, signal, ElementRef, ViewChild, computed, OnInit, OnDestroy, HostListener, effect } from '@angular/core';
+import { Component, input, output, signal, ElementRef, ViewChild, computed, OnInit, OnDestroy, HostListener, effect, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Task } from '../../../../models';
 import { renderMarkdown } from '../../../../utils/markdown';
+import { LoggerService } from '../../../../services/logger.service';
 
 export interface ConnectionEditorData {
   sourceId: string;
@@ -154,6 +155,9 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   @ViewChild('titleInput') titleInput!: ElementRef<HTMLInputElement>;
   @ViewChild('editorContainer') editorContainer!: ElementRef<HTMLDivElement>;
 
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ConnectionEditor');
+
   readonly data = input<ConnectionEditorData | null>(null);
   readonly position = input<{ x: number; y: number }>({ x: 0, y: 0 });
   readonly connectionTasks = input<ConnectionTasks>({ source: null, target: null });
@@ -268,17 +272,17 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
                                     target.closest('textarea, button, svg') !== null;
       
       if (isInteractiveElement) {
-        console.log('[ConnectionEditor] 点击可交互元素，保持编辑模式');
+        this.logger.debug('点击可交互元素，保持编辑模式');
         return;
       }
       
       if (clickedInside) {
         // 点击在编辑器内部但不是可交互元素（如标题栏、空白区域），退出编辑模式
-        console.log('[ConnectionEditor] 点击编辑器空白区域，退出编辑模式');
+        this.logger.debug('点击编辑器空白区域，退出编辑模式');
         this.exitEditMode();
       } else {
         // 点击在编辑器外部，退出编辑模式并关闭编辑器
-        console.log('[ConnectionEditor] 点击编辑器外部，退出编辑模式并关闭');
+        this.logger.debug('点击编辑器外部，退出编辑模式并关闭');
         this.exitEditMode();
         this.saveAndClose();
       }
@@ -312,7 +316,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     // 检查是否有输入框正在使用
     const activeElement = document.activeElement;
     if (activeElement && activeElement.tagName === 'TEXTAREA') {
-      console.log('[ConnectionEditor] 文本框正在使用，保持编辑模式');
+      this.logger.debug('文本框正在使用，保持编辑模式');
       return;
     }
     
@@ -329,17 +333,17 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
                                     target.closest('textarea, button, svg') !== null;
       
       if (isInteractiveElement) {
-        console.log('[ConnectionEditor] 触摸可交互元素，保持编辑模式');
+        this.logger.debug('触摸可交互元素，保持编辑模式');
         return;
       }
       
       if (clickedInside) {
         // 触摸在编辑器内部但不是可交互元素，退出编辑模式
-        console.log('[ConnectionEditor] 触摸编辑器空白区域，退出编辑模式');
+        this.logger.debug('触摸编辑器空白区域，退出编辑模式');
         this.exitEditMode();
       } else {
         // 触摸在编辑器外部，退出编辑模式并关闭编辑器
-        console.log('[ConnectionEditor] 触摸编辑器外部，退出编辑模式并关闭');
+        this.logger.debug('触摸编辑器外部，退出编辑模式并关闭');
         this.exitEditMode();
         this.saveAndClose();
       }
@@ -356,7 +360,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    */
   toggleEditMode(): void {
     const newMode = !this.isEditMode();
-    console.log('[ConnectionEditor] toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
+    this.logger.debug('toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
     if (newMode) {
       this.enterEditMode();
     } else {
@@ -486,7 +490,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   onDeleteClick(event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    console.log('[ConnectionEditor] 删除按钮被点击');
+    this.logger.debug('删除按钮被点击');
     // 设置忽略外部点击的保护窗口，防止 document:click 立即关闭编辑器
     this.ignoreOutsideUntil = Date.now() + 300;
     this.delete.emit();

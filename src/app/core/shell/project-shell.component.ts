@@ -18,6 +18,7 @@ import { ToastService } from '../../../services/toast.service';
 import { TabSyncService } from '../../../services/tab-sync.service';
 import { FlowCommandService } from '../../features/flow/services/flow-command.service';
 import { ModalLoaderService } from '../services/modal-loader.service';
+import { LoggerService } from '../../../services/logger.service';
 import { TextViewComponent } from '../../features/text';
 import { FlowViewComponent } from '../../features/flow';
 
@@ -274,6 +275,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private readonly modalLoader = inject(ModalLoaderService);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('ProjectShell');
   private destroy$ = new Subject<void>();
   
   // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
@@ -460,7 +463,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   }
   
   switchToText() {
-    console.log('[ProjectShell] switchToText 被调用', new Error().stack);
+    this.logger.debug('switchToText 被调用');
     this.uiState.activeView.set('text');
   }
   

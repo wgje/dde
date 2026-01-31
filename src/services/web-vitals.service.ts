@@ -216,10 +216,7 @@ export class WebVitalsService {
       ? metric.value.toFixed(4) 
       : `${metric.value.toFixed(0)}ms`;
     
-    console.log(
-      `%c${emoji} ${metric.name}: ${value} (${rating})`,
-      `color: ${rating === 'good' ? 'green' : rating === 'needs-improvement' ? 'orange' : 'red'}`
-    );
+    this.logger.debug(`${emoji} ${metric.name}: ${value} (${rating})`);
   }
   
   /**

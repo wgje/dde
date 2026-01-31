@@ -321,7 +321,7 @@ export class MigrationService {
       // 先尝试 sessionStorage
       if (dataSize <= MIGRATION_SNAPSHOT_CONFIG.MAX_SESSION_STORAGE_SIZE) {
         sessionStorage.setItem(MIGRATION_SNAPSHOT_CONFIG.PRIMARY_KEY, snapshotData);
-        console.log(`[Migration] 快照已保存到 sessionStorage (${(dataSize / 1024).toFixed(2)} KB)`);
+        this.logger.debug(`快照已保存到 sessionStorage (${(dataSize / 1024).toFixed(2)} KB)`);
         return true;
       }
       
@@ -332,7 +332,7 @@ export class MigrationService {
       );
       
       localStorage.setItem(MIGRATION_SNAPSHOT_CONFIG.FALLBACK_KEY, snapshotData);
-      console.log(`[Migration] 快照已保存到 localStorage (${(dataSize / 1024 / 1024).toFixed(2)} MB)`);
+      this.logger.debug(`快照已保存到 localStorage (${(dataSize / 1024 / 1024).toFixed(2)} MB)`);
       return true;
     } catch (e) {
       // 存储失败（可能是配额用尽）
@@ -399,7 +399,7 @@ export class MigrationService {
       const sessionData = sessionStorage.getItem(MIGRATION_SNAPSHOT_CONFIG.PRIMARY_KEY);
       if (sessionData) {
         const parsed = JSON.parse(sessionData);
-        console.log('[Migration] 从 sessionStorage 恢复快照');
+        this.logger.debug('从 sessionStorage 恢复快照');
         return parsed.projects || null;
       }
       
@@ -407,7 +407,7 @@ export class MigrationService {
       const localData = localStorage.getItem(MIGRATION_SNAPSHOT_CONFIG.FALLBACK_KEY);
       if (localData) {
         const parsed = JSON.parse(localData);
-        console.log('[Migration] 从 localStorage 恢复快照');
+        this.logger.debug('从 localStorage 恢复快照');
         return parsed.projects || null;
       }
       
@@ -682,7 +682,7 @@ export class MigrationService {
           const expiresAtTimestamp = new Date(parsed.expiresAt).getTime();
           const nowTimestamp = Date.now();
           if (expiresAtTimestamp < nowTimestamp) {
-            console.log('访客数据已过期，清理中...');
+            this.logger.debug('访客数据已过期，清理中...');
             this.clearLocalGuestData();
             return null;
           }

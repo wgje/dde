@@ -77,7 +77,7 @@ export class UserSessionService {
         this.undoService.clearHistory();
         this.syncCoordinator.teardownRealtimeSubscription();
       } catch (cleanupError) {
-        console.error('[Session] 清理旧用户数据失败:', cleanupError);
+        this.logger.warn('清理旧用户数据失败', cleanupError);
         // 继续执行，不阻断流程
       }
     }
@@ -92,12 +92,12 @@ export class UserSessionService {
           await this.loadUserData(userId);
         } catch (error) {
           // loadUserData 内部已有错误处理，这里是最后的防线
-          console.error('[Session] loadUserData 失败:', error);
+          this.logger.warn('loadUserData 失败', error);
           // 降级处理：至少加载种子数据
           try {
             this.loadFromCacheOrSeed();
           } catch (fallbackError) {
-            console.error('[Session] 降级加载种子数据也失败:', fallbackError);
+            this.logger.warn('降级加载种子数据也失败', fallbackError);
             // 即使种子数据加载失败，也不阻断应用启动
           }
           // 不重新抛出异常，避免阻断应用启动
@@ -107,7 +107,7 @@ export class UserSessionService {
       try {
         this.loadFromCacheOrSeed();
       } catch (error) {
-        console.error('[Session] loadFromCacheOrSeed 失败:', error);
+        this.logger.warn('loadFromCacheOrSeed 失败', error);
         // 不重新抛出异常
       }
     }
@@ -261,34 +261,34 @@ export class UserSessionService {
   async loadProjects(): Promise<void> {
     const perfStart = performance.now();
     const userId = this.currentUserId();
-    console.log('[Session] loadProjects 开始（本地优先模式）, userId:', userId);
+    this.logger.debug('loadProjects 开始（本地优先模式）', { userId });
     
     // === 阶段 1: 立即渲染本地数据 ===
     
     if (!userId) {
-      console.log('[Session] 无 userId，从缓存或种子加载');
+      this.logger.debug('无 userId，从缓存或种子加载');
       this.loadFromCacheOrSeed();
-      console.log(`[Session] ⚡ 数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
+      this.logger.debug(`⚡ 数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       return;
     }
     
     // 【性能优化 2026-01-26】如果是本地模式用户，直接从缓存加载，不尝试云端同步
     // 立即返回，避免触发任何网络请求或会话检查
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      console.log('[Session] 本地模式，从缓存或种子加载');
+      this.logger.debug('本地模式，从缓存或种子加载');
       this.loadFromCacheOrSeed();
-      console.log(`[Session] ⚡ 本地模式数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
+      this.logger.debug(`⚡ 本地模式数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       // 确保不启动后台同步任务
       return;
     }
 
     const previousActive = this.projectState.activeProjectId();
     const offlineProjects = this.syncCoordinator.loadOfflineSnapshot();
-    console.log('[Session] 离线缓存项目数量:', offlineProjects?.length ?? 0);
+    this.logger.debug('离线缓存项目数量', { count: offlineProjects?.length ?? 0 });
     
     // 【关键改动】立即渲染本地缓存数据，不等待云端
     if (offlineProjects && offlineProjects.length > 0) {
-      console.log('[Session] 立即渲染本地缓存数据');
+      this.logger.debug('立即渲染本地缓存数据');
       
       // 验证并迁移本地数据
       const validProjects: Project[] = [];
@@ -299,7 +299,7 @@ export class UserSessionService {
             validProjects.push(migrated);
           }
         } catch (error) {
-          console.warn('[Session] 跳过无效的缓存项目:', p.id, error);
+          this.logger.warn('跳过无效的缓存项目', { projectId: p.id, error });
         }
       }
       
@@ -319,14 +319,14 @@ export class UserSessionService {
           this.monitorProjectAttachments(activeProject);
         }
         
-        console.log('[Session] 本地数据已渲染，用户可以操作');
+        this.logger.debug('本地数据已渲染，用户可以操作');
       } else {
         // 缓存数据无效，使用种子数据
         this.loadFromCacheOrSeed();
       }
     } else {
       // 无本地缓存，立即生成种子数据让用户可以操作
-      console.log('[Session] 无本地缓存，生成种子数据');
+      this.logger.debug('无本地缓存，生成种子数据');
       this.loadFromCacheOrSeed();
     }
     
@@ -335,7 +335,7 @@ export class UserSessionService {
     
     this.runIdleTask(() => {
       this.startBackgroundSync(userId, previousActive).catch(error => {
-        console.warn('[Session] 后台同步失败:', error);
+        this.logger.warn('后台同步失败', error);
         // 后台同步失败不影响用户操作，静默处理
       });
     });
@@ -365,11 +365,11 @@ export class UserSessionService {
   private async startBackgroundSync(userId: string, previousActive: string | null): Promise<void> {
     // 【修复】本地模式不启动后台同步，防止将 'local-user' 传递给 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      console.log('[Session] 本地模式，跳过后台同步');
+      this.logger.debug('本地模式，跳过后台同步');
       return;
     }
 
-    console.log('[Session] 开始后台同步');
+    this.logger.debug('开始后台同步');
 
     const activeProjectId = this.projectState.activeProjectId();
     
@@ -380,11 +380,11 @@ export class UserSessionService {
       try {
         const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
         if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
-          console.log('[Session] Delta Sync 成功', deltaResult);
+          this.logger.debug('Delta Sync 成功', deltaResult);
           currentProjectSynced = true;
         }
       } catch (deltaSyncError) {
-        console.warn('[Session] Delta Sync 失败，尝试全量同步当前项目', deltaSyncError);
+        this.logger.warn('Delta Sync 失败，尝试全量同步当前项目', deltaSyncError);
       }
     }
     
@@ -393,14 +393,14 @@ export class UserSessionService {
     // 其他项目在用户切换项目时再加载
     if (!currentProjectSynced && activeProjectId) {
       try {
-        console.log('[Session] 按需加载当前项目:', activeProjectId);
+        this.logger.debug('按需加载当前项目', { projectId: activeProjectId });
         const currentProject = await this.syncCoordinator.loadSingleProjectFromCloud(activeProjectId);
         if (currentProject) {
           await this.mergeSingleProject(currentProject, userId);
           currentProjectSynced = true;
         }
       } catch (e) {
-        console.warn('[Session] 当前项目同步失败:', e);
+        this.logger.warn('当前项目同步失败', e);
       }
     }
     
@@ -409,10 +409,10 @@ export class UserSessionService {
     try {
       await this.syncProjectListMetadata(userId);
     } catch (e) {
-      console.warn('[Session] 项目列表元数据同步失败:', e);
+      this.logger.warn('项目列表元数据同步失败', e);
     }
     
-    console.log('[Session] 后台同步完成', { currentProjectSynced });
+    this.logger.debug('后台同步完成', { currentProjectSynced });
   }
   
   /**
@@ -430,7 +430,7 @@ export class UserSessionService {
       .order('updated_at', { ascending: false });
     
     if (error) {
-      console.warn('[Session] 获取项目列表失败:', error.message);
+      this.logger.warn('获取项目列表失败', { message: error.message });
       return;
     }
     
@@ -471,7 +471,7 @@ export class UserSessionService {
     
     if (hasChanges) {
       this.projectState.setProjects(updatedProjects);
-      console.log('[Session] 项目列表元数据已更新');
+      this.logger.debug('项目列表元数据已更新');
     }
   }
   
@@ -494,7 +494,7 @@ export class UserSessionService {
     const hasPendingChanges = this.syncCoordinator.hasPendingChangesForProject(cloudProject.id);
     
     if (hasPendingChanges) {
-      console.log('[Session] 检测到本地未同步修改，使用 LWW 合并');
+      this.logger.debug('检测到本地未同步修改，使用 LWW 合并');
       // 逐个任务比较 updatedAt，保留最新的
       const mergedTasks = this.mergeTasksWithLWW(localProject.tasks, cloudProject.tasks);
       const mergedConnections = this.mergeConnectionsWithLWW(
@@ -581,13 +581,13 @@ export class UserSessionService {
     userId: string,
     previousActive: string | null
   ): Promise<void> {
-    console.log('[Session] 开始合并云端数据');
+    this.logger.debug('开始合并云端数据');
     
     const validatedProjects: Project[] = [];
     const failedProjects: string[] = [];
 
     for (const p of cloudProjects) {
-      console.log('[Session] 云端项目详情:', {
+      this.logger.debug('云端项目详情', {
         id: p.id,
         name: p.name,
         taskCount: p.tasks?.length ?? 0,
@@ -599,7 +599,7 @@ export class UserSessionService {
         validatedProjects.push(result.value);
       } else if (isFailure(result)) {
         failedProjects.push(p.name || p.id);
-        console.error(`项目 "${p.name}" 验证失败，跳过加载:`, result.error.message);
+        this.logger.warn(`项目 "${p.name}" 验证失败，跳过加载`, { error: result.error.message });
       }
     }
 
@@ -622,7 +622,7 @@ export class UserSessionService {
       );
       mergedProjects = mergeResult.projects;
       
-      console.log('[Session] 合并后项目数量:', mergedProjects.length);
+      this.logger.debug('合并后项目数量', { count: mergedProjects.length });
 
       if (mergeResult.syncedCount > 0) {
         this.toastService.success(
@@ -639,7 +639,7 @@ export class UserSessionService {
     // 保存合并后的快照
     this.syncCoordinator.saveOfflineSnapshot(mergedProjects);
     
-    console.log('[Session] 后台同步完成');
+    this.logger.debug('后台同步完成');
   }
   
   /**
@@ -677,15 +677,15 @@ export class UserSessionService {
     const failedProjects: string[] = [];
     
     for (const project of localProjects) {
-      console.log('[Session] 迁移项目:', project.id, project.name);
+      this.logger.debug('迁移项目', { projectId: project.id, name: project.name });
       const rebalanced = this.layoutService.rebalance(project);
       const result = await this.syncCoordinator.saveProjectToCloud(rebalanced, userId);
       if (result.success) {
         syncedCount++;
-        console.log('[Session] 项目迁移成功:', project.name);
+        this.logger.debug('项目迁移成功', { name: project.name });
       } else {
         failedProjects.push(project.name || project.id);
-        console.error('[Session] 项目迁移失败:', project.name, result);
+        this.logger.warn('项目迁移失败', { name: project.name, result });
       }
     }
     
@@ -724,12 +724,12 @@ export class UserSessionService {
       await this.loadProjects();
     } catch (error) {
       // loadProjects 内部已有错误处理，这里是最后的防线
-      console.error('[Session] loadProjects 未捕获异常:', error);
+      this.logger.warn('loadProjects 未捕获异常', error);
       // 确保至少有可用的数据
       try {
         this.loadFromCacheOrSeed();
       } catch (fallbackError) {
-        console.error('[Session] 种子数据加载失败:', fallbackError);
+        this.logger.warn('种子数据加载失败', fallbackError);
       }
       
       // 向用户显示友好的错误提示
@@ -742,14 +742,14 @@ export class UserSessionService {
     // 实时订阅和冲突数据重载在后台执行，不阻塞 UI
     // 使用 Promise 而非 await，让它们在后台运行
     this.syncCoordinator.initRealtimeSubscription(userId).catch(e => {
-      console.warn('实时订阅初始化失败（后台）:', e);
+      this.logger.warn('实时订阅初始化失败（后台）', e);
       // 实时订阅失败不影响核心功能，静默处理
     });
 
     this.syncCoordinator.tryReloadConflictData(userId, (id) =>
       this.projectState.projects().find(p => p.id === id)
     ).catch(e => {
-      console.warn('冲突数据重载失败（后台）:', e);
+      this.logger.warn('冲突数据重载失败（后台）', e);
       // 冲突数据重载失败不影响核心功能，静默处理
     });
   }
@@ -777,13 +777,13 @@ export class UserSessionService {
             corruptedProjects.push(p.name || p.id || '未知项目');
           }
         } catch (error) {
-          console.error('[Session] 项目迁移失败:', p.id, error);
+          this.logger.warn('项目迁移失败', { projectId: p.id, error });
           corruptedProjects.push(p.name || p.id || '未知项目');
         }
       }
       
       if (corruptedProjects.length > 0) {
-        console.warn('[Session] 跳过损坏的项目:', corruptedProjects);
+        this.logger.warn('跳过损坏的项目', { corruptedProjects });
         this.toastService.warning(
           '部分数据已跳过',
           `以下项目数据损坏已跳过: ${corruptedProjects.join(', ')}`

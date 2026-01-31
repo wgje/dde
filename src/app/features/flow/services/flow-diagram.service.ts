@@ -373,7 +373,7 @@ export class FlowDiagramService {
       // 移动端框选模式：点击节点时禁用默认单选，交给节点模板或下方逻辑处理
       const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
       if (isSelectModeActive && obj?.part instanceof go.Node) {
-        console.log('[FlowDiagram] standardMouseSelect - 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
+        this.logger.debug('[standardMouseSelect] 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
         if (e) {
           e.handled = true;
         } else {
@@ -385,7 +385,7 @@ export class FlowDiagramService {
         diagram.commitTransaction('toggle-selection');
         // 手动触发 ChangedSelection 事件
         diagram.raiseDiagramEvent('ChangedSelection');
-        console.log('[FlowDiagram] 切换选中状态完成', { 
+        this.logger.debug('[toggle-selection] 切换选中状态完成', { 
           nodeKey: obj.part.key, 
           newState: obj.part.isSelected,
           totalSelected: diagram.selection.count
@@ -440,7 +440,7 @@ export class FlowDiagramService {
           diagram.commitTransaction('toggle-selection');
           // 手动触发 ChangedSelection 事件
           diagram.raiseDiagramEvent('ChangedSelection');
-          console.log('[FlowDiagram] Touch 切换完成', { 
+          this.logger.debug('[Touch toggle] 切换完成', { 
             nodeKey: obj.part.key, 
             newState: obj.part.isSelected,
             totalSelected: diagram.selection.count

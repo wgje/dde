@@ -4790,7 +4790,7 @@ export class SimpleSyncService {
   async loadProjectsFromCloud(userId: string, _silent?: boolean): Promise<Project[]> {
     // 【修复】本地模式不查询 Supabase，防止无效 UUID 错误
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      console.log('[SimpleSync] 本地模式，跳过云端加载');
+      this.logger.debug('本地模式，跳过云端加载');
       return [];
     }
 

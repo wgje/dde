@@ -356,7 +356,7 @@ export class FlowTemplateService {
           const dragSelectTool = e.diagram?.toolManager.dragSelectingTool;
           const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
 
-          console.log('[FlowTemplate] 节点点击事件', {
+          this.logger.debug('节点点击事件', {
             isSelectModeActive,
             isMobileMode,
             dragSelectToolEnabled: dragSelectTool?.isEnabled,
@@ -366,7 +366,7 @@ export class FlowTemplateService {
 
           // 移动端框选模式：点击节点立即切换选中状态
           if (isSelectModeActive) {
-            console.log('[FlowTemplate] 框选模式激活 - 切换节点选中状态', { from: (node as go.Node).isSelected, to: !(node as go.Node).isSelected });
+            this.logger.debug('框选模式激活 - 切换节点选中状态', { from: (node as go.Node).isSelected, to: !(node as go.Node).isSelected });
             e.handled = true;
             // 在事务中切换选中状态
             e.diagram?.startTransaction('toggle-selection');
@@ -374,7 +374,7 @@ export class FlowTemplateService {
             e.diagram?.commitTransaction('toggle-selection');
             // 手动触发 ChangedSelection 事件
             e.diagram?.raiseDiagramEvent('ChangedSelection');
-            console.log('[FlowTemplate] 选中状态已更新', { 
+            this.logger.debug('选中状态已更新', { 
               nodeKey: (node as go.Node).key, 
               isSelected: (node as go.Node).isSelected,
               totalSelected: e.diagram?.selection.count

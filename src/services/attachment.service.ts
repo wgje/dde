@@ -5,6 +5,7 @@ import { ATTACHMENT_CONFIG, VIRUS_SCAN_CONFIG } from '../config';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FileTypeValidatorService, FILE_TYPE_VALIDATION_CONFIG } from './file-type-validator.service';
 import { VirusScanService } from './virus-scan.service';
+import { LoggerService } from './logger.service';
 
 /**
  * 上传进度
@@ -55,6 +56,8 @@ export class AttachmentService {
   private destroyRef = inject(DestroyRef);
   private fileTypeValidator = inject(FileTypeValidatorService);
   private virusScan = inject(VirusScanService);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('Attachment');
 
   /** 当前上传进度 */
   readonly uploadProgress = signal<UploadProgress[]>([]);
@@ -366,7 +369,7 @@ export class AttachmentService {
       const err = e as { name?: string; message?: string };
       // 检查是否为取消操作
       if (err?.name === 'AbortError' || err?.message === 'Upload cancelled') {
-        console.log(`Upload cancelled: ${file.name}`);
+        this.logger.debug('上传已取消', { fileName: file.name });
         this.updateProgress(file.name, 0, 'cancelled');
         return { success: false, cancelled: true, error: '上传已取消' };
       }

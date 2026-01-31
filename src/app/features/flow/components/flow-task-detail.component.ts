@@ -5,6 +5,7 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
+import { LoggerService } from '../../../../services/logger.service';
 import { Task, Attachment } from '../../../../models';
 import { renderMarkdown } from '../../../../utils/markdown';
 
@@ -424,6 +425,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly userSession = inject(UserSessionService);
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly elementRef = inject(ElementRef);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowTaskDetail');
 
   @ViewChild('mobileDrawer') private mobileDrawer?: ElementRef<HTMLDivElement>;
   @ViewChild('mobileDrawerTitle') private mobileDrawerTitle?: ElementRef<HTMLDivElement>;
@@ -755,7 +758,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   onLocalTitleChange(value: string) {
     // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
     if (this.isTaskSwitching) {
-      console.debug('[FlowTaskDetail] 任务切换中，跳过 titleChange 发射');
+      this.logger.debug('任务切换中，跳过 titleChange 发射');
       return;
     }
     
@@ -774,7 +777,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   onLocalContentChange(value: string) {
     // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
     if (this.isTaskSwitching) {
-      console.debug('[FlowTaskDetail] 任务切换中，跳过 contentChange 发射');
+      this.logger.debug('任务切换中，跳过 contentChange 发射');
       return;
     }
     
@@ -791,13 +794,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
   toggleEditMode(): void {
     // 防止快速连续点击（节流 300ms）
     if (this.isTogglingMode()) {
-      console.log('[FlowTaskDetail] toggleEditMode: 节流中，忽略点击');
+      this.logger.debug('toggleEditMode: 节流中，忽略点击');
       return;
     }
     
     this.isTogglingMode.set(true);
     const newMode = !this.isEditMode();
-    console.log('[FlowTaskDetail] toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
+    this.logger.debug('toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
     this.isEditMode.update(v => !v);
     
     // 300ms 后重置节流标记
@@ -836,7 +839,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     // 如果点击的是可交互元素，不切换模式（让元素正常工作）
     if (isInteractiveElement) {
-      console.log('[FlowTaskDetail] 点击可交互元素，保持编辑模式');
+      this.logger.debug('点击可交互元素，保持编辑模式');
       return;
     }
     
@@ -845,11 +848,11 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     if (clickedInside) {
       // 点击在面板内部但不是可交互元素（例如：标题栏、空白区域），切换到预览模式
-      console.log('[FlowTaskDetail] 点击详情面板空白区域，切换到预览模式');
+      this.logger.debug('点击详情面板空白区域，切换到预览模式');
       this.isEditMode.set(false);
     } else {
       // 点击在面板外部，也切换到预览模式
-      console.log('[FlowTaskDetail] 点击面板外部，切换到预览模式');
+      this.logger.debug('点击面板外部，切换到预览模式');
       this.isEditMode.set(false);
     }
   }
@@ -875,7 +878,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     // 检查是否有输入框或文本框正在获得焦点（用户正在输入）
     const activeElement = document.activeElement;
     if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
-      console.log('[FlowTaskDetail] 输入框正在使用，保持编辑模式');
+      this.logger.debug('输入框正在使用，保持编辑模式');
       return;
     }
     
@@ -891,7 +894,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     // 如果触摸的是可交互元素，不切换模式
     if (isInteractiveElement) {
-      console.log('[FlowTaskDetail] 触摸可交互元素，保持编辑模式');
+      this.logger.debug('触摸可交互元素，保持编辑模式');
       return;
     }
     
@@ -900,11 +903,11 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     if (clickedInside) {
       // 触摸在面板内部但不是可交互元素，切换到预览模式
-      console.log('[FlowTaskDetail] 触摸详情面板空白区域，切换到预览模式');
+      this.logger.debug('触摸详情面板空白区域，切换到预览模式');
       this.isEditMode.set(false);
     } else {
       // 触摸在面板外部，也切换到预览模式
-      console.log('[FlowTaskDetail] 触摸面板外部，切换到预览模式');
+      this.logger.debug('触摸面板外部，切换到预览模式');
       this.isEditMode.set(false);
     }
   }
