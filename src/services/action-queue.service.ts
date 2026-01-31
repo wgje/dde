@@ -831,7 +831,7 @@ export class ActionQueueService {
       try {
         cb(deadLetterItem);
       } catch (e) {
-        console.error('Dead letter callback error:', e);
+        this.logger.error('Dead letter callback error', { error: e });
       }
     });
     
@@ -926,14 +926,14 @@ export class ActionQueueService {
     
     // 业务错误和权限错误直接移入死信队列，不重试
     if (errorType === 'business' || errorType === 'permission') {
-      console.warn(`${errorType === 'business' ? '业务' : '权限'}错误，不可重试:`, error);
+      this.logger.warn(`${errorType === 'business' ? '业务' : '权限'}错误，不可重试`, { error });
       this.moveToDeadLetter(action, `${errorType === 'business' ? '业务' : '权限'}错误: ${error}`);
       return 'dead-letter';
     }
     
     // 超过最大重试次数
     if (action.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
-      console.error('超过最大重试次数，移入死信队列:', {
+      this.logger.error('超过最大重试次数，移入死信队列', {
         actionId: action.id,
         type: action.type,
         entityType: action.entityType,
@@ -1329,7 +1329,7 @@ export class ActionQueueService {
         }
       });
     } catch (e) {
-      console.warn('Failed to load action queue from storage', e);
+      this.logger.warn('Failed to load action queue from storage', { error: e });
     }
   }
   
@@ -1345,7 +1345,7 @@ export class ActionQueueService {
         JSON.stringify(this.deadLetterQueue())
       );
     } catch (e) {
-      console.warn('Failed to save dead letter queue to storage', e);
+      this.logger.warn('Failed to save dead letter queue to storage', { error: e });
     }
   }
   
@@ -1380,7 +1380,7 @@ export class ActionQueueService {
         }
       }
     } catch (e) {
-      console.warn('Failed to load dead letter queue from storage', e);
+      this.logger.warn('Failed to load dead letter queue from storage', { error: e });
     }
   }
   

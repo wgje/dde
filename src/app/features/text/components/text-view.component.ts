@@ -225,7 +225,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   /** 处理拖拽超时 - 当 touchend 丢失时自动完成拖拽 */
   private handleTouchDragTimeout(event: CustomEvent) {
     const { task, targetStage, targetBeforeId } = event.detail;
-    console.warn('[TextView] TouchDragTimeout received', {
+    this.logger.warn('[TextView] TouchDragTimeout received', {
       taskId: task?.id.slice(-4),
       targetStage,
       targetBeforeId: targetBeforeId?.slice(-4) || null
@@ -237,7 +237,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
         const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId);
         if (isFailure(result)) {
           const errorDetail = getErrorMessage(result.error);
-          console.error('[TouchDragTimeout] Move failed:', errorDetail);
+          this.logger.error('[TouchDragTimeout] Move failed', { error: errorDetail });
           this.toast.error('移动任务失败', `无法将任务移动到阶段 ${targetStage}：${errorDetail}`);
         }
         
@@ -268,7 +268,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
     const hasGhost = !!this.dragDropService['touchState']?.dragGhost;
     
     if (isDragging || hasGhost) {
-      console.warn('[TextView] Emergency cleanup triggered - found orphaned drag state');
+      this.logger.warn('[TextView] Emergency cleanup triggered - found orphaned drag state');
       const touchEndResult = this.dragDropService.endTouchDrag();
       const mouseExpandedStages = this.dragDropService.endDrag();
       this.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
@@ -954,7 +954,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
     this.restoreAutoCollapsedSourceStage();
     
     if (!task) {
-      console.warn('[TouchEnd] No task found');
+      this.logger.warn('[TouchEnd] No task found');
       return;
     }
     
@@ -1000,7 +1000,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId, inferredParentId);
       if (isFailure(result)) {
         const errorDetail = getErrorMessage(result.error);
-        console.error('[TouchEnd] Move failed:', errorDetail);
+        this.logger.error('[TouchEnd] Move failed', { error: errorDetail });
         this.toast.error('移动任务失败', `无法将任务移动到阶段 ${targetStage}：${errorDetail}`);
       } else {
         // 🔧 修复：不要自动展开目标阶段，因为在拖拽过程中已经处理了展开/折叠

@@ -192,6 +192,47 @@
 
 ---
 
+## Sprint 7 实施完成 ✅ (S-01 扩展)
+
+### console.* 清理最终统计
+
+| 指标 | 原始值 | 清理后 | 说明 |
+|------|--------|--------|------|
+| console.* 总数 | 344 | 35 | 减少 90% |
+| 需保留数 | 17 | 35 | 启动阶段/适配器类必要调用 |
+| 已替换为 LoggerService | 0 | 309 | 25+ 文件修改 |
+
+### 保留的 console 调用（合理例外）
+
+| 文件 | 数量 | 原因 |
+|------|------|------|
+| supabase-client.service.ts | 5 | 启动阶段关键诊断，LoggerService 未就绪 |
+| storage-adapter.service.ts | 5 | 轻量级适配器类，不注入 LoggerService |
+| auth.guard.ts | 4 | 模块级函数，无法使用依赖注入 |
+| test-setup.*.ts | 3 | 测试设置文件 |
+| virus-scan.service.ts | 2 | 注释中的示例代码 |
+| 其他 | 16 | 组件/服务中的必要保留 |
+
+### 修改文件清单（Sprint 7 扩展）
+
+| 文件 | 操作 |
+|------|------|
+| src/services/layout.service.ts | 添加 LoggerService，替换 9 处 console |
+| src/services/migration.service.ts | 替换 6 处 console |
+| src/services/action-queue.service.ts | 替换 6 处 console |
+| src/services/attachment.service.ts | 替换 5 处 console |
+| src/app/features/text/components/text-view.component.ts | 替换 5 处 console |
+| src/app/features/flow/services/flow-diagram.service.ts | 替换 5 处 console |
+| src/services/auth.service.ts | 替换 3 处 console |
+| src/app.component.ts | 替换 3 处 console |
+| src/app/features/text/services/text-view-drag-drop.service.ts | 替换 3 处 console |
+| src/services/undo.service.ts | 添加 LoggerService，替换 2 处 console |
+| src/services/task-operation.service.ts | 替换 2 处 console |
+| src/services/task-operation-adapter.service.ts | 替换 2 处 console |
+| src/services/undo.service.spec.ts | 添加 LoggerService mock |
+
+---
+
 ## 验收检查
 
 - [x] 文档版本已更新 (1.1 → 1.2)
@@ -200,6 +241,10 @@
 - [x] 工作量估算已更新 (+20% 缓冲)
 - [x] 遗漏的超大文件已记录
 - [x] 所有 checklist 任务已标记完成
+- [x] console.* 清理完成（344 → 35，减少 90%）
+- [x] 构建成功，无 TypeScript 错误
+- [x] ESLint 检查通过
+- [x] 单元测试通过
 
 ---
 
@@ -212,3 +257,4 @@
 ---
 
 **变更记录完成时间**: 2026-01-31
+**最后更新**: 2026-01-31 (Sprint 7 console 清理扩展)

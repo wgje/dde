@@ -336,7 +336,7 @@ export class MigrationService {
       return true;
     } catch (e) {
       // 存储失败（可能是配额用尽）
-      console.error('[Migration] 保存快照失败:', e);
+      this.logger.error('保存快照失败', { error: e });
       
       // 尝试提供文件下载作为最后手段
       this.offerSnapshotDownload(projects);
@@ -374,7 +374,7 @@ export class MigrationService {
         '由于存储空间不足，已下载迁移快照文件。如迁移失败，可使用此文件恢复数据。'
       );
     } catch (e) {
-      console.error('[Migration] 下载快照失败:', e);
+      this.logger.error('下载快照失败', { error: e });
     }
   }
   
@@ -386,7 +386,7 @@ export class MigrationService {
       sessionStorage.removeItem(MIGRATION_SNAPSHOT_CONFIG.PRIMARY_KEY);
       localStorage.removeItem(MIGRATION_SNAPSHOT_CONFIG.FALLBACK_KEY);
     } catch (e) {
-      console.warn('[Migration] 清理快照失败:', e);
+      this.logger.warn('清理快照失败', { error: e });
     }
   }
   
@@ -413,7 +413,7 @@ export class MigrationService {
       
       return null;
     } catch (e) {
-      console.error('[Migration] 恢复快照失败:', e);
+      this.logger.error('恢复快照失败', { error: e });
       return null;
     }
   }
@@ -658,7 +658,7 @@ export class MigrationService {
         expiresAt: expiresAt.toISOString()
       }));
     } catch (e) {
-      console.warn('保存访客数据失败:', e);
+      this.logger.warn('保存访客数据失败', { error: e });
     }
   }
   
@@ -707,7 +707,7 @@ export class MigrationService {
       
       return null;
     } catch (e) {
-      console.warn('读取访客数据失败:', e);
+      this.logger.warn('读取访客数据失败', { error: e });
       return null;
     }
   }

@@ -379,7 +379,7 @@ export class FlowDiagramService {
         if (e) {
           e.handled = true;
         } else {
-          console.warn('[FlowDiagram] 事件对象为 undefined，无法标记为已处理');
+          this.logger.warn('[FlowDiagram] 事件对象为 undefined，无法标记为已处理');
         }
         // 在事务中切换选中状态
         diagram.startTransaction('toggle-selection');
@@ -405,7 +405,7 @@ export class FlowDiagramService {
         if (e) {
           e.handled = true;
         } else {
-          console.warn('[FlowDiagram] 多选模式下事件对象为 undefined');
+          this.logger.warn('[FlowDiagram] 多选模式下事件对象为 undefined');
         }
         diagram.startTransaction('multi-select');
         obj.part.isSelected = !obj.part.isSelected;
@@ -419,7 +419,7 @@ export class FlowDiagramService {
       if (e) {
         originalStandardMouseSelect(e, obj);
       } else {
-        console.warn('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
+        this.logger.warn('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
       }
     };
 
@@ -434,7 +434,7 @@ export class FlowDiagramService {
           if (e) {
             e.handled = true;
           } else {
-            console.warn('[FlowDiagram] Touch 事件对象为 undefined');
+            this.logger.warn('[FlowDiagram] Touch 事件对象为 undefined');
           }
           // 在事务中切换选中状态
           diagram.startTransaction('toggle-selection');
@@ -453,7 +453,7 @@ export class FlowDiagramService {
         if (e) {
           originalStandardTouchSelect(e, obj);
         } else {
-          console.warn('[FlowDiagram] 跳过 originalStandardTouchSelect 调用（事件为 undefined）');
+          this.logger.warn('[FlowDiagram] 跳过 originalStandardTouchSelect 调用（事件为 undefined）');
         }
       };
     }

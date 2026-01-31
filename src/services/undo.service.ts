@@ -3,6 +3,7 @@ import { UndoAction, Project } from '../models';
 import { UNDO_CONFIG } from '../config';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
+import { LoggerService } from './logger.service';
 
 /**
  * 持久化数据结构
@@ -44,6 +45,7 @@ export type UndoResult =
 export class UndoService {
   private readonly toast = inject(ToastService);
   private readonly uiState = inject(UiStateService);
+  private readonly logger = inject(LoggerService).category('Undo');
   
   /** 撤销栈 */
   private undoStack = signal<UndoAction[]>([]);
@@ -143,7 +145,7 @@ export class UndoService {
    */
   beginBatch(project: Project): void {
     if (this.isBatching) {
-      console.warn('[UndoService] 已在批处理模式，忽略重复调用');
+      this.logger.warn('[UndoService] 已在批处理模式，忽略重复调用');
       return;
     }
     
@@ -160,7 +162,7 @@ export class UndoService {
    */
   endBatch(project: Project): void {
     if (!this.isBatching) {
-      console.warn('[UndoService] 未在批处理模式，忽略调用');
+      this.logger.warn('[UndoService] 未在批处理模式，忽略调用');
       return;
     }
     

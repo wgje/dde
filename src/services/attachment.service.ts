@@ -210,7 +210,7 @@ export class AttachmentService {
           }
         } catch (e) {
           // URL 刷新失败，静默处理，下次检查会重试
-          console.warn(`刷新附件 URL 失败: ${id}`, e);
+          this.logger.warn(`刷新附件 URL 失败: ${id}`, { error: e });
         }
       }
     }
@@ -374,7 +374,7 @@ export class AttachmentService {
         return { success: false, cancelled: true, error: '上传已取消' };
       }
       
-      console.error('File upload failed:', e);
+      this.logger.error('File upload failed', { error: e });
       this.updateProgress(file.name, 0, 'error', err?.message);
       return { success: false, error: err?.message ?? '上传失败' };
     } finally {
@@ -518,7 +518,7 @@ export class AttachmentService {
       return { success: true };
     } catch (e: unknown) {
       const err = e as { message?: string };
-      console.error('File deletion failed:', e);
+      this.logger.error('File deletion failed', { error: e });
       return { success: false, error: err?.message ?? '删除失败' };
     }
   }
@@ -612,7 +612,7 @@ export class AttachmentService {
 
       return result;
     } catch (e) {
-      console.error('Failed to refresh URL:', e);
+      this.logger.error('Failed to refresh URL', { error: e });
       return null;
     }
   }
@@ -644,7 +644,7 @@ export class AttachmentService {
 
       return data;
     } catch (e) {
-      console.error('File download failed:', e);
+      this.logger.error('File download failed', { error: e });
       return null;
     }
   }

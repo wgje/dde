@@ -1226,7 +1226,7 @@ export class TaskOperationAdapterService {
   private recordAndUpdate(mutator: (project: Project) => Project): void {
     // 防止竞态条件：如果正在更新，跳过（因为是同步操作，理论上不会发生）
     if (this.isUpdating) {
-      console.warn('[TaskOperationAdapter] 检测到并发更新，跳过本次操作');
+      this.logger.warn('[TaskOperationAdapter] 检测到并发更新，跳过本次操作');
       return;
     }
     
@@ -1285,7 +1285,7 @@ export class TaskOperationAdapterService {
    */
   private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
     if (this.isUpdating) {
-      console.warn('[TaskOperationAdapter] 检测到并发更新，跳过本次操作');
+      this.logger.warn('[TaskOperationAdapter] 检测到并发更新，跳过本次操作');
       return;
     }
     

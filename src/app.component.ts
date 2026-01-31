@@ -814,8 +814,8 @@ export class AppComponent implements OnInit, OnDestroy {
     } catch (e: unknown) {
       // 只有会话检查失败才算启动失败
       const err = e as Error | undefined;
-      console.error('[Bootstrap] ========== 启动失败 ==========');
-      console.error('[Bootstrap] 错误详情:', {
+      this.logger.error('[Bootstrap] ========== 启动失败 ==========');
+      this.logger.error('[Bootstrap] 错误详情', {
         message: err?.message,
         stack: err?.stack,
         name: err?.name,
@@ -823,7 +823,7 @@ export class AppComponent implements OnInit, OnDestroy {
       });
       
       const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
-      console.error('[Bootstrap] 转换后的用户消息:', errorMsg);
+      this.logger.error('[Bootstrap] 转换后的用户消息', { errorMsg });
       
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);

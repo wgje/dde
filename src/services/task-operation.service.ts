@@ -1356,7 +1356,7 @@ export class TaskOperationService {
       const { taskId, parentStage, depth } = queue.shift()!;
       
       if (depth > MAX_DEPTH) {
-        console.warn('[CascadeStage] 树深度超过限制，可能存在数据问题', { taskId, depth });
+        this.logger.warn('[CascadeStage] 树深度超过限制，可能存在数据问题', { taskId, depth });
         continue;
       }
       
@@ -1381,7 +1381,7 @@ export class TaskOperationService {
     }
     
     if (iterations >= maxIterations) {
-      console.error('[CascadeStage] 迭代次数超限，可能存在循环依赖');
+      this.logger.error('[CascadeStage] 迭代次数超限，可能存在循环依赖');
     }
   }
   

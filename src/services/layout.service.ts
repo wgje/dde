@@ -42,6 +42,8 @@ function calculateMaxIterations(taskCount: number): number {
 })
 export class LayoutService {
   private toast = inject(ToastService);
+  private loggerService = inject(LoggerService);
+  private logger = this.loggerService.category('Layout');
   
   /** 是否已显示过迭代超限警告（避免重复提示） */
   private hasShownIterationWarning = false;
@@ -164,7 +166,7 @@ export class LayoutService {
         const { parentId, depth } = stack.pop()!;
         
         if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
-          console.warn('树深度超过限制，可能存在数据问题', { parentId, depth });
+          this.logger.warn('树深度超过限制，可能存在数据问题', { parentId, depth });
           continue;
         }
         
@@ -189,7 +191,7 @@ export class LayoutService {
       }
       
       if (iterations >= maxIterations) {
-        console.error('displayId 分配迭代次数超限，可能存在循环依赖');
+        this.logger.error('displayId 分配迭代次数超限，可能存在循环依赖');
         this.notifyIterationLimit('displayId 分配');
       }
     };
@@ -230,7 +232,7 @@ export class LayoutService {
         const { nodeId, floor: parentFloor, depth } = queue.shift()!;
         
         if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
-          console.warn('级联更新深度超过限制', { nodeId, depth });
+          this.logger.warn('级联更新深度超过限制', { nodeId, depth });
           continue;
         }
         
@@ -247,7 +249,7 @@ export class LayoutService {
       }
       
       if (iterations >= maxIterations) {
-        console.error('级联更新迭代次数超限');
+        this.logger.error('级联更新迭代次数超限');
         this.notifyIterationLimit('级联更新');
       }
     };
@@ -492,7 +494,7 @@ export class LayoutService {
     const violatesChild = Number.isFinite(minChildRank) && nextRank >= minChildRank;
     
     if (violatesParent || violatesChild) {
-      console.warn('Refused ordering: violates parent/child constraints', {
+      this.logger.warn('Refused ordering: violates parent/child constraints', {
         taskId: target.id,
         parentRank,
         minChildRank,
@@ -527,7 +529,7 @@ export class LayoutService {
     }
     
     if (iterations >= maxIterations) {
-      console.error('循环检测迭代次数超限，假定存在循环');
+      this.logger.error('循环检测迭代次数超限，假定存在循环');
       this.notifyIterationLimit('循环检测');
       return true;
     }
@@ -622,7 +624,7 @@ export class LayoutService {
     
     const fixedTasks = tasks.map(t => {
       if (t.parentId && !taskIds.has(t.parentId)) {
-        console.warn('Found orphaned task, resetting parent', { taskId: t.id, invalidParentId: t.parentId });
+        this.logger.warn('Found orphaned task, resetting parent', { taskId: t.id, invalidParentId: t.parentId });
         fixedCount++;
         return {
           ...t,
@@ -715,7 +717,7 @@ export class LayoutService {
       recursionStack.clear();
       
       if (task.parentId && hasCycle(task.id)) {
-        console.warn('Detected cycle, breaking at', { taskId: task.id, parentId: task.parentId });
+        this.logger.warn('Detected cycle, breaking at', { taskId: task.id, parentId: task.parentId });
         task.parentId = null;
         task.stage = 1;
         task.displayId = '?';
@@ -739,7 +741,7 @@ export class LayoutService {
         const base = task.stage ? this.stageBase(task.stage) : LAYOUT_CONFIG.RANK_ROOT_BASE;
         task.rank = base + (task.order || 0) * LAYOUT_CONFIG.RANK_STEP;
         fixedCount++;
-        console.warn('Fixed invalid rank', { taskId: task.id, newRank: task.rank });
+        this.logger.warn('Fixed invalid rank', { taskId: task.id, newRank: task.rank });
       }
       
       // 检查 rank 是否在合理范围内

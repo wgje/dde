@@ -121,7 +121,7 @@ export class AuthService {
       // 使用 AbortController 实现超时（如果支持）
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
       const timeoutId = setTimeout(() => {
-        console.warn('[Auth] 会话检查超时警告 (10秒)');
+        this.logger.warn('[Auth] 会话检查超时警告 (10秒)');
         if (controller) controller.abort();
       }, SESSION_TIMEOUT);
       
@@ -239,7 +239,7 @@ export class AuthService {
     
     // 仅在非生产环境启用
     if (envWithDevLogin.production) {
-      console.warn('⚠️ devAutoLogin 不应在生产环境使用，已忽略');
+      this.logger.warn('⚠️ devAutoLogin 不应在生产环境使用，已忽略');
       return null;
     }
     
@@ -433,7 +433,7 @@ export class AuthService {
         await this.supabase.signOut();
       } catch (e) {
         // 即使 Supabase 登出失败，本地状态已清理
-        console.warn('Supabase signOut failed:', e);
+        this.logger.warn('Supabase signOut failed', { error: e });
       }
     }
   }

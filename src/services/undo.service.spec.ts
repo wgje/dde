@@ -8,6 +8,7 @@
 import { Injector, runInInjectionContext } from '@angular/core';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
+import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
 import { UiStateService } from './ui-state.service';
 import { UNDO_CONFIG } from '../config';
@@ -58,10 +59,26 @@ describe('UndoService', () => {
       isMobile: vi.fn(() => false)
     };
     
+    // Mock LoggerService
+    const mockLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const mockLoggerService = {
+      category: vi.fn(() => mockLogger),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    
     const injector = Injector.create({
       providers: [
         { provide: ToastService, useValue: mockToastService },
         { provide: UiStateService, useValue: mockUiState },
+        { provide: LoggerService, useValue: mockLoggerService },
       ]
     });
     service = runInInjectionContext(injector, () => new UndoService());

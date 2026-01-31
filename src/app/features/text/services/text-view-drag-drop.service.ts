@@ -248,7 +248,7 @@ export class TextViewDragDropService {
     this.moveTimeoutId = setTimeout(() => {
       const timeSinceLastMove = Date.now() - this.lastMoveTime;
       if (this.touchState.isDragging && this.touchState.task && timeSinceLastMove >= 1300) {
-        console.warn('[TouchDrag] Move timeout - no activity for 1.5s, touchend may have been lost');
+        this.logger.warn('[TouchDrag] Move timeout - no activity for 1.5s, touchend may have been lost');
         // 触发一个自定义事件，让组件处理
         document.dispatchEvent(new CustomEvent('touchDragTimeout', {
           detail: {
@@ -589,7 +589,7 @@ export class TextViewDragDropService {
         ghost.style.opacity = '0';
         ghost.remove();
       } catch (e) {
-        console.warn('Failed to remove drag ghost:', e);
+        this.logger.warn('Failed to remove drag ghost', { error: e });
       }
       this.touchState.dragGhost = null;
     }
@@ -611,7 +611,7 @@ export class TextViewDragDropService {
           (ghost as HTMLElement).style.opacity = '0';
           ghost.remove();
         } catch (e) {
-          console.warn('Failed to remove orphaned ghost element:', e);
+          this.logger.warn('Failed to remove orphaned ghost element', { error: e });
         }
       });
     });
