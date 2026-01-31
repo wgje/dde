@@ -46,10 +46,13 @@ describe('RemoteChangeHandlerService', () => {
       }),
       hasPendingLocalChanges: vi.fn().mockReturnValue(false),
       getLastPersistAt: vi.fn().mockReturnValue(0),
-      loadSingleProject: vi.fn().mockResolvedValue(null),
       getTombstoneIds: vi.fn().mockResolvedValue(new Set()),
       smartMerge: vi.fn((local, remote) => ({ project: remote, conflictCount: 0 })),
-      validateAndRebalance: vi.fn(p => p)
+      validateAndRebalance: vi.fn(p => p),
+      // core 子对象：deprecated 方法迁移后的新调用路径
+      core: {
+        loadSingleProject: vi.fn().mockResolvedValue(null)
+      }
     };
     
     mockUiState = {

@@ -75,7 +75,7 @@ export class UserSessionService {
         this.projectState.setActiveProjectId(null);
         this.projectState.setProjects([]);
         this.undoService.clearHistory();
-        this.syncCoordinator.teardownRealtimeSubscription();
+        this.syncCoordinator.core.teardownRealtimeSubscription();
       } catch (cleanupError) {
         this.logger.warn('清理旧用户数据失败', cleanupError);
         // 继续执行，不阻断流程
@@ -154,7 +154,7 @@ export class UserSessionService {
     this.projectState.clearData();
     this.uiState.clearAllState();
     this.undoService.clearHistory();
-    this.syncCoordinator.clearOfflineCache();
+    this.syncCoordinator.core.clearOfflineCache();
   }
 
   /**
@@ -283,7 +283,7 @@ export class UserSessionService {
     }
 
     const previousActive = this.projectState.activeProjectId();
-    const offlineProjects = this.syncCoordinator.loadOfflineSnapshot();
+    const offlineProjects = this.syncCoordinator.core.loadOfflineSnapshot();
     this.logger.debug('离线缓存项目数量', { count: offlineProjects?.length ?? 0 });
     
     // 【关键改动】立即渲染本地缓存数据，不等待云端
@@ -637,7 +637,7 @@ export class UserSessionService {
     this.applyMergedProjects(mergedProjects, previousActive);
     
     // 保存合并后的快照
-    this.syncCoordinator.saveOfflineSnapshot(mergedProjects);
+    this.syncCoordinator.core.saveOfflineSnapshot(mergedProjects);
     
     this.logger.debug('后台同步完成');
   }
@@ -679,7 +679,7 @@ export class UserSessionService {
     for (const project of localProjects) {
       this.logger.debug('迁移项目', { projectId: project.id, name: project.name });
       const rebalanced = this.layoutService.rebalance(project);
-      const result = await this.syncCoordinator.saveProjectToCloud(rebalanced, userId);
+      const result = await this.syncCoordinator.core.saveProjectSmart(rebalanced, userId);
       if (result.success) {
         syncedCount++;
         this.logger.debug('项目迁移成功', { name: project.name });
@@ -741,7 +741,7 @@ export class UserSessionService {
     
     // 实时订阅和冲突数据重载在后台执行，不阻塞 UI
     // 使用 Promise 而非 await，让它们在后台运行
-    this.syncCoordinator.initRealtimeSubscription(userId).catch(e => {
+    this.syncCoordinator.core.initRealtimeSubscription(userId).catch(e => {
       this.logger.warn('实时订阅初始化失败（后台）', e);
       // 实时订阅失败不影响核心功能，静默处理
     });
@@ -759,7 +759,7 @@ export class UserSessionService {
    * 包含数据完整性检查
    */
   private loadFromCacheOrSeed(): void {
-    const cached = this.syncCoordinator.loadOfflineSnapshot();
+    const cached = this.syncCoordinator.core.loadOfflineSnapshot();
     let projects: Project[] = [];
 
     if (cached && cached.length > 0) {

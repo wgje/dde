@@ -63,7 +63,7 @@ export class ProjectOperationService {
     const userId = this.userSession.currentUserId();
     if (userId) {
       try {
-        const result = await this.syncCoordinator.saveProjectToCloud(balanced, userId);
+        const result = await this.syncCoordinator.core.saveProjectSmart(balanced, userId);
         
         if (!result.success && !result.conflict) {
           if (!this.syncCoordinator.isOnline()) {
@@ -121,7 +121,7 @@ export class ProjectOperationService {
     
     if (userId) {
       try {
-        const success = await this.syncCoordinator.deleteProjectFromCloud(projectId, userId);
+        const success = await this.syncCoordinator.core.deleteProjectFromCloud(projectId, userId);
         
         if (!success) {
           if (!this.syncCoordinator.isOnline()) {
@@ -152,7 +152,7 @@ export class ProjectOperationService {
       this.optimisticState.commitSnapshot(snapshot.id);
     }
     
-    this.syncCoordinator.saveOfflineSnapshot(this.projectState.projects());
+    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
     return { success: true };
   }
 
@@ -242,7 +242,7 @@ export class ProjectOperationService {
       const userId = this.userSession.currentUserId();
       if (userId) {
         try {
-          const syncResult = await this.syncCoordinator.saveProjectToCloud(resolvedProject, userId);
+          const syncResult = await this.syncCoordinator.core.saveProjectSmart(resolvedProject, userId);
           if (!syncResult.success && !syncResult.conflict) {
             this.actionQueue.enqueue({
               type: 'update',
@@ -265,6 +265,6 @@ export class ProjectOperationService {
       }
     }
     
-    this.syncCoordinator.saveOfflineSnapshot(this.projectState.projects());
+    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
   }
 }
