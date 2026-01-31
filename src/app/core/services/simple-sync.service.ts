@@ -31,7 +31,9 @@ import {
   RetryQueueService,
   TaskSyncService,
   ProjectSyncService,
-  ConnectionSyncService
+  ConnectionSyncService,
+  RealtimePollingService,
+  SessionManagerService
 } from './sync';
 import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
@@ -120,6 +122,10 @@ export class SimpleSyncService {
   private readonly projectSyncService = inject(ProjectSyncService);
   private readonly connectionSyncService = inject(ConnectionSyncService);
   
+  // Sprint 9 技术债务修复：Realtime/Session 子服务
+  private readonly realtimePollingService = inject(RealtimePollingService);
+  private readonly sessionManager = inject(SessionManagerService);
+  
   /**
    * 获取 Supabase 客户端，离线模式返回 null
    */
@@ -158,6 +164,14 @@ export class SimpleSyncService {
   /** 是否正在从远程加载 - 兼容旧接口 */
   readonly isLoadingRemote = signal(false);
   
+  /** 
+   * Realtime 是否启用 - 委托给 RealtimePollingService
+   * 保留为方法以保持向后兼容
+   */
+  isRealtimeEnabled(): boolean {
+    return this.realtimePollingService.isRealtimeEnabled();
+  }
+
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
   
@@ -251,31 +265,12 @@ export class SimpleSyncService {
   /** 熔断器打开时间戳 */
   private circuitOpenedAt = 0;
   
-  /** Realtime 订阅通道 */
-  private realtimeChannel: RealtimeChannel | null = null;
-
-  /** 用户偏好变更回调（Realtime） */
-  private onUserPreferencesChangeCallback: UserPreferencesChangeCallback | null = null;
+  // ==================== Realtime/轮询已迁移至 RealtimePollingService ====================
   
-  /** 远程变更回调 */
-  private onRemoteChangeCallback: RemoteChangeCallback | null = null;
-  
-  // ==================== 轮询相关（流量优化）====================
-  /** 轮询定时器 */
-  private pollingTimer: ReturnType<typeof setInterval> | null = null;
-  /** 当前订阅的项目 ID */
-  private currentProjectId: string | null = null;
-  /** 用户活跃状态 */
-  private isUserActive = true;
-  /** 用户活跃超时定时器 */
-  private userActiveTimer: ReturnType<typeof setTimeout> | null = null;
   /** 最后一次同步时间（用于增量同步） */
   private lastSyncTimeByProject: Map<string, string> = new Map();
   /** Tombstone 缓存（项目ID -> { ids: Set, timestamp }） */
   private tombstoneCache: Map<string, { ids: Set<string>; timestamp: number }> = new Map();
-  
-  /** Realtime 是否启用（运行时可切换） */
-  readonly isRealtimeEnabled = signal<boolean>(SYNC_CONFIG.REALTIME_ENABLED);
   
   /**
    * 【Senior Consultant Sentry Context】获取 Sentry 上下文元数据
@@ -481,7 +476,7 @@ export class SimpleSyncService {
     this.loadLocalTombstones(); // 恢复本地 tombstone 缓存
     this.setupNetworkListeners();
     this.startRetryLoop();
-    this.setupUserActivityTracking();
+    // 用户活跃追踪已迁移至 RealtimePollingService
     
     this.destroyRef.onDestroy(() => {
       this.cleanup();
@@ -726,35 +721,6 @@ export class SimpleSyncService {
     return breakdown;
   }
 
-  // ==================== 用户活跃状态追踪 ====================
-  
-  /**
-   * 设置用户活跃状态追踪
-   * 用于动态调整轮询频率
-   */
-  private setupUserActivityTracking(): void {
-    if (typeof window === 'undefined') return;
-    
-    const resetActiveTimer = () => {
-      this.isUserActive = true;
-      if (this.userActiveTimer) {
-        clearTimeout(this.userActiveTimer);
-      }
-      this.userActiveTimer = setTimeout(() => {
-        this.isUserActive = false;
-      }, SYNC_CONFIG.USER_ACTIVE_TIMEOUT);
-    };
-    
-    // 监听用户活动事件
-    const events = ['mousedown', 'keydown', 'touchstart', 'scroll'];
-    events.forEach(event => {
-      window.addEventListener(event, resetActiveTimer, { passive: true });
-    });
-    
-    // 初始化
-    resetActiveTimer();
-  }
-  
   // ==================== 本地 Tombstone 管理 ====================
   
   /**
@@ -1005,11 +971,9 @@ export class SimpleSyncService {
       this.retryTimer = null;
     }
     
-    // 清理 Realtime 订阅，防止资源泄漏
-    // 注意：这里不使用 await，因为 cleanup 在 destroyRef 回调中同步调用
-    if (this.realtimeChannel) {
-      this.realtimeChannel = null;
-    }
+    // Realtime 订阅清理已迁移至 RealtimePollingService
+    // 这里只需确保取消订阅
+    this.realtimePollingService.unsubscribeFromProject();
   }
   
   /**
@@ -3436,316 +3400,38 @@ export class SimpleSyncService {
   // ==================== Realtime 订阅 / 轮询 ====================
   
   /**
-   * 设置远程变更回调
+   * 设置远程变更回调 - 委托给 RealtimePollingService
    */
   setOnRemoteChange(callback: RemoteChangeCallback): void {
-    this.onRemoteChangeCallback = callback;
+    this.realtimePollingService.setOnRemoteChange(callback);
   }
 
   /**
-   * 设置用户偏好变更回调（Realtime）
-   * 由 PreferenceService 注册，用于跨端即时更新偏好信号。
+   * 设置用户偏好变更回调 - 委托给 RealtimePollingService
    */
   setUserPreferencesChangeCallback(callback: UserPreferencesChangeCallback | null): void {
-    this.onUserPreferencesChangeCallback = callback;
+    this.realtimePollingService.setUserPreferencesChangeCallback(callback);
   }
   
   /**
-   * 启用/禁用 Realtime（运行时切换）
-   * 
-   * 【流量优化】允许用户在设置中手动启用 Realtime
-   * 默认禁用以节省流量
+   * 启用/禁用 Realtime - 委托给 RealtimePollingService
    */
   setRealtimeEnabled(enabled: boolean): void {
-    this.isRealtimeEnabled.set(enabled);
-    
-    // 如果有当前项目，重新订阅
-    if (this.currentProjectId) {
-      const projectId = this.currentProjectId;
-      this.unsubscribeFromProject().then(() => {
-        this.subscribeToProject(projectId, '');
-      });
-    }
-    
-    this.logger.info(`Realtime ${enabled ? '已启用' : '已禁用，使用轮询'}`);
+    this.realtimePollingService.setRealtimeEnabled(enabled);
   }
   
   /**
-   * 订阅项目变更（自动选择 Realtime 或轮询）
-   * 
-   * 【流量优化】
-   * - 默认使用轮询，节省 WebSocket 流量
-   * - 可通过 setRealtimeEnabled(true) 启用 Realtime
+   * 订阅项目变更 - 委托给 RealtimePollingService
    */
   async subscribeToProject(projectId: string, userId: string): Promise<void> {
-    // 先取消旧订阅/轮询
-    await this.unsubscribeFromProject();
-    
-    this.currentProjectId = projectId;
-    
-    if (this.isRealtimeEnabled()) {
-      // 使用 Realtime（需要用户手动启用）
-      await this.subscribeToProjectRealtime(projectId, userId);
-    } else {
-      // 使用轮询（默认，节省流量）
-      this.startPolling(projectId);
-    }
+    await this.realtimePollingService.subscribeToProject(projectId, userId);
   }
   
   /**
-   * 启动轮询（替代 Realtime）
-   * 
-   * 【流量优化】
-   * - 用户活跃时：每 15 秒轮询一次
-   * - 用户不活跃时：每 30 秒轮询一次
-   */
-  private startPolling(projectId: string): void {
-    if (this.pollingTimer) {
-      clearInterval(this.pollingTimer);
-    }
-    
-    this.logger.info('启动轮询同步', { projectId, interval: SYNC_CONFIG.POLLING_INTERVAL });
-    
-    const poll = async () => {
-      if (!this.syncState().isOnline || this.realtimePaused) return;
-      
-      try {
-        // 触发远程变更回调
-        if (this.onRemoteChangeCallback) {
-          await this.onRemoteChangeCallback({ 
-            eventType: 'polling', 
-            projectId 
-          });
-        }
-      } catch (e) {
-        this.logger.debug('轮询检查失败', e);
-      }
-    };
-    
-    // 动态轮询间隔
-    const getPollingInterval = () => 
-      this.isUserActive ? SYNC_CONFIG.POLLING_ACTIVE_INTERVAL : SYNC_CONFIG.POLLING_INTERVAL;
-    
-    // 使用动态间隔的轮询
-    const scheduleNextPoll = () => {
-      this.pollingTimer = setTimeout(async () => {
-        await poll();
-        scheduleNextPoll();
-      }, getPollingInterval());
-    };
-    
-    // 启动轮询（首次立即执行）
-    poll().then(() => scheduleNextPoll());
-  }
-  
-  /**
-   * 停止轮询
-   * 注意：使用 clearTimeout 因为 scheduleNextPoll 使用递归 setTimeout
-   */
-  private stopPolling(): void {
-    if (this.pollingTimer) {
-      clearTimeout(this.pollingTimer);
-      this.pollingTimer = null;
-    }
-  }
-  
-  /**
-   * 订阅项目实时变更（Realtime 模式）
-   * 仅在用户手动启用时使用
-   * 
-   * 【P2 优化】重连后自动触发增量同步
-   * 【Stingy Hoarder Protocol】增强安全校验 + 降级逻辑
-   * @see docs/plan_save.md Phase 4
-   */
-  private async subscribeToProjectRealtime(projectId: string, userId: string): Promise<void> {
-    const client = this.getSupabaseClient();
-    if (!client) return;
-    
-    const channelName = `project:${projectId}:${userId.substring(0, 8)}`;
-    
-    this.logger.info('启用 Realtime 订阅', { projectId, channel: channelName });
-    
-    // 追踪之前的连接状态，用于检测重连
-    let previousStatus: string | null = null;
-    // 连续错误计数（用于降级到轮询）
-    let consecutiveErrors = 0;
-    const MAX_CONSECUTIVE_ERRORS = 3;
-    
-    this.realtimeChannel = client
-      .channel(channelName)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'tasks',
-          filter: `project_id=eq.${projectId}`
-        },
-        (payload) => {
-          // 🔒 二次校验：确保收到的数据属于当前用户（防御性编程）
-          // RLS 应该已经过滤，但作为多层防御
-          const taskData = payload.new as { user_id?: string; project_id?: string } | undefined;
-          if (taskData && taskData.project_id !== projectId) {
-            Sentry.captureMessage('Realtime 收到非当前项目数据', { 
-              level: 'warning',
-              extra: { receivedProjectId: taskData.project_id, expectedProjectId: projectId }
-            });
-            return; // 静默丢弃
-          }
-          
-          // 🔒 二次校验：确保 user_id 匹配当前用户（如果数据包含该字段）
-          if (taskData?.user_id && taskData.user_id !== userId) {
-            Sentry.captureMessage('Realtime 收到非本用户数据', { 
-              level: 'error',
-              extra: { receivedUserId: taskData.user_id, expectedUserId: userId }
-            });
-            return; // 静默丢弃
-          }
-          
-          this.logger.debug('收到任务变更', { event: payload.eventType });
-          if (this.onRemoteChangeCallback && !this.realtimePaused) {
-            this.onRemoteChangeCallback({ 
-              eventType: payload.eventType, 
-              projectId 
-            });
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'connections',
-          filter: `project_id=eq.${projectId}`
-        },
-        (payload) => {
-          // 🔒 二次校验
-          const connData = payload.new as { project_id?: string } | undefined;
-          if (connData && connData.project_id !== projectId) {
-            Sentry.captureMessage('Realtime 收到非当前项目连接数据', { 
-              level: 'warning',
-              extra: { receivedProjectId: connData.project_id, expectedProjectId: projectId }
-            });
-            return;
-          }
-          
-          this.logger.debug('收到连接变更', { event: payload.eventType });
-          if (this.onRemoteChangeCallback && !this.realtimePaused) {
-            this.onRemoteChangeCallback({ 
-              eventType: payload.eventType, 
-              projectId 
-            });
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'user_preferences',
-          filter: userId ? `user_id=eq.${userId}` : undefined
-        },
-        (payload) => {
-          // 偏好不属于项目维度，不走 onRemoteChangeCallback（避免触发项目级 reload）
-          this.logger.debug('收到用户偏好变更', { event: payload.eventType });
-          if (this.onUserPreferencesChangeCallback && !this.realtimePaused && userId) {
-            this.onUserPreferencesChangeCallback({
-              eventType: payload.eventType,
-              userId
-            });
-          }
-        }
-      )
-      .subscribe((status, err) => {
-        this.logger.info('Realtime 订阅状态', { status, channel: channelName, previousStatus });
-        
-        // 处理错误状态 - 降级到轮询
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          consecutiveErrors++;
-          Sentry.captureMessage('Realtime 订阅错误', { 
-            level: 'warning',
-            extra: { 
-              status, 
-              error: err?.message,
-              consecutiveErrors,
-              channel: channelName
-            }
-          });
-          
-          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-            this.logger.warn('Realtime 连续失败，降级到轮询', { consecutiveErrors });
-            this.fallbackToPolling(projectId);
-            return;
-          }
-        } else if (status === 'SUBSCRIBED') {
-          // 重置错误计数
-          consecutiveErrors = 0;
-        }
-        
-        // 【P2 优化】检测重连：从非 SUBSCRIBED 状态恢复到 SUBSCRIBED
-        if (status === 'SUBSCRIBED' && previousStatus && previousStatus !== 'SUBSCRIBED') {
-          this.logger.info('Realtime 重连成功，触发增量同步', { previousStatus });
-          
-          // 异步触发增量同步
-          if (this.onRemoteChangeCallback && !this.realtimePaused) {
-            // 使用 'reconnect' 事件类型表明这是重连后的同步
-            this.onRemoteChangeCallback({ 
-              eventType: 'reconnect', 
-              projectId 
-            }).catch(e => {
-              this.logger.warn('重连后增量同步失败', e);
-            });
-          }
-        }
-        
-        previousStatus = status;
-      });
-  }
-
-  /**
-   * Realtime 降级到轮询
-   * 当 Realtime 连续失败时调用
-   */
-  private fallbackToPolling(projectId: string): void {
-    this.logger.info('Realtime 降级到轮询模式', { projectId });
-    
-    // 取消 Realtime 订阅
-    if (this.realtimeChannel) {
-      const client = this.getSupabaseClient();
-      if (client) {
-        client.removeChannel(this.realtimeChannel).catch(() => {
-          // 忽略取消订阅时的错误
-        });
-      }
-      this.realtimeChannel = null;
-    }
-    
-    // 启动轮询
-    this.startPolling(projectId);
-    
-    // 发送 Toast 通知用户
-    this.toast.info('实时同步暂不可用', '已切换到定时同步模式');
-  }
-  
-  /**
-   * 取消订阅（同时停止轮询和 Realtime）
+   * 取消订阅 - 委托给 RealtimePollingService
    */
   async unsubscribeFromProject(): Promise<void> {
-    this.currentProjectId = null;
-    
-    // 停止轮询
-    this.stopPolling();
-    
-    // 取消 Realtime 订阅
-    if (this.realtimeChannel) {
-      const client = this.getSupabaseClient();
-      if (client) {
-        await client.removeChannel(this.realtimeChannel);
-      }
-      this.realtimeChannel = null;
-    }
+    await this.realtimePollingService.unsubscribeFromProject();
   }
   
   // ==================== 用户偏好 ====================
@@ -4743,10 +4429,10 @@ export class SimpleSyncService {
   private taskChangeCallback: TaskChangeCallback | null = null;
   
   /**
-   * 设置远程变更回调
+   * 设置远程变更回调 - 委托给 RealtimePollingService（兼容旧接口）
    */
   setRemoteChangeCallback(callback: RemoteChangeCallback): void {
-    this.onRemoteChangeCallback = callback;
+    this.realtimePollingService.setOnRemoteChange(callback);
   }
   
   /**
@@ -4758,35 +4444,31 @@ export class SimpleSyncService {
   
   /**
    * 初始化 Realtime 订阅
-   * @param userId 用户 ID（兼容旧接口，实际订阅在 subscribeToProject 中进行）
+   * @param userId 用户 ID（兼容旧接口）
    */
   async initRealtimeSubscription(userId: string): Promise<void> {
-    // 旧接口兼容：实际订阅在 subscribeToProject 中按项目维度进行
-    // 这里只是标记用户已准备好接收实时更新
     this.logger.debug('Realtime 订阅已初始化', { userId: userId.substring(0, 8) });
   }
   
   /**
-   * 关闭 Realtime 订阅
+   * 关闭 Realtime 订阅 - 委托给 RealtimePollingService
    */
   teardownRealtimeSubscription(): void {
-    this.unsubscribeFromProject();
+    this.realtimePollingService.unsubscribeFromProject();
   }
   
   /**
-   * 暂停 Realtime 更新
+   * 暂停 Realtime 更新 - 委托给 RealtimePollingService
    */
   pauseRealtimeUpdates(): void {
-    this.realtimePaused = true;
-    this.logger.debug('Realtime 更新已暂停');
+    this.realtimePollingService.pauseRealtimeUpdates();
   }
   
   /**
-   * 恢复 Realtime 更新
+   * 恢复 Realtime 更新 - 委托给 RealtimePollingService
    */
   resumeRealtimeUpdates(): void {
-    this.realtimePaused = false;
-    this.logger.debug('Realtime 更新已恢复');
+    this.realtimePollingService.resumeRealtimeUpdates();
   }
   
   /**

@@ -19,6 +19,7 @@ import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core'
 import { Subject } from 'rxjs';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
+import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -81,6 +82,8 @@ export class SyncCoordinatorService {
   private syncService = this.core;
   
   private actionQueue = inject(ActionQueueService);
+  // Sprint 9 技术债务修复：提取的处理器服务
+  private actionQueueProcessors = inject(ActionQueueProcessorsService);
   private conflictService = inject(ConflictResolutionService);
   private conflictStorage = inject(ConflictStorageService);
   private changeTracker = inject(ChangeTrackerService);
@@ -169,8 +172,8 @@ export class SyncCoordinatorService {
   readonly onConflict$ = this.conflict$.asObservable();
   
   constructor() {
-    this.setupQueueSyncCoordination();
-    this.setupActionQueueProcessors();
+    // Sprint 9 技术债务修复：委托给提取的服务
+    this.actionQueueProcessors.setupProcessors();
     this.validateRequiredProcessors();
     this.startLocalAutosave();
     this.setupSyncModeCallback();

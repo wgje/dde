@@ -30,6 +30,7 @@ import { GateActionsComponent } from './gate-actions.component';
     @if (gateService.isActive()) {
       <div 
         class="gate-overlay fixed inset-0 z-[9999] flex flex-col items-center justify-center p-4 overflow-hidden"
+        data-testid="gate-overlay"
         role="dialog"
         aria-modal="true"
         aria-labelledby="gate-title"

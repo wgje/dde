@@ -40,6 +40,9 @@ const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
 /** LocalStorage 键：当日跳过次数重置日期 */
 const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
 
+/** 动画超时时间（毫秒）- 防止动画卡死导致按钮永久禁用 */
+const ANIMATION_TIMEOUT_MS = 1000;
+
 @Injectable({
   providedIn: 'root'
 })
@@ -68,13 +71,101 @@ export class GateService {
    */
   readonly isActive = isGateActive;
   
+  /** 动画超时定时器 - 用于防止动画卡死 */
+  private animationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  
   /**
    * 检测用户是否启用了减少动画（prefers-reduced-motion）
-   * 当启用时，CSS 动画被禁用，需要跳过动画状态直接进入 idle
+   * 使用响应式 signal 支持运行时变化
+   * 
+   * 【Bug Fix】之前是一个只读属性，在构造时检测一次
+   * 现在改为 signal 并监听 matchMedia 变化事件
    */
-  private readonly prefersReducedMotion = 
+  private readonly prefersReducedMotionSignal = signal<boolean>(
     typeof window !== 'undefined' && 
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  );
+  
+  /**
+   * 向后兼容的只读访问器
+   */
+  private get prefersReducedMotion(): boolean {
+    return this.prefersReducedMotionSignal();
+  }
+  
+  constructor() {
+    this.setupReducedMotionListener();
+  }
+  
+  /**
+   * 监听 prefers-reduced-motion 变化
+   * 当用户在运行时切换减少动画偏好时，立即响应
+   */
+  private setupReducedMotionListener(): void {
+    if (typeof window === 'undefined') return;
+    
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    
+    // 监听变化
+    mediaQuery.addEventListener('change', (e) => {
+      this.prefersReducedMotionSignal.set(e.matches);
+      this.logger.debug('Gate', `prefers-reduced-motion changed to: ${e.matches}`);
+      
+      // 如果当前在动画状态且启用了减少动画，立即切换到 idle
+      if (e.matches && this.cardAnimation() !== 'idle') {
+        this.logger.info('Gate', 'Reduced motion enabled, forcing idle state');
+        this.cardAnimation.set('idle');
+        this.clearAnimationTimeout();
+      }
+    });
+  }
+  
+  /**
+   * 设置动画状态并启动超时保护
+   * 
+   * 【Bug Fix】防止动画因任何原因（如 CSS 被禁用、事件未触发）卡死
+   * 超时后自动恢复到 idle 状态，确保按钮可点击
+   */
+  private setCardAnimationWithTimeout(
+    state: 'idle' | 'entering' | 'sinking' | 'emerging'
+  ): void {
+    // 清除之前的超时
+    this.clearAnimationTimeout();
+    
+    // 如果用户启用了减少动画，直接设置 idle
+    if (state !== 'idle' && this.prefersReducedMotion) {
+      this.cardAnimation.set('idle');
+      this.logger.debug('Gate', `Reduced motion: skipping animation state '${state}'`);
+      return;
+    }
+    
+    this.cardAnimation.set(state);
+    
+    // 非 idle 状态设置超时保护
+    if (state !== 'idle') {
+      this.animationTimeoutId = setTimeout(() => {
+        if (this.cardAnimation() === state) {
+          this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
+          this.cardAnimation.set('idle');
+          
+          // 如果是 sinking 状态超时，需要完成状态切换
+          if (state === 'sinking') {
+            this.onSinkingComplete();
+          }
+        }
+      }, ANIMATION_TIMEOUT_MS);
+    }
+  }
+  
+  /**
+   * 清除动画超时定时器
+   */
+  private clearAnimationTimeout(): void {
+    if (this.animationTimeoutId) {
+      clearTimeout(this.animationTimeoutId);
+      this.animationTimeoutId = null;
+    }
+  }
   
   /**
    * 检查是否需要显示大门
@@ -102,16 +193,9 @@ export class GateService {
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
       
-      // 【Bug Fix】检测用户是否启用了减少动画偏好
-      // 当 prefers-reduced-motion: reduce 时，CSS 动画被禁用
-      // 导致 animationend 事件永远不触发，cardAnimation 卡在 'entering'
-      // 此时按钮会被永久禁用。解决方案：直接设置为 'idle' 跳过动画
-      if (this.prefersReducedMotion) {
-        this.cardAnimation.set('idle');
-        this.logger.debug('Gate', 'Reduced motion detected, skipping entry animation');
-      } else {
-        this.cardAnimation.set('entering');
-      }
+      // 使用带超时保护的动画状态设置
+      // 这会自动处理 prefers-reduced-motion 情况
+      this.setCardAnimationWithTimeout('entering');
       this.logger.info('Gate', `Gate activated with ${pending.length} pending items`);
     } else {
       // 没有待处理条目，跳过大门
@@ -185,15 +269,17 @@ export class GateService {
    * 切换到下一个条目（触发下沉动画）
    * 动画完成后由 onSinkingComplete() 处理状态切换
    * 
-   * 【Bug Fix】当用户启用减少动画时，直接调用完成回调而不等待动画
+   * 使用带超时保护的动画设置，确保即使动画卡死也能恢复
    */
   private nextEntry(): void {
+    // 使用带超时保护的动画设置
+    // 如果是减少动画模式，会自动设置为 idle 并跳过动画
+    this.setCardAnimationWithTimeout('sinking');
+    
+    // 如果减少动画模式，setCardAnimationWithTimeout 已设置 idle
+    // 需要手动触发状态切换
     if (this.prefersReducedMotion) {
-      // 减少动画模式：直接执行状态切换，不触发动画
       this.onSinkingComplete();
-    } else {
-      // 正常模式：触发下沉动画，后续逻辑由 animationend 事件驱动
-      this.cardAnimation.set('sinking');
     }
   }
   
@@ -202,16 +288,17 @@ export class GateService {
    * 由 GateCardComponent 的 animationend 事件触发
    */
   onEnteringComplete(): void {
+    this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
   }
   
   /**
    * 下沉动画完成回调
    * 由 GateCardComponent 的 animationend 事件触发
-   * 
-   * 【Bug Fix】当用户启用减少动画时，直接切换到下一条目不触发浮现动画
    */
   onSinkingComplete(): void {
+    this.clearAnimationTimeout();
+    
     const nextIndex = gateCurrentIndex() + 1;
     const total = gatePendingItems().length;
     
@@ -231,12 +318,8 @@ export class GateService {
       // 切换到下一个条目
       gateCurrentIndex.set(nextIndex);
       
-      // 【Bug Fix】减少动画模式：直接设置 idle，不触发浮现动画
-      if (this.prefersReducedMotion) {
-        this.cardAnimation.set('idle');
-      } else {
-        this.cardAnimation.set('emerging');
-      }
+      // 使用带超时保护的动画设置
+      this.setCardAnimationWithTimeout('emerging');
     }
   }
   
@@ -245,6 +328,7 @@ export class GateService {
    * 由 GateCardComponent 的 animationend 事件触发
    */
   onEmergingComplete(): void {
+    this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
   }
   

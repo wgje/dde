@@ -25,7 +25,7 @@ import { CircuitBreakerService } from '../../../services/circuit-breaker.service
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { EventBusService } from '../../../services/event-bus.service';
-import { SyncStateService, TombstoneService, RetryQueueService, TaskSyncService, ProjectSyncService, ConnectionSyncService } from './sync';
+import { SyncStateService, TombstoneService, RetryQueueService, TaskSyncService, ProjectSyncService, ConnectionSyncService, RealtimePollingService, SessionManagerService } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
@@ -42,6 +42,11 @@ describe('SimpleSyncService', () => {
   let mockToast: any;
   let mockThrottle: any;
   let mockClient: any;
+  
+  // Sprint 9 子服务 Mock - 提升到 describe 级别以便测试用例访问
+  let mockRealtimePolling: any;
+  let mockSessionManager: any;
+  let mockRealtimeEnabledState = false;
   
   // 测试数据工厂
   const createMockTask = (overrides: Partial<Task> = {}): Task => ({
@@ -343,6 +348,32 @@ describe('SimpleSyncService', () => {
       softDeleteConnectionsBatch: vi.fn().mockResolvedValue(true)
     };
     
+    // Sprint 9 新增子服务 Mock
+    // 使用可变状态追踪 Realtime 启用状态
+    mockRealtimeEnabledState = false;
+    mockRealtimePolling = {
+      isRealtimeEnabled: vi.fn().mockImplementation(() => mockRealtimeEnabledState),
+      setOnRemoteChange: vi.fn(),
+      setUserPreferencesChangeCallback: vi.fn(),
+      setRealtimeEnabled: vi.fn().mockImplementation((enabled: boolean) => {
+        mockRealtimeEnabledState = enabled;
+      }),
+      subscribeToProject: vi.fn().mockResolvedValue(undefined),
+      unsubscribeFromProject: vi.fn().mockResolvedValue(undefined),
+      pauseRealtimeUpdates: vi.fn(),
+      resumeRealtimeUpdates: vi.fn(),
+      getCurrentProjectId: vi.fn().mockReturnValue(null)
+    };
+    
+    mockSessionManager = {
+      isSessionExpiredError: vi.fn().mockReturnValue(false),
+      handleSessionExpired: vi.fn(),
+      tryRefreshSession: vi.fn().mockResolvedValue(false),
+      handleAuthErrorWithRefresh: vi.fn().mockResolvedValue(false),
+      resetSessionExpired: vi.fn(),
+      validateSession: vi.fn().mockResolvedValue({ valid: true, userId: 'test-user' })
+    };
+    
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useValue: mockSupabase },
@@ -362,7 +393,10 @@ describe('SimpleSyncService', () => {
         // Sprint 8 新增的子服务
         { provide: TaskSyncService, useValue: mockTaskSync },
         { provide: ProjectSyncService, useValue: mockProjectSync },
-        { provide: ConnectionSyncService, useValue: mockConnectionSync }
+        { provide: ConnectionSyncService, useValue: mockConnectionSync },
+        // Sprint 9 新增的子服务
+        { provide: RealtimePollingService, useValue: mockRealtimePolling },
+        { provide: SessionManagerService, useValue: mockSessionManager }
       ]
     });
     
@@ -1126,32 +1160,28 @@ describe('SimpleSyncService', () => {
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
     });
     
-    it('setOnRemoteChange 应该设置回调', () => {
+    it('setOnRemoteChange 应该委托给 RealtimePollingService', () => {
       const callback = vi.fn();
       service.setOnRemoteChange(callback);
       
-      // 验证回调已设置（通过私有属性检查）
-      expect(service['onRemoteChangeCallback']).toBe(callback);
+      // 验证委托给 RealtimePollingService
+      expect(mockRealtimePolling.setOnRemoteChange).toHaveBeenCalledWith(callback);
     });
     
-    it('subscribeToProject 默认应该启动轮询而非 Realtime（流量优化）', async () => {
-      // 【流量优化】默认使用轮询，不创建 Realtime 通道
+    it('subscribeToProject 应该委托给 RealtimePollingService', async () => {
       await service.subscribeToProject('project-1', 'user-123');
       
-      // 默认不调用 channel（使用轮询）
-      expect(mockClient.channel).not.toHaveBeenCalled();
-      // 验证当前项目 ID 已设置
-      expect(service['currentProjectId']).toBe('project-1');
+      // 验证委托给 RealtimePollingService
+      expect(mockRealtimePolling.subscribeToProject).toHaveBeenCalledWith('project-1', 'user-123');
     });
     
-    it('setRealtimeEnabled(true) 后 subscribeToProject 应该创建 Realtime 通道', async () => {
+    it('setRealtimeEnabled(true) 后 isRealtimeEnabled 应该返回 true', async () => {
       // 手动启用 Realtime
       service.setRealtimeEnabled(true);
       expect(service.isRealtimeEnabled()).toBe(true);
       
-      await service.subscribeToProject('project-1', 'user-123');
-      
-      expect(mockClient.channel).toHaveBeenCalled();
+      // 验证委托调用
+      expect(mockRealtimePolling.setRealtimeEnabled).toHaveBeenCalledWith(true);
     });
   });
   

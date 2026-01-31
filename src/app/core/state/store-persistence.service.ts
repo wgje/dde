@@ -25,27 +25,11 @@ import { validateProject } from '../../../utils/validation';
 import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService, DeltaSyncPersistenceService } from './persistence';
 import * as Sentry from '@sentry/angular';
 
-/** 存储键前缀（保留用于未来扩展） */
-const _STORAGE_PREFIX = 'nanoflow.store';
-
 /** 存储版本号（用于数据迁移） */
 const STORAGE_VERSION = 1;
 
 /** 防抖延迟（毫秒） */
 const DEBOUNCE_DELAY = 1000;
-
-/**
- * 持久化的项目数据结构
- * @internal 保留用于类型文档
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-interface PersistedProjectData {
-  version: number;
-  timestamp: string;
-  project: Project;
-  tasks: Task[];
-  connections: Connection[];
-}
 
 /**
  * 元数据结构
@@ -743,150 +727,65 @@ export class StorePersistenceService {
     });
   }
 
-  // ============================================================
-  // 【Stingy Hoarder Protocol】Delta Sync 支持
-  // @see docs/plan_save.md Phase 2
-  // ============================================================
+  // ==================== Delta Sync 支持 ====================
 
-  // ============================================================
-  // 【Stingy Hoarder Protocol】Delta Sync 支持（委托给 DeltaSyncPersistenceService）
-  // @see docs/plan_save.md Phase 2
-  // ============================================================
-
-  /**
-   * 从本地 IndexedDB 加载项目的所有任务（委托给 DeltaSyncPersistenceService）
-   */
+  /** 从本地加载任务 */
   async loadTasksFromLocal(projectId: string): Promise<Task[]> {
     return this.deltaSyncPersistence.loadTasksFromLocal(projectId);
   }
 
-  /**
-   * 获取指定时间后更新的任务（委托给 DeltaSyncPersistenceService）
-   */
+  /** 获取指定时间后更新的任务 */
   async getTasksUpdatedSince(projectId: string, sinceTime: string): Promise<Task[]> {
     return this.deltaSyncPersistence.getTasksUpdatedSince(projectId, sinceTime);
   }
 
-  /**
-   * 获取本地最新的 updated_at 时间戳（委托给 DeltaSyncPersistenceService）
-   */
+  /** 获取本地最新时间戳 */
   async getLatestLocalTimestamp(projectId: string): Promise<string | null> {
     return this.deltaSyncPersistence.getLatestLocalTimestamp(projectId);
   }
 
-  /**
-   * 保存单个任务到本地 IndexedDB（委托给 DeltaSyncPersistenceService）
-   */
+  /** 保存单个任务到本地 */
   async saveTaskToLocal(task: Task, projectId: string): Promise<void> {
     return this.deltaSyncPersistence.saveTaskToLocal(task, projectId);
   }
 
-  /**
-   * 从本地 IndexedDB 删除单个任务（委托给 DeltaSyncPersistenceService）
-   */
+  /** 从本地删除单个任务 */
   async deleteTaskFromLocal(taskId: string): Promise<void> {
     return this.deltaSyncPersistence.deleteTaskFromLocal(taskId);
   }
 
-  /**
-   * 批量更新本地任务（委托给 DeltaSyncPersistenceService）
-   */
+  /** 批量更新本地任务 */
   async bulkMergeTasksToLocal(tasks: Task[], projectId: string): Promise<void> {
     return this.deltaSyncPersistence.bulkMergeTasksToLocal(tasks, projectId);
   }
 
-  // ============================================================
-  // 【v5.9】离线数据完整性校验（委托给 DataIntegrityService）
-  // ============================================================
+  // ==================== 离线数据完整性校验 ====================
 
-  /**
-   * 【v5.9】全面验证离线数据完整性（委托给 DataIntegrityService）
-   */
+  /** 验证离线数据完整性 */
   async validateOfflineDataIntegrity(): Promise<{
     valid: boolean;
-    issues: Array<{
-      type: string;
-      entityId: string;
-      projectId?: string;
-      message: string;
-      severity: 'error' | 'warning';
-    }>;
-    stats: {
-      projectCount: number;
-      taskCount: number;
-      connectionCount: number;
-      orphanedTasks: number;
-      brokenConnections: number;
-    };
+    issues: Array<{ type: string; entityId: string; projectId?: string; message: string; severity: 'error' | 'warning'; }>;
+    stats: { projectCount: number; taskCount: number; connectionCount: number; orphanedTasks: number; brokenConnections: number; };
   }> {
     return this.dataIntegrity.validateOfflineDataIntegrity();
   }
   
-  /**
-   * 【v5.9】清理孤立数据（委托给 DataIntegrityService）
-   */
+  /** 清理孤立数据 */
   async cleanupOrphanedData(): Promise<{ removedTasks: number; removedConnections: number }> {
     return this.dataIntegrity.cleanupOrphanedData();
   }
 
-  // ============================================================
-  // 【Stingy Hoarder Protocol】迁移回滚支持（委托给 BackupService）
-  // @see docs/plan_save.md Phase 2.5
-  // ============================================================
+  // ==================== 备份服务 ====================
 
-  /**
-   * 创建当前数据库的备份（委托给 BackupService）
-   */
-  async createBackup(): Promise<string | null> {
-    return this.backupService.createBackup();
-  }
-
-  /**
-   * 从备份恢复数据（委托给 BackupService）
-   */
-  async restoreFromBackup(backupDbName: string): Promise<boolean> {
-    return this.backupService.restoreFromBackup(backupDbName);
-  }
-
-  /**
-   * 获取所有备份列表（委托给 BackupService）
-   */
-  async listBackups(): Promise<Array<{ name: string; date: string }>> {
-    return this.backupService.listBackups();
-  }
-
-  /**
-   * 删除指定备份（委托给 BackupService）
-   */
-  async deleteBackup(backupDbName: string): Promise<boolean> {
-    return this.backupService.deleteBackup(backupDbName);
-  }
+  /** 创建数据库备份 */
+  async createBackup(): Promise<string | null> { return this.backupService.createBackup(); }
+  /** 从备份恢复 */
+  async restoreFromBackup(backupDbName: string): Promise<boolean> { return this.backupService.restoreFromBackup(backupDbName); }
+  /** 列出所有备份 */
+  async listBackups(): Promise<Array<{ name: string; date: string }>> { return this.backupService.listBackups(); }
+  /** 删除备份 */
+  async deleteBackup(backupDbName: string): Promise<boolean> { return this.backupService.deleteBackup(backupDbName); }
 }
 
-// ============================================================
-// 【v5.9】离线数据完整性校验 - 类型定义（导出供外部使用）
-// ============================================================
-
-/**
- * 【v5.9】数据完整性校验结果
- */
-export interface OfflineIntegrityResult {
-  valid: boolean;
-  issues: OfflineIntegrityIssue[];
-  stats: {
-    projectCount: number;
-    taskCount: number;
-    connectionCount: number;
-    orphanedTasks: number;
-    brokenConnections: number;
-  };
-  timestamp: number;
-}
-
-export interface OfflineIntegrityIssue {
-  type: 'orphaned-task' | 'broken-connection' | 'missing-project' | 'invalid-data' | 'index-mismatch';
-  entityId: string;
-  projectId?: string;
-  message: string;
-  severity: 'error' | 'warning';
-}
+// 类型定义导出从 persistence/types.ts
+export type { OfflineIntegrityResult, OfflineIntegrityIssue } from './persistence/types';

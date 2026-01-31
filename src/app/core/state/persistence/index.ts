@@ -9,3 +9,4 @@ export type { IntegrityIssue, IntegrityCheckResult, WriteVerifyResult } from './
 export { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 export { BackupService } from './backup.service';
 export { DeltaSyncPersistenceService } from './delta-sync-persistence.service';
+export type { OfflineIntegrityResult, OfflineIntegrityIssue } from './types';

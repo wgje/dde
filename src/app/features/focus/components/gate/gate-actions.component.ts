@@ -29,6 +29,7 @@ import { SpeechToTextService } from '../../../../../services/speech-to-text.serv
         
         <!-- 稍后提醒 (最左，黄色但柔和) -->
         <button 
+          data-testid="gate-snooze-button"
           class="group relative px-2 py-4 rounded-2xl font-medium text-xs
                  bg-stone-100 dark:bg-[#2c2c2e] 
                  text-stone-500 dark:text-stone-400
@@ -53,6 +54,7 @@ import { SpeechToTextService } from '../../../../../services/speech-to-text.serv
 
         <!-- 已读 (中间，中性) -->
         <button 
+          data-testid="gate-read-button"
           class="group px-2 py-4 rounded-2xl font-medium text-xs
                  bg-white dark:bg-[#3a3a3c] 
                  border border-stone-200 dark:border-stone-700
@@ -69,6 +71,7 @@ import { SpeechToTextService } from '../../../../../services/speech-to-text.serv
         
         <!-- 完成 (最右，强调) -->
         <button 
+          data-testid="gate-complete-button"
           class="group px-2 py-4 rounded-2xl font-medium text-xs
                  bg-stone-900 dark:bg-[#d1d1d6]
                  text-white dark:text-black
