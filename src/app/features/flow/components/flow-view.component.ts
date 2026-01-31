@@ -28,6 +28,7 @@ import { FlowBatchDeleteService } from '../services/flow-batch-delete.service';
 import { FlowSelectModeService } from '../services/flow-select-mode.service';
 import { FlowMobileDrawerService } from '../services/flow-mobile-drawer.service';
 import { FlowDiagramEffectsService } from '../services/flow-diagram-effects.service';
+import { FlowEventRegistrationService } from '../services/flow-event-registration.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -124,6 +125,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly selectMode = inject(FlowSelectModeService);
   private readonly mobileDrawer = inject(FlowMobileDrawerService);
   private readonly diagramEffects = inject(FlowDiagramEffectsService);
+  private readonly eventRegistration = inject(FlowEventRegistrationService);
   
   // ========== 组件状态 ==========
   
@@ -678,179 +680,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const success = this.diagram.initialize(this.diagramDiv.nativeElement);
     if (!success) return;
     
-    // 注册回调（通过 EventService）
-    // 注：eventService.setDiagram() 已由 diagram.initialize() 内部调用
-    this.eventService.onNodeClick((taskId, isDoubleClick) => {
-      if (this.link.isLinkMode()) {
-        const created = this.link.handleLinkModeClick(taskId);
-        if (created) {
-          this.refreshDiagram();
-        }
-      } else if (this.selectMode.isSelectMode()) {
-        // 移动端框选模式：点击切换选中状态
-        this.selectionService.toggleNodeSelection(taskId);
-      } else {
-        this.selectedTaskId.set(taskId);
-        if (isDoubleClick) {
-          this.uiState.isFlowDetailOpen.set(true);
-          // 手机端：双击打开详情时，自动展开到最佳观看高度
-          if (this.uiState.isMobile()) {
-            this.expandDrawerToOptimalHeight();
-          }
-        }
-      }
+    // 注册所有 GoJS 事件回调（通过 EventRegistrationService）
+    this.eventRegistration.registerAllEvents({
+      isSelectMode: () => this.selectMode.isSelectMode(),
+      selectedTaskId: this.selectedTaskId,
+      refreshDiagram: () => this.refreshDiagram(),
+      expandDrawerToOptimalHeight: () => this.expandDrawerToOptimalHeight(),
+      handleNodeMoved: (key, loc, isUnassigned, diagram) => 
+        this.dragDrop.handleNodeMoved(key, loc, isUnassigned, diagram),
+      isPaletteOpen: this.isPaletteOpen,
+      handleDeleteKeyPressed: () => this.handleDeleteKeyPressed()
     });
-    
-    this.eventService.onLinkClick((linkData, x, y, isDoubleClick = false) => {
-      this.logger.debug('onLinkClick 回调触发', { 
-        linkData, 
-        isCrossTree: linkData?.isCrossTree,
-        x, 
-        y,
-        isMobile: this.uiState.isMobile(),
-        isDoubleClick
-      });
-      
-      // 移动端：单击打开编辑器（仅跨树连接），双击/长按显示删除提示
-      if (this.uiState.isMobile()) {
-        if (isDoubleClick) {
-          this.logger.debug('移动端长按/双击：显示删除提示');
-          this.link.showLinkDeleteHint(linkData, x, y);
-        } else if (linkData?.isCrossTree) {
-          this.logger.debug('移动端单击：打开跨树连接编辑器');
-          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
-        }
-        // 普通父子连接单击不做处理
-      } else {
-        // 桌面端：跨树连接线打开编辑器，普通连接线不处理（由右键菜单处理）
-        if (linkData?.isCrossTree) {
-          this.logger.debug('桌面端：打开跨树连接编辑器', { from: linkData.from, to: linkData.to });
-          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
-        }
-      }
-    });
-    
-    // 注册连接线删除回调（右键菜单）
-    this.eventService.onLinkDelete((linkData) => {
-      this.logger.debug('onLinkDelete 回调触发（右键菜单）', { linkData });
-      const result = this.link.deleteLink(linkData);
-      if (result) {
-        this.logger.debug('右键菜单删除成功', result);
-        this.refreshDiagram();
-      }
-    });
-    
-    this.eventService.onLinkGesture((sourceId, targetId, x, y, gojsLink) => {
-      // 移除临时连接线
-      this.diagram.removeLink(gojsLink);
-      
-      const action = this.link.handleLinkGesture(sourceId, targetId, x, y);
-      if (action === 'create-cross-tree' || action === 'create-parent-child' || action === 'replace-subtree') {
-        this.refreshDiagram();
-      }
-    });
-    
-    // 注册连接线重连回调（子树迁移/跨树连接重连）
-    this.eventService.onLinkRelink((linkType, relinkInfo, _x, _y, gojsLink) => {
-      this.logger.debug('onLinkRelink 回调触发', { linkType, relinkInfo });
-      
-      // 移除 GoJS 中的临时连接线（实际数据由 store 管理）
-      this.diagram.removeLink(gojsLink);
-      
-      const { changedEnd, oldFromId, oldToId, newFromId, newToId } = relinkInfo;
-      
-      if (linkType === 'parent-child') {
-        // 父子连接重连
-        if (changedEnd === 'from') {
-          // from 端（父端）被改变：将子任务树迁移到新父任务下
-          const result = this.link.handleParentChildRelink(newToId, oldFromId, newFromId);
-          if (result === 'success') {
-            this.refreshDiagram();
-          }
-        } else {
-          // to 端（子端/下游端点）被改变：
-          // 这是核心功能 - 用户将连接线下游端点拖到新的目标节点
-          // 常见场景：将父子连接的下游端点拖到待分配块，触发子树替换
-          this.logger.debug('父子连接 to 端重连', { 
-            parentId: newFromId, 
-            oldChildId: oldToId, 
-            newTargetId: newToId 
-          });
-          const result = this.link.handleParentChildRelinkToEnd(newFromId, oldToId, newToId);
-          if (result === 'success' || result === 'replace-subtree') {
-            this.refreshDiagram();
-          }
-        }
-      } else if (linkType === 'cross-tree') {
-        // 跨树连接重连：删除旧连接，创建新连接
-        const result = this.link.handleCrossTreeRelink(
-          oldFromId,
-          oldToId,
-          newFromId,
-          newToId,
-          changedEnd
-        );
-        if (result === 'success') {
-          this.refreshDiagram();
-        }
-      }
-    });
-    
-    this.eventService.onSelectionMoved((movedNodes) => {
-      // 多节点移动时使用批处理模式，合并为单个撤销单元
-      const needsBatch = movedNodes.length > 1;
-      
-      if (needsBatch) {
-        this.taskOpsAdapter.beginPositionBatch();
-      }
-      
-      try {
-        movedNodes.forEach(node => {
-          if (node.isUnassigned) {
-            // 检测是否拖到连接线上
-            const diagramInstance = this.diagram.diagramInstance;
-            if (diagramInstance) {
-              const loc = new go.Point(node.x, node.y);
-              this.dragDrop.handleNodeMoved(node.key, loc, true, diagramInstance);
-            }
-          } else {
-            // 单节点：带撤销的位置更新；批量：普通更新（由 endBatch 统一记录）
-            if (needsBatch) {
-              this.taskOpsAdapter.updateTaskPositionWithRankSync(node.key, node.x, node.y);
-            } else {
-              // 单节点拖拽完成，带撤销记录
-              this.taskOpsAdapter.updateTaskPositionWithUndo(node.key, node.x, node.y);
-            }
-          }
-        });
-      } finally {
-        if (needsBatch) {
-          this.taskOpsAdapter.endPositionBatch();
-        }
-      }
-    });
-    
-    this.eventService.onBackgroundClick(() => {
-      this.logger.debug('backgroundClick 触发，关闭编辑器和删除提示');
-      this.link.closeConnectionEditor();
-      // 移动端：同时关闭删除提示
-      if (this.uiState.isMobile()) {
-        this.link.cancelLinkDelete();
-        // 移动端：点击流程图画布时收缩左侧调色板（黑匣子栏）
-        if (this.isPaletteOpen()) {
-          this.isPaletteOpen.set(false);
-        }
-      }
-    });
-
-    // 移动端：节点拖拽幽灵反馈（避免触摸时节点被手指遮挡导致“像没拖动”）
-    // 注册 Delete 键事件处理（由 GoJS commandHandler 拦截后触发）
-    // 通过事件总线解耦，确保单向数据流：Store -> Signal -> Diagram
-    flowTemplateEventHandlers.onDeleteKeyPressed = () => {
-      this.zone.run(() => {
-        this.handleDeleteKeyPressed();
-      });
-    };
 
     this.installMobileDiagramDragGhostListeners();
     
@@ -861,7 +701,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     // 初始化小地图
     this.initOverview();
-  }
+  } 
 
   private installMobileDiagramDragGhostListeners(): void {
     if (!this.uiState.isMobile()) return;
