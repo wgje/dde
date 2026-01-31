@@ -396,4 +396,45 @@ export class TaskTrashService {
     
     return activeP.tasks.filter(t => t.deletedAt != null).length;
   }
+
+  /**
+   * 计算批量删除的影响（预览用）
+   * 
+   * 用于在执行批量删除前，向用户展示将会删除多少任务
+   * 
+   * @param explicitIds 用户显式选中的任务 ID 列表
+   * @returns { total: 总删除数, explicit: 显式选中数, cascaded: 级联删除数 }
+   */
+  calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
+    const activeP = this.getActiveProject();
+    if (!activeP || explicitIds.length === 0) {
+      return { total: 0, explicit: 0, cascaded: 0 };
+    }
+    
+    const allIdsToDelete = new Set<string>();
+    const stack = [...explicitIds];
+    
+    while (stack.length > 0) {
+      const currentId = stack.pop()!;
+      if (allIdsToDelete.has(currentId)) continue;
+      
+      const task = activeP.tasks.find(t => t.id === currentId && !t.deletedAt);
+      if (!task) continue;
+      
+      allIdsToDelete.add(currentId);
+      
+      activeP.tasks
+        .filter(t => t.parentId === currentId && !t.deletedAt)
+        .forEach(child => stack.push(child.id));
+    }
+    
+    const explicitCount = explicitIds.filter(id => allIdsToDelete.has(id)).length;
+    const cascadedCount = allIdsToDelete.size - explicitCount;
+    
+    return {
+      total: allIdsToDelete.size,
+      explicit: explicitCount,
+      cascaded: cascadedCount
+    };
+  }
 }

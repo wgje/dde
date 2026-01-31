@@ -113,9 +113,10 @@ export class TaskCreationService {
       parentId
     );
     const parent = parentId ? activeP.tasks.find(t => t.id === parentId) : null;
-    const candidateRank = targetStage === null
-      ? LAYOUT_CONFIG.RANK_ROOT_BASE + activeP.tasks.filter(t => t.stage === null).length * LAYOUT_CONFIG.RANK_STEP
+    const candidateRankResult = targetStage === null
+      ? { rank: LAYOUT_CONFIG.RANK_ROOT_BASE + activeP.tasks.filter(t => t.stage === null).length * LAYOUT_CONFIG.RANK_STEP, needsRebalance: false }
       : this.layoutService.computeInsertRank(targetStage, stageTasks, null, parent?.rank ?? null);
+    const candidateRank = candidateRankResult.rank;
 
     const newTaskId = crypto.randomUUID();
     const newTask: Task = {
@@ -221,9 +222,10 @@ export class TaskCreationService {
       task.parentId
     );
 
-    const candidateRank = task.stage === null
-      ? LAYOUT_CONFIG.RANK_ROOT_BASE + activeP.tasks.filter(t => t.stage === null).length * LAYOUT_CONFIG.RANK_STEP
+    const candidateRankResult = task.stage === null
+      ? { rank: LAYOUT_CONFIG.RANK_ROOT_BASE + activeP.tasks.filter(t => t.stage === null).length * LAYOUT_CONFIG.RANK_STEP, needsRebalance: false }
       : this.layoutService.computeInsertRank(task.stage, stageTasks, null, task.rank);
+    const candidateRank = candidateRankResult.rank;
 
     const newTaskId = crypto.randomUUID();
     const newTask: Task = {
