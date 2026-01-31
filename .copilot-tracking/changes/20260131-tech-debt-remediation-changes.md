@@ -3,13 +3,13 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ Sprint 1-2 实施完成
+**执行状态**: ✅ Sprint 1-4 实施完成
 
 ---
 
 ## 变更摘要
 
-本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，并执行了 Sprint 1-2 的实施工作。
+本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，并执行了 Sprint 1-4 的实施工作。
 
 ---
 
@@ -31,23 +31,42 @@
 | 解决循环依赖 (C-05) | ✅ | 移除所有 injector hack |
 | 修复相关测试文件 | ✅ | 添加 EventBusService mock |
 
-### EventBusService 详情
+---
 
-创建了新的事件总线服务 `src/services/event-bus.service.ts`，提供以下事件：
+## Sprint 3 实施完成 ✅
 
-- `onUndoRequest$` / `onRedoRequest$` - 撤销/重做请求
-- `onProjectSwitch$` - 项目切换
-- `onSyncStatus$` - 同步状态变更
-- `onSessionRestored$` - 会话恢复
-- `onTaskUpdate$` - 任务更新
-- `onForceSyncRequest$` - 强制同步请求
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建 sync/ 子目录 | ✅ | 新的模块化目录结构 |
+| SyncStateService | ✅ | 同步状态管理 (~170 行) |
+| TombstoneService | ✅ | 墓碑/软删除管理 (~280 行) |
+| RetryQueueService | ✅ | 重试队列管理 (~470 行) |
+| SimpleSyncService 集成 | ✅ | 注入新子服务（渐进式迁移） |
 
-### 循环依赖修复详情
+---
 
-1. **TaskOperationAdapterService** → 移除 `inject(Injector)` 和 `getStoreService()` hack
-2. **AuthService** → 移除 `inject(Injector)` 和延迟注入 SimpleSyncService
-3. **StoreService** → 订阅 EventBusService 的撤销/重做请求
-4. **SimpleSyncService** → 订阅 EventBusService 的会话恢复事件
+## Sprint 4 实施完成 ✅
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| PersistSchedulerService | ✅ | 持久化调度管理 (~220 行) |
+| SyncCoordinatorService 集成 | ✅ | 注入新子服务（渐进式迁移） |
+
+---
+
+## 待完成的 Sprints
+
+### Sprint 5: Flow/Task 服务拆分 (未开始)
+- FlowDiagramService 拆分
+- TaskOperationService 拆分
+
+### Sprint 6: console.* 清理 (进行中)
+- 当前状态：318 个 console.* 调用
+- 主要文件：
+  - text-view.component.ts (47)
+  - user-session.service.ts (40)
+  - task-repository.service.ts (28)
+  - auth.service.ts (22)
 
 ---
 
@@ -60,6 +79,16 @@
 | @deprecated 方法 | 27 | 27 | 0% | ✅ 准确 |
 | any 类型 | 36 | 36 | 0% | ✅ 准确 |
 | 超 800 行文件 | 27 | 27 | 0% | ✅ 准确 |
+
+---
+
+## Git Commits
+
+| Hash | 描述 |
+|------|------|
+| d3eec3a | Sprint 1-2: 工具链/基础规范 + EventBusService |
+| fffbeed | Sprint 3: 同步子服务创建 |
+| b2bea97 | Sprint 4: PersistSchedulerService 创建 |
 
 ---
 
