@@ -3,13 +3,51 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ 已完成
+**执行状态**: ✅ Sprint 1-2 实施完成
 
 ---
 
 ## 变更摘要
 
-本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，包括数据验证、遗漏项发现和计划文档更新。
+本次任务对 NanoFlow 技术债务清理计划进行了深度审查和更新，并执行了 Sprint 1-2 的实施工作。
+
+---
+
+## Sprint 1 实施完成 ✅
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 修复 prompt 文件 tools: 语法 (8个) | ✅ | 移除无效的 tools: 行 |
+| ESLint 规则升级为 error 级别 | ✅ | no-console, no-explicit-any |
+| 创建测试 Mock 类型库 | ✅ | 添加索引文件和 @tests 路径别名 |
+
+---
+
+## Sprint 2 实施完成 ✅
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 创建 EventBusService | ✅ | 用于解耦循环依赖 |
+| 解决循环依赖 (C-05) | ✅ | 移除所有 injector hack |
+| 修复相关测试文件 | ✅ | 添加 EventBusService mock |
+
+### EventBusService 详情
+
+创建了新的事件总线服务 `src/services/event-bus.service.ts`，提供以下事件：
+
+- `onUndoRequest$` / `onRedoRequest$` - 撤销/重做请求
+- `onProjectSwitch$` - 项目切换
+- `onSyncStatus$` - 同步状态变更
+- `onSessionRestored$` - 会话恢复
+- `onTaskUpdate$` - 任务更新
+- `onForceSyncRequest$` - 强制同步请求
+
+### 循环依赖修复详情
+
+1. **TaskOperationAdapterService** → 移除 `inject(Injector)` 和 `getStoreService()` hack
+2. **AuthService** → 移除 `inject(Injector)` 和延迟注入 SimpleSyncService
+3. **StoreService** → 订阅 EventBusService 的撤销/重做请求
+4. **SimpleSyncService** → 订阅 EventBusService 的会话恢复事件
 
 ---
 

@@ -25,6 +25,7 @@ import { CircuitBreakerService } from '../../../services/circuit-breaker.service
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { EventBusService } from '../../../services/event-bus.service';
+import { SyncStateService, TombstoneService, RetryQueueService } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
@@ -249,6 +250,75 @@ describe('SimpleSyncService', () => {
       requestForceSync: vi.fn()
     };
     
+    // Mock SyncStateService（Sprint 3 新增）
+    const mockSyncState = {
+      syncState: vi.fn().mockReturnValue({
+        isSyncing: false,
+        isOnline: true,
+        offlineMode: false,
+        sessionExpired: false,
+        lastSyncTime: null,
+        pendingCount: 0,
+        syncError: null,
+        hasConflict: false,
+        conflictData: null
+      }),
+      state: { update: vi.fn() },
+      isOnline: vi.fn().mockReturnValue(true),
+      isSyncing: vi.fn().mockReturnValue(false),
+      hasConflict: vi.fn().mockReturnValue(false),
+      sessionExpired: vi.fn().mockReturnValue(false),
+      pendingCount: vi.fn().mockReturnValue(0),
+      isLoadingRemote: { set: vi.fn() },
+      update: vi.fn(),
+      setSyncing: vi.fn(),
+      setOnline: vi.fn(),
+      setOfflineMode: vi.fn(),
+      setSessionExpired: vi.fn(),
+      resetSessionExpired: vi.fn(),
+      setLastSyncTime: vi.fn(),
+      setPendingCount: vi.fn(),
+      incrementPendingCount: vi.fn(),
+      decrementPendingCount: vi.fn(),
+      setSyncError: vi.fn(),
+      setConflict: vi.fn(),
+      clearConflict: vi.fn(),
+      setLoadingRemote: vi.fn()
+    };
+    
+    // Mock TombstoneService（Sprint 3 新增）
+    const mockTombstone = {
+      addLocalTombstones: vi.fn(),
+      getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+      clearLocalTombstones: vi.fn(),
+      clearAllLocalTombstones: vi.fn(),
+      getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+      invalidateTombstoneCache: vi.fn(),
+      getCachedTombstoneIds: vi.fn().mockReturnValue(null),
+      updateTombstoneCache: vi.fn(),
+      getConnectionTombstoneCache: vi.fn().mockReturnValue(null),
+      updateConnectionTombstoneCache: vi.fn(),
+      deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined)
+    };
+    
+    // Mock RetryQueueService（Sprint 3 新增）
+    const mockRetryQueue = {
+      length: 0,
+      getItems: vi.fn().mockReturnValue([]),
+      clear: vi.fn(),
+      add: vi.fn(),
+      remove: vi.fn(),
+      removeByEntityId: vi.fn(),
+      incrementRetryCount: vi.fn(),
+      takeAll: vi.fn().mockReturnValue([]),
+      putBack: vi.fn(),
+      cleanExpired: vi.fn().mockReturnValue(0),
+      checkCapacityWarning: vi.fn(),
+      getTypeBreakdown: vi.fn().mockReturnValue({ task: 0, project: 0, connection: 0 }),
+      flushSync: vi.fn(),
+      MAX_RETRIES: 5
+    };
+    
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useValue: mockSupabase },
@@ -260,7 +330,11 @@ describe('SimpleSyncService', () => {
         { provide: ClockSyncService, useValue: mockClockSync },
         { provide: MobileSyncStrategyService, useValue: mockMobileSync },
         { provide: EventBusService, useValue: mockEventBus },
-        { provide: DestroyRef, useValue: mockDestroyRef }
+        { provide: DestroyRef, useValue: mockDestroyRef },
+        // Sprint 3 新增的子服务
+        { provide: SyncStateService, useValue: mockSyncState },
+        { provide: TombstoneService, useValue: mockTombstone },
+        { provide: RetryQueueService, useValue: mockRetryQueue }
       ]
     });
     
