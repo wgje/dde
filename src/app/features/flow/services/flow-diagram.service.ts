@@ -131,13 +131,8 @@ export class FlowDiagramService {
         const flowStyles = getFlowStyles(theme as FlowTheme, isDark ? 'dark' : 'light');
         this.diagram!.div!.style.backgroundColor = flowStyles.canvas.background;
         
-        // 更新 Overview（如果存在）
-        if (this.overview && this.overviewContainer) {
-          this.overview.updateAllTargetBindings();
-          // 更新小地图背景色
-          const overviewBackground = this.getOverviewBackgroundColor();
-          this.overviewContainer.style.backgroundColor = overviewBackground;
-        }
+        // 更新 Overview（委托给 FlowOverviewService）
+        this.overviewService.updateTheme();
         
         this.logger.debug('主题变化触发 GoJS 重绘', { isDark, theme });
       });
@@ -523,22 +518,6 @@ export class FlowDiagramService {
   }
   
   /**
-   * @deprecated 委托给 FlowOverviewService.getOverviewBackgroundColor()
-   */ getOverviewBackgroundColor(): string {
-    // 深色模式下使用较浅的背景色（与画布背景相反），浅色模式下使用深色背景
-    // 这样小地图中的节点才能清晰可见
-    const isDark = this.themeService.isDark();
-    if (isDark) {
-      // 深色模式：使用深色但比画布稍亮的颜色
-      return '#1f1f1f';
-    } else {
-      // 浅色模式：使用深色背景
-      const styles = this.configService.currentStyles();
-      return this.readCssColorVar('--theme-text-dark') ?? styles.text.titleColor ?? '#292524';
-    }
-  }
-  
-  /**
    * 应用画布背景色（根据当前主题）
    */
   private applyCanvasBackground(): void {
@@ -548,16 +527,6 @@ export class FlowDiagramService {
     const isDark = this.themeService.isDark();
     const flowStyles = getFlowStyles(theme, isDark ? 'dark' : 'light');
     this.diagram.div.style.backgroundColor = flowStyles.canvas.background;
-  }
-  
-  private readCssColorVar(varName: string): string | null {
-    try {
-      if (typeof window === 'undefined' || typeof document === 'undefined') return null;
-      const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-      return value || null;
-    } catch {
-      return null;
-    }
   }
   
   /**

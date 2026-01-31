@@ -99,7 +99,7 @@
 | 服务 | 原行数 | 新行数 | 变化 |
 |------|--------|--------|------|
 | TaskOperationService | 2282 | 2059 | -223 (-10%) |
-| FlowDiagramService | 2385 → 2391 | 1129 | -1256 (-53%) ✅ |
+| FlowDiagramService | 2385 | 1098 | -1287 (-54%) ✅ |
 | TaskOperationAdapterService | 1439 | 1394 | -45 (-3%) |
 
 ### 新创建服务
@@ -116,9 +116,10 @@
 - 删除死代码：`setupOverviewAutoScale()` (~540 行)
 - 删除死代码：`attachOverviewPointerListeners()` (~500 行)
 - 删除死代码：`calculateTotalBounds()` (~17 行)
+- 删除死代码：`getOverviewBackgroundColor()` 和 `readCssColorVar()` (~25 行)
 - 删除 22 个未使用的 overview 相关私有变量
-- 保留 `overview` 和 `overviewContainer` 引用供 suspend/resume 使用
-- **总计减少 1109 行代码 (~50%)**
+- 主题变化处理委托给 FlowOverviewService.updateTheme()
+- **总计减少 1140 行代码 (~51%)**
 
 #### TaskOperationAdapterService 重构
 - 创建 ConnectionAdapterService (185 行)
