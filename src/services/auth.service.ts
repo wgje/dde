@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef, Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { 
   Result, OperationError, ErrorCodes, success, failure, humanizeErrorMessage 
@@ -7,6 +7,7 @@ import { supabaseErrorToError } from '../utils/supabase-error';
 import { environment } from '../environments/environment';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import type { SimpleSyncService } from '../app/core/services/simple-sync.service';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -44,6 +45,10 @@ export class AuthService {
   private toast = inject(ToastService);
   private logger = inject(LoggerService).category('AuthService');
   private destroyRef = inject(DestroyRef);
+  private injector = inject(Injector);
+  
+  /** 延迟注入的 SimpleSyncService，避免循环依赖 */
+  private _syncService: SimpleSyncService | null = null;
   
   /** 是否已尝试过开发环境自动登录 */
   private devAutoLoginAttempted = false;
@@ -560,6 +565,8 @@ export class AuthService {
     // 清除过期标记
     if (this.sessionExpired()) {
       this.sessionExpired.set(false);
+      // 【P0 Critical 修复 2026-01-31】通知 SimpleSyncService 会话已恢复
+      this.notifySyncServiceSessionRestored();
     }
     
     // 更新会话信息
@@ -577,13 +584,45 @@ export class AuthService {
       this.logger.info('用户已登录', { userId: session.user.id });
       this.currentUserId.set(session.user.id);
       this.sessionEmail.set(session.user.email ?? null);
-      this.sessionExpired.set(false);
+      
+      // 【P0 Critical 修复 2026-01-31】会话恢复，通知 SimpleSyncService
+      if (this.sessionExpired()) {
+        this.sessionExpired.set(false);
+        this.notifySyncServiceSessionRestored();
+      }
+      
       this.authState.update(s => ({
         ...s,
         userId: session.user!.id,
         email: session.user!.email ?? null,
         isCheckingSession: false,
       }));
+    }
+  }
+  
+  /**
+   * 通知 SimpleSyncService 会话已恢复
+   * 
+   * 【P0 Critical 修复 2026-01-31】
+   * 使用延迟注入避免循环依赖（AuthService <-> SimpleSyncService）
+   */
+  private notifySyncServiceSessionRestored(): void {
+    try {
+      // 延迟注入 SimpleSyncService
+      if (!this._syncService) {
+        // 动态导入避免循环依赖
+        import('../app/core/services/simple-sync.service').then(module => {
+          this._syncService = this.injector.get(module.SimpleSyncService);
+          this._syncService.resetSessionExpired();
+        }).catch(err => {
+          this.logger.warn('无法加载 SimpleSyncService', err);
+        });
+      } else {
+        this._syncService.resetSessionExpired();
+      }
+    } catch (e) {
+      // SimpleSyncService 可能尚未初始化，忽略错误
+      this.logger.warn('无法通知 SimpleSyncService 会话恢复', e);
     }
   }
 }

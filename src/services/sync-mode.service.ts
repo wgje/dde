@@ -45,11 +45,21 @@ export interface SyncModeConfig {
   generateConflictDoc: boolean;
 }
 
-/** 默认同步间隔（秒） */
-const DEFAULT_SYNC_INTERVAL = 30;
+/** 
+ * 默认同步间隔（秒）
+ * 【性能优化 2026-01-27】从 30s 增加到 300s（5分钟）
+ * 理由：与 SYNC_CONFIG.POLLING_INTERVAL 保持一致，减少不必要的 API 请求
+ * 背景：30s 间隔导致 LCP 超过 12 秒的性能问题
+ * @see docs/performance-optimization-plan.md
+ */
+const DEFAULT_SYNC_INTERVAL = 300;
 
-/** 最小同步间隔（秒） */
-const MIN_SYNC_INTERVAL = 10;
+/** 
+ * 最小同步间隔（秒）
+ * 【性能优化 2026-01-27】从 10s 增加到 60s
+ * 理由：过于频繁的同步会影响首屏性能
+ */
+const MIN_SYNC_INTERVAL = 60;
 
 /** 最大同步间隔（秒）- 12小时 */
 const MAX_SYNC_INTERVAL = 43200;
@@ -265,26 +275,69 @@ export class SyncModeService {
   
   // ========== 私有方法 ==========
   
+  /** 是否已完成首次同步延迟（避免启动时立即触发同步与 loadProjects 竞争） */
+  private startupDelayCooldown = true;
+  
   /**
    * 启动自动同步定时器
+   * 【性能优化 2026-01-27】添加启动延迟，避免首屏加载时触发冗余同步
    */
   private startAutoSync(): void {
     this.stopAutoSync();
     
     const intervalMs = this.config().interval * 1000;
     
+    // 【性能优化】首次启动延迟 30 秒后才开始自动同步
+    // 避免与 loadProjects、后台同步竞争资源
+    if (this.startupDelayCooldown) {
+      this.startupDelayCooldown = false;
+      this.logger.info('启动延迟：30 秒后开始自动同步');
+      setTimeout(() => {
+        if (this.config().mode === 'automatic' && !this.autoSyncTimer) {
+          this.startAutoSyncTimer(intervalMs);
+        }
+      }, 30000);
+      return;
+    }
+    
+    this.startAutoSyncTimer(intervalMs);
+  }
+  
+  /**
+   * 实际启动自动同步定时器
+   * 【增强 2026-01-31】添加更详细的监控日志
+   */
+  private startAutoSyncTimer(intervalMs: number): void {
+    let syncCount = 0;
+    
     this.autoSyncTimer = setInterval(async () => {
       if (this.syncCallback && this.config().mode === 'automatic') {
-        this.logger.debug('自动同步触发');
+        syncCount++;
+        const syncStartTime = Date.now();
+        this.logger.debug('自动同步触发', { 
+          syncNumber: syncCount,
+          intervalSeconds: intervalMs / 1000
+        });
         try {
           await this.syncCallback('both');
+          const duration = Date.now() - syncStartTime;
+          this.logger.debug('自动同步完成', { 
+            syncNumber: syncCount, 
+            durationMs: duration 
+          });
         } catch (e) {
-          this.logger.error('自动同步失败', e);
+          this.logger.error('自动同步失败', { 
+            syncNumber: syncCount, 
+            error: e 
+          });
         }
       }
     }, intervalMs);
     
-    this.logger.info('自动同步已启动', { intervalMs });
+    this.logger.info('自动同步已启动', { 
+      intervalMs, 
+      intervalMinutes: Math.round(intervalMs / 60000 * 10) / 10 
+    });
   }
   
   /**
@@ -300,13 +353,35 @@ export class SyncModeService {
   
   /**
    * 加载配置
+   * 
+   * 【配置迁移 2026-01-31】
+   * - 旧版本默认 interval 为 30-60 秒，现已优化为 300 秒
+   * - 需要检测并迁移旧配置，避免用户被困在低效的轮询间隔
    */
   private loadConfig(): SyncModeConfig {
     try {
       const stored = localStorage.getItem(CONFIG_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
-        return { ...this.getDefaultConfig(), ...parsed };
+        const merged = { ...this.getDefaultConfig(), ...parsed };
+        
+        // 【配置迁移】如果存储的 interval 小于新的默认值且不是用户明确设置的极端值，
+        // 升级到新的默认值。这里使用 120 秒作为阈值，假设小于 120 秒的值是旧默认值。
+        // 用户如果明确需要快速同步，可以在设置中重新配置。
+        if (merged.interval < 120 && merged.interval !== MIN_SYNC_INTERVAL) {
+          this.logger.info('检测到旧版同步间隔配置，已升级', {
+            oldInterval: merged.interval,
+            newInterval: DEFAULT_SYNC_INTERVAL
+          });
+          merged.interval = DEFAULT_SYNC_INTERVAL;
+          // 保存迁移后的配置
+          setTimeout(() => this.saveConfig(), 100);
+        }
+        
+        // 【安全检查】确保 interval 在有效范围内
+        merged.interval = Math.max(MIN_SYNC_INTERVAL, Math.min(MAX_SYNC_INTERVAL, merged.interval));
+        
+        return merged;
       }
     } catch (e) {
       this.logger.warn('加载同步配置失败，使用默认值', e);

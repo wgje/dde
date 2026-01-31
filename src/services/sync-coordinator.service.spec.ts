@@ -167,7 +167,7 @@ const mockSyncModeService = {
     mode: 'automatic',
     syncOnBoot: true,
     syncOnExit: true,
-    autoSyncInterval: 30000,
+    autoSyncInterval: 300000, // 5分钟，匹配新的 DEFAULT_SYNC_INTERVAL
     perceptionEnabled: false,
   }),
   triggerSync: vi.fn().mockResolvedValue(undefined),

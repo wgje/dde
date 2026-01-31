@@ -113,9 +113,15 @@ export class RemoteChangeHandlerService {
         }
 
         try {
-          if (payload?.eventType && payload?.projectId) {
+          // 【修复 2026-01-31】正确处理 polling 事件类型
+          // polling 事件应调用 onLoadProjects 执行全量同步，而非 handleIncrementalUpdate
+          const eventType = payload?.eventType;
+          const isRealtimeEvent = eventType === 'INSERT' || eventType === 'UPDATE' || eventType === 'DELETE';
+          
+          if (isRealtimeEvent && payload?.projectId) {
             await this.handleIncrementalUpdate(payload as RemoteProjectChangePayload);
           } else {
+            // polling 事件或无 eventType 时，执行完整的项目加载
             await onLoadProjects();
           }
         } catch (e) {

@@ -141,6 +141,11 @@ describe('SimpleSyncService', () => {
       auth: {
         getSession: vi.fn().mockResolvedValue({
           data: { session: { user: { id: 'test-user-id' } } }
+        }),
+        // 【P0 修复测试】添加 refreshSession mock
+        refreshSession: vi.fn().mockResolvedValue({
+          data: { session: null },
+          error: { message: 'Default mock - no session' }
         })
       }
     };
@@ -218,7 +223,7 @@ describe('SimpleSyncService', () => {
     const mockMobileSync = {
       isMobile: vi.fn().mockReturnValue(false),
       shouldUseReducedSync: vi.fn().mockReturnValue(false),
-      getSyncInterval: vi.fn().mockReturnValue(30000),
+      getSyncInterval: vi.fn().mockReturnValue(300000), // 5分钟，匹配新的 DEFAULT_SYNC_INTERVAL
       shouldAllowSync: vi.fn().mockReturnValue(true),
       shouldForceManualSync: vi.fn().mockReturnValue(false),
       getSyncConfig: vi.fn().mockReturnValue({}),
@@ -745,6 +750,67 @@ describe('SimpleSyncService', () => {
       expect(service.state().pendingCount).toBe(0);
       expect(saveRetryQueueToIdb).toHaveBeenCalled();
     }, 5000);
+    
+    it('processRetryQueue 处理失败时不应双重入队（修复 2026-01-31）', async () => {
+      // 【关键测试】验证修复：当 pushTask 失败时，不会同时被 pushTask 和 processRetryQueue 入队
+      mockSupabase.isConfigured = true;
+      mockSupabase.client = vi.fn().mockReturnValue(mockClient);
+
+      // 避免 retryWithBackoff 指数退避导致测试超时
+      vi.spyOn(service as unknown as { retryWithBackoff: () => Promise<void> }, 'retryWithBackoff')
+        .mockImplementation(async (fn: () => Promise<void>) => {
+          await fn();
+        });
+      
+      const task = createMockTask({ id: 'task-double-queue' });
+      
+      // 模拟推送失败（可重试错误）
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null })
+              })
+            })
+          };
+        }
+        if (table === 'tasks') {
+          return {
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({
+                  data: null,
+                  error: { code: '503', message: 'Service unavailable' }
+                })
+              })
+            }),
+            select: vi.fn().mockReturnValue({
+              in: vi.fn().mockResolvedValue({ data: [], error: null })
+            })
+          };
+        }
+        return {};
+      });
+      
+      // 手动添加到队列（模拟之前的入队）
+      (service as any).retryQueue = [];
+      (service as any).addToRetryQueue('task', 'upsert', task, 'project-1');
+      const queueLengthBefore = (service as any).retryQueue.length;
+      expect(queueLengthBefore).toBe(1);
+      
+      // 处理队列（应该失败但不双重入队）
+      await (service as any).processRetryQueue();
+      
+      // 【关键断言】队列长度应该仍为 1（同一任务不应出现 2 次）
+      const queueLengthAfter = (service as any).retryQueue.length;
+      expect(queueLengthAfter).toBe(1);
+      
+      // 验证是同一个任务（通过去重机制或 fromRetryQueue 参数）
+      const queuedItem = (service as any).retryQueue[0];
+      expect(queuedItem.data.id).toBe('task-double-queue');
+      expect(queuedItem.retryCount).toBe(1); // 重试次数应该增加
+    });
     
     it('超过最大重试次数应该放弃并通知用户', async () => {
       // 这个测试验证的是重试逻辑的边界条件
@@ -2032,9 +2098,9 @@ describe('SimpleSyncService', () => {
   });
 
   describe('队列容量警告节流', () => {
-    it('checkQueueCapacityWarning 应该有 60 秒冷却时间', () => {
-      // 验证冷却时间配置存在
-      expect(service['CAPACITY_WARNING_COOLDOWN']).toBe(60_000);
+    it('checkQueueCapacityWarning 应该有 5 分钟冷却时间', () => {
+      // 验证冷却时间配置存在（修复：从 60s 增加到 5 分钟）
+      expect(service['CAPACITY_WARNING_COOLDOWN']).toBe(300_000);
     });
 
     it('低于阈值时不应该显示警告', async () => {
@@ -2085,6 +2151,7 @@ describe('SimpleSyncService', () => {
       mockToast.error.mockClear();
       service['lastCapacityWarningTime'] = 0;
       service['lastWarningPercent'] = 0;
+      service['lastForceProcessTime'] = 0;
 
       // 模拟队列达到阈值
       service['retryQueue'] = Array.from({ length: 85 }, (_, i) => ({
@@ -2105,27 +2172,29 @@ describe('SimpleSyncService', () => {
       (service as any).checkQueueCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(1);
 
-      // 30 秒后调用 - 仍在冷却期内
-      vi.advanceTimersByTime(30_000);
+      // 2 分钟后调用 - 仍在冷却期内（冷却时间是 5 分钟）
+      vi.advanceTimersByTime(120_000);
       (service as any).checkQueueCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(1);
 
-      // 60 秒后调用 - 冷却结束，应该再次显示
-      vi.advanceTimersByTime(31_000);
+      // 5 分钟后调用 - 冷却结束，应该再次显示
+      vi.advanceTimersByTime(180_000 + 1000); // 再过 3 分钟 + 1 秒 = 总共 5 分 1 秒
       (service as any).checkQueueCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(2);
 
       vi.useRealTimers();
     });
 
-    it('情况恶化时应该立即显示警告（绕过冷却）', async () => {
+    it('情况恶化时应该记录 Sentry 警告（绕过冷却）', async () => {
       // 使用 fake timers
       vi.useFakeTimers();
 
       // 重置状态
       mockToast.error.mockClear();
+      (Sentry.captureMessage as ReturnType<typeof vi.fn>).mockClear();
       service['lastCapacityWarningTime'] = Date.now();
       service['lastWarningPercent'] = 85; // 上次警告时是 85%
+      service['lastForceProcessTime'] = 0;
 
       // 模拟队列情况恶化到 96%（增加超过 10%）
       service['retryQueue'] = Array.from({ length: 96 }, (_, i) => ({
@@ -2138,9 +2207,23 @@ describe('SimpleSyncService', () => {
         createdAt: Date.now()
       }));
 
-      // 应该立即显示（绕过冷却期）
+      // 调用容量检查
       (service as any).checkQueueCapacityWarning();
-      expect(mockToast.error).toHaveBeenCalledTimes(1);
+      
+      // 情况恶化时应该记录 Sentry（即使在冷却期内）
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        'RetryQueue capacity warning',
+        expect.objectContaining({
+          level: 'warning',
+          tags: expect.objectContaining({
+            percentUsed: '96'
+          })
+        })
+      );
+      
+      // Toast 只在冷却时间过后显示（减少用户打扰）
+      // 在冷却期内情况恶化时不显示 Toast
+      expect(mockToast.error).toHaveBeenCalledTimes(0);
 
       vi.useRealTimers();
     });
@@ -2170,6 +2253,362 @@ describe('SimpleSyncService', () => {
       expect(mockLoggerCategory.info).toHaveBeenCalledWith(
         'RetryQueue 容量恢复正常',
         expect.objectContaining({ currentSize: 50 })
+      );
+    });
+
+    it('队列满载时应该记录诊断信息', () => {
+      // 重置状态
+      mockToast.error.mockClear();
+      mockLoggerCategory.warn.mockClear();
+      service['lastCapacityWarningTime'] = 0;
+      service['lastWarningPercent'] = 0;
+      service['lastForceProcessTime'] = 0;
+      
+      // 确保在线状态且会话有效
+      service['syncState'].update(s => ({ ...s, isOnline: true, sessionExpired: false }));
+
+      // 模拟队列达到 90%+ 容量
+      service['retryQueue'] = Array.from({ length: 92 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 调用容量检查
+      (service as any).checkQueueCapacityWarning();
+      
+      // 验证记录了队列容量警告日志（包含诊断信息）
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'RetryQueue 容量警告',
+        expect.objectContaining({
+          currentSize: 92,
+          maxSize: 100,
+          percentUsed: 92,
+          isOnline: true,
+          isSyncing: expect.any(Boolean),
+          circuitState: expect.any(String),
+          retryQueueTypes: expect.objectContaining({
+            task: 92,
+            project: 0,
+            connection: 0
+          })
+        })
+      );
+    });
+
+    it('队列阻塞且 isSyncing 时应该强制重置 isSyncing', () => {
+      // 重置状态
+      mockLoggerCategory.warn.mockClear();
+      service['lastCapacityWarningTime'] = 0;
+      service['lastWarningPercent'] = 0;
+      service['lastForceProcessTime'] = 0;
+      
+      // 模拟 isSyncing 卡住的状态（通过 syncState signal 设置）
+      service['syncState'].update(s => ({ ...s, isOnline: true, sessionExpired: false, isSyncing: true }));
+
+      // 模拟队列达到 90%+ 容量
+      service['retryQueue'] = Array.from({ length: 92 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 调用容量检查
+      (service as any).checkQueueCapacityWarning();
+      
+      // 验证记录了 isSyncing 卡死警告
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        expect.stringContaining('isSyncing 状态卡死'),
+        expect.anything()
+      );
+      
+      // 验证 isSyncing 被重置
+      expect(service['syncState']().isSyncing).toBe(false);
+    });
+
+    it('getQueueTypeBreakdown 应该正确统计队列类型', () => {
+      // 模拟混合类型队列
+      service['retryQueue'] = [
+        { id: '1', type: 'task' as const, operation: 'upsert' as const, data: { id: 't1' }, projectId: 'p1', retryCount: 0, createdAt: Date.now() },
+        { id: '2', type: 'task' as const, operation: 'upsert' as const, data: { id: 't2' }, projectId: 'p1', retryCount: 0, createdAt: Date.now() },
+        { id: '3', type: 'project' as const, operation: 'upsert' as const, data: { id: 'p1' }, retryCount: 0, createdAt: Date.now() },
+        { id: '4', type: 'connection' as const, operation: 'upsert' as const, data: { id: 'c1' }, projectId: 'p1', retryCount: 0, createdAt: Date.now() },
+      ] as any[];
+
+      const breakdown = (service as any).getQueueTypeBreakdown();
+      
+      expect(breakdown).toEqual({
+        task: 2,
+        project: 1,
+        connection: 1
+      });
+    });
+  });
+  
+  // ==================== P0 修复：Session Expired 阻止队列溢出 ====================
+  describe('【P0 修复】Session Expired 导致队列溢出', () => {
+    
+    it('addToRetryQueue 应在 sessionExpired 时跳过添加', () => {
+      // 设置会话过期状态
+      service['syncState'].update(s => ({ ...s, sessionExpired: true }));
+      
+      const initialQueueLength = service['retryQueue'].length;
+      const task = createMockTask();
+      
+      // 尝试添加到重试队列
+      (service as any).addToRetryQueue('task', 'upsert', task, 'project-1');
+      
+      // 验证队列长度未变化
+      expect(service['retryQueue'].length).toBe(initialQueueLength);
+      
+      // 验证记录了跳过日志
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        '会话已过期，跳过添加到重试队列',
+        expect.objectContaining({ type: 'task', dataId: task.id })
+      );
+    });
+    
+    it('addToRetryQueue 应在会话正常时正常添加', () => {
+      // 确保会话正常
+      service['syncState'].update(s => ({ ...s, sessionExpired: false }));
+      
+      const initialQueueLength = service['retryQueue'].length;
+      const task = createMockTask({ id: 'new-task-for-queue' });
+      
+      // 添加到重试队列
+      (service as any).addToRetryQueue('task', 'upsert', task, 'project-1');
+      
+      // 验证队列长度增加
+      expect(service['retryQueue'].length).toBe(initialQueueLength + 1);
+    });
+    
+    it('resetSessionExpired 应正确重置会话状态', () => {
+      // 设置会话过期状态
+      service['syncState'].update(s => ({ ...s, sessionExpired: true }));
+      
+      // 添加一些队列项
+      service['retryQueue'] = [{
+        id: 'test-item',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask(),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+      
+      // 调用重置方法
+      service.resetSessionExpired();
+      
+      // 验证会话状态被重置
+      expect(service.syncState().sessionExpired).toBe(false);
+      
+      // 验证记录了恢复日志
+      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+        '会话状态已重置',
+        expect.objectContaining({ previousQueueLength: 1 })
+      );
+    });
+    
+    it('resetSessionExpired 应在会话未过期时不做任何操作', () => {
+      // 确保会话正常
+      service['syncState'].update(s => ({ ...s, sessionExpired: false }));
+      
+      // 清空日志 mock
+      mockLoggerCategory.info.mockClear();
+      
+      // 调用重置方法
+      service.resetSessionExpired();
+      
+      // 验证没有记录日志（因为没有需要重置的状态）
+      expect(mockLoggerCategory.info).not.toHaveBeenCalledWith(
+        '会话状态已重置',
+        expect.anything()
+      );
+    });
+    
+    it('startRetryLoop 应在 sessionExpired 时跳过处理', async () => {
+      vi.useFakeTimers();
+      
+      // 设置会话过期状态
+      service['syncState'].update(s => ({ ...s, sessionExpired: true, isOnline: true }));
+      
+      // 添加队列项
+      service['retryQueue'] = [{
+        id: 'test-item',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask(),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+      
+      // 创建 processRetryQueue spy
+      const processRetryQueueSpy = vi.spyOn(service as any, 'processRetryQueue');
+      
+      // 前进一个重试间隔
+      vi.advanceTimersByTime(5000);
+      
+      // 验证 processRetryQueue 没有被调用（因为 sessionExpired 在 setInterval 回调中被检查）
+      // 注意：实际上 processRetryQueue 可能被调用，但它会立即返回
+      // 我们验证队列项没有被处理（retryCount 没有增加）
+      const queueItem = service['retryQueue'][0];
+      expect(queueItem.retryCount).toBe(0);
+      
+      vi.useRealTimers();
+    });
+  });
+  
+  // ==================== P0 修复：Session Refresh 自动恢复 ====================
+  describe('【P0 修复】Session Expired 自动刷新恢复', () => {
+    
+    // 在每个测试前设置 Supabase 为已配置状态
+    beforeEach(() => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.client.mockReturnValue(mockClient);
+      // 清理之前测试的 mock 调用
+      mockClient.auth.refreshSession.mockClear();
+    });
+    
+    it('tryRefreshSession 应在刷新成功时返回 true', async () => {
+      // 模拟刷新成功
+      mockClient.auth.refreshSession.mockResolvedValueOnce({
+        data: {
+          session: {
+            user: { id: 'user-1' },
+            expires_at: Date.now() / 1000 + 3600
+          }
+        },
+        error: null
+      });
+      
+      const result = await (service as any).tryRefreshSession('test-context');
+      
+      expect(result).toBe(true);
+      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+        '会话刷新成功',
+        expect.objectContaining({ context: 'test-context', userId: 'user-1' })
+      );
+    });
+    
+    it('tryRefreshSession 应在刷新失败时返回 false', async () => {
+      // 模拟刷新失败
+      mockClient.auth.refreshSession.mockResolvedValueOnce({
+        data: { session: null },
+        error: { message: 'Token expired' }
+      });
+      
+      const result = await (service as any).tryRefreshSession('test-context');
+      
+      expect(result).toBe(false);
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        '会话刷新失败',
+        expect.objectContaining({ context: 'test-context', error: 'Token expired' })
+      );
+    });
+    
+    it('tryRefreshSession 应在 sessionExpired 已标记时跳过刷新', async () => {
+      // 设置会话过期状态
+      service['syncState'].update(s => ({ ...s, sessionExpired: true }));
+      
+      const result = await (service as any).tryRefreshSession('test-context');
+      
+      expect(result).toBe(false);
+      expect(mockClient.auth.refreshSession).not.toHaveBeenCalled();
+    });
+    
+    it('handleAuthErrorWithRefresh 应在刷新成功时返回 true', async () => {
+      // 模拟刷新成功
+      mockClient.auth.refreshSession.mockResolvedValueOnce({
+        data: {
+          session: {
+            user: { id: 'user-1' },
+            expires_at: Date.now() / 1000 + 3600
+          }
+        },
+        error: null
+      });
+      
+      const result = await (service as any).handleAuthErrorWithRefresh('pushProject', { projectId: 'proj-1' });
+      
+      expect(result).toBe(true);
+      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+        '会话刷新成功，可重试操作',
+        expect.objectContaining({ context: 'pushProject' })
+      );
+    });
+    
+    it('handleAuthErrorWithRefresh 应在刷新失败时返回 false', async () => {
+      // 模拟刷新失败
+      mockClient.auth.refreshSession.mockResolvedValueOnce({
+        data: { session: null },
+        error: { message: 'Refresh token expired' }
+      });
+      
+      const result = await (service as any).handleAuthErrorWithRefresh('pushTask', { taskId: 'task-1' });
+      
+      expect(result).toBe(false);
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        '会话刷新失败，标记为过期',
+        expect.objectContaining({ context: 'pushTask' })
+      );
+    });
+    
+    it('pushProject 应在 401 错误时尝试刷新并重试', async () => {
+      // 第一次调用失败（401）
+      // 第二次调用成功（刷新后）
+      let callCount = 0;
+      mockThrottle.execute.mockImplementation(async (_key: string, fn: () => Promise<unknown>) => {
+        callCount++;
+        if (callCount === 1) {
+          // 第一次执行失败
+          throw { code: 401, message: 'JWT expired' };
+        }
+        // 第二次执行成功
+        return fn();
+      });
+      
+      // 模拟刷新成功
+      mockClient.auth.refreshSession.mockResolvedValueOnce({
+        data: {
+          session: {
+            user: { id: 'user-1' },
+            expires_at: Date.now() / 1000 + 3600
+          }
+        },
+        error: null
+      });
+      
+      // Mock getSession 返回用户
+      mockClient.auth.getSession.mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } }
+      });
+      
+      // Mock upsert 成功
+      mockClient.from.mockReturnValue({
+        upsert: vi.fn().mockReturnValue({
+          data: null,
+          error: null
+        })
+      });
+      
+      const project = createMockProject();
+      const result = await service.pushProject(project);
+      
+      // 验证尝试了刷新
+      expect(mockClient.auth.refreshSession).toHaveBeenCalled();
+      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+        '检测到认证错误，尝试刷新会话后重试',
+        expect.anything()
       );
     });
   });
