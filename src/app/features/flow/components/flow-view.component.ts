@@ -21,6 +21,11 @@ import { FlowLinkService } from '../services/flow-link.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
 import { FlowSwipeGestureService, SwipeResult } from '../services/flow-swipe-gesture.service';
 import { FlowDrawerHeightService } from '../services/flow-drawer-height.service';
+import { FlowCascadeAssignService } from '../services/flow-cascade-assign.service';
+import { FlowKeyboardService } from '../services/flow-keyboard.service';
+import { FlowPaletteResizeService } from '../services/flow-palette-resize.service';
+import { FlowBatchDeleteService } from '../services/flow-batch-delete.service';
+import { FlowSelectModeService } from '../services/flow-select-mode.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -30,8 +35,8 @@ import { FlowDeleteConfirmComponent } from './flow-delete-confirm.component';
 import { FlowLinkTypeDialogComponent } from './flow-link-type-dialog.component';
 import { FlowConnectionEditorComponent } from './flow-connection-editor.component';
 import { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
-import { FlowCascadeAssignDialogComponent, CascadeAssignDialogData } from './flow-cascade-assign-dialog.component';
-import { FlowBatchDeleteDialogComponent, BatchDeleteDialogData } from './flow-batch-delete-dialog.component';
+import { FlowCascadeAssignDialogComponent } from './flow-cascade-assign-dialog.component';
+import { FlowBatchDeleteDialogComponent } from './flow-batch-delete-dialog.component';
 import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
 import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
 import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
@@ -110,6 +115,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly taskOps = inject(FlowTaskOperationsService);
   private readonly swipeGesture = inject(FlowSwipeGestureService);
   private readonly drawerHeightService = inject(FlowDrawerHeightService);
+  readonly cascadeAssign = inject(FlowCascadeAssignService);
+  private readonly keyboard = inject(FlowKeyboardService);
+  private readonly paletteResize = inject(FlowPaletteResizeService);
+  readonly batchDelete = inject(FlowBatchDeleteService);
+  readonly selectMode = inject(FlowSelectModeService);
   
   // ========== 组件状态 ==========
   
@@ -119,12 +129,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 删除确认状态 */
   readonly deleteConfirmTask = signal<Task | null>(null);
   readonly deleteKeepChildren = signal(false);
-  
-  /** 批量删除确认状态 */
-  readonly batchDeleteDialog = signal<BatchDeleteDialogData | null>(null);
-  
-  /** 级联分配确认对话框状态 */
-  readonly cascadeAssignDialog = signal<CascadeAssignDialogData | null>(null);
   
   /** 任务详情面板位置 */
   readonly taskDetailPos = signal<{ x: number; y: number }>({ x: -1, y: -1 });
@@ -151,9 +155,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 右侧滑出面板状态（移动端） */
   readonly isRightPanelOpen = signal(false);
-  
-  /** 移动端：框选模式（区分平移和框选） */
-  readonly isSelectMode = signal(false);
   
   /** 小地图尺寸（移动端使用更小尺寸） */
   readonly overviewSize = computed(() => {
@@ -195,9 +196,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 待清理的定时器（防止内存泄漏） */
   private pendingTimers: ReturnType<typeof setTimeout>[] = [];
   
-  /** 移动端框选模式：保存的原始 standardMouseSelect 方法 */
-  private originalStandardMouseSelect: (() => void) | undefined;
-  
   /** rAF 调度 ID（用于取消） */
   private pendingRafId: number | null = null;
 
@@ -219,11 +217,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   /** Idle 小地图初始化句柄（用于取消） */
   private idleOverviewInitHandle: number | null = null;
-  
-  // ========== 调色板拖动状态 ==========
-  private isResizingPalette = false;
-  private startY = 0;
-  private startHeight = 0;
   
   /**
    * 监听窗口大小改变（处理屏幕旋转等情况）
@@ -651,7 +644,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         if (created) {
           this.refreshDiagram();
         }
-      } else if (this.isSelectMode()) {
+      } else if (this.selectMode.isSelectMode()) {
         // 移动端框选模式：点击切换选中状态
         this.selectionService.toggleNodeSelection(taskId);
       } else {
@@ -1213,7 +1206,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.refreshDiagram();
   }
   
-  // ========== 级联分配对话框 ==========
+  // ========== 级联分配对话框（委托给 FlowCascadeAssignService） ==========
   
   /**
    * 显示级联分配确认对话框
@@ -1224,89 +1217,23 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     targetStage: number,
     targetParentId: string | null
   ): void {
-    const tasks = this.projectState.tasks();
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
-    
-    // 计算子树信息
-    const subtreeCount = this.countSubtree(taskId, tasks);
-    const subtreeDepth = this.getSubtreeDepth(taskId, tasks);
-    
-    const targetParent = targetParentId ? tasks.find(t => t.id === targetParentId) : null;
-    
-    this.cascadeAssignDialog.set({
-      show: true,
-      taskId,
-      taskTitle: task.title || '未命名任务',
-      targetStage,
-      subtreeCount,
-      targetParentId,
-      targetParentTitle: targetParent?.title || null,
-      subtreeDepth
-    });
+    this.cascadeAssign.showDialog(taskId, targetStage, targetParentId);
   }
   
   /**
    * 确认级联分配
    */
   confirmCascadeAssign(): void {
-    const dialog = this.cascadeAssignDialog();
-    if (!dialog) return;
-    
-    this.taskOpsAdapter.moveTaskToStage(
-      dialog.taskId,
-      dialog.targetStage,
-      undefined,
-      dialog.targetParentId
-    );
-    
-    this.cascadeAssignDialog.set(null);
-    this.refreshDiagram();
-    this.toast.success('分配成功', `已将 ${dialog.subtreeCount} 个任务分配到阶段 ${dialog.targetStage}`);
+    if (this.cascadeAssign.confirm()) {
+      this.refreshDiagram();
+    }
   }
   
   /**
    * 取消级联分配
    */
   cancelCascadeAssign(): void {
-    this.cascadeAssignDialog.set(null);
-  }
-  
-  /**
-   * 计算子树任务数量
-   */
-  private countSubtree(taskId: string, tasks: Task[]): number {
-    const visited = new Set<string>();
-    const stack = [taskId];
-    
-    while (stack.length > 0) {
-      const id = stack.pop()!;
-      if (visited.has(id)) continue;
-      visited.add(id);
-      
-      tasks.filter(t => t.parentId === id && !t.deletedAt)
-        .forEach(child => stack.push(child.id));
-    }
-    
-    return visited.size;
-  }
-  
-  /**
-   * 计算子树深度
-   */
-  private getSubtreeDepth(taskId: string, tasks: Task[]): number {
-    let maxDepth = 0;
-    const stack: { id: string; depth: number }[] = [{ id: taskId, depth: 0 }];
-    
-    while (stack.length > 0) {
-      const { id, depth } = stack.pop()!;
-      maxDepth = Math.max(maxDepth, depth);
-      
-      tasks.filter(t => t.parentId === id && !t.deletedAt)
-        .forEach(child => stack.push({ id: child.id, depth: depth + 1 }));
-    }
-    
-    return maxDepth;
+    this.cascadeAssign.cancel();
   }
   
   /** 保存联系块的标题和描述 */
@@ -1413,56 +1340,29 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
   }
   
+  // ========== 批量删除操作（委托给 FlowBatchDeleteService） ==========
+  
   /**
    * 请求批量删除（由 Delete 键或工具栏按钮触发）
-   * 计算删除影响并显示确认弹窗
    */
   requestBatchDelete(): void {
-    const selectedIds = Array.from(this.selectionService.selectedTaskIds());
-    if (selectedIds.length === 0) return;
-    
-    // 单选时走单任务删除流程
-    if (selectedIds.length === 1) {
-      const task = this.projectState.tasks().find(t => t.id === selectedIds[0]);
-      if (task) {
-        this.deleteTask(task);
-      }
-      return;
+    const singleTask = this.batchDelete.requestBatchDelete();
+    if (singleTask) {
+      // 单选时走单任务删除流程
+      this.deleteTask(singleTask);
     }
-    
-    // 多选时计算删除影响并显示批量确认弹窗
-    const impact = this.taskOps.calculateBatchDeleteImpact(selectedIds);
-    
-    this.batchDeleteDialog.set({
-      selectedIds,
-      impact
-    });
   }
   
   /**
    * 确认批量删除
    */
   confirmBatchDelete(): void {
-    const dialogData = this.batchDeleteDialog();
-    if (!dialogData) return;
-    
-    // 清空选择和详情面板
-    this.selectedTaskId.set(null);
-    this.selectionService.clearSelection();
-    
-    // 执行批量删除
-    const deletedCount = this.taskOps.deleteTasksBatch(dialogData.selectedIds);
-    
-    // 关闭弹窗
-    this.batchDeleteDialog.set(null);
-    
-    // 显示成功提示
-    if (deletedCount > 0) {
-      this.toast.success('操作成功', `已删除 ${deletedCount} 个任务`);
-    }
+    const deletedCount = this.batchDelete.confirmBatchDelete(() => {
+      this.selectedTaskId.set(null);
+    });
     
     // 强制刷新图表
-    if (this.diagram.isInitialized) {
+    if (deletedCount > 0 && this.diagram.isInitialized) {
       this.diagram.updateDiagram(this.projectState.tasks(), true);
     }
   }
@@ -1471,172 +1371,40 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
    * 处理 Delete 键删除事件（由 GoJS commandHandler 拦截后触发）
    */
   private handleDeleteKeyPressed(): void {
-    const selectedIds = Array.from(this.selectionService.selectedTaskIds());
-    if (selectedIds.length === 0) return;
-    
-    this.logger.debug(`Delete 键删除: ${selectedIds.length} 个选中任务`);
-    this.requestBatchDelete();
+    const singleTask = this.batchDelete.handleDeleteKeyPressed();
+    if (singleTask) {
+      this.deleteTask(singleTask);
+    }
   }
+  
+  // ========== 框选模式（委托给 FlowSelectModeService） ==========
   
   /**
-   * 切换移动端框选模式（框选 vs 平移）
-   * - 框选模式：dragSelectingTool 启用，panningTool 禁用，点击节点切换选择状态
-   * - 平移模式：panningTool 启用，dragSelectingTool 禁用，点击节点单选并显示详情
+   * 切换移动端框选模式
    */
   toggleSelectMode(): void {
-    if (!this.uiState.isMobile()) {
-      this.logger.debug('跳过桌面端框选模式切换');
-      return;
-    }
-
-    const newMode = !this.isSelectMode();
-    this.isSelectMode.set(newMode);
-    
-    this.logger.debug('切换框选模式', { newMode, isMobile: this.uiState.isMobile() });
-    
-    const diagramInstance = this.diagram.diagramInstance;
-    if (diagramInstance) {
-      // 切换工具启用状态
-      diagramInstance.toolManager.dragSelectingTool.isEnabled = newMode;
-      diagramInstance.toolManager.panningTool.isEnabled = !newMode;
-
-      this.logger.debug('工具状态更新', {
-        dragSelectingToolEnabled: diagramInstance.toolManager.dragSelectingTool.isEnabled,
-        panningToolEnabled: diagramInstance.toolManager.panningTool.isEnabled
-      });
-
-      // 关键修改：保持 ClickSelectingTool 启用，但拦截其默认选择行为
-      // 这样可以确保 click 事件被触发，从而让 FlowTemplateService 中的多选逻辑生效
-      const clickTool = diagramInstance.toolManager.clickSelectingTool;
-      clickTool.isEnabled = true;
-
-      if (newMode) {
-        // 进入框选模式：拦截 standardMouseSelect
-        // 保存原始方法（如果还没保存）
-        if (!this.originalStandardMouseSelect) {
-          this.originalStandardMouseSelect = clickTool.standardMouseSelect.bind(clickTool);
-        }
-        // 覆盖为无操作，交由节点 click 事件处理多选
-        clickTool.standardMouseSelect = function() {
-          // Do nothing
-        };
-        
-        this.logger.debug('移动端切换到框选模式：可拖拽框选或点击节点多选');
-        this.toast.info('框选模式', '拖拽框选或点击节点多选');
-      } else {
-        // 退出框选模式：恢复 standardMouseSelect
-        if (this.originalStandardMouseSelect) {
-          clickTool.standardMouseSelect = this.originalStandardMouseSelect;
-          this.originalStandardMouseSelect = undefined;
-        }
-        
-        this.selectionService.clearSelection();
-        this.logger.debug('移动端切换到平移模式：点击节点查看详情');
-        this.toast.info('平移模式', '可拖拽移动画布');
-      }
-    }
+    this.selectMode.toggleSelectMode();
   }
   
-  // ========== 调色板拖动 ==========
+  // ========== 调色板拖动（委托给 FlowPaletteResizeService） ==========
   
   startPaletteResize(e: MouseEvent): void {
-    e.preventDefault();
-    this.isResizingPalette = true;
-    this.startY = e.clientY;
-    this.startHeight = this.paletteHeight();
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
-    
-    const onMove = (ev: MouseEvent) => {
-      if (!this.isResizingPalette) return;
-      const delta = ev.clientY - this.startY;
-      const newHeight = Math.max(100, Math.min(600, this.startHeight + delta));
-      this.paletteHeight.set(newHeight);
-    };
-    
-    const onUp = () => {
-      this.isResizingPalette = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    this.paletteResize.bindHeightSignal(this.paletteHeight);
+    this.paletteResize.startMouseResize(e);
   }
   
   startPaletteResizeTouch(e: TouchEvent): void {
-    if (e.touches.length !== 1) return;
-    e.preventDefault();
-    this.isResizingPalette = true;
-    this.startY = e.touches[0].clientY;
-    this.startHeight = this.paletteHeight();
-    
-    const onMove = (ev: TouchEvent) => {
-      if (!this.isResizingPalette || ev.touches.length !== 1) return;
-      ev.preventDefault();
-      const delta = ev.touches[0].clientY - this.startY;
-      const newHeight = Math.max(80, Math.min(500, this.startHeight + delta));
-      this.paletteHeight.set(newHeight);
-    };
-    
-    const onEnd = () => {
-      this.isResizingPalette = false;
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('touchend', onEnd);
-      window.removeEventListener('touchcancel', onEnd);
-    };
-    
-    window.addEventListener('touchmove', onMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
-    window.addEventListener('touchcancel', onEnd);
+    this.paletteResize.bindHeightSignal(this.paletteHeight);
+    this.paletteResize.startTouchResize(e);
   }
   
-  // ========== 快捷键处理 ==========
+  // ========== 快捷键处理（委托给 FlowKeyboardService） ==========
   
   @HostListener('window:keydown', ['$event'])
   handleDiagramShortcut(event: KeyboardEvent): void {
-    if (!this.diagram.isInitialized) return;
-    if (!event.altKey) return;
-    
-    const key = event.key.toLowerCase();
-    const diagramInstance = this.diagram.diagramInstance;
-    if (!diagramInstance) return;
-    
-    // Alt+Z: 解除父子关系
-    if (key === 'z') {
-      const selectedKeys = this.selectionService.getSelectedNodeKeys();
-      if (!selectedKeys.length) return;
-      
-      event.preventDefault();
-      event.stopPropagation();
-      
-      this.zone.run(() => {
-        selectedKeys.forEach(id => this.taskOpsAdapter.detachTask(id));
-      });
-      return;
-    }
-    
-    // Alt+X: 删除选中的连接线（跨树连接）
-    if (key === 'x') {
-      const selectedLinks: go.ObjectData[] = [];
-      diagramInstance.selection.each((part: go.Part) => {
-        if (part instanceof go.Link && part?.data?.isCrossTree) {
-          selectedLinks.push(part.data);
-        }
-      });
-      
-      if (!selectedLinks.length) return;
-      
-      event.preventDefault();
-      event.stopPropagation();
-      
-      this.zone.run(() => {
-        this.link.handleDeleteCrossTreeLinks(selectedLinks);
-        this.refreshDiagram();
-      });
-      return;
+    const result = this.keyboard.handleShortcut(event);
+    if (result === 'handled') {
+      this.refreshDiagram();
     }
   }
   

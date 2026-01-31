@@ -121,7 +121,7 @@
         [linkSourceTask]="link.linkSourceTask()"
         [isResizingDrawer]="isResizingDrawerSignal()"
         [drawerHeightVh]="drawerHeight()"
-        [isSelectMode]="isSelectMode()"
+        [isSelectMode]="selectMode.isSelectMode()"
         (zoomIn)="zoomIn()"
         (zoomOut)="zoomOut()"
         (autoLayout)="applyAutoLayout()"
@@ -467,7 +467,7 @@
       [linkSourceTask]="link.linkSourceTask()"
       [isResizingDrawer]="isResizingDrawerSignal()"
       [drawerHeightVh]="drawerHeight()"
-      [isSelectMode]="isSelectMode()"
+      [isSelectMode]="selectMode.isSelectMode()"
       (zoomIn)="zoomIn()"
       (zoomOut)="zoomOut()"
       (autoLayout)="applyAutoLayout()"
@@ -522,9 +522,9 @@
   
   <!-- 批量删除确认弹窗 -->
   <app-flow-batch-delete-dialog
-    [data]="batchDeleteDialog()"
+    [data]="batchDelete.dialogData()"
     [isMobile]="uiState.isMobile()"
-    (cancel)="batchDeleteDialog.set(null)"
+    (cancel)="batchDelete.cancelBatchDelete()"
     (confirm)="confirmBatchDelete()">
   </app-flow-batch-delete-dialog>
   
@@ -558,9 +558,9 @@
   
   <!-- 级联分配确认对话框 -->
   <app-flow-cascade-assign-dialog
-    [data]="cascadeAssignDialog()"
+    [data]="cascadeAssign.dialogData()"
     (confirm)="confirmCascadeAssign()"
-    (cancel)="cancelCascadeAssign()">
+    (cancel)="cascadeAssign.cancel()">
   </app-flow-cascade-assign-dialog>
   
   <!-- 移动端右侧滑出项目面板 (桌面端不显示) -->
