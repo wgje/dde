@@ -89,16 +89,18 @@ export function saveAuthCache(userId: string | null): void {
  */
 async function waitForSessionCheck(
   authService: AuthService,
-  logger: LoggerService,
+  loggerService: LoggerService,
   maxWaitMs: number = GUARD_CONFIG.SESSION_CHECK_TIMEOUT
 ): Promise<void> {
+  const logger = loggerService.category('Guard');
+  
   // 如果已经完成检查，直接返回
   if (!authService.authState().isCheckingSession) {
-    logger.debug('[Guard] 会话检查已完成，直接返回');
+    logger.debug('会话检查已完成，直接返回');
     return;
   }
   
-  logger.debug('[Guard] 开始等待会话检查...');
+  logger.debug('开始等待会话检查...');
   
   return new Promise<void>((resolve) => {
     const startTime = Date.now();
@@ -112,9 +114,9 @@ async function waitForSessionCheck(
       if (timeout) {
         // 【优化】超时后立即放行，不再阻塞 UI 渲染
         // 会话检查会在后台继续，用户可以先看到页面
-        logger.debug('[Guard] 会话检查超时，立即放行以渲染 UI', { elapsed });
+        logger.debug(`会话检查超时，立即放行以渲染 UI`, { elapsed });
       } else {
-        logger.debug('[Guard] 会话检查完成', { elapsed });
+        logger.debug(`会话检查完成`, { elapsed });
       }
       resolve();
     };
@@ -209,59 +211,60 @@ export function getDataIsolationId(authService: AuthService): string | null {
 export const requireAuthGuard: CanActivateFn = async (route, state) => {
   const perfStart = performance.now();
   const authService = inject(AuthService);
-  const logger = inject(LoggerService);
+  const loggerService = inject(LoggerService);
+  const logger = loggerService.category('Guard');
   const modalService = inject(ModalService);
   
-  logger.debug('[Guard] requireAuthGuard 开始执行', { targetUrl: state.url });
+  logger.debug(`requireAuthGuard 开始执行`, { targetUrl: state.url });
   
   if (!authService.isConfigured) {
     // Supabase 未配置，允许完全离线模式访问
     // 数据存储在本地 IndexedDB，用户可以正常进行所有操作
     // 这不是"限制功能"的降级模式，而是完整的本地优先体验
-    logger.debug('[Guard] Supabase 未配置，允许离线模式访问');
-    logger.debug('[Guard] ⚡ 守卫检查完成', { elapsed: performance.now() - perfStart });
+    logger.debug('Supabase 未配置，允许离线模式访问');
+    logger.debug(`⚡ 守卫检查完成`, { elapsed: performance.now() - perfStart });
     return true;
   }
   
   // 【性能优化 2026-01-26】本地模式立即放行，避免等待会话检查
   if (isLocalModeEnabled()) {
-    logger.debug('[Guard] 本地模式已启用，立即允许访问');
-    logger.debug('[Guard] ⚡ 守卫检查完成', { elapsed: performance.now() - perfStart });
+    logger.debug('本地模式已启用，立即允许访问');
+    logger.debug(`⚡ 守卫检查完成`, { elapsed: performance.now() - perfStart });
     return true;
   }
   
   // 等待会话检查完成（带超时保护）
   // 注意：checkSession 现在会自动尝试开发环境自动登录
   const authState = authService.authState();
-  logger.debug('[Guard] 当前认证状态', { isCheckingSession: authState.isCheckingSession, userId: authState.userId });
+  logger.debug(`当前认证状态`, { isCheckingSession: authState.isCheckingSession, userId: authState.userId });
   
   if (authState.isCheckingSession) {
-    await waitForSessionCheck(authService, logger);
+    await waitForSessionCheck(authService, loggerService);
   }
   
   const userId = authService.currentUserId();
-  logger.debug('[Guard] 检查用户ID', { userId });
+  logger.debug(`检查用户ID`, { userId });
   
   if (userId) {
     // 保存认证状态到本地缓存（用于离线模式）
     saveAuthCache(userId);
-    logger.debug('[Guard] 用户已登录，允许访问');
+    logger.debug('用户已登录，允许访问');
     return true;
   }
   
   // 检查本地缓存的认证状态（离线模式支持）
   // 这允许用户在网络恢复前继续使用应用的全部功能
   const localAuth = checkLocalAuthCache();
-  logger.debug('[Guard] 本地缓存认证', { localAuth });
+  logger.debug(`本地缓存认证`, { localAuth });
   
   if (localAuth.userId) {
-    logger.debug('[Guard] 使用本地缓存认证，允许离线访问');
+    logger.debug('使用本地缓存认证，允许离线访问');
     return true;
   }
   
   // 未登录且无本地缓存，这是阻断性场景：需要用户首次登录
   // 只有这种情况才需要显式的交互提示
-  logger.debug('[Guard] 需要登录，显示登录模态框（不重定向，避免循环）');
+  logger.debug('需要登录，显示登录模态框（不重定向，避免循环）');
   
   // 直接显示登录模态框，不做导航重定向（避免无限循环）
   // 用户登录成功后会自动刷新当前路由

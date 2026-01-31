@@ -87,7 +87,7 @@ export class TaskRepositoryService {
       .order('created_at', { ascending: true });
 
     if (error) {
-      console.error('Failed to load tasks:', error);
+      this.logger.error('Failed to load tasks', error);
       throw supabaseErrorToError(error);
     }
 
@@ -113,7 +113,7 @@ export class TaskRepositoryService {
       : new Set((tombstones || []).map(t => t.task_id));
 
     if (tombstoneError) {
-      console.warn('Failed to load tombstones (continuing without tombstone filtering):', tombstoneError);
+      this.logger.warn('Failed to load tombstones (continuing without tombstone filtering)', tombstoneError);
     }
 
     const removedIds = new Set<string>();
@@ -188,7 +188,7 @@ export class TaskRepositoryService {
       .is('deleted_at', null);
 
     if (error) {
-      console.error('Failed to load connections:', error);
+      this.logger.error('Failed to load connections', error);
       throw supabaseErrorToError(error);
     }
 
@@ -214,7 +214,7 @@ export class TaskRepositoryService {
       .upsert(rowToUpsert, { onConflict: 'id' });
 
     if (error) {
-      console.error('Failed to save task:', error);
+      this.logger.error('Failed to save task', error);
       return { success: false, error: error.message };
     }
 
@@ -261,9 +261,9 @@ export class TaskRepositoryService {
           if (retryCount <= MAX_RETRIES) {
             // 指数退避重试
             await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, retryCount)));
-            console.warn(`任务批次 ${i}-${i + batch.length} 保存失败，重试 ${retryCount}/${MAX_RETRIES}:`, error.message);
+            this.logger.warn(`任务批次 ${i}-${i + batch.length} 保存失败，重试 ${retryCount}/${MAX_RETRIES}`, { error: error.message });
           } else {
-            console.error(`任务批次 ${i}-${i + batch.length} 保存失败，已达最大重试次数:`, error);
+            this.logger.error(`任务批次 ${i}-${i + batch.length} 保存失败，已达最大重试次数`, error);
             failedCount += batch.length;
             lastError = error.message;
             failedBatches.push({ index: i, tasks: batch });
@@ -276,7 +276,7 @@ export class TaskRepositoryService {
 
     if (failedCount > 0) {
       // 记录详细失败信息以便调试
-      console.error(`[TaskRepo] 批量保存任务失败统计:`, {
+      this.logger.error('批量保存任务失败统计', {
         total: tasks.length,
         failed: failedCount,
         failedBatchCount: failedBatches.length,
@@ -320,7 +320,7 @@ export class TaskRepositoryService {
       .eq('id', taskId);
 
     if (error) {
-      console.error('Failed to delete task:', error);
+      this.logger.error('Failed to delete task', error);
       return { success: false, error: error.message };
     }
 
@@ -339,7 +339,7 @@ export class TaskRepositoryService {
       .eq('id', taskId);
 
     if (error) {
-      console.error('Failed to soft delete task:', error);
+      this.logger.error('Failed to soft delete task', error);
       return { success: false, error: error.message };
     }
 
@@ -358,7 +358,7 @@ export class TaskRepositoryService {
       .eq('id', taskId);
 
     if (error) {
-      console.error('Failed to restore task:', error);
+      this.logger.error('Failed to restore task', error);
       return { success: false, error: error.message };
     }
 
@@ -381,7 +381,7 @@ export class TaskRepositoryService {
       .eq('id', taskId);
 
     if (error) {
-      console.error(`Failed to update task ${field}:`, error);
+      this.logger.error(`Failed to update task ${field}`, error);
       return { success: false, error: error.message };
     }
 
@@ -403,7 +403,7 @@ export class TaskRepositoryService {
       .eq('id', taskId);
 
     if (error) {
-      console.error('Failed to update task fields:', error);
+      this.logger.error('Failed to update task fields', error);
       return { success: false, error: error.message };
     }
 
@@ -428,7 +428,7 @@ export class TaskRepositoryService {
 
     if (error) {
       // 如果 RPC 不存在，回退到读取-修改-写入模式
-      console.warn('RPC not available, falling back to read-modify-write:', error);
+      this.logger.warn('RPC not available, falling back to read-modify-write', error);
       return this.addAttachmentFallback(taskId, attachment);
     }
 
@@ -489,7 +489,7 @@ export class TaskRepositoryService {
 
     if (error) {
       // 回退到读取-修改-写入模式
-      console.warn('RPC not available, falling back to read-modify-write:', error);
+      this.logger.warn('RPC not available, falling back to read-modify-write', error);
       return this.removeAttachmentFallback(taskId, attachmentId);
     }
 
@@ -553,7 +553,7 @@ export class TaskRepositoryService {
       }, { onConflict: 'id' });
 
     if (error) {
-      console.error('Failed to save connection:', error);
+      this.logger.error('Failed to save connection', error);
       return { success: false, error: error.message };
     }
 
@@ -574,7 +574,7 @@ export class TaskRepositoryService {
       .eq('target_id', targetId);
 
     if (error) {
-      console.error('Failed to delete connection:', error);
+      this.logger.error('Failed to delete connection', error);
       return { success: false, error: error.message };
     }
 
@@ -599,7 +599,7 @@ export class TaskRepositoryService {
         existingConnections = await this.loadConnections(projectId);
       } catch (loadError: unknown) {
         const err = loadError as Error | undefined;
-        console.warn('加载现有连接失败，尝试全量插入:', err?.message);
+        this.logger.warn('加载现有连接失败，尝试全量插入', { error: err?.message });
         // 如果加载失败，回退到全量 upsert
         return this.syncConnectionsFallback(projectId, connections);
       }
@@ -718,14 +718,14 @@ export class TaskRepositoryService {
       }
       
       if (errors.length > 0) {
-        console.warn('连接同步部分失败:', errors);
+        this.logger.warn('连接同步部分失败', { errors });
         // 部分成功也返回 success，只记录警告
       }
       
       return { success: true };
     } catch (error: unknown) {
       const err = error as Error | undefined;
-      console.error('Connection sync failed:', error);
+      this.logger.error('Connection sync failed', error);
       return { success: false, error: err?.message || String(error) };
     }
   }
@@ -750,7 +750,7 @@ export class TaskRepositoryService {
       .upsert(connectionRows, { onConflict: 'project_id,source_id,target_id' });
     
     if (error) {
-      console.error('Connection fallback sync failed:', error);
+      this.logger.error('Connection fallback sync failed', error);
       return { success: false, error: error.message };
     }
     
@@ -801,7 +801,7 @@ export class TaskRepositoryService {
       .gt('updated_at', since);
 
     if (error) {
-      console.error('Failed to check task updates:', error);
+      this.logger.error('Failed to check task updates', error);
       return false;
     }
 
@@ -821,7 +821,7 @@ export class TaskRepositoryService {
       .gt('updated_at', since);
 
     if (error) {
-      console.error('Failed to get updated tasks:', error);
+      this.logger.error('Failed to get updated tasks', error);
       throw supabaseErrorToError(error);
     }
 
@@ -1022,7 +1022,7 @@ export class TaskRepositoryService {
     }
 
     if (errors.length > 0) {
-      console.error('[TaskRepo] 增量保存任务部分失败:', errors);
+      this.logger.error('增量保存任务部分失败', { errors });
       return { 
         success: false, 
         error: errors.join('; '),
@@ -1146,7 +1146,7 @@ export class TaskRepositoryService {
     }
 
     if (errors.length > 0) {
-      console.error('[TaskRepo] 增量同步连接部分失败:', errors);
+      this.logger.error('增量同步连接部分失败', { errors });
       return { 
         success: false, 
         error: errors.join('; '),

@@ -800,7 +800,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     this.isTogglingMode.set(true);
     const newMode = !this.isEditMode();
-    this.logger.debug('toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
+    this.logger.debug(`toggleEditMode: 当前模式 = ${this.isEditMode()} → 新模式 = ${newMode}`);
     this.isEditMode.update(v => !v);
     
     // 300ms 后重置节流标记
@@ -1021,7 +1021,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     
     let rafId: number | null = null;
     // 缓存最后计算的高度，用于磁吸（在 onEnd 中会更新）
-    const _lastCalculatedHeight: number = this.drawerStartHeight;
+    let _lastCalculatedHeight: number = this.drawerStartHeight;
     
     const onMove = (ev: TouchEvent | MouseEvent) => {
       if (!this.isResizingDrawer) return;
@@ -1048,7 +1048,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
         const deltaVh = (deltaY / window.innerHeight) * 100;
         
         const newHeight = Math.max(minHeight, Math.min(70, this.drawerStartHeight + deltaVh));
-        lastCalculatedHeight = newHeight; // 更新缓存值
+        _lastCalculatedHeight = newHeight; // 更新缓存值
         this.drawerHeightChange.emit(newHeight);
       });
     };

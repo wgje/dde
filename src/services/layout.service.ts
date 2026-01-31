@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { Task, Project, Connection } from '../models';
 import { ToastService } from './toast.service';
+import { LoggerService } from './logger.service';
 import { LAYOUT_CONFIG, LETTERS } from '../config';
 
 /**

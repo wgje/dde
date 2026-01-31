@@ -360,7 +360,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    */
   toggleEditMode(): void {
     const newMode = !this.isEditMode();
-    this.logger.debug('toggleEditMode: 当前模式 =', this.isEditMode(), '→ 新模式 =', newMode);
+    this.logger.debug(`toggleEditMode: 当前模式 = ${this.isEditMode()} → 新模式 = ${newMode}`);
     if (newMode) {
       this.enterEditMode();
     } else {

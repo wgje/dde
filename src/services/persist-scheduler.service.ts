@@ -171,7 +171,7 @@ export class PersistSchedulerService {
    * 
    * 多次调用会合并为一次执行
    */
-  schedulePersist(debounceMs: number = SYNC_CONFIG.PERSIST_DEBOUNCE): void {
+  schedulePersist(debounceMs: number = SYNC_CONFIG.DEBOUNCE_DELAY): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
     }

@@ -10,10 +10,12 @@
  */
 
 // 状态管理
-export { SyncStateService, SyncState, ConflictData } from './sync-state.service';
+export { SyncStateService } from './sync-state.service';
+export type { SyncState, ConflictData } from './sync-state.service';
 
 // 墓碑管理
 export { TombstoneService } from './tombstone.service';
 
 // 重试队列
-export { RetryQueueService, RetryQueueItem } from './retry-queue.service';
+export { RetryQueueService } from './retry-queue.service';
+export type { RetryQueueItem } from './retry-queue.service';

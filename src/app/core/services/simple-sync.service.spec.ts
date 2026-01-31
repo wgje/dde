@@ -237,7 +237,7 @@ describe('SimpleSyncService', () => {
     // DestroyRef mock（用于 onDestroy 回调）
     const destroyCallbacks: Array<() => void> = [];
     const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
-      onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); }
+      onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); return () => { /* cleanup */ }; }
     };
     
     // Mock EventBusService
@@ -843,7 +843,7 @@ describe('SimpleSyncService', () => {
       mockSupabase.client = vi.fn().mockReturnValue(mockClient);
 
       // 避免 retryWithBackoff 指数退避导致测试超时
-      vi.spyOn(service as unknown as { retryWithBackoff: () => Promise<void> }, 'retryWithBackoff')
+      vi.spyOn(service as unknown as { retryWithBackoff: (fn: () => Promise<void>) => Promise<void> }, 'retryWithBackoff')
         .mockImplementation(async (fn: () => Promise<void>) => {
           await fn();
         });

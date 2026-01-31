@@ -7,7 +7,6 @@ tools:
   - edit/editFiles
   - vscode/extensions
   - web/fetch
-  - findTestFiles
   - web/githubRepo
   - vscode/getProjectSetupInfo
   - vscode/installExtension
@@ -308,7 +307,7 @@ When presenting alternatives, you MUST:
 1. You WILL provide concise description of each viable approach with core principles
 2. You WILL highlight main benefits and trade-offs with practical implications
 3. You WILL ask "Which approach aligns better with your objectives?"
-4. You WILL confirm "Should I focus the research on [selected approach]?"
+4. You WILL confirm "Should I focus the research on selected approach?"
 5. You WILL verify "Should I remove the other approaches from the research document?"
 
 When research is complete, you WILL provide:
