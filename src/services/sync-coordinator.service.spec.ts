@@ -17,6 +17,7 @@ import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/co
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
+import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -196,6 +197,11 @@ const mockPersistSchedulerService = {
   flushPendingPersist: vi.fn().mockResolvedValue(undefined)
 };
 
+// Sprint 9 新增：ActionQueueProcessorsService mock
+const mockActionQueueProcessorsService = {
+  setupProcessors: vi.fn(),
+};
+
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -271,6 +277,7 @@ describe('SyncCoordinatorService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
+        { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
@@ -684,84 +691,15 @@ describe('SyncCoordinatorService', () => {
   // ==================== 队列处理协调 ====================
 
   describe('队列处理协调', () => {
-    it('应该在构造时设置队列处理回调', () => {
-      expect(mockActionQueueService.setQueueProcessCallbacks).toHaveBeenCalledWith(
-        expect.any(Function), // pauseCallback
-        expect.any(Function)  // resumeCallback
-      );
-    });
-
-    it('队列处理开始时应该暂停实时更新', () => {
-      // 获取设置的回调
-      const [pauseCallback] = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0];
-      
-      pauseCallback();
-      
-      expect(mockSyncService.pauseRealtimeUpdates).toHaveBeenCalled();
-    });
-
-    it('队列处理结束时应该恢复实时更新', () => {
-      // 获取设置的回调
-      const [, resumeCallback] = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0];
-      
-      resumeCallback();
-      
-      expect(mockSyncService.resumeRealtimeUpdates).toHaveBeenCalled();
+    it('应该在构造时委托给 ActionQueueProcessorsService 设置处理器', () => {
+      expect(mockActionQueueProcessorsService.setupProcessors).toHaveBeenCalled();
     });
   });
 
-  // ==================== 动作处理器注册 ====================
+  // ==================== 动作处理器注册（已移至 ActionQueueProcessorsService） ====================
 
-  describe('动作处理器注册', () => {
-    it('应该注册 project:update 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'project:update',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 project:delete 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'project:delete',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 project:create 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'project:create',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 task:create 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'task:create',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 task:update 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'task:update',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 task:delete 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'task:delete',
-        expect.any(Function)
-      );
-    });
-
-    it('应该注册 preference:update 处理器', () => {
-      expect(mockActionQueueService.registerProcessor).toHaveBeenCalledWith(
-        'preference:update',
-        expect.any(Function)
-      );
-    });
-  });
+  // 注：动作处理器注册逻辑已提取到 ActionQueueProcessorsService
+  // 这些测试应该在 ActionQueueProcessorsService 的测试文件中进行
 
   // ==================== 网络状态变化场景 ====================
 
@@ -865,6 +803,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
+        { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
