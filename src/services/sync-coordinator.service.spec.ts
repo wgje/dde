@@ -18,6 +18,8 @@ import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
+import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
+import { ProjectSyncOperationsService } from './project-sync-operations.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -202,6 +204,20 @@ const mockActionQueueProcessorsService = {
   setupProcessors: vi.fn(),
 };
 
+// Sprint 9 新增：DeltaSyncCoordinatorService mock
+const mockDeltaSyncCoordinatorService = {
+  performDeltaSync: vi.fn().mockResolvedValue({ taskChanges: 0, connectionChanges: 0 }),
+  hasProjectContentDifference: vi.fn().mockReturnValue(false),
+};
+
+// Sprint 9 新增：ProjectSyncOperationsService mock
+const mockProjectSyncOperationsService = {
+  resyncActiveProject: vi.fn().mockResolvedValue({ success: true, message: '已同步' }),
+  mergeOfflineDataOnReconnect: vi.fn().mockResolvedValue({ projects: [], syncedCount: 0, conflictProjects: [] }),
+  validateAndRebalanceWithResult: vi.fn().mockImplementation((project: Project) => ({ ok: true, value: project })),
+  validateAndRebalance: vi.fn().mockImplementation((project: Project) => project),
+};
+
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -278,6 +294,8 @@ describe('SyncCoordinatorService', () => {
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
+        { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
+        { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
@@ -468,11 +486,17 @@ describe('SyncCoordinatorService', () => {
   // ==================== 离线数据合并 ====================
 
   describe('离线数据合并', () => {
+    // Sprint 9: mergeOfflineDataOnReconnect 现在委托给 ProjectSyncOperationsService
     it('离线新建项目应该同步到云端', async () => {
       const offlineProject = createTestProject({ id: 'new-proj', name: 'Offline' });
       const cloudProjects: Project[] = [];
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+      // 配置 mock 返回值
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [offlineProject],
+        syncedCount: 1,
+        conflictProjects: []
+      });
       
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,
@@ -481,14 +505,25 @@ describe('SyncCoordinatorService', () => {
       );
       
       expect(result.syncedCount).toBe(1);
-      expect(mockSyncService.saveProjectToCloud).toHaveBeenCalled();
+      expect(mockProjectSyncOperationsService.mergeOfflineDataOnReconnect).toHaveBeenCalledWith(
+        cloudProjects,
+        [offlineProject],
+        'user-123',
+        expect.any(Function),
+        expect.any(Function)
+      );
     });
 
     it('离线版本高于云端时应该同步', async () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 3 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 5 });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+      // 配置 mock 返回值
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [offlineProject],
+        syncedCount: 1,
+        conflictProjects: []
+      });
       
       const result = await service.mergeOfflineDataOnReconnect(
         [cloudProject],
@@ -503,6 +538,13 @@ describe('SyncCoordinatorService', () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 10 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 3 });
       
+      // 配置 mock 返回值 - 云端版本更高时 syncedCount 为 0
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [cloudProject],
+        syncedCount: 0,
+        conflictProjects: []
+      });
+      
       const result = await service.mergeOfflineDataOnReconnect(
         [cloudProject],
         [offlineProject],
@@ -510,18 +552,24 @@ describe('SyncCoordinatorService', () => {
       );
       
       expect(result.syncedCount).toBe(0);
-      expect(mockSyncService.saveProjectToCloud).not.toHaveBeenCalled();
     });
 
     it('冲突时应该发布冲突事件到 onConflict$', async () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 5 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 6 });
       
-      mockSyncService.saveProjectToCloud.mockResolvedValueOnce({
-        success: false,
-        conflict: true,
-        remoteData: cloudProject,
-      });
+      // 配置 mock 返回冲突项目
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockImplementationOnce(
+        async (_cloud, _offline, _userId, _getTombstone, onConflict) => {
+          // 模拟调用冲突回调
+          onConflict(offlineProject, cloudProject);
+          return {
+            projects: [cloudProject],
+            syncedCount: 0,
+            conflictProjects: [offlineProject]
+          };
+        }
+      );
       
       const onConflictSpy = vi.fn();
       const subscription = service.onConflict$.subscribe(onConflictSpy);
@@ -542,6 +590,7 @@ describe('SyncCoordinatorService', () => {
     });
 
     it('冲突时应记录冲突（LWW 冲突解决入口）', async () => {
+      // Sprint 9: resyncActiveProject 现在委托给 ProjectSyncOperationsService
       const localProject = createTestProject({ id: 'proj-1', version: 2 });
       const remoteProject = createTestProject({ id: 'proj-1', version: 3 });
 
@@ -551,22 +600,19 @@ describe('SyncCoordinatorService', () => {
 
       mockAuthService.currentUserId.mockReturnValue('user-123');
 
-      mockSyncService.loadSingleProject.mockResolvedValueOnce(remoteProject);
-      mockConflictService.smartMerge.mockReturnValue({
-        project: remoteProject,
-        issues: ['title'],
-        conflictCount: 1,
+      // 配置 mock 返回冲突检测结果
+      mockProjectSyncOperationsService.resyncActiveProject.mockResolvedValueOnce({
+        success: true,
+        message: '已合并，1 处冲突已保存供稍后处理',
+        conflictDetected: true
       });
 
       const result = await service.resyncActiveProject();
 
       expect(result.success).toBe(true);
-      expect(mockConflictStorageService.saveConflict).toHaveBeenCalledWith(
-        expect.objectContaining({
-          projectId: 'proj-1',
-          localProject,
-          remoteProject,
-        })
+      expect(result.conflictDetected).toBe(true);
+      expect(mockProjectSyncOperationsService.resyncActiveProject).toHaveBeenCalledWith(
+        expect.any(Function)
       );
     });
   });
@@ -804,6 +850,8 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
+        { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
+        { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
@@ -975,6 +1023,7 @@ describe('SyncCoordinatorService 集成场景', () => {
   
   describe('场景：大规模离线数据合并', () => {
     it('应该正确处理大量离线项目的合并', async () => {
+      // Sprint 9: mergeOfflineDataOnReconnect 现在委托给 ProjectSyncOperationsService
       // 创建 50 个离线项目
       const offlineProjects: Project[] = [];
       for (let i = 0; i < 50; i++) {
@@ -991,8 +1040,12 @@ describe('SyncCoordinatorService 集成场景', () => {
         version: 2 // 云端版本更高
       }));
       
-      // 模拟所有保存都成功
-      mockSyncService.saveProjectToCloud.mockResolvedValue({ success: true });
+      // 配置 mock 返回预期结果
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [...cloudProjects, ...offlineProjects.slice(25)],
+        syncedCount: 25,
+        conflictProjects: []
+      });
       
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,
@@ -1000,7 +1053,15 @@ describe('SyncCoordinatorService 集成场景', () => {
         'user-123'
       );
       
-      // 应该同步 25 个新项目（后半部分），0 个更新（因为云端版本更高）
+      // 验证委托调用
+      expect(mockProjectSyncOperationsService.mergeOfflineDataOnReconnect).toHaveBeenCalledWith(
+        cloudProjects,
+        offlineProjects,
+        'user-123',
+        expect.any(Function),
+        expect.any(Function)
+      );
+      // 验证返回预期结果
       expect(result.syncedCount).toBe(25);
       expect(result.projects.length).toBe(50);
     });
@@ -1012,11 +1073,12 @@ describe('SyncCoordinatorService 集成场景', () => {
         createTestProject({ id: 'proj-3', version: 2 }),
       ];
       
-      // 第一个成功，第二个失败，第三个成功
-      mockSyncService.saveProjectToCloud
-        .mockResolvedValueOnce({ success: true })
-        .mockResolvedValueOnce({ success: false, error: 'Network error' })
-        .mockResolvedValueOnce({ success: true });
+      // Sprint 9: 配置 mock 返回预期结果
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [offlineProjects[0], offlineProjects[2]],
+        syncedCount: 2,
+        conflictProjects: []
+      });
       
       const result = await service.mergeOfflineDataOnReconnect(
         [], // 云端为空

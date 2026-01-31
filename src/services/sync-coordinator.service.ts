@@ -20,6 +20,8 @@ import { Subject } from 'rxjs';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
+import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
+import { ProjectSyncOperationsService } from './project-sync-operations.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -84,6 +86,10 @@ export class SyncCoordinatorService {
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
   private actionQueueProcessors = inject(ActionQueueProcessorsService);
+  // Sprint 9 技术债务修复：Delta Sync 协调器
+  private deltaSyncCoordinator = inject(DeltaSyncCoordinatorService);
+  // Sprint 9 技术债务修复：项目同步操作服务
+  private projectSyncOps = inject(ProjectSyncOperationsService);
   private conflictService = inject(ConflictResolutionService);
   private conflictStorage = inject(ConflictStorageService);
   private changeTracker = inject(ChangeTrackerService);
@@ -533,114 +539,8 @@ export class SyncCoordinatorService {
    * @returns 变更数量，0 表示无变更
    */
   async performDeltaSync(projectId: string): Promise<{ taskChanges: number; connectionChanges: number }> {
-    if (!SYNC_CONFIG.DELTA_SYNC_ENABLED) {
-      return { taskChanges: 0, connectionChanges: 0 };
-    }
-
-    this.logger.debug('开始 Delta Sync 增量同步', { projectId });
-
-    try {
-      const { tasks, connections } = await this.syncService.checkForDrift(projectId);
-      
-      if (tasks.length === 0 && connections.length === 0) {
-        this.logger.debug('Delta Sync 无变更', { projectId });
-        return { taskChanges: 0, connectionChanges: 0 };
-      }
-
-      // 获取当前项目
-      const currentProject = this.projectState.projects().find(p => p.id === projectId);
-      if (!currentProject) {
-        this.logger.warn('Delta Sync 项目不存在', { projectId });
-        return { taskChanges: 0, connectionChanges: 0 };
-      }
-
-      // 合并任务增量
-      const taskMap = new Map(currentProject.tasks.map(t => [t.id, t]));
-      for (const deltaTask of tasks) {
-        const existing = taskMap.get(deltaTask.id);
-        // LWW: 只有新数据更新时才覆盖
-        // 【修复】使用 Date.getTime() 比较，避免字符串比较在跨时区场景的问题
-        const deltaTime = deltaTask.updatedAt ? new Date(deltaTask.updatedAt).getTime() : 0;
-        const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
-        if (!existing || deltaTime > existingTime) {
-          if (deltaTask.deletedAt) {
-            // 远程已删除
-            taskMap.delete(deltaTask.id);
-          } else {
-            // 【P0 修复 2026-01-13】保护 content 字段
-            // 如果远程 content 为空但本地有内容，保留本地内容
-            // 防止因查询配置错误导致的内容丢失
-            let mergedTask = deltaTask;
-            if (existing && existing.content && !deltaTask.content) {
-              this.logger.warn('Delta Sync: 检测到远程 content 为空，保留本地内容', {
-                taskId: deltaTask.id,
-                localContentLength: existing.content.length
-              });
-              
-              // 【Sentry 监控】上报 content 保护事件（采样率 10%）
-              // 这个告警表示保护机制生效，说明可能存在配置问题
-              if (Math.random() < 0.1) {
-                Sentry.captureMessage('Delta Sync: Content protection triggered', {
-                  level: 'warning',
-                  tags: { 
-                    operation: 'performDeltaSync', 
-                    taskId: deltaTask.id,
-                    severity: 'p0-data-integrity'
-                  },
-                  extra: { 
-                    localContentLength: existing.content.length,
-                    remoteContent: deltaTask.content,
-                    remoteUpdatedAt: deltaTask.updatedAt,
-                    localUpdatedAt: existing.updatedAt,
-                    projectId,
-                    source: 'delta-sync-content-protection'
-                  }
-                });
-              }
-              
-              mergedTask = { ...deltaTask, content: existing.content };
-            }
-            taskMap.set(deltaTask.id, mergedTask);
-          }
-        }
-      }
-
-      // 合并连接增量 - 连接按 ID 直接覆盖（无 updatedAt 字段）
-      const connectionMap = new Map(currentProject.connections.map(c => [c.id, c]));
-      for (const deltaConn of connections) {
-        if (deltaConn.deletedAt) {
-          connectionMap.delete(deltaConn.id);
-        } else {
-          // 直接覆盖或插入
-          connectionMap.set(deltaConn.id, deltaConn);
-        }
-      }
-
-      // 更新项目
-      const updatedProject: Project = {
-        ...currentProject,
-        tasks: Array.from(taskMap.values()),
-        connections: Array.from(connectionMap.values()),
-        updatedAt: new Date().toISOString()
-      };
-
-      // 更新状态
-      this.projectState.updateProjects(projects => 
-        projects.map(p => p.id === updatedProject.id ? updatedProject : p)
-      );
-
-      this.logger.info('Delta Sync 完成', {
-        projectId,
-        taskChanges: tasks.length,
-        connectionChanges: connections.length
-      });
-
-      return { taskChanges: tasks.length, connectionChanges: connections.length };
-
-    } catch (error) {
-      this.logger.error('Delta Sync 失败', error);
-      return { taskChanges: 0, connectionChanges: 0 };
-    }
+    // Sprint 9 技术债务修复：委托给 DeltaSyncCoordinatorService
+    return this.deltaSyncCoordinator.performDeltaSync(projectId);
   }
   
   /**
@@ -675,104 +575,10 @@ export class SyncCoordinatorService {
     message: string;
     conflictDetected?: boolean;
   }> {
-    const projectId = this.projectState.activeProjectId();
-    const userId = this.authService.currentUserId();
-    
-    if (!projectId || !userId) {
-      return { success: false, message: '无活动项目或未登录' };
-    }
-    
-    const localProject = this.projectState.activeProject();
-    if (!localProject) {
-      return { success: false, message: '本地项目不存在' };
-    }
-    
-    this.logger.info('开始重新同步项目', { projectId });
-    
-    try {
-      // 1. 从云端拉取最新数据
-      const remoteProject = await this.syncService.loadSingleProject(projectId, userId);
-      
-      if (!remoteProject) {
-        // 云端不存在，可能被删除了
-        return { success: false, message: '云端项目不存在' };
-      }
-      
-      // 【关键修复】获取 tombstoneIds，防止已删除任务在合并时复活
-      const tombstoneIds = await this.getTombstoneIds(projectId);
-      
-      const localVersion = localProject.version ?? 0;
-      const remoteVersion = remoteProject.version ?? 0;
-      
-      // 2. 版本相同时，也需要智能合并以保留本地的软删除状态
-      // 原因：用户可能在本地删除了连接，但还没来得及同步（版本号还没变化）
-      // 如果直接用远程数据覆盖，会丢失本地的 deletedAt 状态
-      if (localVersion === remoteVersion) {
-        // 执行智能合并，保留本地的软删除状态
-        const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
-        const validated = this.validateAndRebalance(mergeResult.project);
-        this.projectState.updateProjects(ps => 
-          ps.map(p => p.id === projectId ? validated : p)
-        );
-        return { success: true, message: '数据已是最新' };
-      }
-      
-      // 3. 远程版本更新，执行智能合并
-      if (remoteVersion > localVersion) {
-        const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
-        
-        if (mergeResult.conflictCount > 0) {
-          // 发现冲突，静默保存到冲突仓库（不弹窗打扰用户）
-          // 使用 issues 作为冲突字段描述
-          await this.saveConflictSilently(localProject, remoteProject, mergeResult.issues);
-          this.logger.info('检测到冲突，已保存到冲突仓库', { 
-            projectId, 
-            conflictCount: mergeResult.conflictCount 
-          });
-        }
-        
-        const validated = this.validateAndRebalance(mergeResult.project);
-        this.projectState.updateProjects(ps => 
-          ps.map(p => p.id === projectId ? validated : p)
-        );
-        
-        // 清理字段锁（同步完成）
-        this.changeTracker.clearProjectFieldLocks(projectId);
-        
-        return { 
-          success: true, 
-          message: mergeResult.conflictCount > 0 
-            ? `已合并，${mergeResult.conflictCount} 处冲突已保存供稍后处理`
-            : '已与云端同步',
-          conflictDetected: mergeResult.conflictCount > 0
-        };
-      }
-      
-      // 4. 本地版本更新，推送到云端
-      const saveResult = await this.syncService.saveProjectSmart(localProject, userId);
-      
-      if (saveResult.success) {
-        // 清理字段锁
-        this.changeTracker.clearProjectFieldLocks(projectId);
-        return { success: true, message: '本地更改已推送到云端' };
-      } else if (saveResult.conflict) {
-        // 保存时发现冲突
-        if (saveResult.remoteData) {
-          await this.saveConflictSilently(localProject, saveResult.remoteData, []);
-        }
-        return { 
-          success: false, 
-          message: '发现版本冲突，已保存到冲突仓库',
-          conflictDetected: true
-        };
-      } else {
-        return { success: false, message: '同步失败' };
-      }
-      
-    } catch (error) {
-      this.logger.error('重新同步失败', error);
-      return { success: false, message: '同步时发生错误' };
-    }
+    // Sprint 9 技术债务修复：委托给 ProjectSyncOperationsService
+    return this.projectSyncOps.resyncActiveProject(
+      (projectId) => this.getTombstoneIds(projectId)
+    );
   }
   
   /**
@@ -856,224 +662,36 @@ export class SyncCoordinatorService {
     offlineProjects: Project[],
     userId: string
   ): Promise<{ projects: Project[]; syncedCount: number; conflictProjects: Project[] }> {
-    const cloudMap = new Map(cloudProjects.map(p => [p.id, p]));
-    const mergedProjects: Project[] = [...cloudProjects];
-    const conflictProjects: Project[] = [];
-    let syncedCount = 0;
-    
-    for (const offlineProject of offlineProjects) {
-      const cloudProject = cloudMap.get(offlineProject.id);
-      
-      if (!cloudProject) {
-        const result = await this.syncService.saveProjectToCloud(offlineProject, userId);
-        if (result.success) {
-          // 使用返回的新版本号更新项目
-          const syncedProject = { ...offlineProject, version: result.newVersion ?? offlineProject.version };
-          mergedProjects.push(syncedProject);
-          syncedCount++;
-          this.logger.info('离线新建项目已同步:', offlineProject.name);
-        }
-        continue;
-      }
-      
-      const offlineVersion = offlineProject.version ?? 0;
-      const cloudVersion = cloudProject.version ?? 0;
-      
-      // 检查是否需要同步离线数据
-      let shouldSyncOffline = false;
-      let reason = '';
-      
-      if (offlineVersion > cloudVersion) {
-        shouldSyncOffline = true;
-        reason = '版本号更高';
-      } else if (offlineVersion === cloudVersion) {
-        // 版本号相同时，比较内容是否有差异
-        const hasContentDiff = this.hasProjectContentDifference(offlineProject, cloudProject);
-        
-        if (hasContentDiff) {
-          // 有内容差异，比较更新时间
-          const offlineTime = new Date(offlineProject.updatedAt || 0).getTime();
-          const cloudTime = new Date(cloudProject.updatedAt || 0).getTime();
-          
-          if (offlineTime >= cloudTime) {
-            shouldSyncOffline = true;
-            reason = '本地有未同步的修改';
-          } else {
-            // 云端更新时间更新，但我们仍需要记录这个潜在的冲突
-            this.logger.info('检测到本地修改可能被覆盖', {
-              projectId: offlineProject.id,
-              offlineTime: new Date(offlineTime).toISOString(),
-              cloudTime: new Date(cloudTime).toISOString()
-            });
-            // 【关键修复】使用智能合并时传入 tombstoneIds，防止已删除任务复活
-            const tombstoneIds = await this.getTombstoneIds(offlineProject.id);
-            const mergedProject = this.conflictService.smartMerge(offlineProject, cloudProject, tombstoneIds);
-            shouldSyncOffline = true;
-            reason = '智能合并本地和云端修改';
-            // 替换 offlineProject 为合并后的版本
-            Object.assign(offlineProject, mergedProject.project);
-          }
-        }
-      }
-      
-      if (shouldSyncOffline) {
-        const projectToSync = { 
-          ...offlineProject, 
-          version: Math.max(offlineVersion, cloudVersion) + 1 
-        };
-        
-        this.logger.info('同步离线修改', { 
-          projectId: offlineProject.id, 
-          reason,
-          offlineVersion,
-          cloudVersion
-        });
-        
-        const result = await this.syncService.saveProjectToCloud(projectToSync, userId);
-        if (result.success) {
-          // 使用返回的新版本号更新项目
-          const syncedProject = { ...projectToSync, version: result.newVersion ?? projectToSync.version };
-          const idx = mergedProjects.findIndex(p => p.id === offlineProject.id);
-          if (idx !== -1) {
-            mergedProjects[idx] = syncedProject;
-          }
-          syncedCount++;
-          this.logger.info('离线修改已同步:', offlineProject.name);
-        } else if (result.conflict) {
-          this.logger.warn('离线数据存在冲突', { projectName: offlineProject.name });
-          // 记录冲突项目供调用者处理
-          conflictProjects.push(offlineProject);
-          // 发布冲突事件（替代回调）
-          this.conflict$.next({
-            localProject: offlineProject,
-            remoteProject: result.remoteData!,
-            projectId: offlineProject.id
-          });
-        }
-      }
-    }
-    
-    return { projects: mergedProjects, syncedCount, conflictProjects };
-  }
-  
-  /**
-   * 检查两个项目是否有内容差异
-   * 比较任务数量、任务内容、连接等
-   */
-  private hasProjectContentDifference(project1: Project, project2: Project): boolean {
-    // 比较任务数量
-    if (project1.tasks.length !== project2.tasks.length) {
-      return true;
-    }
-    
-    // 比较连接数量
-    if ((project1.connections?.length ?? 0) !== (project2.connections?.length ?? 0)) {
-      return true;
-    }
-    
-    // 创建任务 ID 到内容的映射
-    const tasks1Map = new Map(project1.tasks.map(t => [t.id, t]));
-    const tasks2Map = new Map(project2.tasks.map(t => [t.id, t]));
-    
-    // 检查是否有不同的任务 ID
-    for (const id of tasks1Map.keys()) {
-      if (!tasks2Map.has(id)) {
-        return true;
-      }
-    }
-    
-    // 比较每个任务的关键内容
-    for (const [id, task1] of tasks1Map) {
-      const task2 = tasks2Map.get(id);
-      if (!task2) {
-        return true;
-      }
-      
-      // 比较标题和内容
-      if (task1.title !== task2.title || task1.content !== task2.content) {
-        return true;
-      }
-      
-      // 比较结构属性
-      if (task1.parentId !== task2.parentId || 
-          task1.stage !== task2.stage ||
-          task1.deletedAt !== task2.deletedAt) {
-        return true;
-      }
-    }
-    
-    return false;
+    // Sprint 9 技术债务修复：委托给 ProjectSyncOperationsService
+    return this.projectSyncOps.mergeOfflineDataOnReconnect(
+      cloudProjects,
+      offlineProjects,
+      userId,
+      (projectId) => this.getTombstoneIds(projectId),
+      (local, remote) => this.conflict$.next({
+        localProject: local,
+        remoteProject: remote,
+        projectId: local.id
+      })
+    );
   }
   
   /**
    * 验证并重新平衡项目
    */
   validateAndRebalanceWithResult(project: Project): Result<Project, OperationError> {
-    const validation = validateProject(project);
-    
-    // 仅把“项目级不可修复”的问题视为致命错误。
-    // 例如：项目 ID 缺失/无效、tasks 不是数组（无法安全推断原始结构）。
-    // 连接/单个任务字段等问题应可通过 sanitizeProject 清理修复，避免整项目被跳过。
-    const fatalErrors = validation.errors.filter(e =>
-      e.includes('项目 ID 无效或缺失') ||
-      e.includes('项目任务列表必须是数组')
-    );
-    
-    if (fatalErrors.length > 0) {
-      this.logger.error('项目数据致命错误，无法恢复', { 
-        projectId: project.id, 
-        fatalErrors 
-      });
-      return failure(
-        ErrorCodes.VALIDATION_ERROR,
-        `项目数据损坏无法修复: ${fatalErrors.join('; ')}`,
-        { projectId: project.id, errors: fatalErrors }
-      );
-    }
-    
-    if (!validation.valid) {
-      this.logger.warn('项目数据验证失败，尝试清理修复', { 
-        projectId: project.id, 
-        errors: validation.errors 
-      });
-      project = sanitizeProject(project);
-      
-      const revalidation = validateProject(project);
-      if (!revalidation.valid) {
-        this.logger.error('清理后数据仍然无效', { errors: revalidation.errors });
-        return failure(
-          ErrorCodes.VALIDATION_ERROR,
-          `项目数据清理后仍然无效: ${revalidation.errors.join('; ')}`,
-          { projectId: project.id, errors: revalidation.errors }
-        );
-      }
-    }
-    
-    if (validation.warnings.length > 0) {
-      this.logger.warn('项目数据警告', { projectId: project.id, warnings: validation.warnings });
-    }
-    
-    const { project: fixedProject, issues } = this.layoutService.validateAndFixTree(project);
-    if (issues.length > 0) {
-      this.logger.info('已修复数据问题', { projectId: project.id, issues });
-    }
-    
-    return success(this.layoutService.rebalance(fixedProject));
+    // Sprint 9 技术债务修复：委托给 ProjectSyncOperationsService
+    return this.projectSyncOps.validateAndRebalanceWithResult(project);
   }
   
   /**
    * 验证并重新平衡项目（简化版，出错时返回清理后的项目）
    */
   validateAndRebalance(project: Project): Project {
-    const result = this.validateAndRebalanceWithResult(project);
-    if (isFailure(result)) {
-      const errorMsg = result.error.message;
-      this.logger.error('validateAndRebalance 失败', { error: errorMsg });
-      this.toastService.error('数据验证失败', errorMsg);
-      return sanitizeProject(project);
-    }
-    return result.value;
+    // Sprint 9 技术债务修复：委托给 ProjectSyncOperationsService
+    return this.projectSyncOps.validateAndRebalance(project);
   }
+
   
   /**
    * 销毁服务
