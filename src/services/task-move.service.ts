@@ -642,4 +642,93 @@ export class TaskMoveService {
       return this.layoutService.rebalance({ ...p, tasks: filteredTasks, connections: filteredConnections });
     });
   }
+
+  /**
+   * 将整个子任务树迁移到新的父任务下
+   * 
+   * 功能说明：
+   * - 将指定任务及其所有后代迁移到新父任务下
+   * - 自动计算 stage 偏移量并批量更新所有后代的 stage
+   * - 为迁移的根任务计算新的 rank（放在新父任务的子节点末尾）
+   * - 更新 connections 以反映新的父子关系
+   * - 触发 rebalance 重算所有 displayId
+   * 
+   * @param taskId 要迁移的子树根节点 ID
+   * @param newParentId 新父任务 ID（null 表示迁移到 stage 1 根节点）
+   * @returns Result 包含成功或错误信息
+   */
+  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    const activeP = this.getActiveProjectCallback?.() ?? null;
+    if (!activeP) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
+    }
+    
+    const targetTask = activeP.tasks.find(t => t.id === taskId);
+    if (!targetTask) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '要迁移的任务不存在');
+    }
+    
+    const oldParentId = targetTask.parentId;
+    
+    // 如果新旧父节点相同，无需操作
+    if (oldParentId === newParentId) {
+      return success(undefined);
+    }
+    
+    // 检查循环依赖：新父节点不能是目标任务的后代
+    if (newParentId && this.layoutService.detectCycle(taskId, newParentId, activeP.tasks)) {
+      return failure(ErrorCodes.LAYOUT_CYCLE_DETECTED, '无法迁移：目标父任务是当前任务的后代，会产生循环依赖');
+    }
+    
+    let operationResult: Result<void, OperationError> = success(undefined);
+    
+    this.recordAndUpdateCallback?.(p => {
+      const tasks = p.tasks.map(t => ({ ...t }));
+      const target = tasks.find(t => t.id === taskId);
+      if (!target) {
+        operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
+        return p;
+      }
+      
+      const newParent = newParentId ? tasks.find(t => t.id === newParentId) : null;
+      
+      // 计算 stage 偏移量
+      const oldStage = target.stage ?? 1;
+      let newStage: number;
+      
+      if (newParentId === null) {
+        newStage = 1;
+      } else if (newParent) {
+        newStage = (newParent.stage ?? 0) + 1;
+      } else {
+        operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '新父任务不存在');
+        return p;
+      }
+      
+      const stageOffset = newStage - oldStage;
+      
+      // 收集子树并更新 stage
+      const subtreeIds = this.subtreeOps.collectSubtreeIds(taskId, tasks);
+      this.subtreeOps.updateSubtreeStages(subtreeIds, stageOffset, tasks);
+      
+      // 更新目标任务的 parentId
+      target.parentId = newParentId;
+      target.updatedAt = new Date().toISOString();
+      
+      // 计算新的 rank
+      target.rank = this.subtreeOps.computeNewRankForMigratedTask(taskId, newParentId, tasks);
+      
+      // 确保子树中所有任务的 rank 约束正确
+      this.subtreeOps.fixSubtreeRanks(taskId, tasks);
+      
+      // 更新 connections
+      const connections = this.subtreeOps.updateParentChildConnections(
+        taskId, oldParentId, newParentId, p.connections
+      );
+      
+      return this.layoutService.rebalance({ ...p, tasks, connections });
+    });
+    
+    return operationResult;
+  }
 }

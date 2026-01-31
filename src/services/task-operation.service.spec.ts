@@ -11,6 +11,11 @@ import { TaskTrashService } from './task-trash.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SubtreeOperationsService } from './subtree-operations.service';
+import { TaskCreationService } from './task-creation.service';
+import { TaskMoveService } from './task-move.service';
+import { TaskAttributeService } from './task-attribute.service';
+import { TaskConnectionService } from './task-connection.service';
 import { Project, Task, Connection } from '../models';
 
 const mockLoggerCategory = {
@@ -88,6 +93,11 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: TaskTrashService, useClass: TaskTrashService },
+        { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
+        { provide: TaskCreationService, useClass: TaskCreationService },
+        { provide: TaskMoveService, useClass: TaskMoveService },
+        { provide: TaskAttributeService, useClass: TaskAttributeService },
+        { provide: TaskConnectionService, useClass: TaskConnectionService },
       ],
     });
 
@@ -241,6 +251,11 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: TaskTrashService, useClass: TaskTrashService },
+        { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
+        { provide: TaskCreationService, useClass: TaskCreationService },
+        { provide: TaskMoveService, useClass: TaskMoveService },
+        { provide: TaskAttributeService, useClass: TaskAttributeService },
+        { provide: TaskConnectionService, useClass: TaskConnectionService },
       ],
     });
 
@@ -402,6 +417,11 @@ describe('TaskOperationService (database constraint validation)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: TaskTrashService, useClass: TaskTrashService },
+        { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
+        { provide: TaskCreationService, useClass: TaskCreationService },
+        { provide: TaskMoveService, useClass: TaskMoveService },
+        { provide: TaskAttributeService, useClass: TaskAttributeService },
+        { provide: TaskConnectionService, useClass: TaskConnectionService },
       ],
     });
 
