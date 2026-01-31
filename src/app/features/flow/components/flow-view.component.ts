@@ -19,6 +19,7 @@ import { FlowDragDropService, InsertPositionInfo } from '../services/flow-drag-d
 import { FlowTouchService } from '../services/flow-touch.service';
 import { FlowLinkService } from '../services/flow-link.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
+import { FlowSwipeGestureService, SwipeResult } from '../services/flow-swipe-gesture.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -72,44 +73,7 @@ import * as go from 'gojs';
     MobileBlackBoxDrawerComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  styles: [`
-    :host {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      min-height: 0;
-      position: relative;
-      background-color: var(--theme-bg, #F5F2E9);
-    }
-    
-    @keyframes slide-up {
-      from {
-        opacity: 0;
-        transform: translate(-50%, 20px);
-      }
-      to {
-        opacity: 1;
-        transform: translate(-50%, 0);
-      }
-    }
-    
-    .animate-slide-up {
-      animation: slide-up 0.2s ease-out;
-    }
-    
-    @keyframes slide-in-right {
-      from {
-        transform: translateX(100%);
-      }
-      to {
-        transform: translateX(0);
-      }
-    }
-    
-    .animate-slide-in-right {
-      animation: slide-in-right 0.25s ease-out;
-    }
-  `],
+  styleUrls: ['./flow-view.component.scss'],
   templateUrl: './flow-view.component.html'
 })
 export class FlowViewComponent implements AfterViewInit, OnDestroy {
@@ -143,6 +107,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly touch = inject(FlowTouchService);
   readonly link = inject(FlowLinkService);
   readonly taskOps = inject(FlowTaskOperationsService);
+  private readonly swipeGesture = inject(FlowSwipeGestureService);
   
   // ========== 组件状态 ==========
   
@@ -1756,155 +1721,54 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     void this.router.navigate(['/projects', projectId, currentView]);
   }
   
-  // ========== 右侧面板滑动手势 ==========
-  
-  private rightPanelSwipeState = {
-    startX: 0,
-    startY: 0,
-    isSwiping: false
-  };
+  // ========== 右侧面板滑动手势（委托给 FlowSwipeGestureService） ==========
   
   onRightPanelTouchStart(e: TouchEvent): void {
-    if (e.touches.length !== 1) return;
-    this.rightPanelSwipeState = {
-      startX: e.touches[0].clientX,
-      startY: e.touches[0].clientY,
-      isSwiping: false
-    };
+    this.swipeGesture.handleRightPanelTouchStart(e);
   }
   
   onRightPanelTouchMove(e: TouchEvent): void {
-    if (e.touches.length !== 1) return;
-    const deltaX = e.touches[0].clientX - this.rightPanelSwipeState.startX;
-    const deltaY = Math.abs(e.touches[0].clientY - this.rightPanelSwipeState.startY);
-    
-    // 向右滑动（正值）且水平距离大于垂直距离
-    if (deltaX > 30 && deltaX > deltaY * 1.5) {
-      this.rightPanelSwipeState.isSwiping = true;
-    }
+    this.swipeGesture.handleRightPanelTouchMove(e);
   }
   
   onRightPanelTouchEnd(e: TouchEvent): void {
-    if (!this.rightPanelSwipeState.isSwiping) return;
-    
-    const deltaX = e.changedTouches[0].clientX - this.rightPanelSwipeState.startX;
-    if (deltaX > 50) {
-      // 向右滑动超过阈值，关闭面板
+    if (this.swipeGesture.handleRightPanelTouchEnd(e) === 'close-panel') {
       this.isRightPanelOpen.set(false);
     }
-    this.rightPanelSwipeState.isSwiping = false;
   }
   
   onRightPanelBackdropTouchStart(e: TouchEvent): void {
-    this.onRightPanelTouchStart(e);
+    this.swipeGesture.handleRightPanelTouchStart(e);
   }
   
   onRightPanelBackdropTouchMove(e: TouchEvent): void {
-    this.onRightPanelTouchMove(e);
+    this.swipeGesture.handleRightPanelTouchMove(e);
   }
   
   onRightPanelBackdropTouchEnd(e: TouchEvent): void {
-    if (!this.rightPanelSwipeState.isSwiping) {
-      // 如果不是滑动，则是点击背景关闭
+    if (this.swipeGesture.handleBackdropTouchEnd(e) === 'close-panel') {
       this.isRightPanelOpen.set(false);
-    } else {
-      this.onRightPanelTouchEnd(e);
     }
-    this.rightPanelSwipeState.isSwiping = false;
   }
   
-  // ========== 流程图区域滑动手势（用于切换视图/打开任务列表） ==========
+  // ========== 流程图区域滑动手势（委托给 FlowSwipeGestureService） ==========
   
-  private diagramAreaSwipeState = {
-    startX: 0,
-    startY: 0,
-    startTime: 0,
-    isSwiping: false,
-    isVerticalScroll: false  // 是否为垂直滚动（应由 GoJS 处理）
-  };
-  
-  /**
-   * 流程图区域触摸开始
-   * 记录起始位置，准备检测滑动手势
-   */
   onDiagramAreaTouchStart(e: TouchEvent): void {
-    if (!this.uiState.isMobile()) return;
-    if (e.touches.length !== 1) return;
-    
-    const touch = e.touches[0];
-    this.diagramAreaSwipeState = {
-      startX: touch.clientX,
-      startY: touch.clientY,
-      startTime: Date.now(),
-      isSwiping: false,
-      isVerticalScroll: false
-    };
+    this.swipeGesture.handleDiagramAreaTouchStart(e);
   }
   
-  /**
-   * 流程图区域触摸移动
-   * 检测是水平滑动还是垂直滚动
-   */
   onDiagramAreaTouchMove(e: TouchEvent): void {
-    if (!this.uiState.isMobile()) return;
-    if (e.touches.length !== 1) return;
-    
-    // 如果已经确定是垂直滚动，让 GoJS 处理
-    if (this.diagramAreaSwipeState.isVerticalScroll) return;
-    
-    const touch = e.touches[0];
-    const deltaX = touch.clientX - this.diagramAreaSwipeState.startX;
-    const deltaY = touch.clientY - this.diagramAreaSwipeState.startY;
-    const absDeltaX = Math.abs(deltaX);
-    const absDeltaY = Math.abs(deltaY);
-    
-    // 如果还没确定方向
-    if (!this.diagramAreaSwipeState.isSwiping && !this.diagramAreaSwipeState.isVerticalScroll) {
-      // 移动距离太小，继续等待
-      if (absDeltaX < 15 && absDeltaY < 15) return;
-      
-      // 判断是水平滑动还是垂直滚动
-      if (absDeltaX > absDeltaY * 1.5 && absDeltaX > 20) {
-        // 水平滑动 - 用于切换视图
-        this.diagramAreaSwipeState.isSwiping = true;
-      } else if (absDeltaY > absDeltaX) {
-        // 垂直滚动 - 让 GoJS 处理
-        this.diagramAreaSwipeState.isVerticalScroll = true;
-      }
-    }
+    this.swipeGesture.handleDiagramAreaTouchMove(e);
   }
   
-  /**
-   * 流程图区域触摸结束
-   * 根据滑动方向执行相应操作
-   */
   onDiagramAreaTouchEnd(e: TouchEvent): void {
-    if (!this.uiState.isMobile()) return;
-    
-    // 如果是垂直滚动或没有检测到滑动，不处理
-    if (this.diagramAreaSwipeState.isVerticalScroll || !this.diagramAreaSwipeState.isSwiping) {
-      return;
-    }
-    
-    const touch = e.changedTouches[0];
-    const deltaX = touch.clientX - this.diagramAreaSwipeState.startX;
-    const deltaTime = Date.now() - this.diagramAreaSwipeState.startTime;
-    
-    // 快速滑动降低阈值，慢速滑动需要更大距离
-    const threshold = deltaTime < 300 ? 40 : 60;
-    
-    if (deltaX > threshold) {
-      // 向右滑动 → 打开任务列表面板
+    const result = this.swipeGesture.handleDiagramAreaTouchEnd(e);
+    if (result === 'right') {
       this.isRightPanelOpen.set(true);
-    } else if (deltaX < -threshold) {
-      // 向左滑动 → 切换到文本视图
-      this.logger.debug('滑动触发 goBackToText', { deltaX, threshold, deltaTime });
+    } else if (result === 'left') {
+      this.logger.debug('滑动触发 goBackToText');
       this.goBackToText.emit();
     }
-    
-    // 重置状态
-    this.diagramAreaSwipeState.isSwiping = false;
-    this.diagramAreaSwipeState.isVerticalScroll = false;
   }
   
   // ========== 私有辅助方法 ==========
