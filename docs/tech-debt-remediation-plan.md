@@ -1,11 +1,40 @@
 # NanoFlow 技术债务清理策划案
 
-> **文档版本**: 1.2  
+> **文档版本**: 1.3  
 > **创建日期**: 2026-01-31  
 > **审查日期**: 2026-01-31  
 > **深度验证日期**: 2026-01-31  
+> **最后更新**: 2026-01-31 (进度更新)  
 > **审查状态**: ✅ 深度审查完成（数据已验证）  
 > **基于**: Gilfoyle 代码审查报告 + AI 深度研究
+
+---
+
+## 📊 实施进度跟踪（2026-01-31 更新）
+
+### 完成状态
+
+| 文件 | 初始行数 | 当前行数 | 目标 | 状态 | 减少行数 |
+|------|----------|----------|------|------|----------|
+| StorePersistenceService | 1551 | 790 | ≤800 | ✅ 完成 | -761 |
+| SyncCoordinatorService | 1466 | 826 | ≤800 | ✅ 接近目标 | -640 |
+| TaskOperationService | 2060 | 1673 | ≤800 | 🔄 进行中 | -387 |
+| FlowViewComponent | 2555 | 1986 | ≤800 | ⏳ 待处理 | -569 |
+| SimpleSyncService | 4945 | 4627 | ≤800 | ⏳ 待处理 | -318 |
+
+### 新增子服务
+
+| 服务 | 行数 | 用途 |
+|------|------|------|
+| SubtreeOperationsService | 430 | 子树操作（从 TaskOperationService 提取） |
+| TaskCreationService | 266 | 任务创建（预备，尚未集成） |
+| ProjectSyncOperationsService | 322 | 项目同步操作（从 SyncCoordinatorService 提取） |
+| DeltaSyncCoordinatorService | 185 | Delta Sync 协调（从 SyncCoordinatorService 提取） |
+
+### Git 提交记录
+
+- `3f5d574` - refactor: extract SubtreeOperationsService from TaskOperationService
+- `8ef28dd` - refactor: extract ProjectSyncOperationsService from SyncCoordinatorService
 
 ---
 
