@@ -8,3 +8,4 @@ export { DataIntegrityService } from './data-integrity.service';
 export type { IntegrityIssue, IntegrityCheckResult, WriteVerifyResult } from './data-integrity.service';
 export { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 export { BackupService } from './backup.service';
+export { DeltaSyncPersistenceService } from './delta-sync-persistence.service';

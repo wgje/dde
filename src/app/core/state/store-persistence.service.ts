@@ -22,7 +22,7 @@ import { LoggerService } from '../../../services/logger.service';
 import { Project, Task, Connection } from '../../../models';
 import { validateProject } from '../../../utils/validation';
 // Sprint 8 技术债务修复：提取的子服务
-import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService } from './persistence';
+import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService, DeltaSyncPersistenceService } from './persistence';
 import * as Sentry from '@sentry/angular';
 
 /** 存储键前缀（保留用于未来扩展） */
@@ -71,6 +71,7 @@ export class StorePersistenceService {
   private readonly indexedDBService = inject(IndexedDBService);
   private readonly dataIntegrity = inject(DataIntegrityService);
   private readonly backupService = inject(BackupService);
+  private readonly deltaSyncPersistence = inject(DeltaSyncPersistenceService);
   
   /** 防抖计时器 */
   private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -747,183 +748,51 @@ export class StorePersistenceService {
   // @see docs/plan_save.md Phase 2
   // ============================================================
 
+  // ============================================================
+  // 【Stingy Hoarder Protocol】Delta Sync 支持（委托给 DeltaSyncPersistenceService）
+  // @see docs/plan_save.md Phase 2
+  // ============================================================
+
   /**
-   * 从本地 IndexedDB 加载项目的所有任务
-   * 
-   * @param projectId 项目 ID
-   * @returns 该项目的所有任务（包含已删除的）
+   * 从本地 IndexedDB 加载项目的所有任务（委托给 DeltaSyncPersistenceService）
    */
   async loadTasksFromLocal(projectId: string): Promise<Task[]> {
-    try {
-      const db = await this.initDatabase();
-      const tasks = await this.getByIndex<Task & { projectId: string }>(
-        db, 
-        DB_CONFIG.stores.tasks, 
-        'projectId', 
-        projectId
-      );
-      
-      // 移除 projectId 属性（仅用于索引）
-      return tasks.map(t => {
-        const { projectId: _, ...task } = t;
-        return task as Task;
-      });
-    } catch (err) {
-      this.logger.error('加载本地任务失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'loadTasksFromLocal', projectId } });
-      return [];
-    }
+    return this.deltaSyncPersistence.loadTasksFromLocal(projectId);
   }
 
   /**
-   * 获取指定时间后更新的任务（Delta Sync）
-   * 
-   * 用于增量同步：只返回 updated_at > sinceTime 的任务
-   * 
-   * @param projectId 项目 ID
-   * @param sinceTime ISO 时间字符串（例如 "2025-12-31T12:00:00Z"）
-   * @returns 在 sinceTime 之后更新的活跃任务（排除软删除）
-   * 
-   * @see docs/plan_save.md Layer 2.2
+   * 获取指定时间后更新的任务（委托给 DeltaSyncPersistenceService）
    */
   async getTasksUpdatedSince(projectId: string, sinceTime: string): Promise<Task[]> {
-    try {
-      const allTasks = await this.loadTasksFromLocal(projectId);
-      const sinceDate = new Date(sinceTime);  // 🔒 使用 Date 对象比较，避免时区问题
-      
-      return allTasks.filter(t => 
-        t.updatedAt && new Date(t.updatedAt) > sinceDate && !t.deletedAt  // 🔒 过滤软删除
-      );
-    } catch (err) {
-      this.logger.error('获取增量更新任务失败', { projectId, sinceTime, error: err });
-      Sentry.captureException(err, { tags: { operation: 'getTasksUpdatedSince', projectId } });
-      return [];
-    }
+    return this.deltaSyncPersistence.getTasksUpdatedSince(projectId, sinceTime);
   }
 
   /**
-   * 获取本地最新的 updated_at 时间戳
-   * 
-   * 用于 Delta Sync：确定从服务端拉取的起始时间点
-   * 
-   * @param projectId 项目 ID
-   * @returns 最新时间戳，若无数据则返回 null（确保类型安全）
-   * 
-   * @see docs/plan_save.md Layer 2.2
+   * 获取本地最新的 updated_at 时间戳（委托给 DeltaSyncPersistenceService）
    */
   async getLatestLocalTimestamp(projectId: string): Promise<string | null> {
-    try {
-      const tasks = await this.loadTasksFromLocal(projectId);
-      if (tasks.length === 0) return null;
-      
-      // 🔒 过滤掉无 updatedAt 的任务，确保类型安全
-      const tasksWithTimestamp = tasks.filter((t): t is Task & { updatedAt: string } => 
-        typeof t.updatedAt === 'string' && t.updatedAt.length > 0
-      );
-      
-      if (tasksWithTimestamp.length === 0) return null;
-      
-      // 按 updatedAt 降序排列，取最新
-      tasksWithTimestamp.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return tasksWithTimestamp[0].updatedAt;
-    } catch (err) {
-      this.logger.error('获取本地最新时间戳失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'getLatestLocalTimestamp', projectId } });
-      return null;
-    }
+    return this.deltaSyncPersistence.getLatestLocalTimestamp(projectId);
   }
 
   /**
-   * 保存单个任务到本地 IndexedDB
-   * 
-   * 用于 Realtime 推送：收到服务端变更后立即持久化
-   * 
-   * @param task 要保存的任务
-   * @param projectId 项目 ID（用于索引）
+   * 保存单个任务到本地 IndexedDB（委托给 DeltaSyncPersistenceService）
    */
   async saveTaskToLocal(task: Task, projectId: string): Promise<void> {
-    try {
-      const db = await this.initDatabase();
-      const transaction = db.transaction(DB_CONFIG.stores.tasks, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.tasks);
-      
-      // 添加 projectId 用于索引
-      store.put({ ...task, projectId });
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.debug('任务已保存到本地', { taskId: task.id, projectId });
-    } catch (err) {
-      this.logger.error('保存任务到本地失败', { taskId: task.id, projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'saveTaskToLocal', taskId: task.id, projectId } });
-    }
+    return this.deltaSyncPersistence.saveTaskToLocal(task, projectId);
   }
 
   /**
-   * 从本地 IndexedDB 删除单个任务
-   * 
-   * 用于 Realtime 推送：收到 DELETE 事件后删除本地数据
-   * 
-   * @param taskId 任务 ID
+   * 从本地 IndexedDB 删除单个任务（委托给 DeltaSyncPersistenceService）
    */
   async deleteTaskFromLocal(taskId: string): Promise<void> {
-    try {
-      const db = await this.initDatabase();
-      const transaction = db.transaction(DB_CONFIG.stores.tasks, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.tasks);
-      
-      store.delete(taskId);
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.debug('任务已从本地删除', { taskId });
-    } catch (err) {
-      this.logger.error('从本地删除任务失败', { taskId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'deleteTaskFromLocal', taskId } });
-    }
+    return this.deltaSyncPersistence.deleteTaskFromLocal(taskId);
   }
 
   /**
-   * 批量更新本地任务（Delta Sync 增量合并）
-   * 
-   * 用于 Delta Sync：将服务端增量数据合并到本地
-   * 
-   * @param tasks 要合并的任务列表
-   * @param projectId 项目 ID
+   * 批量更新本地任务（委托给 DeltaSyncPersistenceService）
    */
   async bulkMergeTasksToLocal(tasks: Task[], projectId: string): Promise<void> {
-    if (tasks.length === 0) return;
-    
-    try {
-      const db = await this.initDatabase();
-      const transaction = db.transaction(DB_CONFIG.stores.tasks, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.tasks);
-      
-      for (const task of tasks) {
-        // 如果是软删除的任务，从本地删除
-        if (task.deletedAt) {
-          store.delete(task.id);
-        } else {
-          store.put({ ...task, projectId });
-        }
-      }
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.debug('批量合并任务完成', { count: tasks.length, projectId });
-    } catch (err) {
-      this.logger.error('批量合并任务失败', { count: tasks.length, projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'bulkMergeTasksToLocal', projectId } });
-    }
+    return this.deltaSyncPersistence.bulkMergeTasksToLocal(tasks, projectId);
   }
 
   // ============================================================

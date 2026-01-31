@@ -69,6 +69,14 @@ export class GateService {
   readonly isActive = isGateActive;
   
   /**
+   * 检测用户是否启用了减少动画（prefers-reduced-motion）
+   * 当启用时，CSS 动画被禁用，需要跳过动画状态直接进入 idle
+   */
+  private readonly prefersReducedMotion = 
+    typeof window !== 'undefined' && 
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  
+  /**
    * 检查是否需要显示大门
    * 在应用启动时调用
    */
@@ -93,8 +101,17 @@ export class GateService {
       gatePendingItems.set(pending);
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
-      // 设置首次入场动画状态
-      this.cardAnimation.set('entering');
+      
+      // 【Bug Fix】检测用户是否启用了减少动画偏好
+      // 当 prefers-reduced-motion: reduce 时，CSS 动画被禁用
+      // 导致 animationend 事件永远不触发，cardAnimation 卡在 'entering'
+      // 此时按钮会被永久禁用。解决方案：直接设置为 'idle' 跳过动画
+      if (this.prefersReducedMotion) {
+        this.cardAnimation.set('idle');
+        this.logger.debug('Gate', 'Reduced motion detected, skipping entry animation');
+      } else {
+        this.cardAnimation.set('entering');
+      }
       this.logger.info('Gate', `Gate activated with ${pending.length} pending items`);
     } else {
       // 没有待处理条目，跳过大门
@@ -167,10 +184,17 @@ export class GateService {
   /**
    * 切换到下一个条目（触发下沉动画）
    * 动画完成后由 onSinkingComplete() 处理状态切换
+   * 
+   * 【Bug Fix】当用户启用减少动画时，直接调用完成回调而不等待动画
    */
   private nextEntry(): void {
-    // 只触发下沉动画，后续逻辑由 animationend 事件驱动
-    this.cardAnimation.set('sinking');
+    if (this.prefersReducedMotion) {
+      // 减少动画模式：直接执行状态切换，不触发动画
+      this.onSinkingComplete();
+    } else {
+      // 正常模式：触发下沉动画，后续逻辑由 animationend 事件驱动
+      this.cardAnimation.set('sinking');
+    }
   }
   
   /**
@@ -184,6 +208,8 @@ export class GateService {
   /**
    * 下沉动画完成回调
    * 由 GateCardComponent 的 animationend 事件触发
+   * 
+   * 【Bug Fix】当用户启用减少动画时，直接切换到下一条目不触发浮现动画
    */
   onSinkingComplete(): void {
     const nextIndex = gateCurrentIndex() + 1;
@@ -202,9 +228,15 @@ export class GateService {
         this.showCompletionMessage.set(false);
       }, 1500);
     } else {
-      // 切换到下一个条目并触发浮现动画
+      // 切换到下一个条目
       gateCurrentIndex.set(nextIndex);
-      this.cardAnimation.set('emerging');
+      
+      // 【Bug Fix】减少动画模式：直接设置 idle，不触发浮现动画
+      if (this.prefersReducedMotion) {
+        this.cardAnimation.set('idle');
+      } else {
+        this.cardAnimation.set('emerging');
+      }
     }
   }
   
