@@ -26,6 +26,8 @@ import { FlowKeyboardService } from '../services/flow-keyboard.service';
 import { FlowPaletteResizeService } from '../services/flow-palette-resize.service';
 import { FlowBatchDeleteService } from '../services/flow-batch-delete.service';
 import { FlowSelectModeService } from '../services/flow-select-mode.service';
+import { FlowMobileDrawerService } from '../services/flow-mobile-drawer.service';
+import { FlowDiagramEffectsService } from '../services/flow-diagram-effects.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -120,6 +122,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly paletteResize = inject(FlowPaletteResizeService);
   readonly batchDelete = inject(FlowBatchDeleteService);
   readonly selectMode = inject(FlowSelectModeService);
+  private readonly mobileDrawer = inject(FlowMobileDrawerService);
+  private readonly diagramEffects = inject(FlowDiagramEffectsService);
   
   // ========== 组件状态 ==========
   
@@ -249,85 +253,123 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   constructor() {
-    // 监听任务数据变化，使用 rAF 对齐渲染帧更新图表
-    // 核心原则：眼睛看到的（UI）用 rAF，硬盘存的（Data）用 debounce
+    // 使用 FlowDiagramEffectsService 统一管理响应式 effect
+    const scheduleRaf = this.scheduleRafDiagramUpdate.bind(this);
+    
+    // 核心数据变化 effects
+    this.diagramEffects.createTasksEffect(this.injector, scheduleRaf);
+    this.diagramEffects.createConnectionsEffect(this.injector, scheduleRaf);
+    this.diagramEffects.createSearchEffect(this.injector, scheduleRaf);
+    this.diagramEffects.createThemeEffect(this.injector, scheduleRaf);
+    
+    // 选中状态同步
+    this.diagramEffects.createSelectionSyncEffect(
+      this.injector,
+      this.selectedTaskId,
+      this.selectNodeWithRetry.bind(this)
+    );
+    
+    // 命令服务订阅
+    this.diagramEffects.createCenterCommandEffect(
+      this.injector,
+      this.executeCenterOnNode.bind(this)
+    );
+    this.diagramEffects.createRetryCommandEffect(
+      this.injector,
+      this.retryInitDiagram.bind(this)
+    );
+    
+    // 移动端抽屉高度管理 effects
+    this.setupMobileDrawerEffects();
+  }
+  
+  /**
+   * 设置移动端抽屉高度相关的 effects
+   * 使用 FlowMobileDrawerService 进行高度计算
+   */
+  private setupMobileDrawerEffects(): void {
+    // 🎯 移动端：基于"调色板高度"为参考系，设置详情抽屉的最佳高度（vh）
     effect(() => {
-      const tasks = this.projectState.tasks();
-      if (this.diagram.isInitialized) {
-        this.scheduleRafDiagramUpdate(tasks, false);
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      if (!this.uiState.isMobile() || activeView !== 'flow') {
+        // 非移动端或非流程图视图时，仅更新状态追踪
+        this.mobileDrawer.determineScenario(isDetailOpen);
+        if (!isDetailOpen) {
+          this.drawerManualOverride.set(false);
+        }
+        return;
+      }
+
+      const scenario = this.mobileDrawer.determineScenario(isDetailOpen);
+      
+      if (scenario && !this.drawerManualOverride()) {
+        untracked(() => {
+          const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), scenario);
+          if (targetVh !== null) {
+            this.scheduleDrawerHeightUpdate(targetVh);
+          }
+        });
+      }
+      
+      if (!isDetailOpen) {
+        this.drawerManualOverride.set(false);
       }
     }, { injector: this.injector });
-    
-    // 监听跨树连接变化（connections 是在 project 中而非 tasks 中）
-    // 必须单独监听，否则添加/删除跨树连接不会触发图表更新
-    // 注意：使用连接的"有效签名"而非数组长度，以检测软删除和恢复操作
-    effect(() => {
-      const project = this.projectState.activeProject();
-      // 构建有效连接的签名（过滤掉 deletedAt，只统计活跃连接）
-      const activeConnections = project?.connections?.filter(c => !c.deletedAt) ?? [];
-      // 使用连接的 source-target 对作为签名，检测任何变化
-      const connectionSignature = activeConnections
-        .map(c => `${c.source}->${c.target}`)
-        .sort()
-        .join('|');
-      // 读取 connectionSignature 来建立依赖关系
-      if (connectionSignature !== undefined && this.diagram.isInitialized) {
-        this.scheduleRafDiagramUpdate(this.projectState.tasks(), true);
-      }
-    }, { injector: this.injector });
-    
-    // 监听搜索查询变化，使用 rAF 更新图表高亮
-    effect(() => {
-      const _query = this.uiState.searchQuery();
-      if (this.diagram.isInitialized) {
-        this.scheduleRafDiagramUpdate(this.projectState.tasks(), true);
-      }
-    }, { injector: this.injector });
-    
-    // 监听主题变化，使用 rAF 更新图表节点颜色
-    effect(() => {
-      const _theme = this.preference.theme();
-      if (this.diagram.isInitialized) {
-        this.scheduleRafDiagramUpdate(this.projectState.tasks(), true);
-      }
-    }, { injector: this.injector });
-    
-    // 跨视图选中状态同步
-    // 当新任务创建后，GoJS 图表可能还未更新，需要延迟重试
+
+    // 🎯 场景二之后：当详情已开且点击任务块时，自动切回"场景一"最佳高度
     effect(() => {
       const selectedId = this.selectedTaskId();
-      if (selectedId && this.diagram.isInitialized) {
-        // 尝试选中节点，使用增强的重试逻辑
-        this.selectNodeWithRetry(selectedId);
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      if (!this.uiState.isMobile() || activeView !== 'flow' || !isDetailOpen || !selectedId) return;
+      if (this.drawerManualOverride()) return;
+      if (this.mobileDrawer.isAtDirectPreset()) return;
+
+      untracked(() => {
+        const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
+        if (targetVh !== null) {
+          this.scheduleDrawerHeightUpdate(targetVh);
+          this.mobileDrawer.markAsDirectPreset();
+        }
+      });
+    }, { injector: this.injector });
+
+    // 监听拖拽标记，用户一旦开始拖拽则启用手动覆盖
+    effect(() => {
+      if (this.isResizingDrawerSignal()) {
+        this.drawerManualOverride.set(true);
       }
     }, { injector: this.injector });
     
-    // ========== 命令服务订阅 ==========
-    // 订阅居中到节点命令（来自 ProjectShellComponent）
+    // 🎯 移动端：场景2（小抽屉）后，点击任务块应自动扩展到场景1的最佳位置
     effect(() => {
-      const cmd = this.flowCommand.centerNodeCommand();
-      if (cmd) {
-        // untracked 防止在此处读取其他信号时建立不必要的依赖
-        untracked(() => {
-          // 如果图表已就绪，立即执行
-          if (this.diagram.isInitialized) {
-            this.executeCenterOnNode(cmd.taskId, cmd.openDetail);
-            this.flowCommand.clearCenterCommand();
-          }
-          // 如果未就绪，命令已被 flowCommand 缓存，将在 ngAfterViewInit 后执行
-        });
-      }
+      const activeView = this.uiState.activeView();
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const selectedTaskId = this.selectedTaskId();
+      const isResizing = this.isResizingDrawerSignal();
+
+      if (!this.uiState.isMobile()) return;
+      if (activeView !== 'flow' || !isDetailOpen || !selectedTaskId || isResizing) return;
+      if (this.drawerManualOverride()) return;
+
+      untracked(() => {
+        const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
+        if (targetVh === null) return;
+        
+        const currentVh = this.drawerHeight();
+        if (this.mobileDrawer.shouldExpandDrawer(currentVh, targetVh)) {
+          this.scheduleDrawerHeightUpdate(targetVh);
+        }
+      });
     }, { injector: this.injector });
-    
-    // 订阅重试初始化命令
-    effect(() => {
-      const count = this.flowCommand.retryDiagramCommand();
-      if (count > 0) {
-        untracked(() => {
-          this.retryInitDiagram();
-        });
-      }
-    }, { injector: this.injector });
+  }
+  
+  /**
+   * 使用 requestAnimationFrame 调度图表更新
+   * 将多个 signal 变化合并到同一帧，避免过度渲染
     
     // 🎯 移动端：基于“调色板高度”为参考系，设置详情抽屉的最佳高度（vh）
     // 基准屏幕：高度 667px；调色板：80px。
