@@ -392,7 +392,7 @@ export class StoreService {
       const userId = this.currentUserId();
       if (userId) {
         try {
-          const syncResult = await this.sync.saveProjectToCloud(resolvedProject, userId);
+          const syncResult = await this.sync.core.saveProjectSmart(resolvedProject, userId);
           if (!syncResult.success && !syncResult.conflict) {
             this.actionQueue.enqueue({
               type: 'update',
@@ -415,7 +415,7 @@ export class StoreService {
       }
     }
     
-    this.sync.saveOfflineSnapshot(this.projects());
+    this.sync.core.saveOfflineSnapshot(this.projects());
   }
 
   // ========== 项目操作 ==========
@@ -433,7 +433,7 @@ export class StoreService {
     const userId = this.currentUserId();
     if (userId) {
       try {
-        const result = await this.sync.saveProjectToCloud(balanced, userId);
+        const result = await this.sync.core.saveProjectSmart(balanced, userId);
         
         if (!result.success && !result.conflict) {
           if (!this.isOnline()) {
@@ -492,7 +492,7 @@ export class StoreService {
     
     if (userId) {
       try {
-        const success = await this.sync.deleteProjectFromCloud(projectId, userId);
+        const success = await this.sync.core.deleteProjectFromCloud(projectId, userId);
         
         if (!success) {
           if (!this.isOnline()) {
@@ -527,7 +527,7 @@ export class StoreService {
       this.optimisticState.commitSnapshot(snapshot.id);
     }
     
-    this.sync.saveOfflineSnapshot(this.projects());
+    this.sync.core.saveOfflineSnapshot(this.projects());
     return { success: true };
   }
 

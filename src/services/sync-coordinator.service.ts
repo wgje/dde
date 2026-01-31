@@ -478,62 +478,6 @@ export class SyncCoordinatorService {
     this.syncService.setTaskChangeCallback(onTaskChange);
   }
   
-  /**
-   * 初始化实时订阅
-   * @deprecated 使用 this.core.initRealtimeSubscription() 替代
-   */
-  async initRealtimeSubscription(userId: string) {
-    await this.syncService.initRealtimeSubscription(userId);
-  }
-  
-  /**
-   * 清理实时订阅
-   * @deprecated 使用 this.core.teardownRealtimeSubscription() 替代
-   */
-  teardownRealtimeSubscription() {
-    this.syncService.teardownRealtimeSubscription();
-  }
-  
-  /**
-   * 保存离线快照
-   * @deprecated 使用 this.core.saveOfflineSnapshot() 替代
-   */
-  saveOfflineSnapshot(projects: Project[]) {
-    this.syncService.saveOfflineSnapshot(projects);
-  }
-  
-  /**
-   * 加载离线快照
-   * @deprecated 使用 this.core.loadOfflineSnapshot() 替代
-   */
-  loadOfflineSnapshot(): Project[] | null {
-    return this.syncService.loadOfflineSnapshot();
-  }
-  
-  /**
-   * 清除离线缓存
-   * @deprecated 使用 this.core.clearOfflineCache() 替代
-   */
-  clearOfflineCache() {
-    this.syncService.clearOfflineCache();
-  }
-  
-  /**
-   * 从云端加载项目
-   * @param userId - 用户 ID
-   * @param silent - 是否静默加载（不显示加载状态），用于后台自动同步
-   * @deprecated 使用 this.core.loadProjectsFromCloud() 替代
-   */
-  async loadProjectsFromCloud(userId: string, silent = false): Promise<Project[]> {
-    // 【修复】本地模式不从云端加载，防止将 'local-user' 传递给 Supabase
-    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('本地模式，返回空项目列表');
-      return [];
-    }
-
-    return this.syncService.loadProjectsFromCloud(userId, silent);
-  }
-  
   // ============================================================
   // 【按需加载优化 2026-01-27】单项目加载与待同步检测
   // ============================================================
@@ -697,23 +641,6 @@ export class SyncCoordinatorService {
   }
   
   /**
-   * 保存项目到云端
-   * @deprecated 使用 this.core.saveProjectSmart() 替代
-   */
-  async saveProjectToCloud(project: Project, userId: string) {
-    // 使用智能同步：优先增量，避免全量 upsert 覆盖其他设备的任务状态/位置/删除标记
-    return this.syncService.saveProjectSmart(project, userId);
-  }
-  
-  /**
-   * 从云端删除项目
-   * @deprecated 使用 this.core.deleteProjectFromCloud() 替代
-   */
-  async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
-    return this.syncService.deleteProjectFromCloud(projectId, userId);
-  }
-  
-  /**
    * 安全批量软删除任务（服务端防护）
    * 
    * 【P0 熔断层】使用 safe_delete_tasks RPC 确保批量删除不会超过限制：
@@ -726,14 +653,6 @@ export class SyncCoordinatorService {
    */
   async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
     return this.syncService.softDeleteTasksBatch(projectId, taskIds);
-  }
-
-  /**
-   * 加载单个项目
-   * @deprecated 使用 this.core.loadSingleProject() 替代
-   */
-  async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
-    return this.syncService.loadSingleProject(projectId, userId);
   }
   
   /**

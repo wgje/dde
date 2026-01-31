@@ -425,35 +425,8 @@ describe('SyncCoordinatorService', () => {
   });
 
   // ==================== 版本冲突检测 ====================
-
-  describe('版本冲突检测', () => {
-    it('本地 v2 远程 v3 时应该触发冲突处理', async () => {
-      const localProject = createTestProject({ id: 'proj-1', version: 2 });
-      const remoteProject = createTestProject({ id: 'proj-1', version: 3 });
-      
-      mockSyncService.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        conflict: true,
-        remoteData: remoteProject,
-      });
-      
-      const result = await service.saveProjectToCloud(localProject, 'user-123');
-      
-      expect(result.success).toBe(false);
-      expect(result.conflict).toBe(true);
-      expect(result.remoteData).toEqual(remoteProject);
-    });
-
-    it('本地版本等于远程版本时应该正常保存', async () => {
-      const project = createTestProject({ id: 'proj-1', version: 5 });
-      
-      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
-      
-      const result = await service.saveProjectToCloud(project, 'user-123');
-      
-      expect(result.success).toBe(true);
-    });
-  });
+  // 注意: saveProjectToCloud 已迁移到 SimpleSyncService.saveProjectSmart
+  // 版本冲突测试应在 simple-sync.service.spec.ts 中
 
   // ==================== 冲突解决 ====================
 
@@ -707,81 +680,6 @@ describe('SyncCoordinatorService', () => {
   });
 
   // ==================== 实时订阅管理 ====================
-
-  describe('实时订阅管理', () => {
-    it('initRealtimeSubscription 应该委托给 syncService', async () => {
-      await service.initRealtimeSubscription('user-123');
-      
-      expect(mockSyncService.initRealtimeSubscription).toHaveBeenCalledWith('user-123');
-    });
-
-    it('teardownRealtimeSubscription 应该委托给 syncService', () => {
-      service.teardownRealtimeSubscription();
-      
-      expect(mockSyncService.teardownRealtimeSubscription).toHaveBeenCalled();
-    });
-  });
-
-  // ==================== 离线快照管理 ====================
-
-  describe('离线快照管理', () => {
-    it('saveOfflineSnapshot 应该委托给 syncService', () => {
-      const projects = [createTestProject()];
-      
-      service.saveOfflineSnapshot(projects);
-      
-      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledWith(projects);
-    });
-
-    it('loadOfflineSnapshot 应该委托给 syncService', () => {
-      const projects = [createTestProject()];
-      mockSyncService.loadOfflineSnapshot.mockReturnValueOnce(projects);
-      
-      const result = service.loadOfflineSnapshot();
-      
-      expect(result).toEqual(projects);
-    });
-
-    it('clearOfflineCache 应该委托给 syncService', () => {
-      service.clearOfflineCache();
-      
-      expect(mockSyncService.clearOfflineCache).toHaveBeenCalled();
-    });
-  });
-
-  // ==================== 云端操作 ====================
-
-  describe('云端操作', () => {
-    it('loadProjectsFromCloud 应该委托给 syncService', async () => {
-      const projects = [createTestProject()];
-      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce(projects);
-      
-      const result = await service.loadProjectsFromCloud('user-123');
-      
-      // silent 参数默认为 false
-      expect(mockSyncService.loadProjectsFromCloud).toHaveBeenCalledWith('user-123', false);
-      expect(result).toEqual(projects);
-    });
-
-    it('deleteProjectFromCloud 应该委托给 syncService', async () => {
-      mockSyncService.deleteProjectFromCloud.mockResolvedValueOnce(true);
-      
-      const result = await service.deleteProjectFromCloud('proj-1', 'user-123');
-      
-      expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith('proj-1', 'user-123');
-      expect(result).toBe(true);
-    });
-
-    it('loadSingleProject 应该委托给 syncService', async () => {
-      const project = createTestProject({ id: 'proj-1' });
-      mockSyncService.loadSingleProject.mockResolvedValueOnce(project);
-      
-      const result = await service.loadSingleProject('proj-1', 'user-123');
-      
-      expect(mockSyncService.loadSingleProject).toHaveBeenCalledWith('proj-1', 'user-123');
-      expect(result).toEqual(project);
-    });
-  });
 
   // ==================== 队列处理协调 ====================
 
@@ -1050,7 +948,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         remoteData: remoteProject,
       });
       
-      const result = await service.saveProjectToCloud(localProject, 'user-123');
+      const result = await service.core.saveProjectSmart(localProject, 'user-123');
       
       expect(result.success).toBe(false);
       expect(result.conflict).toBe(true);
@@ -1198,7 +1096,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service.saveProjectToCloud(project, 'user-123');
+      const result = await service.core.saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });
@@ -1211,7 +1109,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service.saveProjectToCloud(project, 'user-123');
+      const result = await service.core.saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });
