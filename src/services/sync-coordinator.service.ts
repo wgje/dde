@@ -183,7 +183,6 @@ export class SyncCoordinatorService {
     this.validateRequiredProcessors();
     this.startLocalAutosave();
     this.setupSyncModeCallback();
-    this.setupPerceptionSubscription();
     
     this.destroyRef.onDestroy(() => {
       if (this.persistTimer) {
@@ -206,15 +205,7 @@ export class SyncCoordinatorService {
       await this.executeSyncByDirection(direction);
     });
   }
-  
-  /**
-   * 设置感知订阅（简化：LWW 模式不需要设备感知）
-   */
-  private setupPerceptionSubscription(): void {
-    // LWW 简化：不再监听其他设备的同步完成通知
-    // 原因：个人应用场景中，设备感知增加复杂性但收益有限
-  }
-  
+
   /**
    * 根据方向执行同步（简化版）
    */
@@ -272,58 +263,29 @@ export class SyncCoordinatorService {
     this.syncService.saveOfflineSnapshot(mergedProjects);
   }
 
-  /**
-   * 初始化同步感知（简化：空实现）
-   */
-  async initSyncPerception(_userId: string): Promise<void> {
-    // LWW 简化：不再需要设备感知功能
-  }
+  /** 初始化同步感知（LWW 简化：空实现） */
+  async initSyncPerception(_userId: string): Promise<void> { /* no-op */ }
   
-  /**
-   * 停止同步感知（简化：空实现）
-   */
-  async stopSyncPerception(): Promise<void> {
-    // LWW 简化：不再需要设备感知功能
-  }
+  /** 停止同步感知（LWW 简化：空实现） */
+  async stopSyncPerception(): Promise<void> { /* no-op */ }
   
-  /**
-   * 创建同步检查点（简化：空实现）
-   */
-  async createSyncCheckpoint(_memo?: string): Promise<void> {
-    // LWW 简化：不再需要检查点功能
-    // 原因：LWW 策略下，每次同步都是以时间戳为准，不需要历史快照
-  }
+  /** 创建同步检查点（LWW 简化：空实现） */
+  async createSyncCheckpoint(_memo?: string): Promise<void> { /* no-op */ }
   
-  /**
-   * 记录冲突到历史（简化：仅记录日志）
-   */
-  async recordConflictToHistory(
-    projectId: string,
-    _localProject: Project,
-    _remoteProject: Project,
-    reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery' | 'status_conflict' | 'field_conflict' | 'merge_conflict'
-  ): Promise<void> {
-    // LWW 简化：仅记录日志，不再保存冲突历史
+  /** 记录冲突到历史（LWW 简化：仅日志） */
+  async recordConflictToHistory(projectId: string, _l: Project, _r: Project, reason: string): Promise<void> {
     this.logger.info('检测到冲突（LWW 自动处理）', { projectId, reason });
   }
   
-  /**
-   * 设置同步模式
-   */
+  /** 设置同步模式 */
   setSyncMode(mode: 'automatic' | 'manual' | 'completely-manual'): void {
     this.syncModeService.setMode(mode);
   }
   
-  /**
-   * 设置是否启用感知（简化：空实现）
-   */
-  async setPerceptionEnabled(_enabled: boolean): Promise<void> {
-    // LWW 简化：不再需要设备感知功能
-  }
+  /** 设置是否启用感知（LWW 简化：空实现） */
+  async setPerceptionEnabled(_enabled: boolean): Promise<void> { /* no-op */ }
   
-  /**
-   * 手动触发同步（所有模式下可用）
-   */
+  /** 手动触发同步（所有模式下可用） */
   async triggerManualSync(direction: SyncDirection = 'both'): Promise<void> {
     await this.syncModeService.triggerSync(direction);
   }
