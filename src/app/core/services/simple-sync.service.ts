@@ -14,6 +14,7 @@
  */
 
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
@@ -22,6 +23,7 @@ import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { CircuitBreakerService } from '../../../services/circuit-breaker.service';
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
+import { EventBusService } from '../../../services/event-bus.service';
 import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
@@ -96,6 +98,7 @@ export class SimpleSyncService {
   private readonly circuitBreaker = inject(CircuitBreakerService);
   private readonly clockSync = inject(ClockSyncService);
   private readonly mobileSync = inject(MobileSyncStrategyService);
+  private readonly eventBus = inject(EventBusService);
   private readonly destroyRef = inject(DestroyRef);
   
   /**
@@ -447,6 +450,11 @@ export class SimpleSyncService {
   }
   
   constructor() {
+    // 【技术债务修复】订阅会话恢复事件，替代 injector hack
+    this.eventBus.onSessionRestored$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(() => this.resetSessionExpired());
+    
     // 【Senior Consultant P0】优先初始化 IndexedDB，然后迁移 localStorage 数据
     this.initRetryQueueDb().then(() => {
       this.loadRetryQueueFromStorage(); // 恢复持久化的重试队列（优先 IDB，降级 localStorage）

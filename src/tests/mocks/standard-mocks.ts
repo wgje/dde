@@ -364,6 +364,36 @@ export const createMockClockSync = () => ({
 });
 
 /**
+ * EventBusService Mock
+ * 用于解耦循环依赖测试
+ */
+export const createMockEventBus = () => {
+  const mockPipe = { subscribe: vi.fn() };
+  
+  return {
+    // Observable 流（返回可 pipe 的对象）
+    onUndoRequest$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onRedoRequest$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onProjectSwitch$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onSyncStatus$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onForceSyncRequest$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onTaskUpdate$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    onSessionRestored$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    allEvents$: { pipe: vi.fn().mockReturnValue(mockPipe) },
+    lastEvent: vi.fn().mockReturnValue(null),
+    
+    // 发布方法
+    requestUndo: vi.fn(),
+    requestRedo: vi.fn(),
+    publishProjectSwitch: vi.fn(),
+    publishSyncStatus: vi.fn(),
+    requestForceSync: vi.fn(),
+    publishTaskUpdate: vi.fn(),
+    publishSessionRestored: vi.fn(),
+  };
+};
+
+/**
  * StorageAdapterService Mock
  */
 export const createMockStorageAdapter = () => ({
@@ -517,6 +547,7 @@ export function createStandardMocks(options: {
   const networkAwareness = createMockNetworkAwareness();
   const actionQueue = createMockActionQueue();
   const undo = createMockUndo();
+  const eventBus = createMockEventBus();
   const { destroyRef, triggerDestroy } = createMockDestroyRef();
   
   return {
@@ -529,6 +560,7 @@ export function createStandardMocks(options: {
     networkAwareness,
     actionQueue,
     undo,
+    eventBus,
     destroyRef,
     triggerDestroy,
     
@@ -547,6 +579,7 @@ export function createStandardMocks(options: {
         { provide: 'NetworkAwarenessService', useValue: networkAwareness },
         { provide: 'ActionQueueService', useValue: actionQueue },
         { provide: 'UndoService', useValue: undo },
+        { provide: 'EventBusService', useValue: eventBus },
         { provide: DestroyRef, useValue: destroyRef },
       ];
     },
@@ -567,4 +600,5 @@ export type MockNetworkAwareness = ReturnType<typeof createMockNetworkAwareness>
 export type MockActionQueue = ReturnType<typeof createMockActionQueue>;
 export type MockUndo = ReturnType<typeof createMockUndo>;
 export type MockTabSync = ReturnType<typeof createMockTabSync>;
+export type MockEventBus = ReturnType<typeof createMockEventBus>;
 export type MockDestroyRef = ReturnType<typeof createMockDestroyRef>;

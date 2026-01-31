@@ -64,6 +64,7 @@
  * └─────────────────┘   └─────────────────┘   └─────────────────┘
  */
 import { Injectable, inject, DestroyRef } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { LoggerService } from './logger.service';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
@@ -80,6 +81,7 @@ import { AttachmentService } from './attachment.service';
 import { LayoutService } from './layout.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { ChangeTrackerService } from './change-tracker.service';
+import { EventBusService } from './event-bus.service';
 import { 
   Task, Project, ThemeType, Attachment 
 } from '../models';
@@ -126,6 +128,7 @@ export class StoreService {
   private layoutService = inject(LayoutService);
   private optimisticState = inject(OptimisticStateService);
   private changeTracker = inject(ChangeTrackerService);
+  private eventBus = inject(EventBusService);
   private destroyRef = inject(DestroyRef);
   
   /** 回收站清理定时器 */
@@ -231,6 +234,15 @@ export class StoreService {
   readonly onConflict$ = this.sync.onConflict$;
 
   constructor() {
+    // 订阅事件总线的撤销/重做请求（解决循环依赖）
+    this.eventBus.onUndoRequest$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(() => this.undo());
+    
+    this.eventBus.onRedoRequest$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(() => this.redo());
+    
     // 初始化远程变更处理
     this.remoteChangeHandler.setupCallbacks(() => this.session.loadProjects());
     

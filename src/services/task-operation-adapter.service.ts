@@ -29,9 +29,10 @@
  * ✗ 任务 CRUD 逻辑 → TaskOperationService
  * ✗ 数据持久化 → SyncCoordinatorService
  */
-import { Injectable, inject, Injector, Type } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { TaskOperationService } from './task-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
+import { EventBusService } from './event-bus.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
@@ -69,7 +70,7 @@ export class TaskOperationAdapterService {
   private toastService = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOpsAdapter');
-  private readonly injector = inject(Injector);
+  private readonly eventBus = inject(EventBusService);
   
   /** 上次更新类型 */
   private lastUpdateType: 'content' | 'structure' | 'position' = 'structure';
@@ -1158,22 +1159,6 @@ export class TaskOperationAdapterService {
   
   /** 更新锁：防止快照和更新之间的竞态条件 */
   private isUpdating = false;
-  
-  /**
-   * 获取 StoreService 实例（延迟注入避免循环依赖）
-   * 使用 injector 动态获取
-   */
-  private getStoreService(): { undo: () => void } | null {
-    try {
-      // 使用 Angular Injector 动态获取 StoreService
-      // 延迟导入避免循环依赖（StoreService -> TaskOperationAdapterService -> StoreService）
-      const StoreService = this.injector.get('StoreService' as unknown as Type<{ undo: () => void }>);
-      return StoreService;
-    } catch (e) {
-      this.logger.warn('无法获取 StoreService（可能存在循环依赖）', e);
-      return null;
-    }
-  }
   
   /**
    * 执行撤销操作（内部方法，用于 Toast 回调）

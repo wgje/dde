@@ -24,6 +24,7 @@ import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { CircuitBreakerService } from '../../../services/circuit-breaker.service';
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
+import { EventBusService } from '../../../services/event-bus.service';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
@@ -238,6 +239,16 @@ describe('SimpleSyncService', () => {
       onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); }
     };
     
+    // Mock EventBusService
+    const mockEventBus = {
+      onSessionRestored$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
+      onUndoRequest$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
+      onRedoRequest$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
+      publishSyncStatus: vi.fn(),
+      publishSessionRestored: vi.fn(),
+      requestForceSync: vi.fn()
+    };
+    
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useValue: mockSupabase },
@@ -248,6 +259,7 @@ describe('SimpleSyncService', () => {
         { provide: CircuitBreakerService, useValue: mockCircuitBreaker },
         { provide: ClockSyncService, useValue: mockClockSync },
         { provide: MobileSyncStrategyService, useValue: mockMobileSync },
+        { provide: EventBusService, useValue: mockEventBus },
         { provide: DestroyRef, useValue: mockDestroyRef }
       ]
     });

@@ -33,20 +33,22 @@ export default [
       '@typescript-eslint': tseslint
     },
     rules: {
-      // TypeScript 规则
-      '@typescript-eslint/no-unused-vars': ['warn', { 
+      // TypeScript 规则 - 技术债务清理：升级为 error 级别
+      '@typescript-eslint/no-unused-vars': ['error', { 
         argsIgnorePattern: '^_',
         varsIgnorePattern: '^_',
         destructuredArrayIgnorePattern: '^_',
         caughtErrors: 'none' // 忽略 catch 中未使用的错误变量
       }],
       '@typescript-eslint/explicit-function-return-type': 'off',
-      '@typescript-eslint/no-explicit-any': 'warn', // Phase 4: 类型安全增强
+      '@typescript-eslint/no-explicit-any': 'error', // 技术债务清理：禁止 any 类型
       '@typescript-eslint/no-non-null-assertion': 'off',
       
-      // 通用规则 - 允许调试用的 console
-      'no-console': 'off', // 项目使用 LoggerService，console 用于调试
-      'prefer-const': 'warn',
+      // 通用规则 - 技术债务清理：禁止生产代码使用 console
+      'no-console': ['error', { 
+        allow: ['warn', 'error'] // 允许 console.warn/error 用于紧急情况
+      }],
+      'prefer-const': 'error',
       'no-duplicate-imports': 'error'
     }
   },

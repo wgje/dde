@@ -10,11 +10,12 @@
  * - 手动登出 vs Token 过期区分
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
+import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
 import { AuthService } from './auth.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { EventBusService } from './event-bus.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -68,11 +69,22 @@ describe('AuthService', () => {
       signOut: vi.fn().mockResolvedValue(undefined),
     };
     
+    const mockEventBus = {
+      onSessionRestored$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
+      publishSessionRestored: vi.fn(),
+    };
+    
+    const mockDestroyRef = {
+      onDestroy: vi.fn(),
+    };
+    
     injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useValue: mockSupabaseClient },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: EventBusService, useValue: mockEventBus },
+        { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
     
