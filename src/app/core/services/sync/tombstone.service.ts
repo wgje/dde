@@ -305,4 +305,51 @@ export class TombstoneService {
       // 不抛出，因为任务已经删除，附件清理失败只是资源浪费，不影响功能
     }
   }
+  
+  // ==================== 便捷 API ====================
+  
+  /**
+   * 获取任务 tombstone ID 列表
+   * 返回本地缓存的所有 tombstone IDs（不查询云端）
+   */
+  getTaskTombstones(projectId: string): string[] {
+    return Array.from(this.getLocalTombstones(projectId));
+  }
+  
+  /**
+   * 失效缓存（invalidateTombstoneCache 的别名）
+   */
+  invalidateCache(projectId: string): void {
+    this.invalidateTombstoneCache(projectId);
+  }
+  
+  // ==================== 连接 Tombstone 管理 ====================
+  
+  /** 本地连接 tombstone */
+  private localConnectionTombstones = new Map<string, { id: string; timestamp: number }[]>();
+  
+  /**
+   * 记录连接删除
+   */
+  recordConnectionDeletion(connectionId: string, timestamp: number): void {
+    const key = 'global'; // 连接 tombstone 不按项目分组
+    if (!this.localConnectionTombstones.has(key)) {
+      this.localConnectionTombstones.set(key, []);
+    }
+    this.localConnectionTombstones.get(key)!.push({ id: connectionId, timestamp });
+    
+    // 清理过期的 tombstone（超过 24 小时）
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const filtered = this.localConnectionTombstones.get(key)!.filter(
+      t => t.timestamp > cutoff
+    );
+    this.localConnectionTombstones.set(key, filtered);
+  }
+  
+  /**
+   * 获取连接 tombstone 列表
+   */
+  getConnectionTombstones(): { id: string; timestamp: number }[] {
+    return this.localConnectionTombstones.get('global') || [];
+  }
 }

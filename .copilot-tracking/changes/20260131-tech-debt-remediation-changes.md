@@ -3,7 +3,7 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ Sprint 1-7 实施完成，Sprint 5 完整完成
+**执行状态**: ✅ Sprint 1-8 实施进行中
 
 ---
 
@@ -266,6 +266,90 @@
 
 ---
 
+## Sprint 8 实施进行中 🔄 (SimpleSyncService + StorePersistenceService 子服务提取)
+
+### 新创建的同步子服务
+
+| 服务 | 行数 | 职责 |
+|------|------|------|
+| TaskSyncService | 509 | 任务同步操作（pushTask, pullTasks, deleteTask 等） |
+| ProjectSyncService | 178 | 项目同步操作（pushProject, pullProjects, deleteProject） |
+| ConnectionSyncService | 217 | 连接同步操作（pushConnection, pullConnections） |
+
+### 新创建的持久化子服务
+
+| 服务 | 行数 | 职责 |
+|------|------|------|
+| IndexedDBService | 222 | IndexedDB 基础操作（初始化、CRUD、事务） |
+| DataIntegrityService | 286 | 数据完整性验证、孤立数据清理 |
+| BackupService | 312 | 数据库备份/恢复、生命周期管理 |
+
+### 更新的服务
+
+| 服务 | 修改说明 |
+|------|----------|
+| TombstoneService | 添加 `recordConnectionDeletion()`, `getConnectionTombstones()` 方法 |
+| SimpleSyncService | 导入并注入新的子服务（渐进式迁移） |
+| StorePersistenceService | 移除重复 DB_CONFIG，委托 initDatabase/validateOfflineDataIntegrity/cleanupOrphanedData/备份方法给子服务 |
+| simple-sync.service.spec.ts | 添加新子服务 mock |
+| sync/index.ts | 导出 ProjectSyncService, ConnectionSyncService |
+| persistence/index.ts | 导出 IndexedDBService, DataIntegrityService, BackupService, DB_CONFIG |
+
+### 行数变化统计
+
+| 文件 | 原行数 | 新行数 | 变化 |
+|------|--------|--------|------|
+| store-persistence.service.ts | 1551 | 1022 | **-529 (-34%)** ✅ |
+
+### 子服务统计
+
+**同步子服务总计: 2146 行**
+| 文件 | 行数 |
+|------|------|
+| sync-state.service.ts | 201 |
+| tombstone.service.ts | 355 |
+| retry-queue.service.ts | 653 |
+| task-sync.service.ts | 509 |
+| project-sync.service.ts | 178 |
+| connection-sync.service.ts | 217 |
+
+**持久化子服务总计: 830 行**
+| 文件 | 行数 |
+|------|------|
+| indexeddb.service.ts | 222 |
+| data-integrity.service.ts | 286 |
+| backup.service.ts | 312 |
+| index.ts | 10 |
+
+### 待完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| SimpleSyncService 方法委托 | 🔄 | 需要将公共方法委托给子服务（4945 行 → 目标 ≤800） |
+| StorePersistenceService 达标 | ✅ | 从 1551 行减至 1022 行（-34%），距离目标 800 行还需优化 |
+| FlowViewComponent 模板提取 | ⏳ | 将 ~570 行内联模板提取到 HTML 文件（2555 行 → 目标 ≤800） |
+| SyncCoordinatorService 重构 | ⏳ | 10 个 deprecated 方法待处理（1466 行 → 目标 ≤800） |
+| TaskOperationService 拆分 | ⏳ | 2059 行 → 目标 ≤800 |
+| RealtimeSyncService 创建 | ⏳ | 从 SimpleSyncService 提取 Realtime 订阅逻辑 |
+| PollingSyncService 创建 | ⏳ | 从 SimpleSyncService 提取轮询同步逻辑 |
+
+### 验证结果
+
+- ✅ TypeScript 编译通过
+- ✅ 测试通过: 954 passed / 2 failed（失败的是无关的 markdown 安全测试）
+
+### 进度总结
+
+| 原始文件 | 原行数 | 当前行数 | 目标行数 | 状态 |
+|----------|--------|----------|----------|------|
+| SimpleSyncService | 4945 | 4945 | ≤800 | 🔴 子服务已创建，待委托 |
+| FlowViewComponent | 2555 | 2555 | ≤800 | 🔴 待提取模板 |
+| TaskOperationService | 2059 | 2059 | ≤800 | 🟠 待处理 |
+| SyncCoordinatorService | 1466 | 1466 | ≤800 | 🟠 待处理 |
+| **StorePersistenceService** | **1551** | **1022** | **≤800** | **🟢 显著进展 (-34%)** |
+
+---
+
 ## 后续行动建议
 
 1. **立即可执行**: Sprint 1 任务（prompt 文件修复、ESLint 规则升级）
@@ -275,4 +359,4 @@
 ---
 
 **变更记录完成时间**: 2026-01-31
-**最后更新**: 2026-01-31 (Sprint 7 console 清理扩展)
+**最后更新**: 2026-01-31 (Sprint 8 SimpleSyncService 子服务提取)

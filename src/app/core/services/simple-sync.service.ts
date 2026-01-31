@@ -24,8 +24,15 @@ import { CircuitBreakerService } from '../../../services/circuit-breaker.service
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { EventBusService } from '../../../services/event-bus.service';
-// Sprint 3 技术债务修复：拆分的子服务（渐进式迁移）
-import { SyncStateService, TombstoneService, RetryQueueService } from './sync';
+// Sprint 3-7 技术债务修复：拆分的子服务（渐进式迁移）
+import { 
+  SyncStateService, 
+  TombstoneService, 
+  RetryQueueService,
+  TaskSyncService,
+  ProjectSyncService,
+  ConnectionSyncService
+} from './sync';
 import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
@@ -107,6 +114,11 @@ export class SimpleSyncService {
   private readonly syncStateService = inject(SyncStateService);
   private readonly tombstoneService = inject(TombstoneService);
   private readonly retryQueueService = inject(RetryQueueService);
+  
+  // Sprint 7 技术债务修复：新增子服务（委托模式）
+  private readonly taskSyncService = inject(TaskSyncService);
+  private readonly projectSyncService = inject(ProjectSyncService);
+  private readonly connectionSyncService = inject(ConnectionSyncService);
   
   /**
    * 获取 Supabase 客户端，离线模式返回 null

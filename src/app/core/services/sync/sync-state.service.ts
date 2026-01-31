@@ -190,4 +190,12 @@ export class SyncStateService {
   setLoadingRemote(loading: boolean): void {
     this.isLoadingRemote.set(loading);
   }
+  
+  /**
+   * 检查会话是否已过期
+   * 返回 boolean 而非 Signal，便于在非响应式代码中使用
+   */
+  isSessionExpired(): boolean {
+    return this.syncState().sessionExpired;
+  }
 }

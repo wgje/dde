@@ -25,7 +25,7 @@ import { CircuitBreakerService } from '../../../services/circuit-breaker.service
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { EventBusService } from '../../../services/event-bus.service';
-import { SyncStateService, TombstoneService, RetryQueueService } from './sync';
+import { SyncStateService, TombstoneService, RetryQueueService, TaskSyncService, ProjectSyncService, ConnectionSyncService } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
@@ -319,6 +319,30 @@ describe('SimpleSyncService', () => {
       MAX_RETRIES: 5
     };
     
+    // Sprint 8 新增子服务 Mock
+    const mockTaskSync = {
+      pushTask: vi.fn().mockResolvedValue(true),
+      pushTaskPosition: vi.fn().mockResolvedValue(true),
+      pullTasks: vi.fn().mockResolvedValue([]),
+      deleteTask: vi.fn().mockResolvedValue(true),
+      purgeTasksFromCloud: vi.fn().mockResolvedValue(true),
+      softDeleteTasksBatch: vi.fn().mockResolvedValue(true),
+      topologicalSortTasks: vi.fn().mockImplementation((tasks) => tasks)
+    };
+    
+    const mockProjectSync = {
+      pushProject: vi.fn().mockResolvedValue(true),
+      pullProjects: vi.fn().mockResolvedValue([]),
+      deleteProjectFromCloud: vi.fn().mockResolvedValue(true)
+    };
+    
+    const mockConnectionSync = {
+      pushConnection: vi.fn().mockResolvedValue(true),
+      pullConnections: vi.fn().mockResolvedValue([]),
+      deleteConnectionFromCloud: vi.fn().mockResolvedValue(true),
+      softDeleteConnectionsBatch: vi.fn().mockResolvedValue(true)
+    };
+    
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useValue: mockSupabase },
@@ -334,7 +358,11 @@ describe('SimpleSyncService', () => {
         // Sprint 3 新增的子服务
         { provide: SyncStateService, useValue: mockSyncState },
         { provide: TombstoneService, useValue: mockTombstone },
-        { provide: RetryQueueService, useValue: mockRetryQueue }
+        { provide: RetryQueueService, useValue: mockRetryQueue },
+        // Sprint 8 新增的子服务
+        { provide: TaskSyncService, useValue: mockTaskSync },
+        { provide: ProjectSyncService, useValue: mockProjectSync },
+        { provide: ConnectionSyncService, useValue: mockConnectionSync }
       ]
     });
     
