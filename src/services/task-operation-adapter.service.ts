@@ -41,6 +41,7 @@ import { LayoutService } from './layout.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { ConnectionAdapterService } from './connection-adapter.service';
 import { Project, Task, Attachment, Connection } from '../models';
 import { Result, OperationError } from '../utils/result';
 
@@ -59,6 +60,12 @@ export class TaskOperationAdapterService {
   readonly core = inject(TaskOperationService);
   /** @deprecated 使用 this.core 替代 */
   private taskOps = this.core;
+  
+  /**
+   * 连接操作适配器 - 处理跨树连接相关操作
+   * 从本服务拆分出来，减少文件行数
+   */
+  readonly connectionAdapter = inject(ConnectionAdapterService);
   
   private syncCoordinator = inject(SyncCoordinatorService);
   private changeTracker = inject(ChangeTrackerService);
@@ -1054,57 +1061,25 @@ export class TaskOperationAdapterService {
     setTimeout(checkSync, 200);
   }
   
-  // ========== 连接操作 ==========
+  // ========== 连接操作（委托给 ConnectionAdapterService） ==========
   
+  /**
+   * @deprecated 使用 connectionAdapter.addCrossTreeConnection() 替代
+   */
   addCrossTreeConnection(sourceId: string, targetId: string): void {
-    this.taskOps.addCrossTreeConnection(sourceId, targetId);
-    
-    // 桌面端：简单提示（使用 Ctrl+Z 撤销）
-    // 移动端：显示带撤回按钮的 Toast
-    const isMobile = this.uiState.isMobile();
-    
-    this.toastService.success(
-      '已添加关联',
-      undefined,
-      isMobile ? {
-        duration: 5000,
-        action: {
-          label: '撤销',
-          onClick: () => {
-            this.logger.info('用户撤回添加连接操作', { sourceId, targetId });
-            this.performUndo();
-          }
-        }
-      } : { duration: 3000 }
-    );
+    this.connectionAdapter.addCrossTreeConnection(sourceId, targetId);
   }
   
+  /**
+   * @deprecated 使用 connectionAdapter.removeConnection() 替代
+   */
   removeConnection(sourceId: string, targetId: string): void {
-    this.taskOps.removeConnection(sourceId, targetId);
-    
-    // 桌面端：简单提示（使用 Ctrl+Z 撤销）
-    // 移动端：显示带撤回按钮的 Toast
-    const isMobile = this.uiState.isMobile();
-    
-    this.toastService.success(
-      '已删除关联',
-      undefined,
-      isMobile ? {
-        duration: 5000,
-        action: {
-          label: '撤销',
-          onClick: () => {
-            this.logger.info('用户撤回删除连接操作', { sourceId, targetId });
-            this.performUndo();
-          }
-        }
-      } : { duration: 3000 }
-    );
+    this.connectionAdapter.removeConnection(sourceId, targetId);
   }
   
   /**
    * 重连跨树连接（原子操作）
-   * 在一个撤销单元内删除旧连接并创建新连接
+   * @deprecated 使用 connectionAdapter.relinkCrossTreeConnection() 替代
    */
   relinkCrossTreeConnection(
     oldSourceId: string,
@@ -1112,34 +1087,15 @@ export class TaskOperationAdapterService {
     newSourceId: string,
     newTargetId: string
   ): void {
-    this.taskOps.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
-    
-    // 桌面端：简单提示（使用 Ctrl+Z 撤销）
-    // 移动端：显示带撤回按钮的 Toast
-    const isMobile = this.uiState.isMobile();
-    
-    this.toastService.success(
-      '已重连关联',
-      undefined,
-      isMobile ? {
-        duration: 5000,
-        action: {
-          label: '撤销',
-          onClick: () => {
-            this.logger.info('用户撤回重连操作', { oldSourceId, oldTargetId, newSourceId, newTargetId });
-            this.performUndo();
-          }
-        }
-      } : { duration: 3000 }
-    );
+    this.connectionAdapter.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
   }
   
   /**
    * 更新连接内容（标题和描述）
+   * @deprecated 使用 connectionAdapter.updateConnectionContent() 替代
    */
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
-    this.markEditing();
-    this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
+    this.connectionAdapter.updateConnectionContent(sourceId, targetId, title, description);
   }
   
   // ========== 查询方法 ==========

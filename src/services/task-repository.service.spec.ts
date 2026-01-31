@@ -98,6 +98,7 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
     supabaseMock = createSupabaseMock();
     const injector = Injector.create({
       providers: [
+        { provide: LoggerService, useValue: mockLoggerService },
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });

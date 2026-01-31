@@ -3,7 +3,7 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ Sprint 1-6 实施完成，Sprint 5 部分完成
+**执行状态**: ✅ Sprint 1-7 实施完成，Sprint 5 完整完成
 
 ---
 
@@ -99,7 +99,8 @@
 | 服务 | 原行数 | 新行数 | 变化 |
 |------|--------|--------|------|
 | TaskOperationService | 2282 | 2059 | -223 (-10%) |
-| FlowDiagramService | 2385 | 2391 | +6 (注入配置) |
+| FlowDiagramService | 2385 → 2391 | 1129 | -1256 (-53%) ✅ |
+| TaskOperationAdapterService | 1439 | 1394 | -45 (-3%) |
 
 ### 新创建服务
 
@@ -107,13 +108,29 @@
 |------|------|------|
 | TaskTrashService | 399 | 回收站管理（软删除/恢复/清理） |
 | FlowOverviewService | 887 | 小地图管理（初始化/自动缩放/交互） |
+| ConnectionAdapterService | 185 | 连接操作适配器（从 TaskOperationAdapterService 拆分） |
+
+### Sprint 5 完成详情（本次会话）
+
+#### FlowDiagramService 重构
+- 删除死代码：`setupOverviewAutoScale()` (~540 行)
+- 删除死代码：`attachOverviewPointerListeners()` (~500 行)
+- 删除死代码：`calculateTotalBounds()` (~17 行)
+- 删除 22 个未使用的 overview 相关私有变量
+- 保留 `overview` 和 `overviewContainer` 引用供 suspend/resume 使用
+- **总计减少 1109 行代码 (~50%)**
+
+#### TaskOperationAdapterService 重构
+- 创建 ConnectionAdapterService (185 行)
+- 连接操作方法委托给 ConnectionAdapterService
+- 更新测试添加 ConnectionAdapterService mock
 
 ### 待完成
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| FlowDiagramService 完整迁移 | ⏳ | 移除 ~800 行重复代码 |
-| TaskOperationAdapterService 拆分 | ⏳ | 1438 行 |
+| FlowDiagramService 完整迁移 | ✅ | 死代码已清理，从 2391 → 1129 行 |
+| TaskOperationAdapterService 拆分 | ✅ | ConnectionAdapterService 已提取 |
 
 ---
 

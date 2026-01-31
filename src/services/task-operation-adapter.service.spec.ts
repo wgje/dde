@@ -18,6 +18,8 @@ import { LayoutService } from './layout.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { EventBusService } from './event-bus.service';
+import { ConnectionAdapterService } from './connection-adapter.service';
 import { Project, Task } from '../models';
 import { success } from '../utils/result';
 
@@ -119,6 +121,17 @@ const mockUiStateService = {
   markEditing: vi.fn(),  // 【关键修复】添加 markEditing mock
 };
 const mockLayoutService = {};
+const mockEventBusService = {
+  emit: vi.fn(),
+  on: vi.fn(() => ({ unsubscribe: vi.fn() })),
+};
+
+const mockConnectionAdapterService = {
+  addCrossTreeConnection: vi.fn(),
+  removeConnection: vi.fn(),
+  relinkCrossTreeConnection: vi.fn(),
+  updateConnectionContent: vi.fn(),
+};
 
 describe('TaskOperationAdapterService - moveTaskToStage', () => {
   let service: TaskOperationAdapterService;
@@ -142,6 +155,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiStateService },
         { provide: LayoutService, useValue: mockLayoutService },
+        { provide: EventBusService, useValue: mockEventBusService },
+        { provide: ConnectionAdapterService, useValue: mockConnectionAdapterService },
       ],
     });
 
