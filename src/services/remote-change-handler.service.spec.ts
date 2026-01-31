@@ -119,7 +119,7 @@ describe('RemoteChangeHandlerService', () => {
       
       expect(onLoadProjects).toHaveBeenCalled();
       // 不应调用 loadSingleProject（handleIncrementalUpdate 的标志）
-      expect(mockSyncCoordinator.loadSingleProject).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
     });
     
     it('无 eventType 的事件应调用 onLoadProjects', async () => {
@@ -149,7 +149,7 @@ describe('RemoteChangeHandlerService', () => {
       await projectChangeCallback!(insertPayload);
       
       // handleIncrementalUpdate 会调用 loadSingleProject
-      expect(mockSyncCoordinator.loadSingleProject).toHaveBeenCalledWith('project-1', 'user-123');
+      expect(mockSyncCoordinator.core.loadSingleProject).toHaveBeenCalledWith('project-1', 'user-123');
       // 不应调用 onLoadProjects
       expect(onLoadProjects).not.toHaveBeenCalled();
     });
@@ -165,7 +165,7 @@ describe('RemoteChangeHandlerService', () => {
       };
       await projectChangeCallback!(updatePayload);
       
-      expect(mockSyncCoordinator.loadSingleProject).toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).toHaveBeenCalled();
       expect(onLoadProjects).not.toHaveBeenCalled();
     });
     
@@ -200,7 +200,7 @@ describe('RemoteChangeHandlerService', () => {
       await projectChangeCallback!(payload);
       
       // 应跳过更新
-      expect(mockSyncCoordinator.loadSingleProject).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalledWith('跳过项目级远程更新');
     });
     
@@ -216,7 +216,7 @@ describe('RemoteChangeHandlerService', () => {
       };
       await projectChangeCallback!(payload);
       
-      expect(mockSyncCoordinator.loadSingleProject).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalledWith(
         '跳过远程项目更新',
         expect.objectContaining({ hasPendingLocalChanges: true })
@@ -236,7 +236,7 @@ describe('RemoteChangeHandlerService', () => {
       };
       await projectChangeCallback!(payload);
       
-      expect(mockSyncCoordinator.loadSingleProject).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalledWith(
         '跳过远程项目更新',
         expect.objectContaining({ inEditGuard: true })

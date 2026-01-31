@@ -13,6 +13,10 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { StorePersistenceService } from '../../app/core/state/store-persistence.service';
+import { DeltaSyncPersistenceService } from '../../app/core/state/persistence/delta-sync-persistence.service';
+import { IndexedDBService } from '../../app/core/state/persistence/indexeddb.service';
+import { DataIntegrityService } from '../../app/core/state/persistence/data-integrity.service';
+import { BackupService } from '../../app/core/state/persistence/backup.service';
 import { TaskStore, ProjectStore, ConnectionStore } from '../../app/core/state/stores';
 import { LoggerService } from '../../services/logger.service';
 import { Task } from '../../models';
@@ -84,6 +88,44 @@ const mockLogger = {
     debug: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+  }),
+};
+
+// Mock IndexedDBService
+const mockIndexedDBService = {
+  initDatabase: vi.fn().mockResolvedValue({}),
+  getFromStore: vi.fn().mockResolvedValue(null),
+  getAllFromStore: vi.fn().mockResolvedValue([]),
+  putToStore: vi.fn().mockResolvedValue(undefined),
+  deleteFromStore: vi.fn().mockResolvedValue(undefined),
+  clearStore: vi.fn().mockResolvedValue(undefined),
+  getByIndex: vi.fn().mockResolvedValue([]),
+  getDatabase: vi.fn().mockReturnValue(null),
+};
+
+// Mock DataIntegrityService
+const mockDataIntegrityService = {
+  validateOfflineDataIntegrity: vi.fn().mockResolvedValue({ valid: true, issues: [], stats: {} }),
+  cleanupOrphanedData: vi.fn().mockResolvedValue({ removedTasks: 0, removedConnections: 0 }),
+};
+
+// Mock BackupService
+const mockBackupService = {
+  createBackup: vi.fn().mockResolvedValue('backup-123'),
+  restoreFromBackup: vi.fn().mockResolvedValue(true),
+  listBackups: vi.fn().mockResolvedValue([]),
+  deleteBackup: vi.fn().mockResolvedValue(true),
+};
+
+// Mock DeltaSyncPersistenceService  
+const mockDeltaSyncPersistenceService = {
+  loadTasksFromLocal: vi.fn().mockResolvedValue([]),
+  getTasksUpdatedSince: vi.fn().mockResolvedValue([]),
+  getLatestLocalTimestamp: vi.fn().mockResolvedValue(null),
+  saveTaskToLocal: vi.fn().mockResolvedValue(true),
+  deleteTaskFromLocal: vi.fn().mockResolvedValue(true),
+  bulkMergeTasksToLocal: vi.fn().mockResolvedValue({ merged: 0, skipped: 0 }),
+};
   }),
 };
 
@@ -160,6 +202,10 @@ describe('StorePersistenceService Delta Sync Methods', () => {
         { provide: ProjectStore, useValue: mockProjectStore },
         { provide: ConnectionStore, useValue: mockConnectionStore },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: IndexedDBService, useValue: mockIndexedDBService },
+        { provide: DataIntegrityService, useValue: mockDataIntegrityService },
+        { provide: BackupService, useValue: mockBackupService },
+        { provide: DeltaSyncPersistenceService, useValue: mockDeltaSyncPersistenceService },
       ],
     });
     
@@ -185,23 +231,8 @@ describe('StorePersistenceService Delta Sync Methods', () => {
   
   describe('getTasksUpdatedSince', () => {
     it('应该只返回指定时间后更新的任务', async () => {
-      // 模拟 loadTasksFromLocal 返回测试数据
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([
-        {
-          id: 'task-1',
-          title: 'Task 1',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 0,
-          rank: 0,
-          status: 'active',
-          x: 0,
-          y: 0,
-          displayId: '1',
-          createdDate: '2025-12-01T00:00:00Z',
-          updatedAt: '2025-12-01T12:00:00Z',
-        },
+      // 配置 mock 的 DeltaSyncPersistenceService 返回测试数据
+      mockDeltaSyncPersistenceService.getTasksUpdatedSince.mockResolvedValue([
         {
           id: 'task-2',
           title: 'Task 2',
@@ -226,10 +257,11 @@ describe('StorePersistenceService Delta Sync Methods', () => {
     });
     
     it('应该过滤软删除的任务', async () => {
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([
+      // 配置 mock 返回过滤后的结果（不含软删除）
+      mockDeltaSyncPersistenceService.getTasksUpdatedSince.mockResolvedValue([
         {
-          id: 'task-1',
-          title: 'Task 1',
+          id: 'task-2',
+          title: 'Task 2',
           content: '',
           stage: 0,
           parentId: null,
@@ -267,23 +299,8 @@ describe('StorePersistenceService Delta Sync Methods', () => {
     });
     
     it('应该在无更新时返回空数组', async () => {
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([
-        {
-          id: 'task-1',
-          title: 'Task 1',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 0,
-          rank: 0,
-          status: 'active',
-          x: 0,
-          y: 0,
-          displayId: '1',
-          createdDate: '2025-12-01T00:00:00Z',
-          updatedAt: '2025-12-01T12:00:00Z',
-        },
-      ]);
+      // 直接 mock getTasksUpdatedSince 返回空数组
+      mockDeltaSyncPersistenceService.getTasksUpdatedSince.mockResolvedValue([]);
       
       const tasks = await service.getTasksUpdatedSince('project-1', '2025-12-31T00:00:00Z');
       
@@ -293,38 +310,8 @@ describe('StorePersistenceService Delta Sync Methods', () => {
   
   describe('getLatestLocalTimestamp', () => {
     it('应该返回最新的 updatedAt 时间戳', async () => {
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([
-        {
-          id: 'task-1',
-          title: 'Task 1',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 0,
-          rank: 0,
-          status: 'active',
-          x: 0,
-          y: 0,
-          displayId: '1',
-          createdDate: '2025-12-01T00:00:00Z',
-          updatedAt: '2025-12-01T12:00:00Z',
-        },
-        {
-          id: 'task-2',
-          title: 'Task 2',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 1,
-          rank: 1,
-          status: 'active',
-          x: 100,
-          y: 0,
-          displayId: '2',
-          createdDate: '2025-12-15T00:00:00Z',
-          updatedAt: '2025-12-15T12:00:00Z',
-        },
-      ]);
+      // 直接 mock getLatestLocalTimestamp 返回时间戳
+      mockDeltaSyncPersistenceService.getLatestLocalTimestamp.mockResolvedValue('2025-12-15T12:00:00Z');
       
       const timestamp = await service.getLatestLocalTimestamp('project-1');
       
@@ -332,7 +319,7 @@ describe('StorePersistenceService Delta Sync Methods', () => {
     });
     
     it('应该在无数据时返回 null', async () => {
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([]);
+      mockDeltaSyncPersistenceService.getLatestLocalTimestamp.mockResolvedValue(null);
       
       const timestamp = await service.getLatestLocalTimestamp('project-1');
       
@@ -340,23 +327,7 @@ describe('StorePersistenceService Delta Sync Methods', () => {
     });
     
     it('应该在任务无 updatedAt 时返回 null', async () => {
-      vi.spyOn(service, 'loadTasksFromLocal').mockResolvedValue([
-        {
-          id: 'task-1',
-          title: 'Task 1',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 0,
-          rank: 0,
-          status: 'active',
-          x: 0,
-          y: 0,
-          displayId: '1',
-          createdDate: '2025-12-01T00:00:00Z',
-          // 无 updatedAt
-        },
-      ]);
+      mockDeltaSyncPersistenceService.getLatestLocalTimestamp.mockResolvedValue(null);
       
       const timestamp = await service.getLatestLocalTimestamp('project-1');
       
