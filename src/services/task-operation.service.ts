@@ -3,6 +3,7 @@ import { Task, Project, Attachment } from '../models';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { TaskTrashService } from './task-trash.service';
+import { SubtreeOperationsService } from './subtree-operations.service';
 import { LAYOUT_CONFIG, FLOATING_TREE_CONFIG } from '../config';
 import {
   Result, OperationError, ErrorCodes, success, failure
@@ -61,6 +62,7 @@ export class TaskOperationService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOperation');
   private readonly trashService = inject(TaskTrashService);
+  private readonly subtreeOps = inject(SubtreeOperationsService);
   
   /** 重平衡锁定的阶段 */
   private rebalancingStages = new Set<number>();
@@ -182,7 +184,7 @@ export class TaskOperationService {
     // 🔴 浮动任务树：同源不变性验证
     // 确保父子任务必须同时在待分配区或同时在阶段中
     if (parentId) {
-      const consistencyCheck = this.validateParentChildStageConsistency(
+      const consistencyCheck = this.subtreeOps.validateParentChildStageConsistency(
         parentId, 
         targetStage, 
         activeP.tasks
@@ -739,7 +741,7 @@ export class TaskOperationService {
     // ========== 分支2: 浮动树整体分配 ==========
     if (isFromUnassigned && isToStage) {
       // 阶段溢出预检查
-      const capacityCheck = this.validateStageCapacity(taskId, newStage, activeP.tasks);
+      const capacityCheck = this.subtreeOps.validateStageCapacity(taskId, newStage, activeP.tasks);
       if (!capacityCheck.ok) {
         return capacityCheck;
       }
@@ -773,7 +775,7 @@ export class TaskOperationService {
     // ========== 分支4: 已分配任务阶段变更（原有逻辑增强） ==========
     if (!isFromUnassigned && isToStage) {
       // 阶段溢出预检查
-      const capacityCheck = this.validateStageCapacity(taskId, newStage, activeP.tasks);
+      const capacityCheck = this.subtreeOps.validateStageCapacity(taskId, newStage, activeP.tasks);
       if (!capacityCheck.ok) {
         return capacityCheck;
       }
@@ -884,7 +886,7 @@ export class TaskOperationService {
       root.rank = placed.rank;
       
       // 修复子树 rank 约束
-      this.fixSubtreeRanks(taskId, tasks);
+      this.subtreeOps.fixSubtreeRanks(taskId, tasks);
       
       return this.layoutService.rebalance({ ...p, tasks });
     });
@@ -908,7 +910,7 @@ export class TaskOperationService {
       }
       
       // 收集整个子树
-      const subtreeIds = this.collectSubtreeIds(taskId, tasks);
+      const subtreeIds = this.subtreeOps.collectSubtreeIds(taskId, tasks);
       const now = new Date().toISOString();
       
       // 将整个子树移回待分配区
@@ -989,7 +991,7 @@ export class TaskOperationService {
       
       // 级联更新子任务的 stage
       if (oldStage !== newStage) {
-        this.cascadeUpdateChildrenStage(target.id, newStage, tasks);
+        this.subtreeOps.cascadeUpdateChildrenStage(target.id, newStage, tasks);
       }
 
       const stageTasks = tasks.filter(t => t.stage === newStage && t.id !== taskId);
@@ -1034,7 +1036,7 @@ export class TaskOperationService {
       return failure(ErrorCodes.VALIDATION_ERROR, '目标任务不是源任务的直接子节点');
     }
 
-    if (this.wouldCreateCycle(taskId, sourceId, targetId, activeP.tasks)) {
+    if (this.subtreeOps.wouldCreateCycle(taskId, sourceId, targetId, activeP.tasks)) {
       return failure(ErrorCodes.LAYOUT_CYCLE_DETECTED, '操作会产生循环依赖');
     }
     
@@ -1045,7 +1047,7 @@ export class TaskOperationService {
       const target = tasks.find(t => t.id === targetId)!;
       const newTask = tasks.find(t => t.id === taskId)!;
       
-      const targetSubtreeIds = this.collectSubtreeIds(targetId, tasks);
+      const targetSubtreeIds = this.subtreeOps.collectSubtreeIds(targetId, tasks);
       
       const newTaskStage = (source.stage || 1) + 1;
       newTask.parentId = sourceId;
@@ -1236,10 +1238,8 @@ export class TaskOperationService {
       let newStage: number;
       
       if (newParentId === null) {
-        // 迁移到根节点（stage 1）
         newStage = 1;
       } else if (newParent) {
-        // 新父节点的下一级
         newStage = (newParent.stage ?? 0) + 1;
       } else {
         operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '新父任务不存在');
@@ -1248,84 +1248,24 @@ export class TaskOperationService {
       
       const stageOffset = newStage - oldStage;
       
-      // 收集子树所有任务 ID
-      const subtreeIds = this.collectSubtreeIds(taskId, tasks);
-      
-      // 更新子树中所有任务的 stage
-      const now = new Date().toISOString();
-      subtreeIds.forEach(id => {
-        const t = tasks.find(task => task.id === id);
-        if (t && t.stage !== null) {
-          t.stage = t.stage + stageOffset;
-          t.updatedAt = now;
-        }
-      });
+      // 收集子树并更新 stage（使用 SubtreeOperationsService）
+      const subtreeIds = this.subtreeOps.collectSubtreeIds(taskId, tasks);
+      this.subtreeOps.updateSubtreeStages(subtreeIds, stageOffset, tasks);
       
       // 更新目标任务的 parentId
       target.parentId = newParentId;
-      target.updatedAt = now;
+      target.updatedAt = new Date().toISOString();
       
-      // 计算新的 rank：放在新父任务的子节点末尾
-      const siblings = tasks.filter(t => 
-        t.parentId === newParentId && 
-        t.id !== taskId && 
-        !t.deletedAt
+      // 计算新的 rank（使用 SubtreeOperationsService）
+      target.rank = this.subtreeOps.computeNewRankForMigratedTask(taskId, newParentId, tasks);
+      
+      // 确保子树中所有任务的 rank 约束正确
+      this.subtreeOps.fixSubtreeRanks(taskId, tasks);
+      
+      // 更新 connections（使用 SubtreeOperationsService）
+      const connections = this.subtreeOps.updateParentChildConnections(
+        taskId, oldParentId, newParentId, p.connections
       );
-      
-      if (newParentId === null) {
-        // 根节点：找 stage 1 的根任务
-        const stage1Roots = tasks.filter(t => 
-          t.stage === 1 && 
-          !t.parentId && 
-          t.id !== taskId && 
-          !t.deletedAt
-        ).sort((a, b) => a.rank - b.rank);
-        
-        if (stage1Roots.length > 0) {
-          const lastRoot = stage1Roots[stage1Roots.length - 1];
-          target.rank = lastRoot.rank + LAYOUT_CONFIG.RANK_STEP;
-        } else {
-          target.rank = LAYOUT_CONFIG.RANK_ROOT_BASE;
-        }
-      } else if (newParent) {
-        // 有父节点：rank 必须大于父节点，且放在兄弟节点末尾
-        const siblingsSorted = siblings.sort((a, b) => a.rank - b.rank);
-        const parentRank = newParent.rank;
-        
-        if (siblingsSorted.length > 0) {
-          const lastSibling = siblingsSorted[siblingsSorted.length - 1];
-          target.rank = Math.max(parentRank + LAYOUT_CONFIG.RANK_STEP, lastSibling.rank + LAYOUT_CONFIG.RANK_STEP);
-        } else {
-          target.rank = parentRank + LAYOUT_CONFIG.RANK_STEP;
-        }
-      }
-      
-      // 确保子树中所有任务的 rank 约束正确（子节点 rank > 父节点 rank）
-      this.fixSubtreeRanks(taskId, tasks);
-      
-      // 更新 connections：移除旧的父子连接，添加新的父子连接
-      let connections = [...p.connections];
-      
-      // 移除旧的父子连接（如果存在）
-      if (oldParentId) {
-        connections = connections.filter(c => 
-          !(c.source === oldParentId && c.target === taskId)
-        );
-      }
-      
-      // 添加新的父子连接（如果新父节点存在）
-      if (newParentId) {
-        const existingConn = connections.find(c => 
-          c.source === newParentId && c.target === taskId
-        );
-        if (!existingConn) {
-          connections.push({
-            id: crypto.randomUUID(),
-            source: newParentId,
-            target: taskId
-          });
-        }
-      }
       
       return this.layoutService.rebalance({ ...p, tasks, connections });
     });
@@ -1333,96 +1273,6 @@ export class TaskOperationService {
     return operationResult;
   }
   
-  /**
-   * 级联更新子任务的 stage
-   * 当父任务移动到新阶段时，所有子任务的 stage 需要同步更新为 parentStage + 1
-   * 使用迭代算法避免栈溢出（符合 AGENTS.md 中的 MAX_TREE_DEPTH 限制要求）
-   */
-  private cascadeUpdateChildrenStage(parentId: string, parentNewStage: number, tasks: Task[]): void {
-    const MAX_DEPTH = 500; // 与 LayoutService 保持一致
-    const queue: { taskId: string; parentStage: number; depth: number }[] = [];
-    
-    // 获取父任务的直接子节点
-    const directChildren = tasks.filter(t => t.parentId === parentId && !t.deletedAt);
-    directChildren.forEach(child => {
-      queue.push({ taskId: child.id, parentStage: parentNewStage, depth: 1 });
-    });
-    
-    let iterations = 0;
-    const maxIterations = tasks.length * 10;
-    
-    while (queue.length > 0 && iterations < maxIterations) {
-      iterations++;
-      const { taskId, parentStage, depth } = queue.shift()!;
-      
-      if (depth > MAX_DEPTH) {
-        this.logger.warn('[CascadeStage] 树深度超过限制，可能存在数据问题', { taskId, depth });
-        continue;
-      }
-      
-      const child = tasks.find(t => t.id === taskId);
-      if (!child) continue;
-      
-      const expectedStage = parentStage + 1;
-      if (child.stage !== expectedStage) {
-        this.logger.debug('级联更新子任务 stage', {
-          taskId: taskId.slice(-4),
-          oldStage: child.stage,
-          newStage: expectedStage
-        });
-        child.stage = expectedStage;
-      }
-      
-      // 继续处理孙子节点
-      const grandChildren = tasks.filter(t => t.parentId === taskId && !t.deletedAt);
-      grandChildren.forEach(gc => {
-        queue.push({ taskId: gc.id, parentStage: expectedStage, depth: depth + 1 });
-      });
-    }
-    
-    if (iterations >= maxIterations) {
-      this.logger.error('[CascadeStage] 迭代次数超限，可能存在循环依赖');
-    }
-  }
-  
-  /**
-   * 修复子树中所有任务的 rank 约束
-   * 确保子节点的 rank 始终大于父节点的 rank
-   */
-  private fixSubtreeRanks(rootId: string, tasks: Task[]): void {
-    const stack: { taskId: string; parentRank: number }[] = [];
-    const rootTask = tasks.find(t => t.id === rootId);
-    if (!rootTask) return;
-    
-    // 获取根任务的直接子节点
-    const rootChildren = tasks.filter(t => t.parentId === rootId && !t.deletedAt);
-    rootChildren.forEach(child => {
-      stack.push({ taskId: child.id, parentRank: rootTask.rank });
-    });
-    
-    let iterations = 0;
-    const maxIterations = tasks.length * 10;
-    
-    while (stack.length > 0 && iterations < maxIterations) {
-      iterations++;
-      const { taskId, parentRank } = stack.pop()!;
-      const task = tasks.find(t => t.id === taskId);
-      if (!task) continue;
-      
-      // 确保子节点 rank > 父节点 rank
-      if (task.rank <= parentRank) {
-        task.rank = parentRank + LAYOUT_CONFIG.RANK_STEP;
-      }
-      
-      // 将子节点加入栈中继续处理
-      const children = tasks.filter(t => t.parentId === taskId && !t.deletedAt);
-      children.forEach(child => {
-        stack.push({ taskId: child.id, parentRank: task.rank });
-      });
-    }
-  }
-  
-  // ========== 连接操作 ==========
   
   /**
    * 添加跨树连接
@@ -1618,152 +1468,6 @@ export class TaskOperationService {
     return this.layoutService.applyRefusalStrategy(target, candidateRank, parentRank, minChildRank);
   }
   
-  /**
-   * 收集指定任务及其所有后代的 ID
-   */
-  private collectSubtreeIds(taskId: string, tasks: Task[]): Set<string> {
-    const result = new Set<string>();
-    const stack = [taskId];
-    
-    while (stack.length > 0) {
-      const currentId = stack.pop()!;
-      result.add(currentId);
-      tasks.filter(t => t.parentId === currentId).forEach(child => {
-        stack.push(child.id);
-      });
-    }
-    
-    return result;
-  }
-  
-  /**
-   * 检查插入操作是否会产生循环依赖
-   */
-  private wouldCreateCycle(taskId: string, sourceId: string, targetId: string, tasks: Task[]): boolean {
-    let current = tasks.find(t => t.id === sourceId);
-    while (current && current.parentId) {
-      if (current.parentId === taskId) {
-        return true;
-      }
-      current = tasks.find(t => t.id === current!.parentId);
-    }
-    
-    const targetSubtree = this.collectSubtreeIds(targetId, tasks);
-    if (targetSubtree.has(taskId)) {
-      return true;
-    }
-    
-    return false;
-  }
-  
-  // ========== 浮动任务树辅助方法 ==========
-  
-  /**
-   * 计算子树深度
-   * @param taskId 根节点 ID
-   * @param tasks 所有任务
-   * @returns 子树最大深度（根节点深度为 0）
-   */
-  private getSubtreeDepth(taskId: string, tasks: Task[]): number {
-    let maxDepth = 0;
-    const stack: { id: string; depth: number }[] = [{ id: taskId, depth: 0 }];
-    const visited = new Set<string>();
-    
-    while (stack.length > 0) {
-      const { id, depth } = stack.pop()!;
-      if (visited.has(id)) continue;
-      visited.add(id);
-      
-      maxDepth = Math.max(maxDepth, depth);
-      
-      // 防止无限递归
-      if (depth >= FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) continue;
-      
-      tasks.filter(t => t.parentId === id && !t.deletedAt)
-        .forEach(child => stack.push({ id: child.id, depth: depth + 1 }));
-    }
-    
-    return maxDepth;
-  }
-  
-  /**
-   * 获取动态最大阶段索引
-   * 基于当前项目中最大的 stage + 缓冲区
-   */
-  private getMaxStageIndex(tasks: Task[]): number {
-    const currentMax = Math.max(
-      ...tasks.filter(t => t.stage !== null && !t.deletedAt).map(t => t.stage!),
-      0
-    );
-    return currentMax + FLOATING_TREE_CONFIG.STAGE_BUFFER;
-  }
-  
-  /**
-   * 验证阶段容量（阶段溢出预检查）
-   * 检查将任务子树分配到目标阶段是否会导致子任务超出最大阶段限制
-   */
-  private validateStageCapacity(
-    taskId: string,
-    targetStage: number,
-    tasks: Task[]
-  ): Result<void, OperationError> {
-    const subtreeDepth = this.getSubtreeDepth(taskId, tasks);
-    const maxStageIndex = this.getMaxStageIndex(tasks);
-    
-    if (targetStage + subtreeDepth > maxStageIndex) {
-      return failure(
-        ErrorCodes.STAGE_OVERFLOW,
-        `操作被拦截：子任务将超出最大阶段限制（需要 ${targetStage + subtreeDepth}，最大 ${maxStageIndex}）`,
-        { requiredStage: targetStage + subtreeDepth, maxStage: maxStageIndex, subtreeDepth }
-      );
-    }
-    
-    return success(undefined);
-  }
-  
-  /**
-   * 验证父子阶段一致性（同源不变性）
-   * 确保父子任务必须同时在待分配区或同时在阶段中
-   * 
-   * 规则：
-   * - 如果 Parent.stage === null，则 Child.stage 必须 === null
-   * - 如果 Parent.stage === N (N >= 1)，则 Child.stage 必须 === N+1
-   */
-  private validateParentChildStageConsistency(
-    parentId: string | null,
-    childStage: number | null,
-    tasks: Task[]
-  ): Result<void, OperationError> {
-    if (!parentId) return success(undefined);
-    
-    const parent = tasks.find(t => t.id === parentId);
-    if (!parent) return success(undefined);
-    
-    const parentIsUnassigned = parent.stage === null;
-    const childIsUnassigned = childStage === null;
-    
-    // 同源检查：父子必须同为已分配或同为未分配
-    if (parentIsUnassigned !== childIsUnassigned) {
-      return failure(
-        ErrorCodes.CROSS_BOUNDARY_VIOLATION,
-        '非法操作：父任务和子任务必须同时在待分配区或同时在阶段中',
-        { parentStage: parent.stage, childStage }
-      );
-    }
-    
-    // 如果都已分配，检查阶段关系：子任务必须在父任务的下一阶段
-    if (!parentIsUnassigned && !childIsUnassigned) {
-      if (childStage !== parent.stage! + 1) {
-        return failure(
-          ErrorCodes.CROSS_BOUNDARY_VIOLATION,
-          '非法操作：子任务必须在父任务的下一阶段',
-          { parentStage: parent.stage, childStage, expectedChildStage: parent.stage! + 1 }
-        );
-      }
-    }
-    
-    return success(undefined);
-  }
 
   // ========== 子树替换操作（流程图逻辑链条功能） ==========
 
@@ -1811,7 +1515,7 @@ export class TaskOperationService {
     const targetStage = sourceTask.stage + 1;
 
     // 阶段溢出预检查
-    const capacityCheck = this.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
+    const capacityCheck = this.subtreeOps.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
     if (!capacityCheck.ok) {
       return capacityCheck as Result<{ detachedSubtreeRootId: string | null }, OperationError>;
     }
@@ -1823,50 +1527,18 @@ export class TaskOperationService {
       const tasks = p.tasks.map(t => ({ ...t }));
       const source = tasks.find(t => t.id === sourceTaskId)!;
       const target = tasks.find(t => t.id === targetUnassignedId)!;
-      const now = new Date().toISOString();
 
       // 1. 获取要被剥离的子任务
-      // 如果指定了 specificChildId，只剥离该子任务
-      // 否则剥离所有直接子任务
       const allChildren = tasks.filter(t => t.parentId === sourceTaskId && !t.deletedAt);
       const childrenToDetach = specificChildId
         ? allChildren.filter(t => t.id === specificChildId)
         : allChildren;
 
-      // 2. 将目标待分配块从其原父节点剥离（如果有）
-      const _oldParentId = target.parentId;
-      
-      // 3. 将目标待分配块的子树整体分配到目标阶段
-      const targetSubtreeIds = this.collectSubtreeIds(targetUnassignedId, tasks);
-      const queue: { task: Task; depth: number }[] = [{ task: target, depth: 0 }];
-      const visited = new Set<string>();
+      // 2. 将目标待分配块的子树整体分配到目标阶段（使用 SubtreeOperationsService）
+      this.subtreeOps.assignSubtreeToStage(targetUnassignedId, sourceTaskId, targetStage, tasks);
 
-      while (queue.length > 0) {
-        const { task, depth } = queue.shift()!;
-        if (visited.has(task.id)) continue;
-        visited.add(task.id);
-
-        // 设置阶段：根节点为 targetStage，子节点递增
-        task.stage = targetStage + depth;
-        task.updatedAt = now;
-
-        // 根节点设置新的父节点为源任务
-        if (depth === 0) {
-          task.parentId = sourceTaskId;
-        }
-
-        // 收集子节点（限制深度防止无限循环）
-        if (depth < FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
-          const children = tasks.filter(t => t.parentId === task.id && !t.deletedAt);
-          children.forEach(child => {
-            if (targetSubtreeIds.has(child.id)) {
-              queue.push({ task: child, depth: depth + 1 });
-            }
-          });
-        }
-      }
-
-      // 4. 计算新子树根节点的 rank
+      // 3. 计算新子树根节点的 rank
+      const targetSubtreeIds = this.subtreeOps.collectSubtreeIds(targetUnassignedId, tasks);
       const stageTasks = tasks.filter(t => t.stage === targetStage && t.id !== targetUnassignedId && !targetSubtreeIds.has(t.id));
       const candidateRank = this.computeInsertRank(targetStage, stageTasks, null, source.rank);
       const placed = this.applyRefusalStrategy(target, candidateRank, source.rank, Infinity, tasks);
@@ -1876,40 +1548,12 @@ export class TaskOperationService {
       }
       target.rank = placed.rank;
 
-      // 5. 修复新子树的 rank 约束
-      this.fixSubtreeRanks(targetUnassignedId, tasks);
+      // 4. 修复新子树的 rank 约束
+      this.subtreeOps.fixSubtreeRanks(targetUnassignedId, tasks);
 
-      // 6. 将要被替换的子任务剥离为待分配块
-      // 注意：只剥离 childrenToDetach，保留其他子任务不变
+      // 5. 将要被替换的子任务剥离为待分配块（使用 SubtreeOperationsService）
       if (childrenToDetach.length > 0) {
-        // 选择第一个子节点作为剥离子树的根
-        const detachedRoot = childrenToDetach[0];
-        detachedRootId = detachedRoot.id;
-
-        // 收集被剥离子任务的子树
-        childrenToDetach.forEach(child => {
-          const childSubtreeIds = this.collectSubtreeIds(child.id, tasks);
-          childSubtreeIds.forEach(id => {
-            const t = tasks.find(task => task.id === id);
-            if (t) {
-              t.stage = null;
-              t.updatedAt = now;
-              t.displayId = '?';
-            }
-          });
-          // 断开与源任务的父子关系
-          child.parentId = null;
-        });
-
-        // 计算待分配区的位置
-        const unassignedCount = tasks.filter(t => t.stage === null && !childrenToDetach.some(c => this.collectSubtreeIds(c.id, tasks).has(t.id))).length;
-        childrenToDetach.forEach((child, index) => {
-          child.order = unassignedCount + index + 1;
-          const pos = this.layoutService.getUnassignedPosition(unassignedCount + index);
-          child.x = pos.x;
-          child.y = pos.y;
-          child.rank = LAYOUT_CONFIG.RANK_ROOT_BASE + (unassignedCount + index) * LAYOUT_CONFIG.RANK_STEP;
-        });
+        detachedRootId = this.subtreeOps.detachChildrenAsUnassigned(childrenToDetach, tasks);
       }
 
       operationResult = success({ detachedSubtreeRootId: detachedRootId });
@@ -1958,7 +1602,7 @@ export class TaskOperationService {
     const targetStage = sourceTask.stage + 1;
 
     // 阶段溢出预检查
-    const capacityCheck = this.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
+    const capacityCheck = this.subtreeOps.validateStageCapacity(targetUnassignedId, targetStage, activeP.tasks);
     if (!capacityCheck.ok) {
       return capacityCheck;
     }
@@ -1969,42 +1613,12 @@ export class TaskOperationService {
       const tasks = p.tasks.map(t => ({ ...t }));
       const source = tasks.find(t => t.id === sourceTaskId)!;
       const target = tasks.find(t => t.id === targetUnassignedId)!;
-      const now = new Date().toISOString();
 
-      // 1. 从原父待分配块剥离（如果有）
-      // target.parentId 会在下面被重新设置，所以这里不需要显式清除
+      // 1. 将目标待分配块的子树整体分配到目标阶段（使用 SubtreeOperationsService）
+      this.subtreeOps.assignSubtreeToStage(targetUnassignedId, sourceTaskId, targetStage, tasks);
 
-      // 2. 将目标待分配块的子树整体分配到目标阶段
-      const targetSubtreeIds = this.collectSubtreeIds(targetUnassignedId, tasks);
-      const queue: { task: Task; depth: number }[] = [{ task: target, depth: 0 }];
-      const visited = new Set<string>();
-
-      while (queue.length > 0) {
-        const { task, depth } = queue.shift()!;
-        if (visited.has(task.id)) continue;
-        visited.add(task.id);
-
-        // 设置阶段：根节点为 targetStage，子节点递增
-        task.stage = targetStage + depth;
-        task.updatedAt = now;
-
-        // 根节点设置新的父节点为源任务
-        if (depth === 0) {
-          task.parentId = sourceTaskId;
-        }
-
-        // 收集子节点（限制深度防止无限循环）
-        if (depth < FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
-          const children = tasks.filter(t => t.parentId === task.id && !t.deletedAt);
-          children.forEach(child => {
-            if (targetSubtreeIds.has(child.id)) {
-              queue.push({ task: child, depth: depth + 1 });
-            }
-          });
-        }
-      }
-
-      // 3. 计算新子树根节点的 rank
+      // 2. 计算新子树根节点的 rank
+      const targetSubtreeIds = this.subtreeOps.collectSubtreeIds(targetUnassignedId, tasks);
       const stageTasks = tasks.filter(t => t.stage === targetStage && t.id !== targetUnassignedId && !targetSubtreeIds.has(t.id));
       const candidateRank = this.computeInsertRank(targetStage, stageTasks, null, source.rank);
       const placed = this.applyRefusalStrategy(target, candidateRank, source.rank, Infinity, tasks);
@@ -2014,8 +1628,8 @@ export class TaskOperationService {
       }
       target.rank = placed.rank;
 
-      // 4. 修复新子树的 rank 约束
-      this.fixSubtreeRanks(targetUnassignedId, tasks);
+      // 3. 修复新子树的 rank 约束
+      this.subtreeOps.fixSubtreeRanks(targetUnassignedId, tasks);
 
       return this.layoutService.rebalance({ ...p, tasks });
     });
