@@ -1,0 +1,887 @@
+/**
+ * FlowOverviewService - 小地图（Overview）管理服务
+ * 
+ * 从 FlowDiagramService 拆分出来，专注于：
+ * - 小地图初始化与销毁
+ * - 自动缩放逻辑（无限画布支持）
+ * - 视口同步（viewportBounds ↔ fixedBounds）
+ * - 指针交互（拖拽视口框）
+ * - ResizeObserver 管理
+ * 
+ * 设计原则：
+ * - 职责单一：仅处理小地图相关逻辑
+ * - 依赖主图：通过 setDiagram() 注入 GoJS Diagram 实例
+ * - 事件隔离：使用 zone.runOutsideAngular 避免触发 Angular 变更检测
+ */
+
+import { Injectable, inject, NgZone } from '@angular/core';
+import { LoggerService } from '../../../../services/logger.service';
+import { ThemeService } from '../../../../services/theme.service';
+import { FlowTemplateService } from './flow-template.service';
+import { FlowDiagramConfigService } from './flow-diagram-config.service';
+import * as go from 'gojs';
+
+// 全局调试开关
+const isOverviewDebugEnabled = () => 
+  !!(globalThis as unknown as { __NF_OVERVIEW_DEBUG?: boolean })?.__NF_OVERVIEW_DEBUG;
+
+@Injectable({
+  providedIn: 'root'
+})
+export class FlowOverviewService {
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('FlowOverview');
+  private readonly zone = inject(NgZone);
+  private readonly themeService = inject(ThemeService);
+  private readonly templateService = inject(FlowTemplateService);
+  private readonly configService = inject(FlowDiagramConfigService);
+
+  // ========== 外部注入 ==========
+  private diagram: go.Diagram | null = null;
+  
+  // ========== 小地图状态 ==========
+  private overview: go.Overview | null = null;
+  private overviewContainer: HTMLDivElement | null = null;
+  private lastOverviewScale: number = 0.1;
+  private isDestroyed = false;
+  
+  // ========== 交互状态 ==========
+  private isNodeDragging: boolean = false;
+  private isOverviewInteracting: boolean = false;
+  private isOverviewBoxDragging: boolean = false;
+  private overviewBoxViewportBounds: go.Rect | null = null;
+  private isApplyingOverviewViewportUpdate: boolean = false;
+  private overviewUpdateQueuedWhileApplying: boolean = false;
+  private overviewScheduleUpdate: ((source: 'viewport' | 'document') => void) | null = null;
+  
+  // ========== 缓存与节流 ==========
+  private overviewBoundsCache: string = '';
+  private overviewInteractionLastApplyAt = 0;
+  private throttledUpdateBindingsTimer: ReturnType<typeof setTimeout> | null = null;
+  private throttledUpdateBindingsPending = false;
+  
+  // ========== 调试日志 ==========
+  private overviewDebugLastLogAt = 0;
+  private overviewDebugSuppressedCount = 0;
+  private overviewDragDebugLastLogAt = 0;
+  
+  // ========== DiagramListener 引用 ==========
+  private overviewDocumentBoundsChangedHandler: ((e: go.DiagramEvent) => void) | null = null;
+  private overviewViewportBoundsChangedHandler: ((e: go.DiagramEvent) => void) | null = null;
+  
+  // ========== 视口轮询 ==========
+  private overviewViewportPollRafId: number | null = null;
+  private overviewViewportPollLastKey: string = '';
+  
+  // ========== ResizeObserver ==========
+  private overviewResizeObserver: ResizeObserver | null = null;
+  
+  // ========== Pointer 事件清理 ==========
+  private overviewPointerCleanup: (() => void) | null = null;
+
+  // ========== 公开访问器 ==========
+  
+  get overviewInstance(): go.Overview | null {
+    return this.overview;
+  }
+  
+  get isOverviewInitialized(): boolean {
+    return this.overview !== null && !this.isDestroyed;
+  }
+
+  // ========== 生命周期方法 ==========
+  
+  /**
+   * 设置关联的主图实例
+   */
+  setDiagram(diagram: go.Diagram | null): void {
+    this.diagram = diagram;
+  }
+  
+  /**
+   * 设置节点拖拽状态（用于节流控制）
+   */
+  setNodeDragging(isDragging: boolean): void {
+    this.isNodeDragging = isDragging;
+  }
+
+  /**
+   * 初始化小地图
+   * 
+   * @param container 小地图容器元素
+   * @param isMobile 是否移动端
+   */
+  initializeOverview(container: HTMLDivElement, isMobile: boolean = false): void {
+    if (!this.diagram || this.isDestroyed) {
+      this.logger.warn('无法初始化 Overview：主图未就绪');
+      return;
+    }
+    
+    this.zone.runOutsideAngular(() => {
+      try {
+        this.cleanupOverview();
+        
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+        
+        if (containerWidth <= 0 || containerHeight <= 0) {
+          this.logger.warn('Overview 容器尺寸无效，延迟初始化');
+          return;
+        }
+        
+        this.overviewContainer = container;
+        
+        // 设置背景色
+        container.style.backgroundColor = this.getOverviewBackgroundColor();
+        
+        // 创建 Overview 实例
+        this.overview = new go.Overview(container, {
+          observed: this.diagram,
+          contentAlignment: go.Spot.Center,
+          'animationManager.isEnabled': false
+        });
+        
+        // 设置模板
+        this.templateService.setupOverviewNodeTemplate(this.overview);
+        this.templateService.setupOverviewLinkTemplate(this.overview);
+        
+        this.overview.observed = this.diagram;
+        
+        // 设置视口框样式
+        this.templateService.setupOverviewBoxStyle(this.overview, isMobile);
+        
+        this.overview.scale = 0.15;
+        this.lastOverviewScale = 0.15;
+
+        // 绑定指针监听
+        this.attachOverviewPointerListeners(container);
+        
+        // 设置自动缩放
+        this.setupOverviewAutoScale();
+        
+        // 设置 ResizeObserver
+        this.setupOverviewResizeObserver(container);
+        
+        // 强制刷新
+        if (this.diagram) {
+          this.diagram.requestUpdate();
+        }
+        if (this.overview) {
+          this.overview.requestUpdate();
+        }
+        
+        this.logger.info(`Overview 初始化成功 - 尺寸: ${containerWidth}x${containerHeight}`);
+      } catch (error) {
+        this.logger.error('Overview 初始化失败:', error);
+      }
+    });
+  }
+  
+  /**
+   * 销毁小地图
+   */
+  destroyOverview(): void {
+    this.cleanupOverview();
+    this.isDestroyed = true;
+  }
+  
+  /**
+   * 刷新小地图
+   */
+  refreshOverview(): void {
+    if (!this.overview || !this.overviewContainer || this.isDestroyed) return;
+    
+    try {
+      this.overview.requestUpdate();
+      
+      const containerWidth = this.overviewContainer.clientWidth;
+      const containerHeight = this.overviewContainer.clientHeight;
+      
+      if (containerWidth > 0 && containerHeight > 0 && this.diagram) {
+        const docBounds = this.diagram.documentBounds;
+        if (docBounds.isReal() && docBounds.width > 0 && docBounds.height > 0) {
+          const padding = 0.1;
+          const scaleX = (containerWidth * (1 - padding * 2)) / docBounds.width;
+          const scaleY = (containerHeight * (1 - padding * 2)) / docBounds.height;
+          const newScale = Math.max(0.02, Math.min(0.5, Math.min(scaleX, scaleY)));
+          
+          this.overview.scale = newScale;
+          this.lastOverviewScale = newScale;
+          
+          this.logger.debug(`Overview 已刷新 - scale: ${newScale}`);
+        }
+      }
+    } catch (error) {
+      this.logger.error('刷新 Overview 失败:', error);
+    }
+  }
+  
+  /**
+   * 更新主题相关样式
+   */
+  updateTheme(): void {
+    if (!this.overview || !this.overviewContainer) return;
+    
+    this.overview.updateAllTargetBindings();
+    this.overviewContainer.style.backgroundColor = this.getOverviewBackgroundColor();
+  }
+
+  // ========== 私有方法 ==========
+  
+  private cleanupOverview(): void {
+    // 清理 Pointer 监听
+    if (this.overviewPointerCleanup) {
+      this.overviewPointerCleanup();
+      this.overviewPointerCleanup = null;
+    }
+    
+    // 清理 ResizeObserver
+    if (this.overviewResizeObserver) {
+      this.overviewResizeObserver.disconnect();
+      this.overviewResizeObserver = null;
+    }
+    
+    // 移除 DiagramListener
+    if (this.diagram) {
+      if (this.overviewDocumentBoundsChangedHandler) {
+        this.diagram.removeDiagramListener('DocumentBoundsChanged', this.overviewDocumentBoundsChangedHandler);
+        this.overviewDocumentBoundsChangedHandler = null;
+      }
+      if (this.overviewViewportBoundsChangedHandler) {
+        this.diagram.removeDiagramListener('ViewportBoundsChanged', this.overviewViewportBoundsChangedHandler);
+        this.overviewViewportBoundsChangedHandler = null;
+      }
+    }
+    
+    // 取消视口轮询
+    if (this.overviewViewportPollRafId !== null) {
+      cancelAnimationFrame(this.overviewViewportPollRafId);
+      this.overviewViewportPollRafId = null;
+    }
+    
+    // 清理节流定时器
+    if (this.throttledUpdateBindingsTimer) {
+      clearTimeout(this.throttledUpdateBindingsTimer);
+      this.throttledUpdateBindingsTimer = null;
+    }
+    
+    // 销毁 Overview
+    if (this.overview) {
+      this.overview.div = null;
+      this.overview = null;
+    }
+    
+    this.overviewContainer = null;
+    this.overviewBoundsCache = '';
+    this.overviewScheduleUpdate = null;
+  }
+  
+  private getOverviewBackgroundColor(): string {
+    const isDark = this.themeService.isDark();
+    if (isDark) {
+      return '#1f1f1f';
+    } else {
+      const styles = this.configService.currentStyles();
+      return this.readCssColorVar('--theme-text-dark') ?? styles.text.titleColor ?? '#292524';
+    }
+  }
+  
+  private readCssColorVar(varName: string): string | null {
+    try {
+      if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+      const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+      return value || null;
+    } catch {
+      return null;
+    }
+  }
+  
+  private setupOverviewResizeObserver(container: HTMLDivElement): void {
+    this.overviewResizeObserver = new ResizeObserver(() => {
+      window.requestAnimationFrame(() => {
+        if (this.isDestroyed || !this.overview) return;
+        this.refreshOverview();
+      });
+    });
+    this.overviewResizeObserver.observe(container);
+  }
+  
+  /**
+   * 设置小地图自动缩放
+   */
+  private setupOverviewAutoScale(): void {
+    if (!this.diagram || !this.overview) return;
+    
+    // 使用 documentBounds（O(1)）替代遍历节点
+    const getNodesBounds = (): go.Rect => {
+      if (!this.diagram) return new go.Rect(0, 0, 500, 500);
+      
+      const docBounds = this.diagram.documentBounds;
+      if (!docBounds.isReal() || (docBounds.width === 0 && docBounds.height === 0)) {
+        return new go.Rect(-250, -250, 500, 500);
+      }
+      
+      const padding = 80;
+      return new go.Rect(
+        docBounds.x - padding,
+        docBounds.y - padding,
+        docBounds.width + padding * 2,
+        docBounds.height + padding * 2
+      );
+    };
+    
+    const calculateBaseScale = (): number => {
+      if (!this.overviewContainer || !this.diagram) return 0.15;
+      
+      const containerWidth = this.overviewContainer.clientWidth;
+      const containerHeight = this.overviewContainer.clientHeight;
+      const nodeBounds = getNodesBounds();
+      
+      if (containerWidth <= 0 || containerHeight <= 0) return 0.15;
+      
+      const padding = 0.1;
+      const scaleX = (containerWidth * (1 - padding * 2)) / nodeBounds.width;
+      const scaleY = (containerHeight * (1 - padding * 2)) / nodeBounds.height;
+      
+      return Math.min(scaleX, scaleY, 0.35);
+    };
+
+    const clampScale = (scale: number): number => {
+      return Math.max(1e-4, Math.min(0.5, scale));
+    };
+    
+    const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+    
+    const SCALE_LERP_FACTOR_SHRINK = 0.45;
+    const SCALE_LERP_FACTOR_GROW = 0.18;
+    
+    const smartLerp = (current: number, target: number): number => {
+      if (current / target > 2 || target / current > 2) {
+        return target;
+      }
+      const t = target < current ? SCALE_LERP_FACTOR_SHRINK : SCALE_LERP_FACTOR_GROW;
+      return lerp(current, target, t);
+    };
+    
+    let baseScale = calculateBaseScale();
+    let lastNodeDataCount = ((this.diagram.model as go.Model & { nodeDataArray?: go.ObjectData[] })?.nodeDataArray?.length ?? 0);
+    this.lastOverviewScale = clampScale(baseScale);
+    this.overview.scale = this.lastOverviewScale;
+    
+    const nodeBounds = getNodesBounds();
+    this.overview.centerRect(nodeBounds);
+    
+    /**
+     * 动态扩展边界 - 无限画布核心
+     */
+    const calculateExtendedBounds = (baseBounds: go.Rect, viewportBounds: go.Rect): go.Rect => {
+      const overflowLeft = Math.max(0, baseBounds.x - viewportBounds.x);
+      const overflowRight = Math.max(0, viewportBounds.right - baseBounds.right);
+      const overflowTop = Math.max(0, baseBounds.y - viewportBounds.y);
+      const overflowBottom = Math.max(0, viewportBounds.bottom - baseBounds.bottom);
+
+      const extended = new go.Rect(
+        baseBounds.x - overflowLeft,
+        baseBounds.y - overflowTop,
+        baseBounds.width + overflowLeft + overflowRight,
+        baseBounds.height + overflowTop + overflowBottom
+      );
+
+      const containerW = this.overviewContainer?.clientWidth ?? 200;
+      const containerH = this.overviewContainer?.clientHeight ?? 150;
+      const dynamicBufferW = Math.max(400, containerW * 0.3);
+      const dynamicBufferH = Math.max(400, containerH * 0.3);
+      
+      const minWidth = viewportBounds.width + dynamicBufferW;
+      if (extended.width < minWidth) {
+        const pad = (minWidth - extended.width) / 2;
+        extended.x -= pad;
+        extended.width = minWidth;
+      }
+      
+      const minHeight = viewportBounds.height + dynamicBufferH;
+      if (extended.height < minHeight) {
+        const pad = (minHeight - extended.height) / 2;
+        extended.y -= pad;
+        extended.height = minHeight;
+      }
+
+      return extended;
+    };
+    
+    // 限频日志
+    const logOverview = (tag: string, details?: Record<string, unknown>): void => {
+      if (!isOverviewDebugEnabled()) return;
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const minInterval = tag.startsWith('apply:') ? 200 : 400;
+      if (now - this.overviewDebugLastLogAt < minInterval) {
+        this.overviewDebugSuppressedCount++;
+        return;
+      }
+      this.overviewDebugLastLogAt = now;
+      this.logger.warn(`[Overview] ${tag}`, {
+        suppressedCount: this.overviewDebugSuppressedCount,
+        ...details
+      });
+      this.overviewDebugSuppressedCount = 0;
+    };
+    
+    // 节流绑定更新
+    const scheduleViewportBindingsUpdate = (): void => {
+      if (this.throttledUpdateBindingsPending) return;
+      this.throttledUpdateBindingsPending = true;
+      
+      if (this.throttledUpdateBindingsTimer) {
+        clearTimeout(this.throttledUpdateBindingsTimer);
+      }
+      
+      this.throttledUpdateBindingsTimer = setTimeout(() => {
+        this.throttledUpdateBindingsPending = false;
+        this.throttledUpdateBindingsTimer = null;
+        if (this.overview && !this.isDestroyed) {
+          this.overview.updateAllTargetBindings();
+        }
+      }, 100);
+    };
+
+    // 核心更新逻辑
+    const applyOverviewUpdate = (source: 'viewport' | 'document'): void => {
+      if (this.isApplyingOverviewViewportUpdate) {
+        this.overviewUpdateQueuedWhileApplying = true;
+        return;
+      }
+      
+      this.isApplyingOverviewViewportUpdate = true;
+      
+      try {
+        if (!this.diagram || !this.overview) return;
+        
+        // 节点数量变化时重新计算 baseScale
+        const currentNodeDataCount = ((this.diagram.model as go.Model & { nodeDataArray?: go.ObjectData[] })?.nodeDataArray?.length ?? 0);
+        if (currentNodeDataCount !== lastNodeDataCount) {
+          baseScale = calculateBaseScale();
+          lastNodeDataCount = currentNodeDataCount;
+        }
+
+        const fakeViewportBounds = this.overviewBoxViewportBounds;
+        const usingFakeViewportBounds = !!(this.isOverviewBoxDragging && fakeViewportBounds && fakeViewportBounds.isReal());
+        const viewportBounds: go.Rect = usingFakeViewportBounds
+          ? fakeViewportBounds
+          : this.diagram.viewportBounds;
+        if (!viewportBounds.isReal()) {
+          logOverview('skip:viewport-not-real');
+          return;
+        }
+      
+        const nodeBounds = getNodesBounds();
+        const docBounds = this.diagram.documentBounds;
+        let totalBounds: go.Rect;
+        if (!docBounds.isReal() || (docBounds.width === 0 && docBounds.height === 0)) {
+          totalBounds = viewportBounds.copy();
+        } else {
+          const minX = Math.min(docBounds.x, viewportBounds.x);
+          const minY = Math.min(docBounds.y, viewportBounds.y);
+          const maxX = Math.max(docBounds.x + docBounds.width, viewportBounds.x + viewportBounds.width);
+          const maxY = Math.max(docBounds.y + docBounds.height, viewportBounds.y + viewportBounds.height);
+          totalBounds = new go.Rect(minX, minY, maxX - minX, maxY - minY);
+        }
+      
+        const isViewportOutside = 
+          viewportBounds.x < nodeBounds.x - 50 ||
+          viewportBounds.y < nodeBounds.y - 50 ||
+          viewportBounds.right > nodeBounds.right + 50 ||
+          viewportBounds.bottom > nodeBounds.bottom + 50;
+      
+        if (this.overviewContainer) {
+          const containerWidth = this.overviewContainer.clientWidth;
+          const containerHeight = this.overviewContainer.clientHeight;
+        
+          if (containerWidth > 0 && containerHeight > 0 && totalBounds.width > 0 && totalBounds.height > 0) {
+            const worldBounds = calculateExtendedBounds(nodeBounds.copy().unionRect(viewportBounds), viewportBounds);
+
+            const q = (v: number) => Math.round(v);
+            const boundsKey = `${q(viewportBounds.x)}|${q(viewportBounds.y)}|${q(viewportBounds.width)}|${q(viewportBounds.height)}`;
+            
+            this.setOverviewFixedBounds(worldBounds);
+            
+            if (boundsKey !== this.overviewBoundsCache) {
+              this.overviewBoundsCache = boundsKey;
+              logOverview('apply:bounds', { usingFakeViewportBounds });
+            }
+
+            const currentScale = this.overview.scale;
+            const viewportBoxWidth = viewportBounds.width * currentScale;
+            const viewportBoxHeight = viewportBounds.height * currentScale;
+          
+            const boxPadding = Math.max(20, Math.min(containerWidth, containerHeight) * 0.1);
+            const needsShrinkForBox = 
+              viewportBoxWidth > containerWidth - boxPadding ||
+              viewportBoxHeight > containerHeight - boxPadding;
+          
+            if (isViewportOutside || needsShrinkForBox) {
+              const padding = 0.15;
+              const scaleX = (containerWidth * (1 - padding * 2)) / totalBounds.width;
+              const scaleY = (containerHeight * (1 - padding * 2)) / totalBounds.height;
+              let targetScale = clampScale(Math.min(scaleX, scaleY, 0.5));
+            
+              const newViewportBoxWidth = viewportBounds.width * targetScale;
+              const newViewportBoxHeight = viewportBounds.height * targetScale;
+            
+              if (newViewportBoxWidth > containerWidth - boxPadding) {
+                targetScale = Math.min(targetScale, (containerWidth - boxPadding) / viewportBounds.width);
+              }
+              if (newViewportBoxHeight > containerHeight - boxPadding) {
+                targetScale = Math.min(targetScale, (containerHeight - boxPadding) / viewportBounds.height);
+              }
+            
+              targetScale = clampScale(targetScale);
+            
+              if (Math.abs(targetScale - this.overview.scale) > 0.002) {
+                const smoothedScale = smartLerp(this.overview.scale, targetScale);
+                this.overview.scale = clampScale(smoothedScale);
+                this.lastOverviewScale = this.overview.scale;
+              }
+            } else {
+              const targetScale = clampScale(baseScale);
+            
+              const testBoxWidth = viewportBounds.width * targetScale;
+              const testBoxHeight = viewportBounds.height * targetScale;
+            
+              let finalScale = targetScale;
+              if (testBoxWidth > containerWidth - boxPadding) {
+                finalScale = Math.min(finalScale, (containerWidth - boxPadding) / viewportBounds.width);
+              }
+              if (testBoxHeight > containerHeight - boxPadding) {
+                finalScale = Math.min(finalScale, (containerHeight - boxPadding) / viewportBounds.height);
+              }
+            
+              finalScale = clampScale(finalScale);
+            
+              if (Math.abs(finalScale - currentScale) > 0.002) {
+                const smoothedScale = smartLerp(currentScale, finalScale);
+                this.overview.scale = clampScale(smoothedScale);
+                this.lastOverviewScale = this.overview.scale;
+              }
+            }
+
+            if (usingFakeViewportBounds) {
+              this.overview.centerRect(viewportBounds);
+            }
+          }
+        }
+        
+        if (this.overview) {
+          if (source === 'document') {
+            this.overview.updateAllTargetBindings();
+            this.overview.requestUpdate();
+          } else {
+            this.overview.requestUpdate();
+            scheduleViewportBindingsUpdate();
+          }
+        }
+      } finally {
+        this.isApplyingOverviewViewportUpdate = false;
+        
+        if (this.overviewUpdateQueuedWhileApplying) {
+          this.overviewUpdateQueuedWhileApplying = false;
+          requestAnimationFrame(() => applyOverviewUpdate('viewport'));
+        }
+      }
+    };
+
+    // 保存调度函数引用
+    this.overviewScheduleUpdate = (source: 'viewport' | 'document') => {
+      if (this.isDestroyed || !this.overview) return;
+      
+      // 节点拖拽期间更强的节流
+      if (this.isNodeDragging) {
+        const now = Date.now();
+        if (now - this.overviewInteractionLastApplyAt < 32) return;
+        this.overviewInteractionLastApplyAt = now;
+      }
+      
+      requestAnimationFrame(() => applyOverviewUpdate(source));
+    };
+
+    // 绑定 DiagramListener
+    this.overviewDocumentBoundsChangedHandler = () => {
+      this.overviewScheduleUpdate?.('document');
+    };
+    this.overviewViewportBoundsChangedHandler = () => {
+      this.overviewScheduleUpdate?.('viewport');
+    };
+    
+    this.diagram.addDiagramListener('DocumentBoundsChanged', this.overviewDocumentBoundsChangedHandler);
+    this.diagram.addDiagramListener('ViewportBoundsChanged', this.overviewViewportBoundsChangedHandler);
+  }
+  
+  private setOverviewFixedBounds(bounds: go.Rect | null): void {
+    if (!this.overview) return;
+    (this.overview as unknown as { fixedBounds: go.Rect | undefined }).fixedBounds = bounds ?? undefined;
+  }
+
+  /**
+   * 绑定 Overview 的 Pointer 事件监听
+   */
+  private attachOverviewPointerListeners(container: HTMLDivElement): void {
+    if (this.overviewPointerCleanup) {
+      this.overviewPointerCleanup();
+      this.overviewPointerCleanup = null;
+    }
+
+    const prevTouchAction = container.style.touchAction;
+    container.style.touchAction = 'none';
+
+    let capturedPointerId: number | null = null;
+    let hasPointerCapture = false;
+    let isDraggingBox = false;
+    let isManualBoxDrag = false;
+    let manualBoxDragOffset: { dx: number; dy: number } | null = null;
+    let manualDragViewportSize: { w: number; h: number } | null = null;
+
+    const getOverviewDocPointFromClient = (clientX: number, clientY: number): go.Point | null => {
+      if (!this.overview) return null;
+      const rect = container.getBoundingClientRect();
+      const viewX = clientX - rect.left;
+      const viewY = clientY - rect.top;
+      return this.overview.transformViewToDoc(new go.Point(viewX, viewY));
+    };
+
+    const debugDrag = (reason: string, _details?: Record<string, unknown>): void => {
+      if (!isOverviewDebugEnabled()) return;
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const minIntervalMs = reason.includes(':move') ? 80 : 200;
+      if (now - this.overviewDragDebugLastLogAt < minIntervalMs) return;
+      this.overviewDragDebugLastLogAt = now;
+      this.logger.warn('[OverviewDragDebug]', { reason, isDraggingBox, isManualBoxDrag });
+    };
+
+    const stopEventForManualDrag = (ev: Event): void => {
+      try { (ev as Event & { stopImmediatePropagation?: () => void }).stopImmediatePropagation?.(); } catch { /* ignore */ }
+      try { ev.stopPropagation(); } catch { /* ignore */ }
+      try { (ev as Event & { preventDefault?: () => void }).preventDefault?.(); } catch { /* ignore */ }
+    };
+
+    const beginManualBoxDrag = (pt: go.Point): void => {
+      if (!this.diagram || !this.overview) return;
+      const vb = this.diagram.viewportBounds;
+      if (!vb.isReal()) return;
+
+      const boxBounds = this.overview.box?.actualBounds;
+      const boxCenter = boxBounds?.isReal() ? boxBounds.center : pt;
+      manualBoxDragOffset = { dx: pt.x - boxCenter.x, dy: pt.y - boxCenter.y };
+      manualDragViewportSize = { w: vb.width, h: vb.height };
+
+      try { this.diagram.skipsUndoManager = true; } catch { /* ignore */ }
+
+      isManualBoxDrag = true;
+      debugDrag('manualDrag:begin');
+    };
+
+    const applyManualBoxDrag = (pt: go.Point): void => {
+      if (!this.diagram || !isManualBoxDrag || !manualBoxDragOffset || !manualDragViewportSize) return;
+
+      const centerX = pt.x - manualBoxDragOffset.dx;
+      const centerY = pt.y - manualBoxDragOffset.dy;
+      const desiredPos = new go.Point(
+        centerX - manualDragViewportSize.w / 2,
+        centerY - manualDragViewportSize.h / 2
+      );
+
+      if (!this.diagram.position.equals(desiredPos)) {
+        this.diagram.position = desiredPos;
+        this.diagram.requestUpdate();
+      }
+
+      if (this.overview) {
+        this.overview.updateAllTargetBindings();
+        this.overview.requestUpdate();
+      }
+    };
+
+    const endManualBoxDrag = (): void => {
+      if (!isManualBoxDrag) return;
+      isManualBoxDrag = false;
+      manualBoxDragOffset = null;
+      manualDragViewportSize = null;
+      
+      if (this.diagram) {
+        try { this.diagram.skipsUndoManager = false; } catch { /* ignore */ }
+      }
+
+      debugDrag('manualDrag:end');
+    };
+
+    const onPointerDown = (ev: PointerEvent): void => {
+      if (!this.overview) return;
+      
+      const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
+      if (!pt) return;
+      
+      const boxBounds = this.overview.box?.actualBounds;
+      if (boxBounds?.isReal() && boxBounds.containsPoint(pt)) {
+        isDraggingBox = true;
+        this.isOverviewBoxDragging = true;
+        stopEventForManualDrag(ev);
+        beginManualBoxDrag(pt);
+        this.overviewBoundsCache = '';
+        this.overviewScheduleUpdate?.('viewport');
+        return;
+      }
+      
+      isDraggingBox = false;
+      this.isOverviewInteracting = true;
+      
+      try {
+        container.setPointerCapture(ev.pointerId);
+        capturedPointerId = ev.pointerId;
+        hasPointerCapture = true;
+      } catch (e) {
+        this.logger.debug('setPointerCapture 不可用:', e);
+      }
+    };
+    
+    const onPointerMove = (ev: PointerEvent): void => {
+      if (!isDraggingBox || !this.overview) return;
+
+      if (isManualBoxDrag) {
+        stopEventForManualDrag(ev);
+      }
+
+      if (capturedPointerId !== null && ev.pointerId !== capturedPointerId) return;
+      const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
+      if (pt && isManualBoxDrag) {
+        applyManualBoxDrag(pt);
+      }
+      this.overviewScheduleUpdate?.('viewport');
+    };
+    
+    const onPointerUpLike = (): void => {
+      if (hasPointerCapture && capturedPointerId !== null) {
+        try { container.releasePointerCapture(capturedPointerId); } catch { /* ignore */ }
+      }
+      capturedPointerId = null;
+      hasPointerCapture = false;
+      
+      if (isDraggingBox) {
+        isDraggingBox = false;
+        this.isOverviewBoxDragging = false;
+        endManualBoxDrag();
+        this.overviewBoxViewportBounds = null;
+        
+        if (this.throttledUpdateBindingsTimer) {
+          clearTimeout(this.throttledUpdateBindingsTimer);
+          this.throttledUpdateBindingsTimer = null;
+        }
+        this.throttledUpdateBindingsPending = false;
+        
+        this.overviewBoundsCache = '';
+        this.overviewScheduleUpdate?.('viewport');
+
+        requestAnimationFrame(() => {
+          if (this.isDestroyed || !this.overview) return;
+          this.overview.updateAllTargetBindings();
+          this.overview.requestUpdate();
+        });
+        return;
+      }
+      
+      if (!this.isOverviewInteracting) return;
+      this.isOverviewInteracting = false;
+      this.overviewInteractionLastApplyAt = 0;
+
+      this.overviewBoundsCache = '';
+      this.overviewScheduleUpdate?.('viewport');
+
+      requestAnimationFrame(() => {
+        if (this.isDestroyed || !this.diagram || !this.overview) return;
+        this.overview.requestUpdate();
+        this.diagram.requestUpdate();
+      });
+    };
+
+    const onWindowPointerMove = (ev: PointerEvent): void => {
+      if (!isDraggingBox) return;
+      if (capturedPointerId !== null && ev.pointerId !== capturedPointerId) return;
+      if (isManualBoxDrag) {
+        stopEventForManualDrag(ev);
+      }
+      const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
+      if (pt && isManualBoxDrag) {
+        applyManualBoxDrag(pt);
+      }
+      this.overviewScheduleUpdate?.('viewport');
+    };
+
+    let isMouseDraggingBox = false;
+    const onMouseDown = (ev: MouseEvent): void => {
+      if (!this.overview) return;
+      const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
+      if (!pt) return;
+      const boxBounds = this.overview.box?.actualBounds;
+      if (boxBounds?.isReal() && boxBounds.containsPoint(pt)) {
+        isMouseDraggingBox = true;
+        this.isOverviewBoxDragging = true;
+        stopEventForManualDrag(ev);
+        beginManualBoxDrag(pt);
+        this.overviewBoundsCache = '';
+        this.overviewScheduleUpdate?.('viewport');
+      }
+    };
+    const onMouseMove = (ev: MouseEvent): void => {
+      if (!isMouseDraggingBox) return;
+      const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
+      if (pt) {
+        applyManualBoxDrag(pt);
+      }
+      this.overviewScheduleUpdate?.('viewport');
+    };
+    const onMouseUp = (): void => {
+      if (!isMouseDraggingBox) return;
+      isMouseDraggingBox = false;
+      this.isOverviewBoxDragging = false;
+      this.overviewBoxViewportBounds = null;
+      endManualBoxDrag();
+      this.overviewBoundsCache = '';
+      this.overviewScheduleUpdate?.('viewport');
+    };
+
+    const onWindowPointerUp = (ev: PointerEvent): void => {
+      if (capturedPointerId !== null && ev.pointerId === capturedPointerId) {
+        onPointerUpLike();
+      }
+    };
+
+    this.zone.runOutsideAngular(() => {
+      container.addEventListener('pointerdown', onPointerDown, { passive: false, capture: true });
+      container.addEventListener('pointermove', onPointerMove, { passive: false, capture: true });
+      container.addEventListener('pointerup', onPointerUpLike, { passive: true, capture: true });
+      container.addEventListener('pointercancel', onPointerUpLike, { passive: true, capture: true });
+      container.addEventListener('lostpointercapture', onPointerUpLike, { passive: true, capture: true });
+      window.addEventListener('pointermove', onWindowPointerMove, { passive: false });
+      window.addEventListener('pointerup', onWindowPointerUp, { passive: true });
+      window.addEventListener('pointercancel', onWindowPointerUp, { passive: true });
+
+      container.addEventListener('mousedown', onMouseDown, { passive: false, capture: true });
+      window.addEventListener('mousemove', onMouseMove, { passive: true });
+      window.addEventListener('mouseup', onMouseUp, { passive: true });
+    });
+
+    this.overviewPointerCleanup = () => {
+      container.style.touchAction = prevTouchAction;
+      
+      container.removeEventListener('pointerdown', onPointerDown, { capture: true } as EventListenerOptions);
+      container.removeEventListener('pointermove', onPointerMove, { capture: true } as EventListenerOptions);
+      container.removeEventListener('pointerup', onPointerUpLike, { capture: true } as EventListenerOptions);
+      container.removeEventListener('pointercancel', onPointerUpLike, { capture: true } as EventListenerOptions);
+      container.removeEventListener('lostpointercapture', onPointerUpLike, { capture: true } as EventListenerOptions);
+      window.removeEventListener('pointermove', onWindowPointerMove);
+      window.removeEventListener('pointerup', onWindowPointerUp);
+      window.removeEventListener('pointercancel', onWindowPointerUp);
+
+      container.removeEventListener('mousedown', onMouseDown, { capture: true } as EventListenerOptions);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }
+}

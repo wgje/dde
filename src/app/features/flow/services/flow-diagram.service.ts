@@ -12,8 +12,9 @@ import { FlowSelectionService } from './flow-selection.service';
 import { FlowZoomService } from './flow-zoom.service';
 import { FlowEventService } from './flow-event.service';
 import { FlowTemplateService } from './flow-template.service';
+import { FlowOverviewService } from './flow-overview.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
-import { getFlowStyles, FlowTheme, FlowColorMode } from '../../../../config/flow-styles';
+import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
 import { MinimapMathService } from './minimap-math.service';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
@@ -70,6 +71,7 @@ export class FlowDiagramService {
   private readonly zoomService = inject(FlowZoomService);
   private readonly eventService = inject(FlowEventService);
   private readonly templateService = inject(FlowTemplateService);
+  private readonly overviewService = inject(FlowOverviewService);
   
   // TODO: 后续重构可将 calculateExtendedBounds 等边界计算逻辑迁移到 MinimapMathService
   // 这将提高可维护性和可测试性（可以独立单元测试，无需 DOM/Canvas）
@@ -540,9 +542,13 @@ export class FlowDiagramService {
   
   /**
    * 初始化小地图
+   * @deprecated 渐进式重构：内部逻辑正在迁移到 FlowOverviewService
    */
   initializeOverview(container: HTMLDivElement): void {
     if (!this.diagram || this.isDestroyed) return;
+    
+    // 设置 OverviewService 的主图引用
+    this.overviewService.setDiagram(this.diagram);
     
     if (this.overview) {
       this.disposeOverview();

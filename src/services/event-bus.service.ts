@@ -11,7 +11,6 @@
  */
 import { Injectable, signal } from '@angular/core';
 import { Subject, Observable } from 'rxjs';
-import type { Project, Task } from '../models';
 
 // ============================================
 // 事件类型定义

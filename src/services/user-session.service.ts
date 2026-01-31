@@ -343,7 +343,7 @@ export class UserSessionService {
 
   private runIdleTask(task: () => void): void {
     if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(() => task());
+      (window as unknown as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(() => task());
     } else {
       setTimeout(task, 0);
     }
@@ -362,7 +362,7 @@ export class UserSessionService {
    * - 优先使用增量同步，节省流量
    * - 首次同步或增量失败时才进行全量同步
    */
-  private async startBackgroundSync(userId: string, previousActive: string | null): Promise<void> {
+  private async startBackgroundSync(userId: string, _previousActive: string | null): Promise<void> {
     // 【修复】本地模式不启动后台同步，防止将 'local-user' 传递给 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过后台同步');
@@ -479,7 +479,7 @@ export class UserSessionService {
    * 合并单个项目数据
    * 【LWW 竞态保护】确保用户编辑不会被旧数据覆盖
    */
-  private async mergeSingleProject(cloudProject: Project, userId: string): Promise<void> {
+  private async mergeSingleProject(cloudProject: Project, _userId: string): Promise<void> {
     const localProjects = this.projectState.projects();
     const localProject = localProjects.find(p => p.id === cloudProject.id);
     

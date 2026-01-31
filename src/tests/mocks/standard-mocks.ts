@@ -7,7 +7,7 @@
  * @see docs/test-architecture-modernization-plan.md Section 4.3
  */
 import { vi } from 'vitest';
-import { signal, WritableSignal, DestroyRef, Injector, Provider, runInInjectionContext } from '@angular/core';
+import { signal, DestroyRef, Injector, Provider, runInInjectionContext } from '@angular/core';
 import type { Project, Task, Connection, Attachment, TaskStatus } from '../../models';
 
 // ============================================

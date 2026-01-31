@@ -5,16 +5,15 @@
  * 遵循 Offline-first：本地写入 → UI 更新 → 后台推送
  */
 
-import { Injectable, inject, computed } from '@angular/core';
-import { BlackBoxEntry, BlackBoxDateGroup } from '../models/focus';
+import { Injectable, inject } from '@angular/core';
+import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes } from '../utils/result';
 import { 
   blackBoxEntriesMap, 
   blackBoxEntriesGroupedByDate,
   unreadBlackBoxCount,
   updateBlackBoxEntry,
-  setBlackBoxEntries,
-  deleteBlackBoxEntry as deleteFromStore,
+  deleteBlackBoxEntry as _deleteFromStore,
   getTodayDate
 } from '../app/core/state/focus-stores';
 import { BlackBoxSyncService } from './black-box-sync.service';

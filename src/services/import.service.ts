@@ -20,8 +20,7 @@ import { Project, Task, Connection, AttachmentType } from '../models';
 import { 
   ExportData, 
   ExportMetadata, 
-  ExportProject,
-  EXPORT_CONFIG 
+  ExportProject
 } from './export.service';
 
 // ============================================

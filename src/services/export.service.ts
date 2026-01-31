@@ -18,7 +18,6 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { PreferenceService } from './preference.service';
 import { Project, Task, Connection } from '../models';
-import { environment } from '../environments/environment';
 
 // ============================================
 // 导出配置

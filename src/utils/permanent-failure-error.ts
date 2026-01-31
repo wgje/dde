@@ -95,5 +95,5 @@ export class PermanentFailureError extends Error {
  */
 export function isPermanentFailureError(error: unknown): error is PermanentFailureError {
   return error instanceof PermanentFailureError ||
-    (error instanceof Error && (error as any).isPermanentFailure === true);
+    (error instanceof Error && (error as unknown as { isPermanentFailure?: boolean }).isPermanentFailure === true);
 }

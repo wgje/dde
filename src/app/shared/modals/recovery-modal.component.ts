@@ -17,8 +17,7 @@ import { Component, inject, signal, computed, OnInit, Output, EventEmitter } fro
 import { CommonModule } from '@angular/common';
 import { 
   RecoveryService, 
-  RecoveryPoint, 
-  RecoveryPreview,
+  RecoveryPoint,
   RecoveryOptions,
 } from '../../../services/recovery.service';
 

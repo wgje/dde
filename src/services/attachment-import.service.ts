@@ -13,13 +13,12 @@
  * - 配额检查在上传前
  * - 断点续传支持（后续迭代）
  */
-import { Injectable, inject, signal, computed } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { AttachmentService } from './attachment.service';
 import { AuthService } from './auth.service';
-import { Attachment, AttachmentType } from '../models';
-import { ATTACHMENT_CONFIG } from '../config';
+import { Attachment } from '../models';
 
 // ============================================
 // 配置

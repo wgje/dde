@@ -77,7 +77,7 @@ export class PermissionDeniedHandlerService {
       tags: {
         service: 'PermissionDeniedHandler',
         errorCode: error.code,
-        dataType: rejectedData[0] ? (rejectedData[0] as any).source ? 'connection' : 'task' : 'unknown'
+        dataType: rejectedData[0] ? ((rejectedData[0] as Record<string, unknown>).source ? 'connection' : 'task') : 'unknown'
       },
       extra: {
         dataCount: rejectedData.length,

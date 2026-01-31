@@ -3,7 +3,7 @@
 # Change Record: 技术债务清理计划审查与更新
 
 **执行日期**: 2026-01-31  
-**执行状态**: ✅ Sprint 1-6 实施完成
+**执行状态**: ✅ Sprint 1-6 实施完成，Sprint 5 部分完成
 
 ---
 
@@ -78,6 +78,42 @@
 | src/services/migration.service.ts | 替换 5 处 console.log |
 | src/services/task-repository.service.ts | 添加 LoggerService，替换 1 处 |
 | + 14 个其他文件 | 小幅修改 |
+
+---
+
+## Sprint 5 部分完成 🔄
+
+### 已完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| TaskTrashService 创建 | ✅ | 从 TaskOperationService 拆分 (399 行) |
+| TaskOperationService 集成 | ✅ | 回收站方法委托给 TaskTrashService |
+| FlowOverviewService 创建 | ✅ | 从 FlowDiagramService 拆分 (887 行) |
+| FlowDiagramService 集成 | ✅ | 注入 FlowOverviewService 并设置主图引用 |
+| 测试更新 | ✅ | TaskOperationService 测试添加 provider |
+| ESLint 错误清零 | ✅ | 40 → 0 (未使用变量/any 类型) |
+
+### 行数变化
+
+| 服务 | 原行数 | 新行数 | 变化 |
+|------|--------|--------|------|
+| TaskOperationService | 2282 | 2059 | -223 (-10%) |
+| FlowDiagramService | 2385 | 2391 | +6 (注入配置) |
+
+### 新创建服务
+
+| 服务 | 行数 | 说明 |
+|------|------|------|
+| TaskTrashService | 399 | 回收站管理（软删除/恢复/清理） |
+| FlowOverviewService | 887 | 小地图管理（初始化/自动缩放/交互） |
+
+### 待完成
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| FlowDiagramService 完整迁移 | ⏳ | 移除 ~800 行重复代码 |
+| TaskOperationAdapterService 拆分 | ⏳ | 1438 行 |
 
 ---
 

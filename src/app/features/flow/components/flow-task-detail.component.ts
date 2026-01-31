@@ -1020,7 +1020,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
     
     let rafId: number | null = null;
-    let lastCalculatedHeight: number = this.drawerStartHeight; // 缓存最后计算的高度，用于磁吸
+    // 缓存最后计算的高度，用于磁吸（在 onEnd 中会更新）
+    const _lastCalculatedHeight: number = this.drawerStartHeight;
     
     const onMove = (ev: TouchEvent | MouseEvent) => {
       if (!this.isResizingDrawer) return;

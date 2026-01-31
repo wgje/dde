@@ -79,8 +79,8 @@ export class Diagram {
   }
   
   // 事务控制
-  startTransaction = vi.fn((name?: string) => true);
-  commitTransaction = vi.fn((name?: string) => true);
+  startTransaction = vi.fn((_name?: string) => true);
+  commitTransaction = vi.fn((_name?: string) => true);
   rollbackTransaction = vi.fn(() => true);
   
   // 节点/链接操作
@@ -413,7 +413,7 @@ export class PathFigure {
   startY: number;
   segments: unknown[] = [];
   
-  constructor(startX = 0, startY = 0, isFilled = true, isShadowed = true) {
+  constructor(startX = 0, startY = 0, _isFilled = true, _isShadowed = true) {
     this.startX = startX;
     this.startY = startY;
   }

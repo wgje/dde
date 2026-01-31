@@ -2657,7 +2657,7 @@ export class SimpleSyncService {
    * @param attempt 当前尝试次数，用于限制递归深度（最多 3 次）
    */
   private saveRetryQueueToStorage(attempt = 0): void {
-    const MAX_SAVE_ATTEMPTS = 3;
+    // MAX_SAVE_ATTEMPTS 在 saveRetryQueueToLocalStorage 中使用
     
     // 【Senior Consultant "Red Phone"】检查容量并发出警告
     this.checkQueueCapacityWarning();

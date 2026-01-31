@@ -41,9 +41,9 @@ export interface ScanResponse {
 }
 
 /**
- * 批量扫描任务接口
+ * 批量扫描任务接口（预留用于后续批量扫描功能）
  */
-interface ScanTask {
+export interface ScanTask {
   fileId: string;
   file: Blob;
   filename: string;
@@ -431,7 +431,7 @@ export class VirusScanService {
   /**
    * 处理未扫描文件
    */
-  private handleUnscannedFile(fileId: string): ScanResponse {
+  private handleUnscannedFile(_fileId: string): ScanResponse {
     const action = VIRUS_SCAN_CONFIG.DOWNLOAD_CHECK.ON_UNSCANNED as string;
     
     switch (action) {
@@ -596,7 +596,7 @@ export class VirusScanService {
   /**
    * 创建跳过扫描的结果
    */
-  private createSkippedResult(filename: string, reason: string): ScanResult {
+  private createSkippedResult(_filename: string, reason: string): ScanResult {
     return {
       fileId: crypto.randomUUID(),
       status: SCAN_STATUS.SKIPPED,
@@ -609,7 +609,7 @@ export class VirusScanService {
   /**
    * 创建待扫描的结果
    */
-  private createPendingResult(filename: string): ScanResult {
+  private createPendingResult(_filename: string): ScanResult {
     return {
       fileId: crypto.randomUUID(),
       status: SCAN_STATUS.PENDING,

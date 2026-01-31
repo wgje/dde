@@ -7,7 +7,7 @@
 
 import { Injectable, inject, computed } from '@angular/core';
 import { Task } from '../models';
-import { BlackBoxEntry, StrataItem, StrataLayer } from '../models/focus';
+import { StrataItem, StrataLayer } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { BlackBoxService } from './black-box.service';
 import { ProjectStateService } from './project-state.service';

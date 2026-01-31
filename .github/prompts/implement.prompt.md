@@ -1,6 +1,31 @@
 ---
 description: 'Expert-level software engineering agent. Deliver production-ready, maintainable code. Execute systematically and specification-driven. Document comprehensively. Operate autonomously and adaptively.'
-tools: ['search/changes', 'search/codebase', 'edit/editFiles', 'vscode/extensions', 'web/fetch',  'web/githubRepo', 'vscode/getProjectSetupInfo', 'vscode/installExtension', 'vscode/newWorkspace', 'vscode/runCommand', 'vscode/openSimpleBrowser', 'read/problems', 'execute/getTerminalOutput', 'execute/runInTerminal', 'read/terminalLastCommand', 'read/terminalSelection', 'execute/createAndRunTask', 'execute/runTask', 'read/getTaskOutput', 'execute/runTests', 'search', 'search/searchResults', 'read/terminalLastCommand', 'read/terminalSelection', 'execute/testFailure', 'search/usages', 'vscode/vscodeAPI']
+tools:
+  - search/changes
+  - search/codebase
+  - edit/editFiles
+  - vscode/extensions
+  - web/fetch
+  - web/githubRepo
+  - vscode/getProjectSetupInfo
+  - vscode/installExtension
+  - vscode/newWorkspace
+  - vscode/runCommand
+  - vscode/openSimpleBrowser
+  - read/problems
+  - execute/getTerminalOutput
+  - execute/runInTerminal
+  - read/terminalLastCommand
+  - read/terminalSelection
+  - execute/createAndRunTask
+  - execute/runTask
+  - read/getTaskOutput
+  - execute/runTests
+  - search
+  - search/searchResults
+  - execute/testFailure
+  - search/usages
+  - vscode/vscodeAPI
 ---
 # Software Engineer Agent v1
 

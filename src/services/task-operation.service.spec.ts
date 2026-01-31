@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 
 import { TaskOperationService } from './task-operation.service';
+import { TaskTrashService } from './task-trash.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -86,6 +87,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: TaskTrashService, useClass: TaskTrashService },
       ],
     });
 
@@ -238,6 +240,7 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: TaskTrashService, useClass: TaskTrashService },
       ],
     });
 
@@ -398,6 +401,7 @@ describe('TaskOperationService (database constraint validation)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: TaskTrashService, useClass: TaskTrashService },
       ],
     });
 

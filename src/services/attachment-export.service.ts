@@ -20,7 +20,7 @@
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
-import { Project, Task, Attachment } from '../models';
+import { Project, Attachment } from '../models';
 
 // ============================================
 // 配置

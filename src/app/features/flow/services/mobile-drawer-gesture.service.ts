@@ -121,7 +121,7 @@ export class MobileDrawerGestureService {
     const bottomHeightPx = this.bottomPanelHeight() * this.viewportHeight / 100;
     
     // 扩大触摸热区（实际把手仅 20px，但触摸区域扩展到 48px）
-    const touchZone = 48;
+    // touchZone 常量定义在配置中，此处使用硬编码值以匹配把手和触摸区域
     
     // 顶部面板把手在面板底部边缘
     // 把手视觉位置：从 (topHeightPx - HANDLE_HEIGHT) 到 topHeightPx

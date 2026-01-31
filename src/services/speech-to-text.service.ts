@@ -5,7 +5,7 @@
  * 支持离线缓存和自动重试
  */
 
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';

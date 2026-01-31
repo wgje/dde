@@ -5,7 +5,7 @@
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
 
-import { Injectable, inject, computed, signal } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';

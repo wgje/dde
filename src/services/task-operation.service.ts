@@ -2,7 +2,8 @@ import { Injectable, inject, DestroyRef } from '@angular/core';
 import { Task, Project, Attachment } from '../models';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
-import { LAYOUT_CONFIG, TRASH_CONFIG, FLOATING_TREE_CONFIG } from '../config';
+import { TaskTrashService } from './task-trash.service';
+import { LAYOUT_CONFIG, FLOATING_TREE_CONFIG } from '../config';
 import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';
@@ -59,6 +60,7 @@ export class TaskOperationService {
   private destroyRef = inject(DestroyRef);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOperation');
+  private readonly trashService = inject(TaskTrashService);
   
   /** 重平衡锁定的阶段 */
   private rebalancingStages = new Set<number>();
@@ -96,6 +98,12 @@ export class TaskOperationService {
     this.onProjectUpdateCallback = callbacks.onProjectUpdate;
     this.onProjectUpdateDebouncedCallback = callbacks.onProjectUpdateDebounced;
     this.getActiveProjectCallback = callbacks.getActiveProject;
+    
+    // 同步设置 TrashService 回调
+    this.trashService.setCallbacks({
+      getActiveProject: callbacks.getActiveProject,
+      recordAndUpdate: callbacks.onProjectUpdate
+    });
   }
   
   // ========== 查询方法 ==========
@@ -578,68 +586,14 @@ export class TaskOperationService {
     }
   }
   
-  // ========== 任务删除与恢复 ==========
+  // ========== 任务删除与恢复（委托给 TaskTrashService） ==========
   
   /**
    * 软删除任务（移动到回收站）
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   deleteTask(taskId: string): void {
-    const activeP = this.getActiveProject();
-    if (!activeP) return;
-    
-    const idsToDelete = new Set<string>();
-    const stack = [taskId];
-    while (stack.length > 0) {
-      const id = stack.pop()!;
-      if (idsToDelete.has(id)) continue;
-      idsToDelete.add(id);
-      activeP.tasks.filter(t => t.parentId === id).forEach(child => stack.push(child.id));
-    }
-    
-    const now = new Date().toISOString();
-    
-    // 找出所有涉及被删除任务的连接
-    const deletedConnections = activeP.connections.filter(
-      c => idsToDelete.has(c.source) || idsToDelete.has(c.target)
-    );
-    
-    this.recordAndUpdate(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            deletedAt: now,
-            deletedMeta: {
-              parentId: t.parentId,
-              stage: t.stage,
-              order: t.order,
-              rank: t.rank,
-              x: t.x,
-              y: t.y,
-            },
-            stage: null,
-            deletedConnections
-          };
-        } else if (idsToDelete.has(t.id)) {
-          return {
-            ...t,
-            deletedAt: now,
-            deletedMeta: {
-              parentId: t.parentId,
-              stage: t.stage,
-              order: t.order,
-              rank: t.rank,
-              x: t.x,
-              y: t.y,
-            },
-            stage: null
-          };
-        }
-        return t;
-      }),
-      connections: p.connections.filter(c => !idsToDelete.has(c.source) && !idsToDelete.has(c.target))
-    }));
+    this.trashService.deleteTask(taskId);
   }
   
   /**
@@ -652,87 +606,17 @@ export class TaskOperationService {
    * 
    * @param explicitIds 用户显式选中的任务 ID 列表
    * @returns 实际删除的任务数量（含级联子任务）
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   deleteTasksBatch(explicitIds: string[]): number {
-    const activeP = this.getActiveProject();
-    if (!activeP || explicitIds.length === 0) return 0;
-    
-    // 1. 级联收集与去重（使用迭代算法，避免栈溢出）
-    const allIdsToDelete = new Set<string>();
-    const stack = [...explicitIds];
-    
-    while (stack.length > 0) {
-      const currentId = stack.pop()!;
-      if (allIdsToDelete.has(currentId)) continue; // 已收集，跳过（去重）
-      
-      // 检查任务是否存在且未被删除
-      const task = activeP.tasks.find(t => t.id === currentId && !t.deletedAt);
-      if (!task) continue;
-      
-      allIdsToDelete.add(currentId);
-      
-      // 收集直接子任务
-      activeP.tasks
-        .filter(t => t.parentId === currentId && !t.deletedAt)
-        .forEach(child => stack.push(child.id));
+    const result = this.trashService.deleteTask(explicitIds[0], false);
+    // 如果是批量删除，需要逐个处理
+    if (explicitIds.length > 1) {
+      for (let i = 1; i < explicitIds.length; i++) {
+        this.trashService.deleteTask(explicitIds[i], false);
+      }
     }
-    
-    if (allIdsToDelete.size === 0) return 0;
-    
-    const now = new Date().toISOString();
-    
-    // 2. 找出所有涉及被删除任务的连接
-    const deletedConnections = activeP.connections.filter(
-      c => allIdsToDelete.has(c.source) || allIdsToDelete.has(c.target)
-    );
-    
-    // 3. 确定"主任务"列表（用户显式选中的任务，用于存储 deletedConnections）
-    const explicitIdsSet = new Set(explicitIds);
-    
-    // 4. 一次性批量更新
-    this.recordAndUpdate(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.map(t => {
-        if (!allIdsToDelete.has(t.id)) return t;
-        
-        // 构建 deletedMeta 用于恢复
-        const deletedMeta = {
-          parentId: t.parentId,
-          stage: t.stage,
-          order: t.order,
-          rank: t.rank,
-          x: t.x,
-          y: t.y,
-        };
-        
-        // 只有用户显式选中的"主任务"才保存 deletedConnections
-        // 级联删除的子任务不保存，避免数据冗余
-        if (explicitIdsSet.has(t.id)) {
-          const taskConnections = deletedConnections.filter(
-            c => c.source === t.id || c.target === t.id
-          );
-          return {
-            ...t,
-            deletedAt: now,
-            deletedMeta,
-            deletedConnections: taskConnections,
-            stage: null
-          };
-        }
-        
-        return {
-          ...t,
-          deletedAt: now,
-          deletedMeta,
-          stage: null
-        };
-      }),
-      connections: p.connections.filter(
-        c => !allIdsToDelete.has(c.source) && !allIdsToDelete.has(c.target)
-      )
-    }));
-    
-    return allIdsToDelete.size;
+    return result.deletedTaskIds.size;
   }
   
   /**
@@ -777,141 +661,34 @@ export class TaskOperationService {
   
   /**
    * 永久删除任务
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   permanentlyDeleteTask(taskId: string): void {
-    const activeP = this.getActiveProject();
-    if (!activeP) return;
-    
-    const idsToDelete = new Set<string>();
-    const stack = [taskId];
-    while (stack.length > 0) {
-      const id = stack.pop()!;
-      if (idsToDelete.has(id)) continue;
-      idsToDelete.add(id);
-      activeP.tasks.filter(t => t.parentId === id).forEach(child => stack.push(child.id));
-    }
-    
-    this.recordAndUpdate(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.filter(t => !idsToDelete.has(t.id)),
-      connections: p.connections.filter(c => !idsToDelete.has(c.source) && !idsToDelete.has(c.target))
-    }));
+    this.trashService.permanentlyDeleteTask(taskId);
   }
   
   /**
    * 从回收站恢复任务
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   restoreTask(taskId: string): void {
-    const activeP = this.getActiveProject();
-    if (!activeP) return;
-    
-    const mainTask = activeP.tasks.find(t => t.id === taskId);
-    const savedConnections = mainTask?.deletedConnections || [];
-    
-    const idsToRestore = new Set<string>();
-    const stack = [taskId];
-    while (stack.length > 0) {
-      const id = stack.pop()!;
-      if (idsToRestore.has(id)) continue;
-      idsToRestore.add(id);
-      activeP.tasks.filter(t => t.parentId === id).forEach(child => stack.push(child.id));
-    }
-    
-    this.recordAndUpdate(p => {
-      const restoredTasks = p.tasks.map(t => {
-        if (idsToRestore.has(t.id)) {
-          const meta = t.deletedMeta;
-          const { deletedConnections: _deletedConnections, deletedMeta: _deletedMeta, ...rest } = t;
-          
-          let restored;
-          if (meta) {
-            restored = {
-              ...rest,
-              deletedAt: null,
-              parentId: meta.parentId,
-              stage: meta.stage,
-              order: meta.order,
-              rank: meta.rank,
-              x: meta.x,
-              y: meta.y,
-            };
-          } else {
-            restored = { ...rest, deletedAt: null };
-          }
-          
-          // 🔴 数据库约束：确保 title 和 content 不能同时为空
-          if ((!restored.title || restored.title.trim() === '') && 
-              (!restored.content || restored.content.trim() === '')) {
-            restored.title = '新任务';
-          }
-          
-          return restored;
-        }
-        return t;
-      });
-      
-      const existingConnKeys = new Set(
-        p.connections.map(c => `${c.source}->${c.target}`)
-      );
-      const connectionsToRestore = savedConnections.filter(
-        c => !existingConnKeys.has(`${c.source}->${c.target}`)
-      );
-      
-      return this.layoutService.rebalance({
-        ...p,
-        tasks: restoredTasks,
-        connections: [...p.connections, ...connectionsToRestore]
-      });
-    });
+    this.trashService.restoreTask(taskId);
   }
   
   /**
    * 清空回收站
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   emptyTrash(): void {
-    const activeP = this.getActiveProject();
-    if (!activeP) return;
-    
-    const deletedIds = new Set(activeP.tasks.filter(t => t.deletedAt).map(t => t.id));
-    
-    this.recordAndUpdate(p => this.layoutService.rebalance({
-      ...p,
-      tasks: p.tasks.filter(t => !t.deletedAt),
-      connections: p.connections.filter(c => !deletedIds.has(c.source) && !deletedIds.has(c.target))
-    }));
+    this.trashService.emptyTrash();
   }
   
   /**
    * 清理超过保留期限的回收站项目
+   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
    */
   cleanupOldTrashItems(): number {
-    const activeP = this.getActiveProject();
-    if (!activeP) return 0;
-    
-    const now = new Date();
-    const cutoffDate = new Date(now.getTime() - TRASH_CONFIG.AUTO_CLEANUP_DAYS * 24 * 60 * 60 * 1000);
-    
-    let cleanedCount = 0;
-    
-    this.recordAndUpdate(p => {
-      const tasksToKeep = p.tasks.filter(task => {
-        if (!task.deletedAt) return true;
-        
-        const deletedDate = new Date(task.deletedAt);
-        if (deletedDate < cutoffDate) {
-          cleanedCount++;
-          return false;
-        }
-        return true;
-      });
-      
-      if (tasksToKeep.length !== p.tasks.length) {
-        return this.layoutService.rebalance({ ...p, tasks: tasksToKeep });
-      }
-      return p;
-    });
-    
-    return cleanedCount;
+    return this.trashService.cleanupOldTrashItems();
   }
   
   // ========== 任务移动 ==========
@@ -2057,7 +1834,7 @@ export class TaskOperationService {
         : allChildren;
 
       // 2. 将目标待分配块从其原父节点剥离（如果有）
-      const oldParentId = target.parentId;
+      const _oldParentId = target.parentId;
       
       // 3. 将目标待分配块的子树整体分配到目标阶段
       const targetSubtreeIds = this.collectSubtreeIds(targetUnassignedId, tasks);

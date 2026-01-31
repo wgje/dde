@@ -589,7 +589,7 @@ export class SyncStatusComponent {
   async downloadBackup() {
     try {
       // 获取当前项目的本地数据
-      const activeProjectId = this.projectState.activeProjectId() || '';
+      const _activeProjectId = this.projectState.activeProjectId() || '';
       
       // 构建备份数据
       const backupData = {

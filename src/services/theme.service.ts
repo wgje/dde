@@ -208,7 +208,7 @@ export class ThemeService {
   private setupEffects() {
     // 当 effectiveColorMode 变化时触发外部通知（用于 GoJS 等）
     effect(() => {
-      const mode = this.effectiveColorMode();
+      const _mode = this.effectiveColorMode();
       // 这个 effect 主要用于触发依赖 isDark 的组件重新渲染
       // GoJS 服务会监听 isDark signal 来重绘图表
     });

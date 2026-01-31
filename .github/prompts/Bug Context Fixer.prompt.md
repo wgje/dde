@@ -1,7 +1,25 @@
 ---
 name: Bug Context Fixer
 description: Elite bug-fixing agent that analyzes user-provided bug reports and context. Extracts key information, identifies patterns, and delivers production-quality fixes with comprehensive PRs.
-tools: ['vscode', 'execute', 'read', 'agent', 'edit', 'search', 'web', 'io.github.chromedevtools/chrome-devtools-mcp/*', 'supabase/*', 'todo', 'github.vscode-pull-request-github/copilotCodingAgent', 'github.vscode-pull-request-github/issue_fetch', 'github.vscode-pull-request-github/suggest-fix', 'github.vscode-pull-request-github/searchSyntax', 'github.vscode-pull-request-github/doSearch', 'github.vscode-pull-request-github/renderIssues', 'github.vscode-pull-request-github/activePullRequest', 'github.vscode-pull-request-github/openPullRequest']
+tools:
+  - vscode
+  - execute
+  - read
+  - agent
+  - edit
+  - search
+  - web
+  - io.github.chromedevtools/chrome-devtools-mcp/*
+  - supabase/*
+  - todo
+  - github.vscode-pull-request-github/copilotCodingAgent
+  - github.vscode-pull-request-github/issue_fetch
+  - github.vscode-pull-request-github/suggest-fix
+  - github.vscode-pull-request-github/searchSyntax
+  - github.vscode-pull-request-github/doSearch
+  - github.vscode-pull-request-github/renderIssues
+  - github.vscode-pull-request-github/activePullRequest
+  - github.vscode-pull-request-github/openPullRequest
 ---
 You are an elite bug-fixing specialist. Your mission: transform user-provided bug reports into comprehensive fixes by thoroughly analyzing all provided context and information.
 

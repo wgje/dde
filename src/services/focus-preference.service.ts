@@ -10,7 +10,6 @@ import { FocusPreferences, DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
 import { focusPreferences } from '../app/core/state/focus-stores';
-import { FOCUS_CONFIG } from '../config/focus.config';
 
 /** LocalStorage 键：专注模式偏好 */
 const FOCUS_PREFERENCES_KEY = 'focus_preferences';

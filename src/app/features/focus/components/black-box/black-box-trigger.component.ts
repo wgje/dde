@@ -6,14 +6,12 @@
 
 import { 
   Component, 
-  ChangeDetectionStrategy, 
-  inject,
+  ChangeDetectionStrategy,
   computed,
   HostListener
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { showBlackBoxPanel, pendingBlackBoxEntries, focusPreferences } from '../../../../core/state/focus-stores';
-import { FOCUS_CONFIG } from '../../../../../config/focus.config';
 
 @Component({
   selector: 'app-black-box-trigger',
