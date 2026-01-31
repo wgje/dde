@@ -432,11 +432,12 @@ export class AppComponent implements OnInit, OnDestroy {
       });
     };
 
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(() => run());
-    } else {
-      setTimeout(run, 0);
-    }
+    // 【性能修复 2026-01-31】移除 requestIdleCallback
+    // 问题：HeadlessChrome 等环境中 requestIdleCallback 可能延迟 9+ 秒
+    // 这导致 Guard 等待 isCheckingSession 超时后放行，但 UI 仍显示 loading overlay
+    // 解决：使用 queueMicrotask 在下一个微任务中立即执行
+    // 这允许当前帧完成渲染，同时确保 bootstrap 尽快开始
+    queueMicrotask(run);
   }
   
   ngOnDestroy() {

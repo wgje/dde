@@ -10,6 +10,11 @@ export { FlowViewComponent } from './flow-view.component';
 export { FlowToolbarComponent } from './flow-toolbar.component';
 export { FlowPaletteComponent } from './flow-palette.component';
 
+// 移动端抽屉组件
+export { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
+export { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
+export { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
+
 // 任务详情组件
 export { FlowTaskDetailComponent } from './flow-task-detail.component';
 

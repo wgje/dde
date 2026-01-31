@@ -4,6 +4,7 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
+import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
 
 /**
  * 流程图顶部调色板组件
@@ -12,7 +13,7 @@ import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-b
 @Component({
   selector: 'app-flow-palette',
   standalone: true,
-  imports: [CommonModule, BlackBoxPanelComponent],
+  imports: [CommonModule, BlackBoxPanelComponent, StrataViewComponent],
   styles: [`
     :host {
       position: absolute;
@@ -116,6 +117,9 @@ import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-b
 
             <!-- 3. 黑匣子快速录入 (Quick Capture) -->
             <app-black-box-panel></app-black-box-panel>
+            
+            <!-- 4. 地质层 (Strata) - 已完成任务堆叠显示 -->
+            <app-strata-view></app-strata-view>
             
             <!-- 底部占位，防止内容被遮挡 -->
             <div class="h-4"></div>

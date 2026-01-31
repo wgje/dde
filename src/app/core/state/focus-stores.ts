@@ -110,15 +110,15 @@ export const blackBoxEntriesGroupedByDate = computed<BlackBoxDateGroup[]>(() => 
 /**
  * 待处理的黑匣子条目（用于大门）
  * 
- * 逻辑：
- * 1. 当天的条目：只显示未读且未完成的
- * 2. 跨天的条目（昨日及之前）：只要未完成就显示（已读状态重置）
+ * 逻辑（更新后）：
+ * - 只显示**今天之前**的条目（排除当天录入）
+ * - 只要条目未完成（无论已读还是被跳过），都会显示
+ * - 每次进入软件都会弹出提醒
  * 
- * 即：跨天后"已读但未完成"的条目会再次出现在大门中
+ * 用户需求：只提醒"除了今天以外"的所有录入内容
  */
 export const pendingBlackBoxEntries = computed(() => {
   const entries = Array.from(blackBoxEntriesMap().values());
-  const yesterday = getYesterdayDate();
   const today = getTodayDate();
   
   return entries.filter(e => {
@@ -131,18 +131,13 @@ export const pendingBlackBoxEntries = computed(() => {
     // 被跳过且未到提醒日期的不显示
     if (e.snoozeUntil && e.snoozeUntil > today) return false;
     
-    // 今天的条目：只显示未读的
-    if (e.date === today) {
-      return !e.isRead;
+    // 排除今天的条目 - 今天录入的不在大门中提醒
+    if (e.date >= today) {
+      return false;
     }
     
-    // 跨天的条目（昨日及之前）：只要未完成就显示
-    // 即使已读，跨天后也要重新确认
-    if (e.date <= yesterday) {
-      return true; // 未完成就显示
-    }
-    
-    return false;
+    // 今天之前的条目：只要未完成就显示（无论已读与否）
+    return true;
   }).sort((a, b) => 
     new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
   );

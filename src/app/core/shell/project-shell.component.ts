@@ -17,6 +17,7 @@ import { SyncCoordinatorService } from '../../../services/sync-coordinator.servi
 import { ToastService } from '../../../services/toast.service';
 import { TabSyncService } from '../../../services/tab-sync.service';
 import { FlowCommandService } from '../../features/flow/services/flow-command.service';
+import { ModalLoaderService } from '../services/modal-loader.service';
 import { TextViewComponent } from '../../features/text';
 import { FlowViewComponent } from '../../features/flow';
 
@@ -247,15 +248,18 @@ import { FlowViewComponent } from '../../features/flow';
           </div>
         }
       } @else {
-        <!-- 无活动项目时的占位 -->
-        <div class="flex-1 flex items-center justify-center text-stone-300 dark:text-stone-600 flex-col gap-6 p-4">
-          <div class="w-24 h-24 rounded-full bg-stone-100 dark:bg-stone-800 flex items-center justify-center">
+        <!-- 无活动项目时的占位 - 点击可创建新项目 -->
+        <button 
+          (click)="openNewProjectModal()"
+          class="flex-1 flex items-center justify-center text-stone-300 dark:text-stone-600 flex-col gap-6 p-4 w-full cursor-pointer group"
+          aria-label="创建新项目">
+          <div class="w-24 h-24 rounded-full bg-stone-100 dark:bg-stone-800 flex items-center justify-center shadow-md transition-all duration-200 ease-out transform will-change-transform group-hover:-translate-y-1 group-hover:scale-105 group-hover:bg-stone-50 dark:group-hover:bg-stone-700/70 group-hover:shadow-xl group-active:scale-95 group-active:shadow-lg group-active:bg-stone-200 dark:group-active:bg-stone-700">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
           </div>
           <p class="font-light tracking-widest text-sm text-center">请选择或创建一个项目</p>
-        </div>
+        </button>
       }
     </div>
   `
@@ -269,6 +273,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private tabSync = inject(TabSyncService);
   private route = inject(ActivatedRoute);
   private router = inject(Router);
+  private readonly modalLoader = inject(ModalLoaderService);
   private destroy$ = new Subject<void>();
   
   // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
@@ -593,6 +598,14 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     // 通过命令服务发送重试命令
     // 命令会被缓存直到 FlowView 就绪
     this.flowCommand.retryDiagram();
+  }
+  
+  /**
+   * 打开新建项目模态框
+   * 当没有活动项目时，点击占位区域触发
+   */
+  openNewProjectModal(): void {
+    this.modalLoader.openNewProjectModal();
   }
   
   /**

@@ -2030,4 +2030,147 @@ describe('SimpleSyncService', () => {
       );
     });
   });
+
+  describe('队列容量警告节流', () => {
+    it('checkQueueCapacityWarning 应该有 60 秒冷却时间', () => {
+      // 验证冷却时间配置存在
+      expect(service['CAPACITY_WARNING_COOLDOWN']).toBe(60_000);
+    });
+
+    it('低于阈值时不应该显示警告', async () => {
+      // 添加少量任务（低于 80% 阈值）
+      for (let i = 0; i < 70; i++) {
+        const task = createMockTask({ id: `task-${i}` });
+        await service.pushTask(task, 'project-1');
+      }
+
+      // 手动调用容量检查
+      (service as any).checkQueueCapacityWarning();
+
+      // 不应该显示错误 Toast
+      expect(mockToast.error).not.toHaveBeenCalled();
+    });
+
+    it('达到阈值时应该显示警告（首次）', async () => {
+      // 重置 Toast mock
+      mockToast.error.mockClear();
+
+      // 模拟队列达到 80% 容量
+      service['retryQueue'] = Array.from({ length: 85 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 调用容量检查
+      (service as any).checkQueueCapacityWarning();
+
+      // 应该显示警告
+      expect(mockToast.error).toHaveBeenCalledWith(
+        '⚠️ 同步队列即将满载',
+        '请连接网络以防止数据丢失',
+        { duration: 30_000 }
+      );
+    });
+
+    it('冷却时间内不应该重复显示警告', async () => {
+      // 使用 fake timers
+      vi.useFakeTimers();
+
+      // 重置状态
+      mockToast.error.mockClear();
+      service['lastCapacityWarningTime'] = 0;
+      service['lastWarningPercent'] = 0;
+
+      // 模拟队列达到阈值
+      service['retryQueue'] = Array.from({ length: 85 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 第一次调用 - 应该显示
+      (service as any).checkQueueCapacityWarning();
+      expect(mockToast.error).toHaveBeenCalledTimes(1);
+
+      // 立即再次调用 - 应该被节流跳过
+      (service as any).checkQueueCapacityWarning();
+      expect(mockToast.error).toHaveBeenCalledTimes(1);
+
+      // 30 秒后调用 - 仍在冷却期内
+      vi.advanceTimersByTime(30_000);
+      (service as any).checkQueueCapacityWarning();
+      expect(mockToast.error).toHaveBeenCalledTimes(1);
+
+      // 60 秒后调用 - 冷却结束，应该再次显示
+      vi.advanceTimersByTime(31_000);
+      (service as any).checkQueueCapacityWarning();
+      expect(mockToast.error).toHaveBeenCalledTimes(2);
+
+      vi.useRealTimers();
+    });
+
+    it('情况恶化时应该立即显示警告（绕过冷却）', async () => {
+      // 使用 fake timers
+      vi.useFakeTimers();
+
+      // 重置状态
+      mockToast.error.mockClear();
+      service['lastCapacityWarningTime'] = Date.now();
+      service['lastWarningPercent'] = 85; // 上次警告时是 85%
+
+      // 模拟队列情况恶化到 96%（增加超过 10%）
+      service['retryQueue'] = Array.from({ length: 96 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 应该立即显示（绕过冷却期）
+      (service as any).checkQueueCapacityWarning();
+      expect(mockToast.error).toHaveBeenCalledTimes(1);
+
+      vi.useRealTimers();
+    });
+
+    it('恢复正常后应该重置警告状态', async () => {
+      // 设置上次警告状态
+      service['lastWarningPercent'] = 85;
+
+      // 模拟队列恢复正常（低于阈值）
+      service['retryQueue'] = Array.from({ length: 50 }, (_, i) => ({
+        id: `item-${i}`,
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: `task-${i}` }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }));
+
+      // 调用容量检查
+      (service as any).checkQueueCapacityWarning();
+
+      // 验证状态被重置
+      expect(service['lastWarningPercent']).toBe(0);
+
+      // 验证记录了恢复日志
+      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+        'RetryQueue 容量恢复正常',
+        expect.objectContaining({ currentSize: 50 })
+      );
+    });
+  });
 });

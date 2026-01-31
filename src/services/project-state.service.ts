@@ -318,6 +318,23 @@ export class ProjectStateService {
   }
 
   /**
+   * 创建新项目
+   * 生成新项目对象，包含唯一 ID 和初始化信息
+   */
+  createNewProject(name: string, description: string): Project {
+    return {
+      id: crypto.randomUUID(),
+      name,
+      description,
+      createdDate: new Date().toISOString(),
+      tasks: [],
+      connections: [],
+      updatedAt: new Date().toISOString(),
+      version: 1,
+    };
+  }
+
+  /**
    * 清空数据
    */
   clearData(): void {

@@ -1,6 +1,7 @@
 import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector, untracked } from '@angular/core';
-import { CommonModule, DatePipe } from '@angular/common';
+import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
@@ -29,6 +30,9 @@ import { FlowConnectionEditorComponent } from './flow-connection-editor.componen
 import { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
 import { FlowCascadeAssignDialogComponent, CascadeAssignDialogData } from './flow-cascade-assign-dialog.component';
 import { FlowBatchDeleteDialogComponent, BatchDeleteDialogData } from './flow-batch-delete-dialog.component';
+import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
+import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
+import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
 import { flowTemplateEventHandlers } from '../services/flow-template-events';
 import * as go from 'gojs';
 
@@ -54,7 +58,6 @@ import * as go from 'gojs';
   imports: [
     CommonModule, 
     FormsModule,
-    DatePipe,
     FlowToolbarComponent, 
     FlowPaletteComponent, 
     FlowTaskDetailComponent,
@@ -63,7 +66,10 @@ import * as go from 'gojs';
     FlowConnectionEditorComponent,
     FlowLinkDeleteHintComponent,
     FlowCascadeAssignDialogComponent,
-    FlowBatchDeleteDialogComponent
+    FlowBatchDeleteDialogComponent,
+    MobileDrawerContainerComponent,
+    MobileTodoDrawerComponent,
+    MobileBlackBoxDrawerComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: [`
@@ -90,28 +96,311 @@ import * as go from 'gojs';
     .animate-slide-up {
       animation: slide-up 0.2s ease-out;
     }
+    
+    @keyframes slide-in-right {
+      from {
+        transform: translateX(100%);
+      }
+      to {
+        transform: translateX(0);
+      }
+    }
+    
+    .animate-slide-in-right {
+      animation: slide-in-right 0.25s ease-out;
+    }
   `],
   template: `
-    <div class="flex flex-col flex-1 min-h-0 relative">
-      <!-- 顶部调色板区域 -->
-      <app-flow-palette
-        [height]="paletteHeight()"
-        [isDropTargetActive]="dragDrop.isDropTargetActive()"
-        (isOpenChange)="onPaletteOpenChange($event)"
-        (heightChange)="paletteHeight.set($event)"
-        (centerOnNode)="centerOnNode($event)"
-        (createUnassigned)="createUnassigned()"
-        (taskClick)="onUnassignedTaskClick($event)"
-        (taskDragStart)="onDragStart($event.event, $event.task)"
-        (taskDrop)="onUnassignedDrop($event.event)"
-        (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
-        (taskTouchMove)="onUnassignedTouchMove($event.event)"
-        (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
-        (swipeToText)="goBackToText.emit()"
-        (swipeToSidebar)="toggleRightPanel()">
-      </app-flow-palette>
+    <!-- 移动端：双向抽屉布局 -->
+    @if (uiState.isMobile()) {
+      <app-mobile-drawer-container
+        class="flex-1 min-h-0"
+        (drawerStateChange)="onDrawerStateChange($event)">
+        
+        <!-- 顶层抽屉：待办 + 待分配 -->
+        <div slot="top" class="h-full">
+          <app-mobile-todo-drawer
+            [isDropTargetActive]="dragDrop.isDropTargetActive()"
+            (centerOnNode)="onMobileDrawerCenterOnNode($event)"
+            (createUnassigned)="createUnassigned()"
+            (taskClick)="onUnassignedTaskClick($event)"
+            (taskDragStart)="onDragStart($event.event, $event.task)"
+            (taskDrop)="onUnassignedDrop($event.event)"
+            (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
+            (taskTouchMove)="onUnassignedTouchMove($event.event)"
+            (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
+            (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
+          </app-mobile-todo-drawer>
+        </div>
+        
+        <!-- 中间层：流程图 -->
+        <div slot="middle" class="h-full relative" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
+          @if (!diagram.error()) {
+            <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+            
+            <!-- 移动端导航按钮 -->
+            <!-- 左下角：前往文本视图 -->
+            <button
+              (click)="goBackToText.emit()"
+              class="absolute left-0 bottom-16 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-l-0 border-stone-200 dark:border-stone-700 rounded-r-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
+              title="返回文本">
+              <span class="text-[8px] text-stone-400">◀</span>
+            </button>
 
-      <!-- 流程图区域 -->
+            <!-- 右侧小地图上方：展开项目列表 -->
+            <button
+              (click)="toggleRightPanel()"
+              class="absolute right-0 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-r-0 border-stone-200 dark:border-stone-700 rounded-l-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
+              style="bottom: 96px;" 
+              title="项目列表">
+              <span class="text-[8px] text-stone-400">◀</span>
+            </button>
+            
+            <!-- 批量操作浮动工具栏 -->
+            @if (selectionService.hasMultipleSelection()) {
+              <div class="absolute left-2 z-40 animate-slide-up" style="bottom: 56px;">
+                <div class="bg-white/95 dark:bg-stone-800/95 backdrop-blur rounded-lg shadow-lg border border-stone-200 dark:border-stone-600 px-2.5 py-1.5 flex items-center gap-1.5">
+                  <span class="text-xs text-stone-600 dark:text-stone-300">
+                    已选 <span class="font-semibold text-stone-800 dark:text-stone-100">{{ selectionService.selectionCount() }}</span>
+                  </span>
+                  <div class="w-px h-3 bg-stone-200 dark:bg-stone-600"></div>
+                  <button 
+                    (click)="requestBatchDelete()"
+                    class="flex items-center gap-1 px-1.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors">
+                    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    删除
+                  </button>
+                  <button 
+                    (click)="selectionService.clearSelection()"
+                    class="px-1.5 py-1 text-xs font-medium text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-700 rounded transition-colors">
+                    取消
+                  </button>
+                </div>
+              </div>
+            }
+            
+            <!-- 小地图/导航器 -->
+            @if (isOverviewVisible()) {
+              <div 
+                class="absolute z-50 pointer-events-auto bg-white/90 dark:bg-stone-800/90 backdrop-blur rounded-lg shadow-md border border-stone-200/60 dark:border-stone-700/60 select-none"
+                style="overflow: hidden;"
+                [ngClass]="{ 'opacity-40 hover:opacity-100': isOverviewCollapsed() }"
+                [style.right.px]="8"
+                [style.bottom]="'8px'"
+                [style.width.px]="isOverviewCollapsed() ? 24 : overviewSize().width"
+                [style.height.px]="isOverviewCollapsed() ? 24 : overviewSize().height">
+                @if (!isOverviewCollapsed()) {
+                  <div #overviewDiv class="w-full h-full relative z-0" style="overflow: hidden; position: relative;"></div>
+                }
+                <button
+                  (pointerdown)="onOverviewTogglePointerDown($event)"
+                  type="button"
+                  class="absolute top-0.5 right-0.5 z-50 pointer-events-auto rounded bg-white/80 dark:bg-stone-700/80 hover:bg-stone-100 dark:hover:bg-stone-600 flex items-center justify-center transition-colors w-6 h-6"
+                  [title]="isOverviewCollapsed() ? '展开小地图' : '折叠小地图'">
+                  <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" class="w-3 h-3 text-stone-500 dark:text-stone-400">
+                    @if (isOverviewCollapsed()) {
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                    } @else {
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 12h12" />
+                    }
+                  </svg>
+                </button>
+              </div>
+            }
+          } @else {
+            <!-- 流程图加载失败降级 UI -->
+            <div class="absolute inset-0 flex flex-col items-center justify-center bg-stone-50 dark:bg-stone-900 p-6">
+              <div class="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mb-4">
+                <svg class="w-8 h-8 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-stone-800 dark:text-stone-200 mb-2">流程图加载失败</h3>
+              <p class="text-sm text-stone-500 dark:text-stone-400 text-center mb-4">{{ diagram.error() }}</p>
+              <div class="flex gap-3">
+                <button (click)="goBackToText.emit()" class="px-4 py-2 bg-stone-200 dark:bg-stone-700 text-stone-700 dark:text-stone-200 rounded-lg hover:bg-stone-300 dark:hover:bg-stone-600 transition-colors text-sm font-medium">
+                  切换到文本视图
+                </button>
+              </div>
+            </div>
+          }
+
+          <!-- 工具栏 -->
+          <app-flow-toolbar
+            [isLinkMode]="link.isLinkMode()"
+            [isPaletteOpen]="isPaletteOpen()"
+            [linkSourceTask]="link.linkSourceTask()"
+            [isResizingDrawer]="isResizingDrawerSignal()"
+            [drawerHeightVh]="drawerHeight()"
+            [isSelectMode]="isSelectMode()"
+            (zoomIn)="zoomIn()"
+            (zoomOut)="zoomOut()"
+            (autoLayout)="applyAutoLayout()"
+            (toggleLinkMode)="link.toggleLinkMode()"
+            (cancelLinkMode)="link.cancelLinkMode()"
+            (toggleSidebar)="emitToggleSidebar()"
+            (goBackToText)="goBackToText.emit()"
+            (exportPng)="exportToPng()"
+            (exportSvg)="exportToSvg()"
+            (saveToCloud)="saveToCloud()"
+            (toggleSelectMode)="toggleSelectMode()">
+          </app-flow-toolbar>
+
+          <!-- 任务详情面板 -->
+          <app-flow-task-detail
+            [task]="selectedTask()"
+            [position]="taskDetailPos()"
+            [drawerHeight]="drawerHeight()"
+            [autoHeightEnabled]="!drawerManualOverride()"
+            (positionChange)="taskDetailPos.set($event)"
+            (drawerHeightChange)="drawerHeight.set($event)"
+            (isResizingChange)="isResizingDrawerSignal.set($event)"
+            (titleChange)="taskOps.updateTaskTitle($event.taskId, $event.title)"
+            (contentChange)="taskOps.updateTaskContent($event.taskId, $event.content)"
+            (priorityChange)="taskOps.updateTaskPriority($event.taskId, $event.priority)"
+            (dueDateChange)="taskOps.updateTaskDueDate($event.taskId, $event.dueDate)"
+            (tagAdd)="taskOps.addTaskTag($event.taskId, $event.tag)"
+            (tagRemove)="taskOps.removeTaskTag($event.taskId, $event.tag)"
+            (addSibling)="addSiblingTask($event)"
+            (addChild)="addChildTask($event)"
+            (toggleStatus)="taskOps.toggleTaskStatus($event)"
+            (archiveTask)="archiveTask($event)"
+            (deleteTask)="deleteTask($event)"
+            (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
+            (attachmentAdd)="taskOps.addTaskAttachment($event.taskId, $event.attachment)"
+            (attachmentRemove)="taskOps.removeTaskAttachment($event.taskId, $event.attachmentId)"
+            (attachmentsChange)="taskOps.updateTaskAttachments($event.taskId, $event.attachments)"
+            (attachmentError)="taskOps.handleAttachmentError($event)">
+          </app-flow-task-detail>
+        </div>
+        
+        <!-- 底层抽屉：黑匣子 -->
+        <div slot="bottom" class="h-full">
+          <app-mobile-black-box-drawer
+            (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
+          </app-mobile-black-box-drawer>
+        </div>
+      </app-mobile-drawer-container>
+      
+      <!-- 移动端右侧滑出项目面板 -->
+      @if (isRightPanelOpen()) {
+        <!-- 背景遮罩 - 无模糊效果 -->
+        <div 
+          class="fixed inset-0 bg-black/20 z-[100]"
+          (click)="isRightPanelOpen.set(false)"
+          (touchstart)="onRightPanelBackdropTouchStart($event)"
+          (touchmove)="onRightPanelBackdropTouchMove($event)"
+          (touchend)="onRightPanelBackdropTouchEnd($event)">
+        </div>
+        
+        <!-- 右侧面板 - 紧凑宽度 -->
+        <div 
+          class="fixed top-0 right-0 bottom-0 w-20 bg-white dark:bg-stone-900 z-[101] shadow-xl
+                 flex flex-col animate-slide-in-right border-l border-stone-200 dark:border-stone-700"
+          (touchstart)="onRightPanelTouchStart($event)"
+          (touchmove)="onRightPanelTouchMove($event)"
+          (touchend)="onRightPanelTouchEnd($event)">
+          
+          <!-- 面板标题 -->
+          <div class="shrink-0 px-3 py-2.5 bg-gradient-to-r from-indigo-500 to-indigo-600 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <svg class="w-4 h-4 text-white/80" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              <h2 class="text-sm font-semibold text-white">项目</h2>
+            </div>
+            <button 
+              (click)="isRightPanelOpen.set(false)"
+              class="p-1 rounded hover:bg-white/20 transition-colors">
+              <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          <!-- 项目数量统计 -->
+          <div class="shrink-0 px-3 py-1.5 bg-stone-50 dark:bg-stone-800/50 border-b border-stone-100 dark:border-stone-700">
+            <span class="text-[10px] text-stone-500 dark:text-stone-400">
+              共 {{ projectState.projects().length }} 个项目
+            </span>
+          </div>
+          
+          <!-- 项目列表 -->
+          <div class="flex-1 overflow-y-auto py-1.5">
+            @for (project of projectState.projects(); track project.id) {
+              <div 
+                class="mx-1.5 mb-0.5 px-2.5 py-2 rounded-md cursor-pointer transition-all flex items-center gap-2 group"
+                [ngClass]="{
+                  'bg-indigo-50 dark:bg-indigo-900/30 border-l-2 border-indigo-500': project.id === projectState.activeProjectId(),
+                  'hover:bg-stone-50 dark:hover:bg-stone-800 active:bg-stone-100 dark:active:bg-stone-700': project.id !== projectState.activeProjectId()
+                }"
+                (click)="onRightPanelProjectClick(project.id)">
+                <div class="w-1.5 h-1.5 rounded-full shrink-0"
+                     [ngClass]="{
+                       'bg-indigo-500': project.id === projectState.activeProjectId(),
+                       'bg-stone-300 dark:bg-stone-600 group-hover:bg-stone-400': project.id !== projectState.activeProjectId()
+                     }">
+                </div>
+                <span class="text-xs font-medium truncate flex-1"
+                      [ngClass]="{
+                        'text-indigo-700 dark:text-indigo-300': project.id === projectState.activeProjectId(),
+                        'text-stone-600 dark:text-stone-300': project.id !== projectState.activeProjectId()
+                      }">
+                  {{ project.name || '未命名项目' }}
+                </span>
+                @if (project.id === projectState.activeProjectId()) {
+                  <svg class="w-3 h-3 text-indigo-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                  </svg>
+                }
+              </div>
+            }
+            
+            @if (projectState.projects().length === 0) {
+              <div class="px-3 py-6 text-center">
+                <svg class="w-8 h-8 mx-auto text-stone-300 dark:text-stone-600 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                </svg>
+                <p class="text-[11px] text-stone-400 dark:text-stone-500">暂无项目</p>
+              </div>
+            }
+          </div>
+          
+          <!-- 底部操作提示 -->
+          <div class="shrink-0 px-3 py-2 bg-stone-50 dark:bg-stone-800/50 border-t border-stone-100 dark:border-stone-700">
+            <div class="flex items-center justify-center gap-1 text-[9px] text-stone-400 dark:text-stone-500">
+              <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+              </svg>
+              <span>滑动关闭</span>
+            </div>
+          </div>
+        </div>
+      }
+    } @else {
+      <!-- 桌面端：保持原有布局 -->
+      <div class="flex flex-col flex-1 min-h-0 relative">
+        <!-- 顶部调色板区域 -->
+        <app-flow-palette
+          [height]="paletteHeight()"
+          [isDropTargetActive]="dragDrop.isDropTargetActive()"
+          (isOpenChange)="onPaletteOpenChange($event)"
+          (heightChange)="paletteHeight.set($event)"
+          (centerOnNode)="centerOnNode($event)"
+          (createUnassigned)="createUnassigned()"
+          (taskClick)="onUnassignedTaskClick($event)"
+          (taskDragStart)="onDragStart($event.event, $event.task)"
+          (taskDrop)="onUnassignedDrop($event.event)"
+          (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
+          (taskTouchMove)="onUnassignedTouchMove($event.event)"
+          (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
+          (swipeToText)="goBackToText.emit()"
+          (swipeToSidebar)="toggleRightPanel()">
+        </app-flow-palette>
+
+        <!-- 流程图区域 -->
       <div class="flex-1 min-h-0 relative overflow-hidden dark:bg-stone-950 md:border-t md:border-[#78716C]/50" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
         @if (!diagram.error()) {
           <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
@@ -387,84 +676,9 @@ import * as go from 'gojs';
         (cancel)="cancelCascadeAssign()">
       </app-flow-cascade-assign-dialog>
       
-      <!-- 移动端右侧滑出项目面板 -->
-      @if (uiState.isMobile()) {
-        <!-- 背景遮罩 -->
-        @if (isRightPanelOpen()) {
-          <div 
-            class="fixed inset-0 bg-black/30 z-40 animate-fade-in"
-            (click)="isRightPanelOpen.set(false)"
-            (touchstart)="onRightPanelBackdropTouchStart($event)"
-            (touchmove)="onRightPanelBackdropTouchMove($event)"
-            (touchend)="onRightPanelBackdropTouchEnd($event)">
-          </div>
-        }
-        
-        <!-- 右侧滑出项目面板 - 完全复刻左侧侧边栏样式 -->
-        <aside 
-          class="fixed top-0 right-0 h-full w-[180px] border-l flex flex-col shrink-0 transition-transform duration-300 ease-out shadow-[-4px_0_24px_rgba(0,0,0,0.08)] z-50 overflow-hidden"
-          style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
-          [class.translate-x-full]="!isRightPanelOpen()"
-          [class.translate-x-0]="isRightPanelOpen()"
-          (touchstart)="onRightPanelTouchStart($event)"
-          (touchmove)="onRightPanelTouchMove($event)"
-          (touchend)="onRightPanelTouchEnd($event)">
-          
-          <!-- Panel Header - 复刻侧边栏头部 -->
-          <div class="flex justify-between items-center shrink-0 mx-3 mt-4 mb-3">
-            <h1 class="font-bold text-stone-800 dark:text-stone-100 tracking-tight font-serif text-base">NanoFlow</h1>
-            <button 
-              (click)="isRightPanelOpen.set(false)"
-              class="text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 w-6 h-6 flex items-center justify-center rounded-full transition-all active:bg-stone-200 dark:active:bg-stone-700"
-              title="关闭" aria-label="关闭面板">
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-              </svg>
-            </button>
-          </div>
-          
-          <!-- Project List - 完全复刻项目列表样式 -->
-          <div class="flex-1 overflow-y-auto space-y-1 px-2">
-            @for (proj of projectState.projects(); track proj.id) {
-              <div 
-                (click)="onRightPanelProjectClick(proj.id)"
-                class="rounded-lg cursor-pointer transition-all duration-200 group hover:bg-stone-100 dark:hover:bg-stone-700 px-2 py-2"
-                [ngClass]="{
-                  'bg-indigo-100': projectState.activeProjectId() === proj.id,
-                  'dark:bg-indigo-900/30': projectState.activeProjectId() === proj.id,
-                  'text-indigo-900': projectState.activeProjectId() === proj.id,
-                  'dark:text-indigo-200': projectState.activeProjectId() === proj.id,
-                  'text-stone-500': projectState.activeProjectId() !== proj.id,
-                  'dark:text-stone-400': projectState.activeProjectId() !== proj.id
-                }">
-                <div class="flex items-center justify-between gap-1 min-w-0">
-                  <div class="font-medium transition-colors flex-1 min-w-0 truncate text-xs">
-                    {{ proj.name }}
-                  </div>
-                </div>
-                @if (projectState.activeProjectId() === proj.id) {
-                  <div class="text-[10px] text-indigo-400 mt-1 animate-fade-in leading-relaxed font-mono">
-                    {{ proj.createdDate | date:'MM/dd' }}
-                  </div>
-                }
-              </div>
-            } @empty {
-              <div class="text-center py-8 text-stone-400 text-xs italic">
-                暂无项目
-              </div>
-            }
-          </div>
-          
-          <!-- Panel Footer - 复刻侧边栏底部 -->
-          <div class="mb-4 shrink-0 space-y-2 mx-2">
-            <!-- 同步状态提示 -->
-            <div class="text-[10px] text-stone-400 text-center py-2">
-              共 {{ projectState.projects().length }} 个项目
-            </div>
-          </div>
-        </aside>
-      }
+      <!-- 移动端右侧滑出项目面板 (桌面端不显示) -->
     </div>
+    }
   `
 })
 export class FlowViewComponent implements AfterViewInit, OnDestroy {
@@ -483,6 +697,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly zone = inject(NgZone);
   private readonly elementRef = inject(ElementRef);
   private readonly injector = inject(Injector);
+  private readonly router = inject(Router);
   
   // 命令服务（解耦与 ProjectShellComponent 的通信）
   private readonly flowCommand = inject(FlowCommandService);
@@ -2042,6 +2257,44 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
+  /** 处理抽屉状态变化 (移动端双向抽屉) */
+  onDrawerStateChange(event: { previousLayer: string; currentLayer: string; triggeredBy: string }): void {
+    this.logger.debug('Drawer state change:', event);
+    // 抽屉关闭时，可能需要刷新图表
+    if (event.currentLayer === 'middle' && event.previousLayer !== 'middle') {
+      // 返回中层时触发图表重绘
+      requestAnimationFrame(() => {
+        const diagramInstance = this.diagram.diagramInstance;
+        if (diagramInstance) {
+          diagramInstance.requestUpdate();
+        }
+      });
+    }
+  }
+  
+  /** 移动端抽屉内点击节点定位（关闭抽屉后定位） */
+  onMobileDrawerCenterOnNode(taskId: string): void {
+    // 延迟执行，等待抽屉关闭动画
+    setTimeout(() => {
+      this.centerOnNode(taskId);
+    }, 350);
+  }
+  
+  /**
+   * 处理移动端抽屉区域（待分配区域、黑匣子）的滑动切换手势
+   * - 向右滑动：切换到文本视图
+   * - 向左滑动：打开项目侧边栏
+   */
+  onDrawerSwipeToSwitch(direction: 'left' | 'right'): void {
+    if (direction === 'right') {
+      // 向右滑动 → 切换到文本视图
+      this.goBackToText.emit();
+    } else if (direction === 'left') {
+      // 向左滑动 → 打开项目侧边栏
+      this.toggleRightPanel();
+    }
+  }
+  
   /** 切换右侧面板（移动端） */
   toggleRightPanel(): void {
     if (this.uiState.isMobile()) {
@@ -2061,10 +2314,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.isRightPanelOpen.set(false);
   }
   
-  /** 右侧面板项目点击处理 */
+  /** 右侧面板项目点击处理 - 切换项目并同步 URL */
   onRightPanelProjectClick(projectId: string): void {
+    // 设置活动项目 ID，触发 tasks() computed 重新计算
     this.projectState.activeProjectId.set(projectId);
+    // 关闭右侧面板
     this.isRightPanelOpen.set(false);
+    // 同步 URL 路由，保持当前视图类型
+    const currentView = this.uiState.activeView() || 'flow';
+    void this.router.navigate(['/projects', projectId, currentView]);
   }
   
   // ========== 右侧面板滑动手势 ==========

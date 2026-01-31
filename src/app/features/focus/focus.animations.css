@@ -130,6 +130,30 @@
   }
 }
 
+/* 卡片下沉动画（切换到下一个条目时） */
+@keyframes task-sink {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 20px, 0) scale(0.95);
+  }
+}
+
+/* 卡片浮现动画（新条目入场） */
+@keyframes task-emerge {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -20px, 0) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
 /* 进度条动画 */
 @keyframes gate-progress {
   from {
@@ -148,7 +172,14 @@
   animation: gate-leave 0.3s ease-out forwards;
 }
 
+/* 基础 .gate-card 不定义动画，避免与状态动画冲突 */
 .gate-card {
+  /* 入场动画只在初始渲染时由 entering 类触发 */
+  animation: none;
+}
+
+/* 初始入场动画 - 只在首次渲染时使用 */
+.gate-card.entering {
   animation: gate-card-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
@@ -162,6 +193,16 @@
 
 .gate-card.snoozing {
   animation: gate-card-snooze 0.3s ease-out forwards;
+}
+
+/* 下沉动画（切换到下一条目） */
+.gate-card.sinking {
+  animation: task-sink 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+}
+
+/* 浮现动画（新条目入场） */
+.gate-card.emerging {
+  animation: task-emerge 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 
 /* ============================================================

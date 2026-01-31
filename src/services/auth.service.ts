@@ -62,9 +62,14 @@ export class AuthService {
     return this.supabase.isConfigured;
   }
   
-  /** 认证状态 */
+  /** 
+   * 认证状态
+   * 【性能优化 2026-01-31】isCheckingSession 初始值改为 false
+   * 只有在实际调用 checkSession() 时才设为 true
+   * 这样 Guard 不会在应用启动时就开始等待
+   */
   readonly authState = signal<AuthState>({
-    isCheckingSession: true,
+    isCheckingSession: false,
     isLoading: false,
     userId: null,
     email: null,

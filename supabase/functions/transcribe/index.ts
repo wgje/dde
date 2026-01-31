@@ -9,10 +9,32 @@
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+/**
+ * 允许的来源白名单
+ * 安全修复：限制 CORS 来源，防止任意网站调用 API
+ */
+const ALLOWED_ORIGINS = [
+  'https://dde-eight.vercel.app',
+  'https://nanoflow.app',
+  'http://localhost:4200',      // 开发环境
+  'http://localhost:5173',      // Vite 开发服务器
+];
+
+/**
+ * 根据请求来源返回 CORS 头
+ * 只有白名单中的来源才会被允许
+ */
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  const isAllowed = origin && ALLOWED_ORIGINS.some(allowed => 
+    origin === allowed || origin.endsWith('.vercel.app')
+  );
+  
+  return {
+    'Access-Control-Allow-Origin': isAllowed ? origin! : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Vary': 'Origin', // 重要：告知缓存根据 Origin 区分响应
+  };
 }
 
 /** 每用户每日转写限额 */
@@ -25,10 +47,15 @@ const GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions'
 const MAX_FILE_SIZE = 25 * 1024 * 1024
 
 serve(async (req: Request) => {
+  // 获取请求来源，用于 CORS 响应
+  const origin = req.headers.get('Origin');
+  const corsHeaders = getCorsHeaders(origin);
+
   // 📊 请求入口日志 - 帮助确认请求是否到达
   console.log('🎤 [Transcribe] Request received:', {
     method: req.method,
     url: req.url,
+    origin,
     hasAuth: !!req.headers.get('Authorization'),
     contentType: req.headers.get('Content-Type'),
     timestamp: new Date().toISOString()

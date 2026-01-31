@@ -57,8 +57,8 @@ export class GateService {
   readonly progress = gateProgress;
   readonly canSnooze = canSnooze;
   
-  // 卡片动画状态
-  readonly cardAnimation = signal<'idle' | 'sinking' | 'emerging'>('idle');
+  // 卡片动画状态：entering=首次入场, sinking=下沉, emerging=浮现, idle=静止
+  readonly cardAnimation = signal<'idle' | 'entering' | 'sinking' | 'emerging'>('idle');
   
   // 是否显示完成提示
   readonly showCompletionMessage = signal<boolean>(false);
@@ -93,6 +93,8 @@ export class GateService {
       gatePendingItems.set(pending);
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
+      // 设置首次入场动画状态
+      this.cardAnimation.set('entering');
       this.logger.info('Gate', `Gate activated with ${pending.length} pending items`);
     } else {
       // 没有待处理条目，跳过大门
@@ -163,40 +165,55 @@ export class GateService {
   }
   
   /**
-   * 切换到下一个条目（带动画）
+   * 切换到下一个条目（触发下沉动画）
+   * 动画完成后由 onSinkingComplete() 处理状态切换
    */
   private nextEntry(): void {
+    // 只触发下沉动画，后续逻辑由 animationend 事件驱动
+    this.cardAnimation.set('sinking');
+  }
+  
+  /**
+   * 入场动画完成回调
+   * 由 GateCardComponent 的 animationend 事件触发
+   */
+  onEnteringComplete(): void {
+    this.cardAnimation.set('idle');
+  }
+  
+  /**
+   * 下沉动画完成回调
+   * 由 GateCardComponent 的 animationend 事件触发
+   */
+  onSinkingComplete(): void {
     const nextIndex = gateCurrentIndex() + 1;
     const total = gatePendingItems().length;
     
-    // 触发下沉动画
-    this.cardAnimation.set('sinking');
-    
-    // 动画完成后切换
-    setTimeout(() => {
-      if (nextIndex >= total) {
-        // 全部处理完毕 - 显示完成提示
-        gateState.set('completed');
-        this.showCompletionMessage.set(true);
-        this.cardAnimation.set('idle');
-        
-        this.logger.info('Gate', 'Gate completed, all items processed');
-        
-        // 1.5秒后隐藏完成提示
-        setTimeout(() => {
-          this.showCompletionMessage.set(false);
-        }, 1500);
-      } else {
-        gateCurrentIndex.set(nextIndex);
-        // 触发浮现动画
-        this.cardAnimation.set('emerging');
-        
-        // 动画结束后重置
-        setTimeout(() => {
-          this.cardAnimation.set('idle');
-        }, 300);
-      }
-    }, 280);
+    if (nextIndex >= total) {
+      // 全部处理完毕 - 显示完成提示
+      gateState.set('completed');
+      this.showCompletionMessage.set(true);
+      this.cardAnimation.set('idle');
+      
+      this.logger.info('Gate', 'Gate completed, all items processed');
+      
+      // 1.5秒后隐藏完成提示
+      setTimeout(() => {
+        this.showCompletionMessage.set(false);
+      }, 1500);
+    } else {
+      // 切换到下一个条目并触发浮现动画
+      gateCurrentIndex.set(nextIndex);
+      this.cardAnimation.set('emerging');
+    }
+  }
+  
+  /**
+   * 浮现动画完成回调
+   * 由 GateCardComponent 的 animationend 事件触发
+   */
+  onEmergingComplete(): void {
+    this.cardAnimation.set('idle');
   }
   
   /**

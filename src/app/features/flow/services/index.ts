@@ -46,3 +46,6 @@ export { FlowCommandService, FlowCommandType, type FlowCommand, type CenterNodeP
 // 小地图服务
 export { MinimapMathService, type WorldPoint, type MinimapPoint, type WorldBounds, type MinimapState, type DragSession, type RealTimeScaleResult, type VirtualBoundsResult } from './minimap-math.service';
 export { ReactiveMinimapService, type MinimapElements, type NodePosition as MinimapNodePosition, type MainCanvasViewport, type ReactiveDragSession, type MinimapTransform } from './reactive-minimap.service';
+
+// 移动端抽屉手势服务
+export { MobileDrawerGestureService } from './mobile-drawer-gesture.service';

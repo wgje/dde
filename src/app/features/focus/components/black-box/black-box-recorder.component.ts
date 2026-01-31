@@ -33,7 +33,10 @@ import { SpeechToTextService } from '../../../../../services/speech-to-text.serv
       <button 
         class="record-btn w-full px-4 py-5 rounded-xl transition-all duration-200
                flex items-center justify-center gap-2 text-sm font-medium
-               select-none touch-none"
+               select-none touch-none
+               border-2 border-solid border-transparent
+               hover:border-dashed hover:border-amber-300/50 
+               dark:hover:border-stone-500/50"
         [class]="getButtonClass()"
         [disabled]="voiceService.isTranscribing()"
         (mousedown)="start($event)" 
@@ -128,12 +131,11 @@ export class BlackBoxRecorderComponent {
       return 'bg-stone-200 dark:bg-stone-600 text-stone-500 dark:text-stone-300 cursor-wait';
     }
     if (this.voiceService.isRecording()) {
-      return 'recording bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[0.98]';
+      return 'recording bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[0.98] border-2 border-dashed border-red-400';
     }
     return `bg-amber-100/80 dark:bg-stone-700/80 
             text-amber-700 dark:text-amber-300 
             hover:bg-amber-200 dark:hover:bg-stone-600 
-            border-2 border-dashed border-amber-300 dark:border-stone-500
             active:scale-[0.98]`;
   }
   

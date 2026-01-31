@@ -58,7 +58,8 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                       'px-2 py-1.5 bg-retro-teal/5 dark:bg-retro-teal/10 border border-retro-teal/20 dark:border-retro-teal/30 hover:border-retro-teal/40': !isEditMode()
                     }">
                     @if (isEditMode()) {
-                      <div class="space-y-2">
+                      <!-- 【修复】编辑容器需要防止事件冒泡导致缩小 -->
+                      <div class="space-y-2" (click)="$event.stopPropagation()">
                         <input #editInput
                           data-title-input
                           class="w-full bg-transparent border-none focus:ring-0 text-retro-dark dark:text-stone-200 p-0 mb-1"
@@ -67,8 +68,9 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                           (input)="localTitle.set(editInput.value)"
                           (keydown.enter)="saveTask(task)"
                           (keydown.escape)="cancelEdit()"
-                          (blur)="saveTask(task)"
-                          placeholder="输入任务标题...">
+                          (blur)="onTitleBlur($event, task)"
+                          placeholder="输入任务标题..."
+                          (click)="$event.stopPropagation()">
                         <textarea
                           #contentInput
                           class="w-full border border-stone-200 dark:border-stone-700 rounded-md bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300 focus:ring-1 focus:ring-retro-teal focus:border-retro-teal outline-none resize-none"
@@ -77,6 +79,7 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                           (input)="localContent.set(contentInput.value)"
                           (keydown.meta.enter)="saveTask(task)"
                           (keydown.ctrl.enter)="saveTask(task)"
+                          (click)="$event.stopPropagation()"
                           placeholder="输入任务内容 (Markdown)..."></textarea>
                         <div class="flex justify-end gap-2">
                           <button (click)="cancelEdit(); $event.stopPropagation()" class="text-[10px] text-stone-400 hover:text-stone-600">取消</button>
@@ -84,8 +87,9 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                         </div>
                       </div>
                     } @else {
-                      <div class="flex justify-between items-start gap-2">
-                        <div class="flex-1 min-w-0" (click)="enterEdit(task); $event.stopPropagation()">
+                      <div class="flex justify-between items-start gap-2 group/preview">
+                        <!-- 【修复】点击内容区域直接进入编辑，不触发卡片切换逻辑 -->
+                        <div class="flex-1 min-w-0 cursor-text" (click)="enterEdit(task); $event.stopPropagation()">
                           <div class="font-medium text-retro-dark dark:text-stone-200 truncate"
                                [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}">
                             {{task.title}}
@@ -97,13 +101,16 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                             </div>
                           }
                         </div>
-                        <div class="flex gap-1 shrink-0 mt-0.5">
+                        <!-- 操作按钮组 -->
+                        <div class="flex gap-1 shrink-0 mt-0.5 opacity-0 group-hover/preview:opacity-100 transition-opacity">
                           <button (click)="enterEdit(task); $event.stopPropagation()" 
-                                  class="p-1 text-stone-400 hover:text-retro-teal transition-colors">
+                                  class="p-1 text-stone-400 hover:text-retro-teal transition-colors"
+                                  title="编辑任务">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
                           </button>
                           <button (click)="deleteTask(task.id); $event.stopPropagation()" 
-                                  class="p-1 text-stone-400 hover:text-retro-rust transition-colors">
+                                  class="p-1 text-stone-400 hover:text-retro-rust transition-colors"
+                                  title="删除任务">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                           </button>
                         </div>
@@ -111,10 +118,10 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                     }
                   </div>
                 } @else {
-                  <!-- 普通展示模式 -->
+                  <!-- 【修复】普通展示模式：卡片外框用于在场景间切换，内容区域专用于编辑 -->
                   <div 
                     [attr.data-unassigned-task]="task.id"
-                    (click)="onTaskClick(task)"
+                    (click)="onTaskCardClick(task); $event.stopPropagation()"
                     [attr.draggable]="true"
                     (dragstart)="handleDragStart($event, task)"
                     (dragend)="handleDragEnd()"
@@ -138,7 +145,6 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
             @if (projectState.unassignedTasks().length === 0) {
               <div class="px-3 py-4 text-center">
                 <p class="text-stone-400 italic font-light" [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">无待分配任务</p>
-                <div class="mt-2 text-[10px] text-stone-300 dark:text-stone-500 uppercase tracking-widest">NanoFlow</div>
               </div>
             }
           </div>
@@ -212,7 +218,9 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected onTaskClick(task: Task): void {
-    // 点击同一任务时：编辑态 -> 预览态 -> 折叠态 三段式切换
+    // 【修复】区分点击源：卡片外框(三段式切换) vs 内容区域(直接编辑)
+    // - 点击卡片外框按钮：展开 -> 折叠 -> 展开
+    // - 点击内容区域：直接进入编辑模式（符合编辑直觉）
     if (this.editingTaskId() === task.id) {
       if (this.isEditMode()) {
         this.isEditMode.set(false); // 编辑 -> 预览
@@ -227,11 +235,50 @@ export class TextUnassignedComponent implements OnDestroy {
     this.taskClick.emit(task);
   }
 
+  /**
+   * 【新增】处理普通展示模式卡片的点击
+   * 点击卡片显示体验：展开卡片查看内容
+   */
+  protected onTaskCardClick(task: Task): void {
+    // 如果没展开过，展开显示预览
+    // 如果已经展开过，再次点击则进行下一步操作
+    if (this.editingTaskId() === task.id) {
+      // 再次点击已展开的卡片：进入编辑模式（而不是折叠）
+      this.isEditMode.set(true);
+      this.localTitle.set(task.title || '');
+      this.localContent.set(task.content || '');
+    } else {
+      // 首次展开：显示预览
+      this.editingTaskId.set(task.id);
+      this.isEditMode.set(false);
+      this.syncLocalState(task.id);
+    }
+  }
+
   protected enterEdit(task: Task): void {
     this.editingTaskId.set(task.id);
     this.isEditMode.set(true);
     this.localTitle.set(task.title || '');
     this.localContent.set(task.content || '');
+  }
+
+  /**
+   * 【修复】标题输入框失焦处理 - 防止在编辑过程中意外保存
+   * 只有当用户确实要结束编辑时（点击保存/取消或按 Escape）才保存
+   * title 输入框之间的 tab/焦点切换不应触发保存
+   */
+  protected onTitleBlur(event: FocusEvent, task: Task): void {
+    // 检查焦点是否移动到同一编辑框内的其他元素
+    const relatedTarget = event.relatedTarget as HTMLElement;
+    const editContainer = (event.target as HTMLElement).closest('[data-unassigned-task]');
+    
+    // 如果焦点仍在编辑容器内（比如移到 textarea），不保存
+    if (relatedTarget && editContainer?.contains(relatedTarget)) {
+      return;
+    }
+    
+    // 焦点离开了编辑框容器，才进行保存
+    this.saveTask(task);
   }
 
   protected cancelEdit(): void {

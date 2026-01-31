@@ -2,15 +2,20 @@
  * 大门卡片组件
  * 
  * 显示当前待处理的遗留条目
+ * 使用 animationend 事件精确控制动画切换，避免 setTimeout 导致的卡顿
  */
 
 import { 
   Component, 
   ChangeDetectionStrategy, 
-  inject 
+  inject,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
+
+/** 动画完成事件类型 */
+export type GateAnimationType = 'entering' | 'sinking' | 'emerging';
 
 @Component({
   selector: 'app-gate-card',
@@ -21,8 +26,10 @@ import { GateService } from '../../../../../services/gate.service';
        <div class="gate-card bg-white dark:bg-[#1c1c1e]
              rounded-3xl shadow-2xl shadow-black/20 overflow-hidden
              border border-stone-100 dark:border-white/5 relative"
+         [class.entering]="cardAnimation() === 'entering'"
          [class.sinking]="cardAnimation() === 'sinking'"
-         [class.emerging]="cardAnimation() === 'emerging'">
+         [class.emerging]="cardAnimation() === 'emerging'"
+         (animationend)="onAnimationEnd($event)">
       
       <!-- 顶栏：标签与进度 -->
       <div class="px-8 pt-8 flex items-center justify-between">
@@ -130,39 +137,8 @@ import { GateService } from '../../../../../services/gate.service';
       /* 放置 jitter: 确保高度在动画期间稳定 */
       min-height: 220px;
     }
-
-    /* 下沉动画优化 - 减少位移距离，避免过大变动导致掉帧 */
-    .gate-card.sinking {
-      animation: task-sink 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-    }
-
-    /* 浮现动画优化 */
-    .gate-card.emerging {
-      animation: task-emerge 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-    }
     
-    @keyframes task-sink {
-      0% {
-        opacity: 1;
-        transform: translate3d(0, 0, 0) scale(1);
-      }
-      100% {
-        opacity: 0;
-        /* 增加Z轴位移以利用GPU */
-        transform: translate3d(0, 20px, 0) scale(0.95);
-      }
-    }
-    
-    @keyframes task-emerge {
-      0% {
-        opacity: 0;
-        transform: translate3d(0, -20px, 0) scale(0.98);
-      }
-      100% {
-        opacity: 1;
-        transform: translate3d(0, 0, 0) scale(1);
-      }
-    }
+    /* 动画类由全局 focus.animations.css 定义，这里只做补充性能优化 */
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
@@ -172,4 +148,62 @@ export class GateCardComponent {
   readonly currentEntry = this.gateService.currentEntry;
   readonly progress = this.gateService.progress;
   readonly cardAnimation = this.gateService.cardAnimation;
+  
+  /** 动画完成事件 */
+  readonly animationComplete = output<GateAnimationType>();
+  
+  /** 防止动画事件重复触发的标志 */
+  private isProcessingAnimation = false;
+  
+  /**
+   * 处理 CSS 动画结束事件
+   * 精确控制动画状态转换，避免 setTimeout 导致的卡顿
+   * 
+   * 【防抖机制】确保同一动画周期内只处理一次事件
+   */
+  onAnimationEnd(event: AnimationEvent): void {
+    // 防止事件冒泡导致的重复处理
+    event.stopPropagation();
+    
+    // 只处理我们关心的动画，忽略其他动画
+    const animationName = event.animationName;
+    
+    if (animationName === 'gate-card-pop') {
+      // 入场动画完成，切换到 idle 状态
+      if (this.isProcessingAnimation) return;
+      this.isProcessingAnimation = true;
+      
+      this.animationComplete.emit('entering');
+      this.gateService.onEnteringComplete();
+      
+      requestAnimationFrame(() => {
+        this.isProcessingAnimation = false;
+      });
+    } else if (animationName === 'task-sink') {
+      // 防抖：避免重复触发
+      if (this.isProcessingAnimation) return;
+      this.isProcessingAnimation = true;
+      
+      this.animationComplete.emit('sinking');
+      this.gateService.onSinkingComplete();
+      
+      // 下一帧重置防抖标志
+      requestAnimationFrame(() => {
+        this.isProcessingAnimation = false;
+      });
+    } else if (animationName === 'task-emerge') {
+      // 防抖：避免重复触发
+      if (this.isProcessingAnimation) return;
+      this.isProcessingAnimation = true;
+      
+      this.animationComplete.emit('emerging');
+      this.gateService.onEmergingComplete();
+      
+      // 下一帧重置防抖标志
+      requestAnimationFrame(() => {
+        this.isProcessingAnimation = false;
+      });
+    }
+    // 其他动画（如 gate-card-complete 等）不处理
+  }
 }

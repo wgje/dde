@@ -109,6 +109,15 @@ export {
   FocusErrorMessages
 } from './focus.config';
 
+// 移动端抽屉配置
+export {
+  DRAWER_CONFIG,
+  type SnapPointName,
+  type DrawerLayer,
+  type DrawerStateChangeEvent,
+  type DrawerDragEvent
+} from './drawer.config';
+
 // 性能优化配置（P0-P3 优化 2026-01-26）
 export {
   PERFORMANCE_FLAGS,

@@ -9,6 +9,7 @@ import {
   ChangeDetectionStrategy, 
   inject,
   signal,
+  output,
   OnInit
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
@@ -18,6 +19,12 @@ import { FocusPreferenceService } from '../../../../../services/focus-preference
 import { BlackBoxRecorderComponent } from './black-box-recorder.component';
 import { BlackBoxTextInputComponent } from './black-box-text-input.component';
 import { BlackBoxDateGroupComponent } from './black-box-date-group.component';
+import { 
+  SwipeGestureState, 
+  SwipeDirection, 
+  startSwipeTracking, 
+  detectHorizontalSwipe 
+} from '../../../../../utils/gesture';
 
 @Component({
   selector: 'app-black-box-panel',
@@ -33,6 +40,8 @@ import { BlackBoxDateGroupComponent } from './black-box-date-group.component';
                 <div class="relative rounded-xl bg-amber-50/60 dark:bg-stone-800/60 
                   border border-amber-100/50 dark:border-stone-700/50 
                   backdrop-blur-md overflow-hidden"
+                (touchstart)="onSwipeTouchStart($event)"
+                (touchend)="onSwipeTouchEnd($event)"
                 data-testid="black-box-panel"
                 role="dialog"
                 aria-label="黑匣子面板">
@@ -178,6 +187,12 @@ export class BlackBoxPanelComponent implements OnInit {
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
   
+  /** 滑动切换视图事件 */
+  readonly swipeToSwitch = output<SwipeDirection>();
+  
+  // 滑动手势状态
+  private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+  
   /**
    * 组件初始化时从服务器加载数据
    */
@@ -245,5 +260,40 @@ export class BlackBoxPanelComponent implements OnInit {
    */
   cancelDelete(): void {
     this.pendingDeleteId.set(null);
+  }
+  
+  // ===============================================
+  // 滑动切换视图手势处理
+  // ===============================================
+  
+  /**
+   * 滑动开始 - 在面板容器上调用
+   */
+  onSwipeTouchStart(event: TouchEvent): void {
+    if (event.touches.length !== 1) return;
+    this.swipeState = startSwipeTracking(event.touches[0]);
+  }
+  
+  /**
+   * 滑动结束 - 检测是否触发视图切换
+   * 【重要】检测到有效滑动时阻止事件冒泡，避免 app.component 误打开侧边栏
+   */
+  onSwipeTouchEnd(event: TouchEvent): void {
+    if (!this.swipeState.isActive) return;
+    
+    const touch = event.changedTouches[0];
+    const direction = detectHorizontalSwipe(
+      this.swipeState,
+      touch.clientX,
+      touch.clientY
+    );
+    
+    if (direction) {
+      // 阻止事件冒泡，避免 app.component 误判为侧边栏切换手势
+      event.stopPropagation();
+      this.swipeToSwitch.emit(direction);
+    }
+    
+    this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   }
 }

@@ -48,27 +48,92 @@ interface ScanResult {
 
 // ==================== CORS 处理 ====================
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+/**
+ * 允许的来源白名单
+ * 安全修复：限制 CORS 来源，防止任意网站调用 API
+ */
+const ALLOWED_ORIGINS = [
+  'https://dde-eight.vercel.app',
+  'https://nanoflow.app',
+  'http://localhost:4200',      // 开发环境
+  'http://localhost:5173',      // Vite 开发服务器
+];
+
+/**
+ * 当前请求的 CORS 头（在请求处理开始时设置）
+ */
+let currentCorsHeaders: Record<string, string> = {};
+
+/**
+ * 根据请求来源返回 CORS 头
+ * 只有白名单中的来源才会被允许
+ */
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  const isAllowed = origin && ALLOWED_ORIGINS.some(allowed => 
+    origin === allowed || origin.endsWith('.vercel.app')
+  );
+  
+  return {
+    'Access-Control-Allow-Origin': isAllowed ? origin! : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Vary': 'Origin',
+  };
+}
+
+/**
+ * 验证用户认证
+ * 返回用户 ID 或 null（如果未认证）
+ */
+async function verifyAuth(req: Request): Promise<{ userId: string } | null> {
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) {
+    return null;
+  }
+  
+  const token = authHeader.replace('Bearer ', '');
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) {
+    return null;
+  }
+  
+  return { userId: user.id };
+}
 
 // ==================== 主函数 ====================
 
 serve(async (req: Request) => {
+  // 获取请求来源，用于 CORS 响应
+  const origin = req.headers.get('Origin');
+  currentCorsHeaders = getCorsHeaders(origin);
+
   // 处理 CORS 预检请求
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
+    return new Response('ok', { headers: currentCorsHeaders });
   }
 
   try {
+    // 🔒 安全修复：添加认证检查（health 检查除外）
     const body = await req.json() as ScanRequest;
     const { action } = body;
 
+    // health 检查不需要认证（用于监控）
+    if (action === 'health') {
+      return handleHealthCheck();
+    }
+
+    // 其他操作需要认证
+    const auth = await verifyAuth(req);
+    if (!auth) {
+      console.warn('🛡️ [VirusScan] Unauthorized request for action:', action);
+      return jsonResponse({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }, 401);
+    }
+
+    console.log('🛡️ [VirusScan] Authenticated user:', auth.userId.slice(0, 8) + '...', 'action:', action);
+
     switch (action) {
-      case 'health':
-        return handleHealthCheck();
-      
       case 'scan':
         return handleScan(body);
       
@@ -384,7 +449,7 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
-      ...corsHeaders,
+      ...currentCorsHeaders,
       'Content-Type': 'application/json',
     },
   });

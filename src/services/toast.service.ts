@@ -58,8 +58,11 @@ export class ToastService {
   private static readonly ERROR_DURATION: number = 8000;
   private static readonly MAX_TOASTS: number = 5;
   
-  /** 错误去重缓存：记录最近显示的错误及其时间 */
-  private recentErrors = new Map<string, number>();
+  /** 
+   * 通用去重缓存：记录最近显示的消息及其时间
+   * key 格式: `${type}:${title}:${message}`
+   */
+  private recentMessages = new Map<string, number>();
 
   /**
    * 显示成功消息
@@ -77,43 +80,62 @@ export class ToastService {
     const opts = this.normalizeOptions(options);
     
     // 错误去重检查
-    const dedupKey = `error:${title}:${message || ''}`;
-    const now = Date.now();
-    const lastShown = this.recentErrors.get(dedupKey);
-    
-    if (lastShown && (now - lastShown) < TOAST_CONFIG.ERROR_DEDUP_INTERVAL) {
-      // 在去重间隔内，跳过显示
+    if (this.isDuplicate('error', title, message)) {
       return;
     }
-    
-    // 记录显示时间
-    this.recentErrors.set(dedupKey, now);
-    
-    // 清理过期的去重记录（避免内存泄漏）
-    this.cleanupRecentErrors();
     
     this.show('error', title, message, opts.duration ?? ToastService.ERROR_DURATION, opts.action);
   }
   
   /**
-   * 清理过期的错误去重记录
+   * 检查消息是否在去重间隔内已显示过
+   * @returns true 表示重复消息，应跳过显示
    */
-  private cleanupRecentErrors(): void {
+  private isDuplicate(type: ToastType, title: string, message?: string): boolean {
+    const dedupKey = `${type}:${title}:${message || ''}`;
+    const now = Date.now();
+    const lastShown = this.recentMessages.get(dedupKey);
+    
+    if (lastShown && (now - lastShown) < TOAST_CONFIG.ERROR_DEDUP_INTERVAL) {
+      // 在去重间隔内，跳过显示
+      return true;
+    }
+    
+    // 记录显示时间
+    this.recentMessages.set(dedupKey, now);
+    
+    // 清理过期的去重记录（避免内存泄漏）
+    this.cleanupRecentMessages();
+    
+    return false;
+  }
+  
+  /**
+   * 清理过期的去重记录
+   */
+  private cleanupRecentMessages(): void {
     const now = Date.now();
     const expireThreshold = TOAST_CONFIG.ERROR_DEDUP_INTERVAL * 2;
     
-    for (const [key, timestamp] of this.recentErrors.entries()) {
+    for (const [key, timestamp] of this.recentMessages.entries()) {
       if (now - timestamp > expireThreshold) {
-        this.recentErrors.delete(key);
+        this.recentMessages.delete(key);
       }
     }
   }
 
   /**
    * 显示警告消息
+   * 支持去重：相同的 title+message 在去重间隔内只显示一次
    */
   warning(title: string, message?: string, options?: ToastOptions | number): void {
     const opts = this.normalizeOptions(options);
+    
+    // 警告去重检查
+    if (this.isDuplicate('warning', title, message)) {
+      return;
+    }
+    
     this.show('warning', title, message, opts.duration ?? ToastService.DEFAULT_DURATION, opts.action);
   }
 

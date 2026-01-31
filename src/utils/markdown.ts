@@ -1,4 +1,5 @@
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+import DOMPurify from 'dompurify';
 
 /**
  * 安全的 Markdown 渲染器
@@ -10,6 +11,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
  * - 限制允许的 HTML 标签和属性
  * - 所有用户输入都经过转义处理
  * - 链接添加 rel="noopener noreferrer" 防止 tabnabbing 攻击
+ * - 🔒 使用 DOMPurify 作为额外安全层（防御深度）
  */
 
 /**
@@ -281,11 +283,34 @@ export function renderMarkdown(content: string): string {
 }
 
 /**
+ * DOMPurify 配置
+ * 允许的标签和属性白名单
+ */
+const DOMPURIFY_CONFIG = {
+  ALLOWED_TAGS: [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'br', 'hr',
+    'ul', 'ol', 'li',
+    'strong', 'em', 'del', 'code', 'pre',
+    'a', 'blockquote', 'div', 'span',
+  ],
+  ALLOWED_ATTR: ['href', 'class', 'target', 'rel'],
+  ALLOW_DATA_ATTR: false,
+  ADD_ATTR: ['target', 'rel'], // 确保链接安全属性被保留
+};
+
+/**
  * 渲染 Markdown 并返回安全的 HTML（用于 Angular）
+ * 
+ * 双重防护：
+ * 1. renderMarkdown 内部的 escapeHtml + sanitizeUrl
+ * 2. DOMPurify 作为最终安全网
  */
 export function renderMarkdownSafe(content: string, sanitizer: DomSanitizer): SafeHtml {
   const html = renderMarkdown(content);
-  return sanitizer.bypassSecurityTrustHtml(html);
+  // 🔒 使用 DOMPurify 作为额外安全层
+  const cleanHtml = DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
+  return sanitizer.bypassSecurityTrustHtml(cleanHtml);
 }
 
 /**

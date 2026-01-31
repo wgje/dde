@@ -124,12 +124,15 @@ export class LoggerService {
   private log(level: LogLevel, category: string, message: string, data?: unknown): void {
     if (level < this.level) return;
     
+    // 🔒 安全：清洗敏感字段
+    const sanitizedData = this.sanitizeData(data);
+    
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       level,
       category,
       message,
-      data
+      data: sanitizedData
     };
     
     // 持久化日志
@@ -142,7 +145,7 @@ export class LoggerService {
     
     // 控制台输出
     const prefix = `[${this.getLevelName(level)}] [${category}]`;
-    const args = data !== undefined ? [prefix, message, data] : [prefix, message];
+    const args = sanitizedData !== undefined ? [prefix, message, sanitizedData] : [prefix, message];
     
     switch (level) {
       case LogLevel.DEBUG:
@@ -158,6 +161,78 @@ export class LoggerService {
         console.error(...args);
         break;
     }
+  }
+  
+  /**
+   * 敏感字段列表
+   * 这些字段在日志中会被替换为 [REDACTED]
+   */
+  private static readonly SENSITIVE_FIELDS = new Set([
+    'password',
+    'token',
+    'accessToken',
+    'access_token',
+    'refreshToken',
+    'refresh_token',
+    'secret',
+    'apiKey',
+    'api_key',
+    'apikey',
+    'authorization',
+    'auth',
+    'key',
+    'credential',
+    'credentials',
+    'private',
+    'privateKey',
+    'private_key',
+  ]);
+  
+  /**
+   * 清洗敏感数据
+   * 递归遍历对象，将敏感字段替换为 [REDACTED]
+   */
+  private sanitizeData(data: unknown, depth = 0): unknown {
+    // 防止无限递归
+    if (depth > 5) return '[MAX_DEPTH]';
+    
+    if (data === null || data === undefined) {
+      return data;
+    }
+    
+    // 字符串：检查是否像 JWT token
+    if (typeof data === 'string') {
+      // JWT token 模式：eyJ... 开头
+      if (data.startsWith('eyJ') && data.length > 50) {
+        return '[JWT_REDACTED]';
+      }
+      return data;
+    }
+    
+    // 非对象类型直接返回
+    if (typeof data !== 'object') {
+      return data;
+    }
+    
+    // 数组：递归处理每个元素
+    if (Array.isArray(data)) {
+      return data.map(item => this.sanitizeData(item, depth + 1));
+    }
+    
+    // 对象：检查并清洗敏感字段
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      const lowerKey = key.toLowerCase();
+      if (LoggerService.SENSITIVE_FIELDS.has(lowerKey)) {
+        result[key] = '[REDACTED]';
+      } else if (typeof value === 'string' && value.startsWith('eyJ') && value.length > 50) {
+        // JWT token 值
+        result[key] = '[JWT_REDACTED]';
+      } else {
+        result[key] = this.sanitizeData(value, depth + 1);
+      }
+    }
+    return result;
   }
   
   /**

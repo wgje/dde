@@ -1,23 +1,27 @@
 /**
  * 大门按钮组组件
  * 
- * 已读、完成、稍后提醒按钮
+ * 已读、完成、稍后提醒按钮，以及快速录入区域
  */
 
 import { 
   Component, 
   ChangeDetectionStrategy, 
   inject,
-  computed
+  computed,
+  signal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { GateService } from '../../../../../services/gate.service';
 import { ToastService } from '../../../../../services/toast.service';
+import { BlackBoxService } from '../../../../../services/black-box.service';
+import { SpeechToTextService } from '../../../../../services/speech-to-text.service';
 
 @Component({
   selector: 'app-gate-actions',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
     <div class="w-full">
       <!-- 三列布局布局 -->
@@ -87,6 +91,60 @@ import { ToastService } from '../../../../../services/toast.service';
             </span>
         </div>
       }
+      
+      <!-- 快速录入区域 -->
+      <div class="mt-4 pt-3 border-t border-stone-200/50 dark:border-white/10">
+        <div class="flex items-center gap-2">
+          <input 
+            type="text"
+            class="flex-1 px-3 py-2 rounded-xl 
+                   bg-stone-100 dark:bg-white/10 
+                   text-stone-700 dark:text-white 
+                   placeholder-stone-400 dark:placeholder-white/40 
+                   text-sm outline-none
+                   focus:bg-stone-200 dark:focus:bg-white/20 
+                   transition-colors border border-stone-200 dark:border-transparent"
+            placeholder="记录一个想法..."
+            [(ngModel)]="quickInputText"
+            [disabled]="isRecording() || isTranscribing()"
+            (keydown.enter)="submitQuickInput()"
+          />
+          @if (speechSupported()) {
+            <button 
+              class="p-2.5 rounded-full transition-all duration-200
+                     flex items-center justify-center
+                     focus-visible:ring-2 focus-visible:ring-orange-500/30"
+              [class]="isRecording() 
+                ? 'bg-red-500 text-white animate-pulse scale-110' 
+                : 'bg-stone-100 dark:bg-white/10 text-stone-500 dark:text-stone-400 hover:bg-stone-200 dark:hover:bg-white/20'"
+              [disabled]="isTranscribing()"
+              (mousedown)="startRecording($event)"
+              (mouseup)="stopRecording()"
+              (mouseleave)="stopRecording()"
+              (touchstart)="startRecording($event)"
+              (touchend)="stopRecording()">
+              @if (isTranscribing()) {
+                <span class="animate-spin">⏳</span>
+              } @else if (isRecording()) {
+                <span>🔴</span>
+              } @else {
+                <span>🎤</span>
+              }
+            </button>
+          }
+        </div>
+        @if (quickInputText() || isRecording()) {
+          <div class="mt-2 text-center">
+            <span class="text-[10px] text-stone-400 dark:text-stone-500">
+              @if (isRecording()) {
+                松开停止录音
+              } @else {
+                按回车键快速录入
+              }
+            </span>
+          </div>
+        }
+      </div>
     </div>
   `,
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -94,6 +152,8 @@ import { ToastService } from '../../../../../services/toast.service';
 export class GateActionsComponent {
   private gateService = inject(GateService);
   private toast = inject(ToastService);
+  private blackBoxService = inject(BlackBoxService);
+  private speechService = inject(SpeechToTextService);
   
   readonly canSnooze = this.gateService.canSnooze;
   
@@ -101,6 +161,14 @@ export class GateActionsComponent {
   readonly isProcessing = computed(() => 
     this.gateService.cardAnimation() !== 'idle'
   );
+  
+  // 快速录入文本
+  readonly quickInputText = signal('');
+  
+  // 语音录入状态
+  readonly isRecording = this.speechService.isRecording;
+  readonly isTranscribing = this.speechService.isTranscribing;
+  readonly speechSupported = this.speechService.isSupported;
   
   /**
    * 剩余跳过次数
@@ -138,6 +206,56 @@ export class GateActionsComponent {
     const result = this.gateService.snooze();
     if (!result.ok) {
       this.toast.warning('跳过失败', result.error.message);
+    }
+  }
+  
+  /**
+   * 提交快速录入
+   */
+  submitQuickInput(): void {
+    const text = this.quickInputText().trim();
+    if (!text) return;
+    
+    const result = this.blackBoxService.create({ content: text });
+    if (result.ok) {
+      this.quickInputText.set('');
+      this.toast.success('已记录', '想法已添加到黑匣子');
+    } else {
+      this.toast.error('录入失败', result.error.message);
+    }
+  }
+  
+  /**
+   * 开始语音录入
+   */
+  startRecording(event: Event): void {
+    event.preventDefault(); // 阻止触摸事件冒泡
+    this.speechService.startRecording();
+  }
+  
+  /**
+   * 停止语音录入并转写
+   */
+  async stopRecording(): Promise<void> {
+    if (!this.isRecording()) return;
+    
+    try {
+      const text = await this.speechService.stopAndTranscribe();
+      if (text && text.trim()) {
+        // 直接创建条目
+        const result = this.blackBoxService.create({ content: text.trim() });
+        if (result.ok) {
+          this.toast.success('已记录', '语音已转写并添加到黑匣子');
+        } else {
+          // 转写成功但创建失败，将文本放入输入框
+          this.quickInputText.set(text.trim());
+          this.toast.warning('创建失败', '请手动提交');
+        }
+      }
+    } catch (error) {
+      // 记录错误便于排查
+      console.error('[GateActions] 语音转写失败:', error);
+      this.toast.error('语音转写失败', '请重试或手动输入');
     }
   }
 }

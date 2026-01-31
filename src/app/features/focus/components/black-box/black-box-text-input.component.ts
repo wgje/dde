@@ -35,16 +35,24 @@ import { FormsModule } from '@angular/forms';
       <div class="relative">
         <textarea
           [(ngModel)]="inputText"
+          [ngClass]="{
+            'border-dashed border-amber-300': isPressed(),
+            'dark:border-stone-500': isPressed(),
+            'border-solid': !isPressed()
+          }"
           class="w-full px-3 py-2.5 rounded-xl text-sm
                  bg-amber-50/80 dark:bg-stone-700/80
-                 border-2 border-dashed border-amber-300 dark:border-stone-500
+                 border-2 transition-colors duration-200
                  text-stone-700 dark:text-stone-200
                  placeholder:text-stone-400 dark:placeholder:text-stone-500
-                 focus:outline-none focus:border-amber-400 dark:focus:border-amber-500
-                 resize-none"
+                 focus:outline-none focus:border-dashed focus:border-amber-400 
+                 dark:focus:border-amber-500 resize-none"
           rows="3"
           placeholder="记录你的想法..."
           (keydown.enter)="onEnterKey($event)"
+          (touchstart)="isPressed.set(true)"
+          (touchend)="isPressed.set(false)"
+          (touchcancel)="isPressed.set(false)"
           aria-label="输入想法"
           data-testid="black-box-text-input">
         </textarea>
@@ -70,11 +78,17 @@ import { FormsModule } from '@angular/forms';
       </p>
     </div>
   `,
+  styles: [`
+    :host {
+      display: block;
+    }
+  `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class BlackBoxTextInputComponent {
   inputText = signal('');
   @Input() showFallbackHint = true;
+  isPressed = signal(false);
   
   @Output() submitted = new EventEmitter<string>();
   

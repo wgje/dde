@@ -168,6 +168,18 @@ export class SimpleSyncService {
    */
   private readonly QUEUE_WARNING_THRESHOLD = 0.8;
   
+  /**
+   * 【队列容量警告节流】冷却时间（毫秒）
+   * 60秒内不重复显示相同警告，避免 Toast 轰炸
+   */
+  private readonly CAPACITY_WARNING_COOLDOWN = 60_000;
+  
+  /** 上次显示容量警告的时间戳 */
+  private lastCapacityWarningTime = 0;
+  
+  /** 上次警告时的队列使用百分比（用于恶化检测） */
+  private lastWarningPercent = 0;
+  
   /** 
    * 本地 tombstone 缓存 
    * 用于在云端 RPC 不可用时防止已删除任务复活
@@ -477,37 +489,66 @@ export class SimpleSyncService {
   
   /**
    * 【Senior Consultant "Red Phone"】检查队列容量并发出警告
+   * 
+   * 【节流机制】防止 Toast 轰炸：
+   * - 60秒冷却时间内不重复显示警告
+   * - 情况恶化（百分比增加 10%+）时立即告警
+   * - 恢复正常时重置状态
+   * - 使用固定消息格式让 Toast 去重生效
    */
   private checkQueueCapacityWarning(): void {
     const currentSize = this.retryQueue.length;
     const maxSize = this.MAX_RETRY_QUEUE_SIZE;
     const threshold = Math.floor(maxSize * this.QUEUE_WARNING_THRESHOLD);
     
-    if (currentSize >= threshold) {
-      const percentUsed = Math.round((currentSize / maxSize) * 100);
-      this.logger.warn('RetryQueue 容量警告', { currentSize, maxSize, percentUsed });
-      
-      // 【Red Phone 指示器】显示红色警告 Toast
-      this.toast.error(
-        '⚠️ 同步队列即将满载',
-        `${currentSize}/${maxSize} 个操作待同步 (${percentUsed}%)。请连接网络以防止数据丢失。`,
-        { duration: 0 } // 不自动关闭，需要用户确认
-      );
-      
-      // 记录到 Sentry（按 Senior Consultant 要求包含元数据但不包含 PII）
-      Sentry.captureMessage('RetryQueue capacity warning', {
-        level: 'warning',
-        tags: { 
-          operation: 'queueCapacityCheck',
-          percentUsed: String(percentUsed)
-        },
-        extra: { 
-          queueLength: currentSize, 
-          maxQueueSize: maxSize,
-          // 不包含任务标题等 PII
-        }
-      });
+    // 低于阈值，恢复正常状态
+    if (currentSize < threshold) {
+      if (this.lastWarningPercent > 0) {
+        this.lastWarningPercent = 0;
+        this.logger.info('RetryQueue 容量恢复正常', { currentSize, maxSize });
+      }
+      return;
     }
+    
+    const percentUsed = Math.round((currentSize / maxSize) * 100);
+    const now = Date.now();
+    
+    // 【节流检查】冷却时间 + 恶化检测
+    // 60秒内不重复警告，除非情况显著恶化（增加 10%+）
+    const cooldownPassed = now - this.lastCapacityWarningTime > this.CAPACITY_WARNING_COOLDOWN;
+    const significantIncrease = percentUsed >= this.lastWarningPercent + 10;
+    
+    if (!cooldownPassed && !significantIncrease) {
+      return; // 跳过重复警告
+    }
+    
+    // 更新警告状态
+    this.lastCapacityWarningTime = now;
+    this.lastWarningPercent = percentUsed;
+    
+    this.logger.warn('RetryQueue 容量警告', { currentSize, maxSize, percentUsed });
+    
+    // 【Red Phone 指示器】显示警告 Toast
+    // 使用固定消息格式 + 合理的显示时间，让 Toast 去重生效
+    this.toast.error(
+      '⚠️ 同步队列即将满载',
+      '请连接网络以防止数据丢失',
+      { duration: 30_000 } // 30秒后自动关闭，而非永久显示
+    );
+    
+    // 记录到 Sentry（按 Senior Consultant 要求包含元数据但不包含 PII）
+    Sentry.captureMessage('RetryQueue capacity warning', {
+      level: 'warning',
+      tags: { 
+        operation: 'queueCapacityCheck',
+        percentUsed: String(percentUsed)
+      },
+      extra: { 
+        queueLength: currentSize, 
+        maxQueueSize: maxSize,
+        // 不包含任务标题等 PII
+      }
+    });
   }
 
   // ==================== 用户活跃状态追踪 ====================
