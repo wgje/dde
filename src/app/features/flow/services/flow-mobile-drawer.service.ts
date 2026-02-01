@@ -1,5 +1,24 @@
-import { Injectable, inject, signal, effect, untracked, Injector } from '@angular/core';
+import { Injectable, inject, signal, effect, untracked, Injector, WritableSignal } from '@angular/core';
 import { UiStateService } from '../../../../services/ui-state.service';
+
+/**
+ * 抽屉效果上下文接口
+ * 组件需要提供这些信号和回调
+ */
+export interface DrawerEffectContext {
+  /** 调色板高度信号 */
+  paletteHeight: () => number;
+  /** 抽屉高度信号 */
+  drawerHeight: () => number;
+  /** 手动覆盖标志信号 */
+  drawerManualOverride: WritableSignal<boolean>;
+  /** 是否正在拖拽信号 */
+  isResizingDrawerSignal: () => boolean;
+  /** 选中任务ID信号 */
+  selectedTaskId: () => string | null;
+  /** 调度抽屉高度更新回调 */
+  scheduleDrawerHeightUpdate: (vh: number) => void;
+}
 
 /**
  * 🎯 移动端抽屉高度计算服务
@@ -132,5 +151,92 @@ export class FlowMobileDrawerService {
    */
   resetPreset(): void {
     this.lastDrawerPreset = 'none';
+  }
+
+  /**
+   * 设置移动端抽屉高度相关的 effects
+   * 将 effect 逻辑从组件迁移到服务，减少组件代码量
+   * 
+   * @param injector Angular 注入器
+   * @param ctx 组件提供的信号和回调上下文
+   */
+  setupDrawerEffects(injector: Injector, ctx: DrawerEffectContext): void {
+    // 🎯 移动端：基于"调色板高度"为参考系，设置详情抽屉的最佳高度（vh）
+    effect(() => {
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      if (!this.uiState.isMobile() || activeView !== 'flow') {
+        // 非移动端或非流程图视图时，仅更新状态追踪
+        this.determineScenario(isDetailOpen);
+        if (!isDetailOpen) {
+          ctx.drawerManualOverride.set(false);
+        }
+        return;
+      }
+
+      const scenario = this.determineScenario(isDetailOpen);
+      
+      if (scenario && !ctx.drawerManualOverride()) {
+        untracked(() => {
+          const targetVh = this.calculateDrawerVh(ctx.paletteHeight(), scenario);
+          if (targetVh !== null) {
+            ctx.scheduleDrawerHeightUpdate(targetVh);
+          }
+        });
+      }
+      
+      if (!isDetailOpen) {
+        ctx.drawerManualOverride.set(false);
+      }
+    }, { injector });
+
+    // 🎯 场景二之后：当详情已开且点击任务块时，自动切回"场景一"最佳高度
+    effect(() => {
+      const selectedId = ctx.selectedTaskId();
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const activeView = this.uiState.activeView();
+
+      if (!this.uiState.isMobile() || activeView !== 'flow' || !isDetailOpen || !selectedId) return;
+      if (ctx.drawerManualOverride()) return;
+      if (this.isAtDirectPreset()) return;
+
+      untracked(() => {
+        const targetVh = this.calculateDrawerVh(ctx.paletteHeight(), 'direct');
+        if (targetVh !== null) {
+          ctx.scheduleDrawerHeightUpdate(targetVh);
+          this.markAsDirectPreset();
+        }
+      });
+    }, { injector });
+
+    // 监听拖拽标记，用户一旦开始拖拽则启用手动覆盖
+    effect(() => {
+      if (ctx.isResizingDrawerSignal()) {
+        ctx.drawerManualOverride.set(true);
+      }
+    }, { injector });
+    
+    // 🎯 移动端：场景2（小抽屉）后，点击任务块应自动扩展到场景1的最佳位置
+    effect(() => {
+      const activeView = this.uiState.activeView();
+      const isDetailOpen = this.uiState.isFlowDetailOpen();
+      const selectedTaskId = ctx.selectedTaskId();
+      const isResizing = ctx.isResizingDrawerSignal();
+
+      if (!this.uiState.isMobile()) return;
+      if (activeView !== 'flow' || !isDetailOpen || !selectedTaskId || isResizing) return;
+      if (ctx.drawerManualOverride()) return;
+
+      untracked(() => {
+        const targetVh = this.calculateDrawerVh(ctx.paletteHeight(), 'direct');
+        if (targetVh === null) return;
+        
+        const currentVh = ctx.drawerHeight();
+        if (this.shouldExpandDrawer(currentVh, targetVh)) {
+          ctx.scheduleDrawerHeightUpdate(targetVh);
+        }
+      });
+    }, { injector });
   }
 }

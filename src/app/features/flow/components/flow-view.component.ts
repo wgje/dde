@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, effect, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector, untracked } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -15,11 +15,11 @@ import { FlowEventService } from '../services/flow-event.service';
 import { FlowZoomService } from '../services/flow-zoom.service';
 import { FlowSelectionService } from '../services/flow-selection.service';
 import { FlowLayoutService } from '../services/flow-layout.service';
-import { FlowDragDropService, InsertPositionInfo } from '../services/flow-drag-drop.service';
+import { FlowDragDropService } from '../services/flow-drag-drop.service';
 import { FlowTouchService } from '../services/flow-touch.service';
 import { FlowLinkService } from '../services/flow-link.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
-import { FlowSwipeGestureService, SwipeResult } from '../services/flow-swipe-gesture.service';
+import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service';
 import { FlowDrawerHeightService } from '../services/flow-drawer-height.service';
 import { FlowCascadeAssignService } from '../services/flow-cascade-assign.service';
 import { FlowKeyboardService } from '../services/flow-keyboard.service';
@@ -29,6 +29,7 @@ import { FlowSelectModeService } from '../services/flow-select-mode.service';
 import { FlowMobileDrawerService } from '../services/flow-mobile-drawer.service';
 import { FlowDiagramEffectsService } from '../services/flow-diagram-effects.service';
 import { FlowEventRegistrationService } from '../services/flow-event-registration.service';
+import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -43,7 +44,7 @@ import { FlowBatchDeleteDialogComponent } from './flow-batch-delete-dialog.compo
 import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
 import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
 import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
-import { flowTemplateEventHandlers } from '../services/flow-template-events';
+
 import * as go from 'gojs';
 
 /**
@@ -126,6 +127,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly mobileDrawer = inject(FlowMobileDrawerService);
   private readonly diagramEffects = inject(FlowDiagramEffectsService);
   private readonly eventRegistration = inject(FlowEventRegistrationService);
+  private readonly cleanup = inject(FlowViewCleanupService);
   
   // ========== 组件状态 ==========
   
@@ -281,92 +283,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.retryInitDiagram.bind(this)
     );
     
-    // 移动端抽屉高度管理 effects
-    this.setupMobileDrawerEffects();
-  }
-  
-  /**
-   * 设置移动端抽屉高度相关的 effects
-   * 使用 FlowMobileDrawerService 进行高度计算
-   */
-  private setupMobileDrawerEffects(): void {
-    // 🎯 移动端：基于"调色板高度"为参考系，设置详情抽屉的最佳高度（vh）
-    effect(() => {
-      const isDetailOpen = this.uiState.isFlowDetailOpen();
-      const activeView = this.uiState.activeView();
-
-      if (!this.uiState.isMobile() || activeView !== 'flow') {
-        // 非移动端或非流程图视图时，仅更新状态追踪
-        this.mobileDrawer.determineScenario(isDetailOpen);
-        if (!isDetailOpen) {
-          this.drawerManualOverride.set(false);
-        }
-        return;
-      }
-
-      const scenario = this.mobileDrawer.determineScenario(isDetailOpen);
-      
-      if (scenario && !this.drawerManualOverride()) {
-        untracked(() => {
-          const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), scenario);
-          if (targetVh !== null) {
-            this.scheduleDrawerHeightUpdate(targetVh);
-          }
-        });
-      }
-      
-      if (!isDetailOpen) {
-        this.drawerManualOverride.set(false);
-      }
-    }, { injector: this.injector });
-
-    // 🎯 场景二之后：当详情已开且点击任务块时，自动切回"场景一"最佳高度
-    effect(() => {
-      const selectedId = this.selectedTaskId();
-      const isDetailOpen = this.uiState.isFlowDetailOpen();
-      const activeView = this.uiState.activeView();
-
-      if (!this.uiState.isMobile() || activeView !== 'flow' || !isDetailOpen || !selectedId) return;
-      if (this.drawerManualOverride()) return;
-      if (this.mobileDrawer.isAtDirectPreset()) return;
-
-      untracked(() => {
-        const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
-        if (targetVh !== null) {
-          this.scheduleDrawerHeightUpdate(targetVh);
-          this.mobileDrawer.markAsDirectPreset();
-        }
-      });
-    }, { injector: this.injector });
-
-    // 监听拖拽标记，用户一旦开始拖拽则启用手动覆盖
-    effect(() => {
-      if (this.isResizingDrawerSignal()) {
-        this.drawerManualOverride.set(true);
-      }
-    }, { injector: this.injector });
-    
-    // 🎯 移动端：场景2（小抽屉）后，点击任务块应自动扩展到场景1的最佳位置
-    effect(() => {
-      const activeView = this.uiState.activeView();
-      const isDetailOpen = this.uiState.isFlowDetailOpen();
-      const selectedTaskId = this.selectedTaskId();
-      const isResizing = this.isResizingDrawerSignal();
-
-      if (!this.uiState.isMobile()) return;
-      if (activeView !== 'flow' || !isDetailOpen || !selectedTaskId || isResizing) return;
-      if (this.drawerManualOverride()) return;
-
-      untracked(() => {
-        const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
-        if (targetVh === null) return;
-        
-        const currentVh = this.drawerHeight();
-        if (this.mobileDrawer.shouldExpandDrawer(currentVh, targetVh)) {
-          this.scheduleDrawerHeightUpdate(targetVh);
-        }
-      });
-    }, { injector: this.injector });
+    // 移动端抽屉高度管理 effects（委托给 FlowMobileDrawerService）
+    this.mobileDrawer.setupDrawerEffects(this.injector, {
+      paletteHeight: () => this.paletteHeight(),
+      drawerHeight: () => this.drawerHeight(),
+      drawerManualOverride: this.drawerManualOverride,
+      isResizingDrawerSignal: () => this.isResizingDrawerSignal(),
+      selectedTaskId: () => this.selectedTaskId(),
+      scheduleDrawerHeightUpdate: (vh) => this.scheduleDrawerHeightUpdate(vh)
+    });
   }
   
   /**
@@ -426,60 +351,31 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   ngOnDestroy() {
     this.isDestroyed = true;
-    
-    // 标记 View 已销毁
-    this.flowCommand.markViewDestroyed();
 
-    // 优先卸载 GoJS 监听 + 清理幽灵，避免残留 DOM/引用
-    this.uninstallMobileDiagramDragGhostListeners();
-    this.touch.endDiagramNodeDragGhost();
-    
-    // 清理所有待处理的定时器
-    this.pendingTimers.forEach(clearTimeout);
-    this.pendingTimers = [];
-    
-    // 清理 rAF
-    if (this.pendingRafId !== null) {
-      cancelAnimationFrame(this.pendingRafId);
-      this.pendingRafId = null;
-    }
+    // 收集清理资源
+    const resources: CleanupResources = {
+      pendingTimers: this.pendingTimers,
+      pendingRafId: this.pendingRafId,
+      pendingDrawerHeightRafId: this.pendingDrawerHeightRafId,
+      pendingRetryRafIds: this.pendingRetryRafIds,
+      overviewResizeTimer: this.overviewResizeTimer,
+      idleInitHandle: this.idleInitHandle,
+      idleOverviewInitHandle: this.idleOverviewInitHandle
+    };
 
-    if (this.pendingDrawerHeightRafId !== null) {
-      cancelAnimationFrame(this.pendingDrawerHeightRafId);
-      this.pendingDrawerHeightRafId = null;
-      this.pendingDrawerHeightTarget = null;
-    }
-    
-    // 清理节点选中重试的 rAF
-    this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
-    this.pendingRetryRafIds = [];
-    
-    // 清理 Overview 刷新定时器
-    if (this.overviewResizeTimer) {
-      clearTimeout(this.overviewResizeTimer);
-      this.overviewResizeTimer = null;
-    }
+    // 委托给 CleanupService 执行完整清理
+    this.cleanup.performCleanup(
+      resources,
+      () => this.uninstallMobileDiagramDragGhostListeners()
+    );
 
-    // 清理 idle 初始化句柄
-    if (typeof cancelIdleCallback !== 'undefined' && this.idleInitHandle !== null) {
-      cancelIdleCallback(this.idleInitHandle);
-      this.idleInitHandle = null;
-    }
-
-    if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
-      cancelIdleCallback(this.idleOverviewInitHandle);
-      this.idleOverviewInitHandle = null;
-    }
-    
-    // 清理服务
-    this.diagram.dispose();
-    this.touch.dispose();
-    this.link.dispose();
-    this.dragDrop.dispose();
-    this.taskOps.dispose();
-    
-    // 清理 Delete 键事件处理器
-    flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
+    // 同步本地状态（避免后续误用）
+    this.pendingRafId = null;
+    this.pendingDrawerHeightRafId = null;
+    this.pendingDrawerHeightTarget = null;
+    this.overviewResizeTimer = null;
+    this.idleInitHandle = null;
+    this.idleOverviewInitHandle = null;
   }
   
   // ========== 图表初始化 ==========
@@ -981,30 +877,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /**
    * 展开抽屉到最佳观看高度（仅手机端）
-   * 双击任务块打开详情时调用，使用与现有 effect 相同的计算逻辑
+   * 双击任务块打开详情时调用
    */
   private expandDrawerToOptimalHeight(): void {
-    if (typeof window === 'undefined' || window.innerHeight <= 0) return;
-
-    // 使用与场景一（直接点击）相同的计算逻辑
-    const REFERENCE_SCREEN_HEIGHT = 667;
-    const REFERENCE_PALETTE_HEIGHT_PX = 80;
-    const DRAWER_VH_DIRECT_CLICK = 24.88; // 直接点击场景的最佳高度
-    
-    const refDrawerPxDirect = (REFERENCE_SCREEN_HEIGHT * DRAWER_VH_DIRECT_CLICK) / 100;
-    const ratioDirect = refDrawerPxDirect / REFERENCE_PALETTE_HEIGHT_PX;
-
-    const palettePx = this.paletteHeight();
-    const targetDrawerPx = palettePx * ratioDirect;
-    const targetVh = (targetDrawerPx / window.innerHeight) * 100;
-    const clampedVh = Math.max(5, Math.min(targetVh, 70));
-
-    // 延迟设置，等待详情面板完全渲染
-    requestAnimationFrame(() => {
+    const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
+    if (targetVh !== null) {
+      // 延迟设置，等待详情面板完全渲染
       requestAnimationFrame(() => {
-        this.scheduleDrawerHeightUpdate(clampedVh);
+        requestAnimationFrame(() => {
+          this.scheduleDrawerHeightUpdate(targetVh);
+        });
       });
-    });
+    }
   }
   
   // ========== 批量删除操作（委托给 FlowBatchDeleteService） ==========
