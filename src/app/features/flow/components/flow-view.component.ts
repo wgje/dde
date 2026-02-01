@@ -824,50 +824,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const diagramInstance = this.diagram.diagramInstance;
     if (!diagramInstance) return;
 
-    // 场景二：从待分配区域拖放到画布时，不应立刻"任务化"。
-    // 仅更新位置，待后续"拉线"时再根据连接关系赋予阶段/序号。
-    if (taskData?.stage === null) {
-      // 同时更新 Store 和 GoJS 中的节点位置
-      // Store 更新确保数据持久化，GoJS 更新确保视觉即时反馈
-      this.taskOpsAdapter.updateTaskPosition(taskData.id, docPoint.x, docPoint.y);
-      this.layoutService.setNodePosition(taskData.id, docPoint.x, docPoint.y);
-      return;
-    }
-    
     const insertInfo = this.dragDrop.findInsertPosition(docPoint, diagramInstance);
-    
-    if (insertInfo.insertOnLink) {
-      const { sourceId, targetId } = insertInfo.insertOnLink;
-      this.dragDrop.insertTaskBetweenNodes(taskData.id, sourceId, targetId, docPoint);
-    } else if (insertInfo.parentId) {
-      const parentTask = this.projectState.tasks().find(t => t.id === insertInfo.parentId);
-      if (parentTask) {
-        const newStage = (parentTask.stage || 1) + 1;
-        this.taskOpsAdapter.moveTaskToStage(taskData.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
-        this.scheduleTimer(() => {
-          this.taskOpsAdapter.updateTaskPosition(taskData.id, docPoint.x, docPoint.y);
-        }, 100);
-      }
-    } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
-      const refTask = this.projectState.tasks().find(t => t.id === (insertInfo.beforeTaskId || insertInfo.afterTaskId));
-      if (refTask?.stage) {
-        if (insertInfo.afterTaskId) {
-          const siblings = this.projectState.tasks()
-            .filter(t => t.stage === refTask.stage && t.parentId === refTask.parentId)
-            .sort((a, b) => a.rank - b.rank);
-          const afterIndex = siblings.findIndex(t => t.id === refTask.id);
-          const nextSibling = siblings[afterIndex + 1];
-          this.taskOpsAdapter.moveTaskToStage(taskData.id, refTask.stage, nextSibling?.id || null, refTask.parentId);
-        } else {
-          this.taskOpsAdapter.moveTaskToStage(taskData.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
-        }
-        this.scheduleTimer(() => {
-          this.taskOpsAdapter.updateTaskPosition(taskData.id, docPoint.x, docPoint.y);
-        }, 100);
-      }
-    } else {
-      this.taskOpsAdapter.updateTaskPosition(taskData.id, docPoint.x, docPoint.y);
-    }
+    this.dragDrop.processDrop(taskData, insertInfo, docPoint, 100);
   }
   
   // ========== 触摸处理 ==========
@@ -890,44 +848,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.diagramDiv?.nativeElement,
       this.diagram.diagramInstance,
       (task, insertInfo, docPoint) => {
-        this.handleTouchDrop(task, insertInfo, docPoint);
+        // 使用统一的拖放处理，移动端使用 UI_CONFIG.MEDIUM_DELAY
+        this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
       }
     );
-  }
-  
-  private handleTouchDrop(task: Task, insertInfo: InsertPositionInfo, docPoint: go.Point): void {
-    // 场景二（移动端）：待分配块拖入画布仅更新位置，不立刻任务化
-    if (task.stage === null) {
-      // 同时更新 Store 和 GoJS 中的节点位置
-      // Store 更新确保数据持久化，GoJS 更新确保视觉即时反馈
-      this.taskOpsAdapter.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-      this.layoutService.setNodePosition(task.id, docPoint.x, docPoint.y);
-      return;
-    }
-
-    if (insertInfo.insertOnLink) {
-      const { sourceId, targetId } = insertInfo.insertOnLink;
-      this.dragDrop.insertTaskBetweenNodes(task.id, sourceId, targetId, docPoint);
-    } else if (insertInfo.parentId) {
-      const parentTask = this.projectState.tasks().find(t => t.id === insertInfo.parentId);
-      if (parentTask) {
-        const newStage = (parentTask.stage || 1) + 1;
-        this.taskOpsAdapter.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
-        this.scheduleTimer(() => {
-          this.taskOpsAdapter.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-        }, UI_CONFIG.MEDIUM_DELAY);
-      }
-    } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
-      const refTask = this.projectState.tasks().find(t => t.id === (insertInfo.beforeTaskId || insertInfo.afterTaskId));
-      if (refTask?.stage) {
-        this.taskOpsAdapter.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
-        this.scheduleTimer(() => {
-          this.taskOpsAdapter.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-        }, UI_CONFIG.MEDIUM_DELAY);
-      }
-    } else {
-      this.taskOpsAdapter.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-    }
   }
   
   // ========== 待分配任务点击 ==========

@@ -1,6 +1,7 @@
 import { Injectable, inject, signal, NgZone } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { FlowLayoutService } from './flow-layout.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
@@ -51,6 +52,7 @@ export interface DropResultCallback {
 export class FlowDragDropService {
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
+  private readonly layoutService = inject(FlowLayoutService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDragDrop');
   private readonly toast = inject(ToastService);
@@ -379,6 +381,64 @@ export class FlowDragDropService {
     const projY = y1 + t * dy;
     
     return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
+  }
+  
+  /**
+   * 统一的拖放处理逻辑
+   * 合并了桌面端 handleDiagramDrop 和移动端 handleTouchDrop 的共同逻辑
+   * 
+   * @param task 被拖放的任务
+   * @param insertInfo 插入位置信息
+   * @param docPoint 拖放位置（文档坐标）
+   * @param delayMs 位置更新延迟（桌面端使用 100，移动端使用 UI_CONFIG.MEDIUM_DELAY）
+   */
+  processDrop(
+    task: Task,
+    insertInfo: InsertPositionInfo,
+    docPoint: go.Point,
+    delayMs: number = 100
+  ): void {
+    const tasks = this.projectState.tasks();
+    
+    // 场景：待分配块拖入画布仅更新位置，不立刻任务化
+    if (task.stage === null) {
+      this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+      this.layoutService.setNodePosition(task.id, docPoint.x, docPoint.y);
+      return;
+    }
+
+    if (insertInfo.insertOnLink) {
+      const { sourceId, targetId } = insertInfo.insertOnLink;
+      this.insertTaskBetweenNodes(task.id, sourceId, targetId, docPoint);
+    } else if (insertInfo.parentId) {
+      const parentTask = tasks.find(t => t.id === insertInfo.parentId);
+      if (parentTask) {
+        const newStage = (parentTask.stage || 1) + 1;
+        this.taskOps.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
+        setTimeout(() => {
+          this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+        }, delayMs);
+      }
+    } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
+      const refTask = tasks.find(t => t.id === (insertInfo.beforeTaskId || insertInfo.afterTaskId));
+      if (refTask?.stage) {
+        if (insertInfo.afterTaskId) {
+          const siblings = tasks
+            .filter(t => t.stage === refTask.stage && t.parentId === refTask.parentId)
+            .sort((a, b) => a.rank - b.rank);
+          const afterIndex = siblings.findIndex(t => t.id === refTask.id);
+          const nextSibling = siblings[afterIndex + 1];
+          this.taskOps.moveTaskToStage(task.id, refTask.stage, nextSibling?.id || null, refTask.parentId);
+        } else {
+          this.taskOps.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
+        }
+        setTimeout(() => {
+          this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+        }, delayMs);
+      }
+    } else {
+      this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+    }
   }
   
   /**
