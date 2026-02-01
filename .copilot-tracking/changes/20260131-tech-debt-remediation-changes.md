@@ -385,8 +385,8 @@
 
 | 指标 | 之前 | 当前 | 目标 | 进度 |
 |------|------|------|------|------|
-| TypeScript | 1662 | 1113 | 800 | 🟡 -549 行 (-33%) |
-| HTML 模板 | 569 | 478 | - | 🟢 -91 行 (-16%) |
+| TypeScript | 1662 | 988 | 800 | 🟡 -674 行 (-41%) |
+| HTML 模板 | 569 | 416 | - | 🟢 -153 行 (-27%) |
 
 ### Git Commits (Sprint 8.5)
 
@@ -395,6 +395,15 @@
 | 034b2dc | refactor(flow): 提取清理和抽屉效果逻辑到服务 |
 | f3fce59 | refactor(flow): 提取右侧面板为独立组件 FlowRightPanelComponent |
 | d57f98e | refactor(flow): 移除未使用的服务注入 |
+| 2960577 | refactor(flow): 提取重试逻辑和批量工具栏到服务/组件 |
+
+### 新增服务/组件 (本次会话续)
+
+| 服务/组件 | 行数 | 说明 |
+|-----------|------|------|
+| FlowDiagramRetryService | 205 | 图表初始化与重试逻辑 |
+| FlowBatchToolbarComponent | 83 | 批量操作浮动工具栏 |
+| FlowSelectionService 扩展 | +90 | 添加 selectNodeWithRetry 方法 |
 
 ### 待完成
 
@@ -402,7 +411,7 @@
 |------|------|------|
 | SimpleSyncService 方法委托 | 🔴 | 需要将公共方法委托给子服务（4627 行 → 目标 ≤800） |
 | StorePersistenceService 达标 | ✅ | 从 1551 行减至 790 行（-49%），已达标 |
-| FlowViewComponent 模板提取 | 🟡 | 1662 → 1113 行（-33%），需继续减少 313 行 |
+| FlowViewComponent 继续优化 | 🟡 | 1662 → 988 行（-41%），需继续减少 188 行 |
 | SyncCoordinatorService 重构 | ✅ | 788 行，已达标 |
 | TaskOperationService 拆分 | ✅ | 757 行，已达标 |
 | RealtimeSyncService 创建 | ⏳ | 从 SimpleSyncService 提取 Realtime 订阅逻辑 |
@@ -418,7 +427,7 @@
 | 原始文件 | 原行数 | 当前行数 | 目标行数 | 状态 |
 |----------|--------|----------|----------|------|
 | SimpleSyncService | 4627 | 4627 | ≤800 | 🔴 子服务已创建，待委托 |
-| FlowViewComponent | 1662 | 1113 | ≤800 | 🟡 进展 33%，距目标还需 -313 |
+| FlowViewComponent | 1662 | 988 | ≤800 | 🟡 进展 41%，距目标还需 -188 |
 | TaskOperationService | 2059 | 757 | ≤800 | ✅ 已达标 |
 | SyncCoordinatorService | 1466 | 788 | ≤800 | ✅ 已达标 |
 | StorePersistenceService | 1551 | 790 | ≤800 | ✅ 已达标 |
