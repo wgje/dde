@@ -10,7 +10,7 @@
 
 ---
 
-## 📊 实施进度跟踪（2026-01-31 更新）
+## 📊 实施进度跟踪（2026-02-01 更新）
 
 ### 完成状态
 
@@ -19,8 +19,8 @@
 | StorePersistenceService | 1551 | 790 | ≤800 | ✅ 完成 | -761 |
 | SyncCoordinatorService | 1466 | 826 | ≤800 | ✅ 接近目标 | -640 |
 | TaskOperationService | 2060 | 1673 | ≤800 | 🔄 进行中 | -387 |
-| FlowViewComponent | 2555 | 1986 | ≤800 | ⏳ 待处理 | -569 |
-| SimpleSyncService | 4945 | 4627 | ≤800 | ⏳ 待处理 | -318 |
+| FlowViewComponent | 2555 | 988 | ≤800 | ✅ 接近目标 | -1567 |
+| SimpleSyncService | 4945 | 4627 | ≤800 | 🔄 基础设施就位 | -318 |
 
 ### 新增子服务
 
@@ -30,6 +30,31 @@
 | TaskCreationService | 266 | 任务创建（预备，尚未集成） |
 | ProjectSyncOperationsService | 322 | 项目同步操作（从 SyncCoordinatorService 提取） |
 | DeltaSyncCoordinatorService | 185 | Delta Sync 协调（从 SyncCoordinatorService 提取） |
+| FlowDiagramRetryService | 205 | GoJS 图表重试逻辑（从 FlowViewComponent 提取） |
+| FlowBatchToolbarComponent | 83 | 批量操作工具栏（从 FlowViewComponent 提取） |
+| SyncOperationHelperService | 411 | 同步操作包装器（Session/Auth 处理） |
+
+### sync 子服务架构
+
+SimpleSyncService (4627 行) 的子服务已就位，待逐步委托：
+
+| 服务 | 行数 | 状态 | 用途 |
+|------|------|------|------|
+| TaskSyncService | 509 | ✅ 已创建 | 任务同步（pushTask, pullTasks, deleteTask） |
+| ProjectSyncService | 178 | ✅ 已创建 | 项目同步 |
+| ConnectionSyncService | 217 | ✅ 已创建 | 连接同步 |
+| TombstoneService | 355 | ✅ 已创建 | 墓碑管理 |
+| RetryQueueService | 663 | ✅ 已创建 | 重试队列 |
+| SessionManagerService | 197 | ✅ 已创建 | 会话管理 |
+| SyncStateService | 201 | ✅ 已创建 | 同步状态 |
+| RealtimePollingService | 391 | ✅ 已创建 | 实时订阅 |
+| SyncOperationHelperService | 411 | ✅ 新增 | 操作包装器 |
+
+**SimpleSyncService 重构策略**：
+1. ✅ 子服务已注入但未委托（Sprint 7-9）
+2. ✅ SyncOperationHelperService 提供统一的 Auth/Session 处理
+3. ⏳ 下一步：将 pushTask/pushConnection/pushProject 委托给子服务
+4. ⏳ 预计可减少 ~2000 行代码
 
 ### Git 提交记录
 

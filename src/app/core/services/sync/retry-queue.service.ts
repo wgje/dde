@@ -22,15 +22,25 @@ import { Task, Project, Connection } from '../../../../models';
 import * as Sentry from '@sentry/angular';
 
 /**
+ * 可重试的实体类型
+ */
+export type RetryableEntityType = 'task' | 'project' | 'connection';
+
+/**
+ * 可重试的操作类型
+ */
+export type RetryableOperation = 'upsert' | 'delete';
+
+/**
  * 重试队列项
  */
 export interface RetryQueueItem {
   /** 唯一标识符 */
   id: string;
   /** 实体类型 */
-  type: 'task' | 'project' | 'connection';
+  type: RetryableEntityType;
   /** 操作类型 */
-  operation: 'upsert' | 'delete';
+  operation: RetryableOperation;
   /** 实体数据 */
   data: Task | Project | Connection | { id: string };
   /** 关联的项目 ID */
@@ -141,8 +151,8 @@ export class RetryQueueService {
    * - 容量限制：超限时移除最老的项
    */
   add(
-    type: 'task' | 'project' | 'connection',
-    operation: 'upsert' | 'delete',
+    type: RetryableEntityType,
+    operation: RetryableOperation,
     data: Task | Project | Connection | { id: string },
     projectId?: string
   ): void {

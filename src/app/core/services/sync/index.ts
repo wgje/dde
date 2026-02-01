@@ -23,7 +23,7 @@ export { TombstoneService } from './tombstone.service';
 
 // 重试队列
 export { RetryQueueService } from './retry-queue.service';
-export type { RetryQueueItem } from './retry-queue.service';
+export type { RetryQueueItem, RetryableEntityType, RetryableOperation } from './retry-queue.service';
 
 // 任务同步
 export { TaskSyncService } from './task-sync.service';
@@ -40,3 +40,7 @@ export type { RemoteChangeCallback, UserPreferencesChangeCallback } from './real
 
 // 会话管理 (Sprint 9)
 export { SessionManagerService } from './session-manager.service';
+
+// 同步操作辅助 (Sprint 9)
+export { SyncOperationHelperService } from './sync-operation-helper.service';
+export type { SyncOperationContext, SyncOperationOptions, SyncOperationResult } from './sync-operation-helper.service';
