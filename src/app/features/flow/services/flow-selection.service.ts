@@ -264,4 +264,95 @@ export class FlowSelectionService {
       }
     });
   }
+
+  // ========== 带重试逻辑的节点选中 ==========
+
+  /** 节点选中重试的 rAF ID 列表（用于取消） */
+  private pendingRetryRafIds: number[] = [];
+
+  /** 是否已销毁（用于取消重试） */
+  private isDestroyed = false;
+
+  /**
+   * 标记服务销毁状态
+   * 应在组件 ngOnDestroy 时调用
+   */
+  markDestroyed(): void {
+    this.isDestroyed = true;
+    // 取消所有待处理的重试
+    this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
+    this.pendingRetryRafIds = [];
+  }
+
+  /**
+   * 重置销毁状态（用于重新初始化）
+   */
+  resetDestroyedState(): void {
+    this.isDestroyed = false;
+  }
+
+  /**
+   * 带重试逻辑的节点选中方法
+   * 
+   * 解决问题：创建任务后，GoJS 图表可能还未完成更新，节点不存在
+   * 方案：使用多次重试 + 递增延迟，确保节点存在后再选中
+   * 
+   * @param taskId 要选中的任务 ID
+   * @param scheduleTimer 定时器调度函数（用于追踪定时器，在组件销毁时取消）
+   * @param retryCount 当前重试次数（内部使用）
+   */
+  selectNodeWithRetry(
+    taskId: string,
+    scheduleTimer: (callback: () => void, delay: number) => void,
+    retryCount = 0
+  ): void {
+    const MAX_RETRIES = 5;
+    const RETRY_DELAYS = [0, 16, 50, 100, 200]; // 渐进延迟：立即、1帧、50ms、100ms、200ms
+
+    if (this.isDestroyed) return;
+
+    if (!this.diagram) return;
+
+    const node = this.diagram.findNodeForKey(taskId);
+    if (node) {
+      // 节点存在，直接选中
+      this.selectNode(taskId);
+      return;
+    }
+
+    // 节点不存在，重试
+    if (retryCount < MAX_RETRIES) {
+      const delay = RETRY_DELAYS[retryCount] ?? 200;
+      this.logger.debug('节点选中重试', { taskId, retryCount, delay });
+
+      if (delay === 0) {
+        // 使用 rAF 等待下一帧，追踪 ID 以便销毁时取消
+        const rafId = requestAnimationFrame(() => {
+          // 从追踪列表中移除
+          const idx = this.pendingRetryRafIds.indexOf(rafId);
+          if (idx > -1) this.pendingRetryRafIds.splice(idx, 1);
+          // 再次检查销毁状态
+          if (this.isDestroyed) return;
+          this.selectNodeWithRetry(taskId, scheduleTimer, retryCount + 1);
+        });
+        this.pendingRetryRafIds.push(rafId);
+      } else {
+        // 使用定时器延迟重试
+        scheduleTimer(() => {
+          this.selectNodeWithRetry(taskId, scheduleTimer, retryCount + 1);
+        }, delay);
+      }
+    } else {
+      // 所有重试失败，记录警告
+      this.logger.warn('节点选中失败：节点不存在（已重试 ' + MAX_RETRIES + ' 次）', { taskId });
+    }
+  }
+
+  /**
+   * 取消所有待处理的重试
+   */
+  cancelPendingRetries(): void {
+    this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
+    this.pendingRetryRafIds = [];
+  }
 }

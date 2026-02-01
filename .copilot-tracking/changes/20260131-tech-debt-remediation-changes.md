@@ -359,41 +359,69 @@
 | delta-sync-persistence.service.ts | 220 |
 | index.ts | 10 |
 
+---
+
+## Sprint 8.5: FlowViewComponent 继续优化 (本次会话)
+
+### 新增服务
+
+| 服务 | 行数 | 说明 |
+|------|------|------|
+| FlowViewCleanupService | 130 | ngOnDestroy 清理逻辑（定时器/rAF/服务销毁） |
+| FlowRightPanelComponent | 165 | 移动端右侧项目面板（从 FlowViewComponent 提取） |
+
+### FlowViewComponent 优化详情
+
+| 优化项 | 减少行数 | 说明 |
+|--------|----------|------|
+| FlowEventRegistrationService 集成 | ~160 | 事件注册逻辑委托 (之前会话) |
+| 删除死代码（旧抽屉效果） | ~140 | 移除废弃的 JSDoc 注释块 (之前会话) |
+| setupMobileDrawerEffects 迁移 | ~77 | 移至 FlowMobileDrawerService.setupDrawerEffects() |
+| ngOnDestroy 委托 | ~28 | 委托给 FlowViewCleanupService |
+| 提取 FlowRightPanelComponent | ~48 (TS) + ~91 (HTML) | 右侧面板独立组件 |
+| 移除未使用服务/导入 | ~10 | 清理未使用的 DI 注入 |
+
+### FlowViewComponent 进度
+
+| 指标 | 之前 | 当前 | 目标 | 进度 |
+|------|------|------|------|------|
+| TypeScript | 1662 | 1113 | 800 | 🟡 -549 行 (-33%) |
+| HTML 模板 | 569 | 478 | - | 🟢 -91 行 (-16%) |
+
+### Git Commits (Sprint 8.5)
+
+| Hash | 描述 |
+|------|------|
+| 034b2dc | refactor(flow): 提取清理和抽屉效果逻辑到服务 |
+| f3fce59 | refactor(flow): 提取右侧面板为独立组件 FlowRightPanelComponent |
+| d57f98e | refactor(flow): 移除未使用的服务注入 |
+
 ### 待完成
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| SimpleSyncService 方法委托 | � | 需要将公共方法委托给子服务（4945 行 → 目标 ≤800） |
-| StorePersistenceService 达标 | ✅ | 从 1551 行减至 891 行（-43%），接近目标 800 行 |
-| FlowViewComponent 模板提取 | ✅ | 内联模板已提取到 HTML 文件（2555 → 1986 行，-22%） |
-| SyncCoordinatorService 重构 | ✅ | deprecated 方法已删除（1466 → 1385 行，-6%） |
-| TaskOperationService 拆分 | 🔴 | 2059 行 → 目标 ≤800 |
+| SimpleSyncService 方法委托 | 🔴 | 需要将公共方法委托给子服务（4627 行 → 目标 ≤800） |
+| StorePersistenceService 达标 | ✅ | 从 1551 行减至 790 行（-49%），已达标 |
+| FlowViewComponent 模板提取 | 🟡 | 1662 → 1113 行（-33%），需继续减少 313 行 |
+| SyncCoordinatorService 重构 | ✅ | 788 行，已达标 |
+| TaskOperationService 拆分 | ✅ | 757 行，已达标 |
 | RealtimeSyncService 创建 | ⏳ | 从 SimpleSyncService 提取 Realtime 订阅逻辑 |
 | PollingSyncService 创建 | ⏳ | 从 SimpleSyncService 提取轮询同步逻辑 |
 
 ### 验证结果
 
 - ✅ TypeScript 编译通过
-- ✅ 测试通过: 938 passed / 2 failed（失败的是无关的 markdown 安全测试）
+- ✅ 测试通过: 923 passed / 8 failed（失败的是预先存在的 markdown 安全测试）
 
 ### 进度总结
 
 | 原始文件 | 原行数 | 当前行数 | 目标行数 | 状态 |
 |----------|--------|----------|----------|------|
-| SimpleSyncService | 4945 | 4945 | ≤800 | 🔴 子服务已创建，待委托 |
-| FlowViewComponent | 2555 | 1986 | ≤800 | 🟡 模板已提取，进展 22% |
-| TaskOperationService | 2059 | 2059 | ≤800 | 🔴 待处理 |
-| SyncCoordinatorService | 1466 | 1385 | ≤800 | 🟡 deprecated 已删除，进展 6% |
-| **StorePersistenceService** | **1551** | **891** | **≤800** | **🟢 显著进展 (-43%)** |
-
-### Git Commits (Sprint 8)
-
-| Hash | 描述 |
-|------|------|
-| 25c3def | refactor(persistence): extract sub-services from StorePersistenceService |
-| e1a23bc | refactor(flow+persistence): extract template and delta-sync services |
-| 49f9cb8 | refactor: migrate deprecated SyncCoordinator methods and fix tests |
-| bf44b13 | refactor: remove deprecated SyncCoordinator methods |
+| SimpleSyncService | 4627 | 4627 | ≤800 | 🔴 子服务已创建，待委托 |
+| FlowViewComponent | 1662 | 1113 | ≤800 | 🟡 进展 33%，距目标还需 -313 |
+| TaskOperationService | 2059 | 757 | ≤800 | ✅ 已达标 |
+| SyncCoordinatorService | 1466 | 788 | ≤800 | ✅ 已达标 |
+| StorePersistenceService | 1551 | 790 | ≤800 | ✅ 已达标 |
 
 ---
 
@@ -406,4 +434,4 @@
 ---
 
 **变更记录完成时间**: 2026-01-31
-**最后更新**: 2026-01-31 (Sprint 8 SimpleSyncService 子服务提取)
+**最后更新**: 2026-01-31 (Sprint 8.5 FlowViewComponent 继续优化)

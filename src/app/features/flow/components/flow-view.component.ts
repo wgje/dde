@@ -24,6 +24,7 @@ import { FlowMobileDrawerService } from '../services/flow-mobile-drawer.service'
 import { FlowDiagramEffectsService } from '../services/flow-diagram-effects.service';
 import { FlowEventRegistrationService } from '../services/flow-event-registration.service';
 import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
+import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -39,6 +40,7 @@ import { MobileDrawerContainerComponent } from './mobile-drawer-container.compon
 import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
 import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
 import { FlowRightPanelComponent } from './flow-right-panel.component';
+import { FlowBatchToolbarComponent } from './flow-batch-toolbar.component';
 
 import * as go from 'gojs';
 
@@ -76,7 +78,8 @@ import * as go from 'gojs';
     MobileDrawerContainerComponent,
     MobileTodoDrawerComponent,
     MobileBlackBoxDrawerComponent,
-    FlowRightPanelComponent
+    FlowRightPanelComponent,
+    FlowBatchToolbarComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrls: ['./flow-view.component.scss'],
@@ -118,6 +121,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly diagramEffects = inject(FlowDiagramEffectsService);
   private readonly eventRegistration = inject(FlowEventRegistrationService);
   private readonly cleanup = inject(FlowViewCleanupService);
+  private readonly diagramRetry = inject(FlowDiagramRetryService);
   
   // ========== 组件状态 ==========
   
@@ -141,8 +145,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly drawerManualOverride = signal(false);
   readonly isResizingDrawerSignal = signal(false);
   
-  /** 是否正在重试加载图表 */
-  readonly isRetryingDiagram = signal(false);
+  /** 是否正在重试加载图表（委托给 diagramRetry 服务） */
+  readonly isRetryingDiagram = computed(() => this.diagramRetry.isRetrying());
+  
+  /** 是否已达到重试上限（委托给 diagramRetry 服务） */
+  readonly hasReachedRetryLimit = computed(() => this.diagramRetry.hasReachedRetryLimit());
   
   /** 小地图状态 */
   readonly isOverviewVisible = signal(true);
@@ -172,11 +179,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     return '8px';
   });
 
-  /** 图表初始化重试次数 */
-  private diagramRetryCount = 0;
-  
-  /** 是否已达到重试上限（用于 UI 显示不同按钮） */
-  readonly hasReachedRetryLimit = signal(false);
+  /** 图表初始化重试次数 - 委托给 diagramRetry 服务管理 */
   
   /** 计算属性: 获取选中的任务对象 */
   readonly selectedTask = computed(() => {
@@ -201,17 +204,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private pendingDrawerHeightRafId: number | null = null;
   private pendingDrawerHeightTarget: number | null = null;
   
-  /** 节点选中重试的 rAF ID 列表（用于取消） */
-  private pendingRetryRafIds: number[] = [];
-  
   /** 是否有待处理的图表更新（用于 rAF 合并） */
   private diagramUpdatePending = false;
   
   /** Overview 刷新定时器（防抖） */
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Idle 初始化句柄（用于取消） */
-  private idleInitHandle: number | null = null;
 
   /** Idle 小地图初始化句柄（用于取消） */
   private idleOverviewInitHandle: number | null = null;
@@ -256,11 +253,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.diagramEffects.createSearchEffect(this.injector, scheduleRaf);
     this.diagramEffects.createThemeEffect(this.injector, scheduleRaf);
     
-    // 选中状态同步
+    // 选中状态同步（委托给 selectionService）
     this.diagramEffects.createSelectionSyncEffect(
       this.injector,
       this.selectedTaskId,
-      this.selectNodeWithRetry.bind(this)
+      (taskId: string) => this.selectionService.selectNodeWithRetry(taskId, this.scheduleTimer.bind(this))
     );
     
     // 命令服务订阅
@@ -342,14 +339,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   ngOnDestroy() {
     this.isDestroyed = true;
 
+    // 通知服务组件销毁
+    this.selectionService.markDestroyed();
+    this.diagramRetry.resetState();
+
     // 收集清理资源
     const resources: CleanupResources = {
       pendingTimers: this.pendingTimers,
       pendingRafId: this.pendingRafId,
       pendingDrawerHeightRafId: this.pendingDrawerHeightRafId,
-      pendingRetryRafIds: this.pendingRetryRafIds,
+      pendingRetryRafIds: [],  // 已迁移到 selectionService
       overviewResizeTimer: this.overviewResizeTimer,
-      idleInitHandle: this.idleInitHandle,
+      idleInitHandle: this.diagramRetry.getIdleInitHandle(),  // 从服务获取
       idleOverviewInitHandle: this.idleOverviewInitHandle
     };
 
@@ -364,32 +365,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.pendingDrawerHeightRafId = null;
     this.pendingDrawerHeightTarget = null;
     this.overviewResizeTimer = null;
-    this.idleInitHandle = null;
     this.idleOverviewInitHandle = null;
   }
   
   // ========== 图表初始化 ==========
 
   private scheduleDiagramInit(): void {
-    const startInit = () => {
-      if (this.isDestroyed) return;
-      this.initDiagram();
-      if (this.diagram.isInitialized) {
-        this.onDiagramInitialized();
-      }
-    };
-
-    // 使用 requestIdleCallback 延迟重任务，避免阻塞 LCP
-    if (typeof requestIdleCallback !== 'undefined') {
-      this.idleInitHandle = requestIdleCallback(() => {
-        this.idleInitHandle = null;
-        this.zone.run(() => startInit());
-      }, { timeout: 5000 });
-    } else {
-      this.scheduleTimer(() => {
-        this.zone.run(() => startInit());
-      }, 1200);
-    }
+    this.diagramRetry.scheduleDiagramInit(
+      () => this.initDiagram(),
+      () => this.onDiagramInitialized(),
+      this.scheduleTimer.bind(this),
+      () => this.isDestroyed
+    );
   }
 
   private onDiagramInitialized(delayMs: number = UI_CONFIG.MEDIUM_DELAY): void {
@@ -544,90 +531,29 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.toggleOverviewCollapse();
   }
 
+  /**
+   * 重试初始化图表（委托给 diagramRetry 服务）
+   */
   retryInitDiagram(): void {
-    // 检查是否超过最大重试次数
-    if (this.diagramRetryCount >= FLOW_VIEW_CONFIG.MAX_DIAGRAM_RETRIES) {
-      this.toast.error(
-        '初始化失败', 
-        `流程图加载失败已重试 ${FLOW_VIEW_CONFIG.MAX_DIAGRAM_RETRIES} 次，请尝试刷新页面或切换到文本视图`
-      );
-      this.isRetryingDiagram.set(false);
-      this.hasReachedRetryLimit.set(true);
-      return;
-    }
-    
-    this.diagramRetryCount++;
-    this.isRetryingDiagram.set(true);
-    this.hasReachedRetryLimit.set(false);
-    
-    // 显示重试进度反馈
-    const remaining = FLOW_VIEW_CONFIG.MAX_DIAGRAM_RETRIES - this.diagramRetryCount;
-    this.toast.info(
-      `重试加载中...`,
-      `第 ${this.diagramRetryCount} 次尝试（剩余 ${remaining} 次）`,
-      { duration: 2000 }
+    this.diagramRetry.retryInitDiagram(
+      this.diagramDiv,
+      () => this.initDiagram(),
+      (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
+      this.scheduleTimer.bind(this)
     );
-    
-    // 使用指数退避：使用集中配置的基础延迟
-    const delay = FLOW_VIEW_CONFIG.DIAGRAM_RETRY_BASE_DELAY * Math.pow(2, this.diagramRetryCount - 1);
-    
-    this.scheduleTimer(() => {
-      // 在 Angular zone 内运行以确保变更检测
-      this.zone.run(() => {
-        // 再次检查 DOM 是否准备好
-        if (!this.diagramDiv || !this.diagramDiv.nativeElement) {
-          this.logger.warn('[FlowView] 重试时 diagramDiv 仍未准备好，将再次重试');
-          this.isRetryingDiagram.set(false);
-          // 如果 DOM 未准备好，递归重试（会增加重试计数）
-          this.scheduleTimer(() => this.retryInitDiagram(), 500);
-          return;
-        }
-
-        this.initDiagram();
-        if (this.diagram.isInitialized) {
-          this.onDiagramInitialized(0);
-          // 成功后重置重试计数
-          this.diagramRetryCount = 0;
-          this.hasReachedRetryLimit.set(false);
-          this.toast.success('加载成功', '流程图已就绪');
-        }
-        this.isRetryingDiagram.set(false);
-      });
-    }, delay);
   }
   
   /**
-   * 完全重置图表状态并重新初始化
+   * 完全重置图表状态并重新初始化（委托给 diagramRetry 服务）
    * 用于用户手动触发的"完全重置"操作
    */
   resetAndRetryDiagram(): void {
-    // 重置所有状态
-    this.diagramRetryCount = 0;
-    this.hasReachedRetryLimit.set(false);
-    this.diagram.dispose();
-    
-    // 重新初始化
-    this.toast.info('重置中...', '正在完全重置流程图');
-    
-    this.scheduleTimer(() => {
-      this.zone.run(() => {
-        // 检查 DOM 是否准备好
-        if (!this.diagramDiv || !this.diagramDiv.nativeElement) {
-          this.logger.error('[FlowView] 重置时 diagramDiv 不可用');
-          this.toast.error('重置失败', '视图未准备好，请稍后重试');
-          return;
-        }
-
-        this.initDiagram();
-        if (this.diagram.isInitialized) {
-          this.onDiagramInitialized(0);
-          this.toast.success('重置成功', '流程图已就绪');
-        } else {
-          // 重置后仍然失败，显示错误但允许再次重试
-          this.toast.error('重置失败', '流程图初始化失败，请尝试刷新页面');
-        }
-      });
-    }, 200);
+    this.diagramRetry.resetAndRetryDiagram(
+      this.diagramDiv,
+      () => this.initDiagram(),
+      (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
+      this.scheduleTimer.bind(this)
+    );
   }
   
   // ========== 图表操作 ==========
@@ -1036,58 +962,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // ========== 私有辅助方法 ==========
   
-  /**
-   * 带重试逻辑的节点选中方法
-   * 
-   * 解决问题：创建任务后，GoJS 图表可能还未完成更新，节点不存在
-   * 方案：使用多次重试 + 递增延迟，确保节点存在后再选中
-   * 
-   * @param taskId 要选中的任务 ID
-   * @param retryCount 当前重试次数（内部使用）
-   */
-  private selectNodeWithRetry(taskId: string, retryCount = 0): void {
-    const MAX_RETRIES = 5;
-    const RETRY_DELAYS = [0, 16, 50, 100, 200]; // 渐进延迟：立即、1帧、50ms、100ms、200ms
-    
-    if (this.isDestroyed) return;
-    
-    const diagramInstance = this.diagram.diagramInstance;
-    if (!diagramInstance) return;
-    
-    const node = diagramInstance.findNodeForKey(taskId);
-    if (node) {
-      // 节点存在，直接选中
-      this.diagram.selectNode(taskId);
-      return;
-    }
-    
-    // 节点不存在，重试
-    if (retryCount < MAX_RETRIES) {
-      const delay = RETRY_DELAYS[retryCount] ?? 200;
-      this.logger.debug('节点选中重试', { taskId, retryCount, delay });
-      
-      if (delay === 0) {
-        // 使用 rAF 等待下一帧，追踪 ID 以便销毁时取消
-        const rafId = requestAnimationFrame(() => {
-          // 从追踪列表中移除
-          const idx = this.pendingRetryRafIds.indexOf(rafId);
-          if (idx > -1) this.pendingRetryRafIds.splice(idx, 1);
-          // 再次检查销毁状态
-          if (this.isDestroyed) return;
-          this.selectNodeWithRetry(taskId, retryCount + 1);
-        });
-        this.pendingRetryRafIds.push(rafId);
-      } else {
-        // 使用定时器延迟重试
-        this.scheduleTimer(() => {
-          this.selectNodeWithRetry(taskId, retryCount + 1);
-        }, delay);
-      }
-    } else {
-      // 所有重试失败，记录警告
-      this.logger.warn('节点选中失败：节点不存在（已重试 ' + MAX_RETRIES + ' 次）', { taskId });
-    }
-  }
+  // ========== 私有辅助方法 ==========
   
   /**
    * 安全调度定时器，自动追踪并在组件销毁时清理
