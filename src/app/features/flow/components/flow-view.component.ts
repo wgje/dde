@@ -3,14 +3,10 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
-import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
-import { PreferenceService } from '../../../../services/preference.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowCommandService } from '../services/flow-command.service';
 import { FlowDiagramService } from '../services/flow-diagram.service';
-import { FlowEventService } from '../services/flow-event.service';
 import { FlowZoomService } from '../services/flow-zoom.service';
 import { FlowSelectionService } from '../services/flow-selection.service';
 import { FlowLayoutService } from '../services/flow-layout.service';
@@ -19,7 +15,6 @@ import { FlowTouchService } from '../services/flow-touch.service';
 import { FlowLinkService } from '../services/flow-link.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
 import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service';
-import { FlowDrawerHeightService } from '../services/flow-drawer-height.service';
 import { FlowCascadeAssignService } from '../services/flow-cascade-assign.service';
 import { FlowKeyboardService } from '../services/flow-keyboard.service';
 import { FlowPaletteResizeService } from '../services/flow-palette-resize.service';
@@ -95,9 +90,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== P2-1 迁移：直接注入子服务 ==========
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
-  private readonly syncCoordinator = inject(SyncCoordinatorService);
-  private readonly preference = inject(PreferenceService);
   private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService).category('FlowView');
   private readonly zone = inject(NgZone);
@@ -109,7 +101,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 核心服务
   readonly diagram = inject(FlowDiagramService);
-  private readonly eventService = inject(FlowEventService);
   private readonly zoomService = inject(FlowZoomService);
   readonly selectionService = inject(FlowSelectionService);
   private readonly layoutService = inject(FlowLayoutService);
@@ -118,7 +109,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly link = inject(FlowLinkService);
   readonly taskOps = inject(FlowTaskOperationsService);
   private readonly swipeGesture = inject(FlowSwipeGestureService);
-  private readonly drawerHeightService = inject(FlowDrawerHeightService);
   readonly cascadeAssign = inject(FlowCascadeAssignService);
   private readonly keyboard = inject(FlowKeyboardService);
   private readonly paletteResize = inject(FlowPaletteResizeService);
