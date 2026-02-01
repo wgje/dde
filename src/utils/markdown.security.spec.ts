@@ -34,8 +34,9 @@ describe('Markdown Security', () => {
       const malicious = '<img onerror="alert(1)" src="x">';
       const result = renderMarkdown(malicious);
       
-      expect(result).not.toContain('onerror=');
+      // < 被转义，所以整个内容是纯文本，onerror 不会执行
       expect(result).toContain('&lt;img');
+      expect(result).not.toContain('<img');
     });
 
     it('should escape SVG with embedded scripts', () => {
@@ -116,8 +117,9 @@ describe('Markdown Security', () => {
       const malicious = '[click](https://example.com" onclick="alert(1))';
       const result = renderMarkdown(malicious);
       
-      // 引号应该被转义
-      expect(result).not.toContain('onclick=');
+      // 引号应该被转义为 &quot;，这样 onclick 不会被解析为属性
+      expect(result).toContain('&quot;');
+      expect(result).not.toContain('onclick="');  // 原始未转义的引号不应存在
     });
 
     it('should escape backslashes', () => {

@@ -98,7 +98,8 @@ export class ConflictStorageService {
           reject(request.error);
         };
       });
-    } catch {
+    } catch (e) {
+      this.logger.debug('IndexedDB 不可用（getConflictCount），降级到 localStorage', { error: e });
       // 检查 localStorage 降级
       return this.countLocalStorageFallback();
     }
@@ -297,7 +298,8 @@ export class ConflictStorageService {
           reject(request.error);
         };
       });
-    } catch {
+    } catch (e) {
+      this.logger.debug('IndexedDB 不可用（hasConflicts），降级到 localStorage', { error: e });
       // 检查 localStorage 降级
       return this.hasLocalStorageFallback();
     }
@@ -324,7 +326,8 @@ export class ConflictStorageService {
       const key = `${this.FALLBACK_KEY_PREFIX}${projectId}`;
       const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : null;
-    } catch {
+    } catch (e) {
+      this.logger.debug('从 localStorage 加载冲突数据失败', { projectId, error: e });
       return null;
     }
   }
@@ -333,8 +336,8 @@ export class ConflictStorageService {
     try {
       const key = `${this.FALLBACK_KEY_PREFIX}${projectId}`;
       localStorage.removeItem(key);
-    } catch {
-      // 忽略清理失败
+    } catch (e) {
+      this.logger.debug('清理 localStorage 失败，忽略', { projectId, error: e });
     }
   }
   
@@ -347,7 +350,8 @@ export class ConflictStorageService {
         }
       }
       return false;
-    } catch {
+    } catch (e) {
+      this.logger.debug('localStorage 访问失败，返回 false', { error: e });
       return false;
     }
   }
@@ -362,7 +366,8 @@ export class ConflictStorageService {
         }
       }
       return count;
-    } catch {
+    } catch (e) {
+      this.logger.debug('localStorage 访问失败，返回 0', { error: e });
       return 0;
     }
   }

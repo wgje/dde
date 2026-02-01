@@ -134,8 +134,9 @@ export class BlackBoxSyncService {
           this.logger.warn('BlackBoxSync', 'Failed to load lastSyncTime');
           resolve();
         };
-      } catch {
-        // Store 可能不存在（首次升级前）
+      } catch (e) {
+        // 降级处理：Store 可能不存在（首次升级前）
+        this.logger.debug('loadLastSyncTime', 'IndexedDB store 不存在', { error: e });
         resolve();
       }
     });
@@ -154,7 +155,9 @@ export class BlackBoxSyncService {
         store.put({ key: this.LAST_SYNC_TIME_KEY, value: this.lastSyncTime });
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
-      } catch {
+      } catch (e) {
+        // 降级处理：保存失败时静默继续
+        this.logger.debug('saveLastSyncTime', '保存同步时间失败', { error: e });
         resolve();
       }
     });

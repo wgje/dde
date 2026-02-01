@@ -585,8 +585,9 @@ export class ExportService {
         const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-      } catch {
+      } catch (e) {
         // 降级到简单 hash
+        this.logger.debug('SHA-256 计算失败，降级到简单 hash', { error: e });
         return this.simpleHash(jsonString);
       }
     }
@@ -645,8 +646,9 @@ export class ExportService {
       if (stored) {
         this._lastExportTime.set(stored);
       }
-    } catch {
+    } catch (e) {
       // 忽略存储错误
+      this.logger.debug('读取上次导出时间失败', { error: e });
     }
   }
   
@@ -660,8 +662,9 @@ export class ExportService {
     try {
       localStorage.setItem('nanoflow.lastExportAt', now);
       // 仅本地存储，不同步到云端
-    } catch {
+    } catch (e) {
       // 忽略存储错误
+      this.logger.debug('保存上次导出时间失败', { error: e });
     }
   }
 }

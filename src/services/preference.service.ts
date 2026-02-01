@@ -15,6 +15,7 @@
  */
 import { Injectable, inject, signal, effect } from '@angular/core';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
 import { ThemeService } from './theme.service';
@@ -34,6 +35,7 @@ function getUserPreferenceKey(userId: string | null, key: string): string {
   providedIn: 'root'
 })
 export class PreferenceService {
+  private readonly logger = inject(LoggerService).category('PreferenceService');
   private syncService = inject(SimpleSyncService);
   private actionQueue = inject(ActionQueueService);
   private authService = inject(AuthService);
@@ -127,7 +129,7 @@ export class PreferenceService {
       }
       return success;
     } catch (error) {
-      console.error('保存用户偏好失败:', error);
+      this.logger.error('保存用户偏好失败', error);
       this.lastLocalPreferencesWriteAt = Date.now();
       this.actionQueue.enqueue({
         type: 'update',
@@ -151,7 +153,8 @@ export class PreferenceService {
       const stored = localStorage.getItem(key);
       // 默认 true（使用 LWW 自动解决）
       return stored === null ? true : stored === 'true';
-    } catch {
+    } catch (e) {
+      this.logger.debug('loadAutoResolveFromStorage: localStorage 访问失败，使用默认值', e);
       return true;
     }
   }
@@ -165,8 +168,8 @@ export class PreferenceService {
     try {
       const key = getUserPreferenceKey(userId, 'autoResolveConflicts');
       localStorage.setItem(key, String(enabled));
-    } catch {
-      // 忽略存储失败
+    } catch (e) {
+      this.logger.debug('saveAutoResolveToStorage: localStorage 存储失败，忽略', e);
     }
   }
   
@@ -212,7 +215,8 @@ export class PreferenceService {
         };
       }
       return null;
-    } catch {
+    } catch (e) {
+      this.logger.debug('loadLocalBackupSettingsFromCloud: 加载云端备份设置失败', e);
       return null;
     }
   }

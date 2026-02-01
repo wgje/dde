@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { ToastService } from '../../../services/toast.service';
+import { LoggerService } from '../../../services/logger.service';
 
 /**
  * 密码重置组件
@@ -157,6 +158,7 @@ export class ResetPasswordComponent implements OnInit {
   private router = inject(Router);
   private route = inject(ActivatedRoute);
   private toast = inject(ToastService);
+  private readonly logger = inject(LoggerService);
 
   isLoading = signal(true);
   isValid = signal(false);
@@ -224,7 +226,7 @@ export class ResetPasswordComponent implements OnInit {
       }
     } catch (e: unknown) {
       const err = e as { message?: string };
-      console.error('Token verification failed:', e);
+      this.logger.error('ResetPassword', 'Token verification failed', e);
       this.isValid.set(false);
       this.error.set(err?.message ?? '验证失败');
     } finally {
@@ -269,7 +271,7 @@ export class ResetPasswordComponent implements OnInit {
       }, 2000);
     } catch (e: unknown) {
       const err = e as { message?: string };
-      console.error('Password reset failed:', e);
+      this.logger.error('ResetPassword', 'Password reset failed', e);
       this.error.set(err?.message ?? '密码重置失败，请重试');
     } finally {
       this.isSubmitting.set(false);

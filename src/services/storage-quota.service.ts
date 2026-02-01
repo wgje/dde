@@ -153,8 +153,8 @@ export class StorageQuotaService {
           }
         }
       }
-    } catch {
-      // 忽略访问错误
+    } catch (e) {
+      this.logger.debug('getLocalStorageUsage', 'localStorage 访问失败，返回当前统计', { error: e });
     }
     
     return totalSize;
@@ -198,7 +198,8 @@ export class StorageQuotaService {
       
       // 回退：无法估计
       return { used: 0, quota: 0 };
-    } catch {
+    } catch (e) {
+      this.logger.debug('getIndexedDBUsage', 'Storage API 不可用，返回零值', { error: e });
       return { used: 0, quota: 0 };
     }
   }
@@ -313,8 +314,8 @@ export class StorageQuotaService {
           }
         }
       }
-    } catch {
-      // 忽略访问错误
+    } catch (e) {
+      this.logger.debug('getCleanableItems', 'localStorage 访问失败，返回已收集项', { error: e });
     }
     
     // 按大小排序

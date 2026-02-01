@@ -509,7 +509,8 @@ export class FileTypeValidatorService {
         valid: false,
         error: '文件内容不是有效的 SVG',
       };
-    } catch {
+    } catch (e) {
+      this.logger.debug('无法读取 SVG 文件内容', { error: e });
       return {
         valid: false,
         error: '无法读取 SVG 文件内容',

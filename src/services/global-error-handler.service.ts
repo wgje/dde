@@ -2,6 +2,7 @@ import { ErrorHandler, Injectable, inject, NgZone, signal } from '@angular/core'
 import { Router } from '@angular/router';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { TOAST_CONFIG } from '../config';
 
 /**
@@ -76,6 +77,9 @@ export class GlobalErrorHandler implements ErrorHandler {
   private toast = inject(ToastService);
   private router = inject(Router);
   private zone = inject(NgZone);
+  
+  /** Sentry 懒加载服务 - 用于异步错误上报 */
+  private readonly sentryLoader = inject(SentryLazyLoaderService);
 
   /** 当前可恢复错误（用于显示恢复对话框） */
   readonly recoverableError = signal<RecoverableError | null>(null);
@@ -424,14 +428,27 @@ export class GlobalErrorHandler implements ErrorHandler {
   private handleSilentError(message: string, stack?: string): void {
     // 仅记录日志，不打扰用户
     this.logger.debug('Silent error captured', { message, stack });
+    
+    // 静默级错误也上报到 Sentry（用于后续分析）
+    this.sentryLoader.captureException(new Error(message), {
+      severity: 'silent',
+      component: 'GlobalErrorHandler',
+    });
   }
 
   /**
    * 处理提示级错误
    */
-  private handleNotifyError(message: string, stack?: string, _originalError?: unknown): void {
+  private handleNotifyError(message: string, stack?: string, originalError?: unknown): void {
     // 记录详细日志
     this.logger.warn('Notify-level error', { message, stack });
+    
+    // 上报到 Sentry
+    this.sentryLoader.captureException(originalError ?? new Error(message), {
+      severity: 'notify',
+      component: 'GlobalErrorHandler',
+      userMessage: this.getUserMessage(message),
+    });
     
     // 获取用户友好的消息
     const userMessage = this.getUserMessage(message);
@@ -457,6 +474,14 @@ export class GlobalErrorHandler implements ErrorHandler {
     // 记录错误日志
     this.logger.error('FATAL ERROR', { message, stack, originalError });
     
+    // 上报到 Sentry（高优先级）
+    this.sentryLoader.captureException(originalError ?? new Error(message), {
+      severity: 'fatal',
+      component: 'GlobalErrorHandler',
+      userMessage: this.getUserMessage(message),
+      isFatal: true,
+    });
+    
     // 保存错误信息到 sessionStorage（用于错误页面显示）
     try {
       sessionStorage.setItem('nanoflow.fatal-error', JSON.stringify({
@@ -465,8 +490,9 @@ export class GlobalErrorHandler implements ErrorHandler {
         timestamp: new Date().toISOString(),
         stack: stack?.substring(0, 2000) // 限制堆栈长度
       }));
-    } catch {
-      // sessionStorage 不可用，忽略
+    } catch (e) {
+      // 降级处理：sessionStorage 不可用，忽略
+      this.logger.debug('sessionStorage 写入失败', { error: e });
     }
     
     // 在 Angular zone 内导航到错误页面
@@ -508,6 +534,7 @@ export function CatchError(severity: ErrorSeverity = ErrorSeverity.NOTIFY, custo
         if (errorHandler) {
           errorHandler.reportError(error, severity, customMessage);
         } else {
+          // 装饰器回退：当 GlobalErrorHandler 不可用时使用 console
           console.error(`[${propertyKey}] Error:`, error);
         }
         throw error; // 重新抛出以便调用方知道操作失败

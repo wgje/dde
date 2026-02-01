@@ -26,83 +26,21 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ThemeService } from '../../../../services/theme.service';
 import * as go from 'gojs';
+import {
+  GojsClickHandler,
+  GojsNodeExt,
+  GojsGraphObjectExt,
+  GojsLinkingToolExt,
+  GojsRelinkingToolExt,
+  GojsMake,
+  PortConfig,
+  NodeStyleConfig,
+  LinkStyleConfig,
+  GojsShapeBuilder
+} from './flow-template.types';
 
-// ========== GoJS 扩展类型定义 ==========
-
-/** GoJS 事件回调类型 */
-type GojsClickHandler = (e: go.InputEvent, obj: go.GraphObject | null) => void;
-type GojsShapeBuilder = go.Shape;
-
-/** GoJS Node 扩展属性（类型定义不完整的属性） */
-interface GojsNodeExt {
-  data?: go.ObjectData;
-  findObject?: (name: string) => go.GraphObject | null;
-}
-
-/** GoJS GraphObject 扩展属性 */
-interface GojsGraphObjectExt {
-  part?: go.Part | null;
-}
-
-/** GoJS LinkingTool 扩展属性 */
-interface GojsLinkingToolExt {
-  originalFromPort?: go.GraphObject | string | null;
-  originalToPort?: go.GraphObject | string | null;
-  originalFromNode?: go.Node | null;
-  _tempMainPort?: go.GraphObject | null;
-  _originNode?: go.Node | null;
-  _savedFromLinkable?: boolean;
-  _savedToLinkable?: boolean;
-  startPort?: go.GraphObject | string | null;
-  fromPort?: go.GraphObject | string | null;
-  fromNode?: go.Node | null;
-}
-
-/** GoJS RelinkingTool 扩展属性 */
-interface GojsRelinkingToolExt {
-  originalFromPort?: go.GraphObject | string | null;
-  originalToPort?: go.GraphObject | string | null;
-  adornedLink?: go.Link | null;
-  adornedObject?: go.Link | null;
-  originalLink?: go.Link | null;
-  isForwards?: boolean;
-}
-
-/** GoJS 模板构建器函数类型 - 使用 typeof go.GraphObject.make */
-type GojsMake = typeof go.GraphObject.make;
-
-/**
- * 节点端口配置
- */
-export interface PortConfig {
-  name: string;
-  spot: go.Spot;
-  size: number;
-}
-
-/**
- * 节点样式配置
- */
-export interface NodeStyleConfig {
-  portSize: number;
-  assignedWidth: number;
-  unassignedWidth: number;
-  defaultFill: string;
-  defaultStroke: string;
-  selectedStroke: string;
-  cornerRadius: number;
-}
-
-/**
- * 连接线样式配置
- */
-export interface LinkStyleConfig {
-  defaultStroke: string;
-  parentChildStroke: string;
-  selectedStroke: string;
-  strokeWidth: number;
-  captureRadius: number;
-}
+// 重新导出类型以保持向后兼容
+export type { PortConfig, NodeStyleConfig, LinkStyleConfig } from './flow-template.types';
 
 @Injectable({
   providedIn: 'root'

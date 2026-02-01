@@ -370,8 +370,9 @@ export class SpeechToTextService {
       let errorData: { error?: string; code?: string; message?: string } = {};
       try {
         errorData = JSON.parse(responseText);
-      } catch {
-        // 响应不是 JSON
+      } catch (e) {
+        // 降级处理：响应不是 JSON，使用空对象
+        this.logger.debug('transcribe', '响应非 JSON 格式', { error: e, responseText });
       }
       
       // 处理特定错误

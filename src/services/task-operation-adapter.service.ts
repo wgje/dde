@@ -1156,6 +1156,35 @@ export class TaskOperationAdapterService {
   }
   
   /**
+   * 执行重做操作（公开方法）
+   * 用于键盘快捷键调用
+   */
+  performRedo(): void {
+    const activeProject = this.projectState.activeProject();
+    const currentVersion = activeProject?.version;
+    const result = this.undoService.redo(currentVersion);
+    
+    if (!result) {
+      this.logger.debug('没有可重做的操作');
+      return;
+    }
+    
+    if (result === 'version-mismatch') {
+      this.toastService.warning('重做失败', '远程数据已更新，无法重做');
+      return;
+    }
+    
+    if (typeof result === 'object' && 'type' in result && result.type === 'version-mismatch-forceable') {
+      this.toastService.warning('重做失败', '远程数据已更新，无法重做');
+      return;
+    }
+    
+    const action = result;
+    this.applyProjectSnapshot(action.projectId, action.data.after);
+    this.logger.info('重做操作成功', { projectId: action.projectId, type: action.type });
+  }
+  
+  /**
    * 应用项目快照（内部方法）
    */
   private applyProjectSnapshot(projectId: string, snapshot: Partial<Project>): void {

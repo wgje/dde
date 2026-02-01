@@ -49,7 +49,17 @@ export default [
         allow: ['warn', 'error'] // 允许 console.warn/error 用于紧急情况
       }],
       'prefer-const': 'error',
-      'no-duplicate-imports': 'error'
+      'no-duplicate-imports': 'error',
+      
+      // 禁止错误吞噬模式：catch 块中直接 return null/undefined
+      // 应使用 Result 模式替代
+      'no-restricted-syntax': [
+        'warn',
+        {
+          selector: 'CatchClause > BlockStatement > ReturnStatement[argument.type="Literal"][argument.value=null]',
+          message: '禁止在 catch 块中直接 return null，请使用 Result 模式（failure/wrapWithResult）'
+        }
+      ]
     }
   },
   {

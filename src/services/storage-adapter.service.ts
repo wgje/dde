@@ -54,6 +54,7 @@ export const STORAGE_ADAPTER = new InjectionToken<StorageAdapter>('STORAGE_ADAPT
  */
 @Injectable()
 export class LocalStorageAdapter implements StorageAdapter {
+  private readonly logger = inject(LoggerService).category('LocalStorageAdapter');
   private readonly PREFIX = 'nanoflow.';
   
   async get<T>(key: string): Promise<T | null> {
@@ -63,7 +64,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       if (value === null) return null;
       return JSON.parse(value) as T;
     } catch (e) {
-      console.warn(`[LocalStorageAdapter] Failed to get ${key}:`, e);
+      this.logger.warn(`Failed to get ${key}`, e);
       return null;
     }
   }
@@ -78,10 +79,10 @@ export class LocalStorageAdapter implements StorageAdapter {
       // 检测配额溢出
       const err = e as { name?: string; code?: number; message?: string };
       if (err?.name === 'QuotaExceededError' || err?.code === 22) {
-        console.error(`[LocalStorageAdapter] Quota exceeded for ${key}`);
+        this.logger.error(`Quota exceeded for ${key}`);
         throw new StorageQuotaError(`存储空间不足，无法保存 ${key}`);
       }
-      console.warn(`[LocalStorageAdapter] Failed to set ${key}:`, e);
+      this.logger.warn(`Failed to set ${key}`, e);
       return false;
     }
   }
@@ -92,7 +93,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       localStorage.removeItem(fullKey);
       return true;
     } catch (e) {
-      console.warn(`[LocalStorageAdapter] Failed to remove ${key}:`, e);
+      this.logger.warn(`Failed to remove ${key}`, e);
       return false;
     }
   }
@@ -110,7 +111,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       keysToRemove.forEach(key => localStorage.removeItem(key));
       return true;
     } catch (e) {
-      console.warn('[LocalStorageAdapter] Failed to clear:', e);
+      this.logger.warn('Failed to clear', e);
       return false;
     }
   }
@@ -453,7 +454,8 @@ export class StorageAdapterService {
         };
       });
       return true;
-    } catch {
+    } catch (e) {
+      this.logger.debug('isIndexedDBAvailable', 'IndexedDB 不可用', { error: e });
       return false;
     }
   }
@@ -464,7 +466,8 @@ export class StorageAdapterService {
       localStorage.setItem(test, test);
       localStorage.removeItem(test);
       return true;
-    } catch {
+    } catch (e) {
+      this.logger.debug('isLocalStorageAvailable', 'localStorage 不可用', { error: e });
       return false;
     }
   }
@@ -571,7 +574,8 @@ export class StorageAdapterService {
     await this.init();
     try {
       return await this.adapter!.has(key);
-    } catch {
+    } catch (e) {
+      this.logger.debug('has', '检查键存在性失败', { key, error: e });
       return false;
     }
   }
@@ -583,7 +587,8 @@ export class StorageAdapterService {
     await this.init();
     try {
       return await this.adapter!.keys();
-    } catch {
+    } catch (e) {
+      this.logger.debug('keys', '获取所有键失败', { error: e });
       return [];
     }
   }

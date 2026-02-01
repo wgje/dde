@@ -33,7 +33,9 @@
     "postinstall": "node scripts/patch-esbuild.cjs",
     "db:types": "npx supabase gen types typescript --linked > src/types/supabase.ts",
     "seed:supabase": "node scripts/seed-supabase.js",
-    "setup:storage": "node scripts/setup-storage-bucket.cjs"
+    "setup:storage": "node scripts/setup-storage-bucket.cjs",
+    "analyze:bundle": "bash scripts/analyze-bundle.sh",
+    "perf:benchmark": "bash scripts/performance-benchmark.sh"
   },
   "dependencies": {
     "@angular/build": "^19.2.18",

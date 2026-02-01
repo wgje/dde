@@ -7,9 +7,6 @@
  * - SyncStateService: 同步状态管理
  * - TombstoneService: 墓碑（软删除标记）管理
  * - RetryQueueService: 重试队列管理
- * - TaskSyncService: 任务同步操作
- * - ProjectSyncService: 项目同步操作
- * - ConnectionSyncService: 连接同步操作
  * - RealtimePollingService: 实时订阅与轮询管理 (Sprint 9)
  * - SessionManagerService: 会话管理 (Sprint 9)
  */
@@ -25,15 +22,6 @@ export { TombstoneService } from './tombstone.service';
 export { RetryQueueService } from './retry-queue.service';
 export type { RetryQueueItem, RetryableEntityType, RetryableOperation } from './retry-queue.service';
 
-// 任务同步
-export { TaskSyncService } from './task-sync.service';
-
-// 项目同步
-export { ProjectSyncService } from './project-sync.service';
-
-// 连接同步
-export { ConnectionSyncService } from './connection-sync.service';
-
 // 实时订阅与轮询 (Sprint 9)
 export { RealtimePollingService } from './realtime-polling.service';
 export type { RemoteChangeCallback, UserPreferencesChangeCallback } from './realtime-polling.service';
@@ -44,3 +32,21 @@ export { SessionManagerService } from './session-manager.service';
 // 同步操作辅助 (Sprint 9)
 export { SyncOperationHelperService } from './sync-operation-helper.service';
 export type { SyncOperationContext, SyncOperationOptions, SyncOperationResult } from './sync-operation-helper.service';
+
+// 用户偏好同步 (Sprint 9)
+export { UserPreferencesSyncService } from './user-preferences-sync.service';
+
+// 项目数据加载 (Sprint 9)
+export { ProjectDataService } from './project-data.service';
+
+// 批量同步 (Sprint 9)
+export { BatchSyncService } from './batch-sync.service';
+export type { BatchSyncResult, BatchSyncCallbacks } from './batch-sync.service';
+
+// 任务同步操作 (技术债务重构)
+export { TaskSyncOperationsService } from './task-sync-operations.service';
+export type { TombstoneQueryResult, AddToRetryQueueFn as TaskAddToRetryQueueFn, CircuitBreakerFn, SyncStateCheckFn as TaskSyncStateCheckFn } from './task-sync-operations.service';
+
+// 连接同步操作 (技术债务重构)
+export { ConnectionSyncOperationsService } from './connection-sync-operations.service';
+export type { AddToRetryQueueFn as ConnectionAddToRetryQueueFn, SyncStateCheckFn as ConnectionSyncStateCheckFn } from './connection-sync-operations.service';

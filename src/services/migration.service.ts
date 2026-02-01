@@ -5,85 +5,25 @@ import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
 import { CACHE_CONFIG } from '../config';
 import * as Sentry from '@sentry/angular';
+import {
+  MIGRATION_SNAPSHOT_CONFIG,
+  MigrationStatus,
+  MigrationStatusRecord,
+  IntegrityCheckResult,
+  IntegrityIssue,
+  MigrationStrategy,
+  MigrationResult
+} from './migration.types';
 
-/**
- * 迁移快照配置
- * 【Week 2】sessionStorage 5MB 限制处理
- */
-const MIGRATION_SNAPSHOT_CONFIG = {
-  /** sessionStorage 最大大小（字节）- 预留 1MB 给其他用途 */
-  MAX_SESSION_STORAGE_SIZE: 4 * 1024 * 1024,
-  /** 主 sessionStorage key */
-  PRIMARY_KEY: 'nanoflow.migration-snapshot',
-  /** 备份 localStorage key */
-  FALLBACK_KEY: 'nanoflow.migration-snapshot-fallback',
-  /** 迁移状态 key */
-  STATUS_KEY: 'nanoflow.migration-status',
-} as const;
-
-/**
- * 【v5.9】迁移状态枚举
- * 用于跟踪迁移过程中的各个阶段，确保原子性
- */
-export type MigrationStatus = 
-  | 'idle'           // 空闲状态
-  | 'preparing'      // 准备中（创建快照）
-  | 'validating'     // 验证本地数据
-  | 'uploading'      // 上传中
-  | 'verifying'      // 验证远程数据
-  | 'cleaning'       // 清理本地数据
-  | 'completed'      // 完成
-  | 'failed'         // 失败
-  | 'rollback';      // 回滚中
-
-/**
- * 【v5.9】迁移状态记录
- */
-export interface MigrationStatusRecord {
-  status: MigrationStatus;
-  startedAt: string;
-  lastUpdatedAt: string;
-  phase: number;        // 当前阶段 (1-5)
-  totalPhases: number;  // 总阶段数
-  projectsTotal: number;
-  projectsCompleted: number;
-  projectsFailed: string[];
-  error?: string;
-}
-
-/**
- * 【v5.9】数据完整性检查结果
- */
-export interface IntegrityCheckResult {
-  valid: boolean;
-  issues: IntegrityIssue[];
-  projectCount: number;
-  taskCount: number;
-  connectionCount: number;
-}
-
-export interface IntegrityIssue {
-  type: 'missing-id' | 'orphan-task' | 'broken-connection' | 'invalid-field' | 'duplicate-id';
-  entityType: 'project' | 'task' | 'connection';
-  entityId?: string;
-  message: string;
-  severity: 'warning' | 'error';
-}
-
-/**
- * 本地数据迁移策略
- */
-export type MigrationStrategy = 'keep-local' | 'keep-remote' | 'merge' | 'discard-local';
-
-/**
- * 迁移结果
- */
-export interface MigrationResult {
-  success: boolean;
-  migratedProjects: number;
-  strategy: MigrationStrategy;
-  error?: string;
-}
+// 重新导出类型以保持向后兼容
+export type {
+  MigrationStatus,
+  MigrationStatusRecord,
+  IntegrityCheckResult,
+  IntegrityIssue,
+  MigrationStrategy,
+  MigrationResult
+} from './migration.types';
 
 /**
  * 本地数据迁移服务
@@ -812,7 +752,9 @@ export class MigrationService {
       const data = sessionStorage.getItem(MIGRATION_SNAPSHOT_CONFIG.STATUS_KEY);
       if (!data) return null;
       return JSON.parse(data) as MigrationStatusRecord;
-    } catch {
+    } catch (e) {
+      // 日志记录但返回 null（语义正确：无法获取状态）
+      this.logger.debug('获取迁移状态失败', { error: e });
       return null;
     }
   }
@@ -823,8 +765,9 @@ export class MigrationService {
   clearMigrationStatus(): void {
     try {
       sessionStorage.removeItem(MIGRATION_SNAPSHOT_CONFIG.STATUS_KEY);
-    } catch {
-      // 忽略错误
+    } catch (e) {
+      // 非关键操作，仅记录日志
+      this.logger.debug('清除迁移状态失败', { error: e });
     }
   }
   

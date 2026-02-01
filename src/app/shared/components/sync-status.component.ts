@@ -7,6 +7,7 @@ import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
 import { ToastService } from '../../../services/toast.service';
+import { LoggerService } from '../../../services/logger.service';
 
 /**
  * 同步状态组件
@@ -375,6 +376,7 @@ export class SyncStatusComponent {
   private syncCoordinator = inject(SyncCoordinatorService);
   private projectState = inject(ProjectStateService);
   private toastService = inject(ToastService);
+  private readonly logger = inject(LoggerService);
   
   // 输入属性 - 是否使用紧凑模式
   compact = input(false);
@@ -624,7 +626,7 @@ export class SyncStatusComponent {
       this.toastService.success('备份已下载', '请妥善保存备份文件');
     } catch (e) {
       this.toastService.error('下载失败', '无法创建备份文件');
-      console.error('Backup download failed:', e);
+      this.logger.error('SyncStatus', 'Backup download failed', e);
     }
   }
 }

@@ -218,7 +218,8 @@ export class ImportService {
     let text: string;
     try {
       text = await file.text();
-    } catch {
+    } catch (e) {
+      this.logger.debug('读取文件失败', { error: e, fileName: file.name });
       return {
         valid: false,
         error: '无法读取文件',
@@ -740,8 +741,9 @@ export class ImportService {
         
         return calculatedChecksum === originalChecksum;
       }
-    } catch {
-      // 忽略错误，返回 true 允许继续
+    } catch (e) {
+      // 降级处理：校验失败时允许继续
+      this.logger.debug('校验和验证失败', { error: e });
     }
     
     // 简单 hash 无法准确验证，返回 true

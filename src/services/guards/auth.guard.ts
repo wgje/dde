@@ -4,6 +4,7 @@ import { AuthService } from '../auth.service';
 import { LoggerService } from '../logger.service';
 import { ModalService } from '../modal.service';
 import { GUARD_CONFIG, AUTH_CONFIG } from '../../config';
+import { guardLogger } from '../../utils/standalone-logger';
 
 /** 本地认证缓存 key */
 const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
@@ -15,7 +16,9 @@ const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
 export function isLocalModeEnabled(): boolean {
   try {
     return localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true';
-  } catch {
+  } catch (e) {
+    // 降级处理：localStorage 不可用时返回 false
+    guardLogger.warn('AuthGuard localStorage 访问失败', e);
     return false;
   }
 }
@@ -28,7 +31,7 @@ export function enableLocalMode(): void {
   try {
     localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
   } catch (e) {
-    console.warn('启用本地模式失败:', e);
+    guardLogger.warn('启用本地模式失败', e);
   }
 }
 
@@ -40,7 +43,7 @@ export function disableLocalMode(): void {
   try {
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
   } catch (e) {
-    console.warn('禁用本地模式失败:', e);
+    guardLogger.warn('禁用本地模式失败', e);
   }
 }
 
@@ -60,7 +63,7 @@ function checkLocalAuthCache(): { userId: string | null; expiredAt: number | nul
     }
   } catch (e) {
     // 解析失败时记录日志，方便调试
-    console.warn('解析认证缓存失败:', e);
+    guardLogger.warn('解析认证缓存失败', e);
   }
   return { userId: null, expiredAt: null };
 }
@@ -78,7 +81,7 @@ export function saveAuthCache(userId: string | null): void {
     }
   } catch (e) {
     // 存储失败时记录日志
-    console.warn('保存认证缓存失败:', e);
+    guardLogger.warn('保存认证缓存失败', e);
   }
 }
 

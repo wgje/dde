@@ -1,5 +1,6 @@
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
+import { securityLogger } from './standalone-logger';
 
 /**
  * 安全的 Markdown 渲染器
@@ -97,7 +98,8 @@ function isSafeUrl(url: string): boolean {
 function sanitizeUrl(url: string): string {
   const trimmed = url.trim();
   if (!isSafeUrl(trimmed)) {
-    console.warn('[Security] Blocked potentially dangerous URL:', trimmed.substring(0, 50));
+    // 安全警告：必须保留日志以便追踪潜在攻击
+    securityLogger.warn(`Blocked potentially dangerous URL: ${trimmed.substring(0, 50)}`);
     return '#blocked';
   }
   // 转义 URL 中的特殊字符，防止属性注入

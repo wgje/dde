@@ -12,7 +12,6 @@ import { UndoService } from './services/undo.service';
 import { ToastService } from './services/toast.service';
 import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
-import { StoreService } from './services/store.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { MigrationService } from './services/migration.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
@@ -116,7 +115,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly searchService = inject(SearchService);
-  private readonly store = inject(StoreService);
+  // StoreService 已废弃，直接使用子服务
 
   // ========== 模板所需的公共 getter（暴露给 HTML 模板）==========
   
@@ -383,21 +382,21 @@ export class AppComponent implements OnInit, OnDestroy {
     // Ctrl+Z / Cmd+Z: 撤销
     if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
       event.preventDefault();
-      this.store.undo();
+      this.taskOpsAdapter.performUndo();
       return;
     }
 
     // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
     if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
       event.preventDefault();
-      this.store.redo();
+      this.taskOpsAdapter.performRedo();
       return;
     }
 
     // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
     if ((event.ctrlKey || event.metaKey) && key === 'y') {
       event.preventDefault();
-      this.store.redo();
+      this.taskOpsAdapter.performRedo();
       return;
     }
   };
@@ -664,17 +663,17 @@ export class AppComponent implements OnInit, OnDestroy {
     // Ctrl+Z / Cmd+Z: 撤销
     if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
       event.preventDefault();
-      this.store.undo();
+      this.taskOpsAdapter.performUndo();
     }
     // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
     if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
       event.preventDefault();
-      this.store.redo();
+      this.taskOpsAdapter.performRedo();
     }
     // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
     if ((event.ctrlKey || event.metaKey) && key === 'y') {
       event.preventDefault();
-      this.store.redo();
+      this.taskOpsAdapter.performRedo();
     }
   }
   

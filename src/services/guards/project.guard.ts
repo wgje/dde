@@ -5,6 +5,7 @@ import { SyncCoordinatorService } from '../sync-coordinator.service';
 import { UserSessionService } from '../user-session.service';
 import { ToastService } from '../toast.service';
 import { GUARD_CONFIG } from '../../config';
+import { guardLogger } from '../../utils/standalone-logger';
 
 /**
  * 【重构】本地优先的数据初始化检查
@@ -102,8 +103,9 @@ async function waitForDataInit(
       loadTriggered = true;
       try {
         await userSession.loadProjects();
-      } catch {
-        // loadProjects 内部已有兜底，这里不再额外处理
+      } catch (e) {
+        // 降级处理：loadProjects 内部已有兜底
+        guardLogger.warn('ProjectGuard loadProjects 调用失败', e);
       }
       continue;
     }

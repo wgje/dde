@@ -254,6 +254,68 @@ export function tryCatch<T>(
 }
 
 /**
+ * 将可能抛出异常的操作包装为 Result（带日志记录）
+ * 用于替换 catch { return null } 错误吞噬模式
+ * 
+ * @example
+ * // Before (错误吞噬)
+ * async loadData(): Promise<Data | null> {
+ *   try { return await fetch(...); }
+ *   catch { return null; }
+ * }
+ * 
+ * // After (Result 模式)
+ * async loadData(): Promise<Result<Data, OperationError>> {
+ *   return wrapWithResult(
+ *     async () => await fetch(...),
+ *     ErrorCodes.DATA_NOT_FOUND,
+ *     'Failed to load data',
+ *     this.logger
+ *   );
+ * }
+ */
+export async function wrapWithResult<T>(
+  fn: () => Promise<T>,
+  errorCode: ErrorCode = ErrorCodes.UNKNOWN,
+  errorMessage?: string,
+  logger?: { error: (category: string, message: string, data?: unknown) => void },
+  logCategory?: string
+): Promise<Result<T, OperationError>> {
+  try {
+    const value = await fn();
+    return success(value);
+  } catch (e: unknown) {
+    const msg = errorMessage || extractErrorMessage(e);
+    if (logger && logCategory) {
+      logger.error(logCategory, msg, e);
+    }
+    return failure(errorCode, msg, { originalError: extractErrorMessage(e) });
+  }
+}
+
+/**
+ * 同步版本的 wrapWithResult
+ */
+export function wrapWithResultSync<T>(
+  fn: () => T,
+  errorCode: ErrorCode = ErrorCodes.UNKNOWN,
+  errorMessage?: string,
+  logger?: { error: (category: string, message: string, data?: unknown) => void },
+  logCategory?: string
+): Result<T, OperationError> {
+  try {
+    const value = fn();
+    return success(value);
+  } catch (e: unknown) {
+    const msg = errorMessage || extractErrorMessage(e);
+    if (logger && logCategory) {
+      logger.error(logCategory, msg, e);
+    }
+    return failure(errorCode, msg, { originalError: extractErrorMessage(e) });
+  }
+}
+
+/**
  * 将可能抛出异常的异步操作包装为 Result
  */
 export async function tryCatchAsync<T>(

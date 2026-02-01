@@ -14,6 +14,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { SpeechToTextService } from '../../../../../services/speech-to-text.service';
+import { LoggerService } from '../../../../../services/logger.service';
 
 @Component({
   selector: 'app-black-box-recorder',
@@ -115,6 +116,7 @@ import { SpeechToTextService } from '../../../../../services/speech-to-text.serv
 })
 export class BlackBoxRecorderComponent {
   voiceService = inject(SpeechToTextService);
+  private readonly logger = inject(LoggerService);
   
   transcription = signal('');
   recordingDuration = signal(0);
@@ -192,7 +194,7 @@ export class BlackBoxRecorderComponent {
         }, 3000);
       }
     } catch (e) {
-      console.error('Recording failed:', e);
+      this.logger.error('BlackBoxRecorder', 'Recording failed', e);
     }
   }
 }

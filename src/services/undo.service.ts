@@ -735,8 +735,8 @@ export class UndoService {
         UNDO_CONFIG.PERSISTENCE.STORAGE_KEY,
         JSON.stringify(data)
       );
-    } catch {
-      // sessionStorage 满或不可用，静默失败
+    } catch (e) {
+      this.logger.debug('sessionStorage 不可用或已满，静默失败', { error: e });
     }
   }
   
@@ -782,8 +782,8 @@ export class UndoService {
         this.undoStack.set(this.limitUndoStack(restoredActions, false));
         // 不恢复重做栈，因为刷新后重做无意义
       }
-    } catch {
-      // 解析失败，静默忽略
+    } catch (e) {
+      this.logger.debug('解析 sessionStorage 失败，清除数据', { error: e });
       sessionStorage.removeItem(UNDO_CONFIG.PERSISTENCE.STORAGE_KEY);
     }
   }
@@ -794,8 +794,8 @@ export class UndoService {
   private clearPersistedData(): void {
     try {
       sessionStorage.removeItem(UNDO_CONFIG.PERSISTENCE.STORAGE_KEY);
-    } catch {
-      // 静默失败
+    } catch (e) {
+      this.logger.debug('sessionStorage 访问失败，静默忽略', { error: e });
     }
   }
   

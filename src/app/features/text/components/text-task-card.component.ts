@@ -2,6 +2,7 @@ import { Component, inject, Input, Output, EventEmitter, ChangeDetectionStrategy
 import { CommonModule, DatePipe } from '@angular/common';
 import { DomSanitizer } from '@angular/platform-browser';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
+import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
 import { renderMarkdownSafe } from '../../../../utils/markdown';
 import { TextTaskEditorComponent } from './text-task-editor.component';
@@ -82,6 +83,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 export class TextTaskCardComponent implements OnChanges {
   readonly projectState = inject(ProjectStateService);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly logger = inject(LoggerService);
   
   @ViewChild('taskEditor') taskEditor?: TextTaskEditorComponent;
   @ViewChild('taskEditor', { read: ElementRef }) taskEditorElement?: ElementRef<HTMLElement>;
@@ -107,7 +109,7 @@ export class TextTaskCardComponent implements OnChanges {
       
       // 检测 displayId 从有效值变成 "?" 的情况
       if (prev?.displayId && prev.displayId !== '?' && curr?.displayId === '?') {
-        console.warn('[TextTaskCard] displayId changed from valid to "?":', {
+        this.logger.warn('TextTaskCard', 'displayId changed from valid to "?"', {
           taskId: curr.id.slice(-4),
           prevDisplayId: prev.displayId,
           currDisplayId: curr.displayId,

@@ -10,6 +10,8 @@ tools:
   - web
   - agent
   - todo
+  - io.github.chromedevtools/chrome-devtools-mcp/*
+  - context7/*
 ---
 
 # Technical spike research mode

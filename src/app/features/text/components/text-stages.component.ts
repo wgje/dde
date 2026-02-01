@@ -2,6 +2,7 @@ import { Component, inject, Input, Output, EventEmitter, signal, computed, Chang
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
 import { DropTargetInfo } from './text-view.types';
 import { TextStageCardComponent } from './text-stage-card.component';
@@ -162,6 +163,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
 export class TextStagesComponent {
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly logger = inject(LoggerService);
   
   @Input() isMobile = false;
   @Input() selectedTaskId: string | null = null;
@@ -253,7 +255,7 @@ export class TextStagesComponent {
         const allStage1Tasks = stages.flatMap(s => s.tasks).filter(t => t.stage === 1 && !t.parentId);
         const tasksWithQuestionMark = allStage1Tasks.filter(t => t.displayId === '?');
         if (tasksWithQuestionMark.length > 0) {
-          console.warn('[visibleStages] Stage 1 roots with displayId="?":', 
+          this.logger.warn('TextStages', 'Stage 1 roots with displayId="?"', 
             tasksWithQuestionMark.map(t => ({ id: t.id.slice(-4), title: t.title || 'untitled' }))
           );
         }
@@ -272,7 +274,7 @@ export class TextStagesComponent {
           const filteredOut = beforeFilter.filter(bt => !afterFilter.some(at => at.id === bt.id));
           const invalidFiltered = filteredOut.filter(t => t.displayId === '?' || !t.displayId.startsWith(root.displayId));
           if (invalidFiltered.length > 0) {
-            console.warn('[visibleStages] Tasks filtered out due to displayId mismatch:', {
+            this.logger.warn('TextStages', 'Tasks filtered out due to displayId mismatch', {
               rootDisplayId: root.displayId,
               filteredTasks: invalidFiltered.map(t => ({
                 id: t.id.slice(-4),

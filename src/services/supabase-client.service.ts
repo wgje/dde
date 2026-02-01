@@ -1,5 +1,6 @@
-import { Injectable, signal } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import { createClient, type AuthResponse, type Session, type SupabaseClient } from '@supabase/supabase-js';
+import { LoggerService } from './logger.service';
 import { environment } from '../environments/environment'; // 引入环境文件
 import type { Database } from '../types/supabase';
 
@@ -18,6 +19,7 @@ const SENSITIVE_KEY_PATTERNS = [
   providedIn: 'root'
 })
 export class SupabaseClientService {
+  private readonly logger = inject(LoggerService).category('SupabaseClient');
   private supabase: SupabaseClient<Database> | null = null;
   
   // 配置状态信号，UI 可以响应式订阅
@@ -37,11 +39,11 @@ export class SupabaseClientService {
       
       if (environment.production) {
         // 生产环境：记录严重错误
-        console.error('🚨 [CRITICAL]', errorMsg);
+        this.logger.error('[CRITICAL] 环境变量未配置', errorMsg);
         this.configurationError.set(errorMsg);
       } else {
         // 开发环境：警告并进入离线模式
-        console.warn('⚠️', errorMsg, '应用将以离线模式运行。');
+        this.logger.warn('环境变量未配置，应用将以离线模式运行', errorMsg);
         this.isOfflineMode.set(true);
       }
       return;
@@ -49,8 +51,8 @@ export class SupabaseClientService {
     
     // 🔒 安全检查：确保不会意外使用 SERVICE_ROLE_KEY
     if (this.isSensitiveKey(supabaseAnonKey)) {
-      const securityError = '🚨 [SECURITY] 检测到敏感密钥！前端不应使用 SERVICE_ROLE_KEY，请使用 ANON_KEY。';
-      console.error(securityError);
+      const securityError = '[SECURITY] 检测到敏感密钥！前端不应使用 SERVICE_ROLE_KEY，请使用 ANON_KEY。';
+      this.logger.error(securityError);
       this.configurationError.set('安全配置错误：请使用公开的 ANON_KEY 而非 SERVICE_ROLE_KEY');
       // 阻止创建客户端，强制进入离线模式
       this.isOfflineMode.set(true);
@@ -108,7 +110,7 @@ export class SupabaseClientService {
         },
       });
     } catch (e) {
-      console.error('Failed to initialize Supabase client:', e);
+      this.logger.error('Supabase 客户端初始化失败', e);
       this.configurationError.set('Supabase 客户端初始化失败');
       this.supabase = null;
     }
@@ -131,7 +133,7 @@ export class SupabaseClientService {
         // 检查 role 字段
         if (payload.role && payload.role !== 'anon') {
           // 检测到非匿名角色密钥，直接返回 true 阻止使用
-          console.error('🚨 检测到非匿名角色密钥:', payload.role, '- 已阻止使用');
+          this.logger.error('检测到非匿名角色密钥，已阻止使用', { role: payload.role });
           return true;
         }
       }

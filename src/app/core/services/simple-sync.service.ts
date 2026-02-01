@@ -1,16 +1,17 @@
 /**
- * SimpleSyncService - 简化的同步服务
+ * SimpleSyncService - 简化的同步服务（门面模式）
  * 
  * 核心原则（来自 agents.md）：
  * - 采用 Last-Write-Wins (LWW) 策略
  * - 用户操作 → 立即写入本地 → 后台推送到 Supabase
  * - 错误处理：失败放入 RetryQueue，网络恢复自动重试
  * 
- * 【流量优化】2024-12-31
- * - 默认禁用 Realtime，改用轮询节省流量
- * - 字段筛选替代 SELECT * 节省 60-70% 流量
- * - 增量同步优化
- * - Tombstone 缓存避免重复查询
+ * 【技术债务重构】2026-02-01
+ * - 从 3499 行重构为 ≤800 行门面服务
+ * - 任务同步逻辑委托给 TaskSyncOperationsService
+ * - 连接同步逻辑委托给 ConnectionSyncOperationsService
+ * - 重试队列逻辑整合到 RetryQueueService
+ * - 项目同步逻辑委托给 ProjectDataService
  */
 
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
@@ -19,30 +20,27 @@ import { SupabaseClientService } from '../../../services/supabase-client.service
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
-import { ChangeTrackerService } from '../../../services/change-tracker.service';
-import { CircuitBreakerService } from '../../../services/circuit-breaker.service';
 import { ClockSyncService } from '../../../services/clock-sync.service';
-import { MobileSyncStrategyService } from '../../../services/mobile-sync-strategy.service';
 import { EventBusService } from '../../../services/event-bus.service';
-// Sprint 3-7 技术债务修复：拆分的子服务（渐进式迁移）
+// 拆分的子服务
 import { 
-  SyncStateService, 
   TombstoneService, 
-  RetryQueueService,
-  TaskSyncService,
-  ProjectSyncService,
-  ConnectionSyncService,
   RealtimePollingService,
-  SessionManagerService
+  SessionManagerService,
+  SyncOperationHelperService,
+  UserPreferencesSyncService,
+  ProjectDataService,
+  BatchSyncService,
+  TaskSyncOperationsService,
+  ConnectionSyncOperationsService
 } from './sync';
-import { Task, Project, Connection, UserPreferences, ThemeType } from '../../../models';
-import { TaskRow, ProjectRow, ConnectionRow } from '../../../models/supabase-types';
+import { Task, Project, Connection, UserPreferences } from '../../../models';
+import { ProjectRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
 import { supabaseErrorToError, EnhancedError } from '../../../utils/supabase-error';
-import { supabaseWithRetry } from '../../../utils/timeout';
 import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
-import { REQUEST_THROTTLE_CONFIG, SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../config';
-import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
+import { SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import * as Sentry from '@sentry/angular';
 
 /**
@@ -59,7 +57,7 @@ interface RetryQueueItem {
 }
 
 /**
- * 同步状态 - 兼容旧 SyncService 接口
+ * 同步状态
  */
 interface SyncState {
   isSyncing: boolean;
@@ -79,18 +77,14 @@ interface SyncState {
 interface ConflictData {
   local: Project;
   remote: Project;
-  remoteData?: Project;  // 兼容旧接口别名
+  remoteData?: Project;
   projectId: string;
 }
 
-/**
- * 远程变更回调 - 兼容旧接口
- */
+/** 远程变更回调 */
 export type RemoteChangeCallback = (payload: { eventType?: string; projectId?: string } | undefined) => Promise<void>;
 
-/**
- * 任务变更回调 - 兼容旧接口
- */
+/** 任务变更回调 */
 export type TaskChangeCallback = (payload: { eventType: string; taskId: string; projectId: string }) => void;
 
 /** 用户偏好变更回调 */
@@ -105,34 +99,26 @@ export class SimpleSyncService {
   private readonly logger = this.loggerService.category('SimpleSync');
   private readonly toast = inject(ToastService);
   private readonly throttle = inject(RequestThrottleService);
-  private readonly changeTracker = inject(ChangeTrackerService);
-  private readonly circuitBreaker = inject(CircuitBreakerService);
   private readonly clockSync = inject(ClockSyncService);
-  private readonly mobileSync = inject(MobileSyncStrategyService);
   private readonly eventBus = inject(EventBusService);
   private readonly destroyRef = inject(DestroyRef);
   
-  // Sprint 3 技术债务修复：注入拆分的子服务（渐进式迁移）
-  private readonly syncStateService = inject(SyncStateService);
+  // 子服务注入
   private readonly tombstoneService = inject(TombstoneService);
-  private readonly retryQueueService = inject(RetryQueueService);
-  
-  // Sprint 7 技术债务修复：新增子服务（委托模式）
-  private readonly taskSyncService = inject(TaskSyncService);
-  private readonly projectSyncService = inject(ProjectSyncService);
-  private readonly connectionSyncService = inject(ConnectionSyncService);
-  
-  // Sprint 9 技术债务修复：Realtime/Session 子服务
   private readonly realtimePollingService = inject(RealtimePollingService);
   private readonly sessionManager = inject(SessionManagerService);
+  private readonly syncOpHelper = inject(SyncOperationHelperService);
+  private readonly userPrefsSync = inject(UserPreferencesSyncService);
+  private readonly projectDataService = inject(ProjectDataService);
+  private readonly batchSyncService = inject(BatchSyncService);
+  private readonly taskSyncOps = inject(TaskSyncOperationsService);
+  private readonly connectionSyncOps = inject(ConnectionSyncOperationsService);
   
   /**
-   * 获取 Supabase 客户端，离线模式返回 null
+   * 获取 Supabase 客户端
    */
   private getSupabaseClient(): SupabaseClient | null {
-    if (!this.supabase.isConfigured) {
-      return null;
-    }
+    if (!this.supabase.isConfigured) return null;
     try {
       return this.supabase.client();
     } catch {
@@ -140,7 +126,7 @@ export class SimpleSyncService {
     }
   }
   
-  /** 同步状态 - 兼容旧 SyncService 接口 */
+  /** 同步状态 */
   readonly syncState = signal<SyncState>({
     isSyncing: false,
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
@@ -153,780 +139,104 @@ export class SimpleSyncService {
     conflictData: null
   });
   
-  /** 兼容旧接口：state 别名 */
+  /** 兼容旧接口 */
   readonly state = this.syncState;
   
   /** 便捷 computed 属性 */
   readonly isOnline = computed(() => this.syncState().isOnline);
   readonly isSyncing = computed(() => this.syncState().isSyncing);
   readonly hasConflict = computed(() => this.syncState().hasConflict);
-  
-  /** 是否正在从远程加载 - 兼容旧接口 */
   readonly isLoadingRemote = signal(false);
-  
-  /** 
-   * Realtime 是否启用 - 委托给 RealtimePollingService
-   * 保留为方法以保持向后兼容
-   */
-  isRealtimeEnabled(): boolean {
-    return this.realtimePollingService.isRealtimeEnabled();
-  }
-
-  /** Realtime 更新是否暂停 */
-  private realtimePaused = false;
   
   /** 重试队列 */
   private retryQueue: RetryQueueItem[] = [];
-  
-  /** 重试定时器 */
   private retryTimer: ReturnType<typeof setInterval> | null = null;
   
-  /** 同步计数器（用于数据漂移检测） */
-  private syncCounter = 0;
+  /** 最后一次同步时间 */
+  private lastSyncTimeByProject: Map<string, string> = new Map();
   
-  /** 
-   * 【Senior Consultant P0】IndexedDB 数据库实例（用于 RetryQueue）
-   * 解决 localStorage 5MB 配额限制导致的"飞机航班"场景数据丢失
-   */
-  private retryQueueDb: IDBDatabase | null = null;
-  private retryQueueDbInitPromise: Promise<IDBDatabase | null> | null = null;
-  
-  /** IndexedDB 配置 */
-  private readonly RETRY_QUEUE_DB_CONFIG = {
-    name: 'nanoflow-retry-queue',
-    version: 1,
-    storeName: 'offline_mutation_queue'
-  };
-  
-  /** 
-   * 【Senior Consultant "Red Phone"】队列容量预警阈值
-   * 达到 80% 容量时提前告警用户
-   */
-  private readonly QUEUE_WARNING_THRESHOLD = 0.8;
-  
-  /**
-   * 【队列容量警告节流】冷却时间（毫秒）
-   * 【修复 2026-01-31】从 60 秒增加到 5 分钟
-   * 原因：轮询间隔是 60 秒，导致每次轮询时冷却时间刚好过期，产生过多 Sentry 噪音
-   */
-  private readonly CAPACITY_WARNING_COOLDOWN = 300_000;
-  
-  /** 上次显示容量警告的时间戳 */
-  private lastCapacityWarningTime = 0;
-  
-  /** 上次警告时的队列使用百分比（用于恶化检测） */
-  private lastWarningPercent = 0;
-  
-  /** 上次强制处理队列的时间戳（用于防止队列卡死） */
-  private lastForceProcessTime = 0;
-  
-  /** 
-   * 本地 tombstone 缓存 
-   * 用于在云端 RPC 不可用时防止已删除任务复活
-   * 格式：Map<projectId, Set<taskId>>
-   */
-  private localTombstones: Map<string, Set<string>> = new Map();
-  
-  /** 本地 tombstone 持久化 key */
-  private readonly LOCAL_TOMBSTONES_KEY = 'nanoflow.local-tombstones';
-  
-  /** 最大重试次数 */
-  private readonly MAX_RETRIES = 5;
-  
-  /** 重试间隔（毫秒） */
-  private readonly RETRY_INTERVAL = 5000;
-  
-  /** 重试队列最大大小（防止 localStorage 溢出） */
-  private readonly MAX_RETRY_QUEUE_SIZE = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE;
-  
-  /** 重试项最大年龄（毫秒，24 小时） */
-  private readonly MAX_RETRY_ITEM_AGE = SYNC_CONFIG.MAX_RETRY_ITEM_AGE;
-  
-  /** 重试队列存储大小限制（字节） */
-  private readonly RETRY_QUEUE_SIZE_LIMIT = SYNC_CONFIG.RETRY_QUEUE_SIZE_LIMIT_BYTES;
-  
-  /** 重试队列持久化 key */
-  private readonly RETRY_QUEUE_STORAGE_KEY = 'nanoflow.retry-queue';
-  
-  /** 重试队列版本号（用于格式兼容） */
-  private readonly RETRY_QUEUE_VERSION = 1;
-  
-  /** 立即重试的最大次数（带指数退避） */
-  private readonly IMMEDIATE_RETRY_MAX = 3;
-  
-  /** 立即重试的基础延迟（毫秒） */
-  private readonly IMMEDIATE_RETRY_BASE_DELAY = 1000;
-  
-  // ==================== Circuit Breaker 状态 ====================
-  /** 熔断器状态：closed（正常）| open（熔断）| half-open（试探） */
+  /** 熔断器状态 */
   private circuitState: 'closed' | 'open' | 'half-open' = 'closed';
-  /** 连续失败次数 */
   private consecutiveFailures = 0;
-  /** 熔断器打开时间戳 */
   private circuitOpenedAt = 0;
   
-  // ==================== Realtime/轮询已迁移至 RealtimePollingService ====================
+  /** 配置常量 */
+  private readonly MAX_RETRIES = 5;
+  private readonly RETRY_INTERVAL = 5000;
+  private readonly MAX_RETRY_QUEUE_SIZE = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE;
+  private readonly RETRY_QUEUE_STORAGE_KEY = 'nanoflow.retry-queue';
+  private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   
-  /** 最后一次同步时间（用于增量同步） */
-  private lastSyncTimeByProject: Map<string, string> = new Map();
-  /** Tombstone 缓存（项目ID -> { ids: Set, timestamp }） */
-  private tombstoneCache: Map<string, { ids: Set<string>; timestamp: number }> = new Map();
-  
-  /**
-   * 【Senior Consultant Sentry Context】获取 Sentry 上下文元数据
-   * 包含有用的调试信息，但不包含 PII（任务标题、内容等）
-   */
-  private getSentryContext(): Record<string, unknown> {
-    return {
-      queueLength: this.retryQueue.length,
-      storageUsage: this.estimateStorageUsage(),
-      lastSyncTime: this.syncState().lastSyncTime,
-      isOnline: this.syncState().isOnline,
-      circuitState: this.circuitState,
-      consecutiveFailures: this.consecutiveFailures,
-      // 不包含任务标题、内容等 PII
-    };
-  }
-  
-  /**
-   * 估算存储使用量（字节）
-   */
-  private estimateStorageUsage(): number {
-    try {
-      if (typeof localStorage === 'undefined') return 0;
-      let total = 0;
-      for (const key of Object.keys(localStorage)) {
-        if (key.startsWith('nanoflow.')) {
-          total += localStorage.getItem(key)?.length ?? 0;
-        }
-      }
-      return total;
-    } catch {
-      return -1;
-    }
-  }
-  
-  /**
-   * 【Senior Consultant】增强的 Sentry 异常捕获
-   * 自动添加上下文元数据，同时清洗 PII
-   */
-  private captureExceptionWithContext(
-    error: unknown,
-    operation: string,
-    extra?: Record<string, unknown>
-  ): void {
-    // 清洗 extra 中的 PII 字段
-    const sanitizedExtra: Record<string, unknown> = {};
-    if (extra) {
-      for (const [key, value] of Object.entries(extra)) {
-        // 跳过 PII 字段
-        if (['title', 'content', 'description', 'name'].includes(key)) {
-          continue;
-        }
-        // ID 字段保留（用于调试）
-        sanitizedExtra[key] = value;
-      }
-    }
-    
-    Sentry.captureException(error, {
-      tags: { operation },
-      extra: {
-        ...this.getSentryContext(),
-        ...sanitizedExtra
-      }
-    });
-  }
-  
-  /**
-   * 处理会话过期错误（统一入口，防止重复 Toast）
-   * @param context 操作上下文（用于日志）
-   * @param details 详细信息（用于日志）
-   * @returns 始终返回 false（表示操作失败）
-   */
-  private handleSessionExpired(context: string, details?: Record<string, unknown>): never {
-    // 幂等性保护：只在首次检测时设置标志和显示提示
-    if (!this.syncState().sessionExpired) {
-      this.syncState.update(s => ({ ...s, sessionExpired: true }));
-      this.logger.warn(`检测到会话过期: ${context}`, details);
-      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-    } else {
-      // 已经标记过期，仅记录日志
-      this.logger.debug(`会话已过期（已标记）: ${context}`, details);
-    }
-    // 抛出永久失败异常，防止重试
-    throw new PermanentFailureError(
-      'Session expired',
-      undefined,
-      { context, ...details }
-    );
-  }
-  
-  /**
-   * 检查错误是否为会话过期错误（401, 42501 RLS, AuthError）
-   */
-  private isSessionExpiredError(error: EnhancedError): boolean {
-    return (
-      error.errorType === 'AuthError' ||
-      error.code === 401 || error.code === '401' ||
-      error.code === 42501 || error.code === '42501'
-    );
-  }
-  
-  /**
-   * 尝试刷新会话 - 在检测到 401 时自动尝试恢复
-   * 
-   * 【P0 Critical 修复 2026-01-31】
-   * 解决用户长时间离开后回来，token 过期导致 PermanentFailureError 的问题。
-   * 先尝试刷新 session，只有刷新失败才标记为永久失败。
-   * 
-   * @param context 操作上下文（用于日志）
-   * @returns true 如果刷新成功，false 如果失败
-   */
-  private async tryRefreshSession(context: string): Promise<boolean> {
-    // 如果已经标记为会话过期，不再尝试刷新
-    if (this.syncState().sessionExpired) {
-      this.logger.debug('会话已标记过期，跳过刷新尝试', { context });
-      return false;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.logger.debug('Supabase 客户端不可用，无法刷新会话', { context });
-      return false;
-    }
-    
-    try {
-      this.logger.info('尝试自动刷新会话', { context });
-      
-      const { data, error } = await client.auth.refreshSession();
-      
-      if (error) {
-        this.logger.warn('会话刷新失败', { context, error: error.message });
-        // 刷新失败，返回 false 让调用方处理
-        return false;
-      }
-      
-      if (data.session) {
-        this.logger.info('会话刷新成功', { 
-          context, 
-          userId: data.session.user.id,
-          expiresAt: data.session.expires_at 
-        });
-        
-        // 重置 sessionExpired 标志（如果之前被设置过）
-        if (this.syncState().sessionExpired) {
-          this.syncState.update(s => ({ ...s, sessionExpired: false }));
-          this.logger.info('会话过期标志已重置');
-        }
-        
-        return true;
-      } else {
-        this.logger.warn('刷新返回空 session', { context });
-        return false;
-      }
-    } catch (e) {
-      this.logger.warn('会话刷新异常', { context, error: e });
-      return false;
-    }
-  }
-  
-  /**
-   * 处理 401 错误 - 先尝试刷新，失败再标记过期
-   * 
-   * 【P0 Critical 修复 2026-01-31】
-   * 用户长时间离开后回来时，不要直接抛出 PermanentFailureError，
-   * 而是先尝试刷新 session，给用户更好的体验。
-   * 
-   * @param context 操作上下文
-   * @param details 详细信息
-   * @returns true 如果成功恢复（调用方应重试操作），false 需要调用 handleSessionExpired
-   */
-  private async handleAuthErrorWithRefresh(
-    context: string, 
-    details?: Record<string, unknown>
-  ): Promise<boolean> {
-    const refreshed = await this.tryRefreshSession(context);
-    
-    if (refreshed) {
-      this.logger.info('会话刷新成功，可重试操作', { context, details });
-      Sentry.addBreadcrumb({
-        category: 'auth',
-        message: 'Session refreshed after 401',
-        level: 'info',
-        data: { context, ...details }
-      });
-      return true;
-    }
-    
-    // 刷新失败，记录详细日志后标记过期
-    this.logger.warn('会话刷新失败，标记为过期', { context, details });
-    return false;
-  }
-  
+  /** 任务变更回调 */
+  private taskChangeCallback: TaskChangeCallback | null = null;
+
   constructor() {
-    // 【技术债务修复】订阅会话恢复事件，替代 injector hack
+    // 订阅会话恢复事件
     this.eventBus.onSessionRestored$.pipe(
       takeUntilDestroyed(this.destroyRef)
     ).subscribe(() => this.resetSessionExpired());
     
-    // 【Senior Consultant P0】优先初始化 IndexedDB，然后迁移 localStorage 数据
-    this.initRetryQueueDb().then(() => {
-      this.loadRetryQueueFromStorage(); // 恢复持久化的重试队列（优先 IDB，降级 localStorage）
+    // 初始化 BatchSyncService 回调
+    this.batchSyncService.setCallbacks({
+      pushProject: (p, f) => this.pushProject(p, f),
+      pushTask: (t, pid, s, f) => this.pushTask(t, pid, s, f),
+      pushTaskPosition: (tid, x, y) => this.pushTaskPosition(tid, x, y),
+      pushConnection: (c, pid, s, te, f) => this.pushConnection(c, pid, s, te, f),
+      getTombstoneIds: (pid) => this.getTombstoneIds(pid),
+      getConnectionTombstoneIds: (pid) => this.getConnectionTombstoneIds(pid),
+      purgeTasksFromCloud: (pid, tids) => this.purgeTasksFromCloud(pid, tids),
+      topologicalSortTasks: (tasks) => this.topologicalSortTasks(tasks),
+      addToRetryQueue: (t, o, d, p) => this.addToRetryQueue(t, o, d as Task | Project | Connection | { id: string }, p)
     });
-    this.loadLocalTombstones(); // 恢复本地 tombstone 缓存
+    
+    // 初始化子服务回调
+    this.initSubserviceCallbacks();
+    
+    // 加载重试队列并启动网络监听
+    this.loadRetryQueueFromStorage();
     this.setupNetworkListeners();
     this.startRetryLoop();
-    // 用户活跃追踪已迁移至 RealtimePollingService
     
-    this.destroyRef.onDestroy(() => {
-      this.cleanup();
-    });
-  }
-  
-  // ==================== 【Senior Consultant P0】IndexedDB RetryQueue 支持 ====================
-  
-  /**
-   * 初始化 RetryQueue IndexedDB
-   * 
-   * 【Senior Consultant P0 修复】解决 localStorage 5MB 限制导致的数据丢失
-   * IndexedDB 提供更大的存储空间（通常 50MB+），解决"飞机航班"场景问题
-   */
-  private async initRetryQueueDb(): Promise<IDBDatabase | null> {
-    if (this.retryQueueDb) return this.retryQueueDb;
-    
-    if (!this.retryQueueDbInitPromise) {
-      this.retryQueueDbInitPromise = new Promise((resolve) => {
-        if (typeof indexedDB === 'undefined') {
-          this.logger.warn('IndexedDB 不可用，RetryQueue 将使用 localStorage');
-          resolve(null);
-          return;
-        }
-        
-        try {
-          const request = indexedDB.open(
-            this.RETRY_QUEUE_DB_CONFIG.name, 
-            this.RETRY_QUEUE_DB_CONFIG.version
-          );
-          
-          request.onerror = () => {
-            this.logger.warn('RetryQueue IndexedDB 打开失败，降级到 localStorage', request.error);
-            resolve(null);
-          };
-          
-          request.onsuccess = () => {
-            this.retryQueueDb = request.result;
-            this.logger.info('RetryQueue IndexedDB 初始化成功');
-            resolve(request.result);
-          };
-          
-          request.onupgradeneeded = (event) => {
-            const db = (event.target as IDBOpenDBRequest).result;
-            
-            if (!db.objectStoreNames.contains(this.RETRY_QUEUE_DB_CONFIG.storeName)) {
-              const store = db.createObjectStore(this.RETRY_QUEUE_DB_CONFIG.storeName, { keyPath: 'id' });
-              store.createIndex('createdAt', 'createdAt', { unique: false });
-              store.createIndex('type', 'type', { unique: false });
-              this.logger.info('RetryQueue IndexedDB store 创建成功');
-            }
-          };
-        } catch (err) {
-          this.logger.error('RetryQueue IndexedDB 初始化异常', err);
-          resolve(null);
-        }
-      });
-    }
-    
-    return this.retryQueueDbInitPromise;
+    this.destroyRef.onDestroy(() => this.cleanup());
   }
   
   /**
-   * 从 IndexedDB 加载 RetryQueue
+   * 初始化子服务回调
    */
-  private async loadRetryQueueFromIdb(): Promise<RetryQueueItem[]> {
-    const db = await this.initRetryQueueDb();
-    if (!db) return [];
-    
-    return new Promise((resolve) => {
-      try {
-        const transaction = db.transaction(this.RETRY_QUEUE_DB_CONFIG.storeName, 'readonly');
-        const store = transaction.objectStore(this.RETRY_QUEUE_DB_CONFIG.storeName);
-        const request = store.getAll();
-        
-        request.onsuccess = () => {
-          const items = request.result || [];
-          this.logger.debug('从 IndexedDB 加载 RetryQueue', { count: items.length });
-          resolve(items);
-        };
-        
-        request.onerror = () => {
-          this.logger.error('从 IndexedDB 加载 RetryQueue 失败', request.error);
-          resolve([]);
-        };
-      } catch (err) {
-        this.logger.error('IndexedDB 读取异常', err);
-        resolve([]);
-      }
-    });
-  }
-  
-  /**
-   * 保存 RetryQueue 到 IndexedDB
-   */
-  private async saveRetryQueueToIdb(): Promise<boolean> {
-    const db = await this.initRetryQueueDb();
-    if (!db) return false;
-    
-    return new Promise((resolve) => {
-      try {
-        const transaction = db.transaction(this.RETRY_QUEUE_DB_CONFIG.storeName, 'readwrite');
-        const store = transaction.objectStore(this.RETRY_QUEUE_DB_CONFIG.storeName);
-        
-        // 清空后重写（简单但可靠）
-        store.clear();
-        
-        for (const item of this.retryQueue) {
-          store.put(this.minifyRetryItemForStorage(item));
-        }
-        
-        transaction.oncomplete = () => {
-          this.logger.debug('RetryQueue 保存到 IndexedDB 成功', { count: this.retryQueue.length });
-          resolve(true);
-        };
-        
-        transaction.onerror = () => {
-          this.logger.error('RetryQueue 保存到 IndexedDB 失败', transaction.error);
-          resolve(false);
-        };
-      } catch (err) {
-        this.logger.error('IndexedDB 写入异常', err);
-        resolve(false);
-      }
-    });
-  }
-  
-  /**
-   * 【Senior Consultant "Red Phone"】检查队列容量并发出警告
-   * 
-   * 【节流机制】防止 Toast 轰炸：
-   * - 5分钟冷却时间内不重复显示警告（修复：从 60 秒增加）
-   * - 情况恶化（百分比增加 10%+）时立即告警
-   * - 恢复正常时重置状态
-   * - 使用固定消息格式让 Toast 去重生效
-   * 
-   * 【修复 2026-01-31】添加诊断信息和强制处理机制
-   * - 记录 isSyncing 状态用于诊断队列卡死
-   * - 满载时尝试强制触发队列处理
-   */
-  private checkQueueCapacityWarning(): void {
-    const currentSize = this.retryQueue.length;
-    const maxSize = this.MAX_RETRY_QUEUE_SIZE;
-    const threshold = Math.floor(maxSize * this.QUEUE_WARNING_THRESHOLD);
-    const now = Date.now();
-    
-    // 低于阈值，恢复正常状态
-    if (currentSize < threshold) {
-      if (this.lastWarningPercent > 0) {
-        this.lastWarningPercent = 0;
-        this.logger.info('RetryQueue 容量恢复正常', { currentSize, maxSize });
-      }
-      return;
-    }
-    
-    const percentUsed = Math.round((currentSize / maxSize) * 100);
-    
-    // 【修复 2026-01-31】队列满载时尝试强制处理
-    // 防止因 isSyncing 状态卡死导致队列永远无法清空
-    if (percentUsed >= 90 && this.state().isOnline && !this.syncState().sessionExpired) {
-      const timeSinceLastForce = now - this.lastForceProcessTime;
-      // 每 30 秒最多强制处理一次
-      if (timeSinceLastForce > 30_000) {
-        this.lastForceProcessTime = now;
-        
-        // 如果 isSyncing 被卡住超过 2 分钟，强制重置
-        if (this.state().isSyncing) {
-          this.logger.warn('检测到可能的 isSyncing 状态卡死，强制重置', {
-            isSyncing: this.state().isSyncing,
-            queueSize: currentSize
-          });
-          this.state.update(s => ({ ...s, isSyncing: false }));
-        }
-        
-        // 异步触发队列处理
-        this.logger.info('队列接近满载，强制触发处理', { percentUsed, currentSize });
-        setTimeout(() => this.processRetryQueue(), 0);
-      }
-    }
-    
-    // 【节流检查】冷却时间 + 恶化检测
-    // 5分钟内不重复警告，除非情况显著恶化（增加 10%+）
-    const cooldownPassed = now - this.lastCapacityWarningTime > this.CAPACITY_WARNING_COOLDOWN;
-    const significantIncrease = percentUsed >= this.lastWarningPercent + 10;
-    
-    if (!cooldownPassed && !significantIncrease) {
-      return; // 跳过重复警告
-    }
-    
-    // 更新警告状态
-    this.lastCapacityWarningTime = now;
-    this.lastWarningPercent = percentUsed;
-    
-    // 收集诊断信息
-    const diagnostics = {
-      currentSize,
-      maxSize,
-      percentUsed,
-      isSyncing: this.state().isSyncing,
-      isOnline: this.state().isOnline,
-      sessionExpired: this.syncState().sessionExpired,
-      circuitState: this.circuitState,
-      retryQueueTypes: this.getQueueTypeBreakdown()
-    };
-    
-    this.logger.warn('RetryQueue 容量警告', diagnostics);
-    
-    // 【Red Phone 指示器】显示警告 Toast（仅在首次满载时显示）
-    // 使用固定消息格式 + 合理的显示时间，让 Toast 去重生效
-    if (cooldownPassed) {
-      this.toast.error(
-        '⚠️ 同步队列即将满载',
-        '请连接网络以防止数据丢失',
-        { duration: 30_000 } // 30秒后自动关闭
-      );
-    }
-    
-    // 记录到 Sentry（按 Senior Consultant 要求包含元数据但不包含 PII）
-    Sentry.captureMessage('RetryQueue capacity warning', {
-      level: 'warning',
-      tags: { 
-        operation: 'queueCapacityCheck',
-        percentUsed: String(percentUsed),
-        isSyncing: String(diagnostics.isSyncing),
-        circuitState: this.circuitState
+  private initSubserviceCallbacks(): void {
+    this.taskSyncOps.setCallbacks({
+      addToRetryQueue: (t, o, d, p) => this.addToRetryQueue(t, o, d, p),
+      circuitBreaker: {
+        check: () => this.checkCircuitBreaker(),
+        recordSuccess: () => this.recordCircuitSuccess(),
+        recordFailure: (et) => this.recordCircuitFailure(et)
       },
-      extra: { 
-        ...diagnostics,
-        // 不包含任务标题等 PII
+      syncStateCheck: {
+        isSessionExpired: () => this.syncState().sessionExpired,
+        updateLastSyncTime: () => this.state.update(s => ({ ...s, lastSyncTime: nowISO() }))
+      }
+    });
+    
+    this.connectionSyncOps.setCallbacks({
+      addToRetryQueue: (t, o, d, p) => this.addToRetryQueue(t, o, d as Connection | { id: string }, p),
+      syncStateCheck: {
+        isSessionExpired: () => this.syncState().sessionExpired,
+        updateSyncState: (u) => this.syncState.update(s => ({ ...s, ...u }))
       }
     });
   }
   
-  /**
-   * 获取队列中各类型项的数量统计（用于诊断）
-   */
-  private getQueueTypeBreakdown(): Record<string, number> {
-    const breakdown: Record<string, number> = { task: 0, project: 0, connection: 0 };
-    for (const item of this.retryQueue) {
-      breakdown[item.type] = (breakdown[item.type] || 0) + 1;
-    }
-    return breakdown;
-  }
-
-  // ==================== 本地 Tombstone 管理 ====================
+  // ==================== 网络与生命周期 ====================
   
-  /**
-   * 加载本地 tombstone 缓存
-   */
-  private loadLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    
-    try {
-      const data = localStorage.getItem(this.LOCAL_TOMBSTONES_KEY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        this.localTombstones = new Map(
-          Object.entries(parsed).map(([k, v]) => [k, new Set(v as string[])])
-        );
-        this.logger.debug('已恢复本地 tombstone 缓存', { 
-          projectCount: this.localTombstones.size 
-        });
-      }
-    } catch (e) {
-      this.logger.warn('加载本地 tombstone 缓存失败', e);
-      this.localTombstones = new Map();
-    }
-  }
-  
-  /**
-   * 保存本地 tombstone 缓存
-   */
-  private saveLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    
-    try {
-      const data: Record<string, string[]> = {};
-      for (const [projectId, taskIds] of this.localTombstones.entries()) {
-        data[projectId] = Array.from(taskIds);
-      }
-      localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(data));
-    } catch (e) {
-      this.logger.warn('保存本地 tombstone 缓存失败', e);
-    }
-  }
-  
-  /**
-   * 添加本地 tombstone（用于在 RPC 不可用时防止任务复活）
-   */
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    if (!this.localTombstones.has(projectId)) {
-      this.localTombstones.set(projectId, new Set());
-    }
-    const set = this.localTombstones.get(projectId)!;
-    for (const id of taskIds) {
-      set.add(id);
-    }
-    this.saveLocalTombstones();
-    this.logger.debug('添加本地 tombstone', { projectId, taskIds });
-  }
-  
-  /**
-   * 删除 Storage 中的附件文件
-   * 
-   * 【v5.7 附件-任务删除联动】
-   * 在任务永久删除时，清理关联的附件文件
-   * 异步执行，不阻塞任务删除操作
-   * 
-   * @param client Supabase 客户端
-   * @param paths 附件存储路径列表
-   */
-  private async deleteAttachmentFilesFromStorage(
-    client: ReturnType<typeof this.getSupabaseClient>,
-    paths: string[]
-  ): Promise<void> {
-    if (!client || paths.length === 0) return;
-    
-    try {
-      // 批量删除，每次最多 100 个
-      const batchSize = 100;
-      for (let i = 0; i < paths.length; i += batchSize) {
-        const batch = paths.slice(i, i + batchSize);
-        const { error } = await client.storage
-          .from('attachments')
-          .remove(batch);
-        
-        if (error) {
-          this.logger.warn('deleteAttachmentFilesFromStorage: 批量删除失败', {
-            batch: batch.slice(0, 5),
-            batchSize: batch.length,
-            error: error.message
-          });
-          // 继续删除下一批，不抛出异常
-        } else {
-          this.logger.debug('deleteAttachmentFilesFromStorage: 批量删除成功', {
-            batchIndex: i / batchSize,
-            batchSize: batch.length
-          });
-        }
-      }
-      
-      this.logger.info('deleteAttachmentFilesFromStorage: 完成', {
-        totalPaths: paths.length
-      });
-    } catch (e) {
-      this.logger.error('deleteAttachmentFilesFromStorage: 异常', e);
-      // 不抛出，因为任务已经删除，附件清理失败只是资源浪费，不影响功能
-    }
-  }
-  
-  /**
-   * 获取本地 tombstone（合并云端 tombstone）
-   */
-  getLocalTombstones(projectId: string): Set<string> {
-    return this.localTombstones.get(projectId) || new Set();
-  }
-  
-  /**
-   * 清除本地 tombstone（当云端 tombstone 同步成功后）
-   */
-  clearLocalTombstones(projectId: string, taskIds: string[]): void {
-    const set = this.localTombstones.get(projectId);
-    if (set) {
-      for (const id of taskIds) {
-        set.delete(id);
-      }
-      if (set.size === 0) {
-        this.localTombstones.delete(projectId);
-      }
-      this.saveLocalTombstones();
-    }
-  }
-  
-  // ==================== Tombstone 缓存（流量优化）====================
-  
-  /**
-   * 获取 Tombstones（带缓存）
-   * 
-   * 【流量优化】缓存 tombstone 结果，避免每次同步都查询
-   * 缓存有效期：5 分钟（SYNC_CONFIG.TOMBSTONE_CACHE_TTL）
-   */
-  private async getTombstonesWithCache(
-    projectId: string, 
-    client: SupabaseClient
-  ): Promise<{ data: { task_id: string }[] | null; error: Error | null }> {
-    const now = Date.now();
-    const cached = this.tombstoneCache.get(projectId);
-    
-    // 检查缓存是否有效
-    if (cached && (now - cached.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL) {
-      this.logger.debug('使用 Tombstone 缓存', { 
-        projectId, 
-        count: cached.ids.size,
-        age: Math.round((now - cached.timestamp) / 1000) + 's'
-      });
-      return { 
-        data: Array.from(cached.ids).map(id => ({ task_id: id })), 
-        error: null 
-      };
-    }
-    
-    // 缓存过期或不存在，查询云端
-    try {
-      const result = await this.throttle.execute(
-        `task-tombstones:${projectId}`,
-        async () => {
-          return await client
-            .from('task_tombstones')
-            .select(FIELD_SELECT_CONFIG.TOMBSTONE_FIELDS)
-            .eq('project_id', projectId);
-        },
-        { 
-          deduplicate: true,
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT 
-        }
-      );
-      
-      // 更新缓存
-      if (!result.error && result.data) {
-        const ids = new Set<string>();
-        for (const row of result.data) {
-          ids.add(row.task_id);
-        }
-        this.tombstoneCache.set(projectId, { ids, timestamp: now });
-        this.logger.debug('更新 Tombstone 缓存', { projectId, count: ids.size });
-      }
-      
-      return result;
-    } catch (e) {
-      return { data: null, error: e as Error };
-    }
-  }
-  
-  /**
-   * 清除 Tombstone 缓存（当有新的删除操作时）
-   */
-  invalidateTombstoneCache(projectId: string): void {
-    this.tombstoneCache.delete(projectId);
-  }
-  
-  /**
-   * 设置网络状态监听
-   */
   private setupNetworkListeners(): void {
     if (typeof window === 'undefined') return;
     
     const handleOnline = () => {
       this.logger.info('网络恢复');
       this.state.update(s => ({ ...s, isOnline: true }));
-      this.processRetryQueue();
+      if (this.retryQueue.length > 0) {
+        this.processRetryQueue();
+      }
     };
     
     const handleOffline = () => {
@@ -943,143 +253,48 @@ export class SimpleSyncService {
     });
   }
   
-  /**
-   * 启动重试循环
-   * 
-   * 【P0 修复 2026-01-31】添加 sessionExpired 检查，避免无效重试
-   */
   private startRetryLoop(): void {
     this.retryTimer = setInterval(() => {
-      // 【P0 Critical】会话过期时完全跳过重试
-      // 原因：会话过期后所有请求都会返回 401，重试毫无意义且消耗资源
-      if (this.syncState().sessionExpired) {
-        return;
-      }
-      
+      if (this.syncState().sessionExpired) return;
       if (this.state().isOnline && this.retryQueue.length > 0) {
         this.processRetryQueue();
       }
     }, this.RETRY_INTERVAL);
   }
   
-  /**
-   * 清理资源
-   */
   private cleanup(): void {
     if (this.retryTimer) {
       clearInterval(this.retryTimer);
       this.retryTimer = null;
     }
-    
-    // Realtime 订阅清理已迁移至 RealtimePollingService
-    // 这里只需确保取消订阅
     this.realtimePollingService.unsubscribeFromProject();
   }
   
-  /**
-   * 立即刷新重试队列（同步方式）
-   * 用于 beforeunload 事件，确保页面关闭前尽可能保存数据
-   * 
-   * 【设计原则】来自高级顾问审查：
-   * - 3 秒防抖在"关闭笔记本"场景下可能丢失数据
-   * - beforeunload 时应立即 flush 待处理队列
-   */
   flushRetryQueueSync(): void {
-    // 确保重试队列已持久化到 localStorage
     this.saveRetryQueueToStorage();
-    
-    // 记录待处理项数量，供调试
     if (this.retryQueue.length > 0) {
-      this.logger.info('beforeunload: 保存待处理同步项', { 
-        count: this.retryQueue.length 
-      });
+      this.logger.info('beforeunload: 保存待处理同步项', { count: this.retryQueue.length });
     }
   }
   
-  /**
-   * 延迟工具函数
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  // ==================== 熔断器 ====================
   
-  /**
-   * 带指数退避的重试辅助函数
-   * 仅对可重试的错误进行重试（5xx, 429, 408, 网络错误等）
-   * 
-   * @param operation 要执行的操作
-   * @param maxRetries 最大重试次数
-   * @param baseDelay 基础延迟（毫秒）
-   * @returns 操作结果
-   */
-  private async retryWithBackoff<T>(
-    operation: () => Promise<T>,
-    maxRetries = this.IMMEDIATE_RETRY_MAX,
-    baseDelay = this.IMMEDIATE_RETRY_BASE_DELAY
-  ): Promise<T> {
-    let lastError: unknown;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error;
-        const enhanced = supabaseErrorToError(error);
-        
-        // 如果不是可重试错误，立即抛出
-        if (!enhanced.isRetryable) {
-          throw enhanced;
-        }
-        
-        // 如果还有重试机会，等待后重试
-        if (attempt < maxRetries) {
-          const delay = baseDelay * Math.pow(2, attempt); // 指数退避：1s, 2s, 4s
-          this.logger.debug(`操作失败 (${enhanced.errorType})，${delay}ms 后重试 (${attempt + 1}/${maxRetries})`, enhanced.message);
-          await this.delay(delay);
-        } else {
-          // 所有重试用尽
-          this.logger.warn(`操作失败，已重试 ${maxRetries} 次`, enhanced);
-          throw enhanced;
-        }
-      }
-    }
-    
-    throw lastError;
-  }
-  
-  // ==================== Circuit Breaker ====================
-  
-  /**
-   * Circuit Breaker: 检查是否应该执行请求
-   * @returns true 如果可以执行请求，false 如果熔断中
-   */
   private checkCircuitBreaker(): boolean {
-    if (this.circuitState === 'closed') {
-      return true;
-    }
-    
+    if (this.circuitState === 'closed') return true;
     if (this.circuitState === 'open') {
       const elapsed = Date.now() - this.circuitOpenedAt;
       if (elapsed >= CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME) {
-        // 转入半开状态，允许试探请求
         this.circuitState = 'half-open';
-        this.logger.info('Circuit Breaker: 进入半开状态，尝试恢复');
+        this.logger.info('Circuit Breaker: 进入半开状态');
         return true;
       }
-      // 仍在熔断期
       return false;
     }
-    
-    // half-open 状态：允许请求
     return true;
   }
 
-  /**
-   * Circuit Breaker: 记录请求成功
-   */
   private recordCircuitSuccess(): void {
     if (this.circuitState === 'half-open') {
-      // 半开状态下成功，关闭熔断器
       this.circuitState = 'closed';
       this.consecutiveFailures = 0;
       this.logger.info('Circuit Breaker: 恢复正常');
@@ -1088,19 +303,12 @@ export class SimpleSyncService {
     }
   }
 
-  /**
-   * Circuit Breaker: 记录请求失败
-   */
   private recordCircuitFailure(errorType: string): void {
-    // 只有特定错误类型触发熔断
-    if (!CIRCUIT_BREAKER_CONFIG.TRIGGER_ERROR_TYPES.includes(errorType)) {
-      return;
-    }
+    if (!CIRCUIT_BREAKER_CONFIG.TRIGGER_ERROR_TYPES.includes(errorType)) return;
     
     this.consecutiveFailures++;
     
     if (this.circuitState === 'half-open') {
-      // 半开状态下失败，重新打开熔断器
       this.circuitState = 'open';
       this.circuitOpenedAt = Date.now();
       this.logger.warn('Circuit Breaker: 半开状态失败，重新熔断');
@@ -1110,2060 +318,244 @@ export class SimpleSyncService {
     if (this.consecutiveFailures >= CIRCUIT_BREAKER_CONFIG.FAILURE_THRESHOLD) {
       this.circuitState = 'open';
       this.circuitOpenedAt = Date.now();
-      this.logger.warn(`Circuit Breaker: 触发熔断，连续失败 ${this.consecutiveFailures} 次，暂停 ${CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME / 1000} 秒`);
+      this.logger.warn(`Circuit Breaker: 触发熔断，连续失败 ${this.consecutiveFailures} 次`);
     }
   }
   
-  // ==================== 任务同步 ====================
+  // ==================== 任务同步（委托） ====================
   
-  /**
-   * 推送任务到云端
-   * 使用 upsert 实现 LWW
-   * 
-   * 自动重试策略：
-   * - 对于可重试错误（5xx, 429, 408, 网络错误），立即重试 3 次（指数退避：1s, 2s, 4s）
-   * - 重试失败后加入持久化重试队列，等待网络恢复后重试
-   * - 使用限流服务控制并发请求数量，避免连接池耗尽
-   * 
-   * 【关键防护】防止已删除任务复活
-   * - 推送前检查 task_tombstones 表（除非调用方已完成批量过滤）
-   * - 如果任务已在 tombstones 中，跳过推送避免复活
-   * 
-   * 【P0 Critical 修复 2026-01-31】
-   * 在检测到 401 错误时，先尝试自动刷新 session，避免用户被迫重新登录。
-   * 
-   * @param skipTombstoneCheck 跳过 tombstone 检查（调用方已批量过滤时使用）
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队（由调用方处理）
-   * @returns Promise<boolean> 成功返回 true，失败返回 false
-   * @throws {PermanentFailureError} 版本冲突或会话过期时抛出，不应重试
-   */
   async pushTask(task: Task, projectId: string, skipTombstoneCheck = false, fromRetryQueue = false): Promise<boolean> {
-    // 【Critical #1】会话过期检查 - 阻止在会话过期后继续同步
-    if (this.syncState().sessionExpired) {
-      this.handleSessionExpired('pushTask', { taskId: task.id, projectId });
-    }
-    
-    // Circuit Breaker 检查：如果熔断中，直接加入重试队列
-    if (!this.checkCircuitBreaker()) {
-      this.logger.debug('Circuit Breaker: 熔断中，跳过推送', { taskId: task.id });
-      // 【修复 2026-01-31】仅在非队列调用时入队，避免双重入队
-      if (!fromRetryQueue) {
-        this.addToRetryQueue('task', 'upsert', task, projectId);
-      }
-      return false;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      // 【修复 2026-01-31】仅在非队列调用时入队，避免双重入队
-      if (!fromRetryQueue) {
-        this.addToRetryQueue('task', 'upsert', task, projectId);
-      }
-      return false;
-    }
-    
-    // 【P0 修复】支持自动刷新后重试的内部执行函数
-    const executeTaskPush = async (): Promise<boolean> => {
-      // 【Critical】验证用户会话，防止 RLS 策略违规
-      const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
-        // 【P0 修复】尝试刷新 session 而不是直接设置标志
-        const refreshed = await this.tryRefreshSession('pushTask.getSession');
-        if (refreshed) {
-          // 刷新成功，获取新 session 继续执行
-          const { data: { session: newSession } } = await client.auth.getSession();
-          if (newSession?.user?.id) {
-            // 继续执行任务推送
-            return await this.doTaskPush(client, task, projectId, skipTombstoneCheck);
-          }
-        }
-        // 刷新失败，标记会话过期
-        this.handleSessionExpired('pushTask.getSession', { taskId: task.id, projectId });
-      }
-      
-      return await this.doTaskPush(client, task, projectId, skipTombstoneCheck);
-    };
-    
-    try {
-      return await executeTaskPush();
-    } catch (e) {
-      const enhanced = supabaseErrorToError(e);
-      
-      // 【P0 Critical 修复 2026-01-31】检测到 401/42501 时先尝试刷新 session
-      if (this.isSessionExpiredError(enhanced)) {
-        this.logger.info('检测到认证错误，尝试刷新会话后重试', { 
-          taskId: task.id, 
-          projectId,
-          errorCode: enhanced.code 
-        });
-        
-        const canRetry = await this.handleAuthErrorWithRefresh('pushTask', { 
-          taskId: task.id, 
-          projectId, 
-          errorCode: enhanced.code 
-        });
-        
-        if (canRetry) {
-          // 刷新成功，递归重试一次
-          try {
-            return await executeTaskPush();
-          } catch (retryError) {
-            // 重试也失败了，走正常的错误处理流程
-            const retryEnhanced = supabaseErrorToError(retryError);
-            if (this.isSessionExpiredError(retryEnhanced)) {
-              // 重试后仍然是认证错误，这次真的标记为过期
-              this.handleSessionExpired('pushTask.retryAfterRefresh', { 
-                taskId: task.id, 
-                projectId, 
-                errorCode: retryEnhanced.code 
-              });
-            }
-            // 其他错误继续处理
-            return this.handlePushTaskError(retryEnhanced, task, projectId, fromRetryQueue);
-          }
-        } else {
-          // 刷新失败，标记会话过期
-          this.handleSessionExpired('pushTask', { taskId: task.id, projectId, errorCode: enhanced.code });
-        }
-      }
-      
-      return this.handlePushTaskError(enhanced, task, projectId, fromRetryQueue);
-    }
+    return this.taskSyncOps.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue);
   }
   
-  /**
-   * 执行任务推送操作
-   * 【重构】从 pushTask 提取出来，支持刷新后重试
-   */
-  private async doTaskPush(
-    client: SupabaseClient, 
-    task: Task, 
-    projectId: string, 
-    skipTombstoneCheck: boolean
-  ): Promise<boolean> {
-    await this.throttle.execute(
-      `push-task:${task.id}`,
-      async () => {
-        // 【防御层 #1】tombstone 检查（除非调用方已批量过滤）
-        if (!skipTombstoneCheck) {
-          const { data: tombstone } = await client
-            .from('task_tombstones')
-            .select('task_id')
-            .eq('task_id', task.id)
-            .maybeSingle();
-          
-          if (tombstone) {
-            this.logger.info('pushTask: 跳过已删除任务（tombstone 防护）', { 
-              taskId: task.id, 
-              projectId 
-            });
-            return;
-          }
-        }
-        
-        await this.retryWithBackoff(async () => {
-          const { data: upsertedData, error } = await client
-            .from('tasks')
-            .upsert({
-              id: task.id,
-              project_id: projectId,
-              title: task.title,
-              content: task.content,
-              stage: task.stage,
-              parent_id: task.parentId,
-              order: task.order,
-              rank: task.rank,
-              status: task.status,
-              x: task.x,
-              y: task.y,
-              short_id: task.shortId,
-              deleted_at: task.deletedAt || null,
-            })
-            .select('updated_at')
-            .single();
-          
-          if (error) throw supabaseErrorToError(error);
-          
-          if (upsertedData?.updated_at) {
-            this.clockSync.recordServerTimestamp(upsertedData.updated_at, task.id);
-          }
-        });
-      },
-      { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
-    );
-    
-    // Circuit Breaker: 记录成功
-    this.recordCircuitSuccess();
-    this.state.update(s => ({ ...s, lastSyncTime: nowISO() }));
-    return true;
-  }
-  
-  /**
-   * 处理 pushTask 错误（非认证错误）
-   * 【重构】从 pushTask 提取出来，避免代码重复
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队
-   */
-  private handlePushTaskError(enhanced: EnhancedError, task: Task, projectId: string, fromRetryQueue = false): boolean {
-    // 【乐观锁强化】版本冲突错误不加入重试队列
-    if (enhanced.errorType === 'VersionConflictError') {
-      this.logger.warn('推送任务版本冲突', { taskId: task.id, projectId });
-      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      Sentry.captureMessage('Optimistic lock conflict in pushTask', {
-        level: 'warning',
-        tags: { operation: 'pushTask', taskId: task.id, projectId },
-        extra: { taskUpdatedAt: task.updatedAt }
-      });
-      throw new PermanentFailureError(
-        'Version conflict',
-        enhanced,
-        { operation: 'pushTask', taskId: task.id, projectId }
-      );
-    }
-    
-    // Circuit Breaker: 记录失败（仅网络错误）
-    this.recordCircuitFailure(enhanced.errorType);
-    
-    // 根据错误类型选择日志级别
-    if (enhanced.isRetryable) {
-      this.logger.debug(`推送任务失败 (${enhanced.errorType})，已加入重试队列`, enhanced.message);
-    } else {
-      this.logger.error('推送任务失败', enhanced);
-    }
-    
-    // 报告到 Sentry
-    this.captureExceptionWithContext(enhanced, 'pushTask', {
-      taskId: task.id,
-      projectId,
-      errorType: enhanced.errorType,
-      isRetryable: enhanced.isRetryable
-    });
-    
-    // 【修复 2026-01-31】只有可重试的错误才加入重试队列
-    // 且仅在非队列调用时入队，避免双重入队
-    if (enhanced.isRetryable && !fromRetryQueue) {
-      this.addToRetryQueue('task', 'upsert', task, projectId);
-    } else if (!enhanced.isRetryable) {
-      this.logger.warn('不可重试的错误，不加入重试队列', {
-        taskId: task.id,
-        errorType: enhanced.errorType,
-        message: enhanced.message
-      });
-    }
-    return false;
-  }
-  
-  /**
-   * 【流量优化 2026-01-12】推送任务位置到云端（增量更新）
-   * 
-   * 仅更新 x, y 坐标，不上传 content 等大字段
-   * 拖拽节点时从 ~5KB（全量任务）降低到 ~100B（仅坐标）
-   * 
-   * @param taskId 任务 ID
-   * @param x X 坐标
-   * @param y Y 坐标
-   * @returns Promise<boolean> 成功返回 true
-   */
   async pushTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
-    // 会话过期检查
-    if (this.syncState().sessionExpired) {
-      this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
-      return false;
-    }
-    
-    // Circuit Breaker 检查
-    if (!this.checkCircuitBreaker()) {
-      this.logger.debug('Circuit Breaker: 熔断中，跳过位置推送', { taskId });
-      return false;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      return false;
-    }
-    
-    try {
-      const { error } = await client
-        .from('tasks')
-        .update({ 
-          x, 
-          y, 
-          updated_at: new Date().toISOString()  // LWW 时间戳，确保多设备同步正确
-        })
-        .eq('id', taskId);
-      
-      if (error) {
-        this.logger.debug('pushTaskPosition 失败', { taskId, error: error.message });
-        return false;
-      }
-      
-      this.recordCircuitSuccess();
-      return true;
-    } catch (e) {
-      this.logger.debug('pushTaskPosition 异常', { taskId, error: e });
-      return false;
-    }
+    return this.taskSyncOps.pushTaskPosition(taskId, x, y);
   }
   
-  /**
-   * 从云端拉取任务
-   * LWW：只更新 updated_at 更新的数据
-   * 
-   * 【关键修复】检查 task_tombstones 表，防止已删除任务复活
-   * 
-   * 【流量优化】使用字段筛选，不加载 content 字段
-   */
   async pullTasks(projectId: string, since?: string): Promise<Task[]> {
-    const client = this.getSupabaseClient();
-    if (!client) return [];
-    
-    try {
-      // 1. 并行查询任务和 tombstones（使用缓存）
-      // 【流量优化】使用字段筛选，不加载 content
-      let tasksQuery = client
-        .from('tasks')
-        .select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS)
-        .eq('project_id', projectId);
-      
-      if (since) {
-        tasksQuery = tasksQuery.gt('updated_at', since);
-      }
-      
-      // 【流量优化】使用 tombstone 缓存
-      const [tasksResult, tombstonesResult] = await Promise.all([
-        tasksQuery,
-        this.getTombstonesWithCache(projectId, client)
-      ]);
-      
-      if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
-      
-      // 2. 构建 tombstone ID 集合
-      const tombstoneIds = new Set<string>();
-      if (!tombstonesResult.error && tombstonesResult.data) {
-        for (const t of tombstonesResult.data) {
-          tombstoneIds.add(t.task_id);
-        }
-      }
-      
-      // 3. 转换为本地模型
-      // 【关键修复】不再过滤已删除的任务！
-      // 同步查询必须返回已删除记录，由客户端处理删除逻辑
-      // 否则其他设备无法知道某个任务已被删除，导致任务"复活"
-      const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
-      
-      // 标记 tombstone 任务（永久删除），客户端应从本地删除这些任务
-      return allTasks.map(task => {
-        if (tombstoneIds.has(task.id)) {
-          this.logger.debug('pullTasks: 标记 tombstone 任务', { taskId: task.id });
-          // 将 tombstone 任务也标记为已删除，确保客户端处理
-          return { ...task, deletedAt: task.deletedAt || new Date().toISOString() };
-        }
-        return task;
-      });
-    } catch (e) {
-      this.logger.error('拉取任务失败', e);
-      return [];
-    }
+    return this.taskSyncOps.pullTasks(projectId, since);
   }
   
-  /**
-   * 删除云端任务
-   */
   async deleteTask(taskId: string, projectId: string): Promise<boolean> {
-    // 【Critical】会话过期检查 - 阻止在会话过期后继续同步
-    if (this.syncState().sessionExpired) {
-      this.handleSessionExpired('deleteTask', { taskId, projectId });
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
-      return false;
-    }
-    
-    try {
-      const { error } = await client
-        .from('tasks')
-        .delete()
-        .eq('id', taskId);
-      
-      if (error) throw supabaseErrorToError(error);
-      
-      // 【流量优化】删除成功后失效 Tombstone 缓存
-      // 确保下次同步能获取最新的 tombstone 列表
-      this.invalidateTombstoneCache(projectId);
-      
-      return true;
-    } catch (e) {
-      const enhanced = supabaseErrorToError(e);
-      
-      // 【修复】检测会话过期错误
-      if (this.isSessionExpiredError(enhanced)) {
-        this.handleSessionExpired('deleteTask', { taskId, projectId, errorCode: enhanced.code });
-      }
-      
-      this.logger.error('删除任务失败', enhanced);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(enhanced, 'deleteTask', {
-        taskId,
-        projectId,
-        errorType: enhanced.errorType,
-        isRetryable: enhanced.isRetryable
-      });
-      
-      // 【关键修复】只有可重试的错误才加入重试队列
-      if (enhanced.isRetryable) {
-        this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
-      } else {
-        this.logger.warn('不可重试的删除错误，不加入重试队列', {
-          taskId,
-          errorType: enhanced.errorType,
-          message: enhanced.message
-        });
-      }
-      return false;
-    }
+    return this.taskSyncOps.deleteTask(taskId, projectId);
   }
   
-  /**
-   * 获取项目的所有 tombstone 任务 ID
-   * 用于检查任务是否已被永久删除
-   * 
-   * 【关键修复】合并云端 tombstones 和本地 tombstone 缓存
-   * 本地缓存用于 RPC 不可用时的保护
-   */
-  async getTombstoneIds(projectId: string): Promise<Set<string>> {
-    const result = await this.getTombstoneIdsWithStatus(projectId);
-    return result.ids;
-  }
-  
-  /**
-   * 【v5.9】获取项目的所有 tombstone 任务 ID（带查询状态）
-   * 用于合并时判断是否需要保守处理
-   * 
-   * @returns TombstoneQueryResult 包含 ID 集合和查询状态
-   */
-  async getTombstoneIdsWithStatus(projectId: string): Promise<{
-    ids: Set<string>;
-    fromRemote: boolean;
-    localCacheOnly: boolean;
-    timestamp: number;
-  }> {
-    const tombstoneIds = new Set<string>();
-    let fromRemote = false;
-    let localCacheOnly = true;
-    
-    // 1. 首先添加本地 tombstone 缓存（即使云端查询失败也能保护）
-    const localTombstones = this.getLocalTombstones(projectId);
-    for (const id of localTombstones) {
-      tombstoneIds.add(id);
-    }
-    
-    // 2. 查询云端 tombstones
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.logger.info('getTombstoneIds: 离线模式，仅使用本地缓存', { 
-        projectId, 
-        localCount: localTombstones.size 
-      });
-      return { ids: tombstoneIds, fromRemote: false, localCacheOnly: true, timestamp: Date.now() };
-    }
-    
-    try {
-      const { data, error } = await client
-        .from('task_tombstones')
-        .select('task_id')
-        .eq('project_id', projectId);
-      
-      if (error) {
-        this.logger.warn('获取云端 tombstones 失败，使用本地缓存', error);
-        return { ids: tombstoneIds, fromRemote: false, localCacheOnly: true, timestamp: Date.now() };
-      }
-      
-      // 添加云端 tombstones
-      for (const t of (data || [])) {
-        tombstoneIds.add(t.task_id);
-      }
-      
-      fromRemote = true;
-      localCacheOnly = false;
-      
-      if (localTombstones.size > 0 || tombstoneIds.size > localTombstones.size) {
-        this.logger.debug('getTombstoneIds: 合并完成', {
-          projectId,
-          localCount: localTombstones.size,
-          cloudCount: tombstoneIds.size - localTombstones.size,
-          totalCount: tombstoneIds.size
-        });
-      }
-      
-      return { ids: tombstoneIds, fromRemote, localCacheOnly, timestamp: Date.now() };
-    } catch (e) {
-      this.logger.warn('获取 tombstones 异常，使用本地缓存', e);
-      return { ids: tombstoneIds, fromRemote: false, localCacheOnly: true, timestamp: Date.now() };
-    }
-  }
-  
-  /**
-   * 获取项目的所有 connection tombstone ID
-   * 用于检查连接是否已被永久删除
-   * 
-   * 【P0 防复活】防止已删除连接被旧客户端复活
-   */
-  async getConnectionTombstoneIds(projectId: string): Promise<Set<string>> {
-    const tombstoneIds = new Set<string>();
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.logger.info('getConnectionTombstoneIds: 离线模式，返回空集', { projectId });
-      return tombstoneIds;
-    }
-    
-    try {
-      const { data, error } = await client
-        .from('connection_tombstones')
-        .select('connection_id')
-        .eq('project_id', projectId);
-      
-      if (error) {
-        this.logger.warn('获取连接 tombstones 失败', error);
-        return tombstoneIds;
-      }
-      
-      for (const t of (data || [])) {
-        tombstoneIds.add(t.connection_id);
-      }
-      
-      if (tombstoneIds.size > 0) {
-        this.logger.debug('getConnectionTombstoneIds: 获取完成', {
-          projectId,
-          count: tombstoneIds.size
-        });
-      }
-      
-      return tombstoneIds;
-    } catch (e) {
-      this.logger.warn('获取连接 tombstones 异常', e);
-      return tombstoneIds;
-    }
-  }
-  
-  /**
-   * 永久删除云端任务（写入 tombstone + 物理删除）
-   * 
-   * 【关键】这是防止已删除任务复活的核心方法
-   * - 调用 purge_tasks_v2 RPC 写入 tombstone 并删除任务
-   * - 如果 RPC 不可用，降级为软删除（但这不是理想方案，因为软删除任务仍可能被同步回来）
-   * - tombstone 记录会阻止任何后续的 upsert 复活该任务
-   * - v5.7: 新增 purge_tasks_v3 支持返回附件路径，自动清理 Storage 中的附件文件
-   * 
-   * @returns true 表示成功（包括降级为软删除），false 表示完全失败
-   */
-  async purgeTasksFromCloud(projectId: string, taskIds: string[]): Promise<boolean> {
-    if (taskIds.length === 0) return true;
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
-      // 【关键修复】离线时加入重试队列（离线是可重试的网络问题）
-      for (const taskId of taskIds) {
-        this.addToRetryQueue('task', 'delete', { id: taskId }, projectId);
-      }
-      return false;
-    }
-    
-    try {
-      // 优先使用 purge_tasks_v3（返回附件路径以便删除）
-      this.logger.debug('purgeTasksFromCloud: 调用 purge_tasks_v3', { projectId, taskIds });
-      const purgeV3Result = await client.rpc('purge_tasks_v3', {
-        p_project_id: projectId,
-        p_task_ids: taskIds
-      });
-      
-      if (!purgeV3Result.error && purgeV3Result.data) {
-        const { purged_count, attachment_paths } = purgeV3Result.data as { 
-          purged_count: number; 
-          attachment_paths: string[] 
-        };
-        
-        this.logger.info('purgeTasksFromCloud: purge_tasks_v3 成功', { 
-          projectId, 
-          taskCount: taskIds.length,
-          taskIds,
-          purgedCount: purged_count,
-          attachmentPathsCount: attachment_paths?.length ?? 0
-        });
-        
-        // 【v5.7】删除附件文件（后台异步，不阻塞返回）
-        if (attachment_paths && attachment_paths.length > 0) {
-          this.deleteAttachmentFilesFromStorage(client, attachment_paths).catch(err => {
-            this.logger.warn('purgeTasksFromCloud: 附件文件删除失败（任务已删除）', err);
-          });
-        }
-        
-        // 【关键】即使 RPC 成功也添加本地 tombstone，确保多设备一致性
-        this.addLocalTombstones(projectId, taskIds);
-        return true;
-      }
-      
-      // v3 失败，降级到 v2（不返回附件路径）
-      this.logger.warn('purgeTasksFromCloud: purge_tasks_v3 失败，尝试 v2', purgeV3Result.error);
-      const purgeV2Result = await client.rpc('purge_tasks_v2', {
-        p_project_id: projectId,
-        p_task_ids: taskIds
-      });
-      
-      if (!purgeV2Result.error) {
-        this.logger.info('purgeTasksFromCloud: purge_tasks_v2 成功', { 
-          projectId, 
-          taskCount: taskIds.length,
-          taskIds,
-          purgedCount: purgeV2Result.data
-        });
-        // 【关键】即使 RPC 成功也添加本地 tombstone，确保多设备一致性
-        this.addLocalTombstones(projectId, taskIds);
-        return true;
-      }
-      
-      // v2 失败，降级到 v1
-      this.logger.warn('purgeTasksFromCloud: purge_tasks_v2 失败，尝试 v1', purgeV2Result.error);
-      const purgeV1Result = await client.rpc('purge_tasks', { p_task_ids: taskIds });
-      
-      if (!purgeV1Result.error) {
-        this.logger.info('purgeTasksFromCloud: purge_tasks (v1) 成功', { 
-          projectId, 
-          taskCount: taskIds.length,
-          taskIds,
-          purgedCount: purgeV1Result.data
-        });
-        // 【关键】即使 RPC 成功也添加本地 tombstone，确保多设备一致性
-        this.addLocalTombstones(projectId, taskIds);
-        return true;
-      }
-      
-      // 两个 RPC 都失败，降级为软删除
-      // 注意：软删除不会写入 tombstone，任务仍可能被其他设备同步回来
-      this.logger.warn('purgeTasksFromCloud: RPC 均失败，降级为软删除', { 
-        v2Error: purgeV2Result.error,
-        v1Error: purgeV1Result.error 
-      });
-      
-      const { error } = await client
-        .from('tasks')
-        .update({ deleted_at: new Date().toISOString() })
-        .eq('project_id', projectId)
-        .in('id', taskIds);
-      
-      if (error) {
-        this.logger.error('purgeTasksFromCloud: 软删除也失败', error);
-        throw supabaseErrorToError(error);
-      }
-      
-      // 【关键修复】添加本地 tombstone，防止软删除的任务被同步回来
-      // 即使云端没有 tombstone，本地也会过滤这些任务
-      this.addLocalTombstones(projectId, taskIds);
-      
-      // 软删除成功，但需要警告
-      this.logger.warn('purgeTasksFromCloud: 已降级为软删除（已添加本地 tombstone 保护）', { 
-        projectId, 
-        taskIds 
-      });
-      
-      // 【重要】软删除成功也返回 true，因为任务确实被标记删除了
-      // 本地 tombstone 会防止这些任务在同步时复活
-      return true;
-    } catch (e) {
-      this.logger.error('purgeTasksFromCloud 失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'purgeTasksFromCloud', {
-        projectId,
-        taskCount: taskIds.length // 只记录数量，不记录具体 ID 列表
-      });
-      return false;
-    }
-  }
-  
-  /**
-   * 安全批量软删除任务（服务端防护）
-   * 
-   * 【P0 熔断层】使用 safe_delete_tasks RPC 确保批量删除不会超过限制：
-   * - 单次删除不能超过 50% 或 50 条任务
-   * - 项目任务数 > 10 时，不允许删到 0
-   * 
-   * 此方法应在用户触发批量删除时调用，确保服务端也执行相同的保护逻辑。
-   * 客户端 CircuitBreakerService 提供第一层保护，服务端 RPC 提供第二层保护。
-   * 
-   * @param projectId 项目 ID
-   * @param taskIds 要删除的任务 ID 列表
-   * @returns 实际删除的任务数量，-1 表示失败
-   */
   async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
-    if (taskIds.length === 0) return 0;
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
-      // 离线模式下由本地处理删除，后续同步时推送 deletedAt
-      return taskIds.length;
-    }
-    
-    try {
-      this.logger.debug('softDeleteTasksBatch: 调用 safe_delete_tasks RPC', { 
-        projectId, 
-        taskIds,
-        taskCount: taskIds.length 
-      });
-      
-      const { data, error } = await client.rpc('safe_delete_tasks', {
-        p_task_ids: taskIds,
-        p_project_id: projectId
-      });
-      
-      if (error) {
-        // 检查是否是熔断规则阻止
-        if (error.message?.includes('Bulk delete blocked')) {
-          this.logger.warn('softDeleteTasksBatch: 服务端熔断阻止删除', { 
-            projectId, 
-            taskIds,
-            error: error.message 
-          });
-          this.toast.warning('删除被阻止', error.message);
-          Sentry.captureMessage('Server circuit breaker blocked delete', {
-            level: 'warning',
-            tags: { operation: 'softDeleteTasksBatch', projectId },
-            extra: { taskIds, error: error.message }
-          });
-          return -1;
-        }
-        
-        throw supabaseErrorToError(error);
-      }
-      
-      this.logger.info('softDeleteTasksBatch: 删除成功', { 
-        projectId, 
-        requestedCount: taskIds.length,
-        affectedCount: data
-      });
-      
-      return data ?? 0;
-    } catch (e) {
-      this.logger.error('softDeleteTasksBatch 失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'softDeleteTasksBatch', {
-        projectId,
-        taskCount: taskIds.length // 只记录数量，不记录具体 ID 列表
-      });
-      
-      // RPC 失败时降级为逐个软删除
-      this.logger.warn('softDeleteTasksBatch: RPC 失败，降级为逐个更新');
-      try {
-        const { error } = await client
-          .from('tasks')
-          .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq('project_id', projectId)
-          .in('id', taskIds);
-        
-        if (error) {
-          this.logger.error('softDeleteTasksBatch: 降级也失败', error);
-          throw supabaseErrorToError(error);
-        }
-        
-        return taskIds.length;
-      } catch (fallbackError) {
-        this.logger.error('softDeleteTasksBatch: 完全失败', fallbackError);
-        return -1;
-      }
-    }
+    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds);
+  }
+  
+  async purgeTasksFromCloud(projectId: string, taskIds: string[]): Promise<boolean> {
+    return this.taskSyncOps.purgeTasksFromCloud(projectId, taskIds);
+  }
+  
+  async getTombstoneIds(projectId: string): Promise<Set<string>> {
+    return this.taskSyncOps.getTombstoneIds(projectId);
+  }
+  
+  async getTombstoneIdsWithStatus(projectId: string): Promise<{ ids: Set<string>; fromRemote: boolean; localCacheOnly: boolean; timestamp: number }> {
+    return this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
+  }
+  
+  getLocalTombstones(projectId: string): Set<string> {
+    return this.taskSyncOps.getLocalTombstones(projectId);
+  }
+  
+  addLocalTombstones(projectId: string, taskIds: string[]): void {
+    this.taskSyncOps.addLocalTombstones(projectId, taskIds);
+  }
+  
+  private topologicalSortTasks(tasks: Task[]): Task[] {
+    return this.taskSyncOps.topologicalSortTasks(tasks);
+  }
+  
+  invalidateTombstoneCache(projectId: string): void {
+    this.tombstoneService.invalidateCache(projectId);
+  }
+  
+  // ==================== 连接同步（委托） ====================
+  
+  async pushConnection(connection: Connection, projectId: string, skipTombstoneCheck = false, skipTaskExistenceCheck = false, fromRetryQueue = false): Promise<boolean> {
+    return this.connectionSyncOps.pushConnection(connection, projectId, skipTombstoneCheck, skipTaskExistenceCheck, fromRetryQueue);
+  }
+  
+  async getConnectionTombstoneIds(projectId: string): Promise<Set<string>> {
+    return this.connectionSyncOps.getConnectionTombstoneIds(projectId);
   }
   
   // ==================== 项目同步 ====================
   
-  /**
-   * 推送项目到云端
-   * 注意：RLS 策略要求 owner_id = auth.uid()，所以需要设置 owner_id
-   * 使用限流服务控制并发请求数量
-   * 
-   * 【P0 Critical 修复 2026-01-31】
-   * 在检测到 401 错误时，先尝试自动刷新 session，避免用户被迫重新登录。
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队
-   */
   async pushProject(project: Project, fromRetryQueue = false): Promise<boolean> {
-    // 【Critical #6】会话过期检查 - 阻止在会话过期后继续同步
     if (this.syncState().sessionExpired) {
-      this.handleSessionExpired('pushProject', { projectId: project.id });
+      this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id });
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
-      // 【修复 2026-01-31】仅在非队列调用时入队，避免双重入队
-      if (!fromRetryQueue) {
+      if (!fromRetryQueue) this.addToRetryQueue('project', 'upsert', project);
+      return false;
+    }
+    
+    try {
+      await this.throttle.execute(
+        `push-project:${project.id}`,
+        async () => {
+          const { data: { session } } = await client.auth.getSession();
+          const userId = session?.user?.id;
+          if (!userId) {
+            this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
+          }
+          
+          const { error } = await client
+            .from('projects')
+            .upsert({
+              id: project.id,
+              owner_id: userId,
+              title: project.name,
+              description: project.description,
+              version: project.version || 1,
+              updated_at: project.updatedAt || nowISO(),
+              migrated_to_v2: true
+            });
+          
+          if (error) throw supabaseErrorToError(error);
+        },
+        { priority: 'high', retries: 2 }
+      );
+      return true;
+    } catch (e) {
+      const enhanced = supabaseErrorToError(e);
+      
+      if (enhanced.errorType === 'VersionConflictError') {
+        this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+        throw new PermanentFailureError('Version conflict', enhanced, { operation: 'pushProject', projectId: project.id });
+      }
+      
+      if (enhanced.isRetryable && !fromRetryQueue) {
         this.addToRetryQueue('project', 'upsert', project);
       }
       return false;
     }
-    
-    // 【P0 修复】支持自动刷新后重试的内部执行函数
-    const executeProjectPush = async (): Promise<boolean> => {
-      await this.throttle.execute(
-        `push-project:${project.id}`,
-        async () => {
-          // 获取当前用户 ID（RLS 策略需要 owner_id = auth.uid()）
-          const { data: { session } } = await client.auth.getSession();
-          const userId = session?.user?.id;
-          if (!userId) {
-            // 【P0 修复】尝试刷新 session 而不是直接抛出错误
-            const refreshed = await this.tryRefreshSession('pushProject.getSession');
-            if (refreshed) {
-              // 刷新成功，获取新 session
-              const { data: { session: newSession } } = await client.auth.getSession();
-              if (newSession?.user?.id) {
-                // 使用新 session 继续执行
-                await this.doProjectUpsert(client, project, newSession.user.id);
-                return;
-              }
-            }
-            // 刷新失败，标记会话过期
-            this.handleSessionExpired('pushProject.getSession', { projectId: project.id });
-          }
-          
-          await this.doProjectUpsert(client, project, userId!);
-        },
-        { priority: 'high', retries: 2 }  // 项目操作优先级高
-      );
-      return true;
-    };
-    
-    try {
-      return await executeProjectPush();
-    } catch (e) {
-      const enhanced = supabaseErrorToError(e);
-      
-      // 【P0 Critical 修复 2026-01-31】检测到 401/42501 时先尝试刷新 session
-      if (this.isSessionExpiredError(enhanced)) {
-        this.logger.info('检测到认证错误，尝试刷新会话后重试', { 
-          projectId: project.id, 
-          errorCode: enhanced.code 
-        });
-        
-        const canRetry = await this.handleAuthErrorWithRefresh('pushProject', { 
-          projectId: project.id, 
-          errorCode: enhanced.code 
-        });
-        
-        if (canRetry) {
-          // 刷新成功，递归重试一次
-          try {
-            return await executeProjectPush();
-          } catch (retryError) {
-            // 重试也失败了，走正常的错误处理流程
-            const retryEnhanced = supabaseErrorToError(retryError);
-            if (this.isSessionExpiredError(retryEnhanced)) {
-              // 重试后仍然是认证错误，这次真的标记为过期
-              this.handleSessionExpired('pushProject.retryAfterRefresh', { 
-                projectId: project.id, 
-                errorCode: retryEnhanced.code 
-              });
-            }
-            // 其他错误继续处理
-            return this.handlePushProjectError(retryEnhanced, project, fromRetryQueue);
-          }
-        } else {
-          // 刷新失败，标记会话过期
-          this.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
-        }
-      }
-      
-      return this.handlePushProjectError(enhanced, project, fromRetryQueue);
-    }
   }
   
-  /**
-   * 执行项目 upsert 操作
-   * 【重构】从 pushProject 提取出来，支持刷新后重试
-   */
-  private async doProjectUpsert(
-    client: SupabaseClient, 
-    project: Project, 
-    userId: string
-  ): Promise<void> {
-    const { error } = await client
-      .from('projects')
-      .upsert({
-        id: project.id,
-        owner_id: userId,
-        title: project.name,
-        description: project.description,
-        version: project.version || 1,
-        updated_at: project.updatedAt || nowISO(),
-        migrated_to_v2: true
-      });
-    
-    if (error) throw supabaseErrorToError(error);
-  }
-  
-  /**
-   * 处理 pushProject 错误（非认证错误）
-   * 【重构】从 pushProject 提取出来，避免代码重复
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队
-   */
-  private handlePushProjectError(enhanced: EnhancedError, project: Project, fromRetryQueue = false): boolean {
-    // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
-    if (enhanced.errorType === 'VersionConflictError') {
-      this.logger.warn('推送项目版本冲突', { projectId: project.id });
-      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      Sentry.captureMessage('Optimistic lock conflict in pushProject', {
-        level: 'warning',
-        tags: { operation: 'pushProject', projectId: project.id },
-        extra: { projectVersion: project.version }
-      });
-      // 抛出永久失败错误，让 processRetryQueue 知道不要重试
-      throw new PermanentFailureError(
-        'Version conflict',
-        enhanced,
-        { operation: 'pushProject', projectId: project.id }
-      );
-    }
-    
-    // 根据错误类型选择日志级别
-    if (enhanced.isRetryable) {
-      this.logger.debug(`推送项目失败 (${enhanced.errorType})，已加入重试队列`, enhanced.message);
-    } else {
-      this.logger.error('推送项目失败', enhanced);
-    }
-    
-    // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-    this.captureExceptionWithContext(enhanced, 'pushProject', {
-      projectId: project.id,
-      errorType: enhanced.errorType,
-      isRetryable: enhanced.isRetryable
-      // 注意：不包含 project.name（PII）
-    });
-    
-    // 【修复 2026-01-31】只有可重试的错误才加入重试队列
-    // 且仅在非队列调用时入队，避免双重入队
-    // 版本回退错误（"Version regression not allowed"）是不可重试的
-    if (enhanced.isRetryable && !fromRetryQueue) {
-      this.addToRetryQueue('project', 'upsert', project);
-    } else if (!enhanced.isRetryable) {
-      this.logger.warn('不可重试的错误，不加入重试队列', {
-        projectId: project.id,
-        errorType: enhanced.errorType,
-        message: enhanced.message
-      });
-    }
-    return false;
-  }
-  
-  /**
-   * 拉取项目列表
-   * 
-   * 【流量优化】使用字段筛选
-   */
   async pullProjects(since?: string): Promise<Project[]> {
     const client = this.getSupabaseClient();
     if (!client) return [];
     
     try {
-      // 【流量优化】使用字段筛选替代 SELECT *
-      let query = client
-        .from('projects')
-        .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS);
-      
-      if (since) {
-        query = query.gt('updated_at', since);
-      }
+      let query = client.from('projects').select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS);
+      if (since) query = query.gt('updated_at', since);
       
       const { data, error } = await query;
-      
       if (error) throw supabaseErrorToError(error);
       
-      return (data || []).map(row => this.rowToProject(row as ProjectRow));
+      return (data || []).map(row => this.projectDataService.rowToProject(row as ProjectRow));
     } catch (e) {
       this.logger.error('拉取项目失败', e);
       return [];
     }
   }
   
-  // ==================== 连接同步 ====================
-  
-  /**
-   * 推送连接到云端
-   * 
-   * 自动重试策略：
-   * - 对于可重试错误（5xx, 429, 408, 网络错误），立即重试 3 次（指数退避：1s, 2s, 4s）
-   * - 重试失败后加入持久化重试队列，等待网络恢复后重试
-   * - 使用限流服务控制并发请求数量
-   * 
-   * 【关键修复】推送前验证引用的任务存在，防止外键约束违规
-   * 【P0 防复活】推送前检查 connection_tombstones 表，防止已删除连接复活
-   * @param skipTaskExistenceCheck 跳过任务存在性检查（调用方已验证时使用，避免冗余查询超时）
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队
-   */
-  async pushConnection(connection: Connection, projectId: string, skipTombstoneCheck = false, skipTaskExistenceCheck = false, fromRetryQueue = false): Promise<boolean> {
-    // 【Critical】会话过期检查 - 阻止在会话过期后继续同步
-    if (this.syncState().sessionExpired) {
-      this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
-      // 不加入 RetryQueue（会话过期后重试无意义，需要重新登录）
-      return false;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      // 【修复 2026-01-31】仅在非队列调用时入队，避免双重入队
-      if (!fromRetryQueue) {
-        this.addToRetryQueue('connection', 'upsert', connection, projectId);
-      }
-      return false;
-    }
-    
-    try {
-      // 【Critical】验证用户会话，防止 RLS 策略违规
-      const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
-        // 检测到会话丢失，设置 sessionExpired 标志并停止同步
-        this.syncState.update(s => ({ ...s, sessionExpired: true }));
-        this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
-        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-        // 不加入重试队列（会话过期后重试无意义，需要重新登录）
-        return false;
-      }
-      
-      // 【防御层 #1】tombstone 检查（除非调用方已批量过滤）
-      if (!skipTombstoneCheck) {
-        const { data: tombstone } = await client
-          .from('connection_tombstones')
-          .select('connection_id')
-          .eq('connection_id', connection.id)
-          .maybeSingle();
-        
-        if (tombstone) {
-          this.logger.info('pushConnection: 跳过已删除连接（tombstone 防护）', { 
-            connectionId: connection.id, 
-            projectId 
-          });
-          return false;
-        }
-      }
-      
-      // 【关键修复】推送前验证引用的任务存在性，防止外键约束违规
-      // 【超时保护】使用 supabaseWithRetry 实现 10 秒超时 + 自动重试（最多3次）
-      // 【重要】不过滤 deleted_at，因为数据库外键约束只检查任务行是否存在，不管软删除状态
-      // 软删除的任务仍然在 tasks 表中，满足外键约束
-      // 【性能优化 v2026-01】当调用方已批量验证任务存在性时，跳过冗余查询，避免频繁超时
-      if (!skipTaskExistenceCheck) {
-        let existingTasks: Array<{ id: string }> | null = null;
-        try {
-          const result = await supabaseWithRetry(
-            () => client
-              .from('tasks')
-              .select('id')
-              .in('id', [connection.source, connection.target])
-              .eq('project_id', projectId),
-            {
-              timeout: 'QUICK', // 5秒超时（存在性检查应快速完成）
-              maxRetries: 2     // 最多重试2次（总超时 < 15秒）
-            }
-          );
-          
-          // 【关键修复】检查 Supabase 查询错误
-          if (result.error) {
-            this.logger.warn('任务存在性查询失败，跳过连接推送', {
-              connectionId: connection.id,
-              source: connection.source,
-              target: connection.target,
-              error: result.error
-            });
-            return false; // fail-safe: 查询失败时不推送连接
-          }
-          
-          existingTasks = result.data;
-        } catch (error) {
-          // 【错误处理】查询超时或失败视为任务不存在（fail-safe），不推送连接
-          this.logger.warn('任务存在性查询失败（超时或错误），跳过连接推送', {
-            connectionId: connection.id,
-            source: connection.source,
-            target: connection.target,
-            error: error instanceof Error ? error.message : String(error)
-          });
-          
-          Sentry.captureMessage('任务存在性查询失败', {
-            level: 'warning',
-            tags: { 
-              operation: 'pushConnection', 
-              errorType: error instanceof Error && error.message.includes('timeout') ? 'QUERY_TIMEOUT' : 'QUERY_ERROR'
-            },
-            extra: {
-              connectionId: connection.id,
-              projectId,
-              source: connection.source,
-              target: connection.target,
-              errorMessage: error instanceof Error ? error.message : String(error)
-            }
-          });
-          
-          return false; // 失败不加入重试队列，避免累积
-        }
-        
-        const existingTaskIds = new Set((existingTasks || []).map(t => t.id));
-        
-        if (!existingTaskIds.has(connection.source) || !existingTaskIds.has(connection.target)) {
-          this.logger.warn('跳过推送连接（引用的任务不存在）', {
-            connectionId: connection.id,
-            source: connection.source,
-            target: connection.target,
-            sourceExists: existingTaskIds.has(connection.source),
-            targetExists: existingTaskIds.has(connection.target)
-          });
-          
-          // 【关键】外键约束违规不可重试，直接失败而不加入重试队列
-          Sentry.captureMessage('连接引用的任务不存在', {
-            level: 'warning',
-            tags: { 
-              operation: 'pushConnection',
-              errorType: 'FOREIGN_KEY_VIOLATION'
-            },
-            extra: {
-              connectionId: connection.id,
-              projectId,
-              source: connection.source,
-              target: connection.target,
-              sourceExists: existingTaskIds.has(connection.source),
-              targetExists: existingTaskIds.has(connection.target)
-            }
-          });
-          
-          return false;
-        }
-      }
-      
-      await this.throttle.execute(
-        `push-connection:${connection.id}`,
-        async () => {
-          await this.retryWithBackoff(async () => {
-            // 【关键修复 v2026-01】使用 onConflict 处理复合唯一约束冲突
-            // 数据库有两个唯一约束：
-            //   1. 主键 id
-            //   2. 复合唯一约束 (project_id, source_id, target_id)
-            // 默认 upsert 只按主键冲突处理，需要显式指定 onConflict
-            const { error } = await client
-              .from('connections')
-              .upsert({
-                id: connection.id,
-                project_id: projectId,
-                source_id: connection.source,
-                target_id: connection.target,
-                title: connection.title || null,
-                description: connection.description || null,
-                deleted_at: connection.deletedAt || null
-              }, {
-                // 按主键冲突时更新
-                onConflict: 'id',
-                // 忽略复合唯一约束冲突（相同 source/target 已存在时跳过）
-                ignoreDuplicates: false
-              });
-            
-            // 【关键修复】处理复合唯一约束冲突（23505 = unique_violation）
-            // 如果冲突是因为已存在相同的 source/target 连接，视为幂等成功
-            if (error) {
-              const code = error.code || (error as { code?: string }).code;
-              if (code === '23505' && error.message?.includes('connections_project_id_source_id_target_id')) {
-                // 已存在相同连接，幂等成功，无需重复插入
-                this.logger.info('连接已存在（幂等成功）', {
-                  connectionId: connection.id,
-                  source: connection.source,
-                  target: connection.target
-                });
-                return; // 不抛出错误，视为成功
-              }
-              throw supabaseErrorToError(error);
-            }
-          });
-        },
-        { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }  // 30秒超时，平衡用户体验
-      );
-      
-      return true;
-    } catch (e) {
-      const enhanced = supabaseErrorToError(e);
-      
-      // 【乐观锁强化】版本冲突错误不加入重试队列，需要用户刷新后重试
-      if (enhanced.errorType === 'VersionConflictError') {
-        this.logger.warn('推送连接版本冲突', { connectionId: connection.id, projectId });
-        this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-        Sentry.captureMessage('Optimistic lock conflict in pushConnection', {
-          level: 'warning',
-          tags: { operation: 'pushConnection', connectionId: connection.id, projectId }
-        });
-        // 抛出永久失败错误，让 processRetryQueue 知道不要重试
-        throw new PermanentFailureError(
-          'Version conflict',
-          enhanced,
-          { operation: 'pushConnection', connectionId: connection.id, projectId }
-        );
-      }
-      
-      // 【关键修复】外键约束错误不可重试
-      const isForeignKeyError = enhanced.errorType === 'ForeignKeyError' ||
-                               enhanced.message?.includes('foreign key constraint') || 
-                               enhanced.message?.includes('violates foreign key') ||
-                               enhanced.code === '23503' || enhanced.code === 23503;
-      
-      if (isForeignKeyError) {
-        this.logger.error('连接推送失败（外键约束违规）', {
-          connectionId: connection.id,
-          projectId,
-          source: connection.source,
-          target: connection.target,
-          error: enhanced.message,
-          errorCode: enhanced.code
-        });
-        
-        // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-        this.captureExceptionWithContext(enhanced, 'pushConnection_fk_violation', {
-          connectionId: connection.id,
-          projectId,
-          source: connection.source,
-          target: connection.target,
-          errorCode: enhanced.code
-        });
-        
-        // 外键错误不加入重试队列
-        return false;
-      }
-      
-      // 根据错误类型选择日志级别
-      if (enhanced.isRetryable) {
-        this.logger.debug(`推送连接失败 (${enhanced.errorType})，已加入重试队列`, {
-          message: enhanced.message,
-          connectionId: connection.id
-        });
-      } else {
-        this.logger.error('推送连接失败', {
-          error: enhanced,
-          connectionId: connection.id,
-          projectId,
-          source: connection.source,
-          target: connection.target,
-          isRetryable: enhanced.isRetryable,
-          errorType: enhanced.errorType
-        });
-      }
-      
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(enhanced, 'pushConnection', {
-        connectionId: connection.id,
-        projectId,
-        source: connection.source,
-        target: connection.target,
-        errorType: enhanced.errorType,
-        isRetryable: enhanced.isRetryable
-      });
-      
-      // 【修复 2026-01-31】只有可重试的错误才加入重试队列
-      // 且仅在非队列调用时入队，避免双重入队
-      if (enhanced.isRetryable && !fromRetryQueue) {
-        this.addToRetryQueue('connection', 'upsert', connection, projectId);
-      } else if (!enhanced.isRetryable) {
-        this.logger.warn('不可重试的错误，不加入重试队列', {
-          connectionId: connection.id,
-          errorType: enhanced.errorType,
-          message: enhanced.message
-        });
-      }
-      return false;
-    }
-  }
-  
   // ==================== 重试队列 ====================
   
-  /**
-   * 从存储加载重试队列
-   * 
-   * 【Senior Consultant P0】优先使用 IndexedDB，降级到 localStorage
-   * IndexedDB 提供更大存储空间，解决"飞机航班"场景的数据丢失问题
-   * 
-   * 在构造函数中调用，恢复页面刷新前未完成的同步操作
-   * 【关键修复】清理无效的连接项，防止外键约束错误累积
-   */
-  private async loadRetryQueueFromStorage(): Promise<void> {
-    // 【P0】优先从 IndexedDB 加载
-    const idbItems = await this.loadRetryQueueFromIdb();
-    if (idbItems.length > 0) {
-      this.retryQueue = this.filterAndCleanQueue(idbItems);
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-      this.logger.info(`从 IndexedDB 恢复 ${this.retryQueue.length} 个待同步项`);
-      
-      // 迁移：清理旧的 localStorage 数据
-      if (typeof localStorage !== 'undefined') {
-        const oldData = localStorage.getItem(this.RETRY_QUEUE_STORAGE_KEY);
-        if (oldData) {
-          localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
-          this.logger.info('已迁移并清理 localStorage 中的旧 RetryQueue 数据');
-        }
-      }
-      
-      // 异步清理无效连接
-      if (this.retryQueue.some(item => item.type === 'connection')) {
-        this.cleanupInvalidConnections().catch(e => {
-          this.logger.error('清理无效连接失败', e);
-        });
-      }
-      return;
-    }
-    
-    // 【降级】从 localStorage 加载（兼容旧版本）
+  private loadRetryQueueFromStorage(): void {
     if (typeof localStorage === 'undefined') return;
     
     try {
       const stored = localStorage.getItem(this.RETRY_QUEUE_STORAGE_KEY);
       if (!stored) return;
       
-      const parsed = JSON.parse(stored);
-      
-      // 版本检查：如果版本不匹配，丢弃旧数据
-      if (parsed.version !== this.RETRY_QUEUE_VERSION) {
-        this.logger.warn('重试队列版本不匹配，清空旧数据');
-        localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
-        return;
-      }
-      
-      // 恢复队列
-      if (Array.isArray(parsed.items)) {
-        this.retryQueue = this.filterAndCleanQueue(parsed.items);
+      const data = JSON.parse(stored);
+      if (data.items && Array.isArray(data.items)) {
+        this.retryQueue = data.items;
         this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-        this.logger.info(`从 localStorage 恢复 ${this.retryQueue.length} 个待同步项`);
-        
-        // 【P0 迁移】立即迁移到 IndexedDB
-        this.saveRetryQueueToIdb().then(success => {
-          if (success) {
-            localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
-            this.logger.info('RetryQueue 已从 localStorage 迁移到 IndexedDB');
-          }
-        });
-        
-        // 【关键修复】异步清理无效连接（引用不存在的任务）
-        // 在后台进行，不阻塞应用启动
-        if (this.retryQueue.some(item => item.type === 'connection')) {
-          this.cleanupInvalidConnections().catch(e => {
-            this.logger.error('清理无效连接失败', e);
-          });
-        }
+        this.logger.debug('加载重试队列', { count: this.retryQueue.length });
       }
     } catch (e) {
-      this.logger.error('加载重试队列失败', e);
-      localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
+      this.logger.warn('加载重试队列失败', e);
     }
   }
   
-  /**
-   * 【新增】过滤和清理队列项
-   * 抽取公共逻辑，供 IndexedDB 和 localStorage 加载时共用
-   */
-  private filterAndCleanQueue(items: RetryQueueItem[]): RetryQueueItem[] {
-    // 清理超限的队列
-    if (items.length > this.MAX_RETRY_QUEUE_SIZE) {
-      this.logger.warn('重试队列超限，截断', {
-        original: items.length,
-        limit: this.MAX_RETRY_QUEUE_SIZE
-      });
-      items = items.slice(-this.MAX_RETRY_QUEUE_SIZE);
-      Sentry.captureMessage('重试队列加载时超限', {
-        level: 'warning',
-        tags: { originalSize: String(items.length) }
-      });
-    }
-    
-    // 清理过期的重试项（超过 24 小时）
-    const now = Date.now();
-    items = items.filter((item: RetryQueueItem) => {
-      if (now - item.createdAt > this.MAX_RETRY_ITEM_AGE) {
-        this.logger.debug('移除过期的重试项', {
-          type: item.type,
-          id: item.data.id,
-          age: Math.floor((now - item.createdAt) / 1000 / 60) + ' 分钟'
-        });
-        return false;
-      }
-      return true;
-    });
-    
-    // 清理连接超过最大重试次数的项
-    items = items.filter((item: RetryQueueItem) => {
-      if (item.type === 'connection' && item.retryCount >= this.MAX_RETRIES) {
-        this.logger.debug('移除超过重试次数的连接', {
-          connectionId: item.data.id,
-          retryCount: item.retryCount
-        });
-        return false;
-      }
-      return true;
-    });
-    
-    return items;
-  }
-  /**
-   * 异步清理重试队列中引用不存在任务的连接
-   * 防止外键约束错误累积导致 localStorage 溢出
-   * 
-   * 【并发保护】检查同步状态，避免与 processRetryQueue 冲突
-   */
-  private async cleanupInvalidConnections(): Promise<void> {
-    // 【并发保护】如果正在同步，跳过清理（避免竞态条件）
-    if (this.state().isSyncing) {
-      this.logger.debug('跳过无效连接清理（正在同步中）');
-      return;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) return;
-    
-    const connectionItems = this.retryQueue.filter(item => item.type === 'connection');
-    if (connectionItems.length === 0) return;
-    
-    try {
-      // 批量查询所有引用的任务
-      const allReferencedTaskIds = new Set<string>();
-      for (const item of connectionItems) {
-        const conn = item.data as Connection;
-        allReferencedTaskIds.add(conn.source);
-        allReferencedTaskIds.add(conn.target);
-      }
-      
-      const { data: existingTasks } = await client
-        .from('tasks')
-        .select('id')
-        .in('id', Array.from(allReferencedTaskIds))
-        .is('deleted_at', null);
-      
-      const existingTaskIds = new Set((existingTasks || []).map(t => t.id));
-      
-      // 过滤掉引用不存在任务的连接
-      const originalLength = this.retryQueue.length;
-      this.retryQueue = this.retryQueue.filter(item => {
-        if (item.type !== 'connection') return true;
-        
-        const conn = item.data as Connection;
-        const sourceExists = existingTaskIds.has(conn.source);
-        const targetExists = existingTaskIds.has(conn.target);
-        
-        if (!sourceExists || !targetExists) {
-          this.logger.info('清理无效连接（引用的任务不存在）', {
-            connectionId: conn.id,
-            source: conn.source,
-            target: conn.target,
-            sourceExists,
-            targetExists
-          });
-          return false;
-        }
-        return true;
-      });
-      
-      const removedCount = originalLength - this.retryQueue.length;
-      if (removedCount > 0) {
-        this.logger.info(`清理了 ${removedCount} 个无效连接`);
-        this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-        this.saveRetryQueueToStorage();
-        
-        Sentry.captureMessage('清理无效连接', {
-          level: 'info',
-          tags: { removedCount: String(removedCount) }
-        });
-      }
-    } catch (e) {
-      this.logger.error('批量查询任务存在性失败', e);
-    }
-  }
-  
-  /**
-   * 精简 Task 数据，只保留同步必需的字段
-   * 移除客户端临时字段以减少存储大小
-   * 返回包含所有必需字段的对象，确保类型安全
-   */
-  private minifyTaskForStorage(task: Task): Task {
-    // 返回精简版 Task，移除客户端临时字段
-    return {
-      id: task.id,
-      title: task.title,
-      content: task.content,
-      stage: task.stage,
-      parentId: task.parentId,
-      order: task.order,
-      rank: task.rank,
-      status: task.status,
-      x: task.x,
-      y: task.y,
-      createdDate: task.createdDate,
-      updatedAt: task.updatedAt,
-      displayId: task.displayId,
-      shortId: task.shortId,
-      deletedAt: task.deletedAt,
-      // 显式排除大型客户端字段
-      // deletedConnections: undefined,
-      // deletedMeta: undefined,
-      // attachments: undefined,
-    };
-  }
-  
-  /**
-   * 精简 RetryQueueItem 数据用于存储
-   */
-  private minifyRetryItemForStorage(item: RetryQueueItem): RetryQueueItem {
-    if (item.type === 'task' && item.operation === 'upsert') {
-      return {
-        ...item,
-        data: this.minifyTaskForStorage(item.data as Task)
-      };
-    }
-    return item;
-  }
-  
-  /**
-   * 将重试队列保存到存储
-   * 
-   * 【Senior Consultant P0】优先使用 IndexedDB，降级到 localStorage
-   * 
-   * 在队列变化时调用，防止页面刷新丢失
-   * 
-   * 【2024-12-31 修复】
-   * - 精简存储数据，移除客户端临时字段
-   * - QuotaExceeded 时主动缩减队列
-   * - 添加存储大小检查
-   * @param attempt 当前尝试次数，用于限制递归深度（最多 3 次）
-   */
-  private saveRetryQueueToStorage(attempt = 0): void {
-    // MAX_SAVE_ATTEMPTS 在 saveRetryQueueToLocalStorage 中使用
-    
-    // 【Senior Consultant "Red Phone"】检查容量并发出警告
-    this.checkQueueCapacityWarning();
-    
-    // 【P0】优先保存到 IndexedDB（异步，不阻塞）
-    this.saveRetryQueueToIdb().then(success => {
-      if (success) {
-        // IndexedDB 保存成功，清理 localStorage 中的旧数据
-        if (typeof localStorage !== 'undefined') {
-          localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
-        }
-        return;
-      }
-      // IndexedDB 失败，降级到 localStorage
-      this.saveRetryQueueToLocalStorage(attempt);
-    });
-  }
-  
-  /**
-   * 【降级方案】保存到 localStorage
-   */
-  private saveRetryQueueToLocalStorage(attempt = 0): void {
-    const MAX_SAVE_ATTEMPTS = 3;
-    
+  private saveRetryQueueToStorage(): void {
     if (typeof localStorage === 'undefined') return;
-    
-    // 递归深度限制：防止栈溢出
-    if (attempt >= MAX_SAVE_ATTEMPTS) {
-      this.logger.error(`保存重试队列失败：超过最大尝试次数 ${MAX_SAVE_ATTEMPTS}，放弃保存`, {
-        queueSize: this.retryQueue.length
-      });
-      Sentry.captureMessage('RetryQueue save failed: max attempts exceeded', {
-        level: 'error',
-        tags: { queueSize: String(this.retryQueue.length), attempts: String(attempt) }
-      });
-      return;
-    }
     
     try {
       if (this.retryQueue.length === 0) {
-        // 队列为空时删除存储
         localStorage.removeItem(this.RETRY_QUEUE_STORAGE_KEY);
         return;
       }
       
-      // 精简存储数据
-      const minifiedItems = this.retryQueue.map(item => this.minifyRetryItemForStorage(item));
-      
-      const data = {
-        version: this.RETRY_QUEUE_VERSION,
-        items: minifiedItems,
-        savedAt: Date.now()
-      };
-      
-      const jsonStr = JSON.stringify(data);
-      
-      // 检查大小是否超限
-      const sizeBytes = new Blob([jsonStr]).size;
-      if (sizeBytes > this.RETRY_QUEUE_SIZE_LIMIT) {
-        this.logger.warn('重试队列存储大小超限，开始缩减', {
-          sizeBytes,
-          limit: this.RETRY_QUEUE_SIZE_LIMIT,
-          itemCount: this.retryQueue.length
-        });
-        this.shrinkRetryQueue();
-        // 递归调用，使用缩减后的队列（传递尝试次数）
-        this.saveRetryQueueToLocalStorage(attempt + 1);
-        return;
-      }
-      
-      localStorage.setItem(this.RETRY_QUEUE_STORAGE_KEY, jsonStr);
-      this.logger.debug(`保存 ${this.retryQueue.length} 个待同步项到 localStorage (${Math.round(sizeBytes / 1024)}KB)`);
+      const data = { version: 1, items: this.retryQueue, savedAt: Date.now() };
+      localStorage.setItem(this.RETRY_QUEUE_STORAGE_KEY, JSON.stringify(data));
     } catch (e) {
-      // 处理 QuotaExceededError
-      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-        this.logger.warn('localStorage 配额已满，缩减重试队列');
-        Sentry.captureMessage('RetryQueue QuotaExceeded', {
-          level: 'warning',
-          tags: { queueSize: String(this.retryQueue.length) }
-        });
-        this.shrinkRetryQueue();
-        // 递归调用，使用缩减后的队列（传递尝试次数）
-        if (this.retryQueue.length > 0) {
-          this.saveRetryQueueToLocalStorage(attempt + 1);
-        }
-      } else {
-        this.logger.error('保存重试队列失败', e);
-      }
+      this.logger.warn('保存重试队列失败', e);
     }
   }
   
-  /**
-   * 缩减重试队列
-   * 优先移除：1) 重试次数多的 2) 年龄老的 3) 数据大的
-   */
-  private shrinkRetryQueue(): void {
-    const originalLength = this.retryQueue.length;
-    
-    // 策略1: 移除超过最大重试次数的项
-    this.retryQueue = this.retryQueue.filter(item => item.retryCount < this.MAX_RETRIES);
-    
-    // 策略2: 如果还是太多，移除最老的一半
-    if (this.retryQueue.length > this.MAX_RETRY_QUEUE_SIZE / 2) {
-      // 按创建时间排序，保留较新的一半
-      this.retryQueue.sort((a, b) => b.createdAt - a.createdAt);
-      this.retryQueue = this.retryQueue.slice(0, Math.floor(this.MAX_RETRY_QUEUE_SIZE / 2));
-    }
-    
-    // 策略3: 如果还有问题，移除 content 最大的 task 项
-    if (this.retryQueue.length > 10) {
-      // 按数据大小排序（估算）
-      const sizeEstimate = (item: RetryQueueItem): number => {
-        if (item.type === 'task') {
-          const task = item.data as Task;
-          return (task.content?.length || 0) + (task.title?.length || 0);
-        }
-        return 100; // 默认大小
-      };
-      
-      // 移除最大的 20%
-      this.retryQueue.sort((a, b) => sizeEstimate(a) - sizeEstimate(b));
-      this.retryQueue = this.retryQueue.slice(0, Math.floor(this.retryQueue.length * 0.8));
-    }
-    
-    const removedCount = originalLength - this.retryQueue.length;
-    if (removedCount > 0) {
-      this.logger.info(`缩减重试队列: 移除 ${removedCount} 项，剩余 ${this.retryQueue.length} 项`);
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-      
-      Sentry.captureMessage('RetryQueue shrunk due to quota', {
-        level: 'info',
-        tags: {
-          removedCount: String(removedCount),
-          remainingCount: String(this.retryQueue.length)
-        }
-      });
-    }
-  }
-  
-  /**
-   * 添加到重试队列
-   * 
-   * 【关键修复 2026-01-31】
-   * 1. 添加队列大小限制，防止 localStorage 配额溢出
-   * 2. 添加去重机制，同一实体只保留最新的操作，防止队列膨胀
-   * 3. 【P0 修复 2026-01-31】会话过期时不添加新项，防止队列无限膨胀
-   */
-  private addToRetryQueue(
+  addToRetryQueue(
     type: 'task' | 'project' | 'connection',
     operation: 'upsert' | 'delete',
     data: Task | Project | Connection | { id: string },
     projectId?: string
   ): void {
-    // 【P0 Critical 修复】会话过期时阻止添加新的重试项
-    // 原因：会话过期后所有同步操作都会失败（401），继续添加只会导致队列溢出
-    // 正确的处理：等待用户重新登录后，从 IndexedDB 恢复数据重新同步
-    if (this.syncState().sessionExpired) {
-      this.logger.debug('会话已过期，跳过添加到重试队列', { 
-        type, 
-        operation, 
-        dataId: data.id 
-      });
-      return;
-    }
+    if (this.syncState().sessionExpired) return;
     
-    // 【关键修复 #2】去重检测：如果同一实体已在队列中，替换旧条目而非追加
-    // 这防止频繁编辑同一任务导致队列膨胀
-    const existingIndex = this.retryQueue.findIndex(
-      item => item.type === type && item.data.id === data.id
-    );
+    const existingIndex = this.retryQueue.findIndex(item => item.type === type && item.data.id === data.id);
     
     if (existingIndex !== -1) {
-      // 已存在相同实体：保留其 retryCount 以避免绕过重试限制，但更新数据和时间戳
-      const existingItem = this.retryQueue[existingIndex];
       this.retryQueue[existingIndex] = {
-        ...existingItem,
-        operation, // 更新操作类型（upsert 可能变为 delete）
-        data,      // 更新为最新数据
-        projectId: projectId ?? existingItem.projectId,
-        createdAt: Date.now() // 刷新时间戳
+        ...this.retryQueue[existingIndex],
+        operation,
+        data,
+        projectId: projectId ?? this.retryQueue[existingIndex].projectId,
+        createdAt: Date.now()
       };
-      this.logger.debug('更新重试队列中的现有项', { 
-        type, 
-        operation, 
-        dataId: data.id,
-        retryCount: existingItem.retryCount
-      });
-      this.saveRetryQueueToStorage();
-      return;
-    }
-    
-    // 【关键修复 #1】检查队列大小，超限时清理最老的项
-    if (this.retryQueue.length >= this.MAX_RETRY_QUEUE_SIZE) {
-      const removed = this.retryQueue.shift(); // 移除最老的项
-      this.logger.warn('重试队列已满，移除最老的项', {
-        removed: { type: removed?.type, id: removed?.data.id },
-        queueSize: this.retryQueue.length
-      });
-      Sentry.captureMessage('重试队列溢出', {
-        level: 'warning',
-        tags: { queueSize: String(this.retryQueue.length) }
+    } else {
+      if (this.retryQueue.length >= this.MAX_RETRY_QUEUE_SIZE) {
+        this.retryQueue.shift();
+      }
+      
+      this.retryQueue.push({
+        id: crypto.randomUUID(),
+        type,
+        operation,
+        data,
+        projectId,
+        retryCount: 0,
+        createdAt: Date.now()
       });
     }
     
-    const item: RetryQueueItem = {
-      id: crypto.randomUUID(),
-      type,
-      operation,
-      data,
-      projectId,
-      retryCount: 0,
-      createdAt: Date.now()
-    };
-    
-    this.retryQueue.push(item);
     this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-    this.saveRetryQueueToStorage(); // 持久化
-    
-    this.logger.debug('添加到重试队列', { type, operation, dataId: data.id });
+    this.saveRetryQueueToStorage();
   }
   
-  /**
-   * 处理重试队列
-   * 【关键修复】按依赖顺序处理：项目 → 任务 → 连接，防止外键约束违反
-   * 【关键修复 2026-01-31】添加运行时过期项清理
-   */
   private async processRetryQueue(): Promise<void> {
-    // 【Critical #17】会话过期检查 - 暂停重试队列处理，等待重新登录
-    if (this.syncState().sessionExpired) {
-      this.logger.info('会话已过期，暂停重试队列处理，等待重新登录');
-      return;
-    }
-    
-    if (this.state().isSyncing || !this.state().isOnline) return;
-    
-    // 【关键修复 2026-01-31】运行时清理过期项
-    // 之前只在加载时清理，现在每次处理前也清理
-    const now = Date.now();
-    const originalLength = this.retryQueue.length;
-    this.retryQueue = this.retryQueue.filter(item => {
-      const isExpired = now - item.createdAt > this.MAX_RETRY_ITEM_AGE;
-      const isMaxRetried = item.retryCount >= this.MAX_RETRIES;
-      
-      if (isExpired) {
-        this.logger.debug('清理过期重试项', { 
-          type: item.type, 
-          id: item.data.id,
-          ageHours: Math.floor((now - item.createdAt) / 1000 / 60 / 60)
-        });
-        return false;
-      }
-      
-      if (isMaxRetried) {
-        this.logger.debug('清理超过重试限制的项', { 
-          type: item.type, 
-          id: item.data.id,
-          retryCount: item.retryCount
-        });
-        return false;
-      }
-      
-      return true;
-    });
-    
-    if (this.retryQueue.length < originalLength) {
-      const cleaned = originalLength - this.retryQueue.length;
-      this.logger.info('运行时清理重试队列', { 
-        cleaned, 
-        remaining: this.retryQueue.length 
-      });
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
-      this.saveRetryQueueToStorage();
-    }
-    
-    if (this.retryQueue.length === 0) return;
+    if (this.state().isSyncing || this.retryQueue.length === 0) return;
     
     this.state.update(s => ({ ...s, isSyncing: true }));
     
-    const itemsToProcess = [...this.retryQueue];
+    const items = [...this.retryQueue];
     this.retryQueue = [];
     
-    // 【关键修复】按类型排序：project → task → connection
-    const sortedItems = itemsToProcess.sort((a, b) => {
-      const order = { project: 0, task: 1, connection: 2 };
-      return order[a.type] - order[b.type];
-    });
-    
-    // 【性能优化 v2026-01】批量过滤已在 tombstone 中的任务和连接
-    // 避免在 pushTask/pushConnection 中逐个查询 tombstones
-    let filteredItems = sortedItems;
-    const client = this.getSupabaseClient();
-    if (client) {
-      try {
-        // 收集所有需要检查的任务和连接ID
-        const taskIdsToCheck = new Set<string>();
-        const connectionIdsToCheck = new Set<string>();
-        const projectIds = new Set<string>();
-        
-        for (const item of sortedItems) {
-          if (item.type === 'task' && item.operation === 'upsert') {
-            taskIdsToCheck.add(item.data.id);
-            if (item.projectId) projectIds.add(item.projectId);
-          } else if (item.type === 'connection' && item.operation === 'upsert') {
-            connectionIdsToCheck.add(item.data.id);
-            if (item.projectId) projectIds.add(item.projectId);
-          }
-        }
-        
-        // 批量查询 tombstones（按项目）
-        const allTaskTombstones = new Set<string>();
-        const allConnectionTombstones = new Set<string>();
-        
-        for (const projectId of projectIds) {
-          if (taskIdsToCheck.size > 0) {
-            const taskTombstones = await this.getTombstoneIds(projectId);
-            for (const id of taskTombstones) {
-              allTaskTombstones.add(id);
-            }
-          }
-          if (connectionIdsToCheck.size > 0) {
-            const connTombstones = await this.getConnectionTombstoneIds(projectId);
-            for (const id of connTombstones) {
-              allConnectionTombstones.add(id);
-            }
-          }
-        }
-        
-        // 过滤掉 tombstone 中的项
-        filteredItems = sortedItems.filter(item => {
-          if (item.type === 'task' && item.operation === 'upsert') {
-            if (allTaskTombstones.has(item.data.id)) {
-              this.logger.info('processRetryQueue: 跳过 tombstone 任务', { taskId: item.data.id });
-              return false;
-            }
-          } else if (item.type === 'connection' && item.operation === 'upsert') {
-            if (allConnectionTombstones.has(item.data.id)) {
-              this.logger.info('processRetryQueue: 跳过 tombstone 连接', { connectionId: item.data.id });
-              return false;
-            }
-          }
-          return true;
-        });
-        
-        if (filteredItems.length < sortedItems.length) {
-          this.logger.info('processRetryQueue: 过滤了 tombstone 项', {
-            original: sortedItems.length,
-            filtered: filteredItems.length
-          });
-        }
-      } catch (e) {
-        this.logger.warn('processRetryQueue: 批量查询 tombstones 失败，依赖单独检查', e);
-        // 【关键】失败时不跳过单独检查，让 pushTask/pushConnection 执行 tombstone 验证
-        Sentry.captureException(e, {
-          level: 'warning',
-          tags: { operation: 'processRetryQueue', phase: 'batch_tombstone_filter' },
-          extra: { itemCount: sortedItems.length }
-        });
-      }
-    }
-    
-    // 【防御层 #2】追踪批量过滤是否成功
-    const batchFilterSucceeded = filteredItems !== sortedItems;
-    
-    // 【关键修复】追踪本批次尝试同步的任务 ID
-    const taskIdsInBatch = new Set<string>(
-      filteredItems
-        .filter(item => item.type === 'task' && item.operation === 'upsert')
-        .map(item => item.data.id)
-    );
-    
-    // 【关键修复】追踪成功推送的任务 ID
-    const successfulTaskIds = new Set<string>();
-    
-    // 【性能优化】批量查询所有连接引用的任务是否存在
-    const connectionItems = filteredItems.filter(item => item.type === 'connection');
-    const allReferencedTaskIds = new Set<string>();
-    for (const item of connectionItems) {
-      const conn = item.data as Connection;
-      allReferencedTaskIds.add(conn.source);
-      allReferencedTaskIds.add(conn.target);
-    }
-    
-    // 批量查询数据库中存在的任务 ID（带超时保护）
-    let existingTaskIdsInDb = new Set<string>();
-    if (allReferencedTaskIds.size > 0) {
-      const client = this.getSupabaseClient();
-      if (client) {
-        try {
-          // 5秒超时保护
-          const queryPromise = client
-            .from('tasks')
-            .select('id')
-            .in('id', Array.from(allReferencedTaskIds));
-          
-          const timeoutPromise = new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error('Query timeout')), 5000)
-          );
-          
-          const { data: existingTasks } = await Promise.race([
-            queryPromise,
-            timeoutPromise
-          ]);
-          
-          existingTaskIdsInDb = new Set((existingTasks || []).map(t => t.id));
-          
-          this.logger.debug('批量查询任务存在性完成', {
-            queried: allReferencedTaskIds.size,
-            found: existingTaskIdsInDb.size
-          });
-        } catch (e) {
-          this.logger.error('批量查询任务存在性失败', e);
-          // 查询失败时使用空集合，所有连接都会被跳过
-        }
-      }
-    }
-    
-    for (const item of filteredItems) {
+    for (const item of items) {
       let success = false;
       
       try {
         if (item.type === 'task') {
-          if (item.operation === 'upsert') {
-            // 仅当批量过滤成功时才跳过单独 tombstone 检查
-            // 【修复 2026-01-31】传入 fromRetryQueue=true，避免双重入队
-            success = await this.pushTask(item.data as Task, item.projectId!, batchFilterSucceeded, true);
-            if (success) {
-              successfulTaskIds.add(item.data.id);
-            }
-          } else {
-            success = await this.deleteTask(item.data.id, item.projectId!);
-          }
+          success = item.operation === 'upsert'
+            ? await this.pushTask(item.data as Task, item.projectId!, true, true)
+            : await this.deleteTask(item.data.id, item.projectId!);
         } else if (item.type === 'project') {
-          // 【修复 2026-01-31】传入 fromRetryQueue=true，避免双重入队
           success = await this.pushProject(item.data as Project, true);
         } else if (item.type === 'connection') {
-          // 【关键修复】验证连接引用的任务是否存在
-          const conn = item.data as Connection;
-          
-          // 1. 检查引用的任务是否在本批次中失败
-          const sourceFailed = taskIdsInBatch.has(conn.source) && !successfulTaskIds.has(conn.source);
-          const targetFailed = taskIdsInBatch.has(conn.target) && !successfulTaskIds.has(conn.target);
-          
-          if (sourceFailed || targetFailed) {
-            this.logger.warn('跳过连接重试（引用的任务在本批次中失败）', {
-              connectionId: conn.id,
-              source: conn.source,
-              target: conn.target,
-              sourceFailed,
-              targetFailed
-            });
-            // 仍然加回队列，等待下次重试
-            item.retryCount++;
-            if (item.retryCount < this.MAX_RETRIES) {
-              this.retryQueue.push(item);
-            }
-            continue;
-          }
-          
-          // 2. 【关键增强】使用批量查询结果验证任务存在性
-          const sourceExists = successfulTaskIds.has(conn.source) || existingTaskIdsInDb.has(conn.source);
-          const targetExists = successfulTaskIds.has(conn.target) || existingTaskIdsInDb.has(conn.target);
-          
-          if (!sourceExists || !targetExists) {
-            this.logger.warn('跳过连接重试（引用的任务不存在）', {
-              connectionId: conn.id,
-              source: conn.source,
-              target: conn.target,
-              sourceExists,
-              targetExists
-            });
-            
-            // 任务不存在，增加重试次数但仍然保留
-            // 任务可能稍后被其他设备同步过来
-            item.retryCount++;
-            if (item.retryCount < this.MAX_RETRIES) {
-              this.retryQueue.push(item);
-            } else {
-              // 超过最大重试次数，记录错误并丢弃
-              this.logger.error('连接引用的任务持续不存在，已丢弃', {
-                connectionId: conn.id,
-                source: conn.source,
-                target: conn.target
-              });
-              Sentry.captureMessage('连接引用的任务不存在', {
-                level: 'warning',
-                tags: { operation: 'processRetryQueue' },
-                extra: {
-                  connectionId: conn.id,
-                  source: conn.source,
-                  target: conn.target,
-                  projectId: item.projectId
-                }
-              });
-            }
-            continue;
-          }
-          
-          // 仅当批量过滤成功时才跳过单独 tombstone 检查
-          // skipTaskExistenceCheck=true: 已通过 existingTaskIdsInDb 批量验证任务存在性
-          // 【修复 2026-01-31】传入 fromRetryQueue=true，避免双重入队
-          success = await this.pushConnection(conn, item.projectId!, batchFilterSucceeded, true, true);
+          success = await this.pushConnection(item.data as Connection, item.projectId!, true, true, true);
         }
       } catch (e) {
-        // 【关键修复】检查是否为永久失败（如版本冲突、会话过期）
         if (isPermanentFailureError(e)) {
-          this.logger.warn('检测到永久失败，移除队列项', {
-            type: item.type,
-            id: item.data.id,
-            error: e.getFullMessage(),
-            context: e.context,
-            stack: e.stack
-          });
-          continue; // 跳过，不加回队列
+          this.logger.warn('永久失败，移除队列项', { type: item.type, id: item.data.id });
+          continue;
         }
-        
         this.logger.error('重试失败', e);
-        // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-        this.captureExceptionWithContext(e, 'retryQueue', { itemType: item.type });
-        // 检查是否为不可重试的错误
-        const enhanced = supabaseErrorToError(e);
-        if (!enhanced.isRetryable) {
-          // 不可重试的错误（如数据验证错误），直接丢弃
-          this.logger.warn('检测到不可重试错误，移除队列项', {
-            type: item.type,
-            id: item.data.id,
-            errorType: enhanced.errorType,
-            message: enhanced.message
-          });
-          continue; // 跳过，不加回队列
-        }
       }
       
       if (!success) {
@@ -3177,1447 +569,218 @@ export class SimpleSyncService {
       }
     }
     
-    this.saveRetryQueueToStorage(); // 持久化更新后的队列
-    
-    this.state.update(s => ({
-      ...s,
-      isSyncing: false,
-      pendingCount: this.retryQueue.length
-    }));
+    this.saveRetryQueueToStorage();
+    this.state.update(s => ({ ...s, isSyncing: false, pendingCount: this.retryQueue.length }));
   }
   
-  /**
-   * 重置会话过期状态
-   * 
-   * 【P0 Critical 修复 2026-01-31】用于登录成功后重置会话状态
-   * 调用点：AuthService 检测到用户重新登录时
-   * 
-   * 职责：
-   * 1. 重置 sessionExpired 标志，允许同步恢复
-   * 2. 清理队列中可能已经过时的项（可选）
-   * 3. 触发一次重试队列处理
-   */
-  resetSessionExpired(): void {
-    if (!this.syncState().sessionExpired) {
-      // 没有过期状态，无需处理
-      return;
-    }
-    
-    const previousQueueLength = this.retryQueue.length;
-    
-    // 重置会话过期标志
-    this.syncState.update(s => ({ ...s, sessionExpired: false }));
-    
-    this.logger.info('会话状态已重置', { 
-      previousQueueLength,
-      currentQueueLength: this.retryQueue.length
-    });
-    
-    // 会话恢复后，立即触发一次重试队列处理
-    // 注意：队列中的项可能已经过时，但 processRetryQueue 会处理这些情况
-    if (this.state().isOnline && this.retryQueue.length > 0) {
-      this.logger.info('会话恢复，触发重试队列处理');
-      this.processRetryQueue();
-    }
-    
-    Sentry.addBreadcrumb({
-      category: 'sync',
-      message: 'Session expired state reset',
-      level: 'info',
-      data: {
-        previousQueueLength,
-        currentQueueLength: this.retryQueue.length
-      }
-    });
-  }
-  
-  /**
-   * 清理重试队列（公开方法，供紧急情况使用）
-   * 【关键修复】用于手动清理累积的无效重试项，防止 localStorage 溢出
-   */
   clearRetryQueue(): void {
     const count = this.retryQueue.length;
     this.retryQueue = [];
     this.saveRetryQueueToStorage();
     this.state.update(s => ({ ...s, pendingCount: 0 }));
-    
     this.logger.info(`已清理 ${count} 个重试项`);
     this.toast.info(`已清理 ${count} 个待同步项`);
-    
-    Sentry.captureMessage('手动清理重试队列', {
-      level: 'info',
-      tags: { clearedCount: String(count) }
-    });
   }
   
-  /**
-   * 拓扑排序任务，确保父任务在子任务之前
-   * 防止推送时违反外键约束 tasks_parent_id_fkey
-   */
-  private topologicalSortTasks(tasks: Task[]): Task[] {
-    const taskMap = new Map(tasks.map(t => [t.id, t]));
-    const sorted: Task[] = [];
-    const visited = new Set<string>();
-    const visiting = new Set<string>();
-    
-    const visit = (taskId: string): void => {
-      if (visited.has(taskId)) return;
-      
-      const task = taskMap.get(taskId);
-      if (!task) return;
-      
-      // 检测循环依赖：断开循环但仍然添加任务
-      if (visiting.has(taskId)) {
-        this.logger.warn('检测到任务循环依赖，断开循环', { taskId });
-        // 标记为已访问，但不再继续递归，防止无限循环
-        // 任务会在外层循环中被添加
-        return;
-      }
-      
-      visiting.add(taskId);
-      
-      // 先访问父任务
-      if (task.parentId && taskMap.has(task.parentId)) {
-        visit(task.parentId);
-      }
-      
-      visiting.delete(taskId);
-      visited.add(taskId);
-      sorted.push(task);
-    };
-    
-    // 访问所有任务
-    for (const task of tasks) {
-      visit(task.id);
-    }
-    
-    this.logger.debug('拓扑排序完成', {
-      original: tasks.length,
-      sorted: sorted.length
-    });
-    
-    return sorted;
+  // ==================== Realtime / 轮询 ====================
+  
+  isRealtimeEnabled(): boolean {
+    return this.realtimePollingService.isRealtimeEnabled();
   }
   
-  // ==================== 数据转换 ====================
-  
-  /**
-   * 数据库行转换为 Task 模型
-   * 使用 TaskRow 类型确保类型安全
-   * 
-   * 【P0 修复 2026-01-13】content 字段处理
-   * - 查询必须包含 content 字段（已在 FIELD_SELECT_CONFIG.TASK_LIST_FIELDS 中添加）
-   * - 如果 content 未定义且不为 null，记录警告日志（用于检测配置问题）
-   */
-  private rowToTask(row: TaskRow | Partial<TaskRow>): Task {
-    // 【P0 防护】检测 content 字段是否缺失
-    // 如果缺失说明查询配置有问题，需要立即修复
-    if (!('content' in row)) {
-      this.logger.warn('rowToTask: content 字段缺失，可能导致数据丢失！', { 
-        taskId: row.id,
-        hasTitle: 'title' in row,
-        hasStage: 'stage' in row
-      });
-      
-      // 【Sentry 监控】采样率 10% 上报，避免大量重复告警
-      // 但在开发模式下始终上报，方便调试
-      const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
-      const shouldReport = isDev || Math.random() < 0.1;
-      
-      if (shouldReport) {
-        Sentry.captureMessage('Sync Warning: Task content field missing in payload', {
-          level: 'warning',
-          tags: { 
-            operation: 'rowToTask', 
-            taskId: row.id || 'unknown',
-            severity: 'p0-data-integrity'
-          },
-          extra: { 
-            rowKeys: Object.keys(row),
-            hasTitle: 'title' in row,
-            hasStage: 'stage' in row,
-            hasUpdatedAt: 'updated_at' in row,
-            source: 'content-field-protection',
-            timestamp: new Date().toISOString()
-          }
-        });
-      }
-    }
-    
-    return {
-      id: row.id || '',
-      title: row.title || '',
-      // 【P0 修复】content 必须从查询中加载，不能默认为空字符串
-      // 如果确实是空内容，row.content 会是 '' 或 null
-      content: row.content ?? '',
-      stage: row.stage ?? null,
-      parentId: row.parent_id ?? null,
-      order: row.order || 0,
-      rank: row.rank || 0,
-      status: (row.status as 'active' | 'completed' | 'archived') || 'active',
-      x: row.x || 0,
-      y: row.y || 0,
-      createdDate: row.created_at || '',
-      updatedAt: row.updated_at,
-      displayId: '',  // displayId 由客户端计算
-      shortId: row.short_id || undefined,
-      deletedAt: row.deleted_at || undefined
-    };
-  }
-  
-  /**
-   * 数据库行转换为 Project 模型
-   * 使用 ProjectRow 类型确保类型安全
-   */
-  private rowToProject(row: ProjectRow | Partial<ProjectRow>): Project {
-    return {
-      id: row.id || '',
-      name: row.title || '',
-      description: row.description || '',
-      createdDate: row.created_date || '',
-      updatedAt: row.updated_at || undefined,
-      version: row.version || 1,
-      tasks: [],
-      connections: []
-    };
-  }
-  
-  /**
-   * 数据库行转换为 Connection 模型
-   * 使用 ConnectionRow 类型确保类型安全
-   */
-  private rowToConnection(row: ConnectionRow): Connection {
-    return {
-      id: row.id,
-      source: row.source_id,
-      target: row.target_id,
-      title: row.title ?? undefined,
-      description: row.description || '',
-      deletedAt: row.deleted_at ?? undefined
-    };
-  }
-  
-  // ==================== Realtime 订阅 / 轮询 ====================
-  
-  /**
-   * 设置远程变更回调 - 委托给 RealtimePollingService
-   */
   setOnRemoteChange(callback: RemoteChangeCallback): void {
     this.realtimePollingService.setOnRemoteChange(callback);
   }
 
-  /**
-   * 设置用户偏好变更回调 - 委托给 RealtimePollingService
-   */
   setUserPreferencesChangeCallback(callback: UserPreferencesChangeCallback | null): void {
     this.realtimePollingService.setUserPreferencesChangeCallback(callback);
   }
   
-  /**
-   * 启用/禁用 Realtime - 委托给 RealtimePollingService
-   */
   setRealtimeEnabled(enabled: boolean): void {
     this.realtimePollingService.setRealtimeEnabled(enabled);
   }
   
-  /**
-   * 订阅项目变更 - 委托给 RealtimePollingService
-   */
   async subscribeToProject(projectId: string, userId: string): Promise<void> {
     await this.realtimePollingService.subscribeToProject(projectId, userId);
   }
   
-  /**
-   * 取消订阅 - 委托给 RealtimePollingService
-   */
   async unsubscribeFromProject(): Promise<void> {
     await this.realtimePollingService.unsubscribeFromProject();
   }
   
+  setRemoteChangeCallback(callback: RemoteChangeCallback): void {
+    this.realtimePollingService.setOnRemoteChange(callback);
+  }
+  
+  setTaskChangeCallback(callback: TaskChangeCallback): void {
+    this.taskChangeCallback = callback;
+  }
+  
+  async initRealtimeSubscription(userId: string): Promise<void> {
+    this.logger.debug('Realtime 订阅已初始化', { userId: userId.substring(0, 8) });
+  }
+  
+  teardownRealtimeSubscription(): void {
+    this.realtimePollingService.unsubscribeFromProject();
+  }
+  
+  pauseRealtimeUpdates(): void {
+    this.realtimePollingService.pauseRealtimeUpdates();
+  }
+  
+  resumeRealtimeUpdates(): void {
+    this.realtimePollingService.resumeRealtimeUpdates();
+  }
+  
   // ==================== 用户偏好 ====================
   
-  /**
-   * 加载用户偏好
-   * 
-   * 【流量优化】只查询必要字段
-   */
   async loadUserPreferences(userId: string): Promise<UserPreferences | null> {
-    const client = this.getSupabaseClient();
-    if (!client) return null;
-    
-    try {
-      // 【流量优化】只查询必要字段
-      const { data, error } = await client
-        .from('user_preferences')
-        .select('theme,layout_direction,floating_window_pref')
-        .eq('user_id', userId)
-        .single();
-      
-      if (error) {
-        if (error.code === 'PGRST116') {
-          // 没有找到记录，返回 null
-          return null;
-        }
-        throw error;
-      }
-      
-      return {
-        theme: (data.theme as ThemeType) || 'default',
-        layoutDirection: (data.layout_direction as 'ltr' | 'rtl') || 'ltr',
-        floatingWindowPref: (data.floating_window_pref as 'auto' | 'fixed') || 'auto'
-      };
-    } catch (e) {
-      this.logger.error('加载用户偏好失败', e);
-      return null;
-    }
+    return this.userPrefsSync.loadUserPreferences(userId);
   }
   
-  /**
-   * 保存用户偏好
-   */
   async saveUserPreferences(userId: string, preferences: Partial<UserPreferences>): Promise<boolean> {
-    const client = this.getSupabaseClient();
-    if (!client) return false;
-    
-    try {
-      const { error } = await client
-        .from('user_preferences')
-        .upsert({
-          user_id: userId,
-          theme: preferences.theme,
-          updated_at: nowISO()
-        });
-      
-      if (error) throw supabaseErrorToError(error);
-      return true;
-    } catch (e) {
-      this.logger.error('保存用户偏好失败', e);
-      return false;
-    }
+    return this.userPrefsSync.saveUserPreferences(userId, preferences);
   }
   
-  // ==================== 数据漂移检测 ====================
+  // ==================== Delta Sync ====================
   
-  /**
-   * 检测数据漂移
-   * 比较本地和远程的行数差异，如果差异显著则上报 Sentry
-   * 
-   * 【设计原则】来自高级顾问建议：
-   * - 每 50 次同步检查一次
-   * - 如果本地和远程行数差异超过 20%，上报警告
-   * - 用于检测同步逻辑是否静默丢弃数据
-   */
-  private async checkDataDrift(projectId: string, localTaskCount: number, localConnectionCount: number): Promise<void> {
-    const client = this.getSupabaseClient();
-    if (!client) return;
-    
-    try {
-      // 查询远程任务和连接数量
-      const [tasksResult, connectionsResult] = await Promise.all([
-        client.from('tasks').select('id', { count: 'exact', head: true }).eq('project_id', projectId).is('deleted_at', null),
-        client.from('connections').select('id', { count: 'exact', head: true }).eq('project_id', projectId).is('deleted_at', null)
-      ]);
-      
-      const remoteTaskCount = tasksResult.count ?? 0;
-      const remoteConnectionCount = connectionsResult.count ?? 0;
-      
-      // 计算差异
-      const taskDiff = Math.abs(localTaskCount - remoteTaskCount);
-      const connectionDiff = Math.abs(localConnectionCount - remoteConnectionCount);
-      
-      // 差异阈值：20% 或 5 个以上
-      const taskDriftThreshold = Math.max(localTaskCount * 0.2, 5);
-      const connectionDriftThreshold = Math.max(localConnectionCount * 0.2, 3);
-      
-      const hasTaskDrift = taskDiff > taskDriftThreshold;
-      const hasConnectionDrift = connectionDiff > connectionDriftThreshold;
-      
-      if (hasTaskDrift || hasConnectionDrift) {
-        this.logger.warn('检测到数据漂移', {
-          projectId,
-          localTaskCount,
-          remoteTaskCount,
-          taskDiff,
-          localConnectionCount,
-          remoteConnectionCount,
-          connectionDiff
-        });
-        
-        // 上报 Sentry 警告
-        Sentry.captureMessage('Data Drift Detected', {
-          level: 'warning',
-          tags: {
-            operation: 'checkDataDrift',
-            projectId
-          },
-          extra: {
-            localTaskCount,
-            remoteTaskCount,
-            taskDiff,
-            localConnectionCount,
-            remoteConnectionCount,
-            connectionDiff,
-            syncCounter: this.syncCounter
-          }
-        });
-      } else {
-        this.logger.debug('数据漂移检测通过', {
-          projectId,
-          localTaskCount,
-          remoteTaskCount,
-          localConnectionCount,
-          remoteConnectionCount
-        });
-      }
-    } catch (e) {
-      // 数据漂移检测失败不应影响正常同步流程
-      this.logger.debug('数据漂移检测失败', e);
-    }
-  }
-
-  // ============================================================
-  // 【Stingy Hoarder Protocol】Delta Sync 增量同步
-  // @see docs/plan_save.md Phase 3
-  // ============================================================
-
-  /**
-   * Delta Sync 增量检查
-   * 
-   * 检查服务端是否有自上次同步以来的新变更
-   * 只拉取 updated_at > lastSyncTime 的记录
-   * 
-   * 【核心优化】
-   * - 从 MB 级全量拉取降至 ~800 Bytes - 1.5 KB 增量检查
-   * - 使用 Sentry Span 追踪性能
-   * 
-   * @param projectId 项目 ID
-   * @returns 增量变更数据，若无变更则返回空数组
-   */
   async checkForDrift(projectId: string): Promise<{ tasks: Task[]; connections: Connection[] }> {
     const client = this.getSupabaseClient();
-    if (!client) {
+    if (!client || !SYNC_CONFIG.DELTA_SYNC_ENABLED) {
       return { tasks: [], connections: [] };
     }
-
-    // 如果 Delta Sync 未启用，返回空结果
-    if (!SYNC_CONFIG.DELTA_SYNC_ENABLED) {
-      this.logger.debug('Delta Sync 未启用，跳过增量检查');
+    
+    const lastSyncTime = this.lastSyncTimeByProject.get(projectId);
+    if (!lastSyncTime) {
       return { tasks: [], connections: [] };
     }
-
-    // 【ClockSync 集成】确保时钟同步，防止时间漂移导致 LWW 判断错误
-    // @see docs/plan_save.md Phase 3
+    
     try {
-      const clockResult = await this.clockSync.ensureSynced();
-      if (clockResult.status === 'error') {
-        // 时钟严重偏移，记录警告但继续同步
-        this.logger.warn('时钟偏移严重，Delta Sync 可能不准确', {
-          driftMs: clockResult.driftMs,
-          reliable: clockResult.reliable
-        });
-        
-        Sentry.captureMessage('Clock drift may affect Delta Sync', {
-          level: 'warning',
-          tags: {
-            operation: 'checkForDrift',
-            clockDriftMs: String(clockResult.driftMs),
-            projectId
-          }
-        });
-      } else if (clockResult.status === 'warning') {
-        this.logger.debug('时钟有轻微偏移', { driftMs: clockResult.driftMs });
+      const [tasksResult, connectionsResult] = await Promise.all([
+        client.from('tasks').select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS).eq('project_id', projectId).gt('updated_at', lastSyncTime),
+        client.from('connections').select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS).eq('project_id', projectId).gt('updated_at', lastSyncTime)
+      ]);
+      
+      if (tasksResult.error || connectionsResult.error) {
+        throw supabaseErrorToError(tasksResult.error || connectionsResult.error);
       }
-    } catch (clockErr) {
-      // 时钟同步失败不应阻塞 Delta Sync
-      this.logger.debug('时钟同步检测失败，继续 Delta Sync', clockErr);
+      
+      const deltaTasks = (tasksResult.data || []) as unknown as Task[];
+      const deltaConnections = (connectionsResult.data || []) as unknown as Connection[];
+      
+      this.lastSyncTimeByProject.set(projectId, nowISO());
+      
+      return {
+        tasks: deltaTasks.filter(t => !t.deletedAt),
+        connections: deltaConnections.filter(c => !c.deletedAt)
+      };
+    } catch (e) {
+      this.logger.error('Delta Sync 检查失败', e);
+      throw e;
     }
-
-    // 获取时钟偏移值用于 Span 属性
-    const clockDriftMs = this.clockSync.currentDriftMs();
-    const clockStatus = this.clockSync.driftStatus();
-
-    return await Sentry.startSpan(
-      {
-        name: 'sync-drift-check',
-        op: 'sync.delta',
-        attributes: {
-          projectId,
-          'clock.drift_ms': clockDriftMs,
-          'clock.status': clockStatus,
-        },
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      async (span: any) => {
-        try {
-          // 获取上次同步时间
-          const lastSyncTime = this.lastSyncTimeByProject.get(projectId);
-          
-          if (!lastSyncTime) {
-            // 首次同步，需要全量拉取
-            this.logger.debug('首次同步，需要全量拉取', { projectId });
-            span.setAttribute('sync_type', 'full');
-            return { tasks: [], connections: [] };
-          }
-
-          this.logger.debug('开始 Delta Sync 增量检查', { 
-            projectId, 
-            lastSyncTime 
-          });
-
-          // 并行查询增量数据
-          const [tasksResult, connectionsResult] = await Promise.all([
-            client
-              .from('tasks')
-              .select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS)
-              .eq('project_id', projectId)
-              .gt('updated_at', lastSyncTime)
-              .order('updated_at', { ascending: true }),
-            client
-              .from('connections')
-              .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-              .eq('project_id', projectId)
-              .gt('updated_at', lastSyncTime)
-              .order('updated_at', { ascending: true })
-          ]);
-
-          if (tasksResult.error) {
-            throw supabaseErrorToError(tasksResult.error);
-          }
-          if (connectionsResult.error) {
-            throw supabaseErrorToError(connectionsResult.error);
-          }
-
-          const deltaTasks = (tasksResult.data || []) as unknown as Task[];
-          const deltaConnections = (connectionsResult.data || []) as unknown as Connection[];
-
-          // 更新 Span 属性
-          span.setAttribute('tasks_synced', deltaTasks.length);
-          span.setAttribute('connections_synced', deltaConnections.length);
-          span.setStatus({ code: 1 }); // OK
-
-          // 过滤已删除的记录（客户端二次过滤）
-          const activeTasks = deltaTasks.filter(t => !t.deletedAt);
-          const activeConnections = deltaConnections.filter(c => !c.deletedAt);
-
-          // 更新同步时间
-          const now = nowISO();
-          this.lastSyncTimeByProject.set(projectId, now);
-
-          if (deltaTasks.length > 0 || deltaConnections.length > 0) {
-            this.logger.info('Delta Sync 发现变更', {
-              projectId,
-              taskChanges: deltaTasks.length,
-              connectionChanges: deltaConnections.length,
-              activeTaskChanges: activeTasks.length,
-              activeConnectionChanges: activeConnections.length
-            });
-          } else {
-            this.logger.debug('Delta Sync 无变更', { projectId });
-          }
-
-          return {
-            tasks: activeTasks,
-            connections: activeConnections
-          };
-        } catch (err) {
-          span.setStatus({ code: 2, message: 'sync_failed' }); // ERROR
-          
-          const enhancedError = err instanceof Error 
-            ? supabaseErrorToError(err) 
-            : supabaseErrorToError(new Error(String(err)));
-
-          // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-          this.captureExceptionWithContext(enhancedError, 'sync-drift-check', {
-            projectId
-          });
-
-          this.logger.error('Delta Sync 检查失败', { projectId, error: err });
-          throw err;
-        }
-      }
-    );
   }
-
-  /**
-   * 设置项目的最后同步时间
-   * 用于 Delta Sync 增量计算
-   */
+  
   setLastSyncTime(projectId: string, timestamp: string): void {
     this.lastSyncTimeByProject.set(projectId, timestamp);
-    this.logger.debug('更新同步时间戳', { projectId, timestamp });
   }
-
-  /**
-   * 获取项目的最后同步时间
-   */
+  
   getLastSyncTime(projectId: string): string | null {
     return this.lastSyncTimeByProject.get(projectId) || null;
   }
-
-  /**
-   * 清除项目的同步时间（强制下次全量同步）
-   */
+  
   clearLastSyncTime(projectId: string): void {
     this.lastSyncTimeByProject.delete(projectId);
-    this.logger.debug('清除同步时间戳', { projectId });
   }
   
-  // ==================== 冲突解决（LWW） ====================
+  // ==================== 冲突解决 ====================
   
-  /**
-   * 解决冲突 - 使用 LWW 策略
-   * @param projectId 项目 ID
-   * @param resolvedProject 解决后的项目
-   * @param strategy 'local' | 'remote' - 仅用于日志
-   */
   resolveConflict(projectId: string, resolvedProject: Project, strategy: 'local' | 'remote'): void {
     this.logger.info('解决冲突', { projectId, strategy });
-    
-    // 清除冲突状态
-    this.syncState.update(s => ({
-      ...s,
-      hasConflict: false,
-      conflictData: null
-    }));
+    this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
   }
   
-  /**
-   * 设置冲突状态
-   */
   setConflict(conflictData: ConflictData): void {
-    this.syncState.update(s => ({
-      ...s,
-      hasConflict: true,
-      conflictData
-    }));
+    this.syncState.update(s => ({ ...s, hasConflict: true, conflictData }));
   }
   
-  // ==================== 完整项目同步 ====================
+  // ==================== 项目加载 ====================
   
-  /**
-   * 保存完整项目到云端（包含任务和连接）
-   * 兼容旧 SyncService 接口
-   * 
-   * 批量推送优化：
-   * - 在连续请求之间添加 100ms 延迟，防止触发服务器速率限制
-   * - 每个请求自动重试（pushTask/pushConnection 内置重试机制）
-   * 
-   * 【关键修复】推送前检查 tombstones，防止已删除任务复活
-   * 【P0 熔断层】推送前进行熔断校验，检测空数据、任务数骤降等异常
-   */
-  async saveProjectToCloud(
-    project: Project,
-    _userId: string
-  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number }> {
-    // 【性能优化 2026-01-26】本地模式快速退出，避免不必要的会话检查
-    if (_userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('本地模式，跳过云端同步');
-      return { success: false };
-    }
-
-    // 【Stingy Hoarder Protocol】Phase 4.5 - 网络感知检查
-    // 在弱网或节省流量模式下，将同步操作加入队列而非立即执行
-    // @see docs/plan_save.md Phase 4.5
-    if (!this.mobileSync.shouldAllowSync()) {
-      const strategy = this.mobileSync.currentStrategy();
-      this.logger.debug('网络感知: 同步被延迟', {
-        projectId: project.id,
-        strategy
-      });
-      // 加入重试队列，等待网络恢复
-      this.addToRetryQueue('project', 'upsert', project);
-      return { success: false };
-    }
-
-    // 【P0 熔断层】同步前校验 - 检测空数据、任务数骤降、必填字段缺失
-    const circuitValidation = this.circuitBreaker.validateBeforeSync(project);
-    if (!circuitValidation.passed && circuitValidation.shouldBlock) {
-      this.logger.error('熔断: 同步被阻止', {
-        projectId: project.id,
-        level: circuitValidation.level,
-        violations: circuitValidation.violations
-      });
-      Sentry.captureMessage('CircuitBreaker: Sync blocked in saveProjectToCloud', {
-        level: 'error',
-        tags: { 
-          operation: 'saveProjectToCloud',
-          projectId: project.id,
-          level: circuitValidation.level
-        },
-        extra: {
-          passed: circuitValidation.passed,
-          level: circuitValidation.level,
-          severity: circuitValidation.severity,
-          shouldBlock: circuitValidation.shouldBlock,
-          suggestedAction: circuitValidation.suggestedAction,
-          violations: circuitValidation.violations,
-        }
-      });
-      // 熔断时不将数据加入重试队列，需要用户确认后才能继续
-      return { success: false };
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      this.addToRetryQueue('project', 'upsert', project);
-      return { success: false };
-    }
-    
-    // 【性能优化 2026-01-26】在批量操作开始前进行一次 session 验证
-    // 避免在每个 pushTask/pushConnection 中重复检查（40+ 次 → 1 次）
-    // 注意：本地模式已在函数开始时提前返回，此处不会执行
-    try {
-      const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
-        this.syncState.update(s => ({ ...s, sessionExpired: true }));
-        this.logger.warn('批量推送前检测到会话丢失', { projectId: project.id, operation: 'saveProjectToCloud' });
-        // 【修复】本地模式不显示 Toast，避免误导用户
-        if (_userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-          this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-        }
-        return { success: false };
-      }
-    } catch (e) {
-      this.logger.error('Session 验证失败', e);
-      this.syncState.update(s => ({ ...s, sessionExpired: true }));
-      // 【修复】本地模式不显示 Toast
-      if (_userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      }
-      return { success: false };
-    }
-    
-    this.syncState.update(s => ({ ...s, isSyncing: true }));
-    
-    try {
-      // 【关键防护】先获取 tombstones，过滤已永久删除的任务
-      // 【修复】软删除任务（有 deletedAt）必须推送到云端，让其他设备知道任务已被删除
-      // 否则云端保留旧数据，Realtime 同步时任务会"复活"
-      const tombstoneIds = await this.getTombstoneIds(project.id);
-      const tasksToSync = project.tasks.filter(task => {
-        if (tombstoneIds.has(task.id)) {
-          this.logger.info('saveProjectToCloud: 跳过 tombstone 任务', { taskId: task.id });
-          return false;
-        }
-        // 【关键修复】不再跳过软删除任务！
-        // 软删除任务必须推送 deletedAt 到云端，防止任务复活
-        // 服务器端用 pg_cron 定期清理 30 天前的软删除记录
-        return true;
-      });
-      
-      if (tasksToSync.length !== project.tasks.length) {
-        this.logger.info('saveProjectToCloud: 过滤了已删除任务', {
-          original: project.tasks.length,
-          filtered: tasksToSync.length,
-          tombstoneCount: tombstoneIds.size
-        });
-      }
-      
-      // 【关键修复】处理永久删除的任务
-      // 从 ChangeTracker 获取需要删除的任务 ID，调用 purge RPC 写入 tombstone
-      const changes = this.changeTracker.getProjectChanges(project.id);
-      if (changes.taskIdsToDelete.length > 0) {
-        this.logger.info('saveProjectToCloud: 检测到永久删除任务', { 
-          taskIds: changes.taskIdsToDelete 
-        });
-        const purgeSuccess = await this.purgeTasksFromCloud(project.id, changes.taskIdsToDelete);
-        
-        // 【关键】purge 成功后清除变更记录，防止重复删除
-        if (purgeSuccess) {
-          for (const taskId of changes.taskIdsToDelete) {
-            this.changeTracker.clearTaskChange(project.id, taskId);
-          }
-          this.logger.debug('saveProjectToCloud: 已清除永久删除任务的变更记录');
-        }
-      }
-      
-      // 1. 保存项目元数据
-      await this.pushProject(project);
-      
-      // 2. 批量保存任务（请求间延迟 100ms 防止速率限制）
-      // 【关键修复】拓扑排序确保父任务在子任务之前推送，防止外键约束违反
-      const sortedTasks = this.topologicalSortTasks(tasksToSync);
-      
-      // 【流量优化 2026-01-12】获取每个任务的变更字段，用于增量更新
-      const taskUpdateFieldsById = changes.taskUpdateFieldsById;
-      
-      // 【关键修复】收集成功推送的任务 ID，用于后续连接验证
-      const successfulTaskIds = new Set<string>();
-      for (let i = 0; i < sortedTasks.length; i++) {
-        if (i > 0) {
-          // 【优化 v2026-01】增加到200ms，降低后端累积压力，减少504超时
-          await this.delay(200);
-        }
-        // skipTombstoneCheck=true: 已在上方通过 getTombstoneIds 批量过滤
-        try {
-          const task = sortedTasks[i];
-          const changedFields = taskUpdateFieldsById[task.id];
-          
-          // 【流量优化】如果仅有位置变更（x, y），使用增量更新
-          // 从 ~5KB（全量任务含 content）降低到 ~100B（仅坐标）
-          const isPositionOnlyUpdate = changedFields && 
-            changedFields.length > 0 &&
-            changedFields.every(f => f === 'x' || f === 'y' || f === 'rank');
-          
-          let success: boolean;
-          if (isPositionOnlyUpdate) {
-            // 增量位置更新
-            success = await this.pushTaskPosition(task.id, task.x, task.y);
-            this.logger.debug('使用增量位置更新', { taskId: task.id, changedFields });
-          } else {
-            // 全量更新
-            success = await this.pushTask(task, project.id, true);
-          }
-          
-          if (success) {
-            successfulTaskIds.add(task.id);
-          }
-        } catch (e) {
-          // 【Critical】永久失败（版本冲突、会话过期）不应中断整个批量同步
-          if (isPermanentFailureError(e)) {
-            this.logger.warn('跳过永久失败的任务，继续批量同步', {
-              taskId: sortedTasks[i].id,
-              error: e.getFullMessage(),
-              context: e.context
-            });
-            // 不加入成功集合，继续下一个任务
-            continue;
-          }
-          // 非永久失败的错误，重新抛出（会话初始化失败等）
-          throw e;
-        }
-      }
-      
-      // 3. 批量保存连接（请求间延迟 100ms 防止速率限制）
-      // 【性能优化 v2026-01】批量获取连接 tombstones，避免 pushConnection 中的逐个查询
-      const connectionTombstoneIds = await this.getConnectionTombstoneIds(project.id);
-      
-      // 【修复数据漂移】过滤软删除的连接，与远程查询逻辑保持一致
-      // 【关键修复】过滤引用未同步成功任务的连接，防止外键约束违反
-      // 【P0 防复活】过滤已在 tombstone 中的连接
-      const connectionsToSync = project.connections.filter(conn => {
-        if (conn.deletedAt) return false;
-        if (connectionTombstoneIds.has(conn.id)) {
-          this.logger.info('saveProjectToCloud: 跳过 tombstone 连接', { connectionId: conn.id });
-          return false;
-        }
-        if (!successfulTaskIds.has(conn.source) || !successfulTaskIds.has(conn.target)) {
-          this.logger.warn('跳过连接（引用的任务未同步成功）', {
-            connectionId: conn.id,
-            source: conn.source,
-            target: conn.target,
-            sourceExists: successfulTaskIds.has(conn.source),
-            targetExists: successfulTaskIds.has(conn.target)
-          });
-          return false;
-        }
-        return true;
-      });
-      
-      if (connectionsToSync.length !== project.connections.length) {
-        this.logger.info('saveProjectToCloud: 过滤了软删除/tombstone 连接', {
-          original: project.connections.length,
-          filtered: connectionsToSync.length,
-          tombstoneCount: connectionTombstoneIds.size
-        });
-      }
-      
-      for (let i = 0; i < connectionsToSync.length; i++) {
-        if (i > 0) {
-          // 【优化 v2026-01】增加到200ms，降低后端累积压力，减少504超时
-          await this.delay(200);
-        }
-        // skipTombstoneCheck=true: 已在上方通过 getConnectionTombstoneIds 批量过滤
-        // skipTaskExistenceCheck=true: 已在上方通过 successfulTaskIds 验证任务同步成功
-        try {
-          await this.pushConnection(connectionsToSync[i], project.id, true, true);
-        } catch (e) {
-          // 【Critical】永久失败（版本冲突、会话过期）不应中断整个批量同步
-          if (isPermanentFailureError(e)) {
-            this.logger.warn('跳过永久失败的连接，继续批量同步', {
-              connectionId: connectionsToSync[i].id,
-              error: e.getFullMessage(),
-              context: e.context
-            });
-            // 继续下一个连接
-            continue;
-          }
-          // 非永久失败的错误，重新抛出（会话初始化失败等）
-          throw e;
-        }
-      }
-      
-      this.syncState.update(s => ({
-        ...s,
-        isSyncing: false,
-        lastSyncTime: nowISO()
-      }));
-      
-      // 【数据漂移检测】来自高级顾问建议
-      // 每 50 次同步检查本地和远程行数差异，上报 Sentry 警告
-      // 【修复】使用过滤后的连接数，与远程查询逻辑保持一致
-      // 【修复数据漂移误报】过滤软删除任务，与远程查询 `deleted_at IS NULL` 一致
-      this.syncCounter++;
-      if (this.syncCounter % 50 === 0) {
-        const activeTasksCount = tasksToSync.filter(t => !t.deletedAt).length;
-        this.checkDataDrift(project.id, activeTasksCount, connectionsToSync.length);
-      }
-      
-      // 【P0 熔断层】同步成功后更新已知任务数量（用于下次骤降检测）
-      this.circuitBreaker.updateLastKnownTaskCount(project.id, tasksToSync.length);
-      
-      return { success: true, newVersion: project.version };
-    } catch (e) {
-      this.logger.error('保存项目失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'saveProject', { projectId: project.id });
-      this.syncState.update(s => ({
-        ...s,
-        isSyncing: false,
-        syncError: '保存失败'
-      }));
-      return { success: false };
-    }
+  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number }> {
+    return this.batchSyncService.saveProjectToCloud(project, userId);
   }
   
-  /**
-   * 智能保存项目（兼容旧 SyncService 接口）
-   * SimpleSyncService 使用 LWW 策略，直接调用 saveProjectToCloud
-   */
-  async saveProjectSmart(
-    project: Project,
-    userId: string
-  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[] }> {
+  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[] }> {
     const result = await this.saveProjectToCloud(project, userId);
     return { ...result, newVersion: project.version };
   }
   
-  // ==================== 性能优化：批量 RPC 加载（P0 优化 2026-01-26）====================
-  
-  /**
-   * 【P0 性能优化】使用 RPC 批量加载项目数据
-   * 
-   * 优化效果：
-   * - 将 4+ 个 API 请求合并为 1 个 RPC 调用
-   * - 减少 ~70% 的网络往返时间
-   * - 预期首屏时间提升 3-4 秒
-   * 
-   * @param projectId 项目 ID
-   * @returns 完整的项目数据（含任务、连接、墓碑）
-   */
   async loadFullProjectOptimized(projectId: string): Promise<Project | null> {
-    const client = this.getSupabaseClient();
-    if (!client) return null;
-
-    try {
-      this.logger.debug('使用 RPC 批量加载项目', { projectId });
-      
-      const { data, error } = await client.rpc('get_full_project_data', {
-        p_project_id: projectId
-      });
-
-      if (error) {
-        this.logger.warn('RPC 调用失败，回退到顺序加载', { error: error.message });
-        // 降级到原有方法
-        return this.loadFullProject(projectId, '');
-      }
-      
-      if (!data?.project) {
-        this.logger.warn('RPC 返回空数据', { projectId });
-        return null;
-      }
-
-      // 转换 RPC 返回的数据格式
-      const project = this.rowToProject(data.project);
-      
-      // 过滤 tombstones 中的已删除任务
-      const taskTombstoneSet = new Set<string>(data.task_tombstones || []);
-      const connectionTombstoneSet = new Set<string>(data.connection_tombstones || []);
-      
-      project.tasks = (data.tasks || [])
-        .filter((t: TaskRow) => !taskTombstoneSet.has(t.id))
-        .map((t: TaskRow) => this.rowToTask(t));
-      
-      project.connections = (data.connections || [])
-        .filter((c: ConnectionRow) => !connectionTombstoneSet.has(c.id))
-        .map((c: ConnectionRow) => this.rowToConnection(c));
-
-      this.logger.info('RPC 批量加载成功', { 
-        projectId, 
-        tasksCount: project.tasks.length,
-        connectionsCount: project.connections.length
-      });
-
-      return project;
-    } catch (e) {
-      this.logger.error('批量加载项目失败', e);
-      this.captureExceptionWithContext(e, 'loadFullProjectOptimized', { projectId });
-      // 降级到原有方法
-      return this.loadFullProject(projectId, '');
-    }
+    return this.projectDataService.loadFullProjectOptimized(projectId);
   }
   
-  /**
-   * 加载完整项目（包含任务和连接）
-   * 使用请求限流避免连接池耗尽
-   */
   async loadFullProject(projectId: string, _userId: string): Promise<Project | null> {
+    return this.projectDataService.loadFullProject(projectId);
+  }
+  
+  async loadProjectsFromCloud(userId: string, _silent?: boolean): Promise<Project[]> {
+    return this.projectDataService.loadProjectsFromCloud(userId);
+  }
+  
+  async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
     const client = this.getSupabaseClient();
-    if (!client) return null;
+    if (!client) return false;
     
     try {
-      // 1. 加载项目元数据（使用限流 + 去重）
-      const projectData = await this.throttle.execute(
-        `project-meta:${projectId}`,
-        async () => {
-          // 【流量优化】使用字段筛选替代 SELECT *
-          const { data, error } = await client
-            .from('projects')
-            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-            .eq('id', projectId)
-            .single();
-          if (error) throw error;
-          return data;
-        },
-        { 
-          deduplicate: true, 
-          priority: 'normal',
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT
-        }
-      );
-      
-      // 【修复】顺序加载任务和连接，避免绕过限流服务的并发控制
-      // 原来使用 Promise.all 会同时发起多个请求，可能导致连接池耗尽
-      // 虽然每个请求都通过 throttle.execute 包装，但 Promise.all 会同时触发它们
-      // 限流服务会把它们都加入队列，但如果队列处理速度快，仍可能同时发起多个 HTTP 请求
-      const tasks = await this.pullTasksThrottled(projectId);
-      const connectionsData = await this.throttle.execute(
-        `connections:${projectId}`,
-        async () => {
-          // 【关键修复】不再过滤 deleted_at！
-          // 同步查询必须返回已删除记录，由客户端处理删除逻辑
-          // 否则其他设备无法知道某个连接已被删除，导致连接"复活"
-          // 【流量优化】使用字段筛选替代 SELECT *
-          const { data } = await client
-            .from('connections')
-            .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-            .eq('project_id', projectId);
-          return data || [];
-        },
-        { 
-          deduplicate: true, 
-          priority: 'normal',
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT
-        }
-      );
-      
-      // 转换连接数据，保留 deletedAt 字段
-      const connections: Connection[] = connectionsData.map((row: Record<string, unknown>) => ({
-        id: String(row.id),
-        source: String(row.source_id),
-        target: String(row.target_id),
-        title: row.title ? String(row.title) : undefined,
-        description: String(row.description || ''),
-        deletedAt: row.deleted_at ? String(row.deleted_at) : null
-      }));
-      
-      const project = this.rowToProject(projectData);
-      // 【关键修复】不再在这里过滤已删除的任务和连接
-      // 返回所有数据，由调用方决定如何处理已删除的记录
-      project.tasks = tasks;
-      project.connections = connections;
-      
-      return project;
+      const { error } = await client.from('projects').delete().eq('id', projectId).eq('owner_id', userId);
+      if (error) throw supabaseErrorToError(error);
+      return true;
     } catch (e) {
-      this.logger.error('加载项目失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'loadFullProject', { projectId });
-      return null;
+      this.logger.error('删除项目失败', e);
+      return false;
     }
   }
   
-  /**
-   * 拉取任务（带限流）
-   * 
-   * 【关键修复】检查 task_tombstones 表，防止已删除任务复活
-   * 
-   * 问题场景：
-   * 1. 设备 A 删除任务（软删除 + purge 写入 tombstone）
-   * 2. 设备 B 本地缓存中仍有该任务
-   * 3. 设备 B 同步时如果不检查 tombstones，会把已删除任务推回云端
-   * 
-   * 解决方案：
-   * - 拉取任务时同时查询 task_tombstones
-   * - 过滤掉已在 tombstones 中的任务
-   * - 过滤掉已软删除（deleted_at 非空）的任务
-   */
-  private async pullTasksThrottled(projectId: string): Promise<Task[]> {
-    const client = this.getSupabaseClient();
-    if (!client) return [];
-    
-    Sentry.addBreadcrumb({
-      category: 'sync',
-      message: 'Loading tasks with tombstones',
-      level: 'info',
-      data: { projectId }
-    });
-    
-    // 【修复】移除嵌套 throttle 调用，避免超时叠加和并发槽位浪费
-    // 每个查询独立通过 throttle 包装，使用 BATCH_SYNC_TIMEOUT (90秒)
-    // 【流量优化】使用字段筛选替代 SELECT *，不含 content 字段节省 60-70% 流量
-    const tasksResult = await this.throttle.execute(
-      `tasks-data:${projectId}`,
-      async () => {
-        return await client
-          .from('tasks')
-          .select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS)
-          .eq('project_id', projectId);
-      },
-      { 
-        deduplicate: true,
-        timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT 
-      }
-    );
-    
-    // 【流量优化】使用 Tombstone 缓存避免重复查询
-    const tombstonesResult = await this.getTombstonesWithCache(projectId, client);
-    
-    if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
-    
-    const tasksCount = (tasksResult.data as TaskRow[] || []).length;
-    const tombstonesCount = (tombstonesResult.data || []).length;
-    
-    // 2. 构建 tombstone ID 集合（云端 + 本地）
-    // tombstones 查询失败时降级：只依赖本地 tombstone 和 deleted_at 过滤
-    const tombstoneIds = new Set<string>();
-    
-    // 添加云端 tombstones
-    if (tombstonesResult.error) {
-      this.logger.warn('加载云端 tombstones 失败，使用本地缓存', tombstonesResult.error);
-    } else {
-      for (const t of (tombstonesResult.data || [])) {
-        tombstoneIds.add(t.task_id);
-      }
-    }
-    
-    // 【关键修复】合并本地 tombstones（用于 RPC 不可用时的保护）
-    const localTombstones = this.getLocalTombstones(projectId);
-    for (const id of localTombstones) {
-      tombstoneIds.add(id);
-    }
-    
-    if (localTombstones.size > 0) {
-      this.logger.debug('合并本地 tombstones', { 
-        projectId, 
-        localCount: localTombstones.size,
-        cloudCount: tombstoneIds.size - localTombstones.size
-      });
-    }
-    
-    // 3. 【关键修复】返回所有任务，包括已删除的
-    // 同步查询必须返回已删除记录，由客户端处理删除逻辑
-    // 否则其他设备无法知道某个任务已被删除，导致任务"复活"
-    const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
-    
-    // 标记 tombstone 任务（永久删除）
-    const markedTasks = allTasks.map(task => {
-      if (tombstoneIds.has(task.id)) {
-        this.logger.debug('标记 tombstone 任务', { taskId: task.id });
-        return { ...task, deletedAt: task.deletedAt || new Date().toISOString() };
-      }
-      return task;
-    });
-    
-    const deletedCount = markedTasks.filter(t => t.deletedAt).length;
-    
-    Sentry.addBreadcrumb({
-      category: 'sync',
-      message: 'Tasks loaded successfully',
-      level: 'info',
-      data: { 
-        projectId, 
-        tasksCount, 
-        tombstonesCount,
-        totalCount: allTasks.length,
-        tombstoneCount: tombstoneIds.size,
-        deletedCount 
-      }
-    });
-    
-    if (tombstoneIds.size > 0 || deletedCount > 0) {
-      this.logger.info(`任务同步信息`, {
-        projectId,
-        totalCount: allTasks.length,
-        tombstoneCount: tombstoneIds.size,
-        softDeletedCount: deletedCount - tombstoneIds.size
-      });
-    }
-    
-    return markedTasks;
+  async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
+    return this.loadFullProject(projectId, userId);
   }
   
-  /**
-   * 清除离线缓存
-   */
+  async tryReloadConflictData(userId: string, _findProject?: (id: string) => Project | undefined): Promise<Project | undefined> {
+    const state = this.syncState();
+    if (!state.hasConflict || !state.conflictData) return undefined;
+    const project = await this.loadFullProject(state.conflictData.projectId, userId);
+    return project ?? undefined;
+  }
+  
   clearOfflineCache(): void {
     this.retryQueue = [];
     this.syncState.update(s => ({ ...s, pendingCount: 0 }));
     this.logger.info('离线缓存已清除');
   }
   
-  // ==================== 离线快照 ====================
-  
-  // 使用配置中的缓存键，确保全局一致
-  private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
-  private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
-  
-  /**
-   * 保存离线快照
-   * 用于断网时的数据持久化
-   * 
-   * 【关键修复】保存前过滤已删除的任务，防止网络恢复后复活
-   */
   saveOfflineSnapshot(projects: Project[]): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      // 【关键修复】过滤每个项目中已删除的任务
-      // 只保存未删除的任务，防止已删除任务在网络恢复后被误认为"本地新增"而复活
-      const cleanedProjects = projects.map(p => ({
-        ...p,
-        tasks: (p.tasks || []).filter(t => !t.deletedAt)
-      }));
-      
-      localStorage.setItem(this.OFFLINE_CACHE_KEY, JSON.stringify({
-        projects: cleanedProjects,
-        version: this.CACHE_VERSION
-      }));
-    } catch (e) {
-      this.logger.warn('离线快照保存失败', e);
-    }
+    this.projectDataService.saveOfflineSnapshot(projects);
   }
   
-  /**
-   * 加载离线快照
-   * 
-   * 【关键修复】加载时防御性过滤已删除任务
-   * 虽然 saveOfflineSnapshot 保存时已过滤，但旧版本缓存可能包含已删除任务
-   */
   loadOfflineSnapshot(): Project[] | null {
-    if (typeof localStorage === 'undefined') return null;
-    try {
-      const cached = localStorage.getItem(this.OFFLINE_CACHE_KEY);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed?.projects)) {
-          // 【关键修复】防御性过滤：确保不会从旧版本缓存中恢复已删除任务
-          return parsed.projects.map((p: Project) => ({
-            ...p,
-            tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
-          }));
-        }
-      }
-    } catch (e) {
-      this.logger.warn('离线快照加载失败', e);
-    }
-    return null;
+    return this.projectDataService.loadOfflineSnapshot();
   }
   
-  // ==================== 兼容旧 SyncService 接口 ====================
+  // ==================== 会话管理 ====================
   
-  /** 任务变更回调 */
-  private taskChangeCallback: TaskChangeCallback | null = null;
-  
-  /**
-   * 设置远程变更回调 - 委托给 RealtimePollingService（兼容旧接口）
-   */
-  setRemoteChangeCallback(callback: RemoteChangeCallback): void {
-    this.realtimePollingService.setOnRemoteChange(callback);
-  }
-  
-  /**
-   * 设置任务变更回调
-   */
-  setTaskChangeCallback(callback: TaskChangeCallback): void {
-    this.taskChangeCallback = callback;
-  }
-  
-  /**
-   * 初始化 Realtime 订阅
-   * @param userId 用户 ID（兼容旧接口）
-   */
-  async initRealtimeSubscription(userId: string): Promise<void> {
-    this.logger.debug('Realtime 订阅已初始化', { userId: userId.substring(0, 8) });
-  }
-  
-  /**
-   * 关闭 Realtime 订阅 - 委托给 RealtimePollingService
-   */
-  teardownRealtimeSubscription(): void {
-    this.realtimePollingService.unsubscribeFromProject();
-  }
-  
-  /**
-   * 暂停 Realtime 更新 - 委托给 RealtimePollingService
-   */
-  pauseRealtimeUpdates(): void {
-    this.realtimePollingService.pauseRealtimeUpdates();
-  }
-  
-  /**
-   * 恢复 Realtime 更新 - 委托给 RealtimePollingService
-   */
-  resumeRealtimeUpdates(): void {
-    this.realtimePollingService.resumeRealtimeUpdates();
-  }
-  
-  /**
-   * 从云端加载项目列表（包含任务和连接）
-   * 使用请求限流避免并发请求耗尽连接池
-   * 
-   * @param userId 用户 ID
-   * @param _silent 静默模式（兼容旧接口，忽略）
-   * 
-   * 【流量优化】使用字段筛选
-   * 【P0 性能优化 2026-01-26】使用 RPC 批量加载
-   */
-  async loadProjectsFromCloud(userId: string, _silent?: boolean): Promise<Project[]> {
-    // 【修复】本地模式不查询 Supabase，防止无效 UUID 错误
-    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('本地模式，跳过云端加载');
-      return [];
-    }
-
-    const client = this.getSupabaseClient();
-    if (!client) return [];
+  resetSessionExpired(): void {
+    if (!this.syncState().sessionExpired) return;
     
-    this.isLoadingRemote.set(true);
+    const previousQueueLength = this.retryQueue.length;
+    this.syncState.update(s => ({ ...s, sessionExpired: false }));
     
-    try {
-      // 1. 先加载项目列表（单个请求）
-      // 【流量优化】使用字段筛选替代 SELECT *
-      const projectList = await this.throttle.execute(
-        `project-list:${userId}`,
-        async () => {
-          const { data, error } = await client
-            .from('projects')
-            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-            .eq('owner_id', userId)
-            .order('updated_at', { ascending: false });
-          
-          if (error) throw supabaseErrorToError(error);
-          return data || [];
-        },
-        { 
-          deduplicate: true, 
-          priority: 'high',
-          // 【修复】增加超时时间和重试次数，防止在网络拥堵或队列积压时加载失败
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT, 
-          retries: 5 
-        }
-      );
-      
-      // 2. 【P0 优化】使用 RPC 批量加载（单个请求加载完整项目数据）
-      // 相比原来的 4+ 个顺序请求，性能提升 70%
-      
-      this.logger.debug('开始批量加载项目', { count: projectList.length });
-      
-      const loadPromises = projectList.map(row => 
-        this.loadFullProjectOptimized(row.id)  // 使用优化后的 RPC 方法
-      );
-      
-      const results = await Promise.allSettled(loadPromises);
-      
-      const projects: Project[] = [];
-      let failedCount = 0;
-      
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status === 'fulfilled' && result.value) {
-          projects.push(result.value);
-        } else if (result.status === 'rejected') {
-          failedCount++;
-          this.logger.warn('加载项目失败', { 
-            projectId: projectList[i]?.id,
-            error: result.reason 
-          });
-        }
-      }
-      
-      if (failedCount > 0) {
-        this.logger.warn('部分项目加载失败', { 
-          total: projectList.length, 
-          failed: failedCount,
-          success: projects.length 
-        });
-      }
-      
-      return projects;
-    } catch (e) {
-      this.logger.error('加载项目列表失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'loadRemoteProjects', {});
-      return [];
-    } finally {
-      this.isLoadingRemote.set(false);
-    }
-  }
-  
-  /**
-   * 从云端删除项目
-   * 注意：projects 表使用硬删除（没有 deleted_at 列）
-   */
-  async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
-    const client = this.getSupabaseClient();
-    if (!client) return false;
+    this.logger.info('会话状态已重置', { previousQueueLength, currentQueueLength: this.retryQueue.length });
     
-    try {
-      // 硬删除：projects 表没有 deleted_at 列
-      // 关联的 tasks 和 connections 会通过外键 CASCADE 自动删除
-      const { error } = await client
-        .from('projects')
-        .delete()
-        .eq('id', projectId)
-        .eq('owner_id', userId);  // 数据库列名为 owner_id
-      
-      if (error) throw supabaseErrorToError(error);
-      return true;
-    } catch (e) {
-      this.logger.error('删除项目失败', e);
-      // 报告到 Sentry（使用增强上下文，自动清洗 PII）
-      this.captureExceptionWithContext(e, 'deleteProject', { projectId });
-      return false;
+    if (this.state().isOnline && this.retryQueue.length > 0) {
+      this.logger.info('会话恢复，触发重试队列处理');
+      this.processRetryQueue();
     }
   }
   
-  /**
-   * 加载单个项目
-   */
-  async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
-    return this.loadFullProject(projectId, userId);
-  }
-  
-  /**
-   * 尝试重新加载冲突数据
-   * @param userId 用户 ID
-   * @param _findProject 查找项目函数（兼容旧接口，忽略）
-   */
-  async tryReloadConflictData(
-    userId: string, 
-    _findProject?: (id: string) => Project | undefined
-  ): Promise<Project | undefined> {
-    // SimpleSyncService 使用 LWW，冲突场景简化处理
-    const state = this.syncState();
-    if (!state.hasConflict || !state.conflictData) {
-      return undefined;
-    }
-    const project = await this.loadFullProject(state.conflictData.projectId, userId);
-    return project ?? undefined;
-  }
-  
-  /**
-   * 销毁服务（清理资源）
-   */
   destroy(): void {
     this.cleanup();
     this.unsubscribeFromProject();

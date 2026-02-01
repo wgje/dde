@@ -681,8 +681,8 @@ export class IndexedDBHealthService {
           const records = await this.exportStore(db, storeName);
           result.data[storeName] = records.valid;
           result.corruptedIds.push(...records.corruptedIds);
-        } catch {
-          this.logger.warn(`导出 ${storeName} 失败`);
+        } catch (e) {
+          this.logger.warn(`导出 ${storeName} 失败`, { error: e });
         }
       }
       
@@ -728,7 +728,9 @@ export class IndexedDBHealthService {
           // 验证数据可序列化
           JSON.parse(JSON.stringify(value));
           valid.push(value);
-        } catch {
+        } catch (e) {
+          // 降级处理：记录损坏的条目 ID
+          this.logger.debug('exportStore', '数据序列化失败', { key: cursor.key, error: e });
           corruptedIds.push(cursor.key as string);
         }
         

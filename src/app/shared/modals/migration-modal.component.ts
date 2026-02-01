@@ -1,5 +1,6 @@
 import { Component, inject, output, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { LoggerService } from '../../../services/logger.service';
 import { MigrationService, MigrationStrategy } from '../../../services/migration.service';
 import { AuthService } from '../../../services/auth.service';
 import { ToastService } from '../../../services/toast.service';
@@ -205,6 +206,7 @@ export class MigrationModalComponent {
   private migrationService = inject(MigrationService);
   private authService = inject(AuthService);
   private toast = inject(ToastService);
+  private readonly logger = inject(LoggerService);
   
   close = output<void>();
   migrated = output<void>();
@@ -251,7 +253,7 @@ export class MigrationModalComponent {
       const errorMsg = error instanceof Error ? error.message : '未知错误';
       this.errorMessage.set(errorMsg);
       this.toast.error('迁移失败', errorMsg);
-      console.error('数据迁移异常:', error);
+      this.logger.error('MigrationModal', '数据迁移异常', error);
     }
   }
 }

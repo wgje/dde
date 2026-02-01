@@ -744,8 +744,9 @@ export class AttachmentExportService {
         const hashArray = Array.from(new Uint8Array(hashBuffer));
         return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
       }
-    } catch {
-      // 忽略错误
+    } catch (e) {
+      // 降级处理：使用简单校验和
+      this.logger.debug('SHA-256 计算失败，使用简单校验和', { error: e });
     }
     
     // Fallback: 简单校验和

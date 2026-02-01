@@ -46,7 +46,11 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
 
         @if (uiState.isTextUnassignedOpen()) {
           <div class="pb-2 animate-collapse-open">
-            <div class="flex flex-wrap" [ngClass]="{'gap-2': !isMobile, 'gap-1.5': isMobile}">
+            <div class="flex flex-wrap" 
+                 [ngClass]="{'gap-2': !isMobile, 'gap-1.5': isMobile}"
+                 (dragover)="handleDragOverUnassigned($event)"
+                 (dragleave)="handleDragLeaveUnassigned($event)"
+                 (drop)="handleDropUnassigned($event)">
               @for (task of projectState.unassignedTasks(); track task.id) {
                 @if (editingTaskId() === task.id) {
                   <!-- 编辑/预览模式 -->
@@ -349,6 +353,60 @@ export class TextUnassignedComponent implements OnDestroy {
 
   protected handleTouchCancel(event: TouchEvent): void {
     this.touchCancel.emit(event);
+  }
+
+  /**
+   * 待分配区域内的拖放事件处理
+   * 支持待分配块之间的重新挂载（改变父子关系）
+   */
+  protected handleDragOverUnassigned(event: DragEvent): void {
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+  }
+
+  protected handleDragLeaveUnassigned(event: DragEvent): void {
+    // 可选：添加视觉反馈
+  }
+
+  protected handleDropUnassigned(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+
+    // 提取拖放数据
+    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
+    if (!data) return;
+
+    try {
+      const draggedTask = JSON.parse(data) as Task;
+      
+      // 只处理待分配块之间的拖放（都是 stage === null）
+      if (draggedTask?.id && draggedTask.stage === null) {
+        // 获取所有待分配任务（排除拖动的任务本身）
+        const unassignedTasks = this.projectState.unassignedTasks()
+          .filter(t => t.id !== draggedTask.id);
+        
+        if (unassignedTasks.length > 0) {
+          // 选择第一个待分配块作为新的父块
+          // 实际应用中可以根据鼠标位置选择最近的块
+          const targetTask = unassignedTasks[0];
+          
+          // 使用适配器执行重新挂载操作
+          const result = this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+          
+          if (!result.ok) {
+            // 操作失败，但不需要显示错误消息（已由适配器处理）
+            return;
+          }
+          
+          // 操作成功，emit 事件通知父组件更新视图
+          this.dragStart.emit({ event: new DragEvent('drop'), task: draggedTask });
+        }
+      }
+    } catch (err) {
+      // 数据解析失败，忽略
+    }
   }
 
   private syncLocalState(taskId: string): void {

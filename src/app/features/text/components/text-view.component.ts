@@ -920,28 +920,54 @@ export class TextViewComponent implements OnInit, OnDestroy {
       }
       
       if (!foundStage) {
-        // 更新幽灵元素视觉反馈：不在有效阶段上
-        this.dragDropService.updateGhostVisualFeedback(false);
+        // 检查是否在待分配区域内的某个待分配块上
+        let foundUnassigned = false;
+        const draggingTaskId = this.dragDropService.draggingTaskId();
         
-        // 标记开始 DOM 更新
-        this.dragDropService.beginDOMUpdate();
-        
-        // 获取需要折叠的阶段
-        const collapseStage = this.dragDropService.updateTouchTarget(null, null);
-        
-        // 使用 requestAnimationFrame 延迟折叠，避免中断触摸事件
-        if (collapseStage !== null) {
-          requestAnimationFrame(() => {
-            this.stagesRef?.collapseStage(collapseStage);
-            // 折叠完成后立即结束 DOM 更新标记
-            setTimeout(() => this.dragDropService.endDOMUpdate(), 50);
-          });
-        } else {
-          // 没有需要折叠的阶段，立即结束 DOM 更新标记
-          this.dragDropService.endDOMUpdate();
+        for (const el of elements) {
+          const unassignedEl = el.closest('[data-unassigned-task]');
+          if (unassignedEl) {
+            const targetTaskId = unassignedEl.getAttribute('data-unassigned-task');
+            // 排除被拖拽的任务本身
+            if (targetTaskId && targetTaskId !== draggingTaskId) {
+              this.dragDropService.updateUnassignedTarget(targetTaskId);
+              this.dragDropService.updateGhostVisualFeedback(true);
+              foundUnassigned = true;
+              break;
+            }
+          }
         }
+        
+        if (!foundUnassigned) {
+          // 清除待分配块目标
+          this.dragDropService.clearUnassignedTarget();
+          
+          // 更新幽灵元素视觉反馈：不在有效阶段上
+          this.dragDropService.updateGhostVisualFeedback(false);
+          
+          // 标记开始 DOM 更新
+          this.dragDropService.beginDOMUpdate();
+          
+          // 获取需要折叠的阶段
+          const collapseStage = this.dragDropService.updateTouchTarget(null, null);
+          
+          // 使用 requestAnimationFrame 延迟折叠，避免中断触摸事件
+          if (collapseStage !== null) {
+            requestAnimationFrame(() => {
+              this.stagesRef?.collapseStage(collapseStage);
+              // 折叠完成后立即结束 DOM 更新标记
+              setTimeout(() => this.dragDropService.endDOMUpdate(), 50);
+            });
+          } else {
+            // 没有需要折叠的阶段，立即结束 DOM 更新标记
+            this.dragDropService.endDOMUpdate();
+          }
 
-        this.collapseSourceStageIfNeeded(null);
+          this.collapseSourceStageIfNeeded(null);
+        }
+      } else {
+        // 进入阶段时清除待分配块目标
+        this.dragDropService.clearUnassignedTarget();
       }
     }
   }
@@ -949,7 +975,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   onTouchEnd(_event: TouchEvent) {
     const touchEndResult = this.dragDropService.endTouchDrag();
     const mouseExpandedStages = this.dragDropService.endDrag();
-    const { task, targetStage, targetBeforeId, wasDragging, autoExpandedStages } = touchEndResult;
+    const { task, targetStage, targetBeforeId, targetUnassignedId, wasDragging, autoExpandedStages } = touchEndResult;
     this.collapseAutoExpandedStages(autoExpandedStages, mouseExpandedStages);
     this.restoreAutoCollapsedSourceStage();
     
@@ -958,7 +984,26 @@ export class TextViewComponent implements OnInit, OnDestroy {
       return;
     }
     
-    // 只有在真正拖拽到有效目标时才执行移动
+    // 场景1：待分配块间的拖放（重新挂载父子关系）
+    if (wasDragging && targetUnassignedId !== null && task.stage === null) {
+      this.logger.debug('[TouchEnd] Unassigned to unassigned remount', {
+        taskId: task.id.slice(-4),
+        targetId: targetUnassignedId.slice(-4)
+      });
+      
+      // 调用 moveTaskToStage，stage 保持为 null，parentId 设置为目标任务
+      const result = this.taskOpsAdapter.moveTaskToStage(task.id, null, undefined, targetUnassignedId);
+      if (isFailure(result)) {
+        const errorDetail = getErrorMessage(result.error);
+        this.logger.error('[TouchEnd] Unassigned remount failed', { error: errorDetail });
+        this.toast.error('重新挂载失败', errorDetail);
+      } else {
+        this.toast.success('已重新挂载', `"${task.title}" 已移到目标任务下`);
+      }
+      return;
+    }
+    
+    // 场景2：拖到阶段区域
     if (wasDragging && targetStage !== null) {
       // 推断父任务ID，确保自动编号逻辑正确应用
       let inferredParentId: string | null | undefined = undefined;

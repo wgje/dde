@@ -64,43 +64,15 @@ describe('本地模式性能优化 (2026-01-26)', () => {
         createdDate: new Date().toISOString()
       };
 
-      const getSessionSpy = vi.spyOn(service as any, 'getSupabaseClient').mockReturnValue({
-        auth: {
-          getSession: vi.fn().mockResolvedValue({
-            data: { session: { user: { id: 'real-user-id' } } }
-          })
-        }
-      });
-
-      vi.spyOn((service as any).mobileSync, 'shouldAllowSync').mockReturnValue(true);
-      vi.spyOn((service as any).circuitBreaker, 'validateBeforeSync').mockReturnValue({
-        passed: true,
-        violations: [],
-        level: 'L0',
-        severity: 'low',
-        shouldBlock: false,
-        suggestedAction: 'none'
-      });
-      vi.spyOn(service as any, 'getTombstoneIds').mockResolvedValue(new Set());
-      vi.spyOn(service as any, 'getConnectionTombstoneIds').mockResolvedValue(new Set());
-      vi.spyOn(service as any, 'pushProject').mockResolvedValue(true);
-      vi.spyOn((service as any).changeTracker, 'getProjectChanges').mockReturnValue({
-        projectId: project.id,
-        tasksToCreate: [],
-        tasksToUpdate: [],
-        taskIdsToDelete: [],
-        connectionsToCreate: [],
-        connectionsToUpdate: [],
-        connectionsToDelete: [],
-        hasChanges: false,
-        totalChanges: 0,
-        taskUpdateFieldsById: {}
-      });
+      // 【重构修复】saveProjectToCloud 现在委托给 BatchSyncService
+      // 验证 BatchSyncService 被正确调用
+      const batchSyncService = (service as any).batchSyncService;
+      const saveProjectToCloudSpy = vi.spyOn(batchSyncService, 'saveProjectToCloud').mockResolvedValue({ success: true, newVersion: 1 });
 
       await service.saveProjectToCloud(project, 'real-user-id');
 
-      // 断言：真实用户应该调用 getSession
-      expect(getSessionSpy).toHaveBeenCalled();
+      // 断言：应该委托给 BatchSyncService
+      expect(saveProjectToCloudSpy).toHaveBeenCalledWith(project, 'real-user-id');
     });
   });
 

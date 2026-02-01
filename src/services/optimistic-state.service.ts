@@ -347,8 +347,8 @@ export class OptimisticStateService {
   private deepCloneProjects(projects: Project[]): Project[] {
     try {
       return structuredClone(projects);
-    } catch {
-      this.logger.warn('structuredClone 失败，使用 JSON 方式');
+    } catch (e) {
+      this.logger.warn('structuredClone 失败，使用 JSON 方式', { error: e });
       return JSON.parse(JSON.stringify(projects));
     }
   }

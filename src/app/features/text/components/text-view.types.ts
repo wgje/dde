@@ -9,6 +9,8 @@ export interface DragState {
   isDragging: boolean;
   targetStage: number | null;
   targetBeforeId: string | null;
+  /** 待分配块间拖放时的目标任务ID */
+  targetUnassignedId: string | null;
 }
 
 /** 触摸拖拽状态 */

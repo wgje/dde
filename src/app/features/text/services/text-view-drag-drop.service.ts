@@ -66,6 +66,7 @@ export class TextViewDragDropService {
       isDragging: false,
       targetStage: null,
       targetBeforeId: null,
+      targetUnassignedId: null,  // 待分配块间拖放的目标任务ID
       startX: 0,
       startY: 0,
       currentX: 0,
@@ -419,15 +420,37 @@ export class TextViewDragDropService {
     
     return null;
   }
+
+  /** 
+   * 更新待分配块目标（用于待分配块间的拖放）
+   * @param targetTaskId 目标待分配任务的ID（将成为被拖动任务的新父节点）
+   */
+  updateUnassignedTarget(targetTaskId: string | null): void {
+    this.touchState.targetUnassignedId = targetTaskId;
+    // 当进入待分配区域时，清除阶段目标
+    if (targetTaskId !== null) {
+      this.touchState.targetStage = null;
+      this.touchState.targetBeforeId = null;
+      this.dragOverStage.set(null);
+      this.dropTargetInfo.set(null);
+    }
+    this.logger.debug('updateUnassignedTarget', { targetTaskId: targetTaskId?.slice(-4) ?? null });
+  }
+
+  /** 清除待分配块目标 */
+  clearUnassignedTarget(): void {
+    this.touchState.targetUnassignedId = null;
+  }
   
   /** 结束触摸拖拽，返回目标信息以及需要折叠的阶段 */
-  endTouchDrag(): { task: Task | null; targetStage: number | null; targetBeforeId: string | null; wasDragging: boolean; autoExpandedStages: number[] } {
+  endTouchDrag(): { task: Task | null; targetStage: number | null; targetBeforeId: string | null; targetUnassignedId: string | null; wasDragging: boolean; autoExpandedStages: number[] } {
     this.logger.debug('🟣 endTouchDrag called', {
       hadTask: !!this.touchState.task,
       wasDragging: this.touchState.isDragging,
       hadGhost: !!this.touchState.dragGhost,
       activationTime: this.dragActivationTime,
-      elapsed: this.dragActivationTime ? Date.now() - this.dragActivationTime : null
+      elapsed: this.dragActivationTime ? Date.now() - this.dragActivationTime : null,
+      targetUnassignedId: this.touchState.targetUnassignedId
     });
     // 取消长按定时器
     // 清除超时检测器
@@ -446,6 +469,7 @@ export class TextViewDragDropService {
       task: this.touchState.task,
       targetStage: this.touchState.targetStage,
       targetBeforeId: this.touchState.targetBeforeId,
+      targetUnassignedId: this.touchState.targetUnassignedId,
       wasDragging: this.touchState.isDragging,
       autoExpandedStages
     };

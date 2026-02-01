@@ -1,5 +1,6 @@
 import { Task, Project, Connection, TaskStatus, Attachment, AttachmentType } from '../models';
 import { nowISO } from './date';
+import { utilLogger } from './standalone-logger';
 
 /**
  * 数据验证工具
@@ -384,7 +385,7 @@ export function sanitizeTask(rawTask: unknown): Task {
     // 仅在开发模式输出修复日志，避免生产环境控制台噪音。
     const isNgDevMode = Boolean((globalThis as { ngDevMode?: boolean }).ngDevMode);
     if (isNgDevMode) {
-      console.warn(`[sanitizeTask] 任务 ${task.id || 'unknown'} 的以下字段已修复:`, fixes.join(', '));
+      utilLogger.warn(`sanitizeTask: 任务 ${task.id || 'unknown'} 的以下字段已修复: ${fixes.join(', ')}`);
     }
   }
 

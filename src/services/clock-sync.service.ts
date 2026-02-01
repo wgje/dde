@@ -167,8 +167,9 @@ export class ClockSyncService {
         }
         
         serverTime = new Date(data);
-      } catch {
+      } catch (e) {
         // Fallback: 使用 HTTP 响应头中的 Date
+        this.logger.debug('获取服务端时间失败，尝试 fallback', { error: e });
         const fallbackResult = await this.fallbackTimeCheck();
         if (fallbackResult) {
           return fallbackResult;
@@ -300,7 +301,8 @@ export class ClockSyncService {
       
       return result;
       
-    } catch {
+    } catch (e) {
+      this.logger.debug('Fallback 时间检测失败', { error: e });
       return null;
     }
   }

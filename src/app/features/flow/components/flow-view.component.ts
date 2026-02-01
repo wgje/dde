@@ -43,6 +43,7 @@ import { FlowRightPanelComponent } from './flow-right-panel.component';
 import { FlowBatchToolbarComponent } from './flow-batch-toolbar.component';
 
 import * as go from 'gojs';
+import { getErrorMessage } from '../../../../utils/result';
 
 /**
  * FlowViewComponent - 流程图视图组件
@@ -464,7 +465,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         diagramInstance.removeDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
       } catch (error) {
         // 忽略移除监听器时的错误（图表可能已经被销毁）
-        console.warn('[FlowView] 移除 SelectionMoved 监听器失败', error);
+        this.logger.warn('移除 SelectionMoved 监听器失败', { error });
       }
       this.diagramSelectionMovedListener = null;
     }
@@ -626,9 +627,55 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   onUnassignedDrop(event: DragEvent): void {
-    const success = this.dragDrop.handleDropToUnassigned(event);
-    if (success) {
-      this.refreshDiagram();
+    event.preventDefault();
+    
+    // 提取拖放数据
+    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
+    if (!data) {
+      this.dragDrop.handleDropToUnassigned(event);
+      return;
+    }
+
+    try {
+      const draggedTask = JSON.parse(data) as Task;
+      
+      // 场景1：已分配任务拖回待分配区 -> 解除分配
+      if (draggedTask?.id && draggedTask.stage !== null) {
+        const success = this.dragDrop.handleDropToUnassigned(event);
+        if (success) {
+          this.refreshDiagram();
+        }
+        return;
+      }
+      
+      // 场景2：待分配块之间拖放 -> 改变父子关系（重新挂载）
+      // 当拖动一个待分配块到待分配区域时，需要确定目标父块
+      // 由于拖放到的是整个待分配区域，我们需要找到鼠标下方最近的待分配块
+      if (draggedTask?.id && draggedTask.stage === null) {
+        // 获取所有待分配任务
+        const unassignedTasks = this.projectState.unassignedTasks();
+        
+        // 排除拖动的任务本身，获取可能成为目标的其他待分配块
+        const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
+        
+        if (targetCandidates.length > 0) {
+          // 如果有其他待分配块，选择第一个作为新父块（可以根据鼠标位置优化）
+          const targetTask = targetCandidates[0];
+          
+          // 检查是否形成循环父子关系
+          const result = this.taskOpsAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+          if (!result.ok) {
+            this.toast.error('重新挂载失败', getErrorMessage(result.error));
+          } else {
+            this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
+            this.refreshDiagram();
+          }
+          return;
+        }
+      }
+    } catch (err) {
+      // 数据解析失败，执行默认处理
+      this.dragDrop.handleDropToUnassigned(event);
     }
   }
   

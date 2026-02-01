@@ -393,7 +393,8 @@ export class LocalBackupService implements OnDestroy {
     try {
       const file = await fileHandle.getFile();
       return file.size === expectedSize;
-    } catch {
+    } catch (e) {
+      this.logger.debug('验证备份文件失败', { error: e, expectedSize });
       return false;
     }
   }

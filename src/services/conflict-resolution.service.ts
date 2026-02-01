@@ -9,46 +9,24 @@ import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';
 import * as Sentry from '@sentry/angular';
+import {
+  ConflictResolutionStrategy,
+  ConflictData,
+  MergeResult,
+  TombstoneQueryResult,
+  RecoveredTaskInfo,
+  MergeStats
+} from './conflict-resolution.types';
 
-/**
- * 冲突解决策略（LWW 简化版）
- * - local: 使用本地版本（用户刚编辑的内容）
- * - remote: 使用远程版本（其他设备的内容）
- * - merge: 智能合并（保留双方新增的任务，冲突时本地优先）
- */
-export type ConflictResolutionStrategy = 'local' | 'remote' | 'merge';
-
-/**
- * 冲突数据
- */
-export interface ConflictData {
-  localProject: Project;
-  remoteProject: Project;
-  projectId: string;
-}
-
-/**
- * 合并结果
- */
-export interface MergeResult {
-  project: Project;
-  issues: string[];
-  conflictCount: number;
-}
-
-/**
- * 【v5.9】Tombstone 查询结果
- * 用于追踪 tombstone 查询是否成功，以便保守处理
- */
-export interface TombstoneQueryResult {
-  ids: Set<string>;
-  /** 是否成功从远程查询到 tombstones */
-  fromRemote: boolean;
-  /** 是否仅使用本地缓存（远程查询失败时） */
-  localCacheOnly: boolean;
-  /** 查询时间戳 */
-  timestamp: number;
-}
+// 重新导出类型以保持向后兼容
+export type {
+  ConflictResolutionStrategy,
+  ConflictData,
+  MergeResult,
+  TombstoneQueryResult,
+  RecoveredTaskInfo,
+  MergeStats
+} from './conflict-resolution.types';
 
 /**
  * 冲突解决服务（LWW 简化版）

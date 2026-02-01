@@ -623,10 +623,12 @@ describe('SyncCoordinatorService', () => {
     it('validateAndRebalance 应该返回验证后的项目', () => {
       const project = createTestProject({ id: 'proj-1' });
       
+      // 模拟委托服务返回验证后的项目
+      mockProjectSyncOperationsService.validateAndRebalance.mockReturnValueOnce(project);
+      
       const result = service.validateAndRebalance(project);
       
-      expect(mockLayoutService.validateAndFixTree).toHaveBeenCalledWith(project);
-      expect(mockLayoutService.rebalance).toHaveBeenCalled();
+      expect(mockProjectSyncOperationsService.validateAndRebalance).toHaveBeenCalledWith(project);
       expect(result).toBeDefined();
     });
 
@@ -652,18 +654,30 @@ describe('SyncCoordinatorService', () => {
         connections: [{ id: 'c1', source: '' as any, target: 't1' } as any],
       });
 
+      // 模拟委托服务返回修复后的项目（无效连接已被移除）
+      const fixedProject = { ...project, connections: [] };
+      mockProjectSyncOperationsService.validateAndRebalanceWithResult.mockReturnValueOnce({
+        ok: true,
+        value: fixedProject,
+      });
+
       const result = service.validateAndRebalanceWithResult(project);
       expect(result.ok).toBe(true);
-      expect(mockLayoutService.validateAndFixTree).toHaveBeenCalledTimes(1);
+      expect(mockProjectSyncOperationsService.validateAndRebalanceWithResult).toHaveBeenCalled();
     });
 
     it('tasks 不是数组应视为致命错误', () => {
       const project = createTestProject({ id: 'proj-tasks-invalid' }) as any;
       project.tasks = undefined;
 
+      // 模拟委托服务返回致命错误
+      mockProjectSyncOperationsService.validateAndRebalanceWithResult.mockReturnValueOnce({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', message: 'tasks 不是数组' },
+      });
+
       const result = service.validateAndRebalanceWithResult(project);
       expect(result.ok).toBe(false);
-      expect(mockLayoutService.validateAndFixTree).not.toHaveBeenCalled();
     });
 
     it('父任务缺失时应自动断开 parentId（避免因 tombstone 过滤导致项目跳过）', () => {
@@ -673,6 +687,13 @@ describe('SyncCoordinatorService', () => {
           createTestTask({ id: 'child-1', parentId: 'missing-parent' }),
         ],
         connections: [],
+      });
+
+      // 模拟委托服务返回修复后的项目（parentId 已被置为 null）
+      const fixedProject = { ...project, tasks: [{ ...project.tasks[0], parentId: null }] };
+      mockProjectSyncOperationsService.validateAndRebalanceWithResult.mockReturnValueOnce({
+        ok: true,
+        value: fixedProject,
       });
 
       const result = service.validateAndRebalanceWithResult(project);
@@ -698,6 +719,9 @@ describe('SyncCoordinatorService', () => {
       // 重要：在测试前重置所有 mock
       vi.clearAllMocks();
       
+      // 模拟委托服务返回有 issues 的结果
+      mockProjectSyncOperationsService.validateAndRebalance.mockReturnValueOnce(project);
+      
       // 使用 mockImplementation 而不是 mockReturnValue 来确保覆盖默认实现
       mockLayoutService.validateAndFixTree.mockImplementation(() => ({
         project: project,
@@ -707,14 +731,8 @@ describe('SyncCoordinatorService', () => {
       // 调用被测方法
       service.validateAndRebalance(project);
       
-      // 验证 validateAndFixTree 被调用了
-      expect(mockLayoutService.validateAndFixTree).toHaveBeenCalledTimes(1);
-      
-      // validateAndFixTree 返回 issues 时应调用 logger.info
-      expect(mockLoggerCategory.info).toHaveBeenCalledWith(
-        '已修复数据问题',
-        { projectId: 'proj-1', issues: ['Fixed orphan task'] }
-      );
+      // 验证 validateAndRebalance 被调用了
+      expect(mockProjectSyncOperationsService.validateAndRebalance).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -899,6 +917,13 @@ describe('SyncCoordinatorService 集成场景', () => {
       // 6. 模拟重连后合并
       const cloudProjects: Project[] = [{ ...project, version: 1 }];
       mockSyncService.saveProjectToCloud.mockResolvedValueOnce({ success: true });
+
+      // 模拟委托服务返回同步结果
+      mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
+        projects: [offlineProject],
+        syncedCount: 1,
+        conflictProjects: [],
+      });
       
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,

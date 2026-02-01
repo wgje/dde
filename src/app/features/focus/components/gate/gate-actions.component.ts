@@ -17,6 +17,7 @@ import { GateService } from '../../../../../services/gate.service';
 import { ToastService } from '../../../../../services/toast.service';
 import { BlackBoxService } from '../../../../../services/black-box.service';
 import { SpeechToTextService } from '../../../../../services/speech-to-text.service';
+import { LoggerService } from '../../../../../services/logger.service';
 
 @Component({
   selector: 'app-gate-actions',
@@ -157,6 +158,7 @@ export class GateActionsComponent {
   private toast = inject(ToastService);
   private blackBoxService = inject(BlackBoxService);
   private speechService = inject(SpeechToTextService);
+  private readonly logger = inject(LoggerService);
   
   readonly canSnooze = this.gateService.canSnooze;
   
@@ -257,7 +259,7 @@ export class GateActionsComponent {
       }
     } catch (error) {
       // 记录错误便于排查
-      console.error('[GateActions] 语音转写失败:', error);
+      this.logger.error('GateActions', '语音转写失败', error);
       this.toast.error('语音转写失败', '请重试或手动输入');
     }
   }

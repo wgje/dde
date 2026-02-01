@@ -262,7 +262,8 @@ export class VirusScanService {
       const available = !error && data?.status === 'healthy';
       this.isAvailable.set(available);
       return available;
-    } catch {
+    } catch (e) {
+      this.logger.debug('病毒扫描服务健康检查失败', { error: e });
       this.isAvailable.set(false);
       return false;
     }
@@ -393,7 +394,8 @@ export class VirusScanService {
       });
 
       return !error && data?.valid === true;
-    } catch {
+    } catch (e) {
+      this.logger.debug('验证文件哈希失败', { error: e, fileId });
       return false;
     }
   }

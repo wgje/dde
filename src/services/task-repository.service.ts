@@ -4,55 +4,18 @@ import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { 
+  TaskRow, 
+  ConnectionRow, 
+  ProjectRow,
+  RepositoryResult,
+  BatchOperationResult,
+  IncrementalSyncResult,
+  FullProjectResult
+} from './task-repository.types';
 
-/**
- * 数据库行类型定义
- */
-export interface TaskRow {
-  id: string;
-  project_id: string;
-  parent_id: string | null;
-  title: string;
-  content: string;
-  stage: number | null;
-  order: number;
-  rank: number;
-  status: 'active' | 'completed' | 'archived';
-  x: number;
-  y: number;
-  short_id: string | null;
-  priority: 'low' | 'medium' | 'high' | 'urgent' | null;
-  due_date: string | null;
-  tags: string[];
-  attachments: Attachment[];
-  deleted_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ConnectionRow {
-  id: string;
-  project_id: string;
-  source_id: string;
-  target_id: string;
-  /** 联系块标题 */
-  title: string | null;
-  description: string | null;
-  deleted_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ProjectRow {
-  id: string;
-  owner_id: string;
-  title: string | null;
-  description: string | null;
-  created_date: string | null;
-  updated_at: string | null;
-  version: number;
-  migrated_to_v2: boolean;
-}
+// 重新导出类型以保持向后兼容
+export { TaskRow, ConnectionRow, ProjectRow } from './task-repository.types';
 
 /**
  * 任务仓库服务

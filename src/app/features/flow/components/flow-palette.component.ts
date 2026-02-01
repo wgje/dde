@@ -229,6 +229,29 @@ export class FlowPaletteComponent implements OnDestroy {
   
   onDrop(event: DragEvent) {
     event.preventDefault();
+    
+    // 从拖放事件中提取任务数据
+    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
+    if (!data) {
+      this.taskDrop.emit({ event });
+      return;
+    }
+
+    try {
+      const draggedTask = JSON.parse(data) as any;
+      
+      // 处理"待分配块到待分配块"的拖放
+      // 当两个任务都是待分配块（stage === null）时，改变父子关系
+      if (draggedTask?.id && draggedTask.stage === null) {
+        // 待分配块被拖到待分配区域，触发重新挂载逻辑
+        // 由 flow-view 组件通过事件处理来执行具体操作
+        this.taskDrop.emit({ event });
+        return;
+      }
+    } catch (err) {
+      // 数据解析失败，继续触发通用的 drop 事件
+    }
+
     this.taskDrop.emit({ event });
   }
   

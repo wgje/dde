@@ -366,10 +366,10 @@ export class SyncCoordinatorService {
     if (missing.length > 0) {
       // 开发环境下抛出错误，便于早期发现问题
       if (typeof ngDevMode !== 'undefined' && ngDevMode) {
-        console.error(
-          `[SyncCoordinator] 缺少必需的 ActionQueue 处理器: ${missing.join(', ')}`,
-          '\n已注册的处理器:', this.actionQueue.getRegisteredProcessorTypes()
-        );
+        this.logger.error('缺少必需的 ActionQueue 处理器', {
+          missing: missing.join(', '),
+          registered: this.actionQueue.getRegisteredProcessorTypes()
+        });
       }
     }
   }

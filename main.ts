@@ -1,66 +1,28 @@
 import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
-import { provideRouter, withComponentInputBinding, withHashLocation, Router } from '@angular/router';
+import { provideRouter, withComponentInputBinding, withHashLocation } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
-// ============= Sentry SDK 瘦身优化 =============
-// 【性能优化 2026-01-17】按需导入 + 移除未使用的模块
-// 原始包大小: 375 KB，优化后预计: ~150 KB (-60%)
-// 策略：
-// 1. 移除 replayIntegration（会话回放占 ~150KB，个人项目不需要）
-// 2. 按需导入替代 import * as Sentry
-// 3. 使用 browserTracingIntegration 的轻量版本
-import {
-  init as sentryInit,
-  browserTracingIntegration,
-  createErrorHandler as sentryCreateErrorHandler,
-  TraceService,
-} from '@sentry/angular';
+// ============= Sentry SDK 懒加载优化 =============
+// 【性能优化 2026-02-01】Sentry 懒加载以消除 320ms 首屏阻塞
+// 
+// 优化策略：
+// 1. 移除同步 Sentry.init()，改为 SentryLazyLoaderService 异步初始化
+// 2. 使用 requestIdleCallback 在浏览器空闲时加载
+// 3. 错误队列机制确保初始化前的错误不丢失
+// 
+// 预期收益：Render Delay -200~300ms，LCP 显著改善
+import { SentryLazyLoaderService } from './src/services/sentry-lazy-loader.service';
 import { AppComponent } from './src/app.component';
 import { routes } from './src/app.routes';
 import { GlobalErrorHandler } from './src/services/global-error-handler.service';
 import { WebVitalsService } from './src/services/web-vitals.service';
-import { environment } from './src/environments/environment';
 
-// ============= Sentry 错误监控初始化 =============
-// 【流量优化 2026-01-12】单人项目不需要企业级监控，大幅降低采样率
-// 参考：Senior Consultant Review - 5MB/天的上行流量主要来自 Sentry 过度采样
-const IS_DEV = isDevMode();
-// 性能追踪：生产环境完全禁用（你不需要监控 Supabase 的响应速度，那是 Supabase 的事）
-const TRACES_SAMPLE_RATE = IS_DEV ? 0.1 : 0;             // 生产 0%，开发 10%
-
-sentryInit({
-  dsn: environment.SENTRY_DSN,
-  integrations: [
-    // 【性能优化 2026-01-17】仅保留轻量级性能追踪
-    // 已移除: replayIntegration（节省 ~150KB）
-    // Session Replay 虽然对复现 Bug 有用，但：
-    // 1. 个人项目不需要 24 小时监控录像
-    // 2. 代码体积开销太大
-    // 3. 如需调试，可临时启用
-    browserTracingIntegration(),
-  ],
-  // 只允许来自我们域名的请求被追踪
-  tracePropagationTargets: ['localhost', /^https:\/\/dde-psi\.vercel\.app/],
-  // 采样率：生产环境降低以减少性能开销
-  tracesSampleRate: TRACES_SAMPLE_RATE,
-  // 【性能优化】完全禁用会话回放 - 不再需要这些配置
-  // replaysSessionSampleRate: 已移除
-  // replaysOnErrorSampleRate: 已移除
-  // 环境标识
-  environment: IS_DEV ? 'development' : 'production',
-  // 【流量优化】过滤浏览器噪音错误，避免无意义上报
-  ignoreErrors: [
-    'ResizeObserver loop limit exceeded',
-    'ResizeObserver loop completed with undelivered notifications.',
-    // 网络断开/重连是移动端常态，不是错误
-    'Failed to fetch',
-    'NetworkError',
-    'Load failed',
-    // Supabase 409 冲突是业务逻辑，不是系统故障
-    'duplicate key value violates unique constraint',
-  ],
-});
+// ============= Sentry 懒加载（非阻塞初始化）=============
+// 【性能优化 2026-02-01】Sentry SDK 现由 SentryLazyLoaderService 管理
+// - 首屏渲染完成后通过 requestIdleCallback 异步初始化
+// - 初始化前的错误会被队列缓存，初始化后自动发送
+// - 详见 src/services/sentry-lazy-loader.service.ts
 
 // ============= BUILD ID: 2025-12-04-v19-TOGGLE-ALIGN =============
 const BUILD_ID = '2025-12-04-v19-TOGGLE-ALIGN';
@@ -243,22 +205,25 @@ async function startApplication() {
   try {
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
-        // Sentry 错误处理器 - 捕获所有 Angular 错误并上报
+        // ============= 错误处理器（使用 GlobalErrorHandler）=============
+        // 【优化 2026-02-01】改用 GlobalErrorHandler 集成 SentryLazyLoaderService
+        // GlobalErrorHandler 会在 Sentry 初始化完成后自动上报错误
         {
           provide: ErrorHandler,
-          useValue: sentryCreateErrorHandler({
-            showDialog: false, // 不显示用户反馈对话框
-          }),
+          useClass: GlobalErrorHandler,
         },
-        // Sentry 性能追踪 - 追踪路由变化
-        {
-          provide: TraceService,
-          deps: [Router],
-        },
+        // ============= Sentry 懒加载初始化（非阻塞）=============
+        // 【性能优化 2026-02-01】使用 APP_INITIALIZER + queueMicrotask 实现非阻塞初始化
+        // 返回立即 resolve 的 Promise，不阻塞应用启动
+        // Sentry 将在浏览器空闲时通过 requestIdleCallback 初始化
         {
           provide: APP_INITIALIZER,
-          useFactory: () => () => {},
-          deps: [TraceService],
+          useFactory: (sentryLoader: SentryLazyLoaderService) => () => {
+            // 使用 queueMicrotask 确保不阻塞当前任务
+            queueMicrotask(() => sentryLoader.triggerLazyInit());
+            return Promise.resolve();
+          },
+          deps: [SentryLazyLoaderService],
           multi: true,
         },
         provideRouter(

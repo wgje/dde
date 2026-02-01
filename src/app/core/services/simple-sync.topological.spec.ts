@@ -1,20 +1,21 @@
 /**
  * 拓扑排序单元测试
- * 测试 SimpleSyncService.topologicalSortTasks 方法
+ * 测试 TaskSyncOperationsService.topologicalSortTasks 方法
+ * （重构后从 SimpleSyncService 移入）
  */
 
 import { describe, it, expect } from 'vitest';
-import { SimpleSyncService } from './simple-sync.service';
+import { TaskSyncOperationsService } from './sync/task-sync-operations.service';
 import { Task } from '../../../models';
 
-describe('SimpleSyncService - topologicalSortTasks', () => {
+describe('TaskSyncOperationsService - topologicalSortTasks', () => {
   const mockLogger = {
     warn: () => undefined,
     debug: () => undefined,
   };
 
   const topologicalSortTasks = (tasks: Task[]): Task[] => {
-    const fn = (SimpleSyncService as unknown as { prototype: Record<string, unknown> }).prototype[
+    const fn = (TaskSyncOperationsService as unknown as { prototype: Record<string, unknown> }).prototype[
       'topologicalSortTasks'
     ] as (this: { logger: typeof mockLogger }, tasks: Task[]) => Task[];
 

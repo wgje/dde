@@ -67,3 +67,12 @@ export {
   detectOrphans,
   type ValidationResult 
 } from './validation';
+
+// 独立日志工具（用于无法注入 LoggerService 的场景）
+export {
+  createStandaloneLogger,
+  guardLogger,
+  utilLogger,
+  securityLogger,
+  type LogLevel
+} from './standalone-logger';

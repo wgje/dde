@@ -126,8 +126,6 @@ const mockDeltaSyncPersistenceService = {
   deleteTaskFromLocal: vi.fn().mockResolvedValue(true),
   bulkMergeTasksToLocal: vi.fn().mockResolvedValue({ merged: 0, skipped: 0 }),
 };
-  }),
-};
 
 describe('StorePersistenceService Delta Sync Methods', () => {
   let service: StorePersistenceService;
@@ -257,24 +255,8 @@ describe('StorePersistenceService Delta Sync Methods', () => {
     });
     
     it('应该过滤软删除的任务', async () => {
-      // 配置 mock 返回过滤后的结果（不含软删除）
+      // DeltaSyncPersistenceService 已经过滤软删除，mock 返回过滤后的结果
       mockDeltaSyncPersistenceService.getTasksUpdatedSince.mockResolvedValue([
-        {
-          id: 'task-2',
-          title: 'Task 2',
-          content: '',
-          stage: 0,
-          parentId: null,
-          order: 0,
-          rank: 0,
-          status: 'active',
-          x: 0,
-          y: 0,
-          displayId: '1',
-          createdDate: '2025-12-20T00:00:00Z',
-          updatedAt: '2025-12-20T12:00:00Z',
-          deletedAt: '2025-12-20T12:00:00Z', // 软删除
-        },
         {
           id: 'task-2',
           title: 'Task 2',
@@ -294,6 +276,7 @@ describe('StorePersistenceService Delta Sync Methods', () => {
       
       const tasks = await service.getTasksUpdatedSince('project-1', '2025-12-10T00:00:00Z');
       
+      // 软删除的 task-1 已被 DeltaSyncPersistenceService 过滤
       expect(tasks.length).toBe(1);
       expect(tasks[0].id).toBe('task-2');
     });

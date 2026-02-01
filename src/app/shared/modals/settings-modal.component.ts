@@ -1,5 +1,6 @@
 import { Component, inject, Output, EventEmitter, input, signal, computed, viewChild, ElementRef, isDevMode } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
 import { ExportService } from '../../../services/export.service';
@@ -496,6 +497,7 @@ export class SettingsModalComponent {
   readonly themeService = inject(ThemeService);
   readonly focusPreferenceService = inject(FocusPreferenceService);
   readonly gateService = inject(GateService);
+  private readonly logger = inject(LoggerService);
   
   /** 是否开发模式（用于显示开发工具） */
   readonly isDev = isDevMode();
@@ -586,7 +588,7 @@ export class SettingsModalComponent {
     if (inputRef?.nativeElement) {
       inputRef.nativeElement.click();
     } else {
-      console.error('[SettingsModal] 文件输入元素未找到');
+      this.logger.error('SettingsModal', '文件输入元素未找到');
     }
   }
   
