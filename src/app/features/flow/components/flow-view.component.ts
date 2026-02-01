@@ -1,7 +1,6 @@
 import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
@@ -44,6 +43,7 @@ import { FlowBatchDeleteDialogComponent } from './flow-batch-delete-dialog.compo
 import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
 import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
 import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
+import { FlowRightPanelComponent } from './flow-right-panel.component';
 
 import * as go from 'gojs';
 
@@ -80,7 +80,8 @@ import * as go from 'gojs';
     FlowBatchDeleteDialogComponent,
     MobileDrawerContainerComponent,
     MobileTodoDrawerComponent,
-    MobileBlackBoxDrawerComponent
+    MobileBlackBoxDrawerComponent,
+    FlowRightPanelComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrls: ['./flow-view.component.scss'],
@@ -102,7 +103,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly zone = inject(NgZone);
   private readonly elementRef = inject(ElementRef);
   private readonly injector = inject(Injector);
-  private readonly router = inject(Router);
   
   // 命令服务（解耦与 ProjectShellComponent 的通信）
   private readonly flowCommand = inject(FlowCommandService);
@@ -1021,54 +1021,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.isPaletteOpen.set(false);
       }
       this.isRightPanelOpen.set(willOpen);
-    }
-  }
-  
-  /** 右侧面板任务点击处理 */
-  onRightPanelTaskClick(taskId: string): void {
-    this.selectedTaskId.set(taskId);
-    this.centerOnNode(taskId, true);
-    this.isRightPanelOpen.set(false);
-  }
-  
-  /** 右侧面板项目点击处理 - 切换项目并同步 URL */
-  onRightPanelProjectClick(projectId: string): void {
-    // 设置活动项目 ID，触发 tasks() computed 重新计算
-    this.projectState.activeProjectId.set(projectId);
-    // 关闭右侧面板
-    this.isRightPanelOpen.set(false);
-    // 同步 URL 路由，保持当前视图类型
-    const currentView = this.uiState.activeView() || 'flow';
-    void this.router.navigate(['/projects', projectId, currentView]);
-  }
-  
-  // ========== 右侧面板滑动手势（委托给 FlowSwipeGestureService） ==========
-  
-  onRightPanelTouchStart(e: TouchEvent): void {
-    this.swipeGesture.handleRightPanelTouchStart(e);
-  }
-  
-  onRightPanelTouchMove(e: TouchEvent): void {
-    this.swipeGesture.handleRightPanelTouchMove(e);
-  }
-  
-  onRightPanelTouchEnd(e: TouchEvent): void {
-    if (this.swipeGesture.handleRightPanelTouchEnd(e) === 'close-panel') {
-      this.isRightPanelOpen.set(false);
-    }
-  }
-  
-  onRightPanelBackdropTouchStart(e: TouchEvent): void {
-    this.swipeGesture.handleRightPanelTouchStart(e);
-  }
-  
-  onRightPanelBackdropTouchMove(e: TouchEvent): void {
-    this.swipeGesture.handleRightPanelTouchMove(e);
-  }
-  
-  onRightPanelBackdropTouchEnd(e: TouchEvent): void {
-    if (this.swipeGesture.handleBackdropTouchEnd(e) === 'close-panel') {
-      this.isRightPanelOpen.set(false);
     }
   }
   
