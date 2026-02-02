@@ -39,6 +39,12 @@ if (hasDevAutoLogin) {
 const targetPath = path.resolve(__dirname, '../src/environments/environment.development.ts');
 const targetPathProd = path.resolve(__dirname, '../src/environments/environment.ts');
 
+// 确保 environments 目录存在
+const envDir = path.dirname(targetPath);
+if (!fs.existsSync(envDir)) {
+  fs.mkdirSync(envDir, { recursive: true });
+}
+
 // 离线模式使用占位符
 const finalUrl = supabaseUrl || 'YOUR_SUPABASE_URL';
 const finalKey = supabaseAnonKey || 'YOUR_SUPABASE_ANON_KEY';
