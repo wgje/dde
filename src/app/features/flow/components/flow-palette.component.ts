@@ -238,7 +238,7 @@ export class FlowPaletteComponent implements OnDestroy {
     }
 
     try {
-      const draggedTask = JSON.parse(data) as any;
+      const draggedTask = JSON.parse(data) as { id?: string; stage?: number | null };
       
       // 处理"待分配块到待分配块"的拖放
       // 当两个任务都是待分配块（stage === null）时，改变父子关系
@@ -297,7 +297,10 @@ export class FlowPaletteComponent implements OnDestroy {
     }
     
     if (this.touchState.isDragging) {
-      event.preventDefault();
+      // 检查事件是否可取消（避免滚动进行中的 Intervention 警告）
+      if (event.cancelable) {
+        event.preventDefault();
+      }
       event.stopPropagation();
       
       // 更新幽灵元素位置

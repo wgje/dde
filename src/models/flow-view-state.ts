@@ -7,7 +7,7 @@
  * - 状态重置
  */
 
-import { Task } from './index';
+import { Task } from './core-types';
 
 /**
  * 连接类型选择对话框数据

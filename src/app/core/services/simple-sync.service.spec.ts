@@ -14,7 +14,7 @@
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
-import { disablePollutionGuard, enablePollutionGuard } from '../../../test-setup.mocks';
+import { disablePollutionGuard, enablePollutionGuard, mockSentryLazyLoaderService } from '../../../test-setup.mocks';
 import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
@@ -22,14 +22,14 @@ import { ToastService } from '../../../services/toast.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { TombstoneService, RealtimePollingService, SessionManagerService, SyncOperationHelperService, UserPreferencesSyncService, ProjectDataService, BatchSyncService, TaskSyncOperationsService, ConnectionSyncOperationsService } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
-// 使用全局 Sentry mock（来自 test-setup.ts）
-import * as Sentry from '@sentry/angular';
-const mockCaptureException = vi.mocked(Sentry.captureException);
-const mockCaptureMessage = vi.mocked(Sentry.captureMessage);
+// 使用 SentryLazyLoaderService mock（来自 test-setup.mocks.ts）
+// 注意：现在服务使用 this.sentryLazyLoader 而非直接的 Sentry
+// 测试应验证 mockSentryLazyLoaderService 的调用
 
 describe('SimpleSyncService', () => {
   let service: SimpleSyncService;
@@ -252,7 +252,7 @@ describe('SimpleSyncService', () => {
         if (service) {
           const currentState = service['syncState']();
           if (!currentState.sessionExpired) {
-            service['syncState'].update((s: Record<string, unknown>) => ({ ...s, sessionExpired: true }));
+            service['syncState'].update((s) => ({ ...s, sessionExpired: true }));
             // 模拟真实行为：首次过期时显示 Toast
             mockToast.warning('登录已过期', '请重新登录以继续同步数据');
           }
@@ -374,7 +374,9 @@ describe('SimpleSyncService', () => {
         { provide: BatchSyncService, useValue: mockBatchSync },
         // 【技术债务重构】新增的子服务
         { provide: TaskSyncOperationsService, useValue: mockTaskSyncOps },
-        { provide: ConnectionSyncOperationsService, useValue: mockConnectionSyncOps }
+        { provide: ConnectionSyncOperationsService, useValue: mockConnectionSyncOps },
+        // Sentry 懒加载服务 mock
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService }
       ]
     });
     
@@ -2244,7 +2246,7 @@ describe('SimpleSyncService', () => {
 
       // 重置状态
       mockToast.error.mockClear();
-      (Sentry.captureMessage as ReturnType<typeof vi.fn>).mockClear();
+      mockSentryLazyLoaderService.captureMessage.mockClear();
       service['lastCapacityWarningTime'] = Date.now();
       service['lastWarningPercent'] = 85; // 上次警告时是 85%
 
@@ -2263,7 +2265,7 @@ describe('SimpleSyncService', () => {
       (service as any).checkQueueCapacityWarning();
       
       // 情况恶化时应该记录 Sentry（即使在冷却期内）
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'RetryQueue capacity warning',
         expect.objectContaining({
           level: 'warning',

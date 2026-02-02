@@ -15,8 +15,7 @@
 import { Injectable, signal, computed, DestroyRef, inject } from '@angular/core';
 import { MOBILE_SYNC_CONFIG } from '../config/sync.config';
 import { LoggerService } from './logger.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 /**
  * 网络质量等级
  */
@@ -62,6 +61,7 @@ interface NavigatorWithBattery extends Navigator {
 
 @Injectable({ providedIn: 'root' })
 export class NetworkAwarenessService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('NetworkAwareness');
   private readonly destroyRef = inject(DestroyRef);
@@ -251,7 +251,7 @@ export class NetworkAwarenessService {
     
     // 发送 Sentry 事件用于网络质量分布统计
     if (connection.effectiveType && connection.effectiveType !== '4g') {
-      Sentry.addBreadcrumb({
+      this.sentryLazyLoader.addBreadcrumb({
         category: 'network',
         message: `网络质量: ${connection.effectiveType}`,
         level: 'info',

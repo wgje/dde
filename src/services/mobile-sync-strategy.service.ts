@@ -15,8 +15,7 @@ import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core'
 import { NetworkAwarenessService, NetworkQuality } from './network-awareness.service';
 import { MOBILE_SYNC_CONFIG, SYNC_CONFIG } from '../config/sync.config';
 import { LoggerService } from './logger.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 /**
  * 同步策略配置
  */
@@ -65,6 +64,7 @@ interface BatchedRequest<T = unknown> {
 
 @Injectable({ providedIn: 'root' })
 export class MobileSyncStrategyService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly network = inject(NetworkAwarenessService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('MobileSyncStrategy');
@@ -364,7 +364,7 @@ export class MobileSyncStrategyService {
         } catch (err) {
           // 失败，reject 所有请求
           this.logger.error('批量刷新失败', err);
-          Sentry.captureException(err, {
+          this.sentryLazyLoader.captureException(err, {
             tags: { operation: 'batchFlush' },
             extra: { requestCount: requests.length }
           });

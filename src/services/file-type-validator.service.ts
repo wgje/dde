@@ -20,8 +20,7 @@
 
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from './logger.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 // ============================================
 // 配置常量
 // ============================================
@@ -268,6 +267,7 @@ export type FileValidationErrorCode =
   providedIn: 'root'
 })
 export class FileTypeValidatorService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly logger = inject(LoggerService).category('FileTypeValidator');
 
   /**
@@ -633,7 +633,7 @@ export class FileTypeValidatorService {
     });
     
     // 上报到 Sentry
-    Sentry.captureMessage('文件类型验证失败', {
+    this.sentryLazyLoader.captureMessage('文件类型验证失败', {
       level: 'warning',
       tags: {
         operation: 'file-type-validation',

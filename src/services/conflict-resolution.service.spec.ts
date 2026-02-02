@@ -17,6 +17,8 @@ import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { Project, Task, Connection } from '../models';
 
 // ========== 模拟依赖服务 ==========
@@ -140,6 +142,7 @@ describe('ConflictResolutionService', () => {
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
 

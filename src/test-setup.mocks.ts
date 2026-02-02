@@ -194,6 +194,30 @@ const sentryMock = (() => {
   };
 })();
 
+// 导出 sentryMock 以便测试使用
+export { sentryMock };
+
+/**
+ * Mock SentryLazyLoaderService
+ * 用于替换 inject(SentryLazyLoaderService)
+ */
+export const mockSentryLazyLoaderService = {
+  captureException: vi.fn().mockResolvedValue('mock-event-id'),
+  captureMessage: vi.fn().mockResolvedValue('mock-event-id'),
+  addBreadcrumb: vi.fn().mockResolvedValue(undefined),
+  withScope: vi.fn((callback: (scope: unknown) => void) => {
+    const mockScope = { setExtras: vi.fn(), setTag: vi.fn(), setLevel: vi.fn() };
+    callback(mockScope);
+    return Promise.resolve();
+  }),
+  setContext: vi.fn().mockResolvedValue(undefined),
+  setExtra: vi.fn().mockResolvedValue(undefined),
+  setTag: vi.fn().mockResolvedValue(undefined),
+  setUser: vi.fn().mockResolvedValue(undefined),
+  setMeasurement: vi.fn(),  // 新增：Web Vitals 使用
+  loadSentry: vi.fn().mockResolvedValue(sentryMock),
+};
+
 vi.mock('@sentry/angular', () => {
   const mockScope = { setExtras: vi.fn(), setTag: vi.fn(), setLevel: vi.fn() };
   return {
@@ -390,6 +414,12 @@ export function resetMocks() {
   sentryMock.captureMessage.mockClear();
   sentryMock.addBreadcrumb.mockClear();
   sentryMock.init.mockClear();
+  
+  // SentryLazyLoaderService mock
+  mockSentryLazyLoaderService.captureException.mockClear();
+  mockSentryLazyLoaderService.captureMessage.mockClear();
+  mockSentryLazyLoaderService.addBreadcrumb.mockClear();
+  mockSentryLazyLoaderService.withScope.mockClear();
 
   // Supabase Client
   mockSupabaseClient.from.mockClear();

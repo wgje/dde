@@ -13,8 +13,7 @@ import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { Project, Task, Connection } from '../../../../models';
 import { IndexedDBService, DB_CONFIG } from './indexeddb.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /** 存储元数据结构 */
 interface StoreMeta {
   version: number;
@@ -35,6 +34,7 @@ const BACKUP_CONFIG = {
   providedIn: 'root'
 })
 export class BackupService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Backup');
   private readonly indexedDB = inject(IndexedDBService);
@@ -114,7 +114,7 @@ export class BackupService {
       return backupDbName;
     } catch (err) {
       this.logger.error('创建数据库备份失败', err);
-      Sentry.captureException(err, { tags: { operation: 'createBackup' } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'createBackup' } });
       return null;
     } finally {
       // 确保备份数据库连接被关闭，防止资源泄漏
@@ -223,7 +223,7 @@ export class BackupService {
       return true;
     } catch (err) {
       this.logger.error('从备份恢复失败', err);
-      Sentry.captureException(err, { tags: { operation: 'restoreFromBackup', backupDbName } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'restoreFromBackup', backupDbName } });
       return false;
     }
   }

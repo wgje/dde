@@ -18,7 +18,10 @@
     - img-src: 允许 data: 和 blob: URI（用于图片处理）
     - connect-src: 允许 Supabase API 和 Sentry
     - worker-src: 允许 Service Worker
-    - frame-ancestors: 防止点击劫持
+    - manifest-src: 允许 PWA manifest（开发环境支持 Codespaces/远程 URL）
+    
+    注意：frame-ancestors 只能通过 HTTP 响应头设置（meta 标签中无效）
+    生产环境通过 nginx/CDN 设置：Content-Security-Policy: frame-ancestors 'self'
   -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
@@ -28,7 +31,7 @@
     img-src 'self' data: blob: https://*.supabase.co;
     connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.sentry.io https://api.groq.com;
     worker-src 'self' blob:;
-    frame-ancestors 'self';
+    manifest-src 'self' https://*.github.dev https://*.app.github.dev;
     base-uri 'self';
     form-action 'self';
   ">

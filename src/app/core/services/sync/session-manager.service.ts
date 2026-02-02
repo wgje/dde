@@ -19,12 +19,12 @@ import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 @Injectable({
   providedIn: 'root'
 })
 export class SessionManagerService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SessionManager');
@@ -143,7 +143,7 @@ export class SessionManagerService {
     
     if (refreshed) {
       this.logger.info('会话刷新成功，可重试操作', { context, details });
-      Sentry.addBreadcrumb({
+      this.sentryLazyLoader.addBreadcrumb({
         category: 'auth',
         message: 'Session refreshed after 401',
         level: 'info',
@@ -167,7 +167,7 @@ export class SessionManagerService {
     this.syncState.setSessionExpired(false);
     this.logger.info('会话状态已重置');
     
-    Sentry.addBreadcrumb({
+    this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: 'Session expired state reset',
       level: 'info'

@@ -38,8 +38,7 @@ import { Project, Task, UserPreferences } from '../models';
 import { SYNC_CONFIG, AUTH_CONFIG } from '../config';
 import { validateProject, sanitizeProject } from '../utils/validation';
 import { Result, success, failure, ErrorCodes, OperationError, isFailure } from '../utils/result';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 /**
  * 冲突事件数据
  * 用于发布-订阅模式的冲突通知
@@ -70,6 +69,7 @@ interface PersistState {
   providedIn: 'root'
 })
 export class SyncCoordinatorService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncCoordinator');
   

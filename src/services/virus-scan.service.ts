@@ -5,7 +5,7 @@
 // ============================================
 
 import { inject, Injectable, signal } from '@angular/core';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -75,6 +75,7 @@ export interface ScanTask {
  */
 @Injectable({ providedIn: 'root' })
 export class VirusScanService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('VirusScan');
@@ -179,7 +180,7 @@ export class VirusScanService {
         const hashValid = await this.verifyFileHash(fileId, storedHash);
         if (!hashValid) {
           this.logger.error('文件哈希不匹配，可能被篡改', { fileId });
-          Sentry.captureMessage('File hash mismatch - potential TOCTOU attack', {
+          this.sentryLazyLoader.captureMessage('File hash mismatch - potential TOCTOU attack', {
             level: 'error',
             tags: { type: 'security', fileId },
           });
@@ -583,7 +584,7 @@ export class VirusScanService {
 
     // 上报 Sentry
     if (VIRUS_SCAN_CONFIG.SCAN_RESULT.REPORT_TO_SENTRY) {
-      Sentry.captureMessage('Malware detected in uploaded file', {
+      this.sentryLazyLoader.captureMessage('Malware detected in uploaded file', {
         level: 'warning',
         tags: { type: 'security', category: 'malware' },
         extra: {

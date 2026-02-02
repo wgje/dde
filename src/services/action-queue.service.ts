@@ -4,7 +4,7 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
 import { extractErrorMessage } from '../utils/result';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { 
   OperationPriority, 
   ActionPayload, 
@@ -91,6 +91,7 @@ const LOCAL_QUEUE_CONFIG = {
   providedIn: 'root'
 })
 export class ActionQueueService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ActionQueue');
   private readonly toast = inject(ToastService);
@@ -342,7 +343,7 @@ export class ActionQueueService {
     this.syncSentryContext();
     
     // Sentry breadcrumb: 记录入队操作
-    Sentry.addBreadcrumb({
+    this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: `Action enqueued: ${action.type} ${action.entityType}`,
       level: 'info',
@@ -406,7 +407,7 @@ export class ActionQueueService {
     const queueSnapshot = this.pendingActions();
     
     // Sentry breadcrumb: 记录队列处理开始
-    Sentry.addBreadcrumb({
+    this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: `Queue processing started`,
       level: 'info',
@@ -528,7 +529,7 @@ export class ActionQueueService {
       this.onQueueProcessEnd?.();
       
       // Sentry breadcrumb: 记录队列处理完成
-      Sentry.addBreadcrumb({
+      this.sentryLazyLoader.addBreadcrumb({
         category: 'sync',
         message: `Queue processing completed`,
         level: processed > 0 ? 'info' : (failed > 0 ? 'warning' : 'info'),
@@ -709,7 +710,7 @@ export class ActionQueueService {
       });
       
       // 发送 Sentry 事件
-      Sentry.captureMessage('Create failed, dependent actions paused', {
+      this.sentryLazyLoader.captureMessage('Create failed, dependent actions paused', {
         level: 'warning',
         tags: { 
           operation: 'pauseDependentActions',
@@ -809,7 +810,7 @@ export class ActionQueueService {
     }
     
     // Sentry breadcrumb: 记录死信转移
-    Sentry.addBreadcrumb({
+    this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: `Action moved to dead letter`,
       level: 'warning',

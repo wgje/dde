@@ -53,11 +53,12 @@ export default [
       
       // 禁止错误吞噬模式：catch 块中直接 return null/undefined
       // 应使用 Result 模式替代
+      // 【P0 代码质量】升级为 error 级别，防止新代码引入错误吞噬模式
       'no-restricted-syntax': [
-        'warn',
+        'error',
         {
           selector: 'CatchClause > BlockStatement > ReturnStatement[argument.type="Literal"][argument.value=null]',
-          message: '禁止在 catch 块中直接 return null，请使用 Result 模式（failure/wrapWithResult）'
+          message: '禁止在 catch 块中直接 return null，请使用 Result 模式（failure/wrapWithResult）或添加 eslint-disable 注释说明原因'
         }
       ]
     }

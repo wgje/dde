@@ -17,8 +17,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { SyncStateService } from './sync-state.service';
 import { SYNC_CONFIG } from '../../../../config';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 远程变更回调
  */
@@ -33,6 +32,7 @@ export type UserPreferencesChangeCallback = (payload: { eventType: string; userI
   providedIn: 'root'
 })
 export class RealtimePollingService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RealtimePolling');
@@ -292,7 +292,7 @@ export class RealtimePollingService {
         
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           consecutiveErrors++;
-          Sentry.captureMessage('Realtime 订阅错误', { 
+          this.sentryLazyLoader.captureMessage('Realtime 订阅错误', { 
             level: 'warning',
             extra: { status, error: err?.message, consecutiveErrors }
           });

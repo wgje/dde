@@ -16,9 +16,9 @@
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { Project, Task, Connection } from '../models';
-import * as Sentry from '@sentry/angular';
 
 /**
  * 熔断分级配置
@@ -134,6 +134,7 @@ export class CircuitBreakerService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('CircuitBreaker');
   private readonly toast = inject(ToastService);
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   
   /**
    * 上次已知的任务数量（按项目 ID）
@@ -681,7 +682,7 @@ export class CircuitBreakerService {
           projectId,
           violations: result.violations
         });
-        Sentry.captureMessage('CircuitBreaker: L1 Warning', {
+        this.sentryLazyLoader.captureMessage('CircuitBreaker: L1 Warning', {
           level: 'warning',
           tags: { level: 'L1', projectId },
           extra: { violations: result.violations }
@@ -694,7 +695,7 @@ export class CircuitBreakerService {
           projectId,
           violations: result.violations
         });
-        Sentry.captureMessage('CircuitBreaker: L2 Soft Block', {
+        this.sentryLazyLoader.captureMessage('CircuitBreaker: L2 Soft Block', {
           level: 'error',
           tags: { level: 'L2', projectId },
           extra: { violations: result.violations }
@@ -711,7 +712,7 @@ export class CircuitBreakerService {
           projectId,
           violations: result.violations
         });
-        Sentry.captureMessage('CircuitBreaker: L3 Hard Block', {
+        this.sentryLazyLoader.captureMessage('CircuitBreaker: L3 Hard Block', {
           level: 'fatal',
           tags: { level: 'L3', projectId },
           extra: { violations: result.violations }

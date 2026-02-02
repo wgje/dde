@@ -9,13 +9,14 @@
  * @see docs/plan_save.md Phase 2
  */
 import { inject, Injectable } from '@angular/core';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import type { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 
 @Injectable({ providedIn: 'root' })
 export class DeltaSyncPersistenceService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly indexedDBService = inject(IndexedDBService);
   private readonly logger = inject(LoggerService).category('DeltaSyncPersistence');
 
@@ -42,7 +43,7 @@ export class DeltaSyncPersistenceService {
       });
     } catch (err) {
       this.logger.error('加载本地任务失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'loadTasksFromLocal', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'loadTasksFromLocal', projectId } });
       return [];
     }
   }
@@ -68,7 +69,7 @@ export class DeltaSyncPersistenceService {
       );
     } catch (err) {
       this.logger.error('获取增量更新任务失败', { projectId, sinceTime, error: err });
-      Sentry.captureException(err, { tags: { operation: 'getTasksUpdatedSince', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'getTasksUpdatedSince', projectId } });
       return [];
     }
   }
@@ -100,7 +101,7 @@ export class DeltaSyncPersistenceService {
       return tasksWithTimestamp[0].updatedAt;
     } catch (err) {
       this.logger.error('获取本地最新时间戳失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'getLatestLocalTimestamp', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'getLatestLocalTimestamp', projectId } });
       return null;
     }
   }
@@ -130,7 +131,7 @@ export class DeltaSyncPersistenceService {
       this.logger.debug('任务已保存到本地', { taskId: task.id, projectId });
     } catch (err) {
       this.logger.error('保存任务到本地失败', { taskId: task.id, projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'saveTaskToLocal', taskId: task.id, projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'saveTaskToLocal', taskId: task.id, projectId } });
     }
   }
 
@@ -157,7 +158,7 @@ export class DeltaSyncPersistenceService {
       this.logger.debug('任务已从本地删除', { taskId });
     } catch (err) {
       this.logger.error('从本地删除任务失败', { taskId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'deleteTaskFromLocal', taskId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'deleteTaskFromLocal', taskId } });
     }
   }
 
@@ -194,7 +195,7 @@ export class DeltaSyncPersistenceService {
       this.logger.debug('批量合并任务完成', { count: tasks.length, projectId });
     } catch (err) {
       this.logger.error('批量合并任务失败', { count: tasks.length, projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'bulkMergeTasksToLocal', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'bulkMergeTasksToLocal', projectId } });
     }
   }
 

@@ -19,8 +19,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { SYNC_CONFIG } from '../../../../config';
 import { Task, Project, Connection } from '../../../../models';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 可重试的实体类型
  */
@@ -60,6 +59,7 @@ export interface RetryQueueItem {
   providedIn: 'root'
 })
 export class RetryQueueService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RetryQueue');
   private readonly toast = inject(ToastService);
@@ -188,7 +188,7 @@ export class RetryQueueService {
         removed: { type: removed?.type, id: removed?.data.id },
         queueSize: this.queue.length
       });
-      Sentry.captureMessage('重试队列溢出', {
+      this.sentryLazyLoader.captureMessage('重试队列溢出', {
         level: 'warning',
         tags: { queueSize: String(this.queue.length) }
       });
@@ -371,7 +371,7 @@ export class RetryQueueService {
       );
     }
     
-    Sentry.captureMessage('RetryQueue capacity warning', {
+    this.sentryLazyLoader.captureMessage('RetryQueue capacity warning', {
       level: 'warning',
       tags: { 
         operation: 'queueCapacityCheck',
@@ -629,7 +629,7 @@ export class RetryQueueService {
       remaining: this.queue.length 
     });
     
-    Sentry.captureMessage('RetryQueue shrunk due to quota', {
+    this.sentryLazyLoader.captureMessage('RetryQueue shrunk due to quota', {
       level: 'info',
       tags: {
         removedCount: String(removed.length),

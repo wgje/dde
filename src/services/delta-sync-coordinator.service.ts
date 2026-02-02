@@ -16,12 +16,12 @@ import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 @Injectable({
   providedIn: 'root'
 })
 export class DeltaSyncCoordinatorService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly syncService = inject(SimpleSyncService);
   private readonly conflictService = inject(ConflictResolutionService);
   private readonly projectState = inject(ProjectStateService);
@@ -86,7 +86,7 @@ export class DeltaSyncCoordinatorService {
       return { taskChanges: tasks.length, connectionChanges: connections.length };
     } catch (error) {
       this.logger.error('Delta Sync 失败', { projectId, error });
-      Sentry.captureException(error, {
+      this.sentryLazyLoader.captureException(error, {
         tags: { operation: 'performDeltaSync' },
         extra: { projectId }
       });
@@ -123,7 +123,7 @@ export class DeltaSyncCoordinatorService {
             mergedTask = { ...deltaTask, content: existing.content };
             
             if (Math.random() < 0.1) {
-              Sentry.captureMessage('Delta Sync: Content protection triggered', {
+              this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
                 level: 'warning',
                 tags: { operation: 'performDeltaSync', taskId: deltaTask.id },
                 extra: { localContentLength: existing.content.length, projectId }

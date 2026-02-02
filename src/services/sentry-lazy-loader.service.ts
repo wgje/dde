@@ -9,9 +9,14 @@ interface SentryModule {
   init: typeof import('@sentry/angular').init;
   browserTracingIntegration: typeof import('@sentry/angular').browserTracingIntegration;
   captureException: typeof import('@sentry/angular').captureException;
+  captureMessage: typeof import('@sentry/angular').captureMessage;
   withScope: typeof import('@sentry/angular').withScope;
   setTag: typeof import('@sentry/angular').setTag;
   setUser: typeof import('@sentry/angular').setUser;
+  setContext: typeof import('@sentry/angular').setContext;
+  setExtra: typeof import('@sentry/angular').setExtra;
+  addBreadcrumb: typeof import('@sentry/angular').addBreadcrumb;
+  setMeasurement: typeof import('@sentry/angular').setMeasurement;
 }
 
 /**
@@ -258,6 +263,105 @@ export class SentryLazyLoaderService {
     const sentry = this.sentryModule();
     if (sentry) {
       sentry.setTag(key, value);
+    }
+  }
+
+  /**
+   * 设置性能测量值（用于 Web Vitals）
+   */
+  setMeasurement(name: string, value: number, unit: string): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      sentry.setMeasurement(name, value, unit);
+    }
+  }
+
+  /**
+   * 设置上下文
+   */
+  setContext(name: string, context: Record<string, unknown> | null): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      sentry.setContext(name, context);
+    }
+  }
+
+  /**
+   * 设置额外信息
+   */
+  setExtra(key: string, extra: unknown): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      sentry.setExtra(key, extra);
+    }
+  }
+
+  /**
+   * 添加面包屑
+   */
+  addBreadcrumb(breadcrumb: {
+    category?: string;
+    message?: string;
+    level?: 'fatal' | 'error' | 'warning' | 'log' | 'info' | 'debug';
+    data?: Record<string, unknown>;
+  }): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      sentry.addBreadcrumb(breadcrumb);
+    }
+  }
+
+  /**
+   * 捕获消息
+   */
+  captureMessage(
+    message: string,
+    options?: {
+      level?: 'fatal' | 'error' | 'warning' | 'log' | 'info' | 'debug';
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      fingerprint?: string[];
+    }
+  ): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      if (options) {
+        sentry.withScope(scope => {
+          if (options.level) {
+            scope.setLevel(options.level);
+          }
+          if (options.tags) {
+            Object.entries(options.tags).forEach(([key, value]) => {
+              scope.setTag(key, value);
+            });
+          }
+          if (options.extra) {
+            Object.entries(options.extra).forEach(([key, value]) => {
+              scope.setExtra(key, value);
+            });
+          }
+          if (options.fingerprint) {
+            scope.setFingerprint(options.fingerprint);
+          }
+          sentry.captureMessage(message);
+        });
+      } else {
+        sentry.captureMessage(message);
+      }
+    } else {
+      // 加入待处理队列
+      this.addToPendingQueue(new Error(message), { isMessage: true, ...options });
+      this.triggerLazyInit();
+    }
+  }
+
+  /**
+   * 使用作用域
+   */
+  withScope(callback: (scope: { setTag: (key: string, value: string) => void; setExtra: (key: string, value: unknown) => void }) => void): void {
+    const sentry = this.sentryModule();
+    if (sentry) {
+      sentry.withScope(callback);
     }
   }
 }

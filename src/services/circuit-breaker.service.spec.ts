@@ -19,6 +19,8 @@ import {
 } from './circuit-breaker.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { Project, Task } from '../models';
 
 describe('CircuitBreakerService', () => {
@@ -95,6 +97,10 @@ describe('CircuitBreakerService', () => {
           useValue: {
             category: () => mockLogger,
           },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: mockSentryLazyLoaderService,
         },
       ],
     });

@@ -1,5 +1,5 @@
 import { Injectable, inject, signal } from '@angular/core';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { 
   SENTRY_EVENT_TYPES, 
   SENTRY_ALERT_RULES, 
@@ -60,6 +60,7 @@ export interface AlertStats {
   providedIn: 'root'
 })
 export class SentryAlertService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SentryAlert');
@@ -126,7 +127,7 @@ export class SentryAlertService {
    * 确保每个错误报告都包含同步状态信息
    */
   private updateSentryContext(): void {
-    Sentry.setContext('sync_state', {
+    this.sentryLazyLoader.setContext('sync_state', {
       action_queue_length: this.syncContext.actionQueueLength,
       last_sync_timestamp: this.syncContext.lastSyncTimestamp,
       pending_actions: this.syncContext.pendingActions,
@@ -134,9 +135,9 @@ export class SentryAlertService {
     });
     
     // 也设置为标签，方便在 Sentry 中筛选
-    Sentry.setTag('action_queue_length', String(this.syncContext.actionQueueLength));
+    this.sentryLazyLoader.setTag('action_queue_length', String(this.syncContext.actionQueueLength));
     if (this.syncContext.deadLetterCount > 0) {
-      Sentry.setTag('has_dead_letters', 'true');
+      this.sentryLazyLoader.setTag('has_dead_letters', 'true');
     }
   }
   
@@ -491,7 +492,7 @@ export class SentryAlertService {
     }
     
     try {
-      Sentry.captureMessage(event.message, {
+      this.sentryLazyLoader.captureMessage(event.message, {
         level: level as Sentry.SeverityLevel,
         tags: {
           eventType: event.type,

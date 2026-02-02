@@ -18,8 +18,7 @@ import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SupabaseClientService } from './supabase-client.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 // ========== 类型定义 ==========
 
 /**
@@ -83,6 +82,7 @@ export const CLOCK_SYNC_CONFIG = {
   providedIn: 'root'
 })
 export class ClockSyncService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ClockSync');
   private readonly toast = inject(ToastService);
@@ -220,7 +220,7 @@ export class ClockSyncService {
         
         if (status === 'error') {
           // 上报 Sentry
-          Sentry.captureMessage('Significant clock drift detected', {
+          this.sentryLazyLoader.captureMessage('Significant clock drift detected', {
             level: 'warning',
             tags: { driftMs: String(driftMs) },
             extra: { result }

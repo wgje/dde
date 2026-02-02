@@ -15,8 +15,7 @@ import { ToastService } from './toast.service';
 import { ModalService } from './modal.service';
 import { SupabaseError } from '../utils/supabase-error';
 import { PERMISSION_DENIED_CONFIG } from '../config/sync.config';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 /**
  * 被拒数据隔离记录
  */
@@ -45,6 +44,7 @@ export interface RejectedDataStore {
   providedIn: 'root'
 })
 export class PermissionDeniedHandlerService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly logger = inject(LoggerService).category('PermissionDeniedHandler');
   private readonly toast = inject(ToastService);
   private readonly modal = inject(ModalService);
@@ -72,7 +72,7 @@ export class PermissionDeniedHandlerService {
     await this.notifyUserOfRejectedData(isolatedRecords, error);
 
     // 3. 上报到 Sentry 用于监控
-    Sentry.captureMessage('Permission denied during data sync', {
+    this.sentryLazyLoader.captureMessage('Permission denied during data sync', {
       level: 'warning',
       tags: {
         service: 'PermissionDeniedHandler',

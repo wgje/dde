@@ -13,8 +13,7 @@ import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 import { Project, Task, Connection } from '../../../../models';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 完整性检查问题
  */
@@ -54,6 +53,7 @@ export interface WriteVerifyResult {
   providedIn: 'root'
 })
 export class DataIntegrityService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('DataIntegrity');
   private readonly indexedDB = inject(IndexedDBService);
@@ -189,7 +189,7 @@ export class DataIntegrityService {
         });
         
         if (hasErrors) {
-          Sentry.captureMessage('离线数据完整性检查发现严重问题', {
+          this.sentryLazyLoader.captureMessage('离线数据完整性检查发现严重问题', {
             level: 'error',
             tags: { operation: 'validateOfflineDataIntegrity' },
             extra: { 
@@ -219,7 +219,7 @@ export class DataIntegrityService {
       };
     } catch (err) {
       this.logger.error('离线数据完整性检查失败', err);
-      Sentry.captureException(err, { tags: { operation: 'validateOfflineDataIntegrity' } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'validateOfflineDataIntegrity' } });
       
       return {
         valid: false,
@@ -279,7 +279,7 @@ export class DataIntegrityService {
       return { removedTasks, removedConnections };
     } catch (err) {
       this.logger.error('清理孤立数据失败', err);
-      Sentry.captureException(err, { tags: { operation: 'cleanupOrphanedData' } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'cleanupOrphanedData' } });
       return { removedTasks, removedConnections };
     }
   }

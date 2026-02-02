@@ -35,8 +35,7 @@ import {
   LocalBackupStatus,
   LocalBackupCompatibility,
 } from '../config/local-backup.config';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 // ============================================
 // IndexedDB 存储键
 // ============================================
@@ -52,6 +51,7 @@ const IDB_KEYS = {
   providedIn: 'root'
 })
 export class LocalBackupService implements OnDestroy {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly logger = inject(LoggerService).category('LocalBackup');
   private readonly toast = inject(ToastService);
   private readonly exportService = inject(ExportService);
@@ -198,7 +198,7 @@ export class LocalBackupService implements OnDestroy {
       }
       
       this.logger.error('目录授权失败', error);
-      Sentry.captureException(error, { tags: { operation: 'localBackup.requestDirectory' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.requestDirectory' } });
       
       return { success: false, error: e.message };
     }
@@ -377,7 +377,7 @@ export class LocalBackupService implements OnDestroy {
     } catch (error) {
       const e = error as Error;
       this.logger.error('本地备份失败', error);
-      Sentry.captureException(error, { tags: { operation: 'localBackup.perform' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.perform' } });
       
       return { success: false, error: e.message };
       

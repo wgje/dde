@@ -12,6 +12,8 @@ import {
 } from './offline-integrity.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { Project, Task, Connection } from '../models';
 
 describe('OfflineIntegrityService', () => {
@@ -40,6 +42,7 @@ describe('OfflineIntegrityService', () => {
       providers: [
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ]
     });
     

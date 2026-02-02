@@ -267,7 +267,10 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     }
     
     if (this.touchState.isDragging) {
-      event.preventDefault();
+      // 检查事件是否可取消（避免滚动进行中的 Intervention 警告）
+      if (event.cancelable) {
+        event.preventDefault();
+      }
       event.stopPropagation();
       
       // 更新幽灵元素位置

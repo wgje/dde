@@ -25,8 +25,7 @@ import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { Task, Project, Connection } from '../../../../models';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 同步操作上下文
  */
@@ -68,6 +67,7 @@ export type SyncOperationResult<T> =
   providedIn: 'root'
 })
 export class SyncOperationHelperService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncOpHelper');
@@ -279,7 +279,7 @@ export class SyncOperationHelperService {
       this.logger.warn(`${operationName}: 版本冲突`, { entityId });
       this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
       
-      Sentry.captureMessage(`Optimistic lock conflict in ${operationName}`, {
+      this.sentryLazyLoader.captureMessage(`Optimistic lock conflict in ${operationName}`, {
         level: 'warning',
         tags: { operation: operationName, entityId, projectId: projectId ?? 'unknown' }
       });
@@ -296,7 +296,7 @@ export class SyncOperationHelperService {
     if (isForeignKeyError) {
       this.logger.error(`${operationName}: 外键约束违规`, { entityId, error: enhanced.message });
       
-      Sentry.captureMessage(`Foreign key violation in ${operationName}`, {
+      this.sentryLazyLoader.captureMessage(`Foreign key violation in ${operationName}`, {
         level: 'warning',
         tags: { operation: operationName, entityId, projectId: projectId ?? 'unknown' },
         extra: { errorCode: enhanced.code, ...extra }
@@ -316,7 +316,7 @@ export class SyncOperationHelperService {
     } else {
       this.logger.error(`${operationName}: 不可重试的错误`, { entityId, error: enhanced });
       
-      Sentry.captureException(enhanced, {
+      this.sentryLazyLoader.captureException(enhanced, {
         tags: { operation: operationName, entityId, errorType: enhanced.errorType },
         extra: { projectId, ...extra }
       });

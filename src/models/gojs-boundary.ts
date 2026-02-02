@@ -19,7 +19,7 @@
  */
 
 import * as go from 'gojs';
-import { Task, Connection } from './index';
+import { Task, Connection } from './core-types';
 
 // ============================================
 // 业务层 -> GoJS 层的数据转换接口

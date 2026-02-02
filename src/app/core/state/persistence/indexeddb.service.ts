@@ -11,8 +11,7 @@
 
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /** IndexedDB 数据库配置 */
 export const DB_CONFIG = {
   name: 'nanoflow-store-cache',
@@ -29,6 +28,7 @@ export const DB_CONFIG = {
   providedIn: 'root'
 })
 export class IndexedDBService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('IndexedDB');
   

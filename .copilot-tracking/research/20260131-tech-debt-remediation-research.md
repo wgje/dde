@@ -105,22 +105,7 @@ StoreService
 
 **确认**: 计划中的事件总线模式是解决此问题的推荐方案。
 
-### 2.4 Prompt 文件 tools: 语法验证
-
-以下 **8 个文件** 包含 `tools:` 语法（VS Code Copilot 不支持）：
-
-1. `.github/prompts/Bug Context Fixer.prompt.md`
-2. `.github/prompts/gilfoyle.prompt.md`
-3. `.github/prompts/implement.prompt.md`
-4. `.github/prompts/refactor-clean.prompt.md`
-5. `.github/prompts/research-technical-spike.prompt.md`
-6. `.github/prompts/sql-optimization.prompt.md`
-7. `.github/prompts/task-planner.agent.prompt.md`
-8. `.github/prompts/task-researcher.prompt.md`
-
-**备注**: 计划声称 5 个文件有问题，实际发现 **8 个文件**。
-
-### 2.5 不安全类型转换分布
+### 2.4 不安全类型转换分布
 
 通过 `grep -rn "as unknown\|as any" src --include="*.ts" | grep -v spec` 发现，不安全类型转换主要集中在：
 
@@ -279,7 +264,6 @@ diagram.clear();
 ### 4.2 需要改进的地方
 
 1. **ESLint 禁用统计口径不一致**: 非 spec 文件仅 4 处，需确认是否需要关注 spec 文件
-2. **prompt 文件数量偏差**: 实际 8 个文件有 `tools:` 语法问题，计划说 5 个
 3. **GoJS 类型转换需要专门方案**: 9 处 `as unknown` 在 flow-diagram.service.ts 需要类型扩展文件
 
 ### 4.3 风险评估（更新后）
@@ -445,7 +429,6 @@ declare module 'gojs' {
 | P0 | 创建 EventBusService 解决循环依赖 | 1d | 无 |
 | P0 | 拆分 SimpleSyncService | 5d | EventBusService |
 | P0 | 清理 sync-coordinator 代理方法 | 2d | SimpleSyncService 拆分 |
-| P1 | 修复 8 个 prompt 文件 tools: 语法 | 0.5d | 无 |
 | P1 | 创建 gojs-extended.d.ts 类型扩展 | 1d | 无 |
 | P2 | console.* 替换为 LoggerService | 3d | 无 |
 | P2 | ESLint 规则升级为 error 级别 | 0.5d | console 替换完成 |
@@ -499,10 +482,6 @@ grep -rn "injector\.get(" /workspaces/dde/src --include="*.ts" | grep -v spec.ts
 grep -rn "eslint-disable" /workspaces/dde/src --include="*.ts" | grep -v spec | wc -l
 # 结果: 4
 
-# prompt tools: 语法
-grep -l "tools:" /workspaces/dde/.github/prompts/*.md
-# 结果: 8 个文件
-
 # 不安全类型转换（非 spec）
 grep -rn "as unknown\|as any" /workspaces/dde/src --include="*.ts" | grep -v spec | wc -l
 # 结果: ~41
@@ -532,4 +511,221 @@ grep -rn "as unknown\|as any" /workspaces/dde/src --include="*.ts" | grep -v spe
 ---
 
 **研究完成时间**: 2026-01-31  
+**更新时间**: 2026-02-02  
 **下一步**: 创建任务计划，开始 Sprint 1 实施
+
+---
+
+## 10. 2026-02-02 Gilfoyle 审查深度补充研究
+
+### 10.1 同步架构复杂性分析
+
+**当前同步服务架构**:
+```
+SimpleSyncService (1031 行 - 门面服务)
+├── TombstoneService (355 行)
+├── RealtimePollingService (391 行)
+├── SessionManagerService (197 行)
+├── SyncOperationHelperService (411 行)
+├── UserPreferencesSyncService (99 行)
+├── ProjectDataService (569 行)
+├── BatchSyncService (256 行)
+├── TaskSyncOperationsService (872 行)
+├── ConnectionSyncOperationsService (448 行)
+├── RetryQueueService (663 行)
+└── SyncStateService (201 行)
+
+SyncCoordinatorService (788 行)
+├── core = SimpleSyncService (直接暴露)
+├── actionQueue = ActionQueueService
+├── deltaSyncCoordinator = DeltaSyncCoordinatorService
+├── projectSyncOps = ProjectSyncOperationsService
+├── conflictService = ConflictResolutionService
+├── conflictStorage = ConflictStorageService
+├── changeTracker = ChangeTrackerService
+└── persistScheduler = PersistSchedulerService
+```
+
+**同步子服务总行数**: 4514 行
+**同步核心服务总行数**: ~6000 行 (SimpleSyncService + SyncCoordinatorService + 子服务)
+
+**问题分析**:
+1. **职责分散**: 同步逻辑分散在 15+ 个服务中
+2. **门面套门面**: SyncCoordinatorService 是 SimpleSyncService 的门面，但 SimpleSyncService 本身也是门面
+3. **数据流复杂**: 写操作经过 5+ 个服务才到达 Supabase
+
+### 10.2 编译错误深度分析
+
+**错误位置**: [simple-sync.service.spec.ts#L255](../../src/app/core/services/simple-sync.service.spec.ts#L255)
+
+**错误代码**:
+```typescript
+service['syncState'].update((s: Record<string, unknown>) => ({ ...s, sessionExpired: true }));
+```
+
+**根本原因**:
+- 使用 `Record<string, unknown>` 替代具体的 `SyncState` 类型
+- TypeScript 的类型推断无法将 `Record<string, unknown>` 分配给 `SyncState`
+
+**正确修复**:
+```typescript
+// 方案 1: 移除类型注解，让 TypeScript 推断
+service['syncState'].update((s) => ({ ...s, sessionExpired: true }));
+
+// 方案 2: 使用正确的类型 (需要导入 SyncState)
+import type { SyncState } from './simple-sync.service';
+service['syncState'].update((s: SyncState) => ({ ...s, sessionExpired: true }));
+```
+
+### 10.3 Bundle 大小深度分析
+
+**构建输出分析**:
+```
+初始加载 (Initial):
+- main-55DRTK4A.js: 620 KB (超过 500 KB 预算)
+- chunk-2HI5X322.js: 420 KB (疑似 GoJS 库)
+- chunk-F2ZW6RDP.js: 190 KB
+- chunk-Y57OMHZ5.js: 177 KB
+- chunk-SNJRJD4L.js: 144 KB
+- styles-FJT52VNQ.css: 138 KB
+- 其他 chunks: ~600 KB
+
+总计: 2.34 MB (超过 2.00 MB 预算)
+
+延迟加载 (Lazy):
+- chunk-G73HAI6H.js (Flow 视图): 1.35 MB
+- chunk-CQNFCICM.js: 110 KB
+- 其他 lazy chunks: ~200 KB
+```
+
+**优化建议**:
+1. **分析 main bundle**: 使用 `npm run analyze:bundle` 查看具体组成
+2. **GoJS 延迟加载**: 确保 GoJS 仅在 Flow 视图加载时引入
+3. **Tree shaking 检查**: 验证未使用的代码是否被移除
+4. **CSS 优化**: 138 KB 的 CSS 可能包含未使用的 Tailwind 类
+
+### 10.4 Angular 最佳实践对照
+
+**服务设计原则** (Angular 官方):
+> "Services in Angular should be designed around a single responsibility principle, focusing on one specific concern or feature."
+
+**当前项目违规**:
+| 服务 | 职责 | 问题 |
+|------|------|------|
+| SimpleSyncService | 任务同步、连接同步、项目同步、重试队列、熔断器 | **5+ 职责** |
+| TaskOperationService | 任务 CRUD、回收站、排序、父子关系 | **4+ 职责** |
+| FlowDiagramService | 图表管理、小地图、导出、主题、视图状态 | **5+ 职责** |
+
+**建议**: 按单一职责原则重新划分服务边界
+
+### 10.5 Vitest Mock 类型安全最佳实践
+
+**当前模式** (不推荐):
+```typescript
+let mockSupabase: any;
+let mockLogger: any;
+let mockToast: any;
+```
+
+**推荐模式** (vi.mocked):
+```typescript
+import { vi } from 'vitest';
+import { SupabaseClientService } from './supabase-client.service';
+import { LoggerService } from './logger.service';
+
+vi.mock('./supabase-client.service');
+vi.mock('./logger.service');
+
+const mockSupabase = vi.mocked(SupabaseClientService);
+const mockLogger = vi.mocked(LoggerService);
+```
+
+**部分 Mock 模式**:
+```typescript
+vi.mocked(service.method, { partial: true }).mockReturnValue({ ok: false });
+```
+
+### 10.6 setCallbacks 模式替代方案
+
+**当前模式**:
+```typescript
+@Injectable({ providedIn: 'root' })
+class TaskCreationService {
+  private callbacks: CallbacksType | null = null;
+  
+  setCallbacks(callbacks: CallbacksType) {
+    this.callbacks = callbacks;
+  }
+  
+  createTask() {
+    this.callbacks?.recordAndUpdate(...);
+  }
+}
+```
+
+**推荐模式: InjectionToken**:
+```typescript
+// tokens.ts
+export const PROJECT_UPDATER = new InjectionToken<ProjectUpdater>('PROJECT_UPDATER');
+
+// task-creation.service.ts
+@Injectable({ providedIn: 'root' })
+class TaskCreationService {
+  private readonly updater = inject(PROJECT_UPDATER);
+  
+  createTask() {
+    this.updater.recordAndUpdate(...);
+  }
+}
+
+// providers 配置
+providers: [
+  {
+    provide: PROJECT_UPDATER,
+    useExisting: ProjectStateService  // 或 factory 函数
+  }
+]
+```
+
+**优势**:
+- 编译时类型检查
+- 无运行时初始化顺序依赖
+- 更好的测试可模拟性
+
+---
+
+## 11. 研究结论汇总 (2026-02-02 更新)
+
+### 11.1 问题严重性排序 (更新)
+
+| 优先级 | 问题 | 影响 | 工作量 |
+|--------|------|------|--------|
+| **P0** | 编译错误 | 阻塞构建 | 5 分钟 |
+| **P0** | .bak 文件 | 代码库污染 | 1 分钟 |
+| **P0** | Error Swallowing (55+ 处) | 调试盲区 | 2 周 |
+| **P1** | 服务过度工程 (133+ 服务) | 维护困难 | 4 周 |
+| **P1** | StoreService 精简 | 架构清晰度 | 2 周 |
+| **P1** | console.* 替换 | 日志统一 | 3 天 |
+| **P2** | Bundle 超标 (+343 KB) | 加载性能 | 1 周 |
+| **P2** | 测试类型安全 (118 处 as any) | 测试可靠性 | 持续 |
+| **P2** | setCallbacks 模式 (35 处) | 架构现代化 | 3 周 |
+| **P2** | 大文件拆分 (27 个 > 800 行) | 可维护性 | 持续 |
+
+### 11.2 立即行动项
+
+1. **修复编译错误**: 删除 `Record<string, unknown>` 类型注解
+2. **删除 .bak 文件**: `git rm src/app/features/flow/components/flow-view.component.ts.bak`
+3. **更新 .gitignore**: 添加 `*.bak` 模式
+
+### 11.3 研究状态
+
+- ✅ 服务架构分析完成
+- ✅ 编译错误定位完成
+- ✅ Bundle 大小分析完成
+- ✅ Mock 类型最佳实践研究完成
+- ✅ setCallbacks 替代方案研究完成
+- ✅ 优先级矩阵更新完成
+
+**研究文件路径**: `.copilot-tracking/research/20260201-code-quality-issues-research.md` (综合问题)
+
+

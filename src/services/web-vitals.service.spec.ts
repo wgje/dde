@@ -12,7 +12,8 @@ import { TestBed } from '@angular/core/testing';
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock, type MockedObject } from 'vitest';
 import { WebVitalsService, WEB_VITALS_THRESHOLDS } from './web-vitals.service';
 import { LoggerService } from './logger.service';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { isDevMode } from '@angular/core';
 
 vi.mock('@angular/core', async () => {
@@ -24,12 +25,6 @@ vi.mock('@angular/core', async () => {
 });
 
 const isDevModeMock = vi.mocked(isDevMode);
-
-// Mock Sentry
-vi.mock('@sentry/angular', () => ({
-  setMeasurement: vi.fn(),
-  captureMessage: vi.fn(),
-}));
 
 // Mock web-vitals library
 vi.mock('web-vitals', () => ({
@@ -57,8 +52,8 @@ describe('WebVitalsService - TTFB 优化测试', () => {
     isDevModeMock.mockReturnValue(true);
 
     // Reset Sentry mocks
-    (Sentry.setMeasurement as Mock).mockClear();
-    (Sentry.captureMessage as Mock).mockClear();
+    mockSentryLazyLoaderService.setMeasurement.mockClear();
+    mockSentryLazyLoaderService.captureMessage.mockClear();
 
     // Mock LoggerService
     mockLogger = {
@@ -73,6 +68,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       providers: [
         WebVitalsService,
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
 
@@ -205,10 +201,10 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       service['reportToSentry'](metric, 'poor');
       
       // 不应该调用 captureMessage
-      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
       
       // 应该调用 setMeasurement（记录指标）
-      expect(Sentry.setMeasurement).toHaveBeenCalledWith('TTFB', 2861, 'millisecond');
+      expect(mockSentryLazyLoaderService.setMeasurement).toHaveBeenCalledWith('TTFB', 2861, 'millisecond');
     });
 
     it('4G 网络下的 poor TTFB 应该触发告警', () => {
@@ -227,7 +223,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       service['reportToSentry'](metric, 'poor');
       
       // 应该触发告警
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         '性能告警: TTFB 超出阈值',
         expect.objectContaining({
           level: 'warning',
@@ -264,7 +260,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       service['reportToSentry'](lcpMetric, 'poor');
       
       // LCP 应该正常触发告警（不受网络质量过滤影响）
-      expect(Sentry.captureMessage).toHaveBeenCalled();
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalled();
     });
   });
 

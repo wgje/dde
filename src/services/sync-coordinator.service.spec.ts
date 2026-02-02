@@ -16,6 +16,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -297,6 +299,7 @@ describe('SyncCoordinatorService', () => {
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
 
@@ -871,6 +874,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
         { provide: DestroyRef, useValue: mockDestroyRef },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
 

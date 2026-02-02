@@ -21,12 +21,12 @@ import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 @Injectable({
   providedIn: 'root'
 })
 export class ProjectDataService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectData');
@@ -112,7 +112,7 @@ export class ProjectDataService {
       return project;
     } catch (e) {
       this.logger.error('批量加载项目失败', e);
-      Sentry.captureException(e, {
+      this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'loadFullProjectOptimized' },
         extra: { projectId }
       });
@@ -183,7 +183,7 @@ export class ProjectDataService {
       return project;
     } catch (e) {
       this.logger.error('加载项目失败', e);
-      Sentry.captureException(e, {
+      this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'loadFullProject' },
         extra: { projectId }
       });
@@ -264,7 +264,7 @@ export class ProjectDataService {
       return projects;
     } catch (e) {
       this.logger.error('加载项目列表失败', e);
-      Sentry.captureException(e, {
+      this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'loadProjectsFromCloud' }
       });
       return [];
@@ -284,7 +284,7 @@ export class ProjectDataService {
    * 拉取任务（带限流和 tombstone 处理）
    */
   private async pullTasksThrottled(projectId: string, client: SupabaseClient): Promise<Task[]> {
-    Sentry.addBreadcrumb({
+    this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: 'Loading tasks with tombstones',
       level: 'info',
@@ -526,7 +526,7 @@ export class ProjectDataService {
       // 【Sentry 监控】采样率 10% 上报
       const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
       if (isDev || Math.random() < 0.1) {
-        Sentry.captureMessage('Sync Warning: Task content field missing', {
+        this.sentryLazyLoader.captureMessage('Sync Warning: Task content field missing', {
           level: 'warning',
           tags: { operation: 'rowToTask', taskId: row.id || 'unknown' },
           extra: { rowKeys: Object.keys(row) }

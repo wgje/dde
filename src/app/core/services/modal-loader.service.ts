@@ -21,7 +21,7 @@ import { Injectable, inject, Type } from '@angular/core';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { DynamicModalService, ModalRef } from '../../../services/dynamic-modal.service';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 
 /**
  * 模态框类型映射
@@ -47,6 +47,7 @@ export class ModalLoaderService {
   private readonly logger = this.loggerService.category('ModalLoader');
   private readonly toast = inject(ToastService);
   private readonly dynamicModal = inject(DynamicModalService);
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   
   /** 已加载的模态框缓存 */
   private readonly loadedModals = new Map<ModalType, Type<unknown>>();
@@ -204,7 +205,7 @@ export class ModalLoaderService {
     this.failureCount.set(type, failures);
     
     this.logger.error(`模态框加载失败 (已重试${this.MAX_RETRIES}次): ${type}`, lastError);
-    Sentry.captureException(lastError, { tags: { operation: 'loadModal', modalType: type } });
+    this.sentryLazyLoader.captureException(lastError, { tags: { operation: 'loadModal', modalType: type } });
     
     // 根据失败次数显示不同提示
     if (failures >= 3) {

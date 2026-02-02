@@ -1,10 +1,12 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.5.0
--- 最后验证: 2026-01-27
+-- 版本: 3.6.0
+-- 最后验证: 2026-02-02
 --
 -- 更新日志：
+--   3.6.0 (2026-02-02): 性能优化：添加 get_all_projects_data 和 get_projects_list RPC 函数
+--                       支持增量同步和分页查询，减少 N+1 查询问题
 --   3.5.0 (2026-01-27): 性能优化：添加 get_full_project_data 和 get_user_projects_meta
 --                       批量加载 RPC 函数，合并 4+ 请求为 1 个，首屏加载提升 70%
 --   3.4.0 (2026-01-26): 深度数据库优化：删除未使用索引、添加 RLS 辅助函数、
@@ -2818,6 +2820,114 @@ COMMENT ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) IS
 -- 权限设置
 REVOKE EXECUTE ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) TO authenticated;
+
+-- ============================================
+-- 性能优化：批量加载 RPC 函数 (2026-02-02)
+-- 将 N+1 查询合并为单次 RPC 调用
+-- 预期收益：API 请求从 12+ 降至 1-2 个
+-- ============================================
+
+-- 批量加载所有项目（用于后台同步）
+CREATE OR REPLACE FUNCTION public.get_all_projects_data(
+  p_since_timestamp TIMESTAMPTZ DEFAULT '1970-01-01'::TIMESTAMPTZ
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_result JSON;
+  v_user_id UUID;
+BEGIN
+  v_user_id := auth.uid();
+  
+  SELECT json_build_object(
+    'projects', COALESCE((
+      SELECT json_agg(row_to_json(p.*) ORDER BY p.updated_at DESC)
+      FROM (
+        SELECT id, owner_id, title, description, created_date, updated_at, version
+        FROM public.projects 
+        WHERE owner_id = v_user_id AND updated_at > p_since_timestamp
+      ) p
+    ), '[]'::json),
+    'server_time', now()
+  ) INTO v_result;
+  
+  RETURN v_result;
+END;
+$$;
+
+COMMENT ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) IS 
+  '批量加载用户所有项目的元数据（增量同步）- 性能优化 2026-02-02';
+
+REVOKE EXECUTE ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) TO authenticated;
+
+-- 分页获取项目列表（含摘要信息）
+CREATE OR REPLACE FUNCTION public.get_projects_list(
+  p_limit INT DEFAULT 50,
+  p_offset INT DEFAULT 0
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_result JSON;
+  v_user_id UUID;
+BEGIN
+  v_user_id := auth.uid();
+  
+  SELECT json_build_object(
+    'projects', COALESCE((
+      SELECT json_agg(json_build_object(
+        'id', p.id,
+        'owner_id', p.owner_id,
+        'title', p.title,
+        'description', p.description,
+        'created_date', p.created_date,
+        'updated_at', p.updated_at,
+        'version', p.version,
+        'task_count', (SELECT COUNT(*) FROM public.tasks WHERE project_id = p.id AND deleted_at IS NULL),
+        'last_modified', (SELECT MAX(updated_at) FROM (
+          SELECT updated_at FROM public.tasks WHERE project_id = p.id
+          UNION ALL
+          SELECT updated_at FROM public.connections WHERE project_id = p.id
+        ) AS updates)
+      ) ORDER BY p.updated_at DESC)
+      FROM (
+        SELECT *
+        FROM public.projects 
+        WHERE owner_id = v_user_id
+        ORDER BY updated_at DESC
+        LIMIT p_limit OFFSET p_offset
+      ) p
+    ), '[]'::json),
+    'total', (SELECT COUNT(*) FROM public.projects WHERE owner_id = v_user_id),
+    'server_time', now()
+  ) INTO v_result;
+  
+  RETURN v_result;
+END;
+$$;
+
+COMMENT ON FUNCTION public.get_projects_list(INT, INT) IS 
+  '分页获取项目列表（含摘要信息）- 性能优化 2026-02-02';
+
+REVOKE EXECUTE ON FUNCTION public.get_projects_list(INT, INT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_projects_list(INT, INT) TO authenticated;
+
+-- 添加索引以支持 RPC 查询（如果尚未存在）
+CREATE INDEX IF NOT EXISTS idx_projects_owner_updated 
+  ON public.projects(owner_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_project_order 
+  ON public.tasks(project_id, stage, "order");
+
+CREATE INDEX IF NOT EXISTS idx_connections_project 
+  ON public.connections(project_id);
 
 -- ============================================================
 -- 权限收口：SECURITY DEFINER RPC 禁止 PUBLIC / anon

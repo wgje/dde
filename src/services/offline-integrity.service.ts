@@ -18,8 +18,7 @@ import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Project, Task } from '../models';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 /**
  * 离线数据完整性校验配置
  */
@@ -111,6 +110,7 @@ export interface RepairResult {
   providedIn: 'root'
 })
 export class OfflineIntegrityService implements OnDestroy {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('OfflineIntegrity');
   private readonly toast = inject(ToastService);
@@ -228,7 +228,7 @@ export class OfflineIntegrityService implements OnDestroy {
         // 严重问题上报 Sentry
         const criticalIssues = issues.filter(i => i.severity === 'critical');
         if (criticalIssues.length > 0) {
-          Sentry.captureMessage('OfflineIntegrity: Critical issues detected', {
+          this.sentryLazyLoader.captureMessage('OfflineIntegrity: Critical issues detected', {
             level: 'error',
             tags: { operation: 'offline-integrity-check' },
             extra: {

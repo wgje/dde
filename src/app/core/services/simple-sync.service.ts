@@ -41,7 +41,7 @@ import { supabaseErrorToError, EnhancedError } from '../../../utils/supabase-err
 import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
 import { SYNC_CONFIG, CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 
 /**
  * 重试队列项
@@ -113,6 +113,7 @@ export class SimpleSyncService {
   private readonly batchSyncService = inject(BatchSyncService);
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
   private readonly connectionSyncOps = inject(ConnectionSyncOperationsService);
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   
   /**
    * 获取 Supabase 客户端
@@ -554,7 +555,7 @@ export class SimpleSyncService {
           queueSize: this.retryQueue.length,
           isProcessingQueue: this.isProcessingQueue
         });
-        Sentry.captureMessage('重试队列溢出', {
+        this.sentryLazyLoader.captureMessage('重试队列溢出', {
           level: 'warning',
           tags: { 
             queueSize: String(this.retryQueue.length),
@@ -671,7 +672,7 @@ export class SimpleSyncService {
       );
     }
     
-    Sentry.captureMessage('RetryQueue capacity warning', {
+    this.sentryLazyLoader.captureMessage('RetryQueue capacity warning', {
       level: 'warning',
       tags: { 
         operation: 'queueCapacityCheck',

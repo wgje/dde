@@ -16,7 +16,7 @@
 
 import { Injectable, inject, isDevMode } from '@angular/core';
 import { onLCP, onCLS, onINP, onTTFB, onFCP, type Metric } from 'web-vitals';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { LoggerService } from './logger.service';
 
 /** Web Vitals 阈值配置 (基于 Google 推荐值) */
@@ -65,6 +65,7 @@ interface NetworkInfo {
   providedIn: 'root'
 })
 export class WebVitalsService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('WebVitals');
   
@@ -224,7 +225,7 @@ export class WebVitalsService {
    */
   private reportToSentry(metric: Metric, rating: MetricRating): void {
     // 使用 Sentry 的 transaction 记录性能指标
-    Sentry.setMeasurement(metric.name, metric.value, metric.name === 'CLS' ? '' : 'millisecond');
+    this.sentryLazyLoader.setMeasurement(metric.name, metric.value, metric.name === 'CLS' ? '' : 'millisecond');
     
     // 开发环境下不对 TTFB 发送告警
     // TTFB 是服务器响应时间，开发环境的网络延迟是正常的
@@ -250,7 +251,7 @@ export class WebVitalsService {
       const networkInfo = this.getNetworkInfo();
       const networkQuality = this.detectNetworkQuality();
       
-      Sentry.captureMessage(`性能告警: ${metric.name} 超出阈值`, {
+      this.sentryLazyLoader.captureMessage(`性能告警: ${metric.name} 超出阈值`, {
         level: 'warning',
         tags: {
           'web-vital': metric.name,

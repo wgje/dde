@@ -4,7 +4,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
 import { CACHE_CONFIG } from '../config';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   MIGRATION_SNAPSHOT_CONFIG,
   MigrationStatus,
@@ -37,6 +37,7 @@ export type {
   providedIn: 'root'
 })
 export class MigrationService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private syncService = inject(SimpleSyncService);
   private toast = inject(ToastService);
   private loggerService = inject(LoggerService);
@@ -217,7 +218,7 @@ export class MigrationService {
     } catch (e: unknown) {
       const err = e as { message?: string };
       this.updateMigrationStatus('failed', { error: err?.message ?? String(e) });
-      Sentry.captureException(e, { 
+      this.sentryLazyLoader.captureException(e, { 
         tags: { operation: 'executeMigration', strategy },
         extra: { projectCount: localData.length }
       });
@@ -414,7 +415,7 @@ export class MigrationService {
         failedCount: failedProjects.length,
         failedProjects
       });
-      Sentry.captureMessage('数据迁移部分失败', {
+      this.sentryLazyLoader.captureMessage('数据迁移部分失败', {
         level: 'warning',
         tags: { operation: 'migrateLocalToCloud' },
         extra: { migratedCount, failedProjects }
@@ -510,7 +511,7 @@ export class MigrationService {
         failedCount: failedProjects.length,
         failedProjects
       });
-      Sentry.captureMessage('数据合并部分失败', {
+      this.sentryLazyLoader.captureMessage('数据合并部分失败', {
         level: 'warning',
         tags: { operation: 'mergeLocalAndRemote' },
         extra: { migratedCount, failedProjects }
@@ -936,7 +937,7 @@ export class MigrationService {
       });
       
       if (hasErrors) {
-        Sentry.captureMessage('数据完整性检查发现严重问题', {
+        this.sentryLazyLoader.captureMessage('数据完整性检查发现严重问题', {
           level: 'error',
           tags: { operation: 'validateDataIntegrity' },
           extra: { issues: issues.filter(i => i.severity === 'error') }
@@ -999,7 +1000,7 @@ export class MigrationService {
       
       if (missingItems.length > 0) {
         this.logger.error('迁移验证失败：存在未同步的数据', { missingItems });
-        Sentry.captureMessage('迁移验证失败', {
+        this.sentryLazyLoader.captureMessage('迁移验证失败', {
           level: 'error',
           tags: { operation: 'verifyMigrationSuccess' },
           extra: { missingItems }

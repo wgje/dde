@@ -28,8 +28,7 @@ import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * Tombstone 查询结果
  */
@@ -71,6 +70,7 @@ export type SyncStateCheckFn = {
   providedIn: 'root'
 })
 export class TaskSyncOperationsService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskSyncOps');
@@ -146,7 +146,7 @@ export class TaskSyncOperationsService {
       }
     }
     
-    Sentry.captureException(error, {
+    this.sentryLazyLoader.captureException(error, {
       tags: { operation },
       extra: sanitizedExtra
     });
@@ -317,7 +317,7 @@ export class TaskSyncOperationsService {
     if (enhanced.errorType === 'VersionConflictError') {
       this.logger.warn('推送任务版本冲突', { taskId: task.id, projectId });
       this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      Sentry.captureMessage('Optimistic lock conflict in pushTask', {
+      this.sentryLazyLoader.captureMessage('Optimistic lock conflict in pushTask', {
         level: 'warning',
         tags: { operation: 'pushTask', taskId: task.id, projectId },
         extra: { taskUpdatedAt: task.updatedAt }
@@ -523,7 +523,7 @@ export class TaskSyncOperationsService {
             error: error.message 
           });
           this.toast.warning('删除被阻止', error.message);
-          Sentry.captureMessage('Server circuit breaker blocked delete', {
+          this.sentryLazyLoader.captureMessage('Server circuit breaker blocked delete', {
             level: 'warning',
             tags: { operation: 'softDeleteTasksBatch', projectId },
             extra: { taskIds, error: error.message }

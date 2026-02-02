@@ -20,8 +20,7 @@ import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
 import { UI_CONFIG } from '../../../../config';
 import * as go from 'gojs';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 视图状态（用于保存/恢复）
  * @internal 仅用于文档目的
@@ -54,6 +53,7 @@ interface ViewState {
   providedIn: 'root'
 })
 export class FlowDiagramService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
@@ -259,7 +259,7 @@ export class FlowDiagramService {
       return true;
       
     } catch (error) {
-      Sentry.captureException(error, { tags: { operation: 'initDiagram' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'initDiagram' } });
       this.handleError('流程图初始化失败', error);
       return false;
     }
@@ -610,7 +610,7 @@ export class FlowDiagramService {
       return blob;
     } catch (error) {
       this.logger.error('导出 PNG 失败', error);
-      Sentry.captureException(error, { tags: { operation: 'exportToPng' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToPng' } });
       this.toast.error('导出失败', '生成图片时发生错误');
       return null;
     }
@@ -644,7 +644,7 @@ export class FlowDiagramService {
       return blob;
     } catch (error) {
       this.logger.error('导出 SVG 失败', error);
-      Sentry.captureException(error, { tags: { operation: 'exportToSvg' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToSvg' } });
       this.toast.error('导出失败', '生成 SVG 时发生错误');
       return null;
     }
@@ -884,7 +884,7 @@ export class FlowDiagramService {
       }
       
     } catch (error) {
-      Sentry.captureException(error, { tags: { operation: 'updateDiagram' } });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'updateDiagram' } });
       this.handleError('更新流程图失败', error);
     }
   }
@@ -925,7 +925,7 @@ export class FlowDiagramService {
         onDrop(task, loc);
       } catch (err) {
         this.logger.error('Drop error:', err);
-        Sentry.captureException(err, { tags: { operation: 'drop' } });
+        this.sentryLazyLoader.captureException(err, { tags: { operation: 'drop' } });
       }
     });
   }

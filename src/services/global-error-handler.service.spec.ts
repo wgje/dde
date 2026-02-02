@@ -7,6 +7,7 @@ import { GlobalErrorHandler, ErrorSeverity } from './global-error-handler.servic
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Router } from '@angular/router';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 describe('GlobalErrorHandler', () => {
@@ -15,6 +16,7 @@ describe('GlobalErrorHandler', () => {
   let toastSpy: any;
   let routerSpy: any;
   let zoneSpy: any;
+  let sentryLoaderSpy: any;
   let injector: Injector;
 
   beforeEach(() => {
@@ -38,12 +40,18 @@ describe('GlobalErrorHandler', () => {
       runOutsideAngular: vi.fn((fn: () => void) => fn())
     };
 
+    sentryLoaderSpy = {
+      captureException: vi.fn().mockResolvedValue(undefined),
+      captureMessage: vi.fn().mockResolvedValue(undefined)
+    };
+
     injector = Injector.create({
       providers: [
         { provide: LoggerService, useValue: loggerSpy },
         { provide: ToastService, useValue: toastSpy },
         { provide: Router, useValue: routerSpy },
-        { provide: NgZone, useValue: zoneSpy }
+        { provide: NgZone, useValue: zoneSpy },
+        { provide: SentryLazyLoaderService, useValue: sentryLoaderSpy }
       ]
     });
 

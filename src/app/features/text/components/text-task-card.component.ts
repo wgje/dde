@@ -268,7 +268,10 @@ export class TextTaskCardComponent implements OnChanges {
       // 这样可以防止浏览器触发页面滚动，确保拖拽体验流畅
       // 注意：isDragging 属性由父组件传入，在拖拽激活后会变为 true
       if (this.isDragging) {
-        event.preventDefault();
+        // 检查事件是否可取消（避免滚动进行中的 Intervention 警告）
+        if (event.cancelable) {
+          event.preventDefault();
+        }
       }
       // 注意：在拖拽激活前的 touchmove 不阻止默认行为，
       // 这是为了让用户可以正常滚动页面（垂直方向的移动）

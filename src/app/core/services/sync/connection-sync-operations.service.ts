@@ -23,8 +23,7 @@ import { supabaseWithRetry } from '../../../../utils/timeout';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * 添加到重试队列的回调类型
  */
@@ -47,6 +46,7 @@ export type SyncStateCheckFn = {
   providedIn: 'root'
 })
 export class ConnectionSyncOperationsService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ConnectionSyncOps');
@@ -102,7 +102,7 @@ export class ConnectionSyncOperationsService {
       }
     }
     
-    Sentry.captureException(error, {
+    this.sentryLazyLoader.captureException(error, {
       tags: { operation },
       extra: sanitizedExtra
     });
@@ -265,7 +265,7 @@ export class ConnectionSyncOperationsService {
           targetExists: existingTaskIds.has(connection.target)
         });
         
-        Sentry.captureMessage('连接引用的任务不存在', {
+        this.sentryLazyLoader.captureMessage('连接引用的任务不存在', {
           level: 'warning',
           tags: { 
             operation: 'pushConnection',
@@ -293,7 +293,7 @@ export class ConnectionSyncOperationsService {
         error: error instanceof Error ? error.message : String(error)
       });
       
-      Sentry.captureMessage('任务存在性查询失败', {
+      this.sentryLazyLoader.captureMessage('任务存在性查询失败', {
         level: 'warning',
         tags: { 
           operation: 'pushConnection', 
@@ -327,7 +327,7 @@ export class ConnectionSyncOperationsService {
     if (enhanced.errorType === 'VersionConflictError') {
       this.logger.warn('推送连接版本冲突', { connectionId: connection.id, projectId });
       this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      Sentry.captureMessage('Optimistic lock conflict in pushConnection', {
+      this.sentryLazyLoader.captureMessage('Optimistic lock conflict in pushConnection', {
         level: 'warning',
         tags: { operation: 'pushConnection', connectionId: connection.id, projectId }
       });

@@ -26,7 +26,7 @@ import { FlowEventRegistrationService } from '../services/flow-event-registratio
 import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
 import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service';
 import { Task } from '../../../../models';
-import { UI_CONFIG, FLOW_VIEW_CONFIG } from '../../../../config';
+import { UI_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
 import { FlowPaletteComponent } from './flow-palette.component';
 import { FlowTaskDetailComponent } from './flow-task-detail.component';

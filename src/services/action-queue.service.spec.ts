@@ -19,7 +19,8 @@ import { ActionQueueService, EnqueueParams } from './action-queue.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
-import { createMockDestroyRef } from '../test-setup.mocks';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // 模拟 LoggerService
 const mockLoggerCategory = {
@@ -141,6 +142,7 @@ describe('ActionQueueService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryAlertService, useValue: mockSentryAlertService },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });

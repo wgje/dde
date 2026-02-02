@@ -23,7 +23,7 @@ import { Project, Task, Connection } from '../../../models';
 import { validateProject } from '../../../utils/validation';
 // Sprint 8 技术债务修复：提取的子服务
 import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService, DeltaSyncPersistenceService } from './persistence';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 
 /** 存储版本号（用于数据迁移） */
 const STORAGE_VERSION = 1;
@@ -56,6 +56,7 @@ export class StorePersistenceService {
   private readonly dataIntegrity = inject(DataIntegrityService);
   private readonly backupService = inject(BackupService);
   private readonly deltaSyncPersistence = inject(DeltaSyncPersistenceService);
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   
   /** 防抖计时器 */
   private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -168,7 +169,7 @@ export class StorePersistenceService {
           this.fallbackToLocalStorage(projectId, project, tasks, connections);
         }
         
-        Sentry.captureMessage('IndexedDB 写入校验失败', {
+        this.sentryLazyLoader.captureMessage('IndexedDB 写入校验失败', {
           level: 'error',
           tags: { operation: 'writeIntegrityCheck', projectId, retried: String(retrySuccess) },
           extra: { 
@@ -188,7 +189,7 @@ export class StorePersistenceService {
       });
     } catch (err) {
       this.logger.error('保存项目数据失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'saveProjectData', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'saveProjectData', projectId } });
       // 【Senior Consultant P1】降级到 localStorage
       const project = this.projectStore.getProject(projectId);
       const tasks = this.taskStore.getTasksByProject(projectId);
@@ -278,7 +279,7 @@ export class StorePersistenceService {
       });
     } catch (e) {
       this.logger.error('localStorage 降级保存也失败', { projectId, error: e });
-      Sentry.captureException(e, { 
+      this.sentryLazyLoader.captureException(e, { 
         tags: { operation: 'fallbackToLocalStorage', projectId },
         level: 'fatal'
       });
@@ -393,7 +394,7 @@ export class StorePersistenceService {
       });
     } catch (err) {
       this.logger.error('保存元数据失败', err);
-      Sentry.captureException(err, { tags: { operation: 'saveMeta' } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'saveMeta' } });
     }
   }
   
@@ -463,7 +464,7 @@ export class StorePersistenceService {
           projectId, 
           errors: validation.errors.slice(0, 10)
         });
-        Sentry.captureMessage('IndexedDB 缓存数据验证失败', {
+        this.sentryLazyLoader.captureMessage('IndexedDB 缓存数据验证失败', {
           level: 'error',
           tags: { operation: 'loadProject', projectId },
           extra: { errors: validation.errors }
@@ -502,7 +503,7 @@ export class StorePersistenceService {
       return true;
     } catch (err) {
       this.logger.error('恢复项目数据失败', { projectId, error: err });
-      Sentry.captureException(err, { tags: { operation: 'loadProject', projectId } });
+      this.sentryLazyLoader.captureException(err, { tags: { operation: 'loadProject', projectId } });
       return false;
     } finally {
       this.isRestoring = false;

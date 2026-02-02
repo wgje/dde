@@ -16,6 +16,8 @@ import { Injector, runInInjectionContext, signal, DestroyRef } from '@angular/co
 import { MobileSyncStrategyService, SyncStrategyConfig } from './mobile-sync-strategy.service';
 import { NetworkAwarenessService, NetworkQuality, DataSaverMode } from './network-awareness.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // Mock NetworkAwarenessService
 const createMockNetworkService = (overrides: Partial<{
@@ -64,6 +66,7 @@ describe('MobileSyncStrategyService', () => {
         { provide: NetworkAwarenessService, useValue: mockNetworkService },
         { provide: LoggerService, useValue: mockLogger },
         { provide: DestroyRef, useValue: mockDestroyRef },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
     

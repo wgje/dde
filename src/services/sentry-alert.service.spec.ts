@@ -3,8 +3,9 @@ import { Injector, runInInjectionContext } from '@angular/core';
 import { SentryAlertService, AlertStats } from './sentry-alert.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { SENTRY_EVENT_TYPES, SENTRY_ALERT_CONFIG } from '../config/sentry-alert.config';
-import * as Sentry from '@sentry/angular';
 
 describe('SentryAlertService', () => {
   let service: SentryAlertService;
@@ -17,6 +18,9 @@ describe('SentryAlertService', () => {
   
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSentryLazyLoaderService.captureMessage.mockClear();
+    mockSentryLazyLoaderService.setContext.mockClear();
+    mockSentryLazyLoaderService.setTag.mockClear();
     
     mockToast = {
       error: vi.fn(),
@@ -39,6 +43,7 @@ describe('SentryAlertService', () => {
       providers: [
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
 
@@ -54,7 +59,7 @@ describe('SentryAlertService', () => {
     it('应报告熔断开启事件', () => {
       service.reportCircuitBreakerOpen({ failureCount: 3 });
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('Circuit breaker opened'),
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -70,7 +75,7 @@ describe('SentryAlertService', () => {
       service.reportCircuitBreakerClose();
       
       // LOW 级别事件不会调用 Sentry.captureMessage
-      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
       
       // 但统计数据仍应更新
       const stats = service.getStats();
@@ -80,7 +85,7 @@ describe('SentryAlertService', () => {
     it('应报告空数据阻止事件', () => {
       service.reportEmptyDataBlocked('project-123', { reason: 'empty tasks' });
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('Empty data sync blocked'),
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -93,7 +98,7 @@ describe('SentryAlertService', () => {
     it('应报告任务数骤降事件', () => {
       service.reportTaskDrop('project-123', 100, 10);
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('Task count dropped'),
         expect.objectContaining({
           extra: expect.objectContaining({
@@ -108,7 +113,7 @@ describe('SentryAlertService', () => {
     it('应报告版本冲突事件', () => {
       service.reportVersionConflict('task', 'task-123', 5, 3);
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('Version conflict on task'),
         expect.objectContaining({
           extra: expect.objectContaining({
@@ -124,7 +129,7 @@ describe('SentryAlertService', () => {
     it('应报告权限拒绝事件', () => {
       service.reportPermissionDenied('deleteTask');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('Permission denied'),
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -137,7 +142,7 @@ describe('SentryAlertService', () => {
     it('应报告 Tombstone 复活尝试', () => {
       service.reportTombstoneViolation('task-123');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('resurrect tombstoned task'),
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -150,7 +155,7 @@ describe('SentryAlertService', () => {
     it('应报告会话过期事件', () => {
       service.reportSessionExpired();
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         expect.stringContaining('session expired'),
         expect.any(Object)
       );
@@ -161,7 +166,7 @@ describe('SentryAlertService', () => {
     it('应报告校验失败事件', () => {
       service.reportIntegrityIssue('validation_failed', 'Invalid task data');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Invalid task data',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -174,7 +179,7 @@ describe('SentryAlertService', () => {
     it('应报告循环引用事件', () => {
       service.reportIntegrityIssue('circular_reference', 'Circular reference detected');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Circular reference detected',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -189,7 +194,7 @@ describe('SentryAlertService', () => {
     it('应报告配额超限事件', () => {
       service.reportStorageIssue('quota_exceeded', 'Storage quota exceeded');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Storage quota exceeded',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -204,7 +209,7 @@ describe('SentryAlertService', () => {
     it('应报告持续失败事件', () => {
       service.reportSyncIssue('persistent_failure', 'Sync failed repeatedly');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Sync failed repeatedly',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -217,7 +222,7 @@ describe('SentryAlertService', () => {
     it('应报告多标签页冲突事件', () => {
       service.reportSyncIssue('tab_conflict', 'Tab conflict detected');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Tab conflict detected',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -232,7 +237,7 @@ describe('SentryAlertService', () => {
     it('应报告备份失败事件', () => {
       service.reportBackupEvent('failed', 'Backup failed');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'Backup failed',
         expect.objectContaining({
           tags: expect.objectContaining({
@@ -247,11 +252,11 @@ describe('SentryAlertService', () => {
     it('应对相同事件进行去重', () => {
       // 第一次报告
       service.reportCircuitBreakerOpen();
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(1);
       
       // 立即再次报告相同事件
       service.reportCircuitBreakerOpen();
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(1);
       
       // 验证去重统计
       const stats = service.getStats();
@@ -265,14 +270,14 @@ describe('SentryAlertService', () => {
       service.reportCircuitBreakerClose();
       
       // Open 是 HIGH 级别，会上报；Close 是 LOW 级别，被拦截
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(1);
     });
     
     it('应区分不同的标签', () => {
       service.reportEmptyDataBlocked('project-1');
       service.reportEmptyDataBlocked('project-2');
       
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(2);
     });
   });
   
@@ -285,11 +290,11 @@ describe('SentryAlertService', () => {
         service.reportEmptyDataBlocked(`project-${i}`);
       }
       
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(maxEvents);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(maxEvents);
       
       // 超出限制的事件应被拒绝（使用新的项目 ID）
       service.reportEmptyDataBlocked('project-extra');
-      expect(Sentry.captureMessage).toHaveBeenCalledTimes(maxEvents);
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(maxEvents);
       
       // 验证限流统计
       const stats = service.getStats();

@@ -10,6 +10,36 @@
 
 import * as go from 'gojs';
 
+// ========== GoJS 内部 API 类型扩展 ==========
+
+/**
+ * 扩展 Diagram 静态属性（licenseKey）
+ * GoJS 的 licenseKey 是静态属性，官方类型定义未暴露
+ */
+declare module 'gojs' {
+  interface DiagramStatic {
+    licenseKey: string;
+  }
+  
+  /**
+   * 扩展 Overview 类型（fixedBounds 属性）
+   * fixedBounds 用于限制概览图的显示范围
+   */
+  interface Overview {
+    fixedBounds?: go.Rect;
+  }
+  
+  /**
+   * 扩展 ClickSelectingTool 类型
+   * standardMouseSelect 和 standardTouchSelect 是内部方法
+   */
+  interface ClickSelectingTool {
+    standardMouseSelect?(e?: go.InputEvent, obj?: go.GraphObject | null): void;
+    standardTouchSelect?(e?: go.InputEvent, obj?: go.GraphObject | null): void;
+  }
+}
+
+
 // ========== 节点数据类型 ==========
 
 /**

@@ -366,7 +366,7 @@ export class TextUnassignedComponent implements OnDestroy {
     }
   }
 
-  protected handleDragLeaveUnassigned(event: DragEvent): void {
+  protected handleDragLeaveUnassigned(_event: DragEvent): void {
     // 可选：添加视觉反馈
   }
 

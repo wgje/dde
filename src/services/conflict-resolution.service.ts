@@ -8,7 +8,7 @@ import { Project, Task } from '../models';
 import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';
-import * as Sentry from '@sentry/angular';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   ConflictResolutionStrategy,
   ConflictData,
@@ -45,6 +45,7 @@ export type {
   providedIn: 'root'
 })
 export class ConflictResolutionService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private syncService = inject(SimpleSyncService);
   private layoutService = inject(LayoutService);
   private toast = inject(ToastService);
@@ -308,7 +309,7 @@ export class ConflictResolutionService {
       this.logger.warn('smartMerge: tombstone 查询失败且本地缓存为空，启用保守模式', { 
         projectId: local.id 
       });
-      Sentry.captureMessage('smartMerge 启用保守模式', {
+      this.sentryLazyLoader.captureMessage('smartMerge 启用保守模式', {
         level: 'warning',
         tags: { operation: 'smartMerge', projectId: local.id },
         extra: { reason: 'tombstone 查询失败且本地缓存为空' }
@@ -438,7 +439,7 @@ export class ConflictResolutionService {
         projectId: local.id 
       });
       issues.push(`保守模式跳过 ${conservativeSkipCount} 个可能已删除的任务`);
-      Sentry.captureMessage('smartMerge 保守跳过任务', {
+      this.sentryLazyLoader.captureMessage('smartMerge 保守跳过任务', {
         level: 'warning',
         tags: { operation: 'smartMerge', projectId: local.id },
         extra: { conservativeSkipCount }
@@ -563,7 +564,7 @@ export class ConflictResolutionService {
           });
           
           // 发送 Sentry 事件
-          Sentry.captureMessage('Content conflict detected, created copy', {
+          this.sentryLazyLoader.captureMessage('Content conflict detected, created copy', {
             level: 'info',
             tags: { operation: 'mergeTaskFields', taskId: local.id },
             extra: { 

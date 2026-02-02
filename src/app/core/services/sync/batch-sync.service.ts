@@ -23,8 +23,7 @@ import { nowISO } from '../../../../utils/date';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import * as Sentry from '@sentry/angular';
-
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /** 批量同步结果 */
 export interface BatchSyncResult {
   success: boolean;
@@ -50,6 +49,7 @@ export interface BatchSyncCallbacks {
   providedIn: 'root'
 })
 export class BatchSyncService {
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('BatchSync');
@@ -124,7 +124,7 @@ export class BatchSyncService {
     const circuitValidation = this.circuitBreaker.validateBeforeSync(project);
     if (!circuitValidation.passed && circuitValidation.shouldBlock) {
       this.logger.error('熔断: 同步被阻止', { projectId: project.id });
-      Sentry.captureMessage('CircuitBreaker: Sync blocked', {
+      this.sentryLazyLoader.captureMessage('CircuitBreaker: Sync blocked', {
         level: 'error',
         tags: { operation: 'saveProjectToCloud', projectId: project.id }
       });
@@ -244,7 +244,7 @@ export class BatchSyncService {
       return { success: true, newVersion: project.version };
     } catch (e) {
       this.logger.error('保存项目失败', e);
-      Sentry.captureException(e, {
+      this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'saveProjectToCloud' },
         extra: { projectId: project.id }
       });

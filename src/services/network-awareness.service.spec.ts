@@ -16,6 +16,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { NetworkAwarenessService, NetworkQuality, DataSaverMode } from './network-awareness.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // Mock LoggerService
 const mockLogger = {
@@ -42,6 +44,7 @@ describe('NetworkAwarenessService', () => {
     injector = Injector.create({
       providers: [
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
       ],
     });
     
