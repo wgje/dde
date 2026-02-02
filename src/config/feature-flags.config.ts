@@ -75,6 +75,7 @@ export type FeatureFlag = {
 
 /**
  * 检查特性是否启用
+ * @reserved 预留的工具函数，供动态特性开关检查使用
  * 
  * @param flag 特性开关名称（仅布尔类型）
  * @returns 是否启用

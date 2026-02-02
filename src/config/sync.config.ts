@@ -203,6 +203,8 @@ export const OPTIMISTIC_CONFIG = {
  * 
  * 【Week 4 强化】从 warn_and_lww 改为 reject 模式
  * 服务端触发器 check_version_increment() 已改为 RAISE EXCEPTION
+ * 
+ * @reserved 预留的乐观锁配置，供版本冲突处理使用
  */
 export const OPTIMISTIC_LOCK_CONFIG = {
   /** 
@@ -247,6 +249,8 @@ export const QUEUE_CONFIG = {
  * 场景：用户离线编辑 → 管理员撤销权限 → 重连时同步被 401/403 拒绝
  * 问题：被拒数据直接丢弃，用户无法恢复
  * 解决：隔离被拒数据到 IndexedDB，提供复制/导出/放弃选项
+ * 
+ * @reserved 预留的权限拒绝处理配置
  */
 export const PERMISSION_DENIED_CONFIG = {
   /** 
@@ -276,6 +280,8 @@ export const PERMISSION_DENIED_CONFIG = {
 /**
  * 【v5.9】存储配额配置
  * 用于监控和保护本地存储空间
+ * 
+ * @reserved 预留的存储配额监控配置
  */
 export const STORAGE_QUOTA_CONFIG = {
   /** localStorage 警告阈值（字节）- 4MB（通常配额 5-10MB） */
@@ -311,6 +317,8 @@ export type CorruptionRecoveryStrategy = 'auto-cloud' | 'prompt-recovery' | 'not
 /**
  * 【v5.10】IndexedDB 健康检查配置
  * 检测和恢复 IndexedDB 损坏问题
+ * 
+ * @reserved 预留的 IndexedDB 健康检查配置
  */
 export const INDEXEDDB_HEALTH_CONFIG = {
   /** 初始化时检测数据库健康 */
@@ -348,6 +356,9 @@ export const INDEXEDDB_HEALTH_CONFIG = {
 /**
  * 【v5.10】时钟同步配置
  * 检测客户端与服务端时钟偏移，保护 LWW 策略
+ * 
+ * @reserved 此配置供外部引用，实际使用在 clock-sync.service.ts 中有相同定义
+ * TODO: 考虑整合为单一来源
  */
 export const CLOCK_SYNC_CONFIG = {
   /** 是否启用服务端时间校正 */
@@ -383,6 +394,8 @@ export type ConcurrentEditStrategy = 'block' | 'warn' | 'silent';
 /**
  * 【v5.10】多标签页并发保护配置
  * 增强 TabSyncService 的编辑锁机制
+ * 
+ * @reserved 预留的多标签页并发控制配置
  */
 export const TAB_CONCURRENCY_CONFIG = {
   /** 是否启用并发编辑检测 */
@@ -412,6 +425,7 @@ export const TAB_CONCURRENCY_CONFIG = {
  * 根据网络状况动态调整同步行为，最大化节省流量
  * 
  * @see docs/plan_save.md Phase 4.5
+ * @reserved 预留的移动端同步策略配置
  */
 export const MOBILE_SYNC_CONFIG = {
   /** 后台标签页暂停同步 */

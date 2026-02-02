@@ -9,6 +9,8 @@
  * 
  * 用于快速启用/禁用性能优化功能
  * 便于 A/B 测试和问题回滚
+ * 
+ * @reserved 预留的性能优化开关，供 P0-P3 优化功能使用
  */
 export const PERFORMANCE_FLAGS = {
   /**
@@ -62,6 +64,7 @@ export const PERFORMANCE_FLAGS = {
 
 /**
  * 批量加载配置
+ * @reserved 预留的批量加载优化配置
  */
 export const BATCH_LOAD_CONFIG = {
   /**
@@ -95,6 +98,7 @@ export const BATCH_LOAD_CONFIG = {
 
 /**
  * GoJS 渲染优化配置
+ * @reserved 预留的 GoJS 性能优化配置
  */
 export const GOJS_PERF_CONFIG = {
   /**
@@ -123,6 +127,7 @@ export const GOJS_PERF_CONFIG = {
 
 /**
  * 骨架屏配置
+ * @reserved 预留的骨架屏显示配置
  */
 export const SKELETON_CONFIG = {
   /**
@@ -145,6 +150,7 @@ export const SKELETON_CONFIG = {
 
 /**
  * 性能监控配置
+ * @reserved 预留的性能监控配置
  */
 export const PERF_MONITORING_CONFIG = {
   /**

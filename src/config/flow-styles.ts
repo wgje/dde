@@ -100,6 +100,7 @@ export interface FlowStyleConfig {
 
 /**
  * 默认主题样式
+ * @reserved 通过 FLOW_THEME_STYLES 映射动态访问
  */
 export const DEFAULT_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -139,6 +140,7 @@ export const DEFAULT_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 海洋主题样式
+ * @reserved 通过 FLOW_THEME_STYLES 映射动态访问
  */
 export const OCEAN_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -178,6 +180,7 @@ export const OCEAN_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 森林主题样式
+ * @reserved 通过 FLOW_THEME_STYLES 映射动态访问
  */
 export const FOREST_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -217,6 +220,7 @@ export const FOREST_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 日落主题样式
+ * @reserved 通过 FLOW_THEME_STYLES 映射动态访问
  */
 export const SUNSET_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -256,6 +260,7 @@ export const SUNSET_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 薰衣草主题样式
+ * @reserved 通过 FLOW_THEME_STYLES 映射动态访问
  */
 export const LAVENDER_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -295,6 +300,7 @@ export const LAVENDER_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 主题样式映射
+ * @reserved 用于 getFlowStyles() 动态获取主题样式
  */
 export const FLOW_THEME_STYLES: Record<FlowTheme, FlowStyleConfig> = {
   default: DEFAULT_FLOW_STYLES,
@@ -308,6 +314,7 @@ export const FLOW_THEME_STYLES: Record<FlowTheme, FlowStyleConfig> = {
 
 /**
  * 默认主题深色样式
+ * @reserved 通过 FLOW_DARK_THEME_STYLES 映射动态访问
  */
 export const DEFAULT_DARK_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -347,6 +354,7 @@ export const DEFAULT_DARK_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 海洋主题深色样式
+ * @reserved 通过 FLOW_DARK_THEME_STYLES 映射动态访问
  */
 export const OCEAN_DARK_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -386,6 +394,7 @@ export const OCEAN_DARK_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 森林主题深色样式
+ * @reserved 通过 FLOW_DARK_THEME_STYLES 映射动态访问
  */
 export const FOREST_DARK_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -425,6 +434,7 @@ export const FOREST_DARK_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 日落主题深色样式
+ * @reserved 通过 FLOW_DARK_THEME_STYLES 映射动态访问
  */
 export const SUNSET_DARK_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -464,6 +474,7 @@ export const SUNSET_DARK_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 薰衣草主题深色样式
+ * @reserved 通过 FLOW_DARK_THEME_STYLES 映射动态访问
  */
 export const LAVENDER_DARK_FLOW_STYLES: FlowStyleConfig = {
   node: {
@@ -503,6 +514,7 @@ export const LAVENDER_DARK_FLOW_STYLES: FlowStyleConfig = {
 
 /**
  * 深色主题样式映射
+ * @reserved 用于 getFlowStyles() 动态获取深色主题样式
  */
 export const FLOW_DARK_THEME_STYLES: Record<FlowTheme, FlowStyleConfig> = {
   default: DEFAULT_DARK_FLOW_STYLES,

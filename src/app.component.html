@@ -94,8 +94,10 @@
     [fatal]="true"
     [containerClass]="'full-page'">
     
-  <!-- Focus Mode 覆盖层 - 大门、聚光灯、黑匣子、地质层 -->
-  <app-focus-mode></app-focus-mode>
+  <!-- Focus Mode 覆盖层 - 大门、聚光灯、黑匣子、地质层 - @defer 懒加载 -->
+  @defer (on idle) {
+    <app-focus-mode></app-focus-mode>
+  }
     
   <div data-testid="app-container" class="flex flex-1 w-full min-h-0 overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
   
@@ -326,9 +328,11 @@
     <div class="mb-4 shrink-0 space-y-2"
          [ngClass]="{'mx-4': !isMobile(), 'mx-2': isMobile()}">
       
-      <!-- Focus Mode 工具栏 -->
+      <!-- Focus Mode 工具栏 - @defer 懒加载 -->
       <div class="flex items-center justify-center gap-2 py-2 border-b border-stone-200/50 dark:border-stone-700/50 mb-2">
-        <app-spotlight-trigger></app-spotlight-trigger>
+        @defer (on idle) {
+          <app-spotlight-trigger></app-spotlight-trigger>
+        }
       </div>
       
       <!-- 嵌入式同步状态组件 -->
@@ -452,8 +456,8 @@
     <router-outlet></router-outlet>
   </main>
 
-  <!-- Settings Modal -->
-  @if (showSettings()) {
+  <!-- Settings Modal - @defer 懒加载 -->
+  @defer (when showSettings()) {
     <app-settings-modal
       [sessionEmail]="sessionEmail()"
       [projects]="projects()"
@@ -465,8 +469,8 @@
     </app-settings-modal>
   }
   
-  <!-- New Project Modal -->
-  @if(showNewProjectModal()) {
+  <!-- New Project Modal - @defer 懒加载 -->
+  @defer (when showNewProjectModal()) {
     <app-new-project-modal
       (close)="modal.closeByType('newProject')"
       (confirm)="confirmCreateProject($event.name, $event.description)">
@@ -475,8 +479,8 @@
   
   <!-- Delete Project Modal 已迁移到动态渲染，不再需要模板条件 -->
   
-  <!-- Login Modal -->
-  @if (showLoginModal()) {
+  <!-- Login Modal - @defer 懒加载 -->
+  @defer (when showLoginModal()) {
     <app-login-modal
       [authError]="authError()"
       [isLoading]="isAuthLoading()"
@@ -489,8 +493,8 @@
     </app-login-modal>
   }
   
-  <!-- Conflict Resolution Modal -->
-  @if (showConflictModal() && conflictData()) {
+  <!-- Conflict Resolution Modal - @defer 懒加载 -->
+  @defer (when showConflictModal() && conflictData()) {
     <app-conflict-modal
       [conflictData]="conflictData()"
       (resolveLocal)="resolveConflictLocal()"
@@ -500,48 +504,54 @@
     </app-conflict-modal>
   }
 
-  <!-- 配置帮助对话框 -->
-  @if (modal.isOpen('configHelp')) {
+  <!-- 配置帮助对话框 - @defer 懒加载 -->
+  @defer (when modal.isOpen('configHelp')) {
     <app-config-help-modal (close)="modal.closeByType('configHelp')"></app-config-help-modal>
   }
   
-  <!-- 回收站模态框 -->
-  <app-trash-modal 
-    [show]="showTrashModal()" 
-    (close)="modal.closeByType('trash')">
-  </app-trash-modal>
+  <!-- 回收站模态框 - @defer 懒加载 -->
+  @defer (when showTrashModal()) {
+    <app-trash-modal 
+      [show]="showTrashModal()" 
+      (close)="modal.closeByType('trash')">
+    </app-trash-modal>
+  }
   
-  <!-- 数据迁移对话框 -->
-  @if (showMigrationModal()) {
+  <!-- 数据迁移对话框 - @defer 懒加载 -->
+  @defer (when showMigrationModal()) {
     <app-migration-modal
       (close)="closeMigrationModal()"
       (migrated)="handleMigrationComplete()">
     </app-migration-modal>
   }
   
-  <!-- 错误恢复对话框 -->
-  @if (errorHandler.recoverableError(); as error) {
-    <app-error-recovery-modal
-      [title]="error.title"
-      [message]="error.message"
-      [details]="error.details"
-      [options]="error.options"
-      [defaultOptionId]="error.defaultOptionId"
-      [autoSelectIn]="error.autoSelectIn ?? null"
-      (select)="error.resolve($event.optionId)"
-      (close)="errorHandler.dismissRecoveryDialog()">
-    </app-error-recovery-modal>
+  <!-- 错误恢复对话框 - @defer 懒加载 -->
+  @defer (when errorHandler.recoverableError()) {
+    @if (errorHandler.recoverableError(); as error) {
+      <app-error-recovery-modal
+        [title]="error.title"
+        [message]="error.message"
+        [details]="error.details"
+        [options]="error.options"
+        [defaultOptionId]="error.defaultOptionId"
+        [autoSelectIn]="error.autoSelectIn ?? null"
+        (select)="error.resolve($event.optionId)"
+        (close)="errorHandler.dismissRecoveryDialog()">
+      </app-error-recovery-modal>
+    }
   }
   
-  <!-- 存储失败逃生模态框 -->
-  <app-storage-escape-modal
-    [show]="showStorageEscapeModal()"
-    [data]="storageEscapeData()"
-    (close)="closeStorageEscapeModal()">
-  </app-storage-escape-modal>
+  <!-- 存储失败逃生模态框 - @defer 懒加载 -->
+  @defer (when showStorageEscapeModal()) {
+    <app-storage-escape-modal
+      [show]="showStorageEscapeModal()"
+      [data]="storageEscapeData()"
+      (close)="closeStorageEscapeModal()">
+    </app-storage-escape-modal>
+  }
   
-  <!-- 系统仪表盘模态框 -->
-  @if (modal.isOpen('dashboard')) {
+  <!-- 系统仪表盘模态框 - @defer 懒加载 -->
+  @defer (when modal.isOpen('dashboard')) {
     <app-dashboard-modal
       (close)="modal.closeByType('dashboard')"
       (openConflictCenter)="openConflictCenterFromDashboard()">

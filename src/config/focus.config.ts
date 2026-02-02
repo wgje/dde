@@ -111,6 +111,7 @@ export const FOCUS_CONFIG = {
 
 /**
  * 专注模式错误码
+ * @reserved 预留的错误码系统，供专注模式错误处理使用
  */
 export const FocusErrorCodes = {
   /** 配额已用完 */
@@ -139,6 +140,7 @@ export type FocusErrorCode = typeof FocusErrorCodes[keyof typeof FocusErrorCodes
 
 /**
  * 专注模式错误消息
+ * @reserved 预留的错误消息映射，供专注模式错误处理使用
  */
 export const FocusErrorMessages: Record<FocusErrorCode, string> = {
   [FocusErrorCodes.QUOTA_EXCEEDED]: '今日转写次数已达上限',
