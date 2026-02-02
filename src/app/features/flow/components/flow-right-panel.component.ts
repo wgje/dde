@@ -20,7 +20,7 @@ import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service'
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (isOpen()) {
-      <!-- 背景遮罩 -->
+      <!-- 背景遮罩：点击此区域才关闭面板 -->
       <div 
         class="fixed inset-0 bg-black/20 z-[100]"
         (click)="close.emit()"
@@ -29,10 +29,11 @@ import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service'
         (touchend)="onBackdropTouchEnd($event)">
       </div>
       
-      <!-- 右侧面板 -->
+      <!-- 右侧面板：动态宽度为屏幕的 1/3 -->
       <div 
-        class="fixed top-0 right-0 bottom-0 w-20 bg-white dark:bg-stone-900 z-[101] shadow-xl
+        class="fixed top-0 right-0 bottom-0 bg-white dark:bg-stone-900 z-[101] shadow-xl
                flex flex-col animate-slide-in-right border-l border-stone-200 dark:border-stone-700"
+        [style.width]="'calc(100vw / 3)'"
         (touchstart)="onPanelTouchStart($event)"
         (touchmove)="onPanelTouchMove($event)"
         (touchend)="onPanelTouchEnd($event)">
@@ -43,7 +44,7 @@ import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service'
             <svg class="w-4 h-4 text-white/80" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
             </svg>
-            <h2 class="text-sm font-semibold text-white">项目</h2>
+            <h2 class="text-base font-semibold text-white">项目</h2>
           </div>
           <button 
             (click)="close.emit()"
@@ -77,7 +78,7 @@ import { FlowSwipeGestureService } from '../services/flow-swipe-gesture.service'
                      'bg-stone-300 dark:bg-stone-600 group-hover:bg-stone-400': project.id !== projectState.activeProjectId()
                    }">
               </div>
-              <span class="text-xs font-medium truncate flex-1"
+              <span class="text-sm font-medium truncate flex-1"
                     [ngClass]="{
                       'text-indigo-700 dark:text-indigo-300': project.id === projectState.activeProjectId(),
                       'text-stone-600 dark:text-stone-300': project.id !== projectState.activeProjectId()
@@ -130,10 +131,11 @@ export class FlowRightPanelComponent {
   /** 项目点击事件 */
   readonly projectClick = output<string>();
 
-  /** 处理项目点击 */
+  /** 处理项目点击 - 切换项目时保持面板显示，只有点击非面板区域才关闭 */
   onProjectClick(projectId: string): void {
     this.projectState.activeProjectId.set(projectId);
-    this.close.emit();
+    // 不再调用 close.emit()，项目切换时面板保持显示
+    // 用户需点击背景遮罩区域才会关闭面板
     const currentView = this.uiState.activeView() || 'flow';
     void this.router.navigate(['/projects', projectId, currentView]);
   }

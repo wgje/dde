@@ -133,7 +133,7 @@ const mockSupabaseAuth = {
 
 // 完整的 Supabase Client Mock
 const mockSupabaseClient = {
-  from: vi.fn(() => mockSupabaseQuery),
+  from: vi.fn((_table?: string) => mockSupabaseQuery),
   rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
   channel: vi.fn(() => mockSupabaseChannel),
   removeChannel: vi.fn().mockResolvedValue('ok'),
@@ -159,9 +159,9 @@ export function mockSupabaseQueryResult(
   response: { data: unknown; error: unknown }
 ) {
   const chainable = createChainableQuery(response as { data: null; error: null });
-  mockSupabaseClient.from.mockImplementation((t: string) => 
-    t === table ? chainable : createChainableQuery()
-  );
+  mockSupabaseClient.from.mockImplementation((t?: string) => {
+    return t === table ? chainable : createChainableQuery();
+  });
   return chainable;
 }
 

@@ -45,6 +45,10 @@ describe('SimpleSyncService', () => {
   let mockSessionManager: any;
   let mockRealtimeEnabledState = false;
   
+  // Sentry Mock 变量（从 mockSentryLazyLoaderService 提取）
+  const mockCaptureException = mockSentryLazyLoaderService.captureException;
+  const mockCaptureMessage = mockSentryLazyLoaderService.captureMessage;
+  
   // 测试数据工厂
   const createMockTask = (overrides: Partial<Task> = {}): Task => ({
     id: 'task-1',
