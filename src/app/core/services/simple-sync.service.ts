@@ -167,6 +167,19 @@ export class SimpleSyncService {
   private readonly RETRY_QUEUE_STORAGE_KEY = 'nanoflow.retry-queue';
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   
+  /** 容量警告节流配置 */
+  private readonly CAPACITY_WARNING_COOLDOWN = 300_000; // 5 分钟冷却
+  private readonly CAPACITY_WARNING_THRESHOLD = 0.8; // 80% 触发警告
+  private lastCapacityWarningTime = 0;
+  private lastWarningPercent = 0;
+  
+  /** 
+   * 队列处理锁 - 防止 processRetryQueue 并发执行
+   * 【修复 2026-02-02】解决队列满载问题：之前 isSyncing 标志可能被外部重置导致并发处理
+   */
+  private isProcessingQueue = false;
+  private lastQueueProcessTime = 0;
+  
   /** 任务变更回调 */
   private taskChangeCallback: TaskChangeCallback | null = null;
 
@@ -267,6 +280,8 @@ export class SimpleSyncService {
       clearInterval(this.retryTimer);
       this.retryTimer = null;
     }
+    // 【修复 2026-02-02】重置队列处理状态
+    this.isProcessingQueue = false;
     this.realtimePollingService.unsubscribeFromProject();
   }
   
@@ -491,6 +506,11 @@ export class SimpleSyncService {
     }
   }
   
+  /**
+   * 添加项目到重试队列
+   * 
+   * 【修复 2026-02-02】添加诊断日志和有效性检查
+   */
   addToRetryQueue(
     type: 'task' | 'project' | 'connection',
     operation: 'upsert' | 'delete',
@@ -499,9 +519,22 @@ export class SimpleSyncService {
   ): void {
     if (this.syncState().sessionExpired) return;
     
+    // 【修复】验证数据有效性
+    if (!data?.id) {
+      this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
+      return;
+    }
+    
+    // 【修复】task 和 connection 类型必须有 projectId
+    if ((type === 'task' || type === 'connection') && !projectId) {
+      this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
+      return;
+    }
+    
     const existingIndex = this.retryQueue.findIndex(item => item.type === type && item.data.id === data.id);
     
     if (existingIndex !== -1) {
+      // 更新已存在的项（去重）
       this.retryQueue[existingIndex] = {
         ...this.retryQueue[existingIndex],
         operation,
@@ -509,9 +542,26 @@ export class SimpleSyncService {
         projectId: projectId ?? this.retryQueue[existingIndex].projectId,
         createdAt: Date.now()
       };
+      // 【诊断】记录去重情况
+      this.logger.debug('addToRetryQueue: 更新已存在项', { type, id: data.id, queueSize: this.retryQueue.length });
     } else {
+      // 容量检查：队列满时移除最老的项
       if (this.retryQueue.length >= this.MAX_RETRY_QUEUE_SIZE) {
-        this.retryQueue.shift();
+        const removed = this.retryQueue.shift();
+        this.logger.warn('重试队列已满，移除最老的项', {
+          removed: { type: removed?.type, id: removed?.data.id, retryCount: removed?.retryCount },
+          newItem: { type, id: data.id },
+          queueSize: this.retryQueue.length,
+          isProcessingQueue: this.isProcessingQueue
+        });
+        Sentry.captureMessage('重试队列溢出', {
+          level: 'warning',
+          tags: { 
+            queueSize: String(this.retryQueue.length),
+            newItemType: type,
+            isProcessing: String(this.isProcessingQueue)
+          }
+        });
       }
       
       this.retryQueue.push({
@@ -527,20 +577,188 @@ export class SimpleSyncService {
     
     this.state.update(s => ({ ...s, pendingCount: this.retryQueue.length }));
     this.saveRetryQueueToStorage();
+    
+    // 检查容量警告（带节流）
+    this.checkQueueCapacityWarning();
   }
   
-  private async processRetryQueue(): Promise<void> {
-    if (this.state().isSyncing || this.retryQueue.length === 0) return;
+  /**
+   * 检查队列容量并发出警告（带节流）
+   * 
+   * 设计：
+   * - 80% 容量触发警告
+   * - 5 分钟冷却防止告警风暴
+   * - 每增加 10% 容量允许新的警告
+   * - 90% 时触发强制处理尝试
+   */
+  private checkQueueCapacityWarning(): void {
+    const currentSize = this.retryQueue.length;
+    const threshold = Math.floor(this.MAX_RETRY_QUEUE_SIZE * this.CAPACITY_WARNING_THRESHOLD);
+    const now = Date.now();
     
+    // 低于阈值，恢复正常状态
+    if (currentSize < threshold) {
+      if (this.lastWarningPercent > 0) {
+        this.lastWarningPercent = 0;
+        this.logger.info('RetryQueue 容量恢复正常', { currentSize, maxSize: this.MAX_RETRY_QUEUE_SIZE });
+      }
+      return;
+    }
+    
+    const percentUsed = Math.round((currentSize / this.MAX_RETRY_QUEUE_SIZE) * 100);
+    const syncState = this.state();
+    
+    // 90% 满载时尝试强制处理
+    if (percentUsed >= 90 && syncState.isOnline) {
+      // 【修复 2026-02-02】使用 isProcessingQueue 检测真正的处理状态
+      if (this.isProcessingQueue) {
+        // 检测处理是否卡死（超过 2 分钟）
+        const processingDuration = now - this.lastQueueProcessTime;
+        if (processingDuration > 120_000) {
+          this.logger.warn('processRetryQueue 卡死，强制重置', { 
+            percentUsed, 
+            processingDuration,
+            isSyncing: syncState.isSyncing 
+          });
+          this.isProcessingQueue = false;
+          this.state.update(s => ({ ...s, isSyncing: false }));
+        } else {
+          this.logger.debug('队列处理中，跳过强制处理', { processingDuration });
+          return;
+        }
+      }
+      
+      // 【修复】如果 isSyncing 为 true 但 isProcessingQueue 为 false，说明状态不一致
+      if (syncState.isSyncing && !this.isProcessingQueue) {
+        this.logger.warn('isSyncing 状态不一致，重置', { percentUsed });
+        this.state.update(s => ({ ...s, isSyncing: false }));
+      }
+      
+      this.logger.info('队列接近满载，触发强制处理', { percentUsed, queueLength: currentSize });
+      this.processRetryQueue();
+    }
+    
+    // 节流检查：冷却期内且无显著增长则跳过
+    const cooldownPassed = now - this.lastCapacityWarningTime > this.CAPACITY_WARNING_COOLDOWN;
+    const significantIncrease = percentUsed >= this.lastWarningPercent + 10;
+    
+    if (!cooldownPassed && !significantIncrease) {
+      return;
+    }
+    
+    // 更新警告状态
+    this.lastCapacityWarningTime = now;
+    this.lastWarningPercent = percentUsed;
+    
+    const diagnostics = {
+      currentSize,
+      maxSize: this.MAX_RETRY_QUEUE_SIZE,
+      percentUsed,
+      isOnline: syncState.isOnline,
+      isSyncing: syncState.isSyncing,
+      circuitState: this.circuitState,
+      retryQueueTypes: this.getQueueTypeBreakdown()
+    };
+    
+    this.logger.warn('RetryQueue 容量警告', diagnostics);
+    
+    // 仅在冷却期过后显示 Toast（避免用户疲劳）
+    if (cooldownPassed) {
+      this.toast.error(
+        '⚠️ 同步队列即将满载',
+        '请连接网络以防止数据丢失',
+        { duration: 30_000 }
+      );
+    }
+    
+    Sentry.captureMessage('RetryQueue capacity warning', {
+      level: 'warning',
+      tags: { 
+        operation: 'queueCapacityCheck',
+        percentUsed: String(percentUsed)
+      },
+      extra: diagnostics
+    });
+  }
+  
+  /**
+   * 获取队列中各类型项的数量统计
+   */
+  private getQueueTypeBreakdown(): Record<string, number> {
+    const breakdown: Record<string, number> = { task: 0, project: 0, connection: 0 };
+    for (const item of this.retryQueue) {
+      breakdown[item.type] = (breakdown[item.type] || 0) + 1;
+    }
+    return breakdown;
+  }
+  
+  /**
+   * 处理重试队列
+   * 
+   * 【修复 2026-02-02】解决 RetryQueue 持续满载问题：
+   * 1. 使用独立的 isProcessingQueue 锁防止并发处理
+   * 2. 在处理前清理过期项目（超过 MAX_RETRY_ITEM_AGE）
+   * 3. 添加 projectId 有效性检查，防止无效项目持续重试
+   * 4. 添加详细诊断日志帮助定位问题
+   */
+  private async processRetryQueue(): Promise<void> {
+    // 【修复】使用独立锁而非 isSyncing，防止外部重置导致并发处理
+    if (this.isProcessingQueue || this.retryQueue.length === 0) {
+      return;
+    }
+    
+    // 额外检查 isSyncing 作为保护层
+    if (this.state().isSyncing) {
+      this.logger.debug('processRetryQueue: isSyncing 为 true，跳过处理');
+      return;
+    }
+    
+    this.isProcessingQueue = true;
+    this.lastQueueProcessTime = Date.now();
     this.state.update(s => ({ ...s, isSyncing: true }));
     
+    const initialCount = this.retryQueue.length;
     const items = [...this.retryQueue];
     this.retryQueue = [];
     
+    // 【修复】清理过期项目（超过 24 小时）
+    const now = Date.now();
+    const maxAge = SYNC_CONFIG.MAX_RETRY_ITEM_AGE;
+    const validItems: RetryQueueItem[] = [];
+    let expiredCount = 0;
+    
     for (const item of items) {
+      if (now - item.createdAt > maxAge) {
+        expiredCount++;
+        this.logger.debug('移除过期队列项', { 
+          type: item.type, 
+          id: item.data.id, 
+          ageHours: Math.round((now - item.createdAt) / 3600000) 
+        });
+        continue;
+      }
+      validItems.push(item);
+    }
+    
+    if (expiredCount > 0) {
+      this.logger.info('清理过期队列项', { expiredCount, remainingCount: validItems.length });
+    }
+    
+    let successCount = 0;
+    let failCount = 0;
+    let skipCount = 0;
+    
+    for (const item of validItems) {
       let success = false;
       
       try {
+        // 【修复】验证必要字段存在
+        if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
+          this.logger.warn('跳过无效队列项（缺少 projectId）', { type: item.type, id: item.data.id });
+          skipCount++;
+          continue;
+        }
+        
         if (item.type === 'task') {
           success = item.operation === 'upsert'
             ? await this.pushTask(item.data as Task, item.projectId!, true, true)
@@ -550,9 +768,14 @@ export class SimpleSyncService {
         } else if (item.type === 'connection') {
           success = await this.pushConnection(item.data as Connection, item.projectId!, true, true, true);
         }
+        
+        if (success) {
+          successCount++;
+        }
       } catch (e) {
         if (isPermanentFailureError(e)) {
           this.logger.warn('永久失败，移除队列项', { type: item.type, id: item.data.id });
+          skipCount++;
           continue;
         }
         this.logger.error('重试失败', e);
@@ -562,15 +785,33 @@ export class SimpleSyncService {
         item.retryCount++;
         if (item.retryCount < this.MAX_RETRIES) {
           this.retryQueue.push(item);
+          failCount++;
         } else {
-          this.logger.warn('重试次数超限，放弃', { type: item.type, id: item.data.id });
-          this.toast.error('部分数据同步失败，请检查网络连接');
+          this.logger.warn('重试次数超限，放弃', { type: item.type, id: item.data.id, retryCount: item.retryCount });
+          // 【改进】只在首次达到上限时显示 Toast，避免用户疲劳
+          if (item.retryCount === this.MAX_RETRIES) {
+            this.toast.error('部分数据同步失败，请检查网络连接');
+          }
         }
       }
     }
     
+    // 【诊断】记录处理结果
+    if (initialCount > 0) {
+      this.logger.info('processRetryQueue 完成', {
+        initialCount,
+        successCount,
+        failCount,
+        skipCount,
+        expiredCount,
+        remainingCount: this.retryQueue.length,
+        duration: Date.now() - this.lastQueueProcessTime
+      });
+    }
+    
     this.saveRetryQueueToStorage();
     this.state.update(s => ({ ...s, isSyncing: false, pendingCount: this.retryQueue.length }));
+    this.isProcessingQueue = false;
   }
   
   clearRetryQueue(): void {

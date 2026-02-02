@@ -96,7 +96,7 @@ export class StrataService {
       .map(e => ({
         type: 'black_box' as const,
         id: e.id,
-        title: e.content.slice(0, 100),
+        title: (e.content || '').slice(0, 100),
         completedAt: e.updatedAt,
         source: e
       }));

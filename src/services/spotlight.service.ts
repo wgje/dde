@@ -241,10 +241,11 @@ export class SpotlightService {
    * 将黑匣子条目转换为任务格式
    */
   private convertBlackBoxToTask(entry: BlackBoxEntry): Task {
+    const content = entry.content || '';
     return {
       id: entry.id,
-      title: entry.content.slice(0, 50) + (entry.content.length > 50 ? '...' : ''),
-      content: entry.content,
+      title: content.slice(0, 50) + (content.length > 50 ? '...' : ''),
+      content: content,
       stage: null,
       parentId: null,
       order: 0,

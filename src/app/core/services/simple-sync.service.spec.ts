@@ -2149,9 +2149,9 @@ describe('SimpleSyncService', () => {
     });
   });
 
-  // 【技术债务重构】此测试组测试的逻辑已在重构中移除（简化 SimpleSyncService）
-  // 如果需要队列容量警告功能，应在 RetryQueueService 中实现并测试
-  describe.skip('队列容量警告节流', () => {
+  // 【P1 修复】队列容量警告功能已在 SimpleSyncService 中实现
+  // 修复：RetryQueue 持续满载导致告警风暴和潜在数据丢失
+  describe('队列容量警告节流', () => {
     it('checkQueueCapacityWarning 应该有 5 分钟冷却时间', () => {
       // 验证冷却时间配置存在（修复：从 60s 增加到 5 分钟）
       expect(service['CAPACITY_WARNING_COOLDOWN']).toBe(300_000);
@@ -2205,7 +2205,6 @@ describe('SimpleSyncService', () => {
       mockToast.error.mockClear();
       service['lastCapacityWarningTime'] = 0;
       service['lastWarningPercent'] = 0;
-      service['lastForceProcessTime'] = 0;
 
       // 模拟队列达到阈值
       service['retryQueue'] = Array.from({ length: 85 }, (_, i) => ({
@@ -2248,7 +2247,6 @@ describe('SimpleSyncService', () => {
       (Sentry.captureMessage as ReturnType<typeof vi.fn>).mockClear();
       service['lastCapacityWarningTime'] = Date.now();
       service['lastWarningPercent'] = 85; // 上次警告时是 85%
-      service['lastForceProcessTime'] = 0;
 
       // 模拟队列情况恶化到 96%（增加超过 10%）
       service['retryQueue'] = Array.from({ length: 96 }, (_, i) => ({
@@ -2316,13 +2314,12 @@ describe('SimpleSyncService', () => {
       mockLoggerCategory.warn.mockClear();
       service['lastCapacityWarningTime'] = 0;
       service['lastWarningPercent'] = 0;
-      service['lastForceProcessTime'] = 0;
       
-      // 确保在线状态且会话有效
-      service['syncState'].update(s => ({ ...s, isOnline: true, sessionExpired: false }));
+      // 设置离线状态（防止触发 processRetryQueue 清空队列）
+      service['syncState'].update(s => ({ ...s, isOnline: false, sessionExpired: false }));
 
-      // 模拟队列达到 90%+ 容量
-      service['retryQueue'] = Array.from({ length: 92 }, (_, i) => ({
+      // 模拟队列达到 85%（高于阈值但低于 90%，避免触发强制处理）
+      service['retryQueue'] = Array.from({ length: 85 }, (_, i) => ({
         id: `item-${i}`,
         type: 'task' as const,
         operation: 'upsert' as const,
@@ -2339,14 +2336,14 @@ describe('SimpleSyncService', () => {
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
         'RetryQueue 容量警告',
         expect.objectContaining({
-          currentSize: 92,
+          currentSize: 85,
           maxSize: 100,
-          percentUsed: 92,
-          isOnline: true,
+          percentUsed: 85,
+          isOnline: false,
           isSyncing: expect.any(Boolean),
           circuitState: expect.any(String),
           retryQueueTypes: expect.objectContaining({
-            task: 92,
+            task: 85,
             project: 0,
             connection: 0
           })
@@ -2359,10 +2356,14 @@ describe('SimpleSyncService', () => {
       mockLoggerCategory.warn.mockClear();
       service['lastCapacityWarningTime'] = 0;
       service['lastWarningPercent'] = 0;
-      service['lastForceProcessTime'] = 0;
+      
+      // Mock processRetryQueue 以防止它修改 isSyncing 状态
+      const processRetryQueueSpy = vi.spyOn(service as any, 'processRetryQueue').mockImplementation(() => Promise.resolve());
       
       // 模拟 isSyncing 卡住的状态（通过 syncState signal 设置）
+      // 【修复 2026-02-02】新增 isProcessingQueue 为 false，模拟状态不一致情况
       service['syncState'].update(s => ({ ...s, isOnline: true, sessionExpired: false, isSyncing: true }));
+      service['isProcessingQueue'] = false; // 状态不一致：isSyncing=true 但 isProcessingQueue=false
 
       // 模拟队列达到 90%+ 容量
       service['retryQueue'] = Array.from({ length: 92 }, (_, i) => ({
@@ -2378,14 +2379,20 @@ describe('SimpleSyncService', () => {
       // 调用容量检查
       (service as any).checkQueueCapacityWarning();
       
-      // 验证记录了 isSyncing 卡死警告
+      // 【修复 2026-02-02】验证记录了 isSyncing 状态不一致警告
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
-        expect.stringContaining('isSyncing 状态卡死'),
-        expect.anything()
+        'isSyncing 状态不一致，重置',
+        expect.objectContaining({ percentUsed: 92 })
       );
       
       // 验证 isSyncing 被重置
       expect(service['syncState']().isSyncing).toBe(false);
+      
+      // 验证 processRetryQueue 被调用（强制处理尝试）
+      expect(processRetryQueueSpy).toHaveBeenCalled();
+      
+      // 恢复 spy
+      processRetryQueueSpy.mockRestore();
     });
 
     it('getQueueTypeBreakdown 应该正确统计队列类型', () => {

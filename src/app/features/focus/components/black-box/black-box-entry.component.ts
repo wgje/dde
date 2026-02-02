@@ -29,12 +29,12 @@ import { BlackBoxEntry } from '../../../../../models';
       data-testid="black-box-entry"
       tabindex="0"
       role="article"
-      [attr.aria-label]="'黑匣子条目: ' + entry.content.slice(0, 50)">
+      [attr.aria-label]="'黑匣子条目: ' + (entry.content || '').slice(0, 50)">
       
       <!-- 内容 -->
       <p class="text-xs text-stone-600 dark:text-stone-300 
                 leading-relaxed break-words">
-        {{ entry.content }}
+        {{ entry.content || '' }}
       </p>
       
       <!-- 底部栏 -->
