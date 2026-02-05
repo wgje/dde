@@ -27,9 +27,20 @@ import { ToastContainerComponent } from './app/shared/components/toast-container
 import { SyncStatusComponent } from './app/shared/components/sync-status.component';
 import { OfflineBannerComponent } from './app/shared/components/offline-banner.component';
 import { DemoBannerComponent } from './app/shared/components/demo-banner.component';
-// FocusModeComponent, SpotlightTriggerComponent 和模态框改为 @defer 懒加载
-// 仅保留类型导入用于类型检查
-import type { StorageEscapeData } from './app/shared/modals';
+// 模态框组件导入
+import {
+  SettingsModalComponent,
+  LoginModalComponent,
+  ConflictModalComponent,
+  NewProjectModalComponent,
+  ConfigHelpModalComponent,
+  TrashModalComponent,
+  MigrationModalComponent,
+  ErrorRecoveryModalComponent,
+  StorageEscapeModalComponent,
+  DashboardModalComponent,
+  type StorageEscapeData
+} from './app/shared/modals';
 import { ErrorBoundaryComponent } from './app/shared/components/error-boundary.component';
 import { FormsModule } from '@angular/forms';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
@@ -65,7 +76,7 @@ import { UI_CONFIG, AUTH_CONFIG } from './config';
   selector: 'app-root',
   standalone: true,
   imports: [
-    CommonModule, 
+    CommonModule,
     FormsModule,
     RouterOutlet,
     ToastContainerComponent,
@@ -73,7 +84,17 @@ import { UI_CONFIG, AUTH_CONFIG } from './config';
     OfflineBannerComponent,
     DemoBannerComponent,
     ErrorBoundaryComponent,
-    // FocusModeComponent, SpotlightTriggerComponent 和模态框组件使用 @defer 懒加载
+    // 模态框组件
+    SettingsModalComponent,
+    LoginModalComponent,
+    ConflictModalComponent,
+    NewProjectModalComponent,
+    ConfigHelpModalComponent,
+    TrashModalComponent,
+    MigrationModalComponent,
+    ErrorRecoveryModalComponent,
+    StorageEscapeModalComponent,
+    DashboardModalComponent,
   ],
   templateUrl: './app.component.html',
 })
