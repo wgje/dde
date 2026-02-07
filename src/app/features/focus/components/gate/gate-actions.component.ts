@@ -114,19 +114,22 @@ import { LoggerService } from '../../../../../services/logger.service';
             (keydown.enter)="submitQuickInput()"
           />
           @if (speechSupported()) {
-            <button 
+            <button
               class="p-2.5 rounded-full transition-all duration-200
                      flex items-center justify-center
                      focus-visible:ring-2 focus-visible:ring-orange-500/30"
-              [class]="isRecording() 
-                ? 'bg-red-500 text-white animate-pulse scale-110' 
+              [class]="isRecording()
+                ? 'bg-red-500 text-white animate-pulse scale-110'
                 : 'bg-stone-100 dark:bg-white/10 text-stone-500 dark:text-stone-400 hover:bg-stone-200 dark:hover:bg-white/20'"
               [disabled]="isTranscribing()"
+              [attr.aria-label]="isRecording() ? '松开停止录音' : isTranscribing() ? '正在转写' : '按住开始录音'"
               (mousedown)="startRecording($event)"
               (mouseup)="stopRecording()"
               (mouseleave)="stopRecording()"
               (touchstart)="startRecording($event)"
-              (touchend)="stopRecording()">
+              (touchend)="stopRecording()"
+              (keydown.space)="startRecording($event)"
+              (keyup.space)="stopRecording()">
               @if (isTranscribing()) {
                 <span class="animate-spin">⏳</span>
               } @else if (isRecording()) {

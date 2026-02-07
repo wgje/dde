@@ -4,22 +4,16 @@ import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
-import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { Task, Attachment } from '../../../../models';
 import { renderMarkdown } from '../../../../utils/markdown';
-
-/**
- * 任务详情面板组件
- * 桌面端：可拖动浮动面板
- * 移动端：底部抽屉
- * 
- * 默认为预览模式，点击切换到编辑模式
- */
+import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';
+/** 任务详情面板 - 桌面端:浮动面板, 移动端:底部抽屉, 默认预览模式 */
 @Component({
   selector: 'app-flow-task-detail',
   standalone: true,
   imports: [CommonModule, FormsModule],
+  providers: [FlowTaskDetailFormService],
   template: `
     <!-- 桌面端可拖动浮动面板 -->
     @if (!uiState.isMobile() && uiState.isFlowDetailOpen()) {
@@ -27,9 +21,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
            [style.right.px]="position().x < 0 ? 0 : null"
            [style.top.px]="position().y < 0 ? 24 : position().y"
            [style.left.px]="position().x >= 0 ? position().x : null">
-         <!-- Content Panel -->
          <div class="w-64 max-h-96 bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-200/50 dark:border-stone-600/50 shadow-xl overflow-hidden flex flex-col rounded-xl">
-             
              <!-- 可拖动标题栏 - 双击重置位置 -->
              <div class="px-3 py-2 border-b border-stone-100 dark:border-stone-700 flex justify-between items-center cursor-move select-none bg-gradient-to-r from-stone-50 dark:from-stone-700 to-white dark:to-stone-800"
                   (mousedown)="startDrag($event)"
@@ -149,7 +141,6 @@ import { renderMarkdown } from '../../../../utils/markdown';
     <!-- 桌面端任务内容模板 -->
     <ng-template #taskContent let-task>
       <div class="space-y-2">
-          <!-- 头部信息栏 + 编辑切换 -->
           <div class="flex items-center justify-between">
               <div class="flex items-center gap-2 text-[10px]">
                   <span class="font-bold text-retro-muted dark:text-stone-400 bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
@@ -181,8 +172,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
                   {{ isEditMode() ? '预览' : '编辑' }}
               </button>
           </div>
-          
-          <!-- 预览模式 -->
+
           @if (!isEditMode()) {
               <div class="cursor-pointer" (click)="toggleEditMode(); $event.stopPropagation()">
                 <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '无标题' }}</h4>
@@ -196,14 +186,13 @@ import { renderMarkdown } from '../../../../utils/markdown';
                   }
               </div>
           } @else {
-              <!-- 编辑模式 -->
               <input data-testid="flow-task-title-input" type="text" 
                   [ngModel]="localTitle()" 
                   (ngModelChange)="onLocalTitleChange($event)"
                   (focus)="onInputFocus('title')"
                   (blur)="onInputBlur('title')"
-                  (mousedown)="isSelecting = true"
-                  (mouseup)="isSelecting = false"
+                  (mousedown)="formService.isSelecting = true"
+                  (mouseup)="formService.isSelecting = false"
                   spellcheck="false"
                   class="w-full text-xs font-medium text-stone-800 dark:text-stone-100 border border-stone-200 dark:border-stone-600 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700"
                   placeholder="任务标题">
@@ -214,8 +203,8 @@ import { renderMarkdown } from '../../../../utils/markdown';
                   rows="4"
                   (focus)="onInputFocus('content')"
                   (blur)="onInputBlur('content')"
-                  (mousedown)="isSelecting = true"
-                  (mouseup)="isSelecting = false"
+                  (mousedown)="formService.isSelecting = true"
+                  (mouseup)="formService.isSelecting = false"
                   spellcheck="false"
                   class="w-full text-[11px] text-stone-600 dark:text-stone-300 border border-stone-200 dark:border-stone-600 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700 resize-none font-mono leading-relaxed"
                   placeholder="输入内容（支持 Markdown）..."></textarea>
@@ -240,8 +229,6 @@ import { renderMarkdown } from '../../../../utils/markdown';
                   {{task.status === 'completed' ? '撤销' : '完成'}}
               </button>
           </div>
-          
-          <!-- 第二行按钮：归档和删除 -->
           <div class="flex gap-1.5">
               <button (click)="archiveTask.emit(task)"
                   class="flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all border"
@@ -257,27 +244,11 @@ import { renderMarkdown } from '../../../../utils/markdown';
                   删除
               </button>
           </div>
-          
-          <!-- 附件管理 - 暂时隐藏 -->
-          <!-- @if (userSession.currentUserId()) {
-            <app-attachment-manager
-              [userId]="userSession.currentUserId()!"
-              [projectId]="projectState.activeProjectId()!"
-              [taskId]="task.id"
-              [currentAttachments]="task.attachments"
-              [compact]="true"
-              (attachmentAdd)="attachmentAdd.emit({ taskId: task.id, attachment: $event })"
-              (attachmentRemove)="attachmentRemove.emit({ taskId: task.id, attachmentId: $event })"
-              (attachmentsChange)="attachmentsChange.emit({ taskId: task.id, attachments: $event })"
-              (error)="attachmentError.emit($event)">
-            </app-attachment-manager>
-          } -->
       </div>
     </ng-template>
     
     <!-- 移动端任务内容模板 -->
     <ng-template #mobileTaskContent let-task>
-      <!-- 紧凑的任务信息头 - 单行布局 -->
       <div class="flex items-center gap-1.5 mb-1 flex-wrap">
         <span class="font-bold text-retro-muted dark:text-stone-400 text-[8px] tracking-wider bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
         <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
@@ -288,7 +259,6 @@ import { renderMarkdown } from '../../../../utils/markdown';
               }">
           {{task.status === 'completed' ? '完成' : '进行'}}
         </span>
-        <!-- 预览/编辑切换按钮 -->
         <button 
           (click)="toggleEditMode()"
           class="ml-auto text-[9px] px-1.5 py-0.5 rounded transition-all duration-200"
@@ -301,47 +271,37 @@ import { renderMarkdown } from '../../../../utils/markdown';
           {{ isEditMode() ? '预览' : '编辑' }}
         </button>
       </div>
-      
-      <!-- 预览模式 -->
+
       @if (!isEditMode()) {
         <div class="cursor-pointer space-y-1" (click)="toggleEditMode(); $event.stopPropagation()">
-          <!-- 标题 -->
           <h4 class="text-xs font-medium text-stone-800 dark:text-stone-100 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
-          
-          <!-- Markdown 预览内容 -->
           @if (task.content) {
             <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="renderMarkdownContent(task.content)"></div>
           }
         </div>
       } @else {
-        <!-- 编辑模式 -->
         <div class="space-y-1.5">
-          <!-- 标题输入 -->
           <input type="text" 
             [ngModel]="localTitle()" 
             (ngModelChange)="onLocalTitleChange($event)"
             (focus)="onInputFocus('title')"
             (blur)="onInputBlur('title')"
-            (mousedown)="isSelecting = true"
-            (mouseup)="isSelecting = false"
+            (mousedown)="formService.isSelecting = true"
+            (mouseup)="formService.isSelecting = false"
             spellcheck="false"
             class="w-full text-xs font-medium text-stone-800 dark:text-stone-100 border border-stone-200 dark:border-stone-600 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700"
             placeholder="任务标题">
-          
-          <!-- 内容输入 -->
           <textarea 
             [ngModel]="localContent()" 
             (ngModelChange)="onLocalContentChange($event)" 
             rows="3"
             (focus)="onInputFocus('content')"
             (blur)="onInputBlur('content')"
-            (mousedown)="isSelecting = true"
-            (mouseup)="isSelecting = false"
+            (mousedown)="formService.isSelecting = true"
+            (mouseup)="formService.isSelecting = false"
             spellcheck="false"
             class="w-full text-[11px] text-stone-600 dark:text-stone-300 border border-stone-200 dark:border-stone-600 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700 resize-none font-mono"
             placeholder="任务内容（支持 Markdown）..."></textarea>
-          
-          <!-- 快速待办输入 -->
           <div class="flex items-center gap-1 bg-retro-rust/5 border border-retro-rust/20 rounded overflow-hidden p-0.5">
             <span class="text-retro-rust flex-shrink-0 text-[10px] pl-1">☐</span>
             <input
@@ -360,7 +320,7 @@ import { renderMarkdown } from '../../../../utils/markdown';
         </div>
       }
       
-      <!-- 操作按钮 - 紧凑模式下使用透明度和高度渐变，避免抖动 -->
+      <!-- 操作按钮 -->
       <div class="overflow-hidden transition-all duration-150"
            [class.max-h-0]="isCompactMode()"
            [class.opacity-0]="isCompactMode()"
@@ -385,8 +345,6 @@ import { renderMarkdown } from '../../../../utils/markdown';
             {{task.status === 'completed' ? '撤销' : '完成'}}
           </button>
         </div>
-        
-        <!-- 第二行：归档和删除 -->
         <div class="flex gap-1 mt-1">
           <button (click)="archiveTask.emit(task)"
             class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded transition-all border"
@@ -402,19 +360,6 @@ import { renderMarkdown } from '../../../../utils/markdown';
           </button>
         </div>
       </div>
-      
-      <!-- 附件管理（手机端） - 暂时隐藏 -->
-      <!-- @if (userSession.currentUserId()) {
-        <app-attachment-manager
-          [userId]="userSession.currentUserId()!"
-          [projectId]="projectState.activeProjectId()!"
-          [taskId]="task.id"
-          [currentAttachments]="task.attachments"
-          [compact]="true"
-          (attachmentsChange)="attachmentsChange.emit({ taskId: task.id, attachments: $event })"
-          (error)="attachmentError.emit($event)">
-        </app-attachment-manager>
-      } -->
     </ng-template>
   `
 })
@@ -423,10 +368,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
-  private readonly changeTracker = inject(ChangeTrackerService);
   private readonly elementRef = inject(ElementRef);
-  private readonly loggerService = inject(LoggerService);
-  private readonly logger = this.loggerService.category('FlowTaskDetail');
+  readonly formService = inject(FlowTaskDetailFormService);
 
   @ViewChild('mobileDrawer') private mobileDrawer?: ElementRef<HTMLDivElement>;
   @ViewChild('mobileDrawerTitle') private mobileDrawerTitle?: ElementRef<HTMLDivElement>;
@@ -443,26 +386,11 @@ export class FlowTaskDetailComponent implements OnDestroy {
   // 当用户手动拖拽抽屉时，父组件可关闭自动高度补偿，避免“弹回”
   readonly autoHeightEnabled = input<boolean>(true);
   
-  // ========== Split-Brain 本地状态 ==========
-  /** 本地标题（与 Store 解耦，仅在非聚焦时同步） */
-  protected readonly localTitle = signal('');
-  /** 本地内容（与 Store 解耦，仅在非聚焦时同步） */
-  protected readonly localContent = signal('');
-  /** 标题输入框是否聚焦 */
-  private isTitleFocused = false;
-  /** 内容输入框是否聚焦 */
-  private isContentFocused = false;
-  /** 解锁延迟定时器 */
-  private unlockTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  
-  // 编辑模式状态（默认为预览模式）
-  readonly isEditMode = signal(false);
-  
-  // 标记是否正在进行文本选择
-  private isSelecting = false;
-  
-  // 防止快速点击的节流标记（需要响应式，供模板使用）
-  readonly isTogglingMode = signal(false);
+  // 表单状态委托给 FlowTaskDetailFormService
+  readonly localTitle = this.formService.localTitle;
+  readonly localContent = this.formService.localContent;
+  readonly isEditMode = this.formService.isEditMode;
+  readonly isTogglingMode = this.formService.isTogglingMode;
   
   // 紧凑模式：只有当抽屉高度非常小（< 12vh）时才启用，隐藏操作按钮
   // 日期和状态应该一直显示，除非抽屉几乎完全收起
@@ -504,96 +432,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private drawerStartY = 0;
   private drawerStartHeight = 0;
   
-  // 跟踪当前任务 ID，用于检测任务切换
-  private currentTaskId: string | null = null;
-  
-  /** 
-   * 🔴 关键修复：任务切换保护标志
-   * 在任务切换期间阻止 ngModelChange 事件发射，防止旧任务的值被错误地发射到新任务
-   * 
-   * 问题场景：
-   * 1. 用户在任务 A 输入内容
-   * 2. 用户快速切换到任务 B
-   * 3. effect 触发，localContent.set(B.content || '') 被调用
-   * 4. 这触发 ngModelChange -> onLocalContentChange(B.content)
-   * 5. 此时 task() 已是 B，发射 { taskId: B.id, content: '' } 
-   * 6. 任务 B 的内容被错误清空！
-   * 
-   * 解决方案：设置标志阻止发射，在下一个 microtask 重置
-   */
-  private isTaskSwitching = false;
-  
   constructor() {
-    // Split-Brain 核心逻辑：仅在输入框非聚焦时从 Store 同步到本地
-    effect(() => {
-      const task = this.task();
-      if (task) {
-        // 检测任务切换：如果任务 ID 变化，强制重置本地状态（清除聚焦锁定）
-        const taskChanged = this.currentTaskId !== task.id;
-        if (taskChanged) {
-          // 🔴 设置切换保护标志，阻止 ngModelChange 发射
-          this.isTaskSwitching = true;
-          
-          // 显式解锁旧任务的字段（避免依赖自动超时）
-          if (this.currentTaskId) {
-            const projectId = this.projectState.activeProjectId();
-            if (projectId) {
-              this.unlockTaskFields(this.currentTaskId, ['title', 'content']);
-            }
-          }
-          
-          this.currentTaskId = task.id;
-          // 任务切换时，强制更新本地状态（无论是否聚焦）
-          this.localTitle.set(task.title || '');
-          this.localContent.set(task.content || '');
-          // 重置聚焦状态
-          this.isTitleFocused = false;
-          this.isContentFocused = false;
-          // 清理所有解锁定时器
-          this.unlockTimers.forEach(timer => clearTimeout(timer));
-          this.unlockTimers.clear();
-          
-          // 🔴 在下一个 microtask 重置标志
-          // 这确保当前 Angular 变更检测周期中的 ngModelChange 被阻止
-          // 但后续用户输入的 ngModelChange 正常工作
-          queueMicrotask(() => {
-            this.isTaskSwitching = false;
-          });
-        } else {
-          // 同一任务：仅当输入框未聚焦时才同步
-          if (!this.isTitleFocused) {
-            this.localTitle.set(task.title || '');
-          }
-          if (!this.isContentFocused) {
-            this.localContent.set(task.content || '');
-          }
-        }
-      } else {
-        // 任务为 null，显式解锁并重置状态
-        // 🔴 设置切换保护标志
-        this.isTaskSwitching = true;
-        
-        if (this.currentTaskId) {
-          const projectId = this.projectState.activeProjectId();
-          if (projectId) {
-            this.unlockTaskFields(this.currentTaskId, ['title', 'content']);
-          }
-        }
-        
-        this.currentTaskId = null;
-        this.localTitle.set('');
-        this.localContent.set('');
-        this.isTitleFocused = false;
-        this.isContentFocused = false;
-        this.unlockTimers.forEach(timer => clearTimeout(timer));
-        this.unlockTimers.clear();
-        
-        // 🔴 在下一个 microtask 重置标志
-        queueMicrotask(() => {
-          this.isTaskSwitching = false;
-        });
-      }
-    });
+    // Split-Brain 核心逻辑：委托给 formService
+    this.formService.initSyncEffect(() => this.task());
 
     // 🔴 移动端：当任务、编辑模式或面板打开状态变化时，自动调整高度
     effect(() => {
@@ -617,36 +458,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
     });
   }
   
-  // ========== Split-Brain 输入处理 ==========
-  
-  /**
-   * 锁定任务字段（防止远程覆盖本地编辑）
-   */
-  private lockTaskFields(taskId: string, fields: string[]): void {
-    const projectId = this.projectState.activeProjectId();
-    if (!projectId) return;
-    
-    for (const field of fields) {
-      this.changeTracker.lockTaskField(taskId, projectId, field, ChangeTrackerService.TEXT_INPUT_LOCK_TIMEOUT_MS);
-    }
-  }
-  
-  /**
-   * 解锁任务字段
-   */
-  private unlockTaskFields(taskId: string, fields: string[]): void {
-    const projectId = this.projectState.activeProjectId();
-    if (!projectId) return;
-    
-    for (const field of fields) {
-      this.changeTracker.unlockTaskField(taskId, projectId, field);
-    }
-  }
+  // ========== 表单事件委托 ==========
 
-  /**
-   * 🔴 移动端：请求自动调整高度以适应内容
-   * 测量标题、内容和拖动条的总高度，并转换为 vh 发射
-   */
+  /** 移动端：请求自动调整高度以适应内容 */
   private requestAutoHeight() {
     if (!this.uiState.isMobile() || !this.uiState.isFlowDetailOpen()) return;
     if (!this.autoHeightEnabled()) return; // 手动覆盖时不自动调整
@@ -693,231 +507,66 @@ export class FlowTaskDetailComponent implements OnDestroy {
     setTimeout(() => measureOnce(), 200);
   }
   
-  /**
-   * 输入框聚焦处理
-   */
+  /** 输入框聚焦处理 */
   onInputFocus(field: 'title' | 'content') {
     this.uiState.markEditing();
-    
-    const task = this.task();
-    if (!task) return;
-    
-    if (field === 'title') {
-      this.isTitleFocused = true;
-      const existingTimer = this.unlockTimers.get('title');
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-        this.unlockTimers.delete('title');
-      }
-      this.lockTaskFields(task.id, ['title']);
-    } else if (field === 'content') {
-      this.isContentFocused = true;
-      const existingTimer = this.unlockTimers.get('content');
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-        this.unlockTimers.delete('content');
-      }
-      this.lockTaskFields(task.id, ['content']);
-    }
+    this.formService.onInputFocus(field, this.task());
   }
-  
-  /**
-   * 输入框失焦处理
-   */
+
+  /** 输入框失焦处理 */
   onInputBlur(field: 'title' | 'content') {
-    const task = this.task();
-    if (!task) return;
-    
-    if (field === 'title') {
-      // 提交并发射事件
-      this.titleChange.emit({ taskId: task.id, title: this.localTitle() });
-      
-      const timer = setTimeout(() => {
-        this.isTitleFocused = false;
-        this.unlockTaskFields(task.id, ['title']);
-        this.unlockTimers.delete('title');
-      }, 10000);
-      this.unlockTimers.set('title', timer);
-    } else if (field === 'content') {
-      this.contentChange.emit({ taskId: task.id, content: this.localContent() });
-      
-      const timer = setTimeout(() => {
-        this.isContentFocused = false;
-        this.unlockTaskFields(task.id, ['content']);
-        this.unlockTimers.delete('content');
-      }, 10000);
-      this.unlockTimers.set('content', timer);
+    const result = this.formService.onInputBlur(field, this.task());
+    if (result) {
+      if (result.field === 'title') {
+        this.titleChange.emit({ taskId: result.taskId, title: result.value });
+      } else {
+        this.contentChange.emit({ taskId: result.taskId, content: result.value });
+      }
     }
   }
   
-  /**
-   * 本地标题变更（同时更新本地状态和发射事件）
-   * 
-   * 🔴 关键修复：在任务切换期间阻止发射，防止数据丢失
-   */
+  /** 本地标题变更 */
   onLocalTitleChange(value: string) {
-    // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
-    if (this.isTaskSwitching) {
-      this.logger.debug('任务切换中，跳过 titleChange 发射');
-      return;
-    }
-    
-    this.localTitle.set(value);
-    const task = this.task();
-    if (task) {
-      this.titleChange.emit({ taskId: task.id, title: value });
+    const result = this.formService.onLocalTitleChange(value, this.task());
+    if (result) {
+      this.titleChange.emit(result);
     }
   }
-  
-  /**
-   * 本地内容变更（同时更新本地状态和发射事件）
-   * 
-   * 🔴 关键修复：在任务切换期间阻止发射，防止数据丢失
-   */
+
+  /** 本地内容变更 */
   onLocalContentChange(value: string) {
-    // 🔴 任务切换保护：阻止 effect 触发的 signal.set() 导致的 ngModelChange 发射
-    if (this.isTaskSwitching) {
-      this.logger.debug('任务切换中，跳过 contentChange 发射');
-      return;
-    }
-    
-    this.localContent.set(value);
-    const task = this.task();
-    if (task) {
-      this.contentChange.emit({ taskId: task.id, content: value });
+    const result = this.formService.onLocalContentChange(value, this.task());
+    if (result) {
+      this.contentChange.emit(result);
     }
   }
+
+  /** 切换编辑模式 */
+  toggleEditMode(): void { this.formService.toggleEditMode(); }
   
-  /**
-   * 切换编辑模式（带节流保护，防止 Rage Click）
-   */
-  toggleEditMode(): void {
-    // 防止快速连续点击（节流 300ms）
-    if (this.isTogglingMode()) {
-      this.logger.debug('toggleEditMode: 节流中，忽略点击');
-      return;
-    }
-    
-    this.isTogglingMode.set(true);
-    const newMode = !this.isEditMode();
-    this.logger.debug(`toggleEditMode: 当前模式 = ${this.isEditMode()} → 新模式 = ${newMode}`);
-    this.isEditMode.update(v => !v);
-    
-    // 300ms 后重置节流标记
-    setTimeout(() => {
-      this.isTogglingMode.set(false);
-    }, 300);
-  }
-  
-  /**
-   * 监听 document 点击事件
-   * 编辑模式下，点击详情面板内的空白区域（非输入框、非按钮）或面板外部，切换回预览模式
-   */
+  /** 监听 document 点击事件，编辑模式下点击非交互区域退出编辑 */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
-    // 如果已经是预览模式，无需处理
-    if (!this.isEditMode()) return;
-    
-    // 如果正在进行文本选择，不处理
-    if (this.isSelecting) return;
-    
-    // 检查是否有文本被选中（用户可能刚完成选择操作）
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      return;
-    }
-    
-    const target = event.target as HTMLElement;
-    
-    // 检查是否点击了可交互元素（输入框、文本框、任何按钮、SVG图标）
-    const isInteractiveElement = target.tagName === 'INPUT' || 
-                                  target.tagName === 'TEXTAREA' ||
-                                  target.tagName === 'BUTTON' ||
-                                  target.tagName === 'svg' ||
-                                  target.tagName === 'path' ||
-                                  target.closest('input, textarea, button, svg') !== null;
-    
-    // 如果点击的是可交互元素，不切换模式（让元素正常工作）
-    if (isInteractiveElement) {
-      this.logger.debug('点击可交互元素，保持编辑模式');
-      return;
-    }
-    
-    // 检查点击是否在任务详情面板内部
-    const clickedInside = this.elementRef.nativeElement.contains(target);
-    
-    if (clickedInside) {
-      // 点击在面板内部但不是可交互元素（例如：标题栏、空白区域），切换到预览模式
-      this.logger.debug('点击详情面板空白区域，切换到预览模式');
-      this.isEditMode.set(false);
-    } else {
-      // 点击在面板外部，也切换到预览模式
-      this.logger.debug('点击面板外部，切换到预览模式');
+    if (this.formService.shouldExitEditMode(event.target as HTMLElement, this.elementRef.nativeElement)) {
       this.isEditMode.set(false);
     }
   }
-  
-  /**
-   * 监听 document 触摸事件（移动端）
-   * 编辑模式下，触摸详情面板内的空白区域（非输入框、非按钮）或面板外部，切换回预览模式
-   */
+
+  /** 监听 document 触摸事件（移动端），编辑模式下触摸非交互区域退出编辑 */
   @HostListener('document:touchstart', ['$event'])
   onDocumentTouchStart(event: TouchEvent): void {
-    // 如果已经是预览模式，无需处理
-    if (!this.isEditMode()) return;
-    
-    // 如果正在进行文本选择，不处理
-    if (this.isSelecting) return;
-    
-    // 检查是否有文本被选中
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      return;
-    }
-    
-    // 检查是否有输入框或文本框正在获得焦点（用户正在输入）
+    // 检查是否有输入框正在使用
     const activeElement = document.activeElement;
     if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
-      this.logger.debug('输入框正在使用，保持编辑模式');
       return;
     }
-    
-    const target = event.target as HTMLElement;
-    
-    // 检查是否触摸了可交互元素（输入框、文本框、任何按钮、SVG图标）
-    const isInteractiveElement = target.tagName === 'INPUT' || 
-                                  target.tagName === 'TEXTAREA' ||
-                                  target.tagName === 'BUTTON' ||
-                                  target.tagName === 'svg' ||
-                                  target.tagName === 'path' ||
-                                  target.closest('input, textarea, button, svg') !== null;
-    
-    // 如果触摸的是可交互元素，不切换模式
-    if (isInteractiveElement) {
-      this.logger.debug('触摸可交互元素，保持编辑模式');
-      return;
-    }
-    
-    // 检查触摸是否在任务详情面板内部
-    const clickedInside = this.elementRef.nativeElement.contains(target);
-    
-    if (clickedInside) {
-      // 触摸在面板内部但不是可交互元素，切换到预览模式
-      this.logger.debug('触摸详情面板空白区域，切换到预览模式');
-      this.isEditMode.set(false);
-    } else {
-      // 触摸在面板外部，也切换到预览模式
-      this.logger.debug('触摸面板外部，切换到预览模式');
+    if (this.formService.shouldExitEditMode(event.target as HTMLElement, this.elementRef.nativeElement)) {
       this.isEditMode.set(false);
     }
   }
   
-  /**
-   * 渲染 Markdown 内容
-   */
-  renderMarkdownContent(content: string): string {
-    return renderMarkdown(content);
-  }
+  /** 渲染 Markdown 内容 */
+  renderMarkdownContent(content: string): string { return renderMarkdown(content); }
   
   // 桌面端面板拖动
   startDrag(event: MouseEvent | TouchEvent) {
@@ -985,12 +634,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
     document.removeEventListener('touchend', this.stopDrag);
   };
 
-  /**
-   * 重置面板位置到默认位置（右上角）
-   */
-  resetPosition() {
-    this.positionChange.emit({ x: -1, y: -1 });
-  }
+  /** 重置面板位置到默认位置（右上角） */
+  resetPosition() { this.positionChange.emit({ x: -1, y: -1 }); }
   
   // 移动端抽屉高度调整（顶部下拉：向下拖增大，向上拖减小）
   startDrawerResize(event: TouchEvent | MouseEvent) {
@@ -1131,17 +776,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
   // ========== 生命周期管理 ==========
   
   ngOnDestroy(): void {
-    // 确保移除所有拖动相关的事件监听器
     this.stopDrag();
-    
-    // 重置拖动状态
     this.dragState.isDragging = false;
     this.isResizingDrawer = false;
-    
-    // 清理所有未完成的解锁定时器
-    for (const timer of this.unlockTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.unlockTimers.clear();
+    this.formService.cleanup();
   }
 }

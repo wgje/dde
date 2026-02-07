@@ -31,21 +31,23 @@ import { LoggerService } from '../../../../../services/logger.service';
       }
 
       <!-- 录音按钮 -->
-      <button 
+      <button
         class="record-btn w-full px-4 py-5 rounded-xl transition-all duration-200
                flex items-center justify-center gap-2 text-sm font-medium
                select-none touch-none
                border-2 border-solid border-transparent
-               hover:border-dashed hover:border-amber-300/50 
+               hover:border-dashed hover:border-amber-300/50
                dark:hover:border-stone-500/50"
         [class]="getButtonClass()"
         [disabled]="voiceService.isTranscribing()"
-        (mousedown)="start($event)" 
+        (mousedown)="start($event)"
         (mouseup)="stop()"
-        (mouseleave)="stop()" 
-        (touchstart)="start($event)" 
+        (mouseleave)="stop()"
+        (touchstart)="start($event)"
         (touchend)="stop()"
         (touchcancel)="stop()"
+        (keydown.space)="start($event)"
+        (keyup.space)="stop()"
         [attr.aria-pressed]="voiceService.isRecording()"
         [attr.aria-label]="getAriaLabel()"
         data-testid="black-box-recorder">

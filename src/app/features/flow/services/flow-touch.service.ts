@@ -248,7 +248,7 @@ export class FlowTouchService {
     // 防御性清理（避免异常情况下残留）
     const leftovers = document.querySelectorAll('[data-flow-diagram-drag-ghost="true"]');
     leftovers.forEach(el => {
-      try { el.remove(); } catch { /* ignore */ }
+      try { el.remove(); } catch { /* GoJS 事件/DOM 操作防御性忽略 */ }
     });
   }
   
@@ -447,5 +447,39 @@ export class FlowTouchService {
       window.removeEventListener(listener.type, listener.handler);
     }
     this.activeListeners = [];
+  }
+
+  // ========== GoJS SelectionMoved 幽灵清理监听 ==========
+
+  /** 缓存监听器引用，以便移除 */
+  private diagramSelectionMovedListener: ((e: go.DiagramEvent) => void) | null = null;
+
+  /**
+   * 安装 GoJS SelectionMoved 监听器，在移动端拖拽结束时清理幽灵元素
+   * @param diagramInstance GoJS Diagram 实例
+   * @param isMobile 是否为移动端
+   */
+  installDiagramDragGhostListeners(diagramInstance: go.Diagram | null, isMobile: boolean): void {
+    if (!isMobile || !diagramInstance) return;
+    if (this.diagramSelectionMovedListener) return;
+
+    this.diagramSelectionMovedListener = () => {
+      if (!isMobile) return;
+      this.endDiagramNodeDragGhost();
+    };
+    diagramInstance.addDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
+  }
+
+  /**
+   * 卸载 GoJS SelectionMoved 监听器
+   */
+  uninstallDiagramDragGhostListeners(diagramInstance: go.Diagram | null): void {
+    if (!diagramInstance || !this.diagramSelectionMovedListener) return;
+    try {
+      diagramInstance.removeDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
+    } catch {
+      // 忽略图表已销毁时的错误
+    }
+    this.diagramSelectionMovedListener = null;
   }
 }

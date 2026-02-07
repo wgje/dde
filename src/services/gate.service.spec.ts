@@ -16,7 +16,7 @@ import {
   focusPreferences,
   setBlackBoxEntries,
   resetGateState
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 import { BlackBoxEntry } from '../models/focus';
 
 describe('GateService', () => {

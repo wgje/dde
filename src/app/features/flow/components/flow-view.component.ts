@@ -25,6 +25,7 @@ import { FlowDiagramEffectsService } from '../services/flow-diagram-effects.serv
 import { FlowEventRegistrationService } from '../services/flow-event-registration.service';
 import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
 import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service';
+import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -43,24 +44,8 @@ import { FlowRightPanelComponent } from './flow-right-panel.component';
 import { FlowBatchToolbarComponent } from './flow-batch-toolbar.component';
 
 import * as go from 'gojs';
-import { getErrorMessage } from '../../../../utils/result';
 
-/**
- * FlowViewComponent - 流程图视图组件
- * 
- * 重构后的职责：
- * - 模板渲染
- * - 子组件通信
- * - 服务协调
- * - 生命周期管理
- * 
- * 核心逻辑已拆分到以下服务：
- * - FlowDiagramService: GoJS 图表管理
- * - FlowDragDropService: 拖放处理
- * - FlowTouchService: 触摸处理
- * - FlowLinkService: 连接线管理
- * - FlowTaskOperationsService: 任务操作
- */
+/** 流程图视图组件 —— 模板渲染 + 子组件通信 + 服务协调 + 生命周期管理 */
 @Component({
   selector: 'app-flow-view',
   standalone: true,
@@ -119,6 +104,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly batchDelete = inject(FlowBatchDeleteService);
   readonly selectMode = inject(FlowSelectModeService);
   private readonly mobileDrawer = inject(FlowMobileDrawerService);
+  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly diagramEffects = inject(FlowDiagramEffectsService);
   private readonly eventRegistration = inject(FlowEventRegistrationService);
   private readonly cleanup = inject(FlowViewCleanupService);
@@ -162,68 +148,35 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 右侧滑出面板状态（移动端） */
   readonly isRightPanelOpen = signal(false);
   
-  /** 小地图尺寸（移动端使用更小尺寸） */
-  readonly overviewSize = computed(() => {
-    if (this.uiState.isMobile()) {
-      return { width: 100, height: 80 };
-    }
-    return { width: 180, height: 140 };
-  });
+  readonly overviewSize = computed(() =>
+    this.uiState.isMobile() ? { width: 100, height: 80 } : { width: 180, height: 140 }
+  );
 
-  /** 小地图底部位置（抽屉在顶部，固定在底部） */
-  readonly overviewBottomPosition = computed(() => {
-    // 桌面端稍高一点
-    if (!this.uiState.isMobile()) {
-      return '16px';
-    }
-    // 移动端固定在底部（抽屉在顶部，不影响小地图）
-    return '8px';
-  });
+  readonly overviewBottomPosition = computed(() =>
+    this.uiState.isMobile() ? '8px' : '16px'
+  );
 
   /** 图表初始化重试次数 - 委托给 diagramRetry 服务管理 */
   
-  /** 计算属性: 获取选中的任务对象 */
+  /** 选中的任务对象 */
   readonly selectedTask = computed(() => {
     const id = this.selectedTaskId();
     if (!id) return null;
-    return this.projectState.tasks().find(t => t.id === id) || null;
+    return this.projectState.getTask(id) || null;
   });
   
   // ========== 私有状态 ==========
   private isDestroyed = false;
-
-  /** GoJS 拖拽结束时用于移动端幽灵清理的监听器引用（便于销毁/重建时移除） */
-  private diagramSelectionMovedListener: ((e: go.DiagramEvent) => void) | null = null;
   
-  /** 待清理的定时器（防止内存泄漏） */
+  /** 待清理的定时器 */
   private pendingTimers: ReturnType<typeof setTimeout>[] = [];
-  
-  /** rAF 调度 ID（用于取消） */
-  private pendingRafId: number | null = null;
-
-  /** 抽屉高度更新的 rAF（合并多次高度变更） */
-  private pendingDrawerHeightRafId: number | null = null;
-  private pendingDrawerHeightTarget: number | null = null;
-  
-  /** 是否有待处理的图表更新（用于 rAF 合并） */
-  private diagramUpdatePending = false;
   
   /** Overview 刷新定时器（防抖） */
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Idle 小地图初始化句柄（用于取消） */
-  private idleOverviewInitHandle: number | null = null;
   
-  /**
-   * 监听窗口大小改变（处理屏幕旋转等情况）
-   */
   @HostListener('window:resize')
   onWindowResize(): void {
-    // 防抖处理，避免频繁刷新
-    if (this.overviewResizeTimer) {
-      clearTimeout(this.overviewResizeTimer);
-    }
-    
+    if (this.overviewResizeTimer) clearTimeout(this.overviewResizeTimer);
     this.overviewResizeTimer = setTimeout(() => {
       if (!this.isDestroyed && !this.isOverviewCollapsed()) {
         this.diagram.refreshOverview();
@@ -231,12 +184,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }, 300);
   }
   
-  /**
-   * 监听屏幕方向改变（移动端）
-   */
   @HostListener('window:orientationchange')
   onOrientationChange(): void {
-    // 屏幕旋转后延迟刷新，确保布局完成
     this.scheduleTimer(() => {
       if (!this.isDestroyed && !this.isOverviewCollapsed()) {
         this.diagram.refreshOverview();
@@ -245,89 +194,29 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   constructor() {
-    // 使用 FlowDiagramEffectsService 统一管理响应式 effect
-    const scheduleRaf = this.scheduleRafDiagramUpdate.bind(this);
+    const scheduleRaf = (tasks: Task[], forceUpdate: boolean) =>
+      this.diagramEffects.scheduleRafDiagramUpdate(tasks, forceUpdate, this.isDestroyed);
     
-    // 核心数据变化 effects
     this.diagramEffects.createTasksEffect(this.injector, scheduleRaf);
     this.diagramEffects.createConnectionsEffect(this.injector, scheduleRaf);
     this.diagramEffects.createSearchEffect(this.injector, scheduleRaf);
     this.diagramEffects.createThemeEffect(this.injector, scheduleRaf);
     
-    // 选中状态同步（委托给 selectionService）
     this.diagramEffects.createSelectionSyncEffect(
       this.injector,
       this.selectedTaskId,
       (taskId: string) => this.selectionService.selectNodeWithRetry(taskId, this.scheduleTimer.bind(this))
     );
+    this.diagramEffects.createCenterCommandEffect(this.injector, this.executeCenterOnNode.bind(this));
+    this.diagramEffects.createRetryCommandEffect(this.injector, this.retryInitDiagram.bind(this));
     
-    // 命令服务订阅
-    this.diagramEffects.createCenterCommandEffect(
-      this.injector,
-      this.executeCenterOnNode.bind(this)
-    );
-    this.diagramEffects.createRetryCommandEffect(
-      this.injector,
-      this.retryInitDiagram.bind(this)
-    );
-    
-    // 移动端抽屉高度管理 effects（委托给 FlowMobileDrawerService）
     this.mobileDrawer.setupDrawerEffects(this.injector, {
       paletteHeight: () => this.paletteHeight(),
       drawerHeight: () => this.drawerHeight(),
       drawerManualOverride: this.drawerManualOverride,
       isResizingDrawerSignal: () => this.isResizingDrawerSignal(),
       selectedTaskId: () => this.selectedTaskId(),
-      scheduleDrawerHeightUpdate: (vh) => this.scheduleDrawerHeightUpdate(vh)
-    });
-  }
-  
-  /**
-   * 使用 requestAnimationFrame 调度图表更新
-   * 将多个 signal 变化合并到同一帧，避免过度渲染
-   * 
-   * 注意：rAF 的作用是"对齐"而非"延迟"
-   * 它把更新逻辑和浏览器刷新频率（60Hz）对齐，确保不会在一帧里做两次无用渲染
-   */
-  private scheduleRafDiagramUpdate(tasks: Task[], forceUpdate: boolean): void {
-    // 标记需要完整更新
-    if (forceUpdate) {
-      this.diagramUpdatePending = true;
-    }
-    
-    // 如果已有 rAF 调度，复用它
-    if (this.pendingRafId !== null) {
-      return;
-    }
-    
-    this.pendingRafId = requestAnimationFrame(() => {
-      this.pendingRafId = null;
-      
-      if (this.isDestroyed || !this.diagram.isInitialized) return;
-      
-      // 执行图表更新，使用合并后的 forceUpdate 标志
-      this.diagram.updateDiagram(this.projectState.tasks(), this.diagramUpdatePending);
-      this.diagramUpdatePending = false;
-    });
-  }
-
-  /**
-   * 合并抽屉高度更新，避免短时间内多次触发布局变化
-   */
-  private scheduleDrawerHeightUpdate(targetVh: number): void {
-    if (this.isDestroyed) return;
-
-    this.pendingDrawerHeightTarget = targetVh;
-    if (this.pendingDrawerHeightRafId !== null) return;
-
-    this.pendingDrawerHeightRafId = requestAnimationFrame(() => {
-      this.pendingDrawerHeightRafId = null;
-      const nextVh = this.pendingDrawerHeightTarget;
-      this.pendingDrawerHeightTarget = null;
-      if (nextVh === null) return;
-      if (Math.abs(this.drawerHeight() - nextVh) > 0.2) {
-        this.drawerHeight.set(nextVh);
-      }
+      scheduleDrawerHeightUpdate: (vh) => this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, vh)
     });
   }
   
@@ -344,29 +233,19 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.selectionService.markDestroyed();
     this.diagramRetry.resetState();
 
-    // 收集清理资源
     const resources: CleanupResources = {
       pendingTimers: this.pendingTimers,
-      pendingRafId: this.pendingRafId,
-      pendingDrawerHeightRafId: this.pendingDrawerHeightRafId,
-      pendingRetryRafIds: [],  // 已迁移到 selectionService
+      pendingRetryRafIds: [],
       overviewResizeTimer: this.overviewResizeTimer,
-      idleInitHandle: this.diagramRetry.getIdleInitHandle(),  // 从服务获取
-      idleOverviewInitHandle: this.idleOverviewInitHandle
+      idleInitHandle: this.diagramRetry.getIdleInitHandle()
     };
 
-    // 委托给 CleanupService 执行完整清理
     this.cleanup.performCleanup(
       resources,
-      () => this.uninstallMobileDiagramDragGhostListeners()
+      () => this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance)
     );
 
-    // 同步本地状态（避免后续误用）
-    this.pendingRafId = null;
-    this.pendingDrawerHeightRafId = null;
-    this.pendingDrawerHeightTarget = null;
     this.overviewResizeTimer = null;
-    this.idleOverviewInitHandle = null;
   }
   
   // ========== 图表初始化 ==========
@@ -402,20 +281,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   private initDiagram(): void {
-    // 防御性检查：确保 DOM 元素已准备好
-    if (!this.diagramDiv || !this.diagramDiv.nativeElement) {
+    if (!this.diagramDiv?.nativeElement) {
       this.logger.warn('[FlowView] diagramDiv 未准备好，跳过初始化');
       return;
     }
 
-    // 若重复初始化（重试/重置），先移除旧监听并清理幽灵
-    this.uninstallMobileDiagramDragGhostListeners();
+    // 若重复初始化，先移除旧监听并清理幽灵
+    this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance);
     this.touch.endDiagramNodeDragGhost();
 
     const success = this.diagram.initialize(this.diagramDiv.nativeElement);
     if (!success) return;
     
-    // 注册所有 GoJS 事件回调（通过 EventRegistrationService）
     this.eventRegistration.registerAllEvents({
       isSelectMode: () => this.selectMode.isSelectMode(),
       selectedTaskId: this.selectedTaskId,
@@ -427,100 +304,35 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       handleDeleteKeyPressed: () => this.handleDeleteKeyPressed()
     });
 
-    this.installMobileDiagramDragGhostListeners();
+    this.touch.installDiagramDragGhostListeners(this.diagram.diagramInstance, this.uiState.isMobile());
     
-    // 设置拖放处理
     this.diagram.setupDropHandler((taskData, docPoint) => {
       this.handleDiagramDrop(taskData, docPoint);
     });
     
-    // 初始化小地图
-    this.initOverview();
-  } 
-
-  private installMobileDiagramDragGhostListeners(): void {
-    if (!this.uiState.isMobile()) return;
-    if (this.diagramSelectionMovedListener) return;
-
-    const diagramInstance = this.diagram.diagramInstance;
-    if (!diagramInstance) return;
-
-    // 注意：GoJS 没有 'SelectionMoving' 事件（会导致运行时错误）
-    // 只使用 'SelectionMoved' 在拖拽结束时清理幽灵元素
-    // 如果需要实时跟踪，应该监听 ToolManager 或使用 doMouseMove
-    this.diagramSelectionMovedListener = () => {
-      if (!this.uiState.isMobile()) return;
-      this.touch.endDiagramNodeDragGhost();
-    };
-
-    diagramInstance.addDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
-  }
-
-  private uninstallMobileDiagramDragGhostListeners(): void {
-    const diagramInstance = this.diagram.diagramInstance;
-    if (!diagramInstance) return;
-
-    if (this.diagramSelectionMovedListener) {
-      try {
-        diagramInstance.removeDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
-      } catch (error) {
-        // 忽略移除监听器时的错误（图表可能已经被销毁）
-        this.logger.warn('移除 SelectionMoved 监听器失败', { error });
-      }
-      this.diagramSelectionMovedListener = null;
-    }
+    this.diagram.scheduleOverviewInit(
+      this.overviewDiv, this.isOverviewVisible(), this.isOverviewCollapsed(),
+      this.zone, this.scheduleTimer.bind(this)
+    );
   }
   
   // ========== 小地图 ==========
-  
-  /**
-   * 初始化小地图
-   */
-  private initOverview(immediate = false): void {
-    if (!this.isOverviewVisible() || this.isOverviewCollapsed()) return;
 
-    const runInit = () => {
-      if (this.overviewDiv?.nativeElement && this.diagram.isInitialized) {
-        this.diagram.initializeOverview(this.overviewDiv.nativeElement);
-      }
-    };
-
-    if (immediate) {
-      this.scheduleTimer(() => runInit(), 0);
-      return;
-    }
-
-    if (typeof requestIdleCallback !== 'undefined') {
-      if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
-        cancelIdleCallback(this.idleOverviewInitHandle);
-      }
-      this.idleOverviewInitHandle = requestIdleCallback(() => {
-        this.idleOverviewInitHandle = null;
-        this.zone.run(() => runInit());
-      }, { timeout: 3000 });
-    } else {
-      this.scheduleTimer(() => runInit(), 300);
-    }
-  }
-  
-  /**
-   * 折叠/展开小地图
-   */
   toggleOverviewCollapse(): void {
     const wasCollapsed = this.isOverviewCollapsed();
     this.isOverviewCollapsed.set(!wasCollapsed);
     
-    // 展开时需要重新初始化 Overview
     if (wasCollapsed) {
-      // 使用 requestAnimationFrame + setTimeout 确保 DOM 完全渲染后再初始化
-      // 修复移动端展开小地图时只显示一半的问题
+      // 展开：确保 DOM 渲染后再初始化
       requestAnimationFrame(() => {
         this.scheduleTimer(() => {
-          this.initOverview(true);
-        }, 100); // 增加延迟时间，确保容器尺寸已确定
+          this.diagram.scheduleOverviewInit(
+            this.overviewDiv, this.isOverviewVisible(), false,
+            this.zone, this.scheduleTimer.bind(this), true
+          );
+        }, 100);
       });
     } else {
-      // 折叠时销毁 Overview
       this.diagram.disposeOverview();
     }
   }
@@ -532,9 +344,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.toggleOverviewCollapse();
   }
 
-  /**
-   * 重试初始化图表（委托给 diagramRetry 服务）
-   */
   retryInitDiagram(): void {
     this.diagramRetry.retryInitDiagram(
       this.diagramDiv,
@@ -544,10 +353,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     );
   }
   
-  /**
-   * 完全重置图表状态并重新初始化（委托给 diagramRetry 服务）
-   * 用于用户手动触发的"完全重置"操作
-   */
+  /** 完全重置图表并重新初始化 */
   resetAndRetryDiagram(): void {
     this.diagramRetry.resetAndRetryDiagram(
       this.diagramDiv,
@@ -584,18 +390,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.toast.info('功能开发中', '云端保存功能即将推出');
   }
 
-  /**
-   * 居中到指定节点（公共 API，向后兼容）
-   * 可被模板或外部直接调用
-   */
+  /** 居中到指定节点 */
   centerOnNode(taskId: string, openDetail: boolean = true): void {
     this.executeCenterOnNode(taskId, openDetail);
   }
   
-  /**
-   * 执行居中到节点（内部实现）
-   * 供命令服务 effect 和公共方法调用
-   */
   private executeCenterOnNode(taskId: string, openDetail: boolean): void {
     if (!this.diagram.isInitialized) {
       this.logger.warn('图表未初始化，无法居中到节点', { taskId });
@@ -627,55 +426,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   onUnassignedDrop(event: DragEvent): void {
-    event.preventDefault();
-    
-    // 提取拖放数据
-    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
-    if (!data) {
-      this.dragDrop.handleDropToUnassigned(event);
-      return;
-    }
-
-    try {
-      const draggedTask = JSON.parse(data) as Task;
-      
-      // 场景1：已分配任务拖回待分配区 -> 解除分配
-      if (draggedTask?.id && draggedTask.stage !== null) {
-        const success = this.dragDrop.handleDropToUnassigned(event);
-        if (success) {
-          this.refreshDiagram();
-        }
-        return;
-      }
-      
-      // 场景2：待分配块之间拖放 -> 改变父子关系（重新挂载）
-      // 当拖动一个待分配块到待分配区域时，需要确定目标父块
-      // 由于拖放到的是整个待分配区域，我们需要找到鼠标下方最近的待分配块
-      if (draggedTask?.id && draggedTask.stage === null) {
-        // 获取所有待分配任务
-        const unassignedTasks = this.projectState.unassignedTasks();
-        
-        // 排除拖动的任务本身，获取可能成为目标的其他待分配块
-        const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
-        
-        if (targetCandidates.length > 0) {
-          // 如果有其他待分配块，选择第一个作为新父块（可以根据鼠标位置优化）
-          const targetTask = targetCandidates[0];
-          
-          // 检查是否形成循环父子关系
-          const result = this.taskOpsAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
-          if (!result.ok) {
-            this.toast.error('重新挂载失败', getErrorMessage(result.error));
-          } else {
-            this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
-            this.refreshDiagram();
-          }
-          return;
-        }
-      }
-    } catch (err) {
-      // 数据解析失败，执行默认处理
-      this.dragDrop.handleDropToUnassigned(event);
+    if (this.dragDrop.handleFullUnassignedDrop(event)) {
+      this.refreshDiagram();
     }
   }
   
@@ -732,12 +484,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.refreshDiagram();
   }
   
-  // ========== 级联分配对话框（委托给 FlowCascadeAssignService） ==========
-  
-  /**
-   * 显示级联分配确认对话框
-   * 当用户将待分配任务树拖拽到阶段区域时调用
-   */
+  // ========== 级联分配 ==========
+
   showCascadeAssignDialog(
     taskId: string,
     targetStage: number,
@@ -746,18 +494,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.cascadeAssign.showDialog(taskId, targetStage, targetParentId);
   }
   
-  /**
-   * 确认级联分配
-   */
+  /** 确认级联分配 */
   confirmCascadeAssign(): void {
     if (this.cascadeAssign.confirm()) {
       this.refreshDiagram();
     }
   }
   
-  /**
-   * 取消级联分配
-   */
+  /** 取消级联分配 */
   cancelCascadeAssign(): void {
     this.cascadeAssign.cancel();
   }
@@ -836,29 +580,21 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  // ========== 批量删除操作 ==========
-  
-  /**
-   * 展开抽屉到最佳观看高度（仅手机端）
-   * 双击任务块打开详情时调用
-   */
+  // ========== 移动端抽屉 ==========
+
   private expandDrawerToOptimalHeight(): void {
     const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
     if (targetVh !== null) {
-      // 延迟设置，等待详情面板完全渲染
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          this.scheduleDrawerHeightUpdate(targetVh);
+          this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, targetVh);
         });
       });
     }
   }
   
-  // ========== 批量删除操作（委托给 FlowBatchDeleteService） ==========
-  
-  /**
-   * 请求批量删除（由 Delete 键或工具栏按钮触发）
-   */
+  // ========== 批量删除 ==========
+
   requestBatchDelete(): void {
     const singleTask = this.batchDelete.requestBatchDelete();
     if (singleTask) {
@@ -867,9 +603,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  /**
-   * 确认批量删除
-   */
   confirmBatchDelete(): void {
     const deletedCount = this.batchDelete.confirmBatchDelete(() => {
       this.selectedTaskId.set(null);
@@ -881,9 +614,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  /**
-   * 处理 Delete 键删除事件（由 GoJS commandHandler 拦截后触发）
-   */
+  /** Delete 键处理 */
   private handleDeleteKeyPressed(): void {
     const singleTask = this.batchDelete.handleDeleteKeyPressed();
     if (singleTask) {
@@ -891,17 +622,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  // ========== 框选模式（委托给 FlowSelectModeService） ==========
-  
-  /**
-   * 切换移动端框选模式
-   */
+  // ========== 框选模式 ==========
+
   toggleSelectMode(): void {
     this.selectMode.toggleSelectMode();
   }
   
-  // ========== 调色板拖动（委托给 FlowPaletteResizeService） ==========
-  
+  // ========== 调色板拖动 ==========
+
   startPaletteResize(e: MouseEvent): void {
     this.paletteResize.bindHeightSignal(this.paletteHeight);
     this.paletteResize.startMouseResize(e);
@@ -912,8 +640,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.paletteResize.startTouchResize(e);
   }
   
-  // ========== 快捷键处理（委托给 FlowKeyboardService） ==========
-  
+  // ========== 快捷键 ==========
+
   @HostListener('window:keydown', ['$event'])
   handleDiagramShortcut(event: KeyboardEvent): void {
     const result = this.keyboard.handleShortcut(event);
@@ -961,9 +689,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   /**
-   * 处理移动端抽屉区域（待分配区域、黑匣子）的滑动切换手势
-   * - 向右滑动：切换到文本视图
-   * - 向左滑动：打开项目侧边栏
+   * 流程图区域滑动手势
+   * - 向右：切换到文本视图
+   * - 向左：打开项目侧边栏
    */
   onDrawerSwipeToSwitch(direction: 'left' | 'right'): void {
     if (direction === 'right') {
@@ -987,8 +715,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  // ========== 流程图区域滑动手势（委托给 FlowSwipeGestureService） ==========
-  
+  // ========== 流程图区域滑动手势 ==========
+
   onDiagramAreaTouchStart(e: TouchEvent): void {
     this.swipeGesture.handleDiagramAreaTouchStart(e);
   }
@@ -1009,13 +737,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // ========== 私有辅助方法 ==========
   
-  // ========== 私有辅助方法 ==========
-  
   /**
    * 安全调度定时器，自动追踪并在组件销毁时清理
-   * @param callback 回调函数
-   * @param delay 延迟毫秒数
-   * @returns 定时器 ID
    */
   private scheduleTimer(callback: () => void, delay: number): ReturnType<typeof setTimeout> {
     const timerId = setTimeout(() => {

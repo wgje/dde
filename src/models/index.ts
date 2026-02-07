@@ -158,6 +158,10 @@ export interface UserPreferences {
    * 本地自动备份间隔（毫秒）
    */
   localBackupIntervalMs?: number;
+  /**
+   * 专注模式偏好设置（跨设备同步）
+   */
+  focusPreferences?: import('./focus').FocusPreferences;
 }
 
 /**

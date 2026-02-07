@@ -4,37 +4,18 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { TaskTrashService } from './task-trash.service';
 import { SubtreeOperationsService } from './subtree-operations.service';
-import { TaskCreationService, CreateTaskParams as TaskCreationParams } from './task-creation.service';
-import { TaskMoveService, MoveTaskParams as TaskMoveParams } from './task-move.service';
+import { TaskCreationService, CreateTaskParams } from './task-creation.service';
+import { TaskMoveService, MoveTaskParams } from './task-move.service';
 import { TaskAttributeService } from './task-attribute.service';
 import { TaskConnectionService } from './task-connection.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { LAYOUT_CONFIG, FLOATING_TREE_CONFIG } from '../config';
 import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';
 
-/**
- * 任务操作参数
- * @deprecated 使用 TaskCreationService 的 CreateTaskParams
- */
-export interface CreateTaskParams {
-  title: string;
-  content: string;
-  targetStage: number | null;
-  parentId: string | null;
-  isSibling?: boolean;
-}
 
-/**
- * 任务移动参数
- * @deprecated 使用 TaskMoveService 的 MoveTaskParams
- */
-export interface MoveTaskParams {
-  taskId: string;
-  newStage: number | null;
-  beforeTaskId?: string | null;
-  newParentId?: string | null;
-}
 
 /**
  * 任务插入参数
@@ -74,19 +55,14 @@ export class TaskOperationService {
   private readonly taskAttr = inject(TaskAttributeService);
   private readonly taskConn = inject(TaskConnectionService);
   
-  /** 重平衡锁定的阶段 */
-  private rebalancingStages = new Set<number>();
+  private projectState = inject(ProjectStateService);
+  private recorder = inject(TaskRecordTrackingService);
   
   /** 需要重平衡的阶段 */
   private stagesNeedingRebalance = new Set<number>();
   
   /** 重平衡定时器 */
   private rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
-  
-  /** 操作回调 - 用于通知 StoreService 进行持久化和撤销记录 */
-  private onProjectUpdateCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private onProjectUpdateDebouncedCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private getActiveProjectCallback: (() => Project | null) | null = null;
   
   constructor() {
     // 注册清理逻辑，防止定时器内存泄漏
@@ -98,57 +74,7 @@ export class TaskOperationService {
     });
   }
   
-  /**
-   * 设置操作回调
-   * @param callbacks 回调函数集合
-   */
-  setCallbacks(callbacks: {
-    onProjectUpdate: (mutator: (project: Project) => Project) => void;
-    onProjectUpdateDebounced: (mutator: (project: Project) => Project) => void;
-    getActiveProject: () => Project | null;
-  }) {
-    this.onProjectUpdateCallback = callbacks.onProjectUpdate;
-    this.onProjectUpdateDebouncedCallback = callbacks.onProjectUpdateDebounced;
-    this.getActiveProjectCallback = callbacks.getActiveProject;
-    
-    // 同步设置 TrashService 回调
-    this.trashService.setCallbacks({
-      getActiveProject: callbacks.getActiveProject,
-      recordAndUpdate: callbacks.onProjectUpdate
-    });
-    
-    // 同步设置 TaskCreationService 回调
-    this.taskCreation.setCallbacks({
-      recordAndUpdate: callbacks.onProjectUpdate,
-      getActiveProject: callbacks.getActiveProject,
-      isStageRebalancing: (stage: number) => this.isStageRebalancing(stage)
-    });
-    
-    // 同步设置 TaskMoveService 回调
-    this.taskMove.setCallbacks({
-      recordAndUpdate: callbacks.onProjectUpdate,
-      getActiveProject: callbacks.getActiveProject,
-      isStageRebalancing: (stage: number) => this.isStageRebalancing(stage),
-      computeInsertRank: (stage, siblings, beforeId, parentRank) => 
-        this.computeInsertRank(stage, siblings, beforeId, parentRank),
-      applyRefusalStrategy: (task, candidateRank, parentRank, minChildRank, tasks) =>
-        this.applyRefusalStrategy(task, candidateRank, parentRank, minChildRank, tasks)
-    });
-    
-    // 同步设置 TaskAttributeService 回调
-    this.taskAttr.setCallbacks({
-      recordAndUpdate: callbacks.onProjectUpdate,
-      recordAndUpdateDebounced: callbacks.onProjectUpdateDebounced,
-      getActiveProject: callbacks.getActiveProject
-    });
-    
-    // 同步设置 TaskConnectionService 回调
-    this.taskConn.setCallbacks({
-      recordAndUpdate: callbacks.onProjectUpdate,
-      recordAndUpdateDebounced: callbacks.onProjectUpdateDebounced,
-      getActiveProject: callbacks.getActiveProject
-    });
-  }
+
   
   // ========== 查询方法 ==========
   
@@ -156,7 +82,7 @@ export class TaskOperationService {
    * 检查指定阶段是否正在重平衡
    */
   isStageRebalancing(stage: number): boolean {
-    return this.rebalancingStages.has(stage);
+    return this.layoutService.isStageRebalancing(stage);
   }
   
   /**
@@ -170,26 +96,27 @@ export class TaskOperationService {
     
     const tasks = project.tasks;
     const connections = project.connections;
-    
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+
     // 排除父子关系的连接
     const parentChildPairs = new Set<string>();
     tasks.filter(t => t.parentId).forEach(t => {
       parentChildPairs.add(`${t.parentId}->${t.id}`);
     });
-    
+
     const outgoing = connections
       .filter(c => c.source === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
       .map(c => ({
         targetId: c.target,
-        targetTask: tasks.find(t => t.id === c.target),
+        targetTask: taskMap.get(c.target),
         description: c.description
       }));
-    
+
     const incoming = connections
       .filter(c => c.target === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
       .map(c => ({
         sourceId: c.source,
-        sourceTask: tasks.find(t => t.id === c.source),
+        sourceTask: taskMap.get(c.source),
         description: c.description
       }));
     
@@ -249,7 +176,7 @@ export class TaskOperationService {
     const project = this.getActiveProject();
     if (!project) return;
     
-    const task = project.tasks.find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task || task.stage === null) {
       this.updateTaskPosition(taskId, x, y);
       return;
@@ -392,7 +319,7 @@ export class TaskOperationService {
   
   /**
    * 软删除任务（移动到回收站）
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.deleteTask
    */
   deleteTask(taskId: string): void {
     this.trashService.deleteTask(taskId);
@@ -408,7 +335,7 @@ export class TaskOperationService {
    * 
    * @param explicitIds 用户显式选中的任务 ID 列表
    * @returns 实际删除的任务数量（含级联子任务）
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.deleteTask
    */
   deleteTasksBatch(explicitIds: string[]): number {
     const result = this.trashService.deleteTask(explicitIds[0], false);
@@ -431,7 +358,7 @@ export class TaskOperationService {
   
   /**
    * 永久删除任务
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.permanentlyDeleteTask
    */
   permanentlyDeleteTask(taskId: string): void {
     this.trashService.permanentlyDeleteTask(taskId);
@@ -439,7 +366,7 @@ export class TaskOperationService {
   
   /**
    * 从回收站恢复任务
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.restoreTask
    */
   restoreTask(taskId: string): void {
     this.trashService.restoreTask(taskId);
@@ -447,7 +374,7 @@ export class TaskOperationService {
   
   /**
    * 清空回收站
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.emptyTrash
    */
   emptyTrash(): void {
     this.trashService.emptyTrash();
@@ -455,7 +382,7 @@ export class TaskOperationService {
   
   /**
    * 清理超过保留期限的回收站项目
-   * @deprecated 内部实现已迁移到 TaskTrashService，保留此接口兼容性
+   * @see TaskTrashService.cleanupOldTrashItems
    */
   cleanupOldTrashItems(): number {
     return this.trashService.cleanupOldTrashItems();
@@ -482,9 +409,9 @@ export class TaskOperationService {
       return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
     }
 
-    const sourceTask = activeP.tasks.find(t => t.id === sourceId);
-    const targetTask = activeP.tasks.find(t => t.id === targetId);
-    const insertTask = activeP.tasks.find(t => t.id === taskId);
+    const sourceTask = this.projectState.getTask(sourceId);
+    const targetTask = this.projectState.getTask(targetId);
+    const insertTask = this.projectState.getTask(taskId);
 
     if (!sourceTask || !targetTask || !insertTask) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '找不到相关任务');
@@ -500,21 +427,22 @@ export class TaskOperationService {
     
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      
-      const source = tasks.find(t => t.id === sourceId)!;
-      const target = tasks.find(t => t.id === targetId)!;
-      const newTask = tasks.find(t => t.id === taskId)!;
-      
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+
+      const source = taskMap.get(sourceId)!;
+      const target = taskMap.get(targetId)!;
+      const newTask = taskMap.get(taskId)!;
+
       const targetSubtreeIds = this.subtreeOps.collectSubtreeIds(targetId, tasks);
-      
+
       const newTaskStage = (source.stage || 1) + 1;
       newTask.parentId = sourceId;
       newTask.stage = newTaskStage;
-      
+
       target.parentId = taskId;
-      
+
       targetSubtreeIds.forEach(id => {
-        const t = tasks.find(task => task.id === id);
+        const t = taskMap.get(id);
         if (t && t.stage !== null) {
           t.stage = t.stage + 1;
         }
@@ -633,23 +561,22 @@ export class TaskOperationService {
   // ========== 私有辅助方法 ==========
   
   private getActiveProject(): Project | null {
-    return this.getActiveProjectCallback?.() ?? null;
+    return this.projectState.activeProject();
   }
   
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    this.onProjectUpdateCallback?.(mutator);
+    this.recorder.recordAndUpdate(mutator);
   }
   
   private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
-    this.onProjectUpdateDebouncedCallback?.(mutator);
+    this.recorder.recordAndUpdateDebounced(mutator);
   }
   
   /**
    * 直接更新项目（不记录撤销历史）
    */
   private updateActiveProjectRaw(mutator: (project: Project) => Project): void {
-    // 通过 debounced 回调但不触发撤销记录
-    this.onProjectUpdateCallback?.(mutator);
+    this.recorder.recordAndUpdate(mutator);
   }
   
   /**
@@ -687,7 +614,7 @@ export class TaskOperationService {
     const stages = [...this.stagesNeedingRebalance];
     this.stagesNeedingRebalance.clear();
     
-    stages.forEach(s => this.rebalancingStages.add(s));
+    stages.forEach(s => this.layoutService.markStageRebalancing(s));
     
     try {
       const rebalancedTasks = this.layoutService.rebalanceStageRanks(activeP.tasks, stages);
@@ -696,7 +623,7 @@ export class TaskOperationService {
         this.recordAndUpdate(p => this.layoutService.rebalance({ ...p, tasks: rebalancedTasks }));
       }
     } finally {
-      stages.forEach(s => this.rebalancingStages.delete(s));
+      stages.forEach(s => this.layoutService.clearStageRebalancing(s));
     }
   }
   

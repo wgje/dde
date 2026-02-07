@@ -647,7 +647,6 @@ export class ExportService {
         this._lastExportTime.set(stored);
       }
     } catch (e) {
-      // 忽略存储错误
       this.logger.debug('读取上次导出时间失败', { error: e });
     }
   }
@@ -663,7 +662,6 @@ export class ExportService {
       localStorage.setItem('nanoflow.lastExportAt', now);
       // 仅本地存储，不同步到云端
     } catch (e) {
-      // 忽略存储错误
       this.logger.debug('保存上次导出时间失败', { error: e });
     }
   }

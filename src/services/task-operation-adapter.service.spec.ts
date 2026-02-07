@@ -9,16 +9,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { TaskOperationService } from './task-operation.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
-import { LayoutService } from './layout.service';
 import { OptimisticStateService } from './optimistic-state.service';
-import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
-import { EventBusService } from './event-bus.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
 import { Project, Task } from '../models';
 import { success } from '../utils/result';
@@ -67,6 +65,10 @@ const mockProjectStateService = {
     return mockProjectsSignal().find(p => p.id === projectId) || null;
   },
   activeProjectId: () => mockActiveProjectIdSignal(),
+  getTask: (taskId: string) => {
+    const project = mockProjectStateService.activeProject();
+    return project?.tasks.find(t => t.id === taskId);
+  },
   setProjects: vi.fn((projects: Project[]) => {
     mockProjectsSignal.set(projects);
   }),
@@ -133,6 +135,17 @@ const mockConnectionAdapterService = {
   updateConnectionContent: vi.fn(),
 };
 
+const mockRecorderService = {
+  lastUpdateType: 'structure' as 'content' | 'structure' | 'position',
+  showUndoToast: vi.fn(),
+  performUndo: vi.fn(),
+  performRedo: vi.fn(),
+  recordAndUpdate: vi.fn(),
+  recordAndUpdateDebounced: vi.fn(),
+  setupSyncResultHandler: vi.fn(),
+  triggerServerSideDelete: vi.fn(),
+};
+
 describe('TaskOperationAdapterService - moveTaskToStage', () => {
   let service: TaskOperationAdapterService;
   let project: Project;
@@ -146,16 +159,14 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const injector = Injector.create({
       providers: [
         { provide: TaskOperationService, useValue: mockTaskOperationService },
+        { provide: TaskRecordTrackingService, useValue: mockRecorderService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: OptimisticStateService, useValue: mockOptimisticStateService },
-        { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinatorService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiStateService },
-        { provide: LayoutService, useValue: mockLayoutService },
-        { provide: EventBusService, useValue: mockEventBusService },
         { provide: ConnectionAdapterService, useValue: mockConnectionAdapterService },
       ],
     });
@@ -180,12 +191,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     
     // 验证
     expect(result.ok).toBe(true);
-    expect(mockToastService.success).not.toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
-    expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
-      '任务未发生实际移动，跳过 Toast 提示',
-      expect.any(Object)
-    );
   });
 
   it('should show toast when task stage changes', () => {
@@ -203,14 +210,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(true);
-    // 桌面端 (isMobile = false) 使用 duration: 3000，无撤销按钮
-    expect(mockToastService.success).toHaveBeenCalledWith(
-      '已移动到阶段 2',
-      undefined,
-      expect.objectContaining({
-        duration: 3000,
-      })
-    );
+    expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到阶段 2');
     expect(mockOptimisticStateService.discardSnapshot).not.toHaveBeenCalled();
   });
 
@@ -228,7 +228,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-2', 2, null, null);
     
     expect(result.ok).toBe(true);
-    expect(mockToastService.success).toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).not.toHaveBeenCalled();
   });
 
@@ -243,10 +243,10 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(true);
-    expect(mockToastService.success).not.toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
     expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
-      '项目在操作期间被切换，丢弃移动结果',
+      '项目在操作期间被切换',
       expect.objectContaining({
         projectIdBefore: 'proj-1',
         projectIdAfter: 'proj-2',
@@ -272,7 +272,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-3', 1, null, null);
     
     expect(result.ok).toBe(true);
-    expect(mockToastService.success).not.toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
@@ -284,7 +284,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(false);
-    expect(mockToastService.success).not.toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
@@ -312,10 +312,6 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     const result = service.moveTaskToStage('task-1', null, null, null);
     
     expect(result.ok).toBe(true);
-    expect(mockToastService.success).toHaveBeenCalledWith(
-      '已移动到待分配区',
-      undefined,
-      expect.any(Object)
-    );
+    expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到待分配区');
   });
 });

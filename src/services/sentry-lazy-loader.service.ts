@@ -95,12 +95,13 @@ export class SentryLazyLoaderService {
     };
 
     // 使用 requestIdleCallback 在浏览器空闲时初始化
-    // 超时 2s 确保不会无限等待
+    // 超时 5s 确保 Sentry 不在关键渲染路径上
+    // 【性能优化 2026-02-05】从 2s 增加到 5s，减少对 LCP 的影响
     if (typeof requestIdleCallback !== 'undefined') {
-      requestIdleCallback(initCallback, { timeout: 2000 });
+      requestIdleCallback(initCallback, { timeout: 5000 });
     } else {
       // Safari 等不支持 requestIdleCallback 的浏览器
-      setTimeout(initCallback, 2000);
+      setTimeout(initCallback, 5000);
     }
   }
 

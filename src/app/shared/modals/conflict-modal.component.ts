@@ -257,8 +257,10 @@ export class ConflictModalComponent {
                        localTask.status === remoteTask.status &&
                        localTask.priority === remoteTask.priority &&
                        localTask.dueDate === remoteTask.dueDate &&
-                       JSON.stringify(localTask.tags || []) === JSON.stringify(remoteTask.tags || []) &&
-                       JSON.stringify(localTask.attachments || []) === JSON.stringify(remoteTask.attachments || []);
+                       ((localTask.tags ?? []).length === (remoteTask.tags ?? []).length &&
+                        (localTask.tags ?? []).every((t, i) => t === (remoteTask.tags ?? [])[i])) &&
+                       ((localTask.attachments ?? []).length === (remoteTask.attachments ?? []).length &&
+                        (localTask.attachments ?? []).every((a, i) => a.id === (remoteTask.attachments ?? [])[i]?.id));
         status = isSame ? 'same' : 'modified';
         title = localTask.title || remoteTask.title || '未命名';
       } else if (localTask) {

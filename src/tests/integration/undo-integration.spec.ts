@@ -10,9 +10,12 @@ import { TaskOperationAdapterService } from '../../services/task-operation-adapt
 import { UndoService } from '../../services/undo.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SyncCoordinatorService } from '../../services/sync-coordinator.service';
+import { ChangeTrackerService } from '../../services/change-tracker.service';
 import { LayoutService } from '../../services/layout.service';
 import { OptimisticStateService } from '../../services/optimistic-state.service';
 import { UiStateService } from '../../services/ui-state.service';
+import { ToastService } from '../../services/toast.service';
+import { LoggerService } from '../../services/logger.service';
 import { Project, Task } from '../../models';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -26,13 +29,47 @@ const mockSyncCoordinator = {
 const mockOptimisticState = {
   createTaskSnapshot: vi.fn(() => ({ id: 'snapshot-1', taskId: 'task-1', timestamp: Date.now() })),
   rollbackSnapshot: vi.fn(),
-  discardSnapshot: vi.fn()
+  discardSnapshot: vi.fn(),
+  hasSnapshot: vi.fn(() => false),
+  commitSnapshot: vi.fn()
 };
 
 const mockUiState = {
   markEditing: vi.fn(),
   isEditing: false,
   isMobile: vi.fn(() => false)
+};
+
+const mockChangeTracker = {
+  trackTaskCreate: vi.fn(),
+  trackTaskUpdate: vi.fn(),
+  trackTaskDelete: vi.fn(),
+  trackConnectionCreate: vi.fn(),
+  trackConnectionUpdate: vi.fn(),
+  trackConnectionDelete: vi.fn(),
+  lockTaskField: vi.fn()
+};
+
+const mockToastService = {
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn()
+};
+
+const mockLoggerCategory = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+  error: vi.fn()
+};
+
+const mockLoggerService = {
+  category: vi.fn(() => mockLoggerCategory),
+  info: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+  error: vi.fn()
 };
 
 describe('撤销功能集成测试', () => {
@@ -92,14 +129,18 @@ describe('撤销功能集成测试', () => {
           useValue: {
             activeProject: () => projectsSignal()[0],
             activeProjectId: () => projectsSignal()[0]?.id || null,
+            getTask: (taskId: string) => projectsSignal()[0]?.tasks.find((t: Task) => t.id === taskId),
             updateProjects: (fn: (projects: Project[]) => Project[]) => {
               projectsSignal.update(fn);
             }
           }
         },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: OptimisticStateService, useValue: mockOptimisticState },
-        { provide: UiStateService, useValue: mockUiState }
+        { provide: UiStateService, useValue: mockUiState },
+        { provide: ToastService, useValue: mockToastService },
+        { provide: LoggerService, useValue: mockLoggerService }
       ]
     });
     
@@ -122,9 +163,7 @@ describe('撤销功能集成测试', () => {
       expect(initialConnCount).toBe(0);
       
       // 添加跨树连接
-      taskAdapter.addCrossTreeConnection('task-1', 'task-2');
-      
-      // 验证连接已添加
+      taskAdapter.connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
       expect(projectsSignal()[0].connections.length).toBe(1);
       expect(projectsSignal()[0].connections[0].source).toBe('task-1');
       expect(projectsSignal()[0].connections[0].target).toBe('task-2');
@@ -138,10 +177,7 @@ describe('撤销功能集成测试', () => {
       expect(projectsSignal()[0].connections.length).toBe(0);
       
       // 添加跨树连接
-      taskAdapter.addCrossTreeConnection('task-1', 'task-2');
-      expect(projectsSignal()[0].connections.length).toBe(1);
-      
-      // 执行撤销
+      taskAdapter.connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
       const undoAction = undoService.undo();
       expect(undoAction).not.toBeNull();
       

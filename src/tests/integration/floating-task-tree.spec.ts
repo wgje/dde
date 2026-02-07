@@ -1,9 +1,19 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { DestroyRef } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 
 import { TaskOperationService } from '../../services/task-operation.service';
 import { LayoutService } from '../../services/layout.service';
 import { ToastService } from '../../services/toast.service';
+import { LoggerService } from '../../services/logger.service';
+import { ProjectStateService } from '../../services/project-state.service';
+import { TaskRecordTrackingService } from '../../services/task-record-tracking.service';
+import { TaskTrashService } from '../../services/task-trash.service';
+import { SubtreeOperationsService } from '../../services/subtree-operations.service';
+import { TaskCreationService } from '../../services/task-creation.service';
+import { TaskMoveService } from '../../services/task-move.service';
+import { TaskAttributeService } from '../../services/task-attribute.service';
+import { TaskConnectionService } from '../../services/task-connection.service';
 import { Project, Task } from '../../models';
 import { isSuccess, isFailure, ErrorCodes } from '../../utils/result';
 
@@ -57,22 +67,49 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   let project: Project;
 
   beforeEach(() => {
+    project = createProject({});
+
+    const mockLogger = {
+      category: vi.fn().mockReturnThis(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const mockProjectState = {
+      activeProject: () => project,
+      getTask: (taskId: string) => project?.tasks.find((t: Task) => t.id === taskId),
+    };
+    const mockRecorder = {
+      recordAndUpdate: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      lastUpdateType: 'structure' as const,
+    };
+
     TestBed.configureTestingModule({
-      providers: [TaskOperationService, LayoutService, ToastService],
+      providers: [
+        TaskOperationService,
+        LayoutService,
+        ToastService,
+        TaskTrashService,
+        SubtreeOperationsService,
+        TaskCreationService,
+        TaskMoveService,
+        TaskAttributeService,
+        TaskConnectionService,
+        { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskRecordTrackingService, useValue: mockRecorder },
+      ],
     });
 
     service = TestBed.inject(TaskOperationService);
-    project = createProject({});
-
-    service.setCallbacks({
-      getActiveProject: () => project,
-      onProjectUpdate: (mutator) => {
-        project = mutator(project);
-      },
-      onProjectUpdateDebounced: (mutator) => {
-        project = mutator(project);
-      },
-    });
   });
 
   describe('待分配区内创建树结构', () => {

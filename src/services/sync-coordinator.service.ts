@@ -39,6 +39,7 @@ import { SYNC_CONFIG, AUTH_CONFIG } from '../config';
 import { validateProject, sanitizeProject } from '../utils/validation';
 import { Result, success, failure, ErrorCodes, OperationError, isFailure } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { BlackBoxSyncService } from './black-box-sync.service';
 /**
  * 冲突事件数据
  * 用于发布-订阅模式的冲突通知
@@ -80,8 +81,6 @@ export class SyncCoordinatorService {
    * 调用方可使用 sync.core.xxx 替代 sync.proxyMethod()
    */
   readonly core = inject(SimpleSyncService);
-  /** @deprecated 使用 this.core 替代 */
-  private syncService = this.core;
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -104,32 +103,33 @@ export class SyncCoordinatorService {
   
   // 借鉴思源笔记的同步增强服务
   private syncModeService = inject(SyncModeService);
+  private blackBoxSync = inject(BlackBoxSyncService);
   
   // ========== 同步状态 ==========
   
   /** 是否正在同步 */
-  readonly isSyncing = computed(() => this.syncService.syncState().isSyncing);
+  readonly isSyncing = computed(() => this.core.syncState().isSyncing);
   
   /** 是否在线 */
-  readonly isOnline = computed(() => this.syncService.syncState().isOnline);
+  readonly isOnline = computed(() => this.core.syncState().isOnline);
   
   /** 离线模式 */
-  readonly offlineMode = computed(() => this.syncService.syncState().offlineMode);
+  readonly offlineMode = computed(() => this.core.syncState().offlineMode);
   
   /** 会话是否过期 */
-  readonly sessionExpired = computed(() => this.syncService.syncState().sessionExpired);
+  readonly sessionExpired = computed(() => this.core.syncState().sessionExpired);
   
   /** 同步错误 */
-  readonly syncError = computed(() => this.syncService.syncState().syncError);
+  readonly syncError = computed(() => this.core.syncState().syncError);
   
   /** 是否有冲突 */
-  readonly hasConflict = computed(() => this.syncService.syncState().hasConflict);
+  readonly hasConflict = computed(() => this.core.syncState().hasConflict);
   
   /** 冲突数据 */
-  readonly conflictData = computed(() => this.syncService.syncState().conflictData);
+  readonly conflictData = computed(() => this.core.syncState().conflictData);
   
   /** 是否正在加载远程数据 */
-  readonly isLoadingRemote = this.syncService.isLoadingRemote;
+  readonly isLoadingRemote = this.core.isLoadingRemote;
   
   /** 待处理的离线操作数量 */
   readonly pendingActionsCount = this.actionQueue.queueSize;
@@ -237,7 +237,7 @@ export class SyncCoordinatorService {
    * 确保本地的软删除状态不会被远程数据覆盖
    */
   private async downloadAndMerge(userId: string): Promise<void> {
-    const remoteProjects = await this.syncService.loadProjectsFromCloud(userId, true);
+    const remoteProjects = await this.core.loadProjectsFromCloud(userId, true);
     if (remoteProjects.length === 0) return;
     
     const localProjects = this.projectState.projects();
@@ -260,7 +260,7 @@ export class SyncCoordinatorService {
     
     // 更新本地状态
     this.projectState.setProjects(mergedProjects);
-    this.syncService.saveOfflineSnapshot(mergedProjects);
+    this.core.saveOfflineSnapshot(mergedProjects);
   }
 
   /** 初始化同步感知（LWW 简化：空实现） */
@@ -336,7 +336,7 @@ export class SyncCoordinatorService {
       const projects = this.projectState.projects();
       if (projects.length > 0) {
         // 静默保存，不打扰用户
-        this.syncService.saveOfflineSnapshot(projects);
+        this.core.saveOfflineSnapshot(projects);
       }
     }, SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
     
@@ -433,7 +433,7 @@ export class SyncCoordinatorService {
     // 同步保存到本地缓存（不等待云端）
     const projects = this.projectState.projects();
     if (projects.length > 0) {
-      this.syncService.saveOfflineSnapshot(projects);
+      this.core.saveOfflineSnapshot(projects);
       this.logger.info('页面卸载前已保存本地缓存', { projectCount: projects.length });
     }
   }
@@ -445,8 +445,8 @@ export class SyncCoordinatorService {
     onRemoteChange: (payload: { eventType?: string; projectId?: string } | undefined) => Promise<void>,
     onTaskChange: (payload: { eventType: string; taskId: string; projectId: string }) => void
   ) {
-    this.syncService.setRemoteChangeCallback(onRemoteChange);
-    this.syncService.setTaskChangeCallback(onTaskChange);
+    this.core.setRemoteChangeCallback(onRemoteChange);
+    this.core.setTaskChangeCallback(onTaskChange);
   }
   
   // ============================================================
@@ -464,7 +464,7 @@ export class SyncCoordinatorService {
    * @returns 完整的项目数据
    */
   async loadSingleProjectFromCloud(projectId: string): Promise<Project | null> {
-    return this.syncService.loadFullProjectOptimized(projectId);
+    return this.core.loadFullProjectOptimized(projectId);
   }
   
   /**
@@ -517,7 +517,7 @@ export class SyncCoordinatorService {
    * @returns 实际删除的任务数量，-1 表示被服务端拒绝
    */
   async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
-    return this.syncService.softDeleteTasksBatch(projectId, taskIds);
+    return this.core.softDeleteTasksBatch(projectId, taskIds);
   }
   
   /**
@@ -571,7 +571,7 @@ export class SyncCoordinatorService {
     userId: string, 
     findProject: (id: string) => Project | undefined
   ) {
-    return this.syncService.tryReloadConflictData(userId, findProject);
+    return this.core.tryReloadConflictData(userId, findProject);
   }
   
   /**
@@ -606,7 +606,7 @@ export class SyncCoordinatorService {
    * 获取项目的 tombstone IDs
    */
   async getTombstoneIds(projectId: string): Promise<Set<string>> {
-    return this.syncService.getTombstoneIds(projectId);
+    return this.core.getTombstoneIds(projectId);
   }
   
   /**
@@ -620,12 +620,12 @@ export class SyncCoordinatorService {
    * 4. 版本号相同但内容不同 → 保留本地数据（用户最近编辑的）
    */
   async mergeOfflineDataOnReconnect(
-    cloudProjects: Project[], 
+    cloudProjects: Project[],
     offlineProjects: Project[],
     userId: string
   ): Promise<{ projects: Project[]; syncedCount: number; conflictProjects: Project[] }> {
     // Sprint 9 技术债务修复：委托给 ProjectSyncOperationsService
-    return this.projectSyncOps.mergeOfflineDataOnReconnect(
+    const result = await this.projectSyncOps.mergeOfflineDataOnReconnect(
       cloudProjects,
       offlineProjects,
       userId,
@@ -636,6 +636,13 @@ export class SyncCoordinatorService {
         projectId: local.id
       })
     );
+
+    // 同时同步黑匣子数据（不阻塞主流程）
+    this.blackBoxSync.forceSync().catch(e => {
+      this.logger.warn('黑匣子重连同步失败（非阻塞）', e);
+    });
+
+    return result;
   }
   
   /**
@@ -661,7 +668,7 @@ export class SyncCoordinatorService {
   destroy() {
     // 完成冲突事件 Subject
     this.conflict$.complete();
-    this.syncService.destroy();
+    this.core.destroy();
   }
   
   // ========== 私有方法 ==========
@@ -705,7 +712,7 @@ export class SyncCoordinatorService {
     
     // 始终先保存到本地离线快照（防止任何情况下的数据丢失）
     // 注意：这里使用更新后的项目列表，确保 updatedAt 被保存
-    this.syncService.saveOfflineSnapshot(updatedProjects);
+    this.core.saveOfflineSnapshot(updatedProjects);
     
     if (!project) {
       return;
@@ -731,7 +738,7 @@ export class SyncCoordinatorService {
 
     try {
       // 使用智能同步：根据变更量自动选择增量或全量同步
-      const result = await this.syncService.saveProjectSmart(
+      const result = await this.core.saveProjectSmart(
         { ...project, updatedAt: now },
         userId
       );
@@ -746,7 +753,7 @@ export class SyncCoordinatorService {
           )
         );
         // 同步成功后，再次保存快照以确保版本号同步
-        this.syncService.saveOfflineSnapshot(this.projectState.projects());
+        this.core.saveOfflineSnapshot(this.projectState.projects());
         
         // 【关键】同步成功后，解锁该项目的所有字段锁
         this.changeTracker.clearProjectFieldLocks(project.id);

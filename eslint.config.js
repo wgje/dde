@@ -63,6 +63,19 @@ export default [
       ]
     }
   },
+  // 层级依赖规则：services/ 不可反向引用 app/core/
+  {
+    files: ['src/services/**/*.ts'],
+    ignores: ['**/*.spec.ts'],
+    rules: {
+      'no-restricted-imports': ['warn', {
+        patterns: [{
+          group: ['../app/core/*', '../app/core/**'],
+          message: 'services/ 层不可引用 app/core/ 层，请将共享依赖移至 src/services/ 或 src/models/'
+        }]
+      }]
+    }
+  },
   {
     // 测试文件的宽松规则
     files: ['**/*.spec.ts', '**/test-*.ts'],

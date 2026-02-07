@@ -4,9 +4,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { LAYOUT_CONFIG, LETTERS } from '../config';
 
-/**
- * 布局算法配置
- */
+/** 布局算法配置 */
 const ALGORITHM_CONFIG = {
   /** 最大树深度限制（防止栈溢出） */
   MAX_TREE_DEPTH: 500,
@@ -47,6 +45,24 @@ export class LayoutService {
   
   /** 是否已显示过迭代超限警告（避免重复提示） */
   private hasShownIterationWarning = false;
+
+  /** 重平衡锁定的阶段（从 TaskOperationService 迁移，打破循环依赖） */
+  private rebalancingStages = new Set<number>();
+
+  /** 检查指定阶段是否正在重平衡 */
+  isStageRebalancing(stage: number): boolean {
+    return this.rebalancingStages.has(stage);
+  }
+
+  /** 标记阶段正在重平衡 */
+  markStageRebalancing(stage: number): void {
+    this.rebalancingStages.add(stage);
+  }
+
+  /** 清除阶段重平衡标记 */
+  clearStageRebalancing(stage: number): void {
+    this.rebalancingStages.delete(stage);
+  }
 
   // ========== 公共方法 ==========
 
@@ -220,7 +236,7 @@ export class LayoutService {
     const cascadeIterative = (rootId: string) => {
       // 使用队列进行广度优先遍历
       const queue: { nodeId: string; floor: number; depth: number }[] = [];
-      const rootTask = tasks.find(t => t.id === rootId);
+      const rootTask = byId.get(rootId);
       if (!rootTask) return;
       
       queue.push({ nodeId: rootId, floor: rootTask.rank, depth: 0 });
@@ -342,7 +358,6 @@ export class LayoutService {
         existingTasks
       );
     }
-
 
     // 获取同一阶段的所有可见任务（排除已删除和归档的）
     const sameStageTasks = existingTasks.filter(
@@ -511,20 +526,21 @@ export class LayoutService {
   detectCycle(taskId: string, newParentId: string | null, tasks: Task[]): boolean {
     if (!newParentId) return false;
     if (taskId === newParentId) return true;
-    
+
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     const visited = new Set<string>();
     let current: string | null = newParentId;
     let iterations = 0;
     const maxIterations = calculateMaxIterations(tasks.length);
-    
+
     while (current && iterations < maxIterations) {
       iterations++;
-      
+
       if (visited.has(current)) return true;
       if (current === taskId) return true;
       visited.add(current);
-      
-      const parentTask = tasks.find(t => t.id === current);
+
+      const parentTask = taskMap.get(current);
       current = parentTask?.parentId || null;
     }
     
@@ -595,14 +611,15 @@ export class LayoutService {
    */
   rebalanceStageRanks(tasks: Task[], stages: number[]): Task[] {
     const result = tasks.map(t => ({ ...t }));
-    
+    const resultMap = new Map(result.map(t => [t.id, t] as const));
+
     for (const stage of stages) {
       const stageTasks = result.filter(t => t.stage === stage).sort((a, b) => a.rank - b.rank);
       if (stageTasks.length < 2) continue;
-      
+
       const base = this.stageBase(stage);
       stageTasks.forEach((t, idx) => {
-        const taskInResult = result.find(task => task.id === t.id);
+        const taskInResult = resultMap.get(t.id);
         if (taskInResult) {
           taskInResult.rank = base + (idx + 1) * LAYOUT_CONFIG.RANK_STEP;
         }
@@ -689,24 +706,25 @@ export class LayoutService {
    */
   private detectAndFixCycles(tasks: Task[]): { tasks: Task[]; fixed: number } {
     const result = tasks.map(t => ({ ...t }));
+    const resultMap = new Map(result.map(t => [t.id, t] as const));
     let fixedCount = 0;
-    
+
     // 使用 DFS 检测循环
     const visited = new Set<string>();
     const recursionStack = new Set<string>();
-    
+
     const hasCycle = (taskId: string): boolean => {
       if (recursionStack.has(taskId)) return true;
       if (visited.has(taskId)) return false;
-      
+
       visited.add(taskId);
       recursionStack.add(taskId);
-      
-      const task = result.find(t => t.id === taskId);
+
+      const task = resultMap.get(taskId);
       if (task?.parentId && hasCycle(task.parentId)) {
         return true;
       }
-      
+
       recursionStack.delete(taskId);
       return false;
     };
@@ -767,13 +785,9 @@ export class LayoutService {
     let removed = 0;
     
     for (const conn of connections) {
-      if (taskIds.has(conn.source) && taskIds.has(conn.target)) {
-        // 检查是否为自引用
-        if (conn.source !== conn.target) {
-          valid.push(conn);
-        } else {
-          removed++;
-        }
+      // 检查两端存在且非自引用
+      if (taskIds.has(conn.source) && taskIds.has(conn.target) && conn.source !== conn.target) {
+        valid.push(conn);
       } else {
         removed++;
       }

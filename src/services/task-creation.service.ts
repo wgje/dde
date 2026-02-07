@@ -3,6 +3,8 @@ import { Task, Project } from '../models';
 import { Result, OperationError, success, failure, ErrorCodes } from '../utils/result';
 import { LayoutService } from './layout.service';
 import { SubtreeOperationsService } from './subtree-operations.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { LAYOUT_CONFIG } from '../config/layout.config';
 
 /**
@@ -26,37 +28,19 @@ export interface CreateTaskParams {
 export class TaskCreationService {
   private readonly layoutService = inject(LayoutService);
   private readonly subtreeOps = inject(SubtreeOperationsService);
-
-  /** 操作回调 */
-  private recordAndUpdateCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private getActiveProjectCallback: (() => Project | null) | null = null;
-  private isStageRebalancingCallback: ((stage: number) => boolean) | null = null;
-
-  /**
-   * 设置操作回调
-   */
-  setCallbacks(callbacks: {
-    recordAndUpdate: (mutator: (project: Project) => Project) => void;
-    getActiveProject: () => Project | null;
-    isStageRebalancing: (stage: number) => boolean;
-  }): void {
-    this.recordAndUpdateCallback = callbacks.recordAndUpdate;
-    this.getActiveProjectCallback = callbacks.getActiveProject;
-    this.isStageRebalancingCallback = callbacks.isStageRebalancing;
-  }
+  private readonly projectState = inject(ProjectStateService);
+  private readonly recorder = inject(TaskRecordTrackingService);
 
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    if (this.recordAndUpdateCallback) {
-      this.recordAndUpdateCallback(mutator);
-    }
+    this.recorder.recordAndUpdate(mutator);
   }
 
   private getActiveProject(): Project | null {
-    return this.getActiveProjectCallback?.() ?? null;
+    return this.projectState.activeProject();
   }
 
   private isStageRebalancing(stage: number): boolean {
-    return this.isStageRebalancingCallback?.(stage) ?? false;
+    return this.layoutService.isStageRebalancing(stage);
   }
 
   /**
@@ -112,7 +96,7 @@ export class TaskCreationService {
       activeP.tasks,
       parentId
     );
-    const parent = parentId ? activeP.tasks.find(t => t.id === parentId) : null;
+    const parent = parentId ? this.projectState.getTask(parentId) : null;
     const candidateRankResult = targetStage === null
       ? { rank: LAYOUT_CONFIG.RANK_ROOT_BASE + activeP.tasks.filter(t => t.stage === null).length * LAYOUT_CONFIG.RANK_STEP, needsRebalance: false }
       : this.layoutService.computeInsertRank(targetStage, stageTasks, null, parent?.rank ?? null);
@@ -209,7 +193,7 @@ export class TaskCreationService {
     const activeP = this.getActiveProject();
     if (!activeP) return null;
 
-    const task = activeP.tasks.find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task) return null;
 
     const stageTasks = activeP.tasks.filter(t => t.stage === task.stage);

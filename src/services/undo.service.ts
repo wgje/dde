@@ -5,10 +5,7 @@ import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
 
-/**
- * 持久化数据结构
- * @internal
- */
+/** 持久化数据结构 @internal */
 interface PersistedUndoData {
   version: number;
   timestamp: string;
@@ -16,29 +13,14 @@ interface PersistedUndoData {
   undoStack: UndoAction[];
 }
 
-/**
- * 撤销操作结果类型
- * - UndoAction: 撤销成功，返回操作数据
- * - 'version-mismatch': 版本不匹配，建议不撤销
- * - 'version-mismatch-forceable': 版本不匹配但可强制撤销，附带 action 数据
- * - null: 没有可撤销的操作
- */
+/** 撤销操作结果：UndoAction | null | 'version-mismatch' | version-mismatch-forceable */
 export type UndoResult = 
   | UndoAction 
   | null 
   | 'version-mismatch' 
   | { type: 'version-mismatch-forceable'; action: UndoAction; versionDiff: number };
 
-/**
- * 撤销/重做服务
- * 实现应用级别的撤销重做功能
- * 
- * 特性：
- * - 防抖合并：连续的编辑操作会被合并为一个撤销记录
- * - 栈大小限制：避免内存溢出
- * - 版本追踪：与远程同步配合使用
- * - 【v5.8】sessionStorage 持久化：页面刷新后恢复撤销历史
- */
+/** 撤销/重做服务：防抖合并、栈大小限制、版本追踪、sessionStorage 持久化 */
 @Injectable({
   providedIn: 'root'
 })
@@ -90,10 +72,7 @@ export class UndoService {
   private readonly DEBOUNCE_DELAY = 800; // 800ms 内的连续编辑合并
   private readonly MERGE_WINDOW = 2000; // 2s 内同类型操作可合并
 
-  /**
-   * 根据设备类型返回历史上限
-   * 桌面端按配置（默认 50 步且不受时间限制），移动端保持现有上限
-   */
+  /** 根据设备类型返回历史上限 */
   private getMaxHistorySize(): number {
     return this.uiState.isMobile()
       ? UNDO_CONFIG.MOBILE_HISTORY_SIZE
@@ -105,9 +84,7 @@ export class UndoService {
     return this.getMaxHistorySize();
   }
 
-  /**
-   * 按上限裁剪撤销栈并触发截断提示
-   */
+  /** 按上限裁剪撤销栈并触发截断提示 */
   private limitUndoStack(stack: UndoAction[], notify: boolean = true): UndoAction[] {
     const maxSize = this.getMaxHistorySize();
     if (stack.length <= maxSize) return stack;
@@ -118,31 +95,20 @@ export class UndoService {
     return stack.slice(-maxSize);
   }
 
-  /**
-   * 按上限裁剪重做栈（不提示，避免噪声）
-   */
+  /** 按上限裁剪重做栈 */
   private limitRedoStack(stack: UndoAction[]): UndoAction[] {
     const maxSize = this.getMaxRedoHistorySize();
     if (stack.length <= maxSize) return stack;
     return stack.slice(-maxSize);
   }
   
-  /** 
-   * 批处理状态
-   * 用于将多个操作合并为单个撤销单元（如多选批量移动）
-   */
+  /** 批处理状态（将多个操作合并为单个撤销单元） */
   private isBatching = false;
   private batchBeforeSnapshot: Partial<Project> | null = null;
   private batchProjectId: string | null = null;
   private batchProjectVersion: number | null = null;
 
-  /**
-   * 开始批处理模式
-   * 在此模式下，所有操作将被合并为单个撤销记录
-   * 用于多选批量移动等场景
-   * 
-   * @param project 当前项目（用于创建 before 快照）
-   */
+  /** 开始批处理模式 */
   beginBatch(project: Project): void {
     if (this.isBatching) {
       this.logger.warn('[UndoService] 已在批处理模式，忽略重复调用');
@@ -155,11 +121,7 @@ export class UndoService {
     this.batchProjectVersion = project.version ?? 0;
   }
   
-  /**
-   * 结束批处理模式并提交撤销记录
-   * 
-   * @param project 当前项目（用于创建 after 快照）
-   */
+  /** 结束批处理模式并提交撤销记录 */
   endBatch(project: Project): void {
     if (!this.isBatching) {
       this.logger.warn('[UndoService] 未在批处理模式，忽略调用');
@@ -178,9 +140,10 @@ export class UndoService {
       
       let hasChanges = false;
       if (beforeTasks && afterTasks && beforeTasks.length === afterTasks.length) {
+        const afterTaskMap = new Map(afterTasks.map(t => [t.id, t] as const));
         for (let i = 0; i < beforeTasks.length; i++) {
           const before = beforeTasks[i];
-          const after = afterTasks.find(t => t.id === before.id);
+          const after = afterTaskMap.get(before.id);
           if (after && (Math.abs(before.x - after.x) > 1 || Math.abs(before.y - after.y) > 1)) {
             hasChanges = true;
             break;

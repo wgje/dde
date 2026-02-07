@@ -302,7 +302,7 @@ export class ClockSyncService {
       return result;
       
     } catch (e) {
-      this.logger.debug('Fallback 时间检测失败', { error: e });
+      this.logger.warn('Fallback 时间检测失败', { error: e });
       return null;
     }
   }

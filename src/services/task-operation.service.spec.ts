@@ -16,6 +16,8 @@ import { TaskCreationService } from './task-creation.service';
 import { TaskMoveService } from './task-move.service';
 import { TaskAttributeService } from './task-attribute.service';
 import { TaskConnectionService } from './task-connection.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { Project, Task, Connection } from '../models';
 
 const mockLoggerCategory = {
@@ -87,6 +89,24 @@ describe('TaskOperationService (deletedMeta restore)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
+    // 默认项目会在每个测试里初始化
+    project = createProject({});
+
+    // 子服务的 DI mock：ProjectStateService 和 TaskRecordTrackingService
+    const mockProjectState = {
+      activeProject: () => project,
+      getTask: (taskId: string) => project?.tasks.find(t => t.id === taskId),
+    };
+    const mockRecorder = {
+      recordAndUpdate: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      lastUpdateType: 'structure' as const,
+    };
+
     const injector = Injector.create({
       providers: [
         { provide: LayoutService, useClass: LayoutService },
@@ -98,23 +118,12 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         { provide: TaskMoveService, useClass: TaskMoveService },
         { provide: TaskAttributeService, useClass: TaskAttributeService },
         { provide: TaskConnectionService, useClass: TaskConnectionService },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskRecordTrackingService, useValue: mockRecorder },
       ],
     });
 
     service = runInInjectionContext(injector, () => new TaskOperationService());
-
-    // 默认项目会在每个测试里初始化
-    project = createProject({});
-
-    service.setCallbacks({
-      getActiveProject: () => project,
-      onProjectUpdate: (mutator) => {
-        project = mutator(project);
-      },
-      onProjectUpdateDebounced: (mutator) => {
-        project = mutator(project);
-      },
-    });
   });
 
   afterEach(() => {
@@ -245,6 +254,22 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
+    project = createProject({});
+
+    const mockProjectState = {
+      activeProject: () => project,
+      getTask: (taskId: string) => project?.tasks.find(t => t.id === taskId),
+    };
+    const mockRecorder = {
+      recordAndUpdate: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      lastUpdateType: 'structure' as const,
+    };
+
     const injector = Injector.create({
       providers: [
         { provide: LayoutService, useClass: LayoutService },
@@ -256,21 +281,12 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         { provide: TaskMoveService, useClass: TaskMoveService },
         { provide: TaskAttributeService, useClass: TaskAttributeService },
         { provide: TaskConnectionService, useClass: TaskConnectionService },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskRecordTrackingService, useValue: mockRecorder },
       ],
     });
 
     service = runInInjectionContext(injector, () => new TaskOperationService());
-    project = createProject({});
-
-    service.setCallbacks({
-      getActiveProject: () => project,
-      onProjectUpdate: (mutator) => {
-        project = mutator(project);
-      },
-      onProjectUpdateDebounced: (mutator) => {
-        project = mutator(project);
-      },
-    });
   });
 
   afterEach(() => {
@@ -411,6 +427,22 @@ describe('TaskOperationService (database constraint validation)', () => {
     consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
+    project = createProject({});
+
+    const mockProjectState = {
+      activeProject: () => project,
+      getTask: (taskId: string) => project?.tasks.find(t => t.id === taskId),
+    };
+    const mockRecorder = {
+      recordAndUpdate: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+      },
+      lastUpdateType: 'structure' as const,
+    };
+
     const injector = Injector.create({
       providers: [
         { provide: LayoutService, useClass: LayoutService },
@@ -422,21 +454,12 @@ describe('TaskOperationService (database constraint validation)', () => {
         { provide: TaskMoveService, useClass: TaskMoveService },
         { provide: TaskAttributeService, useClass: TaskAttributeService },
         { provide: TaskConnectionService, useClass: TaskConnectionService },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskRecordTrackingService, useValue: mockRecorder },
       ],
     });
 
     service = runInInjectionContext(injector, () => new TaskOperationService());
-    project = createProject({});
-
-    service.setCallbacks({
-      getActiveProject: () => project,
-      onProjectUpdate: (mutator) => {
-        project = mutator(project);
-      },
-      onProjectUpdateDebounced: (mutator) => {
-        project = mutator(project);
-      },
-    });
   });
 
   afterEach(() => {

@@ -58,10 +58,11 @@
   <link rel="dns-prefetch" href="https://o4508391513718784.ingest.us.sentry.io">
   
   <!-- ========== 性能优化：关键字体 Preload ========== -->
+  <!-- 【性能优化 2026-02-05】关键字体自托管，减少 CDN 往返延迟，实现 1 年长期缓存 -->
   <!-- 预加载最常用的中文字体子集（基础拉丁+常用中文），避免渲染阻塞 -->
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-119.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-118.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-117.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-119.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-118.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-117.woff2" as="font" type="font/woff2" crossorigin>
   
   <!-- 关键 @font-face 内联：确保预加载的字体立即可用 -->
   <!-- 必须与 preload 配合，否则浏览器无法关联已预加载的资源 -->
@@ -74,7 +75,7 @@
       font-weight: 400;
       font-display: swap;
       size-adjust: 105%; /* 匹配 system-ui fallback 尺寸，减少布局偏移 */
-      src: url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-119.woff2') format('woff2');
+      src: url('/fonts/lxgwwenkaiscreen-subset-119.woff2') format('woff2');
       unicode-range: U+20-22, U+27-2a, U+2c-3b, U+3f, U+41-4d, U+4f-5d, U+61-7b, U+7d, U+ab, U+ae, U+b2, U+b7, U+bb, U+df-e5, U+e7-ea, U+ec-ed, U+f1-f4, U+f6, U+f9-fa, U+fc, U+101, U+103, U+113, U+12b, U+148, U+14d, U+16b, U+1ce, U+1d0, U+300-301, U+1ebf, U+1ec7, U+2013-2014, U+2039-203a, U+2122, U+3001-3002, U+3042, U+3044, U+3046, U+3048, U+304a-3055, U+3057, U+3059-305b, U+305d, U+305f-3061, U+3063-306b, U+306d-3073, U+3075-3076, U+3078-3079, U+307b, U+307e-307f, U+3081-308d, U+308f, U+3092-3093, U+30a1-30a4, U+30a6-30bb, U+30bd, U+30bf-30c1, U+30c3-30c4, U+30c6-30cb, U+30cd-30d7, U+30d9-30e1, U+30e3-30e7, U+30e9-30ed, U+30ef, U+30f3, U+30fb-30fc, U+4e00, U+4e2d, U+65b0, U+65e5, U+6708-6709, U+70b9, U+7684, U+7f51, U+ff0c, U+ff0e, U+ff1a;
     }
     /* subset-118: 常用中文「的」「是」「在」「有」「个」「人」等核心字 */
@@ -84,7 +85,7 @@
       font-weight: 400;
       font-display: swap;
       size-adjust: 105%;
-      src: url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-118.woff2') format('woff2');
+      src: url('/fonts/lxgwwenkaiscreen-subset-118.woff2') format('woff2');
       unicode-range: U+d, U+3e, U+5f, U+7c, U+a0, U+a9, U+4e09-4e0b, U+4e0d-4e0e, U+4e13, U+4e1a, U+4e2a, U+4e3a-4e3b, U+4e4b, U+4e86, U+4e8e, U+4ea7, U+4eba, U+4ee5, U+4eec, U+4f1a, U+4f4d, U+4f53, U+4f5c, U+4f60, U+4fe1, U+5165, U+5168, U+516c, U+5173, U+5176, U+5185, U+51fa, U+5206, U+5230, U+5236, U+524d, U+529b, U+52a0-52a1, U+52a8, U+5316, U+533a, U+53cb, U+53d1, U+53ef, U+53f7-53f8, U+5408, U+540c-540e, U+544a, U+548c, U+54c1, U+56de, U+56fd-56fe, U+5728, U+5730, U+5907, U+5916, U+591a, U+5927, U+5929, U+597d, U+5982, U+5b50, U+5b66, U+5b89, U+5b9a, U+5b9e, U+5ba2, U+5bb6, U+5bf9, U+5c0f, U+5de5, U+5e02, U+5e38, U+5e73-5e74, U+5e7f, U+5ea6, U+5f00, U+5f0f, U+5f53, U+5f55, U+5fae, U+5fc3, U+6027, U+606f, U+60a8, U+60c5, U+610f, U+6210-6211, U+6237, U+6240, U+624b, U+6280, U+62a5, U+63a5, U+63a8, U+63d0, U+6536, U+6570, U+6587, U+65b9, U+65e0, U+65f6, U+660e, U+662d, U+662f, U+66f4, U+6700, U+670d, U+672c, U+673a, U+6743, U+6765, U+679c, U+682a, U+6b21, U+6b63, U+6cbb, U+6cd5, U+6ce8, U+6d3b, U+70ed, U+7247-7248, U+7269, U+7279, U+73b0, U+7406, U+751f, U+7528, U+7535, U+767b, U+76f8, U+770b, U+77e5, U+793e, U+79d1, U+7ad9, U+7b49, U+7c7b, U+7cfb, U+7ebf, U+7ecf, U+7f8e, U+8005, U+8054, U+80fd, U+81ea, U+85cf, U+884c, U+8868, U+8981, U+89c6, U+8bba, U+8bdd, U+8bf4, U+8bf7, U+8d44, U+8fc7, U+8fd8-8fd9, U+8fdb, U+901a, U+9053, U+90e8, U+91d1, U+957f, U+95e8, U+95ee, U+95f4, U+9762, U+9875, U+9898, U+9996, U+9ad8, U+ff01, U+ff08-ff09;
     }
     /* subset-117: 次常用中文「两」「元」「公」「务」「南」等字 */
@@ -94,14 +95,15 @@
       font-weight: 400;
       font-display: swap;
       size-adjust: 105%;
-      src: url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/files/lxgwwenkaiscreen-subset-117.woff2') format('woff2');
+      src: url('/fonts/lxgwwenkaiscreen-subset-117.woff2') format('woff2');
       unicode-range: U+4e, U+201c-201d, U+3010-3011, U+4e07, U+4e1c, U+4e24, U+4e3e, U+4e48, U+4e50, U+4e5f, U+4e8b-4e8c, U+4ea4, U+4eab-4eac, U+4ecb, U+4ece, U+4ed6, U+4ee3, U+4ef6-4ef7, U+4efb, U+4f20, U+4f55, U+4f7f, U+4fdd, U+505a, U+5143, U+5149, U+514d, U+5171, U+5177, U+518c, U+51fb, U+521b, U+5229, U+522b, U+52a9, U+5305, U+5317, U+534e, U+5355, U+5357, U+535a, U+5373, U+539f, U+53bb, U+53ca, U+53cd, U+53d6, U+53e3, U+53ea, U+53f0, U+5458, U+5546, U+56db, U+573a, U+578b, U+57ce, U+58f0, U+590d, U+5934, U+5973, U+5b57, U+5b8c, U+5b98, U+5bb9, U+5bfc, U+5c06, U+5c11, U+5c31, U+5c55, U+5df2, U+5e03, U+5e76, U+5e94, U+5efa, U+5f71, U+5f97, U+5feb, U+6001, U+603b, U+60f3, U+611f, U+6216, U+624d, U+6253, U+6295, U+6301, U+6392, U+641c, U+652f, U+653e, U+6559, U+6599, U+661f, U+671f, U+672f, U+6761, U+67e5, U+6807, U+6837, U+683c, U+6848, U+6b22, U+6b64, U+6bd4, U+6c14, U+6c34, U+6c42, U+6ca1, U+6d41, U+6d77, U+6d88, U+6e05, U+6e38, U+6e90, U+7136, U+7231, U+7531, U+767e, U+76ee, U+76f4, U+771f, U+7801, U+793a, U+79cd, U+7a0b, U+7a7a, U+7acb, U+7ae0, U+7b2c, U+7b80, U+7ba1, U+7cbe, U+7d22, U+7ea7, U+7ed3, U+7ed9, U+7edf, U+7f16, U+7f6e, U+8001, U+800c, U+8272, U+8282, U+82b1, U+8350, U+88ab, U+88c5, U+897f, U+89c1, U+89c4, U+89e3, U+8a00, U+8ba1, U+8ba4, U+8bae-8bb0, U+8bbe, U+8bc1, U+8bc4, U+8bfb, U+8d28, U+8d39, U+8d77, U+8d85, U+8def, U+8eab, U+8f66, U+8f6c, U+8f7d, U+8fd0, U+9009, U+90ae, U+90fd, U+91cc-91cd, U+91cf, U+95fb, U+9650, U+96c6, U+9891, U+98ce, U+ff1f;
     }
   </style>
   
   <!-- 字体样式表 - 异步加载其他字体子集（非阻塞） -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont/style.css"></noscript>
+  <!-- 【性能优化 2026-02-05】使用自托管字体，避免 CDN 往返延迟，实现 1 年长期缓存 -->
+  <link rel="stylesheet" href="/fonts/lxgw-wenkai-screen.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="/fonts/lxgw-wenkai-screen.css"></noscript>
   
   <!-- ========== 防闪屏脚本 (Anti-FOUC) ========== -->
   <!-- 必须是同步阻塞脚本，在 Angular 启动前确定颜色模式 -->
@@ -127,20 +129,77 @@
           }
         }
       } catch (e) { /* localStorage 不可用或 JSON 解析失败 */ }
-      
+
       // 2. 检测系统偏好
       var systemPref = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      
+
       // 3. 决定最终模式：localOverride > cloudDefault > system
       var mode = localPref || 'system';
       if (mode === 'system') mode = systemPref;
-      
+
       // 4. 立即应用到 DOM，防止白色闪屏
       document.documentElement.setAttribute('data-color-mode', mode);
-      
+
       // 5. 暴露给 Angular 运行时使用
       window.__NANOFLOW_INITIAL_COLOR_MODE__ = mode;
       window.__NANOFLOW_SYSTEM_COLOR_MODE__ = systemPref;
+    })();
+  </script>
+
+  <!-- ========== 性能优化：数据预加载 ========== -->
+  <!-- 【优化 2026-02-05】在 JS 加载期间并行请求初始数据，减少关键路径延迟 -->
+  <script>
+    (function() {
+      window.__PRELOADED_DATA__ = {
+        serverTime: null,
+        projects: null,
+        timestamp: Date.now()
+      };
+
+      // 检查是否已登录（从 Supabase auth token）
+      var authToken = null;
+      try {
+        var keys = Object.keys(localStorage);
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (k.indexOf('sb-') === 0 && k.indexOf('-auth-token') > 0) {
+            var authData = JSON.parse(localStorage.getItem(k));
+            authToken = authData && authData.access_token;
+            break;
+          }
+        }
+      } catch (e) { /* 忽略错误 */ }
+
+      if (!authToken) return;
+
+      // Supabase 配置（公开的 anon key）
+      var supabaseUrl = 'https://fkhihclpghmmtbbywvoj.supabase.co';
+      var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg4MTIwNjYsImV4cCI6MjA0NDM4ODA2Nn0.T7HHx10qFOo_fXqgVubKM0Wk8tnv4Y44l9XXE89Zyf0';
+
+      var headers = {
+        'apikey': supabaseAnonKey,
+        'Authorization': 'Bearer ' + authToken,
+        'Content-Type': 'application/json'
+      };
+      var baseUrl = supabaseUrl + '/rest/v1';
+
+      // 并行请求关键数据（不阻塞页面渲染）
+      fetch(baseUrl + '/rpc/get_server_time', {
+        method: 'POST',
+        headers: headers
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (window.__PRELOADED_DATA__) {
+          window.__PRELOADED_DATA__.serverTime = data;
+        }
+      }).catch(function() {});
+
+      fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
+        headers: headers
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (window.__PRELOADED_DATA__) {
+          window.__PRELOADED_DATA__.projects = data;
+        }
+      }).catch(function() {});
     })();
   </script>
   
@@ -158,18 +217,21 @@
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
   <style>
-    /* ========== 增强版骨架屏 - P1 优化 2026-01-26 ========== */
+    /* ========== 增强版骨架屏 - P2 优化 2026-02-05 ========== */
+    /* 【性能优化】增强骨架屏动画：渐进入场 + 流畅脉冲 + 层级延迟 */
     
     /* CSS 变量：支持浅色/深色模式 */
     :root {
       --skeleton-base: #e7e5e4;
       --skeleton-highlight: #d6d3d1;
+      --skeleton-shine: #f5f5f5;
       --skeleton-bg: #f5f5f4;
       --skeleton-card-bg: #ffffff;
     }
     [data-color-mode="dark"] {
       --skeleton-base: #374151;
       --skeleton-highlight: #4b5563;
+      --skeleton-shine: #6b7280;
       --skeleton-bg: #0f172a;
       --skeleton-card-bg: #1f2937;
     }
@@ -181,7 +243,7 @@
       flex-direction: column;
       background: var(--skeleton-bg);
       z-index: 99999;
-      font-family: "LXGW WenKai Screen", system-ui, -apple-system, sans-serif;
+      font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
       /* 淡出动画 */
       transition: opacity 0.2s ease-out;
     }
@@ -193,7 +255,19 @@
       display: none;
     }
     
-    /* 骨架屏闪烁动画 */
+    /* 渐进式入场动画 - 元素依次出现 */
+    @keyframes skeleton-fade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    /* 柔和脉冲动画 - 增强存在感 */
+    @keyframes skeleton-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    
+    /* 骨架屏闪烁动画 - 优化过渡曲线 */
     @keyframes skeleton-shimmer {
       0% { background-position: 200% 0; }
       100% { background-position: -200% 0; }
@@ -202,11 +276,21 @@
     .skeleton-shimmer {
       background: linear-gradient(90deg, 
         var(--skeleton-base) 0%, 
-        var(--skeleton-highlight) 50%, 
+        var(--skeleton-highlight) 40%,
+        var(--skeleton-shine) 50%,
+        var(--skeleton-highlight) 60%,
         var(--skeleton-base) 100%);
-      background-size: 200% 100%;
-      animation: skeleton-shimmer 1.5s ease-in-out infinite;
+      background-size: 300% 100%;
+      animation: skeleton-shimmer 2s cubic-bezier(0.4, 0, 0.2, 1) infinite,
+                 skeleton-pulse 3s ease-in-out infinite;
     }
+    
+    /* 渐进入场：每个元素延迟显示 */
+    .skeleton-shimmer:nth-child(1) { animation-delay: 0s, 0s; }
+    .skeleton-shimmer:nth-child(2) { animation-delay: 0.1s, 0.1s; }
+    .skeleton-shimmer:nth-child(3) { animation-delay: 0.2s, 0.2s; }
+    .skeleton-shimmer:nth-child(4) { animation-delay: 0.3s, 0.3s; }
+    .skeleton-shimmer:nth-child(5) { animation-delay: 0.4s, 0.4s; }
     
     /* 骨架屏布局：模拟真实 UI */
     .skeleton-layout {
@@ -344,11 +428,17 @@
       background-size: 200% 100%;
     }
     
-    /* 闪烁动画 */
+    /* 闪烁动画 - 优化为从右到左 */
     @keyframes skeleton-shimmer {
-      0% { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
+      0% { background-position: 300% 0; }
+      100% { background-position: -100% 0; }
     }
+    
+    /* 骨架区块入场动画 */
+    .skeleton-nav { animation: skeleton-fade-in 0.3s ease-out 0.05s both; }
+    .skeleton-sidebar { animation: skeleton-fade-in 0.3s ease-out 0.1s both; }
+    .skeleton-main { animation: skeleton-fade-in 0.3s ease-out 0.15s both; }
+    .skeleton-footer { animation: skeleton-fade-in 0.3s ease-out 0.2s both; }
     
     /* 加载提示文字 */
     #initial-loader .text {
@@ -527,7 +617,7 @@
   <app-root></app-root>
   
     <noscript>
-    <div style="padding:2rem;text-align:center;font-family:'LXGW WenKai', sans-serif;">
+    <div style="padding:2rem;text-align:center;font-family:'LXGW WenKai Screen', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;">
       <h1 style="color:#dc2626;">请启用 JavaScript</h1>
       <p style="color:#57534e;">NanoFlow 需要 JavaScript 才能运行。请在浏览器设置中启用 JavaScript，然后刷新页面。</p>
     </div>

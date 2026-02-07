@@ -17,6 +17,8 @@
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { Project, Task, Connection } from '../models';
 import { TRASH_CONFIG } from '../config';
 
@@ -48,14 +50,6 @@ export interface RestoreResult {
   restoredConnectionIds: string[];
 }
 
-/**
- * 回调接口 - 用于与 TaskOperationService 集成
- */
-export interface TrashServiceCallbacks {
-  getActiveProject: () => Project | null;
-  recordAndUpdate: (mutator: (project: Project) => Project) => void;
-}
-
 @Injectable({
   providedIn: 'root'
 })
@@ -63,23 +57,15 @@ export class TaskTrashService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskTrash');
   private readonly layoutService = inject(LayoutService);
-  
-  private callbacks: TrashServiceCallbacks | null = null;
+  private readonly projectState = inject(ProjectStateService);
+  private readonly recorder = inject(TaskRecordTrackingService);
 
-  /**
-   * 设置回调函数
-   * 由 TaskOperationService 调用以建立连接
-   */
-  setCallbacks(callbacks: TrashServiceCallbacks): void {
-    this.callbacks = callbacks;
-  }
-  
   private getActiveProject(): Project | null {
-    return this.callbacks?.getActiveProject() ?? null;
+    return this.projectState.activeProject();
   }
   
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    this.callbacks?.recordAndUpdate(mutator);
+    this.recorder.recordAndUpdate(mutator);
   }
 
   // ========== 公开方法 ==========
@@ -96,12 +82,12 @@ export class TaskTrashService {
       return { deletedTaskIds: new Set(), deletedConnectionIds: [] };
     }
     
-    const task = activeP.tasks.find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task) {
       this.logger.warn(`任务不存在: ${taskId}`);
       return { deletedTaskIds: new Set(), deletedConnectionIds: [] };
     }
-    
+
     const idsToDelete = new Set<string>();
     const childrenToPromote: Task[] = [];
     
@@ -231,7 +217,7 @@ export class TaskTrashService {
       return { restoredTaskIds: new Set(), restoredConnectionIds: [] };
     }
     
-    const mainTask = activeP.tasks.find(t => t.id === taskId);
+    const mainTask = this.projectState.getTask(taskId);
     if (!mainTask) {
       this.logger.warn(`任务不存在: ${taskId}`);
       return { restoredTaskIds: new Set(), restoredConnectionIds: [] };
@@ -418,8 +404,8 @@ export class TaskTrashService {
       const currentId = stack.pop()!;
       if (allIdsToDelete.has(currentId)) continue;
       
-      const task = activeP.tasks.find(t => t.id === currentId && !t.deletedAt);
-      if (!task) continue;
+      const task = this.projectState.getTask(currentId);
+      if (!task || task.deletedAt) continue;
       
       allIdsToDelete.add(currentId);
       

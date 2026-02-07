@@ -21,17 +21,22 @@ import { StrataItemComponent } from './strata-item.component';
   standalone: true,
   imports: [CommonModule, StrataItemComponent],
   template: `
-        <div 
+        <div
           class="strata-layer border-b border-stone-200/30 dark:border-stone-600/20
             last:border-b-0"
           [style.opacity]="layer.opacity"
-          data-testid="strata-layer">
-      
+          data-testid="strata-layer"
+          role="listitem">
+
       <!-- 日期标题 -->
-      <div class="px-3 py-1.5 flex items-center gap-2 
+      <div class="px-3 py-1.5 flex items-center gap-2
                   text-[10px] text-stone-400 dark:text-stone-500
                   cursor-pointer select-none"
+           role="button"
+           tabindex="0"
            (click)="toggleCollapsed()"
+           (keydown.enter)="toggleCollapsed()"
+           (keydown.space)="toggleCollapsed(); $event.preventDefault()"
            [attr.aria-expanded]="!isCollapsed()"
            data-testid="strata-layer-header">
         <span class="font-mono">{{ getLabel() }}</span>

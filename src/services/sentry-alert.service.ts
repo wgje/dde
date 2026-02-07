@@ -1,4 +1,5 @@
 import { Injectable, inject, signal } from '@angular/core';
+import type * as Sentry from '@sentry/angular';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { 
   SENTRY_EVENT_TYPES, 

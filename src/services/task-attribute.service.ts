@@ -2,6 +2,8 @@ import { Injectable, inject } from '@angular/core';
 import { Task, Project, Attachment } from '../models';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { LAYOUT_CONFIG } from '../config';
 
 /**
@@ -15,39 +17,19 @@ export class TaskAttributeService {
   private readonly layoutService = inject(LayoutService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskAttribute');
-
-  /** 操作回调 */
-  private recordAndUpdateCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private recordAndUpdateDebouncedCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private getActiveProjectCallback: (() => Project | null) | null = null;
-
-  /**
-   * 设置操作回调
-   */
-  setCallbacks(callbacks: {
-    recordAndUpdate: (mutator: (project: Project) => Project) => void;
-    recordAndUpdateDebounced: (mutator: (project: Project) => Project) => void;
-    getActiveProject: () => Project | null;
-  }): void {
-    this.recordAndUpdateCallback = callbacks.recordAndUpdate;
-    this.recordAndUpdateDebouncedCallback = callbacks.recordAndUpdateDebounced;
-    this.getActiveProjectCallback = callbacks.getActiveProject;
-  }
+  private readonly projectState = inject(ProjectStateService);
+  private readonly recorder = inject(TaskRecordTrackingService);
 
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    if (this.recordAndUpdateCallback) {
-      this.recordAndUpdateCallback(mutator);
-    }
+    this.recorder.recordAndUpdate(mutator);
   }
 
   private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
-    if (this.recordAndUpdateDebouncedCallback) {
-      this.recordAndUpdateDebouncedCallback(mutator);
-    }
+    this.recorder.recordAndUpdateDebounced(mutator);
   }
 
   private getActiveProject(): Project | null {
-    return this.getActiveProjectCallback?.() ?? null;
+    return this.projectState.activeProject();
   }
 
   /**

@@ -1,30 +1,8 @@
-/**
- * AttachmentExportService - 附件导出服务
- * 
- * 【Week 8 数据保护 - P1 附件导出（流式 ZIP）】
- * 职责：
- * - 下载并打包附件为 ZIP 文件
- * - 流式处理避免内存溢出
- * - 附件去重（同一附件多任务引用只导出一份）
- * - 进度追踪
- * 
- * 设计理念：
- * - 内存安全：分批处理 + 流式写入
- * - 完整性：包含 manifest 和校验和
- * - 可恢复：支持断点续传（未来版本）
- * 
- * 依赖说明：
- * - 使用浏览器原生 Compression Streams API（需 Chrome 80+/Safari 16.4+）
- * - 兼容方案：JSZip 库作为 fallback
- */
+/** AttachmentExportService - 附件导出（流式 ZIP、去重、进度追踪） */
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Project, Attachment } from '../models';
-
-// ============================================
-// 配置
-// ============================================
 
 export const ATTACHMENT_EXPORT_CONFIG = {
   /** 批次大小（每批下载多少个附件） */

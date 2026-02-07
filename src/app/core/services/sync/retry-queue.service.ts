@@ -18,12 +18,14 @@ import { Injectable, inject, DestroyRef } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { SYNC_CONFIG } from '../../../../config';
-import { Task, Project, Connection } from '../../../../models';
+import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { CIRCUIT_BREAKER_CONFIG } from '../../../../config';
+import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 /**
  * 可重试的实体类型
  */
-export type RetryableEntityType = 'task' | 'project' | 'connection';
+export type RetryableEntityType = 'task' | 'project' | 'connection' | 'blackbox';
 
 /**
  * 可重试的操作类型
@@ -41,7 +43,7 @@ export interface RetryQueueItem {
   /** 操作类型 */
   operation: RetryableOperation;
   /** 实体数据 */
-  data: Task | Project | Connection | { id: string };
+  data: Task | Project | Connection | BlackBoxEntry | { id: string };
   /** 关联的项目 ID */
   projectId?: string;
   /** 重试次数 */
@@ -51,9 +53,25 @@ export interface RetryQueueItem {
 }
 
 /**
+ * 重试操作处理器接口
+ * 由 SimpleSyncService 实现，提供实际的推送方法
+ */
+export interface RetryOperationHandler {
+  pushTask(task: Task, projectId: string): Promise<boolean>;
+  deleteTask(taskId: string, projectId: string): Promise<boolean>;
+  pushProject(project: Project): Promise<boolean>;
+  pushConnection(connection: Connection, projectId: string): Promise<boolean>;
+  /** 推送黑匣子条目到服务器（专注模式数据同步） */
+  pushBlackBoxEntry?(entry: BlackBoxEntry): Promise<boolean>;
+  isSessionExpired(): boolean;
+  isOnline(): boolean;
+  onProcessingStateChange(processing: boolean, pendingCount: number): void;
+}
+
+/**
  * 重试队列服务
  * 
- * 管理离线操作的持久化队列
+ * 管理离线操作的持久化队列、熔断器、重试循环
  */
 @Injectable({
   providedIn: 'root'
@@ -100,6 +118,18 @@ export class RetryQueueService {
   /** 上次警告时的队列使用百分比 */
   private lastWarningPercent = 0;
   
+  /** 操作处理器 */
+  private operationHandler: RetryOperationHandler | null = null;
+  /** 队列处理锁 */
+  private isProcessingQueue = false;
+  private lastProcessTime = 0;
+  /** 重试循环定时器 */
+  private retryLoopTimer: ReturnType<typeof setInterval> | null = null;
+  /** 熔断器状态 */
+  private circuitState: 'closed' | 'open' | 'half-open' = 'closed';
+  private consecutiveFailures = 0;
+  private circuitOpenedAt = 0;
+  
   /** 持久化 key */
   private readonly STORAGE_KEY = 'nanoflow.retry-queue';
   
@@ -113,7 +143,7 @@ export class RetryQueueService {
     });
     
     this.destroyRef.onDestroy(() => {
-      // 确保队列保存
+      this.stopLoop();
       this.saveToStorage();
     });
   }
@@ -153,7 +183,7 @@ export class RetryQueueService {
   add(
     type: RetryableEntityType,
     operation: RetryableOperation,
-    data: Task | Project | Connection | { id: string },
+    data: Task | Project | Connection | BlackBoxEntry | { id: string },
     projectId?: string
   ): void {
     // 去重：检查是否已存在同一实体
@@ -212,17 +242,6 @@ export class RetryQueueService {
   }
   
   /**
-   * 移除指定项
-   */
-  remove(id: string): void {
-    const index = this.queue.findIndex(item => item.id === id);
-    if (index !== -1) {
-      this.queue.splice(index, 1);
-      this.saveToStorage();
-    }
-  }
-  
-  /**
    * 移除所有匹配的项
    */
   removeByEntityId(entityId: string): void {
@@ -231,47 +250,6 @@ export class RetryQueueService {
     if (this.queue.length < originalLength) {
       this.saveToStorage();
     }
-  }
-  
-  /**
-   * 更新项的重试次数
-   */
-  incrementRetryCount(id: string): void {
-    const item = this.queue.find(i => i.id === id);
-    if (item) {
-      item.retryCount++;
-      this.saveToStorage();
-    }
-  }
-  
-  /**
-   * 获取并清空队列（用于处理）
-   * 返回按依赖顺序排列的项（project → task → connection）
-   */
-  takeAll(): RetryQueueItem[] {
-    const items = [...this.queue];
-    this.queue = [];
-    this.saveToStorage();
-    
-    // 按类型排序：project → task → connection
-    return items.sort((a, b) => {
-      const order = { project: 0, task: 1, connection: 2 };
-      return order[a.type] - order[b.type];
-    });
-  }
-  
-  /**
-   * 将项放回队列（处理失败时）
-   */
-  putBack(items: RetryQueueItem[]): void {
-    for (const item of items) {
-      // 检查是否已存在（防止重复）
-      const exists = this.queue.some(q => q.id === item.id);
-      if (!exists) {
-        this.queue.push(item);
-      }
-    }
-    this.saveToStorage();
   }
   
   /**
@@ -316,12 +294,9 @@ export class RetryQueueService {
   }
   
   /**
-   * 检查队列容量警告
+   * 检查队列容量警告（含满载强制处理和卡死检测）
    */
-  checkCapacityWarning(callbacks?: {
-    onWarning?: () => void;
-    onForceProcess?: () => void;
-  }): void {
+  checkCapacityWarning(): void {
     const currentSize = this.queue.length;
     const threshold = Math.floor(this.MAX_SIZE * this.WARNING_THRESHOLD);
     const now = Date.now();
@@ -337,9 +312,18 @@ export class RetryQueueService {
     
     const percentUsed = Math.round((currentSize / this.MAX_SIZE) * 100);
     
-    // 满载时触发强制处理
-    if (percentUsed >= 90 && callbacks?.onForceProcess) {
-      callbacks.onForceProcess();
+    // 90% 满载时触发强制处理（含卡死检测）
+    if (percentUsed >= 90 && this.operationHandler?.isOnline()) {
+      if (this.isProcessingQueue) {
+        const duration = now - this.lastProcessTime;
+        if (duration > 120_000) {
+          this.logger.warn('processQueue 卡死，强制重置', { percentUsed, duration });
+          this.isProcessingQueue = false;
+          this.operationHandler.onProcessingStateChange(false, this.queue.length);
+        }
+      } else {
+        this.processQueue();
+      }
     }
     
     // 节流检查
@@ -379,15 +363,13 @@ export class RetryQueueService {
       },
       extra: diagnostics
     });
-    
-    callbacks?.onWarning?.();
   }
   
   /**
    * 获取队列中各类型项的数量统计
    */
   getTypeBreakdown(): Record<string, number> {
-    const breakdown: Record<string, number> = { task: 0, project: 0, connection: 0 };
+    const breakdown: Record<string, number> = { task: 0, project: 0, connection: 0, blackbox: 0 };
     for (const item of this.queue) {
       breakdown[item.type] = (breakdown[item.type] || 0) + 1;
     }
@@ -405,6 +387,149 @@ export class RetryQueueService {
         count: this.queue.length 
       });
     }
+  }
+  
+  // ==================== 操作处理器 ====================
+  
+  /** 设置操作处理器（由 SimpleSyncService 调用） */
+  setOperationHandler(handler: RetryOperationHandler): void {
+    this.operationHandler = handler;
+  }
+  
+  // ==================== 熔断器 ====================
+  
+  checkCircuitBreaker(): boolean {
+    if (this.circuitState === 'closed') return true;
+    if (this.circuitState === 'open') {
+      const elapsed = Date.now() - this.circuitOpenedAt;
+      if (elapsed >= CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME) {
+        this.circuitState = 'half-open';
+        this.logger.info('Circuit Breaker: 进入半开状态');
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  recordCircuitSuccess(): void {
+    if (this.circuitState === 'half-open') {
+      this.circuitState = 'closed';
+      this.consecutiveFailures = 0;
+      this.logger.info('Circuit Breaker: 恢复正常');
+    } else {
+      this.consecutiveFailures = 0;
+    }
+  }
+
+  recordCircuitFailure(errorType: string): void {
+    if (!CIRCUIT_BREAKER_CONFIG.TRIGGER_ERROR_TYPES.includes(errorType)) return;
+    this.consecutiveFailures++;
+    if (this.circuitState === 'half-open') {
+      this.circuitState = 'open';
+      this.circuitOpenedAt = Date.now();
+      this.logger.warn('Circuit Breaker: 半开状态失败，重新熔断');
+      return;
+    }
+    if (this.consecutiveFailures >= CIRCUIT_BREAKER_CONFIG.FAILURE_THRESHOLD) {
+      this.circuitState = 'open';
+      this.circuitOpenedAt = Date.now();
+      this.logger.warn(`Circuit Breaker: 触发熔断，连续失败 ${this.consecutiveFailures} 次`);
+    }
+  }
+  
+  // ==================== 队列处理循环 ====================
+  
+  /** 启动重试循环 */
+  startLoop(intervalMs: number): void {
+    this.stopLoop();
+    this.retryLoopTimer = setInterval(() => {
+      if (this.operationHandler?.isSessionExpired()) return;
+      if (this.operationHandler?.isOnline() && this.queue.length > 0) {
+        this.processQueue();
+      }
+    }, intervalMs);
+  }
+  
+  /** 停止重试循环 */
+  stopLoop(): void {
+    if (this.retryLoopTimer) {
+      clearInterval(this.retryLoopTimer);
+      this.retryLoopTimer = null;
+    }
+  }
+  
+  /**
+   * 处理重试队列
+   * 使用独立处理锁防止并发，按类型排序处理（project → task → connection）
+   */
+  async processQueue(): Promise<void> {
+    if (this.isProcessingQueue || this.queue.length === 0 || !this.operationHandler) return;
+    if (this.operationHandler.isSessionExpired()) return;
+    
+    this.isProcessingQueue = true;
+    this.lastProcessTime = Date.now();
+    this.operationHandler.onProcessingStateChange(true, this.queue.length);
+    
+    // 取出所有项并按依赖排序
+    const items = [...this.queue];
+    this.queue = [];
+    items.sort((a, b) => {
+      const order: Record<string, number> = { project: 0, task: 1, connection: 2, blackbox: 3 };
+      return order[a.type] - order[b.type];
+    });
+    
+    // 清理过期项
+    const now = Date.now();
+    const validItems = items.filter(item => now - item.createdAt <= this.MAX_ITEM_AGE);
+    const expiredCount = items.length - validItems.length;
+    if (expiredCount > 0) this.logger.info('清理过期队列项', { expiredCount });
+    
+    let successCount = 0;
+    
+    for (const item of validItems) {
+      if ((item.type === 'task' || item.type === 'connection') && !item.projectId) continue;
+      
+      let success = false;
+      try {
+        if (item.type === 'task') {
+          success = item.operation === 'upsert'
+            ? await this.operationHandler.pushTask(item.data as Task, item.projectId!)
+            : await this.operationHandler.deleteTask(item.data.id, item.projectId!);
+        } else if (item.type === 'project') {
+          success = await this.operationHandler.pushProject(item.data as Project);
+        } else if (item.type === 'connection') {
+          success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!);
+        } else if (item.type === 'blackbox') {
+          if (this.operationHandler.pushBlackBoxEntry) {
+            success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry);
+          }
+        }
+      } catch (e) {
+        if (isPermanentFailureError(e)) continue;
+        this.logger.error('重试失败', e);
+      }
+      
+      if (success) { successCount++; continue; }
+      item.retryCount++;
+      if (item.retryCount < this.MAX_RETRIES) {
+        this.queue.push(item);
+      } else {
+        this.logger.warn('重试次数超限', { type: item.type, id: item.data.id });
+        this.toast.error('部分数据同步失败，请检查网络连接');
+      }
+    }
+    
+    if (items.length > 0) {
+      this.logger.info('processQueue 完成', {
+        initialCount: items.length, successCount, expiredCount,
+        remainingCount: this.queue.length, duration: Date.now() - this.lastProcessTime
+      });
+    }
+    
+    this.saveToStorage();
+    this.isProcessingQueue = false;
+    this.operationHandler.onProcessingStateChange(false, this.queue.length);
   }
   
   // ==================== IndexedDB 支持 ====================

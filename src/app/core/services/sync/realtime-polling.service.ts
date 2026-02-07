@@ -332,7 +332,9 @@ export class RealtimePollingService {
     if (this.realtimeChannel) {
       const client = this.getSupabaseClient();
       if (client) {
-        client.removeChannel(this.realtimeChannel).catch(() => {});
+        client.removeChannel(this.realtimeChannel).catch((e: unknown) => {
+          this.logger.debug('移除 Realtime 通道失败（可能已断开）', { error: e });
+        });
       }
       this.realtimeChannel = null;
     }

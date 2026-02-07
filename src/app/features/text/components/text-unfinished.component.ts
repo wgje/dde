@@ -78,6 +78,6 @@ export class TextUnfinishedComponent {
   
   onComplete(taskId: string, text: string, event: Event) {
     event.stopPropagation();
-    this.taskOpsAdapter.completeUnfinishedItem(taskId, text);
+    this.taskOpsAdapter.core.completeUnfinishedItem(taskId, text);
   }
 }

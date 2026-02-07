@@ -5,7 +5,7 @@
  * 切断选择，单点聚焦，只显示一件事
  */
 
-import { Injectable, inject, computed } from '@angular/core';
+import { Injectable, inject, computed, DestroyRef } from '@angular/core';
 import { Task } from '../models';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -19,7 +19,7 @@ import {
   spotlightTaskQueue,
   blackBoxEntriesMap,
   focusPreferences
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 
 @Injectable({
   providedIn: 'root'
@@ -29,6 +29,10 @@ export class SpotlightService {
   private projectState = inject(ProjectStateService);
   private taskOperation = inject(TaskOperationService);
   private logger = inject(LoggerService);
+  private destroyRef = inject(DestroyRef);
+
+  /** 延迟切换定时器引用（防止内存泄漏） */
+  private nextTaskTimer: ReturnType<typeof setTimeout> | null = null;
   
   // 暴露状态给组件
   readonly currentTask = spotlightTask;
@@ -44,15 +48,16 @@ export class SpotlightService {
   
   /**
    * 进入聚光灯模式
+   * @returns true 如果成功进入，false 如果被禁用或无可用任务
    */
-  enter(): void {
+  enter(): boolean {
     const preferences = focusPreferences();
-    
+
     if (!preferences.spotlightEnabled) {
       this.logger.debug('Spotlight', 'Spotlight disabled by user preference');
-      return;
+      return false;
     }
-    
+
     // 获取第一个任务
     const task = this.selectNextTask();
     if (task) {
@@ -60,8 +65,10 @@ export class SpotlightService {
       isSpotlightMode.set(true);
       this.preloadQueue();
       this.logger.info('Spotlight', 'Entered spotlight mode');
+      return true;
     } else {
       this.logger.debug('Spotlight', 'No tasks available for spotlight');
+      return false;
     }
   }
 
@@ -94,27 +101,32 @@ export class SpotlightService {
    * 退出聚光灯模式
    */
   exit(): void {
+    this.clearNextTaskTimer();
     spotlightTask.set(null);
     isSpotlightMode.set(false);
     spotlightTaskQueue.set([]);
     this.logger.info('Spotlight', 'Exited spotlight mode');
   }
-  
+
   /**
    * 完成当前任务
    */
   completeCurrentTask(): void {
     const current = this.currentTask();
     if (!current) return;
-    
+
     // 更新任务状态
     this.taskOperation.updateTaskStatus(current.id, 'completed');
-    
+
+    // 清除已有定时器防止重复触发
+    this.clearNextTaskTimer();
+
     // 延迟切换到下一个任务（动画效果）
-    setTimeout(() => {
+    this.nextTaskTimer = setTimeout(() => {
+      this.nextTaskTimer = null;
       this.showNextTask();
     }, FOCUS_CONFIG.SPOTLIGHT.NEXT_TASK_DELAY);
-    
+
     this.logger.debug('Spotlight', `Spotlight task completed: ${current.id}`);
   }
   
@@ -275,8 +287,18 @@ export class SpotlightService {
   getCompletedCount(): number {
     const projectId = this.projectState.activeProjectId();
     if (!projectId) return 0;
-    
+
     const tasks = this.projectState.tasks();
     return tasks.filter((t: Task) => t.status === 'completed' && !t.deletedAt).length;
+  }
+
+  /**
+   * 清除下一任务切换定时器
+   */
+  private clearNextTaskTimer(): void {
+    if (this.nextTaskTimer) {
+      clearTimeout(this.nextTaskTimer);
+      this.nextTaskTimer = null;
+    }
   }
 }

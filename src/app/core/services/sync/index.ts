@@ -20,7 +20,7 @@ export { TombstoneService } from './tombstone.service';
 
 // 重试队列
 export { RetryQueueService } from './retry-queue.service';
-export type { RetryQueueItem, RetryableEntityType, RetryableOperation } from './retry-queue.service';
+export type { RetryQueueItem, RetryableEntityType, RetryableOperation, RetryOperationHandler } from './retry-queue.service';
 
 // 实时订阅与轮询 (Sprint 9)
 export { RealtimePollingService } from './realtime-polling.service';
@@ -45,8 +45,7 @@ export type { BatchSyncResult, BatchSyncCallbacks } from './batch-sync.service';
 
 // 任务同步操作 (技术债务重构)
 export { TaskSyncOperationsService } from './task-sync-operations.service';
-export type { TombstoneQueryResult, AddToRetryQueueFn as TaskAddToRetryQueueFn, CircuitBreakerFn, SyncStateCheckFn as TaskSyncStateCheckFn } from './task-sync-operations.service';
+export type { TombstoneQueryResult } from './task-sync-operations.service';
 
 // 连接同步操作 (技术债务重构)
 export { ConnectionSyncOperationsService } from './connection-sync-operations.service';
-export type { AddToRetryQueueFn as ConnectionAddToRetryQueueFn, SyncStateCheckFn as ConnectionSyncStateCheckFn } from './connection-sync-operations.service';

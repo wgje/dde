@@ -68,7 +68,7 @@ export class FlowTaskOperationsService {
    */
   addTaskTag(taskId: string, tag: string): void {
     if (tag?.trim()) {
-      this.taskOps.addTaskTag(taskId, tag.trim());
+      this.taskOps.core.addTaskTag(taskId, tag.trim());
     }
   }
   
@@ -76,7 +76,7 @@ export class FlowTaskOperationsService {
    * 移除标签
    */
   removeTaskTag(taskId: string, tag: string): void {
-    this.taskOps.removeTaskTag(taskId, tag);
+    this.taskOps.core.removeTaskTag(taskId, tag);
   }
   
   // ========== 待办事项 ==========
@@ -258,7 +258,7 @@ export class FlowTaskOperationsService {
    * 解除任务分配（移回待分配区域）
    */
   detachTask(taskId: string): void {
-    const task = this.projectState.tasks().find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     this.taskOps.detachTask(taskId);
     if (task) {
       this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);

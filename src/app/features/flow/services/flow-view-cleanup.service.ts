@@ -11,6 +11,8 @@
 
 import { Injectable, inject } from '@angular/core';
 import { FlowDiagramService } from './flow-diagram.service';
+import { FlowDiagramEffectsService } from './flow-diagram-effects.service';
+import { FlowMobileDrawerService } from './flow-mobile-drawer.service';
 import { FlowTouchService } from './flow-touch.service';
 import { FlowLinkService } from './flow-link.service';
 import { FlowDragDropService } from './flow-drag-drop.service';
@@ -25,18 +27,12 @@ import { flowTemplateEventHandlers } from './flow-template-events';
 export interface CleanupResources {
   /** 待清理的定时器列表 */
   pendingTimers: ReturnType<typeof setTimeout>[];
-  /** rAF ID */
-  pendingRafId: number | null;
-  /** 抽屉高度更新 rAF ID */
-  pendingDrawerHeightRafId: number | null;
   /** 节点选中重试 rAF ID 列表 */
   pendingRetryRafIds: number[];
   /** Overview 刷新定时器 */
   overviewResizeTimer: ReturnType<typeof setTimeout> | null;
   /** Idle 初始化句柄 */
   idleInitHandle: number | null;
-  /** Idle 小地图初始化句柄 */
-  idleOverviewInitHandle: number | null;
 }
 
 @Injectable({
@@ -44,6 +40,8 @@ export interface CleanupResources {
 })
 export class FlowViewCleanupService {
   private readonly diagram = inject(FlowDiagramService);
+  private readonly diagramEffects = inject(FlowDiagramEffectsService);
+  private readonly mobileDrawer = inject(FlowMobileDrawerService);
   private readonly touch = inject(FlowTouchService);
   private readonly link = inject(FlowLinkService);
   private readonly dragDrop = inject(FlowDragDropService);
@@ -95,39 +93,24 @@ export class FlowViewCleanupService {
     }
   }
 
-  /**
-   * 清理所有 rAF
-   */
   private clearAnimationFrames(resources: CleanupResources): void {
-    if (resources.pendingRafId !== null) {
-      cancelAnimationFrame(resources.pendingRafId);
-      resources.pendingRafId = null;
-    }
-
-    if (resources.pendingDrawerHeightRafId !== null) {
-      cancelAnimationFrame(resources.pendingDrawerHeightRafId);
-      resources.pendingDrawerHeightRafId = null;
-    }
+    // rAF 已迁移到各服务
+    this.diagramEffects.cancelPendingRaf();
+    this.mobileDrawer.cancelPendingDrawerRaf();
 
     resources.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
     resources.pendingRetryRafIds.length = 0;
   }
 
-  /**
-   * 清理 idle callbacks
-   */
   private clearIdleCallbacks(resources: CleanupResources): void {
     if (typeof cancelIdleCallback !== 'undefined') {
       if (resources.idleInitHandle !== null) {
         cancelIdleCallback(resources.idleInitHandle);
         resources.idleInitHandle = null;
       }
-
-      if (resources.idleOverviewInitHandle !== null) {
-        cancelIdleCallback(resources.idleOverviewInitHandle);
-        resources.idleOverviewInitHandle = null;
-      }
     }
+    // Overview idle 已迁移到 FlowDiagramService
+    this.diagram.cancelIdleOverviewInit();
   }
 
   /**

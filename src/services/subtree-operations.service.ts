@@ -108,7 +108,8 @@ export class SubtreeOperationsService {
   ): Result<void, OperationError> {
     if (!parentId) return success(undefined);
 
-    const parent = tasks.find(t => t.id === parentId);
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+    const parent = taskMap.get(parentId);
     if (!parent) return success(undefined);
 
     const parentIsUnassigned = parent.stage === null;
@@ -141,8 +142,9 @@ export class SubtreeOperationsService {
    * 确保子节点的 rank 始终大于父节点的 rank
    */
   fixSubtreeRanks(rootId: string, tasks: Task[]): void {
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     const stack: { taskId: string; parentRank: number }[] = [];
-    const rootTask = tasks.find(t => t.id === rootId);
+    const rootTask = taskMap.get(rootId);
     if (!rootTask) return;
 
     // 获取根任务的直接子节点
@@ -157,7 +159,7 @@ export class SubtreeOperationsService {
     while (stack.length > 0 && iterations < maxIterations) {
       iterations++;
       const { taskId, parentRank } = stack.pop()!;
-      const task = tasks.find(t => t.id === taskId);
+      const task = taskMap.get(taskId);
       if (!task) continue;
 
       // 确保子节点 rank > 父节点 rank
@@ -177,12 +179,13 @@ export class SubtreeOperationsService {
    * 检查插入操作是否会产生循环依赖
    */
   wouldCreateCycle(taskId: string, sourceId: string, targetId: string, tasks: Task[]): boolean {
-    let current = tasks.find(t => t.id === sourceId);
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+    let current = taskMap.get(sourceId);
     while (current && current.parentId) {
       if (current.parentId === taskId) {
         return true;
       }
-      current = tasks.find(t => t.id === current!.parentId);
+      current = taskMap.get(current!.parentId);
     }
 
     const targetSubtree = this.collectSubtreeIds(targetId, tasks);
@@ -198,6 +201,7 @@ export class SubtreeOperationsService {
    * 当父任务移动到新阶段时，所有子任务的 stage 需要同步更新
    */
   cascadeUpdateChildrenStage(parentId: string, parentNewStage: number, tasks: Task[]): void {
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     const MAX_DEPTH = 500;
     const queue: { taskId: string; parentStage: number; depth: number }[] = [];
 
@@ -218,7 +222,7 @@ export class SubtreeOperationsService {
       if (visited.has(taskId) || depth > MAX_DEPTH) continue;
       visited.add(taskId);
 
-      const task = tasks.find(t => t.id === taskId);
+      const task = taskMap.get(taskId);
       if (!task || task.deletedAt) continue;
 
       // 更新阶段：父阶段 + 1
@@ -247,7 +251,8 @@ export class SubtreeOperationsService {
     targetStage: number,
     tasks: Task[]
   ): void {
-    const target = tasks.find(t => t.id === targetId)!;
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+    const target = taskMap.get(targetId)!;
     const targetSubtreeIds = this.collectSubtreeIds(targetId, tasks);
     const queue: { task: Task; depth: number }[] = [{ task: target, depth: 0 }];
     const visited = new Set<string>();
@@ -292,6 +297,7 @@ export class SubtreeOperationsService {
   ): string | null {
     if (childrenToDetach.length === 0) return null;
 
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     const now = new Date().toISOString();
 
     // 选择第一个子节点作为剥离子树的根
@@ -301,7 +307,7 @@ export class SubtreeOperationsService {
     childrenToDetach.forEach(child => {
       const childSubtreeIds = this.collectSubtreeIds(child.id, tasks);
       childSubtreeIds.forEach(id => {
-        const t = tasks.find(task => task.id === id);
+        const t = taskMap.get(id);
         if (t) {
           t.stage = null;
           t.updatedAt = now;
@@ -338,9 +344,10 @@ export class SubtreeOperationsService {
     stageOffset: number,
     tasks: Task[]
   ): void {
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     const now = new Date().toISOString();
     subtreeIds.forEach(id => {
-      const t = tasks.find(task => task.id === id);
+      const t = taskMap.get(id);
       if (t && t.stage !== null) {
         t.stage = t.stage + stageOffset;
         t.updatedAt = now;
@@ -372,7 +379,8 @@ export class SubtreeOperationsService {
         return LAYOUT_CONFIG.RANK_ROOT_BASE;
       }
     } else {
-      const newParent = tasks.find(t => t.id === newParentId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const newParent = taskMap.get(newParentId);
       if (!newParent) return LAYOUT_CONFIG.RANK_ROOT_BASE;
 
       // 有父节点：rank 必须大于父节点，且放在兄弟节点末尾

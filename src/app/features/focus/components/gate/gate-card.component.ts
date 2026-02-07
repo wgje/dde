@@ -72,7 +72,12 @@ export type GateAnimationType = 'entering' | 'sinking' | 'emerging';
       }
       
       <!-- 底部细进度条 -->
-      <div class="absolute bottom-0 left-0 right-0 h-1 bg-stone-50 dark:bg-white/5">
+      <div class="absolute bottom-0 left-0 right-0 h-1 bg-stone-50 dark:bg-white/5"
+           role="progressbar"
+           [attr.aria-valuenow]="progress().current"
+           [attr.aria-valuemin]="0"
+           [attr.aria-valuemax]="progress().total"
+           aria-label="处理进度">
         <div class="h-full bg-orange-500 transition-all duration-300 ease-out"
              [style.width.%]="(progress().current / progress().total) * 100">
         </div>

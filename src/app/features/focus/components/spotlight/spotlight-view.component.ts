@@ -21,10 +21,13 @@ import { SpotlightCardComponent } from './spotlight-card.component';
   imports: [CommonModule, SpotlightCardComponent],
   template: `
     @if (spotlightService.isActive()) {
-      <div class="spotlight-view fixed inset-0 z-[9998] 
+      <div class="spotlight-view fixed inset-0 z-[9998]
                   flex items-center justify-center p-4
              bg-white/95 dark:bg-stone-900/95 backdrop-blur-sm"
-         data-testid="spotlight-view">
+         data-testid="spotlight-view"
+         role="dialog"
+         aria-modal="true"
+         aria-label="专注模式">
         
         <!-- 顶部栏 -->
         <div class="absolute top-4 left-4 right-4 flex items-center justify-between">
@@ -49,16 +52,16 @@ import { SpotlightCardComponent } from './spotlight-card.component';
         
         <!-- 任务卡片 -->
         @if (currentTask(); as task) {
-          <div class="w-full max-w-lg animate-emerge">
-            <app-spotlight-card 
+          <div class="w-full max-w-lg animate-emerge" aria-live="polite">
+            <app-spotlight-card
               [task]="task"
               (complete)="complete()"
               (skip)="skip()" />
           </div>
         } @else {
           <!-- 空状态 -->
-          <div class="text-center">
-            <div class="text-6xl mb-4">🎉</div>
+          <div class="text-center" aria-live="polite">
+            <div class="text-6xl mb-4" aria-hidden="true">🎉</div>
             <h2 class="text-xl font-bold text-stone-700 dark:text-stone-200 mb-2">
               太棒了！
             </h2>

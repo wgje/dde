@@ -33,7 +33,7 @@ export class FlowBatchDeleteService {
 
     // 单选时返回单任务，由组件走单任务删除流程
     if (selectedIds.length === 1) {
-      const task = this.projectState.tasks().find(t => t.id === selectedIds[0]);
+      const task = this.projectState.getTask(selectedIds[0]);
       return task || null;
     }
 

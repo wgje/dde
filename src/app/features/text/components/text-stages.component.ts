@@ -212,7 +212,7 @@ export class TextStagesComponent {
   readonly currentRootLabel = computed(() => {
     const filter = this.uiState.stageViewRootFilter();
     if (filter === 'all') return '全部任务';
-    const task = this.projectState.allStage1Tasks().find(t => t.id === filter);
+    const task = this.projectState.getTask(filter);
     if (!task) return '全部任务';
     return task.title || task.displayId || '未命名任务';
   });
@@ -224,10 +224,10 @@ export class TextStagesComponent {
     
     // 如果有延伸筛选，只保留有该根任务子孙的阶段
     if (rootFilter !== 'all') {
-      const root = this.projectState.allStage1Tasks().find(t => t.id === rootFilter);
+      const root = this.projectState.getTask(rootFilter);
       if (root) {
-        stages = stages.filter(stage => 
-          stage.tasks.some(task => 
+        stages = stages.filter(stage =>
+          stage.tasks.some(task =>
             task.id === root.id || task.displayId.startsWith(root.displayId + ',')
           )
         );
@@ -249,14 +249,14 @@ export class TextStagesComponent {
     
     // 应用延伸筛选
     if (rootFilter !== 'all') {
-      const root = this.projectState.allStage1Tasks().find(t => t.id === rootFilter);
+      const root = this.projectState.getTask(rootFilter);
       if (root) {
         // DEBUG: 追踪带有 "?" displayId 的任务
         const allStage1Tasks = stages.flatMap(s => s.tasks).filter(t => t.stage === 1 && !t.parentId);
         const tasksWithQuestionMark = allStage1Tasks.filter(t => t.displayId === '?');
         if (tasksWithQuestionMark.length > 0) {
           this.logger.warn('TextStages', 'Stage 1 roots with displayId="?"', 
-            tasksWithQuestionMark.map(t => ({ id: t.id.slice(-4), title: t.title || 'untitled' }))
+            tasksWithQuestionMark.map(t => ({ id: t?.id?.slice(-4) ?? 'unknown', title: t?.title || 'untitled' }))
           );
         }
         
@@ -272,14 +272,14 @@ export class TextStagesComponent {
         // DEBUG: 检查是否有任务因为 displayId 问题被过滤掉
         if (beforeFilter.length !== afterFilter.length) {
           const filteredOut = beforeFilter.filter(bt => !afterFilter.some(at => at.id === bt.id));
-          const invalidFiltered = filteredOut.filter(t => t.displayId === '?' || !t.displayId.startsWith(root.displayId));
+          const invalidFiltered = filteredOut.filter(t => t.displayId === '?' || !t.displayId?.startsWith(root.displayId));
           if (invalidFiltered.length > 0) {
             this.logger.warn('TextStages', 'Tasks filtered out due to displayId mismatch', {
               rootDisplayId: root.displayId,
               filteredTasks: invalidFiltered.map(t => ({
-                id: t.id.slice(-4),
-                displayId: t.displayId,
-                title: t.title || 'untitled'
+                id: t?.id?.slice(-4) ?? 'unknown',
+                displayId: t?.displayId ?? 'unknown',
+                title: t?.title || 'untitled'
               }))
             });
           }

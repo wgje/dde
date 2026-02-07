@@ -276,19 +276,3 @@ export const requireAuthGuard: CanActivateFn = async (route, state) => {
   // 返回 false 阻止导航，但不做重定向
   return false;
 };
-
-/**
- * 认证路由守卫（宽松模式）
- * 
- * ⚠️ 已移除 - 请使用 requireAuthGuard
- * 
- * 此守卫允许匿名访问，会导致「幽灵数据」问题：
- * - 匿名用户数据无法归属到任何账户
- * - RLS 策略需要特殊处理 auth.uid() is null
- * - 数据迁移复杂且容易出错
- * 
- * 如果您的代码仍在使用 authGuard，请立即迁移到 requireAuthGuard
- * 
- * @deprecated 已移除，请使用 requireAuthGuard
- * @see requireAuthGuard
- */

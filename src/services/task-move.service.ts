@@ -3,6 +3,8 @@ import { Task, Project, Connection } from '../models';
 import { Result, OperationError, success, failure, ErrorCodes } from '../utils/result';
 import { LayoutService } from './layout.service';
 import { SubtreeOperationsService } from './subtree-operations.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { FLOATING_TREE_CONFIG, LAYOUT_CONFIG } from '../config/layout.config';
 import { LoggerService } from './logger.service';
 
@@ -26,53 +28,30 @@ export interface MoveTaskParams {
 export class TaskMoveService {
   private readonly layoutService = inject(LayoutService);
   private readonly subtreeOps = inject(SubtreeOperationsService);
+  private readonly projectState = inject(ProjectStateService);
+  private readonly recorder = inject(TaskRecordTrackingService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskMove');
 
-  /** 操作回调 */
-  private recordAndUpdateCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private getActiveProjectCallback: (() => Project | null) | null = null;
-  private isStageRebalancingCallback: ((stage: number) => boolean) | null = null;
-  private computeInsertRankCallback: ((stage: number, siblings: Task[], beforeId?: string | null, parentRank?: number | null) => number) | null = null;
-  private applyRefusalStrategyCallback: ((task: Task, candidateRank: number, parentRank: number, minChildRank: number, tasks: Task[]) => { ok: boolean; rank: number }) | null = null;
-
-  /**
-   * 设置操作回调
-   */
-  setCallbacks(callbacks: {
-    recordAndUpdate: (mutator: (project: Project) => Project) => void;
-    getActiveProject: () => Project | null;
-    isStageRebalancing: (stage: number) => boolean;
-    computeInsertRank: (stage: number, siblings: Task[], beforeId?: string | null, parentRank?: number | null) => number;
-    applyRefusalStrategy: (task: Task, candidateRank: number, parentRank: number, minChildRank: number, tasks: Task[]) => { ok: boolean; rank: number };
-  }): void {
-    this.recordAndUpdateCallback = callbacks.recordAndUpdate;
-    this.getActiveProjectCallback = callbacks.getActiveProject;
-    this.isStageRebalancingCallback = callbacks.isStageRebalancing;
-    this.computeInsertRankCallback = callbacks.computeInsertRank;
-    this.applyRefusalStrategyCallback = callbacks.applyRefusalStrategy;
-  }
-
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    if (this.recordAndUpdateCallback) {
-      this.recordAndUpdateCallback(mutator);
-    }
+    this.recorder.recordAndUpdate(mutator);
   }
 
   private getActiveProject(): Project | null {
-    return this.getActiveProjectCallback?.() ?? null;
+    return this.projectState.activeProject();
   }
 
   private isStageRebalancing(stage: number): boolean {
-    return this.isStageRebalancingCallback?.(stage) ?? false;
+    return this.layoutService.isStageRebalancing(stage);
   }
 
   private computeInsertRank(stage: number, siblings: Task[], beforeId?: string | null, parentRank?: number | null): number {
-    return this.computeInsertRankCallback?.(stage, siblings, beforeId, parentRank) ?? 0;
+    const result = this.layoutService.computeInsertRank(stage, siblings, beforeId, parentRank);
+    return result.rank;
   }
 
-  private applyRefusalStrategy(task: Task, candidateRank: number, parentRank: number, minChildRank: number, tasks: Task[]): { ok: boolean; rank: number } {
-    return this.applyRefusalStrategyCallback?.(task, candidateRank, parentRank, minChildRank, tasks) ?? { ok: false, rank: 0 };
+  private applyRefusalStrategy(task: Task, candidateRank: number, parentRank: number, minChildRank: number, _tasks: Task[]): { ok: boolean; rank: number } {
+    return this.layoutService.applyRefusalStrategy(task, candidateRank, parentRank, minChildRank);
   }
 
   /**
@@ -92,20 +71,20 @@ export class TaskMoveService {
       return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
     }
     
-    const target = activeP.tasks.find(t => t.id === taskId);
+    const target = this.projectState.getTask(taskId);
     if (!target) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
     }
-    
+
     const isFromUnassigned = target.stage === null;
     const isToUnassigned = newStage === null;
     const isToStage = newStage !== null;
-    
+
     // ========== 分支1: 待分配区内部重组 ==========
     if (isFromUnassigned && isToUnassigned) {
       return this.reparentWithinUnassigned(taskId, newParentId, activeP.tasks);
     }
-    
+
     // ========== 分支2: 浮动树整体分配 ==========
     if (isFromUnassigned && isToStage) {
       // 阶段溢出预检查
@@ -113,10 +92,10 @@ export class TaskMoveService {
       if (!capacityCheck.ok) {
         return capacityCheck;
       }
-      
+
       // 如果指定了新父任务，验证同源性
       if (newParentId) {
-        const newParent = activeP.tasks.find(t => t.id === newParentId);
+        const newParent = this.projectState.getTask(newParentId);
         if (!newParent || newParent.stage === null) {
           return failure(
             ErrorCodes.CROSS_BOUNDARY_VIOLATION,
@@ -163,8 +142,9 @@ export class TaskMoveService {
     tasks: Task[]
   ): Result<void, OperationError> {
     // 如果 newParentId 有值，检查目标父任务也必须在待分配区
+    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
     if (newParentId) {
-      const newParent = tasks.find(t => t.id === newParentId);
+      const newParent = taskMap.get(newParentId);
       if (!newParent) {
         return failure(ErrorCodes.DATA_NOT_FOUND, '目标父任务不存在');
       }
@@ -208,30 +188,31 @@ export class TaskMoveService {
     
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const root = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const root = taskMap.get(taskId);
       if (!root) {
         operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
         return p;
       }
-      
+
       const now = new Date().toISOString();
       const queue: { task: Task; depth: number }[] = [{ task: root, depth: 0 }];
       const visited = new Set<string>();
-      
+
       while (queue.length > 0) {
         const { task, depth } = queue.shift()!;
         if (visited.has(task.id)) continue;
         visited.add(task.id);
-        
+
         // 设置阶段：根节点为 targetStage，子节点递增
         task.stage = targetStage + depth;
         task.updatedAt = now;
-        
+
         // 根节点设置新的 parentId
         if (depth === 0) {
           task.parentId = newParentId;
         }
-        
+
         // 收集子节点（限制深度防止无限循环）
         if (depth < FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
           const children = tasks.filter(t => t.parentId === task.id && !t.deletedAt);
@@ -240,10 +221,10 @@ export class TaskMoveService {
           });
         }
       }
-      
+
       // 计算根节点的 rank
       const stageTasks = tasks.filter(t => t.stage === targetStage && t.id !== taskId);
-      const parent = newParentId ? tasks.find(t => t.id === newParentId) : null;
+      const parent = newParentId ? taskMap.get(newParentId) : null;
       const candidateRank = this.computeInsertRank(targetStage, stageTasks, beforeTaskId, parent?.rank ?? null);
       
       const placed = this.applyRefusalStrategy(root, candidateRank, parent?.rank ?? 0, Infinity, tasks);
@@ -271,19 +252,20 @@ export class TaskMoveService {
     
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const root = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const root = taskMap.get(taskId);
       if (!root) {
         operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
         return p;
       }
-      
+
       // 收集整个子树
       const subtreeIds = this.subtreeOps.collectSubtreeIds(taskId, tasks);
       const now = new Date().toISOString();
       
       // 将整个子树移回待分配区
       subtreeIds.forEach(id => {
-        const t = tasks.find(task => task.id === id);
+        const t = taskMap.get(id);
         if (t) {
           t.stage = null;
           t.updatedAt = now;
@@ -325,12 +307,13 @@ export class TaskMoveService {
     
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const target = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const target = taskMap.get(taskId);
       if (!target) {
         operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
         return p;
       }
-      
+
       if (newParentId && this.layoutService.detectCycle(taskId, newParentId, tasks)) {
         operationResult = failure(ErrorCodes.LAYOUT_CYCLE_DETECTED, '无法移动：会产生循环依赖');
         return p;
@@ -344,7 +327,7 @@ export class TaskMoveService {
         target.parentId = newParentId;
       } else if (target.parentId) {
         // 验证原 parentId：父任务必须存在且在 newStage - 1 阶段
-        const parent = tasks.find(t => t.id === target.parentId);
+        const parent = taskMap.get(target.parentId);
         if (!parent || parent.stage !== newStage - 1) {
           this.logger.debug('清除无效 parentId', {
             taskId: taskId.slice(-4),
@@ -362,7 +345,7 @@ export class TaskMoveService {
       }
 
       const stageTasks = tasks.filter(t => t.stage === newStage && t.id !== taskId);
-      const parent = target.parentId ? tasks.find(t => t.id === target.parentId) : null;
+      const parent = target.parentId ? taskMap.get(target.parentId) : null;
       const parentRank = this.layoutService.maxParentRank(target, tasks) ?? 0;
       const minChildRank = this.layoutService.minChildRank(target.id, tasks) ?? Infinity;
       
@@ -397,8 +380,8 @@ export class TaskMoveService {
       return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
     }
 
-    const sourceTask = activeP.tasks.find(t => t.id === sourceTaskId);
-    const targetTask = activeP.tasks.find(t => t.id === targetUnassignedId);
+    const sourceTask = this.projectState.getTask(sourceTaskId);
+    const targetTask = this.projectState.getTask(targetUnassignedId);
 
     if (!sourceTask) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '源任务不存在');
@@ -427,8 +410,9 @@ export class TaskMoveService {
 
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const source = tasks.find(t => t.id === sourceTaskId)!;
-      const target = tasks.find(t => t.id === targetUnassignedId)!;
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const source = taskMap.get(sourceTaskId)!;
+      const target = taskMap.get(targetUnassignedId)!;
 
       // 1. 获取要被剥离的子任务
       const allChildren = tasks.filter(t => t.parentId === sourceTaskId && !t.deletedAt);
@@ -480,8 +464,8 @@ export class TaskMoveService {
       return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
     }
 
-    const sourceTask = activeP.tasks.find(t => t.id === sourceTaskId);
-    const targetTask = activeP.tasks.find(t => t.id === targetUnassignedId);
+    const sourceTask = this.projectState.getTask(sourceTaskId);
+    const targetTask = this.projectState.getTask(targetUnassignedId);
 
     if (!sourceTask) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '源任务不存在');
@@ -509,8 +493,9 @@ export class TaskMoveService {
 
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const source = tasks.find(t => t.id === sourceTaskId)!;
-      const target = tasks.find(t => t.id === targetUnassignedId)!;
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const source = taskMap.get(sourceTaskId)!;
+      const target = taskMap.get(targetUnassignedId)!;
 
       // 1. 将目标待分配块的子树整体分配到目标阶段
       this.subtreeOps.assignSubtreeToStage(targetUnassignedId, sourceTaskId, targetStage, tasks);
@@ -542,11 +527,11 @@ export class TaskMoveService {
     const activeP = this.getActiveProject();
     if (!activeP) return null;
 
-    const task = activeP.tasks.find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task || task.stage !== null) return null;
 
     if (task.parentId) {
-      const parent = activeP.tasks.find(t => t.id === task.parentId);
+      const parent = this.projectState.getTask(task.parentId);
       if (parent && parent.stage === null) {
         return parent.id;
       }
@@ -574,11 +559,12 @@ export class TaskMoveService {
   detachTask(taskId: string): void {
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const target = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const target = taskMap.get(taskId);
       if (!target) return p;
 
       const parentId = target.parentId;
-      const parent = tasks.find(t => t.id === parentId);
+      const parent = parentId ? taskMap.get(parentId) : undefined;
 
       // 子节点提升给原父节点
       tasks.forEach(child => {
@@ -611,16 +597,17 @@ export class TaskMoveService {
     const activeP = this.getActiveProject();
     if (!activeP) return;
     
-    const target = activeP.tasks.find(t => t.id === taskId);
+    const target = this.projectState.getTask(taskId);
     if (!target) return;
-    
+
     this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const targetTask = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const targetTask = taskMap.get(taskId);
       if (!targetTask) return p;
-      
+
       const parentId = targetTask.parentId;
-      const parentTask = parentId ? tasks.find(t => t.id === parentId) : null;
+      const parentTask = parentId ? taskMap.get(parentId) ?? null : null;
       
       // 子节点提升到被删除任务的父节点下
       tasks.forEach(child => {
@@ -658,16 +645,16 @@ export class TaskMoveService {
    * @returns Result 包含成功或错误信息
    */
   moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
-    const activeP = this.getActiveProjectCallback?.() ?? null;
+    const activeP = this.getActiveProject();
     if (!activeP) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
     }
     
-    const targetTask = activeP.tasks.find(t => t.id === taskId);
+    const targetTask = this.projectState.getTask(taskId);
     if (!targetTask) {
       return failure(ErrorCodes.DATA_NOT_FOUND, '要迁移的任务不存在');
     }
-    
+
     const oldParentId = targetTask.parentId;
     
     // 如果新旧父节点相同，无需操作
@@ -682,15 +669,16 @@ export class TaskMoveService {
     
     let operationResult: Result<void, OperationError> = success(undefined);
     
-    this.recordAndUpdateCallback?.(p => {
+    this.recordAndUpdate(p => {
       const tasks = p.tasks.map(t => ({ ...t }));
-      const target = tasks.find(t => t.id === taskId);
+      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
+      const target = taskMap.get(taskId);
       if (!target) {
         operationResult = failure(ErrorCodes.DATA_NOT_FOUND, '任务不存在');
         return p;
       }
-      
-      const newParent = newParentId ? tasks.find(t => t.id === newParentId) : null;
+
+      const newParent = newParentId ? taskMap.get(newParentId) ?? null : null;
       
       // 计算 stage 偏移量
       const oldStage = target.stage ?? 1;

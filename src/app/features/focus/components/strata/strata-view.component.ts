@@ -28,11 +28,17 @@ import { StrataLayerComponent } from './strata-layer.component';
           data-testid="strata-view">
       
       <!-- 标题栏 -->
-            <div 
-         class="px-3 py-2.5 cursor-pointer flex justify-between items-center 
+            <div
+         class="px-3 py-2.5 cursor-pointer flex justify-between items-center
            group select-none hover:bg-stone-200/30 dark:hover:bg-stone-700/30
            transition-colors duration-150"
+         role="button"
+         tabindex="0"
+         [attr.aria-expanded]="isExpanded()"
+         aria-label="地质层"
          (click)="toggleExpand()"
+         (keydown.enter)="toggleExpand()"
+         (keydown.space)="toggleExpand(); $event.preventDefault()"
          data-testid="strata-toggle">
         <span class="font-bold text-stone-700 dark:text-stone-100 text-xs 
                      flex items-center gap-2">
@@ -68,7 +74,7 @@ import { StrataLayerComponent } from './strata-layer.component';
           </div>
           
           <!-- 地质层列表 -->
-          <div class="max-h-64 overflow-y-auto">
+          <div class="max-h-64 overflow-y-auto" role="list" aria-label="已完成任务列表">
             @for (layer of layers(); track layer.date; let i = $index) {
               <app-strata-layer 
                 [layer]="layer"

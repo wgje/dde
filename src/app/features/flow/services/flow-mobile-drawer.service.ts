@@ -153,6 +153,35 @@ export class FlowMobileDrawerService {
     this.lastDrawerPreset = 'none';
   }
 
+  /** 抽屉高度更新的 rAF */
+  private pendingDrawerHeightRafId: number | null = null;
+  private pendingDrawerHeightTarget: number | null = null;
+
+  /**
+   * 合并抽屉高度更新，避免短时间内多次触发布局变化
+   */
+  scheduleDrawerHeightUpdate(drawerHeight: WritableSignal<number>, targetVh: number): void {
+    this.pendingDrawerHeightTarget = targetVh;
+    if (this.pendingDrawerHeightRafId !== null) return;
+    this.pendingDrawerHeightRafId = requestAnimationFrame(() => {
+      this.pendingDrawerHeightRafId = null;
+      const nextVh = this.pendingDrawerHeightTarget;
+      this.pendingDrawerHeightTarget = null;
+      if (nextVh === null) return;
+      if (Math.abs(drawerHeight() - nextVh) > 0.2) {
+        drawerHeight.set(nextVh);
+      }
+    });
+  }
+
+  /** 取消待处理的抽屉高度 rAF */
+  cancelPendingDrawerRaf(): void {
+    if (this.pendingDrawerHeightRafId !== null) {
+      cancelAnimationFrame(this.pendingDrawerHeightRafId);
+      this.pendingDrawerHeightRafId = null;
+    }
+  }
+
   /**
    * 设置移动端抽屉高度相关的 effects
    * 将 effect 逻辑从组件迁移到服务，减少组件代码量

@@ -17,6 +17,8 @@ import { ToastService } from '../../../../services/toast.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
 import { SyncOperationHelperService } from './sync-operation-helper.service';
 import { SessionManagerService } from './session-manager.service';
+import { RetryQueueService } from './retry-queue.service';
+import { SyncStateService } from './sync-state.service';
 import { Connection } from '../../../../models';
 import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-error';
 import { supabaseWithRetry } from '../../../../utils/timeout';
@@ -24,23 +26,6 @@ import { PermanentFailureError } from '../../../../utils/permanent-failure-error
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-/**
- * 添加到重试队列的回调类型
- */
-export type AddToRetryQueueFn = (
-  type: 'task' | 'project' | 'connection',
-  operation: 'upsert' | 'delete',
-  data: Connection | { id: string },
-  projectId?: string
-) => void;
-
-/**
- * 同步状态检查回调类型
- */
-export type SyncStateCheckFn = {
-  isSessionExpired: () => boolean;
-  updateSyncState: (update: Partial<{ sessionExpired: boolean }>) => void;
-};
 
 @Injectable({
   providedIn: 'root'
@@ -54,20 +39,31 @@ export class ConnectionSyncOperationsService {
   private readonly throttle = inject(RequestThrottleService);
   private readonly syncOpHelper = inject(SyncOperationHelperService);
   private readonly sessionManager = inject(SessionManagerService);
-  
-  /** 回调函数（由 SimpleSyncService 注入） */
-  private addToRetryQueue: AddToRetryQueueFn | null = null;
-  private syncStateCheck: SyncStateCheckFn | null = null;
+  private readonly retryQueueService = inject(RetryQueueService);
+  private readonly syncStateService = inject(SyncStateService);
   
   /**
-   * 设置回调函数（由 SimpleSyncService 调用）
+   * 安全添加到重试队列（含会话和数据有效性检查）
+   * 替代之前的 setCallbacks 回调模式，直接使用注入的服务
    */
-  setCallbacks(callbacks: {
-    addToRetryQueue: AddToRetryQueueFn;
-    syncStateCheck: SyncStateCheckFn;
-  }): void {
-    this.addToRetryQueue = callbacks.addToRetryQueue;
-    this.syncStateCheck = callbacks.syncStateCheck;
+  private safeAddToRetryQueue(
+    type: 'task' | 'project' | 'connection',
+    operation: 'upsert' | 'delete',
+    data: Connection | { id: string },
+    projectId?: string
+  ): void {
+    if (this.syncStateService.isSessionExpired()) return;
+    if (!data?.id) {
+      this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
+      return;
+    }
+    if ((type === 'task' || type === 'connection') && !projectId) {
+      this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
+      return;
+    }
+    this.retryQueueService.add(type, operation, data, projectId);
+    this.syncStateService.setPendingCount(this.retryQueueService.length);
+    this.retryQueueService.checkCapacityWarning();
   }
   
   /**
@@ -125,15 +121,15 @@ export class ConnectionSyncOperationsService {
     fromRetryQueue = false
   ): Promise<boolean> {
     // 会话过期检查
-    if (this.syncStateCheck?.isSessionExpired()) {
+    if (this.syncStateService.isSessionExpired()) {
       this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
       return false;
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
-      if (!fromRetryQueue && this.addToRetryQueue) {
-        this.addToRetryQueue('connection', 'upsert', connection, projectId);
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
       }
       return false;
     }
@@ -143,7 +139,7 @@ export class ConnectionSyncOperationsService {
       const { data: { session } } = await client.auth.getSession();
       const userId = session?.user?.id;
       if (!userId) {
-        this.syncStateCheck?.updateSyncState({ sessionExpired: true });
+        this.syncStateService.setSessionExpired(true);
         this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
         return false;
@@ -393,8 +389,8 @@ export class ConnectionSyncOperationsService {
     });
     
     // 加入重试队列
-    if (enhanced.isRetryable && !fromRetryQueue && this.addToRetryQueue) {
-      this.addToRetryQueue('connection', 'upsert', connection, projectId);
+    if (enhanced.isRetryable && !fromRetryQueue) {
+      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
     } else if (!enhanced.isRetryable) {
       this.logger.warn('不可重试的错误，不加入重试队列', {
         connectionId: connection.id,

@@ -28,7 +28,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       (touchmove)="onTouchMove($event)"
       (touchend)="onTouchEnd($event)"
       (touchcancel)="onTouchCancel($event)"
-      class="relative bg-canvas/80 dark:bg-stone-800/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
+      class="text-task-card virtual-list-item relative bg-canvas/80 dark:bg-stone-800/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
       [ngClass]="cardClasses">
       
       <!-- 头部信息 -->
@@ -110,12 +110,12 @@ export class TextTaskCardComponent implements OnChanges {
       // 检测 displayId 从有效值变成 "?" 的情况
       if (prev?.displayId && prev.displayId !== '?' && curr?.displayId === '?') {
         this.logger.warn('TextTaskCard', 'displayId changed from valid to "?"', {
-          taskId: curr.id.slice(-4),
+          taskId: curr?.id?.slice(-4) ?? 'unknown',
           prevDisplayId: prev.displayId,
           currDisplayId: curr.displayId,
-          title: curr.title || 'untitled',
-          stage: curr.stage,
-          parentId: curr.parentId?.slice(-4) || null,
+          title: curr?.title || 'untitled',
+          stage: curr?.stage,
+          parentId: curr?.parentId?.slice(-4) ?? null,
           isFirstChange: changes['task'].isFirstChange()
         });
       }

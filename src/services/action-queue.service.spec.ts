@@ -16,6 +16,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
+import { ActionQueueStorageService } from './action-queue-storage.service';
+import { Task, Project } from '../models';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
@@ -50,6 +52,35 @@ const mockSentryAlertService = {
   updateSyncContext: vi.fn(),
 };
 
+function createMockTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: crypto.randomUUID(),
+    title: 'Test Task',
+    content: '',
+    stage: 1,
+    parentId: null,
+    order: 0,
+    rank: 500,
+    status: 'active',
+    x: 0, y: 0,
+    createdDate: new Date().toISOString(),
+    displayId: '1',
+    ...overrides,
+  };
+}
+
+function createMockProject(overrides: Partial<Project> = {}): Project {
+  return {
+    id: crypto.randomUUID(),
+    name: 'Test Project',
+    description: '',
+    createdDate: new Date().toISOString(),
+    tasks: [],
+    connections: [],
+    ...overrides,
+  };
+}
+
 describe('ActionQueueService', () => {
   let service: ActionQueueService;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
@@ -63,8 +94,8 @@ describe('ActionQueueService', () => {
       writable: true,
       configurable: true,
     });
-    // 直接修改服务内部状态，避免竞态条件
-    (service as any).isOnline = online;
+    // 直接修改存储服务内部状态，避免竞态条件
+    service.storage.isOnline = online;
   }
 
   // 辅助函数：模拟网络状态变化并触发事件
@@ -89,14 +120,9 @@ describe('ActionQueueService', () => {
       entityType: 'project',
       entityId: `proj-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       payload: {
-        project: {
+        project: createMockProject({
           id: `proj-${Date.now()}`,
-          name: 'Test Project',
-          description: '',
-          createdDate: new Date().toISOString(),
-          tasks: [],
-          connections: [],
-        } as any,
+        }),
       },
     };
   }
@@ -107,11 +133,9 @@ describe('ActionQueueService', () => {
       entityType: 'task',
       entityId: `task-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       payload: {
-        task: {
+        task: createMockTask({
           id: `task-${Date.now()}`,
-          title: 'Test Task',
-          content: '',
-        } as any,
+        }),
         projectId: 'proj-1',
       },
     };
@@ -139,6 +163,7 @@ describe('ActionQueueService', () => {
     const injector = Injector.create({
       providers: [
         ActionQueueService,
+        ActionQueueStorageService,
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryAlertService, useValue: mockSentryAlertService },
@@ -190,7 +215,7 @@ describe('ActionQueueService', () => {
           type: 'update',
           entityType: 'task',
           entityId: `task-${i}`,
-          payload: { task: { id: `task-${i}` } as any, projectId: 'proj-1' },
+          payload: { task: createMockTask({ id: `task-${i}` }), projectId: 'proj-1' },
         });
       }
       
@@ -376,7 +401,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: `task-${Date.now()}`,
-        payload: { task: { id: 'task-1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1' }), projectId: 'proj-1' },
       });
       
       setNetworkStatus(true);
@@ -487,7 +512,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: `task-${Date.now()}`,
-        payload: { task: { id: 'task-1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1' }), projectId: 'proj-1' },
       });
       
       setNetworkStatus(true);
@@ -516,7 +541,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: `task-${Date.now()}`,
-        payload: { task: { id: 'task-1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1' }), projectId: 'proj-1' },
       });
       
       setNetworkStatus(true);
@@ -565,19 +590,19 @@ describe('ActionQueueService', () => {
         type: 'update',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1' }), projectId: 'proj-1' },
       });
       service.enqueue({
         type: 'update',
         entityType: 'task',
         entityId: 'task-2',
-        payload: { task: { id: 'task-2' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-2' }), projectId: 'proj-1' },
       });
       service.enqueue({
         type: 'update',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1', title: 'Updated' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1', title: 'Updated' }), projectId: 'proj-1' },
       });
       
       const actions = service.getActionsForEntity('task', 'task-1');
@@ -640,7 +665,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1', title: 'New Task' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1', title: 'New Task' }), projectId: 'proj-1' },
       });
       
       // 入队同一实体的 update 操作（会被智能合并到 create 中）
@@ -648,7 +673,7 @@ describe('ActionQueueService', () => {
         type: 'update',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1', title: 'Updated Task' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1', title: 'Updated Task' }), projectId: 'proj-1' },
       });
       
       // 由于智能合并，同一实体的多个操作会合并为一个
@@ -680,7 +705,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1', title: 'Task 1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1', title: 'Task 1' }), projectId: 'proj-1' },
       });
       
       // 入队 task-2 的 update（应该正常处理）
@@ -688,7 +713,7 @@ describe('ActionQueueService', () => {
         type: 'update',
         entityType: 'task',
         entityId: 'task-2',
-        payload: { task: { id: 'task-2', title: 'Task 2 Updated' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-2', title: 'Task 2 Updated' }), projectId: 'proj-1' },
       });
       
       setNetworkStatus(true);
@@ -715,7 +740,7 @@ describe('ActionQueueService', () => {
         type: 'create',
         entityType: 'task',
         entityId: 'task-1',
-        payload: { task: { id: 'task-1', title: 'Task 1' } as any, projectId: 'proj-1' },
+        payload: { task: createMockTask({ id: 'task-1', title: 'Task 1' }), projectId: 'proj-1' },
       });
       
       // 入队 project 的 update（应该正常处理）
@@ -723,7 +748,7 @@ describe('ActionQueueService', () => {
         type: 'update',
         entityType: 'project',
         entityId: 'proj-1',
-        payload: { project: { id: 'proj-1', name: 'Updated' } as any },
+        payload: { project: createMockProject({ id: 'proj-1', name: 'Updated' }) },
       });
       
       setNetworkStatus(true);

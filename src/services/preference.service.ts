@@ -154,7 +154,7 @@ export class PreferenceService {
       // 默认 true（使用 LWW 自动解决）
       return stored === null ? true : stored === 'true';
     } catch (e) {
-      this.logger.debug('loadAutoResolveFromStorage: localStorage 访问失败，使用默认值', e);
+      this.logger.warn('loadAutoResolveFromStorage: localStorage 访问失败，使用默认值', e);
       return true;
     }
   }
@@ -169,7 +169,7 @@ export class PreferenceService {
       const key = getUserPreferenceKey(userId, 'autoResolveConflicts');
       localStorage.setItem(key, String(enabled));
     } catch (e) {
-      this.logger.debug('saveAutoResolveToStorage: localStorage 存储失败，忽略', e);
+      this.logger.warn('saveAutoResolveToStorage: localStorage 存储失败，忽略', e);
     }
   }
   
@@ -216,7 +216,7 @@ export class PreferenceService {
       }
       return null;
     } catch (e) {
-      this.logger.debug('loadLocalBackupSettingsFromCloud: 加载云端备份设置失败', e);
+      this.logger.warn('loadLocalBackupSettingsFromCloud: 加载云端备份设置失败', e);
       return null;
     }
   }

@@ -1,29 +1,11 @@
-/**
- * FlowOverviewService - 小地图（Overview）管理服务
- * 
- * 从 FlowDiagramService 拆分出来，专注于：
- * - 小地图初始化与销毁
- * - 自动缩放逻辑（无限画布支持）
- * - 视口同步（viewportBounds ↔ fixedBounds）
- * - 指针交互（拖拽视口框）
- * - ResizeObserver 管理
- * 
- * 设计原则：
- * - 职责单一：仅处理小地图相关逻辑
- * - 依赖主图：通过 setDiagram() 注入 GoJS Diagram 实例
- * - 事件隔离：使用 zone.runOutsideAngular 避免触发 Angular 变更检测
- */
-
+/** FlowOverviewService - 小地图初始化/销毁、自动缩放、视口同步、指针交互 */
 import { Injectable, inject, NgZone } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ThemeService } from '../../../../services/theme.service';
 import { FlowTemplateService } from './flow-template.service';
+import { FlowLinkTemplateService } from './flow-link-template.service';
 import { FlowDiagramConfigService } from './flow-diagram-config.service';
 import * as go from 'gojs';
-
-// 全局调试开关
-const isOverviewDebugEnabled = () => 
-  !!(globalThis as unknown as { __NF_OVERVIEW_DEBUG?: boolean })?.__NF_OVERVIEW_DEBUG;
 
 @Injectable({
   providedIn: 'root'
@@ -34,18 +16,17 @@ export class FlowOverviewService {
   private readonly zone = inject(NgZone);
   private readonly themeService = inject(ThemeService);
   private readonly templateService = inject(FlowTemplateService);
+  private readonly linkTemplateService = inject(FlowLinkTemplateService);
   private readonly configService = inject(FlowDiagramConfigService);
 
-  // ========== 外部注入 ==========
+  // 外部注入
   private diagram: go.Diagram | null = null;
-  
-  // ========== 小地图状态 ==========
+  // 小地图状态
   private overview: go.Overview | null = null;
   private overviewContainer: HTMLDivElement | null = null;
   private lastOverviewScale: number = 0.1;
   private isDestroyed = false;
-  
-  // ========== 交互状态 ==========
+  // 交互状态
   private isNodeDragging: boolean = false;
   private isOverviewInteracting: boolean = false;
   private isOverviewBoxDragging: boolean = false;
@@ -53,34 +34,22 @@ export class FlowOverviewService {
   private isApplyingOverviewViewportUpdate: boolean = false;
   private overviewUpdateQueuedWhileApplying: boolean = false;
   private overviewScheduleUpdate: ((source: 'viewport' | 'document') => void) | null = null;
-  
-  // ========== 缓存与节流 ==========
+  // 缓存与节流
   private overviewBoundsCache: string = '';
   private overviewInteractionLastApplyAt = 0;
   private throttledUpdateBindingsTimer: ReturnType<typeof setTimeout> | null = null;
   private throttledUpdateBindingsPending = false;
-  
-  // ========== 调试日志 ==========
-  private overviewDebugLastLogAt = 0;
-  private overviewDebugSuppressedCount = 0;
-  private overviewDragDebugLastLogAt = 0;
-  
-  // ========== DiagramListener 引用 ==========
+  // DiagramListener 引用
   private overviewDocumentBoundsChangedHandler: ((e: go.DiagramEvent) => void) | null = null;
   private overviewViewportBoundsChangedHandler: ((e: go.DiagramEvent) => void) | null = null;
-  
-  // ========== 视口轮询 ==========
+  // 视口轮询
   private overviewViewportPollRafId: number | null = null;
   private overviewViewportPollLastKey: string = '';
-  
-  // ========== ResizeObserver ==========
+  // ResizeObserver
   private overviewResizeObserver: ResizeObserver | null = null;
-  
-  // ========== Pointer 事件清理 ==========
+  // Pointer 事件清理
   private overviewPointerCleanup: (() => void) | null = null;
 
-  // ========== 公开访问器 ==========
-  
   get overviewInstance(): go.Overview | null {
     return this.overview;
   }
@@ -89,28 +58,17 @@ export class FlowOverviewService {
     return this.overview !== null && !this.isDestroyed;
   }
 
-  // ========== 生命周期方法 ==========
-  
-  /**
-   * 设置关联的主图实例
-   */
+  /** 设置关联的主图实例 */
   setDiagram(diagram: go.Diagram | null): void {
     this.diagram = diagram;
   }
   
-  /**
-   * 设置节点拖拽状态（用于节流控制）
-   */
+  /** 设置节点拖拽状态（用于节流控制） */
   setNodeDragging(isDragging: boolean): void {
     this.isNodeDragging = isDragging;
   }
 
-  /**
-   * 初始化小地图
-   * 
-   * @param container 小地图容器元素
-   * @param isMobile 是否移动端
-   */
+  /** 初始化小地图 */
   initializeOverview(container: HTMLDivElement, isMobile: boolean = false): void {
     if (!this.diagram || this.isDestroyed) {
       this.logger.warn('无法初始化 Overview：主图未就绪');
@@ -143,7 +101,7 @@ export class FlowOverviewService {
         
         // 设置模板
         this.templateService.setupOverviewNodeTemplate(this.overview);
-        this.templateService.setupOverviewLinkTemplate(this.overview);
+        this.linkTemplateService.setupOverviewLinkTemplate(this.overview);
         
         this.overview.observed = this.diagram;
         
@@ -170,24 +128,19 @@ export class FlowOverviewService {
           this.overview.requestUpdate();
         }
         
-        this.logger.info(`Overview 初始化成功 - 尺寸: ${containerWidth}x${containerHeight}`);
+        this.logger.info(`Overview 初始化成功`);
       } catch (error) {
         this.logger.error('Overview 初始化失败:', error);
       }
     });
   }
   
-  /**
-   * 销毁小地图
-   */
+  /** 销毁小地图 */
   destroyOverview(): void {
     this.cleanupOverview();
     this.isDestroyed = true;
   }
-  
-  /**
-   * 刷新小地图
-   */
+  /** 刷新小地图 */
   refreshOverview(): void {
     if (!this.overview || !this.overviewContainer || this.isDestroyed) return;
     
@@ -204,10 +157,8 @@ export class FlowOverviewService {
           const scaleX = (containerWidth * (1 - padding * 2)) / docBounds.width;
           const scaleY = (containerHeight * (1 - padding * 2)) / docBounds.height;
           const newScale = Math.max(0.02, Math.min(0.5, Math.min(scaleX, scaleY)));
-          
           this.overview.scale = newScale;
           this.lastOverviewScale = newScale;
-          
           this.logger.debug(`Overview 已刷新 - scale: ${newScale}`);
         }
       }
@@ -216,9 +167,7 @@ export class FlowOverviewService {
     }
   }
   
-  /**
-   * 更新主题相关样式
-   */
+  /** 更新主题相关样式 */
   updateTheme(): void {
     if (!this.overview || !this.overviewContainer) return;
     
@@ -226,8 +175,6 @@ export class FlowOverviewService {
     this.overviewContainer.style.backgroundColor = this.getOverviewBackgroundColor();
   }
 
-  // ========== 私有方法 ==========
-  
   private cleanupOverview(): void {
     // 清理 Pointer 监听
     if (this.overviewPointerCleanup) {
@@ -306,9 +253,7 @@ export class FlowOverviewService {
     this.overviewResizeObserver.observe(container);
   }
   
-  /**
-   * 设置小地图自动缩放
-   */
+  /** 设置小地图自动缩放 */
   private setupOverviewAutoScale(): void {
     if (!this.diagram || !this.overview) return;
     
@@ -371,9 +316,7 @@ export class FlowOverviewService {
     const nodeBounds = getNodesBounds();
     this.overview.centerRect(nodeBounds);
     
-    /**
-     * 动态扩展边界 - 无限画布核心
-     */
+    // 动态扩展边界（无限画布核心）
     const calculateExtendedBounds = (baseBounds: go.Rect, viewportBounds: go.Rect): go.Rect => {
       const overflowLeft = Math.max(0, baseBounds.x - viewportBounds.x);
       const overflowRight = Math.max(0, viewportBounds.right - baseBounds.right);
@@ -408,24 +351,7 @@ export class FlowOverviewService {
 
       return extended;
     };
-    
-    // 限频日志
-    const logOverview = (tag: string, details?: Record<string, unknown>): void => {
-      if (!isOverviewDebugEnabled()) return;
-      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-      const minInterval = tag.startsWith('apply:') ? 200 : 400;
-      if (now - this.overviewDebugLastLogAt < minInterval) {
-        this.overviewDebugSuppressedCount++;
-        return;
-      }
-      this.overviewDebugLastLogAt = now;
-      this.logger.warn(`[Overview] ${tag}`, {
-        suppressedCount: this.overviewDebugSuppressedCount,
-        ...details
-      });
-      this.overviewDebugSuppressedCount = 0;
-    };
-    
+
     // 节流绑定更新
     const scheduleViewportBindingsUpdate = (): void => {
       if (this.throttledUpdateBindingsPending) return;
@@ -469,7 +395,6 @@ export class FlowOverviewService {
           ? fakeViewportBounds
           : this.diagram.viewportBounds;
         if (!viewportBounds.isReal()) {
-          logOverview('skip:viewport-not-real');
           return;
         }
       
@@ -503,10 +428,9 @@ export class FlowOverviewService {
             const boundsKey = `${q(viewportBounds.x)}|${q(viewportBounds.y)}|${q(viewportBounds.width)}|${q(viewportBounds.height)}`;
             
             this.setOverviewFixedBounds(worldBounds);
-            
+
             if (boundsKey !== this.overviewBoundsCache) {
               this.overviewBoundsCache = boundsKey;
-              logOverview('apply:bounds', { usingFakeViewportBounds });
             }
 
             const currentScale = this.overview.scale;
@@ -620,9 +544,7 @@ export class FlowOverviewService {
     (this.overview as unknown as { fixedBounds: go.Rect | undefined }).fixedBounds = bounds ?? undefined;
   }
 
-  /**
-   * 绑定 Overview 的 Pointer 事件监听
-   */
+  /** 绑定 Overview 的 Pointer 事件监听 */
   private attachOverviewPointerListeners(container: HTMLDivElement): void {
     if (this.overviewPointerCleanup) {
       this.overviewPointerCleanup();
@@ -647,19 +569,10 @@ export class FlowOverviewService {
       return this.overview.transformViewToDoc(new go.Point(viewX, viewY));
     };
 
-    const debugDrag = (reason: string, _details?: Record<string, unknown>): void => {
-      if (!isOverviewDebugEnabled()) return;
-      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-      const minIntervalMs = reason.includes(':move') ? 80 : 200;
-      if (now - this.overviewDragDebugLastLogAt < minIntervalMs) return;
-      this.overviewDragDebugLastLogAt = now;
-      this.logger.warn('[OverviewDragDebug]', { reason, isDraggingBox, isManualBoxDrag });
-    };
-
     const stopEventForManualDrag = (ev: Event): void => {
-      try { (ev as Event & { stopImmediatePropagation?: () => void }).stopImmediatePropagation?.(); } catch { /* ignore */ }
-      try { ev.stopPropagation(); } catch { /* ignore */ }
-      try { (ev as Event & { preventDefault?: () => void }).preventDefault?.(); } catch { /* ignore */ }
+      try { (ev as Event & { stopImmediatePropagation?: () => void }).stopImmediatePropagation?.(); } catch { /* noop */ }
+      try { ev.stopPropagation(); } catch { /* noop */ }
+      try { (ev as Event & { preventDefault?: () => void }).preventDefault?.(); } catch { /* noop */ }
     };
 
     const beginManualBoxDrag = (pt: go.Point): void => {
@@ -672,10 +585,9 @@ export class FlowOverviewService {
       manualBoxDragOffset = { dx: pt.x - boxCenter.x, dy: pt.y - boxCenter.y };
       manualDragViewportSize = { w: vb.width, h: vb.height };
 
-      try { this.diagram.skipsUndoManager = true; } catch { /* ignore */ }
+      try { this.diagram.skipsUndoManager = true; } catch { /* noop */ }
 
       isManualBoxDrag = true;
-      debugDrag('manualDrag:begin');
     };
 
     const applyManualBoxDrag = (pt: go.Point): void => {
@@ -704,12 +616,9 @@ export class FlowOverviewService {
       isManualBoxDrag = false;
       manualBoxDragOffset = null;
       manualDragViewportSize = null;
-      
       if (this.diagram) {
-        try { this.diagram.skipsUndoManager = false; } catch { /* ignore */ }
+        try { this.diagram.skipsUndoManager = false; } catch { /* noop */ }
       }
-
-      debugDrag('manualDrag:end');
     };
 
     const onPointerDown = (ev: PointerEvent): void => {
@@ -758,7 +667,7 @@ export class FlowOverviewService {
     
     const onPointerUpLike = (): void => {
       if (hasPointerCapture && capturedPointerId !== null) {
-        try { container.releasePointerCapture(capturedPointerId); } catch { /* ignore */ }
+        try { container.releasePointerCapture(capturedPointerId); } catch { /* noop */ }
       }
       capturedPointerId = null;
       hasPointerCapture = false;

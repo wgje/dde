@@ -545,10 +545,12 @@ export class OfflineIntegrityService implements OnDestroy {
   private repairIssue(projects: Project[], issue: IntegrityIssue): boolean {
     const project = projects.find(p => p.id === issue.projectId);
     if (!project) return false;
-    
+
+    const taskMap = new Map(project.tasks.map(t => [t.id, t] as const));
+
     switch (issue.repairAction) {
       case 'clear_parent_id': {
-        const task = project.tasks.find(t => t.id === issue.entityId);
+        const task = taskMap.get(issue.entityId);
         if (task) {
           task.parentId = null;
           this.logger.debug('修复: 清除孤儿 parentId', { taskId: task.id });
@@ -556,7 +558,7 @@ export class OfflineIntegrityService implements OnDestroy {
         }
         return false;
       }
-      
+
       case 'soft_delete_connection': {
         const conn = project.connections.find(c => c.id === issue.entityId);
         if (conn) {
@@ -566,9 +568,9 @@ export class OfflineIntegrityService implements OnDestroy {
         }
         return false;
       }
-      
+
       case 'set_stage_null': {
-        const task = project.tasks.find(t => t.id === issue.entityId);
+        const task = taskMap.get(issue.entityId);
         if (task) {
           task.stage = null;
           this.logger.debug('修复: 重置无效 stage', { taskId: task.id });
@@ -576,10 +578,10 @@ export class OfflineIntegrityService implements OnDestroy {
         }
         return false;
       }
-      
+
       case 'break_cycle': {
         // 打破循环：找到循环中的任务，清除其 parentId
-        const task = project.tasks.find(t => t.id === issue.entityId);
+        const task = taskMap.get(issue.entityId);
         if (task) {
           task.parentId = null;
           this.logger.debug('修复: 打破循环引用', { taskId: task.id });

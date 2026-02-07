@@ -6,6 +6,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { GOJS_CONFIG, UI_CONFIG } from '../../../../config';
+import { getErrorMessage } from '../../../../utils/result';
 import * as go from 'gojs';
 
 /**
@@ -245,9 +246,8 @@ export class FlowDragDropService {
     targetId: string,
     loc: go.Point
   ): boolean {
-    const tasks = this.projectState.tasks();
-    const sourceTask = tasks.find(t => t.id === sourceId);
-    const targetTask = tasks.find(t => t.id === targetId);
+    const sourceTask = this.projectState.getTask(sourceId);
+    const targetTask = this.projectState.getTask(targetId);
     
     if (!sourceTask || !targetTask) {
       this.logger.warn('insertTaskBetweenNodes: 找不到源或目标任务', { sourceId, targetId });
@@ -288,7 +288,7 @@ export class FlowDragDropService {
   ): void {
     // 场景二：待分配节点在流程图内移动，仅更新位置。
     // 不再支持“拖到连接线上立即插入并任务化”，任务化只在“拉线”确认时发生。
-    this.taskOps.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
+    this.taskOps.core.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
   }
   
   // ========== 私有方法 ==========
@@ -411,7 +411,7 @@ export class FlowDragDropService {
       const { sourceId, targetId } = insertInfo.insertOnLink;
       this.insertTaskBetweenNodes(task.id, sourceId, targetId, docPoint);
     } else if (insertInfo.parentId) {
-      const parentTask = tasks.find(t => t.id === insertInfo.parentId);
+      const parentTask = this.projectState.getTask(insertInfo.parentId);
       if (parentTask) {
         const newStage = (parentTask.stage || 1) + 1;
         this.taskOps.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
@@ -420,7 +420,7 @@ export class FlowDragDropService {
         }, delayMs);
       }
     } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
-      const refTask = tasks.find(t => t.id === (insertInfo.beforeTaskId || insertInfo.afterTaskId));
+      const refTask = this.projectState.getTask(insertInfo.beforeTaskId || insertInfo.afterTaskId!);
       if (refTask?.stage) {
         if (insertInfo.afterTaskId) {
           const siblings = tasks
@@ -441,6 +441,49 @@ export class FlowDragDropService {
     }
   }
   
+  /**
+   * 处理待分配区域 drop 的完整逻辑
+   * 包含：解除分配、待分配块之间重挂载
+   * @returns 是否需要刷新图表
+   */
+  handleFullUnassignedDrop(event: DragEvent): boolean {
+    event.preventDefault();
+
+    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
+    if (!data) {
+      return this.handleDropToUnassigned(event);
+    }
+
+    try {
+      const draggedTask = JSON.parse(data) as Task;
+
+      // 场景1：已分配任务拖回待分配区 → 解除分配
+      if (draggedTask?.id && draggedTask.stage !== null) {
+        return this.handleDropToUnassigned(event);
+      }
+
+      // 场景2：待分配块之间拖放 → 改变父子关系
+      if (draggedTask?.id && draggedTask.stage === null) {
+        const unassignedTasks = this.projectState.unassignedTasks();
+        const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
+
+        if (targetCandidates.length > 0) {
+          const targetTask = targetCandidates[0];
+          const result = this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+          if (!result.ok) {
+            this.toast.error('重新挂载失败', getErrorMessage(result.error));
+          } else {
+            this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
+          }
+          return result.ok;
+        }
+      }
+    } catch {
+      return this.handleDropToUnassigned(event);
+    }
+    return false;
+  }
+
   /**
    * 释放资源
    */

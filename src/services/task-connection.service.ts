@@ -1,6 +1,8 @@
 import { Injectable, inject } from '@angular/core';
 import { Project, Connection } from '../models';
 import { LoggerService } from './logger.service';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 
 /**
  * 任务连接服务 - 负责跨树连接的管理
@@ -15,24 +17,8 @@ import { LoggerService } from './logger.service';
 export class TaskConnectionService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskConnection');
-
-  // 回调函数
-  private recordAndUpdateCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private recordAndUpdateDebouncedCallback: ((mutator: (project: Project) => Project) => void) | null = null;
-  private getActiveProjectCallback: (() => Project | null) | null = null;
-
-  /**
-   * 设置回调函数
-   */
-  setCallbacks(callbacks: {
-    recordAndUpdate: (mutator: (project: Project) => Project) => void;
-    recordAndUpdateDebounced: (mutator: (project: Project) => Project) => void;
-    getActiveProject: () => Project | null;
-  }): void {
-    this.recordAndUpdateCallback = callbacks.recordAndUpdate;
-    this.recordAndUpdateDebouncedCallback = callbacks.recordAndUpdateDebounced;
-    this.getActiveProjectCallback = callbacks.getActiveProject;
-  }
+  private readonly projectState = inject(ProjectStateService);
+  private readonly recorder = inject(TaskRecordTrackingService);
 
   // ========== 公共 API ==========
 
@@ -81,8 +67,8 @@ export class TaskConnectionService {
       return;
     }
     
-    const sourceTask = activeP.tasks.find(t => t.id === sourceId);
-    const targetTask = activeP.tasks.find(t => t.id === targetId);
+    const sourceTask = this.projectState.getTask(sourceId);
+    const targetTask = this.projectState.getTask(targetId);
     if (!sourceTask || !targetTask) return;
     
     if (sourceId === targetId) return;
@@ -165,14 +151,14 @@ export class TaskConnectionService {
   // ========== 私有辅助方法 ==========
 
   private getActiveProject(): Project | null {
-    return this.getActiveProjectCallback?.() ?? null;
+    return this.projectState.activeProject();
   }
 
   private recordAndUpdate(mutator: (project: Project) => Project): void {
-    this.recordAndUpdateCallback?.(mutator);
+    this.recorder.recordAndUpdate(mutator);
   }
 
   private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
-    this.recordAndUpdateDebouncedCallback?.(mutator);
+    this.recorder.recordAndUpdateDebounced(mutator);
   }
 }

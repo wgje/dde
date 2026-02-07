@@ -12,6 +12,7 @@
 | 1.1 | 2026-01-22 | 深度审查优化：补充离线同步、权限校验、API 成本控制、错误处理、可访问性、数据迁移等 |
 | 1.2 | 2026-01-23 | 技术架构升级：采用 Groq + Supabase Edge Function 三明治架构，替换 OpenAI Whisper |
 | 1.3 | 2026-01-23 | 代码实现验证：修复 Edge Function Deno 语法、RLS 策略拆分、iOS Safari 兼容、完整离线队列 |
+| 1.4 | 2026-02-07 | 实现审查修复：BlackBoxSync 持久化队列集成、FocusPreference 云同步、离线录音自动创建条目、键盘/ARIA 无障碍完善 |
 
 ### 技术架构亮点
 
@@ -1002,15 +1003,12 @@ export const canSnooze = computed(() => {
 ```
 src/services/
 ├── black-box.service.ts         # 黑匣子 CRUD
-├── black-box-sync.service.ts    # 黑匣子同步（遵循 Offline-first）
+├── black-box-sync.service.ts    # 黑匣子同步（持久化 RetryQueue 集成）
 ├── gate.service.ts              # 大门逻辑
 ├── spotlight.service.ts         # 聚光灯逻辑
 ├── strata.service.ts            # 地质层逻辑
-└── speech-to-text.service.ts    # 语音转文字
-
-src/app/features/focus/
-└── services/
-    └── focus-preference.service.ts  # 🆕 专注模式偏好管理
+├── speech-to-text.service.ts    # 语音转文字
+└── focus-preference.service.ts  # 专注模式偏好管理（含云同步）
 ```
 
 ### 5.2 服务职责
@@ -1992,11 +1990,27 @@ interface FocusDatabase {
 
 ### 11.4 同步策略
 
-黑匣子同步遵循现有架构：
+黑匣子同步遵循现有架构，通过 RetryQueue 持久化队列确保数据安全：
 
 ```typescript
-// 与 SimpleSyncService 保持一致的同步策略
+// BlackBoxSyncService 通过回调模式集成 RetryQueue
 class BlackBoxSyncService {
+  private retryQueueHandler: ((entry: BlackBoxEntry) => void) | null = null;
+
+  // SimpleSyncService 调用此方法注入 RetryQueue 回调
+  setRetryQueueHandler(handler: (entry: BlackBoxEntry) => void): void {
+    this.retryQueueHandler = handler;
+  }
+
+  // 调度同步：IndexedDB 标记 pending → 防抖 → 推入 RetryQueue
+  scheduleSync(entry: BlackBoxEntry): void {
+    // 1. 保存到 IndexedDB，标记 syncStatus: 'pending'
+    this.saveToLocal(entry);
+
+    // 2. 防抖 3s 后推入 RetryQueue（持久化）
+    this.debouncedFlush(entry);
+  }
+
   // 增量拉取：updated_at > last_sync_time
   async pullChanges(): Promise<void> {
     const lastSync = await this.getLastSyncTime('black_box');
@@ -2005,13 +2019,23 @@ class BlackBoxSyncService {
       .select('*')
       .gt('updated_at', lastSync)
       .order('updated_at', { ascending: true });
-    
-    // 合并到本地 IndexedDB
+
+    // 合并到本地 IndexedDB（LWW 策略）
     for (const entry of data ?? []) {
       await this.mergeWithLocal(entry);
     }
   }
-  
+
+  // 网络恢复时：扫描 IndexedDB 中 syncStatus === 'pending' 的条目
+  async recoverPendingEntries(): Promise<void> {
+    const pendingEntries = await this.getPendingFromLocal();
+    for (const entry of pendingEntries) {
+      if (this.retryQueueHandler) {
+        this.retryQueueHandler(entry);
+      }
+    }
+  }
+
   // 冲突解决：LWW
   private async mergeWithLocal(remote: BlackBoxEntry): Promise<void> {
     const local = await this.localStorage.get(remote.id);
@@ -2021,7 +2045,17 @@ class BlackBoxSyncService {
     }
   }
 }
+
+// SimpleSyncService 中的集成
+this.blackBoxSync.setRetryQueueHandler((entry: BlackBoxEntry) => {
+  this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId);
+});
 ```
+
+**关键架构改进（v1.4）**：
+- 替换内存队列为 RetryQueue 持久化队列，消除浏览器崩溃/关闭导致的数据丢失
+- 通过回调模式避免 `src/services/` 与 `src/app/core/services/sync/` 的循环依赖
+- 网络恢复时自动扫描 IndexedDB 中 `syncStatus === 'pending'` 的条目
 
 ---
 
@@ -2031,39 +2065,69 @@ class BlackBoxSyncService {
 
 | 元素 | 快捷键 | 行为 |
 |------|--------|------|
-| 大门 | `1` / `Enter` | 标记已读 |
-| 大门 | `2` / `Space` | 标记完成 |
-| 大门 | `3` / `S` | 稍后提醒 |
+| 大门 | `1` | 标记已读 |
+| 大门 | `2` | 标记完成 |
+| 大门 | `3` | 稍后提醒 |
 | 大门 | `Escape` | 无操作（不允许关闭） |
-| 录音按钮 | `Space` (长按) | 开始/停止录音 |
-| 黑匣子条目 | `R` | 已读 |
-| 黑匣子条目 | `C` | 完成 |
-| 黑匣子条目 | `A` | 归档 |
+| 大门录音按钮 | `Space` (长按) | 开始/停止录音 |
+| 聚光灯 | `Enter` | 完成当前任务 |
+| 聚光灯 | `→` (ArrowRight) | 跳过当前任务 |
+| 聚光灯 | `Escape` | 退出聚光灯模式 |
+| 黑匣子面板/地质层 | `Enter` / `Space` | 展开/折叠面板 |
+| 黑匣子录音按钮 | `Space` (长按) | 开始/停止录音 |
+| 地质层日期层 | `Enter` / `Space` | 展开/折叠该日层 |
 
 ### 12.2 ARIA 标签
 
 ```html
 <!-- 大门遮罩 -->
-<div role="dialog" 
-     aria-modal="true" 
+<div role="dialog"
+     aria-modal="true"
      aria-labelledby="gate-title"
-     aria-describedby="gate-description">
-  <h2 id="gate-title">昨日遗留事项</h2>
-  <p id="gate-description">请处理以下遗留事项后继续</p>
+     aria-describedby="gate-description"
+     tabindex="-1">
+</div>
+
+<!-- 聚光灯视图 -->
+<div role="dialog"
+     aria-modal="true"
+     aria-label="专注模式">
+  <!-- 任务卡片区域带 aria-live，切换任务时自动播报 -->
+  <div aria-live="polite">
+    <app-spotlight-card />
+  </div>
+</div>
+
+<!-- 大门进度条 -->
+<div role="progressbar"
+     [attr.aria-valuenow]="progress().current"
+     [attr.aria-valuemin]="0"
+     [attr.aria-valuemax]="progress().total"
+     aria-label="处理进度">
 </div>
 
 <!-- 录音按钮 -->
 <button [attr.aria-pressed]="isRecording()"
-        [attr.aria-label]="isRecording() ? '松开停止录音' : '按住开始录音'"
-        role="switch">
+        [attr.aria-label]="isRecording() ? '松开停止录音' : '按住开始录音'">
 </button>
 
-<!-- 地质层 -->
-<section role="feed" aria-label="已完成事项历史">
-  <article role="article" *ngFor="let item of items">
-    ...
-  </article>
-</section>
+<!-- 可折叠面板标题栏 -->
+<div role="button"
+     tabindex="0"
+     [attr.aria-expanded]="isExpanded()"
+     aria-label="黑匣子"
+     (keydown.enter)="toggleExpand()"
+     (keydown.space)="toggleExpand(); $event.preventDefault()">
+</div>
+
+<!-- 地质层列表 -->
+<div role="list" aria-label="已完成任务列表">
+  <div role="listitem">
+    <div role="button" tabindex="0"
+         [attr.aria-expanded]="!isCollapsed()">
+    </div>
+  </div>
+</div>
 ```
 
 ### 12.3 屏幕阅读器支持
@@ -2214,8 +2278,19 @@ CREATE UNIQUE INDEX idx_transcription_usage_user_date ON transcription_usage(use
 ALTER TABLE black_box_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transcription_usage ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "用户只能访问自己的黑匣子" ON black_box_entries FOR ALL USING (auth.uid() = user_id);
-CREATE POLICY "用户只能访问自己的使用量" ON transcription_usage FOR ALL USING (auth.uid() = user_id);
+-- 黑匣子：按操作拆分 RLS 策略（与 4.3 节一致）
+CREATE POLICY "black_box_select_policy" ON black_box_entries
+  FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "black_box_insert_policy" ON black_box_entries
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "black_box_update_policy" ON black_box_entries
+  FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "black_box_delete_policy" ON black_box_entries
+  FOR DELETE USING (auth.uid() = user_id);
+
+-- 使用量：仅允许读取（写入由 service_role 在 Edge Function 中执行）
+CREATE POLICY "用户只能读取自己的使用量" ON transcription_usage
+  FOR SELECT USING (auth.uid() = user_id);
 ```
 
 ### 14.3 本地测试

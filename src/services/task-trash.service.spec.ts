@@ -12,10 +12,12 @@
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
-import { TaskTrashService, TrashServiceCallbacks } from './task-trash.service';
+import { TaskTrashService } from './task-trash.service';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
 import { Project, Task } from '../models';
+import { ProjectStateService } from './project-state.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 
 // 测试数据工厂
 function createTask(overrides: Partial<Task> = {}): Task {
@@ -57,7 +59,6 @@ describe('TaskTrashService', () => {
   let mockLogger: { category: ReturnType<typeof vi.fn> };
   let mockLayoutService: Partial<LayoutService>;
   let currentProject: Project | null;
-  let mockCallbacks: TrashServiceCallbacks;
   
   beforeEach(() => {
     currentProject = null;
@@ -77,10 +78,18 @@ describe('TaskTrashService', () => {
       rebalance: vi.fn().mockImplementation((p: Project) => p),
     };
     
-    // 设置回调
-    mockCallbacks = {
-      getActiveProject: () => currentProject,
-      recordAndUpdate: (mutator) => {
+    const mockProjectState = {
+      activeProject: () => currentProject,
+      getTask: vi.fn((taskId: string) => currentProject?.tasks.find(t => t.id === taskId) ?? null),
+    };
+    
+    const mockRecorder = {
+      recordAndUpdate: (mutator: (p: Project) => Project) => {
+        if (currentProject) {
+          currentProject = mutator(currentProject);
+        }
+      },
+      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         if (currentProject) {
           currentProject = mutator(currentProject);
         }
@@ -91,11 +100,12 @@ describe('TaskTrashService', () => {
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: LayoutService, useValue: mockLayoutService },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskRecordTrackingService, useValue: mockRecorder },
       ],
     });
     
     service = runInInjectionContext(injector, () => new TaskTrashService());
-    service.setCallbacks(mockCallbacks);
   });
   
   describe('初始状态', () => {

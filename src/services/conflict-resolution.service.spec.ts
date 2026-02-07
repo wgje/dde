@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ConflictResolutionService } from './conflict-resolution.service';
+import { ConflictDetectionService } from './conflict-detection.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
@@ -135,7 +136,8 @@ describe('ConflictResolutionService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    const injector = Injector.create({
+    // First create injector with base dependencies
+    const baseInjector = Injector.create({
       providers: [
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: LayoutService, useValue: mockLayoutService },
@@ -143,6 +145,17 @@ describe('ConflictResolutionService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+      ],
+    });
+
+    // Create ConflictDetectionService in injection context (it uses inject())
+    const conflictDetection = runInInjectionContext(baseInjector, () => new ConflictDetectionService());
+
+    // Create child injector with ConflictDetectionService
+    const injector = Injector.create({
+      parent: baseInjector,
+      providers: [
+        { provide: ConflictDetectionService, useValue: conflictDetection },
       ],
     });
 

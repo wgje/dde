@@ -6,6 +6,7 @@ import { CACHE_CONFIG } from '../config';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
+import { LoggerService } from './logger.service';
 
 /** 本地颜色模式覆盖的存储键 */
 const LOCAL_COLOR_MODE_KEY = 'nanoflow.colorMode.local';
@@ -30,6 +31,8 @@ export class ThemeService {
   private syncService = inject(SimpleSyncService);
   private authService = inject(AuthService);
   private toast = inject(ToastService);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('Theme');
   private meta = inject(Meta);
   private platformId = inject(PLATFORM_ID);
   
@@ -170,7 +173,7 @@ export class ThemeService {
         if (parsed === 'light' || parsed === 'dark' || parsed === 'system') {
           this.colorMode.set(parsed);
         }
-      } catch { /* ignore */ }
+      } catch (e) { this.logger.debug('解析本地主题设置失败', { error: e }); }
     } else if (initialMode === 'dark' || initialMode === 'light') {
       // 如果没有明确选择，保持 'system'
       // 但确保 DOM 状态一致

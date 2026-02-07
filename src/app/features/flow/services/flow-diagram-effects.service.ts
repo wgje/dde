@@ -27,6 +27,37 @@ export class FlowDiagramEffectsService {
   private readonly flowCommand = inject(FlowCommandService);
   private readonly logger = inject(LoggerService);
 
+  /** rAF 调度 ID（用于取消） */
+  private pendingRafId: number | null = null;
+  /** 是否有待处理的图表更新 */
+  private diagramUpdatePending = false;
+
+  /**
+   * 使用 requestAnimationFrame 调度图表更新
+   * 将多个 signal 变化合并到同一帧
+   */
+  scheduleRafDiagramUpdate(tasks: Task[], forceUpdate: boolean, isDestroyed: boolean): void {
+    if (forceUpdate) this.diagramUpdatePending = true;
+    if (this.pendingRafId !== null) return;
+    this.pendingRafId = requestAnimationFrame(() => {
+      this.pendingRafId = null;
+      if (isDestroyed || !this.diagram.isInitialized) return;
+      this.diagram.updateDiagram(this.projectState.tasks(), this.diagramUpdatePending);
+      this.diagramUpdatePending = false;
+    });
+  }
+
+  /** 获取当前 rAF ID（用于组件清理） */
+  getPendingRafId(): number | null { return this.pendingRafId; }
+
+  /** 取消待处理的 rAF */
+  cancelPendingRaf(): void {
+    if (this.pendingRafId !== null) {
+      cancelAnimationFrame(this.pendingRafId);
+      this.pendingRafId = null;
+    }
+  }
+
   /**
    * 创建任务数据变化 effect
    * 监听任务数据变化，使用 rAF 对齐渲染帧更新图表

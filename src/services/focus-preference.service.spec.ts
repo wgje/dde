@@ -7,7 +7,7 @@ import { TestBed } from '@angular/core/testing';
 import { FocusPreferenceService } from './focus-preference.service';
 import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
-import { focusPreferences } from '../app/core/state/focus-stores';
+import { focusPreferences } from '../state/focus-stores';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 
 describe('FocusPreferenceService', () => {

@@ -10,7 +10,7 @@ import { ToastService } from './toast.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { signal } from '@angular/core';
-import { isRecording, isTranscribing } from '../app/core/state/focus-stores';
+import { isRecording, isTranscribing } from '../state/focus-stores';
 
 describe('SpeechToTextService', () => {
   let service: SpeechToTextService;

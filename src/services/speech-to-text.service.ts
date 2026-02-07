@@ -8,6 +8,7 @@
 import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { AuthService } from './auth.service';
+import { BlackBoxService } from './black-box.service';
 import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
@@ -19,7 +20,7 @@ import {
   isTranscribing, 
   offlinePendingCount,
   remainingQuota 
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 import { OfflineAudioCacheEntry } from '../models/focus';
 
 @Injectable({
@@ -28,6 +29,7 @@ import { OfflineAudioCacheEntry } from '../models/focus';
 export class SpeechToTextService {
   private supabaseClient = inject(SupabaseClientService);
   private auth = inject(AuthService);
+  private blackBoxService = inject(BlackBoxService);
   private toast = inject(ToastService);
   private network = inject(NetworkAwarenessService);
   private logger = inject(LoggerService);
@@ -84,8 +86,29 @@ export class SpeechToTextService {
   private setupNetworkListener(): void {
     window.addEventListener('online', () => {
       this.logger.info('SpeechToText', 'Network restored, processing offline audio cache');
-      this.processOfflineCache();
+      this.processOfflineCacheAndCreateEntries();
     });
+  }
+
+  /**
+   * 处理离线缓存并创建黑匣子条目
+   */
+  private async processOfflineCacheAndCreateEntries(): Promise<void> {
+    try {
+      const results = await this.processOfflineCache();
+      for (const { text } of results) {
+        if (text.trim()) {
+          this.blackBoxService.create({ content: text });
+          this.logger.debug('SpeechToText', `Created BlackBox entry from offline audio: "${text.slice(0, 50)}..."`);
+        }
+      }
+      if (results.length > 0) {
+        this.toast.success('离线录音已处理', `已转写 ${results.length} 条离线录音`);
+      }
+    } catch (e) {
+      this.logger.error('SpeechToText', 'Failed to process offline cache',
+        e instanceof Error ? e.message : String(e));
+    }
   }
   
   /**

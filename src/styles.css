@@ -9,14 +9,15 @@
 /* 关键字体子集（117/118/119）预加载 + 内联 @font-face，确保首屏快速渲染 */
 /* 其他字体子集通过异步加载的 style.css 按需加载（unicode-range 自动匹配） */
 
-/* 全局字体设置 - 强制使用霞鹜文楷屏幕阅读版 */
+/* 全局字体设置 - 霞鹜文楷屏幕阅读版 + 中文系统字体回退 */
+/* font-display: swap 生效时，LXGW 未加载前使用系统中文字体渲染，避免 FOIT */
 *, *::before, *::after,
 input, button, select, textarea {
-  font-family: "LXGW WenKai Screen", sans-serif !important;
+  font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif !important;
 }
 
 body {
-  font-family: "LXGW WenKai Screen", sans-serif;
+  font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
 }
 
 /* ========== 主题变量 ========== */
@@ -541,8 +542,10 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   accent-color: #4f46e5;
 }
 
-/* ========== GoJS 流程图画布触摸手势 ========== */
-/* 显式禁用浏览器默认的触摸手势，避免与 GoJS 画布操作冲突 */
+/* ========== 性能优化：CSS Containment ========== */
+/* 【性能优化 2026-02-05】扩展 containment 减少布局重计算范围 */
+
+/* GoJS 流程图画布 - 完全隔离 */
 .flow-canvas-container {
   touch-action: none;
   /* 防止长按触发上下文菜单 */
@@ -550,7 +553,87 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   /* 防止文本选择 */
   -webkit-user-select: none;
   user-select: none;
+  contain: strict; /* 最强隔离：布局、绘制、大小 */
+}
+
+/* 文本视图滚动容器 - 隔离布局和绘制 */
+.text-view-scroll-container {
   contain: layout paint;
+}
+
+/* 阶段卡片容器 - 隔离布局计算 */
+.stage-card-container,
+.text-stage-card {
+  contain: layout style;
+}
+
+/* 任务卡片 - 隔离内部变化 */
+.task-card,
+.text-task-card {
+  contain: layout;
+}
+
+/* 项目卡片 - 隔离布局 */
+.project-card {
+  contain: layout;
+}
+
+/* 侧边栏 - 隔离布局和绘制 */
+.sidebar-container {
+  contain: layout paint;
+}
+
+/* 模态框内容 - 隔离避免影响背景 */
+.modal-content {
+  contain: layout paint;
+}
+
+/* ========== 性能优化：will-change 提示 ========== */
+/* 【性能优化 2026-02-05】为频繁变化的元素添加 GPU 加速提示 */
+
+/* 拖拽元素 - GPU 加速 */
+.dragging,
+[data-dragging="true"] {
+  will-change: transform;
+}
+
+/* 动画元素 */
+.animate-fade-in,
+.animate-scale-in,
+.animate-slide-up,
+.animate-dropdown,
+.animate-slide-down {
+  will-change: opacity, transform;
+}
+
+/* 展开/收起动画 */
+.collapsible-content {
+  will-change: height;
+}
+
+/* 悬停状态元素 */
+.hover-lift:hover {
+  will-change: transform;
+}
+
+/* ========== 性能优化：content-visibility ========== */
+/* 【性能优化 2026-02-05】对屏幕外内容延迟渲染 */
+
+/* 长列表中的项目 - 屏幕外时跳过渲染 */
+.virtual-list-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px; /* 估计高度 */
+}
+
+/* 隐藏的抽屉/面板 */
+.offscreen-panel {
+  content-visibility: hidden;
+}
+
+/* 折叠的区域 */
+.collapsed-section {
+  content-visibility: hidden;
+  contain-intrinsic-size: 0 0;
 }
 
 /* ========== 拖拽幽灵元素样式 ========== */

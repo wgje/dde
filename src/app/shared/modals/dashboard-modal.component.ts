@@ -1,4 +1,4 @@
-import { Component, inject, Output, EventEmitter, computed, signal, OnInit, OnDestroy } from '@angular/core';
+import { Component, inject, Output, EventEmitter, computed, signal, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
@@ -9,40 +9,17 @@ import { ToastService } from '../../../services/toast.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
 import { Task } from '../../../models';
 
-/** 任务差异项 */
 interface TaskDiff {
-  id: string;
-  title: string;
-  localValue?: string;
-  remoteValue?: string;
-  status: 'same' | 'modified' | 'local-only' | 'remote-only';
-  field?: string; // 冲突字段名
+  id: string; title: string; localValue?: string; remoteValue?: string;
+  status: 'same' | 'modified' | 'local-only' | 'remote-only'; field?: string;
 }
-
-/** 冲突展示项 */
 interface ConflictItem {
-  projectId: string;
-  projectName: string;
-  reason: string;
-  reasonLabel: string;
-  conflictedAt: string;
-  localTaskCount: number;
-  remoteTaskCount: number;
-  taskDiffs: TaskDiff[];
-  isExpanded: boolean;
-  isResolving: boolean;
+  projectId: string; projectName: string; reason: string; reasonLabel: string;
+  conflictedAt: string; localTaskCount: number; remoteTaskCount: number;
+  taskDiffs: TaskDiff[]; isExpanded: boolean; isResolving: boolean;
 }
 
-/**
- * 仪表盘模态框组件
- * 集中展示数据冲突、同步状态、焦点通知等重要信息
- * 支持内联冲突解决，无需跳转到独立模态框
- * 
- * 设计原则：
- * - 移动端优先：差异视图使用垂直堆叠布局
- * - 内联操作：直接在仪表盘内解决冲突
- * - 简化策略：使用本地 / 使用云端 / 保留两者
- */
+/** 仪表盘模态框 - 展示数据冲突、同步状态，支持内联冲突解决 */
 @Component({
   selector: 'app-dashboard-modal',
   standalone: true,
@@ -158,7 +135,7 @@ interface ConflictItem {
             </div>
           </div>
           
-          <!-- ========== 内联冲突解决区域 ========== -->
+
           @if (conflictCount() > 0 && showConflictList()) {
             <div class="space-y-4">
               <div class="flex items-center justify-between">
@@ -476,7 +453,7 @@ interface ConflictItem {
     </div>
   `
 })
-export class DashboardModalComponent implements OnInit, OnDestroy {
+export class DashboardModalComponent implements OnInit {
   private actionQueue = inject(ActionQueueService);
   private syncService = inject(SimpleSyncService);
   private authService = inject(AuthService);
@@ -488,10 +465,8 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
   @Output() close = new EventEmitter<void>();
   @Output() openConflictCenter = new EventEmitter<void>();
   
-  /** 用户是否已登录 */
   readonly isLoggedIn = computed(() => !!this.authService.currentUserId());
-  
-  // 本地状态
+
   showDeadLetters = signal(false);
   showConflictList = signal(false);
   isRetrying = signal(false);
@@ -499,28 +474,19 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
   
   /** 冲突展示项列表 */
   conflictItems = signal<ConflictItem[]>([]);
-  
-  // 从服务获取状态
   readonly pendingCount = this.actionQueue.queueSize;
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
   readonly isProcessing = this.actionQueue.isProcessing;
-  
-  // 冲突仓库状态
   readonly conflictCount = this.conflictStorage.conflictCount;
   readonly hasUnresolvedConflicts = this.conflictStorage.hasUnresolvedConflicts;
-  
   readonly isOnline = computed(() => this.syncService.syncState().isOnline);
   readonly isSyncing = computed(() => this.syncService.syncState().isSyncing);
   readonly syncError = computed(() => this.syncService.syncState().syncError);
   readonly offlineMode = computed(() => this.syncService.syncState().offlineMode);
-  
-  // 计算属性 - 是否有需要关注的问题
   readonly hasIssues = computed(() => 
     this.deadLetterCount() > 0 || this.pendingCount() > 0 || !!this.syncError() || this.offlineMode() || this.conflictCount() > 0
   );
-  
-  /** 详细状态文本 */
   readonly detailedStatus = computed(() => {
     if (this.isSyncing()) {
       return '正在同步数据...';
@@ -545,17 +511,9 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     }
     return '数据已保存到云端';
   });
-  
-  /**
-   * 切换死信队列显示
-   */
   toggleDeadLetters() {
     this.showDeadLetters.update((v: boolean) => !v);
   }
-  
-  /**
-   * 立即重试所有待处理操作
-   */
   async retryAll() {
     // 防止重复点击
     if (this.isRetrying() || this.isProcessing()) return;
@@ -570,33 +528,17 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       this.isRetrying.set(false);
     }
   }
-  
-  /**
-   * 重试单个死信
-   */
   retryDeadLetter(itemId: string) {
     this.actionQueue.retryDeadLetter(itemId);
   }
-  
-  /**
-   * 放弃单个死信
-   */
   dismissDeadLetter(itemId: string) {
     this.actionQueue.dismissDeadLetter(itemId);
   }
-  
-  /**
-   * 清空所有死信
-   */
   clearAllDeadLetters() {
     this.actionQueue.clearDeadLetterQueue();
     this.showDeadLetters.set(false);
     this.toastService.success('已清空', '所有失败记录已清空');
   }
-  
-  /**
-   * 重新同步当前项目
-   */
   async resyncProject() {
     if (this.isResyncing()) return;
     
@@ -619,10 +561,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       this.isResyncing.set(false);
     }
   }
-  
-  /**
-   * 获取操作的可读标签
-   */
   getActionLabel(action: { type: string; entityType: string; entityId: string }): string {
     const typeLabels: Record<string, string> = {
       'create': '创建',
@@ -637,10 +575,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     
     return `${typeLabels[action.type] || action.type} ${entityLabels[action.entityType] || action.entityType}`;
   }
-  
-  /**
-   * 格式化日期
-   */
   formatDate(isoString: string): string {
     const date = new Date(isoString);
     const now = new Date();
@@ -656,23 +590,10 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     const diffDays = Math.floor(diffHours / 24);
     return `${diffDays} 天前`;
   }
-  
-  // ========== 生命周期 ==========
-  
   ngOnInit(): void {
-    // 初始加载冲突数据
     this.loadConflicts();
   }
-  
-  ngOnDestroy(): void {
-    // 清理资源（如果需要）
-  }
-  
-  // ========== 冲突解决方法 ==========
-  
-  /**
-   * 加载所有冲突数据
-   */
+
   async loadConflicts(): Promise<void> {
     const conflicts = await this.conflictStorage.getAllConflicts();
     const items: ConflictItem[] = conflicts.map(conflict => this.mapConflictToItem(conflict));
@@ -683,10 +604,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       this.showConflictList.set(true);
     }
   }
-  
-  /**
-   * 将冲突记录映射为展示项
-   */
   private mapConflictToItem(record: ConflictRecord): ConflictItem {
     const localTasks: Task[] = record.localProject?.tasks || [];
     const remoteTasks: Task[] = record.remoteProject?.tasks || [];
@@ -704,10 +621,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       isResolving: false
     };
   }
-  
-  /**
-   * 计算任务差异
-   */
   private calculateTaskDiffs(localTasks: Task[], remoteTasks: Task[]): TaskDiff[] {
     const localMap = new Map<string, Task>(localTasks.map(t => [t.id, t]));
     const remoteMap = new Map<string, Task>(remoteTasks.map(t => [t.id, t]));
@@ -751,10 +664,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     const order = { 'modified': 0, 'local-only': 1, 'remote-only': 2, 'same': 3 };
     return diffs.sort((a, b) => order[a.status] - order[b.status]);
   }
-  
-  /**
-   * 获取冲突原因标签
-   */
   private getReasonLabel(reason: string): string {
     const labels: Record<string, string> = {
       'version_mismatch': '版本不匹配',
@@ -765,10 +674,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     };
     return labels[reason] || reason;
   }
-  
-  /**
-   * 切换冲突项展开状态
-   */
   toggleConflictExpand(projectId: string): void {
     this.conflictItems.update(items => 
       items.map(item => 
@@ -778,24 +683,12 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       )
     );
   }
-  
-  /**
-   * 使用本地版本解决冲突
-   */
   async resolveUseLocal(projectId: string): Promise<void> {
     await this.resolveConflictWithStrategy(projectId, 'local');
   }
-  
-  /**
-   * 使用云端版本解决冲突
-   */
   async resolveUseRemote(projectId: string): Promise<void> {
     await this.resolveConflictWithStrategy(projectId, 'remote');
   }
-  
-  /**
-   * 保留两者（将云端版本作为副本添加）
-   */
   async resolveKeepBoth(projectId: string): Promise<void> {
     this.setResolving(projectId, true);
     
@@ -826,10 +719,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       this.setResolving(projectId, false);
     }
   }
-  
-  /**
-   * 通用冲突解决方法
-   */
   private async resolveConflictWithStrategy(projectId: string, strategy: 'local' | 'remote'): Promise<void> {
     this.setResolving(projectId, true);
     
@@ -859,10 +748,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       this.setResolving(projectId, false);
     }
   }
-  
-  /**
-   * 设置解决中状态
-   */
   private setResolving(projectId: string, isResolving: boolean): void {
     this.conflictItems.update(items => 
       items.map(item => 
@@ -872,10 +757,6 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
       )
     );
   }
-  
-  /**
-   * 获取状态标签
-   */
   getStatusLabel(status: string): string {
     const labels: Record<string, string> = {
       'same': '一致',
@@ -885,18 +766,8 @@ export class DashboardModalComponent implements OnInit, OnDestroy {
     };
     return labels[status] || status;
   }
-  
-  /**
-   * 按状态统计差异数量
-   */
   countByStatus(diffs: TaskDiff[], status: TaskDiff['status']): number {
     return diffs.filter(d => d.status === status).length;
   }
-  
-  /**
-   * 格式化相对时间
-   */
-  formatRelativeTime(isoString: string): string {
-    return this.formatDate(isoString);
-  }
+  formatRelativeTime(isoString: string): string { return this.formatDate(isoString); }
 }

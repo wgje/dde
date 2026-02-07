@@ -4,12 +4,12 @@ import {
   signal, 
   OnInit, 
   OnDestroy,
-  HostListener
+  HostListener,
+  DestroyRef
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
-import { Subject } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { UiStateService } from '../../../services/ui-state.service';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
@@ -277,7 +277,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectShell');
-  private destroy$ = new Subject<void>();
+  private readonly destroyRef = inject(DestroyRef);
   
   // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
   // Shell 通过命令服务发布意图，FlowView 订阅并响应
@@ -317,7 +317,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   ngOnInit() {
     // 监听路由参数变化
     this.route.params
-      .pipe(takeUntil(this.destroy$))
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(params => {
         const projectId = params['projectId'];
         const taskId = params['taskId'];
@@ -343,7 +343,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     
     // 监听子路由变化来确定视图模式
     this.route.url
-      .pipe(takeUntil(this.destroy$))
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {
         const currentUrl = this.router.url;
         if (currentUrl.endsWith('/flow')) {
@@ -448,8 +448,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       this.deepLinkRetryTimer = null;
     }
     
-    this.destroy$.next();
-    this.destroy$.complete();
+    // DestroyRef 自动处理取消订阅，无需手动触发
   }
   
   // ========== 视图切换 ==========

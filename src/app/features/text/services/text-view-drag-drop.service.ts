@@ -3,16 +3,11 @@ import { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from '../components/text-view.types';
 
-/**
- * 拖拽服务
- * 统一管理鼠标拖拽和触摸拖拽的状态和逻辑
- */
+/** 拖拽服务：统一管理鼠标/触摸拖拽状态和逻辑 */
 @Injectable({ providedIn: 'root' })
 export class TextViewDragDropService {
   private readonly logger = inject(LoggerService).category('TextDragDrop');
-  
-  // ========== 公共状态（信号） ==========
-  
+
   /** 当前拖拽的任务ID */
   readonly draggingTaskId = signal<string | null>(null);
   
@@ -24,9 +19,7 @@ export class TextViewDragDropService {
   
   /** 是否正在进行 DOM 更新（折叠/展开阶段），此时忽略 pointerup/pointercancel */
   private isUpdatingDOM = false;
-  
-  // ========== 私有状态 ==========
-  
+
   /** 鼠标拖拽展开状态 */
   private dragExpandState: DragExpandState = {
     previousHoverStage: null,
@@ -57,9 +50,7 @@ export class TextViewDragDropService {
   
   /** 拖拽激活时间戳 - 用于防止 pointerup 过早触发 */
   private dragActivationTime: number | null = null;
-  
-  // ========== 初始化方法 ==========
-  
+
   private createInitialTouchState(): TouchDragState {
     return {
       task: null,
@@ -78,9 +69,7 @@ export class TextViewDragDropService {
       originalStage: null  // 任务原始所在的阶段，拖拽期间不折叠
     };
   }
-  
-  // ========== 鼠标拖拽方法 ==========
-  
+
   /** 开始鼠标拖拽 */
   startDrag(task: Task) {
     this.draggingTaskId.set(task.id);
@@ -156,11 +145,8 @@ export class TextViewDragDropService {
     this.dragExpandState.previousHoverStage = null;
     return null;
   }
-  
-  // ========== 触摸拖拽方法 ==========
-  
-  /** 长按延迟时间（毫秒）- 用于区分点击和拖拽 */
-  // 🔧 优化：延长到 500ms，降低滚动时误触拖拽的概率
+
+  /** 长按延迟时间 - 500ms，降低滚动时误触概率 */
   private readonly LONG_PRESS_DELAY = 500;
   
   /** 长按回调 - 用于通知组件拖拽已开始 */
@@ -168,11 +154,7 @@ export class TextViewDragDropService {
   
   /** 开始触摸拖拽准备（长按检测） */
   startTouchDrag(task: Task, touch: Touch, onDragStart: () => void): void {
-    this.logger.debug('🟢 startTouchDrag called', {
-      taskId: task.id.slice(-4),
-      position: { x: touch.clientX, y: touch.clientY },
-      originalStage: task.stage
-    });
+    this.logger.debug('startTouchDrag', { taskId: task?.id?.slice(-4) ?? '?', stage: task?.stage });
     
     this.resetTouchState();
     
@@ -186,7 +168,7 @@ export class TextViewDragDropService {
     
     // 使用长按延迟来区分点击和拖拽
     this.touchState.longPressTimer = setTimeout(() => {
-      this.logger.debug('⏰ Long press timer fired, task exists:', !!this.touchState.task);
+      this.logger.debug('Long press fired, task:', !!this.touchState.task);
       if (this.touchState.task) {
         this.activateDrag();
       }
@@ -195,14 +177,10 @@ export class TextViewDragDropService {
   
   /** 激活拖拽状态（长按后或移动距离足够后） */
   private activateDrag(): void {
-    this.logger.debug('🔵 activateDrag called', {
-      isDragging: this.touchState.isDragging,
-      hasTask: !!this.touchState.task,
-      currentPos: { x: this.touchState.currentX, y: this.touchState.currentY }
-    });
+    this.logger.debug('activateDrag', { isDragging: this.touchState.isDragging, hasTask: !!this.touchState.task });
     
     if (this.touchState.isDragging || !this.touchState.task) {
-      this.logger.debug('❌ activateDrag early return');
+      this.logger.debug('activateDrag skip');
       return;
     }
     
@@ -221,11 +199,7 @@ export class TextViewDragDropService {
       this.touchState.expandedDuringDrag.add(this.touchState.originalStage);
     }
     
-    this.logger.debug('✅ Creating ghost at', {
-      x: this.touchState.currentX,
-      y: this.touchState.currentY,
-      task: this.touchState.task.title
-    });
+    this.logger.debug('Creating ghost', { x: this.touchState.currentX, y: this.touchState.currentY });
     
     this.createDragGhost(this.touchState.task, this.touchState.currentX, this.touchState.currentY);
     this.onDragStartCallback?.();
@@ -517,9 +491,7 @@ export class TextViewDragDropService {
   endDOMUpdate(): void {
     this.isUpdatingDOM = false;
   }
-  
-  // ========== 幽灵元素方法 ==========
-  
+
   private createDragGhost(task: Task, x: number, y: number) {
     this.removeDragGhost();
     
@@ -578,7 +550,7 @@ export class TextViewDragDropService {
     this.touchState.dragGhost = ghost;
     
     this.logger.debug('🎯 Ghost created:', {
-      taskId: task.id.slice(-4),
+      taskId: task?.id?.slice(-4) ?? 'unknown',
       ghostId,
       position: { x: ghostX, y: ghostY }
     });
@@ -640,9 +612,7 @@ export class TextViewDragDropService {
       });
     });
   }
-  
-  // ========== 自动滚动方法 ==========
-  
+
   /** 启动自动滚动 */
   startAutoScroll(container: HTMLElement, clientY: number) {
     document.removeEventListener('dragover', this.boundHandleDragAutoScroll);
@@ -754,9 +724,7 @@ export class TextViewDragDropService {
       this.autoScrollState.scrollContainer = null;
     }
   }
-  
-  // ========== 清理方法 ==========
-  
+
   private cancelLongPress() {
     if (this.touchState.longPressTimer) {
       clearTimeout(this.touchState.longPressTimer);

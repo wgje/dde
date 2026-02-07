@@ -1,16 +1,4 @@
-/**
- * UserSessionService - 用户会话管理服务
- * 
- * 【职责边界】
- * ✓ 用户登录/登出时的状态清理
- * ✓ 切换活动项目
- * ✓ 清空本地数据
- * ✓ 初始化/清理实时订阅
- * ✓ 附件监控的生命周期管理
- * ✗ 认证逻辑 → AuthService
- * ✗ 数据持久化 → SyncCoordinatorService
- * ✗ UI 状态 → UiStateService
- */
+/** UserSessionService - 用户会话管理：登录/登出清理、项目切换、数据加载 */
 import { Injectable, inject, DestroyRef } from '@angular/core';
 import { AuthService } from './auth.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
@@ -56,14 +44,7 @@ export class UserSessionService {
     });
   }
 
-  /**
-   * 设置当前用户
-   * 用户登录/登出时调用
-   * 
-   * 注意：此方法总是会加载项目数据，即使 userId 相同
-   * 这是因为 AuthService.checkSession() 可能已经设置了 userId，
-   * 但项目数据还未加载
-   */
+  /** 设置当前用户（登录/登出时调用，总是会加载项目数据） */
   async setCurrentUser(userId: string | null): Promise<void> {
     const previousUserId = this.currentUserId();
     const isUserChange = previousUserId !== userId;
@@ -113,9 +94,7 @@ export class UserSessionService {
     }
   }
 
-  /**
-   * 切换活动项目
-   */
+  /** 切换活动项目 */
   switchActiveProject(projectId: string | null): void {
     const previousProjectId = this.projectState.activeProjectId();
 
@@ -146,10 +125,7 @@ export class UserSessionService {
     }
   }
 
-  /**
-   * 清空本地数据（内存状态）
-   * 注意：此方法仅清理内存状态，完整的登出清理使用 clearAllLocalData()
-   */
+  /** 清空本地数据（内存状态），完整登出用 clearAllLocalData() */
   clearLocalData(): void {
     this.projectState.clearData();
     this.uiState.clearAllState();
@@ -157,27 +133,23 @@ export class UserSessionService {
     this.syncCoordinator.core.clearOfflineCache();
   }
 
-  /**
-   * 【Critical #11 & #12】完整的本地数据清理
-   * 登出时必须调用此方法，清理所有本地存储的用户数据
-   * 防止多用户共享设备时的数据泄露
-   */
+  /** 完整本地数据清理（登出时必须调用，防止数据泄露） */
   async clearAllLocalData(userId?: string): Promise<void> {
     this.logger.info('执行完整的本地数据清理', { userId });
     
     // 1. 清理内存状态（原有逻辑）
     this.clearLocalData();
     
-    // 2. 清理 localStorage 中的所有 NanoFlow 相关数据
+    // 2. 清理 localStorage 中的 NanoFlow 相关数据
     const localStorageKeysToRemove = [
-      CACHE_CONFIG.OFFLINE_CACHE_KEY,       // 'nanoflow.offline-cache-v2' - 离线项目缓存
-      'nanoflow.offline-cache',              // 旧版缓存键（兼容）
-      'nanoflow.retry-queue',                // 待同步队列
-      'nanoflow.local-tombstones',           // 本地 tombstone 缓存
-      'nanoflow.auth-cache',                 // 认证缓存
-      'nanoflow.escape-pod',                 // 紧急逃生数据
-      'nanoflow.safari-warning-time',        // Safari 警告显示时间
-      'nanoflow.guest-data',                 // 访客数据缓存
+      CACHE_CONFIG.OFFLINE_CACHE_KEY,
+      'nanoflow.offline-cache',
+      'nanoflow.retry-queue',
+      'nanoflow.local-tombstones',
+      'nanoflow.auth-cache',
+      'nanoflow.escape-pod',
+      'nanoflow.safari-warning-time',
+      'nanoflow.guest-data',
     ];
     
     localStorageKeysToRemove.forEach(key => {
@@ -200,7 +172,7 @@ export class UserSessionService {
       }
     }
     
-    // 也清理不带用户前缀的旧偏好键（兼容迁移）
+    // 清理旧偏好键（兼容迁移）
     try {
       Object.keys(localStorage)
         .filter(key => key.startsWith('nanoflow.preference.') && !key.includes('.user-'))
@@ -208,17 +180,12 @@ export class UserSessionService {
     } catch (e) {
       this.logger.warn('清理旧偏好键失败', e);
     }
-    
-    // 4. 清理 IndexedDB（主数据库）
+    // 4. 清理 IndexedDB
     await this.clearIndexedDB('nanoflow-db');
     await this.clearIndexedDB('nanoflow-queue-backup');
     
     this.logger.info('本地数据清理完成');
   }
-  
-  /**
-   * 清理指定的 IndexedDB 数据库
-   */
   private async clearIndexedDB(dbName: string): Promise<void> {
     if (typeof indexedDB === 'undefined') return;
     
@@ -249,14 +216,10 @@ export class UserSessionService {
   }
 
   /**
-   * 【重构】本地优先加载项目列表
-   * 
-   * 新策略（来自高级顾问建议）：
-   * 1. 立即从本地缓存/种子数据渲染 UI（"Instant" feel）
-   * 2. 后台静默同步云端数据（"Eventual Consistency"）
-   * 3. 智能合并云端数据，不打断用户操作
-   * 
-   * 这消除了首屏加载的 15 秒等待时间，TTI 降至 <100ms
+   * 本地优先加载项目列表
+   * 1. 立即从本地缓存/种子数据渲染 UI
+   * 2. 后台静默同步云端数据
+   * 3. 智能合并云端数据
    */
   async loadProjects(): Promise<void> {
     const perfStart = performance.now();
@@ -349,19 +312,7 @@ export class UserSessionService {
     }
   }
   
-  /**
-   * 后台静默同步云端数据
-   * 
-   * 【设计原则】来自高级顾问审查 2026-01-27：
-   * - 不阻塞 UI 渲染（Render-First）
-   * - 使用 updatedAt 幂等检查避免 REST/Realtime 竞态
-   * - 智能合并：无脏标记时静默覆盖，有脏标记时触发冲突处理
-   * - 【新增】按需加载：只同步当前项目，其他项目在用户导航时再加载
-   * 
-   * 【Stingy Hoarder Protocol】Phase 3 Delta Sync 优化
-   * - 优先使用增量同步，节省流量
-   * - 首次同步或增量失败时才进行全量同步
-   */
+  /** 后台静默同步云端数据（不阻塞 UI，Delta Sync 优先） */
   private async startBackgroundSync(userId: string, _previousActive: string | null): Promise<void> {
     // 【修复】本地模式不启动后台同步，防止将 'local-user' 传递给 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
@@ -415,10 +366,7 @@ export class UserSessionService {
     this.logger.debug('后台同步完成', { currentProjectSynced });
   }
   
-  /**
-   * 同步项目列表元数据（不加载完整数据）
-   * 【优化 2026-01-27】只获取项目元数据，不下载完整任务数据
-   */
+  /** 同步项目列表元数据（不加载完整数据） */
   private async syncProjectListMetadata(userId: string): Promise<void> {
     const client = this.supabase.client();
     if (!client) return;
@@ -475,10 +423,7 @@ export class UserSessionService {
     }
   }
   
-  /**
-   * 合并单个项目数据
-   * 【LWW 竞态保护】确保用户编辑不会被旧数据覆盖
-   */
+  /** 合并单个项目数据（LWW 竞态保护） */
   private async mergeSingleProject(cloudProject: Project, _userId: string): Promise<void> {
     const localProjects = this.projectState.projects();
     const localProject = localProjects.find(p => p.id === cloudProject.id);
@@ -521,9 +466,7 @@ export class UserSessionService {
     }
   }
   
-  /**
-   * LWW 合并任务列表
-   */
+  /** LWW 合并任务列表 */
   private mergeTasksWithLWW(localTasks: Task[], cloudTasks: Task[]): Task[] {
     const taskMap = new Map<string, Task>();
     
@@ -548,9 +491,7 @@ export class UserSessionService {
     return Array.from(taskMap.values());
   }
   
-  /**
-   * LWW 合并连接列表
-   */
+  /** LWW 合并连接列表 */
   private mergeConnectionsWithLWW(localConns: Connection[], cloudConns: Connection[]): Connection[] {
     const connMap = new Map<string, Connection>();
     
@@ -569,11 +510,7 @@ export class UserSessionService {
   
   /**
    * 智能合并云端数据
-   * 
-   * 【合并策略】来自高级顾问建议：
-   * - 幂等检查：if (incoming.updated_at <= current.updated_at) return;
-   * - 无脏标记 + 云端更新 → 静默覆盖
-   * - 有脏标记 + 云端更新 → 触发冲突处理
+   * 幂等检查 + 无脏标记静默覆盖 + 有脏标记触发冲突处理
    */
   private async mergeCloudData(
     cloudProjects: Project[], 
@@ -587,13 +524,7 @@ export class UserSessionService {
     const failedProjects: string[] = [];
 
     for (const p of cloudProjects) {
-      this.logger.debug('云端项目详情', {
-        id: p.id,
-        name: p.name,
-        taskCount: p.tasks?.length ?? 0,
-        version: p.version,
-        updatedAt: p.updatedAt
-      });
+      this.logger.debug('云端项目', { id: p.id, name: p.name, taskCount: p.tasks?.length ?? 0 });
       const result = this.syncCoordinator.validateAndRebalanceWithResult(p);
       if (result.ok) {
         validatedProjects.push(result.value);
@@ -610,8 +541,8 @@ export class UserSessionService {
       );
     }
 
-    // 合并离线缓存和云端数据
-    const offlineProjects = localProjects; // 使用当前本地状态
+    // 合并云端数据
+    const offlineProjects = localProjects;
     let mergedProjects = validatedProjects;
 
     if (offlineProjects && offlineProjects.length > 0) {
@@ -632,20 +563,14 @@ export class UserSessionService {
       }
     }
 
-    // 【关键】更新 UI - 使用智能合并避免"跳动"
-    // 只更新有变化的部分，而非全量替换
+    // 更新 UI，使用智能合并避免“跳动”
     this.applyMergedProjects(mergedProjects, previousActive);
     
     // 保存合并后的快照
     this.syncCoordinator.core.saveOfflineSnapshot(mergedProjects);
-    
-    this.logger.debug('后台同步完成');
   }
   
-  /**
-   * 应用合并后的项目数据
-   * 【关键】避免 UI "跳动"问题
-   */
+  /** 应用合并后的项目数据（避免 UI “跳动”） */
   private applyMergedProjects(mergedProjects: Project[], previousActive: string | null): void {
     const currentActive = this.projectState.activeProjectId();
     
@@ -667,9 +592,7 @@ export class UserSessionService {
     }
   }
   
-  /**
-   * 将本地数据迁移到云端（首次登录场景）
-   */
+  /** 将本地数据迁移到云端（首次登录场景） */
   private async migrateLocalToCloud(localProjects: Project[], userId: string): Promise<void> {
     this.logger.info('首次登录，迁移本地离线数据到云端');
     
@@ -706,18 +629,7 @@ export class UserSessionService {
 
   // ========== 私有方法 ==========
 
-  /**
-   * 加载用户数据
-   * 
-   * 关键设计：loadProjects 是同步阻塞的（等待完成），
-   * 但 initRealtimeSubscription 和 tryReloadConflictData 是后台执行的。
-   * 这确保用户能尽快看到数据，而实时订阅在后台建立。
-   * 
-   * 错误恢复策略：
-   * - loadProjects 失败时自动降级到本地缓存
-   * - 实时订阅失败不影响核心功能
-   * - 即使所有操作失败，也确保用户能看到种子数据
-   */
+  /** 加载用户数据：加载项目 + 后台建立实时订阅 */
   private async loadUserData(userId: string): Promise<void> {
     // 先加载项目数据（这个需要等待）
     try {
@@ -735,7 +647,6 @@ export class UserSessionService {
       // 向用户显示友好的错误提示
       this.toastService.error('数据加载失败', '已尝试加载本地数据，如问题持续请刷新页面');
       
-      // 不重新抛出异常，避免阻断应用启动
       return;
     }
     
@@ -754,10 +665,7 @@ export class UserSessionService {
     });
   }
 
-  /**
-   * 从缓存或种子数据加载
-   * 包含数据完整性检查
-   */
+  /** 从缓存或种子数据加载（含数据完整性检查） */
   private loadFromCacheOrSeed(): void {
     const cached = this.syncCoordinator.core.loadOfflineSnapshot();
     let projects: Project[] = [];
@@ -799,9 +707,7 @@ export class UserSessionService {
     this.projectState.setActiveProjectId(projects[0]?.id ?? null);
   }
 
-  /**
-   * 迁移项目数据格式
-   */
+  /** 迁移项目数据格式 */
   private migrateProject(project: Project): Project {
     const migrated = { ...project };
 
@@ -822,9 +728,7 @@ export class UserSessionService {
     return this.layoutService.rebalance(migrated);
   }
 
-  /**
-   * 生成种子项目数据
-   */
+  /** 生成种子项目数据 */
   private seedProjects(): Project[] {
     const now = new Date().toISOString();
     // 使用有效的 UUID 格式（所有 ID 必须是 UUID，以便同步到 Supabase）
@@ -875,9 +779,7 @@ export class UserSessionService {
     ];
   }
 
-  /**
-   * 监控项目附件 URL
-   */
+  /** 监控项目附件 URL */
   private monitorProjectAttachments(project: Project): void {
     const userId = this.currentUserId();
     if (!userId) return;

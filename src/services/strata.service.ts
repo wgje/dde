@@ -18,7 +18,7 @@ import {
   blackBoxEntriesMap,
   getTodayDate,
   getDaysAgoDate
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 
 @Injectable({
   providedIn: 'root'
@@ -112,8 +112,8 @@ export class StrataService {
     const tasks = this.projectState.tasks();
     
     return tasks
-      .filter((t: Task) => 
-        t.status === 'completed' && 
+      .filter((t: Task) =>
+        t.status === 'completed' &&
         !t.deletedAt &&
         t.updatedAt &&
         this.getDateFromTimestamp(t.updatedAt) === date
@@ -122,7 +122,7 @@ export class StrataService {
         type: 'task' as const,
         id: t.id,
         title: t.title,
-        completedAt: t.updatedAt!,
+        completedAt: t.updatedAt || new Date().toISOString(),
         source: t
       }));
   }

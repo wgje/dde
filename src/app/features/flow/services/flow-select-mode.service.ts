@@ -59,7 +59,7 @@ export class FlowSelectModeService {
       if (newMode) {
         // 进入框选模式：拦截 standardMouseSelect
         // 保存原始方法（如果还没保存）
-        if (!this.originalStandardMouseSelect) {
+        if (!this.originalStandardMouseSelect && clickTool.standardMouseSelect) {
           this.originalStandardMouseSelect = clickTool.standardMouseSelect.bind(clickTool);
         }
         // 覆盖为无操作，交由节点 click 事件处理多选

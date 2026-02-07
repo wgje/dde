@@ -144,46 +144,6 @@ export interface FlowViewState {
 }
 
 /**
- * 创建初始状态
- * @deprecated 此函数当前未被使用，FlowViewComponent 直接初始化状态
- */
-export function createInitialFlowViewState(): FlowViewState {
-  return {
-    // 选中状态
-    selectedTaskId: null,
-    
-    // 连接模式
-    isLinkMode: false,
-    linkSourceTask: null,
-    linkTypeDialog: null,
-    
-    // 编辑器状态
-    connectionEditorData: null,
-    connectionEditorPos: { x: 0, y: 0 },
-    
-    // 面板状态
-    taskDetailPos: { x: -1, y: -1 }, // -1 表示使用默认位置
-    drawerHeight: 35, // 35vh
-    isResizingDrawer: false,
-    
-    // 调色板状态
-    paletteHeight: 200,
-    isDropTargetActive: false,
-    unassignedDraggingId: null,
-    
-    // 删除确认
-    deleteConfirmTask: null,
-    deleteKeepChildren: false,
-    
-    // 移动端提示
-    linkDeleteHint: null,
-    
-    // 错误状态
-    diagramError: null
-  };
-}
-
-/**
  * 创建初始拖动状态
  */
 export function createInitialDragState(): DragState {

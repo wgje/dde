@@ -11,7 +11,7 @@ import { AuthService } from './auth.service';
 import { ProjectStateService } from './project-state.service';
 import { 
   setBlackBoxEntries 
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 
 describe('BlackBoxService', () => {
   let service: BlackBoxService;

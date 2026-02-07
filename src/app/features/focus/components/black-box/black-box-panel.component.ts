@@ -47,11 +47,17 @@ import {
                 aria-label="黑匣子面板">
         
         <!-- 标题栏 -->
-        <div 
-          class="px-3 py-2.5 cursor-pointer flex justify-between items-center 
+        <div
+          class="px-3 py-2.5 cursor-pointer flex justify-between items-center
                  group select-none hover:bg-amber-100/30 dark:hover:bg-stone-700/30
                  transition-colors duration-150"
-          (click)="toggleExpand()">
+          role="button"
+          tabindex="0"
+          [attr.aria-expanded]="isExpanded()"
+          aria-label="黑匣子"
+          (click)="toggleExpand()"
+          (keydown.enter)="toggleExpand()"
+          (keydown.space)="toggleExpand(); $event.preventDefault()">
           <span class="font-bold text-stone-700 dark:text-stone-100 text-xs 
                        flex items-center gap-2">
             <span class="w-1.5 h-1.5 rounded-full bg-amber-500 
@@ -139,6 +145,7 @@ import {
                     class="px-2 py-1 rounded bg-red-500 text-white text-[10px]
                            hover:bg-red-600 transition-colors"
                     data-testid="confirm-delete"
+                    aria-label="确认删除"
                     (click)="confirmDelete()">
                     删除
                   </button>
@@ -146,6 +153,7 @@ import {
                     class="px-2 py-1 rounded bg-stone-200 dark:bg-stone-700
                            text-stone-600 dark:text-stone-300 text-[10px]
                            hover:bg-stone-300 dark:hover:bg-stone-600 transition-colors"
+                    aria-label="取消删除"
                     (click)="cancelDelete()">
                     取消
                   </button>

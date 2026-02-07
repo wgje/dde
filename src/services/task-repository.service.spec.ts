@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { TaskRepositoryService } from './task-repository.service';
+import { TaskRepositoryBatchService } from './task-repository-batch.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import type { Task } from '../models';
@@ -82,8 +83,8 @@ function createSupabaseMock() {
   return { mockSupabaseClientService, from, upsert, update, del, rpc };
 }
 
-describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
-  let service: TaskRepositoryService;
+describe('TaskRepositoryBatchService.saveTasksIncremental tombstone-wins', () => {
+  let service: TaskRepositoryBatchService;
   let supabaseMock: ReturnType<typeof createSupabaseMock>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
@@ -102,7 +103,7 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
-    service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    service = runInInjectionContext(injector, () => new TaskRepositoryBatchService());
   });
 
   afterEach(() => {
@@ -146,8 +147,8 @@ describe('TaskRepositoryService.saveTasksIncremental tombstone-wins', () => {
   });
 });
 
-describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
-  let service: TaskRepositoryService;
+describe('TaskRepositoryBatchService.saveTasksIncremental delete behavior', () => {
+  let service: TaskRepositoryBatchService;
   let supabaseMock: ReturnType<typeof createSupabaseMock>;
 
   beforeEach(() => {
@@ -159,7 +160,7 @@ describe('TaskRepositoryService.saveTasksIncremental delete behavior', () => {
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
     });
-    service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    service = runInInjectionContext(injector, () => new TaskRepositoryBatchService());
   });
 
   it('prefers purge_tasks RPC and does not call physical delete', async () => {

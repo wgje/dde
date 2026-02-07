@@ -47,6 +47,7 @@
                   "inline": false
                 }
               },
+              "namedChunks": true,
               "budgets": [
                 {
                   "type": "initial",

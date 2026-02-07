@@ -31,6 +31,8 @@ export { FlowLayoutService } from './flow-layout.service';
 
 // 模板与事件总线
 export { FlowTemplateService } from './flow-template.service';
+export { FlowLinkTemplateService } from './flow-link-template.service';
+export { FlowRelinkToolService } from './flow-relink-tool.service';
 export * from './flow-template-events';
 
 // 交互服务

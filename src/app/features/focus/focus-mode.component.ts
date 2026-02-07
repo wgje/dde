@@ -25,7 +25,7 @@ import {
   gateState, 
   spotlightMode, 
   focusPreferences 
-} from '../../core/state/focus-stores';
+} from '../../../state/focus-stores';
 import { LoggerService } from '../../../services/logger.service';
 
 @Component({

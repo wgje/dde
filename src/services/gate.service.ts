@@ -5,7 +5,7 @@
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
 
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject, signal, NgZone } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -27,7 +27,7 @@ import {
   getTodayDate,
   getTomorrowDate,
   updateBlackBoxEntry
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 
 interface OperationError {
   code: string;
@@ -50,6 +50,7 @@ export class GateService {
   private blackBoxService = inject(BlackBoxService);
   private preferenceService = inject(PreferenceService);
   private logger = inject(LoggerService);
+  private ngZone = inject(NgZone);
   
   // 暴露状态给组件
   readonly state = gateState;
@@ -125,6 +126,9 @@ export class GateService {
    * 
    * 【Bug Fix】防止动画因任何原因（如 CSS 被禁用、事件未触发）卡死
    * 超时后自动恢复到 idle 状态，确保按钮可点击
+   * 
+   * 【Bug Fix】使用 NgZone.run() 包装超时回调，确保在 Angular 区域内执行，
+   * 正确触发 OnPush 组件的变更检测
    */
   private setCardAnimationWithTimeout(
     state: 'idle' | 'entering' | 'sinking' | 'emerging'
@@ -144,15 +148,18 @@ export class GateService {
     // 非 idle 状态设置超时保护
     if (state !== 'idle') {
       this.animationTimeoutId = setTimeout(() => {
-        if (this.cardAnimation() === state) {
-          this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
-          this.cardAnimation.set('idle');
-          
-          // 如果是 sinking 状态超时，需要完成状态切换
-          if (state === 'sinking') {
-            this.onSinkingComplete();
+        // 使用 NgZone.run() 确保在 Angular 区域内执行，正确触发变更检测
+        this.ngZone.run(() => {
+          if (this.cardAnimation() === state) {
+            this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
+            this.cardAnimation.set('idle');
+            
+            // 如果是 sinking 状态超时，需要完成状态切换
+            if (state === 'sinking') {
+              this.onSinkingComplete();
+            }
           }
-        }
+        });
       }, ANIMATION_TIMEOUT_MS);
     }
   }
@@ -485,6 +492,9 @@ export class GateService {
     gateCurrentIndex.set(0);
     gateSnoozeCount.set(0);
     gateState.set('reviewing');
+    
+    // 3. 设置动画状态（与正常流程一致）
+    this.setCardAnimationWithTimeout('entering');
     
     this.logger.info('Gate', '[DEV] Gate force shown with mock entries');
   }

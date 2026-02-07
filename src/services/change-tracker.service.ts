@@ -1,25 +1,4 @@
-/**
- * ChangeTrackerService - 变更追踪服务
- * 
- * 【设计目的】
- * 解决全量同步的性能问题，实现真正的增量更新机制。
- * 追踪任务和连接的变更，只同步发生变化的实体。
- * 
- * 【核心概念】
- * - 脏标记（Dirty Flag）：标记哪些实体需要同步
- * - 变更类型：区分创建、更新、删除操作
- * - 项目级聚合：按项目ID分组管理变更
- * 
- * 【使用场景】
- * 1. 用户修改任务标题 → 只同步该任务
- * 2. 用户删除连接 → 只删除该连接
- * 3. 批量拖拽任务 → 聚合位置变更，一次批量同步
- * 
- * 【性能优势】
- * - 修改1个任务：从保存100个任务变为保存1个
- * - 支持变更合并：短时间内多次修改同一任务只产生1次同步
- * - 减少网络传输和数据库操作
- */
+/** ChangeTrackerService - 变更追踪服务，实现增量更新：脏标记 + 项目级聚合 + 变更合并 */
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { Task, Connection } from '../models';
 import { LoggerService } from './logger.service';
@@ -49,48 +28,18 @@ export class ChangeTrackerService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ChangeTracker');
   
-  /** 
-   * 待同步的变更记录
-   * Key: `${projectId}:${entityType}:${entityId}`
-   */
+  /** 待同步的变更记录，Key: `${projectId}:${entityType}:${entityId}` */
   private pendingChanges = new Map<string, ChangeRecord>();
-  
-  /**
-   * 字段级操作锁
-   * 当用户正在操作某个任务的特定字段时（如拖拽改变 rank，点击改变 status），
-   * 锁定该字段，在操作完成并收到服务器 ACK 之前，忽略来自服务器的该字段推送。
-   * 这是基于逻辑状态的防抖，比基于时间阈值更可靠。
-   * 
-   * Key: `${projectId}:${taskId}:${field}`
-   * Value: 锁定时间戳（用于超时自动解锁）
-   */
+  /** 字段级操作锁，防止用户操作期间被远程更新覆盖。Key: `${projectId}:${taskId}:${field}` */
   private fieldLocks = new Map<string, number | FieldLockData>();
-  
-  /** 
-   * 字段锁超时时间（毫秒）- 防止死锁
-   * 【修复】从 10 秒增加到 30 秒，给弱网环境和移动端更多时间同步
-   */
+  /** 字段锁超时（30s）- 弱网环境兑底 */
   private static readonly FIELD_LOCK_TIMEOUT_MS = 30000;
-  
-  /** 
-   * 变更计数器（用于监控）
-   */
   private changeCount = signal(0);
-  
-  /** 待同步变更数量 */
   readonly pendingChangeCount = computed(() => this.changeCount());
-  
-  /**
-   * 最后一次变更的时间戳
-   */
   private lastChangeAt = signal(0);
   readonly lastChangeTimestamp = computed(() => this.lastChangeAt());
-  
-  // ========== 任务变更追踪 ==========
-  
-  /**
-   * 标记任务创建
-   */
+
+  /** 标记任务创建 */
   trackTaskCreate(projectId: string, task: Task): void {
     const key = this.makeKey(projectId, 'task', task.id);
     
@@ -119,10 +68,7 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪任务创建', { projectId, taskId: task.id });
   }
-  
-  /**
-   * 标记任务更新
-   */
+  /** 标记任务更新 */
   trackTaskUpdate(projectId: string, task: Task, changedFields?: string[]): void {
     const key = this.makeKey(projectId, 'task', task.id);
     
@@ -154,10 +100,7 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪任务更新', { projectId, taskId: task.id, fields: changedFields });
   }
-  
-  /**
-   * 标记任务删除
-   */
+  /** 标记任务删除 */
   trackTaskDelete(projectId: string, taskId: string): void {
     const key = this.makeKey(projectId, 'task', taskId);
     
@@ -179,21 +122,13 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪任务删除', { projectId, taskId });
   }
-  
-  /**
-   * 批量标记任务更新（用于拖拽等批量位置变更场景）
-   */
+  /** 批量标记任务更新 */
   trackTasksUpdate(projectId: string, tasks: Task[], changedFields?: string[]): void {
     for (const task of tasks) {
       this.trackTaskUpdate(projectId, task, changedFields);
     }
   }
-  
-  // ========== 连接变更追踪 ==========
-  
-  /**
-   * 标记连接创建
-   */
+  /** 标记连接创建 */
   trackConnectionCreate(projectId: string, connection: Connection): void {
     const connectionId = this.makeConnectionId(connection.source, connection.target);
     const key = this.makeKey(projectId, 'connection', connectionId);
@@ -223,10 +158,7 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪连接创建', { projectId, source: connection.source, target: connection.target });
   }
-  
-  /**
-   * 标记连接更新（如描述变更）
-   */
+  /** 标记连接更新 */
   trackConnectionUpdate(projectId: string, connection: Connection): void {
     const connectionId = this.makeConnectionId(connection.source, connection.target);
     const key = this.makeKey(projectId, 'connection', connectionId);
@@ -254,10 +186,7 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪连接更新', { projectId, source: connection.source, target: connection.target });
   }
-  
-  /**
-   * 标记连接删除
-   */
+  /** 标记连接删除 */
   trackConnectionDelete(projectId: string, source: string, target: string): void {
     const connectionId = this.makeConnectionId(source, target);
     const key = this.makeKey(projectId, 'connection', connectionId);
@@ -281,12 +210,7 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('追踪连接删除', { projectId, source, target });
   }
-  
-  // ========== 查询和消费 ==========
-  
-  /**
-   * 获取项目的变更摘要
-   */
+  /** 获取项目的变更摘要 */
   getProjectChanges(projectId: string): ProjectChangeSummary {
     const tasksToCreate: Task[] = [];
     const tasksToUpdate: Task[] = [];
@@ -349,20 +273,14 @@ export class ChangeTrackerService {
       taskUpdateFieldsById
     };
   }
-  
-  /**
-   * 检查项目是否有待同步的变更
-   */
+  /** 检查项目是否有待同步的变更 */
   hasProjectChanges(projectId: string): boolean {
     for (const record of this.pendingChanges.values()) {
       if (record.projectId === projectId) return true;
     }
     return false;
   }
-  
-  /**
-   * 清除项目的所有变更记录（同步成功后调用）
-   */
+  /** 清除项目的所有变更记录 */
   clearProjectChanges(projectId: string): void {
     const keysToDelete: string[] = [];
     
@@ -379,28 +297,19 @@ export class ChangeTrackerService {
     this.updateCounters();
     this.logger.debug('清除项目变更记录', { projectId, clearedCount: keysToDelete.length });
   }
-  
-  /**
-   * 清除特定任务的变更记录
-   */
+  /** 清除特定任务的变更记录 */
   clearTaskChange(projectId: string, taskId: string): void {
     const key = this.makeKey(projectId, 'task', taskId);
     this.pendingChanges.delete(key);
     this.updateCounters();
   }
-  
-  /**
-   * 清除所有变更记录（全量同步后调用）
-   */
+  /** 清除所有变更记录 */
   clearAllChanges(): void {
     this.pendingChanges.clear();
     this.updateCounters();
     this.logger.debug('清除所有变更记录');
   }
-  
-  /**
-   * 获取所有有变更的项目ID
-   */
+  /** 获取所有有变更的项目ID */
   getChangedProjectIds(): string[] {
     const projectIds = new Set<string>();
     for (const record of this.pendingChanges.values()) {
@@ -408,17 +317,11 @@ export class ChangeTrackerService {
     }
     return Array.from(projectIds);
   }
-  
-  /**
-   * 导出所有待同步变更（用于调试和离线恢复）
-   */
+  /** 导出所有待同步变更 */
   exportPendingChanges(): ChangeRecord[] {
     return Array.from(this.pendingChanges.values());
   }
-  
-  /**
-   * 导入变更记录（用于离线恢复）
-   */
+  /** 导入变更记录 */
   importPendingChanges(changes: ChangeRecord[]): void {
     for (const record of changes) {
       const key = this.makeKey(record.projectId, record.entityType, record.entityId);
@@ -428,22 +331,7 @@ export class ChangeTrackerService {
     this.logger.info('导入变更记录', { count: changes.length });
   }
 
-  // ========== 数据完整性验证 ==========
-
-  /**
-   * 验证增量变更是否会导致数据丢失
-   * 
-   * 检查策略：
-   * 1. 确保所有待删除的任务在当前项目中存在
-   * 2. 确保所有待更新的任务在当前项目中存在
-   * 3. 确保所有待创建的任务不在当前项目中
-   * 4. 检查连接引用的任务是否存在
-   * 
-   * @param projectId 项目ID
-   * @param currentTasks 当前项目的所有任务
-   * @param currentConnections 当前项目的所有连接
-   * @returns 验证结果和潜在问题列表
-   */
+  /** 验证增量变更是否会导致数据丢失 */
   validateChanges(
     projectId: string,
     currentTasks: Task[],
@@ -709,26 +597,10 @@ export class ChangeTrackerService {
     return { hasRisk, risks };
   }
   
-  // ========== 辅助方法 ==========
-  
-  // ========== 字段级操作锁 ==========
-  
-  /**
-   * 文本输入场景的字段锁超时时间（毫秒）
-   * 【关键设计】文本输入使用 1 小时超时，确保用户思考时不会被远程更新打断
-   * blur 事件是唯一的解锁触发器，时间锁只是防止死锁的兜底机制
-   */
-  static readonly TEXT_INPUT_LOCK_TIMEOUT_MS = 3600000; // 1 小时
+  /** 文本输入场景的字段锁超时（1小时），blur 解锁，时间锁只是防死锁兑底 */
+  static readonly TEXT_INPUT_LOCK_TIMEOUT_MS = 3600000;
 
-  /**
-   * 锁定任务的特定字段
-   * 当用户开始操作（如点击状态复选框、开始拖拽、聚焦输入框）时调用
-   * 
-   * @param taskId 任务ID
-   * @param projectId 项目ID  
-   * @param field 要锁定的字段名（如 'status', 'rank', 'stage', 'title', 'content'）
-   * @param durationMs 锁定时长（毫秒），默认 30 秒，文本输入场景建议使用 TEXT_INPUT_LOCK_TIMEOUT_MS
-   */
+  /** 锁定任务的特定字段（用户开始操作时调用） */
   lockTaskField(taskId: string, projectId: string, field: string, durationMs?: number): void {
     const key = this.makeFieldLockKey(projectId, taskId, field);
     // 存储格式：高 32 位为锁定时间戳，低 32 位为超时时长
@@ -740,28 +612,13 @@ export class ChangeTrackerService {
     this.fieldLocks.set(key, lockData);
     this.logger.debug('锁定任务字段', { taskId, projectId, field, durationMs: lockData.duration });
   }
-  
-  /**
-   * 解锁任务的特定字段
-   * 当操作完成并收到服务器 ACK 时调用
-   * 
-   * @param taskId 任务ID
-   * @param projectId 项目ID
-   * @param field 要解锁的字段名
-   */
+  /** 解锁任务的特定字段 */
   unlockTaskField(taskId: string, projectId: string, field: string): void {
     const key = this.makeFieldLockKey(projectId, taskId, field);
     this.fieldLocks.delete(key);
     this.logger.debug('解锁任务字段', { taskId, projectId, field });
   }
-  
-  /**
-   * 解锁任务的所有字段
-   * 当同步成功后批量清理锁
-   * 
-   * @param taskId 任务ID
-   * @param projectId 项目ID
-   */
+  /** 解锁任务的所有字段 */
   unlockAllTaskFields(taskId: string, projectId: string): void {
     const prefix = `${projectId}:${taskId}:`;
     const keysToDelete: string[] = [];
@@ -777,16 +634,7 @@ export class ChangeTrackerService {
       this.logger.debug('解锁任务所有字段', { taskId, projectId, fieldCount: keysToDelete.length });
     }
   }
-  
-  /**
-   * 检查任务的特定字段是否被锁定
-   * 远程变更处理器在更新字段前应检查此方法
-   * 
-   * @param taskId 任务ID
-   * @param projectId 项目ID
-   * @param field 字段名
-   * @returns 是否被锁定（考虑超时自动解锁）
-   */
+  /** 检查任务的特定字段是否被锁定（考虑超时自动解锁） */
   isTaskFieldLocked(taskId: string, projectId: string, field: string): boolean {
     const key = this.makeFieldLockKey(projectId, taskId, field);
     const lockData = this.fieldLocks.get(key) as FieldLockData | number | undefined;
@@ -811,14 +659,7 @@ export class ChangeTrackerService {
     
     return true;
   }
-  
-  /**
-   * 获取任务被锁定的字段列表
-   * 
-   * @param taskId 任务ID
-   * @param projectId 项目ID
-   * @returns 被锁定的字段名列表
-   */
+  /** 获取任务被锁定的字段列表 */
   getLockedFields(taskId: string, projectId: string): string[] {
     const prefix = `${projectId}:${taskId}:`;
     const lockedFields: string[] = [];
@@ -845,12 +686,7 @@ export class ChangeTrackerService {
     
     return lockedFields;
   }
-  
-  /**
-   * 清理所有项目的字段锁（用于同步完成后的清理）
-   * 
-   * @param projectId 项目ID
-   */
+  /** 清理项目的所有字段锁 */
   clearProjectFieldLocks(projectId: string): void {
     const prefix = `${projectId}:`;
     const keysToDelete: string[] = [];
@@ -866,7 +702,8 @@ export class ChangeTrackerService {
       this.logger.debug('清理项目字段锁', { projectId, lockCount: keysToDelete.length });
     }
   }
-  
+  // ========== 辅助方法 ==========
+
   private makeFieldLockKey(projectId: string, taskId: string, field: string): string {
     return `${projectId}:${taskId}:${field}`;
   }

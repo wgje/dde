@@ -20,45 +20,13 @@ export type {
   VirtualBoundsResult
 } from './minimap-math.types';
 
-/**
- * MinimapMathService - 小地图数学计算服务
- * 
- * 实现无限画布应用的"全局自适应小地图"核心逻辑：
- * 
- * 1. 内容包含（Fit-View 逻辑）：
- *    小地图必须始终渲染全部图表内容，通过计算所有节点的边界框并缩放适配容器
- * 
- * 2. 视口指示器（红框）：
- *    - 尺寸逻辑：指示器尺寸与主视口/总内容的比例成正比
- *    - 缩放行为：用户放大时指示器缩小，放大时指示器增大
- * 
- * 3. 坐标映射：
- *    - 主画布 -> 小地图：平移/缩放时更新指示器位置
- *    - 小地图 -> 主画布：拖拽指示器时更新主画布滚动位置
- * 
- * 约束：小地图内容永不裁剪，节点极度分散时可视化会变得微小
- */
+/** MinimapMathService - 小地图数学计算：缩放比例、坐标变换、拖拽会话、虚拟边界 */
 @Injectable({
   providedIn: 'root'
 })
 export class MinimapMathService {
   
-  // ==================== 核心计算：缩放比例 ====================
-  
-  /**
-   * 计算小地图的缩放比例
-   * 
-   * 核心公式：
-   *   scaleRatio = min(minimapWidth / contentWidth, minimapHeight / contentHeight)
-   * 
-   * 这确保内容完全适配小地图容器，无裁剪
-   * 
-   * @param contentBounds 世界空间中所有内容的边界框
-   * @param minimapWidth 小地图容器宽度（像素）
-   * @param minimapHeight 小地图容器高度（像素）
-   * @param padding 边距比例（0-0.5），默认 0.1 表示 10% 边距
-   * @returns 缩放比例
-   */
+  /** 计算小地图缩放比例：min(w/cw, h/ch)，确保内容完全适配 */
   calculateScaleRatio(
     contentBounds: WorldBounds,
     minimapWidth: number,
@@ -77,26 +45,10 @@ export class MinimapMathService {
     const scaleX = effectiveWidth / contentWidth;
     const scaleY = effectiveHeight / contentHeight;
     
-    // 取较小值确保内容完全可见（不裁剪）
     return Math.min(scaleX, scaleY);
   }
-  
-  // ==================== 坐标变换：世界 -> 小地图 ====================
-  
-  /**
-   * 将世界空间坐标转换为小地图空间坐标
-   * 
-   * 公式：
-   *   miniX = (worldX - contentBounds.x) * scaleRatio + offsetX
-   *   miniY = (worldY - contentBounds.y) * scaleRatio + offsetY
-   * 
-   * @param worldPoint 世界空间中的点
-   * @param contentBounds 世界空间中所有内容的边界框
-   * @param scaleRatio 缩放比例
-   * @param minimapWidth 小地图容器宽度
-   * @param minimapHeight 小地图容器高度
-   * @returns 小地图空间中的点
-   */
+
+  /** 世界坐标→小地图坐标 */
   worldToMinimap(
     worldPoint: WorldPoint,
     contentBounds: WorldBounds,
@@ -118,23 +70,8 @@ export class MinimapMathService {
       y: (worldPoint.y - contentBounds.y) * scaleRatio + offsetY
     };
   }
-  
-  // ==================== 坐标变换：小地图 -> 世界 ====================
-  
-  /**
-   * 将小地图空间坐标转换为世界空间坐标
-   * 
-   * 公式（逆变换）：
-   *   worldX = (miniX - offsetX) / scaleRatio + contentBounds.x
-   *   worldY = (miniY - offsetY) / scaleRatio + contentBounds.y
-   * 
-   * @param minimapPoint 小地图空间中的点
-   * @param contentBounds 世界空间中所有内容的边界框
-   * @param scaleRatio 缩放比例
-   * @param minimapWidth 小地图容器宽度
-   * @param minimapHeight 小地图容器高度
-   * @returns 世界空间中的点
-   */
+
+  /** 小地图坐标→世界坐标（逆变换） */
   minimapToWorld(
     minimapPoint: MinimapPoint,
     contentBounds: WorldBounds,
@@ -156,28 +93,8 @@ export class MinimapMathService {
       y: (minimapPoint.y - offsetY) / scaleRatio + contentBounds.y
     };
   }
-  
-  // ==================== 视口指示器计算 ====================
-  
-  /**
-   * 计算视口指示器（红框）的尺寸
-   * 
-   * 核心公式：
-   *   Indicator_Width = (Main_Viewport_Width / Total_Content_Width) * Minimap_Content_Width
-   *   Indicator_Height = (Main_Viewport_Height / Total_Content_Height) * Minimap_Content_Height
-   * 
-   * 缩放行为：
-   *   - 用户放大（看到更少内容）-> 指示器变小
-   *   - 用户缩小（看到更多内容）-> 指示器变大
-   *   - 节点分散（内容边界框增大）-> 指示器相对变小
-   * 
-   * @param viewportBounds 主视口在世界空间中的边界
-   * @param contentBounds 所有内容在世界空间中的边界框
-   * @param scaleRatio 小地图缩放比例
-   * @param minimapWidth 小地图容器宽度
-   * @param minimapHeight 小地图容器高度
-   * @returns 指示器在小地图中的位置和尺寸
-   */
+
+  /** 计算视口指示器（红框）的尺寸和位置 */
   calculateIndicator(
     viewportBounds: WorldBounds,
     contentBounds: WorldBounds,
@@ -205,21 +122,8 @@ export class MinimapMathService {
       height: indicatorHeight
     };
   }
-  
-  // ==================== 综合状态计算 ====================
-  
-  /**
-   * 计算完整的小地图状态
-   * 
-   * 这是一个便捷方法，一次性计算所有需要的值
-   * 
-   * @param contentBounds 世界空间中所有内容的边界框
-   * @param viewportBounds 主视口在世界空间中的边界
-   * @param minimapWidth 小地图容器宽度
-   * @param minimapHeight 小地图容器高度
-   * @param padding 边距比例（默认 0.1）
-   * @returns 完整的小地图状态
-   */
+
+  /** 一次性计算完整的小地图状态 */
   calculateMinimapState(
     contentBounds: WorldBounds,
     viewportBounds: WorldBounds,
@@ -275,22 +179,8 @@ export class MinimapMathService {
       }
     };
   }
-  
-  // ==================== 拖拽指示器 -> 主画布滚动 ====================
-  
-  /**
-   * 根据小地图中指示器的新位置计算主画布应该滚动到的位置
-   * 
-   * 用于处理用户在小地图中拖拽指示器（红框）的交互
-   * 
-   * @param newIndicatorPosition 指示器在小地图中的新位置（中心点）
-   * @param contentBounds 世界空间中所有内容的边界框
-   * @param viewportBounds 当前视口边界（用于获取视口尺寸）
-   * @param scaleRatio 小地图缩放比例
-   * @param minimapWidth 小地图容器宽度
-   * @param minimapHeight 小地图容器高度
-   * @returns 主画布应该滚动到的新位置（左上角）
-   */
+
+  /** 根据指示器新位置计算主画布滚动位置 */
   indicatorDragToScrollPosition(
     newIndicatorPosition: MinimapPoint,
     contentBounds: WorldBounds,

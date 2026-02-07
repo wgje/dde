@@ -327,7 +327,7 @@ export class ConflictStorageService {
       const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : null;
     } catch (e) {
-      this.logger.debug('从 localStorage 加载冲突数据失败', { projectId, error: e });
+      this.logger.warn('从 localStorage 加载冲突数据失败', { projectId, error: e });
       return null;
     }
   }

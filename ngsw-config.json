@@ -26,6 +26,17 @@
           "/**/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif|otf|ttf|woff|woff2)"
         ]
       }
+    },
+    {
+      "name": "local-fonts",
+      "installMode": "prefetch",
+      "updateMode": "prefetch",
+      "resources": {
+        "files": [
+          "/fonts/**/*.woff2",
+          "/fonts/**/*.css"
+        ]
+      }
     }
   ],
   "dataGroups": [

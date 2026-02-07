@@ -1,48 +1,33 @@
-import { Injectable, inject, signal, NgZone, effect } from '@angular/core';
-import { ProjectStateService } from '../../../../services/project-state.service';
+import { Injectable, inject, signal, NgZone, effect, ElementRef } from '@angular/core';
 import { UiStateService } from '../../../../services/ui-state.service';
-import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { ThemeService } from '../../../../services/theme.service';
-import { FlowDiagramConfigService } from './flow-diagram-config.service';
 import { FlowLayoutService } from './flow-layout.service';
 import { FlowSelectionService } from './flow-selection.service';
 import { FlowZoomService } from './flow-zoom.service';
 import { FlowEventService } from './flow-event.service';
 import { FlowTemplateService } from './flow-template.service';
+import { FlowLinkTemplateService } from './flow-link-template.service';
 import { FlowOverviewService } from './flow-overview.service';
+import { FlowDiagramDataService } from './flow-diagram-data.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
 import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
-import { MinimapMathService } from './minimap-math.service';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
 import { UI_CONFIG } from '../../../../config';
 import * as go from 'gojs';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
- * 视图状态（用于保存/恢复）
- * @internal 仅用于文档目的
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-interface ViewState {
-  scale: number;
-  positionX: number;
-  positionY: number;
-}
-
-/**
  * FlowDiagramService - GoJS 图表核心服务（精简版）
  * 
  * 重构后职责：
  * - GoJS Diagram 实例的生命周期管理
  * - 小地图 (Overview) 管理
- * - 图表数据更新
- * - 视图状态保存/恢复
- * - 导出功能
+ * - 拖放支持
  * 
  * 已委托的职责：
+ * - 数据同步/导出/视图状态 → FlowDiagramDataService
  * - 模板配置 → FlowTemplateService
  * - 事件处理 → FlowEventService
  * - 布局操作 → FlowLayoutService
@@ -54,15 +39,11 @@ interface ViewState {
 })
 export class FlowDiagramService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
-  private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
-  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDiagram');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
-  private readonly configService = inject(FlowDiagramConfigService);
   private readonly themeService = inject(ThemeService);
   
   // ========== 委托的子服务 ==========
@@ -71,11 +52,9 @@ export class FlowDiagramService {
   private readonly zoomService = inject(FlowZoomService);
   private readonly eventService = inject(FlowEventService);
   private readonly templateService = inject(FlowTemplateService);
+  private readonly linkTemplateService = inject(FlowLinkTemplateService);
   private readonly overviewService = inject(FlowOverviewService);
-  
-  // TODO: 后续重构可将 calculateExtendedBounds 等边界计算逻辑迁移到 MinimapMathService
-  // 这将提高可维护性和可测试性（可以独立单元测试，无需 DOM/Canvas）
-  private readonly minimapMath = inject(MinimapMathService);
+  private readonly dataService = inject(FlowDiagramDataService);
   
   // ========== 内部状态 ==========
   private diagram: go.Diagram | null = null;
@@ -87,25 +66,11 @@ export class FlowDiagramService {
   private overview: go.Overview | null = null;
   private overviewContainer: HTMLDivElement | null = null;
 
+  /** Idle 小地图初始化句柄 */
+  private idleOverviewInitHandle: number | null = null;
 
-  
-
-
-  
-  
-  
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  private restoreViewStateTimer: ReturnType<typeof setTimeout> | null = null;
-  private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // ========== 视图切换稳定性 ==========
-  private pendingAutoFitToContents = false;
-  
-  // ========== 首次加载标志 ==========
-  private isFirstLoad = true;
-  private _familyColorLogged = false;
   
   // ========== 僵尸模式 ==========
   private isSuspended = false;
@@ -122,7 +87,7 @@ export class FlowDiagramService {
       this.zone.runOutsideAngular(() => {
         // 重新设置模板并更新绑定
         this.templateService.setupNodeTemplate(this.diagram!);
-        this.templateService.setupLinkTemplate(this.diagram!);
+        this.linkTemplateService.setupLinkTemplate(this.diagram!);
         
         // 更新所有节点和连接线的绑定
         this.diagram!.updateAllTargetBindings();
@@ -169,7 +134,6 @@ export class FlowDiagramService {
     
     try {
       this.isDestroyed = false;
-      this.isFirstLoad = true;
       this.diagramDiv = container;
       
       if (environment.gojsLicenseKey) {
@@ -206,10 +170,10 @@ export class FlowDiagramService {
         this.diagram.toolManager.contextMenuTool.isEnabled = false;
       }
       
-      // 委托给 FlowTemplateService 设置图层和模板
+      // 委托给 FlowTemplateService / FlowLinkTemplateService 设置图层和模板
       this.templateService.ensureDiagramLayers(this.diagram);
       this.templateService.setupNodeTemplate(this.diagram);
-      this.templateService.setupLinkTemplate(this.diagram);
+      this.linkTemplateService.setupLinkTemplate(this.diagram);
       
       // 配置工具行为：桌面端左键平移、右键框选；移动端保持原策略
       if (isMobile) {
@@ -237,16 +201,17 @@ export class FlowDiagramService {
       
       // 添加视口变化监听（用于保存视图状态）
       this.diagram.addDiagramListener('ViewportBoundsChanged', () => {
-        this.saveViewState();
+        this.dataService.saveViewState();
       });
       
       // 设置 ResizeObserver
       this.setupResizeObserver();
       
       // 恢复视图状态
-      this.restoreViewState();
+      this.dataService.restoreViewState();
       
       // 将 diagram 实例传递给其他子服务
+      this.dataService.setDiagram(this.diagram);
       this.layoutService.setDiagram(this.diagram);
       this.selectionService.setDiagram(this.diagram);
       this.zoomService.setDiagram(this.diagram);
@@ -539,19 +504,51 @@ export class FlowDiagramService {
     this.overviewService.destroyOverview();
   }
   
-  /**
-   * 刷新 Overview 渲染
-   * 
-   * 【重构完成】完全委托给 FlowOverviewService
-   */
   refreshOverview(): void {
-    // 完全委托给 FlowOverviewService
     this.overviewService.refreshOverview();
+  }
+
+  /** 调度小地图初始化（idle 优先） */
+  scheduleOverviewInit(
+    overviewDiv: ElementRef | undefined,
+    isVisible: boolean,
+    isCollapsed: boolean,
+    zone: NgZone,
+    scheduleTimer: (cb: () => void, delay: number) => void,
+    immediate = false
+  ): void {
+    if (!isVisible || isCollapsed) return;
+    const runInit = () => {
+      if (overviewDiv?.nativeElement && this.isInitialized) {
+        this.initializeOverview(overviewDiv.nativeElement);
+      }
+    };
+    if (immediate) { scheduleTimer(() => runInit(), 0); return; }
+    if (typeof requestIdleCallback !== 'undefined') {
+      if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
+        cancelIdleCallback(this.idleOverviewInitHandle);
+      }
+      this.idleOverviewInitHandle = requestIdleCallback(() => {
+        this.idleOverviewInitHandle = null;
+        zone.run(() => runInit());
+      }, { timeout: 3000 });
+    } else {
+      scheduleTimer(() => runInit(), 300);
+    }
+  }
+
+  cancelIdleOverviewInit(): void {
+    if (this.idleOverviewInitHandle !== null && typeof cancelIdleCallback !== 'undefined') {
+      cancelIdleCallback(this.idleOverviewInitHandle);
+      this.idleOverviewInitHandle = null;
+    }
   }
 
   dispose(): void {
     this.isDestroyed = true;
-    this.isFirstLoad = true;
+    
+    // 清理数据服务
+    this.dataService.dispose();
     
     this.disposeOverview();
     this.clearAllTimers();
@@ -580,92 +577,14 @@ export class FlowDiagramService {
     this.logger.info('GoJS Diagram 已销毁');
   }
   
-  // ========== 导出功能 ==========
+  // ========== 导出功能（委托给 FlowDiagramDataService） ==========
   
   async exportToPng(): Promise<Blob | null> {
-    if (!this.diagram) {
-      this.toast.error('导出失败', '流程图未加载');
-      return null;
-    }
-    
-    try {
-      const imgData = this.diagram.makeImageData({
-        scale: 2,
-        background: '#F5F2E9',
-        type: 'image/png',
-        maxSize: new go.Size(4096, 4096)
-      }) as string;
-      
-      if (!imgData) {
-        this.toast.error('导出失败', '无法生成图片');
-        return null;
-      }
-      
-      const response = await fetch(imgData);
-      const blob = await response.blob();
-      
-      this.downloadBlob(blob, `流程图_${this.getExportFileName()}.png`);
-      this.toast.success('导出成功', 'PNG 图片已下载');
-      
-      return blob;
-    } catch (error) {
-      this.logger.error('导出 PNG 失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToPng' } });
-      this.toast.error('导出失败', '生成图片时发生错误');
-      return null;
-    }
+    return this.dataService.exportToPng();
   }
   
   async exportToSvg(): Promise<Blob | null> {
-    if (!this.diagram) {
-      this.toast.error('导出失败', '流程图未加载');
-      return null;
-    }
-    
-    try {
-      const svg = this.diagram.makeSvg({
-        scale: 1,
-        background: '#F5F2E9',
-        maxSize: new go.Size(4096, 4096)
-      });
-      
-      if (!svg) {
-        this.toast.error('导出失败', '无法生成 SVG');
-        return null;
-      }
-      
-      const serializer = new XMLSerializer();
-      const svgString = serializer.serializeToString(svg);
-      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-      
-      this.downloadBlob(blob, `流程图_${this.getExportFileName()}.svg`);
-      this.toast.success('导出成功', 'SVG 图片已下载');
-      
-      return blob;
-    } catch (error) {
-      this.logger.error('导出 SVG 失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToSvg' } });
-      this.toast.error('导出失败', '生成 SVG 时发生错误');
-      return null;
-    }
-  }
-  
-  private getExportFileName(): string {
-    const project = this.projectState.activeProject();
-    const projectName = project?.name || '未命名项目';
-    const date = new Date().toISOString().slice(0, 10);
-    return `${projectName}_${date}`;
-  }
-  
-  private downloadBlob(blob: Blob, filename: string): void {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    return this.dataService.exportToSvg();
   }
   
   // ========== 图表操作 ==========
@@ -701,192 +620,19 @@ export class FlowDiagramService {
   }
   
   /**
-   * 由外部在 Flow 视图激活时调用
+   * 由外部在 Flow 视图激活时调用（委托给 FlowDiagramDataService）
    */
   onFlowActivated(): void {
-    if (this.isDestroyed || !this.diagram) return;
-    if (this.uiState.activeView() !== 'flow') return;
-    if (!this.pendingAutoFitToContents) return;
-
-    const viewState = this.projectState.getViewState();
-    if (viewState) {
-      this.pendingAutoFitToContents = false;
-      this.diagram.scale = viewState.scale;
-      this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-      return;
-    }
-
-    this.pendingAutoFitToContents = false;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (this.isDestroyed || !this.diagram) return;
-        this.zoomService.fitToContents();
-      });
-    });
+    this.dataService.onFlowActivated();
   }
   
-  // ========== 图表数据更新 ==========
-  
-  private detectStructuralChange(currentNodeMap: Map<string, go.ObjectData>, newTasks: Task[]): boolean {
-    if (currentNodeMap.size !== newTasks.length) {
-      return true;
-    }
-    
-    for (const task of newTasks) {
-      const existing = currentNodeMap.get(task.id);
-      if (!existing) {
-        return true;
-      }
-      
-      if (existing.stage !== task.stage ||
-          existing.status !== task.status ||
-          existing.parentId !== task.parentId) {
-        return true;
-      }
-    }
-    
-    const newTaskIds = new Set(newTasks.map(t => t.id));
-    for (const key of currentNodeMap.keys()) {
-      if (!newTaskIds.has(key)) {
-        return true;
-      }
-    }
-    
-    const project = this.projectState.activeProject();
-    if (project) {
-      const model = this.diagram?.model as go.GraphLinksModel;
-      if (model) {
-        const currentLinkCount = (model.linkDataArray || []).length;
-        const parentChildCount = newTasks.filter(t => t.parentId).length;
-        const crossTreeCount = project.connections?.length || 0;
-        const expectedLinkCount = parentChildCount + crossTreeCount;
-        if (currentLinkCount !== expectedLinkCount) {
-          return true;
-        }
-      }
-    }
-    
-    return false;
-  }
+  // ========== 图表数据更新（委托给 FlowDiagramDataService） ==========
 
   /**
    * 更新图表数据
    */
   updateDiagram(tasks: Task[], forceRefresh: boolean = false): void {
-    if (this.error() || !this.diagram) {
-      return;
-    }
-    
-    const project = this.projectState.activeProject();
-    if (!project) {
-      return;
-    }
-    
-    try {
-      const lastUpdateType = this.taskOps.getLastUpdateType();
-      
-      const model = this.diagram.model as go.GraphLinksModel;
-      const currentNodeMap = new Map<string, go.ObjectData>();
-      (model.nodeDataArray || []).forEach((n: go.ObjectData) => {
-        if (n.key) currentNodeMap.set(n.key as string, n);
-      });
-      
-      const activeTasks = tasks.filter(t => !t.deletedAt);
-      const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
-      
-      if (lastUpdateType === 'position' && !forceRefresh && !hasStructuralChange) {
-        return;
-      }
-      
-      const existingNodeMap = new Map<string, go.ObjectData>();
-      (this.diagram.model as go.GraphLinksModel).nodeDataArray.forEach((n: go.ObjectData) => {
-        if (n.key) {
-          existingNodeMap.set(n.key as string, n);
-        }
-      });
-      
-      const searchQuery = this.uiState.searchQuery();
-      const diagramData = this.configService.buildDiagramData(
-        tasks.filter(t => !t.deletedAt),
-        project,
-        searchQuery,
-        existingNodeMap
-      );
-      
-      const selectedKeys = new Set<string>();
-      this.diagram.selection.each((part: go.Part) => {
-        if (part.data?.key) {
-          selectedKeys.add(part.data.key);
-        }
-      });
-      
-      this.diagram.startTransaction('update');
-      this.diagram.skipsUndoManager = true;
-      
-      model.mergeNodeDataArray(diagramData.nodeDataArray);
-      
-      const linkDataWithPorts = diagramData.linkDataArray.map(link => ({
-        ...link,
-        fromPortId: "",
-        toPortId: ""
-      }));
-      
-      model.mergeLinkDataArray(linkDataWithPorts);
-      
-      const nodeKeys = new Set(diagramData.nodeDataArray.map(n => n.key));
-      const linkKeys = new Set(diagramData.linkDataArray.map(l => l.key));
-      
-      const nodesToRemove = model.nodeDataArray.filter((n: go.ObjectData) => !nodeKeys.has(n.key as string));
-      nodesToRemove.forEach((n: go.ObjectData) => model.removeNodeData(n));
-      
-      const linksToRemove = model.linkDataArray.filter((l: go.ObjectData) => !linkKeys.has(l.key as string));
-      linksToRemove.forEach((l: go.ObjectData) => model.removeLinkData(l));
-      
-      this.diagram.skipsUndoManager = false;
-      this.diagram.commitTransaction('update');
-      
-      if (selectedKeys.size > 0) {
-        this.diagram.nodes.each((node: go.Node) => {
-          if (selectedKeys.has(node.data?.key)) {
-            node.isSelected = true;
-          }
-        });
-      }
-      
-      this.diagram.links.each((link: go.Link) => {
-        link.invalidateRoute();
-      });
-      
-      // Debug 日志
-      const linkData = model.linkDataArray;
-      if (linkData?.length > 0 && !this._familyColorLogged) {
-        this._familyColorLogged = true;
-        this.logger.info(`[LineageColor] 首条连线数据: ${JSON.stringify(linkData[0])}`);
-      }
-      
-      if (this.overview?.observed) {
-        this.overview.updateAllTargetBindings();
-      }
-      
-      if (this.isFirstLoad && diagramData.nodeDataArray.length > 0) {
-        this.isFirstLoad = false;
-        setTimeout(() => {
-          if (this.isDestroyed || !this.diagram) return;
-          const viewState = this.projectState.getViewState();
-          if (!viewState) {
-            if (this.uiState.activeView() !== 'flow') {
-              this.pendingAutoFitToContents = true;
-              return;
-            }
-            this.zoomService.fitToContents();
-          }
-        }, 100);
-      }
-      
-    } catch (error) {
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'updateDiagram' } });
-      this.handleError('更新流程图失败', error);
-    }
+    this.dataService.updateDiagram(tasks, forceRefresh);
   }
   
   // ========== 拖放支持 ==========
@@ -989,96 +735,12 @@ export class FlowDiagramService {
     this.resizeObserver.observe(this.diagramDiv);
   }
   
-  private saveViewState(): void {
-    if (!this.diagram) return;
-    
-    if (this.viewStateSaveTimer) {
-      clearTimeout(this.viewStateSaveTimer);
-    }
-    
-    this.viewStateSaveTimer = setTimeout(() => {
-      if (this.isDestroyed || !this.diagram) return;
-      
-      const projectId = this.projectState.activeProjectId();
-      if (!projectId) return;
-      
-      const scale = this.diagram.scale;
-      const pos = this.diagram.position;
-      
-      this.projectState.updateViewState(projectId, {
-        scale,
-        positionX: pos.x,
-        positionY: pos.y
-      });
-      this.syncCoordinator.schedulePersist();
-      
-      this.viewStateSaveTimer = null;
-    }, 1000);
-  }
-  
-  private restoreViewState(): void {
-    if (!this.diagram) return;
-
-    const immediateViewState = this.projectState.getViewState();
-    if (immediateViewState) {
-      this.pendingAutoFitToContents = false;
-      this.diagram.scale = immediateViewState.scale;
-      this.diagram.position = new go.Point(immediateViewState.positionX, immediateViewState.positionY);
-      return;
-    }
-    
-    if (this.restoreViewStateTimer) {
-      clearTimeout(this.restoreViewStateTimer);
-      this.restoreViewStateTimer = null;
-    }
-
-    this.restoreViewStateTimer = setTimeout(() => {
-      if (this.isDestroyed || !this.diagram) return;
-
-      const viewState = this.projectState.getViewState();
-      
-      if (viewState) {
-        this.pendingAutoFitToContents = false;
-        this.diagram.scale = viewState.scale;
-        this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-      } else {
-        if (this.uiState.activeView() !== 'flow') {
-          this.pendingAutoFitToContents = true;
-          return;
-        }
-
-        if (this.autoFitTimer) {
-          clearTimeout(this.autoFitTimer);
-          this.autoFitTimer = null;
-        }
-
-        this.autoFitTimer = setTimeout(() => {
-          if (this.isDestroyed || !this.diagram) return;
-          this.zoomService.fitToContents();
-          this.autoFitTimer = null;
-        }, 300);
-      }
-      this.restoreViewStateTimer = null;
-    }, 200);
-  }
-  
   private clearAllTimers(): void {
     if (this.resizeDebounceTimer) {
       clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
     }
-    if (this.viewStateSaveTimer) {
-      clearTimeout(this.viewStateSaveTimer);
-      this.viewStateSaveTimer = null;
-    }
-    if (this.restoreViewStateTimer) {
-      clearTimeout(this.restoreViewStateTimer);
-      this.restoreViewStateTimer = null;
-    }
-    if (this.autoFitTimer) {
-      clearTimeout(this.autoFitTimer);
-      this.autoFitTimer = null;
-    }
+    this.dataService.clearTimers();
   }
   
   private handleError(userMessage: string, error: unknown): void {

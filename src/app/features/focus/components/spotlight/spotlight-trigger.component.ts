@@ -15,7 +15,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { SpotlightService } from '../../../../../services/spotlight.service';
 import { ProjectStateService } from '../../../../../services/project-state.service';
-import { spotlightMode, focusPreferences } from '../../../../core/state/focus-stores';
+import { spotlightMode, focusPreferences } from '../../../../../state/focus-stores';
 import { Task } from '../../../../../models';
 
 @Component({

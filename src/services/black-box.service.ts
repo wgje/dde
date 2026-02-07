@@ -15,7 +15,7 @@ import {
   updateBlackBoxEntry,
   deleteBlackBoxEntry as _deleteFromStore,
   getTodayDate
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
 import { ProjectStateService } from './project-state.service';

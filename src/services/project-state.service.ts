@@ -102,7 +102,7 @@ export class ProjectStateService {
     
     let rootDisplayId = '';
     if (filter !== 'all') {
-      const root = tasks.find(r => r.id === filter);
+      const root = this.getTask(filter);
       if (root) rootDisplayId = root.displayId;
     }
 
@@ -274,7 +274,7 @@ export class ProjectStateService {
    * 获取项目（用于外部读取）
    */
   getProject(projectId: string): Project | undefined {
-    return this.projects().find(p => p.id === projectId);
+    return this.projectStore.getProject(projectId);
   }
 
   // ========== 内部更新方法（供 StoreService 调用） ==========
@@ -287,16 +287,26 @@ export class ProjectStateService {
     // 更新 ProjectStore
     this.projectStore.setProjects(projects);
     
-    // 同步任务和连接到对应 Store
+    // 同步任务和连接到对应 Store（批量操作，单次 Map 克隆）
     // 注意：使用 Array.isArray 而非 length 检查，确保空数组也能正确同步
     // 这对于撤销操作恢复到空连接状态至关重要
+    const taskEntries: { tasks: Task[]; projectId: string }[] = [];
+    const connectionEntries: { connections: Connection[]; projectId: string }[] = [];
+    
     for (const project of projects) {
       if (Array.isArray(project.tasks)) {
-        this.taskStore.setTasks(project.tasks, project.id);
+        taskEntries.push({ tasks: project.tasks, projectId: project.id });
       }
       if (Array.isArray(project.connections)) {
-        this.connectionStore.setConnections(project.connections, project.id);
+        connectionEntries.push({ connections: project.connections, projectId: project.id });
       }
+    }
+    
+    if (taskEntries.length > 0) {
+      this.taskStore.setTasksForMultipleProjects(taskEntries);
+    }
+    if (connectionEntries.length > 0) {
+      this.connectionStore.setConnectionsForMultipleProjects(connectionEntries);
     }
   }
 
@@ -376,6 +386,47 @@ export class ProjectStateService {
     const pid = projectId || this.activeProjectId();
     if (pid) {
       this.connectionStore.setConnection(connection, pid);
+    }
+  }
+
+  /**
+   * 批量更新任务（单次 Map 克隆）
+   * 与循环调用 updateTask 相比，减少 N 次 Map 克隆为 1 次
+   */
+  bulkUpdateTasks(tasks: Task[], projectId?: string): void {
+    const pid = projectId || this.activeProjectId();
+    if (pid) {
+      this.taskStore.bulkSetTasks(tasks, pid);
+    }
+  }
+
+  /**
+   * 批量删除任务（单次 Map 克隆）
+   */
+  bulkRemoveTasks(taskIds: string[], projectId?: string): void {
+    const pid = projectId || this.activeProjectId();
+    if (pid) {
+      this.taskStore.bulkRemoveTasks(taskIds, pid);
+    }
+  }
+
+  /**
+   * 批量更新连接（单次 Map 克隆）
+   */
+  bulkUpdateConnections(connections: Connection[], projectId?: string): void {
+    const pid = projectId || this.activeProjectId();
+    if (pid) {
+      this.connectionStore.bulkSetConnections(connections, pid);
+    }
+  }
+
+  /**
+   * 批量删除连接（单次 Map 克隆）
+   */
+  bulkRemoveConnections(connectionIds: string[], projectId?: string): void {
+    const pid = projectId || this.activeProjectId();
+    if (pid) {
+      this.connectionStore.bulkRemoveConnections(connectionIds, pid);
     }
   }
   

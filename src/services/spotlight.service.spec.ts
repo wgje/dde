@@ -16,7 +16,7 @@ import {
   spotlightTaskQueue,
   focusPreferences,
   setBlackBoxEntries
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 import { Task } from '../models';
 
 describe('SpotlightService', () => {

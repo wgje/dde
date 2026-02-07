@@ -13,7 +13,7 @@ import {
   strataLayers,
   focusPreferences,
   setBlackBoxEntries
-} from '../app/core/state/focus-stores';
+} from '../state/focus-stores';
 import { StrataItem, StrataLayer } from '../models/focus';
 
 describe('StrataService', () => {

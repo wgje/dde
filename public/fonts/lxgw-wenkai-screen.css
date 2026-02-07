@@ -1,0 +1,122 @@
+/**
+ * LXGW WenKai Screen - 自托管字体子集
+ *
+ * 【性能优化 2026-02-05】
+ * - 自托管关键字体子集，避免 CDN 往返延迟
+ * - 长期缓存（1年），重复访问无网络请求
+ * - 配合 Service Worker 实现离线访问
+ *
+ * 包含子集: 81, 88, 105, 106, 108, 110, 111, 113, 114, 115, 116, 117, 118, 119
+ * 关键子集 (117, 118, 119) 通过 index.html 内联 + preload 加载
+ * 其他子集通过本文件异步加载
+ */
+
+/* subset-81: 罕用汉字 */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-81.woff2') format('woff2');
+  unicode-range: U+52a2, U+52a6-52a7, U+52ac-52ad, U+52af, U+52b4-52b5, U+52b9, U+52bb-52bc, U+52be, U+52c1, U+52c5, U+52ca, U+52cd, U+52d0, U+52d6-52d7, U+52d9, U+52db, U+52dd-52de, U+52e0, U+52e2-52e3, U+52e5, U+52e7-52f0, U+52f2-52f3, U+52f5-52f9, U+52fb-52fc, U+5302, U+5304, U+530b, U+530d, U+530f-5310, U+5315, U+531a, U+531c-531d, U+5321, U+5323, U+5326, U+532e-5331, U+5338, U+533c-533e, U+5340, U+5344-5345, U+534b-534d, U+5350, U+5354, U+5358, U+535d-535f, U+5363, U+5368-5369, U+536c, U+536e-536f, U+5372, U+5379-537b, U+537d, U+538d-538e, U+5390, U+5393-5394, U+5396, U+539b-539d, U+53a0-53a1, U+53a3-53a5, U+53a9, U+53ad-53ae, U+53b0, U+53b2-53b3, U+53b5-53b8, U+53bc, U+53be, U+53c1, U+53c3-53c7, U+53ce-53cf, U+53d2-53d3, U+53d5, U+53da, U+53de-53df, U+53e1-53e2, U+53e7-53e9, U+53f1, U+53f4-53f5, U+53fa;
+}
+
+/* subset-88: 符号和特殊字符 */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-88.woff2') format('woff2');
+  unicode-range: U+254b, U+2550-2551, U+2554, U+2557, U+255a-255b, U+255d, U+255f-2560, U+2562-2563, U+2565-2567, U+2569-256a, U+256c-2572, U+2579, U+2580-2595, U+25a1, U+25a3, U+25a9-25ad, U+25b0, U+25b3-25bb, U+25bd-25c2, U+25c4, U+25c8-25cb, U+25cd, U+25d0-25d1, U+25d4-25d5, U+25d8, U+25dc-25e6, U+25ea-25eb, U+25ef, U+25fe, U+2600-2604, U+2609, U+260e-260f, U+2611, U+2614-2615, U+2618, U+261a-2620, U+2622-2623, U+262a, U+262d-2630, U+2639-2640, U+2642, U+2648-264f;
+}
+
+/* subset-105: 次常用汉字 A */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-105.woff2') format('woff2');
+  unicode-range: U+5e, U+2190, U+250a, U+25bc, U+25cf, U+300f, U+4e56, U+4ea9, U+4f3d, U+4f6c, U+4f88, U+4fa8, U+4fcf, U+5029, U+5188, U+51f9, U+5203, U+524a, U+5256, U+529d, U+5375, U+53db, U+541f, U+5435, U+5457, U+548b, U+54b1, U+54c7, U+54d4, U+54e9, U+556a, U+5589, U+55bb, U+55e8, U+55ef, U+563b, U+566a, U+576a, U+58f9, U+598d, U+599e, U+59a8, U+5a9b, U+5ae3, U+5bde, U+5c4c, U+5c60, U+5d1b, U+5deb, U+5df7, U+5e18, U+5f26, U+5f64, U+601c, U+6084, U+60e9, U+614c, U+61be, U+6208, U+621a, U+6233, U+6254, U+62d8, U+62e6, U+62ef, U+6323, U+632a, U+633d, U+6361, U+6380, U+6405, U+640f, U+6614, U+6642, U+6657, U+67a3, U+6808, U+683d, U+6850, U+6897, U+68b3, U+68b5, U+68d5, U+6a58, U+6b47, U+6b6a, U+6c28, U+6c90, U+6ca7, U+6cf5, U+6d51, U+6da9, U+6dc7, U+6dd1, U+6e0a, U+6e5b, U+6f47, U+6f6d, U+70ad, U+70f9, U+710a, U+7130, U+71ac, U+745f, U+7476, U+7490, U+7529, U+7538, U+75d2, U+7696, U+76b1, U+76fc, U+777f, U+77dc, U+789f, U+795b, U+79bd, U+79c9, U+7a3b, U+7a46, U+7aa5, U+7ad6, U+7ca5, U+7cb9, U+7cdf, U+7d6e, U+7f06, U+7f38, U+7fa1, U+7fc1, U+8015, U+803b, U+80a2, U+80aa, U+8116, U+813e, U+82ad, U+82bd, U+8305, U+8346, U+846c, U+8549, U+859b, U+8611, U+8680, U+87f9, U+884d, U+8877, U+888d, U+88d4, U+898b, U+8a79, U+8a93, U+8c05, U+8c0d, U+8c26, U+8d1e, U+8d31, U+8d81, U+8e22, U+8f90, U+8f96, U+90ca, U+916c, U+917f, U+9187, U+918b, U+9499, U+94a9, U+9524, U+958b, U+9600, U+9640, U+96b6, U+96ef, U+98d9, U+9976, U+997f, U+9a74, U+9a84, U+9c8d, U+9e26, U+9e9f, U+ad6d, U+c5b4, U+d55c, U+ff0f;
+}
+
+/* subset-106: 次常用汉字 B */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-106.woff2') format('woff2');
+  unicode-range: U+b0, U+2191, U+2460-2461, U+25c6, U+300e, U+4e1b, U+4e7e, U+4ed5, U+4ef2, U+4f10, U+4f1e, U+4f50, U+4fa6, U+4faf, U+5021, U+50f5, U+5179, U+5180, U+51d1, U+522e, U+52a3, U+52c3, U+52cb, U+5300, U+5319, U+5320, U+5349, U+5395, U+53d9, U+541e, U+5428, U+543e, U+54c0, U+54d2, U+570b, U+5858, U+58f6, U+5974, U+59a5, U+59e8, U+59ec, U+5a36, U+5a9a, U+5ab3, U+5b99, U+5baa, U+5ce1, U+5d14, U+5d4c, U+5dc5, U+5de2, U+5e99, U+5e9e, U+5f18, U+5f66, U+5f70, U+6070, U+60d5, U+60e7, U+6101, U+611a, U+6241, U+6252, U+626f, U+6296, U+62bc, U+62cc, U+63a9, U+644a, U+6454, U+64a9, U+64b8, U+6500, U+6572, U+65a5, U+65a9, U+65ec, U+660f, U+6749, U+6795, U+67ab, U+68da, U+6912, U+6bbf, U+6bef, U+6cab, U+6cca, U+6ccc, U+6cfc, U+6d3d, U+6d78, U+6dee, U+6e17, U+6e34, U+6e83, U+6ea2, U+6eb6, U+6f20, U+6fa1, U+707f, U+70d8, U+70eb, U+714c, U+714e, U+7235, U+7239, U+73ca, U+743c, U+745c, U+7624, U+763e, U+76f2, U+77db, U+77e9, U+780d, U+7838, U+7845, U+78ca, U+796d, U+7a84, U+7aed, U+7b3c, U+7eb2, U+7f05, U+7f20, U+7f34, U+7f62, U+7fc5, U+7fd8, U+7ff0, U+800d, U+8036, U+80ba, U+80be, U+80c0-80c1, U+8155, U+817a, U+8180, U+81e3, U+8206, U+8247, U+8270, U+8299, U+8304, U+8393, U+83b9, U+83ca, U+840d, U+8427, U+8469, U+8471, U+84c4, U+84ec, U+853d, U+8681-8682, U+8721, U+8854, U+88d5, U+88f9, U+8bc0, U+8c0a, U+8c29, U+8c2d, U+8d41, U+8dea, U+8eb2, U+8f9f, U+903b, U+903e, U+9102, U+9493, U+94a5, U+94f8, U+95ef, U+95f7, U+9706, U+9709, U+9774, U+9887, U+98a0, U+9e64, U+9f9f, U+e601, U+e603;
+}
+
+/* subset-108: 次常用汉字 C */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-108.woff2') format('woff2');
+  unicode-range: U+24, U+4e08, U+4e43, U+4e4f, U+4ef0, U+4f2a, U+507f, U+50ac, U+50bb, U+5151, U+51bb, U+51f6, U+51fd, U+5272, U+52fe, U+5362, U+53c9, U+53d4, U+53e0, U+543b, U+54f2, U+5507, U+5524, U+558a, U+55b5, U+561b, U+56ca, U+5782, U+57c3, U+5893, U+5915, U+5949, U+5962, U+59ae, U+59dc, U+59fb, U+5bd3, U+5c38, U+5cb3, U+5d07, U+5d29, U+5de1, U+5dfe, U+5e15, U+5eca, U+5f2f, U+5f7c, U+5fcc, U+6021, U+609f, U+60f9, U+6108, U+6148, U+6155, U+6170, U+61d2, U+6251, U+629b, U+62ab, U+62e8, U+62f3, U+6321, U+6350, U+6566, U+659c, U+65e8, U+6635, U+6655, U+6670, U+66f9, U+6734, U+679d, U+6851, U+6905, U+6b49, U+6b96, U+6c1b, U+6c41, U+6c6a, U+6c83, U+6cf3, U+6d9b, U+6dcb, U+6e1d, U+6e20-6e21, U+6eaa, U+6ee4, U+6ee9, U+6f58, U+70e4, U+722c, U+7262, U+7267, U+72b9, U+72e0, U+72ee, U+72f1, U+7334, U+73ab, U+7433, U+7470, U+758f, U+75d5, U+764c, U+7686, U+76c6, U+76fe, U+7720, U+77e2, U+7802, U+7816, U+788d, U+7891, U+7a00, U+7a9d, U+7b52, U+7bad, U+7c98, U+7cca, U+7eba, U+7eea, U+7ef5, U+7f1d, U+7f69, U+806a, U+809a, U+80bf, U+80c3, U+81c0, U+820c, U+82ac, U+82af, U+82cd, U+82d7, U+838e, U+839e, U+8404, U+84b8, U+852c, U+8587, U+85aa, U+8650, U+8679, U+86c7, U+8702, U+87ba, U+886b, U+8870, U+8c10, U+8c23, U+8c6b, U+8d3e, U+8d4b-8d4c, U+8d64, U+8d6b, U+8d74, U+8e29, U+8f69, U+8f74, U+8fb0, U+8fdf, U+901b, U+9038, U+9093, U+90aa, U+9171, U+9489, U+94ae, U+94c3, U+9508, U+9510, U+9601, U+9614, U+9675, U+97f5, U+9888, U+98d8, U+9971, U+9aa4, U+9e3f, U+9e45, U+9e4f, U+9e70, U+9f7f, U+e715;
+}
+
+/* subset-110: 常用汉字 A */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-110.woff2') format('woff2');
+  unicode-range: U+300c-300d, U+4e54, U+4e58, U+4e95, U+4ec1, U+4f2f, U+4f38, U+4fa3, U+4fca, U+503e, U+5141, U+5144, U+517c, U+51cc, U+51ed, U+5242, U+52b2, U+52d2, U+52e4, U+540a, U+5439, U+5448, U+5496, U+54ed, U+5565, U+5761, U+5766, U+58ee, U+593a, U+594b, U+594f, U+5954, U+5996, U+59c6, U+59ff, U+5b64, U+5bff, U+5c18, U+5c1d, U+5c97, U+5ca9, U+5cb8, U+5e9f, U+5ec9, U+5f04, U+5f7b, U+5fa1, U+5fcd, U+6012, U+60a6, U+60ac, U+60b2, U+60ef, U+626e, U+6270, U+6276, U+62d6, U+62dc, U+6316, U+632f, U+633a, U+6355, U+63aa, U+6447, U+649e, U+64c5, U+654c, U+65c1, U+65cb, U+65e6, U+6606, U+6731, U+675c, U+67cf, U+67dc, U+6846, U+6b8b, U+6beb, U+6c61, U+6c88, U+6cbf, U+6cdb, U+6cea, U+6d45, U+6d53, U+6d74, U+6d82, U+6da8, U+6db5, U+6deb, U+6eda, U+6ee8, U+6f0f, U+706d, U+708e, U+70ae, U+70bc, U+70c2, U+70e6, U+7237-7238, U+72fc, U+730e, U+731b, U+739b, U+73bb, U+7483, U+74dc, U+74f6, U+7586, U+7626, U+775b, U+77ff, U+788e, U+78b0, U+7956, U+7965, U+79e6, U+7af9, U+7bee, U+7c97, U+7eb1, U+7eb7, U+7ed1, U+7ed5, U+7f6a, U+7f72, U+7fbd, U+8017, U+808c, U+80a9, U+80c6, U+80ce, U+8150, U+8170, U+819c, U+820d, U+8230, U+8239, U+827e, U+8377, U+8389, U+83b2, U+8428, U+8463, U+867e, U+88c2, U+88d9, U+8986, U+8bca, U+8bde, U+8c13, U+8c8c, U+8d21, U+8d24, U+8d56, U+8d60, U+8d8b, U+8db4, U+8e2a, U+8f68, U+8f89, U+8f9b, U+8fa8, U+8fbd, U+9003, U+90ce, U+90ed, U+9189, U+94bb, U+9505, U+95f9, U+963b, U+9655, U+966a, U+9677, U+96fe, U+9896, U+99a8, U+9a71, U+9a82, U+9a91, U+9b45, U+9ece, U+9f20, U+feff, U+ff0d;
+}
+
+/* subset-111: 常用汉字 B */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-111.woff2') format('woff2');
+  unicode-range: U+4e4c, U+4e88, U+4ea1, U+4ea6, U+4ed3-4ed4, U+4eff, U+4f30, U+4fa7, U+4fc4, U+4fd7, U+500d, U+504f, U+5076-5077, U+517d, U+5192, U+51c9, U+51ef, U+5238, U+5251, U+526a, U+52c7, U+52df, U+52ff, U+53a6, U+53a8, U+53ec, U+5410, U+559d, U+55b7, U+5634, U+573e, U+5783, U+585e, U+586b, U+58a8, U+5999, U+59d3, U+5a1c, U+5a46, U+5b54-5b55, U+5b85, U+5b8b, U+5b8f, U+5bbf, U+5bd2, U+5c16, U+5c24, U+5e05, U+5e45, U+5e7c, U+5e84, U+5f03, U+5f1f, U+5f31, U+5f84, U+5f90, U+5fbd, U+5fc6, U+5fd9, U+5fe7, U+6052, U+6062, U+6089, U+60a3, U+60d1, U+6167, U+622a, U+6234, U+624e, U+6269, U+626c, U+62b5, U+62d2, U+6325, U+63e1, U+643a, U+6446, U+6562, U+656c, U+65e2, U+65fa, U+660c, U+6628, U+6652, U+6668, U+6676, U+66fc, U+66ff, U+6717, U+676d, U+67aa, U+67d4, U+6843, U+6881, U+68d2, U+695a, U+69fd, U+6a2a, U+6b8a, U+6c60, U+6c64, U+6c9f, U+6caa, U+6cc9, U+6ce1, U+6cfd, U+6d1b, U+6d1e, U+6d6e, U+6de1, U+6e10, U+6e7f, U+6f5c, U+704c, U+7070, U+7089, U+70b8, U+718a, U+71c3, U+723d, U+732a, U+73cd, U+7518, U+756a, U+75af, U+75be, U+75c7, U+76d2, U+76d7, U+7763, U+78e8, U+795d, U+79df, U+7c4d, U+7d2f, U+7ee9, U+7f13, U+7f8a, U+8000, U+8010, U+80af, U+80f6, U+80f8, U+8212, U+8273, U+82f9, U+83ab, U+83b1, U+83f2, U+8584, U+871c, U+8861, U+888b, U+88c1, U+88e4, U+8bd1, U+8bf1, U+8c31, U+8d5a, U+8d75-8d76, U+8de8, U+8f85, U+8fa3, U+8fc5, U+9006, U+903c, U+904d, U+9075, U+9178, U+9274, U+950b, U+9526, U+95ea, U+9636, U+9686, U+978b, U+987f, U+9a7e, U+9b42, U+9e1f, U+9ea6, U+9f13, U+9f84, U+ff5e;
+}
+
+/* subset-113: 常用汉字 C */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-113.woff2') format('woff2');
+  unicode-range: U+26, U+3c, U+d7, U+4e4e, U+4e61, U+4e71, U+4ebf, U+4ee4, U+4f26, U+5012, U+51ac, U+51b0, U+51b2, U+51b7, U+5218, U+521a, U+5220, U+5237, U+523b, U+526f, U+5385, U+53bf, U+53e5, U+53eb, U+53f3, U+53f6, U+5409, U+5438, U+54c8, U+54e5, U+552f, U+5584, U+5706, U+5723, U+5750, U+575a, U+5987-5988, U+59b9, U+59d0, U+59d4, U+5b88, U+5b9c, U+5bdf, U+5bfb, U+5c01, U+5c04, U+5c3e, U+5c4b, U+5c4f, U+5c9b, U+5cf0, U+5ddd, U+5de6, U+5de8, U+5e01, U+5e78, U+5e7b, U+5e9c, U+5ead, U+5ef6, U+5f39, U+5fd8, U+6000, U+6025, U+604b, U+6076, U+613f, U+6258, U+6263, U+6267, U+6298, U+62a2, U+62e5, U+62ec, U+6311, U+6377, U+6388-6389, U+63a2, U+63d2, U+641e, U+642d, U+654f, U+6551, U+6597, U+65cf, U+65d7, U+65e7, U+6682, U+66f2, U+671d, U+672b, U+6751, U+6768, U+6811, U+6863, U+6982, U+6bd2, U+6cf0, U+6d0b, U+6d17, U+6d59, U+6dd8, U+6dfb, U+6e7e, U+6f6e, U+6fb3, U+706f, U+719f, U+72af, U+72d0, U+72d7, U+732b, U+732e, U+7389, U+73e0, U+7530, U+7687, U+76d6, U+76db, U+7840, U+786c, U+79cb, U+79d2, U+7a0e, U+7a33, U+7a3f, U+7a97, U+7ade-7adf, U+7b26, U+7e41, U+7ec3, U+7f3a, U+8089, U+80dc, U+811a, U+8131, U+8138, U+821e, U+8349, U+83dc, U+8457, U+867d, U+86cb, U+8a89, U+8ba8, U+8bad, U+8bef, U+8bfe, U+8c6a, U+8d1d, U+8d4f, U+8d62, U+8dd1, U+8df3, U+8f6e, U+8ff9, U+900f, U+9014, U+9057, U+9192, U+91ce, U+9488, U+94a2, U+9547, U+955c, U+95f2, U+9644, U+964d, U+96c4-96c5, U+96e8, U+96f6-96f7, U+9732, U+9759, U+9760, U+987a, U+989c, U+9910, U+996d-996e, U+9b54, U+9e21, U+9ebb, U+9f50;
+}
+
+/* subset-114: 常用汉字 D */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-114.woff2') format('woff2');
+  unicode-range: U+7e, U+2026, U+4e03, U+4e25, U+4e30, U+4e34, U+4e45, U+4e5d, U+4e89, U+4eae, U+4ed8, U+4f11, U+4f19, U+4f24, U+4f34, U+4f59, U+4f73, U+4f9d, U+4fb5, U+5047, U+505c, U+5170, U+519c, U+51cf, U+5267, U+5356, U+5374, U+5382, U+538b, U+53e6, U+5426, U+542b, U+542f, U+5462, U+5473, U+554a, U+5566, U+5708, U+571f, U+5757, U+57df, U+57f9, U+5802, U+590f, U+591c, U+591f, U+592b, U+5965, U+5979, U+5a01, U+5a5a, U+5b69, U+5b81, U+5ba1, U+5ba3, U+5c3c, U+5c42, U+5c81, U+5de7, U+5dee, U+5e0c, U+5e10, U+5e55, U+5e86, U+5e8f, U+5ea7, U+5f02, U+5f52, U+5f81, U+5ff5, U+60ca, U+60e0, U+6279, U+62c5, U+62ff, U+63cf, U+6444, U+64cd, U+653b, U+65bd, U+65e9, U+665a, U+66b4, U+66fe, U+6728, U+6740, U+6742, U+677e, U+67b6, U+680f, U+68a6, U+68c0, U+699c, U+6b4c, U+6b66, U+6b7b, U+6bcd, U+6bdb, U+6c38, U+6c47, U+6c49, U+6cb3, U+6cb9, U+6ce2, U+6d32, U+6d3e, U+6d4f, U+6e56, U+6fc0, U+7075, U+7206, U+725b, U+72c2, U+73ed, U+7565, U+7591, U+7597, U+75c5, U+76ae, U+76d1, U+76df, U+7834, U+7968, U+7981, U+79c0, U+7a7f, U+7a81, U+7ae5, U+7b14, U+7c89, U+7d27, U+7eaf, U+7eb3, U+7eb8, U+7ec7, U+7ee7, U+7eff, U+7f57, U+7ffb, U+805a, U+80a1, U+822c, U+82cf, U+82e5, U+8363, U+836f, U+84dd, U+878d, U+8840, U+8857, U+8863, U+8865, U+8b66, U+8bb2, U+8bda, U+8c01, U+8c08, U+8c46, U+8d1f, U+8d35, U+8d5b, U+8d5e, U+8da3, U+8ddf, U+8f93, U+8fdd, U+8ff0, U+8ff7, U+8ffd, U+9000, U+9047, U+9152, U+949f, U+94c1, U+94f6, U+9646, U+9648, U+9669, U+969c, U+96ea, U+97e9, U+987b, U+987e, U+989d, U+9970, U+9986, U+9c7c, U+9c9c;
+}
+
+/* subset-115: 常用汉字 E */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-115.woff2') format('woff2');
+  unicode-range: U+25, U+4e14, U+4e1d, U+4e3d, U+4e49, U+4e60, U+4e9a, U+4eb2, U+4ec5, U+4efd, U+4f3c, U+4f4f, U+4f8b, U+4fbf, U+5019, U+5145, U+514b, U+516b, U+516d, U+5174, U+5178, U+517b, U+5199, U+519b, U+51b3, U+51b5, U+5207, U+5212, U+5219, U+521d, U+52bf, U+533b, U+5343, U+5347, U+534a, U+536b, U+5370, U+53e4, U+53f2, U+5403, U+542c, U+547d, U+54a8, U+54cd, U+54ea, U+552e, U+56f4, U+5747, U+575b, U+5883, U+589e, U+5931, U+5947, U+5956-5957, U+5a92, U+5b63, U+5b83, U+5ba4, U+5bb3, U+5bcc, U+5c14, U+5c1a, U+5c3d, U+5c40, U+5c45, U+5c5e, U+5df4, U+5e72, U+5e95, U+5f80, U+5f85, U+5fb7, U+5fd7, U+601d, U+626b, U+627f, U+62c9, U+62cd, U+6309, U+63a7, U+6545, U+65ad, U+65af, U+65c5, U+666e, U+667a, U+670b, U+671b, U+674e, U+677f, U+6781, U+6790, U+6797, U+6821, U+6838-6839, U+697c, U+6b27, U+6b62, U+6bb5, U+6c7d, U+6c99, U+6d4e, U+6d6a, U+6e29, U+6e2f, U+6ee1, U+6f14, U+6f2b, U+72b6, U+72ec, U+7387, U+7533, U+753b, U+76ca, U+76d8, U+7701, U+773c, U+77ed, U+77f3, U+7814, U+793c, U+79bb, U+79c1, U+79d8, U+79ef, U+79fb, U+7a76, U+7b11, U+7b54, U+7b56, U+7b97, U+7bc7, U+7c73, U+7d20, U+7eaa, U+7ec8, U+7edd, U+7eed, U+7efc, U+7fa4, U+804c, U+8058, U+80cc, U+8111, U+817e, U+826f, U+8303, U+843d, U+89c9, U+89d2, U+8ba2, U+8bbf, U+8bc9, U+8bcd, U+8be6, U+8c22, U+8c61, U+8d22, U+8d26-8d27, U+8d8a, U+8f6f, U+8f7b, U+8f83, U+8f91, U+8fb9, U+8fd4, U+8fdc, U+9002, U+94b1, U+9519, U+95ed, U+961f, U+9632-9633, U+963f, U+968f-9690, U+96be, U+9876, U+9884, U+98de, U+9988, U+9999, U+9ec4, U+ff1b;
+}
+
+/* subset-116: 常用汉字 F */
+@font-face {
+  font-family: 'LXGW WenKai Screen';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/lxgwwenkaiscreen-subset-116.woff2') format('woff2');
+  unicode-range: U+2b, U+40, U+3000, U+300a-300b, U+4e16, U+4e66, U+4e70, U+4e91-4e92, U+4e94, U+4e9b, U+4ec0, U+4eca, U+4f01, U+4f17-4f18, U+4f46, U+4f4e, U+4f9b, U+4fee, U+503c, U+5065, U+50cf, U+513f, U+5148, U+518d, U+51c6, U+51e0, U+5217, U+529e-529f, U+5341, U+534f, U+5361, U+5386, U+53c2, U+53c8, U+53cc, U+53d7-53d8, U+5404, U+5411, U+5417, U+5427, U+5468, U+559c, U+5668, U+56e0, U+56e2, U+56ed, U+5740, U+57fa, U+58eb, U+5904, U+592a, U+59cb, U+5a31, U+5b58, U+5b9d, U+5bc6, U+5c71, U+5dde, U+5df1, U+5e08, U+5e26, U+5e2e, U+5e93, U+5e97, U+5eb7, U+5f15, U+5f20, U+5f3a, U+5f62, U+5f69, U+5f88, U+5f8b, U+5fc5, U+600e, U+620f, U+6218, U+623f, U+627e, U+628a, U+62a4, U+62db, U+62e9, U+6307, U+6362, U+636e, U+64ad, U+6539, U+653f, U+6548, U+6574, U+6613, U+6625, U+663e, U+666f, U+672a, U+6750, U+6784, U+6a21, U+6b3e, U+6b65, U+6bcf, U+6c11, U+6c5f, U+6d4b, U+6df1, U+706b, U+7167, U+724c, U+738b, U+73a9, U+73af, U+7403, U+7537, U+754c, U+7559, U+767d, U+7740, U+786e, U+795e, U+798f, U+79f0, U+7aef, U+7b7e, U+7bb1, U+7ea2, U+7ea6, U+7ec4, U+7ec6, U+7ecd, U+7edc, U+7ef4, U+8003, U+80b2, U+81f3-81f4, U+822a, U+827a, U+82f1, U+83b7, U+8425, U+89c2, U+89c8, U+8ba9, U+8bb8, U+8bc6, U+8bd5, U+8be2, U+8be5, U+8bed, U+8c03, U+8d23, U+8d2d, U+8d34, U+8d70, U+8db3, U+8fbe, U+8fce, U+8fd1, U+8fde, U+9001, U+901f-9020, U+90a3, U+914d, U+91c7, U+94fe, U+9500, U+952e, U+9605, U+9645, U+9662, U+9664, U+9700, U+9752, U+975e, U+97f3, U+9879, U+9886, U+98df, U+9a6c, U+9a8c, U+9ed1, U+9f99;
+}

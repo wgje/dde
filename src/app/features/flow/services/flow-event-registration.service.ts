@@ -1,6 +1,7 @@
 import { Injectable, inject, NgZone, WritableSignal } from '@angular/core';
 import { FlowEventService } from './flow-event.service';
 import { FlowLinkService } from './flow-link.service';
+import { FlowLinkRelinkService } from './flow-link-relink.service';
 import { FlowDiagramService } from './flow-diagram.service';
 import { FlowDragDropService } from './flow-drag-drop.service';
 import { FlowTouchService } from './flow-touch.service';
@@ -28,6 +29,7 @@ import * as go from 'gojs';
 export class FlowEventRegistrationService {
   private readonly eventService = inject(FlowEventService);
   private readonly link = inject(FlowLinkService);
+  private readonly relinkService = inject(FlowLinkRelinkService);
   private readonly diagram = inject(FlowDiagramService);
   private readonly dragDrop = inject(FlowDragDropService);
   private readonly selectionService = inject(FlowSelectionService);
@@ -146,7 +148,7 @@ export class FlowEventRegistrationService {
         // 父子连接重连
         if (changedEnd === 'from') {
           // from 端（父端）被改变：将子任务树迁移到新父任务下
-          const result = this.link.handleParentChildRelink(newToId, oldFromId, newFromId);
+          const result = this.relinkService.handleParentChildRelink(newToId, oldFromId, newFromId);
           if (result === 'success') {
             refreshDiagram();
           }
@@ -157,14 +159,14 @@ export class FlowEventRegistrationService {
             oldChildId: oldToId, 
             newTargetId: newToId 
           });
-          const result = this.link.handleParentChildRelinkToEnd(newFromId, oldToId, newToId);
+          const result = this.relinkService.handleParentChildRelinkToEnd(newFromId, oldToId, newToId);
           if (result === 'success' || result === 'replace-subtree') {
             refreshDiagram();
           }
         }
       } else if (linkType === 'cross-tree') {
         // 跨树连接重连：删除旧连接，创建新连接
-        const result = this.link.handleCrossTreeRelink(
+        const result = this.relinkService.handleCrossTreeRelink(
           oldFromId,
           oldToId,
           newFromId,
@@ -202,7 +204,7 @@ export class FlowEventRegistrationService {
           } else {
             // 单节点：带撤销的位置更新；批量：普通更新（由 endBatch 统一记录）
             if (needsBatch) {
-              this.taskOpsAdapter.updateTaskPositionWithRankSync(node.key, node.x, node.y);
+              this.taskOpsAdapter.core.updateTaskPositionWithRankSync(node.key, node.x, node.y);
             } else {
               // 单节点拖拽完成，带撤销记录
               this.taskOpsAdapter.updateTaskPositionWithUndo(node.key, node.x, node.y);

@@ -6,6 +6,7 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
+import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
 
 describe('FlowTaskDetailComponent - Task Switching Fix', () => {
@@ -44,12 +45,16 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     mockProjectState = {
       compressDisplayId: vi.fn((id: string) => id),
       activeProjectId: signal('project-1'),
-      activeProject: signal({ 
-        id: 'project-1', 
-        name: 'Test Project', 
-        description: '', 
-        tasks: [], 
-        connections: [] 
+      activeProject: signal({
+        id: 'project-1',
+        name: 'Test Project',
+        description: '',
+        tasks: [],
+        connections: []
+      }),
+      getTask: vi.fn((taskId: string) => {
+        const proj = mockProjectState.activeProject();
+        return proj?.tasks.find((t: any) => t.id === taskId) ?? null;
       }),
     };
 
@@ -61,6 +66,17 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       lockTaskField: vi.fn(),
       unlockTaskField: vi.fn(),
     };
+    // Add static property needed by FlowTaskDetailFormService
+    (mockChangeTracker as any).constructor = { TEXT_INPUT_LOCK_TIMEOUT_MS: 3600000 };
+
+    const mockLoggerService = {
+      category: vi.fn(() => ({
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      })),
+    };
 
     await TestBed.configureTestingModule({
       imports: [FlowTaskDetailComponent],
@@ -69,6 +85,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: UserSessionService, useValue: mockUserSession },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
+        { provide: LoggerService, useValue: mockLoggerService },
       ],
     }).compileComponents();
 
@@ -130,14 +147,14 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       component.onInputBlur('title');
 
       // 验证定时器已创建
-      expect(component['unlockTimers'].size).toBe(1);
+      expect(component.formService['unlockTimers'].size).toBe(1);
 
       // 切换到任务 B
       (component as any)['task'].set(taskB);
       fixture.detectChanges();
 
       // 验证定时器已清理
-      expect(component['unlockTimers'].size).toBe(0);
+      expect(component.formService['unlockTimers'].size).toBe(0);
     });
 
     it('应该在任务变为 null 时重置所有状态', () => {
@@ -159,7 +176,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       // 验证状态已重置
       expect(component['localTitle']()).toBe('');
       expect(component['localContent']()).toBe('');
-      expect(component['currentTaskId']).toBeNull();
+      expect(component.formService['currentTaskId']).toBeNull();
       
       // 验证字段已解锁
       expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledWith('task-a', 'project-1', 'title');
@@ -359,13 +376,13 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         'title',
         expect.any(Number)
       );
-      expect(component['isTitleFocused']).toBe(true);
+      expect(component.formService.isTitleFocused).toBe(true);
     });
 
     it('应该在失焦时延迟解锁字段', async () => {
       // 使用 fake timers 加速测试
       vi.useFakeTimers();
-      
+
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (component as any)['task'] = signal(task);
       fixture.detectChanges();
@@ -374,14 +391,14 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       component.onInputBlur('title');
 
       // 验证定时器已创建
-      expect(component['unlockTimers'].size).toBe(1);
-      expect(component['isTitleFocused']).toBe(true); // 仍然为 true（延迟解锁）
+      expect(component.formService['unlockTimers'].size).toBe(1);
+      expect(component.formService.isTitleFocused).toBe(true); // 仍然为 true（延迟解锁）
 
       // 使用 fake timers 快进 10.1 秒
       await vi.advanceTimersByTimeAsync(10100);
-      
-      expect(component['isTitleFocused']).toBe(false);
-      expect(component['unlockTimers'].size).toBe(0);
+
+      expect(component.formService.isTitleFocused).toBe(false);
+      expect(component.formService['unlockTimers'].size).toBe(0);
       
       vi.useRealTimers();
     });

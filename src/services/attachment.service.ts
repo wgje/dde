@@ -554,6 +554,7 @@ export class AttachmentService {
         }
       } catch (e: unknown) {
         const err = e as { message?: string };
+        this.logger.warn('批量删除文件异常', { batch: Math.floor(i / batchSize) + 1, error: e });
         errors.push(`批次 ${Math.floor(i / batchSize) + 1}: ${err?.message ?? '删除失败'}`);
       }
     }
@@ -575,6 +576,7 @@ export class AttachmentService {
     attachment: Attachment
   ): Promise<{ url: string; thumbnailUrl?: string } | null> {
     if (!this.supabase.isConfigured) {
+      this.logger.warn('Supabase 未配置，无法刷新附件 URL', { attachmentId: attachment.id });
       return null;
     }
 
@@ -588,6 +590,7 @@ export class AttachmentService {
         .createSignedUrl(filePath, ATTACHMENT_CONFIG.SIGNED_URL_EXPIRY);
 
       if (!urlData?.signedUrl) {
+        this.logger.warn('签名 URL 生成失败，返回空', { attachmentId: attachment.id, filePath });
         return null;
       }
 
@@ -627,6 +630,7 @@ export class AttachmentService {
     attachment: Attachment
   ): Promise<Blob | null> {
     if (!this.supabase.isConfigured) {
+      this.logger.warn('Supabase 未配置，无法下载文件', { attachmentId: attachment.id });
       return null;
     }
 

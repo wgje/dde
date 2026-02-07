@@ -410,7 +410,7 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   private syncLocalState(taskId: string): void {
-    const target = this.projectState.tasks().find(t => t.id === taskId);
+    const target = this.projectState.getTask(taskId);
     this.localTitle.set(target?.title || '');
     this.localContent.set(target?.content || '');
   }
