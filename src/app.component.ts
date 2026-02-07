@@ -295,6 +295,9 @@ export class AppComponent implements OnInit, OnDestroy {
     this.setupSidebarToggleListener();
     this.setupStorageFailureHandler();
     this.setupBeforeUnloadHandler();
+    
+    // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
+    this.setupSignalEffects();
   }
 
   /**
@@ -351,6 +354,20 @@ export class AppComponent implements OnInit, OnDestroy {
     // 🚀 空闲时预加载常用模态框（消除首次点击延迟）
     this.modalLoader.preloadCommonModals();
     
+    // 🛡️ 数据保护：延迟初始化存储配额监控和 IndexedDB 健康检查
+    setTimeout(() => {
+      void this.storageQuota.initialize();
+      void this.indexedDBHealth.initialize();
+    }, 5000); // 延迟 5 秒，避免阻塞启动
+  }
+  
+  /**
+   * 信号 effect 集中注册（必须在构造函数中调用以确保注入上下文可用）
+   * 
+   * 背景：effect() 内部需要 inject(Injector)，若在 ngOnInit 等生命周期钩子中调用
+   * 会抛出 NG0203: inject() must be called from an injection context
+   */
+  private setupSignalEffects(): void {
     // 监听可恢复错误信号，命令式打开错误恢复模态框
     effect(() => {
       const error = this.errorHandler.recoverableError();
@@ -397,14 +414,8 @@ export class AppComponent implements OnInit, OnDestroy {
         );
       }
     });
-    
-    // 🛡️ 数据保护：延迟初始化存储配额监控和 IndexedDB 健康检查
-    setTimeout(() => {
-      void this.storageQuota.initialize();
-      void this.indexedDBHealth.initialize();
-    }, 5000); // 延迟 5 秒，避免阻塞启动
   }
-  
+
   ngOnDestroy() {
     // DestroyRef 自动处理取消订阅，无需手动触发
     

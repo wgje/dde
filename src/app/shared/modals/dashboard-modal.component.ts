@@ -237,7 +237,7 @@ interface ConflictItem {
                       
                       <!-- 响应式差异网格：移动端垂直堆叠，桌面端三列 -->
                       <div class="space-y-2 max-h-64 overflow-y-auto">
-                        @for (diff of conflict.taskDiffs.slice(0, 10); track diff.id) {
+                        @for (diff of (conflict.taskDiffs ?? []).slice(0, 10); track diff.id) {
                           <div class="diff-grid grid gap-2 p-2 rounded-lg text-[11px]"
                                [ngClass]="{
                                  'bg-green-50 dark:bg-green-900/20': diff.status === 'same',
@@ -294,9 +294,9 @@ interface ConflictItem {
                           </div>
                         }
                         
-                        @if (conflict.taskDiffs.length > 10) {
+                        @if ((conflict.taskDiffs?.length ?? 0) > 10) {
                           <div class="text-center text-[10px] text-stone-400 dark:text-stone-500 py-2">
-                            还有 {{ conflict.taskDiffs.length - 10 }} 个任务差异未显示
+                            还有 {{ (conflict.taskDiffs?.length ?? 0) - 10 }} 个任务差异未显示
                           </div>
                         }
                       </div>
@@ -605,9 +605,16 @@ export class DashboardModalComponent implements OnInit {
     }
   }
   private mapConflictToItem(record: ConflictRecord): ConflictItem {
-    const localTasks: Task[] = record.localProject?.tasks || [];
-    const remoteTasks: Task[] = record.remoteProject?.tasks || [];
-    
+    const localTasks: Task[] = Array.isArray(record.localProject?.tasks) ? record.localProject!.tasks : [];
+    const remoteTasks: Task[] = Array.isArray(record.remoteProject?.tasks) ? record.remoteProject!.tasks : [];
+
+    let taskDiffs: TaskDiff[];
+    try {
+      taskDiffs = this.calculateTaskDiffs(localTasks, remoteTasks);
+    } catch {
+      taskDiffs = [];
+    }
+
     return {
       projectId: record.projectId,
       projectName: record.localProject?.name || record.remoteProject?.name || '未知项目',
@@ -616,7 +623,7 @@ export class DashboardModalComponent implements OnInit {
       conflictedAt: record.conflictedAt,
       localTaskCount: localTasks.length,
       remoteTaskCount: remoteTasks.length,
-      taskDiffs: this.calculateTaskDiffs(localTasks, remoteTasks),
+      taskDiffs,
       isExpanded: false,
       isResolving: false
     };
@@ -766,8 +773,8 @@ export class DashboardModalComponent implements OnInit {
     };
     return labels[status] || status;
   }
-  countByStatus(diffs: TaskDiff[], status: TaskDiff['status']): number {
-    return diffs.filter(d => d.status === status).length;
+  countByStatus(diffs: TaskDiff[] | undefined, status: TaskDiff['status']): number {
+    return (diffs || []).filter(d => d.status === status).length;
   }
   formatRelativeTime(isoString: string): string { return this.formatDate(isoString); }
 }
