@@ -17,7 +17,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { EventBusService } from '../../../../services/event-bus.service';
 import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
-import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-error';
+import { EnhancedError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 @Injectable({
@@ -50,6 +50,7 @@ export class SessionManagerService {
     try {
       return this.supabase.client();
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：客户端不可用时静默降级
       return null;
     }
   }

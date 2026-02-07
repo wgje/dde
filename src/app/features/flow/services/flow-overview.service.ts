@@ -239,6 +239,7 @@ export class FlowOverviewService {
       const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
       return value || null;
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：CSS 变量读取失败使用默认值
       return null;
     }
   }

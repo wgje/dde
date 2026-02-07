@@ -616,6 +616,7 @@ export class AttachmentService {
       return result;
     } catch (e) {
       this.logger.error('Failed to refresh URL', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：URL 刷新失败使用旧 URL
       return null;
     }
   }
@@ -649,6 +650,7 @@ export class AttachmentService {
       return data;
     } catch (e) {
       this.logger.error('File download failed', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：文件下载失败由调用方处理
       return null;
     }
   }

@@ -1,4 +1,4 @@
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, WritableSignal } from '@angular/core';
 
 /**
  * 调色板拖动调整大小服务

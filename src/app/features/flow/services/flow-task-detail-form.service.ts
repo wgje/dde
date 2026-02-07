@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, effect, untracked } from '@angular/core';
+import { Injectable, inject, signal, effect } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -202,7 +202,7 @@ export class FlowTaskDetailFormService {
    * 判断点击/触摸事件是否应导致退出编辑模式
    * @returns true 表示应切换到预览模式
    */
-  shouldExitEditMode(target: HTMLElement, containerElement: HTMLElement): boolean {
+  shouldExitEditMode(target: HTMLElement, _containerElement: HTMLElement): boolean {
     if (!this.isEditMode()) return false;
     if (this.isSelecting) return false;
 

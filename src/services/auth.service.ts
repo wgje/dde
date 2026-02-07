@@ -191,7 +191,7 @@ export class AuthService {
       const err = e as Error | undefined;
       this.logger.error('========== checkSession 异常 ==========', {
         message: err?.message,
-        stack: err?.stack?.split('\n').slice(0, 3).join('\n'),
+        stack: err?.stack?.split('\n')?.slice(0, 3)?.join('\n'),
         isTimeout: err?.message?.includes('超时')
       });
       
@@ -265,6 +265,7 @@ export class AuthService {
     } catch (e) {
       // 网络异常等：静默降级为未登录状态
       this.logger.info('ℹ️ 开发环境自动登录异常，静默降级', e);
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：自动登录失败静默降级
       return null;
     }
   }
@@ -456,6 +457,7 @@ export class AuthService {
     this.sessionEmail.set(null);
     this.sessionExpired.set(false);
     this.isManualSignOut = false;
+    this.devAutoLoginAttempted = false;
     this.authState.set({
       isCheckingSession: false,
       isLoading: false,

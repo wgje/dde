@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { Task, Project, Connection } from '../models';
+import { Task, Project } from '../models';
 import { Result, OperationError, success, failure, ErrorCodes } from '../utils/result';
 import { LayoutService } from './layout.service';
 import { SubtreeOperationsService } from './subtree-operations.service';

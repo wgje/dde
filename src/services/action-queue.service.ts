@@ -8,12 +8,8 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
 import { 
   OperationPriority, 
-  ActionPayload, 
-  ProjectPayload, 
-  ProjectDeletePayload, 
   TaskPayload, 
   TaskDeletePayload, 
-  PreferencePayload,
   QueuedAction,
   EnqueueParams,
   DeadLetterItem
@@ -69,6 +65,8 @@ export class ActionQueueService {
   
   /** 存储失败状态 — 委托给 storage */
   readonly storageFailure = this.storage.storageFailure;
+  /** 队列冻结状态（配额/存储压力） */
+  readonly queueFrozen = this.storage.queueFrozen;
   
   // 【Sentry 上下文】手动同步队列状态到 Sentry
   private syncSentryContext(): void {
@@ -88,6 +86,12 @@ export class ActionQueueService {
   /** 队列处理生命周期回调 */
   private onQueueProcessStart: (() => void) | null = null;
   private onQueueProcessEnd: (() => void) | null = null;
+  /** 压力模式通知节流 */
+  private readonly QUEUE_PRESSURE_NOTICE_COOLDOWN = 60_000;
+  private lastQueuePressureNoticeAt = 0;
+  /** 冻结状态下尝试持久化的最小间隔 */
+  private readonly FROZEN_PERSIST_RETRY_COOLDOWN = 30_000;
+  private lastFrozenPersistAttemptAt = 0;
   
   constructor() {
     // 初始化 storage 上下文引用
@@ -149,6 +153,16 @@ export class ActionQueueService {
    * 支持优先级分级 + 智能合并
    */
   enqueue(action: EnqueueParams): string {
+    if (this.storage.queueFrozen()) {
+      this.logger.warn('队列处于冻结状态，改为内存兜底接收写入', {
+        type: action.type,
+        entityType: action.entityType,
+        entityId: action.entityId,
+        reason: this.storage.queueFreezeReason()
+      });
+      this.notifyQueuePressureOnce('同步队列存储受限', '当前写入先保存在内存中，请尽快释放浏览器存储空间');
+    }
+
     // 设置默认优先级
     const defaultPriority: OperationPriority = 
       action.entityType === 'project' ? 'critical' :
@@ -161,81 +175,104 @@ export class ActionQueueService {
       retryCount: 0,
       priority: action.priority ?? defaultPriority
     };
-    
+    let resolvedActionId = queuedAction.id;
+    let wasEnqueued = false;
+    /** 智能合并导致队列缩小（如 create+delete 取消） */
+    let wasMergeShrunk = false;
+
     this.pendingActions.update(queue => {
-      let newQueue = [...queue];
-      
+      const newQueue = [...queue];
+
       // ========== 智能合并：对同一实体的操作去重 ==========
-      const existingIndex = newQueue.findIndex(a => 
+      const existingIndex = newQueue.findIndex(a =>
         a.entityType === action.entityType &&
         a.entityId === action.entityId &&
         a.retryCount === 0
       );
-      
+
       if (existingIndex !== -1) {
         const existing = newQueue[existingIndex];
-        
+
         // 场景1: 队列中有delete，新操作是update/create → 忽略
         if (existing.type === 'delete' && (action.type === 'update' || action.type === 'create')) {
           this.logger.debug(`忽略已删除实体的操作`, { entityType: action.entityType, entityId: action.entityId });
+          resolvedActionId = '';
           return queue;
         }
-        
+
         // 场景2: 两个update → 合并为一次
         if (existing.type === 'update' && action.type === 'update') {
           this.logger.debug(`合并重复的update操作`, { entityType: action.entityType, entityId: action.entityId });
           newQueue[existingIndex] = { ...queuedAction, id: existing.id };
+          resolvedActionId = existing.id;
+          wasEnqueued = true;
           return newQueue;
         }
-        
+
         // 场景3: create + update → 合并到create中
         if (existing.type === 'create' && action.type === 'update') {
           this.logger.debug(`合并create后的update`, { entityType: action.entityType, entityId: action.entityId });
           newQueue[existingIndex] = { ...queuedAction, type: 'create', id: existing.id };
+          resolvedActionId = existing.id;
+          wasEnqueued = true;
           return newQueue;
         }
-        
+
         // 场景4: create + delete → 直接移除create
         if (existing.type === 'create' && action.type === 'delete') {
           this.logger.debug(`取消未同步的create操作`, { entityType: action.entityType, entityId: action.entityId });
           newQueue.splice(existingIndex, 1);
+          resolvedActionId = '';
+          wasMergeShrunk = true;
           return newQueue;
         }
       }
-      
+
+      const softLimit = LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE;
+      const absoluteLimit = softLimit * 5;
+      if (newQueue.length >= absoluteLimit) {
+        this.logger.error('队列达到绝对上限，拒绝新操作入队', {
+          absoluteLimit,
+          rejectedType: action.type,
+          rejectedEntityType: action.entityType,
+          rejectedEntityId: action.entityId
+        });
+        this.notifyQueuePressureOnce('同步队列超限', '已达保护上限，请先完成同步后再重试');
+        resolvedActionId = '';
+        return queue;
+      }
+
+      if (newQueue.length >= softLimit) {
+        this.logger.warn('队列达到软上限，进入压力模式但继续入队', {
+          softLimit,
+          queueSize: newQueue.length,
+          maxSize: LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE,
+          type: action.type,
+          entityType: action.entityType
+        });
+        this.notifyQueuePressureOnce('同步队列压力较高', '仍在接收写入，建议尽快联网完成同步');
+      }
+
       // 正常添加
       newQueue.push(queuedAction);
-      
-      // ========== 分级队列管理：低优先级操作优先淘汰 ==========
-      if (newQueue.length > LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE) {
-        const lowPriorityActions = newQueue.filter(a => a.priority === 'low');
-        if (lowPriorityActions.length > LOCAL_QUEUE_CONFIG.LOW_PRIORITY_MAX_SIZE) {
-          const toRemove = lowPriorityActions.slice(0, lowPriorityActions.length - LOCAL_QUEUE_CONFIG.LOW_PRIORITY_MAX_SIZE);
-          const toRemoveIds = new Set(toRemove.map(a => a.id));
-          newQueue = newQueue.filter(a => !toRemoveIds.has(a.id));
-          this.logger.debug(`淘汰了 ${toRemove.length} 个低优先级操作`);
-        }
-        
-        if (newQueue.length > LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE) {
-          const criticalActions = newQueue.filter(a => a.priority === 'critical');
-          const nonCriticalActions = newQueue.filter(a => a.priority !== 'critical');
-          const maxNonCritical = LOCAL_QUEUE_CONFIG.MAX_QUEUE_SIZE - criticalActions.length;
-          
-          if (maxNonCritical > 0) {
-            const keptNonCritical = nonCriticalActions.slice(-maxNonCritical);
-            newQueue = [...criticalActions, ...keptNonCritical];
-            this.logger.warn(`队列溢出：保护了 ${criticalActions.length} 个关键操作，淘汰了 ${nonCriticalActions.length - keptNonCritical.length} 个非关键操作`);
-          } else {
-            newQueue = criticalActions;
-            this.logger.error(`队列严重溢出：仅保留 ${criticalActions.length} 个关键操作，用户数据将被保护`);
-          }
-        }
-      }
+      wasEnqueued = true;
       return newQueue;
     });
-    
+
+    // 智能合并导致队列缩小时，同步 queueSize 并持久化
+    if (wasMergeShrunk) {
+      this.queueSize.set(this.pendingActions().length);
+      this.persistQueue();
+      this.syncSentryContext();
+      return resolvedActionId;
+    }
+
+    if (!wasEnqueued) {
+      return resolvedActionId;
+    }
+
     this.queueSize.set(this.pendingActions().length);
-    this.storage.saveQueueToStorage();
+    this.persistQueue();
     this.syncSentryContext();
     
     // Sentry breadcrumb
@@ -244,7 +281,7 @@ export class ActionQueueService {
       message: `Action enqueued: ${action.type} ${action.entityType}`,
       level: 'info',
       data: {
-        actionId: queuedAction.id,
+        actionId: resolvedActionId,
         entityType: action.entityType,
         entityId: action.entityId,
         type: action.type,
@@ -257,7 +294,29 @@ export class ActionQueueService {
       void this.processQueue();
     }
     
-    return queuedAction.id;
+    return resolvedActionId;
+  }
+
+  private notifyQueuePressureOnce(title: string, message: string): void {
+    const now = Date.now();
+    if (now - this.lastQueuePressureNoticeAt < this.QUEUE_PRESSURE_NOTICE_COOLDOWN) {
+      return;
+    }
+    this.lastQueuePressureNoticeAt = now;
+    this.toast.warning(title, message);
+  }
+
+  private persistQueue(): void {
+    const isFrozen = this.storage.queueFrozen();
+    const now = Date.now();
+    if (isFrozen && now - this.lastFrozenPersistAttemptAt < this.FROZEN_PERSIST_RETRY_COOLDOWN) {
+      return;
+    }
+
+    if (isFrozen) {
+      this.lastFrozenPersistAttemptAt = now;
+    }
+    this.storage.saveQueueToStorage();
   }
   
   /**
@@ -313,8 +372,13 @@ export class ActionQueueService {
     
     try {
       const queue = [...this.pendingActions()];
-      
+
       for (const action of queue) {
+        // 验证 action 仍在队列中（可能已被 dequeue 或前一次处理移除）
+        if (!this.pendingActions().some(a => a.id === action.id)) {
+          continue;
+        }
+
         const entityKey = `${action.entityType}:${action.entityId}`;
         
         // 依赖顺序检查：Create 失败的实体跳过后续操作

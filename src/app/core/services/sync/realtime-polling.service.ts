@@ -16,6 +16,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { SyncStateService } from './sync-state.service';
 import { SYNC_CONFIG } from '../../../../config';
+import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
@@ -27,6 +28,11 @@ export type RemoteChangeCallback = (payload: { eventType?: string; projectId?: s
  * 用户偏好变更回调
  */
 export type UserPreferencesChangeCallback = (payload: { eventType: string; userId: string }) => void;
+
+/**
+ * 任务级变更回调
+ */
+export type TaskChangeCallback = (payload: { eventType: string; taskId: string; projectId: string }) => void;
 
 @Injectable({
   providedIn: 'root'
@@ -48,6 +54,7 @@ export class RealtimePollingService {
   
   /** 当前订阅的项目 ID */
   private currentProjectId: string | null = null;
+  private currentUserId: string | null = null;
   
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
@@ -57,6 +64,9 @@ export class RealtimePollingService {
   
   /** 用户活跃超时定时器 */
   private userActiveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 用户活跃状态事件清理函数 */
+  private activityCleanupFns: (() => void)[] = [];
   
   /** Realtime 是否启用（运行时可切换） */
   readonly isRealtimeEnabled = signal<boolean>(SYNC_CONFIG.REALTIME_ENABLED);
@@ -66,6 +76,8 @@ export class RealtimePollingService {
   
   /** 用户偏好变更回调 */
   private onUserPreferencesChangeCallback: UserPreferencesChangeCallback | null = null;
+  /** 任务级变更回调 */
+  private onTaskChangeCallback: TaskChangeCallback | null = null;
 
   constructor() {
     this.setupUserActivityTracking();
@@ -80,11 +92,21 @@ export class RealtimePollingService {
    */
   private getSupabaseClient(): SupabaseClient | null {
     if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      this.syncState.setSyncError(failure.message);
       return null;
     }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.syncState.setSyncError(failure.message);
+      // eslint-disable-next-line no-restricted-syntax -- 保持空客户端判定，避免在订阅路径抛出阻断异常
       return null;
     }
   }
@@ -94,7 +116,7 @@ export class RealtimePollingService {
    */
   private setupUserActivityTracking(): void {
     if (typeof window === 'undefined') return;
-    
+
     const resetActiveTimer = () => {
       this.isUserActive = true;
       if (this.userActiveTimer) {
@@ -104,12 +126,13 @@ export class RealtimePollingService {
         this.isUserActive = false;
       }, SYNC_CONFIG.USER_ACTIVE_TIMEOUT);
     };
-    
+
     const events = ['mousedown', 'keydown', 'touchstart', 'scroll'];
     events.forEach(event => {
       window.addEventListener(event, resetActiveTimer, { passive: true });
+      this.activityCleanupFns.push(() => window.removeEventListener(event, resetActiveTimer));
     });
-    
+
     resetActiveTimer();
   }
 
@@ -127,6 +150,10 @@ export class RealtimePollingService {
     this.onUserPreferencesChangeCallback = callback;
   }
 
+  setTaskChangeCallback(callback: TaskChangeCallback | null): void {
+    this.onTaskChangeCallback = callback;
+  }
+
   /**
    * 启用/禁用 Realtime（运行时切换）
    */
@@ -135,8 +162,14 @@ export class RealtimePollingService {
     
     if (this.currentProjectId) {
       const projectId = this.currentProjectId;
+      const userId = this.currentUserId;
       this.unsubscribeFromProject().then(() => {
-        this.subscribeToProject(projectId, '');
+        if (!userId) {
+          this.logger.warn('Realtime 重订阅缺少 userId，回退到轮询', { projectId });
+          this.startPolling(projectId);
+          return;
+        }
+        this.subscribeToProject(projectId, userId);
       });
     }
     
@@ -150,6 +183,7 @@ export class RealtimePollingService {
     await this.unsubscribeFromProject();
     
     this.currentProjectId = projectId;
+    this.currentUserId = userId;
     
     if (this.isRealtimeEnabled()) {
       await this.subscribeToProjectRealtime(projectId, userId);
@@ -232,16 +266,32 @@ export class RealtimePollingService {
           filter: `project_id=eq.${projectId}`
         },
         (payload) => {
-          const taskData = payload.new as { project_id?: string } | undefined;
-          if (taskData && taskData.project_id !== projectId) {
+          const taskData = (payload.new || payload.old) as { id?: string; project_id?: string } | undefined;
+          if (taskData?.project_id && taskData.project_id !== projectId) {
             return;
           }
           
           this.logger.debug('收到任务变更', { event: payload.eventType });
-          if (this.onRemoteChangeCallback && !this.realtimePaused) {
+          if (this.realtimePaused) {
+            return;
+          }
+
+          const taskId = taskData?.id;
+          if (taskId && this.onTaskChangeCallback) {
+            this.onTaskChangeCallback({
+              eventType: payload.eventType,
+              taskId,
+              projectId
+            });
+          }
+
+          // DELETE 事件不依赖 payload 字段，统一触发项目级增量拉取 + tombstone 校验
+          if (payload.eventType === 'DELETE' && this.onRemoteChangeCallback) {
             this.onRemoteChangeCallback({ 
               eventType: payload.eventType, 
               projectId 
+            }).catch(e => {
+              this.logger.debug('任务级事件触发项目增量拉取失败', e);
             });
           }
         }
@@ -255,8 +305,8 @@ export class RealtimePollingService {
           filter: `project_id=eq.${projectId}`
         },
         (payload) => {
-          const connData = payload.new as { project_id?: string } | undefined;
-          if (connData && connData.project_id !== projectId) {
+          const connData = (payload.new || payload.old) as { project_id?: string } | undefined;
+          if (connData?.project_id && connData.project_id !== projectId) {
             return;
           }
           
@@ -265,6 +315,8 @@ export class RealtimePollingService {
             this.onRemoteChangeCallback({ 
               eventType: payload.eventType, 
               projectId 
+            }).catch(e => {
+              this.logger.debug('连接级事件触发项目增量拉取失败', e);
             });
           }
         }
@@ -348,6 +400,7 @@ export class RealtimePollingService {
    */
   async unsubscribeFromProject(): Promise<void> {
     this.currentProjectId = null;
+    this.currentUserId = null;
     
     this.stopPolling();
     
@@ -386,8 +439,26 @@ export class RealtimePollingService {
    */
   private cleanup(): void {
     this.stopPolling();
+
+    // 清理 realtime channel
+    if (this.realtimeChannel) {
+      const client = this.getSupabaseClient();
+      if (client) {
+        client.removeChannel(this.realtimeChannel).catch((e: unknown) => {
+          this.logger.debug('清理时移除 Realtime 通道失败', { error: e });
+        });
+      }
+      this.realtimeChannel = null;
+    }
+
     if (this.userActiveTimer) {
       clearTimeout(this.userActiveTimer);
     }
+
+    // 移除用户活跃状态事件监听器
+    for (const cleanupFn of this.activityCleanupFns) {
+      cleanupFn();
+    }
+    this.activityCleanupFns = [];
   }
 }

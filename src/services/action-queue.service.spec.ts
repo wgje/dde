@@ -22,6 +22,7 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { NetworkAwarenessService } from './network-awareness.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // 模拟 LoggerService
@@ -50,6 +51,10 @@ const mockSentryAlertService = {
   captureMessage: vi.fn(),
   setContext: vi.fn(),
   updateSyncContext: vi.fn(),
+};
+
+const mockNetworkAwarenessService = {
+  setStoragePressure: vi.fn(),
 };
 
 function createMockTask(overrides: Partial<Task> = {}): Task {
@@ -168,6 +173,7 @@ describe('ActionQueueService', () => {
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryAlertService, useValue: mockSentryAlertService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+        { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });
@@ -207,7 +213,7 @@ describe('ActionQueueService', () => {
       expect(service.hasPendingActions()).toBe(false);
     });
     
-    it('应该限制队列大小为 100', () => {
+    it('达到软上限后应继续接收写入（避免离线丢写）', () => {
       setNetworkStatus(false);
       // 入队 150 个操作
       for (let i = 0; i < 150; i++) {
@@ -219,8 +225,9 @@ describe('ActionQueueService', () => {
         });
       }
       
-      // 队列应该被限制在 100 个
-      expect(service.queueSize()).toBe(100);
+      // 软上限后仍然继续入队
+      expect(service.queueSize()).toBe(150);
+      expect(mockToastService.warning).toHaveBeenCalled();
     });
     
     it('应该能够清空队列', () => {

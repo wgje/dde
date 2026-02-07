@@ -24,6 +24,7 @@ describe('AuthService', () => {
   let mockSupabaseClient: {
     isConfigured: boolean;
     client: ReturnType<typeof vi.fn>;
+    getSession: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
   };
   let authStateCallback: ((event: string, session: unknown) => void) | null = null;
@@ -65,6 +66,10 @@ describe('AuthService', () => {
             error: null
           }),
         }
+      }),
+      getSession: vi.fn().mockResolvedValue({
+        data: { session: null },
+        error: null
       }),
       signOut: vi.fn().mockResolvedValue(undefined),
     };
@@ -177,6 +182,20 @@ describe('AuthService', () => {
       expect(service.currentUserId()).toBeNull();
       expect(service.sessionEmail()).toBeNull();
       expect(service.sessionExpired()).toBe(false);
+    });
+  });
+
+  describe('checkSession 异常容错', () => {
+    it('异常对象无 stack 时不应触发二次 slice 错误', async () => {
+      mockSupabaseClient.getSession.mockRejectedValueOnce({ message: 'mock-session-error' });
+
+      await expect(service.checkSession()).resolves.toEqual({
+        userId: null,
+        email: null
+      });
+
+      expect(service.authState().error).toBe('mock-session-error');
+      expect(service.authState().isCheckingSession).toBe(false);
     });
   });
 });

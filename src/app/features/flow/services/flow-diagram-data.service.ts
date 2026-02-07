@@ -96,6 +96,7 @@ export class FlowDiagramDataService {
       this.logger.error('导出 PNG 失败', error);
       this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToPng' } });
       this.toast.error('导出失败', '生成图片时发生错误');
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：导出失败已通过 toast 通知用户
       return null;
     }
   }
@@ -130,6 +131,7 @@ export class FlowDiagramDataService {
       this.logger.error('导出 SVG 失败', error);
       this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToSvg' } });
       this.toast.error('导出失败', '生成 SVG 时发生错误');
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：导出失败已通过 toast 通知用户
       return null;
     }
   }

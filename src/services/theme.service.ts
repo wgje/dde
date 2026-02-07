@@ -3,7 +3,7 @@ import { isPlatformBrowser } from '@angular/common';
 import { Meta } from '@angular/platform-browser';
 import { ThemeType, ColorMode } from '../models';
 import { CACHE_CONFIG } from '../config';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';

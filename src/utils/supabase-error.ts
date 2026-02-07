@@ -21,6 +21,17 @@ export interface EnhancedError extends Error {
 export type SupabaseError = EnhancedError;
 
 /**
+ * Supabase 客户端访问失败分类（用于同步链路可观测）
+ */
+export type SupabaseClientFailureCategory = 'offline' | 'not_configured' | 'runtime_failure';
+
+export interface SupabaseClientFailureInfo {
+  category: SupabaseClientFailureCategory;
+  message: string;
+  retryable: boolean;
+}
+
+/**
  * 可重试的错误类型
  */
 const RETRYABLE_ERROR_TYPES = new Set([
@@ -186,6 +197,47 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
   err.errorType = errorType;
   
   return err;
+}
+
+/**
+ * 分类 Supabase 客户端获取失败原因
+ */
+export function classifySupabaseClientFailure(
+  isConfigured: boolean,
+  error?: unknown
+): SupabaseClientFailureInfo {
+  if (!isConfigured) {
+    return {
+      category: 'not_configured',
+      message: 'Supabase 未配置',
+      retryable: false
+    };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      category: 'offline',
+      message: '当前离线，跳过云端同步',
+      retryable: true
+    };
+  }
+
+  if (error) {
+    const enhanced = supabaseErrorToError(error);
+    if (enhanced.errorType === 'OfflineError' || enhanced.errorType === 'NetworkError') {
+      return {
+        category: 'offline',
+        message: enhanced.message,
+        retryable: true
+      };
+    }
+  }
+
+  return {
+    category: 'runtime_failure',
+    message: error instanceof Error ? error.message : 'Supabase 客户端初始化失败',
+    retryable: true
+  };
 }
 
 /**

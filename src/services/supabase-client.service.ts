@@ -42,8 +42,8 @@ export class SupabaseClientService {
         this.logger.error('[CRITICAL] 环境变量未配置', errorMsg);
         this.configurationError.set(errorMsg);
       } else {
-        // 开发环境：警告并进入离线模式
-        this.logger.warn('环境变量未配置，应用将以离线模式运行', errorMsg);
+        // 开发环境：信息提示并进入离线模式（这是预期行为，不是警告）
+        this.logger.info('开发环境离线模式已启用', errorMsg);
         this.isOfflineMode.set(true);
       }
       return;

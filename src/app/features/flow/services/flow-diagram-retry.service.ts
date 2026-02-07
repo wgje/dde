@@ -1,4 +1,4 @@
-import { Injectable, inject, NgZone, signal, WritableSignal, ElementRef } from '@angular/core';
+import { Injectable, inject, NgZone, signal, ElementRef } from '@angular/core';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowDiagramService } from './flow-diagram.service';

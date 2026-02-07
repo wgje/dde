@@ -342,6 +342,11 @@ export class BlackBoxSyncService {
    * 返回 boolean 表示是否成功（供 RetryQueue 决定是否重试）
    */
   async pushToServer(entry: BlackBoxEntry): Promise<boolean> {
+    if (!this.supabase.isConfigured) {
+      this.logger.debug('BlackBoxSync', 'Supabase 未配置，跳过推送');
+      return false;
+    }
+
     try {
       const client = this.supabase.client();
 
@@ -394,8 +399,8 @@ export class BlackBoxSyncService {
       return this.pullPromise;
     }
 
-    if (!this.network.isOnline()) {
-      this.logger.debug('BlackBoxSync', 'Offline, loading from local');
+    if (!this.supabase.isConfigured || !this.network.isOnline()) {
+      this.logger.debug('BlackBoxSync', 'Offline or unconfigured, loading from local');
       await this.loadFromLocal();
       return;
     }

@@ -23,6 +23,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
 import { Project, Task } from '../models';
 import { SupabaseError, supabaseErrorToError } from '../utils/supabase-error';
+import { SYNC_CONFIG } from '../config';
 
 /**
  * 远程项目变更载荷
@@ -310,6 +311,7 @@ export class RemoteChangeHandlerService {
    */
   private handleTaskLevelUpdate(payload: RemoteTaskChangePayload): void {
     const { eventType, taskId, projectId } = payload;
+    this.changeTracker.pruneExpiredChanges(SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS);
     
     // 添加调试日志
     this.logger.info('[TaskSync] 收到任务变更事件', { eventType, taskId, projectId });
@@ -462,9 +464,12 @@ export class RemoteChangeHandlerService {
                 if (p.id !== targetProjectId) return p;
 
                 const existingTaskIndex = p.tasks.findIndex(t => t.id === taskId);
-                const pending = this.changeTracker
-                  .exportPendingChanges()
-                  .find(r => r.entityType === 'task' && r.projectId === targetProjectId && r.entityId === taskId);
+                const pending = this.changeTracker.getPendingChange(
+                  targetProjectId,
+                  'task',
+                  taskId,
+                  SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS
+                );
 
                 let updatedProject: Project;
                 if (existingTaskIndex >= 0) {

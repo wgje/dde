@@ -14,13 +14,12 @@
  * - 去重机制防止队列膨胀
  */
 
-import { Injectable, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef, signal } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
-import { SYNC_CONFIG } from '../../../../config';
+import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config';
 import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-import { CIRCUIT_BREAKER_CONFIG } from '../../../../config';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 /**
  * 可重试的实体类型
@@ -89,6 +88,7 @@ export class RetryQueueService {
   /** IndexedDB 数据库实例 */
   private db: IDBDatabase | null = null;
   private dbInitPromise: Promise<IDBDatabase | null> | null = null;
+  private idbUnsupported = false;
   
   /** IndexedDB 配置 */
   private readonly DB_CONFIG = {
@@ -100,8 +100,14 @@ export class RetryQueueService {
   /** 最大重试次数 */
   readonly MAX_RETRIES = 5;
   
-  /** 重试队列最大大小 */
-  private readonly MAX_SIZE = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE;
+  /** localStorage 降级场景的队列上限 */
+  private readonly MAX_SIZE_LOCAL = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE;
+  /** IndexedDB 正常场景的队列上限（容量更高） */
+  private readonly MAX_SIZE_INDEXEDDB = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE_INDEXEDDB;
+  /** 当前生效的队列上限 */
+  private maxQueueSize = this.MAX_SIZE_LOCAL;
+  /** 软上限溢出倍数（防止内存无限增长） */
+  private readonly MAX_QUEUE_OVERFLOW_FACTOR = 5;
   
   /** 重试项最大年龄（毫秒，24 小时） */
   private readonly MAX_ITEM_AGE = SYNC_CONFIG.MAX_RETRY_ITEM_AGE;
@@ -117,6 +123,12 @@ export class RetryQueueService {
   
   /** 上次警告时的队列使用百分比 */
   private lastWarningPercent = 0;
+  /** 入队拒绝提示冷却（防止告警风暴） */
+  private readonly ENQUEUE_REJECT_COOLDOWN = 60_000;
+  private lastEnqueueRejectTime = 0;
+  /** 存储压力恢复探测冷却，避免频繁触发写探测 */
+  private readonly STORAGE_RECOVERY_COOLDOWN = 30_000;
+  private lastStorageRecoveryAttempt = 0;
   
   /** 操作处理器 */
   private operationHandler: RetryOperationHandler | null = null;
@@ -135,6 +147,10 @@ export class RetryQueueService {
   
   /** 版本号 */
   private readonly VERSION = 1;
+  /** 队列压力状态 */
+  readonly queuePressure = signal(false);
+  readonly queuePressureReason = signal<string | null>(null);
+  private pressureEventCount = 0;
   
   constructor() {
     // 初始化时加载队列
@@ -156,6 +172,10 @@ export class RetryQueueService {
   get length(): number {
     return this.queue.length;
   }
+
+  get pressureEvents(): number {
+    return this.pressureEventCount;
+  }
   
   /**
    * 获取队列副本
@@ -169,6 +189,7 @@ export class RetryQueueService {
    */
   clear(): void {
     this.queue = [];
+    this.clearPressureMode();
     this.saveToStorage();
     this.logger.info('重试队列已清空');
   }
@@ -178,14 +199,16 @@ export class RetryQueueService {
    * 
    * 特性：
    * - 去重：同一实体只保留最新操作
-   * - 容量限制：超限时移除最老的项
+   * - 容量限制：达到上限时进入压力模式，但继续接收新写入（软上限）
    */
   add(
     type: RetryableEntityType,
     operation: RetryableOperation,
     data: Task | Project | Connection | BlackBoxEntry | { id: string },
     projectId?: string
-  ): void {
+  ): boolean {
+    this.tryRecoverQueueFullPressure();
+
     // 去重：检查是否已存在同一实体
     const existingIndex = this.queue.findIndex(
       item => item.type === type && item.data.id === data.id
@@ -208,20 +231,38 @@ export class RetryQueueService {
         retryCount: existing.retryCount
       });
       this.saveToStorage();
-      return;
+      this.checkCapacityWarning();
+      return true;
+    }
+
+    const absoluteLimit = this.maxQueueSize * this.MAX_QUEUE_OVERFLOW_FACTOR;
+    if (this.queue.length >= absoluteLimit) {
+      this.reportEnqueueRejected(type, operation, data.id, 'absolute_limit');
+      this.checkCapacityWarning();
+      return false;
+    }
+
+    // 压力模式下不再直接拒绝新写入，优先保证“离线写入不丢”
+    if (this.queuePressure()) {
+      const reason = this.queuePressureReason() ?? 'pressure_mode';
+      this.logger.warn('重试队列处于压力模式，仍继续接收新写入', {
+        reason,
+        queueSize: this.queue.length,
+        maxSize: this.maxQueueSize
+      });
+      if (reason === 'queue_full') {
+        this.triggerEmergencyProcessQueue('pressure_reject');
+      }
     }
     
     // 容量检查
-    if (this.queue.length >= this.MAX_SIZE) {
-      const removed = this.queue.shift();
-      this.logger.warn('队列已满，移除最老的项', {
-        removed: { type: removed?.type, id: removed?.data.id },
-        queueSize: this.queue.length
+    if (this.queue.length >= this.maxQueueSize) {
+      this.enterPressureMode('queue_full');
+      this.logger.warn('重试队列达到软上限，进入压力模式但继续入队', {
+        queueSize: this.queue.length,
+        maxSize: this.maxQueueSize
       });
-      this.sentryLazyLoader.captureMessage('重试队列溢出', {
-        level: 'warning',
-        tags: { queueSize: String(this.queue.length) }
-      });
+      this.triggerEmergencyProcessQueue('queue_full');
     }
     
     // 添加新项
@@ -237,8 +278,13 @@ export class RetryQueueService {
     
     this.queue.push(item);
     this.saveToStorage();
-    
+
     this.logger.debug('添加到重试队列', { type, operation, dataId: data.id });
+    this.checkCapacityWarning();
+    if (this.queue.length >= Math.floor(this.maxQueueSize * 0.9)) {
+      this.triggerEmergencyProcessQueue('high_watermark');
+    }
+    return true;
   }
   
   /**
@@ -298,19 +344,20 @@ export class RetryQueueService {
    */
   checkCapacityWarning(): void {
     const currentSize = this.queue.length;
-    const threshold = Math.floor(this.MAX_SIZE * this.WARNING_THRESHOLD);
+    const threshold = Math.floor(this.maxQueueSize * this.WARNING_THRESHOLD);
     const now = Date.now();
     
     // 低于阈值，恢复正常状态
     if (currentSize < threshold) {
       if (this.lastWarningPercent > 0) {
         this.lastWarningPercent = 0;
-        this.logger.info('队列容量恢复正常', { currentSize, maxSize: this.MAX_SIZE });
+        this.logger.info('队列容量恢复正常', { currentSize, maxSize: this.maxQueueSize });
       }
+      this.tryRecoverQueueFullPressure(true);
       return;
     }
     
-    const percentUsed = Math.round((currentSize / this.MAX_SIZE) * 100);
+    const percentUsed = Math.round((currentSize / this.maxQueueSize) * 100);
     
     // 90% 满载时触发强制处理（含卡死检测）
     if (percentUsed >= 90 && this.operationHandler?.isOnline()) {
@@ -319,7 +366,11 @@ export class RetryQueueService {
         if (duration > 120_000) {
           this.logger.warn('processQueue 卡死，强制重置', { percentUsed, duration });
           this.isProcessingQueue = false;
-          this.operationHandler.onProcessingStateChange(false, this.queue.length);
+          try {
+            this.operationHandler.onProcessingStateChange(false, this.queue.length);
+          } catch (error) {
+            this.logger.warn('卡死恢复时回写处理状态失败', error);
+          }
         }
       } else {
         this.processQueue();
@@ -340,7 +391,7 @@ export class RetryQueueService {
     
     const diagnostics = {
       currentSize,
-      maxSize: this.MAX_SIZE,
+      maxSize: this.maxQueueSize,
       percentUsed,
       typeBreakdown: this.getTypeBreakdown()
     };
@@ -363,6 +414,131 @@ export class RetryQueueService {
       },
       extra: diagnostics
     });
+  }
+
+  private enterPressureMode(reason: string): void {
+    if (this.queuePressure() && this.queuePressureReason() === reason) {
+      return;
+    }
+    this.queuePressure.set(true);
+    this.queuePressureReason.set(reason);
+    this.pressureEventCount += 1;
+    this.sentryLazyLoader.setTag('retry_queue_pressure', 'true');
+    this.sentryLazyLoader.setContext('retry_queue_pressure', {
+      reason,
+      queue_size: this.queue.length,
+      max_size: this.maxQueueSize,
+      pressure_events: this.pressureEventCount
+    });
+  }
+
+  private clearPressureMode(): void {
+    if (!this.queuePressure()) {
+      return;
+    }
+    this.queuePressure.set(false);
+    this.queuePressureReason.set(null);
+    this.sentryLazyLoader.setTag('retry_queue_pressure', 'false');
+  }
+
+  private tryRecoverQueueFullPressure(force = false): void {
+    if (!this.queuePressure()) {
+      return;
+    }
+    const pressureReason = this.queuePressureReason();
+    if (!pressureReason) {
+      return;
+    }
+
+    if (pressureReason === 'queue_full') {
+      const releaseThreshold = force
+        ? Math.floor(this.maxQueueSize * this.WARNING_THRESHOLD)
+        : this.maxQueueSize - 1;
+      if (this.queue.length <= releaseThreshold) {
+        this.clearPressureMode();
+      }
+      return;
+    }
+
+    if (!pressureReason.startsWith('storage_') || typeof localStorage === 'undefined') {
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - this.lastStorageRecoveryAttempt < this.STORAGE_RECOVERY_COOLDOWN) {
+      return;
+    }
+    this.lastStorageRecoveryAttempt = now;
+
+    if (!this.isLocalStorageWritable()) {
+      return;
+    }
+
+    this.saveToLocalStorage();
+    if (!this.queuePressure()) {
+      this.logger.info('存储压力已恢复，重试队列重新开放入队', { pressureReason });
+    }
+  }
+
+  private isLocalStorageWritable(): boolean {
+    const probeKey = `${this.STORAGE_KEY}.probe`;
+    try {
+      localStorage.setItem(probeKey, '1');
+      localStorage.removeItem(probeKey);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private reportEnqueueRejected(
+    type: RetryableEntityType,
+    operation: RetryableOperation,
+    dataId: string,
+    reason: string
+  ): void {
+    this.logger.warn('队列拒绝入队', {
+      type,
+      operation,
+      dataId,
+      reason,
+      queueSize: this.queue.length,
+      maxSize: this.maxQueueSize
+    });
+    const now = Date.now();
+    const shouldNotify = now - this.lastEnqueueRejectTime > this.ENQUEUE_REJECT_COOLDOWN;
+    if (!shouldNotify) {
+      return;
+    }
+    this.lastEnqueueRejectTime = now;
+    const isStoragePressure = reason.startsWith('storage_');
+    this.toast.warning(
+      isStoragePressure ? '同步队列压力过大' : '同步队列已满',
+      isStoragePressure
+        ? '新操作暂未入队，请释放浏览器存储空间后重试'
+        : '新操作暂未入队，请恢复网络后重试',
+      { duration: 8000 }
+    );
+    this.sentryLazyLoader.captureMessage('RetryQueue enqueue rejected', {
+      level: 'warning',
+      tags: {
+        queueSize: String(this.queue.length),
+        dropPolicy: SYNC_DURABILITY_CONFIG.DROP_POLICY,
+        reason
+      }
+    });
+  }
+
+  private triggerEmergencyProcessQueue(trigger: 'queue_full' | 'pressure_reject' | 'high_watermark'): void {
+    if (!this.operationHandler?.isOnline() || this.isProcessingQueue || this.queue.length === 0) {
+      return;
+    }
+    this.logger.info('触发紧急队列处理', {
+      trigger,
+      queueSize: this.queue.length,
+      maxSize: this.maxQueueSize
+    });
+    void this.processQueue();
   }
   
   /**
@@ -469,67 +645,123 @@ export class RetryQueueService {
     
     this.isProcessingQueue = true;
     this.lastProcessTime = Date.now();
-    this.operationHandler.onProcessingStateChange(true, this.queue.length);
-    
-    // 取出所有项并按依赖排序
-    const items = [...this.queue];
-    this.queue = [];
-    items.sort((a, b) => {
-      const order: Record<string, number> = { project: 0, task: 1, connection: 2, blackbox: 3 };
-      return order[a.type] - order[b.type];
-    });
-    
-    // 清理过期项
-    const now = Date.now();
-    const validItems = items.filter(item => now - item.createdAt <= this.MAX_ITEM_AGE);
-    const expiredCount = items.length - validItems.length;
-    if (expiredCount > 0) this.logger.info('清理过期队列项', { expiredCount });
-    
-    let successCount = 0;
-    
-    for (const item of validItems) {
-      if ((item.type === 'task' || item.type === 'connection') && !item.projectId) continue;
-      
-      let success = false;
-      try {
-        if (item.type === 'task') {
-          success = item.operation === 'upsert'
-            ? await this.operationHandler.pushTask(item.data as Task, item.projectId!)
-            : await this.operationHandler.deleteTask(item.data.id, item.projectId!);
-        } else if (item.type === 'project') {
-          success = await this.operationHandler.pushProject(item.data as Project);
-        } else if (item.type === 'connection') {
-          success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!);
-        } else if (item.type === 'blackbox') {
-          if (this.operationHandler.pushBlackBoxEntry) {
-            success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry);
-          }
+    try {
+      this.operationHandler.onProcessingStateChange(true, this.queue.length);
+    } catch (error) {
+      this.logger.warn('onProcessingStateChange(true) 回调失败，继续处理队列', error);
+    }
+    try {
+      // 按依赖排序（不清空原队列，逐条处理后移除）
+      const sortedItems = [...this.queue].sort((a, b) => {
+        const order: Record<string, number> = { project: 0, task: 1, connection: 2, blackbox: 3 };
+        return order[a.type] - order[b.type];
+      });
+
+      // 清理过期项
+      const now = Date.now();
+      const expiredIds = new Set<string>();
+      const validItems: RetryQueueItem[] = [];
+      for (const item of sortedItems) {
+        if (now - item.createdAt > this.MAX_ITEM_AGE) {
+          expiredIds.add(item.id);
+        } else {
+          validItems.push(item);
         }
-      } catch (e) {
-        if (isPermanentFailureError(e)) continue;
-        this.logger.error('重试失败', e);
       }
-      
-      if (success) { successCount++; continue; }
-      item.retryCount++;
-      if (item.retryCount < this.MAX_RETRIES) {
-        this.queue.push(item);
-      } else {
-        this.logger.warn('重试次数超限', { type: item.type, id: item.data.id });
+      if (expiredIds.size > 0) {
+        this.queue = this.queue.filter(item => !expiredIds.has(item.id));
+        this.saveToStorage();
+        this.logger.info('清理过期队列项', { expiredCount: expiredIds.size });
+      }
+
+      let successCount = 0;
+      const processedIds = new Set<string>();
+      const initialCount = validItems.length;
+      let exceededCount = 0; // 重试超限计数器
+
+      for (const item of validItems) {
+        if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
+          processedIds.add(item.id);
+          continue;
+        }
+
+        let success = false;
+        try {
+          if (item.type === 'task') {
+            success = item.operation === 'upsert'
+              ? await this.operationHandler.pushTask(item.data as Task, item.projectId!)
+              : await this.operationHandler.deleteTask(item.data.id, item.projectId!);
+          } else if (item.type === 'project') {
+            success = await this.operationHandler.pushProject(item.data as Project);
+          } else if (item.type === 'connection') {
+            success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!);
+          } else if (item.type === 'blackbox') {
+            if (this.operationHandler.pushBlackBoxEntry) {
+              success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry);
+            }
+          }
+        } catch (e) {
+          if (isPermanentFailureError(e)) {
+            this.logger.warn('永久失败，从队列移除', { type: item.type, id: item.data.id, error: (e as Error).message });
+            processedIds.add(item.id);
+            continue;
+          }
+          this.logger.error('重试失败', e);
+        }
+
+        if (success) {
+          successCount++;
+          processedIds.add(item.id);
+          continue;
+        }
+
+        // 处理失败：增加重试计数
+        item.retryCount++;
+        if (item.retryCount >= this.MAX_RETRIES) {
+          processedIds.add(item.id);
+          exceededCount++;
+        }
+        // retryCount < MAX_RETRIES 的项留在队列中，下次处理
+      }
+
+      // 批量汇总超限警告，避免日志刷屏
+      if (exceededCount > 0) {
+        this.logger.warn('重试次数超限，移除项目', { count: exceededCount });
         this.toast.error('部分数据同步失败，请检查网络连接');
       }
-    }
-    
-    if (items.length > 0) {
-      this.logger.info('processQueue 完成', {
-        initialCount: items.length, successCount, expiredCount,
-        remainingCount: this.queue.length, duration: Date.now() - this.lastProcessTime
+
+      // 移除已处理的项（成功的 + 永久失败的 + 超限的）
+      if (processedIds.size > 0) {
+        this.queue = this.queue.filter(item => !processedIds.has(item.id));
+      }
+
+      if (initialCount > 0) {
+        this.logger.info('processQueue 完成', {
+          initialCount, successCount, expiredCount: expiredIds.size,
+          remainingCount: this.queue.length, duration: Date.now() - this.lastProcessTime
+        });
+      }
+
+      this.saveToStorage();
+      this.checkCapacityWarning();
+    } catch (error) {
+      this.logger.error('processQueue 发生未捕获异常', error);
+      this.sentryLazyLoader.captureException(error, {
+        tags: {
+          operation: 'retryQueue.processQueue'
+        },
+        extra: {
+          queueSize: this.queue.length
+        }
       });
+    } finally {
+      this.isProcessingQueue = false;
+      try {
+        this.operationHandler.onProcessingStateChange(false, this.queue.length);
+      } catch (error) {
+        this.logger.warn('onProcessingStateChange(false) 回调失败', error);
+      }
     }
-    
-    this.saveToStorage();
-    this.isProcessingQueue = false;
-    this.operationHandler.onProcessingStateChange(false, this.queue.length);
   }
   
   // ==================== IndexedDB 支持 ====================
@@ -539,27 +771,45 @@ export class RetryQueueService {
    */
   private async initDb(): Promise<IDBDatabase | null> {
     if (this.db) return this.db;
+    if (this.idbUnsupported) return null;
     
     if (!this.dbInitPromise) {
       this.dbInitPromise = new Promise((resolve) => {
+        let settled = false;
+        const finalize = (db: IDBDatabase | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(db);
+        };
+
         if (typeof indexedDB === 'undefined') {
           this.logger.warn('IndexedDB 不可用，将使用 localStorage');
-          resolve(null);
+          this.idbUnsupported = true;
+          this.dbInitPromise = null;
+          finalize(null);
           return;
         }
         
         try {
           const request = indexedDB.open(this.DB_CONFIG.name, this.DB_CONFIG.version);
+
+          request.onblocked = () => {
+            this.logger.warn('IndexedDB 打开被阻塞，暂时降级到 localStorage');
+            this.dbInitPromise = null;
+            finalize(null);
+          };
           
           request.onerror = () => {
             this.logger.warn('IndexedDB 打开失败，降级到 localStorage', request.error);
-            resolve(null);
+            this.dbInitPromise = null;
+            finalize(null);
           };
           
           request.onsuccess = () => {
             this.db = request.result;
+            this.maxQueueSize = this.MAX_SIZE_INDEXEDDB;
             this.logger.info('IndexedDB 初始化成功');
-            resolve(request.result);
+            finalize(request.result);
           };
           
           request.onupgradeneeded = (event) => {
@@ -574,7 +824,8 @@ export class RetryQueueService {
           };
         } catch (err) {
           this.logger.error('IndexedDB 初始化异常', err);
-          resolve(null);
+          this.dbInitPromise = null;
+          finalize(null);
         }
       });
     }
@@ -593,12 +844,14 @@ export class RetryQueueService {
       if (items.length > 0) {
         this.queue = items;
         this.logger.info('从 IndexedDB 加载队列', { count: items.length });
+        this.checkCapacityWarning();
         return;
       }
     }
     
     // 降级到 localStorage
     this.loadFromLocalStorage();
+    this.checkCapacityWarning();
   }
   
   /**
@@ -661,7 +914,12 @@ export class RetryQueueService {
     
     if (db) {
       const success = await this.saveToIdb(db);
-      if (success) return;
+      if (success) {
+        if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
+          this.clearPressureMode();
+        }
+        return;
+      }
     }
     
     // 降级到 localStorage
@@ -724,46 +982,30 @@ export class RetryQueueService {
       
       // 检查大小
       if (json.length > SYNC_CONFIG.RETRY_QUEUE_SIZE_LIMIT_BYTES) {
-        this.logger.warn('队列数据过大，触发缩减', { size: json.length });
-        this.shrinkQueue();
+        this.enterPressureMode('storage_size_limit');
+        this.logger.error('队列数据过大，拒绝覆盖存储以保护历史写入', {
+          size: json.length,
+          limit: SYNC_CONFIG.RETRY_QUEUE_SIZE_LIMIT_BYTES
+        });
+        this.toast.error('本地存储压力过高', '同步队列写入已冻结，请释放存储空间');
         return;
       }
       
       localStorage.setItem(this.STORAGE_KEY, json);
+      if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
+        this.clearPressureMode();
+      }
     } catch (e) {
       if ((e as Error).name === 'QuotaExceededError') {
-        this.logger.warn('localStorage 配额超限，触发缩减');
-        this.shrinkQueue();
+        this.enterPressureMode('storage_quota_exceeded');
+        this.logger.error('localStorage 配额超限，拒绝淘汰历史写入', {
+          queueSize: this.queue.length
+        });
+        this.toast.error('存储空间不足', '同步队列写入已冻结，请清理浏览器存储后重试');
       } else {
         this.logger.error('localStorage 保存失败', e);
       }
     }
-  }
-  
-  /**
-   * 缩减队列（当存储空间不足时）
-   */
-  private shrinkQueue(): void {
-    // 按创建时间排序，保留较新的一半
-    this.queue.sort((a, b) => a.createdAt - b.createdAt);
-    const half = Math.ceil(this.queue.length / 2);
-    const removed = this.queue.splice(0, half);
-    
-    this.logger.info('缩减队列', { 
-      removed: removed.length, 
-      remaining: this.queue.length 
-    });
-    
-    this.sentryLazyLoader.captureMessage('RetryQueue shrunk due to quota', {
-      level: 'info',
-      tags: {
-        removedCount: String(removed.length),
-        remainingCount: String(this.queue.length)
-      }
-    });
-    
-    // 重新尝试保存
-    this.saveToLocalStorage();
   }
   
   /**

@@ -39,12 +39,17 @@ export const SYNC_CONFIG = {
   CONNECTIVITY_PROBE_TIMEOUT: 5000,
   // 【已清理】CIRCUIT_BREAKER_* 配置已迁移到 CIRCUIT_BREAKER_CONFIG
   // 详见下方 CIRCUIT_BREAKER_CONFIG 定义
-  /** 
+  /**
    * 重试队列最大大小（防止 localStorage 溢出）
    * 【2024-12-31 修复】从 500 降低到 100，因为每个 Task 可能包含大量内容
    * localStorage 配额约 5-10MB，100 个大型任务约占用 1-2MB
    */
   MAX_RETRY_QUEUE_SIZE: 100,
+  /**
+   * IndexedDB 场景重试队列上限
+   * IndexedDB 容量远高于 localStorage，允许更高积压以避免长离线时过早拒绝写入
+   */
+  MAX_RETRY_QUEUE_SIZE_INDEXEDDB: 1000,
   /** 重试项最大年龄（毫秒，24 小时）*/
   MAX_RETRY_ITEM_AGE: 24 * 60 * 60 * 1000,
   /**
@@ -88,6 +93,36 @@ export const SYNC_CONFIG = {
    * @see docs/plan_save.md Phase 2
    */
   DELTA_SYNC_ENABLED: false,
+  /** Delta 游标安全回看窗口（毫秒），抵御时钟漂移/读已提交边界 */
+  CURSOR_SAFETY_LOOKBACK_MS: 30_000,
+  /** 脏字段保护窗口（毫秒），超过窗口后允许远端合法更新覆盖 */
+  DIRTY_PROTECTION_WINDOW_MS: 10 * 60 * 1000,
+  /** Tombstone 本地保留时长（毫秒） */
+  TOMBSTONE_RETENTION_MS: 30 * 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * 同步耐久策略配置（Durability-First）
+ */
+export const SYNC_DURABILITY_CONFIG = {
+  /**
+   * 队列满载策略：
+   * - soft-overflow: 超过软上限后继续接收写入，后台加速排队消化（默认）
+   * - reject-new: 仅用于绝对保护上限触发时的兜底拒绝
+   */
+  DROP_POLICY: 'soft-overflow' as const,
+  /**
+   * 存储压力模式：
+   * - memory-fallback: 存储压力下优先内存兜底，恢复后再持久化
+   * - freeze-writes: 兼容旧行为（冻结新写）
+   */
+  STORAGE_PRESSURE_MODE: 'memory-fallback' as const,
+  /**
+   * Delta 游标推进策略：
+   * - max-server-updated-at: 以本次返回最大 updated_at 推进（推荐）
+   * - client-now: 兼容旧行为（不推荐）
+   */
+  CURSOR_STRATEGY: 'max-server-updated-at' as const,
 } as const;
 
 /**
@@ -479,4 +514,3 @@ export const MOBILE_SYNC_CONFIG = {
   /** low 网络质量时完全禁用自动同步 */
   DISABLE_AUTO_SYNC_ON_LOW_QUALITY: true,
 } as const;
-

@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import type * as Sentry from '@sentry/angular';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { 
@@ -79,11 +79,19 @@ export class SentryAlertService {
     lastSyncTimestamp: string | null;
     pendingActions: number;
     deadLetterCount: number;
+    syncSuccessRate: number | null;
+    queuePressureEvents: number;
+    dirtyAgeMs: number;
+    cursorLagMs: number;
   } = {
     actionQueueLength: 0,
     lastSyncTimestamp: null,
     pendingActions: 0,
     deadLetterCount: 0,
+    syncSuccessRate: null,
+    queuePressureEvents: 0,
+    dirtyAgeMs: 0,
+    cursorLagMs: 0,
   };
   
   // 告警统计
@@ -103,9 +111,11 @@ export class SentryAlertService {
   readonly EventTypes = SENTRY_EVENT_TYPES;
   
   constructor() {
+    const destroyRef = inject(DestroyRef);
     // 每分钟重置限流计数器
     if (typeof window !== 'undefined') {
-      setInterval(() => this.resetRateLimiter(), 60000);
+      const intervalId = setInterval(() => this.resetRateLimiter(), 60000);
+      destroyRef.onDestroy(() => clearInterval(intervalId));
     }
     
     // 配置 Sentry 全局上下文
@@ -133,10 +143,15 @@ export class SentryAlertService {
       last_sync_timestamp: this.syncContext.lastSyncTimestamp,
       pending_actions: this.syncContext.pendingActions,
       dead_letter_count: this.syncContext.deadLetterCount,
+      sync_success_rate: this.syncContext.syncSuccessRate,
+      queue_pressure_events: this.syncContext.queuePressureEvents,
+      dirty_age_ms: this.syncContext.dirtyAgeMs,
+      cursor_lag_ms: this.syncContext.cursorLagMs,
     });
     
     // 也设置为标签，方便在 Sentry 中筛选
     this.sentryLazyLoader.setTag('action_queue_length', String(this.syncContext.actionQueueLength));
+    this.sentryLazyLoader.setTag('queue_pressure_events', String(this.syncContext.queuePressureEvents));
     if (this.syncContext.deadLetterCount > 0) {
       this.sentryLazyLoader.setTag('has_dead_letters', 'true');
     }

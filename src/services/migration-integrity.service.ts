@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
@@ -155,6 +155,7 @@ export class MigrationIntegrityService {
       return null;
     } catch (e) {
       this.logger.error('恢复快照失败', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：快照恢复失败时回退到无快照状态
       return null;
     }
   }
@@ -208,6 +209,7 @@ export class MigrationIntegrityService {
     } catch (e) {
       // 日志记录但返回 null（语义正确：无法获取状态）
       this.logger.debug('获取迁移状态失败', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：无法解析状态数据
       return null;
     }
   }

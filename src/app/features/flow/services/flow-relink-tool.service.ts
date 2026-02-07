@@ -17,7 +17,6 @@ import * as go from 'gojs';
 import {
   GojsNodeExt,
   GojsLinkingToolExt,
-  GojsRelinkingToolExt,
   GojsMake,
   LinkStyleConfig,
 } from './flow-template.types';

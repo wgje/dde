@@ -17,6 +17,7 @@ import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG, ActionQueueContext } fro
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { NetworkAwarenessService } from './network-awareness.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import type { QueuedAction, DeadLetterItem } from './action-queue.types';
 
@@ -36,6 +37,10 @@ const mockToastService = {
   error: vi.fn(),
   warning: vi.fn(),
   info: vi.fn(),
+};
+
+const mockNetworkAwarenessService = {
+  setStoragePressure: vi.fn(),
 };
 
 function createMockAction(overrides: Partial<QueuedAction> = {}): QueuedAction {
@@ -82,6 +87,7 @@ describe('ActionQueueStorageService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+        { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
       ],
     });
 
@@ -149,12 +155,12 @@ describe('ActionQueueStorageService', () => {
       expect(ctx.dequeue).toHaveBeenCalledWith(action.id);
     });
 
-    it('moveToDeadLetter should silently discard low priority actions', () => {
+    it('moveToDeadLetter should keep low priority actions in dead letter queue', () => {
       const action = createMockAction({ priority: 'low' });
 
       service.moveToDeadLetter(action, 'test reason');
 
-      expect(service.deadLetterQueue().length).toBe(0);
+      expect(service.deadLetterQueue().length).toBe(1);
       expect(ctx.dequeue).toHaveBeenCalledWith(action.id);
     });
 
@@ -199,12 +205,12 @@ describe('ActionQueueStorageService', () => {
       expect(service.hasDeadLetters()).toBe(false);
     });
 
-    it('moveToDeadLetter should enforce max size', () => {
+    it('moveToDeadLetter should cap dead letter queue at MAX_DEAD_LETTER_SIZE', () => {
       for (let i = 0; i < LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE + 10; i++) {
         service.moveToDeadLetter(createMockAction(), `reason-${i}`);
       }
 
-      expect(service.deadLetterQueue().length).toBeLessThanOrEqual(LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
+      expect(service.deadLetterQueue().length).toBe(LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
     });
   });
 

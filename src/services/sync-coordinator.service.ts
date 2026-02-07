@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService, RetryQueueService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -30,14 +30,14 @@ import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+import { SentryAlertService } from './sentry-alert.service';
 // Sprint 4 技术债务修复：提取的子服务
 import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
-import { Project, Task, UserPreferences } from '../models';
-import { SYNC_CONFIG, AUTH_CONFIG } from '../config';
-import { validateProject, sanitizeProject } from '../utils/validation';
-import { Result, success, failure, ErrorCodes, OperationError, isFailure } from '../utils/result';
+import { Project } from '../models';
+import { SYNC_CONFIG } from '../config';
+import { Result, OperationError } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
 /**
@@ -64,6 +64,11 @@ interface PersistState {
   hasPendingLocalChanges: boolean;
   /** 上次更新类型 */
   lastUpdateType: 'content' | 'structure' | 'position';
+}
+
+interface PersistOutcome {
+  remoteConfirmed: boolean;
+  projectId?: string;
 }
 
 @Injectable({
@@ -96,6 +101,8 @@ export class SyncCoordinatorService {
   private authService = inject(AuthService);
   private toastService = inject(ToastService);
   private layoutService = inject(LayoutService);
+  private sentryAlert = inject(SentryAlertService);
+  private retryQueue = inject(RetryQueueService);
   private destroyRef = inject(DestroyRef);
   
   // Sprint 4 技术债务修复：提取的持久化调度服务
@@ -170,6 +177,8 @@ export class SyncCoordinatorService {
    * 4. 可测试：Subject 比回调更容易 mock 和验证
    */
   private readonly conflict$ = new Subject<ConflictEvent>();
+  private syncAttempts = 0;
+  private syncConfirmed = 0;
   
   /** 
    * 冲突事件流（只读）
@@ -191,6 +200,7 @@ export class SyncCoordinatorService {
       if (this.localAutosaveTimer) {
         clearInterval(this.localAutosaveTimer);
       }
+      this.destroy();
     });
   }
   
@@ -238,10 +248,12 @@ export class SyncCoordinatorService {
    */
   private async downloadAndMerge(userId: string): Promise<void> {
     const remoteProjects = await this.core.loadProjectsFromCloud(userId, true);
-    if (remoteProjects.length === 0) return;
-    
+    if (remoteProjects.length === 0) {
+      return;
+    }
     const localProjects = this.projectState.projects();
     const localProjectMap = new Map(localProjects.map(p => [p.id, p]));
+    const remoteProjectMap = new Map(remoteProjects.map(p => [p.id, p]));
     
     // 智能合并每个项目
     const mergedProjects: Project[] = [];
@@ -249,13 +261,45 @@ export class SyncCoordinatorService {
       const localProject = localProjectMap.get(remoteProject.id);
       if (!localProject) {
         // 远程新增的项目，直接使用
-        mergedProjects.push(this.validateAndRebalance(remoteProject));
+        mergedProjects.push(this.validateAndRebalance({
+          ...remoteProject,
+          syncSource: 'synced',
+          pendingSync: false
+        }));
         continue;
       }
       // 【关键修复】获取 tombstoneIds 防止已删除任务在合并时复活
       const tombstoneIds = await this.getTombstoneIds(remoteProject.id);
       const mergeResult = this.smartMerge(localProject, remoteProject, tombstoneIds);
-      mergedProjects.push(this.validateAndRebalance(mergeResult.project));
+      mergedProjects.push(this.validateAndRebalance({
+        ...mergeResult.project,
+        syncSource: 'synced',
+        pendingSync: this.changeTracker.hasProjectChanges(remoteProject.id)
+      }));
+    }
+
+    // 保留 local-only 项目，禁止下载覆盖丢失
+    for (const localProject of localProjects) {
+      if (remoteProjectMap.has(localProject.id)) {
+        continue;
+      }
+
+      const hasPendingChanges = localProject.pendingSync === true
+        || this.changeTracker.hasProjectChanges(localProject.id)
+        || this.hasPendingChangesForProject(localProject.id);
+
+      if (!hasPendingChanges) {
+        this.logger.info('跳过无待同步改动的 local-only 项目，避免远程删除后复活', {
+          projectId: localProject.id
+        });
+        continue;
+      }
+
+      mergedProjects.push(this.validateAndRebalance({
+        ...localProject,
+        syncSource: 'local-only',
+        pendingSync: true
+      }));
     }
     
     // 更新本地状态
@@ -681,26 +725,31 @@ export class SyncCoordinatorService {
     }
     
     this.persistState.update(s => ({ ...s, isPersisting: true }));
+    let outcome: PersistOutcome = { remoteConfirmed: false };
     
     try {
-      await this.doPersistActiveProject();
+      outcome = await this.doPersistActiveProject();
     } finally {
       const currentState = this.persistState();
       this.persistState.update(s => ({ 
         ...s, 
         isPersisting: false,
         lastPersistAt: Date.now(),
-        hasPendingLocalChanges: false
+        hasPendingLocalChanges: outcome.remoteConfirmed
+          ? false
+          : currentState.hasPendingLocalChanges
       }));
       
       if (currentState.hasPending) {
         this.persistState.update(s => ({ ...s, hasPending: false }));
         this.schedulePersist();
       }
+
+      this.updateSyncObservability(outcome);
     }
   }
   
-  private async doPersistActiveProject() {
+  private async doPersistActiveProject(): Promise<PersistOutcome> {
     const project = this.projectState.activeProject();
     const projects = this.projectState.projects();
     const now = new Date().toISOString();
@@ -715,7 +764,7 @@ export class SyncCoordinatorService {
     this.core.saveOfflineSnapshot(updatedProjects);
     
     if (!project) {
-      return;
+      return { remoteConfirmed: false };
     }
 
     const userId = this.authService.currentUserId();
@@ -724,7 +773,7 @@ export class SyncCoordinatorService {
       this.projectState.updateProjects(ps =>
         ps.map(p => p.id === project.id ? { ...p, updatedAt: now } : p)
       );
-      return;
+      return { remoteConfirmed: false, projectId: project.id };
     }
 
     // 若该项目已有未解决的冲突：
@@ -733,7 +782,7 @@ export class SyncCoordinatorService {
     const existingConflict = this.conflictData();
     if (this.hasConflict() && existingConflict && (existingConflict as { projectId?: string }).projectId === project.id) {
       this.logger.info('存在未解决冲突，跳过云端持久化', { projectId: project.id });
-      return;
+      return { remoteConfirmed: false, projectId: project.id };
     }
 
     try {
@@ -748,7 +797,13 @@ export class SyncCoordinatorService {
         this.projectState.updateProjects(ps =>
           ps.map(p => 
             p.id === project.id 
-              ? { ...p, updatedAt: now, version: result.newVersion ?? p.version } 
+              ? {
+                  ...p,
+                  updatedAt: now,
+                  version: result.newVersion ?? p.version,
+                  syncSource: 'synced',
+                  pendingSync: false
+                }
               : p
           )
         );
@@ -757,6 +812,7 @@ export class SyncCoordinatorService {
         
         // 【关键】同步成功后，解锁该项目的所有字段锁
         this.changeTracker.clearProjectFieldLocks(project.id);
+        this.changeTracker.clearProjectChanges(project.id);
         
         // 如果有验证警告，记录日志但不打扰用户
         if (result.validationWarnings && result.validationWarnings.length > 0) {
@@ -765,10 +821,12 @@ export class SyncCoordinatorService {
             warnings: result.validationWarnings
           });
         }
+        return { remoteConfirmed: true, projectId: project.id };
       } else if (result.conflict && result.remoteData) {
         // 版本冲突处理：静默保存到冲突仓库，不弹窗打扰用户
         await this.saveConflictSilently(project, result.remoteData, []);
         this.logger.warn('检测到数据冲突，已保存到冲突仓库', { projectId: project.id });
+        return { remoteConfirmed: false, projectId: project.id };
       } else if (result.validationWarnings && result.validationWarnings.length > 0) {
         // 验证失败导致同步中止
         this.logger.error('同步验证失败', {
@@ -779,7 +837,24 @@ export class SyncCoordinatorService {
           '同步验证失败',
           '检测到潜在的数据丢失风险，已中止同步。数据已保存到本地。'
         );
+        return { remoteConfirmed: false, projectId: project.id };
       }
+      if (!result.success) {
+        const failedTasks = result.failedTaskIds?.length ?? 0;
+        const failedConnections = result.failedConnectionIds?.length ?? 0;
+        if (failedTasks > 0 || failedConnections > 0) {
+          this.logger.warn('远端未完全确认，同步保持待处理状态', {
+            projectId: project.id,
+            failedTasks,
+            failedConnections
+          });
+          this.toastService.warning(
+            '同步未完成',
+            `任务失败 ${failedTasks} 项，连接失败 ${failedConnections} 项，已保留待同步标记`
+          );
+        }
+      }
+      return { remoteConfirmed: false, projectId: project.id };
     } catch (error) {
       this.logger.error('持久化项目时发生异常', { error });
       // 乐观UI：静默记录错误，不阻塞用户操作
@@ -790,6 +865,34 @@ export class SyncCoordinatorService {
       if (!navigator.onLine) {
         this.toastService.info('离线模式', '更改已保存到本地，联网后将自动同步');
       }
+      return { remoteConfirmed: false, projectId: project.id };
     }
+  }
+
+  private updateSyncObservability(outcome: PersistOutcome): void {
+    this.syncAttempts += 1;
+    if (outcome.remoteConfirmed) {
+      this.syncConfirmed += 1;
+    }
+    const successRate = this.syncAttempts === 0
+      ? null
+      : Number((this.syncConfirmed / this.syncAttempts).toFixed(4));
+    const dirtyAgeMs = outcome.projectId
+      ? this.changeTracker.getOldestChangeAgeMs(outcome.projectId)
+      : this.changeTracker.getOldestChangeAgeMs();
+    const lastSync = outcome.projectId ? this.core.getLastSyncTime(outcome.projectId) : null;
+    const cursorLagMs = lastSync ? Math.max(0, Date.now() - new Date(lastSync).getTime()) : 0;
+    const queuePressureEvents =
+      this.retryQueue.pressureEvents +
+      (this.actionQueue.queueFrozen() ? 1 : 0);
+
+    this.sentryAlert.updateSyncContext({
+      lastSyncTimestamp: this.core.syncState().lastSyncTime,
+      pendingActions: this.pendingActionsCount(),
+      syncSuccessRate: successRate,
+      queuePressureEvents,
+      dirtyAgeMs,
+      cursorLagMs
+    });
   }
 }

@@ -4,7 +4,6 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
-import { LAYOUT_CONFIG } from '../config';
 
 /**
  * 任务属性更新服务

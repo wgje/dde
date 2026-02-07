@@ -88,6 +88,9 @@ export class NetworkAwarenessService {
   
   /** 网络连接类型（wifi/cellular/ethernet/等） */
   readonly connectionType = signal<string>('unknown');
+  /** 存储压力状态（用于离线队列冻结提醒） */
+  readonly storagePressure = signal(false);
+  readonly storagePressureReason = signal<string | null>(null);
   
   // ==================== 计算属性 ====================
   
@@ -126,6 +129,8 @@ export class NetworkAwarenessService {
   private networkConnection: NetworkInformation | null = null;
   private batteryManager: BatteryManager | null = null;
   private connectionChangeHandler: EventListener | null = null;
+  private batteryLevelChangeHandler: EventListener | null = null;
+  private batteryChargingChangeHandler: EventListener | null = null;
   
   // 【修复】保存事件处理器引用，确保 cleanup 时能正确移除
   private readonly onlineHandler = () => this.handleOnlineChange(true);
@@ -283,18 +288,20 @@ export class NetworkAwarenessService {
       this.isCharging.set(this.batteryManager.charging);
       
       // 监听变化
-      this.batteryManager.addEventListener('levelchange', () => {
+      this.batteryLevelChangeHandler = () => {
         if (this.batteryManager) {
           this.batteryLevel.set(Math.round(this.batteryManager.level * 100));
           this.checkLowBatteryWarning();
         }
-      });
-      
-      this.batteryManager.addEventListener('chargingchange', () => {
+      };
+      this.batteryManager.addEventListener('levelchange', this.batteryLevelChangeHandler);
+
+      this.batteryChargingChangeHandler = () => {
         if (this.batteryManager) {
           this.isCharging.set(this.batteryManager.charging);
         }
-      });
+      };
+      this.batteryManager.addEventListener('chargingchange', this.batteryChargingChangeHandler);
       
       this.logger.debug('电池状态已初始化', {
         level: this.batteryLevel(),
@@ -368,6 +375,7 @@ export class NetworkAwarenessService {
     batteryLevel: number;
     isCharging: boolean;
     shouldThrottle: boolean;
+    storagePressure: boolean;
   } {
     return {
       quality: this.networkQuality(),
@@ -377,8 +385,18 @@ export class NetworkAwarenessService {
       dataSaverMode: this.dataSaverMode(),
       batteryLevel: this.batteryLevel(),
       isCharging: this.isCharging(),
-      shouldThrottle: this.shouldThrottleSync()
+      shouldThrottle: this.shouldThrottleSync(),
+      storagePressure: this.storagePressure()
     };
+  }
+
+  /**
+   * 更新存储压力状态（由队列服务调用）
+   */
+  setStoragePressure(active: boolean, reason: string | null = null): void {
+    this.storagePressure.set(active);
+    this.storagePressureReason.set(reason);
+    this.logger.info('存储压力状态更新', { active, reason });
   }
   
   /**
@@ -403,7 +421,17 @@ export class NetworkAwarenessService {
     if (this.networkConnection?.removeEventListener && this.connectionChangeHandler) {
       this.networkConnection.removeEventListener('change', this.connectionChangeHandler);
     }
-    
+
+    // 移除电池状态监听器
+    if (this.batteryManager) {
+      if (this.batteryLevelChangeHandler) {
+        this.batteryManager.removeEventListener('levelchange', this.batteryLevelChangeHandler);
+      }
+      if (this.batteryChargingChangeHandler) {
+        this.batteryManager.removeEventListener('chargingchange', this.batteryChargingChangeHandler);
+      }
+    }
+
     // 【修复】使用保存的引用正确移除事件监听器
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this.onlineHandler);

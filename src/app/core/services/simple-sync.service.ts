@@ -23,7 +23,7 @@ import { RequestThrottleService } from '../../../services/request-throttle.servi
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
 // 拆分的子服务
-import { 
+import {
   TombstoneService, 
   RealtimePollingService,
   SessionManagerService,
@@ -33,15 +33,19 @@ import {
   BatchSyncService,
   TaskSyncOperationsService,
   ConnectionSyncOperationsService,
-  RetryQueueService
+  RetryQueueService,
+  type RetryableEntityType,
+  type RetryableOperation
 } from './sync';
-import type { RetryableEntityType, RetryableOperation } from './sync';
 import { Task, Project, Connection, UserPreferences } from '../../../models';
-import { ProjectRow } from '../../../models/supabase-types';
+import { ProjectRow, TaskRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
-import { supabaseErrorToError, EnhancedError } from '../../../utils/supabase-error';
-import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
-import { SYNC_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
+import {
+  supabaseErrorToError,
+  classifySupabaseClientFailure
+} from '../../../utils/supabase-error';
+import { PermanentFailureError } from '../../../utils/permanent-failure-error';
+import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
@@ -112,10 +116,29 @@ export class SimpleSyncService {
    * 获取 Supabase 客户端
    */
   private getSupabaseClient(): SupabaseClient | null {
-    if (!this.supabase.isConfigured) return null;
+    if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      return null;
+    }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.sentryLazyLoader.captureMessage('Sync client unavailable', {
+        level: 'warning',
+        tags: {
+          operation: 'SimpleSync.getSupabaseClient',
+          category: failure.category
+        }
+      });
+      // eslint-disable-next-line no-restricted-syntax -- 需保持历史接口语义，客户端不可用时返回 null 触发离线降级分支
       return null;
     }
   }
@@ -149,9 +172,6 @@ export class SimpleSyncService {
   private readonly RETRY_INTERVAL = 5000;
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   
-  /** 任务变更回调 */
-  private taskChangeCallback: TaskChangeCallback | null = null;
-
   constructor() {
     // 订阅会话恢复事件
     this.eventBus.onSessionRestored$.pipe(
@@ -179,7 +199,8 @@ export class SimpleSyncService {
       pushConnection: (conn, pid) => this.pushConnection(conn, pid, true, true, true),
       pushBlackBoxEntry: (entry: BlackBoxEntry) => this.blackBoxSync.pushToServer(entry),
       isSessionExpired: () => this.syncState().sessionExpired,
-      isOnline: () => this.state().isOnline,
+      // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
+      isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),
       onProcessingStateChange: (processing, pendingCount) =>
         this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }))
     });
@@ -297,6 +318,7 @@ export class SimpleSyncService {
   async pushProject(project: Project, fromRetryQueue = false): Promise<boolean> {
     if (this.syncState().sessionExpired) {
       this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id });
+      return false;
     }
     
     const client = this.getSupabaseClient();
@@ -313,6 +335,7 @@ export class SimpleSyncService {
           const userId = session?.user?.id;
           if (!userId) {
             this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
+            return;
           }
           
           const { error } = await client
@@ -385,9 +408,12 @@ export class SimpleSyncService {
       this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    this.retryQueueService.add(type, operation, data, projectId);
-    this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
-    this.retryQueueService.checkCapacityWarning();
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    if (enqueued) {
+      this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
+    } else {
+      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+    }
   }
   
   clearRetryQueue(): void {
@@ -429,7 +455,7 @@ export class SimpleSyncService {
   }
   
   setTaskChangeCallback(callback: TaskChangeCallback): void {
-    this.taskChangeCallback = callback;
+    this.realtimePollingService.setTaskChangeCallback(callback);
   }
   
   async initRealtimeSubscription(userId: string): Promise<void> {
@@ -472,28 +498,98 @@ export class SimpleSyncService {
     }
     
     try {
+      const driftMs = Math.abs(this.clockSync.currentDriftMs());
+      const lookbackMs = Math.max(SYNC_CONFIG.CURSOR_SAFETY_LOOKBACK_MS, driftMs);
+      const sinceMs = new Date(lastSyncTime).getTime() - lookbackMs;
+      const effectiveSince = new Date(Math.max(0, sinceMs)).toISOString();
+
       const [tasksResult, connectionsResult] = await Promise.all([
-        client.from('tasks').select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS).eq('project_id', projectId).gt('updated_at', lastSyncTime),
-        client.from('connections').select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS).eq('project_id', projectId).gt('updated_at', lastSyncTime)
+        client.from('tasks').select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS).eq('project_id', projectId).gt('updated_at', effectiveSince),
+        client.from('connections').select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS).eq('project_id', projectId).gt('updated_at', effectiveSince)
       ]);
       
       if (tasksResult.error || connectionsResult.error) {
         throw supabaseErrorToError(tasksResult.error || connectionsResult.error);
       }
       
-      const deltaTasks = (tasksResult.data || []) as unknown as Task[];
-      const deltaConnections = (connectionsResult.data || []) as unknown as Connection[];
+      const taskRows = (tasksResult.data || []) as TaskRow[];
+      const connectionRows = (connectionsResult.data || []) as ConnectionRow[];
+      const deltaTasks = this.dedupeTasksByLatest(
+        taskRows.map(row => this.projectDataService.rowToTask(row))
+      );
+      const deltaConnections = this.dedupeConnectionsByLatest(
+        connectionRows.map(row => this.projectDataService.rowToConnection(row))
+      );
+      const maxUpdatedAt = this.computeMaxUpdatedAt(taskRows, connectionRows);
       
-      this.lastSyncTimeByProject.set(projectId, nowISO());
+      if (SYNC_DURABILITY_CONFIG.CURSOR_STRATEGY === 'max-server-updated-at' && maxUpdatedAt) {
+        this.lastSyncTimeByProject.set(projectId, maxUpdatedAt);
+      } else {
+        this.lastSyncTimeByProject.set(projectId, nowISO());
+      }
+      this.sentryLazyLoader.setContext('sync_delta', {
+        project_id: projectId,
+        cursor_lag_ms: maxUpdatedAt ? Math.max(0, Date.now() - new Date(maxUpdatedAt).getTime()) : null,
+        lookback_ms: lookbackMs
+      });
       
       return {
-        tasks: deltaTasks.filter(t => !t.deletedAt),
-        connections: deltaConnections.filter(c => !c.deletedAt)
+        tasks: deltaTasks,
+        connections: deltaConnections
       };
     } catch (e) {
       this.logger.error('Delta Sync 检查失败', e);
       throw e;
     }
+  }
+
+  private dedupeTasksByLatest(tasks: Task[]): Task[] {
+    const byId = new Map<string, Task>();
+    for (const task of tasks) {
+      const existing = byId.get(task.id);
+      if (!existing) {
+        byId.set(task.id, task);
+        continue;
+      }
+      const existingTs = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      const nextTs = task.updatedAt ? new Date(task.updatedAt).getTime() : 0;
+      if (nextTs >= existingTs) {
+        byId.set(task.id, task);
+      }
+    }
+    return Array.from(byId.values());
+  }
+
+  private dedupeConnectionsByLatest(connections: Connection[]): Connection[] {
+    const byId = new Map<string, Connection>();
+    for (const connection of connections) {
+      const existing = byId.get(connection.id);
+      if (!existing) {
+        byId.set(connection.id, connection);
+        continue;
+      }
+      const existingTs = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      const nextTs = connection.updatedAt ? new Date(connection.updatedAt).getTime() : 0;
+      if (nextTs >= existingTs) {
+        byId.set(connection.id, connection);
+      }
+    }
+    return Array.from(byId.values());
+  }
+
+  private computeMaxUpdatedAt(taskRows: TaskRow[], connectionRows: ConnectionRow[]): string | null {
+    let max = 0;
+    for (const row of taskRows) {
+      if (row.updated_at) {
+        max = Math.max(max, new Date(row.updated_at).getTime());
+      }
+    }
+    for (const row of connectionRows) {
+      if (row.updated_at) {
+        max = Math.max(max, new Date(row.updated_at).getTime());
+      }
+    }
+    return max > 0 ? new Date(max).toISOString() : null;
   }
   
   setLastSyncTime(projectId: string, timestamp: string): void {
@@ -521,11 +617,11 @@ export class SimpleSyncService {
   
   // ==================== 项目加载 ====================
   
-  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number }> {
+  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; failedTaskIds?: string[]; failedConnectionIds?: string[] }> {
     return this.batchSyncService.saveProjectToCloud(project, userId);
   }
-  
-  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[] }> {
+
+  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; failedTaskIds?: string[]; failedConnectionIds?: string[] }> {
     const result = await this.saveProjectToCloud(project, userId);
     return { ...result, newVersion: project.version };
   }

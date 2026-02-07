@@ -10,7 +10,7 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ProjectStateService } from './project-state.service';

@@ -4,7 +4,6 @@ import { FlowLinkService } from './flow-link.service';
 import { FlowLinkRelinkService } from './flow-link-relink.service';
 import { FlowDiagramService } from './flow-diagram.service';
 import { FlowDragDropService } from './flow-drag-drop.service';
-import { FlowTouchService } from './flow-touch.service';
 import { FlowSelectionService } from './flow-selection.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { UiStateService } from '../../../../services/ui-state.service';

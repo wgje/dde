@@ -8,6 +8,7 @@ import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
+import { SYNC_CONFIG } from '../../../config';
 
 /**
  * 同步状态组件
@@ -37,11 +38,8 @@ import { LoggerService } from '../../../services/logger.service';
             'bg-stone-100 dark:bg-stone-700': isExpanded()
           }">
           <!-- 状态点 -->
-          <div class="w-2 h-2 rounded-full flex-shrink-0" 
-               [class.bg-green-500]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
-               [class.bg-amber-500]="!isOnline() || offlineMode() || pendingCount() > 0 || !isLoggedIn()"
-               [class.bg-red-500]="deadLetterCount() > 0"
-               [class.bg-blue-500]="isSyncing()"
+          <div class="w-2 h-2 rounded-full flex-shrink-0"
+               [ngClass]="statusDotClass()"
                [class.animate-pulse]="isSyncing() || pendingCount() > 0">
           </div>
           
@@ -51,6 +49,8 @@ import { LoggerService } from '../../../services/logger.service';
               后台同步...
             } @else if (isSyncing()) {
               同步中...
+            } @else if (queueFrozen()) {
+              队列冻结
             } @else if (deadLetterCount() > 0) {
               {{ deadLetterCount() }} 失败
             } @else if (pendingCount() > 0) {
@@ -106,6 +106,8 @@ import { LoggerService } from '../../../services/logger.service';
                 后台同步中...
               } @else if (isSyncing()) {
                 同步中...
+              } @else if (queueFrozen()) {
+                队列冻结
               } @else if (deadLetterCount() > 0) {
                 {{ deadLetterCount() }} 个同步失败
               } @else if (pendingCount() > 0) {
@@ -398,19 +400,30 @@ export class SyncStatusComponent {
   isResyncing = signal(false);
   
   // 从服务获取状态
-  readonly pendingCount = this.actionQueue.queueSize;
+  readonly pendingCount = computed(() =>
+    this.actionQueue.queueSize() + this.syncService.syncState().pendingCount
+  );
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
   readonly isProcessing = this.actionQueue.isProcessing;
+  readonly queueFrozen = this.actionQueue.queueFrozen;
   
   // 冲突仓库状态
   readonly conflictCount = this.conflictStorage.conflictCount;
   readonly hasUnresolvedConflicts = this.conflictStorage.hasUnresolvedConflicts;
-  
+
   readonly isOnline = computed(() => this.syncService.syncState().isOnline);
   readonly isSyncing = computed(() => this.syncService.syncState().isSyncing);
   readonly syncError = computed(() => this.syncService.syncState().syncError);
   readonly offlineMode = computed(() => this.syncService.syncState().offlineMode);
+
+  /** 状态点颜色（互斥优先级：同步中 > 失败 > 警告 > 正常） */
+  readonly statusDotClass = computed(() => {
+    if (this.isSyncing()) return 'bg-blue-500';
+    if (this.deadLetterCount() > 0 || this.queueFrozen()) return 'bg-red-500';
+    if (!this.isOnline() || this.offlineMode() || this.pendingCount() > 0 || !this.isLoggedIn()) return 'bg-amber-500';
+    return 'bg-green-500';
+  });
   
   /** 【新增】后台正在加载云端数据 */
   readonly isLoadingRemote = this.syncCoordinator.isLoadingRemote;
@@ -420,11 +433,21 @@ export class SyncStatusComponent {
   
   // 计算属性 - 是否有需要关注的问题（包括 offlineMode 连接中断状态和冲突）
   readonly hasIssues = computed(() => 
-    this.deadLetterCount() > 0 || this.pendingCount() > 0 || !!this.syncError() || this.offlineMode() || this.conflictCount() > 0
+    this.deadLetterCount() > 0 ||
+    this.pendingCount() > 0 ||
+    this.queueFrozen() ||
+    !!this.syncError() ||
+    this.offlineMode() ||
+    this.conflictCount() > 0
   );
   
   readonly totalIssues = computed(() => 
-    this.deadLetterCount() + (this.pendingCount() > 0 ? 1 : 0) + (this.syncError() ? 1 : 0) + (this.offlineMode() ? 1 : 0) + this.conflictCount()
+    this.deadLetterCount() +
+    (this.pendingCount() > 0 ? 1 : 0) +
+    (this.queueFrozen() ? 1 : 0) +
+    (this.syncError() ? 1 : 0) +
+    (this.offlineMode() ? 1 : 0) +
+    this.conflictCount()
   );
   
   /**
@@ -434,8 +457,8 @@ export class SyncStatusComponent {
   readonly isCriticalState = computed(() => {
     const deadCount = this.deadLetterCount();
     const pendingCount = this.pendingCount();
-    // 死信队列有内容，或待同步队列超过 80 个（80% of 100 max）
-    return deadCount > 0 || pendingCount > 80;
+    const criticalThreshold = Math.floor(SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE * 0.8);
+    return deadCount > 0 || pendingCount > criticalThreshold;
   });
   
   /** 详细状态文本 */
@@ -445,6 +468,9 @@ export class SyncStatusComponent {
     }
     if (this.isSyncing()) {
       return '正在同步数据...';
+    }
+    if (this.queueFrozen()) {
+      return '同步队列已冻结，请释放存储空间';
     }
     if (this.deadLetterCount() > 0) {
       return `${this.deadLetterCount()} 个操作失败`;

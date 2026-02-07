@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable } from '@angular/core';
 import { environment } from '../environments/environment';
 
 /**
@@ -98,19 +98,42 @@ export class DataPreloaderService {
       timestamp: Date.now()
     };
 
-    // 检查是否已登录
+    // 检查是否已登录（仅当前 Supabase 项目）
     var authToken = null;
+    var tokenExpiresAt = null;
     try {
-      var authKey = Object.keys(localStorage).find(function(k) {
-        return k.startsWith('sb-') && k.endsWith('-auth-token');
-      });
-      if (authKey) {
-        var authData = JSON.parse(localStorage.getItem(authKey));
-        authToken = authData && authData.access_token;
+      var projectRef = new URL('${environment.supabaseUrl}').hostname.split('.')[0];
+      var authKey = 'sb-' + projectRef + '-auth-token';
+      var rawAuth = localStorage.getItem(authKey);
+      if (rawAuth) {
+        var authData = JSON.parse(rawAuth);
+        var session = authData && (authData.currentSession || authData.session || authData);
+        if (session && typeof session.access_token === 'string') {
+          authToken = session.access_token;
+          if (typeof session.expires_at === 'number') {
+            tokenExpiresAt = session.expires_at;
+          } else if (typeof session.expires_at === 'string') {
+            var parsedExpiresAt = Date.parse(session.expires_at);
+            if (!isNaN(parsedExpiresAt)) {
+              tokenExpiresAt = Math.floor(parsedExpiresAt / 1000);
+            }
+          } else if (typeof authData.expiresAt === 'number') {
+            tokenExpiresAt = authData.expiresAt;
+          } else if (typeof session.expires_in === 'number') {
+            tokenExpiresAt = Math.floor(Date.now() / 1000) + session.expires_in;
+          }
+        }
       }
     } catch (e) { console.debug('[Preloader] 读取 auth token 失败', e); }
 
     if (!authToken) return;
+    if (typeof tokenExpiresAt === 'number') {
+      if (tokenExpiresAt > 1000000000000) {
+        tokenExpiresAt = Math.floor(tokenExpiresAt / 1000);
+      }
+      // 令牌过期/即将过期时跳过预加载，避免无意义 401
+      if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 30) return;
+    }
 
     var headers = {
       'apikey': '${environment.supabaseAnonKey}',
@@ -127,7 +150,9 @@ export class DataPreloaderService {
       if (window.__PRELOADED_DATA__) {
         window.__PRELOADED_DATA__.serverTime = data;
       }
-    }).catch(function(e) { console.debug('[Preloader] 预加载 serverTime 失败', e); }); {
+    }).catch(function(e) { console.debug('[Preloader] 预加载 serverTime 失败', e); });
+
+    fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
       headers: headers
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (window.__PRELOADED_DATA__) {

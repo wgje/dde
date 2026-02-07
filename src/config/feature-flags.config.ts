@@ -48,10 +48,27 @@ export const FEATURE_FLAGS = {
   MANUAL_EXPORT_ENABLED: false, // 默认关闭，待 P1 实现
   
   // ==================== 同步功能 ====================
-  /** 是否启用 Realtime 订阅（替代轮询） */
+  /**
+   * 是否启用 Realtime 订阅（替代轮询）
+   * 注意：实际运行时开关由 SYNC_CONFIG.REALTIME_ENABLED 控制
+   */
   REALTIME_ENABLED: false, // 流量优化，默认使用轮询
-  /** 是否启用增量同步优化 */
-  INCREMENTAL_SYNC_ENABLED: true,
+  /**
+   * 是否启用增量同步优化
+   * 注意：实际运行时开关由 SYNC_CONFIG.DELTA_SYNC_ENABLED 控制
+   * 此标志用于更高层的功能门控
+   */
+  INCREMENTAL_SYNC_ENABLED: false, // 与 SYNC_CONFIG.DELTA_SYNC_ENABLED 保持一致
+  /** 同步成功语义：仅远端确认成功才视为成功 */
+  SYNC_STRICT_SUCCESS_ENABLED: true,
+  /** 队列耐久优先：禁用默认淘汰策略 */
+  SYNC_DURABILITY_FIRST_ENABLED: true,
+  /** Delta 游标使用服务端 max(updated_at) 推进 */
+  SYNC_SERVER_CURSOR_ENABLED: true,
+  /** Realtime 任务级回调链路 */
+  SYNC_TASK_LEVEL_CALLBACK_ENABLED: true,
+  /** 单队列语义（灰度开关，先用于状态口径与入口约束） */
+  SYNC_UNIFIED_QUEUE_SEMANTICS_ENABLED: true,
   
   // ==================== 迁移功能 ====================
   /** 是否启用迁移快照 */

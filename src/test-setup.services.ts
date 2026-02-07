@@ -1,7 +1,6 @@
 import 'zone.js';
 import 'zone.js/testing';
 
-import './test-setup.mocks';
 import { mockSentryLazyLoaderService } from './test-setup.mocks';
 
 import { TestBed } from '@angular/core/testing';

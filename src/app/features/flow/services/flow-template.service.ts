@@ -28,7 +28,6 @@ import { ThemeService } from '../../../../services/theme.service';
 import * as go from 'gojs';
 import {
   GojsClickHandler,
-  GojsMake,
   PortConfig,
   NodeStyleConfig,
   GojsShapeBuilder

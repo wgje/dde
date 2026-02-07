@@ -74,7 +74,12 @@ describe('RemoteChangeHandlerService', () => {
         { provide: ToastService, useValue: { info: vi.fn(), warning: vi.fn() } },
         { provide: AuthService, useValue: { currentUserId: vi.fn().mockReturnValue('user-123') } },
         { provide: LoggerService, useValue: { category: () => mockLogger } },
-        { provide: ChangeTrackerService, useValue: { hasUnsyncedChanges: vi.fn().mockReturnValue(false) } },
+        { provide: ChangeTrackerService, useValue: {
+          hasUnsyncedChanges: vi.fn().mockReturnValue(false),
+          pruneExpiredChanges: vi.fn(),
+          getPendingChange: vi.fn().mockReturnValue(null),
+          getLockedFields: vi.fn().mockReturnValue([])
+        } },
         { provide: PermissionDeniedHandlerService, useValue: { handlePermissionDenied: vi.fn() } }
       ]
     });

@@ -1,10 +1,9 @@
-import { Component, input, output, signal, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild } from '@angular/core';
+import { Component, input, output, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
-import { LoggerService } from '../../../../services/logger.service';
 import { Task, Attachment } from '../../../../models';
 import { renderMarkdown } from '../../../../utils/markdown';
 import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';

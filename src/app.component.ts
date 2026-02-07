@@ -37,6 +37,10 @@ import { ThemeType, Project } from './models';
 import { UI_CONFIG } from './config';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { SpotlightTriggerComponent } from './app/features/focus/components/spotlight/spotlight-trigger.component';
+import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
+import { ExportService } from './services/export.service';
+import { StorageQuotaService } from './services/storage-quota.service';
+import { IndexedDBHealthService } from './services/indexeddb-health.service';
 
 /**
  * 应用根组件
@@ -127,6 +131,11 @@ export class AppComponent implements OnInit, OnDestroy {
   private simpleSync = inject(SimpleSyncService);
   private beforeUnloadManager = inject(BeforeUnloadManagerService);
   private beforeUnloadGuard = inject(BeforeUnloadGuardService);
+  
+  /** 数据保护服务 */
+  private readonly exportService = inject(ExportService);
+  private readonly storageQuota = inject(StorageQuotaService);
+  private readonly indexedDBHealth = inject(IndexedDBHealthService);
   
   private route = inject(ActivatedRoute);
   private router = inject(Router);
@@ -266,6 +275,8 @@ export class AppComponent implements OnInit, OnDestroy {
   
   // 统一搜索查询
   unifiedSearchQuery = signal<string>('');
+  /** 记录上一次视口断点状态，避免移动端 resize 抖动触发误收起 */
+  private previousViewportIsMobile = this.uiState.isMobile();
   
   // 搜索防抖定时器
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -274,7 +285,9 @@ export class AppComponent implements OnInit, OnDestroy {
   constructor() {
     // 启动流程：仅执行必要的同步初始化
     // 关键：bootstrapSession 移到 ngOnInit + setTimeout，避免阻塞 TTFB
-    this.checkMobile();
+    if (this.previousViewportIsMobile) {
+      this.isSidebarOpen.set(false);
+    }
     this.setupSwUpdateListener();
     // 主题初始化在 StoreService 构造函数中完成
     // 不再在此重复应用主题
@@ -371,6 +384,25 @@ export class AppComponent implements OnInit, OnDestroy {
         void this.openMigrationModal();
       }
     });
+    
+    // 📦 数据保护：导出提醒（7 天未导出时 Toast 提示）
+    effect(() => {
+      const needsReminder = this.exportService.needsExportReminder();
+      const userId = this.userSession.currentUserId();
+      if (needsReminder && userId) {
+        this.toast.info(
+          '数据备份提醒',
+          '已超过 7 天未导出备份，建议前往设置导出数据。',
+          { duration: 10000 }
+        );
+      }
+    });
+    
+    // 🛡️ 数据保护：延迟初始化存储配额监控和 IndexedDB 健康检查
+    setTimeout(() => {
+      void this.storageQuota.initialize();
+      void this.indexedDBHealth.initialize();
+    }, 5000); // 延迟 5 秒，避免阻塞启动
   }
   
   ngOnDestroy() {
@@ -1033,10 +1065,23 @@ async signOut() {
 
   @HostListener('window:resize')
   checkMobile() {
-    this.uiState.isMobile.set(window.innerWidth < 768); // Tailwind md breakpoint
-    if (this.uiState.isMobile()) {
-      this.isSidebarOpen.set(false); // Auto-close sidebar on mobile
+    if (typeof window === 'undefined') return;
+
+    const nextIsMobile = window.innerWidth < 768; // Tailwind md breakpoint
+    const shouldCloseSidebar = shouldAutoCloseSidebarOnViewportChange(
+      this.previousViewportIsMobile,
+      nextIsMobile
+    );
+
+    if (this.uiState.isMobile() !== nextIsMobile) {
+      this.uiState.isMobile.set(nextIsMobile);
     }
+
+    if (shouldCloseSidebar) {
+      this.isSidebarOpen.set(false);
+    }
+
+    this.previousViewportIsMobile = nextIsMobile;
   }
   
   // ========== 统一搜索方法 ==========

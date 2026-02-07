@@ -4,7 +4,6 @@ import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowDiagramService } from './flow-diagram.service';
 import { FlowSelectionService } from './flow-selection.service';
-import * as go from 'gojs';
 
 /**
  * 框选模式服务

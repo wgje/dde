@@ -59,6 +59,7 @@ interface NetworkInfo {
   effectiveType: string;  // '4g', '3g', '2g', 'slow-2g'
   downlink: number;       // Mbps
   rtt: number;            // ms
+  saveData?: boolean;     // 用户是否启用省流模式
 }
 
 @Injectable({
@@ -97,22 +98,31 @@ export class WebVitalsService {
     const effectiveType = connection.effectiveType || '';
     const downlink = connection.downlink || 0;
     const rtt = connection.rtt || 0;
+    const saveData = !!connection.saveData;
+    
+    // 先用真实链路指标判定弱网，避免 "4g + 低带宽" 误判为 moderate
+    const constrainedByTelemetry =
+      saveData ||
+      (downlink > 0 && downlink < 1.5) ||
+      (rtt > 0 && rtt >= 180);
     
     // 分类网络质量
     // 参考: Chrome DevTools Network Throttling Presets
-    if (effectiveType === '4g' && downlink > 5 && rtt < 100) {
+    if (effectiveType === 'slow-2g' || saveData) {
+      this.cachedNetworkQuality = 'offline'; // 极慢网络/省流模式
+    } else if (effectiveType === '2g' || constrainedByTelemetry) {
+      this.cachedNetworkQuality = 'slow'; // 2G 或链路受限
+    } else if (effectiveType === '3g' && downlink <= 2) {
+      this.cachedNetworkQuality = 'slow'; // 典型 3G
+    } else if (effectiveType === '4g' && downlink >= 8 && rtt > 0 && rtt < 80) {
       this.cachedNetworkQuality = 'fast'; // 4G 快速网络
-    } else if (effectiveType === '4g' || (effectiveType === '3g' && downlink > 1.5)) {
-      this.cachedNetworkQuality = 'moderate'; // 4G 慢速 或 3G 快速
-    } else if (effectiveType === '3g' || effectiveType === '2g') {
-      this.cachedNetworkQuality = 'slow'; // 3G 慢速 或 2G
-    } else if (effectiveType === 'slow-2g') {
-      this.cachedNetworkQuality = 'offline'; // 极慢网络
+    } else if (effectiveType === '4g' || effectiveType === '3g') {
+      this.cachedNetworkQuality = 'moderate'; // 常规移动网络
     } else {
       this.cachedNetworkQuality = 'unknown';
     }
     
-    this.logger.info(`网络质量检测: ${this.cachedNetworkQuality}`, { effectiveType, downlink, rtt });
+    this.logger.info(`网络质量检测: ${this.cachedNetworkQuality}`, { effectiveType, downlink, rtt, saveData });
     return this.cachedNetworkQuality;
   }
   
@@ -126,6 +136,7 @@ export class WebVitalsService {
       effectiveType: connection.effectiveType || 'unknown',
       downlink: connection.downlink || 0,
       rtt: connection.rtt || 0,
+      saveData: !!connection.saveData,
     } : null;
   }
   

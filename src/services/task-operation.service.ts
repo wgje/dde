@@ -1,5 +1,5 @@
 import { Injectable, inject, DestroyRef } from '@angular/core';
-import { Task, Project, Attachment, Connection } from '../models';
+import { Task, Project, Attachment } from '../models';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { TaskTrashService } from './task-trash.service';
@@ -10,7 +10,7 @@ import { TaskAttributeService } from './task-attribute.service';
 import { TaskConnectionService } from './task-connection.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
-import { LAYOUT_CONFIG, FLOATING_TREE_CONFIG } from '../config';
+import { LAYOUT_CONFIG } from '../config';
 import {
   Result, OperationError, ErrorCodes, success, failure
 } from '../utils/result';

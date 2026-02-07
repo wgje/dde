@@ -2,7 +2,7 @@ import { Injectable, computed, inject } from '@angular/core';
 import { Project, Task, Connection, UnfinishedItem } from '../models';
 import { LayoutService } from './layout.service';
 import { UiStateService } from './ui-state.service';
-import { TaskStore, ProjectStore, ConnectionStore } from '../app/core/state/stores';
+import { TaskStore, ProjectStore, ConnectionStore } from '../core-bridge';
 import { SUPERSCRIPT_DIGITS } from '../config';
 
 /**

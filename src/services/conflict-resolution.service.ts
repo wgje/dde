@@ -1,5 +1,5 @@
 import { Injectable, inject, computed } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -12,11 +12,7 @@ import {
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   ConflictResolutionStrategy,
-  ConflictData,
   MergeResult,
-  TombstoneQueryResult,
-  RecoveredTaskInfo,
-  MergeStats
 } from './conflict-resolution.types';
 
 // 重新导出类型以保持向后兼容

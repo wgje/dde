@@ -229,7 +229,7 @@ export class FlowLinkRelinkService {
       return 'cancelled';
     }
 
-    const tasks = this.projectState.tasks();
+    const _tasks = this.projectState.tasks();
     const parentTask = this.projectState.getTask(parentId);
     const oldChildTask = this.projectState.getTask(oldChildId);
     const newTargetTask = this.projectState.getTask(newTargetId);
@@ -334,7 +334,7 @@ export class FlowLinkRelinkService {
       return 'cancelled';
     }
 
-    const tasks = this.projectState.tasks();
+    const _tasks = this.projectState.tasks();
     const sourceTask = this.projectState.getTask(newSourceId);
     const targetTask = this.projectState.getTask(newTargetId);
 

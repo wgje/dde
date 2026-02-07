@@ -344,7 +344,8 @@ export class FlowDiagramService {
       if (e) {
         originalStandardMouseSelect(e, obj);
       } else {
-        this.logger.warn('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
+        // 某些编程式调用场景下事件可能为 undefined，这是可接受的
+        this.logger.debug('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
       }
     };
 

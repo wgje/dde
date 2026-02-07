@@ -536,6 +536,7 @@ export class StorePersistenceService {
       return meta;
     } catch (err) {
       this.logger.error('加载元数据失败', err);
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：元数据加载失败使用默认值
       return null;
     }
   }

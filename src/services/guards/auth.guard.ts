@@ -3,11 +3,20 @@ import { CanActivateFn } from '@angular/router';
 import { AuthService } from '../auth.service';
 import { LoggerService } from '../logger.service';
 import { ModalService } from '../modal.service';
-import { GUARD_CONFIG, AUTH_CONFIG } from '../../config';
+import { AUTH_CONFIG, GUARD_CONFIG } from '../../config';
 import { guardLogger } from '../../utils/standalone-logger';
 
 /** 本地认证缓存 key */
 const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
+/** 本地模式变更事件 */
+export const LOCAL_MODE_CHANGED_EVENT = 'nanoflow:local-mode-changed';
+
+function dispatchLocalModeChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.dispatchEvent(new Event(LOCAL_MODE_CHANGED_EVENT));
+}
 
 /**
  * 检查是否处于本地模式
@@ -30,6 +39,7 @@ export function isLocalModeEnabled(): boolean {
 export function enableLocalMode(): void {
   try {
     localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
+    dispatchLocalModeChanged();
   } catch (e) {
     guardLogger.warn('启用本地模式失败', e);
   }
@@ -42,6 +52,7 @@ export function enableLocalMode(): void {
 export function disableLocalMode(): void {
   try {
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
+    dispatchLocalModeChanged();
   } catch (e) {
     guardLogger.warn('禁用本地模式失败', e);
   }
@@ -86,72 +97,25 @@ export function saveAuthCache(userId: string | null): void {
 }
 
 /**
- * 等待会话检查完成
- * 使用递归 setTimeout 代替 setInterval，更可靠且避免内存泄漏
- * 添加明确的超时错误处理
+ * 有上限等待会话检查完成，避免守卫直接放行受保护路由
  */
 async function waitForSessionCheck(
   authService: AuthService,
-  loggerService: LoggerService,
-  maxWaitMs: number = GUARD_CONFIG.SESSION_CHECK_TIMEOUT
+  timeoutMs: number
 ): Promise<void> {
-  const logger = loggerService.category('Guard');
-  
-  // 如果已经完成检查，直接返回
-  if (!authService.authState().isCheckingSession) {
-    logger.debug('会话检查已完成，直接返回');
-    return;
+  const start = Date.now();
+  let interval = GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL;
+
+  while (authService.authState().isCheckingSession) {
+    const elapsed = Date.now() - start;
+    if (elapsed >= timeoutMs) {
+      break;
+    }
+
+    const waitMs = Math.min(interval, timeoutMs - elapsed);
+    await new Promise<void>(resolve => setTimeout(resolve, waitMs));
+    interval = Math.min(interval * 2, GUARD_CONFIG.SESSION_CHECK_POLL_MAX_INTERVAL);
   }
-  
-  logger.debug('开始等待会话检查...');
-  
-  return new Promise<void>((resolve) => {
-    const startTime = Date.now();
-    let resolved = false;
-    
-    const doResolve = (timeout = false) => {
-      if (resolved) return;
-      resolved = true;
-      
-      const elapsed = Date.now() - startTime;
-      if (timeout) {
-        // 【优化】超时后立即放行，不再阻塞 UI 渲染
-        // 会话检查会在后台继续，用户可以先看到页面
-        logger.debug(`会话检查超时，立即放行以渲染 UI`, { elapsed });
-      } else {
-        logger.debug(`会话检查完成`, { elapsed });
-      }
-      resolve();
-    };
-    
-    // 使用递归 setTimeout 代替 setInterval，避免内存泄漏
-    const checkSession = () => {
-      if (resolved) return;
-      
-      // 检查是否完成
-      if (!authService.authState().isCheckingSession) {
-        doResolve();
-        return;
-      }
-      
-      // 检查是否超时
-      const elapsed = Date.now() - startTime;
-      if (elapsed >= maxWaitMs) {
-        doResolve(true);
-        return;
-      }
-      
-      // 继续等待，使用指数退避（使用集中配置）
-      const nextDelay = Math.min(
-        GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL + Math.floor(elapsed / 200) * 50, 
-        GUARD_CONFIG.SESSION_CHECK_POLL_MAX_INTERVAL
-      );
-      setTimeout(checkSession, nextDelay);
-    };
-    
-    // 开始检查
-    checkSession();
-  });
 }
 
 /**
@@ -211,7 +175,7 @@ export function getDataIsolationId(authService: AuthService): string | null {
  * - 数据导出、分享功能
  * - 用户设置页面
  */
-export const requireAuthGuard: CanActivateFn = async (route, state) => {
+export const requireAuthGuard: CanActivateFn = async (_route, state) => {
   const perfStart = performance.now();
   const authService = inject(AuthService);
   const loggerService = inject(LoggerService);
@@ -236,13 +200,19 @@ export const requireAuthGuard: CanActivateFn = async (route, state) => {
     return true;
   }
   
-  // 等待会话检查完成（带超时保护）
-  // 注意：checkSession 现在会自动尝试开发环境自动登录
-  const authState = authService.authState();
+  let authState = authService.authState();
   logger.debug(`当前认证状态`, { isCheckingSession: authState.isCheckingSession, userId: authState.userId });
   
   if (authState.isCheckingSession) {
-    await waitForSessionCheck(authService, loggerService);
+    logger.debug('会话检查进行中，等待检查结果');
+    await waitForSessionCheck(authService, GUARD_CONFIG.SESSION_CHECK_TIMEOUT);
+    authState = authService.authState();
+    if (authState.isCheckingSession) {
+      logger.warn('会话检查超时，按未登录流程处理', {
+        timeout: GUARD_CONFIG.SESSION_CHECK_TIMEOUT,
+        targetUrl: state.url
+      });
+    }
   }
   
   const userId = authService.currentUserId();

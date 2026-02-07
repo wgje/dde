@@ -8,7 +8,7 @@
  * Sprint 9 技术债务修复：从 SyncCoordinatorService 提取
  */
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';

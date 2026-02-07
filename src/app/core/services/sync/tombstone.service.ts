@@ -41,9 +41,9 @@ export class TombstoneService {
   /** 
    * 本地 tombstone 缓存 
    * 用于在云端 RPC 不可用时防止已删除任务复活
-   * 格式：Map<projectId, Set<taskId>>
+   * 格式：Map<projectId, Map<taskId, timestamp>>
    */
-  private localTombstones: Map<string, Set<string>> = new Map();
+  private localTombstones: Map<string, Map<string, number>> = new Map();
   
   /** 本地 tombstone 持久化 key */
   private readonly LOCAL_TOMBSTONES_KEY = 'nanoflow.local-tombstones';
@@ -69,10 +69,32 @@ export class TombstoneService {
     try {
       const data = localStorage.getItem(this.LOCAL_TOMBSTONES_KEY);
       if (data) {
-        const parsed = JSON.parse(data);
-        this.localTombstones = new Map(
-          Object.entries(parsed).map(([k, v]) => [k, new Set(v as string[])])
-        );
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        this.localTombstones = new Map();
+
+        for (const [projectId, value] of Object.entries(parsed)) {
+          const map = new Map<string, number>();
+          if (Array.isArray(value)) {
+            // 向后兼容旧格式：string[]
+            for (const taskId of value) {
+              if (typeof taskId === 'string') {
+                map.set(taskId, Date.now());
+              }
+            }
+          } else if (value && typeof value === 'object') {
+            // 新格式：Record<taskId, timestamp>
+            for (const [taskId, timestamp] of Object.entries(value as Record<string, unknown>)) {
+              const ts = typeof timestamp === 'number' ? timestamp : Date.now();
+              map.set(taskId, ts);
+            }
+          }
+          if (map.size > 0) {
+            this.localTombstones.set(projectId, map);
+          }
+        }
+
+        // 启动时清理过期 tombstone，避免长期膨胀
+        this.cleanupExpiredLocalTombstones();
         this.logger.debug('已恢复本地 tombstone 缓存', { 
           projectCount: this.localTombstones.size 
         });
@@ -90,9 +112,9 @@ export class TombstoneService {
     if (typeof localStorage === 'undefined') return;
     
     try {
-      const data: Record<string, string[]> = {};
+      const data: Record<string, Record<string, number>> = {};
       for (const [projectId, taskIds] of this.localTombstones.entries()) {
-        data[projectId] = Array.from(taskIds);
+        data[projectId] = Object.fromEntries(taskIds.entries());
       }
       localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(data));
     } catch (e) {
@@ -110,11 +132,12 @@ export class TombstoneService {
    */
   addLocalTombstones(projectId: string, taskIds: string[]): void {
     if (!this.localTombstones.has(projectId)) {
-      this.localTombstones.set(projectId, new Set());
+      this.localTombstones.set(projectId, new Map());
     }
     const set = this.localTombstones.get(projectId)!;
+    const now = Date.now();
     for (const id of taskIds) {
-      set.add(id);
+      set.set(id, now);
     }
     this.saveLocalTombstones();
     this.logger.debug('添加本地 tombstone', { projectId, count: taskIds.length });
@@ -124,7 +147,9 @@ export class TombstoneService {
    * 获取本地 tombstone（合并云端 tombstone）
    */
   getLocalTombstones(projectId: string): Set<string> {
-    return this.localTombstones.get(projectId) || new Set();
+    this.cleanupExpiredLocalTombstones(projectId);
+    const records = this.localTombstones.get(projectId);
+    return records ? new Set(records.keys()) : new Set();
   }
   
   /**
@@ -254,6 +279,74 @@ export class TombstoneService {
   updateConnectionTombstoneCache(projectId: string, ids: Set<string>): void {
     this.connectionTombstoneCache.set(projectId, { ids, timestamp: Date.now() });
   }
+
+  /**
+   * 判断任务 upsert 是否应被 tombstone 拦截（防复活）
+   */
+  shouldRejectTaskUpsert(projectId: string, taskId: string, candidateUpdatedAt?: string | null): boolean {
+    // 本地 tombstone 始终优先拒绝（用户主动删除，尚未同步到云端）
+    const localIds = this.getLocalTombstones(projectId);
+    if (localIds.has(taskId)) {
+      return true;
+    }
+
+    const cachedIds = this.getCachedTombstoneIds(projectId);
+    if (!cachedIds) {
+      return false;
+    }
+
+    if (!cachedIds.has(taskId)) {
+      return false;
+    }
+
+    // 候选更新时间未知时，默认拒绝（删除优先）
+    if (!candidateUpdatedAt) {
+      return true;
+    }
+
+    // 云端 tombstone 存在，但候选更新时间已知：
+    // 如果候选的 updatedAt 比 tombstone 缓存时间更新，说明可能是合法恢复
+    const cacheEntry = this.tombstoneCache.get(projectId);
+    if (cacheEntry && new Date(candidateUpdatedAt).getTime() > cacheEntry.timestamp) {
+      this.logger.info('任务 upsert 的 updatedAt 晚于 tombstone 缓存，允许恢复', {
+        projectId, taskId, candidateUpdatedAt, cacheTimestamp: cacheEntry.timestamp
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  private cleanupExpiredLocalTombstones(projectId?: string): void {
+    const cutoff = Date.now() - SYNC_CONFIG.TOMBSTONE_RETENTION_MS;
+    const targetProjects = projectId ? [projectId] : Array.from(this.localTombstones.keys());
+    let cleaned = 0;
+
+    for (const pid of targetProjects) {
+      const records = this.localTombstones.get(pid);
+      if (!records) {
+        continue;
+      }
+      for (const [taskId, timestamp] of records.entries()) {
+        if (timestamp < cutoff) {
+          records.delete(taskId);
+          cleaned++;
+        }
+      }
+      if (records.size === 0) {
+        this.localTombstones.delete(pid);
+      }
+    }
+
+    if (cleaned > 0) {
+      this.logger.info('已清理过期本地 tombstone', {
+        projectId: projectId ?? 'all',
+        cleaned,
+        retentionMs: SYNC_CONFIG.TOMBSTONE_RETENTION_MS
+      });
+      this.saveLocalTombstones();
+    }
+  }
   
   // ==================== 附件存储清理 ====================
   
@@ -315,6 +408,17 @@ export class TombstoneService {
   getTaskTombstones(projectId: string): string[] {
     return Array.from(this.getLocalTombstones(projectId));
   }
+
+  /**
+   * 导出本地 tombstones（兼容历史 API）
+   */
+  exportLocalTombstones(): Record<string, string[]> {
+    const data: Record<string, string[]> = {};
+    for (const [projectId, ids] of this.localTombstones.entries()) {
+      data[projectId] = Array.from(ids.keys());
+    }
+    return data;
+  }
   
   /**
    * 失效缓存（invalidateTombstoneCache 的别名）
@@ -338,8 +442,8 @@ export class TombstoneService {
     }
     this.localConnectionTombstones.get(key)!.push({ id: connectionId, timestamp });
     
-    // 清理过期的 tombstone（超过 24 小时）
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    // 清理过期的 tombstone
+    const cutoff = Date.now() - SYNC_CONFIG.TOMBSTONE_RETENTION_MS;
     const filtered = this.localConnectionTombstones.get(key)!.filter(
       t => t.timestamp > cutoff
     );

@@ -102,6 +102,7 @@ export class DeltaSyncPersistenceService {
     } catch (err) {
       this.logger.error('获取本地最新时间戳失败', { projectId, error: err });
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'getLatestLocalTimestamp', projectId } });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：时间戳获取失败使用全量同步
       return null;
     }
   }

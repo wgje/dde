@@ -1,5 +1,5 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
@@ -7,10 +7,8 @@ import { CACHE_CONFIG } from '../config';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { MigrationIntegrityService } from './migration-integrity.service';
 import {
-  MigrationStatus,
   MigrationStatusRecord,
   IntegrityCheckResult,
-  IntegrityIssue,
   MigrationStrategy,
   MigrationResult
 } from './migration.types';
@@ -59,6 +57,16 @@ export class MigrationService {
   private readonly GUEST_DATA_KEY = 'nanoflow.guest-data';
   private readonly DATA_VERSION = 2; // 数据结构版本号
   private readonly GUEST_DATA_EXPIRY_DAYS = 30; // 访客数据过期天数
+  private readonly TOMBSTONE_KEY = 'nanoflow.local-tombstones';
+  private readonly LEGACY_TOMBSTONE_KEYS = [
+    'nanoflow.local-tombstones.task-sync',
+    'nanoflow.local-tombstones.project-data',
+    'nanoflow.local-tombstones.legacy'
+  ] as const;
+
+  constructor() {
+    this.migrateLegacyTombstoneStorage();
+  }
   
   /**
    * 检查是否需要数据迁移
@@ -403,9 +411,9 @@ export class MigrationService {
         // 双方都有，比较更新时间，取较新的
         const remoteTask = remoteTaskMap.get(task.id);
         if (remoteTask) {
-          const localCreated = new Date(task.createdDate || 0).getTime();
-          const remoteCreated = new Date(remoteTask.createdDate || 0).getTime();
-          mergedTasks.push(localCreated >= remoteCreated ? task : remoteTask);
+          const localUpdated = new Date(task.updatedAt || task.createdDate || 0).getTime();
+          const remoteUpdated = new Date(remoteTask.updatedAt || remoteTask.createdDate || 0).getTime();
+          mergedTasks.push(localUpdated >= remoteUpdated ? task : remoteTask);
         } else {
           mergedTasks.push(task);
         }
@@ -508,6 +516,7 @@ export class MigrationService {
       return null;
     } catch (e) {
       this.logger.warn('读取访客数据失败', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：旧数据读取失败不阻断迁移
       return null;
     }
   }
@@ -540,6 +549,83 @@ export class MigrationService {
   clearLocalGuestData() {
     if (typeof localStorage === 'undefined') return;
     localStorage.removeItem(this.GUEST_DATA_KEY);
+  }
+
+  /**
+   * 迁移历史 tombstone 本地键到统一键
+   * 幂等执行：重复运行不会重复写入同一 taskId
+   */
+  private migrateLegacyTombstoneStorage(): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      const merged = this.readTombstoneRecord(this.TOMBSTONE_KEY);
+      let migratedCount = 0;
+
+      for (const key of this.LEGACY_TOMBSTONE_KEYS) {
+        const legacy = this.readTombstoneRecord(key);
+        if (Object.keys(legacy).length === 0) {
+          continue;
+        }
+
+        for (const [projectId, taskIds] of Object.entries(legacy)) {
+          const existing = merged[projectId] ?? new Set<string>();
+          for (const taskId of taskIds) {
+            const before = existing.size;
+            existing.add(taskId);
+            if (existing.size > before) {
+              migratedCount++;
+            }
+          }
+          merged[projectId] = existing;
+        }
+      }
+
+      if (migratedCount === 0) {
+        return;
+      }
+
+      const serializable: Record<string, string[]> = {};
+      for (const [projectId, ids] of Object.entries(merged)) {
+        serializable[projectId] = Array.from(ids);
+      }
+      localStorage.setItem(this.TOMBSTONE_KEY, JSON.stringify(serializable));
+
+      for (const key of this.LEGACY_TOMBSTONE_KEYS) {
+        localStorage.removeItem(key);
+      }
+
+      this.logger.info('完成 tombstone 本地键迁移', {
+        migratedCount,
+        targetKey: this.TOMBSTONE_KEY
+      });
+    } catch (error) {
+      this.logger.error('tombstone 本地键迁移失败（保留旧数据）', { error });
+      this.sentryLazyLoader.captureException(error, {
+        tags: { operation: 'migrateLegacyTombstoneStorage' }
+      });
+    }
+  }
+
+  private readTombstoneRecord(storageKey: string): Record<string, Set<string>> {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Record<string, Set<string>> = {};
+    for (const [projectId, value] of Object.entries(parsed)) {
+      if (Array.isArray(value)) {
+        result[projectId] = new Set(value.filter((v): v is string => typeof v === 'string'));
+        continue;
+      }
+      if (value && typeof value === 'object') {
+        result[projectId] = new Set(Object.keys(value));
+      }
+    }
+    return result;
   }
   
   /**

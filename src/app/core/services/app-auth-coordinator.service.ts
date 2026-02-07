@@ -60,15 +60,34 @@ export class AppAuthCoordinatorService {
     !this.userSession.currentUserId() || this.isReloginMode()
   );
 
+  /** 会话引导任务是否已调度 */
+  private bootstrapScheduled = false;
+  /** 会话引导是否正在执行（防并发） */
+  private bootstrapInFlight = false;
+
   // ========== 会话引导 ==========
 
   /** 调度会话引导（在首屏渲染后执行） */
   scheduleSessionBootstrap(): void {
-    queueMicrotask(() => {
+    if (this.bootstrapScheduled || this.bootstrapInFlight) {
+      return;
+    }
+
+    this.bootstrapScheduled = true;
+    const runBootstrap = () => {
+      this.bootstrapScheduled = false;
       this.bootstrapSession().catch(_e => {
         // 错误已在 bootstrapSession 内部处理
       });
-    });
+    };
+
+    // 关键：确保首帧先完成渲染，再进行会话检查
+    if (typeof window !== 'undefined' && 'requestAnimationFrame' in window) {
+      requestAnimationFrame(() => setTimeout(runBootstrap, 0));
+      return;
+    }
+
+    setTimeout(runBootstrap, 0);
   }
 
   /** 重试启动会话 */
@@ -77,10 +96,21 @@ export class AppAuthCoordinatorService {
   }
 
   private async bootstrapSession(): Promise<void> {
+    if (this.bootstrapInFlight) {
+      this.logger.debug('[Bootstrap] 已在执行中，跳过重复调用');
+      return;
+    }
+
+    this.bootstrapInFlight = true;
+
     if (!this.auth.isConfigured) {
       this.logger.debug('[Bootstrap] Supabase 未配置，启用离线模式');
       this.isCheckingSession.set(false);
-      await this.userSession.setCurrentUser(null);
+      try {
+        await this.userSession.setCurrentUser(null);
+      } finally {
+        this.bootstrapInFlight = false;
+      }
       return;
     }
 
@@ -131,6 +161,7 @@ export class AppAuthCoordinatorService {
       const totalElapsed = Date.now() - totalStartTime;
       this.logger.debug(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
       this.isCheckingSession.set(false);
+      this.bootstrapInFlight = false;
     }
   }
 

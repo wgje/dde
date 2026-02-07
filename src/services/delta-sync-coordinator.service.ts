@@ -10,7 +10,7 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
@@ -65,13 +65,18 @@ export class DeltaSyncCoordinatorService {
       );
 
       // 更新 ProjectStateService
+      const projectUpdatedAt = this.pickLatestTimestamp(
+        currentProject.updatedAt,
+        tasks.map(t => t.updatedAt).filter((v): v is string => !!v),
+        connections.map(c => c.updatedAt).filter((v): v is string => !!v)
+      );
       this.projectState.updateProjects(ps => ps.map(p => {
         if (p.id === projectId) {
           return {
             ...p,
             tasks: mergedTasks,
             connections: mergedConnections,
-            updatedAt: new Date().toISOString()
+            updatedAt: projectUpdatedAt
           };
         }
         return p;
@@ -108,27 +113,35 @@ export class DeltaSyncCoordinatorService {
       const existing = taskMap.get(deltaTask.id);
       const deltaTime = deltaTask.updatedAt ? new Date(deltaTask.updatedAt).getTime() : 0;
       const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
-      
+
+      // NaN 保护：malformed ISO 字符串会导致 getTime() 返回 NaN
+      if (Number.isNaN(deltaTime) || Number.isNaN(existingTime)) {
+        this.logger.warn('Delta Sync: 检测到无效时间戳，跳过合并', {
+          taskId: deltaTask.id,
+          deltaUpdatedAt: deltaTask.updatedAt,
+          existingUpdatedAt: existing?.updatedAt
+        });
+        continue;
+      }
+
       if (!existing || deltaTime > existingTime) {
         if (deltaTask.deletedAt) {
           taskMap.delete(deltaTask.id);
         } else {
           // 保护 content 字段
           let mergedTask = deltaTask;
-          if (existing && existing.content && !deltaTask.content) {
+          if (existing && existing.content && (deltaTask.content === undefined || deltaTask.content === null || deltaTask.content === '')) {
             this.logger.warn('Delta Sync: 检测到远程 content 为空，保留本地内容', {
               taskId: deltaTask.id,
               localContentLength: existing.content.length
             });
             mergedTask = { ...deltaTask, content: existing.content };
-            
-            if (Math.random() < 0.1) {
-              this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
-                level: 'warning',
-                tags: { operation: 'performDeltaSync', taskId: deltaTask.id },
-                extra: { localContentLength: existing.content.length, projectId }
-              });
-            }
+
+            this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
+              level: 'warning',
+              tags: { operation: 'performDeltaSync', taskId: deltaTask.id },
+              extra: { localContentLength: existing.content.length, projectId }
+            });
           }
           taskMap.set(deltaTask.id, mergedTask);
         }
@@ -144,11 +157,29 @@ export class DeltaSyncCoordinatorService {
   private mergeConnectionsDelta(
     existingConnections: Connection[],
     deltaConnections: Connection[],
-    projectId: string
+    _projectId: string
   ): Connection[] {
     const connMap = new Map(existingConnections.map(c => [c.id, c]));
     
     for (const deltaConn of deltaConnections) {
+      const existing = connMap.get(deltaConn.id);
+      const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      const deltaTime = deltaConn.updatedAt ? new Date(deltaConn.updatedAt).getTime() : 0;
+
+      // NaN 保护
+      if (Number.isNaN(deltaTime) || Number.isNaN(existingTime)) {
+        this.logger.warn('Delta Sync: 连接时间戳无效，跳过合并', {
+          connectionId: deltaConn.id,
+          deltaUpdatedAt: deltaConn.updatedAt,
+          existingUpdatedAt: existing?.updatedAt
+        });
+        continue;
+      }
+
+      if (existing && deltaTime < existingTime) {
+        continue;
+      }
+
       if (deltaConn.deletedAt) {
         connMap.delete(deltaConn.id);
       } else {
@@ -181,5 +212,19 @@ export class DeltaSyncCoordinatorService {
     }
     
     return false;
+  }
+
+  private pickLatestTimestamp(base: string | undefined, ...timestampGroups: string[][]): string {
+    let max = base ? new Date(base).getTime() : 0;
+    if (Number.isNaN(max)) max = 0;
+    for (const group of timestampGroups) {
+      for (const ts of group) {
+        const t = new Date(ts).getTime();
+        if (!Number.isNaN(t)) {
+          max = Math.max(max, t);
+        }
+      }
+    }
+    return max > 0 ? new Date(max).toISOString() : new Date().toISOString();
   }
 }

@@ -14,7 +14,7 @@
  * 格式：nanoflow.preference.{userId}.{key}
  */
 import { Injectable, inject, signal, effect } from '@angular/core';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SimpleSyncService } from '../core-bridge';
 import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
@@ -217,6 +217,7 @@ export class PreferenceService {
       return null;
     } catch (e) {
       this.logger.warn('loadLocalBackupSettingsFromCloud: 加载云端备份设置失败', e);
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：云端设置加载失败使用默认值
       return null;
     }
   }

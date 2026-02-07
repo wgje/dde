@@ -20,7 +20,10 @@ import { SessionManagerService } from './session-manager.service';
 import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { Connection } from '../../../../models';
-import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-error';
+import {
+  supabaseErrorToError,
+  classifySupabaseClientFailure
+} from '../../../../utils/supabase-error';
 import { supabaseWithRetry } from '../../../../utils/timeout';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
@@ -61,9 +64,12 @@ export class ConnectionSyncOperationsService {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    this.retryQueueService.add(type, operation, data, projectId);
-    this.syncStateService.setPendingCount(this.retryQueueService.length);
-    this.retryQueueService.checkCapacityWarning();
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    if (enqueued) {
+      this.syncStateService.setPendingCount(this.retryQueueService.length);
+    } else {
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
+    }
   }
   
   /**
@@ -71,11 +77,21 @@ export class ConnectionSyncOperationsService {
    */
   private getSupabaseClient(): SupabaseClient | null {
     if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      this.syncStateService.setSyncError(failure.message);
       return null;
     }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.syncStateService.setSyncError(failure.message);
+      // eslint-disable-next-line no-restricted-syntax -- 维持调用方约定：客户端不可用时返回 null 走降级链路
       return null;
     }
   }

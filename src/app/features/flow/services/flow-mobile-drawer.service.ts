@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, effect, untracked, Injector, WritableSignal } from '@angular/core';
+import { Injectable, inject, effect, untracked, Injector, WritableSignal } from '@angular/core';
 import { UiStateService } from '../../../../services/ui-state.service';
 
 /**

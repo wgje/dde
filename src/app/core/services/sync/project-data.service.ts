@@ -18,7 +18,7 @@ import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
-import { supabaseErrorToError } from '../../../../utils/supabase-error';
+import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -41,21 +41,26 @@ export class ProjectDataService {
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
   
-  /** Tombstone 缓存 */
-  private tombstoneCache: Map<string, { ids: Set<string>; timestamp: number }> = new Map();
-  
-  /** 本地 tombstones */
-  private localTombstones: Map<string, Set<string>> = new Map();
-  private readonly LOCAL_TOMBSTONES_KEY = 'nanoflow.local-tombstones';
-  
   /**
    * 获取 Supabase 客户端
    */
   private getSupabaseClient(): SupabaseClient | null {
-    if (!this.supabase.isConfigured) return null;
+    if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      this.syncState.setSyncError(failure.message);
+      return null;
+    }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.syncState.setSyncError(failure.message);
+      // eslint-disable-next-line no-restricted-syntax -- 按既有契约返回 null，调用方据此切换到本地快照分支
       return null;
     }
   }
@@ -173,7 +178,8 @@ export class ProjectDataService {
         target: String(row.target_id),
         title: row.title ? String(row.title) : undefined,
         description: String(row.description || ''),
-        deletedAt: row.deleted_at ? String(row.deleted_at) : null
+        deletedAt: row.deleted_at ? String(row.deleted_at) : null,
+        updatedAt: row.updated_at ? String(row.updated_at) : undefined
       }));
       
       const project = this.rowToProject(projectData);
@@ -187,6 +193,7 @@ export class ProjectDataService {
         tags: { operation: 'loadFullProject' },
         extra: { projectId }
       });
+      // eslint-disable-next-line no-restricted-syntax -- 保持 API 契约：异常时返回 null 交由调用方进行回退处理
       return null;
     }
   }
@@ -305,7 +312,7 @@ export class ProjectDataService {
       }
     );
     
-    const tombstonesResult = await this.getTombstonesWithCache(projectId, client);
+    const tombstonesResult = await this.tombstoneService.getTombstonesWithCache(projectId, client);
     
     if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
     
@@ -319,7 +326,7 @@ export class ProjectDataService {
     }
     
     // 合并本地 tombstones
-    const localTombstones = this.getLocalTombstones(projectId);
+    const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
     for (const id of localTombstones) {
       tombstoneIds.add(id);
     }
@@ -335,103 +342,15 @@ export class ProjectDataService {
     });
   }
   
-  /**
-   * 获取 tombstones（带缓存）
-   */
-  private async getTombstonesWithCache(
-    projectId: string, 
-    client: SupabaseClient
-  ): Promise<{ data?: Array<{ task_id: string }>; error?: unknown }> {
-    const cached = this.tombstoneCache.get(projectId);
-    const now = Date.now();
-    
-    // 5分钟缓存
-    if (cached && now - cached.timestamp < 5 * 60 * 1000) {
-      return { 
-        data: Array.from(cached.ids).map(id => ({ task_id: id })) 
-      };
-    }
-    
-    try {
-      const { data, error } = await client
-        .from('task_tombstones')
-        .select('task_id')
-        .eq('project_id', projectId);
-      
-      if (!error && data) {
-        this.tombstoneCache.set(projectId, {
-          ids: new Set(data.map(t => t.task_id)),
-          timestamp: now
-        });
-      }
-      
-      return { data: data ?? undefined, error };
-    } catch (e) {
-      return { error: e };
-    }
-  }
-  
-  /**
-   * 获取本地 tombstones
-   */
-  private getLocalTombstones(projectId: string): Set<string> {
-    if (this.localTombstones.size === 0) {
-      this.loadLocalTombstones();
-    }
-    return this.localTombstones.get(projectId) || new Set();
-  }
-  
-  /**
-   * 加载本地 tombstones
-   */
-  private loadLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      const stored = localStorage.getItem(this.LOCAL_TOMBSTONES_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        for (const [projectId, ids] of Object.entries(parsed)) {
-          this.localTombstones.set(projectId, new Set(ids as string[]));
-        }
-      }
-    } catch (e) {
-      this.logger.warn('加载本地 tombstones 失败', e);
-    }
-  }
-  
-  /**
-   * 添加本地 tombstones
-   */
   addLocalTombstones(projectId: string, taskIds: string[]): void {
-    const existing = this.localTombstones.get(projectId) || new Set<string>();
-    for (const id of taskIds) {
-      existing.add(id);
-    }
-    this.localTombstones.set(projectId, existing);
-    this.saveLocalTombstones();
-  }
-  
-  /**
-   * 保存本地 tombstones
-   */
-  private saveLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      const obj: Record<string, string[]> = {};
-      for (const [projectId, ids] of this.localTombstones) {
-        obj[projectId] = Array.from(ids);
-      }
-      localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(obj));
-    } catch (e) {
-      this.logger.warn('保存本地 tombstones 失败', e);
-    }
+    this.tombstoneService.addLocalTombstones(projectId, taskIds);
   }
   
   /**
    * 清除 tombstone 缓存
    */
   invalidateTombstoneCache(projectId: string): void {
-    this.tombstoneCache.delete(projectId);
+    this.tombstoneService.invalidateTombstoneCache(projectId);
   }
   
   // ==================== 离线快照 ====================
@@ -505,6 +424,8 @@ export class ProjectDataService {
       createdDate: row.created_date || '',
       updatedAt: row.updated_at || undefined,
       version: row.version || 1,
+      syncSource: 'synced',
+      pendingSync: false,
       tasks: [],
       connections: []
     };
@@ -563,7 +484,8 @@ export class ProjectDataService {
       target: row.target_id || '',
       title: row.title || undefined,
       description: row.description || undefined,
-      deletedAt: row.deleted_at || undefined
+      deletedAt: row.deleted_at || undefined,
+      updatedAt: row.updated_at || undefined
     };
   }
 }

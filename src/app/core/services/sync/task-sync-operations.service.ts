@@ -26,9 +26,13 @@ import { SyncStateService } from './sync-state.service';
 import { Task } from '../../../../models';
 import { TaskRow } from '../../../../models/supabase-types';
 import { nowISO } from '../../../../utils/date';
-import { supabaseErrorToError, EnhancedError } from '../../../../utils/supabase-error';
+import {
+  supabaseErrorToError,
+  EnhancedError,
+  classifySupabaseClientFailure
+} from '../../../../utils/supabase-error';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
-import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG } from '../../../../config';
+import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, FLOATING_TREE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /** Tombstone 查询结果 */
@@ -57,16 +61,6 @@ export class TaskSyncOperationsService {
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
   
-  /** 本地 tombstone 缓存：Map<projectId, Set<taskId>> */
-  private localTombstones: Map<string, Set<string>> = new Map();
-  
-  /** 本地 tombstone 持久化 key */
-  private readonly LOCAL_TOMBSTONES_KEY = 'nanoflow.local-tombstones';
-  
-  constructor() {
-    this.loadLocalTombstones();
-  }
-  
   /**
    * 安全添加到重试队列（含会话和数据有效性检查）
    * 替代之前的 setCallbacks 回调模式，直接使用注入的服务
@@ -86,19 +80,32 @@ export class TaskSyncOperationsService {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    this.retryQueueService.add(type, operation, data, projectId);
-    this.syncStateService.setPendingCount(this.retryQueueService.length);
-    this.retryQueueService.checkCapacityWarning();
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    if (enqueued) {
+      this.syncStateService.setPendingCount(this.retryQueueService.length);
+    } else {
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
+    }
   }
   
   /** 获取 Supabase 客户端，离线返回 null */
   private getSupabaseClient(): SupabaseClient | null {
     if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      this.syncStateService.setSyncError(failure.message);
       return null;
     }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.syncStateService.setSyncError(failure.message);
+      // eslint-disable-next-line no-restricted-syntax -- 调用方以 null 识别客户端不可用并走重试/降级路径
       return null;
     }
   }
@@ -132,6 +139,7 @@ export class TaskSyncOperationsService {
     // 会话过期检查
     if (this.syncStateService.isSessionExpired()) {
       this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId });
+      return false;
     }
     
     // Circuit Breaker 检查
@@ -164,6 +172,7 @@ export class TaskSyncOperationsService {
           }
         }
         this.sessionManager.handleSessionExpired('pushTask.getSession', { taskId: task.id, projectId });
+        return false;
       }
       
       return await this.doTaskPush(client, task, projectId, skipTombstoneCheck);
@@ -194,16 +203,18 @@ export class TaskSyncOperationsService {
           } catch (retryError) {
             const retryEnhanced = supabaseErrorToError(retryError);
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              this.sessionManager.handleSessionExpired('pushTask.retryAfterRefresh', { 
-                taskId: task.id, 
-                projectId, 
-                errorCode: retryEnhanced.code 
+              this.sessionManager.handleSessionExpired('pushTask.retryAfterRefresh', {
+                taskId: task.id,
+                projectId,
+                errorCode: retryEnhanced.code
               });
+              return false;
             }
             return this.handlePushTaskError(retryEnhanced, task, projectId, fromRetryQueue);
           }
         } else {
           this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId, errorCode: enhanced.code });
+          return false;
         }
       }
       
@@ -406,6 +417,7 @@ export class TaskSyncOperationsService {
   async deleteTask(taskId: string, projectId: string): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId });
+      return false;
     }
     
     const client = this.getSupabaseClient();
@@ -429,6 +441,7 @@ export class TaskSyncOperationsService {
       
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
         this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId, errorCode: enhanced.code });
+        return false;
       }
       
       this.logger.error('删除任务失败', enhanced);
@@ -631,9 +644,8 @@ export class TaskSyncOperationsService {
   async getTombstoneIdsWithStatus(projectId: string): Promise<TombstoneQueryResult> {
     const tombstoneIds = new Set<string>();
     let fromRemote = false;
-    let localCacheOnly = true;
     
-    const localTombstones = this.getLocalTombstones(projectId);
+    const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
     for (const id of localTombstones) {
       tombstoneIds.add(id);
     }
@@ -648,10 +660,7 @@ export class TaskSyncOperationsService {
     }
     
     try {
-      const { data, error } = await client
-        .from('task_tombstones')
-        .select('task_id')
-        .eq('project_id', projectId);
+      const { data, error } = await this.tombstoneService.getTombstonesWithCache(projectId, client);
       
       if (error) {
         this.logger.warn('获取云端 tombstones 失败，使用本地缓存', error);
@@ -663,7 +672,6 @@ export class TaskSyncOperationsService {
       }
       
       fromRemote = true;
-      localCacheOnly = false;
       
       if (localTombstones.size > 0 || tombstoneIds.size > localTombstones.size) {
         this.logger.debug('getTombstoneIds: 合并完成', {
@@ -674,7 +682,7 @@ export class TaskSyncOperationsService {
         });
       }
       
-      return { ids: tombstoneIds, fromRemote, localCacheOnly, timestamp: Date.now() };
+      return { ids: tombstoneIds, fromRemote, localCacheOnly: false, timestamp: Date.now() };
     } catch (e) {
       this.logger.warn('获取 tombstones 异常，使用本地缓存', e);
       return { ids: tombstoneIds, fromRemote: false, localCacheOnly: true, timestamp: Date.now() };
@@ -683,69 +691,18 @@ export class TaskSyncOperationsService {
   
   /** 获取本地 tombstone 缓存 */
   getLocalTombstones(projectId: string): Set<string> {
-    return this.localTombstones.get(projectId) || new Set();
+    return this.tombstoneService.getLocalTombstones(projectId);
   }
   
   /** 添加本地 tombstones */
   addLocalTombstones(projectId: string, taskIds: string[]): void {
-    let projectTombstones = this.localTombstones.get(projectId);
-    if (!projectTombstones) {
-      projectTombstones = new Set();
-      this.localTombstones.set(projectId, projectTombstones);
-    }
-    
-    for (const taskId of taskIds) {
-      projectTombstones.add(taskId);
-    }
-    
-    this.saveLocalTombstones();
+    this.tombstoneService.addLocalTombstones(projectId, taskIds);
     this.logger.debug('添加本地 tombstones', { projectId, count: taskIds.length });
-  }
-  
-  /** 加载本地 tombstones */
-  private loadLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    
-    try {
-      const data = localStorage.getItem(this.LOCAL_TOMBSTONES_KEY);
-      if (!data) return;
-      
-      const parsed = JSON.parse(data) as Record<string, string[]>;
-      for (const [projectId, taskIds] of Object.entries(parsed)) {
-        this.localTombstones.set(projectId, new Set(taskIds));
-      }
-      
-      this.logger.debug('加载本地 tombstones', { 
-        projectCount: this.localTombstones.size 
-      });
-    } catch (e) {
-      this.logger.warn('加载本地 tombstones 失败', e);
-    }
-  }
-  
-  /** 保存本地 tombstones */
-  private saveLocalTombstones(): void {
-    if (typeof localStorage === 'undefined') return;
-    
-    try {
-      const data: Record<string, string[]> = {};
-      for (const [projectId, taskIds] of this.localTombstones.entries()) {
-        data[projectId] = Array.from(taskIds);
-      }
-      
-      localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(data));
-    } catch (e) {
-      this.logger.warn('保存本地 tombstones 失败', e);
-    }
   }
   
   /** 导出本地 tombstones（用于 SimpleSyncService 兼容） */
   exportLocalTombstones(): Record<string, string[]> {
-    const data: Record<string, string[]> = {};
-    for (const [projectId, taskIds] of this.localTombstones.entries()) {
-      data[projectId] = Array.from(taskIds);
-    }
-    return data;
+    return this.tombstoneService.exportLocalTombstones();
   }
   
   /** 拓扑排序任务，确保父任务在子任务之前 */
@@ -754,31 +711,65 @@ export class TaskSyncOperationsService {
     const sorted: Task[] = [];
     const visited = new Set<string>();
     const visiting = new Set<string>();
-    
-    const visit = (taskId: string): void => {
-      if (visited.has(taskId)) return;
-      
-      const task = taskMap.get(taskId);
-      if (!task) return;
-      
-      if (visiting.has(taskId)) {
-        this.logger.warn('检测到任务循环依赖，断开循环', { taskId });
-        return;
-      }
-      
-      visiting.add(taskId);
-      
-      if (task.parentId && taskMap.has(task.parentId)) {
-        visit(task.parentId);
-      }
-      
-      visiting.delete(taskId);
-      visited.add(taskId);
-      sorted.push(task);
-    };
-    
+
+    type StackFrame = { taskId: string; expanded: boolean; depth: number };
+
     for (const task of tasks) {
-      visit(task.id);
+      if (visited.has(task.id)) {
+        continue;
+      }
+
+      const stack: StackFrame[] = [{ taskId: task.id, expanded: false, depth: 0 }];
+
+      while (stack.length > 0) {
+        const frame = stack.pop()!;
+        const current = taskMap.get(frame.taskId);
+        if (!current) {
+          continue;
+        }
+
+        if (frame.expanded) {
+          visiting.delete(frame.taskId);
+          if (!visited.has(frame.taskId)) {
+            visited.add(frame.taskId);
+            sorted.push(current);
+          }
+          continue;
+        }
+
+        if (visited.has(frame.taskId)) {
+          continue;
+        }
+
+        if (frame.depth > FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) {
+          this.logger.error('拓扑排序深度超限，已降级为当前节点优先', {
+            taskId: frame.taskId,
+            depth: frame.depth,
+            maxDepth: FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH
+          });
+          visited.add(frame.taskId);
+          sorted.push(current);
+          continue;
+        }
+
+        if (visiting.has(frame.taskId)) {
+          this.logger.warn('检测到任务循环依赖，已降级断开循环', { taskId: frame.taskId });
+          visited.add(frame.taskId);
+          sorted.push(current);
+          continue;
+        }
+
+        visiting.add(frame.taskId);
+        stack.push({ taskId: frame.taskId, expanded: true, depth: frame.depth });
+
+        if (current.parentId && taskMap.has(current.parentId) && !visited.has(current.parentId)) {
+          stack.push({
+            taskId: current.parentId,
+            expanded: false,
+            depth: frame.depth + 1
+          });
+        }
+      }
     }
     
     this.logger.debug('拓扑排序完成', {

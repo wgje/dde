@@ -57,12 +57,11 @@
   <!-- Sentry: 仅使用 dns-prefetch，因为首屏不会触发错误上报（P3 优化 2026-01-26）-->
   <link rel="dns-prefetch" href="https://o4508391513718784.ingest.us.sentry.io">
   
-  <!-- ========== 性能优化：关键字体 Preload ========== -->
-  <!-- 【性能优化 2026-02-05】关键字体自托管，减少 CDN 往返延迟，实现 1 年长期缓存 -->
-  <!-- 预加载最常用的中文字体子集（基础拉丁+常用中文），避免渲染阻塞 -->
+  <!-- ========== 性能优化：关键字体加载策略 ========== -->
+  <!-- 仅 preload 首屏最高频子集，其他子集改为 prefetch，避免在弱网下抢占 JS 带宽 -->
   <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-119.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-118.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/fonts/lxgwwenkaiscreen-subset-117.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="prefetch" href="/fonts/lxgwwenkaiscreen-subset-118.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="prefetch" href="/fonts/lxgwwenkaiscreen-subset-117.woff2" as="font" type="font/woff2" crossorigin>
   
   <!-- 关键 @font-face 内联：确保预加载的字体立即可用 -->
   <!-- 必须与 preload 配合，否则浏览器无法关联已预加载的资源 -->
@@ -147,7 +146,7 @@
   </script>
 
   <!-- ========== 性能优化：数据预加载 ========== -->
-  <!-- 【优化 2026-02-05】在 JS 加载期间并行请求初始数据，减少关键路径延迟 -->
+  <!-- 仅在首帧后 + 空闲时 + 非弱网条件执行，避免与首屏关键资源竞争带宽 -->
   <script>
     (function() {
       window.__PRELOADED_DATA__ = {
@@ -156,50 +155,101 @@
         timestamp: Date.now()
       };
 
-      // 检查是否已登录（从 Supabase auth token）
-      var authToken = null;
-      try {
-        var keys = Object.keys(localStorage);
-        for (var i = 0; i < keys.length; i++) {
-          var k = keys[i];
-          if (k.indexOf('sb-') === 0 && k.indexOf('-auth-token') > 0) {
-            var authData = JSON.parse(localStorage.getItem(k));
-            authToken = authData && authData.access_token;
-            break;
-          }
+      var nav = navigator || {};
+      var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+      var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
+      var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
+      var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
+      var saveData = !!(connection && connection.saveData);
+
+      var isConstrainedNetwork = saveData ||
+        effectiveType === '2g' ||
+        effectiveType === 'slow-2g' ||
+        (downlink > 0 && downlink < 1.5) ||
+        rtt > 280;
+
+      if (isConstrainedNetwork) return;
+
+      var runWhenIdle = function(task) {
+        if (typeof requestIdleCallback === 'function') {
+          requestIdleCallback(function(deadline) {
+            if (deadline.didTimeout || deadline.timeRemaining() > 8) {
+              task();
+            } else {
+              setTimeout(task, 0);
+            }
+          }, { timeout: 2000 });
+          return;
         }
-      } catch (e) { /* 忽略错误 */ }
-
-      if (!authToken) return;
-
-      // Supabase 配置（公开的 anon key）
-      var supabaseUrl = 'https://fkhihclpghmmtbbywvoj.supabase.co';
-      var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg4MTIwNjYsImV4cCI6MjA0NDM4ODA2Nn0.T7HHx10qFOo_fXqgVubKM0Wk8tnv4Y44l9XXE89Zyf0';
-
-      var headers = {
-        'apikey': supabaseAnonKey,
-        'Authorization': 'Bearer ' + authToken,
-        'Content-Type': 'application/json'
+        setTimeout(task, 1200);
       };
-      var baseUrl = supabaseUrl + '/rest/v1';
 
-      // 并行请求关键数据（不阻塞页面渲染）
-      fetch(baseUrl + '/rpc/get_server_time', {
-        method: 'POST',
-        headers: headers
-      }).then(function(r) { return r.json(); }).then(function(data) {
-        if (window.__PRELOADED_DATA__) {
-          window.__PRELOADED_DATA__.serverTime = data;
-        }
-      }).catch(function() {});
+      runWhenIdle(function() {
+        // 检查是否已登录（从当前 Supabase 项目的 auth token）
+        var authToken = null;
+        var tokenExpiresAt = null;
+        try {
+          var authKey = 'sb-fkhihclpghmmtbbywvoj-auth-token';
+          var rawAuth = localStorage.getItem(authKey);
+          if (rawAuth) {
+            var authData = JSON.parse(rawAuth);
+            var session = authData && (authData.currentSession || authData.session || authData);
+            if (session && typeof session.access_token === 'string') {
+              authToken = session.access_token;
+              if (typeof session.expires_at === 'number') {
+                tokenExpiresAt = session.expires_at;
+              } else if (typeof session.expires_at === 'string') {
+                var parsedExpiresAt = Date.parse(session.expires_at);
+                if (!isNaN(parsedExpiresAt)) {
+                  tokenExpiresAt = Math.floor(parsedExpiresAt / 1000);
+                }
+              } else if (typeof authData.expiresAt === 'number') {
+                tokenExpiresAt = authData.expiresAt;
+              } else if (typeof session.expires_in === 'number') {
+                tokenExpiresAt = Math.floor(Date.now() / 1000) + session.expires_in;
+              }
+            }
+          }
+        } catch (e) { /* 忽略错误 */ }
 
-      fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
-        headers: headers
-      }).then(function(r) { return r.json(); }).then(function(data) {
-        if (window.__PRELOADED_DATA__) {
-          window.__PRELOADED_DATA__.projects = data;
+        if (!authToken) return;
+        if (typeof tokenExpiresAt === 'number') {
+          if (tokenExpiresAt > 1000000000000) {
+            tokenExpiresAt = Math.floor(tokenExpiresAt / 1000);
+          }
+          // 令牌已过期或即将过期时，跳过预加载，避免触发 401 噪音
+          if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 30) return;
         }
-      }).catch(function() {});
+
+        // Supabase 配置（公开的 anon key）
+        var supabaseUrl = 'https://fkhihclpghmmtbbywvoj.supabase.co';
+        var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg4MTIwNjYsImV4cCI6MjA0NDM4ODA2Nn0.T7HHx10qFOo_fXqgVubKM0Wk8tnv4Y44l9XXE89Zyf0';
+
+        var headers = {
+          'apikey': supabaseAnonKey,
+          'Authorization': 'Bearer ' + authToken,
+          'Content-Type': 'application/json'
+        };
+        var baseUrl = supabaseUrl + '/rest/v1';
+
+        // 并行请求关键数据（不阻塞页面渲染）
+        fetch(baseUrl + '/rpc/get_server_time', {
+          method: 'POST',
+          headers: headers
+        }).then(function(r) { return r.json(); }).then(function(data) {
+          if (window.__PRELOADED_DATA__) {
+            window.__PRELOADED_DATA__.serverTime = data;
+          }
+        }).catch(function() {});
+
+        fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
+          headers: headers
+        }).then(function(r) { return r.json(); }).then(function(data) {
+          if (window.__PRELOADED_DATA__) {
+            window.__PRELOADED_DATA__.projects = data;
+          }
+        }).catch(function() {});
+      });
     })();
   </script>
   
@@ -567,6 +617,7 @@
   </style>
   <!-- 注意: importmap 已移除，Angular CLI 构建使用 npm 依赖 -->
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 h-screen w-screen overflow-hidden">

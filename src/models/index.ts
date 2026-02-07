@@ -95,6 +95,8 @@ export interface Connection {
   description?: string;
   /** 软删除时间戳，存在表示已标记删除，等待恢复或永久删除 */
   deletedAt?: string | null;
+  /** 最后更新时间戳 */
+  updatedAt?: string;
 }
 
 /**
@@ -109,6 +111,10 @@ export interface Project {
   connections: Connection[];
   updatedAt?: string; // 用于冲突检测
   version?: number; // 数据版本号
+  /** 同步来源标记：本地仅存在或已与云端建立对应 */
+  syncSource?: 'local-only' | 'synced';
+  /** 是否存在待同步的本地变更（用于下载合并后保留本地项目） */
+  pendingSync?: boolean;
   // 视图状态持久化
   viewState?: ViewState;
   // 流程图缩略图

@@ -37,7 +37,7 @@ export class AppProjectCoordinatorService {
 
   // ========== 项目选择 ==========
 
-  selectProject(id: string, sidebarOpen: { set: (v: boolean) => void }): void {
+  selectProject(id: string, _sidebarOpen: { set: (v: boolean) => void }): void {
     if (this.expandedProjectId() === id) {
       if (this.isEditingDescription()) {
         this.saveProjectDetails(id);

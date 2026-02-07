@@ -328,6 +328,7 @@ export class ConflictStorageService {
       return data ? JSON.parse(data) : null;
     } catch (e) {
       this.logger.warn('从 localStorage 加载冲突数据失败', { projectId, error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：回退加载失败表示无冲突记录
       return null;
     }
   }

@@ -1,14 +1,13 @@
 /** ChangeTrackerService - 变更追踪服务，实现增量更新：脏标记 + 项目级聚合 + 变更合并 */
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { Task, Connection } from '../models';
+import { SYNC_CONFIG } from '../config';
 import { LoggerService } from './logger.service';
 import {
-  ChangeType,
   EntityType,
   ChangeRecord,
   ProjectChangeSummary,
-  FieldLockData,
-  TaskFieldChange
+  FieldLockData
 } from './change-tracker.types';
 
 // 重新导出类型以保持向后兼容
@@ -281,7 +280,7 @@ export class ChangeTrackerService {
     return false;
   }
   /** 清除项目的所有变更记录 */
-  clearProjectChanges(projectId: string): void {
+  clearProjectChanges(projectId: string): number {
     const keysToDelete: string[] = [];
     
     for (const [key, record] of this.pendingChanges.entries()) {
@@ -296,6 +295,7 @@ export class ChangeTrackerService {
     
     this.updateCounters();
     this.logger.debug('清除项目变更记录', { projectId, clearedCount: keysToDelete.length });
+    return keysToDelete.length;
   }
   /** 清除特定任务的变更记录 */
   clearTaskChange(projectId: string, taskId: string): void {
@@ -320,6 +320,72 @@ export class ChangeTrackerService {
   /** 导出所有待同步变更 */
   exportPendingChanges(): ChangeRecord[] {
     return Array.from(this.pendingChanges.values());
+  }
+
+  /**
+   * 获取单个实体的待同步变更（带保护窗口）
+   * 超过保护窗口的脏记录会自动清理，避免长期偏向本地。
+   */
+  getPendingChange(
+    projectId: string,
+    entityType: EntityType,
+    entityId: string,
+    maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS
+  ): ChangeRecord | undefined {
+    const key = this.makeKey(projectId, entityType, entityId);
+    const record = this.pendingChanges.get(key);
+    if (!record) {
+      return undefined;
+    }
+
+    if (Date.now() - record.timestamp > maxAgeMs) {
+      this.pendingChanges.delete(key);
+      this.updateCounters();
+      this.logger.info('脏字段保护窗口过期，已清理变更记录', {
+        projectId,
+        entityType,
+        entityId,
+        maxAgeMs
+      });
+      return undefined;
+    }
+
+    return record;
+  }
+
+  /**
+   * 清理超过保护窗口的历史脏记录
+   */
+  pruneExpiredChanges(maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS): number {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [key, record] of this.pendingChanges.entries()) {
+      if (now - record.timestamp > maxAgeMs) {
+        this.pendingChanges.delete(key);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      this.updateCounters();
+      this.logger.info('批量清理过期脏记录', { cleaned, maxAgeMs });
+    }
+    return cleaned;
+  }
+
+  /**
+   * 统计最老脏记录的年龄（毫秒）
+   */
+  getOldestChangeAgeMs(projectId?: string): number {
+    let oldestTimestamp = 0;
+    for (const record of this.pendingChanges.values()) {
+      if (projectId && record.projectId !== projectId) {
+        continue;
+      }
+      if (oldestTimestamp === 0 || record.timestamp < oldestTimestamp) {
+        oldestTimestamp = record.timestamp;
+      }
+    }
+    return oldestTimestamp === 0 ? 0 : Math.max(0, Date.now() - oldestTimestamp);
   }
   /** 导入变更记录 */
   importPendingChanges(changes: ChangeRecord[]): void {

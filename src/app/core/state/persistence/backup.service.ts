@@ -51,7 +51,7 @@ export class BackupService {
     let backupDb: IDBDatabase | null = null;
 
     try {
-      const db = await this.indexedDB.initDatabase();
+      await this.indexedDB.initDatabase();
       const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
       const backupDbName = `${BACKUP_CONFIG.DB_PREFIX}${dateStr}`;
 
@@ -115,6 +115,7 @@ export class BackupService {
     } catch (err) {
       this.logger.error('创建数据库备份失败', err);
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'createBackup' } });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：备份失败不阻断主流程
       return null;
     } finally {
       // 确保备份数据库连接被关闭，防止资源泄漏

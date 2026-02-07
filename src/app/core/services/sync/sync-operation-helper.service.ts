@@ -92,6 +92,7 @@ export class SyncOperationHelperService {
     try {
       return this.supabase.client();
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：客户端不可用时静默降级
       return null;
     }
   }

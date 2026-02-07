@@ -20,13 +20,38 @@ interface SentryModule {
 }
 
 /**
- * 待发送的错误信息
+ * 消息上报配置
  */
-interface PendingError {
+type SentryMessageLevel = 'fatal' | 'error' | 'warning' | 'log' | 'info' | 'debug';
+
+interface CaptureMessageOptions {
+  level?: SentryMessageLevel;
+  tags?: Record<string, string>;
+  extra?: Record<string, unknown>;
+  fingerprint?: string[];
+}
+
+/**
+ * 待发送事件：异常
+ */
+interface PendingExceptionEvent {
+  type: 'exception';
   error: unknown;
   context?: Record<string, unknown>;
   timestamp: number;
 }
+
+/**
+ * 待发送事件：消息
+ */
+interface PendingMessageEvent {
+  type: 'message';
+  message: string;
+  options?: CaptureMessageOptions;
+  timestamp: number;
+}
+
+type PendingSentryEvent = PendingExceptionEvent | PendingMessageEvent;
 
 /**
  * Sentry 懒加载服务
@@ -62,11 +87,11 @@ export class SentryLazyLoaderService {
   /** 是否正在初始化中 */
   private isInitializing = false;
   
-  /** 待发送的错误队列（初始化前捕获的错误） */
-  private pendingErrors: PendingError[] = [];
+  /** 待发送事件队列（初始化前捕获的消息/异常） */
+  private pendingEvents: PendingSentryEvent[] = [];
   
-  /** 错误队列最大长度（防止内存泄漏） */
-  private readonly MAX_PENDING_ERRORS = 50;
+  /** 待发送事件队列最大长度（防止内存泄漏） */
+  private readonly MAX_PENDING_EVENTS = 50;
   
   /** 初始化 Promise（防止重复初始化） */
   private initPromise: Promise<void> | null = null;
@@ -86,7 +111,7 @@ export class SentryLazyLoaderService {
     
     // 开发环境跳过 Sentry 初始化（除非有 DSN）
     if (!environment.SENTRY_DSN) {
-      console.log('[SentryLazyLoader] 无 SENTRY_DSN，跳过初始化');
+      console.warn('[SentryLazyLoader] 无 SENTRY_DSN，跳过初始化');
       return;
     }
 
@@ -145,10 +170,10 @@ export class SentryLazyLoaderService {
       
       this.sentryModule.set(Sentry as SentryModule);
       
-      // 发送队列中的待处理错误
-      this.flushPendingErrors();
+      // 发送队列中的待处理事件
+      this.flushPendingEvents();
       
-      console.log('[SentryLazyLoader] Sentry 初始化完成');
+      console.warn('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
       console.error('[SentryLazyLoader] Sentry 初始化失败:', error);
     } finally {
@@ -170,10 +195,15 @@ export class SentryLazyLoaderService {
     
     if (sentry) {
       // Sentry 已初始化，直接发送
-      this.sendToSentry(sentry, error, context);
+      this.sendExceptionToSentry(sentry, error, context);
     } else {
       // 加入待处理队列
-      this.addToPendingQueue(error, context);
+      this.addPendingEvent({
+        type: 'exception',
+        error,
+        context,
+        timestamp: Date.now(),
+      });
       
       // 触发初始化（如果尚未触发）
       this.triggerLazyInit();
@@ -183,7 +213,7 @@ export class SentryLazyLoaderService {
   /**
    * 发送错误到 Sentry
    */
-  private sendToSentry(
+  private sendExceptionToSentry(
     sentry: SentryModule,
     error: unknown,
     context?: Record<string, unknown>
@@ -205,45 +235,104 @@ export class SentryLazyLoaderService {
   }
 
   /**
-   * 添加到待处理队列
+   * 发送消息到 Sentry
    */
-  private addToPendingQueue(error: unknown, context?: Record<string, unknown>): void {
-    // 队列大小限制（防止内存泄漏）
-    if (this.pendingErrors.length >= this.MAX_PENDING_ERRORS) {
-      // 移除最旧的错误
-      this.pendingErrors.shift();
+  private sendMessageToSentry(
+    sentry: SentryModule,
+    message: string,
+    options?: CaptureMessageOptions
+  ): void {
+    try {
+      if (options) {
+        sentry.withScope(scope => {
+          if (options.level) {
+            scope.setLevel(options.level);
+          }
+          if (options.tags) {
+            Object.entries(options.tags).forEach(([key, value]) => {
+              scope.setTag(key, value);
+            });
+          }
+          if (options.extra) {
+            Object.entries(options.extra).forEach(([key, value]) => {
+              scope.setExtra(key, value);
+            });
+          }
+          if (options.fingerprint) {
+            scope.setFingerprint(options.fingerprint);
+          }
+          sentry.captureMessage(message);
+        });
+      } else {
+        sentry.captureMessage(message);
+      }
+    } catch (e) {
+      console.error('[SentryLazyLoader] 发送消息失败:', e);
     }
-    
-    this.pendingErrors.push({
-      error,
-      context,
-      timestamp: Date.now(),
-    });
   }
 
   /**
-   * 发送待处理错误队列
+   * 添加到待处理队列
    */
-  private flushPendingErrors(): void {
+  private addPendingEvent(event: PendingSentryEvent): void {
+    // 队列大小限制（防止内存泄漏）
+    if (this.pendingEvents.length >= this.MAX_PENDING_EVENTS) {
+      // 移除最旧的事件
+      this.pendingEvents.shift();
+    }
+    
+    this.pendingEvents.push(event);
+  }
+
+  /**
+   * 为延迟发送的消息补充上下文
+   */
+  private buildDelayedMessageOptions(
+    options: CaptureMessageOptions | undefined,
+    captureDelay: number
+  ): CaptureMessageOptions {
+    return {
+      ...options,
+      extra: {
+        ...options?.extra,
+        delayedCapture: true,
+        captureDelay,
+      },
+    };
+  }
+
+  /**
+   * 发送待处理事件队列
+   */
+  private flushPendingEvents(): void {
     const sentry = this.sentryModule();
-    if (!sentry || this.pendingErrors.length === 0) {
+    if (!sentry || this.pendingEvents.length === 0) {
       return;
     }
     
-    console.log(`[SentryLazyLoader] 发送 ${this.pendingErrors.length} 个待处理错误`);
+    console.warn(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
-    // 添加延迟标记到上下文
-    this.pendingErrors.forEach(({ error, context, timestamp }) => {
-      const enrichedContext = {
-        ...context,
-        delayedCapture: true,
-        captureDelay: Date.now() - timestamp,
-      };
-      this.sendToSentry(sentry, error, enrichedContext);
-    });
-    
+    const now = Date.now();
+
+    for (const event of this.pendingEvents) {
+      const captureDelay = now - event.timestamp;
+
+      if (event.type === 'exception') {
+        const enrichedContext = {
+          ...event.context,
+          delayedCapture: true,
+          captureDelay,
+        };
+        this.sendExceptionToSentry(sentry, event.error, enrichedContext);
+        continue;
+      }
+
+      const enrichedOptions = this.buildDelayedMessageOptions(event.options, captureDelay);
+      this.sendMessageToSentry(sentry, event.message, enrichedOptions);
+    }
+
     // 清空队列
-    this.pendingErrors = [];
+    this.pendingEvents = [];
   }
 
   /**
@@ -303,7 +392,7 @@ export class SentryLazyLoaderService {
   addBreadcrumb(breadcrumb: {
     category?: string;
     message?: string;
-    level?: 'fatal' | 'error' | 'warning' | 'log' | 'info' | 'debug';
+    level?: SentryMessageLevel;
     data?: Record<string, unknown>;
   }): void {
     const sentry = this.sentryModule();
@@ -317,41 +406,18 @@ export class SentryLazyLoaderService {
    */
   captureMessage(
     message: string,
-    options?: {
-      level?: 'fatal' | 'error' | 'warning' | 'log' | 'info' | 'debug';
-      tags?: Record<string, string>;
-      extra?: Record<string, unknown>;
-      fingerprint?: string[];
-    }
+    options?: CaptureMessageOptions
   ): void {
     const sentry = this.sentryModule();
     if (sentry) {
-      if (options) {
-        sentry.withScope(scope => {
-          if (options.level) {
-            scope.setLevel(options.level);
-          }
-          if (options.tags) {
-            Object.entries(options.tags).forEach(([key, value]) => {
-              scope.setTag(key, value);
-            });
-          }
-          if (options.extra) {
-            Object.entries(options.extra).forEach(([key, value]) => {
-              scope.setExtra(key, value);
-            });
-          }
-          if (options.fingerprint) {
-            scope.setFingerprint(options.fingerprint);
-          }
-          sentry.captureMessage(message);
-        });
-      } else {
-        sentry.captureMessage(message);
-      }
+      this.sendMessageToSentry(sentry, message, options);
     } else {
-      // 加入待处理队列
-      this.addToPendingQueue(new Error(message), { isMessage: true, ...options });
+      this.addPendingEvent({
+        type: 'message',
+        message,
+        options,
+        timestamp: Date.now(),
+      });
       this.triggerLazyInit();
     }
   }

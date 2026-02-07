@@ -23,6 +23,7 @@ import { RequestThrottleService } from '../../../services/request-throttle.servi
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
+import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { TombstoneService, RealtimePollingService, SessionManagerService, SyncOperationHelperService, UserPreferencesSyncService, ProjectDataService, BatchSyncService, TaskSyncOperationsService, ConnectionSyncOperationsService, RetryQueueService } from './sync';
 import type { RetryQueueItem } from './sync';
 import { Task, Project, Connection } from '../../../models';
@@ -350,6 +351,11 @@ describe('SimpleSyncService', () => {
       setCallbacks: vi.fn(),
       saveProjectToCloud: vi.fn().mockResolvedValue({ success: true, newVersion: 1 })
     };
+
+    const mockBlackBoxSync = {
+      setRetryQueueHandler: vi.fn(),
+      pushToServer: vi.fn().mockResolvedValue(true)
+    };
     
     // 【技术债务重构】TaskSyncOperationsService Mock
     // 注：详细的任务同步逻辑测试已迁移至 task-sync-operations.service.spec.ts
@@ -420,6 +426,7 @@ describe('SimpleSyncService', () => {
         { provide: TaskSyncOperationsService, useValue: mockTaskSyncOps },
         { provide: ConnectionSyncOperationsService, useValue: mockConnectionSyncOps },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
+        { provide: BlackBoxSyncService, useValue: mockBlackBoxSync },
         // Sentry 懒加载服务 mock
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService }
       ]

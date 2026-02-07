@@ -14,6 +14,7 @@ import { QUEUE_CONFIG } from '../config';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { NetworkAwarenessService } from './network-awareness.service';
 import { QueuedAction, DeadLetterItem } from './action-queue.types';
 
 // ========== IndexedDB 备份支持 ==========
@@ -78,6 +79,7 @@ export class ActionQueueStorageService {
   private readonly logger = inject(LoggerService).category('ActionQueueStorage');
   private readonly toast = inject(ToastService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly networkAwareness = inject(NetworkAwarenessService);
 
   // ========== 死信队列 ==========
   readonly deadLetterQueue = signal<DeadLetterItem[]>([]);
@@ -85,6 +87,8 @@ export class ActionQueueStorageService {
 
   // ========== 存储失败状态 ==========
   readonly storageFailure = signal(false);
+  readonly queueFrozen = signal(false);
+  readonly queueFreezeReason = signal<string | null>(null);
   private storageFailureCallback: ((data: { queue: QueuedAction[]; deadLetter: DeadLetterItem[] }) => void) | null = null;
 
   // ========== 网络状态 ==========
@@ -178,12 +182,6 @@ export class ActionQueueStorageService {
    * 按优先级策略：low 静默丢弃，normal 正常入队，critical 通知用户
    */
   moveToDeadLetter(action: QueuedAction, reason: string): void {
-    if (action.priority === 'low') {
-      this.ctx.dequeue(action.id);
-      this.logger.debug('低优先级操作失败，静默丢弃', { actionId: action.id, reason });
-      return;
-    }
-
     const deadLetterItem: DeadLetterItem = {
       action,
       failedAt: new Date().toISOString(),
@@ -193,11 +191,14 @@ export class ActionQueueStorageService {
     this.ctx.dequeue(action.id);
 
     this.deadLetterQueue.update(queue => {
-      let newQueue = [...queue, deadLetterItem];
-      if (newQueue.length > LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE) {
-        newQueue = newQueue.slice(-LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
+      const updated = [...queue, deadLetterItem];
+      // 限制死信队列大小，移除最老的条目
+      if (updated.length > LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE) {
+        const overflow = updated.length - LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE;
+        this.logger.warn('死信队列超出上限，移除最旧的条目', { overflow, maxSize: LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE });
+        return updated.slice(overflow);
       }
-      return newQueue;
+      return updated;
     });
 
     this.deadLetterSize.set(this.deadLetterQueue().length);
@@ -418,41 +419,24 @@ export class ActionQueueStorageService {
         LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
         JSON.stringify(this.ctx.pendingActions())
       );
+      this.clearQueueFreeze();
     } catch (e: unknown) {
       const isQuotaError =
         (e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22)) ||
         (e instanceof Error && e.name === 'QuotaExceededError');
 
       if (isQuotaError) {
-        this.logger.warn('LocalStorage 配额不足，尝试清理旧数据...');
-
-        // 策略 1: 清理死信队列
-        this.clearDeadLetterQueue();
-
-        // 策略 2: 只保留最新的50%操作
         const currentQueue = this.ctx.pendingActions();
-        if (currentQueue.length > 10) {
-          const reducedQueue = currentQueue.slice(-Math.ceil(currentQueue.length / 2));
-          try {
-            localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, JSON.stringify(reducedQueue));
-            this.ctx.pendingActions.set(reducedQueue);
-            this.ctx.queueSize.set(reducedQueue.length);
-            this.ctx.syncSentryContext();
-            this.toast.warning('存储空间不足', `已清理 ${currentQueue.length - reducedQueue.length} 个较早的操作记录`);
-            return;
-          } catch {
-            this.logger.debug('localStorage 清理后仍失败，继续降级策略');
-          }
-        }
-
-        // 策略 3: IndexedDB 备份
-        this.logger.warn('LocalStorage 配额严重不足，尝试 IndexedDB 备份...');
+        this.logger.warn('LocalStorage 配额不足，启用队列冻结保护');
+        // 同步冻结写入，防止后续操作在备份完成前继续写入
+        this.freezeQueueWrites('quota_exceeded');
         void this.backupQueueToIndexedDB(currentQueue).then(success => {
           if (success) {
-            localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-            this.logger.info('队列已备份到 IndexedDB，localStorage 已清理');
-            this.toast.info('存储空间不足', '操作队列已转移到备用存储，数据安全');
+            this.toast.warning('存储空间不足', '同步队列已冻结。请释放浏览器存储后继续写入。', {
+              duration: 10000
+            });
           } else {
+            this.freezeQueueWrites('backup_failed');
             this.triggerStorageFailureEscapeMode();
           }
         });
@@ -487,6 +471,7 @@ export class ActionQueueStorageService {
           this.ctx.queueSize.set(backupQueue.length);
           this.ctx.syncSentryContext();
           this.toast.info('队列恢复', `从备用存储恢复了 ${backupQueue.length} 个待处理操作`);
+          this.clearQueueFreeze();
           this.saveQueueToStorage();
         }
       });
@@ -546,6 +531,7 @@ export class ActionQueueStorageService {
   private triggerStorageFailureEscapeMode(): void {
     this.logger.error('【存储灾难】localStorage 和 IndexedDB 均不可用，进入逃生模式');
     this.storageFailure.set(true);
+    this.freezeQueueWrites('storage_failure');
     this.toast.error(
       '🚨 存储失败 - 数据可能丢失',
       '浏览器存储不可用。请立即复制下方数据进行备份！',
@@ -606,6 +592,7 @@ export class ActionQueueStorageService {
       });
     } catch (e) {
       this.logger.warn('IndexedDB 恢复异常', e);
+      // eslint-disable-next-line no-restricted-syntax -- 备份恢复失败时返回 null 交由上层维持当前内存队列
       return null;
     }
   }
@@ -632,8 +619,40 @@ export class ActionQueueStorageService {
     this.deadLetterQueue.set([]);
     this.deadLetterSize.set(0);
     this.storageFailure.set(false);
+    this.queueFrozen.set(false);
+    this.queueFreezeReason.set(null);
+    this.networkAwareness.setStoragePressure(false, null);
     this.failureCallbacks.length = 0;
     this.storageFailureCallback = null;
     this._isOnline = true;
+
+    // 清除 localStorage 中的持久化数据
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+        localStorage.removeItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
+      } catch (e) {
+        this.logger.warn('清除 localStorage 队列数据失败', { error: e });
+      }
+    }
+  }
+
+  private freezeQueueWrites(reason: string): void {
+    this.queueFrozen.set(true);
+    this.queueFreezeReason.set(reason);
+    this.networkAwareness.setStoragePressure(true, reason);
+    this.sentryLazyLoader.captureMessage('Action queue frozen', {
+      level: 'warning',
+      tags: { reason }
+    });
+  }
+
+  private clearQueueFreeze(): void {
+    if (!this.queueFrozen()) {
+      return;
+    }
+    this.queueFrozen.set(false);
+    this.queueFreezeReason.set(null);
+    this.networkAwareness.setStoragePressure(false, null);
   }
 }

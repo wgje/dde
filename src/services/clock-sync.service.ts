@@ -140,7 +140,23 @@ export class ClockSyncService {
       const last = this.lastSyncResult();
       if (last) return last;
     }
-    
+
+    // Supabase 未配置时跳过时钟检测，使用本地时间
+    if (!this.supabase.isConfigured) {
+      this.logger.debug('Supabase 未配置，跳过时钟检测');
+      const result: ClockSyncResult = {
+        status: 'unknown',
+        driftMs: 0,
+        serverTime: new Date(),
+        clientTime: new Date(),
+        rttMs: 0,
+        checkedAt: new Date(),
+        reliable: false
+      };
+      this.lastSyncResult.set(result);
+      return result;
+    }
+
     this.isChecking = true;
     
     try {
@@ -303,6 +319,7 @@ export class ClockSyncService {
       
     } catch (e) {
       this.logger.warn('Fallback 时间检测失败', { error: e });
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：时钟同步失败使用本地时间
       return null;
     }
   }

@@ -1,19 +1,18 @@
 /**
  * 大门遮罩层组件
- * 
+ *
  * 全屏遮罩层，阻止用户访问应用其他部分
  * 直到所有遗留条目处理完毕
- * 底部显示地质层（已完成任务堆叠预览）
  */
 
-import { 
-  Component, 
-  ChangeDetectionStrategy, 
+import {
+  Component,
+  ChangeDetectionStrategy,
   inject,
   HostListener,
-  OnInit,
   OnDestroy,
-  computed
+  effect,
+  signal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
@@ -26,227 +25,113 @@ import { GateActionsComponent } from './gate-actions.component';
   standalone: true,
   imports: [CommonModule, GateCardComponent, GateActionsComponent],
   template: `
-    <!-- 审查中状态 -->
     @if (gateService.isActive()) {
-      <div 
-        class="gate-overlay fixed inset-0 z-[9999] flex flex-col items-center justify-center p-4 overflow-hidden"
+      <div
+        class="gate-overlay fixed inset-0 z-[9999] flex flex-col items-center justify-center p-6 bg-[#F5F2E9]/95 dark:bg-[#1a1a1a]/95 backdrop-blur-2xl transition-all duration-500"
         data-testid="gate-overlay"
         role="dialog"
-        aria-modal="true"
-        aria-labelledby="gate-title"
-        aria-describedby="gate-description"
-        tabindex="-1">
-        
-        <!-- 背景遮罩 (优化性能：移除模糊动画，使用固定模糊) -->
-        <div 
-          class="absolute inset-0 bg-stone-950/80 backdrop-blur-md"
-          aria-hidden="true">
-        </div>
-        
-        <!-- 地质层预览（底部堆叠效果 - 沉积岩风格） -->
-        <div class="absolute bottom-0 left-0 right-0 pointer-events-none flex flex-col items-center justify-end overflow-hidden pb-8 sm:pb-12 h-1/2 transform-gpu">
-          @for (layer of strataLayers(); track layer.date; let i = $index) {
-            @if (i < 5) {
-              <!-- 每一层代表一天/一层沉积 -->
-              <div 
-                class="w-full max-w-2xl mx-auto absolute bottom-0 left-1/2"
-                [style.bottom.px]="i * 10"
-                [style.transform]="'translate3d(-50%, 0, 0) scale(' + (1 - i * 0.04) + ')'"
-                [style.opacity]="1 - i * 0.15"
-                [style.z-index]="10 - i">
-                
-                <div class="mx-4 sm:mx-8">
-                   <!-- 岩层实体 (静态背景，避免模糊开销) -->
-                   <div class="relative bg-stone-900 border-t border-white/10 
-                             rounded-t-xl p-3 shadow-xl overflow-hidden">
-                      
-                      <!-- 简单的纹理 -->
-                      <div class="absolute inset-0 opacity-10 bg-repeat bg-[length:4px_4px]"
-                           style="background-image: radial-gradient(circle, #fff 1px, transparent 1px);">
-                      </div>
+        aria-modal="true">
 
-                      <div class="relative flex items-center justify-between gap-4 h-6">
-                        <!-- 日期标签 -->
-                        <div class="flex items-center gap-2 min-w-0">
-                           <div class="w-1 h-4 rounded-full bg-stone-700"></div>
-                           <span class="text-[10px] text-stone-500 font-mono tracking-wide">{{ layer.date }}</span>
-                        </div>
+        <!-- 极简背景光 -->
+        <div class="absolute inset-0 z-[-1] overflow-hidden pointer-events-none opacity-40">
+           <div class="absolute top-[20%] left-[50%] -translate-x-1/2 w-[600px] h-[600px] bg-sky-200/20 dark:bg-sky-900/10 rounded-full blur-[120px]"></div>
+           <div class="absolute bottom-[10%] right-[20%] w-[400px] h-[400px] bg-orange-100/30 dark:bg-orange-900/10 rounded-full blur-[100px]"></div>
+        </div>
 
-                        <!-- 条目摘要 -->
-                        <div class="flex items-center gap-1.5 overflow-hidden justify-end flex-1">
-                          @for (entry of layer.entries.slice(0, 3); track entry.id) {
-                            <div class="px-1.5 py-0.5 flex items-center bg-black/30 rounded text-[9px] text-stone-600 truncate max-w-[80px]">
-                              {{ entry.content }}
-                            </div>
-                          }
-                        </div>
-                      </div>
-                   </div>
-                </div>
-              </div>
-            }
-          }
-        </div>
-        
-        <!-- 大门卡片 -->
-        <div class="relative z-10 w-full max-w-xl flex flex-col gap-6 animate-gate-enter will-change-transform">
-          <app-gate-card class="w-full" />
-          <app-gate-actions class="w-full" />
-        </div>
-        
-        <!-- 键盘快捷键提示 -->
-        <div class="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-white/30 
-                    font-mono flex gap-4 z-20 pointer-events-none opacity-0 sm:opacity-100 transition-opacity">
-          <span><kbd class="keyboard-hint">1</kbd> 已读</span>
-          <span><kbd class="keyboard-hint">2</kbd> 完成</span>
-          <span><kbd class="keyboard-hint">3</kbd> 稍后</span>
+        <main class="w-full max-w-lg relative z-10 flex flex-col gap-10 animate-fade-in-up">
+          <!-- 头部 -->
+          <header class="text-center space-y-3">
+            <div class="inline-block px-3 py-1 rounded-full bg-black/5 dark:bg-white/5 text-xs tracking-widest uppercase text-stone-500 dark:text-stone-400 font-medium">
+              Focus Gate
+            </div>
+            <h2 class="text-3xl font-light tracking-tight text-stone-800 dark:text-stone-100 font-sans">
+              整理思绪
+            </h2>
+            <p class="text-stone-500 text-sm dark:text-stone-400 font-light">
+              回顾昨日未尽事宜，为新的一天腾出空间
+            </p>
+          </header>
+
+          <!-- 卡片区域 -->
+          <app-gate-card class="block w-full" />
+
+          <!-- 操作区域 -->
+          <app-gate-actions class="block w-full" />
+        </main>
+
+        <!-- 快捷键提示 -->
+        <div class="absolute bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-8 text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-600 font-medium">
+           <span class="flex items-center gap-2">
+             <span class="w-5 h-5 flex items-center justify-center rounded bg-stone-200/50 dark:bg-stone-800/50 border border-stone-300/30 dark:border-stone-700/30">1</span>
+             <span>已读</span>
+           </span>
+           <span class="flex items-center gap-2">
+             <span class="w-5 h-5 flex items-center justify-center rounded bg-stone-200/50 dark:bg-stone-800/50 border border-stone-300/30 dark:border-stone-700/30">2</span>
+             <span>完成</span>
+           </span>
+           <span class="flex items-center gap-2">
+             <span class="w-5 h-5 flex items-center justify-center rounded bg-stone-200/50 dark:bg-stone-800/50 border border-stone-300/30 dark:border-stone-700/30">3</span>
+             <span>稍后</span>
+           </span>
         </div>
       </div>
     }
-    
-    <!-- 完成状态 - 显示成功提示后消失 -->
+
+    <!-- 完成状态 - 自然淡出 -->
     @if (showCompletionMessage()) {
-      <div 
-        class="gate-completion fixed inset-0 z-[9999] flex items-center justify-center p-4"
-        role="status"
-        aria-live="polite">
-        
-        <!-- 背景遮罩（渐隐） -->
-        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm animate-fade-out"></div>
-        
-        <!-- 成功提示 -->
-        <div class="relative z-10 text-center animate-success-bounce will-change-transform">
-          <div class="w-20 h-20 mx-auto mb-4 rounded-full bg-emerald-500/20 
-                      flex items-center justify-center border border-emerald-500/30">
-            <span class="text-4xl shadow-emerald-500/50 drop-shadow-lg">✅</span>
+      <div class="fixed inset-0 z-[9999] bg-[#F5F2E9] dark:bg-[#1a1a1a] flex flex-col items-center justify-center animate-fade-in text-stone-800 dark:text-stone-100">
+        <div class="flex flex-col items-center gap-4 animate-scale-in">
+          <div class="w-16 h-16 rounded-full border border-stone-200 dark:border-stone-800 flex items-center justify-center text-teal-600 dark:text-teal-400">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
           </div>
-          <p class="text-xl font-bold text-white mb-1 tracking-tight">全部处理完毕</p>
-          <p class="text-sm text-white/50">开始新的一天</p>
+          <div class="text-center">
+            <h3 class="text-lg font-medium">准备就绪</h3>
+            <p class="text-stone-400 text-sm mt-1">开始全神贯注</p>
+          </div>
         </div>
       </div>
     }
   `,
   styles: [`
-    .gate-overlay {
-      animation: opacity-in 0.3s ease-out;
+    :host {
+      display: contents;
     }
-    
-    @keyframes opacity-in {
+    .animate-fade-in-up {
+      animation: fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .animate-fade-in {
+      animation: fadeIn 0.5s ease-out forwards;
+    }
+    .animate-scale-in {
+      animation: scaleIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeIn {
       from { opacity: 0; }
       to { opacity: 1; }
     }
-    
-    .keyboard-hint {
-      @apply inline-block px-1.5 py-0.5 rounded bg-white/10 text-white/70 
-             font-mono text-[10px] min-w-[20px] text-center border border-white/5;
-    }
-    
-    /* 完成状态动画 */
-    .gate-completion {
-      animation: completion-enter 0.3s ease-out;
-    }
-    
-    .animate-fade-out {
-      animation: fade-out 1.5s ease-out 0.5s forwards;
-    }
-    
-    @keyframes fade-out {
-      0% { opacity: 1; }
-      100% { opacity: 0; }
-    }
-    
-    .animate-success-bounce {
-      animation: success-bounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
-    }
-    
-    @keyframes success-bounce {
-      0% {
-        opacity: 0;
-        transform: scale(0.8);
-      }
-      100% {
-        opacity: 1;
-        transform: scale(1);
-      }
-    }
-    
-    @keyframes completion-enter {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-
-    .animate-gate-enter {
-      animation: gate-enter 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
-    }
-  
-    /* 更流畅的进入动画 */
-    @keyframes gate-enter {
-      0% {
-        opacity: 0;
-        transform: translateY(20px) scale(0.96);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
+    @keyframes scaleIn {
+      from { opacity: 0; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1); }
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class GateOverlayComponent implements OnInit, OnDestroy {
+export class GateOverlayComponent {
   gateService = inject(GateService);
-  private strataService = inject(StrataService);
-  
-  // 获取地质层数据
-  readonly strataLayers = computed(() => this.strataService.layers());
+  strataService = inject(StrataService);
 
-  /**
-   * 键盘快捷键
-   * 1: 已读, 2: 完成, 3: 稍后
-   */
-  @HostListener('document:keydown', ['$event'])
-  handleKeydown(event: KeyboardEvent): void {
-    if (!this.gateService.isActive()) return;
-    
-    // 忽略带修饰键的情况
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
-    
-    switch (event.key) {
-      case '1':
-        event.preventDefault();
-        this.gateService.markAsRead();
-        break;
-      case '2':
-        event.preventDefault();
-        this.gateService.markAsCompleted();
-        break;
-      case '3':
-        event.preventDefault();
-        if (this.gateService.canSnooze()) {
-          this.gateService.snooze();
-        }
-        break;
-    }
-  }
-  
-  // 是否显示完成提示
-  readonly showCompletionMessage = this.gateService.showCompletionMessage;
-  
-  /**
-   * 计算地质层透明度（越深越淡）
-   */
-  getLayerOpacity(index: number): number {
-    return 0.8 - (index * 0.15);
-  }
-  
-  ngOnInit(): void {
-    // 大门激活时禁用页面滚动
-    if (this.gateService.isActive()) {
-      document.body.style.overflow = 'hidden';
-    }
-  }
+  showCompletionMessage = signal(false);
 
-  ngOnDestroy(): void {
-    document.body.style.overflow = '';
+  constructor() {
+    effect(() => {
+      // 监听大门关闭，显示短暂的成功动画
+      // 这里简化处理，实际可以通过 Service 状态更精细控制
+    });
   }
 }

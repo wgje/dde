@@ -40,10 +40,10 @@ describe('WebVitalsService - TTFB 优化测试', () => {
   let mockLogger: Partial<LoggerService>;
 
   // Mock navigator.connection
-  const mockConnection = (effectiveType: string, downlink: number, rtt: number) => {
+  const mockConnection = (effectiveType: string, downlink: number, rtt: number, saveData = false) => {
     Object.defineProperty(navigator, 'connection', {
       configurable: true,
-      value: { effectiveType, downlink, rtt },
+      value: { effectiveType, downlink, rtt, saveData },
       writable: true,
     });
   };
@@ -105,6 +105,15 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       // @ts-ignore
       const quality = service['detectNetworkQuality']();
       
+      expect(quality).toBe('slow');
+    });
+
+    it('4G 低带宽高延迟应识别为 slow（避免误判 moderate）', () => {
+      mockConnection('4g', 0.4, 200);
+
+      // @ts-ignore
+      const quality = service['detectNetworkQuality']();
+
       expect(quality).toBe('slow');
     });
 
@@ -177,6 +186,18 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       expect(rating2900).toBe('good');
       expect(rating4900).toBe('needs-improvement');
     });
+
+    it('4G 但链路受限时也应使用放宽阈值', () => {
+      mockConnection('4g', 0.4, 200);
+
+      // @ts-ignore
+      const rating2800 = service['getRating']('TTFB', 2800);
+      // @ts-ignore
+      const rating4300 = service['getRating']('TTFB', 4300);
+
+      expect(rating2800).toBe('good');
+      expect(rating4300).toBe('needs-improvement');
+    });
   });
 
   describe('Sentry 告警过滤', () => {
@@ -244,6 +265,24 @@ describe('WebVitalsService - TTFB 优化测试', () => {
       );
     });
 
+    it('4G 低带宽下的 poor TTFB 不应该触发告警', () => {
+      mockConnection('4g', 0.4, 200);
+
+      const metric = {
+        name: 'TTFB',
+        value: 5200,
+        id: 'test-id',
+        delta: 5200,
+        navigationType: 'navigate',
+        entries: [],
+      } as any;
+
+      // @ts-ignore
+      service['reportToSentry'](metric, 'poor');
+
+      expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
+    });
+
     it('其他 Web Vitals 指标不受网络质量影响', () => {
       mockConnection('3g', 1.35, 350);
       
@@ -275,6 +314,7 @@ describe('WebVitalsService - TTFB 优化测试', () => {
         effectiveType: '3g',
         downlink: 1.35,
         rtt: 350,
+        saveData: false,
       });
     });
 

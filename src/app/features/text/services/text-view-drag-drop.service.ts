@@ -574,7 +574,7 @@ export class TextViewDragDropService {
   private removeDragGhost() {
     this.logger.debug('🗑️ removeDragGhost called', {
       hasGhost: !!this.touchState.dragGhost,
-      stack: new Error().stack?.split('\n').slice(1, 5).join(' <- ')
+      stack: new Error().stack?.split('\n')?.slice(1, 5)?.join(' <- ')
     });
     
     // 清理当前引用的幽灵元素
@@ -770,7 +770,7 @@ export class TextViewDragDropService {
       hadTask: !!this.touchState.task,
       wasDragging: this.touchState.isDragging,
       hadGhost: !!this.touchState.dragGhost,
-      stack: new Error().stack?.split('\n').slice(1, 4).join('\n')
+      stack: new Error().stack?.split('\n')?.slice(1, 4)?.join('\n')
     });
     this.cancelLongPress();
     // 在重置前先确保幽灵元素被清理

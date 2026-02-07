@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { ActionQueueService } from './action-queue.service';
@@ -30,8 +31,10 @@ import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
+import { SentryAlertService } from './sentry-alert.service';
 import { SyncModeService } from './sync-mode.service';
 import { PersistSchedulerService } from './persist-scheduler.service';
+import { BlackBoxSyncService } from './black-box-sync.service';
 import { Project, Task, SyncState } from '../models';
 import { success } from '../utils/result';
 
@@ -77,8 +80,18 @@ const mockActionQueueService = {
   registerProcessor: vi.fn(),
   validateProcessors: vi.fn().mockReturnValue([]),
   getRegisteredProcessorTypes: vi.fn().mockReturnValue([]),
+  getPendingActionsForProject: vi.fn().mockReturnValue([]),
   enqueue: vi.fn().mockResolvedValue(true),
   processQueue: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockRetryQueueService = {
+  length: 0,
+  getItems: vi.fn().mockReturnValue([]),
+};
+
+const mockBlackBoxSyncService = {
+  forceSync: vi.fn().mockResolvedValue(undefined),
 };
 
 const mockConflictService = {
@@ -97,6 +110,7 @@ const mockProjectStateService = {
   activeProject: signal<Project | null>(null),
   activeProjectId: signal<string | null>(null),
   updateProjects: vi.fn(),
+  setProjects: vi.fn(),
 };
 
 const mockAuthService = {
@@ -109,6 +123,13 @@ const mockToastService = {
   error: vi.fn(),
   warning: vi.fn(),
   info: vi.fn(),
+};
+
+const mockSentryAlertService = {
+  updateSyncContext: vi.fn(),
+  captureMessage: vi.fn(),
+  captureException: vi.fn(),
+  setContext: vi.fn(),
 };
 
 const mockLayoutService = {
@@ -160,6 +181,7 @@ const mockChangeTrackerService = {
   }),
   clearProjectChanges: vi.fn(),
   getChangedProjectIds: vi.fn().mockReturnValue([]),
+  hasProjectChanges: vi.fn().mockReturnValue(false),
   clearAll: vi.fn(),
 };
 
@@ -280,21 +302,29 @@ describe('SyncCoordinatorService', () => {
     mockProjectStateService.projects.set([]);
     mockProjectStateService.activeProject.set(null);
     mockProjectStateService.activeProjectId.set(null);
+    mockProjectStateService.setProjects.mockImplementation((projects: Project[]) => {
+      mockProjectStateService.projects.set(projects);
+    });
+    mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+    mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
 
     injector = Injector.create({
       providers: [
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
         { provide: ConflictStorageService, useValue: mockConflictStorageService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
+        { provide: SentryAlertService, useValue: mockSentryAlertService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
+        { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
@@ -620,6 +650,52 @@ describe('SyncCoordinatorService', () => {
     });
   });
 
+  describe('downloadAndMerge local-only 保留策略', () => {
+    it('远程不存在且无本地待同步变更时，不应保留本地项目', async () => {
+      const remoteProject = createTestProject({ id: 'remote-1' });
+      const localProject = createTestProject({
+        id: 'local-stale',
+        syncSource: 'synced',
+        pendingSync: false
+      });
+
+      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockProjectStateService.projects.set([localProject]);
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      const mergedProjects = mockProjectStateService.projects();
+      expect(mergedProjects.some(p => p.id === 'remote-1')).toBe(true);
+      expect(mergedProjects.some(p => p.id === 'local-stale')).toBe(false);
+    });
+
+    it('远程不存在但有本地待同步变更时，应保留本地项目', async () => {
+      const remoteProject = createTestProject({ id: 'remote-1' });
+      const localProject = createTestProject({
+        id: 'local-pending',
+        syncSource: 'synced',
+        pendingSync: true
+      });
+
+      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockProjectStateService.projects.set([localProject]);
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      const mergedProjects = mockProjectStateService.projects();
+      const preservedLocal = mergedProjects.find(p => p.id === 'local-pending');
+      expect(preservedLocal).toBeDefined();
+      expect(preservedLocal?.syncSource).toBe('local-only');
+      expect(preservedLocal?.pendingSync).toBe(true);
+    });
+  });
+
   // ==================== 验证与重平衡 ====================
 
   describe('验证与重平衡', () => {
@@ -860,16 +936,19 @@ describe('SyncCoordinatorService 集成场景', () => {
       providers: [
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: ConflictResolutionService, useValue: mockConflictService },
         { provide: ConflictStorageService, useValue: mockConflictStorageService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
+        { provide: SentryAlertService, useValue: mockSentryAlertService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
+        { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
@@ -1161,4 +1240,3 @@ describe('SyncCoordinatorService 集成场景', () => {
     });
   });
 });
-

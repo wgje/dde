@@ -32,6 +32,7 @@ export class UserPreferencesSyncService {
     try {
       return this.supabase.client();
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：客户端不可用时静默降级
       return null;
     }
   }
@@ -67,6 +68,7 @@ export class UserPreferencesSyncService {
       };
     } catch (e) {
       this.logger.error('加载用户偏好失败', e);
+      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：偏好加载失败使用默认值
       return null;
     }
   }

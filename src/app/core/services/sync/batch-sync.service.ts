@@ -9,7 +9,7 @@
  * 从 SimpleSyncService 提取，Sprint 9 技术债务修复
  */
 
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
@@ -21,6 +21,7 @@ import { RetryQueueService } from './retry-queue.service';
 import { Task, Project, Connection } from '../../../../models';
 import { nowISO } from '../../../../utils/date';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import { AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -30,6 +31,10 @@ export interface BatchSyncResult {
   conflict?: boolean;
   remoteData?: Project;
   newVersion?: number;
+  projectPushed?: boolean;
+  failedTaskIds?: string[];
+  failedConnectionIds?: string[];
+  retryEnqueued?: string[];
 }
 
 /** 批量同步回调函数类型 */
@@ -70,10 +75,29 @@ export class BatchSyncService {
    * 获取 Supabase 客户端
    */
   private getSupabaseClient(): SupabaseClient | null {
-    if (!this.supabase.isConfigured) return null;
+    if (!this.supabase.isConfigured) {
+      const failure = classifySupabaseClientFailure(false);
+      this.logger.warn('无法获取 Supabase 客户端', failure);
+      this.syncState.setSyncError(failure.message);
+      return null;
+    }
     try {
       return this.supabase.client();
-    } catch {
+    } catch (error) {
+      const failure = classifySupabaseClientFailure(true, error);
+      this.logger.warn('无法获取 Supabase 客户端', {
+        category: failure.category,
+        message: failure.message
+      });
+      this.syncState.setSyncError(failure.message);
+      this.sentryLazyLoader.captureMessage('Sync client unavailable', {
+        level: 'warning',
+        tags: {
+          operation: 'BatchSync.getSupabaseClient',
+          category: failure.category
+        }
+      });
+      // eslint-disable-next-line no-restricted-syntax -- 需保持离线降级契约，调用方使用 null 判定客户端不可用
       return null;
     }
   }
@@ -102,22 +126,28 @@ export class BatchSyncService {
     project: Project,
     userId: string
   ): Promise<BatchSyncResult> {
+    const failedTaskIds: string[] = [];
+    const failedConnectionIds: string[] = [];
+    const retryEnqueued: string[] = [];
+    let projectPushed = false;
+
     if (!this.callbacks) {
       this.logger.error('BatchSyncService: 回调未初始化');
-      return { success: false };
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
     
     // 本地模式快速退出
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过云端同步');
-      return { success: false };
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
 
     // 网络感知检查
     if (!this.mobileSync.shouldAllowSync()) {
       this.logger.debug('网络感知: 同步被延迟', { projectId: project.id });
       this.callbacks.addToRetryQueue('project', 'upsert', project);
-      return { success: false };
+      retryEnqueued.push(`project:${project.id}`);
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
 
     // 熔断层校验
@@ -128,13 +158,14 @@ export class BatchSyncService {
         level: 'error',
         tags: { operation: 'saveProjectToCloud', projectId: project.id }
       });
-      return { success: false };
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
       this.callbacks.addToRetryQueue('project', 'upsert', project);
-      return { success: false };
+      retryEnqueued.push(`project:${project.id}`);
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
     
     // Session 验证
@@ -143,13 +174,13 @@ export class BatchSyncService {
       if (!session?.user?.id) {
         this.syncState.setSessionExpired(true);
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-        return { success: false };
+        return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
       }
     } catch (e) {
       this.logger.error('Session 验证失败', e);
       this.syncState.setSessionExpired(true);
       this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      return { success: false };
+      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
     
     this.syncState.setSyncing(true);
@@ -171,7 +202,10 @@ export class BatchSyncService {
       }
       
       // 3. 保存项目元数据
-      await this.callbacks.pushProject(project);
+      projectPushed = await this.callbacks.pushProject(project);
+      if (!projectPushed) {
+        retryEnqueued.push(`project:${project.id}`);
+      }
       
       // 4. 批量保存任务（拓扑排序）
       const sortedTasks = this.callbacks.topologicalSortTasks(tasksToSync);
@@ -199,9 +233,13 @@ export class BatchSyncService {
           
           if (success) {
             successfulTaskIds.add(task.id);
+          } else {
+            failedTaskIds.push(task.id);
+            retryEnqueued.push(`task:${task.id}`);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
+            failedTaskIds.push(sortedTasks[i].id);
             this.logger.warn('跳过永久失败的任务', { taskId: sortedTasks[i].id });
             continue;
           }
@@ -211,10 +249,19 @@ export class BatchSyncService {
       
       // 5. 批量保存连接
       const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(project.id);
+      // 包含当前批次成功的任务 + 已经存在于远端的 tombstone 排除后的任务
+      const allSyncedTaskIds = new Set(successfulTaskIds);
+      // 所有本地任务中不在 tombstone 列表里的任务视为远端可能已存在
+      for (const task of project.tasks) {
+        if (!tombstoneIds.has(task.id)) {
+          allSyncedTaskIds.add(task.id);
+        }
+      }
       const connectionsToSync = project.connections.filter(conn => {
         if (conn.deletedAt) return false;
         if (connectionTombstoneIds.has(conn.id)) return false;
-        if (!successfulTaskIds.has(conn.source) || !successfulTaskIds.has(conn.target)) {
+        // 连接的两端都必须是已同步或已知存在的任务
+        if (!allSyncedTaskIds.has(conn.source) || !allSyncedTaskIds.has(conn.target)) {
           this.logger.warn('跳过连接（引用任务未同步）', { connectionId: conn.id });
           return false;
         }
@@ -225,23 +272,47 @@ export class BatchSyncService {
         if (i > 0) await this.delay(200);
         
         try {
-          await this.callbacks.pushConnection(connectionsToSync[i], project.id, true, true);
+          const connection = connectionsToSync[i];
+          const pushed = await this.callbacks.pushConnection(connection, project.id, true, true);
+          if (!pushed) {
+            failedConnectionIds.push(connection.id);
+            retryEnqueued.push(`connection:${connection.id}`);
+          }
         } catch (e) {
           if (isPermanentFailureError(e)) {
-            this.logger.warn('跳过永久失败的连接', { connectionId: connectionsToSync[i].id });
+            const connectionId = connectionsToSync[i].id;
+            failedConnectionIds.push(connectionId);
+            this.logger.warn('跳过永久失败的连接', { connectionId });
             continue;
           }
           throw e;
         }
       }
+
+      const success =
+        projectPushed &&
+        failedTaskIds.length === 0 &&
+        failedConnectionIds.length === 0;
       
       this.syncState.setSyncing(false);
-      this.syncState.setLastSyncTime(nowISO());
+      if (success) {
+        this.syncState.setLastSyncTime(nowISO());
+        this.syncState.setSyncError(null);
+      } else {
+        this.syncState.setSyncError('部分同步失败，已进入重试队列');
+      }
       
       // 更新熔断器已知任务数
       this.circuitBreaker.updateLastKnownTaskCount(project.id, tasksToSync.length);
       
-      return { success: true, newVersion: project.version };
+      return {
+        success,
+        newVersion: project.version,
+        projectPushed,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued
+      };
     } catch (e) {
       this.logger.error('保存项目失败', e);
       this.sentryLazyLoader.captureException(e, {
@@ -250,7 +321,13 @@ export class BatchSyncService {
       });
       this.syncState.setSyncing(false);
       this.syncState.setSyncError('保存失败');
-      return { success: false };
+      return {
+        success: false,
+        projectPushed,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued
+      };
     }
   }
 }
