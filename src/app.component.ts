@@ -1,4 +1,4 @@
-import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, untracked } from '@angular/core';
+import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
@@ -391,6 +391,7 @@ export class AppComponent implements OnInit, OnDestroy {
     effect(() => {
       const loginRequested = this.modal.isOpen('login');
       if (loginRequested) {
+        this.modal.closeByType('login'); // 清除旧状态
         void this.openLoginModal();
       }
     });
@@ -409,14 +410,11 @@ export class AppComponent implements OnInit, OnDestroy {
       const needsReminder = this.exportService.needsExportReminder();
       const userId = this.userSession.currentUserId();
       if (needsReminder && userId) {
-        // 避免把 ToastService 内部 signal（toasts）收集成 effect 依赖，触发循环。
-        untracked(() => {
-          this.toast.info(
-            '数据备份提醒',
-            '已超过 7 天未导出备份，建议前往设置导出数据。',
-            { duration: 10000 }
-          );
-        });
+        this.toast.info(
+          '数据备份提醒',
+          '已超过 7 天未导出备份，建议前往设置导出数据。',
+          { duration: 10000 }
+        );
       }
     });
   }
@@ -576,8 +574,6 @@ export class AppComponent implements OnInit, OnDestroy {
   private _pendingConflict: ConflictData | null = null;
   /** 冲突模态框引用 */
   private _conflictModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
-  /** 登录模态框引用（用于登录成功后关闭动态模态） */
-  private loginModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
 
   /**
    * 打开冲突解决模态框（命令式）
@@ -857,24 +853,18 @@ async signOut() {
    * 打开登录模态框
    */
   async openLoginModal(): Promise<void> {
-    if (this.isModalLoading('login') || this.loginModalRef) return;
+    if (this.isModalLoading('login')) return;
     this.setModalLoading('login', true);
     try {
       const component = await this.modalLoader.loadLoginModal();
-      let modalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
-      modalRef = this.dynamicModal.open(component, {
+      this.dynamicModal.open(component, {
         inputs: {
           authError: this.authCoord.authError(),
           isLoading: this.authCoord.isAuthLoading(),
           resetPasswordSent: this.authCoord.resetPasswordSent()
         },
         outputs: {
-          close: () => {
-            this.modal.closeByType('login', { success: false });
-            if (this.loginModalRef === modalRef) {
-              this.loginModalRef = null;
-            }
-          },
+          close: () => this.dynamicModal.close(),
           login: (data: unknown) => this.handleLoginFromModal(data as { email: string; password: string }),
           signup: (data: unknown) => this.handleSignupFromModal(data as { email: string; password: string; confirmPassword: string }),
           resetPassword: (email: unknown) => this.handleResetPasswordFromModal(email as string),
@@ -882,12 +872,6 @@ async signOut() {
         },
         closeOnBackdropClick: false,
         closeOnEscape: false
-      });
-      this.loginModalRef = modalRef;
-      void modalRef.result.finally(() => {
-        if (this.loginModalRef === modalRef) {
-          this.loginModalRef = null;
-        }
       });
     } catch {
       this.toast.error('登录组件加载失败', '请检查网络连接后重试');
@@ -1076,25 +1060,15 @@ async signOut() {
   // 适配 LoginModalComponent 事件 — 委托到 authCoord
   async handleLoginFromModal(data: { email: string; password: string }) {
     await this.authCoord.handleLoginFromModal(data);
-    if (this.userSession.currentUserId()) {
-      this.loginModalRef?.close();
-      this.loginModalRef = null;
-    }
   }
   async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }) {
     await this.authCoord.handleSignupFromModal(data);
-    if (this.userSession.currentUserId()) {
-      this.loginModalRef?.close();
-      this.loginModalRef = null;
-    }
   }
   async handleResetPasswordFromModal(email: string) {
     await this.authCoord.handleResetPasswordFromModal(email);
   }
   handleLocalModeFromModal() {
     this.authCoord.handleLocalModeFromModal();
-    this.loginModalRef?.close();
-    this.loginModalRef = null;
   }
   handleMigrationComplete() {
     this.authCoord.handleMigrationComplete();

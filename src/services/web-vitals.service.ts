@@ -42,6 +42,14 @@ export const WEB_VITALS_THRESHOLDS = {
 const MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS = { good: 3000, needsImprovement: 5000 };
 
 /**
+ * 生产环境中等网络 TTFB 阈值（常规 3G/4G 移动网络）
+ * 背景: Sentry Alert - 3136ms TTFB from HeadlessChrome (Pune, India)
+ * 原因: TTFB 是纯网络指标（DNS + TLS + 服务器响应），受地理位置和网络条件影响大
+ * 对于静态 SPA 应用，应用代码无法控制 TTFB，需要放宽中等网络场景的阈值
+ */
+const MOBILE_MODERATE_NETWORK_TTFB_THRESHOLDS = { good: 1500, needsImprovement: 3500 };
+
+/**
  * 开发环境 TTFB 阈值（放宽）
  * 原因：GitHub Codespaces / 本地开发服务器的网络延迟是正常的
  * TTFB 是服务器响应时间，不是客户端代码问题
@@ -78,6 +86,9 @@ export class WebVitalsService {
   
   /** 当前网络质量（缓存，避免重复计算） */
   private cachedNetworkQuality: NetworkQuality | null = null;
+
+  /** 是否为合成监控/无头浏览器（缓存） */
+  private cachedIsSynthetic: boolean | null = null;
   
   /**
    * 检测当前网络质量
@@ -100,12 +111,16 @@ export class WebVitalsService {
     const rtt = connection.rtt || 0;
     const saveData = !!connection.saveData;
     
+    // rtt === 0 通常表示浏览器不提供 RTT 数据（HeadlessChrome、部分移动浏览器），
+    // 而不是表示网络延迟为零。将其标记为"不可用"以避免误判。
+    const rttAvailable = rtt > 0;
+
     // 先用真实链路指标判定弱网，避免 "4g + 低带宽" 误判为 moderate
     const constrainedByTelemetry =
       saveData ||
       (downlink > 0 && downlink < 1.5) ||
-      (rtt > 0 && rtt >= 180);
-    
+      (rttAvailable && rtt >= 180);
+
     // 分类网络质量
     // 参考: Chrome DevTools Network Throttling Presets
     if (effectiveType === 'slow-2g' || saveData) {
@@ -114,8 +129,8 @@ export class WebVitalsService {
       this.cachedNetworkQuality = 'slow'; // 2G 或链路受限
     } else if (effectiveType === '3g' && downlink <= 2) {
       this.cachedNetworkQuality = 'slow'; // 典型 3G
-    } else if (effectiveType === '4g' && downlink >= 8 && rtt > 0 && rtt < 80) {
-      this.cachedNetworkQuality = 'fast'; // 4G 快速网络
+    } else if (effectiveType === '4g' && downlink >= 8 && (!rttAvailable || rtt < 80)) {
+      this.cachedNetworkQuality = 'fast'; // 4G 快速网络（rtt 不可用时不惩罚）
     } else if (effectiveType === '4g' || effectiveType === '3g') {
       this.cachedNetworkQuality = 'moderate'; // 常规移动网络
     } else {
@@ -139,6 +154,27 @@ export class WebVitalsService {
       saveData: !!connection.saveData,
     } : null;
   }
+
+  /**
+   * 检测是否为合成监控/无头浏览器环境
+   * HeadlessChrome/Lighthouse/PageSpeed 等工具的 TTFB 不反映真实用户体验，
+   * 因为 TTFB 完全取决于监控节点的地理位置和网络条件
+   */
+  private isSyntheticMonitoring(): boolean {
+    if (this.cachedIsSynthetic !== null) return this.cachedIsSynthetic;
+
+    const ua = navigator.userAgent || '';
+    this.cachedIsSynthetic =
+      /HeadlessChrome/i.test(ua) ||
+      /Lighthouse/i.test(ua) ||
+      /PTST\//i.test(ua) ||          // WebPageTest
+      /PageSpeed/i.test(ua) ||
+      /Googlebot/i.test(ua) ||
+      /Chrome-Lighthouse/i.test(ua) ||
+      (typeof navigator.webdriver === 'boolean' && navigator.webdriver);
+
+    return this.cachedIsSynthetic;
+  }
   
   /**
    * 初始化 Web Vitals 监控
@@ -149,9 +185,17 @@ export class WebVitalsService {
       this.logger.warn('WebVitalsService 已初始化，跳过重复调用');
       return;
     }
-    
+
     this.initialized = true;
-    
+
+    // 合成监控环境（HeadlessChrome/Lighthouse/WebPageTest 等）不注册 Web Vitals 观察者
+    // 根因: 这些环境的网络指标（TTFB/FCP/LCP）取决于监控节点地理位置，不反映真实用户体验
+    // 跳过注册 = 从根源上杜绝 false-positive 告警，同时节省 PerformanceObserver 开销
+    if (this.isSyntheticMonitoring()) {
+      this.logger.info('合成监控环境，跳过 Web Vitals 注册');
+      return;
+    }
+
     // 注册 Core Web Vitals 回调
     // 注意：FID 已在 web-vitals v4 中被 INP 替代
     onLCP((metric: Metric) => this.handleMetric(metric));
@@ -159,7 +203,7 @@ export class WebVitalsService {
     onCLS((metric: Metric) => this.handleMetric(metric));
     onINP((metric: Metric) => this.handleMetric(metric));
     onTTFB((metric: Metric) => this.handleMetric(metric));
-    
+
     this.logger.info('Web Vitals 监控已启动');
   }
   
@@ -202,11 +246,19 @@ export class WebVitalsService {
     // 背景: Sentry Alert 2861ms TTFB on 3G - 这是网络条件导致的，不应该告警
     if (name === 'TTFB' && !isDevMode()) {
       const networkQuality = this.detectNetworkQuality();
-      
+
       // 慢速网络（3G/2G）使用放宽的阈值
       if (networkQuality === 'slow' || networkQuality === 'offline') {
         if (value <= MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS.good) return 'good';
         if (value <= MOBILE_SLOW_NETWORK_TTFB_THRESHOLDS.needsImprovement) return 'needs-improvement';
+        return 'poor';
+      }
+
+      // 中等网络（常规 3G/4G）使用中间阈值
+      // TTFB 是纯网络指标，对静态 SPA 应用来说由 CDN 距离和网络条件决定
+      if (networkQuality === 'moderate') {
+        if (value <= MOBILE_MODERATE_NETWORK_TTFB_THRESHOLDS.good) return 'good';
+        if (value <= MOBILE_MODERATE_NETWORK_TTFB_THRESHOLDS.needsImprovement) return 'needs-improvement';
         return 'poor';
       }
     }
@@ -237,26 +289,36 @@ export class WebVitalsService {
   private reportToSentry(metric: Metric, rating: MetricRating): void {
     // 使用 Sentry 的 transaction 记录性能指标
     this.sentryLazyLoader.setMeasurement(metric.name, metric.value, metric.name === 'CLS' ? '' : 'millisecond');
-    
+
     // 开发环境下不对 TTFB 发送告警
     // TTFB 是服务器响应时间，开发环境的网络延迟是正常的
     if (metric.name === 'TTFB' && isDevMode()) {
       return;
     }
-    
-    // 生产环境下，过滤弱网环境的 TTFB 告警噪音
-    // 背景: 移动端 3G 网络 TTFB 2861ms 是正常的，不应该告警
-    if (metric.name === 'TTFB' && !isDevMode() && rating === 'poor') {
+
+    // 生产环境下，过滤导航时序指标（TTFB、FCP、LCP）的告警噪音
+    // 这三个指标都受 TTFB（网络延迟）主导：FCP ≈ TTFB + 框架启动，LCP ≈ TTFB + 内容渲染
+    // 背景: Sentry Issue #91323207 - HeadlessChrome 从印度访问，TTFB ~7.8s 导致 LCP 7892ms
+    //       TTFB 问题级联到 FCP 和 LCP，但应用代码无法控制 CDN 交付时间
+    const isNavigationMetric = metric.name === 'TTFB' || metric.name === 'FCP' || metric.name === 'LCP';
+    if (isNavigationMetric && !isDevMode() && rating === 'poor') {
       const networkQuality = this.detectNetworkQuality();
       const networkInfo = this.getNetworkInfo();
-      
-      // 慢速网络下，TTFB 不符合标准阈值是预期的，不发送告警
-      if (networkQuality === 'slow' || networkQuality === 'offline') {
-        this.logger.info(`TTFB ${metric.value}ms (弱网环境 ${networkQuality}，跳过告警)`, networkInfo);
+
+      // 合成监控（HeadlessChrome 等）不反映真实用户体验
+      // TTFB 完全取决于监控节点的地理位置和网络条件，FCP/LCP 因此级联受影响
+      if (this.isSyntheticMonitoring()) {
+        this.logger.info(`${metric.name} ${metric.value}ms (合成监控环境，跳过告警)`, networkInfo);
+        return;
+      }
+
+      // 慢速/中等网络下，导航时序指标超标是预期的（纯网络问题不可修）
+      if (networkQuality === 'slow' || networkQuality === 'offline' || networkQuality === 'moderate') {
+        this.logger.info(`${metric.name} ${metric.value}ms (${networkQuality} 网络环境，跳过告警)`, networkInfo);
         return;
       }
     }
-    
+
     // 如果评级差，额外发送告警消息
     if (rating === 'poor') {
       const networkInfo = this.getNetworkInfo();

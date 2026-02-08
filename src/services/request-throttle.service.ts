@@ -309,7 +309,16 @@ export class RequestThrottleService {
    * 判断是否应该重试
    */
   private shouldRetry(error: unknown): boolean {
-    if (!(error instanceof Error)) return true;
+    // Supabase 错误是普通对象 {code, message, details}，非 Error 实例
+    if (!(error instanceof Error)) {
+      const errObj = error as { code?: string; message?: string };
+      const code = errObj?.code;
+      // PostgREST 业务错误码不应重试
+      if (code === 'PGRST116' || code === '42501' || code === '23503' || code === '42P01') {
+        return false;
+      }
+      return true;
+    }
     
     const message = error.message.toLowerCase();
     
@@ -328,6 +337,8 @@ export class RequestThrottleService {
     // 业务错误：不应该重试
     if (
       message.includes('not found') ||
+      message.includes('not acceptable') ||
+      message.includes('406') ||
       message.includes('permission denied') ||
       message.includes('unauthorized') ||
       message.includes('forbidden') ||

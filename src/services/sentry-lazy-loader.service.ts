@@ -152,7 +152,7 @@ export class SentryLazyLoaderService {
           Sentry.browserTracingIntegration(),
         ],
         // 只允许来自我们域名的请求被追踪
-        tracePropagationTargets: ['localhost', /^https:\/\/dde-psi\.vercel\.app/],
+        tracePropagationTargets: ['localhost', /^https:\/\/dde[-\w]*\.vercel\.app/],
         // 采样率：生产环境禁用性能追踪
         tracesSampleRate: 0,
         // 环境标识
@@ -172,8 +172,9 @@ export class SentryLazyLoaderService {
       
       // 发送队列中的待处理事件
       this.flushPendingEvents();
-      
-      console.warn('[SentryLazyLoader] Sentry 初始化完成');
+
+      // 使用 console.log 避免在 Sentry breadcrumbs 中产生 warning 级别噪音
+      console.log('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
       console.error('[SentryLazyLoader] Sentry 初始化失败:', error);
     } finally {
@@ -310,7 +311,10 @@ export class SentryLazyLoaderService {
       return;
     }
     
-    console.warn(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
+    // 使用 console.log 避免在 Sentry breadcrumbs 中产生 warning 级别噪音
+    // 背景: Sentry Issue #91206571 中 "[SentryLazyLoader] 发送 2 个待处理事件" 以 warning 级别
+    //        出现在 breadcrumbs 中，被误判为性能问题根因
+    console.log(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
     const now = Date.now();
 

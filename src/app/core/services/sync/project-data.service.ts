@@ -116,8 +116,9 @@ export class ProjectDataService {
 
       return project;
     } catch (e) {
-      this.logger.error('批量加载项目失败', e);
-      this.sentryLazyLoader.captureException(e, {
+      const err = supabaseErrorToError(e);
+      this.logger.error('批量加载项目失败', err);
+      this.sentryLazyLoader.captureException(err, {
         tags: { operation: 'loadFullProjectOptimized' },
         extra: { projectId }
       });
@@ -142,8 +143,8 @@ export class ProjectDataService {
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
             .eq('id', projectId)
-            .single();
-          if (error) throw error;
+            .maybeSingle();
+          if (error) throw supabaseErrorToError(error);
           return data;
         },
         { 
@@ -153,6 +154,11 @@ export class ProjectDataService {
         }
       );
       
+      if (!projectData) {
+        this.logger.warn('项目不存在或无权访问', { projectId });
+        return null;
+      }
+
       // 2. 顺序加载任务和连接
       const tasks = await this.pullTasksThrottled(projectId, client);
       const connectionsData = await this.throttle.execute(
@@ -188,8 +194,9 @@ export class ProjectDataService {
       
       return project;
     } catch (e) {
-      this.logger.error('加载项目失败', e);
-      this.sentryLazyLoader.captureException(e, {
+      const err = supabaseErrorToError(e);
+      this.logger.error('加载项目失败', err);
+      this.sentryLazyLoader.captureException(err, {
         tags: { operation: 'loadFullProject' },
         extra: { projectId }
       });

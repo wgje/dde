@@ -51,15 +51,10 @@ export class UserPreferencesSyncService {
         .from('user_preferences')
         .select('theme,layout_direction,floating_window_pref')
         .eq('user_id', userId)
-        .single();
+        .maybeSingle();
       
-      if (error) {
-        if (error.code === 'PGRST116') {
-          // 没有找到记录，返回 null
-          return null;
-        }
-        throw error;
-      }
+      if (error) throw error;
+      if (!data) return null;
       
       return {
         theme: (data.theme as ThemeType) || 'default',

@@ -226,32 +226,23 @@ import { FlowViewComponent } from '../../features/flow';
                   </button>
               }
            </div>
-           @if (shouldLoadFlowDiagram()) {
-             <!-- 显式触发后再懒加载，避免登录后立即初始化 GoJS 造成主线程阻塞 -->
-             @defer (on immediate) {
-               <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
-             } @placeholder {
-               <div class="flex-1 flex items-center justify-center text-stone-400">
-                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
-               </div>
-             } @error {
-               <div class="flex-1 flex flex-col items-center justify-center text-stone-500 p-4 gap-4">
-                 <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                 </svg>
-                 <p class="text-sm text-center">流程图加载失败</p>
-                 <button (click)="reloadPage()" class="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600 transition-colors">
-                   刷新页面
-                 </button>
-               </div>
-             }
-           } @else {
-             <div class="flex-1 flex items-center justify-center p-6">
-               <button
-                 type="button"
-                 class="px-4 py-2 text-sm rounded-lg border border-stone-300 text-stone-600 hover:bg-stone-100 transition-colors"
-                 (click)="activateFlowView()">
-                 加载流程图
+           <!-- @defer 块用于懒加载流程图组件 -->
+           <!-- 【性能优化 2026-02-07】改用 on idle 触发，避免桌面端 on viewport 首帧即加载 GoJS -->
+           <!-- prefetch: 当浏览器空闲时预取 GoJS 代码，但不立即执行 -->
+           @defer (on idle; prefetch on idle) {
+             <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
+           } @placeholder {
+             <div class="flex-1 flex items-center justify-center text-stone-400">
+               <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+             </div>
+           } @error {
+             <div class="flex-1 flex flex-col items-center justify-center text-stone-500 p-4 gap-4">
+               <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+               </svg>
+               <p class="text-sm text-center">流程图加载失败</p>
+               <button (click)="reloadPage()" class="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600 transition-colors">
+                 刷新页面
                </button>
              </div>
            }
@@ -294,8 +285,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   // UI 状态
   isFilterOpen = signal(false);
-  /** 显式控制 GoJS 视图加载，避免登录后立即触发重型初始化 */
-  readonly shouldLoadFlowDiagram = signal(false);
   // 使用 uiState.activeView 代替本地的 mobileActiveView，使其他组件可以访问当前视图状态
   
   // 内容调整状态
@@ -359,13 +348,11 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
         const currentUrl = this.router.url;
         if (currentUrl.endsWith('/flow')) {
           this.uiState.activeView.set('flow');
-          this.activateFlowView();
         } else if (currentUrl.endsWith('/text')) {
           this.uiState.activeView.set('text');
         } else if (currentUrl.includes('/task/')) {
           // 任务深链接默认使用流程图视图
           this.uiState.activeView.set('flow');
-          this.activateFlowView();
         }
       });
   }
@@ -394,7 +381,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
         // 任务存在，通过命令服务发送居中请求
         // FlowCommandService 会缓存命令直到 FlowView 就绪
         this.uiState.activeView.set('flow');
-        this.activateFlowView();
         
         // 等待图表渲染后定位
         this.deepLinkRetryTimer = setTimeout(() => {
@@ -412,7 +398,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
         // 超时未找到任务，导航到流程图视图并提示用户
         // 🔥 不再更新 URL - 避免触发路由导航销毁组件
         this.uiState.activeView.set('flow');
-        this.activateFlowView();
         
         // 根据情况显示不同提示，并提供明确的下一步操作
         if (!isLoading && !task) {
@@ -473,14 +458,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * 移动端：使用条件渲染，FlowView 组件会被完全销毁/重建
    */
   switchToFlow() {
-    this.activateFlowView();
     this.uiState.activeView.set('flow');
-  }
-
-  activateFlowView(): void {
-    if (!this.shouldLoadFlowDiagram()) {
-      this.shouldLoadFlowDiagram.set(true);
-    }
   }
   
   switchToText() {
@@ -504,7 +482,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   onFocusFlowNode(taskId: string) {
     if (!this.uiState.isMobile()) {
-      this.activateFlowView();
       // 通过命令服务发送居中请求，无需检查 flowView 实例
       this.flowCommand.centerOnNode(taskId, false);
     }
@@ -619,7 +596,6 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    */
   retryFlowView(): void {
     // 触发流程图重新初始化
-    this.activateFlowView();
     this.uiState.activeView.set('flow');
     // 通过命令服务发送重试命令
     // 命令会被缓存直到 FlowView 就绪
