@@ -274,6 +274,9 @@ export class AuthService {
    * 登录
    * @returns Result 类型，成功时包含用户信息
    */
+  /** 登录超时时间（ms） */
+  private readonly SIGN_IN_TIMEOUT = 15000;
+
   async signIn(email: string, password: string): Promise<Result<AuthResult, OperationError>> {
     if (!this.supabase.isConfigured) {
       return failure(
@@ -285,7 +288,13 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
-      const { data, error } = await this.supabase.signInWithPassword(email, password);
+      // 【P0 修复 2026-02-08】给 signInWithPassword 加超时保护
+      // 防止网络异常时无限挂起，导致 UI 卡在 "登录中..." 无法操作
+      const signInPromise = this.supabase.signInWithPassword(email, password);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('登录请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
+      );
+      const { data, error } = await Promise.race([signInPromise, timeoutPromise]);
       
       if (error || !data.session?.user) {
         const errorMsg = humanizeErrorMessage(error?.message || '登录失败');
@@ -296,7 +305,10 @@ export class AuthService {
       const userId = data.session.user.id;
       const userEmail = data.session.user.email ?? null;
       
-      this.currentUserId.set(userId);
+      // 【P0 修复 2026-02-08】不在此处设置 currentUserId
+      // 原因：signIn() 提前设置会导致后续 setCurrentUser() 判断 isUserChange=false，
+      // 从而跳过 loadUserData()，用户看到的是种子数据而非真实云端数据。
+      // currentUserId 统一由 handleLogin → setCurrentUser(userId, { forceLoad: true }) 设置。
       this.sessionEmail.set(userEmail);
       this.authState.update(s => ({
         ...s,
@@ -308,7 +320,10 @@ export class AuthService {
       return success({ userId, email: userEmail ?? undefined });
     } catch (e: unknown) {
       const err = e as Error | undefined;
-      const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
+      const isTimeout = err?.message?.includes('超时');
+      const errorMsg = isTimeout
+        ? err!.message
+        : humanizeErrorMessage(err?.message ?? String(e));
       this.authState.update(s => ({ ...s, error: errorMsg }));
       return failure(ErrorCodes.UNKNOWN, errorMsg);
     } finally {
@@ -331,10 +346,15 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
-      const { data, error } = await this.supabase.client().auth.signUp({
+      // 【P0 修复 2026-02-08】给注册加超时保护
+      const signUpPromise = this.supabase.client().auth.signUp({
         email,
         password
       });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('注册请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
+      );
+      const { data, error } = await Promise.race([signUpPromise, timeoutPromise]);
       
       if (error) {
         const errorMsg = humanizeErrorMessage(error.message);
@@ -352,7 +372,7 @@ export class AuthService {
         const userId = data.session.user.id;
         const userEmail = data.session.user.email ?? null;
         
-        this.currentUserId.set(userId);
+        // 【P0 修复 2026-02-08】不在此处设置 currentUserId，由 setCurrentUser 统一管理
         this.sessionEmail.set(userEmail);
         this.authState.update(s => ({
           ...s,
@@ -387,9 +407,14 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
-      const { error } = await this.supabase.client().auth.resetPasswordForEmail(email, {
+      // 【P1 修复 2026-02-08】给重置密码加超时保护
+      const resetPromise = this.supabase.client().auth.resetPasswordForEmail(email, {
         redirectTo: `${window.location.origin}/reset-password`
       });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
+      );
+      const { error } = await Promise.race([resetPromise, timeoutPromise]);
       
       if (error) {
         const errorMsg = humanizeErrorMessage(error.message);

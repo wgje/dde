@@ -44,17 +44,34 @@ export class UserSessionService {
     });
   }
 
-  /** 设置当前用户（登录/登出时调用，总是会加载项目数据） */
-  async setCurrentUser(userId: string | null): Promise<void> {
+  /**
+   * 设置当前用户（登录/登出时调用，总是会加载项目数据）
+   * @param userId 用户 ID，null 表示登出
+   * @param opts.forceLoad 强制加载数据，跳过 isUserChange 检查（登录时必须为 true）
+   */
+  async setCurrentUser(userId: string | null, opts?: { forceLoad?: boolean }): Promise<void> {
     const previousUserId = this.currentUserId();
     const isUserChange = previousUserId !== userId;
+    const forceLoad = opts?.forceLoad ?? false;
+    
+    this.logger.debug('setCurrentUser', {
+      previousUserId: previousUserId?.substring(0, 8),
+      newUserId: userId?.substring(0, 8),
+      isUserChange,
+      forceLoad
+    });
     
     // 清理旧用户的附件监控和回调，防止内存泄漏
-    if (isUserChange) {
+    if (isUserChange || forceLoad) {
       try {
         this.attachmentService.clearMonitoredAttachments();
         this.projectState.setActiveProjectId(null);
-        this.projectState.setProjects([]);
+        // 【P0 修复 2026-02-08】不再先清空再加载，避免双重 setProjects 触发信号风暴
+        // 旧行为：setProjects([]) → loadData → setProjects(data) — 两次信号通知
+        // 新行为：直接 loadData → setProjects(data) — 一次信号通知
+        if (isUserChange) {
+          this.projectState.setProjects([]);
+        }
         this.undoService.clearHistory();
         this.syncCoordinator.core.teardownRealtimeSubscription();
       } catch (cleanupError) {
@@ -66,9 +83,11 @@ export class UserSessionService {
     this.authService.currentUserId.set(userId);
 
     if (userId) {
-      // 检查是否已经有项目数据（避免重复加载）
+      // 【P0 修复 2026-02-08】forceLoad=true 时强制加载数据
+      // 修复竞态 bug：signIn() 提前设置 currentUserId 导致 isUserChange=false，
+      // 加上种子数据 hasProjects=true，loadUserData 被错误跳过。
       const hasProjects = this.projectState.projects().length > 0;
-      if (!hasProjects || isUserChange) {
+      if (forceLoad || !hasProjects || isUserChange) {
         try {
           await this.loadUserData(userId);
         } catch (error) {

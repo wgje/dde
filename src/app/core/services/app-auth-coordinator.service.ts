@@ -228,11 +228,22 @@ export class AppAuthCoordinatorService {
       }
       disableLocalMode();
       this.sessionEmail.set(this.auth.sessionEmail());
-      const userId = this.auth.currentUserId();
+      // 【P0 修复 2026-02-08】从 signIn 结果中获取 userId，而非从 signal 读取
+      // signIn() 不再提前设置 currentUserId，由 setCurrentUser 统一管理
+      const userId = result.value.userId ?? null;
       if (userId) {
         localStorage.setItem('currentUserId', userId);
       }
-      await this.userSession.setCurrentUser(userId);
+      // 【P0 修复 2026-02-08】使用 waitWithTimeout 防止数据加载卡死
+      // 与 bootstrapSession 对齐，超时后转后台继续，不阻塞 UI
+      const DATA_LOAD_TIMEOUT_MS = 8000;
+      const loadPromise = this.userSession.setCurrentUser(userId, { forceLoad: true });
+      const loadStatus = await this.waitWithTimeout(loadPromise, DATA_LOAD_TIMEOUT_MS);
+      if (loadStatus === 'timeout') {
+        this.logger.warn('[Login] 数据加载超时，转后台继续', { timeoutMs: DATA_LOAD_TIMEOUT_MS });
+        // 超时不阻断登录流程，数据在后台继续加载
+        void loadPromise.catch(e => this.logger.error('[Login] 后台数据加载失败', e));
+      }
       this.toast.success('登录成功', `欢迎回来`);
       await this.checkMigrationAfterLogin();
       this.isReloginMode.set(false);
@@ -280,7 +291,7 @@ export class AppAuthCoordinatorService {
         this.authError.set('注册成功！请查收邮件并点击验证链接完成注册。');
       } else if (this.auth.currentUserId()) {
         this.sessionEmail.set(this.auth.sessionEmail());
-        await this.userSession.setCurrentUser(this.auth.currentUserId());
+        await this.userSession.setCurrentUser(this.auth.currentUserId(), { forceLoad: true });
         this.toast.success('注册成功', '欢迎使用');
         this.modal.closeByType('login', { success: true, userId: this.auth.currentUserId() ?? undefined });
         this.isSignupMode.set(false);
