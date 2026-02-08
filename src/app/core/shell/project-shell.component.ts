@@ -227,9 +227,9 @@ import { FlowViewComponent } from '../../features/flow';
               }
            </div>
            <!-- @defer 块用于懒加载流程图组件 -->
+           <!-- 【性能优化 2026-02-07】改用 on idle 触发，避免桌面端 on viewport 首帧即加载 GoJS -->
            <!-- prefetch: 当浏览器空闲时预取 GoJS 代码，但不立即执行 -->
-           <!-- 这样首屏时不会阻塞主线程，同时保证用户需要时能快速显示 -->
-           @defer (on viewport; prefetch on idle) {
+           @defer (on idle; prefetch on idle) {
              <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
            } @placeholder {
              <div class="flex-1 flex items-center justify-center text-stone-400">

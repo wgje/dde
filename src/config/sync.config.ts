@@ -31,8 +31,8 @@ export const SYNC_CONFIG = {
   RECONNECT_MAX_DELAY: 30000,
   /** 云端数据加载超时（毫秒）- 增加到30秒，避免网络慢时加载失败 */
   CLOUD_LOAD_TIMEOUT: 30000,
-  /** 本地缓存保存频率（毫秒）- 每1秒自动保存到本地，防止数据丢失 */
-  LOCAL_AUTOSAVE_INTERVAL: 1000,
+  /** 本地缓存保存频率（毫秒）- 每3秒自动保存到本地（含脏检查，无变更时跳过） */
+  LOCAL_AUTOSAVE_INTERVAL: 3000,
   /** 连通性探测间隔（毫秒）- 用于在 VPN/网络切换后自动恢复在线状态 */
   CONNECTIVITY_PROBE_INTERVAL: 15000,
   /** 连通性探测超时（毫秒）- 避免弱网时长时间挂起 */

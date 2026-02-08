@@ -59,11 +59,10 @@ import { IndexedDBHealthService } from './services/indexeddb-health.service';
     OfflineBannerComponent,
     DemoBannerComponent,
     ErrorBoundaryComponent,
-    // 模态框组件通过 @defer 懒加载，不再需要在 imports 中声明
-    // 【性能优化 2026-02-05】移除静态导入，减小 main.js ~80KB
-    // Focus Mode 组件（静态加载，避免 @defer 延迟导致测试按钮无效）
-    FocusModeComponent,
-    SpotlightTriggerComponent,
+    // 【性能优化 2026-02-07】FocusMode 和 SpotlightTrigger 改为 @defer 懒加载
+    // 从 imports 移除，仅在模板 @defer 块中引用，由 Angular 自动 code-split
+    // FocusModeComponent,       → @defer (on idle) in template
+    // SpotlightTriggerComponent, → @defer (on idle) in template
   ],
   templateUrl: './app.component.html',
 })
@@ -350,6 +349,10 @@ export class AppComponent implements OnInit, OnDestroy {
     
     // ⚡ 性能优化：延迟会话检查到浏览器空闲时段
     this.authCoord.scheduleSessionBootstrap();
+
+    // 【性能审计 2026-02-07】延迟初始化同步服务，避免阻塞首屏渲染
+    // SyncCoordinator 的重型副作用（处理器注册、定时器）延迟到首屏完成后
+    setTimeout(() => this.syncCoordinator.initialize(), 100);
     
     // 🚀 空闲时预加载常用模态框（消除首次点击延迟）
     this.modalLoader.preloadCommonModals();

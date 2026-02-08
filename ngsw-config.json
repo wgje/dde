@@ -23,18 +23,19 @@
       "resources": {
         "files": [
           "/icons/**/*",
-          "/**/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif|otf|ttf|woff|woff2)"
+          "/**/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif)"
         ]
       }
     },
     {
       "name": "local-fonts",
-      "installMode": "prefetch",
+      "installMode": "lazy",
       "updateMode": "prefetch",
       "resources": {
         "files": [
           "/fonts/**/*.woff2",
-          "/fonts/**/*.css"
+          "/fonts/**/*.css",
+          "/**/*.(otf|ttf|woff|woff2)"
         ]
       }
     }

@@ -22,6 +22,9 @@ import { AUTH_CONFIG } from '../../../config';
  */
 @Injectable({ providedIn: 'root' })
 export class AppAuthCoordinatorService {
+  /** 启动阶段等待用户数据加载的最大时长（超时后转后台继续） */
+  private readonly BOOTSTRAP_DATA_LOAD_TIMEOUT_MS = AUTH_CONFIG.SESSION_CHECK_TIMEOUT;
+
   private readonly logger = inject(LoggerService).category('Auth');
   private readonly auth = inject(AuthService);
   private readonly userSession = inject(UserSessionService);
@@ -95,6 +98,28 @@ export class AppAuthCoordinatorService {
     this.bootstrapSession().catch(_e => {});
   }
 
+  /**
+   * 等待 Promise 完成，超时则返回 timeout，避免启动流程被长期阻塞
+   */
+  private async waitWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number
+  ): Promise<'completed' | 'timeout'> {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise.then(() => 'completed' as const),
+        new Promise<'timeout'>(resolve => {
+          timeoutId = setTimeout(() => resolve('timeout'), timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
   private async bootstrapSession(): Promise<void> {
     if (this.bootstrapInFlight) {
       this.logger.debug('[Bootstrap] 已在执行中，跳过重复调用');
@@ -134,9 +159,30 @@ export class AppAuthCoordinatorService {
         this.sessionEmail.set(result.email);
         this.logger.debug('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
         const loadStartTime = Date.now();
-        await this.userSession.setCurrentUser(result.userId);
-        const loadElapsed = Date.now() - loadStartTime;
-        this.logger.debug(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
+        const loadPromise = this.userSession.setCurrentUser(result.userId);
+        const loadStatus = await this.waitWithTimeout(
+          loadPromise,
+          this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS
+        );
+
+        if (loadStatus === 'completed') {
+          const loadElapsed = Date.now() - loadStartTime;
+          this.logger.debug(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
+        } else {
+          const loadElapsed = Date.now() - loadStartTime;
+          this.logger.warn(
+            `[Bootstrap] 步骤 2/3: 数据加载超过 ${this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS}ms，转后台继续`,
+            { elapsed: loadElapsed }
+          );
+
+          void loadPromise.then(() => {
+            const backgroundElapsed = Date.now() - loadStartTime;
+            this.logger.info(`[Bootstrap] 后台数据加载完成 (耗时 ${backgroundElapsed}ms)`);
+          }).catch((error: unknown) => {
+            this.logger.error('[Bootstrap] 后台数据加载失败', error);
+          });
+        }
+
         this.logger.debug('[Bootstrap] 步骤 3/3: 检查项目数据...', {
           projectCount: this.projectState.projects().length,
           activeProjectId: this.projectState.activeProjectId()

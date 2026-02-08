@@ -324,7 +324,10 @@ export type ResolutionStrategy =
 // ============================================
 // GoJS 边界类型导出
 // ============================================
-export * from './gojs-boundary';
+// 【性能优化 2026-02-07】移除 barrel export，防止 GoJS ~800KB 被拉入 main bundle
+// GoJS 运行时函数已迁移到 src/app/features/flow/types/gojs-runtime.ts
+// 纯类型接口保留在 gojs-boundary.ts（无 GoJS 运行时依赖）
+// 需要使用时请直接 import from './gojs-boundary' 或对应 flow 目录文件
 
 // ============================================
 // 流程图视图状态导出

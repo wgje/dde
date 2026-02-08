@@ -38,11 +38,8 @@
     "perf:benchmark": "bash scripts/performance-benchmark.sh"
   },
   "dependencies": {
-    "@angular/build": "^19.2.18",
-    "@angular/cli": "^19.2.18",
     "@angular/common": "^19.2.18",
     "@angular/compiler": "^19.2.18",
-    "@angular/compiler-cli": "^19.2.18",
     "@angular/core": "^19.2.18",
     "@angular/forms": "^19.2.18",
     "@angular/platform-browser": "^19.2.18",
@@ -52,8 +49,6 @@
     "@sentry/angular": "^10.32.1",
     "@supabase/supabase-js": "^2.84.0",
     "dompurify": "^3.3.1",
-    "dotenv": "^17.2.3",
-    "esbuild": "0.25.4",
     "gojs": "^3.1.1",
     "idb-keyval": "^6.2.2",
     "rxjs": "^7.8.2",
@@ -61,6 +56,9 @@
     "zone.js": "^0.15.0"
   },
   "devDependencies": {
+    "@angular/build": "^19.2.18",
+    "@angular/cli": "^19.2.18",
+    "@angular/compiler-cli": "^19.2.18",
     "@playwright/test": "^1.48.0",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^22.14.0",
@@ -68,6 +66,8 @@
     "@typescript-eslint/parser": "^8.48.1",
     "@vitest/coverage-v8": "^4.0.14",
     "autoprefixer": "^10.4.22",
+    "dotenv": "^17.2.3",
+    "esbuild": "0.25.4",
     "eslint": "^9.39.1",
     "fake-indexeddb": "^6.0.0",
     "globals": "^16.5.0",

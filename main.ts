@@ -284,25 +284,16 @@ async function runPostBootstrapMaintenance(): Promise<void> {
       log('等待页面刷新...');
       return;
     }
-    await unregisterAllServiceWorkers();
+    // 【性能审计 2026-02-07】移除 unregisterAllServiceWorkers() 调用
+    // SW 注册由 provideServiceWorker() 统一管理，不再每次启动时注销
   } catch (e) {
     logError('启动后维护任务失败', e);
   }
 }
 
-async function unregisterAllServiceWorkers(): Promise<void> {
-  if (!('serviceWorker' in navigator)) return;
-  log('🧹 注销所有 Service Worker...');
-  try {
-    const registrations = await navigator.serviceWorker.getRegistrations();
-    await Promise.all(registrations.map(reg => reg.unregister()));
-    if (registrations.length === 0) {
-      log('无 Service Worker 需要注销');
-    }
-  } catch (e) {
-    logError('注销 SW 失败', e);
-  }
-}
+// 【性能审计 2026-02-07】unregisterAllServiceWorkers 已移除
+// SW 生命周期由 Angular provideServiceWorker() + ngsw-config.json 统一管理
+// 版本升级时的缓存清理仍保留在 checkAndClearCacheIfNeeded() 中
 
 // ========== 显示启动错误界面 ==========
 function showStartupError(title: string, description: string, err: any) {

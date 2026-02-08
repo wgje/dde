@@ -186,13 +186,15 @@ export class SyncCoordinatorService {
    */
   readonly onConflict$ = this.conflict$.asObservable();
   
+  /** 上次快照哈希，用于脏检查避免无变更写入 */
+  private lastSnapshotHash = '';
+
+  /** 是否已初始化（幂等保护） */
+  private isInitialized = false;
+
   constructor() {
-    // Sprint 9 技术债务修复：委托给提取的服务
-    this.actionQueueProcessors.setupProcessors();
-    this.validateRequiredProcessors();
-    this.startLocalAutosave();
-    this.setupSyncModeCallback();
-    
+    // 【性能审计 2026-02-07】延迟初始化：构造函数仅注入依赖，不启动副作用
+    // 重型初始化（处理器注册、定时器、回调）延迟到 initialize() 调用
     this.destroyRef.onDestroy(() => {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer);
@@ -202,6 +204,23 @@ export class SyncCoordinatorService {
       }
       this.destroy();
     });
+  }
+
+  /**
+   * 初始化同步服务（延迟调用）
+   *
+   * 【性能审计 2026-02-07】从构造函数提取，避免阻塞首屏渲染
+   * 由 AppComponent.ngOnInit 在首屏渲染后调用
+   * 幂等：重复调用安全
+   */
+  initialize(): void {
+    if (this.isInitialized) return;
+    this.isInitialized = true;
+
+    this.actionQueueProcessors.setupProcessors();
+    this.validateRequiredProcessors();
+    this.startLocalAutosave();
+    this.setupSyncModeCallback();
   }
   
   // ========== 借鉴思源笔记的同步增强方法 ==========
@@ -375,17 +394,22 @@ export class SyncCoordinatorService {
    * 保守模式核心机制：定期保存到本地，确保用户数据永不丢失
    */
   private startLocalAutosave(): void {
-    // 每秒自动保存到本地缓存
+    // 【性能审计 2026-02-07】每 3s 自动保存到本地缓存（含脏检查，无变更时跳过写入）
     this.localAutosaveTimer = setInterval(() => {
       const projects = this.projectState.projects();
-      if (projects.length > 0) {
-        // 静默保存，不打扰用户
-        this.core.saveOfflineSnapshot(projects);
-      }
+      if (projects.length === 0) return;
+
+      // 脏检查：计算简易哈希，跳过无变更的写入
+      const hash = projects.map(p => `${p.id}:${p.updatedAt ?? ''}:${p.version ?? 0}`).join('|');
+      if (hash === this.lastSnapshotHash) return;
+
+      this.lastSnapshotHash = hash;
+      this.core.saveOfflineSnapshot(projects);
     }, SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
-    
-    this.logger.info('本地自动保存已启动', { 
-      interval: `${SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL}ms` 
+
+    this.logger.info('本地自动保存已启动', {
+      interval: `${SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL}ms`,
+      dirtyCheck: true
     });
   }
   

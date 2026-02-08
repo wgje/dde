@@ -31,7 +31,7 @@
     img-src 'self' data: blob: https://*.supabase.co;
     connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.sentry.io https://api.groq.com;
     worker-src 'self' blob:;
-    manifest-src 'self' https://*.github.dev https://*.app.github.dev;
+    manifest-src 'self' https://github.dev https://*.github.dev https://*.app.github.dev;
     base-uri 'self';
     form-action 'self';
   ">
@@ -616,7 +616,17 @@
      */
   </style>
   <!-- 注意: importmap 已移除，Angular CLI 构建使用 npm 依赖 -->
-  <link rel="manifest" href="manifest.webmanifest">
+  <!-- PWA manifest: Codespaces 代理会拦截 manifest 请求并重定向到 github.dev/pf-signin，
+       其自身 CSP 不允许裸域 https://github.dev，导致 manifest 加载失败。
+       改用脚本动态注入，在 Codespaces 环境中跳过 manifest 加载。 -->
+  <script>
+    if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
+      var link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = 'manifest.webmanifest';
+      document.head.appendChild(link);
+    }
+  </script>
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>

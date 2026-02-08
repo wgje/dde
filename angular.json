@@ -47,23 +47,17 @@
                   "inline": false
                 }
               },
-              "namedChunks": true,
+              "namedChunks": false,
               "budgets": [
                 {
                   "type": "initial",
-                  "maximumWarning": "1.8mb",
-                  "maximumError": "2.5mb"
+                  "maximumWarning": "1.5mb",
+                  "maximumError": "2mb"
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "8kb",
-                  "maximumError": "16kb"
-                },
-                {
-                  "type": "bundle",
-                  "name": "main",
-                  "maximumWarning": "600kb",
-                  "maximumError": "800kb"
+                  "maximumWarning": "4kb",
+                  "maximumError": "8kb"
                 }
               ]
             },
