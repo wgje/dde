@@ -1,6 +1,11 @@
 import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
+import {
+  ActivatedRoute,
+  Router,
+  NavigationEnd,
+  RouterOutlet
+} from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
 import { ProjectStateService } from './services/project-state.service';
 import { TaskOperationAdapterService } from './services/task-operation-adapter.service';
@@ -865,6 +870,12 @@ async signOut() {
    */
   async openLoginModal(): Promise<void> {
     if (this.isModalLoading('login')) return;
+
+    // 当登录入口不是由 Guard 触发时，至少保证登录成功后能回到项目页。
+    if (!this._loginReturnUrl) {
+      this._loginReturnUrl = this.router.url && this.router.url !== '/' ? this.router.url : '/projects';
+    }
+
     this.setModalLoading('login', true);
     try {
       const component = await this.modalLoader.loadLoginModal();
@@ -1077,8 +1088,8 @@ async signOut() {
 
     if (!this.authCoord.authError()) {
       // 登录成功：关闭模态框并导航
-      this.closeLoginModal();
       this.navigateAfterLogin();
+      this.closeLoginModal();
     } else {
       // 登录失败：回显错误并恢复按钮
       this._loginModalRef?.componentRef.setInput('isLoading', false);
@@ -1125,10 +1136,36 @@ async signOut() {
 
   /** 登录成功后导航到 returnUrl（由 auth guard 保存） */
   private navigateAfterLogin(): void {
-    const returnUrl = this._loginReturnUrl;
+    const returnUrl = this._loginReturnUrl && this._loginReturnUrl !== '/'
+      ? this._loginReturnUrl
+      : '/projects';
     this._loginReturnUrl = null;
-    if (returnUrl && returnUrl !== '/') {
-      void this.router.navigateByUrl(returnUrl);
+    if (this.router.url === '/' && returnUrl.startsWith('/projects')) {
+      // 线上偶发：Guard 首次拦截后，Router 的后续 navigateByUrl('/projects') 可能卡住不落地。
+      // 这里直接切换 hash，保证登录后立刻回到项目页，避免“登录后卡死在 /#/"。
+      this.navigateByHash(returnUrl);
+      return;
+    }
+
+    if (this.router.url !== returnUrl) {
+      void this.router.navigateByUrl(returnUrl).then(success => {
+        if (!success && this.router.url !== returnUrl) {
+          this.navigateByHash(returnUrl);
+        }
+      }).catch(error => {
+        this.logger.warn('登录后路由导航失败，使用 hash 兜底', { returnUrl, error });
+        this.navigateByHash(returnUrl);
+      });
+    }
+  }
+
+  /** Hash 路由硬跳转兜底（用于 Router 卡住场景） */
+  private navigateByHash(returnUrl: string): void {
+    if (typeof window === 'undefined') return;
+    const normalized = returnUrl.startsWith('/') ? returnUrl : `/${returnUrl}`;
+    const nextHash = `#${normalized}`;
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
     }
   }
 

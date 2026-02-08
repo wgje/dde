@@ -412,11 +412,11 @@ export class AppAuthCoordinatorService {
   handleLocalModeFromModal(): void {
     enableLocalMode();
     this.auth.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    const loginData = this.modal.getData('login') as LoginData | undefined;
+    const returnUrl = loginData?.returnUrl || '/projects';
     this.modal.closeByType('login', { success: true, userId: AUTH_CONFIG.LOCAL_MODE_USER_ID });
     void this.userSession.loadProjects();
     this.toast.info('本地模式', '数据仅保存在本地，不会同步到云端');
-    const loginData = this.modal.getData('login') as LoginData | undefined;
-    const returnUrl = loginData?.returnUrl || '/projects';
     void this.router.navigateByUrl(returnUrl);
   }
 

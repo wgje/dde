@@ -1,7 +1,7 @@
 import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
-import { provideRouter, withComponentInputBinding, withHashLocation } from '@angular/router';
+import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
 // ============= Sentry SDK 懒加载优化 =============
 // 【性能优化 2026-02-01】Sentry 懒加载以消除 320ms 首屏阻塞
@@ -229,7 +229,11 @@ async function startApplication() {
         provideRouter(
           routes,
           withComponentInputBinding(),
-          withHashLocation()
+          withHashLocation(),
+          withRouterConfig({
+            // 修复守卫取消导航后 URL / Router 状态不一致导致的后续导航卡住问题
+            canceledNavigationResolution: 'computed'
+          })
         ),
         // Service Worker: 启用以检测应用更新
         provideServiceWorker('ngsw-worker.js', {
