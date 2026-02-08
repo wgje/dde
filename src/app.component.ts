@@ -12,7 +12,7 @@ import { ToastService } from './services/toast.service';
 import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
-import { ModalService, type DeleteProjectData, type ConflictData } from './services/modal.service';
+import { ModalService, type DeleteProjectData, type ConflictData, type LoginData } from './services/modal.service';
 import { DynamicModalService } from './services/dynamic-modal.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
@@ -391,8 +391,14 @@ export class AppComponent implements OnInit, OnDestroy {
     effect(() => {
       const loginRequested = this.modal.isOpen('login');
       if (loginRequested) {
+        // 保存 returnUrl（closeByType 会清除 ModalService 数据）
+        const loginData = this.modal.getData('login') as LoginData | undefined;
+        this._loginReturnUrl = loginData?.returnUrl ?? null;
         this.modal.closeByType('login'); // 清除旧状态
-        void this.openLoginModal();
+        // 防止重复打开（当前登录模态框已在显示中）
+        if (!this._loginModalRef) {
+          void this.openLoginModal();
+        }
       }
     });
     
@@ -570,6 +576,11 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
   
+  /** 登录模态框引用（用于成功后关闭和动态更新 inputs） */
+  private _loginModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
+  /** 登录后的返回 URL（在 effect 清除 ModalService 状态前保存） */
+  private _loginReturnUrl: string | null = null;
+
   /** 临时存储冲突数据 */
   private _pendingConflict: ConflictData | null = null;
   /** 冲突模态框引用 */
@@ -857,14 +868,14 @@ async signOut() {
     this.setModalLoading('login', true);
     try {
       const component = await this.modalLoader.loadLoginModal();
-      this.dynamicModal.open(component, {
+      this._loginModalRef = this.dynamicModal.open(component, {
         inputs: {
           authError: this.authCoord.authError(),
           isLoading: this.authCoord.isAuthLoading(),
           resetPasswordSent: this.authCoord.resetPasswordSent()
         },
         outputs: {
-          close: () => this.dynamicModal.close(),
+          close: () => { this._loginModalRef = null; },
           login: (data: unknown) => this.handleLoginFromModal(data as { email: string; password: string }),
           signup: (data: unknown) => this.handleSignupFromModal(data as { email: string; password: string; confirmPassword: string }),
           resetPassword: (email: unknown) => this.handleResetPasswordFromModal(email as string),
@@ -1059,17 +1070,68 @@ async signOut() {
   
   // 适配 LoginModalComponent 事件 — 委托到 authCoord
   async handleLoginFromModal(data: { email: string; password: string }) {
+    this._loginModalRef?.componentRef.setInput('isLoading', true);
+    this._loginModalRef?.componentRef.setInput('authError', null);
+
     await this.authCoord.handleLoginFromModal(data);
+
+    if (!this.authCoord.authError()) {
+      // 登录成功：关闭模态框并导航
+      this.closeLoginModal();
+      this.navigateAfterLogin();
+    } else {
+      // 登录失败：回显错误并恢复按钮
+      this._loginModalRef?.componentRef.setInput('isLoading', false);
+      this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+    }
   }
   async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }) {
+    this._loginModalRef?.componentRef.setInput('isLoading', true);
+    this._loginModalRef?.componentRef.setInput('authError', null);
+
     await this.authCoord.handleSignupFromModal(data);
+
+    if (!this.authCoord.authError() && this.currentUserId()) {
+      // 注册成功（无需确认）：关闭模态框
+      this.closeLoginModal();
+    } else {
+      // 注册失败或需要邮件确认：回显状态
+      this._loginModalRef?.componentRef.setInput('isLoading', false);
+      this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+    }
   }
   async handleResetPasswordFromModal(email: string) {
+    this._loginModalRef?.componentRef.setInput('isLoading', true);
+    this._loginModalRef?.componentRef.setInput('authError', null);
+
     await this.authCoord.handleResetPasswordFromModal(email);
+
+    this._loginModalRef?.componentRef.setInput('isLoading', false);
+    this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+    this._loginModalRef?.componentRef.setInput('resetPasswordSent', this.authCoord.resetPasswordSent());
   }
   handleLocalModeFromModal() {
     this.authCoord.handleLocalModeFromModal();
+    this.closeLoginModal();
   }
+
+  /** 关闭登录模态框并清理引用 */
+  private closeLoginModal(): void {
+    if (this._loginModalRef) {
+      this._loginModalRef.close();
+      this._loginModalRef = null;
+    }
+  }
+
+  /** 登录成功后导航到 returnUrl（由 auth guard 保存） */
+  private navigateAfterLogin(): void {
+    const returnUrl = this._loginReturnUrl;
+    this._loginReturnUrl = null;
+    if (returnUrl && returnUrl !== '/') {
+      void this.router.navigateByUrl(returnUrl);
+    }
+  }
+
   handleMigrationComplete() {
     this.authCoord.handleMigrationComplete();
   }
