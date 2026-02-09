@@ -600,6 +600,9 @@ export class UndoService {
     this.lastActionTime = 0;
     this.isUndoRedoing = false;
     this._truncatedCount.set(0);
+    
+    // 【P0 安全修复】清除 sessionStorage 中的持久化撤销数据
+    this.clearPersistedData();
   }
   
   // ==================== 私有方法 ====================

@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../../services/logger.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -132,6 +132,9 @@ export class TextViewComponent implements OnInit, OnDestroy {
   private boundGlobalPointerUp = this.handleGlobalPointerUp.bind(this);
   private boundEmergencyCleanup = this.handleEmergencyCleanup.bind(this);
   private boundTouchDragTimeout = this.handleTouchDragTimeout.bind(this) as EventListener;
+
+  /** 移动端视图切换追踪（用于切换时收起编辑态） */
+  private lastMobileActiveView: 'text' | 'flow' | null = null;
   
   @ViewChild('scrollContainer', { static: true }) scrollContainerRef!: ElementRef<HTMLElement>;
   @ViewChild('stagesRef') stagesRef!: TextStagesComponent;
@@ -170,6 +173,40 @@ export class TextViewComponent implements OnInit, OnDestroy {
       isMobile: this.isMobile,
       getStagesRef: () => this.stagesRef,
       getUnassignedRef: () => this.unassignedRef,
+    });
+
+    // 移动端视图切换：离开文本视图时收起所有展开/编辑态
+    effect(() => {
+      const isMobile = this.uiState.isMobile();
+      const activeView = this.uiState.activeView();
+
+      if (!isMobile) {
+        this.lastMobileActiveView = activeView;
+        return;
+      }
+
+      const previousView = this.lastMobileActiveView;
+      this.lastMobileActiveView = activeView;
+
+      if (previousView === activeView) return;
+
+      if (activeView !== 'text') {
+        this.resetTextEditingState();
+        return;
+      }
+
+      this.resetTextEditingState();
+    });
+    
+    // 监听项目切换：切换项目时重置编辑状态
+    effect(() => {
+      const projectId = this.projectState.activeProjectId();
+      
+      // 项目切换时重置所有编辑状态
+      // 避免带着上一个项目的编辑状态进入新项目
+      if (projectId) {
+        this.resetTextEditingState();
+      }
     });
     
     // 在 document 上注册全局触摸事件监听器
@@ -240,7 +277,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
   
   ngOnDestroy() {
-    this.selectedTaskId.set(null);
+    this.resetTextEditingState();
     
     document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
     document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as EventListenerOptions);
@@ -251,6 +288,13 @@ export class TextViewComponent implements OnInit, OnDestroy {
     
     this.dragDropService.cleanup();
     this.ops.destroy();
+  }
+
+  private resetTextEditingState(): void {
+    this.selectedTaskId.set(null);
+    this.deleteConfirmTask.set(null);
+    this.deleteKeepChildren.set(false);
+    this.unassignedRef?.resetEditState();
   }
   
   // ========== 鼠标拖拽处理 ==========

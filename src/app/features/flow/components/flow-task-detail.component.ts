@@ -91,16 +91,8 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
         <!-- 标题栏 - 左边留出空间避开导航按钮，紧凑布局 -->
          <div
            #mobileDrawerTitle
-           class="pr-3 flex justify-between items-center flex-shrink-0"
-             [class.pl-28]="drawerHeight() >= 20"
-             [class.pl-3]="drawerHeight() < 20"
-             [class.pt-1.5]="drawerHeight() >= 20"
-             [class.pt-0.5]="drawerHeight() < 20"
-             [class.pb-0.5]="drawerHeight() >= 20"
-             [class.pb-0]="drawerHeight() < 20">
-          <h3 class="font-bold text-stone-700 dark:text-stone-200 text-xs transition-opacity duration-100"
-              [class.opacity-0]="drawerHeight() < 20"
-              [class.opacity-100]="drawerHeight() >= 20">任务详情</h3>
+           class="pr-3 pl-3 pt-0.5 pb-0 flex justify-between items-center flex-shrink-0">
+          <h3 class="font-bold text-stone-700 dark:text-stone-200 text-xs">任务详情</h3>
         </div>
         
         <!-- 内容区域 - 更紧凑 -->
@@ -320,7 +312,10 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
       }
       
       <!-- 操作按钮 -->
-      <div class="overflow-hidden transition-all duration-150"
+      <div
+           #mobileActionSection
+           data-mobile-action-section
+           class="overflow-hidden transition-all duration-150"
            [class.max-h-0]="isCompactMode()"
            [class.opacity-0]="isCompactMode()"
            [class.pointer-events-none]="isCompactMode()"
@@ -353,7 +348,10 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
             }">
             {{task.status === 'archived' ? '取消归档' : '归档'}}
           </button>
-          <button (click)="deleteTask.emit(task)"
+          <button
+            #mobileDeleteButton
+            data-mobile-delete-button
+            (click)="deleteTask.emit(task)"
             class="px-1.5 py-1 bg-stone-50 dark:bg-stone-700 text-stone-400 dark:text-stone-500 border border-stone-200 dark:border-stone-600 hover:bg-red-500 dark:hover:bg-red-600 hover:text-white hover:border-red-500 text-[9px] font-medium rounded transition-all">
             删除
           </button>
@@ -375,8 +373,10 @@ export class FlowTaskDetailComponent implements OnDestroy {
   @ViewChild('mobileDrawerContent') private mobileDrawerContent?: ElementRef<HTMLDivElement>;
   @ViewChild('mobileDrawerHandle') private mobileDrawerHandle?: ElementRef<HTMLDivElement>;
 
-  private static readonly MOBILE_DRAWER_MIN_VISIBLE_PX = 84;
-  private static readonly MOBILE_DRAWER_MEASURE_BUFFER_PX = 12;
+  private static readonly MOBILE_DRAWER_GUARD_PX = 4;
+  private static readonly MOBILE_DRAWER_MIN_VH = 8;
+  private static readonly MOBILE_DRAWER_MAX_VH = 70;
+  private static readonly MOBILE_DRAWER_HEIGHT_EPSILON_VH = 0.3;
   
   // 输入
   readonly task = input<Task | null>(null);
@@ -384,6 +384,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly drawerHeight = input<number>(35); // vh 单位
   // 当用户手动拖拽抽屉时，父组件可关闭自动高度补偿，避免“弹回”
   readonly autoHeightEnabled = input<boolean>(true);
+  // 父组件布局版本（移动端页面/抽屉切换时递增），用于触发重测
+  readonly layoutTick = input<number>(0);
   
   // 表单状态委托给 FlowTaskDetailFormService
   readonly localTitle = this.formService.localTitle;
@@ -391,9 +393,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly isEditMode = this.formService.isEditMode;
   readonly isTogglingMode = this.formService.isTogglingMode;
   
-  // 紧凑模式：只有当抽屉高度非常小（< 12vh）时才启用，隐藏操作按钮
-  // 日期和状态应该一直显示，除非抽屉几乎完全收起
-  readonly isCompactMode = computed(() => this.drawerHeight() < 12);
+  // 紧凑模式：仅手动拖拽且高度 < 12vh 时隐藏操作按钮
+  // 自动模式下永远保持操作区可见
+  readonly isCompactMode = computed(() => !this.autoHeightEnabled() && this.drawerHeight() < 12);
   
   // 内容预览最大高度：根据抽屉高度动态计算
   readonly contentMaxHeight = computed(() => {
@@ -430,80 +432,147 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private isResizingDrawer = false;
   private drawerStartY = 0;
   private drawerStartHeight = 0;
+  private autoHeightRafId: number | null = null;
+  private autoHeightTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastAutoHeightSignature = '';
+  private lastEmittedVh = -1;
+  private isComponentDestroyed = false;
   
   constructor() {
     // Split-Brain 核心逻辑：委托给 formService
     this.formService.initSyncEffect(() => this.task());
 
-    // 🔴 移动端：当任务、编辑模式或面板打开状态变化时，自动调整高度
+    // 🔴 移动端自动高度：统一的触发入口（任务/编辑模式变化 + layoutTick 变化）
+    // 合并为单一 effect，通过签名去重，避免多个 effect 并发触发导致抖动
     effect(() => {
-      this.task();
-      this.isEditMode();
+      const task = this.task();
+      const isEdit = this.isEditMode();
       const isOpen = this.uiState.isFlowDetailOpen();
+      const tick = this.layoutTick();
       
       if (this.uiState.isMobile() && isOpen) {
+        const signature = task
+          ? `${task.id}|${task.title}|${task.content}|${task.status}|${isEdit ? '1' : '0'}|${tick}`
+          : `empty|${isEdit ? '1' : '0'}|${tick}`;
+        if (signature === this.lastAutoHeightSignature) return;
+        this.lastAutoHeightSignature = signature;
+        // 重置发射缓存，允许新一轮测量
+        this.lastEmittedVh = -1;
         untracked(() => this.requestAutoHeight());
-      }
-    });
-
-    // 🔴 移动端：切回 Flow 视图后，强制校准一次抽屉高度（防止提示语被挤没）
-    effect(() => {
-      const view = this.uiState.activeView();
-      const isOpen = this.uiState.isFlowDetailOpen();
-
-      if (this.uiState.isMobile() && view === 'flow' && isOpen) {
-        untracked(() => this.requestAutoHeight());
+      } else {
+        this.lastAutoHeightSignature = '';
+        this.lastEmittedVh = -1;
       }
     });
   }
-  
+
   // ========== 表单事件委托 ==========
 
-  /** 移动端：请求自动调整高度以适应内容 */
-  private requestAutoHeight() {
+  /**
+   * 移动端：请求自动调整高度以适应内容。
+   *
+   * 核心算法：targetPx = titleH + intrinsicContentH + handleH + guard
+   * 只使用内容子元素的固有高度，不引用 containerH 或 contentClientH，
+   * 从而确保算法幂等——无论当前抽屉多高，计算结果都是一样的。
+   */
+  private requestAutoHeight(): void {
+    if (this.isComponentDestroyed) return;
     if (!this.uiState.isMobile() || !this.uiState.isFlowDetailOpen()) return;
-    if (!this.autoHeightEnabled()) return; // 手动覆盖时不自动调整
+    if (!this.autoHeightEnabled()) return;
 
-    const measureOnce = () => {
-      const container = this.mobileDrawer?.nativeElement
-        ?? this.elementRef.nativeElement.querySelector('.absolute.left-0.right-0.z-30');
-      const title = this.mobileDrawerTitle?.nativeElement
-        ?? container?.querySelector('.flex-shrink-0');
-      const content = this.mobileDrawerContent?.nativeElement
-        ?? container?.querySelector('.overflow-y-auto');
-      const handle = this.mobileDrawerHandle?.nativeElement
-        ?? container?.querySelector('.touch-none.flex-shrink-0');
+    // 取消先前的挂起测量，避免多次 emit
+    this.cancelPendingAutoHeight();
 
-      if (!container || !title || !content || !handle) return;
-      if (typeof window === 'undefined' || window.innerHeight <= 0) return;
-
-      const titleH = (title as HTMLElement).offsetHeight || 0;
-      const handleH = (handle as HTMLElement).offsetHeight || 0;
-
-      // 关键：不要用 content.scrollHeight 做自适应。
-      // 否则在点击任务块自动展开时，会把抽屉撑到“内容全量可见”，导致遮挡过大。
-      // 这里仅做“最小可见校准”：确保标题栏/拖动条不会被挤没。
-      const minPx = Math.max(
-        // 即使测量为 0，也至少保证拖动条可用
-        handleH + 12,
-        // 标题 + 拖动条 + 少量缓冲（避免 vh 四舍五入导致抖动）
-        titleH + handleH + FlowTaskDetailComponent.MOBILE_DRAWER_MEASURE_BUFFER_PX
-      );
-
-      const minVh = (minPx / window.innerHeight) * 100;
-      const desiredVh = Math.min(Math.max(minVh, 5), 70);
-
-      // 只做“向上补齐”，不主动缩小（避免用户手动调大后被自动收回）
-      if (this.drawerHeight() + 0.5 < desiredVh) {
-        this.drawerHeightChange.emit(desiredVh);
-      }
-    };
-
-    // 两段式测量：rAF 等待布局稳定，再补一次 timeout 防止字体/内容延迟导致高度为 0
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => measureOnce());
+    this.autoHeightRafId = requestAnimationFrame(() => {
+      this.autoHeightRafId = null;
+      if (this.isComponentDestroyed) return;
+      this.measureAndEmitHeight();
+      // 一次延迟收敛：等字体/样式稳定后再校验
+      this.autoHeightTimer = setTimeout(() => {
+        this.autoHeightTimer = null;
+        if (!this.isComponentDestroyed) this.measureAndEmitHeight();
+      }, 150);
     });
-    setTimeout(() => measureOnce(), 200);
+  }
+
+  /**
+   * 纯测量 + 发射：不依赖当前容器高度，只用子元素固有尺寸。
+   * 幂等：同样的内容调用 N 次结果一致，第二次不会 emit。
+   */
+  private measureAndEmitHeight(): void {
+    const container = this.mobileDrawer?.nativeElement
+      ?? this.elementRef.nativeElement.querySelector('.absolute.left-0.right-0.z-30');
+    const title = this.mobileDrawerTitle?.nativeElement
+      ?? container?.querySelector('.flex-shrink-0');
+    const content = this.mobileDrawerContent?.nativeElement
+      ?? container?.querySelector('.overflow-y-auto');
+    const handle = this.mobileDrawerHandle?.nativeElement
+      ?? container?.querySelector('.touch-none.flex-shrink-0');
+
+    if (!container || !title || !content || !handle) return;
+    const viewportHeight = this.getViewportHeight();
+    if (viewportHeight <= 0) return;
+
+    const titleH = (title as HTMLElement).offsetHeight || 0;
+    const handleH = (handle as HTMLElement).offsetHeight || 0;
+    const intrinsicContentH = this.measureIntrinsicContentHeight(content as HTMLElement);
+
+    const targetPx = titleH + intrinsicContentH + handleH
+      + FlowTaskDetailComponent.MOBILE_DRAWER_GUARD_PX;
+    const maxPx = (FlowTaskDetailComponent.MOBILE_DRAWER_MAX_VH / 100) * viewportHeight;
+    const clampedPx = Math.max(titleH + handleH + 10, Math.min(targetPx, maxPx));
+    const targetVh = Math.max(
+      FlowTaskDetailComponent.MOBILE_DRAWER_MIN_VH,
+      Math.min((clampedPx / viewportHeight) * 100, FlowTaskDetailComponent.MOBILE_DRAWER_MAX_VH)
+    );
+
+    // 只在与上一次发射值有显著差异时 emit
+    if (Math.abs(this.lastEmittedVh - targetVh) > FlowTaskDetailComponent.MOBILE_DRAWER_HEIGHT_EPSILON_VH) {
+      this.lastEmittedVh = targetVh;
+      this.drawerHeightChange.emit(targetVh);
+    }
+  }
+
+  private getViewportHeight(): number {
+    if (typeof window === 'undefined') return 0;
+    const visualHeight = window.visualViewport?.height ?? 0;
+    return visualHeight > 0 ? visualHeight : window.innerHeight;
+  }
+
+  /**
+   * 测量内容区所有子元素的固有高度总和（含 padding/margin）。
+   * 不依赖 scrollHeight/clientHeight（它们会随容器尺寸变化）。
+   */
+  private measureIntrinsicContentHeight(contentEl: HTMLElement): number {
+    if (typeof window === 'undefined') return 0;
+    const children = Array.from(contentEl.children) as HTMLElement[];
+    if (children.length === 0) return 0;
+
+    const contentStyle = window.getComputedStyle(contentEl);
+    const paddingTop = Number.parseFloat(contentStyle.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(contentStyle.paddingBottom || '0') || 0;
+
+    let totalChildrenHeight = 0;
+    for (const child of children) {
+      const rect = child.getBoundingClientRect();
+      const style = window.getComputedStyle(child);
+      const marginTop = Number.parseFloat(style.marginTop || '0') || 0;
+      const marginBottom = Number.parseFloat(style.marginBottom || '0') || 0;
+      totalChildrenHeight += rect.height + marginTop + marginBottom;
+    }
+
+    return Math.max(0, totalChildrenHeight + paddingTop + paddingBottom);
+  }
+
+  private cancelPendingAutoHeight(): void {
+    if (this.autoHeightRafId !== null) {
+      cancelAnimationFrame(this.autoHeightRafId);
+      this.autoHeightRafId = null;
+    }
+    if (this.autoHeightTimer !== null) {
+      clearTimeout(this.autoHeightTimer);
+      this.autoHeightTimer = null;
+    }
   }
   
   /** 输入框聚焦处理 */
@@ -563,7 +632,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
       this.isEditMode.set(false);
     }
   }
-  
+
   /** 渲染 Markdown 内容 */
   renderMarkdownContent(content: string): string { return renderMarkdown(content); }
   
@@ -689,7 +758,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
 
         // 顶部抽屉：向下拖（正 deltaY）增大高度
         const deltaY = currentY - this.drawerStartY;
-        const deltaVh = (deltaY / window.innerHeight) * 100;
+        const viewportHeight = this.getViewportHeight();
+        if (viewportHeight <= 0) return;
+        const deltaVh = (deltaY / viewportHeight) * 100;
         
         const newHeight = Math.max(minHeight, Math.min(70, this.drawerStartHeight + deltaVh));
         _lastCalculatedHeight = newHeight; // 更新缓存值
@@ -775,6 +846,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
   // ========== 生命周期管理 ==========
   
   ngOnDestroy(): void {
+    this.isComponentDestroyed = true;
+    this.cancelPendingAutoHeight();
     this.stopDrag();
     this.dragState.isDragging = false;
     this.isResizingDrawer = false;

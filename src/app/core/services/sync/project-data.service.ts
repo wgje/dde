@@ -20,6 +20,7 @@ import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../../config';
+import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 @Injectable({
@@ -364,43 +365,145 @@ export class ProjectDataService {
   
   /**
    * 保存离线快照
+   * 
+   * 优先使用 IndexedDB（当 OFFLINE_SNAPSHOT_IDB_ENABLED 开启时），
+   * 降级回 localStorage。记录快照大小用于监控。
    */
   saveOfflineSnapshot(projects: Project[]): void {
+    // 过滤已删除的任务
+    const cleanedProjects = projects.map(p => ({
+      ...p,
+      tasks: (p.tasks || []).filter(t => !t.deletedAt)
+    }));
+    
+    const payload = JSON.stringify({
+      projects: cleanedProjects,
+      version: this.CACHE_VERSION
+    });
+    
+    const sizeKB = Math.round(payload.length / 1024);
+    this.logger.debug('离线快照大小', { sizeKB, projectCount: projects.length });
+    
+    // 快照超过 4MB 时发出 Sentry 警告（接近 localStorage 5MB 上限）
+    if (sizeKB > 4096) {
+      this.sentryLazyLoader.captureMessage('Offline snapshot exceeds 4MB', {
+        level: 'warning',
+        tags: { sizeKB: String(sizeKB), projectCount: String(projects.length) }
+      });
+    }
+    
+    // IDB 路径：特性开关开启时尝试 IndexedDB
+    if (FEATURE_FLAGS.OFFLINE_SNAPSHOT_IDB_ENABLED) {
+      void this.saveSnapshotToIDB(payload).catch(() => {
+        // IDB 失败时降级到 localStorage
+        this.saveSnapshotToLocalStorage(payload);
+      });
+      return;
+    }
+    
+    this.saveSnapshotToLocalStorage(payload);
+  }
+  
+  /** localStorage 保存快照 */
+  private saveSnapshotToLocalStorage(payload: string): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      // 过滤已删除的任务
-      const cleanedProjects = projects.map(p => ({
-        ...p,
-        tasks: (p.tasks || []).filter(t => !t.deletedAt)
-      }));
-      
-      localStorage.setItem(this.OFFLINE_CACHE_KEY, JSON.stringify({
-        projects: cleanedProjects,
-        version: this.CACHE_VERSION
-      }));
+      localStorage.setItem(this.OFFLINE_CACHE_KEY, payload);
     } catch (e) {
-      this.logger.warn('离线快照保存失败', e);
+      this.logger.warn('离线快照保存失败（localStorage）', e);
     }
+  }
+  
+  /** IndexedDB 保存快照 */
+  private async saveSnapshotToIDB(payload: string): Promise<void> {
+    const db = await this.openSnapshotDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('snapshots', 'readwrite');
+      tx.objectStore('snapshots').put({ id: 'offline-snapshot', data: payload });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  
+  /** IndexedDB 加载快照 */
+  private async loadSnapshotFromIDB(): Promise<string | null> {
+    const db = await this.openSnapshotDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('snapshots', 'readonly');
+      const req = tx.objectStore('snapshots').get('offline-snapshot');
+      req.onsuccess = () => resolve(req.result?.data ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  
+  /** 打开快照 IndexedDB */
+  private openSnapshotDB(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open('nanoflow-offline-snapshots', 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('snapshots')) {
+          db.createObjectStore('snapshots', { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
   }
   
   /**
    * 加载离线快照
+   * 当 IDB 开关开启时优先从 IDB 读取，降级回 localStorage
    */
   loadOfflineSnapshot(): Project[] | null {
+    // IDB 路径不能同步返回，但这个方法签名是同步的
+    // 保留 localStorage 作为同步路径，IDB 路径需要在外部 async 调用
+    return this.loadOfflineSnapshotFromLocalStorage();
+  }
+  
+  /**
+   * 异步加载离线快照（支持 IDB）
+   */
+  async loadOfflineSnapshotAsync(): Promise<Project[] | null> {
+    if (FEATURE_FLAGS.OFFLINE_SNAPSHOT_IDB_ENABLED) {
+      try {
+        const data = await this.loadSnapshotFromIDB();
+        if (data) {
+          return this.parseSnapshotData(data);
+        }
+      } catch {
+        this.logger.warn('IDB 离线快照加载失败，降级到 localStorage');
+      }
+    }
+    return this.loadOfflineSnapshotFromLocalStorage();
+  }
+  
+  /** 从 localStorage 加载快照 */
+  private loadOfflineSnapshotFromLocalStorage(): Project[] | null {
     if (typeof localStorage === 'undefined') return null;
     try {
       const cached = localStorage.getItem(this.OFFLINE_CACHE_KEY);
       if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed?.projects)) {
-          return parsed.projects.map((p: Project) => ({
-            ...p,
-            tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
-          }));
-        }
+        return this.parseSnapshotData(cached);
       }
     } catch (e) {
       this.logger.warn('离线快照加载失败', e);
+    }
+    return null;
+  }
+  
+  /** 解析快照 JSON 数据 */
+  private parseSnapshotData(raw: string): Project[] | null {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed?.projects)) {
+        return parsed.projects.map((p: Project) => ({
+          ...p,
+          tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
+        }));
+      }
+    } catch (e) {
+      this.logger.warn('快照数据解析失败', e);
     }
     return null;
   }

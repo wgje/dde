@@ -69,6 +69,8 @@ export const FEATURE_FLAGS = {
   SYNC_TASK_LEVEL_CALLBACK_ENABLED: true,
   /** 单队列语义（灰度开关，先用于状态口径与入口约束） */
   SYNC_UNIFIED_QUEUE_SEMANTICS_ENABLED: true,
+  /** 离线快照使用 IndexedDB 替代 localStorage（缓解 5MB 上限） */
+  OFFLINE_SNAPSHOT_IDB_ENABLED: false,
   
   // ==================== 迁移功能 ====================
   /** 是否启用迁移快照 */
@@ -99,4 +101,47 @@ export type FeatureFlag = {
  */
 export function isFeatureEnabled(flag: FeatureFlag): boolean {
   return FEATURE_FLAGS[flag] as boolean;
+}
+
+// ==================== 【NEW-8】关键 Flag 安全校验 ====================
+
+/**
+ * 关键保护性 Flag 列表
+ * 禁用这些 Flag 可能导致数据丢失、安全漏洞或同步异常
+ */
+const CRITICAL_FLAGS: ReadonlyArray<{ flag: FeatureFlag; risk: string }> = [
+  { flag: 'CIRCUIT_BREAKER_ENABLED', risk: '禁用后客户端熔断保护失效，异常请求可能无限重试导致雪崩' },
+  { flag: 'SESSION_EXPIRED_CHECK_ENABLED', risk: '禁用后不检测会话过期，可能导致操作被静默丢弃' },
+  { flag: 'LOGOUT_CLEANUP_ENABLED', risk: '禁用后登出时不清理本地数据，存在跨用户数据泄露风险' },
+  { flag: 'CONNECTION_TOMBSTONE_ENABLED', risk: '禁用后已删除连接可能在同步时复活' },
+  { flag: 'SYNC_STRICT_SUCCESS_ENABLED', risk: '禁用后部分同步失败可能被误判为成功，导致数据不一致' },
+  { flag: 'SYNC_DURABILITY_FIRST_ENABLED', risk: '禁用后同步队列可能淘汰未推送的操作，导致数据丢失' },
+  { flag: 'MIGRATION_SNAPSHOT_ENABLED', risk: '禁用后迁移前不创建快照，迁移失败时无法回滚' },
+] as const;
+
+/**
+ * 校验关键保护性 Feature Flags 状态
+ * 
+ * 在应用启动时调用，如果发现关键 Flag 被禁用，输出 console.warn 警告。
+ * 不阻塞启动流程，但确保开发者/运维人员能感知潜在风险。
+ * 
+ * @returns 被禁用的关键 Flag 列表（空数组表示全部正常）
+ */
+export function validateCriticalFlags(): ReadonlyArray<{ flag: string; risk: string }> {
+  const disabledCritical: Array<{ flag: string; risk: string }> = [];
+
+  for (const { flag, risk } of CRITICAL_FLAGS) {
+    if (!FEATURE_FLAGS[flag]) {
+      disabledCritical.push({ flag, risk });
+    }
+  }
+
+  if (disabledCritical.length > 0) {
+    console.warn(
+      `[FeatureFlags] ⚠️ ${disabledCritical.length} 个关键保护性开关已禁用：\n` +
+      disabledCritical.map(d => `  • ${d.flag}: ${d.risk}`).join('\n')
+    );
+  }
+
+  return disabledCritical;
 }

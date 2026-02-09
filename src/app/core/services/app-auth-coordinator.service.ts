@@ -7,6 +7,9 @@ import { MigrationService } from '../../../services/migration.service';
 import { ModalService, type LoginData } from '../../../services/modal.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
+import { OptimisticStateService } from '../../../services/optimistic-state.service';
+import { UndoService } from '../../../services/undo.service';
+import { AttachmentService } from '../../../services/attachment.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
 import { getErrorMessage, isFailure, humanizeErrorMessage } from '../../../utils/result';
 import { AUTH_CONFIG } from '../../../config';
@@ -33,6 +36,9 @@ export class AppAuthCoordinatorService {
   private readonly modal = inject(ModalService);
   private readonly toast = inject(ToastService);
   private readonly router = inject(Router);
+  private readonly optimisticState = inject(OptimisticStateService);
+  private readonly undoService = inject(UndoService);
+  private readonly attachmentService = inject(AttachmentService);
 
   // ========== 认证状态 Signals ==========
   readonly authEmail = signal('');
@@ -371,6 +377,17 @@ export class AppAuthCoordinatorService {
    */
   async signOut(): Promise<void> {
     const currentUserId = this.auth.currentUserId();
+    
+    // 【P0 安全修复】在清理本地数据前，先调用各服务的 onUserLogout
+    // 防止跨用户数据泄露：乐观更新快照、撤销历史、附件 URL 缓存
+    try {
+      this.optimisticState.onUserLogout();
+      this.undoService.onUserLogout();
+      this.attachmentService.onUserLogout();
+    } catch (e) {
+      this.logger.warn('onUserLogout 清理过程中出错，继续登出流程', e);
+    }
+    
     await this.userSession.clearAllLocalData(currentUserId ?? undefined);
     if (this.auth.isConfigured) {
       await this.auth.signOut();
@@ -412,11 +429,11 @@ export class AppAuthCoordinatorService {
   handleLocalModeFromModal(): void {
     enableLocalMode();
     this.auth.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-    const loginData = this.modal.getData('login') as LoginData | undefined;
-    const returnUrl = loginData?.returnUrl || '/projects';
     this.modal.closeByType('login', { success: true, userId: AUTH_CONFIG.LOCAL_MODE_USER_ID });
     void this.userSession.loadProjects();
     this.toast.info('本地模式', '数据仅保存在本地，不会同步到云端');
+    const loginData = this.modal.getData('login') as LoginData | undefined;
+    const returnUrl = loginData?.returnUrl || '/projects';
     void this.router.navigateByUrl(returnUrl);
   }
 

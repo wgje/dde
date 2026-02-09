@@ -3,7 +3,9 @@ import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
+import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
+import { TIMEOUT_CONFIG } from '../../../../config';
 
 /**
  * 流程图工具栏组件
@@ -238,6 +240,7 @@ export class FlowToolbarComponent {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
+  private readonly toast = inject(ToastService);
 
   /**
    * 基准高度：手机端 667px 设备上实测的最佳详情抽屉高度（转换为 vh），用于归一化
@@ -272,6 +275,8 @@ export class FlowToolbarComponent {
   readonly exportPng = output<void>();
   readonly exportSvg = output<void>();
   readonly saveToCloud = output<void>();
+  /** 父组件提供的 saveToCloud 回调，返回 Promise 以便 toolbar 获取结果并复位状态 */
+  readonly saveToCloudCallback = input<(() => Promise<{ ok: boolean; message?: string }>) | null>(null);
   /** 移动端：切换框选模式 */
   readonly toggleSelectMode = output<void>();
   
@@ -332,14 +337,46 @@ export class FlowToolbarComponent {
     this.exportSvg.emit();
   }
   
-  onSaveToCloud() {
+  /** 超时保护定时器 ID */
+  private uploadTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  async onSaveToCloud() {
     this.isExportMenuOpen = false;
+    if (this.isUploading) return;
     this.isUploading = true;
-    this.saveToCloud.emit();
+
+    // 超时保护：TIMEOUT_CONFIG.HEAVY (30s) 后强制复位
+    this.uploadTimeoutId = setTimeout(() => {
+      if (this.isUploading) {
+        this.setUploadComplete();
+        this.toast.warning('操作超时', '请稍后重试');
+      }
+    }, TIMEOUT_CONFIG.HEAVY);
+
+    // 优先使用回调模式获取异步结果
+    const callback = this.saveToCloudCallback();
+    if (callback) {
+      try {
+        await callback();
+      } catch (_e) {
+        // 错误已在 callback 内部处理
+      } finally {
+        this.setUploadComplete();
+      }
+    } else {
+      // 降级：fire-and-forget output 事件
+      this.saveToCloud.emit();
+      // 无回调时 3s 后自动复位（无法获知异步结果）
+      setTimeout(() => this.setUploadComplete(), 3000);
+    }
   }
   
   setUploadComplete() {
     this.isUploading = false;
+    if (this.uploadTimeoutId) {
+      clearTimeout(this.uploadTimeoutId);
+      this.uploadTimeoutId = null;
+    }
   }
 
   onToggleSelectModePointerDown(event: PointerEvent): void {

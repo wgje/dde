@@ -446,4 +446,71 @@ describe('ActionQueueStorageService', () => {
       expect(service.isOnline).toBe(true);
     });
   });
+
+  // ==================== Task 2.1 新增测试 ====================
+
+  describe('escape export（逃生导出）', () => {
+    it('exportPendingActionsAsJson 应返回有效 JSON', () => {
+      const action1 = createMockAction({ id: 'a1' });
+      const action2 = createMockAction({ id: 'a2' });
+      ctx.pendingActions.set([action1, action2]);
+
+      const result = service.exportPendingActionsAsJson();
+      const parsed = JSON.parse(result);
+
+      expect(parsed).toHaveProperty('exportedAt');
+      expect(parsed).toHaveProperty('pendingActions');
+      expect(parsed.pendingActions).toHaveLength(2);
+      expect(parsed.metadata.source).toBe('action-queue-escape');
+    });
+
+    it('exportPendingActionsAsJson 空队列也应返回有效 JSON', () => {
+      ctx.pendingActions.set([]);
+
+      const result = service.exportPendingActionsAsJson();
+      const parsed = JSON.parse(result);
+
+      expect(parsed.pendingActions).toHaveLength(0);
+    });
+  });
+
+  describe('frozen retry timer（冻结重试计时器）', () => {
+    it('freezeQueueWrites 应启动重试计时器', () => {
+      vi.useFakeTimers();
+
+      service.freezeQueueWrites('test_pressure');
+      expect(service.queueFrozen()).toBe(true);
+
+      // 验证计时器字段已设置
+      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
+      expect(timerField).not.toBeNull();
+
+      vi.useRealTimers();
+    });
+
+    it('clearQueueFreeze 应停止重试计时器', () => {
+      vi.useFakeTimers();
+
+      service.freezeQueueWrites('test_pressure');
+      service.clearQueueFreeze();
+
+      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
+      expect(timerField).toBeNull();
+      expect(service.queueFrozen()).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('reset 应清理冻结重试计时器', () => {
+      vi.useFakeTimers();
+
+      service.freezeQueueWrites('test_pressure');
+      service.reset();
+
+      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
+      expect(timerField).toBeNull();
+
+      vi.useRealTimers();
+    });
+  });
 });

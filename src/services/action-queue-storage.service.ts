@@ -105,6 +105,17 @@ export class ActionQueueStorageService {
 
   // ========== 重试定时器 ==========
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  /** 冻结期定时重试落盘的定时器 */
+  private frozenRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 冻结期重试次数 */
+  private frozenRetryCount = 0;
+  /** 冻结期重试最大次数 */
+  private readonly FROZEN_RETRY_MAX = 10;
+  /** 冻结期重试初始间隔（毫秒） */
+  private readonly FROZEN_RETRY_BASE_DELAY = 30000;
+  /** 冻结期重试最大间隔（毫秒） */
+  private readonly FROZEN_RETRY_MAX_DELAY = 300000;
 
   // ========== 来自主服务的上下文引用 ==========
   private ctx!: ActionQueueContext;
@@ -613,9 +624,108 @@ export class ActionQueueStorageService {
 
   // ========== 状态重置 ==========
 
+  /**
+   * 冻结期定时重试落盘
+   * 冻结后每 30s 重试一次 localStorage 写入，成功则自动解冻
+   * 失败则指数退避（30s → 60s → 120s → max 5min），最多重试 10 次
+   */
+  startFrozenRetryTimer(): void {
+    if (this.frozenRetryTimer) return;
+    this.frozenRetryCount = 0;
+    this.scheduleFrozenRetry();
+  }
+
+  private scheduleFrozenRetry(): void {
+    if (this.frozenRetryCount >= this.FROZEN_RETRY_MAX) {
+      this.logger.warn('冻结期重试已达上限，停止自动重试', { count: this.frozenRetryCount });
+      return;
+    }
+
+    const delay = Math.min(
+      this.FROZEN_RETRY_BASE_DELAY * Math.pow(2, this.frozenRetryCount),
+      this.FROZEN_RETRY_MAX_DELAY
+    );
+
+    this.frozenRetryTimer = setTimeout(() => {
+      this.frozenRetryTimer = null;
+      if (!this.queueFrozen()) return; // 已解冻，无需重试
+
+      this.frozenRetryCount++;
+      this.logger.info('冻结期定时重试落盘', { attempt: this.frozenRetryCount });
+
+      try {
+        // 尝试写入 localStorage
+        const testKey = 'nanoflow.freeze-probe';
+        localStorage.setItem(testKey, '1');
+        localStorage.removeItem(testKey);
+        
+        // 写入成功，尝试保存队列
+        this.saveQueueToStorage();
+        
+        if (!this.queueFrozen()) {
+          this.logger.info('存储恢复，队列自动解冻');
+          this.toast.success('存储恢复', '同步队列已自动解冻');
+        } else {
+          // 保存失败重新触发了冻结，继续重试
+          this.scheduleFrozenRetry();
+        }
+      } catch (_e) {
+        this.logger.debug('冻结期重试写入仍然失败', { attempt: this.frozenRetryCount });
+        this.scheduleFrozenRetry();
+      }
+    }, delay);
+  }
+
+  private stopFrozenRetryTimer(): void {
+    if (this.frozenRetryTimer) {
+      clearTimeout(this.frozenRetryTimer);
+      this.frozenRetryTimer = null;
+    }
+    this.frozenRetryCount = 0;
+  }
+
+  /**
+   * 导出待同步操作为 JSON（逃生导出）
+   * 用于队列冻结时用户手动下载备份
+   */
+  exportPendingActionsAsJson(): string {
+    const data = {
+      exportedAt: new Date().toISOString(),
+      pendingActions: this.ctx.pendingActions(),
+      deadLetterQueue: this.deadLetterQueue(),
+      frozenState: this.queueFrozen(),
+      freezeReason: this.queueFreezeReason(),
+      metadata: { version: 1, source: 'action-queue-escape' }
+    };
+    return JSON.stringify(data, null, 2);
+  }
+
+  /**
+   * 触发逃生导出下载
+   */
+  downloadEscapeExport(): void {
+    try {
+      const json = this.exportPendingActionsAsJson();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nanoflow-pending-sync-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      this.toast.success('导出成功', '待同步数据已下载');
+    } catch (e) {
+      this.logger.error('逃生导出失败', e);
+      this.toast.error('导出失败', '无法创建备份文件');
+    }
+  }
+
   reset(): void {
     this.removeNetworkListeners();
     this.clearRetryTimer();
+    this.stopFrozenRetryTimer();
     this.deadLetterQueue.set([]);
     this.deadLetterSize.set(0);
     this.storageFailure.set(false);
@@ -645,6 +755,8 @@ export class ActionQueueStorageService {
       level: 'warning',
       tags: { reason }
     });
+    // 启动冻结期定时重试
+    this.startFrozenRetryTimer();
   }
 
   private clearQueueFreeze(): void {
@@ -654,5 +766,7 @@ export class ActionQueueStorageService {
     this.queueFrozen.set(false);
     this.queueFreezeReason.set(null);
     this.networkAwareness.setStoragePressure(false, null);
+    // 停止冻结期重试
+    this.stopFrozenRetryTimer();
   }
 }

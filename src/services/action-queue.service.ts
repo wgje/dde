@@ -148,6 +148,11 @@ export class ActionQueueService {
     this.storage.onStorageFailure(callback);
   }
   
+  /** 导出待同步数据为 JSON 并下载（逃生导出，冻结时使用） */
+  downloadEscapeExport(): void {
+    this.storage.downloadEscapeExport();
+  }
+  
   /**
    * 添加操作到队列（类型安全版本）
    * 支持优先级分级 + 智能合并

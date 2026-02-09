@@ -159,6 +159,13 @@ export class UserSessionService {
     // 1. 清理内存状态（原有逻辑）
     this.clearLocalData();
     
+    // 1.5 【P0 安全修复】兜底清理 sessionStorage，防止撤销历史等敏感数据残留
+    try {
+      sessionStorage.clear();
+    } catch (e) {
+      this.logger.warn('sessionStorage.clear() 失败', e);
+    }
+    
     // 2. 清理 localStorage 中的 NanoFlow 相关数据
     const localStorageKeysToRemove = [
       CACHE_CONFIG.OFFLINE_CACHE_KEY,

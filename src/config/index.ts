@@ -70,6 +70,7 @@ export {
 export {
   FEATURE_FLAGS,
   isFeatureEnabled,
+  validateCriticalFlags,
   type FeatureFlag
 } from './feature-flags.config';
 

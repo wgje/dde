@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -26,8 +26,10 @@ import { FlowEventRegistrationService } from '../services/flow-event-registratio
 import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
 import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { SimpleSyncService } from '../../../core/services/simple-sync.service';
+import { AuthService } from '../../../../services/auth.service';
 import { Task } from '../../../../models';
-import { UI_CONFIG } from '../../../../config';
+import { UI_CONFIG, TIMEOUT_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
 import { FlowPaletteComponent } from './flow-palette.component';
 import { FlowTaskDetailComponent } from './flow-task-detail.component';
@@ -109,6 +111,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly eventRegistration = inject(FlowEventRegistrationService);
   private readonly cleanup = inject(FlowViewCleanupService);
   private readonly diagramRetry = inject(FlowDiagramRetryService);
+  private readonly syncService = inject(SimpleSyncService);
+  private readonly authService = inject(AuthService);
   
   // ========== 组件状态 ==========
   
@@ -147,6 +151,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 右侧滑出面板状态（移动端） */
   readonly isRightPanelOpen = signal(false);
+  /** 详情面板布局版本：移动端页面/层切换后递增，驱动详情高度重测 */
+  readonly detailLayoutTick = signal(0);
   
   readonly overviewSize = computed(() =>
     this.uiState.isMobile() ? { width: 100, height: 80 } : { width: 180, height: 140 }
@@ -167,15 +173,21 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // ========== 私有状态 ==========
   private isDestroyed = false;
+
+  /** 绑定的 saveToCloud 回调，传递给 toolbar 组件 */
+  readonly saveToCloudBound = () => this.saveToCloud();
   
   /** 待清理的定时器 */
   private pendingTimers: ReturnType<typeof setTimeout>[] = [];
   
   /** Overview 刷新定时器（防抖） */
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 移动端视图切换追踪（用于入/出 flow 时的状态回收） */
+  private lastMobileActiveView: 'text' | 'flow' | null = null;
   
   @HostListener('window:resize')
   onWindowResize(): void {
+    this.bumpDetailLayoutTick();
     if (this.overviewResizeTimer) clearTimeout(this.overviewResizeTimer);
     this.overviewResizeTimer = setTimeout(() => {
       if (!this.isDestroyed && !this.isOverviewCollapsed()) {
@@ -186,6 +198,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   @HostListener('window:orientationchange')
   onOrientationChange(): void {
+    this.bumpDetailLayoutTick();
     this.scheduleTimer(() => {
       if (!this.isDestroyed && !this.isOverviewCollapsed()) {
         this.diagram.refreshOverview();
@@ -218,12 +231,40 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       selectedTaskId: () => this.selectedTaskId(),
       scheduleDrawerHeightUpdate: (vh) => this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, vh)
     });
+
+    // 移动端视图切换：离开 flow 清理选中与手动高度；返回 flow 后重置到最小提示态。
+    effect(() => {
+      const isMobile = this.uiState.isMobile();
+      const activeView = this.uiState.activeView();
+
+      if (!isMobile) {
+        this.lastMobileActiveView = activeView;
+        return;
+      }
+
+      const previousView = this.lastMobileActiveView;
+      this.lastMobileActiveView = activeView;
+
+      if (previousView === activeView) return;
+
+      if (activeView !== 'flow') {
+        this.selectedTaskId.set(null);
+        this.drawerManualOverride.set(false);
+        return;
+      }
+
+      // 进入 flow：默认回到"未选中提示"状态，抽屉直接设为最小高度（不触发 layoutTick 以避免自动测量覆盖）。
+      this.selectedTaskId.set(null);
+      this.drawerManualOverride.set(false);
+      this.drawerHeight.set(8);
+    }, { injector: this.injector });
   }
   
   // ========== 生命周期 ==========
   
   ngAfterViewInit() {
     this.scheduleDiagramInit();
+    this.bumpDetailLayoutTick();
   }
   
   ngOnDestroy() {
@@ -385,9 +426,66 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.diagram.exportToSvg();
   }
   
-  saveToCloud(): void {
-    // TODO: 实现云端保存功能
-    this.toast.info('功能开发中', '云端保存功能即将推出');
+  /** 保存到云端的结果 Promise，供 toolbar 回调使用 */
+  private saveToCloudPromise: Promise<{ ok: boolean; message?: string }> | null = null;
+
+  /**
+   * 保存当前项目到云端
+   * 返回 Promise 供 toolbar 组件获取结果并复位按钮状态
+   */
+  async saveToCloud(): Promise<{ ok: boolean; message?: string }> {
+    const userId = this.authService.currentUserId();
+    const activeProject = this.projectState.activeProject();
+
+    // 离线时直接提示
+    if (!this.syncService.syncState().isOnline) {
+      this.toast.info('当前处于离线模式', '数据已安全保存在本地，联网后自动同步');
+      return { ok: true, message: '离线模式' };
+    }
+
+    if (!userId || !activeProject) {
+      this.toast.warning('无法保存', '请先登录并打开一个项目');
+      return { ok: false, message: '未登录或无活动项目' };
+    }
+
+    // 使用 AbortController + setTimeout 实现超时保护
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_CONFIG.HEAVY);
+
+    try {
+      const result = await Promise.race([
+        this.syncService.saveProjectToCloud(activeProject, userId),
+        new Promise<never>((_resolve, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error('TIMEOUT')));
+        })
+      ]);
+
+      clearTimeout(timeoutId);
+
+      if (result.success) {
+        const now = new Date().toLocaleTimeString();
+        this.toast.success('已保存到云端', `最后同步: ${now}`);
+        return { ok: true };
+      } else if (result.conflict) {
+        this.toast.warning('存在同步冲突', '请在同步面板中解决冲突后重试');
+        return { ok: false, message: '同步冲突' };
+      } else {
+        this.toast.error('保存失败', '请检查网络连接后重试');
+        return { ok: false, message: '保存失败' };
+      }
+    } catch (e: unknown) {
+      clearTimeout(timeoutId);
+      const errorMsg = e instanceof Error ? e.message : '未知错误';
+
+      if (errorMsg === 'TIMEOUT') {
+        this.toast.warning('保存超时', '数据已缓存，将在连接恢复后自动同步');
+        return { ok: false, message: '超时' };
+      }
+
+      this.toast.error('保存失败', errorMsg);
+      this.logger.error('saveToCloud 异常', e);
+      return { ok: false, message: errorMsg };
+    }
   }
 
   /** 居中到指定节点 */
@@ -583,14 +681,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 移动端抽屉 ==========
 
   private expandDrawerToOptimalHeight(): void {
-    const targetVh = this.mobileDrawer.calculateDrawerVh(this.paletteHeight(), 'direct');
-    if (targetVh !== null) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, targetVh);
-        });
-      });
+    // 用户双击节点时强制回到自动高度模式，确保高度按内容重新收敛。
+    this.drawerManualOverride.set(false);
+    // 确保最小可操作高度，然后让 layoutTick 触发内容自动测量
+    const minVh = 8;
+    if (this.drawerHeight() < minVh) {
+      this.drawerHeight.set(minVh);
     }
+    this.bumpDetailLayoutTick();
   }
   
   // ========== 批量删除 ==========
@@ -668,8 +766,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 处理抽屉状态变化 (移动端双向抽屉) */
   onDrawerStateChange(event: { previousLayer: string; currentLayer: string; triggeredBy: string }): void {
     this.logger.debug('Drawer state change:', event);
-    // 抽屉关闭时，可能需要刷新图表
+    // 顶/中/底层切换后恢复自动模式
+    this.drawerManualOverride.set(false);
+
+    // 回到中层（flow）时，重置详情到"最小 + 提示语"态，直接设置高度避免 tick 覆盖
     if (event.currentLayer === 'middle' && event.previousLayer !== 'middle') {
+      this.selectedTaskId.set(null);
+      this.drawerHeight.set(8);
       // 返回中层时触发图表重绘
       requestAnimationFrame(() => {
         const diagramInstance = this.diagram.diagramInstance;
@@ -677,7 +780,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           diagramInstance.requestUpdate();
         }
       });
+      return;
     }
+
+    // 其他层切换后，详情抽屉按新布局重测一次
+    this.bumpDetailLayoutTick();
   }
   
   /** 移动端抽屉内点击节点定位（关闭抽屉后定位） */
@@ -736,6 +843,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   // ========== 私有辅助方法 ==========
+
+  private bumpDetailLayoutTick(delayMs: number = 0): void {
+    if (!this.uiState.isMobile()) return;
+    if (delayMs <= 0) {
+      this.detailLayoutTick.update((v) => v + 1);
+      return;
+    }
+    this.scheduleTimer(() => {
+      this.detailLayoutTick.update((v) => v + 1);
+    }, delayMs);
+  }
   
   /**
    * 安全调度定时器，自动追踪并在组件销毁时清理

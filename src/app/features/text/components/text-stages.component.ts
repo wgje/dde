@@ -1,4 +1,4 @@
-import { Component, inject, Input, Output, EventEmitter, signal, computed, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, Input, Output, EventEmitter, signal, computed, effect, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -295,6 +295,20 @@ export class TextStagesComponent {
     queueMicrotask(() => {
       const collapsed = new Set(this.projectState.stages().map(s => s.stageNumber));
       this.collapsedStages.set(collapsed);
+    });
+    
+    // 监听项目切换：切换项目时重置阶段折叠状态
+    effect(() => {
+      const projectId = this.projectState.activeProjectId();
+      
+      if (projectId) {
+        // 项目切换时，折叠所有阶段
+        // 确保用户进入新项目时获得一致的初始状态
+        queueMicrotask(() => {
+          const collapsed = new Set(this.projectState.stages().map(s => s.stageNumber));
+          this.collapsedStages.set(collapsed);
+        });
+      }
     });
   }
   

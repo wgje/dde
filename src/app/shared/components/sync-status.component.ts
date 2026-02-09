@@ -6,6 +6,7 @@ import { SyncCoordinatorService } from '../../../services/sync-coordinator.servi
 import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { SYNC_CONFIG } from '../../../config';
@@ -239,6 +240,41 @@ import { SYNC_CONFIG } from '../../../config';
             网络不可用，恢复后自动同步
           </div>
         }
+        
+        <!-- 【增强】队列冻结时：逃生导出按钮 + 内存操作计数 -->
+        @if (queueFrozen()) {
+          <div class="p-1.5 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded">
+            <div class="text-[10px] text-amber-700 dark:text-amber-300 mb-1">⚠️ 存储受限，队列已冻结</div>
+            @if (memoryOnlyCount() > 0) {
+              <div class="text-[10px] text-amber-600 dark:text-amber-400 mb-1">
+                {{ memoryOnlyCount() }} 个操作仅在内存中（未持久化）
+              </div>
+            }
+            <button
+              (click)="exportPendingData(); $event.stopPropagation()"
+              class="w-full py-1 text-[10px] font-medium bg-amber-200 dark:bg-amber-800 hover:bg-amber-300 dark:hover:bg-amber-700 text-amber-800 dark:text-amber-200 rounded transition-colors">
+              ⬇️ 导出待同步数据
+            </button>
+          </div>
+        }
+
+        <!-- 【增强】重试队列容量使用 >50% 时显示 -->
+        @if (retryQueueUsagePercent() > 50) {
+          <div class="flex items-center justify-between px-1 text-[10px]"
+               [class.text-amber-500]="retryQueueUsagePercent() <= 85"
+               [class.text-red-500]="retryQueueUsagePercent() > 85">
+            <span>重试队列</span>
+            <span>{{ retryQueueUsagePercent() }}% 已用</span>
+          </div>
+        }
+
+        <!-- 【增强】最近成功云同步时间 -->
+        @if (lastSyncTimeText()) {
+          <div class="flex items-center justify-between px-1 text-[10px] text-stone-400 dark:text-stone-500">
+            <span>最后同步</span>
+            <span>{{ lastSyncTimeText() }}</span>
+          </div>
+        }
       </div>
     } @else {
       <!-- 完整模式面板 -->
@@ -377,6 +413,7 @@ export class SyncStatusComponent {
   private conflictStorage = inject(ConflictStorageService);
   private syncCoordinator = inject(SyncCoordinatorService);
   private projectState = inject(ProjectStateService);
+  private retryQueue = inject(RetryQueueService);
   private toastService = inject(ToastService);
   private readonly logger = inject(LoggerService);
   
@@ -461,6 +498,31 @@ export class SyncStatusComponent {
     return deadCount > 0 || pendingCount > criticalThreshold;
   });
   
+  /**
+   * 【增强】最近成功云同步时间（格式化）
+   */
+  readonly lastSyncTimeText = computed(() => {
+    const lastSync = this.syncService.syncState().lastSyncTime;
+    if (!lastSync) return null;
+    return this.formatDate(lastSync);
+  });
+
+  /**
+   * 【增强】队列冻结时的内存中操作计数
+   * 队列冻结后新入队的操作仅存在于内存中，重启会丢失
+   */
+  readonly memoryOnlyCount = computed(() => {
+    if (!this.queueFrozen()) return 0;
+    return this.actionQueue.queueSize();
+  });
+
+  /**
+   * 【增强】重试队列容量使用百分比
+   */
+  readonly retryQueueUsagePercent = computed(() => {
+    return this.retryQueue.getCapacityPercent();
+  });
+
   /** 详细状态文本 */
   readonly detailedStatus = computed(() => {
     if (this.isLoadingRemote()) {
@@ -573,6 +635,13 @@ export class SyncStatusComponent {
     }
   }
   
+  /**
+   * 【增强】导出待同步数据（逃生导出）
+   */
+  exportPendingData() {
+    this.actionQueue.downloadEscapeExport();
+  }
+
   /**
    * 获取操作的可读标签
    */

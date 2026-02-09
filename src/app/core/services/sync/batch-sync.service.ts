@@ -173,12 +173,20 @@ export class BatchSyncService {
       const { data: { session } } = await client.auth.getSession();
       if (!session?.user?.id) {
         this.syncState.setSessionExpired(true);
+        // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
+        this.callbacks.addToRetryQueue('project', 'upsert', project);
+        retryEnqueued.push(`project:${project.id}`);
+        this.logger.warn('Session 过期，项目数据已入重试队列', { projectId: project.id });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
         return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
       }
     } catch (e) {
       this.logger.error('Session 验证失败', e);
       this.syncState.setSessionExpired(true);
+      // 【NEW-3 修复】Session 验证异常时同样保护数据
+      this.callbacks.addToRetryQueue('project', 'upsert', project);
+      retryEnqueued.push(`project:${project.id}`);
+      this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
       this.toast.warning('登录已过期', '请重新登录以继续同步数据');
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }

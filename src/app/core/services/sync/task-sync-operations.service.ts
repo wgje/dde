@@ -462,31 +462,33 @@ export class TaskSyncOperationsService {
   /** 安全批量软删除任务 */
   async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
     if (taskIds.length === 0) return 0;
-    
+
     const client = this.getSupabaseClient();
     if (!client) {
       this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
+      // 【NEW-5 修复】离线时添加本地 tombstone，防止下次同步拉取时任务复活
+      this.tombstoneService.addLocalTombstones(projectId, taskIds);
       return taskIds.length;
     }
-    
+
     try {
-      this.logger.debug('softDeleteTasksBatch: 调用 safe_delete_tasks RPC', { 
-        projectId, 
+      this.logger.debug('softDeleteTasksBatch: 调用 safe_delete_tasks RPC', {
+        projectId,
         taskIds,
-        taskCount: taskIds.length 
+        taskCount: taskIds.length
       });
-      
+
       const { data, error } = await client.rpc('safe_delete_tasks', {
         p_task_ids: taskIds,
         p_project_id: projectId
       });
-      
+
       if (error) {
         if (error.message?.includes('Bulk delete blocked')) {
-          this.logger.warn('softDeleteTasksBatch: 服务端熔断阻止删除', { 
-            projectId, 
+          this.logger.warn('softDeleteTasksBatch: 服务端熔断阻止删除', {
+            projectId,
             taskIds,
-            error: error.message 
+            error: error.message
           });
           this.toast.warning('删除被阻止', error.message);
           this.sentryLazyLoader.captureMessage('Server circuit breaker blocked delete', {
@@ -496,16 +498,19 @@ export class TaskSyncOperationsService {
           });
           return -1;
         }
-        
+
         throw supabaseErrorToError(error);
       }
-      
-      this.logger.info('softDeleteTasksBatch: 删除成功', { 
-        projectId, 
+
+      // 【NEW-5 修复】服务端删除成功后添加本地 tombstone，防止同步窗口期内任务复活
+      this.tombstoneService.addLocalTombstones(projectId, taskIds);
+
+      this.logger.info('softDeleteTasksBatch: 删除成功', {
+        projectId,
         requestedCount: taskIds.length,
         affectedCount: data
       });
-      
+
       return data ?? 0;
     } catch (e) {
       this.logger.error('softDeleteTasksBatch 失败', e);
@@ -513,7 +518,7 @@ export class TaskSyncOperationsService {
         projectId,
         taskCount: taskIds.length
       });
-      
+
       // RPC 失败时降级为逐个软删除
       this.logger.warn('softDeleteTasksBatch: RPC 失败，降级为逐个更新');
       try {
@@ -522,15 +527,20 @@ export class TaskSyncOperationsService {
           .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
           .eq('project_id', projectId)
           .in('id', taskIds);
-        
+
         if (error) {
           this.logger.error('softDeleteTasksBatch: 降级也失败', error);
           throw supabaseErrorToError(error);
         }
-        
+
+        // 【NEW-5 修复】降级路径成功后同样添加本地 tombstone
+        this.tombstoneService.addLocalTombstones(projectId, taskIds);
+
         return taskIds.length;
       } catch (fallbackError) {
         this.logger.error('softDeleteTasksBatch: 完全失败', fallbackError);
+        // 完全失败时仍添加本地 tombstone 作为最后防线
+        this.tombstoneService.addLocalTombstones(projectId, taskIds);
         return -1;
       }
     }

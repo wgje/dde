@@ -1,11 +1,6 @@
-import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, untracked } from '@angular/core';
+import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import {
-  ActivatedRoute,
-  Router,
-  NavigationEnd,
-  RouterOutlet
-} from '@angular/router';
+import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
 import { ProjectStateService } from './services/project-state.service';
 import { TaskOperationAdapterService } from './services/task-operation-adapter.service';
@@ -40,6 +35,8 @@ import { filter } from 'rxjs/operators';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ThemeType, Project } from './models';
 import { UI_CONFIG } from './config';
+import { FEATURE_FLAGS } from './config/feature-flags.config';
+import { validateCriticalFlags } from './config/feature-flags.config';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { SpotlightTriggerComponent } from './app/features/focus/components/spotlight/spotlight-trigger.component';
 import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
@@ -367,6 +364,37 @@ export class AppComponent implements OnInit, OnDestroy {
       void this.storageQuota.initialize();
       void this.indexedDBHealth.initialize();
     }, 5000); // 延迟 5 秒，避免阻塞启动
+    
+    // 🛡️ 安全校验：验证关键 Feature Flags 是否处于安全状态
+    this.validateCriticalFeatureFlags();
+  }
+  
+  /**
+   * 启动时校验关键 Feature Flags
+   * 
+   * 【NEW-8】使用集中式校验函数，覆盖全部关键保护性开关（7 项）
+   * 如果数据保护相关的开关被意外关闭，发出 Sentry 警告 + 开发者 Toast
+   */
+  private validateCriticalFeatureFlags(): void {
+    const disabledFlags = validateCriticalFlags();
+    
+    if (disabledFlags.length > 0) {
+      const names = disabledFlags.map(f => f.flag).join('、');
+      this.logger.warn('关键安全开关被禁用', { 
+        flags: disabledFlags.map(f => f.flag),
+        risks: disabledFlags.map(f => f.risk),
+      });
+      
+      // 开发环境显示 Toast 提醒
+      const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
+      if (isDev) {
+        this.toast.warning(
+          '安全开关警告', 
+          `${disabledFlags.length} 个关键开关被禁用：${names}`, 
+          { duration: 10000 }
+        );
+      }
+    }
   }
   
   /**
@@ -420,30 +448,13 @@ export class AppComponent implements OnInit, OnDestroy {
     effect(() => {
       const needsReminder = this.exportService.needsExportReminder();
       const userId = this.userSession.currentUserId();
-
-      // 未登录时重置一次性提醒状态，避免用户切换后被错误拦截。
-      if (!userId) {
-        this._exportReminderShownForUser = null;
-        return;
-      }
-
-      if (!needsReminder) {
-        return;
-      }
-
-      // 防止 effect 因 Toast 内部 signal 读写被“反向订阅”，触发无限提示风暴。
-      if (this._exportReminderShownForUser === userId) {
-        return;
-      }
-
-      this._exportReminderShownForUser = userId;
-      untracked(() => {
+      if (needsReminder && userId) {
         this.toast.info(
           '数据备份提醒',
           '已超过 7 天未导出备份，建议前往设置导出数据。',
           { duration: 10000 }
         );
-      });
+      }
     });
   }
 
@@ -479,6 +490,10 @@ export class AppComponent implements OnInit, OnDestroy {
       this.syncCoordinator.flushPendingPersist();
       this.undoService.flushPendingAction();
       this.simpleSync.flushRetryQueueSync();
+      // 【NEW-6 修复】同步刷盘 ActionQueue 待处理操作到 localStorage
+      // ActionQueue 内存中的操作若未持久化，页面关闭后将丢失
+      this.actionQueue.storage.saveQueueToStorage();
+      this.actionQueue.storage.saveDeadLetterToStorage();
       return false;
     }, 1);
   }
@@ -602,8 +617,6 @@ export class AppComponent implements OnInit, OnDestroy {
   private _loginModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
   /** 登录后的返回 URL（在 effect 清除 ModalService 状态前保存） */
   private _loginReturnUrl: string | null = null;
-  /** 导出提醒一用户一次性展示，防止 signal 反馈循环导致 toast 风暴 */
-  private _exportReminderShownForUser: string | null = null;
 
   /** 临时存储冲突数据 */
   private _pendingConflict: ConflictData | null = null;
@@ -889,12 +902,6 @@ async signOut() {
    */
   async openLoginModal(): Promise<void> {
     if (this.isModalLoading('login')) return;
-
-    // 当登录入口不是由 Guard 触发时，至少保证登录成功后能回到项目页。
-    if (!this._loginReturnUrl) {
-      this._loginReturnUrl = this.router.url && this.router.url !== '/' ? this.router.url : '/projects';
-    }
-
     this.setModalLoading('login', true);
     try {
       const component = await this.modalLoader.loadLoginModal();
@@ -1107,8 +1114,8 @@ async signOut() {
 
     if (!this.authCoord.authError()) {
       // 登录成功：关闭模态框并导航
-      this.navigateAfterLogin();
       this.closeLoginModal();
+      this.navigateAfterLogin();
     } else {
       // 登录失败：回显错误并恢复按钮
       this._loginModalRef?.componentRef.setInput('isLoading', false);
@@ -1155,14 +1162,10 @@ async signOut() {
 
   /** 登录成功后导航到 returnUrl（由 auth guard 保存） */
   private navigateAfterLogin(): void {
-    const returnUrl = this._loginReturnUrl && this._loginReturnUrl !== '/'
-      ? this._loginReturnUrl
-      : '/projects';
+    const returnUrl = this._loginReturnUrl;
     this._loginReturnUrl = null;
-    if (this.router.url !== returnUrl) {
-      void this.router.navigateByUrl(returnUrl).catch(error => {
-        this.logger.warn('登录后路由导航失败', { returnUrl, error });
-      });
+    if (returnUrl && returnUrl !== '/') {
+      void this.router.navigateByUrl(returnUrl);
     }
   }
 

@@ -643,9 +643,10 @@ export class FlowLinkTemplateService {
       },
       $(go.Shape,
         {
-          strokeWidth: 8,
+          // 进一步增加粗细和不透明度，确保在小地图缩放后依然清晰可见
+          strokeWidth: 12,
           stroke: styles.link.parentChildColor,
-          opacity: 0.6
+          opacity: 1.0 // 完全不透明以消除虚边
         }
       )
     );

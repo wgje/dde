@@ -114,6 +114,7 @@
         (exportPng)="exportToPng()"
         (exportSvg)="exportToSvg()"
         (saveToCloud)="saveToCloud()"
+        [saveToCloudCallback]="saveToCloudBound"
         (toggleSelectMode)="toggleSelectMode()">
       </app-flow-toolbar>
 
@@ -123,6 +124,7 @@
         [position]="taskDetailPos()"
         [drawerHeight]="drawerHeight()"
         [autoHeightEnabled]="!drawerManualOverride()"
+        [layoutTick]="detailLayoutTick()"
         (positionChange)="taskDetailPos.set($event)"
         (drawerHeightChange)="drawerHeight.set($event)"
         (isResizingChange)="isResizingDrawerSignal.set($event)"
@@ -326,6 +328,7 @@
       (exportPng)="exportToPng()"
       (exportSvg)="exportToSvg()"
       (saveToCloud)="saveToCloud()"
+      [saveToCloudCallback]="saveToCloudBound"
       (toggleSelectMode)="toggleSelectMode()">
     </app-flow-toolbar>
 
@@ -335,6 +338,7 @@
       [position]="taskDetailPos()"
       [drawerHeight]="drawerHeight()"
       [autoHeightEnabled]="!drawerManualOverride()"
+      [layoutTick]="detailLayoutTick()"
       (positionChange)="taskDetailPos.set($event)"
       (drawerHeightChange)="drawerHeight.set($event)"
       (isResizingChange)="isResizingDrawerSignal.set($event)"

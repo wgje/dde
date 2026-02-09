@@ -340,7 +340,12 @@ export class RetryQueueService {
   }
   
   /**
-   * 检查队列容量警告（含满载强制处理和卡死检测）
+   * 检查队列容量警告（分层预警 + 满载强制处理 + 卡死检测）
+   * 
+   * 分层策略：
+   * - 70%: 仅日志记录
+   * - 85%: warning toast
+   * - 95%: error toast（严重告警）
    */
   checkCapacityWarning(): void {
     const currentSize = this.queue.length;
@@ -396,24 +401,39 @@ export class RetryQueueService {
       typeBreakdown: this.getTypeBreakdown()
     };
     
-    this.logger.warn('队列容量警告', diagnostics);
-    
-    if (cooldownPassed) {
-      this.toast.error(
-        '⚠️ 同步队列即将满载',
-        '请连接网络以防止数据丢失',
-        { duration: 30_000 }
-      );
+    // 分层预警
+    if (percentUsed >= 95) {
+      this.logger.error('RetryQueue 即将满载', diagnostics);
+      if (cooldownPassed) {
+        this.toast.error(
+          '同步队列即将满载',
+          '请尽快恢复网络连接，否则新操作可能无法入队',
+          { duration: 30_000 }
+        );
+      }
+      this.sentryLazyLoader.captureMessage('RetryQueue at 95% capacity', {
+        level: 'error',
+        tags: { operation: 'queueCapacityCheck', percentUsed: String(percentUsed) },
+        extra: diagnostics
+      });
+    } else if (percentUsed >= 85) {
+      this.logger.warn('RetryQueue 接近上限', diagnostics);
+      if (cooldownPassed) {
+        this.toast.warning(
+          '同步队列接近上限',
+          `已使用 ${percentUsed}%，请尽快连接网络`,
+          { duration: 10_000 }
+        );
+      }
+      this.sentryLazyLoader.captureMessage('RetryQueue capacity warning', {
+        level: 'warning',
+        tags: { operation: 'queueCapacityCheck', percentUsed: String(percentUsed) },
+        extra: diagnostics
+      });
+    } else if (percentUsed >= 70) {
+      // 70%：仅日志记录
+      this.logger.warn('RetryQueue 容量偏高', diagnostics);
     }
-    
-    this.sentryLazyLoader.captureMessage('RetryQueue capacity warning', {
-      level: 'warning',
-      tags: { 
-        operation: 'queueCapacityCheck',
-        percentUsed: String(percentUsed)
-      },
-      extra: diagnostics
-    });
   }
 
   private enterPressureMode(reason: string): void {
@@ -541,6 +561,15 @@ export class RetryQueueService {
     void this.processQueue();
   }
   
+  /**
+   * 获取队列容量使用百分比（0-100）
+   * 用于同步状态面板展示队列健康度
+   */
+  getCapacityPercent(): number {
+    if (this.maxQueueSize === 0) return 0;
+    return Math.round((this.queue.length / this.maxQueueSize) * 100);
+  }
+
   /**
    * 获取队列中各类型项的数量统计
    */

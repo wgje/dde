@@ -495,5 +495,32 @@ describe('UndoService', () => {
       // 截断计数应重置
       expect(service.truncatedCount()).toBe(0);
     });
+
+    it('登出应清除 sessionStorage 持久化数据（Task 1.2 验证）', () => {
+      // 先记录一个操作使持久化有内容
+      const project = createTestProject();
+      const before = service.createProjectSnapshot(project);
+      const after = service.createProjectSnapshot({
+        ...project,
+        tasks: [createTask({ id: 'task-1', title: '修改后' })]
+      });
+      
+      service.recordAction({
+        type: 'task-update',
+        projectId: project.id,
+        data: { before, after }
+      });
+      
+      expect(service.canUndo()).toBe(true);
+      
+      // 登出
+      service.onUserLogout();
+      
+      // 撤销栈和重做栈都应清空
+      expect(service.canUndo()).toBe(false);
+      expect(service.canRedo()).toBe(false);
+      expect(service.undoCount()).toBe(0);
+      expect(service.redoCount()).toBe(0);
+    });
   });
 });

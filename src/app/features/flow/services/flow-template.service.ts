@@ -313,8 +313,9 @@ export class FlowTemplateService {
         {
           name: "SHAPE",
           height: 80,
-          strokeWidth: 2,
-          stroke: null  // 无边框，减少渲染
+          // 增加边框以在小地图中更清晰，即使在极小比例下也能保持轮廓
+          strokeWidth: 4,
+          stroke: "rgba(255, 255, 255, 0.5)" // 增加不透明度从 0.2 到 0.5，边缘更锋利
         },
         new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
           isUnassigned ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH : GOJS_CONFIG.ASSIGNED_NODE_WIDTH

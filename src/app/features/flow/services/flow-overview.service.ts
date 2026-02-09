@@ -70,7 +70,11 @@ export class FlowOverviewService {
 
   /** 初始化小地图 */
   initializeOverview(container: HTMLDivElement, isMobile: boolean = false): void {
-    if (!this.diagram || this.isDestroyed) {
+    // 重置销毁标记，允许重新初始化（FlowOverviewService 是全局单例，
+    // 移动端切换视图会销毁/重建 FlowViewComponent，需要重置状态）
+    this.isDestroyed = false;
+
+    if (!this.diagram) {
       this.logger.warn('无法初始化 Overview：主图未就绪');
       return;
     }
@@ -89,14 +93,30 @@ export class FlowOverviewService {
         
         this.overviewContainer = container;
         
-        // 设置背景色
+        // 设置背景色和显示质量优化
         container.style.backgroundColor = this.getOverviewBackgroundColor();
+        
+        // 优化渲染：强制浏览器使用更高对比度和锐利度的图像渲染算法
+        container.style.imageRendering = 'auto'; // 基础回退
+        if ('imageRendering' in container.style) {
+          // 尝试各种浏览器的锐化选项
+          (container.style as any).imageRendering = '-webkit-optimize-contrast';
+          if (container.style.imageRendering !== '-webkit-optimize-contrast') {
+             (container.style as any).imageRendering = 'crisp-edges';
+          }
+        }
+        
+        // 提升抗锯齿效果
+        (container.style as any).webkitFontSmoothing = 'antialiased';
+        (container.style as any).mozOsxFontSmoothing = 'grayscale';
         
         // 创建 Overview 实例
         this.overview = new go.Overview(container, {
           observed: this.diagram,
           contentAlignment: go.Spot.Center,
-          'animationManager.isEnabled': false
+          'animationManager.isEnabled': false,
+          // 强制使用高像素比渲染（至少为 2），大幅提升小地图的清晰度和视网膜屏幕支持
+          'computePixelRatio': () => Math.max(window.devicePixelRatio || 1, 2)
         });
         
         // 设置模板

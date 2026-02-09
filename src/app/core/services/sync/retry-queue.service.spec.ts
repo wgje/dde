@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RetryQueueService, RetryOperationHandler } from './retry-queue.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
+import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { Task } from '../../../../models';
 
 function createTask(id: string): Task {
@@ -68,6 +69,15 @@ describe('RetryQueueService', () => {
         {
           provide: ToastService,
           useValue: toastMock
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            captureMessage: vi.fn(),
+            captureException: vi.fn(),
+            setTag: vi.fn(),
+            setContext: vi.fn()
+          }
         }
       ]
     });
@@ -183,5 +193,62 @@ describe('RetryQueueService', () => {
 
     expect(service.queuePressure()).toBe(false);
     expect(service.queuePressureReason()).toBeNull();
+  });
+
+  // ==================== Task 2.2 / 3.1 新增测试 ====================
+  
+  it('getCapacityPercent 应返回正确的容量百分比', () => {
+    (service as unknown as { maxQueueSize: number }).maxQueueSize = 10;
+    
+    expect(service.getCapacityPercent()).toBe(0);
+    
+    service.add('task', 'upsert', createTask('t-1'), 'p-1');
+    service.add('task', 'upsert', createTask('t-2'), 'p-1');
+    service.add('task', 'upsert', createTask('t-3'), 'p-1');
+    
+    expect(service.getCapacityPercent()).toBe(30);
+  });
+
+  it('getCapacityPercent 队列满时应返回 100 或更高', () => {
+    (service as unknown as { maxQueueSize: number }).maxQueueSize = 2;
+    
+    service.add('task', 'upsert', createTask('t-1'), 'p-1');
+    service.add('task', 'upsert', createTask('t-2'), 'p-1');
+    
+    expect(service.getCapacityPercent()).toBeGreaterThanOrEqual(100);
+  });
+
+  it('checkCapacityWarning 在 80%+ 时应记录日志（WARNING_THRESHOLD=0.8）', () => {
+    (service as unknown as { maxQueueSize: number }).maxQueueSize = 10;
+    // 重置冷却时间
+    (service as unknown as { lastWarningTime: number }).lastWarningTime = 0;
+    (service as unknown as { lastWarningPercent: number }).lastWarningPercent = 0;
+    
+    // 添加 8 个任务达到 80%，刚好超过 WARNING_THRESHOLD(0.8) 的门槛
+    for (let i = 0; i < 8; i++) {
+      service.add('task', 'upsert', createTask(`cap-${i}`), 'p-1');
+    }
+    
+    // 80% 超过阈值，应触发日志
+    expect(loggerCategory.warn).toHaveBeenCalled();
+  });
+
+  it('checkCapacityWarning 在 95%+ 时应触发 error 级别日志', () => {
+    (service as unknown as { maxQueueSize: number }).maxQueueSize = 20;
+    
+    // 先添加 19 个任务达到 95%（此过程中会内部触发 warning）
+    for (let i = 0; i < 19; i++) {
+      service.add('task', 'upsert', createTask(`crit-${i}`), 'p-1');
+    }
+    
+    // 重置冷却，然后显式再次调用 checkCapacityWarning
+    (service as unknown as { lastWarningTime: number }).lastWarningTime = 0;
+    (service as unknown as { lastWarningPercent: number }).lastWarningPercent = 0;
+    loggerCategory.error.mockClear();
+    
+    service.checkCapacityWarning();
+    
+    // 95% 应触发 error 级别日志
+    expect(loggerCategory.error).toHaveBeenCalled();
   });
 });

@@ -221,6 +221,15 @@ export class TextUnassignedComponent implements OnDestroy {
     this.cdr.markForCheck();
   }
 
+  /**
+   * TextViewComponent 调用的公开方法
+   * 退出编辑态并重置为预览折叠
+   */
+  public resetEditState(): void {
+    this.cancelEdit();
+    this.cdr.markForCheck();
+  }
+
   protected onTaskClick(task: Task): void {
     // 【修复】区分点击源：卡片外框(三段式切换) vs 内容区域(直接编辑)
     // - 点击卡片外框按钮：展开 -> 折叠 -> 展开
