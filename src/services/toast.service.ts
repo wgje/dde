@@ -1,4 +1,4 @@
-import { Injectable, signal, computed } from '@angular/core';
+import { Injectable, signal, computed, untracked } from '@angular/core';
 import { TOAST_CONFIG } from '../config';
 
 /**
@@ -46,6 +46,8 @@ export interface ToastMessage {
 export class ToastService {
   /** 当前显示的 Toast 消息列表 */
   private toasts = signal<ToastMessage[]>([]);
+  /** Toast 自动关闭定时器，避免重复消息创建时出现信号反馈风暴 */
+  private dismissTimers = new Map<string, ReturnType<typeof setTimeout>>();
   
   /** 只读的 Toast 消息列表 */
   readonly messages = computed(() => this.toasts());
@@ -163,14 +165,14 @@ export class ToastService {
    */
   private show(type: ToastType, title: string, message?: string, duration = ToastService.DEFAULT_DURATION, action?: ToastAction): void {
     // 检查是否已有相同的消息显示中（合并逻辑）
-    const existingToast = this.toasts().find(
+    const existingToast = untracked(() => this.toasts().find(
       t => t.type === type && t.title === title && t.message === message
-    );
+    ));
     
     if (existingToast) {
-      // 相同消息已存在，重置其时间（延长显示）
-      // 通过移除旧的并添加新的来刷新
-      this.dismiss(existingToast.id);
+      // 相同消息已存在：仅重置关闭计时，不再删除重建，避免 signal 反馈循环
+      this.refreshDismissTimer(existingToast.id, duration);
+      return;
     }
     
     const id = crypto.randomUUID();
@@ -183,6 +185,7 @@ export class ToastService {
       createdAt: Date.now(),
       action
     };
+    const evictedToastIds: string[] = [];
 
     this.toasts.update(current => {
       const updated = [...current, toast];
@@ -191,32 +194,85 @@ export class ToastService {
         // 找到第一个非错误类型的消息移除
         const nonErrorIndex = updated.findIndex(t => t.type !== 'error');
         if (nonErrorIndex !== -1) {
-          updated.splice(nonErrorIndex, 1);
+          const [evicted] = updated.splice(nonErrorIndex, 1);
+          if (evicted) {
+            evictedToastIds.push(evicted.id);
+          }
         } else {
-          // 如果全是错误消息，移除最旧的
-          return updated.slice(-ToastService.MAX_TOASTS);
+          // 如果全是错误消息，移除最旧的（可能移除多条）
+          const overflowCount = updated.length - ToastService.MAX_TOASTS;
+          const evicted = updated.splice(0, overflowCount);
+          for (const item of evicted) {
+            evictedToastIds.push(item.id);
+          }
         }
       }
       return updated;
     });
-
-    // 自动移除
-    if (duration > 0) {
-      setTimeout(() => this.dismiss(id), duration);
+    for (const evictedToastId of evictedToastIds) {
+      this.clearDismissTimer(evictedToastId);
     }
+
+    this.refreshDismissTimer(id, duration);
+  }
+
+  /**
+   * 安排/重置自动关闭计时器
+   */
+  private refreshDismissTimer(id: string, duration: number): void {
+    this.clearDismissTimer(id);
+    if (duration <= 0) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.dismissTimers.delete(id);
+      this.removeToastById(id);
+    }, duration);
+    this.dismissTimers.set(id, timer);
+  }
+
+  /**
+   * 清理指定 Toast 的计时器
+   */
+  private clearDismissTimer(id: string): void {
+    const timer = this.dismissTimers.get(id);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    this.dismissTimers.delete(id);
+  }
+
+  /**
+   * 清理全部计时器
+   */
+  private clearAllDismissTimers(): void {
+    for (const timer of this.dismissTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.dismissTimers.clear();
+  }
+
+  /**
+   * 从消息列表移除指定 Toast（不处理计时器）
+   */
+  private removeToastById(id: string): void {
+    this.toasts.update(current => current.filter(t => t.id !== id));
   }
 
   /**
    * 手动关闭指定 Toast
    */
   dismiss(id: string): void {
-    this.toasts.update(current => current.filter(t => t.id !== id));
+    this.clearDismissTimer(id);
+    this.removeToastById(id);
   }
 
   /**
    * 关闭所有 Toast
    */
   dismissAll(): void {
+    this.clearAllDismissTimers();
     this.toasts.set([]);
   }
 }

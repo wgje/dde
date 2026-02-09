@@ -239,6 +239,29 @@ describe('ToastService', () => {
       // 应该只有一条消息
       expect(service.messages().length).toBe(1);
     });
+
+    it('相同消息重复触发时应该复用同一条并重置自动关闭计时', () => {
+      service.info('测试消息', '详情', 1000);
+
+      const firstToast = service.messages()[0];
+      expect(firstToast).toBeDefined();
+
+      // 接近过期时重复触发同一消息，应该只刷新计时而不是新增/替换
+      vi.advanceTimersByTime(900);
+      service.info('测试消息', '详情', 1000);
+
+      const secondToast = service.messages()[0];
+      expect(service.messages().length).toBe(1);
+      expect(secondToast.id).toBe(firstToast.id);
+
+      // 如果未重置计时，这里会被旧定时器移除
+      vi.advanceTimersByTime(200);
+      expect(service.messages().length).toBe(1);
+
+      // 再过剩余时间后应自动关闭
+      vi.advanceTimersByTime(800);
+      expect(service.messages().length).toBe(0);
+    });
   });
 
   describe('选项处理', () => {

@@ -1,4 +1,4 @@
-import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect } from '@angular/core';
+import { Component, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import {
   ActivatedRoute,
@@ -420,13 +420,30 @@ export class AppComponent implements OnInit, OnDestroy {
     effect(() => {
       const needsReminder = this.exportService.needsExportReminder();
       const userId = this.userSession.currentUserId();
-      if (needsReminder && userId) {
+
+      // 未登录时重置一次性提醒状态，避免用户切换后被错误拦截。
+      if (!userId) {
+        this._exportReminderShownForUser = null;
+        return;
+      }
+
+      if (!needsReminder) {
+        return;
+      }
+
+      // 防止 effect 因 Toast 内部 signal 读写被“反向订阅”，触发无限提示风暴。
+      if (this._exportReminderShownForUser === userId) {
+        return;
+      }
+
+      this._exportReminderShownForUser = userId;
+      untracked(() => {
         this.toast.info(
           '数据备份提醒',
           '已超过 7 天未导出备份，建议前往设置导出数据。',
           { duration: 10000 }
         );
-      }
+      });
     });
   }
 
@@ -585,6 +602,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private _loginModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
   /** 登录后的返回 URL（在 effect 清除 ModalService 状态前保存） */
   private _loginReturnUrl: string | null = null;
+  /** 导出提醒一用户一次性展示，防止 signal 反馈循环导致 toast 风暴 */
+  private _exportReminderShownForUser: string | null = null;
 
   /** 临时存储冲突数据 */
   private _pendingConflict: ConflictData | null = null;
@@ -1140,32 +1159,10 @@ async signOut() {
       ? this._loginReturnUrl
       : '/projects';
     this._loginReturnUrl = null;
-    if (this.router.url === '/' && returnUrl.startsWith('/projects')) {
-      // 线上偶发：Guard 首次拦截后，Router 的后续 navigateByUrl('/projects') 可能卡住不落地。
-      // 这里直接切换 hash，保证登录后立刻回到项目页，避免“登录后卡死在 /#/"。
-      this.navigateByHash(returnUrl);
-      return;
-    }
-
     if (this.router.url !== returnUrl) {
-      void this.router.navigateByUrl(returnUrl).then(success => {
-        if (!success && this.router.url !== returnUrl) {
-          this.navigateByHash(returnUrl);
-        }
-      }).catch(error => {
-        this.logger.warn('登录后路由导航失败，使用 hash 兜底', { returnUrl, error });
-        this.navigateByHash(returnUrl);
+      void this.router.navigateByUrl(returnUrl).catch(error => {
+        this.logger.warn('登录后路由导航失败', { returnUrl, error });
       });
-    }
-  }
-
-  /** Hash 路由硬跳转兜底（用于 Router 卡住场景） */
-  private navigateByHash(returnUrl: string): void {
-    if (typeof window === 'undefined') return;
-    const normalized = returnUrl.startsWith('/') ? returnUrl : `/${returnUrl}`;
-    const nextHash = `#${normalized}`;
-    if (window.location.hash !== nextHash) {
-      window.location.hash = nextHash;
     }
   }
 

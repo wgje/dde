@@ -231,7 +231,7 @@ async function startApplication() {
           withComponentInputBinding(),
           withHashLocation(),
           withRouterConfig({
-            // 修复守卫取消导航后 URL / Router 状态不一致导致的后续导航卡住问题
+            // 关键修复：Guard 取消导航后同步 Router/URL 状态，避免登录后同路径导航被误判为已在目标页
             canceledNavigationResolution: 'computed'
           })
         ),

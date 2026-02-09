@@ -6,6 +6,20 @@
 import { test, expect } from '@playwright/test';
 import { testHelpers } from './helpers';
 
+async function ensureLoginModalVisible(page: import('@playwright/test').Page): Promise<void> {
+  const loginModal = page.locator('[data-testid="login-modal"]');
+  if (await loginModal.isVisible({ timeout: 1500 }).catch(() => false)) {
+    return;
+  }
+
+  const loginButton = page.locator('[data-testid="login-btn"]');
+  if (await loginButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await loginButton.click();
+  }
+
+  await page.waitForSelector('[data-testid="login-modal"]', { timeout: 10000 });
+}
+
 test.describe('关键路径 1: 登录 + 数据加载', () => {
   test('访客模式应能加载默认项目', async ({ page }) => {
     // 访问应用
@@ -27,9 +41,8 @@ test.describe('关键路径 1: 登录 + 数据加载', () => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
     
-    // 打开登录对话框
-    await page.click('[data-testid="login-btn"]');
-    await page.waitForSelector('[data-testid="login-modal"]');
+    // 打开登录对话框（Guard 场景下可能已自动弹出）
+    await ensureLoginModalVisible(page);
     
     // 输入无效凭据
     await page.fill('[data-testid="email-input"]', 'invalid@test.com');
@@ -54,12 +67,9 @@ test.describe('关键路径 1: 登录 + 数据加载', () => {
       return;
     }
     
-    await page.goto('/');
-    await testHelpers.waitForAppReady(page);
-    
-    // 打开登录对话框
-    await page.click('[data-testid="login-btn"]');
-    await page.waitForSelector('[data-testid="login-modal"]');
+    // 直接访问受保护路由，覆盖「Guard 先阻断，再登录」的真实场景
+    await page.goto('/#/projects');
+    await ensureLoginModalVisible(page);
     
     // 输入有效凭据
     await page.fill('[data-testid="email-input"]', testEmail);
@@ -70,6 +80,7 @@ test.describe('关键路径 1: 登录 + 数据加载', () => {
     
     // 等待登录成功
     await expect(page.locator('[data-testid="login-modal"]')).not.toBeVisible({ timeout: 10000 });
+    await expect(page).toHaveURL(/#\/projects(?:$|[/?])/);
     
     // 验证用户头像或用户菜单显示
     await expect(page.locator('[data-testid="user-menu"]')).toBeVisible();
