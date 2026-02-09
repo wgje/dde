@@ -94,3 +94,22 @@ console.log(`✅ 环境变量已写入:`);
 console.log(`   - ${targetPath} (development)`);
 console.log(`   - ${targetPathProd} (production)`);
 
+// === 同步注入 index.html 预加载脚本的 Supabase 配置 ===
+// 使用正则匹配，支持幂等执行（无论是占位符还是已注入的真实值都能正确替换）
+const indexHtmlPath = path.resolve(__dirname, '../index.html');
+try {
+  let indexHtml = fs.readFileSync(indexHtmlPath, 'utf-8');
+  const urlPattern = /var supabaseUrl = '[^']*';/;
+  const keyPattern = /var supabaseAnonKey = '[^']*';/;
+
+  if (urlPattern.test(indexHtml) && keyPattern.test(indexHtml)) {
+    indexHtml = indexHtml.replace(urlPattern, `var supabaseUrl = '${finalUrl}';`);
+    indexHtml = indexHtml.replace(keyPattern, `var supabaseAnonKey = '${finalKey}';`);
+    fs.writeFileSync(indexHtmlPath, indexHtml);
+    console.log(`   - ${indexHtmlPath} (预加载脚本 Supabase 配置)`);
+  } else {
+    console.warn('⚠️ index.html 中未找到预加载脚本的 Supabase 配置占位符，跳过注入');
+  }
+} catch (e) {
+  console.warn('⚠️ 无法更新 index.html 预加载脚本配置:', e.message);
+}

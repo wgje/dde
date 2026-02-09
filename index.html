@@ -226,9 +226,9 @@
           return;
         }
 
-        // Supabase 配置（公开的 anon key）
+        // Supabase 配置（由 scripts/set-env.cjs 构建时注入，请勿手动修改）
         var supabaseUrl = 'https://fkhihclpghmmtbbywvoj.supabase.co';
-        var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mjg4MTIwNjYsImV4cCI6MjA0NDM4ODA2Nn0.T7HHx10qFOo_fXqgVubKM0Wk8tnv4Y44l9XXE89Zyf0';
+        var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgwNDIyMTgsImV4cCI6MjA4MzYxODIxOH0.4Z5eylbmBA-YFiDRvDtom4lTHavHP3JfVmrU0yH9oVo';
 
         var headers = {
           'apikey': supabaseAnonKey,
