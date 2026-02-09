@@ -111,22 +111,13 @@ export class ClockSyncService {
   
   constructor() {
     // 启动时检测 - 延迟到应用空闲时执行，避免阻塞首屏渲染
+    // 使用较长延迟确保 auth session 已刷新完毕
     if (CLOCK_SYNC_CONFIG.CHECK_ON_INIT) {
-      // 使用 requestIdleCallback 在浏览器空闲时执行，避免阻塞关键渲染路径
-      // Fallback 到 setTimeout(5000ms) 确保首屏完成后才检测
-      if (typeof requestIdleCallback !== 'undefined') {
-        requestIdleCallback(() => {
-          this.checkClockDrift().catch(err => {
-            this.logger.debug('启动时时钟检测失败', err);
-          });
-        }, { timeout: 10000 }); // 最多延迟 10 秒
-      } else {
-        setTimeout(() => {
-          this.checkClockDrift().catch(err => {
-            this.logger.debug('启动时时钟检测失败', err);
-          });
-        }, 5000); // 延迟 5 秒，确保首屏渲染完成
-      }
+      setTimeout(() => {
+        this.checkClockDrift().catch(err => {
+          this.logger.debug('启动时时钟检测失败', err);
+        });
+      }, 15000); // 延迟 15 秒，确保认证完成后再检测
     }
   }
   
@@ -160,6 +151,23 @@ export class ClockSyncService {
     this.isChecking = true;
     
     try {
+      // 认证守卫：未登录时跳过时钟检测，避免 401
+      const session = await this.supabase.client().auth.getSession();
+      if (!session.data.session) {
+        this.logger.debug('用户未认证，跳过时钟检测');
+        const result: ClockSyncResult = {
+          status: 'unknown',
+          driftMs: 0,
+          serverTime: new Date(),
+          clientTime: new Date(),
+          rttMs: 0,
+          checkedAt: new Date(),
+          reliable: false
+        };
+        this.lastSyncResult.set(result);
+        return result;
+      }
+
       const clientTimeStart = new Date();
       
       // 使用 RPC 调用获取服务端时间

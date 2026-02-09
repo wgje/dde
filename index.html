@@ -213,12 +213,17 @@
         } catch (e) { /* 忽略错误 */ }
 
         if (!authToken) return;
+        // 严格校验 token 过期状态，避免使用过期 token 触发 401
         if (typeof tokenExpiresAt === 'number') {
           if (tokenExpiresAt > 1000000000000) {
             tokenExpiresAt = Math.floor(tokenExpiresAt / 1000);
           }
-          // 令牌已过期或即将过期时，跳过预加载，避免触发 401 噪音
-          if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 30) return;
+          // 令牌已过期或 5 分钟内即将过期时，跳过预加载
+          // 使用更大的缓冲区（300s 而非 30s），因为预加载器绕过了 SDK 的 refreshSession
+          if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
+        } else {
+          // 无法确定过期时间时，跳过预加载，让 SDK 正常流程处理
+          return;
         }
 
         // Supabase 配置（公开的 anon key）
@@ -233,19 +238,26 @@
         var baseUrl = supabaseUrl + '/rest/v1';
 
         // 并行请求关键数据（不阻塞页面渲染）
+        // 401/403 等认证错误静默跳过，让 SDK 正常认证流程处理
         fetch(baseUrl + '/rpc/get_server_time', {
           method: 'POST',
           headers: headers
-        }).then(function(r) { return r.json(); }).then(function(data) {
-          if (window.__PRELOADED_DATA__) {
+        }).then(function(r) {
+          if (!r.ok) return null; // 静默跳过任何非 200 响应
+          return r.json();
+        }).then(function(data) {
+          if (data && window.__PRELOADED_DATA__) {
             window.__PRELOADED_DATA__.serverTime = data;
           }
         }).catch(function() {});
 
         fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
           headers: headers
-        }).then(function(r) { return r.json(); }).then(function(data) {
-          if (window.__PRELOADED_DATA__) {
+        }).then(function(r) {
+          if (!r.ok) return null; // 静默跳过任何非 200 响应
+          return r.json();
+        }).then(function(data) {
+          if (data && window.__PRELOADED_DATA__) {
             window.__PRELOADED_DATA__.projects = data;
           }
         }).catch(function() {});

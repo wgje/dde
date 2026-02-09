@@ -84,7 +84,7 @@ export class UserPreferencesSyncService {
           layout_direction: preferences.layoutDirection,
           floating_window_pref: preferences.floatingWindowPref,
           updated_at: nowISO()
-        });
+        }, { onConflict: 'user_id' });
       
       if (error) throw supabaseErrorToError(error);
       return true;
