@@ -160,21 +160,15 @@ export class TextViewComponent implements OnInit, OnDestroy {
     return isLoading && !hasLocalData;
   });
   
-  ngOnInit() {
-    // 重置所有编辑状态
-    this.selectedTaskId.set(null);
-    
-    // 初始化任务操作服务
-    this.ops.init({
-      selectedTaskId: this.selectedTaskId,
-      deleteConfirmTask: this.deleteConfirmTask,
-      deleteKeepChildren: this.deleteKeepChildren,
-      focusFlowNode: this.focusFlowNode,
-      isMobile: this.isMobile,
-      getStagesRef: () => this.stagesRef,
-      getUnassignedRef: () => this.unassignedRef,
-    });
-
+  constructor() {
+    // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
+    this.setupSignalEffects();
+  }
+  
+  /**
+   * 信号 effect 集中注册（必须在构造函数中调用以确保注入上下文可用）
+   */
+  private setupSignalEffects(): void {
     // 移动端视图切换：离开文本视图时收起所有展开/编辑态
     effect(() => {
       const isMobile = this.uiState.isMobile();
@@ -207,6 +201,22 @@ export class TextViewComponent implements OnInit, OnDestroy {
       if (projectId) {
         this.resetTextEditingState();
       }
+    });
+  }
+  
+  ngOnInit() {
+    // 重置所有编辑状态
+    this.selectedTaskId.set(null);
+    
+    // 初始化任务操作服务
+    this.ops.init({
+      selectedTaskId: this.selectedTaskId,
+      deleteConfirmTask: this.deleteConfirmTask,
+      deleteKeepChildren: this.deleteKeepChildren,
+      focusFlowNode: this.focusFlowNode,
+      isMobile: this.isMobile,
+      getStagesRef: () => this.stagesRef,
+      getUnassignedRef: () => this.unassignedRef,
     });
     
     // 在 document 上注册全局触摸事件监听器
