@@ -81,6 +81,10 @@ export class FlowTouchService {
       ghost: null
     };
     
+    // 【P3-19 修复】先清除可能残留的定时器
+    if (this.touchState.longPressTimer) {
+      clearTimeout(this.touchState.longPressTimer);
+    }
     // 长按 250ms 后开始拖拽
     this.touchState.longPressTimer = setTimeout(() => {
       if (this.isDestroyed) return;

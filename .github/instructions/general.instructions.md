@@ -1,31 +1,27 @@
 ---
+description: "全局通用编码规则（默认生效）"
 applyTo: "**/*"
 ---
-# General Coding Standards
 
-## Core Philosophy
-- 不要造轮子：使用成熟的工具和库
-- 代码简洁、可读、可维护
-- 小步迭代、频繁提交
+# General Coding Standards (NanoFlow)
 
-## Code Style
-- 使用中文注释描述业务逻辑
-- 代码标识符、变量名使用英文
-- 单个文件 200-400 行为宜，最大不超过 800 行
-- 函数不超过 50 行
-- 嵌套不超过 4 层
+## 核心哲学
+- 不造轮子，先复用现有实现。
+- 最小改动优先，保证可回滚。
+- 正确性优先于炫技。
 
-## Error Handling
-- 使用 Result 模式而非 try/catch 地狱
-- 错误消息要有意义、可定位
-- 关键路径必须有错误处理
+## 硬约束（跨层一致）
+- 实体 ID：客户端 `crypto.randomUUID()`。
+- 同步：增量拉取 + LWW。
+- 离线：本地先写 + 后台同步 + 失败重试。
+- 状态：Angular Signals。
+- 禁止 `inject(StoreService)`。
 
-## Performance
-- 优先考虑算法复杂度
-- 避免不必要的计算和渲染
-- 使用适当的缓存策略
+## 编码质量
+- 中文注释解释业务意图，英文标识符。
+- 严格类型，避免 `any`。
+- 函数短小、层级可控，避免深层嵌套。
+- 修改代码时同步更新相关测试与文档。
 
-## Documentation
-- 公共 API 必须有文档注释
-- 复杂逻辑需要解释「为什么」
-- README 保持最新
+## 冲突处理
+- 若与 `AGENTS.md` 或 `.github/copilot-instructions.md` 冲突，以后二者为准。

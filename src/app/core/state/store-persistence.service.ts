@@ -34,7 +34,9 @@ const DEBOUNCE_DELAY = 1000;
 /**
  * 元数据结构
  */
+// 【P1-02 修复】添加 key 属性匹配 IndexedDB keyPath: 'key'
 interface StoreMeta {
+  key: string;
   version: number;
   lastSyncTime: string;
   activeProjectId: string | null;
@@ -73,6 +75,14 @@ export class StorePersistenceService {
     // 初始化 IndexedDB（委托给子服务）
     this.initDatabase().catch(err => {
       this.logger.warn('IndexedDB 初始化失败，将使用内存存储', err);
+    });
+    
+    // 【P2-04 修复】服务销毁时清理所有防抖计时器
+    this.destroyRef.onDestroy(() => {
+      for (const timer of this.saveTimers.values()) {
+        clearTimeout(timer);
+      }
+      this.saveTimers.clear();
     });
   }
   
@@ -133,6 +143,35 @@ export class StorePersistenceService {
       
       // 保存项目
       projectStore.put(project);
+      
+      // 【P1-04 修复】先清理该项目的旧 task/connection 记录，防止已删除的条目残留
+      const taskIds = new Set(tasks.map(t => t.id));
+      const connIds = new Set(connections.map(c => c.id));
+      
+      // 通过 projectId 索引找到旧记录并删除不在当前集合中的
+      const taskIndex = taskStore.index('projectId');
+      const taskCursor = taskIndex.openCursor(IDBKeyRange.only(projectId));
+      taskCursor.onsuccess = (event) => {
+        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+        if (cursor) {
+          if (!taskIds.has(cursor.value.id)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        }
+      };
+      
+      const connIndex = connectionStore.index('projectId');
+      const connCursor = connIndex.openCursor(IDBKeyRange.only(projectId));
+      connCursor.onsuccess = (event) => {
+        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+        if (cursor) {
+          if (!connIds.has(cursor.value.id)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        }
+      };
       
       // 保存任务（带 projectId 索引）
       for (const task of tasks) {
@@ -363,10 +402,18 @@ export class StorePersistenceService {
   /**
    * 保存所有项目数据
    */
+  private isSavingAll = false;
   async saveAllProjects(): Promise<void> {
-    const projects = this.projectStore.projects();
-    for (const project of projects) {
-      await this.doSaveProject(project.id);
+    // 【P3-02 修复】防止并发调用（如关闭标签页时重复触发）
+    if (this.isSavingAll) return;
+    this.isSavingAll = true;
+    try {
+      const projects = this.projectStore.projects();
+      for (const project of projects) {
+        await this.doSaveProject(project.id);
+      }
+    } finally {
+      this.isSavingAll = false;
     }
   }
   
@@ -379,6 +426,7 @@ export class StorePersistenceService {
     try {
       const db = await this.initDatabase();
       const meta: StoreMeta = {
+        key: 'meta',
         version: STORAGE_VERSION,
         lastSyncTime: new Date().toISOString(),
         activeProjectId: this.projectStore.activeProjectId()
@@ -386,7 +434,8 @@ export class StorePersistenceService {
       
       const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
       const store = transaction.objectStore(DB_CONFIG.stores.meta);
-      store.put(meta, 'meta');
+      // 【P1-02 修复】keyPath='key' 时不需要传外部 key 参数
+      store.put(meta);
       
       await new Promise<void>((resolve, reject) => {
         transaction.oncomplete = () => resolve();
@@ -485,11 +534,18 @@ export class StorePersistenceService {
         this.logger.debug('已过滤已删除任务', { projectId, filteredCount });
       }
       
+      // 【P1-05 修复】同样过滤软删除的连接，防止复活
+      const activeConnections = connections.filter(c => !c.deletedAt);
+      const filteredConnCount = connections.length - activeConnections.length;
+      if (filteredConnCount > 0) {
+        this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });
+      }
+      
       this.taskStore.setTasks(activeTasks.map(t => {
         const { projectId: _, ...task } = t;
         return task as Task;
       }), projectId);
-      this.connectionStore.setConnections(connections.map(c => {
+      this.connectionStore.setConnections(activeConnections.map(c => {
         const { projectId: _, ...conn } = c;
         return conn as Connection;
       }), projectId);
@@ -590,6 +646,7 @@ export class StorePersistenceService {
       const existingMeta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
       
       const meta: StoreMeta = {
+        key: 'meta',
         version: existingMeta?.version ?? STORAGE_VERSION,
         lastSyncTime: existingMeta?.lastSyncTime ?? new Date().toISOString(),
         activeProjectId: projectId
@@ -597,7 +654,8 @@ export class StorePersistenceService {
       
       const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
       const store = transaction.objectStore(DB_CONFIG.stores.meta);
-      store.put(meta, 'meta');
+      // 【P1-02 修复】keyPath='key' 时不需要传外部 key 参数
+      store.put(meta);
       
       await new Promise<void>((resolve, reject) => {
         transaction.oncomplete = () => resolve();

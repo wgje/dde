@@ -25,6 +25,8 @@ export class SubtreeOperationsService {
 
     while (stack.length > 0) {
       const currentId = stack.pop()!;
+      // 循环防护：已访问节点不再入栈
+      if (result.has(currentId)) continue;
       result.add(currentId);
       tasks.filter(t => t.parentId === currentId).forEach(child => {
         stack.push(child.id);

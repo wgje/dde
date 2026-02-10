@@ -307,11 +307,22 @@ export class SyncCoordinatorService {
         || this.changeTracker.hasProjectChanges(localProject.id)
         || this.hasPendingChangesForProject(localProject.id);
 
-      if (!hasPendingChanges) {
-        this.logger.info('跳过无待同步改动的 local-only 项目，避免远程删除后复活', {
+      // 【P0-10 修复】即使没有待同步变更，含有实际数据的项目也不应被静默删除
+      // 只有真正空的项目才允许被服务器删除操作清理
+      const hasSubstantialData = (localProject.tasks?.length ?? 0) > 0;
+
+      if (!hasPendingChanges && !hasSubstantialData) {
+        this.logger.info('跳过无数据且无待同步改动的 local-only 项目', {
           projectId: localProject.id
         });
         continue;
+      }
+
+      if (!hasPendingChanges && hasSubstantialData) {
+        this.logger.warn('本地存在含数据的项目但服务器不存在，保守保留', {
+          projectId: localProject.id,
+          taskCount: localProject.tasks?.length
+        });
       }
 
       mergedProjects.push(this.validateAndRebalance({

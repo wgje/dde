@@ -210,6 +210,28 @@ describe('UserSessionService', () => {
       expect(mockProjectState['clearData']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
     });
+
+    it('应清理 sessionStorage 遗留数据', async () => {
+      sessionStorage.setItem('nanoflow.undo-history', 'sensitive');
+      sessionStorage.setItem('nanoflow.optimistic-snapshot', 'sensitive');
+
+      await service.clearAllLocalData();
+
+      expect(sessionStorage.getItem('nanoflow.undo-history')).toBeNull();
+      expect(sessionStorage.getItem('nanoflow.optimistic-snapshot')).toBeNull();
+    });
+
+    it('应清理用户偏好前缀键', async () => {
+      localStorage.setItem('nanoflow.preference.user-123.theme', 'ocean');
+      localStorage.setItem('nanoflow.preference.user-123.layout', 'ltr');
+      localStorage.setItem('nanoflow.preference.user-999.theme', 'forest');
+
+      await service.clearAllLocalData('user-123');
+
+      expect(localStorage.getItem('nanoflow.preference.user-123.theme')).toBeNull();
+      expect(localStorage.getItem('nanoflow.preference.user-123.layout')).toBeNull();
+      expect(localStorage.getItem('nanoflow.preference.user-999.theme')).toBe('forest');
+    });
   });
 
   describe('DestroyRef cleanup', () => {

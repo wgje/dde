@@ -11,7 +11,8 @@ import {
   inject,
   OnInit,
   OnDestroy,
-  computed
+  computed,
+  NgZone
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateOverlayComponent } from './components/gate/gate-overlay.component';
@@ -27,6 +28,7 @@ import {
   focusPreferences 
 } from '../../../state/focus-stores';
 import { LoggerService } from '../../../services/logger.service';
+import { FOCUS_CONFIG } from '../../../config/focus.config';
 
 @Component({
   selector: 'app-focus-mode',
@@ -59,6 +61,12 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private readonly blackBoxSyncService = inject(BlackBoxSyncService);
   private readonly focusPrefService = inject(FocusPreferenceService);
   private readonly logger = inject(LoggerService);
+  private readonly ngZone = inject(NgZone);
+
+  /** 页面隐藏时的时间戳，用于计算待机时长 */
+  private hiddenAt: number | null = null;
+  /** visibilitychange 监听引用，销毁时清理 */
+  private visibilityHandler: (() => void) | null = null;
 
   // 计算属性 - 决定各组件是否可见
   readonly isGateVisible = computed(() => 
@@ -75,10 +83,48 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     // FocusPreferenceService 在构造函数中已自动加载偏好
     // 先从服务器加载黑匣子数据，然后检查大门状态
     this.initializeAndCheckGate();
+    
+    // 监听页面可见性变化：待机一段时间后回来重新检查大门
+    this.setupVisibilityListener();
   }
 
   ngOnDestroy(): void {
     this.logger.debug('FocusMode', '销毁');
+    if (this.visibilityHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = null;
+    }
+  }
+
+  /**
+   * 监听页面可见性变化
+   * 
+   * 用户切走（页面 hidden）时记录时间戳，
+   * 切回（页面 visible）时如果待机超过阈值，重新拉取数据并检查大门
+   */
+  private setupVisibilityListener(): void {
+    if (typeof document === 'undefined') return;
+    
+    this.visibilityHandler = () => {
+      if (document.visibilityState === 'hidden') {
+        this.hiddenAt = Date.now();
+      } else if (document.visibilityState === 'visible' && this.hiddenAt) {
+        const idleDuration = Date.now() - this.hiddenAt;
+        this.hiddenAt = null;
+        
+        const threshold = FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD;
+        if (idleDuration >= threshold) {
+          this.logger.info('FocusMode', 
+            `待机 ${Math.round(idleDuration / 1000)}s 后回来，重新检查大门`);
+          // 在 NgZone 内执行，确保变更检测正确触发
+          this.ngZone.run(() => {
+            this.initializeAndCheckGate();
+          });
+        }
+      }
+    };
+    
+    document.addEventListener('visibilitychange', this.visibilityHandler);
   }
 
   /**

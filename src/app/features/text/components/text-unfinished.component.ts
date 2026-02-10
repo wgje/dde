@@ -1,4 +1,4 @@
-import { Component, inject, Input, Output, EventEmitter, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, input, output, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -17,13 +17,13 @@ import { UnfinishedItem } from './text-view.types';
   template: `
     <section 
       class="flex-none mt-2 px-2 pb-1 rounded-xl bg-retro-rust/10 dark:bg-retro-rust/5 border border-retro-rust/30 dark:border-retro-rust/20 transition-all"
-      [ngClass]="{'mx-4 mt-4': !isMobile, 'mx-2': isMobile}">
+      [ngClass]="{'mx-4 mt-4': !isMobile(), 'mx-2': isMobile()}">
       
       <header 
         (click)="uiState.isTextUnfinishedOpen.set(!uiState.isTextUnfinishedOpen())" 
         class="py-2 cursor-pointer flex justify-between items-center group select-none">
         <span class="font-bold text-retro-dark dark:text-stone-200 flex items-center gap-2 tracking-tight"
-              [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}">
+              [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
           <span class="w-1.5 h-1.5 rounded-full bg-retro-rust shadow-[0_0_6px_rgba(193,91,62,0.4)]"></span>
           待办事项
         </span>
@@ -33,7 +33,7 @@ import { UnfinishedItem } from './text-view.types';
       
       @if (uiState.isTextUnfinishedOpen()) {
         <div class="pb-2 overflow-y-auto grid grid-cols-1 animate-collapse-open"
-             [ngClass]="{'max-h-48 gap-2': !isMobile, 'max-h-36 gap-1': isMobile}">
+             [ngClass]="{'max-h-48 gap-2': !isMobile(), 'max-h-36 gap-1': isMobile()}">
           @for (item of projectState.unfinishedItems(); track trackItem(item)) {
             <div class="p-2 bg-panel/50 dark:bg-stone-700/50 backdrop-blur-sm rounded-lg border border-retro-muted/20 dark:border-stone-600 hover:border-retro-rust hover:shadow-sm cursor-pointer group flex items-start gap-2 active:scale-[0.98] transition-all">
               <button 
@@ -71,8 +71,8 @@ export class TextUnfinishedComponent {
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   
-  @Input() isMobile = false;
-  @Output() jumpToTask = new EventEmitter<string>();
+  readonly isMobile = input(false);
+  readonly jumpToTask = output<string>();
   
   trackItem = (item: UnfinishedItem) => `${item.taskId}-${item.text}`;
   

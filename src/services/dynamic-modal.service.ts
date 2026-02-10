@@ -33,7 +33,7 @@ import {
   InjectionToken
 } from '@angular/core';
 import { DOCUMENT } from '@angular/common';
-import { Subscription } from 'rxjs';
+// Subscription 类型已移除，使用 { unsubscribe(): void } 鸭子类型兼容 EventEmitter 和 output()
 
 /** 模态框配置接口 */
 export interface ModalConfig<T = unknown> {
@@ -74,8 +74,8 @@ interface ModalStackItem {
   resolve: (result: unknown) => void;
   config: ModalConfig;
   escapeListener?: (e: KeyboardEvent) => void;
-  /** 订阅清理数组 */
-  subscriptions: Subscription[];
+  /** 订阅清理数组（兼容 RxJS Subscription 和 Angular OutputRefSubscription） */
+  subscriptions: { unsubscribe(): void }[];
 }
 
 /** 默认配置 */
@@ -237,14 +237,14 @@ export class DynamicModalService {
       }
     }
     
-    // 订阅收集器
-    const subscriptions: Subscription[] = [];
+    // 订阅收集器（兼容 EventEmitter 和 output() 的 OutputEmitterRef）
+    const subscriptions: { unsubscribe(): void }[] = [];
     
     // 订阅配置中声明的输出事件
     if (config.outputs) {
       const inst = componentRef.instance as Record<string, unknown>;
       for (const [eventName, handler] of Object.entries(config.outputs)) {
-        const eventEmitter = inst[eventName] as { subscribe?: (fn: (v: unknown) => void) => Subscription } | undefined;
+        const eventEmitter = inst[eventName] as { subscribe?: (fn: (v: unknown) => void) => { unsubscribe(): void } } | undefined;
         if (eventEmitter && typeof eventEmitter.subscribe === 'function') {
           // 对 close 事件做特殊处理：先执行回调再关闭模态框
           if (eventName === 'close') {
@@ -263,7 +263,7 @@ export class DynamicModalService {
     
     // 如果 config.outputs 没有声明 close，仍然自动监听 close 事件
     if (!config.outputs?.['close']) {
-      const instance = componentRef.instance as { close?: { subscribe: (fn: (result: R) => void) => Subscription } };
+      const instance = componentRef.instance as { close?: { subscribe: (fn: (result: R) => void) => { unsubscribe(): void } } };
       if (instance.close && typeof instance.close.subscribe === 'function') {
         const sub = instance.close.subscribe((result: R) => {
           closeModal(result);
@@ -273,7 +273,7 @@ export class DynamicModalService {
     }
     // 如果 config.outputs 没有声明 confirm，仍然自动监听 confirm 事件
     if (!config.outputs?.['confirm']) {
-      const instance = componentRef.instance as { confirm?: { subscribe: (fn: (data: R) => void) => Subscription } };
+      const instance = componentRef.instance as { confirm?: { subscribe: (fn: (data: R) => void) => { unsubscribe(): void } } };
       if (instance.confirm && typeof instance.confirm.subscribe === 'function') {
         const sub = instance.confirm.subscribe((data: R) => {
           closeModal(data);

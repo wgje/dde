@@ -78,6 +78,9 @@ export class FlowDiagramEffectsService {
    * 创建跨树连接变化 effect
    * 监听 connections 变化（软删除和恢复）
    */
+  // 【P2-26 修复】保存上次连接签名，只在真正变化时才触发更新
+  private lastConnectionSignature = '';
+  
   createConnectionsEffect(
     injector: Injector,
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
@@ -86,13 +89,13 @@ export class FlowDiagramEffectsService {
       const project = this.projectState.activeProject();
       // 构建有效连接的签名（过滤掉 deletedAt，只统计活跃连接）
       const activeConnections = project?.connections?.filter((c: { deletedAt?: string | null }) => !c.deletedAt) ?? [];
-      // 使用连接的 source-target 对作为签名，检测任何变化
       const connectionSignature = activeConnections
         .map((c: { source: string; target: string }) => `${c.source}->${c.target}`)
         .sort()
         .join('|');
-      // 读取 connectionSignature 来建立依赖关系
-      if (connectionSignature !== undefined && this.diagram.isInitialized) {
+      // 只在签名实际变化时才触发更新
+      if (connectionSignature !== this.lastConnectionSignature && this.diagram.isInitialized) {
+        this.lastConnectionSignature = connectionSignature;
         scheduleRafDiagramUpdate(this.projectState.tasks(), true);
       }
     }, { injector });

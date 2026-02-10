@@ -199,7 +199,9 @@ export class TabSyncService implements OnDestroy {
       timestamp: Date.now(),
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
     this.logger.debug('广播项目打开', { projectId, projectName });
     
     // 检查是否有其他标签页已打开同一项目
@@ -220,7 +222,9 @@ export class TabSyncService implements OnDestroy {
       timestamp: Date.now(),
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
     this.logger.debug('广播项目关闭', { projectId: this.currentProjectId });
     
     this.currentProjectId = null;
@@ -265,7 +269,9 @@ export class TabSyncService implements OnDestroy {
       timestamp: Date.now(),
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
     this.logger.debug('广播数据同步完成', { projectId, updatedAt });
   }
   
@@ -401,7 +407,9 @@ export class TabSyncService implements OnDestroy {
       timestamp: Date.now(),
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
   }
   
   private cleanupStaleTabs(): void {
@@ -417,6 +425,13 @@ export class TabSyncService implements OnDestroy {
     for (const tabId of staleTabIds) {
       this.activeTabs.delete(tabId);
       this.logger.debug('清理过期标签页', { tabId });
+    }
+    
+    // 【P3-20 修复】清理过期的远程编辑锁
+    for (const [key, lock] of this.remoteEditLocks) {
+      if (lock.expiresAt <= now) {
+        this.remoteEditLocks.delete(key);
+      }
     }
   }
   
@@ -631,7 +646,9 @@ export class TabSyncService implements OnDestroy {
       editLock: lock,
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
     this.logger.debug('广播编辑锁', { taskId: lock.taskId, field: lock.field });
   }
   
@@ -645,7 +662,9 @@ export class TabSyncService implements OnDestroy {
       editLock: lock,
     };
     
-    this.channel.postMessage(message);
+    try {
+      this.channel.postMessage(message);
+    } catch { /* 通道已关闭 */ }
     this.logger.debug('广播编辑锁释放', { taskId: lock.taskId, field: lock.field });
   }
   

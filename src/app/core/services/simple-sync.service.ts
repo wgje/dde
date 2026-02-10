@@ -50,6 +50,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { BlackBoxEntry } from '../../../models/focus';
+import { SyncStateService } from './sync/sync-state.service';
 
 /**
  * 同步状态
@@ -108,6 +109,7 @@ export class SimpleSyncService {
   private readonly batchSyncService = inject(BatchSyncService);
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
   private readonly connectionSyncOps = inject(ConnectionSyncOperationsService);
+  private readonly syncStateService = inject(SyncStateService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly blackBoxSync = inject(BlackBoxSyncService);
@@ -143,18 +145,8 @@ export class SimpleSyncService {
     }
   }
   
-  /** 同步状态 */
-  readonly syncState = signal<SyncState>({
-    isSyncing: false,
-    isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
-    offlineMode: false,
-    sessionExpired: false,
-    lastSyncTime: null,
-    pendingCount: 0,
-    syncError: null,
-    hasConflict: false,
-    conflictData: null
-  });
+  /** 同步状态（委托给 SyncStateService 统一管理，解决双源进度不一致问题） */
+  readonly syncState = this.syncStateService.syncState;
   
   /** 兼容旧接口 */
   readonly state = this.syncState;

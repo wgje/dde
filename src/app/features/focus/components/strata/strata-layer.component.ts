@@ -22,7 +22,7 @@ import { StrataItemComponent } from './strata-item.component';
   imports: [CommonModule, StrataItemComponent],
   template: `
         <div
-          class="strata-layer border-b border-stone-200/30 dark:border-stone-600/20
+          class="strata-layer entering border-b border-stone-200/30 dark:border-stone-600/20
             last:border-b-0"
           [style.opacity]="layer.opacity"
           data-testid="strata-layer"
@@ -55,9 +55,7 @@ import { StrataItemComponent } from './strata-item.component';
     </div>
   `,
   styles: [`
-    .strata-layer {
-      transition: opacity 0.3s ease;
-    }
+    /* 动画已移至全局 CSS（focus.animations.css），避免重复定义 */
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })

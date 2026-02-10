@@ -322,7 +322,8 @@ export class ProjectSwitchGuardService {
       }
     }
     
-    return 'proceed';
+    // 【P1-07 修复】用户点击取消时返回 'cancel'，而非 'proceed'
+    return confirmed ? 'proceed' : 'cancel';
   }
   
   /**

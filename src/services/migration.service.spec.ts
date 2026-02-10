@@ -29,8 +29,12 @@ function createProject(overrides: Partial<Project> = {}): Project {
 describe('MigrationService', () => {
   let service: MigrationService;
   let mockIntegrity: Record<string, ReturnType<typeof vi.fn>>;
+  let mockToast: { info: ReturnType<typeof vi.fn>; warning: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; success: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
+    localStorage.clear();
+    vi.useRealTimers();
+
     mockIntegrity = {
       saveMigrationSnapshot: vi.fn(),
       clearMigrationSnapshot: vi.fn(),
@@ -44,13 +48,19 @@ describe('MigrationService', () => {
       verifyMigrationSuccess: vi.fn().mockResolvedValue({ success: true, missingItems: [] }),
       offerSnapshotDownload: vi.fn(),
     };
+    mockToast = {
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      success: vi.fn(),
+    };
 
     const injector = Injector.create({
       providers: [
         { provide: MigrationService, useClass: MigrationService },
         { provide: MigrationIntegrityService, useValue: mockIntegrity },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
-        { provide: ToastService, useValue: { info: vi.fn(), warning: vi.fn(), error: vi.fn(), success: vi.fn() } },
+        { provide: ToastService, useValue: mockToast },
         { provide: SentryLazyLoaderService, useValue: { captureException: vi.fn() } },
         { provide: SimpleSyncService, useValue: { pushProject: vi.fn().mockResolvedValue({ ok: true }) } },
       ],
@@ -93,6 +103,59 @@ describe('MigrationService', () => {
       const loaded = service.getLocalGuestData();
       expect(loaded).toBeNull();
     });
+
+    it('到期前 7 天内应提示访客数据即将过期', () => {
+      const projects = [createProject({ name: 'Guest' })];
+      service.saveGuestData(projects);
+
+      const raw = localStorage.getItem('nanoflow.guest-data');
+      const parsed = JSON.parse(raw || '{}') as Record<string, unknown>;
+      const warningTarget = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString();
+      parsed['expiresAt'] = warningTarget;
+      localStorage.setItem('nanoflow.guest-data', JSON.stringify(parsed));
+
+      mockToast.warning.mockClear();
+      const loaded = service.getLocalGuestData();
+
+      expect(loaded).not.toBeNull();
+      expect(mockToast.warning).toHaveBeenCalledWith(
+        '访客数据即将过期',
+        expect.stringContaining('6 天后过期')
+      );
+    });
+
+    it('到期超过 7 天时不应提示', () => {
+      const projects = [createProject({ name: 'Guest' })];
+      service.saveGuestData(projects);
+
+      const raw = localStorage.getItem('nanoflow.guest-data');
+      const parsed = JSON.parse(raw || '{}') as Record<string, unknown>;
+      parsed['expiresAt'] = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+      localStorage.setItem('nanoflow.guest-data', JSON.stringify(parsed));
+
+      mockToast.warning.mockClear();
+      service.getLocalGuestData();
+      expect(mockToast.warning).not.toHaveBeenCalled();
+    });
+
+    it('24 小时内重复读取不应重复提示', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-02-09T08:00:00.000Z'));
+
+      const projects = [createProject({ name: 'Guest' })];
+      service.saveGuestData(projects);
+
+      const raw = localStorage.getItem('nanoflow.guest-data');
+      const parsed = JSON.parse(raw || '{}') as Record<string, unknown>;
+      parsed['expiresAt'] = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      localStorage.setItem('nanoflow.guest-data', JSON.stringify(parsed));
+
+      mockToast.warning.mockClear();
+      service.getLocalGuestData();
+      service.getLocalGuestData();
+
+      expect(mockToast.warning).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('clearLocalGuestData', () => {
@@ -100,6 +163,12 @@ describe('MigrationService', () => {
       service.saveGuestData([createProject()]);
       service.clearLocalGuestData();
       expect(service.getLocalGuestData()).toBeNull();
+    });
+
+    it('应同时清理访客到期提醒节流键', () => {
+      localStorage.setItem('nanoflow.guest-data-expiry-warning-at', String(Date.now()));
+      service.clearLocalGuestData();
+      expect(localStorage.getItem('nanoflow.guest-data-expiry-warning-at')).toBeNull();
     });
   });
 

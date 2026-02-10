@@ -608,6 +608,9 @@ export class LayoutService {
   /**
    * 重新平衡指定阶段的 rank 值
    * 将阶段内的任务 rank 重新均匀分布
+   * 
+   * 注意：仅重新分配指定 stage 内的顶层任务 rank，
+   * 不会级联更新子任务的 rank。子任务的排序由其 parentId 关联的父任务决定。
    */
   rebalanceStageRanks(tasks: Task[], stages: number[]): Task[] {
     const result = tasks.map(t => ({ ...t }));
@@ -704,42 +707,48 @@ export class LayoutService {
   /**
    * 检测并修复循环依赖
    */
+  /**
+   * 【P1-22 修复】检测并修复循环引用 — 使用迭代算法替代递归，符合项目规范
+   * 对每个任务沿 parentId 链向上遍历，如果回到自身则存在环，断开 parentId
+   */
   private detectAndFixCycles(tasks: Task[]): { tasks: Task[]; fixed: number } {
     const result = tasks.map(t => ({ ...t }));
     const resultMap = new Map(result.map(t => [t.id, t] as const));
     let fixedCount = 0;
 
-    // 使用 DFS 检测循环
-    const visited = new Set<string>();
-    const recursionStack = new Set<string>();
-
-    const hasCycle = (taskId: string): boolean => {
-      if (recursionStack.has(taskId)) return true;
-      if (visited.has(taskId)) return false;
-
-      visited.add(taskId);
-      recursionStack.add(taskId);
-
-      const task = resultMap.get(taskId);
-      if (task?.parentId && hasCycle(task.parentId)) {
-        return true;
-      }
-
-      recursionStack.delete(taskId);
-      return false;
-    };
+    // 全局已确认无环的节点集合
+    const confirmed = new Set<string>();
     
-    // 检查每个任务
     for (const task of result) {
-      visited.clear();
-      recursionStack.clear();
+      if (!task.parentId || confirmed.has(task.id)) continue;
       
-      if (task.parentId && hasCycle(task.id)) {
+      // 迭代沿 parentId 链向上走，检测环
+      const path = new Set<string>();
+      let current: string | null = task.id;
+      let foundCycle = false;
+      
+      while (current) {
+        if (confirmed.has(current)) break; // 已确认无环
+        if (path.has(current)) {
+          foundCycle = true;
+          break;
+        }
+        path.add(current);
+        const t = resultMap.get(current);
+        current = t?.parentId ?? null;
+      }
+      
+      if (foundCycle) {
         this.logger.warn('Detected cycle, breaking at', { taskId: task.id, parentId: task.parentId });
         task.parentId = null;
         task.stage = 1;
         task.displayId = '?';
         fixedCount++;
+      } else {
+        // 路径上所有节点都已确认无环
+        for (const id of path) {
+          confirmed.add(id);
+        }
       }
     }
     

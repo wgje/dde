@@ -7,6 +7,17 @@ import { utilLogger } from './standalone-logger';
  * 在关键入口点验证数据完整性
  */
 
+/** UUID v4 格式校验（兼容 v1-v5） */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * 校验字符串是否为合法的 UUID 格式
+ * 用于同步前拦截脏数据，避免向 Supabase 推送非法 ID
+ */
+export function isValidUUID(str: string): boolean {
+  return UUID_REGEX.test(str);
+}
+
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
@@ -25,12 +36,11 @@ const ALLOWED_MIME_TYPES: Record<AttachmentType, string[]> = {
   link: [], // 链接类型不需要 MIME 验证
   file: [] // 通用文件类型不限制 MIME
 };
+import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 
-// 最大附件大小 (10MB)
-const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
-
-// 每个任务最大附件数
-const MAX_ATTACHMENTS_PER_TASK = 20;
+// 【P2-35 修复】引用配置常量，避免硬编码重复
+const MAX_ATTACHMENT_SIZE = ATTACHMENT_CONFIG.MAX_FILE_SIZE;
+const MAX_ATTACHMENTS_PER_TASK = ATTACHMENT_CONFIG.MAX_ATTACHMENTS_PER_TASK;
 
 /**
  * 验证单个附件
@@ -320,12 +330,27 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
   const validTypes: AttachmentType[] = ['image', 'document', 'link', 'file'];
   const type = validTypes.includes(att.type as AttachmentType) ? (att.type as AttachmentType) : 'file';
   
+  // 【P2-12 修复】验证 URL 协议，阻止 javascript: / data:text/html 等危险协议
+  const ALLOWED_PROTOCOLS = ['https:', 'http:', 'blob:'];
+  const sanitizeUrl = (raw: unknown): string => {
+    const url = String(raw || '');
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      if (!ALLOWED_PROTOCOLS.includes(parsed.protocol)) return '';
+    } catch {
+      // 相对路径或 blob URL 允许通过
+      if (url.startsWith('javascript:') || url.startsWith('data:text/html')) return '';
+    }
+    return url;
+  };
+  
   return {
     id: String(att.id || crypto.randomUUID()),
     type,
     name: String(att.name || '未命名附件'),
-    url: String(att.url || ''),
-    thumbnailUrl: typeof att.thumbnailUrl === 'string' ? att.thumbnailUrl : undefined,
+    url: sanitizeUrl(att.url),
+    thumbnailUrl: typeof att.thumbnailUrl === 'string' ? sanitizeUrl(att.thumbnailUrl) : undefined,
     mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
     size: typeof att.size === 'number' && (att.size as number) >= 0 ? (att.size as number) : undefined,
     createdAt: (att.createdAt as string) || nowISO()
@@ -447,7 +472,10 @@ export function sanitizeProject(rawProject: unknown): Project {
             id: conn.id ? String(conn.id) : crypto.randomUUID(),
             source: String(conn.source),
             target: String(conn.target),
+            // 【P0-12 修复】保留 title 和 updatedAt，防止 LWW 冲突解决失效和联系块标题丢失
+            title: conn.title ? String(conn.title) : undefined,
             description: conn.description ? String(conn.description) : undefined,
+            updatedAt: typeof conn.updatedAt === 'string' ? conn.updatedAt : undefined,
             deletedAt: conn.deletedAt ? String(conn.deletedAt) : undefined
           };
         })

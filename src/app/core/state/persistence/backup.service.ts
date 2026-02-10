@@ -64,10 +64,11 @@ export class BackupService {
       }
 
       // 读取所有数据
-      const allProjects = await this.indexedDB.getAllFromStore<Project>(DB_CONFIG.stores.projects);
-      const allTasks = await this.indexedDB.getAllFromStore<Task>(DB_CONFIG.stores.tasks);
-      const allConnections = await this.indexedDB.getAllFromStore<Connection>(DB_CONFIG.stores.connections);
-      const meta = await this.indexedDB.getFromStore<StoreMeta>(DB_CONFIG.stores.meta, 'meta');
+      const db = await this.indexedDB.initDatabase();
+      const allProjects = await this.indexedDB.getAllFromStore<Project>(db, DB_CONFIG.stores.projects);
+      const allTasks = await this.indexedDB.getAllFromStore<Task>(db, DB_CONFIG.stores.tasks);
+      const allConnections = await this.indexedDB.getAllFromStore<Connection>(db, DB_CONFIG.stores.connections);
+      const meta = await this.indexedDB.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
 
       // 创建备份数据库
       backupDb = await this.createBackupDatabase(backupDbName);
@@ -178,24 +179,23 @@ export class BackupService {
 
       backupDb.close();
 
-      // 清空当前数据库
-      await this.indexedDB.clearStore(DB_CONFIG.stores.projects);
-      await this.indexedDB.clearStore(DB_CONFIG.stores.tasks);
-      await this.indexedDB.clearStore(DB_CONFIG.stores.connections);
-      await this.indexedDB.clearStore(DB_CONFIG.stores.meta);
-
-      // 恢复数据
+      // 【P3-29 修复】清空 + 恢复放在同一个事务中，保证原子性
       const db = await this.indexedDB.initDatabase();
-      const tx = db.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections, DB_CONFIG.stores.meta],
-        'readwrite'
-      );
+      const storeNames = [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections, DB_CONFIG.stores.meta];
+      const tx = db.transaction(storeNames, 'readwrite');
 
       const projectStore = tx.objectStore(DB_CONFIG.stores.projects);
       const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
       const connStore = tx.objectStore(DB_CONFIG.stores.connections);
       const metaStore = tx.objectStore(DB_CONFIG.stores.meta);
 
+      // 先清空所有 store
+      projectStore.clear();
+      taskStore.clear();
+      connStore.clear();
+      metaStore.clear();
+
+      // 再写入备份数据（同一事务内，要么全部成功，要么全部回滚）
       for (const project of allProjects) {
         projectStore.put(project);
       }

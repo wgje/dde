@@ -338,14 +338,13 @@ export class TaskOperationService {
    * @see TaskTrashService.deleteTask
    */
   deleteTasksBatch(explicitIds: string[]): number {
-    const result = this.trashService.deleteTask(explicitIds[0], false);
-    // 如果是批量删除，需要逐个处理
-    if (explicitIds.length > 1) {
-      for (let i = 1; i < explicitIds.length; i++) {
-        this.trashService.deleteTask(explicitIds[i], false);
-      }
+    // 【P1-14 修复】累加所有删除结果，而非仅返回第一个
+    let totalDeleted = 0;
+    for (const id of explicitIds) {
+      const result = this.trashService.deleteTask(id, false);
+      totalDeleted += result.deletedTaskIds.size;
     }
-    return result.deletedTaskIds.size;
+    return totalDeleted;
   }
   
   /**
@@ -573,7 +572,8 @@ export class TaskOperationService {
   }
   
   /**
-   * 直接更新项目（不记录撤销历史）
+   * 【P2-40 修复】更正注释：此方法实际上会记录撤销历史
+   * 与 recordAndUpdateDebounced 的区别在于无防抖（立即执行）
    */
   private updateActiveProjectRaw(mutator: (project: Project) => Project): void {
     this.recorder.recordAndUpdate(mutator);

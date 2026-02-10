@@ -61,9 +61,19 @@ export class TaskStore {
     });
   }
 
-  /** 批量设置任务 */
+  /** 批量设置任务（替换指定项目的全部任务） */
   setTasks(tasks: Task[], projectId: string): void {
-    this.tasksMap.update(map => { tasks.forEach(t => map.set(t.id, t)); return map; });
+    // 【P2-02 修复】先清除该项目的旧任务，再添加新任务，与 bulkSetTasks 语义明确区分
+    this.tasksMap.update(map => {
+      // 移除该项目的旧任务
+      const oldIds = this.tasksByProject().get(projectId);
+      if (oldIds) {
+        for (const id of oldIds) map.delete(id);
+      }
+      // 添加新任务
+      tasks.forEach(t => map.set(t.id, t));
+      return map;
+    });
     this.tasksByProject.update(map => {
       map.set(projectId, new Set(tasks.map(t => t.id)));
       return map;
@@ -175,6 +185,13 @@ export class ProjectStore {
   removeProject(id: string): void {
     this.projectsMap.update(map => { map.delete(id); return map; });
     if (this.activeProjectId() === id) this.activeProjectId.set(null);
+  }
+  
+  // 【P2-03 修复】提供级联清理接口，删除项目时同时清理 Task/Connection Store
+  removeProjectCascade(id: string, taskStore: TaskStore, connectionStore: ConnectionStore): void {
+    taskStore.clearProject(id);
+    connectionStore.clearProject(id);
+    this.removeProject(id);
   }
 
   /** 批量更新项目 */

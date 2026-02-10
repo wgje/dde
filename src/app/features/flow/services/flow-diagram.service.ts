@@ -559,12 +559,18 @@ export class FlowDiagramService {
       this.resizeObserver = null;
     }
     
+    // 【P1-11 修复】清理 drop 事件监听器
+    this.dropHandlerCleanup?.();
+    this.dropHandlerCleanup = null;
+    
     // 清理事件服务
     this.eventService.dispose();
     
     if (this.diagram) {
-      this.diagram.div = null;
+      // 【P1-10 修复】先 clear() 清除数据和事件监听，再断开 DOM
+      // 顺序：clear → removeDiagramListener → div = null
       this.diagram.clear();
+      this.diagram.div = null;
       this.diagram = null;
     }
     
@@ -638,17 +644,23 @@ export class FlowDiagramService {
   
   // ========== 拖放支持 ==========
   
+  // 【P1-11 修复】保存事件监听器引用，用于 dispose 时清理
+  private dropHandlerCleanup: (() => void) | null = null;
+
   setupDropHandler(onDrop: (taskData: Task, docPoint: go.Point) => void): void {
     if (!this.diagramDiv) return;
     
-    this.diagramDiv.addEventListener('dragover', (e: DragEvent) => {
+    // 【P1-11 修复】先清理旧的监听器，防止重复注册
+    this.dropHandlerCleanup?.();
+    
+    const dragoverHandler = (e: DragEvent) => {
       e.preventDefault();
       if (e.dataTransfer) {
         e.dataTransfer.dropEffect = 'move';
       }
-    });
+    };
     
-    this.diagramDiv.addEventListener('drop', (e: DragEvent) => {
+    const dropHandler = (e: DragEvent) => {
       e.preventDefault();
       const jsonData = e.dataTransfer?.getData("application/json");
       const textData = e.dataTransfer?.getData("text");
@@ -674,7 +686,17 @@ export class FlowDiagramService {
         this.logger.error('Drop error:', err);
         this.sentryLazyLoader.captureException(err, { tags: { operation: 'drop' } });
       }
-    });
+    };
+    
+    this.diagramDiv.addEventListener('dragover', dragoverHandler);
+    this.diagramDiv.addEventListener('drop', dropHandler);
+    
+    // 保存清理函数
+    const div = this.diagramDiv;
+    this.dropHandlerCleanup = () => {
+      div.removeEventListener('dragover', dragoverHandler);
+      div.removeEventListener('drop', dropHandler);
+    };
   }
   
   // ========== 私有方法 ==========

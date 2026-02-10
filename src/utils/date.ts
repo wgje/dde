@@ -18,6 +18,10 @@ let lastKnownTimestamp = 0;
  * 获取当前时间的 ISO 字符串（UTC）
  * 使用 Monotonic Wall Clock 确保时间戳单调递增
  * 统一使用此方法代替 new Date().toISOString()
+ * 
+ * 【时钟漂移说明】
+ * 当系统时钟回调时，会产生微小漂移（+1ms）直到真实时钟赶上
+ * 对单用户场景影响可忽略，仅在极端时钟跳变时才可观察到
  */
 export function nowISO(): string {
   const current = Date.now();

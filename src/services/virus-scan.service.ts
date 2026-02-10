@@ -28,7 +28,9 @@ export type ScanErrorCode =
   | 'FILE_TOO_LARGE'
   | 'HASH_MISMATCH'
   | 'THREAT_DETECTED'
-  | 'NETWORK_ERROR';
+  | 'NETWORK_ERROR'
+  | 'CHECK_FAILED'
+  | 'FILE_TOO_LARGE';
 
 /**
  * 扫描响应接口
@@ -112,12 +114,14 @@ export class VirusScanService {
       };
     }
 
-    // 检查文件大小
+    // 检查文件大小 — 【P1-09 修复】超大文件拒绝上传，而非跳过扫描（fail-closed）
     if (file.size > VIRUS_SCAN_CONFIG.UPLOAD_SCAN.MAX_FILE_SIZE) {
-      this.logger.warn('文件过大，跳过扫描', { size: file.size, limit: VIRUS_SCAN_CONFIG.UPLOAD_SCAN.MAX_FILE_SIZE });
+      this.logger.warn('文件过大，拒绝上传', { size: file.size, limit: VIRUS_SCAN_CONFIG.UPLOAD_SCAN.MAX_FILE_SIZE });
+      this.toast.error('文件过大', `文件大小超过 ${Math.round(VIRUS_SCAN_CONFIG.UPLOAD_SCAN.MAX_FILE_SIZE / 1024 / 1024)}MB 限制`);
       return {
-        success: true,
-        result: this.createSkippedResult(filename, 'file_too_large'),
+        success: false,
+        error: '文件大小超过安全扫描限制',
+        errorCode: 'FILE_TOO_LARGE',
       };
     }
 
@@ -195,8 +199,8 @@ export class VirusScanService {
       return { success: true, result };
     } catch (error) {
       this.logger.error('下载前检查失败', { error, fileId });
-      // 失败时根据配置决定是否允许下载
-      return { success: true }; // 默认允许，避免阻塞用户
+      // 【P1-09 修复】fail-closed：检查失败时拒绝下载，而非默认允许
+      return { success: false, error: '文件安全检查失败', errorCode: 'CHECK_FAILED' };
     }
   }
 

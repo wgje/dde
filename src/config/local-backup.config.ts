@@ -41,9 +41,9 @@ export const LOCAL_BACKUP_CONFIG = {
   /** 目录选择器选项 */
   DIRECTORY_PICKER_OPTIONS: {
     /** 默认起始目录 */
-    startIn: 'documents' as FileSystemPermissionMode,
+    startIn: 'documents' as const,
     /** 访问模式 */
-    mode: 'readwrite' as FileSystemPermissionMode,
+    mode: 'readwrite' as const,
   },
   
   /** 备份验证选项 */

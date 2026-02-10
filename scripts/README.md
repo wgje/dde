@@ -16,6 +16,8 @@
   - 清理 v1 遗留数据。
 - `purge-deleted-tasks.sql`
   - 回收站/软删除任务的清理相关。
+- `cleanup-cron-setup.sql`
+  - 为软删除任务/连接与清理日志配置 `pg_cron` 定时任务（运维接线脚本，幂等可重跑）。
 
 ## 备份
 

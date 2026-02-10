@@ -232,7 +232,9 @@ async function startApplication() {
           withHashLocation(),
           withRouterConfig({
             // 关键修复：Guard 取消导航后同步 Router/URL 状态，避免登录后同路径导航被误判为已在目标页
-            canceledNavigationResolution: 'computed'
+            canceledNavigationResolution: 'computed',
+            // 【P2-38】子路由继承父路由参数，ProjectShellComponent 可直接读取子路由 taskId
+            paramsInheritanceStrategy: 'always'
           })
         ),
         // Service Worker: 启用以检测应用更新

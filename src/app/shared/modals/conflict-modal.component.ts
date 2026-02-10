@@ -1,4 +1,4 @@
-import { Component, signal, Output, EventEmitter, input, computed } from '@angular/core';
+import { Component, signal, Output, EventEmitter, input, computed, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Project, Task } from '../../../models';
 
@@ -11,6 +11,7 @@ import { Project, Task } from '../../../models';
   selector: 'app-conflict-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4">
       <div class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-3xl p-6 animate-scale-in max-h-[90vh] overflow-y-auto" (click)="$event.stopPropagation()">

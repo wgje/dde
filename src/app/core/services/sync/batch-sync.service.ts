@@ -193,26 +193,33 @@ export class BatchSyncService {
     
     this.syncState.setSyncing(true);
     
+    // 【P2-16 修复】在推送前创建数据快照，防止推送期间 store 被用户编辑导致数据不一致
+    const projectSnapshot: Project = {
+      ...project,
+      tasks: project.tasks.map(t => ({ ...t })),
+      connections: project.connections.map(c => ({ ...c })),
+    };
+    
     try {
       // 1. 获取 tombstones，过滤已永久删除的任务
-      const tombstoneIds = await this.callbacks.getTombstoneIds(project.id);
-      const tasksToSync = project.tasks.filter(task => !tombstoneIds.has(task.id));
+      const tombstoneIds = await this.callbacks.getTombstoneIds(projectSnapshot.id);
+      const tasksToSync = projectSnapshot.tasks.filter(task => !tombstoneIds.has(task.id));
       
       // 2. 处理永久删除的任务
-      const changes = this.changeTracker.getProjectChanges(project.id);
+      const changes = this.changeTracker.getProjectChanges(projectSnapshot.id);
       if (changes.taskIdsToDelete.length > 0) {
-        const purgeSuccess = await this.callbacks.purgeTasksFromCloud(project.id, changes.taskIdsToDelete);
+        const purgeSuccess = await this.callbacks.purgeTasksFromCloud(projectSnapshot.id, changes.taskIdsToDelete);
         if (purgeSuccess) {
           for (const taskId of changes.taskIdsToDelete) {
-            this.changeTracker.clearTaskChange(project.id, taskId);
+            this.changeTracker.clearTaskChange(projectSnapshot.id, taskId);
           }
         }
       }
       
       // 3. 保存项目元数据
-      projectPushed = await this.callbacks.pushProject(project);
+      projectPushed = await this.callbacks.pushProject(projectSnapshot);
       if (!projectPushed) {
-        retryEnqueued.push(`project:${project.id}`);
+        retryEnqueued.push(`project:${projectSnapshot.id}`);
       }
       
       // 4. 批量保存任务（拓扑排序）
@@ -236,7 +243,7 @@ export class BatchSyncService {
           if (isPositionOnlyUpdate) {
             success = await this.callbacks.pushTaskPosition(task.id, task.x, task.y);
           } else {
-            success = await this.callbacks.pushTask(task, project.id, true);
+            success = await this.callbacks.pushTask(task, projectSnapshot.id, true);
           }
           
           if (success) {
@@ -256,16 +263,16 @@ export class BatchSyncService {
       }
       
       // 5. 批量保存连接
-      const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(project.id);
+      const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(projectSnapshot.id);
       // 包含当前批次成功的任务 + 已经存在于远端的 tombstone 排除后的任务
       const allSyncedTaskIds = new Set(successfulTaskIds);
       // 所有本地任务中不在 tombstone 列表里的任务视为远端可能已存在
-      for (const task of project.tasks) {
+      for (const task of projectSnapshot.tasks) {
         if (!tombstoneIds.has(task.id)) {
           allSyncedTaskIds.add(task.id);
         }
       }
-      const connectionsToSync = project.connections.filter(conn => {
+      const connectionsToSync = projectSnapshot.connections.filter(conn => {
         if (conn.deletedAt) return false;
         if (connectionTombstoneIds.has(conn.id)) return false;
         // 连接的两端都必须是已同步或已知存在的任务
@@ -281,7 +288,7 @@ export class BatchSyncService {
         
         try {
           const connection = connectionsToSync[i];
-          const pushed = await this.callbacks.pushConnection(connection, project.id, true, true);
+          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, true);
           if (!pushed) {
             failedConnectionIds.push(connection.id);
             retryEnqueued.push(`connection:${connection.id}`);

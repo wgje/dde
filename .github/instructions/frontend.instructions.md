@@ -1,63 +1,31 @@
 ---
-applyTo: "src/**/*.ts,src/**/*.html,src/**/*.css"
+description: "前端实现规范（Angular + GoJS + Offline-first）"
+applyTo: "src/**/*.ts,src/**/*.html,src/**/*.scss,src/**/*.css"
 ---
-# Frontend Development Standards (Angular 19.x)
 
-## Angular Guidelines
+# Frontend Development Standards (NanoFlow)
 
-### Components
-- 必须使用 `standalone: true`
-- 变更检测策略 `OnPush`
-- 使用 Signals 进行状态管理
-- 模板使用 `@if`, `@for`, `@defer` 新语法
+## 组件与状态
+- 组件默认 `standalone: true` + `OnPush`。
+- 使用 Signals 管理状态，不引入 RxJS Store 门面。
+- 新代码直接注入子服务，禁止 `inject(StoreService)`。
 
-### Services
-- 禁止在 `StoreService` 门面中添加业务逻辑
-- 新代码直接注入子服务，不使用 `inject(StoreService)`
-- 使用 `inject()` 函数而非构造函数注入
+## Offline-first 交互
+- 用户操作优先本地落地并立即更新 UI。
+- 后台异步同步，失败进入重试队列。
+- 避免“点击后必须等远端返回”的阻塞式体验。
 
-### State Management
-```typescript
-// ✅ 推荐：使用 Signals
-const tasks = signal<Map<string, Task>>(new Map());
-const taskList = computed(() => Array.from(tasks().values()));
+## GoJS 专项
+- 手机默认 Text 视图，Flow 图按需 `@defer`。
+- 切换视图时必须 `diagram.clear()` 并解绑监听。
+- 禁止通过 `visibility:hidden` 持有图实例。
 
-// ❌ 避免：深层嵌套对象
-```
+## 性能与可访问性
+- 避免模板中的高频计算。
+- 大列表考虑虚拟化或分段渲染。
+- 交互元素提供语义标签与键盘可达性。
 
-### Imports
-```typescript
-// ✅ 按类别分组
-import { Component, inject, signal } from '@angular/core';
-import { CommonModule } from '@angular/common';
-import { TaskService } from '@services/task.service';
-```
-
-## GoJS Guidelines
-
-### 移动端
-- 手机默认 Text 视图
-- Flow 图使用 `@defer` 懒加载
-- 禁止 `visibility:hidden`，必须销毁/重建
-
-### 内存管理
-- 切换视图时 `diagram.clear()` + 移除监听
-- 避免在模板事件中直接修改 diagram
-
-## CSS/Tailwind
-
-- 优先使用 Tailwind utility classes
-- 复杂样式抽取为组件样式
-- 响应式优先：mobile-first
-
-## Performance
-
-- 虚拟滚动处理大列表
-- 图片懒加载
-- 避免在模板中调用函数
-
-## Accessibility
-
-- 语义化 HTML 标签
-- ARIA 属性用于交互元素
-- 键盘导航支持
+## 样式约定
+- 优先组件内聚样式，避免全局污染。
+- 响应式采用 mobile-first。
+- 复杂视觉效果需评估渲染开销与可维护性。

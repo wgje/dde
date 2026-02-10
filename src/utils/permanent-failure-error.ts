@@ -59,9 +59,10 @@ export class PermanentFailureError extends Error {
 
   /**
    * 转换为 JSON 格式（用于日志记录）
+   * 【P3-13 修复】生产环境不包含堆栈信息，避免信息泄露
    */
   toJSON(): Record<string, unknown> {
-    return {
+    const json: Record<string, unknown> = {
       name: this.name,
       message: this.message,
       isPermanentFailure: this.isPermanentFailure,
@@ -70,8 +71,12 @@ export class PermanentFailureError extends Error {
         message: this.originalError.message
       } : undefined,
       context: this.context,
-      stack: this.stack
     };
+    // 仅开发环境包含堆栈
+    if (typeof ngDevMode === 'undefined' || ngDevMode) {
+      json['stack'] = this.stack;
+    }
+    return json;
   }
 }
 

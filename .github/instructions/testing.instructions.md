@@ -1,109 +1,36 @@
 ---
-applyTo: "**/*.spec.ts,**/*.test.ts,e2e/**"
+description: "Vitest + Playwright 测试规范与稳定性要求"
+applyTo: "**/*.spec.ts,**/*.test.ts,tests/**,e2e/**"
 ---
-# Testing Standards
 
-## Test Organization
+# Testing Standards (NanoFlow)
 
-### 文件结构
-```
-src/
-├── services/
-│   ├── task.service.ts
-│   └── task.service.spec.ts    # 同目录
-e2e/
-├── critical-paths.spec.ts
-└── sync-integrity.spec.ts
-```
+## 测试金字塔
+- Unit：覆盖核心逻辑与边界条件（数量最多）。
+- Integration：覆盖服务边界与关键协作。
+- E2E：覆盖关键用户路径（数量少但稳定）。
 
-### 命名约定
-- 单元测试: `*.spec.ts`
-- E2E 测试: `e2e/*.spec.ts`
-- 纯函数测试: `*.test.ts`
+## 工具与配置
+- Vitest：`vitest.config.mts`、`vitest.pure.config.mts`、`vitest.services.config.mts`、`vitest.components.config.mts`。
+- Playwright：`playwright.config.ts`。
 
-## Vitest (Unit Tests)
+## 编写要求
+- 测试文件与实现同目录优先（如 `*.service.ts -> *.service.spec.ts`）。
+- 使用 `Arrange -> Act -> Assert` 结构。
+- Mock 只用于隔离外部依赖，不掩盖真实业务逻辑。
 
-### 配置分层
-- `vitest.config.mts` - 主配置
-- `vitest.pure.config.mts` - 纯函数测试
-- `vitest.services.config.mts` - 服务测试
-- `vitest.components.config.mts` - 组件测试
+## E2E 稳定性
+- 选择器优先级：`data-testid` -> 语义角色 -> 文本。
+- 禁止固定睡眠等待（如 `waitForTimeout`）作为主等待策略。
+- 使用可观测状态等待（元素出现、接口完成、URL 变化）。
 
-### 测试结构
-```typescript
-describe('ServiceName', () => {
-  // Arrange
-  beforeEach(() => {
-    // 设置
-  });
+## 与项目理念对齐的必测项
+- 同步与离线写入：断网写入、恢复后补同步。
+- GoJS 生命周期：切换视图后无残留监听/实例。
+- LWW 冲突处理：`updatedAt` 新值覆盖旧值。
+- 错误转换：Supabase 错误可被统一映射并正确分级。
 
-  it('should do something when condition', () => {
-    // Arrange
-    const input = ...;
-    
-    // Act
-    const result = service.method(input);
-    
-    // Assert
-    expect(result).toBe(expected);
-  });
-});
-```
-
-### Mock 策略
-```typescript
-// 使用 vi.mock 模拟依赖
-vi.mock('@services/supabase', () => ({
-  supabase: mockSupabase
-}));
-```
-
-## Playwright (E2E Tests)
-
-### 结构
-```typescript
-test.describe('Feature', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-  });
-
-  test('user can complete action', async ({ page }) => {
-    await page.click('[data-testid="button"]');
-    await expect(page.locator('[data-testid="result"]'))
-      .toBeVisible();
-  });
-});
-```
-
-### 选择器优先级
-1. `data-testid` (推荐)
-2. 语义化角色 `role`
-3. 文本内容
-4. CSS 选择器 (最后手段)
-
-### 等待策略
-```typescript
-// ✅ 推荐
-await page.waitForSelector('[data-testid="loaded"]');
-await expect(element).toBeVisible({ timeout: 10000 });
-
-// ❌ 避免
-await page.waitForTimeout(3000);
-```
-
-## 测试原则
-
-### 覆盖策略
-- 关键路径 100% 覆盖
-- 边界条件测试
-- 错误路径测试
-
-### 隔离
-- 每个测试独立
-- 不依赖执行顺序
-- 清理副作用
-
-### 稳定性
-- 避免 flaky tests
-- 使用确定性数据
-- 适当的超时设置
+## 提交前最低验证
+- 改动涉及纯逻辑：至少运行对应 Vitest 子集。
+- 改动涉及 UI 关键路径：至少运行相关 E2E 用例。
+- 若未执行测试，必须在交付说明中明确原因与风险。

@@ -59,6 +59,15 @@ export class AttachmentService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Attachment');
 
+  /**
+   * 【P3-30 修复】统一附件 Storage 路径构建
+   * 所有读写操作使用同一函数，避免路径格式不一致
+   */
+  private buildStoragePath(userId: string, projectId: string, taskId: string, attachmentId: string, fileName: string): string {
+    const fileExt = sanitizePathSegment(fileName.split('.').pop() || 'bin');
+    return `${userId}/${projectId}/${taskId}/${attachmentId}.${fileExt}`;
+  }
+
   /** 当前上传进度 */
   readonly uploadProgress = signal<UploadProgress[]>([]);
 
@@ -274,7 +283,7 @@ export class AttachmentService {
 
     const attachmentId = crypto.randomUUID();
     const fileExt = sanitizePathSegment(file.name.split('.').pop() || 'bin');
-    const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${fileExt}`;
+    const filePath = this.buildStoragePath(userId, projectId, taskId, attachmentId, file.name);
     
     // 创建取消控制器
     const abortController = new AbortController();
@@ -504,7 +513,7 @@ export class AttachmentService {
       return { success: false, error: 'Supabase 未配置' };
     }
 
-    const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${fileExt}`;
+    const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${sanitizePathSegment(fileExt)}`;
 
     try {
       const { error } = await this.supabase.client().storage
@@ -580,8 +589,7 @@ export class AttachmentService {
       return null;
     }
 
-    const fileExt = attachment.name.split('.').pop() || '';
-    const filePath = `${userId}/${projectId}/${taskId}/${attachment.id}.${fileExt}`;
+    const filePath = this.buildStoragePath(userId, projectId, taskId, attachment.id, attachment.name);
 
     try {
       // 【流量优化】使用配置的签名有效期（30 天）
@@ -635,8 +643,7 @@ export class AttachmentService {
       return null;
     }
 
-    const fileExt = attachment.name.split('.').pop() || '';
-    const filePath = `${userId}/${projectId}/${taskId}/${attachment.id}.${fileExt}`;
+    const filePath = this.buildStoragePath(userId, projectId, taskId, attachment.id, attachment.name);
 
     try {
       const { data, error } = await this.supabase.client().storage

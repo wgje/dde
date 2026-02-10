@@ -136,9 +136,21 @@ export class ConnectionSyncOperationsService {
     skipTaskExistenceCheck = false, 
     fromRetryQueue = false
   ): Promise<boolean> {
-    // 会话过期检查
+    // 会话过期检查 — 【P0-06 修复】会话过期时入重试队列，防止数据丢失
     if (this.syncStateService.isSessionExpired()) {
       this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+      }
+      return false;
+    }
+    
+    // 【P1-18 修复】添加 CircuitBreaker 检查，与 pushTask 行为一致
+    if (!this.retryQueueService.checkCircuitBreaker()) {
+      this.logger.debug('Circuit Breaker: 熔断中，跳过连接推送', { connectionId: connection.id });
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+      }
       return false;
     }
     
@@ -158,6 +170,10 @@ export class ConnectionSyncOperationsService {
         this.syncStateService.setSessionExpired(true);
         this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        // 【P0-06 修复】会话丢失时入队重试，防止连接数据永久丢失
+        if (!fromRetryQueue) {
+          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+        }
         return false;
       }
       

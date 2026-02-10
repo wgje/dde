@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output, signal, computed } from '@angular/core';
+import { Component, EventEmitter, Input, Output, signal, computed, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { QueuedAction, DeadLetterItem } from '../../../services/action-queue.service';
 
@@ -33,6 +33,7 @@ export interface StorageEscapeData {
   selector: 'app-storage-escape-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (isOpen()) {
       <div class="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">

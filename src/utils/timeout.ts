@@ -109,7 +109,11 @@ export async function withTimeout<T>(
   
   // 如果提供了外部信号，链接它
   if (options.signal) {
-    options.signal.addEventListener('abort', () => controller.abort());
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
   }
   
   try {

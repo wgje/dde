@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, ViewChild, AfterViewInit, OnDestroy, NgZone, HostListener, Output, EventEmitter, ChangeDetectionStrategy, Injector, effect } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -74,9 +74,9 @@ import * as go from 'gojs';
   templateUrl: './flow-view.component.html'
 })
 export class FlowViewComponent implements AfterViewInit, OnDestroy {
-  @ViewChild('diagramDiv') diagramDiv!: ElementRef;
-  @ViewChild('overviewDiv') overviewDiv!: ElementRef;
-  @Output() goBackToText = new EventEmitter<void>();
+  readonly diagramDiv = viewChild.required<ElementRef>('diagramDiv');
+  readonly overviewDiv = viewChild.required<ElementRef>('overviewDiv');
+  readonly goBackToText = output<void>();
   
   // ========== P2-1 迁移：直接注入子服务 ==========
   readonly uiState = inject(UiStateService);
@@ -322,7 +322,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   private initDiagram(): void {
-    if (!this.diagramDiv?.nativeElement) {
+    if (!this.diagramDiv()?.nativeElement) {
       this.logger.warn('[FlowView] diagramDiv 未准备好，跳过初始化');
       return;
     }
@@ -331,7 +331,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance);
     this.touch.endDiagramNodeDragGhost();
 
-    const success = this.diagram.initialize(this.diagramDiv.nativeElement);
+    const success = this.diagram.initialize(this.diagramDiv().nativeElement);
     if (!success) return;
     
     this.eventRegistration.registerAllEvents({
@@ -352,7 +352,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     });
     
     this.diagram.scheduleOverviewInit(
-      this.overviewDiv, this.isOverviewVisible(), this.isOverviewCollapsed(),
+      this.overviewDiv(), this.isOverviewVisible(), this.isOverviewCollapsed(),
       this.zone, this.scheduleTimer.bind(this)
     );
   }
@@ -368,7 +368,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       requestAnimationFrame(() => {
         this.scheduleTimer(() => {
           this.diagram.scheduleOverviewInit(
-            this.overviewDiv, this.isOverviewVisible(), false,
+            this.overviewDiv(), this.isOverviewVisible(), false,
             this.zone, this.scheduleTimer.bind(this), true
           );
         }, 100);
@@ -387,7 +387,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   retryInitDiagram(): void {
     this.diagramRetry.retryInitDiagram(
-      this.diagramDiv,
+      this.diagramDiv(),
       () => this.initDiagram(),
       (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
       this.scheduleTimer.bind(this)
@@ -397,7 +397,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 完全重置图表并重新初始化 */
   resetAndRetryDiagram(): void {
     this.diagramRetry.resetAndRetryDiagram(
-      this.diagramDiv,
+      this.diagramDiv(),
       () => this.initDiagram(),
       (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
       this.scheduleTimer.bind(this)
@@ -554,7 +554,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   onUnassignedTouchEnd(event: TouchEvent): void {
     this.touch.endTouch(
       event,
-      this.diagramDiv?.nativeElement,
+      this.diagramDiv()?.nativeElement,
       this.diagram.diagramInstance,
       (task, insertInfo, docPoint) => {
         // 使用统一的拖放处理，移动端使用 UI_CONFIG.MEDIUM_DELAY

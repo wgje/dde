@@ -78,6 +78,9 @@ export class OfflineBannerComponent {
       this.toast.info('当前处于离线模式', '数据将保存在本地，联网后自动同步');
       this.showIndicator.set(true);
     }
+    
+    // 【P2-27 修复】组件销毁时清理定时器
+    this.destroyRef.onDestroy(() => this.cancelFadeOut());
 
     // 使用 effect 监听网络状态变化
     effect(() => {

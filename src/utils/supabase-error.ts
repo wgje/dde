@@ -64,7 +64,9 @@ const RETRYABLE_ERROR_TYPES = new Set([
  */
 export function supabaseErrorToError(error: unknown): EnhancedError {
   if (error instanceof Error) {
-    const enhanced = error as EnhancedError;
+    // 【P2-10 修复】创建新 Error 而非直接修改原始 Error
+    const enhanced = Object.create(error) as EnhancedError;
+    Object.assign(enhanced, { message: error.message, name: error.name, stack: error.stack });
     const lowerMsg = enhanced.message.toLowerCase();
     
     // 识别 Error 实例中的网络错误模式

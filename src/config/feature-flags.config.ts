@@ -50,12 +50,12 @@ export const FEATURE_FLAGS = {
   // ==================== 同步功能 ====================
   /**
    * 是否启用 Realtime 订阅（替代轮询）
-   * 注意：实际运行时开关由 SYNC_CONFIG.REALTIME_ENABLED 控制
+   * @see SYNC_CONFIG.REALTIME_ENABLED — 运行时开关，两者必须保持一致
    */
   REALTIME_ENABLED: false, // 流量优化，默认使用轮询
   /**
    * 是否启用增量同步优化
-   * 注意：实际运行时开关由 SYNC_CONFIG.DELTA_SYNC_ENABLED 控制
+   * @see SYNC_CONFIG.DELTA_SYNC_ENABLED — 运行时开关，两者必须保持一致
    * 此标志用于更高层的功能门控
    */
   INCREMENTAL_SYNC_ENABLED: false, // 与 SYNC_CONFIG.DELTA_SYNC_ENABLED 保持一致

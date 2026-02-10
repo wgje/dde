@@ -613,6 +613,40 @@ describe('SimpleSyncService', () => {
       expect(result).toBe(true);
       expect(mockClient.from).toHaveBeenCalledWith('projects');
     });
+
+    it('pushProject 不应上传客户端 updated_at（由服务端时间统一生成）', async () => {
+      const project = createMockProject({
+        updatedAt: '2000-01-01T00:00:00.000Z'
+      });
+
+      const projectsQueryMock = {
+        upsert: vi.fn().mockResolvedValue({ error: null })
+      };
+
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'projects') return projectsQueryMock;
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null })
+            })
+          }),
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null })
+          })
+        };
+      });
+
+      const result = await service.pushProject(project);
+      expect(result).toBe(true);
+
+      const payload = projectsQueryMock.upsert.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(payload).toBeTruthy();
+      expect(payload['updated_at']).toBeUndefined();
+      expect(payload['id']).toBe(project.id);
+      expect(payload['owner_id']).toBe('test-user-id');
+    });
     
     it('pushConnection 应该成功推送', async () => {
       const connection = createMockConnection();

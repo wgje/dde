@@ -4,6 +4,11 @@
  * GoJS 的官方 TypeScript 类型定义不完整，特别是事件回调和模板配置。
  * 此文件补充常用类型，减少 any 使用。
  * 
+ * 【P2-34 注意】GoJS/Node/Link 类型命名规范：
+ * - 本文件：GoJSNodeData / GoJSLinkData（运行时完整类型，包含 GoJS 依赖）
+ * - models/gojs-boundary.ts：GojsNodeData / GojsLinkData（纯接口，无 GoJS 依赖）
+ * 两者逻辑分离，前者用于 GoJS 图表内部操作，后者用于跨层数据传输。
+ *
  * 使用方式：
  * - 在需要的文件中导入：import type { GoJSNodeData, GoJSLinkData } from '../../types/gojs-extended';
  */

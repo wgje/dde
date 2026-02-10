@@ -51,7 +51,8 @@ export class DeltaSyncPersistenceService {
   /**
    * 获取指定时间后更新的任务（Delta Sync）
    * 
-   * 用于增量同步：只返回 updated_at > sinceTime 的任务
+   * 【P3-05 优化】利用 IDB 复合索引 `projectId_updatedAt` 进行范围查询，
+   * 避免全表加载 + 内存过滤。索引查询后仍需排除软删除记录。
    * 
    * @param projectId 项目 ID
    * @param sinceTime ISO 时间字符串（例如 "2025-12-31T12:00:00Z"）
@@ -61,12 +62,25 @@ export class DeltaSyncPersistenceService {
    */
   async getTasksUpdatedSince(projectId: string, sinceTime: string): Promise<Task[]> {
     try {
-      const allTasks = await this.loadTasksFromLocal(projectId);
-      const sinceDate = new Date(sinceTime);  // 🔒 使用 Date 对象比较，避免时区问题
+      const db = await this.indexedDBService.initDatabase();
       
-      return allTasks.filter(t => 
-        t.updatedAt && new Date(t.updatedAt) > sinceDate && !t.deletedAt  // 🔒 过滤软删除
+      // 利用复合索引 [projectId, updatedAt] 范围查询
+      // lowerBound: [projectId, sinceTime], upperBound: [projectId, '\uffff']（字符串最大值）
+      const tasks = await this.indexedDBService.getByIndexRange<Task & { projectId: string }>(
+        db,
+        DB_CONFIG.stores.tasks,
+        'projectId_updatedAt',
+        [projectId, sinceTime],
+        [projectId, '\uffff']
       );
+      
+      // 复合索引已按 projectId + updatedAt 范围过滤，仅需排除软删除
+      return tasks
+        .filter(t => !t.deletedAt)
+        .map(t => {
+          const { projectId: _, ...task } = t;
+          return task as Task;
+        });
     } catch (err) {
       this.logger.error('获取增量更新任务失败', { projectId, sinceTime, error: err });
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'getTasksUpdatedSince', projectId } });

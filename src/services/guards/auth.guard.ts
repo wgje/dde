@@ -67,8 +67,14 @@ function checkLocalAuthCache(): { userId: string | null; expiredAt: number | nul
     const cached = localStorage.getItem(AUTH_CACHE_KEY);
     if (cached) {
       const { userId, expiredAt } = JSON.parse(cached);
+      // 【P1-06 修复】验证 userId 格式为合法 UUID，防止 XSS 注入伪造
+      if (typeof userId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+        guardLogger.warn('认证缓存 userId 格式不合法，清除缓存');
+        localStorage.removeItem(AUTH_CACHE_KEY);
+        return { userId: null, expiredAt: null };
+      }
       // 检查缓存是否过期（默认 7 天）
-      if (expiredAt && Date.now() < expiredAt) {
+      if (expiredAt && typeof expiredAt === 'number' && Date.now() < expiredAt) {
         return { userId, expiredAt };
       }
     }
@@ -104,7 +110,7 @@ async function waitForSessionCheck(
   timeoutMs: number
 ): Promise<void> {
   const start = Date.now();
-  let interval = GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL;
+  let interval: number = GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL;
 
   while (authService.authState().isCheckingSession) {
     const elapsed = Date.now() - start;

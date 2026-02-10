@@ -6,11 +6,9 @@
  */
 
 import { Injectable, inject, computed } from '@angular/core';
-import { Task } from '../models';
 import { StrataItem, StrataLayer } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { BlackBoxService } from './black-box.service';
-import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import {
   strataLayers,
@@ -25,7 +23,6 @@ import {
 })
 export class StrataService {
   private blackBoxService = inject(BlackBoxService);
-  private projectState = inject(ProjectStateService);
   private logger = inject(LoggerService);
   
   // 暴露状态给组件
@@ -71,13 +68,10 @@ export class StrataService {
   
   /**
    * 获取指定日期的完成项目
+   * 仅记录已完成的录音条目（黑匣子），不包含任务块
    */
   private getItemsForDate(date: string): StrataItem[] {
-    const blackBoxItems = this.getBlackBoxItemsForDate(date);
-    const taskItems = this.getTaskItemsForDate(date);
-    
-    // 合并并按完成时间排序
-    return [...blackBoxItems, ...taskItems]
+    return this.getBlackBoxItemsForDate(date)
       .sort((a, b) => 
         new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
       );
@@ -99,31 +93,6 @@ export class StrataService {
         title: (e.content || '').slice(0, 100),
         completedAt: e.updatedAt,
         source: e
-      }));
-  }
-  
-  /**
-   * 获取指定日期完成的任务
-   */
-  private getTaskItemsForDate(date: string): StrataItem[] {
-    const projectId = this.projectState.activeProjectId();
-    if (!projectId) return [];
-    
-    const tasks = this.projectState.tasks();
-    
-    return tasks
-      .filter((t: Task) =>
-        t.status === 'completed' &&
-        !t.deletedAt &&
-        t.updatedAt &&
-        this.getDateFromTimestamp(t.updatedAt) === date
-      )
-      .map((t: Task) => ({
-        type: 'task' as const,
-        id: t.id,
-        title: t.title,
-        completedAt: t.updatedAt || new Date().toISOString(),
-        source: t
       }));
   }
   

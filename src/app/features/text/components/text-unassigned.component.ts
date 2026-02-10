@@ -1,11 +1,10 @@
 import { Component, inject, Input, Output, EventEmitter, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
-import { renderMarkdownSafe } from '../../../../utils/markdown';
+import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 
 /**
  * 待分配区组件
@@ -14,7 +13,7 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
 @Component({
   selector: 'app-text-unassigned',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, SafeMarkdownPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section 
@@ -101,7 +100,7 @@ import { renderMarkdownSafe } from '../../../../utils/markdown';
                           @if (task.content) {
                             <div class="prose prose-stone dark:prose-invert max-w-none mt-1 opacity-80"
                                  [ngClass]="{'text-xs': !isMobile, 'text-[10px] line-clamp-2': isMobile}"
-                                 [innerHTML]="getSanitizedContent(task.content)">
+                                 [innerHTML]="task.content | safeMarkdown">
                             </div>
                           }
                         </div>
@@ -184,7 +183,6 @@ export class TextUnassignedComponent implements OnDestroy {
   protected taskAdapter = inject(TaskOperationAdapterService);
   protected uiState = inject(UiStateService);
   protected projectState = inject(ProjectStateService);
-  private sanitizer = inject(DomSanitizer);
   private cdr = inject(ChangeDetectorRef);
 
   protected editingTaskId = signal<string | null>(null);
@@ -330,10 +328,7 @@ export class TextUnassignedComponent implements OnDestroy {
     }
   }
 
-  protected getSanitizedContent(content: string): SafeHtml {
-    // 修复：renderMarkdownSafe 需要 sanitizer 参数
-    return renderMarkdownSafe(content, this.sanitizer);
-  }
+
 
   protected onCreateClick(event: Event): void {
     event.stopPropagation();

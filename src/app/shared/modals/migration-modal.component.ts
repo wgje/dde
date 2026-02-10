@@ -1,4 +1,4 @@
-import { Component, inject, output, signal } from '@angular/core';
+import { Component, inject, output, signal, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../services/logger.service';
 import { MigrationService, MigrationStrategy } from '../../../services/migration.service';
@@ -15,6 +15,7 @@ import { ToastService } from '../../../services/toast.service';
   selector: 'app-migration-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" 
          (click)="close.emit()">

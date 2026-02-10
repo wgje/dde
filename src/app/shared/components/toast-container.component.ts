@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ToastService, ToastMessage } from '../../../services/toast.service';
 import { UiStateService } from '../../../services/ui-state.service';
@@ -7,9 +7,11 @@ import { UiStateService } from '../../../services/ui-state.service';
  * Toast 通知组件
  * 统一在右上角显示，移动端使用紧凑样式
  */
+// 【P2-25 修复】添加 OnPush 变更检测策略
 @Component({
   selector: 'app-toast-container',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (toast.hasMessages()) {

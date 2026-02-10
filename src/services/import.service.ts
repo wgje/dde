@@ -16,7 +16,10 @@
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { LayoutService } from './layout.service';
 import { Project, Task, Connection, AttachmentType } from '../models';
+// 【P2-44 修复】导入 sanitizeProject 用于导入数据消毒
+import { sanitizeProject } from '../utils/validation';
 import { 
   ExportData, 
   ExportMetadata, 
@@ -172,6 +175,7 @@ export interface ImportProgress {
 export class ImportService {
   private readonly logger = inject(LoggerService).category('Import');
   private readonly toast = inject(ToastService);
+  private readonly layoutService = inject(LayoutService);
   
   // 状态信号
   private readonly _isImporting = signal(false);
@@ -546,6 +550,7 @@ export class ImportService {
   
   /**
    * 转换导出项目为 Project
+   * 【P2-44 修复】对导入数据执行 sanitizeProject 消毒
    */
   private convertToProject(exportProject: ExportProject, generateNewIds?: boolean): Project {
     const projectId = generateNewIds ? crypto.randomUUID() : exportProject.id;
@@ -558,7 +563,7 @@ export class ImportService {
       }
     }
     
-    return {
+    const rawProject: Project = {
       id: projectId,
       name: exportProject.name,
       description: exportProject.description ?? '',
@@ -575,6 +580,16 @@ export class ImportService {
       flowchartThumbnailUrl: exportProject.flowchartThumbnailUrl,
       version: exportProject.version,
     };
+    
+    // 导入数据消毒：防止 XSS 和无效数据
+    const sanitized = sanitizeProject(rawProject);
+
+    // 【P2-45 修复】导入后执行树结构校验 + 修复
+    const { project: validated, issues } = this.layoutService.validateAndFixTree(sanitized);
+    if (issues.length > 0) {
+      this.logger.warn('导入项目树结构修复', { projectId, issues });
+    }
+    return validated;
   }
   
   /**

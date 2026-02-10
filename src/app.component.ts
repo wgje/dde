@@ -61,10 +61,9 @@ import { IndexedDBHealthService } from './services/indexeddb-health.service';
     OfflineBannerComponent,
     DemoBannerComponent,
     ErrorBoundaryComponent,
-    // 【性能优化 2026-02-07】FocusMode 和 SpotlightTrigger 改为 @defer 懒加载
-    // 从 imports 移除，仅在模板 @defer 块中引用，由 Angular 自动 code-split
-    // FocusModeComponent,       → @defer (on idle) in template
-    // SpotlightTriggerComponent, → @defer (on idle) in template
+    // @defer 懒加载组件仍需声明在 imports 中
+    FocusModeComponent,
+    SpotlightTriggerComponent,
   ],
   templateUrl: './app.component.html',
 })
@@ -1176,25 +1175,31 @@ async signOut() {
     this.authCoord.closeMigrationModal();
   }
 
+  // 【P2-31 修复】resize 防抖定时器
+  private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
   @HostListener('window:resize')
   checkMobile() {
     if (typeof window === 'undefined') return;
+    
+    if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
+    this.resizeDebounceTimer = setTimeout(() => {
+      const nextIsMobile = window.innerWidth < 768; // Tailwind md breakpoint
+      const shouldCloseSidebar = shouldAutoCloseSidebarOnViewportChange(
+        this.previousViewportIsMobile,
+        nextIsMobile
+      );
 
-    const nextIsMobile = window.innerWidth < 768; // Tailwind md breakpoint
-    const shouldCloseSidebar = shouldAutoCloseSidebarOnViewportChange(
-      this.previousViewportIsMobile,
-      nextIsMobile
-    );
+      if (this.uiState.isMobile() !== nextIsMobile) {
+        this.uiState.isMobile.set(nextIsMobile);
+      }
 
-    if (this.uiState.isMobile() !== nextIsMobile) {
-      this.uiState.isMobile.set(nextIsMobile);
-    }
+      if (shouldCloseSidebar) {
+        this.isSidebarOpen.set(false);
+      }
 
-    if (shouldCloseSidebar) {
-      this.isSidebarOpen.set(false);
-    }
-
-    this.previousViewportIsMobile = nextIsMobile;
+      this.previousViewportIsMobile = nextIsMobile;
+    }, 150);
   }
   
   // ========== 统一搜索方法 ==========

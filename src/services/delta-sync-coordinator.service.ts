@@ -17,6 +17,7 @@ import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { TombstoneService } from '../app/core/services/sync/tombstone.service';
 @Injectable({
   providedIn: 'root'
 })
@@ -27,6 +28,7 @@ export class DeltaSyncCoordinatorService {
   private readonly projectState = inject(ProjectStateService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('DeltaSyncCoordinator');
+  private readonly tombstoneService = inject(TombstoneService);
 
   /**
    * Delta Sync 增量同步
@@ -128,19 +130,34 @@ export class DeltaSyncCoordinatorService {
         if (deltaTask.deletedAt) {
           taskMap.delete(deltaTask.id);
         } else {
-          // 保护 content 字段
+          // 【P0-09 修复】检查本地 tombstone，防止已删除任务通过 Delta Sync 复活
+          const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
+          if (localTombstones.has(deltaTask.id)) {
+            this.logger.info('Delta Sync: 跳过 tombstone 任务', { taskId: deltaTask.id });
+            continue;
+          }
+          // 保护 content 和 title 字段
           let mergedTask = deltaTask;
-          if (existing && existing.content && (deltaTask.content === undefined || deltaTask.content === null || deltaTask.content === '')) {
-            this.logger.warn('Delta Sync: 检测到远程 content 为空，保留本地内容', {
+          // 【P3-23 增强】同时保护 content 和 title，区分“字段丢失”与“用户主动清空”
+          const contentLost = existing && existing.content && (deltaTask.content === undefined || deltaTask.content === null);
+          const titleLost = existing && existing.title && (deltaTask.title === undefined || deltaTask.title === null);
+          if (contentLost || titleLost) {
+            this.logger.warn('Delta Sync: 检测到远程字段缺失，保留本地内容', {
               taskId: deltaTask.id,
-              localContentLength: existing.content.length
+              contentLost,
+              titleLost,
+              localContentLength: existing!.content?.length ?? 0
             });
-            mergedTask = { ...deltaTask, content: existing.content };
+            mergedTask = {
+              ...deltaTask,
+              ...(contentLost ? { content: existing!.content } : {}),
+              ...(titleLost ? { title: existing!.title } : {}),
+            };
 
             this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
               level: 'warning',
               tags: { operation: 'performDeltaSync', taskId: deltaTask.id },
-              extra: { localContentLength: existing.content.length, projectId }
+              extra: { localContentLength: existing!.content?.length ?? 0, projectId, contentLost, titleLost }
             });
           }
           taskMap.set(deltaTask.id, mergedTask);

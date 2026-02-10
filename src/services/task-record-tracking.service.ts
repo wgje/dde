@@ -185,8 +185,11 @@ export class TaskRecordTrackingService {
         this.trackChanges(targetProjectId, beforeTaskMap, beforeConnectionMap, afterProject);
       }
 
-      this.syncCoordinator.markLocalChanges('structure');
-      this.syncCoordinator.schedulePersist();
+      // 【P3-32 修复】仅当实际产生变更时才触发同步
+      if (afterProject) {
+        this.syncCoordinator.markLocalChanges('structure');
+        this.syncCoordinator.schedulePersist();
+      }
     } finally {
       this.isUpdating = false;
     }

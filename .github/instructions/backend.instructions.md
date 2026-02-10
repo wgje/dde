@@ -1,58 +1,38 @@
 ---
+description: "Supabase / Edge Functions / API 后端实现规范"
 applyTo: "supabase/**,**/api/**,**/functions/**"
 ---
-# Backend Development Standards
 
-## Supabase Guidelines
+# Backend Development Standards (NanoFlow)
 
-### Edge Functions
-- 使用 Deno 运行时
-- 必须验证请求来源
-- API Key 通过 `supabase secrets set` 管理，禁止硬编码
-- 响应必须设置 CORS headers
-- 使用 `Connection: keep-alive` 提高性能
+## 核心原则
+- 优先复用现有 Supabase 表、函数、策略和错误转换工具。
+- 与 Offline-first + LWW 同步模型保持一致。
 
-### Database
-- 所有表必须启用 RLS (Row Level Security)
-- ID 使用 `gen_random_uuid()` 生成
-- 必须有 `created_at`, `updated_at` 时间戳
-- 软删除使用 `deleted_at` 字段
-- 敏感操作使用事务
+## 数据与模型规则
+- 业务实体 ID 以客户端 `crypto.randomUUID()` 生成的值为准。
+- 数据库 `id` 列使用 UUID 类型；`gen_random_uuid()` 仅可用于兼容/运维脚本，不得改变应用主路径 ID 策略。
+- 必备时间字段：`created_at`、`updated_at`；软删除使用 `deleted_at`。
+- 与任务同步相关查询必须包含 `content` 字段。
 
-### Migrations
-```sql
--- 迁移命名: YYYYMMDDHHMMSS_description.sql
--- 结构:
--- 1. 创建表
--- 2. 创建索引
--- 3. 启用 RLS
--- 4. 创建策略
--- 5. 创建触发器
-```
+## Supabase 与 Edge Functions
+- Edge Functions 使用 Deno 运行时。
+- API Key 仅通过 `supabase secrets set` 管理，禁止硬编码。
+- 必须做来源与权限校验，返回正确 CORS 头。
+- 敏感操作优先事务化，失败可回滚。
 
-### RLS Policies
-```sql
--- 基本模板
-CREATE POLICY "Users can access own data"
-ON table_name FOR ALL
-USING (auth.uid() = user_id);
-```
+## 安全规则
+- 所有业务表启用 RLS。
+- 策略必须绑定 `auth.uid() = user_id` 或等效约束。
+- 输入校验在服务端执行，不信任客户端。
+- 禁止记录密钥、token、明文敏感信息。
 
-## API Design
+## 错误与重试
+- Supabase 错误统一转换：`supabaseErrorToError()`。
+- 网络型失败应可进入重试队列，不应直接丢失写入。
+- 错误响应统一结构：`error.code` + `error.message`。
 
-### Conventions
-- RESTful 资源命名
-- 使用 HTTP 状态码语义化
-- 错误响应包含 `error.code` 和 `error.message`
-- 分页使用 `limit` + `offset` 或 cursor
-
-### Security
-- 所有端点需要认证（除非明确公开）
-- 速率限制防止滥用
-- 输入验证必须在服务端
-- 敏感数据不记录日志
-
-## Error Handling
-- 使用 `supabaseErrorToError()` 统一转换
-- 网络错误静默入队重试
-- 业务错误 Toast 提示用户
+## 迁移规范
+- 命名：`YYYYMMDDHHMMSS_description.sql`。
+- 每个迁移包含：结构变更、索引、RLS、策略、必要回填。
+- 迁移脚本必须可重复执行或具备幂等保护。

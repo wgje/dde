@@ -13,23 +13,7 @@ interface SnapPointsConfig {
 /**
  * 抽屉配置
  */
-export const DRAWER_CONFIG: {
-  EDGE_ZONE_SIZE: number;
-  DRAG_THRESHOLD: number;
-  VELOCITY_THRESHOLD: number;
-  SNAP_THRESHOLD_RATIO: number;
-  HANDLE_HEIGHT: number;
-  TOP_SNAP_POINTS: SnapPointsConfig;
-  BOTTOM_SNAP_POINTS: SnapPointsConfig;
-  ANIMATION_DURATION: number;
-  SPRING: {
-    STIFFNESS: number;
-    DAMPING: number;
-    MASS: number;
-  };
-  GESTURE_HINT_DURATION: number;
-  GESTURE_HINT_SHOWN_KEY: string;
-} = {
+export const DRAWER_CONFIG = {
   /** 边缘检测区域大小（像素）- 把手区域可触发拖拽 */
   EDGE_ZONE_SIZE: 48,
   

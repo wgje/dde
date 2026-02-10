@@ -141,6 +141,10 @@ export class TaskTrashService {
             deletedConnections
           };
         } else if (idsToDelete.has(t.id)) {
+          // 【P1-16 修复】子任务也保存各自关联的连接，以便单独恢复时能恢复连接
+          const childConnections = deletedConnections.filter(
+            c => c.source === t.id || c.target === t.id
+          );
           return {
             ...t,
             deletedAt: now,
@@ -152,7 +156,8 @@ export class TaskTrashService {
               x: t.x,
               y: t.y,
             },
-            stage: null
+            stage: null,
+            deletedConnections: childConnections.length > 0 ? childConnections : undefined
           };
         }
         return t;
@@ -244,11 +249,16 @@ export class TaskTrashService {
           
           let restored;
           if (meta) {
+            // 【P1-15 修复】恢复前验证父任务是否仍然存在且未被删除
+            const parentStillExists = meta.parentId 
+              ? p.tasks.some(pt => pt.id === meta.parentId && !pt.deletedAt)
+              : true;
+            
             restored = {
               ...rest,
               deletedAt: null,
-              parentId: meta.parentId,
-              stage: meta.stage,
+              parentId: parentStillExists ? meta.parentId : null,
+              stage: parentStillExists ? meta.stage : (meta.stage ?? 1),
               order: meta.order,
               rank: meta.rank,
               x: meta.x,

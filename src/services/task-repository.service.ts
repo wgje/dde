@@ -329,9 +329,10 @@ export class TaskRepositoryService {
     taskId: string, 
     attachment: Attachment
   ): Promise<{ success: boolean; error?: string }> {
+    // 【P1-20 修复】添加 updated_at 乐观锁，防止 TOCTOU 竞态覆盖
     const { data, error: fetchError } = await this.supabase.client()
       .from('tasks')
-      .select('attachments')
+      .select('attachments, updated_at')
       .eq('id', taskId)
       .maybeSingle();
 
@@ -344,12 +345,23 @@ export class TaskRepositoryService {
     }
 
     const currentAttachments = data?.attachments || [];
+    // 去重：如果附件 ID 已存在则跳过
+    if (currentAttachments.some((a: Attachment) => a.id === attachment.id)) {
+      return { success: true };
+    }
     const newAttachments = [...currentAttachments, attachment];
 
-    const { error } = await this.supabase.client()
+    const updateQuery = this.supabase.client()
       .from('tasks')
-      .update({ attachments: newAttachments })
+      .update({ attachments: newAttachments, updated_at: new Date().toISOString() })
       .eq('id', taskId);
+    
+    // 如果有 updated_at，用它做乐观锁
+    if (data.updated_at) {
+      (updateQuery as unknown as { eq: (col: string, val: string) => typeof updateQuery }).eq('updated_at', data.updated_at);
+    }
+
+    const { error } = await updateQuery;
 
     if (error) {
       return { success: false, error: error.message };

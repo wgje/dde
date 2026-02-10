@@ -210,6 +210,15 @@ export class UserSessionService {
     await this.clearIndexedDB('nanoflow-db');
     await this.clearIndexedDB('nanoflow-queue-backup');
     
+    // 5. 【P3-12 修复】清理 Supabase auth token
+    try {
+      if (this.supabase.isConfigured) {
+        await this.supabase.signOut();
+      }
+    } catch (e) {
+      this.logger.warn('Supabase signOut 失败', e);
+    }
+    
     this.logger.info('本地数据清理完成');
   }
   private async clearIndexedDB(dbName: string): Promise<void> {

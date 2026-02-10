@@ -21,6 +21,7 @@ import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../
 import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { isValidUUID } from '../../../../utils/validation';
 /**
  * 可重试的实体类型
  */
@@ -105,7 +106,7 @@ export class RetryQueueService {
   /** IndexedDB 正常场景的队列上限（容量更高） */
   private readonly MAX_SIZE_INDEXEDDB = SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE_INDEXEDDB;
   /** 当前生效的队列上限 */
-  private maxQueueSize = this.MAX_SIZE_LOCAL;
+  private maxQueueSize: number = this.MAX_SIZE_LOCAL;
   /** 软上限溢出倍数（防止内存无限增长） */
   private readonly MAX_QUEUE_OVERFLOW_FACTOR = 5;
   
@@ -158,6 +159,9 @@ export class RetryQueueService {
       this.loadFromStorage();
     });
     
+    // 【P2-19 修复】恢复熔断器状态
+    this.loadCircuitState();
+    
     this.destroyRef.onDestroy(() => {
       this.stopLoop();
       this.saveToStorage();
@@ -185,6 +189,31 @@ export class RetryQueueService {
   }
   
   /**
+   * 检查队列中是否存在指定实体的待重试操作
+   */
+  hasEntity(type: RetryableEntityType, entityId: string): boolean {
+    return this.queue.some(item => item.type === type && item.data.id === entityId);
+  }
+
+  /**
+   * 移除队列中指定实体的待重试操作
+   * 
+   * 用于跨队列去重：当 ActionQueue 收到同一实体的新操作时，
+   * RetryQueue 中较旧的重试条目已过时，应移除以避免覆盖新数据
+   * 
+   * @returns 是否成功移除
+   */
+  removeByEntity(type: RetryableEntityType, entityId: string): boolean {
+    const index = this.queue.findIndex(item => item.type === type && item.data.id === entityId);
+    if (index === -1) return false;
+
+    this.queue.splice(index, 1);
+    this.saveToStorage();
+    this.logger.debug('跨队列去重：移除 RetryQueue 中的旧条目', { type, entityId });
+    return true;
+  }
+
+  /**
    * 清空队列
    */
   clear(): void {
@@ -207,6 +236,11 @@ export class RetryQueueService {
     data: Task | Project | Connection | BlackBoxEntry | { id: string },
     projectId?: string
   ): boolean {
+    // 入队前校验实体 ID 格式，拦截脏数据
+    if (data?.id && !isValidUUID(data.id)) {
+      this.logger.warn('RetryQueue.add：拒绝非法 ID 入队', { type, id: data.id });
+      return false;
+    }
     this.tryRecoverQueueFullPressure();
 
     // 去重：检查是否已存在同一实体
@@ -603,12 +637,40 @@ export class RetryQueueService {
   
   // ==================== 熔断器 ====================
   
+  /** 【P2-19 修复】从 sessionStorage 恢复熔断器状态 */
+  private readonly CIRCUIT_STORAGE_KEY = 'nanoflow.circuit-breaker';
+  
+  private loadCircuitState(): void {
+    try {
+      const stored = sessionStorage.getItem(this.CIRCUIT_STORAGE_KEY);
+      if (stored) {
+        const { state, openedAt, failures } = JSON.parse(stored);
+        if (state === 'open' || state === 'half-open') {
+          this.circuitState = state;
+          this.circuitOpenedAt = openedAt ?? 0;
+          this.consecutiveFailures = failures ?? 0;
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  
+  private saveCircuitState(): void {
+    try {
+      sessionStorage.setItem(this.CIRCUIT_STORAGE_KEY, JSON.stringify({
+        state: this.circuitState,
+        openedAt: this.circuitOpenedAt,
+        failures: this.consecutiveFailures,
+      }));
+    } catch { /* ignore */ }
+  }
+  
   checkCircuitBreaker(): boolean {
     if (this.circuitState === 'closed') return true;
     if (this.circuitState === 'open') {
       const elapsed = Date.now() - this.circuitOpenedAt;
       if (elapsed >= CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME) {
         this.circuitState = 'half-open';
+        this.saveCircuitState();
         this.logger.info('Circuit Breaker: 进入半开状态');
         return true;
       }
@@ -621,6 +683,7 @@ export class RetryQueueService {
     if (this.circuitState === 'half-open') {
       this.circuitState = 'closed';
       this.consecutiveFailures = 0;
+      this.saveCircuitState();
       this.logger.info('Circuit Breaker: 恢复正常');
     } else {
       this.consecutiveFailures = 0;
@@ -633,12 +696,14 @@ export class RetryQueueService {
     if (this.circuitState === 'half-open') {
       this.circuitState = 'open';
       this.circuitOpenedAt = Date.now();
+      this.saveCircuitState();
       this.logger.warn('Circuit Breaker: 半开状态失败，重新熔断');
       return;
     }
     if (this.consecutiveFailures >= CIRCUIT_BREAKER_CONFIG.FAILURE_THRESHOLD) {
       this.circuitState = 'open';
       this.circuitOpenedAt = Date.now();
+      this.saveCircuitState();
       this.logger.warn(`Circuit Breaker: 触发熔断，连续失败 ${this.consecutiveFailures} 次`);
     }
   }
@@ -710,6 +775,13 @@ export class RetryQueueService {
 
       for (const item of validItems) {
         if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
+          processedIds.add(item.id);
+          continue;
+        }
+
+        // 校验实体 ID 格式，自动移除脏数据
+        if (item.data?.id && !isValidUUID(item.data.id)) {
+          this.logger.warn('队列中发现非法 ID，自动移除', { type: item.type, id: item.data.id });
           processedIds.add(item.id);
           continue;
         }
@@ -889,14 +961,41 @@ export class RetryQueueService {
   private async loadFromIdb(db: IDBDatabase): Promise<RetryQueueItem[]> {
     return new Promise((resolve) => {
       try {
-        const transaction = db.transaction(this.DB_CONFIG.storeName, 'readonly');
+        const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
         const store = transaction.objectStore(this.DB_CONFIG.storeName);
         const request = store.getAll();
         
         request.onsuccess = () => {
-          const items = request.result || [];
-          this.logger.debug('从 IndexedDB 加载', { count: items.length });
-          resolve(items);
+          const raw = request.result || [];
+          const clean: RetryQueueItem[] = [];
+          const dirtyKeys: string[] = [];
+
+          for (const item of raw) {
+            if (item.data?.id && !isValidUUID(item.data.id)) {
+              this.logger.warn('RetryQueue 加载：丢弃非法 ID 条目', { type: item.type, id: item.data.id });
+              dirtyKeys.push(item.id);
+            } else {
+              clean.push(item);
+            }
+          }
+
+          // 从 IDB 中物理删除脏条目
+          if (dirtyKeys.length > 0) {
+            console.warn('[RetryQueue] 启动清理：从 IDB 删除脏条目', dirtyKeys);
+            this.logger.info('RetryQueue 加载：已过滤脏数据', { removed: dirtyKeys.length });
+            try {
+              const delTx = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
+              const delStore = delTx.objectStore(this.DB_CONFIG.storeName);
+              for (const key of dirtyKeys) {
+                delStore.delete(key);
+              }
+            } catch (delErr) {
+              this.logger.error('RetryQueue：删除脏条目失败', delErr);
+            }
+          }
+
+          this.logger.debug('从 IndexedDB 加载', { count: clean.length });
+          resolve(clean);
         };
         
         request.onerror = () => {
@@ -922,12 +1021,18 @@ export class RetryQueueService {
       
       const parsed = JSON.parse(data);
       if (parsed.version === this.VERSION && Array.isArray(parsed.items)) {
-        // 过滤过期项
+        // 过滤过期项 + 非法 ID 脏数据
         const now = Date.now();
-        this.queue = parsed.items.filter((item: RetryQueueItem) => 
-          now - item.createdAt < this.MAX_ITEM_AGE &&
-          item.retryCount < this.MAX_RETRIES
-        );
+        this.queue = parsed.items.filter((item: RetryQueueItem) => {
+          if (now - item.createdAt >= this.MAX_ITEM_AGE) return false;
+          if (item.retryCount >= this.MAX_RETRIES) return false;
+          // 过滤非法 ID 的脏数据
+          if (item.data?.id && !isValidUUID(item.data.id)) {
+            this.logger.warn('RetryQueue localStorage 加载：丢弃非法 ID', { type: item.type, id: item.data.id });
+            return false;
+          }
+          return true;
+        });
         this.logger.info('从 localStorage 加载队列', { count: this.queue.length });
       }
     } catch (e) {
@@ -937,22 +1042,33 @@ export class RetryQueueService {
   
   /**
    * 保存队列到存储
+   * 【P2-17 修复】添加 catch 处理，防止未捕获的 Promise rejection
+   * 注意：调用方故意不 await，采用 fire-and-forget 模式以不阻塞主线程
    */
   private async saveToStorage(): Promise<void> {
-    const db = await this.initDb();
-    
-    if (db) {
-      const success = await this.saveToIdb(db);
-      if (success) {
-        if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
-          this.clearPressureMode();
+    try {
+      const db = await this.initDb();
+      
+      if (db) {
+        const success = await this.saveToIdb(db);
+        if (success) {
+          if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
+            this.clearPressureMode();
+          }
+          return;
         }
-        return;
+      }
+      
+      // 降级到 localStorage
+      this.saveToLocalStorage();
+    } catch (e) {
+      this.logger.warn('saveToStorage 失败，降级到 localStorage', e);
+      try {
+        this.saveToLocalStorage();
+      } catch {
+        // 完全静默：localStorage 也失败时只能丢弃
       }
     }
-    
-    // 降级到 localStorage
-    this.saveToLocalStorage();
   }
   
   /**
@@ -1050,9 +1166,9 @@ export class RetryQueueService {
       ...item,
       data: {
         ...task,
-        // 移除可重建的字段
-        displayId: undefined as unknown as string,
-        shortId: undefined
+        // 移除可重建的字段（displayId 是动态计算的）
+        // 【P0-05 修复】保留 shortId，它是永久 ID，丢失会导致数据库覆盖为 null
+        displayId: undefined as unknown as string
       }
     };
   }

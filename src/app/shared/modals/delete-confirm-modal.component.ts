@@ -1,4 +1,4 @@
-import { Component, Output, EventEmitter, input, inject } from '@angular/core';
+import { Component, Output, EventEmitter, input, inject, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MODAL_DATA, MODAL_REF } from '../../../services/dynamic-modal.service';
 
@@ -41,6 +41,7 @@ export interface DeleteConfirmResult {
   selector: 'app-delete-confirm-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <!-- 动态模式不需要遮罩层，由 DynamicModalService 提供 -->
     <div 

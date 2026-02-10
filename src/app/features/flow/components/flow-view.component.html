@@ -23,7 +23,7 @@
     <!-- 中间层：流程图 -->
     <div slot="middle" class="h-full relative" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
       @if (!diagram.error()) {
-        <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+        <div #diagramDiv data-testid="flow-diagram" role="img" aria-label="流程图" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
         
         <!-- 移动端导航按钮 -->
         <!-- 左下角：前往文本视图 -->
@@ -184,7 +184,7 @@
     <!-- 流程图区域 -->
   <div class="flex-1 min-h-0 relative overflow-hidden dark:bg-stone-950 md:border-t md:border-[#78716C]/50" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
     @if (!diagram.error()) {
-      <div #diagramDiv data-testid="flow-diagram" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+      <div #diagramDiv data-testid="flow-diagram" role="img" aria-label="流程图" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
       
       <!-- 移动端导航按钮 -->
       @if (uiState.isMobile()) {

@@ -187,15 +187,15 @@ export class FlowDiagramConfigService {
     }
     
     // 添加跨树连接（过滤掉已软删除的连接）
+    // 【P2-30 修复】使用 Set 实现 O(1) 查找，避免 O(n*m)
+    const taskIdSet = new Set(tasksToShow.map(t => t.id));
     for (const conn of project.connections) {
       // 跳过已软删除的连接
       if (conn.deletedAt) continue;
       
       const pairKey = `${conn.source}->${conn.target}`;
       if (!parentChildPairs.has(pairKey)) {
-        const sourceExists = tasksToShow.some(t => t.id === conn.source);
-        const targetExists = tasksToShow.some(t => t.id === conn.target);
-        if (sourceExists && targetExists) {
+        if (taskIdSet.has(conn.source) && taskIdSet.has(conn.target)) {
           linkDataArray.push({
             key: `cross-${conn.source}-${conn.target}`,
             from: conn.source,

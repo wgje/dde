@@ -1,10 +1,13 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.6.0
--- 最后验证: 2026-02-02
+-- 版本: 3.8.0
+-- 最后验证: 2026-02-10
 --
 -- 更新日志：
+--   3.8.0 (2026-02-10): pg_cron 段与 cleanup-cron-setup.sql 对齐（函数存在性校验 + namespace 校验）
+--   3.7.0 (2026-02-09): 一次性初始化增强：自动尝试配置 pg_cron 清理任务（幂等 + 容错）
+--                       同步清理脚本说明，避免“已自动配置/仍提示手动配置”冲突
 --   3.6.0 (2026-02-02): 性能优化：添加 get_all_projects_data 和 get_projects_list RPC 函数
 --                       支持增量同步和分页查询，减少 N+1 查询问题
 --   3.5.0 (2026-01-27): 性能优化：添加 get_full_project_data 和 get_user_projects_meta
@@ -25,9 +28,9 @@
 --   - supabase/migrations/archive/*.sql（历史增量加固、tombstone、purge、病毒扫描、仪表盘 RPC 等）
 --
 -- 推荐用法：
---   1) 在 Supabase Dashboard 启用必要扩展（如 pg_cron）
---   2) 在 Storage 创建 attachments 私有桶
---   3) 在 SQL Editor 执行本脚本
+--   1) 在 Storage 创建 attachments 私有桶
+--   2) 在 SQL Editor 执行本脚本（脚本会自动尝试配置 pg_cron 清理任务）
+--   3) 若实例暂不支持 pg_cron，可后续执行 scripts/cleanup-cron-setup.sql 重试
 -- ============================================================
 
 -- ============================================================
@@ -808,6 +811,83 @@ BEGIN
   RETURN deleted_count;
 END; $$;
 
+-- ============================================
+-- 13.1 软删除清理定时任务（pg_cron，可选）
+-- ============================================
+-- 目标：在支持 pg_cron 的环境中，自动调度软删除清理任务
+-- 说明：
+-- - 幂等：重复执行会先移除旧任务再重建
+-- - 容错：如果当前实例不支持 pg_cron，仅输出 NOTICE，不中断初始化
+-- - 函数校验：调度前确认清理函数存在，避免静默失败
+-- - 与 scripts/cleanup-cron-setup.sql 保持同步（后者为独立可执行版本，使用 EXCEPTION 而非 NOTICE）
+DO $$
+BEGIN
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_cron;
+  EXCEPTION
+    WHEN OTHERS THEN
+      RAISE NOTICE 'pg_cron 不可用，跳过清理定时任务配置: %', SQLERRM;
+      RAISE NOTICE '可后续执行 scripts/cleanup-cron-setup.sql 重试';
+      RETURN;
+  END;
+
+  -- 验证 cron schema 生效
+  IF to_regnamespace('cron') IS NULL THEN
+    RAISE NOTICE 'pg_cron 扩展未生效（cron schema 不存在），跳过配置';
+    RETURN;
+  END IF;
+
+  -- 校验清理函数存在性（避免静默注册无效任务）
+  IF to_regprocedure('public.cleanup_old_deleted_tasks()') IS NULL THEN
+    RAISE NOTICE '缺少函数 cleanup_old_deleted_tasks()，跳过 cron 配置';
+    RETURN;
+  END IF;
+  IF to_regprocedure('public.cleanup_old_deleted_connections()') IS NULL THEN
+    RAISE NOTICE '缺少函数 cleanup_old_deleted_connections()，跳过 cron 配置';
+    RETURN;
+  END IF;
+  IF to_regprocedure('public.cleanup_old_logs()') IS NULL THEN
+    RAISE NOTICE '缺少函数 cleanup_old_logs()，跳过 cron 配置';
+    RETURN;
+  END IF;
+
+  -- 清理旧任务（如果存在），幂等处理
+  PERFORM cron.unschedule(jobid)
+  FROM cron.job
+  WHERE jobname IN (
+    'nanoflow-cleanup-deleted-tasks',
+    'nanoflow-cleanup-deleted-connections',
+    'nanoflow-cleanup-logs'
+  );
+
+  -- 每天 03:10 UTC 清理软删除任务
+  PERFORM cron.schedule(
+    'nanoflow-cleanup-deleted-tasks',
+    '10 3 * * *',
+    $job$SELECT public.cleanup_old_deleted_tasks();$job$
+  );
+
+  -- 每天 03:20 UTC 清理软删除连接
+  PERFORM cron.schedule(
+    'nanoflow-cleanup-deleted-connections',
+    '20 3 * * *',
+    $job$SELECT public.cleanup_old_deleted_connections();$job$
+  );
+
+  -- 每天 03:30 UTC 清理旧日志
+  PERFORM cron.schedule(
+    'nanoflow-cleanup-logs',
+    '30 3 * * *',
+    $job$SELECT public.cleanup_old_logs();$job$
+  );
+
+  RAISE NOTICE 'pg_cron 清理任务已配置: nanoflow-cleanup-deleted-tasks, nanoflow-cleanup-deleted-connections, nanoflow-cleanup-logs';
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE NOTICE '配置 pg_cron 清理任务失败（已忽略，不影响初始化）: %', SQLERRM;
+    RAISE NOTICE '可后续执行 scripts/cleanup-cron-setup.sql 单独配置';
+END $$;
+
 -- 迁移函数：从 JSONB 到独立表
 CREATE OR REPLACE FUNCTION migrate_project_data_to_v2(p_project_id UUID)
 RETURNS TABLE (
@@ -1191,10 +1271,12 @@ USING (bucket_id = 'attachments' AND EXISTS (
 --   ✓ cleanup_deleted_attachments(retention_days)
 --   ✓ purge_tasks_v2(project_id, task_ids)  - 永久删除任务（写入 tombstone）
 --
--- 定时任务（需要启用 pg_cron 后手动配置）：
---   SELECT cron.schedule('cleanup-deleted-tasks', '0 3 * * *', $$SELECT cleanup_old_deleted_tasks()$$);
---   SELECT cron.schedule('cleanup-deleted-connections', '0 3 * * *', $$SELECT cleanup_old_deleted_connections()$$);
---   SELECT cron.schedule('cleanup-old-logs', '0 4 * * 0', $$SELECT cleanup_old_logs()$$);
+-- 定时任务：
+--   - 本脚本第 13.1 节会自动尝试配置：
+--       nanoflow-cleanup-deleted-tasks
+--       nanoflow-cleanup-deleted-connections
+--       nanoflow-cleanup-logs
+--   - 若实例不支持 pg_cron，可后续执行 scripts/cleanup-cron-setup.sql 重试
 --
 -- Storage 桶配置（需要在 Dashboard 中创建）：
 --   Name: attachments
@@ -1228,8 +1310,7 @@ EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
 
--- 2. 清理日志表已在文件早期（第 232 行）创建
--- 注意：cleanup_old_deleted_tasks 和 cleanup_old_logs 函数已在前面定义（第 459 和 474 行）
+-- 2. 清理日志表与清理函数已在文件早期定义（保持幂等重跑）
 
 -- 5. 为 tasks 表的 deleted_at 添加索引（加速清理查询）
 CREATE INDEX IF NOT EXISTS idx_tasks_deleted_at ON public.tasks (deleted_at)

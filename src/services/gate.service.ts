@@ -404,13 +404,6 @@ export class GateService {
       return true;
     }
     
-    // 稍后提醒
-    if ((config.GATE_SNOOZE as readonly string[]).includes(key)) {
-      event.preventDefault();
-      this.snooze();
-      return true;
-    }
-    
     return false;
   }
   

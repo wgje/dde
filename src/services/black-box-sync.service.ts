@@ -16,6 +16,7 @@ import { Injectable, inject } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { SYNC_CONFIG } from '../config/sync.config';
+import { isValidUUID } from '../utils/validation';
 import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
@@ -98,11 +99,24 @@ export class BlackBoxSyncService {
 
     try {
       const entries = await this.loadFromLocal();
-      const pendingEntries = entries.filter(e => e.syncStatus === 'pending');
 
-      if (pendingEntries.length > 0) {
-        this.logger.info('BlackBoxSync', `Recovering ${pendingEntries.length} pending entries to RetryQueue`);
-        for (const entry of pendingEntries) {
+      // 第一步：主动扫描并删除所有非法 ID 条目（不限 syncStatus）
+      for (const entry of entries) {
+        if (!entry.id || !isValidUUID(entry.id)) {
+          console.warn('[BlackBoxSync] 启动清理脏数据:', entry.id);
+          this.logger.warn('BlackBoxSync', `启动清理：删除非法 ID "${entry.id}"`);
+          try { await this.deleteFromLocal(entry.id); } catch { /* 忽略 */ }
+        }
+      }
+
+      // 第二步：恢复合法 pending 条目到 RetryQueue
+      const validPending = entries.filter(
+        e => e.syncStatus === 'pending' && e.id && isValidUUID(e.id)
+      );
+
+      if (validPending.length > 0) {
+        this.logger.info('BlackBoxSync', `Recovering ${validPending.length} pending entries to RetryQueue`);
+        for (const entry of validPending) {
           this.retryQueueHandler(entry);
         }
       }
@@ -236,6 +250,12 @@ export class BlackBoxSyncService {
    * 3. 即使浏览器崩溃，下次启动时 recoverPendingEntries 会恢复
    */
   scheduleSync(entry: BlackBoxEntry): void {
+    // 校验 ID，拦截脏数据进入同步流程
+    if (!entry.id || !isValidUUID(entry.id)) {
+      this.logger.warn('BlackBoxSync', `scheduleSync: 拦截非法 ID "${entry.id}"，不进入同步`);
+      return;
+    }
+
     // 1. 立即保存到本地 IndexedDB（syncStatus=pending）
     const pendingEntry: BlackBoxEntry = { ...entry, syncStatus: 'pending' };
     this.saveToLocal(pendingEntry);
@@ -261,6 +281,11 @@ export class BlackBoxSyncService {
     this.pendingPushEntries.clear();
 
     for (const entry of entries) {
+      // 校验 ID 格式
+      if (!entry.id || !isValidUUID(entry.id)) {
+        this.logger.warn('BlackBoxSync', `flushPending: 跳过非法 ID "${entry.id}"`);
+        continue;
+      }
       if (this.retryQueueHandler) {
         // 通过主同步体系的 RetryQueue（持久化）
         this.retryQueueHandler(entry);
@@ -294,6 +319,30 @@ export class BlackBoxSyncService {
       };
 
       const request = store.put(idbEntry);
+
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 从本地 IndexedDB 删除指定条目
+   * 用于清理脏数据（如非法 ID 的条目）
+   */
+  async deleteFromLocal(id: string): Promise<void> {
+    if (!this.db) {
+      await this.initIndexedDB();
+    }
+
+    return new Promise((resolve, reject) => {
+      if (!this.db) {
+        reject(new Error('IndexedDB not initialized'));
+        return;
+      }
+
+      const tx = this.db.transaction(this.STORE_NAME, 'readwrite');
+      const store = tx.objectStore(this.STORE_NAME);
+      const request = store.delete(id);
 
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
@@ -347,8 +396,26 @@ export class BlackBoxSyncService {
       return false;
     }
 
+    // 校验 ID 格式，跳过 IndexedDB 中的脏数据（如 "dev-preview"）
+    if (!entry.id || !isValidUUID(entry.id)) {
+      this.logger.warn('BlackBoxSync', `跳过非法 ID 的条目: "${entry.id}"，从本地清理`);
+      try {
+        await this.deleteFromLocal(entry.id);
+      } catch { /* 清理失败不阻塞 */ }
+      return true; // 返回 true 让 RetryQueue 不再重试
+    }
+
     try {
       const client = this.supabase.client();
+
+      // 【终极防线】upsert 前再次内联校验 ID 格式
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(entry.id)) {
+        console.warn('[BlackBoxSync] 终极防线拦截非法 ID:', entry.id);
+        this.logger.warn('BlackBoxSync', `终极防线拦截非法 ID: "${entry.id}"`);
+        try { await this.deleteFromLocal(entry.id); } catch { /* ignore */ }
+        return true;
+      }
 
       // 使用 upsert 确保幂等性
       const { error } = await client

@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 
@@ -6,9 +6,11 @@ import { Router, RouterLink } from '@angular/router';
  * 404 页面组件
  * 当用户访问不存在的路由时显示
  */
+// 【P2-25 修复】添加 OnPush
 @Component({
   selector: 'app-not-found',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, RouterLink],
   template: `
     <div class="min-h-screen bg-gradient-to-br from-stone-100 dark:from-stone-900 to-stone-200 dark:to-stone-950 flex items-center justify-center p-4">

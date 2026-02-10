@@ -199,6 +199,8 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   }
   
   // 项目确实不存在
+  // 【P2-11 备注】当前单用户场景不需要所有权验证；
+  // 若将来支持多用户协作，需在此添加 project.userId === currentUserId 校验
   toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
   void router.navigate(['/projects']);
   return false;

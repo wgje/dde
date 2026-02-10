@@ -62,11 +62,13 @@ export class BlackBoxService {
     }
     
     const now = new Date().toISOString();
+    // 解构 data，排除 id 字段，防止外部传入覆盖 crypto.randomUUID()
+    const { id: _ignoreId, ...safeData } = data;
     const entry: BlackBoxEntry = {
-      id: crypto.randomUUID(),  // ⚠️ 客户端生成 UUID
+      id: crypto.randomUUID(),
       projectId: projectId ?? '',
       userId,
-      content: data.content ?? '',
+      content: safeData.content ?? '',
       date: getTodayDate(),
       createdAt: now,
       updatedAt: now,
@@ -77,7 +79,7 @@ export class BlackBoxService {
       syncStatus: 'pending',
       localCreatedAt: now,
       snoozeCount: 0,
-      ...data
+      ...safeData
     };
     
     // 1. 更新状态（立即 UI 响应）

@@ -99,23 +99,30 @@ export class TaskConnectionService {
     newTargetId: string
   ): void {
     const now = new Date().toISOString();
-    this.recordAndUpdate(p => ({
-      ...p,
-      connections: [
-        // 软删除旧连接
-        ...p.connections.map(c => 
-          (c.source === oldSourceId && c.target === oldTargetId)
-            ? { ...c, deletedAt: now }
-            : c
-        ),
-        // 添加新连接
-        { 
+    this.recordAndUpdate(p => {
+      // 【P2-43 修复】检查是否已存在相同 source→target 的活跃连接
+      const duplicateExists = p.connections.some(
+        c => c.source === newSourceId && c.target === newTargetId && !c.deletedAt
+      );
+      
+      const updatedConnections = p.connections.map(c => 
+        (c.source === oldSourceId && c.target === oldTargetId)
+          ? { ...c, deletedAt: now }
+          : c
+      );
+      
+      // 仅在无重复时添加新连接
+      if (!duplicateExists) {
+        updatedConnections.push({
           id: crypto.randomUUID(),
-          source: newSourceId, 
-          target: newTargetId 
-        }
-      ]
-    }));
+          source: newSourceId,
+          target: newTargetId,
+          updatedAt: now,
+        });
+      }
+      
+      return { ...p, connections: updatedConnections };
+    });
   }
 
   /**

@@ -157,15 +157,33 @@ export class SentryLazyLoaderService {
         tracesSampleRate: 0,
         // 环境标识
         environment: environment.production ? 'production' : 'development',
-        // 过滤浏览器噪音错误
+        // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
         ignoreErrors: [
-          'ResizeObserver loop limit exceeded',
-          'ResizeObserver loop completed with undelivered notifications.',
-          'Failed to fetch',
-          'NetworkError',
-          'Load failed',
-          'duplicate key value violates unique constraint',
+          /^ResizeObserver loop/,
+          /^Failed to fetch$/,          // 精确匹配网络错误，不匹配含更多上下文的消息
+          /^NetworkError$/,
+          /^Load failed$/,
+          /^duplicate key value violates unique constraint/,
+          /^The operation was aborted/,  // AbortController 取消
+          /^The user aborted a request/, // 用户取消
         ],
+        // 【P3-15 修复】过滤 URL 中的 auth 参数，防止 Supabase PKCE 回调泄露到 Sentry
+        beforeSend(event) {
+          if (event.request?.url) {
+            event.request.url = event.request.url.replace(/[#?].*$/, '');
+          }
+          return event;
+        },
+        beforeBreadcrumb(breadcrumb) {
+          if (breadcrumb.category === 'navigation' && breadcrumb.data) {
+            for (const key of ['from', 'to']) {
+              if (typeof breadcrumb.data[key] === 'string') {
+                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/[#?].*$/, '');
+              }
+            }
+          }
+          return breadcrumb;
+        },
       });
       
       this.sentryModule.set(Sentry as SentryModule);

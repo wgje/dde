@@ -2,7 +2,7 @@ import { Component, input, output, signal, ElementRef, ViewChild, computed, OnIn
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Task } from '../../../../models';
-import { renderMarkdown } from '../../../../utils/markdown';
+import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { LoggerService } from '../../../../services/logger.service';
 
 export interface ConnectionEditorData {
@@ -34,7 +34,7 @@ export interface ConnectionTasks {
 @Component({
   selector: 'app-flow-connection-editor',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, SafeMarkdownPipe],
   template: `
     @if (data(); as connData) {
       <div class="fixed z-[100] animate-scale-in"
@@ -136,7 +136,7 @@ export interface ConnectionTasks {
                 }
                 <!-- 描述 -->
                 @if (currentDescription()) {
-                  <div class="markdown-preview leading-relaxed text-stone-600 dark:text-stone-300" [innerHTML]="renderMarkdownContent(currentDescription())"></div>
+                  <div class="markdown-preview leading-relaxed text-stone-600 dark:text-stone-300" [innerHTML]="currentDescription() | safeMarkdown:'raw'"></div>
                 } @else if (!currentTitle()) {
                   <span class="text-stone-400 dark:text-stone-500 italic">点击添加标题和描述...</span>
                 } @else {
@@ -506,10 +506,4 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     textarea.style.height = Math.min(100, Math.max(48, textarea.scrollHeight)) + 'px';
   }
   
-  /**
-   * 渲染 Markdown 内容为安全的 HTML
-   */
-  renderMarkdownContent(content: string): string {
-    return renderMarkdown(content);
-  }
 }

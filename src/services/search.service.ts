@@ -57,6 +57,9 @@ export class SearchService {
       !t.deletedAt && (
         this.fuzzyMatch(t.title, query) ||
         this.fuzzyMatch(t.content, query) ||
+        // 【P2-42 修复】搜索范围包含 displayId 和 shortId
+        this.fuzzyMatch(t.displayId, query) ||
+        (t.shortId ? this.fuzzyMatch(t.shortId, query) : false) ||
         (t.attachments?.some(a => this.fuzzyMatch(a.name, query)) ?? false) ||
         (t.tags?.some(tag => this.fuzzyMatch(tag, query)) ?? false)
       )
@@ -160,12 +163,13 @@ export class SearchService {
   
   /**
    * 规范化搜索查询
+   * 【P2-41 修复】保留连字符，确保 shortId (NF-A1B2) 可搜索
    */
   private normalizeSearchQuery(query: string): string {
     return query
       .toLowerCase()
       .trim()
-      .replace(/[.,!?;:'"()[\]{}<>@#$%^&*+=~`|\\/-]/g, '')
+      .replace(/[.,!?;:'"‘’“”()\[\]{}<>@#$%^&*+=~`|\\]/g, '')
       .replace(/\s+/g, ' ');
   }
   

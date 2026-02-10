@@ -65,6 +65,7 @@ export const SYNC_CONFIG = {
    * 【流量优化】默认禁用，改用轮询节省 WebSocket 流量
    * 对于个人 PWA，轮询足够且更节省流量
    */
+  /** @see FEATURE_FLAGS.REALTIME_ENABLED — 高层功能门控 */
   REALTIME_ENABLED: false,
   /** 
    * 轮询间隔（毫秒）- 替代 Realtime 的轮询频率
@@ -92,6 +93,7 @@ export const SYNC_CONFIG = {
    * - false: 使用全量拉取（当前默认，待验证后切换）
    * @see docs/plan_save.md Phase 2
    */
+  /** @see FEATURE_FLAGS.INCREMENTAL_SYNC_ENABLED — 高层功能门控 */
   DELTA_SYNC_ENABLED: false,
   /** Delta 游标安全回看窗口（毫秒），抵御时钟漂移/读已提交边界 */
   CURSOR_SAFETY_LOOKBACK_MS: 30_000,

@@ -5,13 +5,13 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
 import { Task, Attachment } from '../../../../models';
-import { renderMarkdown } from '../../../../utils/markdown';
+import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';
 /** 任务详情面板 - 桌面端:浮动面板, 移动端:底部抽屉, 默认预览模式 */
 @Component({
   selector: 'app-flow-task-detail',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, SafeMarkdownPipe],
   providers: [FlowTaskDetailFormService],
   template: `
     <!-- 桌面端可拖动浮动面板 -->
@@ -170,7 +170,7 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
                   @if (task.content) {
                       <div 
                           class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto overflow-x-hidden"
-                          [innerHTML]="renderMarkdownContent(task.content)">
+                          [innerHTML]="task.content | safeMarkdown:'raw'">
                       </div>
                   } @else {
                       <div class="text-[11px] text-stone-400 dark:text-stone-500 italic">点击编辑内容...</div>
@@ -267,7 +267,7 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
         <div class="cursor-pointer space-y-1" (click)="toggleEditMode(); $event.stopPropagation()">
           <h4 class="text-xs font-medium text-stone-800 dark:text-stone-100 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
           @if (task.content) {
-            <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="renderMarkdownContent(task.content)"></div>
+            <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="task.content | safeMarkdown:'raw'"></div>
           }
         </div>
       } @else {
@@ -633,8 +633,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
   }
 
-  /** 渲染 Markdown 内容 */
-  renderMarkdownContent(content: string): string { return renderMarkdown(content); }
+
   
   // 桌面端面板拖动
   startDrag(event: MouseEvent | TouchEvent) {

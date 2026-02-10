@@ -217,8 +217,10 @@ export interface SyncState {
   hasConflict: boolean;
   conflictData: { 
     local: Project; 
+    /** 冲突时的远程项目数据 */
     remote: Project;
     projectId: string;
+    /** @deprecated 使用 remote 代替。保留兼容旧代码 */
     remoteData?: Project;
   } | null;
 }

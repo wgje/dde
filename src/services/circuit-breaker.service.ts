@@ -493,8 +493,21 @@ export class CircuitBreakerService {
       }
     }
     
-    // 验证任务字段（抽样检查，避免性能问题）
-    const tasksToCheck = project.tasks?.slice(0, 10) ?? [];
+    // 验证任务字段（【P3-22 修复】随机抽样检查，避免仅检查前 N 个）
+    const allTasks = project.tasks ?? [];
+    const sampleSize = Math.min(10, allTasks.length);
+    const tasksToCheck: Task[] = [];
+    if (sampleSize >= allTasks.length) {
+      tasksToCheck.push(...allTasks);
+    } else {
+      const indices = new Set<number>();
+      while (indices.size < sampleSize) {
+        indices.add(Math.floor(Math.random() * allTasks.length));
+      }
+      for (const idx of indices) {
+        tasksToCheck.push(allTasks[idx]);
+      }
+    }
     for (const task of tasksToCheck) {
       const taskViolations = this.validateTask(task);
       violations.push(...taskViolations);

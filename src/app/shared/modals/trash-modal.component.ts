@@ -1,4 +1,4 @@
-import { Component, inject, signal, Output, EventEmitter, Input, computed } from '@angular/core';
+import { Component, inject, signal, Output, EventEmitter, Input, computed, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
@@ -14,6 +14,7 @@ import { TRASH_CONFIG } from '../../../config';
   selector: 'app-trash-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (show) {
       <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"

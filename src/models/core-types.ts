@@ -3,6 +3,9 @@
  * 
  * 这个文件包含最基础的类型定义，不依赖任何其他模型文件。
  * 其他模型文件可以从这里导入基础类型，避免循环依赖。
+ * 
+ * 【P2-32 注意】models/index.ts 是规范的类型源头，本文件为打破循环依赖而存在的副本。
+ * 修改型定义时，必须同步更新两个文件。
  */
 
 /**
@@ -31,6 +34,8 @@ export interface Attachment {
   size?: number;
   createdAt: string;
   signedAt?: string;
+  /** 软删除时间戳 【P2-32 修复】补充缺失字段，与 models/index.ts 保持一致 */
+  deletedAt?: string;
 }
 
 /**
@@ -43,6 +48,8 @@ export interface Connection {
   title?: string;
   description?: string;
   deletedAt?: string | null;
+  /** 最后更新时间戳（LWW 冲突解决必需） */
+  updatedAt?: string;
 }
 
 /**
@@ -99,8 +106,10 @@ export interface Project {
 
 /**
  * 视图状态（用于持久化流程图视口位置）
+ * 【P0-11 修复】统一为 positionX/positionY 扁平结构，与 models/index.ts 保持一致
  */
 export interface ViewState {
-  scale?: number;
-  position?: { x: number; y: number };
+  scale: number;
+  positionX: number;
+  positionY: number;
 }

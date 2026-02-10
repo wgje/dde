@@ -57,6 +57,9 @@ export class MigrationService {
   private readonly GUEST_DATA_KEY = 'nanoflow.guest-data';
   private readonly DATA_VERSION = 2; // 数据结构版本号
   private readonly GUEST_DATA_EXPIRY_DAYS = 30; // 访客数据过期天数
+  private readonly GUEST_DATA_WARNING_DAYS = 7; // 到期前提醒天数
+  private readonly GUEST_DATA_WARNING_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 小时内最多提醒一次
+  private readonly GUEST_DATA_WARNING_KEY = 'nanoflow.guest-data-expiry-warning-at';
   private readonly TOMBSTONE_KEY = 'nanoflow.local-tombstones';
   private readonly LEGACY_TOMBSTONE_KEYS = [
     'nanoflow.local-tombstones.task-sync',
@@ -66,6 +69,7 @@ export class MigrationService {
 
   constructor() {
     this.migrateLegacyTombstoneStorage();
+    this.notifyGuestDataExpiryIfNeeded();
   }
   
   /**
@@ -496,6 +500,8 @@ export class MigrationService {
           }
         }
         
+        this.notifyGuestDataExpiryIfNeeded(parsed.expiresAt);
+        
         // 版本检查和迁移
         if (projects && dataVersion < this.DATA_VERSION) {
           projects = this.migrateLocalData(projects, dataVersion);
@@ -549,6 +555,68 @@ export class MigrationService {
   clearLocalGuestData() {
     if (typeof localStorage === 'undefined') return;
     localStorage.removeItem(this.GUEST_DATA_KEY);
+    localStorage.removeItem(this.GUEST_DATA_WARNING_KEY);
+  }
+
+  /**
+   * 检查访客数据是否临近过期，必要时给出提醒（24h 节流）
+   */
+  private notifyGuestDataExpiryIfNeeded(expiresAtRaw?: unknown): void {
+    if (typeof localStorage === 'undefined') return;
+
+    try {
+      const expiresAt = this.resolveGuestDataExpiresAt(expiresAtRaw);
+      if (!expiresAt) return;
+
+      const expiresAtTimestamp = new Date(expiresAt).getTime();
+      if (Number.isNaN(expiresAtTimestamp)) return;
+
+      const nowTimestamp = Date.now();
+      const remainingMs = expiresAtTimestamp - nowTimestamp;
+      if (remainingMs <= 0) return;
+
+      const warningWindowMs = this.GUEST_DATA_WARNING_DAYS * 24 * 60 * 60 * 1000;
+      if (remainingMs > warningWindowMs) return;
+      if (!this.canShowGuestExpiryWarning(nowTimestamp)) return;
+
+      const daysLeft = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+      this.toast.warning(
+        '访客数据即将过期',
+        `当前访客数据将在 ${daysLeft} 天后过期，请尽快登录迁移或手动导出`
+      );
+      localStorage.setItem(this.GUEST_DATA_WARNING_KEY, String(nowTimestamp));
+      this.logger.info('已提醒访客数据即将过期', { daysLeft, expiresAt });
+    } catch (error) {
+      this.logger.debug('访客数据过期提醒检查失败（已忽略）', { error });
+    }
+  }
+
+  /**
+   * 解析访客数据到期时间
+   */
+  private resolveGuestDataExpiresAt(expiresAtRaw?: unknown): string | null {
+    if (typeof expiresAtRaw === 'string' && expiresAtRaw.length > 0) {
+      return expiresAtRaw;
+    }
+
+    const guestData = localStorage.getItem(this.GUEST_DATA_KEY);
+    if (!guestData) return null;
+
+    const parsed = JSON.parse(guestData) as { expiresAt?: unknown };
+    return typeof parsed.expiresAt === 'string' ? parsed.expiresAt : null;
+  }
+
+  /**
+   * 24 小时节流：避免每次启动都重复提示
+   */
+  private canShowGuestExpiryWarning(nowTimestamp: number): boolean {
+    const lastWarningAt = localStorage.getItem(this.GUEST_DATA_WARNING_KEY);
+    if (!lastWarningAt) return true;
+
+    const lastTimestamp = Number(lastWarningAt);
+    if (Number.isNaN(lastTimestamp)) return true;
+
+    return nowTimestamp - lastTimestamp >= this.GUEST_DATA_WARNING_COOLDOWN_MS;
   }
 
   /**

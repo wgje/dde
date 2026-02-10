@@ -1,4 +1,4 @@
-import { Component, signal, computed, Output, EventEmitter, input, OnDestroy } from '@angular/core';
+import { Component, signal, computed, Output, EventEmitter, input, OnDestroy, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
@@ -6,6 +6,7 @@ import { FormsModule } from '@angular/forms';
   selector: 'app-login-modal',
   standalone: true,
   imports: [CommonModule, FormsModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
       <div data-testid="login-modal" class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-sm p-6 animate-scale-in" (click)="$event.stopPropagation()">

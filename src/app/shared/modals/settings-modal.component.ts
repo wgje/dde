@@ -1,4 +1,4 @@
-import { Component, inject, Output, EventEmitter, input, signal, computed, viewChild, ElementRef, isDevMode } from '@angular/core';
+import { Component, inject, output, input, signal, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
@@ -6,6 +6,7 @@ import { PreferenceService } from '../../../services/preference.service';
 import { ExportService } from '../../../services/export.service';
 import { ImportService, ImportOptions } from '../../../services/import.service';
 import { AttachmentExportService } from '../../../services/attachment-export.service';
+import { AttachmentImportService, type AttachmentImportItem } from '../../../services/attachment-import.service';
 import { LocalBackupService } from '../../../services/local-backup.service';
 import { ThemeService } from '../../../services/theme.service';
 import { FocusPreferenceService } from '../../../services/focus-preference.service';
@@ -13,10 +14,18 @@ import { GateService } from '../../../services/gate.service';
 import { ThemeType, ColorMode, Project } from '../../../models';
 import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
 
+interface TaskAttachmentMetadata {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+}
+
 @Component({
   selector: 'app-settings-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
       <div class="bg-slate-50 dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5 dark:ring-stone-700" (click)="$event.stopPropagation()">
@@ -245,6 +254,44 @@ import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
                     <span>导入</span>
                   </button>
                   <input #fileInput type="file" accept=".json,application/json" class="hidden" (change)="handleFileSelected($event)" />
+                </div>
+              </div>
+
+              <!-- 附件导出导入 -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div class="flex-1">
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">附件备份（ZIP）</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">{{ attachmentTransferStatus() }}</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    (click)="handleAttachmentExport()"
+                    [disabled]="attachmentExportService.isExporting() || attachmentImportService.isImporting()"
+                    class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-[10px] font-bold text-slate-600 dark:text-stone-300 hover:bg-slate-50 dark:hover:bg-stone-600 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                    @if (attachmentExportService.isExporting()) {
+                      <div class="w-2.5 h-2.5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                    } @else {
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                    }
+                    <span>导出 ZIP</span>
+                  </button>
+                  <button
+                    (click)="triggerAttachmentImportFileSelect()"
+                    [disabled]="attachmentImportService.isImporting() || attachmentExportService.isExporting()"
+                    class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-[10px] font-bold text-slate-600 dark:text-stone-300 hover:bg-slate-50 dark:hover:bg-stone-600 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                    @if (attachmentImportService.isImporting()) {
+                      <div class="w-2.5 h-2.5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
+                    } @else {
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                    }
+                    <span>导入 ZIP</span>
+                  </button>
+                  <input
+                    #attachmentZipInput
+                    type="file"
+                    accept=".zip,application/zip"
+                    class="hidden"
+                    (change)="handleAttachmentImportFileSelected($event)" />
                 </div>
               </div>
 
@@ -493,6 +540,7 @@ export class SettingsModalComponent {
   readonly exportService = inject(ExportService);
   readonly importService = inject(ImportService);
   readonly attachmentExportService = inject(AttachmentExportService);
+  readonly attachmentImportService = inject(AttachmentImportService);
   readonly localBackupService = inject(LocalBackupService);
   readonly themeService = inject(ThemeService);
   readonly focusPreferenceService = inject(FocusPreferenceService);
@@ -508,15 +556,33 @@ export class SettingsModalComponent {
   /** 所有项目（用于导出） */
   projects = input<Project[]>([]);
   
-  @Output() close = new EventEmitter<void>();
-  @Output() signOut = new EventEmitter<void>();
-  @Output() themeChange = new EventEmitter<ThemeType>();
-  @Output() colorModeChange = new EventEmitter<ColorMode>();
-  @Output() openDashboard = new EventEmitter<void>();
-  @Output() importComplete = new EventEmitter<Project>();
+  readonly close = output<void>();
+  readonly signOut = output<void>();
+  readonly themeChange = output<ThemeType>();
+  readonly colorModeChange = output<ColorMode>();
+  readonly openDashboard = output<void>();
+  readonly importComplete = output<Project>();
   
   /** 导出提醒开关状态 */
   exportReminderEnabled = signal(true);
+
+  /** 附件传输状态文案 */
+  readonly attachmentTransferStatus = computed(() => {
+    if (this.attachmentExportService.isExporting()) {
+      const progress = this.attachmentExportService.progress();
+      const processed = progress.processedCount;
+      const total = progress.totalCount;
+      return `导出中 ${Math.round(progress.percentage)}% (${processed}/${total || 0})`;
+    }
+
+    if (this.attachmentImportService.isImporting()) {
+      const progress = this.attachmentImportService.progress();
+      const processed = progress.completedItems + progress.failedItems + progress.skippedItems;
+      return `导入中 ${Math.round(progress.percentage)}% (${processed}/${progress.totalItems || 0})`;
+    }
+
+    return 'ZIP 原文件导出与分批导入';
+  });
   
   /** 本地备份间隔选项 */
   readonly backupIntervalOptions = [
@@ -548,6 +614,8 @@ export class SettingsModalComponent {
   
   /** 文件输入引用 - 使用 viewChild signal 引用模板中的 #fileInput */
   private readonly fileInputRef = viewChild<ElementRef<HTMLInputElement>>('fileInput');
+  /** 附件 ZIP 导入文件输入 */
+  private readonly attachmentZipInputRef = viewChild<ElementRef<HTMLInputElement>>('attachmentZipInput');
   
   updateTheme(theme: ThemeType) {
     this.themeChange.emit(theme);
@@ -578,6 +646,28 @@ export class SettingsModalComponent {
     
     await this.exportService.exportAndDownload(projectList);
   }
+
+  /**
+   * 导出附件 ZIP
+   */
+  async handleAttachmentExport(): Promise<void> {
+    const projectList = this.projects();
+    if (projectList.length === 0) {
+      alert('没有可导出的项目');
+      return;
+    }
+
+    const result = await this.attachmentExportService.exportAndDownload(projectList);
+    if (!result.success) {
+      alert(`附件导出失败：${result.error ?? '未知错误'}`);
+      return;
+    }
+
+    if (!result.blob) {
+      alert('附件导出完成：当前项目没有可导出的附件');
+      return;
+    }
+  }
   
   /**
    * 触发文件选择
@@ -589,6 +679,18 @@ export class SettingsModalComponent {
       inputRef.nativeElement.click();
     } else {
       this.logger.error('SettingsModal', '文件输入元素未找到');
+    }
+  }
+
+  /**
+   * 触发附件 ZIP 导入文件选择
+   */
+  triggerAttachmentImportFileSelect(): void {
+    const inputRef = this.attachmentZipInputRef();
+    if (inputRef?.nativeElement) {
+      inputRef.nativeElement.click();
+    } else {
+      this.logger.error('SettingsModal', '附件 ZIP 输入元素未找到');
     }
   }
   
@@ -642,6 +744,122 @@ export class SettingsModalComponent {
     } else {
       alert(`导入失败：${result.error}`);
     }
+  }
+
+  /**
+   * 处理附件 ZIP 选择并导入
+   */
+  async handleAttachmentImportFileSelected(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+
+    if (!file) return;
+    input.value = '';
+
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      alert('请选择 ZIP 附件包文件');
+      return;
+    }
+
+    try {
+      const zipData = await file.arrayBuffer();
+      const projects = this.projects();
+      const taskAttachmentMap = this.buildTaskAttachmentMap(projects);
+      const taskProjectIndex = this.buildTaskProjectIndex(projects);
+
+      const extractedItems = await this.attachmentImportService.extractAttachmentsFromZip(
+        zipData,
+        taskAttachmentMap
+      );
+
+      if (extractedItems.length === 0) {
+        alert('附件包中未找到可导入的附件');
+        return;
+      }
+
+      const groupedByProject = new Map<string, AttachmentImportItem[]>();
+      let unmatchedCount = 0;
+
+      for (const item of extractedItems) {
+        const projectId = item.projectId ?? taskProjectIndex.get(item.taskId);
+        if (!projectId) {
+          unmatchedCount++;
+          continue;
+        }
+
+        const existingGroup = groupedByProject.get(projectId);
+        if (existingGroup) {
+          existingGroup.push(item);
+        } else {
+          groupedByProject.set(projectId, [item]);
+        }
+      }
+
+      if (groupedByProject.size === 0) {
+        alert('附件包中的任务与当前项目不匹配，无法导入');
+        return;
+      }
+
+      let imported = 0;
+      let failed = 0;
+      let skipped = unmatchedCount;
+      const errorMessages: string[] = [];
+
+      for (const [projectId, items] of groupedByProject) {
+        const importResult = await this.attachmentImportService.importAttachments(projectId, items);
+        imported += importResult.imported;
+        failed += importResult.failed;
+        skipped += importResult.skipped;
+        errorMessages.push(...importResult.errors.map(e => `${e.attachmentName || '未知附件'}: ${e.error}`));
+      }
+
+      if (failed === 0) {
+        alert(`附件导入完成！\n成功: ${imported}\n跳过: ${skipped}`);
+      } else {
+        const topError = errorMessages[0] ?? '未知错误';
+        alert(`附件导入部分失败。\n成功: ${imported}\n失败: ${failed}\n跳过: ${skipped}\n首个错误: ${topError}`);
+      }
+
+      if (unmatchedCount > 0) {
+        this.logger.warn('SettingsModal', `部分附件未匹配到项目，已跳过: ${unmatchedCount}`);
+      }
+    } catch (error: unknown) {
+      this.logger.error('SettingsModal', '附件 ZIP 导入失败', error);
+      alert(`附件导入失败：${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  private buildTaskAttachmentMap(projects: Project[]): Map<string, TaskAttachmentMetadata[]> {
+    const map = new Map<string, TaskAttachmentMetadata[]>();
+
+    for (const project of projects) {
+      for (const task of project.tasks) {
+        if (!task.attachments || task.attachments.length === 0) continue;
+
+        const attachments: TaskAttachmentMetadata[] = task.attachments.map(att => ({
+          id: att.id,
+          name: att.name,
+          size: att.size ?? 0,
+          mimeType: att.mimeType ?? 'application/octet-stream',
+        }));
+
+        map.set(task.id, attachments);
+      }
+    }
+
+    return map;
+  }
+
+  private buildTaskProjectIndex(projects: Project[]): Map<string, string> {
+    const index = new Map<string, string>();
+
+    for (const project of projects) {
+      for (const task of project.tasks) {
+        index.set(task.id, project.id);
+      }
+    }
+
+    return index;
   }
   
   // ============================================

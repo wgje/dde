@@ -107,13 +107,24 @@ export class SupabaseClientService {
           // 否则请求在队列中等待时 AbortController 会提前触发，导致 "signal is aborted without reason" 错误
           // 参考：REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT = 90000ms
           // 当前配置：120s = 90s队列等待 + 30s执行缓冲
+          // 【P2-09 修复】保留调用方的 signal，仅当未提供时添加超时控制
           fetch: (url, options = {}) => {
+            // 如果调用方已提供 signal，合并超时信号
+            const callerSignal = options.signal;
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 秒超时（队列等待 + 执行）
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
+            
+            // 使用 AbortSignal.any 合并（如果可用），否则优先使用调用方 signal
+            let mergedSignal: AbortSignal;
+            if (callerSignal && typeof AbortSignal !== 'undefined' && 'any' in AbortSignal) {
+              mergedSignal = (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([callerSignal, controller.signal]);
+            } else {
+              mergedSignal = callerSignal ?? controller.signal;
+            }
             
             return fetch(url, {
               ...options,
-              signal: controller.signal,
+              signal: mergedSignal,
             }).finally(() => clearTimeout(timeoutId));
           },
         },

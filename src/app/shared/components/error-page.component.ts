@@ -1,4 +1,4 @@
-import { Component, inject, OnInit } from '@angular/core';
+import { Component, inject, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { GlobalErrorHandler } from '../../../services/global-error-handler.service';
@@ -18,9 +18,11 @@ interface FatalErrorInfo {
  * 当应用发生无法恢复的错误时显示
  * 提供重载应用和返回首页的选项
  */
+// 【P2-25 修复】添加 OnPush
 @Component({
   selector: 'app-error-page',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     <div class="min-h-screen bg-gradient-to-br from-red-50 to-stone-100 dark:from-red-950 dark:to-stone-900 flex items-center justify-center p-4">

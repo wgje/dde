@@ -6,6 +6,7 @@ import {
   OnInit,
   OnDestroy,
   ChangeDetectorRef,
+  ChangeDetectionStrategy,
   HostBinding,
   NgZone
 } from '@angular/core';
@@ -49,9 +50,11 @@ import { LoggerService } from '../../../services/logger.service';
  *   <app-complex-chart></app-complex-chart>
  * </app-error-boundary>
  */
+// 【P2-25 修复】添加 OnPush
 @Component({
   selector: 'app-error-boundary',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     <!-- 正常状态：显示子内容 -->

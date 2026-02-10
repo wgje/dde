@@ -21,6 +21,8 @@ import { AttachmentService } from './attachment.service';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { SupabaseClientService } from './supabase-client.service';
+import { TaskOperationAdapterService } from './task-operation-adapter.service';
 
 describe('AttachmentImportService', () => {
   let service: AttachmentImportService;
@@ -33,6 +35,13 @@ describe('AttachmentImportService', () => {
   let mockToastService: {
     error: ReturnType<typeof vi.fn>;
     warning: ReturnType<typeof vi.fn>;
+  };
+  let mockSupabaseClientService: {
+    isConfigured: boolean;
+    client: ReturnType<typeof vi.fn>;
+  };
+  let mockTaskOpsAdapter: {
+    addTaskAttachment: ReturnType<typeof vi.fn>;
   };
   
   const mockLogger = {
@@ -70,6 +79,15 @@ describe('AttachmentImportService', () => {
       error: vi.fn(),
       warning: vi.fn(),
     };
+
+    mockSupabaseClientService = {
+      isConfigured: false,
+      client: vi.fn(),
+    };
+
+    mockTaskOpsAdapter = {
+      addTaskAttachment: vi.fn(),
+    };
     
     const injector = Injector.create({
       providers: [
@@ -77,6 +95,8 @@ describe('AttachmentImportService', () => {
         { provide: AuthService, useValue: mockAuthService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SupabaseClientService, useValue: mockSupabaseClientService },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
       ],
     });
     
@@ -139,6 +159,10 @@ describe('AttachmentImportService', () => {
         'task-1',
         expect.any(File)
       );
+      expect(mockTaskOpsAdapter.addTaskAttachment).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({ id: 'att-1' })
+      );
     });
     
     it('上传失败应记录错误', async () => {
@@ -190,6 +214,59 @@ describe('AttachmentImportService', () => {
       
       expect(result.hasQuota).toBe(false);
       expect(result.message).toContain('存储空间不足');
+    });
+  });
+
+  describe('extractAttachmentsFromZip', () => {
+    it('应从 manifest + ZIP 中提取附件数据', async () => {
+      const manifest = {
+        version: '1.0',
+        exportedAt: new Date().toISOString(),
+        totalAttachments: 1,
+        totalSize: 4,
+        successCount: 1,
+        failedCount: 0,
+        skippedCount: 0,
+        attachments: [
+          {
+            id: 'att-1',
+            taskIds: ['task-1'],
+            projectIds: ['project-1'],
+            name: 'a.txt',
+            mimeType: 'text/plain',
+            size: 4,
+            bundlePath: 'attachments/att-1.txt',
+            downloadStatus: 'success',
+          }
+        ]
+      };
+
+      const zipData = createStoredZip([
+        { path: 'manifest.json', text: JSON.stringify(manifest) },
+        { path: 'attachments/att-1.txt', text: 'demo' },
+      ]);
+
+      const items = await service.extractAttachmentsFromZip(zipData, new Map());
+      expect(items).toHaveLength(1);
+      expect(items[0]?.projectId).toBe('project-1');
+      expect(items[0]?.taskId).toBe('task-1');
+      expect(items[0]?.metadata.name).toBe('a.txt');
+      const content = await items[0]!.data!.text();
+      expect(content).toBe('demo');
+    });
+
+    it('无 manifest 时应回退 taskAttachmentMap 路径匹配', async () => {
+      const zipData = createStoredZip([
+        { path: 'attachments/task-1/att-1.txt', text: 'fallback' },
+      ]);
+      const taskMap = new Map([
+        ['task-1', [{ id: 'att-1', name: 'att-1.txt', size: 8, mimeType: 'text/plain' }]]
+      ]);
+
+      const items = await service.extractAttachmentsFromZip(zipData, taskMap);
+      expect(items).toHaveLength(1);
+      expect(items[0]?.taskId).toBe('task-1');
+      expect(items[0]?.zipPath).toBe('attachments/task-1/att-1.txt');
     });
   });
   
@@ -271,3 +348,108 @@ describe('AttachmentImportService', () => {
     });
   });
 });
+
+function createStoredZip(files: Array<{ path: string; text: string }>): ArrayBuffer {
+  const encoder = new TextEncoder();
+  const fileRecords: Array<{
+    nameBytes: Uint8Array;
+    dataBytes: Uint8Array;
+    localHeader: Uint8Array;
+    centralHeader: Uint8Array;
+  }> = [];
+
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.path);
+    const dataBytes = encoder.encode(file.text);
+    const crc = crc32(dataBytes);
+
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(localHeader.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, dataBytes.length, true);
+    lv.setUint32(22, dataBytes.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(centralHeader.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, dataBytes.length, true);
+    cv.setUint32(24, dataBytes.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+
+    localParts.push(localHeader, dataBytes);
+    centralParts.push(centralHeader);
+    fileRecords.push({ nameBytes, dataBytes, localHeader, centralHeader });
+    offset += localHeader.length + dataBytes.length;
+  }
+
+  const centralOffset = offset;
+  let centralSize = 0;
+  for (const part of centralParts) {
+    centralSize += part.length;
+  }
+
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, fileRecords.length, true);
+  ev.setUint16(10, fileRecords.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralOffset, true);
+  ev.setUint16(20, 0, true);
+
+  const totalLength =
+    localParts.reduce((sum, part) => sum + part.length, 0) +
+    centralSize +
+    eocd.length;
+
+  const output = new Uint8Array(totalLength);
+  let cursor = 0;
+
+  for (const part of localParts) {
+    output.set(part, cursor);
+    cursor += part.length;
+  }
+  for (const part of centralParts) {
+    output.set(part, cursor);
+    cursor += part.length;
+  }
+  output.set(eocd, cursor);
+
+  return output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength);
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}

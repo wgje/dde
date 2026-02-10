@@ -233,6 +233,10 @@ export class TaskCreationService {
     const placed = this.layoutService.applyRefusalStrategy(newTask, candidateRank, task.rank, Infinity);
     if (placed.ok) {
       newTask.rank = placed.rank;
+    } else {
+      // 【P3-31 修复】rank 分配失败时使用候选值并记录警告
+      console.warn('[TaskCreation] copyTask: rank 分配失败，使用 candidateRank', { taskId: newTaskId, candidateRank });
+      newTask.rank = candidateRank;
     }
 
     if (task.stage === null) {

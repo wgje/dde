@@ -15,7 +15,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 /** IndexedDB 数据库配置 */
 export const DB_CONFIG = {
   name: 'nanoflow-store-cache',
-  version: 1,
+  version: 2,
   stores: {
     projects: 'projects',
     tasks: 'tasks',
@@ -43,7 +43,7 @@ export class IndexedDBService {
     if (this.db) return this.db;
     
     if (!this.dbInitPromise) {
-      this.dbInitPromise = new Promise((resolve, reject) => {
+      this.dbInitPromise = new Promise<IDBDatabase>((resolve, reject) => {
         if (typeof indexedDB === 'undefined') {
           reject(new Error('IndexedDB 不可用'));
           return;
@@ -53,17 +53,27 @@ export class IndexedDBService {
         
         request.onerror = () => {
           this.logger.error('IndexedDB 打开失败', request.error);
+          // 【P1-01 修复】失败后清除 promise，允许重试
+          this.dbInitPromise = null;
           reject(request.error);
         };
         
         request.onsuccess = () => {
           this.db = request.result;
+          // 【P3-01 修复】处理其他标签页触发数据库版本升级
+          this.db.onversionchange = () => {
+            this.logger.warn('检测到数据库版本变更，关闭当前连接');
+            this.db?.close();
+            this.db = null;
+            this.dbInitPromise = null;
+          };
           this.logger.debug('IndexedDB 初始化成功');
           resolve(request.result);
         };
         
         request.onupgradeneeded = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+          const oldVersion = event.oldVersion;
           
           if (!db.objectStoreNames.contains(DB_CONFIG.stores.projects)) {
             db.createObjectStore(DB_CONFIG.stores.projects, { keyPath: 'id' });
@@ -71,6 +81,8 @@ export class IndexedDBService {
           if (!db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
             const taskStore = db.createObjectStore(DB_CONFIG.stores.tasks, { keyPath: 'id' });
             taskStore.createIndex('projectId', 'projectId', { unique: false });
+            // 【P3-05】复合索引：支持按 projectId + updatedAt 范围查询增量任务
+            taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
           }
           if (!db.objectStoreNames.contains(DB_CONFIG.stores.connections)) {
             const connStore = db.createObjectStore(DB_CONFIG.stores.connections, { keyPath: 'id' });
@@ -78,6 +90,17 @@ export class IndexedDBService {
           }
           if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
             db.createObjectStore(DB_CONFIG.stores.meta, { keyPath: 'key' });
+          }
+          
+          // 版本 1 → 2 升级：为已有的 tasks store 补建复合索引
+          if (oldVersion < 2) {
+            const tx = (event.target as IDBOpenDBRequest).transaction;
+            if (tx && db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
+              const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
+              if (!taskStore.indexNames.contains('projectId_updatedAt')) {
+                taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
+              }
+            }
           }
         };
       });
@@ -107,6 +130,39 @@ export class IndexedDBService {
       const store = transaction.objectStore(storeName);
       const index = store.index(indexName);
       const request = index.getAll(key);
+      
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 【P3-05】通过复合索引范围查询数据
+   * 
+   * 利用 IDB 复合索引进行范围查询，避免全表扫描 + 内存过滤。
+   * 例如：查询某项目自某时间以来更新的任务。
+   * 
+   * @param db 数据库实例
+   * @param storeName 对象存储名
+   * @param indexName 复合索引名（如 'projectId_updatedAt'）
+   * @param lowerBound 范围下界（含）
+   * @param upperBound 范围上界（含），可选
+   */
+  async getByIndexRange<T>(
+    db: IDBDatabase,
+    storeName: string,
+    indexName: string,
+    lowerBound: IDBValidKey,
+    upperBound?: IDBValidKey
+  ): Promise<T[]> {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeName, 'readonly');
+      const store = transaction.objectStore(storeName);
+      const index = store.index(indexName);
+      const range = upperBound
+        ? IDBKeyRange.bound(lowerBound, upperBound)
+        : IDBKeyRange.lowerBound(lowerBound);
+      const request = index.getAll(range);
       
       request.onsuccess = () => resolve(request.result || []);
       request.onerror = () => reject(request.error);
@@ -147,6 +203,7 @@ export class IndexedDBService {
   
   /**
    * 保存单条数据
+   * 【P1-03 修复】使用 transaction.oncomplete 确保数据已持久化
    */
   async putToStore<T>(
     db: IDBDatabase,
@@ -156,10 +213,10 @@ export class IndexedDBService {
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(storeName, 'readwrite');
       const store = transaction.objectStore(storeName);
-      const request = store.put(data);
+      store.put(data);
       
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
     });
   }
   
@@ -178,6 +235,26 @@ export class IndexedDBService {
       
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 【P3-08 优化】批量删除多个记录（单事务，避免 N 次事务开销）
+   */
+  async batchDeleteFromStore(
+    db: IDBDatabase,
+    storeName: string,
+    keys: IDBValidKey[]
+  ): Promise<void> {
+    if (keys.length === 0) return;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeName, 'readwrite');
+      const store = transaction.objectStore(storeName);
+      for (const key of keys) {
+        store.delete(key);
+      }
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
     });
   }
   

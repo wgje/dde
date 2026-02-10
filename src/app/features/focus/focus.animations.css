@@ -477,13 +477,21 @@
   animation: strata-collapse 0.3s ease-out forwards;
 }
 
+/* 基础 .strata-layer 不定义动画，避免与状态动画冲突 */
 .strata-layer {
-  animation: strata-sink 0.3s ease-out forwards;
-  transition: opacity 0.2s, transform 0.2s;
+  animation: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
+/* 初始入场动画 - 只在首次渲染时使用 */
+.strata-layer.entering {
+  animation: strata-sink 0.3s ease-out forwards;
+}
+
+/* 使用 transition 处理 hover 效果，避免鼠标移出时抖动 */
 .strata-layer:hover {
-  animation: strata-hover-expand 0.2s ease-out forwards;
+  opacity: 1 !important;
+  transform: scale(1.02);
 }
 
 /* ============================================================

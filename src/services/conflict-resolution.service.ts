@@ -327,25 +327,15 @@ export class ConflictResolutionService {
       const remoteTask = remoteTaskMap.get(localTask.id);
       
       // 【v5.9 保守处理】tombstone 查询失败时的特殊处理
-      // 如果本地任务不在远程中，且无法确认 tombstone 状态，保守地不添加
+      // 【P0-08 修复】不再丢弃用户数据 —— 保留所有本地任务，宁可让已删除任务复活也不丢失用户编辑
+      // 在无法确认 tombstone 状态时，保守地保留本地任务
       if (!remoteTask && tombstoneQueryFailed && tombstoneIds.size === 0) {
-        // 检查任务是否是"旧任务"（可能被远程删除）
-        // 策略：如果任务的 updatedAt 早于一定时间，则视为可能被删除
-        // 或者更保守：只有当任务是最近创建的（例如 5 分钟内）才保留
-        const taskAge = localTask.updatedAt 
-          ? Date.now() - new Date(localTask.updatedAt).getTime() 
-          : Infinity;
-        const RECENT_THRESHOLD = 5 * 60 * 1000; // 5 分钟
-        
-        if (taskAge > RECENT_THRESHOLD) {
-          this.logger.warn('smartMerge: 保守跳过可能已删除的任务', { 
-            taskId: localTask.id, 
-            taskAge: Math.round(taskAge / 1000) + 's'
-          });
-          conservativeSkipCount++;
-          continue; // 保守地不添加可能已被远程删除的任务
-        }
-        // 最近创建的任务则保留（可能是离线新建的）
+        this.logger.warn('smartMerge: tombstone 不可用，保守保留本地任务', { 
+          taskId: localTask.id
+        });
+        mergedTasks.push(localTask);
+        conservativeSkipCount++;
+        continue;
       }
       
       // 【BUG 修复】软删除任务的处理
@@ -474,12 +464,9 @@ export class ConflictResolutionService {
     let syncedCount = 0;
     
     for (const offlineProject of offlineProjects) {
-      // 【关键修复】在处理离线项目前，过滤已删除的任务
-      // 防止已删除任务通过离线数据同步复活
-      const cleanedOfflineProject = {
-        ...offlineProject,
-        tasks: (offlineProject.tasks || []).filter(t => !t.deletedAt)
-      };
+      // 【P0-07 修复】不再过滤软删除任务 —— 软删除状态需要同步到服务器
+      // 否则离线删除的任务在下次拉取时会复活
+      const cleanedOfflineProject = offlineProject;
       
       const cloudProject = cloudMap.get(cleanedOfflineProject.id);
       

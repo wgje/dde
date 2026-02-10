@@ -2,14 +2,17 @@ import {
   Component, 
   inject, 
   signal, 
+  computed,
   OnInit, 
   OnDestroy,
   HostListener,
-  DestroyRef
+  DestroyRef,
+  ChangeDetectionStrategy
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterOutlet, NavigationEnd } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { filter, startWith } from 'rxjs/operators';
 import { UiStateService } from '../../../services/ui-state.service';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
@@ -19,6 +22,8 @@ import { TabSyncService } from '../../../services/tab-sync.service';
 import { FlowCommandService } from '../../features/flow/services/flow-command.service';
 import { ModalLoaderService } from '../services/modal-loader.service';
 import { LoggerService } from '../../../services/logger.service';
+import { DynamicModalService } from '../../../services/dynamic-modal.service';
+import { AppProjectCoordinatorService } from '../services/app-project-coordinator.service';
 import { TextViewComponent } from '../../features/text';
 import { FlowViewComponent } from '../../features/flow';
 
@@ -42,7 +47,9 @@ import { FlowViewComponent } from '../../features/flow';
 @Component({
   selector: 'app-project-shell',
   standalone: true,
-  imports: [CommonModule, TextViewComponent, FlowViewComponent],
+  // 【P2-22 修复】添加 OnPush 变更检测策略
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [CommonModule, TextViewComponent, FlowViewComponent, RouterOutlet],
   styles: [`
     :host {
       display: flex;
@@ -53,6 +60,8 @@ import { FlowViewComponent } from '../../features/flow';
     }
   `],
   template: `
+    <!-- 隐藏的 router-outlet：子路由（text/flow/task）无组件，仅用于 URL 匹配 -->
+    <router-outlet style="display:none"></router-outlet>
     <div class="relative flex h-full w-full min-h-0 overflow-hidden" style="background-color: var(--theme-bg);">
       @if (projectState.activeProjectId()) {
         <!-- Text Column - 允许滑动手势切换 -->
@@ -95,6 +104,9 @@ import { FlowViewComponent } from '../../features/flow';
                  <div class="relative flex items-center gap-2">
                    <button 
                       (click)="isFilterOpen.set(!isFilterOpen()); $event.stopPropagation()"
+                      [attr.aria-expanded]="isFilterOpen()"
+                      aria-haspopup="listbox"
+                      aria-label="任务过滤器"
                       class="flex items-center gap-2 bg-transparent text-xs font-medium text-stone-500 dark:text-stone-400 hover:text-indigo-800 dark:hover:text-indigo-400 transition-colors py-1.5 px-3 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 border border-transparent active:bg-indigo-100 dark:active:bg-indigo-900/30">
                        <span>{{ currentFilterLabel() }}</span>
                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 transition-transform duration-200" [class.rotate-180]="isFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -104,7 +116,7 @@ import { FlowViewComponent } from '../../features/flow';
                    
                    @if (isFilterOpen()) {
                       <div class="fixed inset-0 z-40" (click)="isFilterOpen.set(false)"></div>
-                      <div class="absolute right-0 top-full mt-1 w-48 bg-white/90 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-100 dark:border-stone-700 rounded-xl shadow-lg z-50 py-1 animate-dropdown overflow-hidden">
+                      <div class="absolute right-0 top-full mt-1 w-48 bg-white/90 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-100 dark:border-stone-700 rounded-xl shadow-lg z-50 py-1 animate-dropdown overflow-hidden" role="listbox" aria-label="过滤选项">
                           <div 
                               (click)="uiState.filterMode.set('all'); isFilterOpen.set(false)"
                               class="px-4 py-2.5 text-xs text-stone-600 dark:text-stone-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 hover:text-indigo-900 dark:hover:text-indigo-300 cursor-pointer flex items-center justify-between group transition-colors">
@@ -141,6 +153,9 @@ import { FlowViewComponent } from '../../features/flow';
                  <div class="flex items-center gap-1 shrink-0">
                    <button 
                       (click)="isFilterOpen.set(!isFilterOpen()); $event.stopPropagation()"
+                      [attr.aria-expanded]="isFilterOpen()"
+                      aria-haspopup="listbox"
+                      aria-label="任务过滤器"
                       class="btn-compact flex items-center gap-1 text-[10px] text-stone-500 dark:text-stone-400 py-0.5 px-1.5 rounded bg-stone-100/80 dark:bg-stone-700/80 active:bg-stone-200 dark:active:bg-stone-600 max-w-[80px]">
                        <span class="truncate">{{ currentFilterLabel() }}</span>
                        <svg class="h-2 w-2 shrink-0" [class.rotate-180]="isFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -156,7 +171,7 @@ import { FlowViewComponent } from '../../features/flow';
                
                @if (isFilterOpen()) {
                   <div class="fixed inset-0 z-40" (click)="isFilterOpen.set(false)"></div>
-                  <div class="absolute right-3 top-12 w-44 bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-200 dark:border-stone-700 rounded-lg shadow-xl z-50 py-1 animate-dropdown overflow-hidden">
+                  <div class="absolute right-3 top-12 w-44 bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-200 dark:border-stone-700 rounded-lg shadow-xl z-50 py-1 animate-dropdown overflow-hidden" role="listbox" aria-label="过滤选项">
                       <div 
                           (click)="uiState.filterMode.set('all'); isFilterOpen.set(false)"
                           class="px-3 py-2 text-xs text-stone-600 dark:text-stone-300 active:bg-indigo-50 dark:active:bg-indigo-900/30 cursor-pointer flex items-center justify-between">
@@ -275,6 +290,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private readonly modalLoader = inject(ModalLoaderService);
+  private readonly dynamicModal = inject(DynamicModalService);
+  private readonly projectCoord = inject(AppProjectCoordinatorService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectShell');
   private readonly destroyRef = inject(DestroyRef);
@@ -305,56 +322,63 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   // 任务深链接重试定时器 - 用于组件销毁时取消
   private deepLinkRetryTimer: ReturnType<typeof setTimeout> | null = null;
   
-  // 计算属性
-  currentFilterLabel() {
+  // 【P2-23 修复】从普通方法改为 computed() 避免每次变更检测重复遍历
+  currentFilterLabel = computed(() => {
     const filterId = this.uiState.filterMode();
     if (filterId === 'all') return '全部任务';
     const task = this.projectState.rootTasks().find(t => t.id === filterId);
     if (!task) return '全部任务';
     return task.title || task.displayId || '未命名任务';
-  }
+  });
   
   ngOnInit() {
-    // 监听路由参数变化
-    this.route.params
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(params => {
-        const projectId = params['projectId'];
-        const taskId = params['taskId'];
-        
-        if (projectId && projectId !== this.projectState.activeProjectId()) {
-          // 路由层已有 projectExistsGuard 负责校验与提示。
-          // 这里不应在项目列表尚未加载完成时误判并弹 toast。
-          this.projectState.setActiveProjectId(projectId);
-
-          // 通知其他标签页当前项目已打开（仅在本地已有项目数据时）
-          const project = this.projectState.projects().find(p => p.id === projectId);
-          if (project) {
-            this.tabSync.notifyProjectOpen(projectId, project.name);
-          }
-        }
-        
-        // 处理任务深链接定位
-        if (taskId) {
-          // 延迟执行以确保项目和任务数据已加载
-          this.handleTaskDeepLink(taskId);
-        }
-      });
+    // 【P2-38 修复】使用 NavigationEnd 事件统一处理路由变化
+    // 父子路由结构下，projectId 在 this.route.params，taskId 在 firstChild.params
+    // 通过 Router.events 可以同时捕获父路由和子路由的变化
+    this.router.events.pipe(
+      filter(event => event instanceof NavigationEnd),
+      startWith(null), // 初始化时也触发一次
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(() => {
+      this.handleRouteChange();
+    });
+  }
+  
+  /**
+   * 统一处理路由变化：解析参数 + 确定视图模式
+   * 父子路由结构：
+   *   /projects/:projectId         → route.snapshot.params['projectId']
+   *   /projects/:projectId/task/:taskId → route.snapshot.firstChild?.params['taskId']
+   */
+  private handleRouteChange() {
+    const snapshot = this.route.snapshot;
+    const projectId = snapshot.params['projectId'];
+    const childSnapshot = snapshot.firstChild;
+    const taskId = childSnapshot?.params['taskId'];
     
-    // 监听子路由变化来确定视图模式
-    this.route.url
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        const currentUrl = this.router.url;
-        if (currentUrl.endsWith('/flow')) {
-          this.uiState.activeView.set('flow');
-        } else if (currentUrl.endsWith('/text')) {
-          this.uiState.activeView.set('text');
-        } else if (currentUrl.includes('/task/')) {
-          // 任务深链接默认使用流程图视图
-          this.uiState.activeView.set('flow');
-        }
-      });
+    // 处理项目切换
+    if (projectId && projectId !== this.projectState.activeProjectId()) {
+      this.projectState.setActiveProjectId(projectId);
+      const project = this.projectState.projects().find(p => p.id === projectId);
+      if (project) {
+        this.tabSync.notifyProjectOpen(projectId, project.name);
+      }
+    }
+    
+    // 处理任务深链接定位
+    if (taskId) {
+      this.handleTaskDeepLink(taskId);
+    }
+    
+    // 根据 URL 确定视图模式
+    const currentUrl = this.router.url;
+    if (currentUrl.endsWith('/flow')) {
+      this.uiState.activeView.set('flow');
+    } else if (currentUrl.endsWith('/text')) {
+      this.uiState.activeView.set('text');
+    } else if (currentUrl.includes('/task/')) {
+      this.uiState.activeView.set('flow');
+    }
   }
   
   /**
@@ -606,8 +630,23 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * 打开新建项目模态框
    * 当没有活动项目时，点击占位区域触发
    */
-  openNewProjectModal(): void {
-    this.modalLoader.openNewProjectModal();
+  async openNewProjectModal(): Promise<void> {
+    try {
+      const component = await this.modalLoader.loadNewProjectModal();
+      this.dynamicModal.open(component, {
+        outputs: {
+          close: () => this.dynamicModal.close(),
+          confirm: (data: unknown) => {
+            const { name, description } = data as { name: string; description: string };
+            this.dynamicModal.close();
+            void this.projectCoord.confirmCreateProject(name, description);
+          }
+        }
+      });
+    } catch (error) {
+      this.toast.error('新建项目组件加载失败', '请检查网络连接后重试');
+      this.logger.error('Failed to load new project modal', error);
+    }
   }
   
   /**

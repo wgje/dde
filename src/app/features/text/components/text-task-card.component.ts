@@ -1,10 +1,9 @@
 import { Component, inject, Input, Output, EventEmitter, ChangeDetectionStrategy, OnChanges, SimpleChanges, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule, DatePipe } from '@angular/common';
-import { DomSanitizer } from '@angular/platform-browser';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
-import { renderMarkdownSafe } from '../../../../utils/markdown';
+import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 
 /**
@@ -14,7 +13,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 @Component({
   selector: 'app-text-task-card',
   standalone: true,
-  imports: [CommonModule, DatePipe, TextTaskEditorComponent],
+  imports: [CommonModule, DatePipe, TextTaskEditorComponent, SafeMarkdownPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div 
@@ -53,7 +52,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
         @if (task.content) {
           <div class="text-stone-500 dark:text-stone-400 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em] markdown-preview-compact"
                [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}"
-               [innerHTML]="renderMarkdown(task.content)">
+               [innerHTML]="task.content | safeMarkdown">
           </div>
         } @else {
           <div class="text-stone-400 dark:text-stone-500 italic font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em]"
@@ -82,7 +81,6 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 })
 export class TextTaskCardComponent implements OnChanges {
   readonly projectState = inject(ProjectStateService);
-  private readonly sanitizer = inject(DomSanitizer);
   private readonly logger = inject(LoggerService);
   
   @ViewChild('taskEditor') taskEditor?: TextTaskEditorComponent;
@@ -150,12 +148,7 @@ export class TextTaskCardComponent implements OnChanges {
     };
   }
   
-  /**
-   * 渲染 Markdown 内容
-   */
-  renderMarkdown(content: string) {
-    return renderMarkdownSafe(content, this.sanitizer);
-  }
+
   
   /**
    * 处理卡片点击

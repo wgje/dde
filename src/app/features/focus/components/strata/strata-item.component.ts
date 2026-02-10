@@ -21,7 +21,7 @@ import { StrataItem } from '../../../../../models';
       class="strata-item p-1.5 rounded-lg mb-1 last:mb-0
              bg-stone-200/30 dark:bg-stone-700/30
              hover:bg-stone-200/50 dark:hover:bg-stone-700/50
-             transition-colors duration-150"
+             transition-all duration-150"
       role="article"
       [attr.aria-label]="'已完成: ' + item.title"
       data-testid="strata-item">
@@ -48,19 +48,9 @@ import { StrataItem } from '../../../../../models';
     </div>
   `,
   styles: [`
-    .strata-item {
+    /* 入场动画已移至全局 CSS（focus.animations.css） */
+    .strata-item.entering {
       animation: strata-sink 0.3s ease-out;
-    }
-    
-    @keyframes strata-sink {
-      from {
-        opacity: 0;
-        transform: translateY(-10px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush

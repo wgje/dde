@@ -6,11 +6,21 @@ import { ToastService } from '../../../../services/toast.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { Task } from '../../../../models';
 
-function createTask(id: string): Task {
+/** 生成稳定的 UUID 供测试去重使用，同一 label 返回同一 UUID */
+const uuidCache = new Map<string, string>();
+function stableUUID(label: string): string {
+  if (!uuidCache.has(label)) {
+    uuidCache.set(label, crypto.randomUUID());
+  }
+  return uuidCache.get(label)!;
+}
+
+function createTask(label: string): Task {
+  const id = stableUUID(label);
   const now = new Date().toISOString();
   return {
     id,
-    title: `Task ${id}`,
+    title: `Task ${label}`,
     content: '',
     stage: null,
     parentId: null,
@@ -20,7 +30,7 @@ function createTask(id: string): Task {
     x: 0,
     y: 0,
     createdDate: now,
-    displayId: id,
+    displayId: label,
     updatedAt: now
   };
 }
@@ -43,6 +53,9 @@ describe('RetryQueueService', () => {
   };
 
   beforeEach(() => {
+    // 每个测试用例重置 UUID 缓存，保证测试隔离
+    uuidCache.clear();
+
     loggerCategory = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -112,8 +125,8 @@ describe('RetryQueueService', () => {
     expect(service.queuePressure()).toBe(true);
     expect(service.queuePressureReason()).toBe('queue_full');
 
-    service.removeByEntityId('t-1'); // 3 -> 2
-    service.removeByEntityId('t-2'); // 2 -> 1
+    service.removeByEntityId(stableUUID('t-1')); // 3 -> 2
+    service.removeByEntityId(stableUUID('t-2')); // 2 -> 1
     expect(service.length).toBe(2);
 
     (service as unknown as { tryRecoverQueueFullPressure: (force?: boolean) => void }).tryRecoverQueueFullPressure(true);
@@ -180,7 +193,7 @@ describe('RetryQueueService', () => {
     // 同实体更新应成功（覆盖队列项），而不是被压力模式拒绝
     expect(service.add('task', 'upsert', updated, 'p-1')).toBe(true);
     expect(service.length).toBe(3);
-    expect(service.getItems().find(item => item.data.id === 't-1')?.data).toEqual(updated);
+    expect(service.getItems().find(item => item.data.id === stableUUID('t-1'))?.data).toEqual(updated);
     expect(toastMock.warning).not.toHaveBeenCalled();
   });
 

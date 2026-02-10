@@ -14,6 +14,8 @@ export const FOCUS_CONFIG = {
     TRANSITION_DURATION: 300,
     /** 每日最大跳过次数 */
     MAX_SNOOZE_PER_DAY: 3,
+    /** 待机多久后回来重新触发大门检查（毫秒），默认 5 分钟 */
+    IDLE_RECHECK_THRESHOLD: 5 * 60 * 1000,
   },
   
   // 聚光灯配置
@@ -98,8 +100,6 @@ export const FOCUS_CONFIG = {
     GATE_MARK_READ: ['1', 'Enter'],
     /** 大门：标记完成 */
     GATE_MARK_COMPLETED: ['2', ' '],
-    /** 大门：稍后提醒 */
-    GATE_SNOOZE: ['3', 's', 'S'],
     /** 黑匣子条目：已读 */
     ENTRY_READ: ['r', 'R'],
     /** 黑匣子条目：完成 */

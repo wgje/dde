@@ -135,8 +135,9 @@ export class UndoService {
       const afterSnapshot = this.createProjectSnapshot(project);
       
       // 检查是否有实际变更（避免空撤销记录）
-      const beforeTasks = this.batchBeforeSnapshot.tasks as Array<{ id: string; x: number; y: number }> | undefined;
-      const afterTasks = afterSnapshot.tasks as Array<{ id: string; x: number; y: number }> | undefined;
+      // 【P3-26 增强】扩展脏检查：除位置外还检查 title、content、stage、parentId、status
+      const beforeTasks = this.batchBeforeSnapshot.tasks as Array<{ id: string; x: number; y: number; title?: string; content?: string; stage?: number | null; parentId?: string | null; status?: string }> | undefined;
+      const afterTasks = afterSnapshot.tasks as Array<{ id: string; x: number; y: number; title?: string; content?: string; stage?: number | null; parentId?: string | null; status?: string }> | undefined;
       
       let hasChanges = false;
       if (beforeTasks && afterTasks && beforeTasks.length === afterTasks.length) {
@@ -144,7 +145,15 @@ export class UndoService {
         for (let i = 0; i < beforeTasks.length; i++) {
           const before = beforeTasks[i];
           const after = afterTaskMap.get(before.id);
-          if (after && (Math.abs(before.x - after.x) > 1 || Math.abs(before.y - after.y) > 1)) {
+          if (after && (
+            Math.abs(before.x - after.x) > 1 || 
+            Math.abs(before.y - after.y) > 1 ||
+            before.title !== after.title ||
+            before.content !== after.content ||
+            before.stage !== after.stage ||
+            before.parentId !== after.parentId ||
+            before.status !== after.status
+          )) {
             hasChanges = true;
             break;
           }
@@ -534,11 +543,17 @@ export class UndoService {
 
   /**
    * 创建项目快照（用于记录操作前的状态）
+   * 【P1-21 修复】深拷贝嵌套数组（attachments, deletedConnections, tags），防止快照被后续修改污染
    */
   createProjectSnapshot(project: Project): Partial<Project> {
     return {
       id: project.id,
-      tasks: project.tasks.map(t => ({ ...t })),
+      tasks: project.tasks.map(t => ({
+        ...t,
+        attachments: t.attachments ? t.attachments.map(a => ({ ...a })) : undefined,
+        deletedConnections: t.deletedConnections ? t.deletedConnections.map(c => ({ ...c })) : undefined,
+        tags: t.tags ? [...t.tags] : undefined,
+      })),
       connections: project.connections.map(c => ({ ...c }))
     };
   }

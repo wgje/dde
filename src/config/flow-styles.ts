@@ -4,10 +4,13 @@
  * 支持主题切换（色调 + 明暗模式）
  */
 
+import { ThemeType } from '../models';
+
 /**
- * 主题类型（色调）
+ * 流程图主题类型（色调）
+ * 【P3-24 修复】统一使用 models/index.ts 的 ThemeType，避免重复定义
  */
-export type FlowTheme = 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender';
+export type FlowTheme = ThemeType;
 
 /**
  * 颜色模式（明暗）

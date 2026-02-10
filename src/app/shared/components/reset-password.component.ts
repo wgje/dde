@@ -1,4 +1,4 @@
-import { Component, inject, signal, OnInit } from '@angular/core';
+import { Component, inject, signal, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
@@ -11,9 +11,11 @@ import { LoggerService } from '../../../services/logger.service';
  * 处理 Supabase 发送的密码重置邮件回调
  * 路由: /reset-password?access_token=xxx&refresh_token=xxx&type=recovery
  */
+// 【P2-25 修复】添加 OnPush
 @Component({
   selector: 'app-reset-password',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, FormsModule],
   template: `
     <div class="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">

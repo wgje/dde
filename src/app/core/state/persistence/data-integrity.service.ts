@@ -254,23 +254,45 @@ export class DataIntegrityService {
       const allProjects = await this.indexedDB.getAllFromStore<Project>(db, DB_CONFIG.stores.projects);
       const validProjectIds = new Set(allProjects.map(p => p.id));
       
+      // 【P3-08 优化】收集所有待删除 ID，使用批量事务替代逐条删除
+      const orphanedTaskIds: string[] = [];
+      const orphanedConnIds: string[] = [];
+
       // 清理孤立任务
       const allTasks = await this.indexedDB.getAllFromStore<Task & { projectId?: string }>(db, DB_CONFIG.stores.tasks);
       for (const task of allTasks) {
         if (task.projectId && !validProjectIds.has(task.projectId)) {
-          await this.indexedDB.deleteFromStore(db, DB_CONFIG.stores.tasks, task.id);
-          removedTasks++;
+          orphanedTaskIds.push(task.id);
         }
       }
       
-      // 清理孤立连接
+      // 清理孤立连接（属于不存在的项目）
       const allConnections = await this.indexedDB.getAllFromStore<Connection & { projectId?: string }>(db, DB_CONFIG.stores.connections);
       for (const conn of allConnections) {
         if (conn.projectId && !validProjectIds.has(conn.projectId)) {
-          await this.indexedDB.deleteFromStore(db, DB_CONFIG.stores.connections, conn.id);
-          removedConnections++;
+          orphanedConnIds.push(conn.id);
         }
       }
+      
+      // 【P3-07 修复】清理断裂连接（source 或 target 对应的任务不存在）
+      const allTaskIds = new Set(allTasks.map(t => t.id));
+      for (const conn of allConnections) {
+        // 跳过已被上面标记的孤立连接
+        if (conn.projectId && !validProjectIds.has(conn.projectId)) continue;
+        if (!allTaskIds.has(conn.source) || !allTaskIds.has(conn.target)) {
+          orphanedConnIds.push(conn.id);
+        }
+      }
+
+      // 批量删除（单事务）
+      if (orphanedTaskIds.length > 0) {
+        await this.indexedDB.batchDeleteFromStore(db, DB_CONFIG.stores.tasks, orphanedTaskIds);
+      }
+      if (orphanedConnIds.length > 0) {
+        await this.indexedDB.batchDeleteFromStore(db, DB_CONFIG.stores.connections, orphanedConnIds);
+      }
+      removedTasks = orphanedTaskIds.length;
+      removedConnections = orphanedConnIds.length;
       
       if (removedTasks > 0 || removedConnections > 0) {
         this.logger.info('已清理孤立数据', { removedTasks, removedConnections });

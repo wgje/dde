@@ -570,8 +570,9 @@ export class TaskMoveService {
       tasks.forEach(child => {
         if (child.parentId === target.id) {
           child.parentId = parentId;
-          if (parent?.stage !== null) {
-            child.stage = parent!.stage + 1;
+          // 安全检查：parent 必须存在且 stage 为有效数字，避免 NaN 传播
+          if (parent && parent.stage !== null && parent.stage !== undefined && Number.isFinite(parent.stage)) {
+            child.stage = parent.stage + 1;
           }
         }
       });

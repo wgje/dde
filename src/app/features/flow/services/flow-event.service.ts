@@ -148,20 +148,17 @@ export class FlowEventService {
   /**
    * 注册模板事件处理器
    * 模板通过 flowTemplateEventHandlers 调用这些处理器
+   * 【P2-29 修复】移除 zone.run 避免与 emit 方法中的 zone.run 双重嵌套
    */
   private setupTemplateEventHandlers(): void {
     // 节点点击
     flowTemplateEventHandlers.onNodeClick = (node: go.Node) => {
-      this.zone.run(() => {
-        this.emitNodeClick(node.data?.key, false);
-      });
+      this.emitNodeClick(node.data?.key, false);
     };
     
     // 节点双击
     flowTemplateEventHandlers.onNodeDoubleClick = (node: go.Node) => {
-      this.zone.run(() => {
-        this.emitNodeClick(node.data?.key, true);
-      });
+      this.emitNodeClick(node.data?.key, true);
     };
     
     // 连接线点击
@@ -169,25 +166,19 @@ export class FlowEventService {
       const viewPoint = this.diagram?.lastInput?.viewPoint;
       const x = viewPoint?.x ?? 0;
       const y = viewPoint?.y ?? 0;
-      this.zone.run(() => {
-        this.emitLinkClick(link.data, x, y, false);
-      });
+      this.emitLinkClick(link.data, x, y, false);
     };
     
     // 连接线删除请求
     flowTemplateEventHandlers.onLinkDeleteRequest = (link: go.Link) => {
-      this.zone.run(() => {
-        this.emitLinkDelete(link.data);
-      });
+      this.emitLinkDelete(link.data);
     };
     
     // 跨树连接标签点击
     flowTemplateEventHandlers.onCrossTreeLabelClick = (link: go.Link, viewX: number, viewY: number) => {
-      this.zone.run(() => {
-        // 将 GoJS 视图坐标转换为浏览器窗口坐标
-        const { windowX, windowY } = this.convertViewToWindowCoords(viewX, viewY);
-        this.emitLinkClick(link.data, windowX, windowY, false);
-      });
+      // 将 GoJS 视图坐标转换为浏览器窗口坐标
+      const { windowX, windowY } = this.convertViewToWindowCoords(viewX, viewY);
+      this.emitLinkClick(link.data, windowX, windowY, false);
     };
     
     this.logger.debug('模板事件处理器已注册');

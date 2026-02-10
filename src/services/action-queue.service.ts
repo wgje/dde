@@ -6,6 +6,7 @@ import { SentryAlertService } from './sentry-alert.service';
 import { extractErrorMessage } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
+import { RetryQueueService, RetryableEntityType } from '../app/core/services/sync/retry-queue.service';
 import { 
   OperationPriority, 
   TaskPayload, 
@@ -47,6 +48,8 @@ export class ActionQueueService {
   private readonly sentryAlert = inject(SentryAlertService);
   private readonly destroyRef = inject(DestroyRef);
   readonly storage = inject(ActionQueueStorageService);
+  /** 跨队列去重：当新操作入队时移除 RetryQueue 中同一实体的旧重试 */
+  private readonly retryQueue = inject(RetryQueueService);
   
   /** 待处理队列 */
   readonly pendingActions = signal<QueuedAction[]>([]);
@@ -279,6 +282,12 @@ export class ActionQueueService {
     this.queueSize.set(this.pendingActions().length);
     this.persistQueue();
     this.syncSentryContext();
+
+    // 跨队列去重：新操作入队后，移除 RetryQueue 中同一实体的旧重试条目
+    // 因为新操作的数据更新，旧的重试一旦成功反而会用过时数据覆盖
+    if (action.entityType === 'task' || action.entityType === 'project') {
+      this.retryQueue.removeByEntity(action.entityType as RetryableEntityType, action.entityId);
+    }
     
     // Sentry breadcrumb
     this.sentryLazyLoader.addBreadcrumb({

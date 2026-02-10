@@ -485,30 +485,58 @@ export class FileTypeValidatorService {
   /**
    * 验证 SVG 文件
    * SVG 是 XML 文本格式，需要检查文本内容
+   * 【P1-08 修复】增加 XSS 攻击向量检测
    */
   private async validateSvg(file: File): Promise<{ valid: boolean; detectedMimeType?: string; error?: string }> {
     try {
-      // 读取前 1KB 进行检查
-      const slice = file.slice(0, 1024);
-      const text = await slice.text();
-      const trimmed = text.trim().toLowerCase();
+      // 读取完整文件内容进行安全检查（SVG 通常不大）
+      const fullText = await file.text();
+      const trimmed = fullText.trim().toLowerCase();
       
       // 检查是否包含 SVG 签名
+      let isSvg = false;
       for (const sig of SVG_SIGNATURES) {
         if (trimmed.startsWith(sig.toLowerCase())) {
-          return { valid: true, detectedMimeType: 'image/svg+xml' };
+          isSvg = true;
+          break;
         }
       }
       
       // 检查是否包含 svg 标签（可能有 BOM 或空白）
-      if (trimmed.includes('<svg')) {
-        return { valid: true, detectedMimeType: 'image/svg+xml' };
+      if (!isSvg && trimmed.includes('<svg')) {
+        isSvg = true;
       }
       
-      return {
-        valid: false,
-        error: '文件内容不是有效的 SVG',
-      };
+      if (!isSvg) {
+        return {
+          valid: false,
+          error: '文件内容不是有效的 SVG',
+        };
+      }
+
+      // 【P1-08】安全检查：检测 SVG 中的 XSS 攻击向量
+      const dangerousPatterns = [
+        /<script[\s>]/i,
+        /on\w+\s*=/i,           // onload=, onerror=, onclick= 等事件处理器
+        /<foreignobject[\s>]/i, // 可嵌入任意 HTML
+        /javascript\s*:/i,      // javascript: 协议
+        /data\s*:\s*text\/html/i, // data:text/html 协议
+        /<iframe[\s>]/i,
+        /<embed[\s>]/i,
+        /<object[\s>]/i,
+      ];
+      
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(fullText)) {
+          this.logger.warn('SVG 包含潜在 XSS 攻击向量', { pattern: pattern.source });
+          return {
+            valid: false,
+            error: 'SVG 文件包含不安全的内容（脚本或事件处理器）',
+          };
+        }
+      }
+
+      return { valid: true, detectedMimeType: 'image/svg+xml' };
     } catch (e) {
       this.logger.debug('无法读取 SVG 文件内容', { error: e });
       return {
@@ -609,7 +637,8 @@ export class FileTypeValidatorService {
     const textExtensions = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'yaml', 'yml'];
     const textMimeTypes = ['text/plain', 'text/markdown', 'text/csv', 'application/json', 'application/xml', 'text/xml'];
     
-    return textExtensions.includes(extension) || textMimeTypes.some(t => mimeType.startsWith(t.split('/')[0]));
+    // 【P3-11 修复】精确匹配 MIME 类型，避免 text/* 匹配 text/html 等不安全类型
+    return textExtensions.includes(extension) || textMimeTypes.includes(mimeType);
   }
 
   /**

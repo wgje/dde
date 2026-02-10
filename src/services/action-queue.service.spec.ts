@@ -23,6 +23,7 @@ import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // 模拟 LoggerService
@@ -55,6 +56,15 @@ const mockSentryAlertService = {
 
 const mockNetworkAwarenessService = {
   setStoragePressure: vi.fn(),
+};
+
+// 模拟 RetryQueueService（P2-15 跨队列去重）
+const mockRetryQueueService = {
+  hasEntity: vi.fn().mockReturnValue(false),
+  removeByEntity: vi.fn().mockReturnValue(false),
+  getItems: vi.fn().mockReturnValue([]),
+  add: vi.fn(),
+  clear: vi.fn(),
 };
 
 function createMockTask(overrides: Partial<Task> = {}): Task {
@@ -174,6 +184,7 @@ describe('ActionQueueService', () => {
         { provide: SentryAlertService, useValue: mockSentryAlertService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });

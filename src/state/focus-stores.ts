@@ -3,6 +3,17 @@
  * 
  * 使用 Angular Signals 进行细粒度更新
  * 与现有 stores.ts 架构保持一致
+ * 
+ * 【P3-04 架构说明】
+ * 当前使用模块级 signal 模式（与 stores.ts 一致）。
+ * 优势：简单直接、无需 DI 即可访问
+ * 缺陷：测试隔离困难、生命周期无法由 Angular 管理
+ * 
+ * 迁移路径（未来 PR）：
+ * 1. 创建 FocusStoreService (providedIn: 'root') 包含所有 signal/computed
+ * 2. 消费者从 inject(FocusStoreService) 访问状态
+ * 3. 测试中通过 TestBed.inject() mock 服务
+ * 4. 使用 resetFocusState() 在测试间重置状态
  */
 
 import { signal, computed } from '@angular/core';
@@ -28,6 +39,33 @@ import { Task } from '../models';
  */
 export function getTodayDate(): string {
   return new Date().toISOString().split('T')[0];
+}
+
+/**
+ * 【P3-03 修复】将今天日期作为信号，确保 pendingBlackBoxEntries 在跨天时自动更新。
+ * 每 60 秒检查日期变化（极低开销），避免 computed 因 new Date() 非信号而过期。
+ */
+export const todayDate = signal(getTodayDate());
+
+/** 【P3-04】todayDate 定时器 ID，用于测试清理和 SSR 兼容 */
+let todayDateIntervalId: ReturnType<typeof setInterval> | null = null;
+
+// 浏览器环境下定时刷新日期信号
+if (typeof window !== 'undefined') {
+  todayDateIntervalId = setInterval(() => {
+    const now = getTodayDate();
+    if (todayDate() !== now) todayDate.set(now);
+  }, 60_000);
+}
+
+/**
+ * 【P3-04】清理 todayDate 定时器（用于测试 teardown 和 SSR）
+ */
+export function cleanupTodayDateInterval(): void {
+  if (todayDateIntervalId !== null) {
+    clearInterval(todayDateIntervalId);
+    todayDateIntervalId = null;
+  }
 }
 
 /**
@@ -121,7 +159,7 @@ export const blackBoxEntriesGroupedByDate = computed<BlackBoxDateGroup[]>(() => 
  */
 export const pendingBlackBoxEntries = computed(() => {
   const entries = Array.from(blackBoxEntriesMap().values());
-  const today = getTodayDate();
+  const today = todayDate(); // 使用信号确保跨天自动更新
   
   return entries.filter(e => {
     // 已归档或软删除的不显示
@@ -328,10 +366,11 @@ export function updateBlackBoxEntry(entry: BlackBoxEntry): void {
     return newMap;
   });
   
-  // 更新日期索引
+  // 【P2-06 修复】创建新 Set 而非原地修改现有 Set
   blackBoxEntriesByDate.update(dateMap => {
     const newDateMap = new Map(dateMap);
-    const dateSet = newDateMap.get(entry.date) || new Set();
+    const existingSet = newDateMap.get(entry.date);
+    const dateSet = existingSet ? new Set(existingSet) : new Set<string>();
     dateSet.add(entry.id);
     newDateMap.set(entry.date, dateSet);
     return newDateMap;
@@ -369,6 +408,25 @@ export function deleteBlackBoxEntry(id: string): void {
     }
     return newMap;
   });
+  
+  // 【P2-05 修复】同步更新日期索引，从日期分组中移除已删除的条目
+  const entry = blackBoxEntriesMap().get(id);
+  if (entry?.date) {
+    blackBoxEntriesByDate.update(dateMap => {
+      const newDateMap = new Map(dateMap);
+      const existingSet = newDateMap.get(entry.date);
+      if (existingSet) {
+        const newSet = new Set(existingSet);
+        newSet.delete(id);
+        if (newSet.size === 0) {
+          newDateMap.delete(entry.date);
+        } else {
+          newDateMap.set(entry.date, newSet);
+        }
+      }
+      return newDateMap;
+    });
+  }
 }
 
 /**
@@ -381,7 +439,7 @@ export function resetGateState(): void {
 }
 
 /**
- * 重置所有专注模式状态
+ * 重置所有专注模式状态（含 todayDate 刷新，适用于测试 teardown）
  */
 export function resetFocusState(): void {
   blackBoxEntriesMap.set(new Map());
@@ -398,4 +456,5 @@ export function resetFocusState(): void {
   offlinePendingCount.set(0);
   remainingQuota.set(50);
   showBlackBoxPanel.set(false);
+  todayDate.set(getTodayDate());
 }

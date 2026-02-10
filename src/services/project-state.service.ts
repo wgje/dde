@@ -185,6 +185,8 @@ export class ProjectStateService {
     
     // 一次遍历 connections 构建所有连接关系（O(m)）
     for (const conn of connections) {
+      // 【P1-13 修复】跳过软删除的连接
+      if (conn.deletedAt) continue;
       const pairKey = `${conn.source}->${conn.target}`;
       if (parentChildPairs.has(pairKey)) continue; // 跳过父子关系
       

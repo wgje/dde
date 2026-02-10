@@ -1,6 +1,5 @@
 import { Component, inject, Input, Output, EventEmitter, signal, ChangeDetectionStrategy, ElementRef, HostListener, effect, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { DomSanitizer } from '@angular/platform-browser';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -8,7 +7,7 @@ import { ProjectStateService, TaskConnectionInfo } from '../../../../services/pr
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task, Attachment } from '../../../../models';
-import { renderMarkdownSafe } from '../../../../utils/markdown';
+import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
 
 /**
@@ -77,7 +76,7 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
               (click)="togglePreview(); $event.stopPropagation()"
               class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
               [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile, 'min-h-28 max-h-40 p-2 text-[11px]': isMobile}"
-              [innerHTML]="localContent() ? renderMarkdown(localContent()) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
+              [innerHTML]="localContent() ? (localContent() | safeMarkdown) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
               title="点击编辑">
             </div>
           } @else {
@@ -280,7 +279,6 @@ export class TextTaskEditorComponent implements OnDestroy {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly sanitizer = inject(DomSanitizer);
   private readonly elementRef = inject(ElementRef);
   private readonly attachmentService = inject(AttachmentService);
   private readonly toast = inject(ToastService);
@@ -430,9 +428,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     }
   }
   
-  renderMarkdown(content: string) {
-    return renderMarkdownSafe(content, this.sanitizer);
-  }
+
   
   /**
    * 输入框聚焦处理（Split-Brain 模式核心）

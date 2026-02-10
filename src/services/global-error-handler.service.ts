@@ -140,9 +140,9 @@ export class GlobalErrorHandler implements ErrorHandler {
       severity: ErrorSeverity.NOTIFY,
       userMessage: '您没有权限执行此操作'
     },
-    // 服务端错误
+    // 【P3-14 修复】服务端错误 - 使用更精确的模式避免误匹配非 HTTP 上下文中的数字
     { 
-      pattern: /500|502|503|504|server.*error|internal.*error/i, 
+      pattern: /\b(?:status|code|http)\s*[:=]?\s*(?:500|502|503|504)\b|server.*error|internal.*error/i, 
       severity: ErrorSeverity.NOTIFY,
       userMessage: '服务器繁忙，请稍后重试'
     },
@@ -484,11 +484,11 @@ export class GlobalErrorHandler implements ErrorHandler {
     
     // 保存错误信息到 sessionStorage（用于错误页面显示）
     try {
+      // 【P2-14 修复】不在 sessionStorage 存储堆栈信息，防止敏感信息泄露
       sessionStorage.setItem('nanoflow.fatal-error', JSON.stringify({
-        message,
+        message: this.getUserMessage(message),
         userMessage: this.getUserMessage(message),
         timestamp: new Date().toISOString(),
-        stack: stack?.substring(0, 2000) // 限制堆栈长度
       }));
     } catch (e) {
       // 降级处理：sessionStorage 不可用，忽略

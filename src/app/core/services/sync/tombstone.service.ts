@@ -56,6 +56,8 @@ export class TombstoneService {
   
   constructor() {
     this.loadLocalTombstones();
+    // 【P1-19 修复】启动时加载连接 tombstone
+    this.loadConnectionTombstones();
   }
   
   // ==================== 本地 Tombstone 管理 ====================
@@ -140,6 +142,8 @@ export class TombstoneService {
       set.set(id, now);
     }
     this.saveLocalTombstones();
+    // 【P2-20 修复】新增 tombstone 后使缓存失效，确保下次查询拿到最新集合
+    this.invalidateTombstoneCache(projectId);
     this.logger.debug('添加本地 tombstone', { projectId, count: taskIds.length });
   }
   
@@ -432,6 +436,9 @@ export class TombstoneService {
   /** 本地连接 tombstone */
   private localConnectionTombstones = new Map<string, { id: string; timestamp: number }[]>();
   
+  /** 【P1-19 修复】连接 tombstone 持久化 key */
+  private readonly LOCAL_CONNECTION_TOMBSTONES_KEY = 'nanoflow.local-connection-tombstones';
+  
   /**
    * 记录连接删除
    */
@@ -448,6 +455,9 @@ export class TombstoneService {
       t => t.timestamp > cutoff
     );
     this.localConnectionTombstones.set(key, filtered);
+    
+    // 【P1-19 修复】持久化到 localStorage
+    this.saveConnectionTombstones();
   }
   
   /**
@@ -455,5 +465,32 @@ export class TombstoneService {
    */
   getConnectionTombstones(): { id: string; timestamp: number }[] {
     return this.localConnectionTombstones.get('global') || [];
+  }
+  
+  /** 【P1-19 修复】从 localStorage 加载连接 tombstone */
+  loadConnectionTombstones(): void {
+    try {
+      const raw = localStorage.getItem(this.LOCAL_CONNECTION_TOMBSTONES_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { id: string; timestamp: number }[];
+      if (!Array.isArray(parsed)) return;
+      const cutoff = Date.now() - SYNC_CONFIG.TOMBSTONE_RETENTION_MS;
+      const valid = parsed.filter(t => t.id && t.timestamp > cutoff);
+      if (valid.length > 0) {
+        this.localConnectionTombstones.set('global', valid);
+      }
+    } catch {
+      // localStorage 损坏，忽略
+    }
+  }
+  
+  /** 【P1-19 修复】持久化连接 tombstone 到 localStorage */
+  private saveConnectionTombstones(): void {
+    try {
+      const entries = this.localConnectionTombstones.get('global') || [];
+      localStorage.setItem(this.LOCAL_CONNECTION_TOMBSTONES_KEY, JSON.stringify(entries));
+    } catch {
+      // localStorage 已满或不可用，忽略
+    }
   }
 }

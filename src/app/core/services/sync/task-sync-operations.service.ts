@@ -330,7 +330,7 @@ export class TaskSyncOperationsService {
   }
   
   /** 推送任务位置到云端（仅更新 x,y 坐标） */
-  async pushTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
+  async pushTaskPosition(taskId: string, x: number, y: number, projectId?: string): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
       return false;
@@ -347,17 +347,24 @@ export class TaskSyncOperationsService {
     }
     
     try {
-      const { error } = await client
+      // 【P2-18 修复】使用 nowISO() 保持与 doTaskPush 时间源一致
+      const { data: updatedData, error } = await client
         .from('tasks')
         .update({ 
           x, 
           y, 
-          updated_at: new Date().toISOString()
+          updated_at: nowISO()
         })
-        .eq('id', taskId);
+        .eq('id', taskId)
+        .select('updated_at')
+        .single();
       
       if (error) {
         this.logger.debug('pushTaskPosition 失败', { taskId, error: error.message });
+        // 【P1-17 修复】失败时入队重试，防止离线位置变更丢失
+        if (projectId) {
+          this.safeAddToRetryQueue('task', 'upsert', { id: taskId, x, y } as unknown as Task, projectId);
+        }
         return false;
       }
       
@@ -365,6 +372,10 @@ export class TaskSyncOperationsService {
       return true;
     } catch (e) {
       this.logger.debug('pushTaskPosition 异常', { taskId, error: e });
+      // 【P1-17 修复】异常时入队重试
+      if (projectId) {
+        this.safeAddToRetryQueue('task', 'upsert', { id: taskId, x, y } as unknown as Task, projectId);
+      }
       return false;
     }
   }

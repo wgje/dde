@@ -97,10 +97,31 @@ export class AuthService {
   /**
    * 检查并恢复会话
    * 添加超时保护，防止网络异常时无限阻塞
+   * 【P2-07 修复】添加并发调用防护，避免多个 checkSession 竞争
+   * 
+   * 【P3-10 说明】返回 userId=null 时，通过 authState 区分两种情况：
+   * - 无会话（正常）：authState().error === null
+   * - 检查失败（异常）：authState().error 包含错误信息
    * 
    * 开发环境：如果没有现有会话且配置了 devAutoLogin，会自动登录
    */
+  private checkSessionPromise: Promise<{ userId: string | null; email: string | null }> | null = null;
+  
   async checkSession(): Promise<{ userId: string | null; email: string | null }> {
+    // 如果已有进行中的 checkSession，直接复用
+    if (this.checkSessionPromise) {
+      return this.checkSessionPromise;
+    }
+    
+    this.checkSessionPromise = this.doCheckSession();
+    try {
+      return await this.checkSessionPromise;
+    } finally {
+      this.checkSessionPromise = null;
+    }
+  }
+  
+  private async doCheckSession(): Promise<{ userId: string | null; email: string | null }> {
     this.logger.debug('========== checkSession 开始 ==========');
     
     if (!this.supabase.isConfigured) {
@@ -118,17 +139,11 @@ export class AuthService {
       this.logger.debug('正在调用 supabase.getSession()...');
       const callStartTime = Date.now();
       
-      // 使用 AbortController 实现超时（如果支持）
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutId = setTimeout(() => {
-        this.logger.warn('[Auth] 会话检查超时警告 (10秒)');
-        if (controller) controller.abort();
-      }, SESSION_TIMEOUT);
-      
+      // 【P2-08 修复】移除无效的 AbortController（signal 未传递给 getSession），
+      // 仅使用 Promise.race 实现超时保护
       let sessionResult: { data: { session: { user?: { id: string; email?: string | null } } | null } | null; error: { message: string; status?: number; name?: string } | null };
       
       try {
-        // 创建一个带超时的 Promise
         const sessionPromise = this.supabase.getSession();
         const timeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error('会话检查超时')), SESSION_TIMEOUT);
@@ -137,8 +152,8 @@ export class AuthService {
         sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
         const callElapsed = Date.now() - callStartTime;
         this.logger.debug(`getSession() 返回 (耗时 ${callElapsed}ms)`);
-      } finally {
-        clearTimeout(timeoutId);
+      } catch (e) {
+        throw e;
       }
       
       const { data, error } = sessionResult;

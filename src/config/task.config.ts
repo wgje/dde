@@ -31,7 +31,12 @@ export const UNDO_CONFIG = {
     STORAGE_KEY: 'nanoflow.undo-history',
     /** 持久化防抖延迟（毫秒） */
     DEBOUNCE_DELAY: 500,
-    /** 最大持久化条目数（与桌面端上限对齐，避免刷新后丢失历史） */
+    /** 最大持久化条目数
+     * 【P2-36 说明】故意少于桌面端 150 条：
+     *   1. sessionStorage 容量有限（50 条约占 100-200KB）
+     *   2. 刷新后恢复更早的撤销历史价值低
+     *   3. 内存中的 150 条是当前会话的完整撤销链
+     */
     MAX_PERSISTED_ITEMS: 50,
   },
 } as const;

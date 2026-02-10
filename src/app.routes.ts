@@ -8,9 +8,15 @@ import { requireAuthGuard, projectExistsGuard, UnsavedChangesGuard } from './ser
  * 路由结构：
  * - /projects - 项目列表（AppComponent）
  * - /projects/:projectId - 项目视图外壳（ProjectShellComponent）
- * - /projects/:projectId/text - 文本视图模式
- * - /projects/:projectId/flow - 流程图模式
- * - /projects/:projectId/task/:taskId - 定位到特定任务
+ *   - /projects/:projectId/text - 文本视图模式（子路由）
+ *   - /projects/:projectId/flow - 流程图模式（子路由）
+ *   - /projects/:projectId/task/:taskId - 定位到特定任务（子路由）
+ * 
+ * 【P2-38 修复】使用父子路由结构
+ * 原来 4 个兄弟路由各自加载 ProjectShellComponent，
+ * 导致在 /text ↔ /flow 之间导航时组件被销毁重建。
+ * 现在 :projectId 作为父路由，text/flow/task 作为无组件子路由，
+ * ProjectShellComponent 在子路由切换时保持存活。
  * 
  * 路由守卫：
  * - requireAuthGuard: 强制登录验证（数据归属权保障）
@@ -38,33 +44,22 @@ export const routes: Routes = [
         loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
       },
       // 特定项目视图 - ProjectShellComponent 管理 text/flow 视图切换
-      // 所有子路由都由同一个 ProjectShellComponent 处理，组件内部根据 URL 判断视图模式
+      // 使用父子路由避免 text/flow 切换时组件重建
       { 
         path: ':projectId', 
         canActivate: [projectExistsGuard],
         canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
-      },
-      // 文本视图模式
-      { 
-        path: ':projectId/text',
-        canActivate: [projectExistsGuard],
-        canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
-      },
-      // 流程图模式
-      { 
-        path: ':projectId/flow',
-        canActivate: [projectExistsGuard],
-        canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
-      },
-      // 定位到特定任务（深度链接）
-      { 
-        path: ':projectId/task/:taskId',
-        canActivate: [projectExistsGuard],
-        canDeactivate: [UnsavedChangesGuard],
-        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent)
+        loadComponent: () => import('./app/core/shell/project-shell.component').then(m => m.ProjectShellComponent),
+        children: [
+          // 默认视图（无后缀路径）
+          { path: '', pathMatch: 'full', children: [] },
+          // 文本视图模式
+          { path: 'text', children: [] },
+          // 流程图模式
+          { path: 'flow', children: [] },
+          // 定位到特定任务（深度链接）
+          { path: 'task/:taskId', children: [] }
+        ]
       }
     ]
   },

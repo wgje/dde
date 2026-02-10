@@ -1,10 +1,11 @@
-import { Component, Output, EventEmitter, ViewChild, ElementRef, AfterViewInit } from '@angular/core';
+import { Component, Output, EventEmitter, ViewChild, ElementRef, AfterViewInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 @Component({
   selector: 'app-new-project-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
       <div data-testid="new-project-modal" class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-md p-6 animate-scale-in" (click)="$event.stopPropagation()">

@@ -17,8 +17,8 @@ export const AUTH_CONFIG = {
    * 3s 足够覆盖极端情况，超时后数据加载在后台继续不影响功能
    */
   SESSION_CHECK_TIMEOUT: 3000,
-  /** 记住登录状态过期时间（毫秒）- 7天 */
-  REMEMBER_ME_EXPIRY: 7 * 24 * 60 * 60 * 1000,
+  /** 【P2-13 修复】记住登录状态过期时间（毫秒）- 从 7天 缩短为 24小时 */
+  REMEMBER_ME_EXPIRY: 24 * 60 * 60 * 1000,
   /** 密码最小长度（与后端保持一致） */
   MIN_PASSWORD_LENGTH: 8,
   /** 本地模式用户 ID（用于离线/本地编辑时的数据隔离） */

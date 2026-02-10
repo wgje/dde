@@ -50,6 +50,8 @@ export class FlowLayoutService {
   
   /** 位置保存定时器 */
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  // 【P1-12 修复】跟踪布局事务定时器，dispose 时清理
+  private layoutTimers: ReturnType<typeof setTimeout>[] = [];
   
   /**
    * 设置 Diagram 引用
@@ -82,13 +84,15 @@ export class FlowLayoutService {
     });
     this.diagram.layoutDiagram(true);
     
-    // 布局完成后保存位置并恢复无操作布局
-    setTimeout(() => {
+    // 【P1-12 修复】跟踪定时器，dispose 时可清理悬空事务
+    const timer = setTimeout(() => {
+      this.layoutTimers = this.layoutTimers.filter(t => t !== timer);
       if (!this.diagram) return;
       this.saveAllNodePositions();
       this.diagram.layout = $(go.Layout);
       this.diagram.commitTransaction('auto-layout');
     }, UI_CONFIG.SHORT_DELAY);
+    this.layoutTimers.push(timer);
     
     this.logger.info('自动布局已应用');
   }
@@ -113,12 +117,15 @@ export class FlowLayoutService {
     });
     this.diagram.layoutDiagram(true);
     
-    setTimeout(() => {
+    // 【P1-12 修复】跟踪定时器，dispose 时可清理悬空事务
+    const timer = setTimeout(() => {
+      this.layoutTimers = this.layoutTimers.filter(t => t !== timer);
       if (!this.diagram) return;
       this.saveAllNodePositions();
       this.diagram.layout = $(go.Layout);
       this.diagram.commitTransaction('tree-layout');
     }, UI_CONFIG.SHORT_DELAY);
+    this.layoutTimers.push(timer);
     
     this.logger.info('树形布局已应用');
   }
@@ -258,6 +265,19 @@ export class FlowLayoutService {
       clearTimeout(this.positionSaveTimer);
       this.positionSaveTimer = null;
     }
+    // 【P1-12 修复】清理所有布局事务定时器，防止 dispose 后事务悬空
+    for (const timer of this.layoutTimers) {
+      clearTimeout(timer);
+    }
+    // 如果有未提交的事务，尝试回滚
+    if (this.diagram) {
+      try {
+        this.diagram.rollbackTransaction();
+      } catch {
+        // 可能没有活跃事务，忽略
+      }
+    }
+    this.layoutTimers = [];
     this.diagram = null;
   }
 }

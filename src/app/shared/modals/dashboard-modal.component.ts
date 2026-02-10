@@ -1,4 +1,4 @@
-import { Component, inject, Output, EventEmitter, computed, signal, OnInit } from '@angular/core';
+import { Component, inject, Output, EventEmitter, computed, signal, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
@@ -24,6 +24,7 @@ interface ConflictItem {
   selector: 'app-dashboard-modal',
   standalone: true,
   imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
       <div class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden animate-scale-in flex flex-col" (click)="$event.stopPropagation()">

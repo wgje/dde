@@ -103,7 +103,8 @@ describe('supabase-error', () => {
       const error = new Error('Test error');
       const result = supabaseErrorToError(error);
       
-      expect(result).toBe(error);
+      // 【P2-10 修复】不再直接修改原对象，而是返回 Object.create(error)
+      expect(result.message).toBe(error.message);
       expect(result.isRetryable).toBeDefined();
       expect(result.errorType).toBeDefined();
     });
