@@ -100,6 +100,8 @@ export const FOCUS_CONFIG = {
     GATE_MARK_READ: ['1', 'Enter'],
     /** 大门：标记完成 */
     GATE_MARK_COMPLETED: ['2', ' '],
+    /** 大门：稍后处理（Snooze） */
+    GATE_SNOOZE: ['3'],
     /** 黑匣子条目：已读 */
     ENTRY_READ: ['r', 'R'],
     /** 黑匣子条目：完成 */

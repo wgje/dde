@@ -39,6 +39,8 @@ import { FEATURE_FLAGS } from './config/feature-flags.config';
 import { validateCriticalFlags } from './config/feature-flags.config';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { SpotlightTriggerComponent } from './app/features/focus/components/spotlight/spotlight-trigger.component';
+import { showBlackBoxPanel } from './state/focus-stores';
+import { SpotlightService } from './services/spotlight.service';
 import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
 import { ExportService } from './services/export.service';
 import { StorageQuotaService } from './services/storage-quota.service';
@@ -82,6 +84,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly searchService = inject(SearchService);
+  private readonly spotlightService = inject(SpotlightService);
 
   /** 认证协调器 — 管理所有认证相关状态和操作 */
   readonly authCoord = inject(AppAuthCoordinatorService);
@@ -335,6 +338,34 @@ export class AppComponent implements OnInit, OnDestroy {
     if ((event.ctrlKey || event.metaKey) && key === 'y') {
       event.preventDefault();
       this.taskOpsAdapter.performRedo();
+      return;
+    }
+
+    // Ctrl+F / Cmd+F: 聚焦全局搜索框（覆盖浏览器默认查找）
+    if ((event.ctrlKey || event.metaKey) && key === 'f' && !event.shiftKey) {
+      event.preventDefault();
+      // 确保侧边栏打开
+      this.isSidebarOpen.set(true);
+      // 延迟聚焦，等待侧边栏展开动画
+      setTimeout(() => {
+        const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
+        searchInput?.focus();
+        searchInput?.select();
+      }, 50);
+      return;
+    }
+
+    // Ctrl+B / Cmd+B: 切换黑匣子面板
+    if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
+      event.preventDefault();
+      showBlackBoxPanel.update(v => !v);
+      return;
+    }
+
+    // Ctrl+. / Cmd+.: 进入聚光灯专注模式
+    if ((event.ctrlKey || event.metaKey) && key === '.') {
+      event.preventDefault();
+      this.spotlightService.enter();
       return;
     }
   };

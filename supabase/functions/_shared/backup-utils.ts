@@ -53,6 +53,12 @@ export interface BackupData {
   tasks: BackupTask[];
   connections: BackupConnection[];
   attachments?: BackupAttachmentMeta[];
+  /** 用户偏好设置（v1.1.0+） */
+  userPreferences?: BackupUserPreferences[];
+  /** 黑匣子条目 - 专注模式数据（v1.1.0+） */
+  blackBoxEntries?: BackupBlackBoxEntry[];
+  /** 项目成员关系（v1.1.0+） */
+  projectMembers?: BackupProjectMember[];
 }
 
 export interface BackupProject {
@@ -62,6 +68,8 @@ export interface BackupProject {
   description?: string;
   createdAt?: string;
   updatedAt?: string;
+  /** 数据版本号（乐观锁） */
+  version?: number;
 }
 
 export interface BackupTask {
@@ -79,6 +87,12 @@ export interface BackupTask {
   displayId?: string;
   shortId?: string;
   attachments?: unknown[];
+  /** 标签列表 */
+  tags?: string[];
+  /** 优先级 */
+  priority?: string;
+  /** 截止日期 */
+  dueDate?: string | null;
   createdAt?: string;
   updatedAt?: string;
   deletedAt?: string | null;
@@ -105,6 +119,45 @@ export interface BackupAttachmentMeta {
   storagePath: string;
 }
 
+/** 用户偏好设置备份 */
+export interface BackupUserPreferences {
+  id: string;
+  userId: string;
+  theme?: string;
+  layoutDirection?: string;
+  floatingWindowPref?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** 黑匣子条目备份（专注模式） */
+export interface BackupBlackBoxEntry {
+  id: string;
+  projectId?: string | null;
+  userId?: string | null;
+  content: string;
+  date?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  isRead?: boolean;
+  isCompleted?: boolean;
+  isArchived?: boolean;
+  snoozeUntil?: string | null;
+  snoozeCount?: number;
+  deletedAt?: string | null;
+}
+
+/** 项目成员备份 */
+export interface BackupProjectMember {
+  id: string;
+  projectId: string;
+  userId: string;
+  role?: string;
+  invitedBy?: string | null;
+  invitedAt?: string;
+  acceptedAt?: string | null;
+}
+
 /** 健康校验结果 */
 export interface BackupValidation {
   isJsonValid: boolean;
@@ -126,7 +179,7 @@ export interface BackupValidation {
 
 export const BACKUP_CONFIG = {
   /** 备份版本 */
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
   
   /** 健康校验配置 */
   VALIDATION: {

@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS backup_metadata (
   task_count INTEGER NOT NULL DEFAULT 0,
   connection_count INTEGER NOT NULL DEFAULT 0,
   attachment_count INTEGER NOT NULL DEFAULT 0,
+  user_preferences_count INTEGER NOT NULL DEFAULT 0,
+  black_box_entry_count INTEGER NOT NULL DEFAULT 0,
+  project_member_count INTEGER NOT NULL DEFAULT 0,
   
   -- 文件信息
   size_bytes BIGINT NOT NULL DEFAULT 0,

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoFlow 语音转写诊断工具</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f4; color: #1c1917; min-height: 100vh; padding: 2rem; }
+    .container { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .subtitle { color: #78716c; font-size: 0.875rem; margin-bottom: 2rem; }
+    .card { background: white; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+    label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.25rem; color: #44403c; }
+    input[type="text"], input[type="url"] { width: 100%; padding: 0.625rem 0.75rem; border: 1px solid #d6d3d1; border-radius: 8px; font-size: 0.875rem; margin-bottom: 0.75rem; }
+    input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    button { padding: 0.625rem 1.25rem; border-radius: 8px; font-size: 0.875rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; }
+    .btn-primary { background: #6366f1; color: white; }
+    .btn-primary:hover { background: #4f46e5; }
+    .btn-primary:disabled { background: #a5b4fc; cursor: not-allowed; }
+    .btn-secondary { background: #e7e5e4; color: #1c1917; }
+    .btn-secondary:hover { background: #d6d3d1; }
+    .btn-danger { background: #ef4444; color: white; }
+    .btn-danger:hover { background: #dc2626; }
+    .result { margin-top: 1rem; padding: 1rem; border-radius: 8px; font-size: 0.8125rem; font-family: 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
+    .result.success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .result.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .result.info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .steps { counter-reset: step; }
+    .step { counter-increment: step; display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.75rem; padding: 0.75rem; border-radius: 8px; background: #fafaf9; }
+    .step::before { content: counter(step); background: #6366f1; color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; }
+    .step.pass::before { content: '✓'; background: #22c55e; }
+    .step.fail::before { content: '✗'; background: #ef4444; }
+    .step.running::before { content: '…'; background: #f59e0b; }
+    .step-content { flex: 1; }
+    .step-title { font-weight: 600; font-size: 0.875rem; }
+    .step-detail { font-size: 0.8125rem; color: #78716c; margin-top: 0.25rem; }
+    .recording-indicator { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; background: #fef2f2; border-radius: 8px; color: #ef4444; font-weight: 600; }
+    .recording-dot { width: 10px; height: 10px; background: #ef4444; border-radius: 50%; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .gap { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎙️ NanoFlow 语音转写诊断工具</h1>
+    <p class="subtitle">验证 Supabase Edge Function + Groq whisper-large-v3 的端到端转写链路</p>
+
+    <!-- 配置 -->
+    <div class="card">
+      <h2>1️⃣ 配置连接信息</h2>
+      <label for="supabaseUrl">Supabase Project URL</label>
+      <input type="url" id="supabaseUrl" placeholder="https://your-project.supabase.co">
+      <label for="anonKey">Supabase Anon Key</label>
+      <input type="text" id="anonKey" placeholder="eyJhbGciOi...">
+      <label for="functionName">Edge Function 名称</label>
+      <input type="text" id="functionName" value="transcribe" placeholder="transcribe">
+    </div>
+
+    <!-- 诊断步骤 -->
+    <div class="card">
+      <h2>2️⃣ 运行诊断</h2>
+      <div class="gap">
+        <button class="btn-primary" onclick="runDiagnostics()" id="diagBtn">开始诊断</button>
+        <button class="btn-secondary" onclick="clearResults()">清除结果</button>
+      </div>
+      <div id="diagnosticSteps" class="steps" style="margin-top: 1rem;"></div>
+    </div>
+
+    <!-- 录音测试 -->
+    <div class="card">
+      <h2>3️⃣ 录音转写测试</h2>
+      <p style="font-size: 0.8125rem; color: #78716c; margin-bottom: 1rem;">
+        按住按钮录音，松开后自动发送到 Edge Function 进行转写。
+      </p>
+      <div class="gap" style="align-items: center;">
+        <button class="btn-danger" id="recordBtn"
+          onmousedown="startRecording()" onmouseup="stopRecording()"
+          ontouchstart="startRecording()" ontouchend="stopRecording()">
+          🎙️ 按住说话
+        </button>
+        <span id="recordingStatus"></span>
+      </div>
+      <div id="transcribeResult"></div>
+    </div>
+  </div>
+
+  <script>
+    // ========== 诊断逻辑 ==========
+    function getConfig() {
+      return {
+        url: document.getElementById('supabaseUrl').value.trim().replace(/\/$/, ''),
+        key: document.getElementById('anonKey').value.trim(),
+        fn: document.getElementById('functionName').value.trim() || 'transcribe',
+      };
+    }
+
+    function addStep(containerId, title, detail, status) {
+      const container = document.getElementById(containerId);
+      const step = document.createElement('div');
+      step.className = `step ${status}`;
+      step.innerHTML = `<div class="step-content"><div class="step-title">${title}</div><div class="step-detail">${detail}</div></div>`;
+      container.appendChild(step);
+      return step;
+    }
+
+    function updateStep(stepEl, title, detail, status) {
+      stepEl.className = `step ${status}`;
+      stepEl.querySelector('.step-title').textContent = title;
+      stepEl.querySelector('.step-detail').textContent = detail;
+    }
+
+    function clearResults() {
+      document.getElementById('diagnosticSteps').innerHTML = '';
+      document.getElementById('transcribeResult').innerHTML = '';
+    }
+
+    async function runDiagnostics() {
+      const { url, key, fn } = getConfig();
+      const container = 'diagnosticSteps';
+      document.getElementById(container).innerHTML = '';
+      document.getElementById('diagBtn').disabled = true;
+
+      // Step 1: 检查配置
+      let step = addStep(container, '检查配置', '验证 URL 和 Key 格式...', 'running');
+      if (!url || !key) {
+        updateStep(step, '配置缺失', '请填写 Supabase URL 和 Anon Key', 'fail');
+        document.getElementById('diagBtn').disabled = false;
+        return;
+      }
+      if (!url.includes('supabase.co') && !url.includes('supabase.in')) {
+        updateStep(step, '配置警告', `URL 不是标准 Supabase 域名: ${url}（自建实例可忽略）`, 'pass');
+      } else {
+        updateStep(step, '配置正确', `URL: ${url.substring(0, 30)}...`, 'pass');
+      }
+
+      // Step 2: 测试 Supabase 连通性
+      step = addStep(container, '测试 Supabase 连通性', '发送 HEAD 请求...', 'running');
+      try {
+        const resp = await fetch(`${url}/rest/v1/`, {
+          method: 'HEAD',
+          headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
+        });
+        if (resp.ok || resp.status === 200) {
+          updateStep(step, 'Supabase 连通', `状态码: ${resp.status}`, 'pass');
+        } else {
+          updateStep(step, 'Supabase 响应异常', `状态码: ${resp.status}`, 'fail');
+        }
+      } catch (e) {
+        updateStep(step, 'Supabase 连接失败', e.message, 'fail');
+        document.getElementById('diagBtn').disabled = false;
+        return;
+      }
+
+      // Step 3: 测试 Edge Function 可达性
+      step = addStep(container, '测试 Edge Function', `请求 ${fn} 函数...`, 'running');
+      try {
+        const resp = await fetch(`${url}/functions/v1/${fn}`, {
+          method: 'POST',
+          headers: {
+            'apikey': key,
+            'Authorization': `Bearer ${key}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ test: true })
+        });
+        const text = await resp.text();
+        if (resp.status === 401) {
+          updateStep(step, 'Edge Function 认证失败 (401)', '可能原因：Anon Key 不正确，或函数需要登录用户认证', 'fail');
+        } else if (resp.status === 404) {
+          updateStep(step, 'Edge Function 未找到 (404)', `函数 "${fn}" 可能未部署。运行: supabase functions deploy ${fn}`, 'fail');
+        } else if (resp.status === 400) {
+          updateStep(step, 'Edge Function 可达', `函数存在并响应（400 = 缺少音频参数，这是预期的）`, 'pass');
+        } else {
+          updateStep(step, `Edge Function 响应: ${resp.status}`, text.substring(0, 200), resp.ok ? 'pass' : 'fail');
+        }
+      } catch (e) {
+        updateStep(step, 'Edge Function 请求失败', e.message, 'fail');
+      }
+
+      // Step 4: 检查浏览器录音支持
+      step = addStep(container, '检查录音支持', '检测 MediaRecorder API...', 'running');
+      if (typeof MediaRecorder !== 'undefined') {
+        const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+        const supported = mimeTypes.filter(m => MediaRecorder.isTypeSupported(m));
+        updateStep(step, '录音 API 可用', `支持格式: ${supported.join(', ') || '无（可能需要 wav 回退）'}`, 'pass');
+      } else {
+        updateStep(step, '录音 API 不可用', '当前浏览器不支持 MediaRecorder', 'fail');
+      }
+
+      // Step 5: 检查麦克风权限
+      step = addStep(container, '检查麦克风权限', '请求麦克风访问...', 'running');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+        updateStep(step, '麦克风权限已授予', '可以录音', 'pass');
+      } catch (e) {
+        updateStep(step, '麦克风权限被拒绝', e.message, 'fail');
+      }
+
+      document.getElementById('diagBtn').disabled = false;
+    }
+
+    // ========== 录音转写测试 ==========
+    let mediaRecorder = null;
+    let audioChunks = [];
+
+    async function startRecording() {
+      const statusEl = document.getElementById('recordingStatus');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000 } });
+        const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+        let mimeType = '';
+        for (const m of mimeTypes) {
+          if (MediaRecorder.isTypeSupported(m)) { mimeType = m; break; }
+        }
+        audioChunks = [];
+        mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 128000 } : { audioBitsPerSecond: 128000 });
+        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+        mediaRecorder.start(100);
+        statusEl.innerHTML = '<span class="recording-indicator"><span class="recording-dot"></span>录音中...</span>';
+      } catch (e) {
+        statusEl.textContent = '❌ 无法录音: ' + e.message;
+      }
+    }
+
+    async function stopRecording() {
+      const statusEl = document.getElementById('recordingStatus');
+      const resultEl = document.getElementById('transcribeResult');
+      if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+      
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+      statusEl.textContent = '⏳ 正在转写...';
+
+      // 等待数据收集完毕
+      await new Promise(r => { mediaRecorder.onstop = r; });
+      
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      if (blob.size < 1000) {
+        statusEl.textContent = '';
+        resultEl.innerHTML = '<div class="result error">录音太短，请按住久一点再松开</div>';
+        return;
+      }
+
+      const { url, key, fn } = getConfig();
+      if (!url || !key) {
+        statusEl.textContent = '';
+        resultEl.innerHTML = '<div class="result error">请先填写 Supabase 配置</div>';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', blob, 'recording.webm');
+      formData.append('model', 'whisper-large-v3');
+      formData.append('language', 'zh');
+
+      try {
+        const startTime = performance.now();
+        const resp = await fetch(`${url}/functions/v1/${fn}`, {
+          method: 'POST',
+          headers: {
+            'apikey': key,
+            'Authorization': `Bearer ${key}`,
+          },
+          body: formData
+        });
+        const elapsed = Math.round(performance.now() - startTime);
+        const data = await resp.json();
+        statusEl.textContent = '';
+
+        if (resp.ok && data.text) {
+          resultEl.innerHTML = `<div class="result success">✅ 转写成功 (${elapsed}ms)\n\n转写文本：${data.text}\n\n音频大小：${(blob.size / 1024).toFixed(1)} KB\n格式：${blob.type}</div>`;
+        } else {
+          resultEl.innerHTML = `<div class="result error">❌ 转写失败 (HTTP ${resp.status}, ${elapsed}ms)\n\n${JSON.stringify(data, null, 2)}</div>`;
+        }
+      } catch (e) {
+        statusEl.textContent = '';
+        resultEl.innerHTML = `<div class="result error">❌ 请求失败: ${e.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>

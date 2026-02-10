@@ -27,6 +27,9 @@ import {
   BackupProject,
   BackupTask,
   BackupConnection,
+  BackupUserPreferences,
+  BackupBlackBoxEntry,
+  BackupProjectMember,
   validateBackup,
   encryptData,
   calculateChecksum,
@@ -370,7 +373,7 @@ async function exportAllData(
       .order("id");
     
     if (userId) {
-      query = query.eq("user_id", userId);
+      query = query.eq("owner_id", userId);
     }
     
     const { data, error } = await query;
@@ -391,6 +394,9 @@ async function exportAllData(
   
   // 获取项目 ID 集合（用于过滤任务和连接）
   const projectIds = new Set(projects.map(p => p.id));
+  
+  // 获取用户 ID 集合（用于过滤用户级数据）
+  const userIds = new Set(projects.map(p => p.userId));
   
   // 导出任务
   let taskOffset = 0;
@@ -448,6 +454,93 @@ async function exportAllData(
   
   console.log(`Exported ${connections.length} connections`);
   
+  // 导出用户偏好设置
+  const userPreferences: BackupUserPreferences[] = [];
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("user_preferences")
+        .select("*")
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+      
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+      
+      const { data, error } = await query;
+      if (error) {
+        // user_preferences 表可能不存在，不阻止备份
+        console.warn(`Failed to export user_preferences: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+      
+      const filtered = userId ? data : data.filter((r: Record<string, unknown>) => !userId || userIds.has(r.user_id as string));
+      userPreferences.push(...filtered.map(mapUserPreferences));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+  console.log(`Exported ${userPreferences.length} user_preferences`);
+  
+  // 导出黑匣子条目（专注模式数据）
+  const blackBoxEntries: BackupBlackBoxEntry[] = [];
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("black_box_entries")
+        .select("*")
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+      
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+      
+      const { data, error } = await query;
+      if (error) {
+        console.warn(`Failed to export black_box_entries: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+      
+      blackBoxEntries.push(...data.map(mapBlackBoxEntry));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+  console.log(`Exported ${blackBoxEntries.length} black_box_entries`);
+  
+  // 导出项目成员关系
+  const projectMembers: BackupProjectMember[] = [];
+  {
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("project_members")
+        .select("*")
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+      
+      if (error) {
+        console.warn(`Failed to export project_members: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+      
+      const filtered = userId
+        ? data.filter((r: Record<string, unknown>) => projectIds.has(r.project_id as string))
+        : data;
+      projectMembers.push(...filtered.map(mapProjectMember));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+  console.log(`Exported ${projectMembers.length} project_members`);
+  
   return {
     version: BACKUP_CONFIG.VERSION,
     type: "full",
@@ -455,6 +548,9 @@ async function exportAllData(
     projects,
     tasks,
     connections,
+    userPreferences,
+    blackBoxEntries,
+    projectMembers,
   };
 }
 
@@ -465,11 +561,12 @@ async function exportAllData(
 function mapProject(row: Record<string, unknown>): BackupProject {
   return {
     id: row.id as string,
-    userId: row.user_id as string,
-    name: row.name as string,
+    userId: row.owner_id as string,
+    name: (row.title as string) || '',
     description: (row.description as string) || undefined,
-    createdAt: row.created_at as string | undefined,
+    createdAt: row.created_date as string | undefined,
     updatedAt: row.updated_at as string | undefined,
+    version: row.version as number | undefined,
   };
 }
 
@@ -489,6 +586,9 @@ function mapTask(row: Record<string, unknown>): BackupTask {
     displayId: row.display_id as string | undefined,
     shortId: row.short_id as string | undefined,
     attachments: row.attachments as unknown[] | undefined,
+    tags: row.tags as string[] | undefined,
+    priority: row.priority as string | undefined,
+    dueDate: row.due_date as string | null | undefined,
     createdAt: row.created_at as string | undefined,
     updatedAt: row.updated_at as string | undefined,
     deletedAt: row.deleted_at as string | null | undefined,
@@ -499,13 +599,55 @@ function mapConnection(row: Record<string, unknown>): BackupConnection {
   return {
     id: row.id as string,
     projectId: row.project_id as string,
-    source: row.source as string,
-    target: row.target as string,
+    source: row.source_id as string,
+    target: row.target_id as string,
     title: (row.title as string) || undefined,
     description: (row.description as string) || undefined,
     createdAt: row.created_at as string | undefined,
     updatedAt: row.updated_at as string | undefined,
     deletedAt: row.deleted_at as string | null | undefined,
+  };
+}
+
+function mapUserPreferences(row: Record<string, unknown>): BackupUserPreferences {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    theme: row.theme as string | undefined,
+    layoutDirection: row.layout_direction as string | undefined,
+    floatingWindowPref: row.floating_window_pref as string | undefined,
+    createdAt: row.created_at as string | undefined,
+    updatedAt: row.updated_at as string | undefined,
+  };
+}
+
+function mapBlackBoxEntry(row: Record<string, unknown>): BackupBlackBoxEntry {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string | null | undefined,
+    userId: row.user_id as string | null | undefined,
+    content: row.content as string,
+    date: row.date as string | undefined,
+    createdAt: row.created_at as string | undefined,
+    updatedAt: row.updated_at as string | undefined,
+    isRead: row.is_read as boolean | undefined,
+    isCompleted: row.is_completed as boolean | undefined,
+    isArchived: row.is_archived as boolean | undefined,
+    snoozeUntil: row.snooze_until as string | null | undefined,
+    snoozeCount: row.snooze_count as number | undefined,
+    deletedAt: row.deleted_at as string | null | undefined,
+  };
+}
+
+function mapProjectMember(row: Record<string, unknown>): BackupProjectMember {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    userId: row.user_id as string,
+    role: row.role as string | undefined,
+    invitedBy: row.invited_by as string | null | undefined,
+    invitedAt: row.invited_at as string | undefined,
+    acceptedAt: row.accepted_at as string | null | undefined,
   };
 }
 

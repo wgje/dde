@@ -1,51 +1,67 @@
-# scripts/ 目录说明
+# scripts/ — 数据库与工具脚本
 
-本目录包含 NanoFlow 的 Supabase / 数据维护相关脚本。
+## 新项目初始化（3 步）
 
-## 一键初始化（推荐）
+```
+1. Supabase Dashboard → Storage → 创建 attachments 私有桶
+2. SQL Editor → 执行 init-supabase.sql（全部数据库对象一次到位）
+3. 可选：SQL Editor → 执行 cleanup-cron-setup.sql（配置定时清理）
+```
 
-- `init-supabase.sql`
-  - 用途：统一的「一次性初始化脚本」，包含当前 NanoFlow 所需的全部数据库对象（表 / RPC / 触发器 / RLS / Realtime / Storage 策略）。
-  - 执行时机：新建 Supabase 项目后，在 Dashboard → SQL Editor 中一次性执行。
+## SQL 文件分类
 
-## 迁移 / 清理 / 维护
+### 必须的（改了数据库结构就要同步更新）
 
-- `migrate-to-v2.sql`
-  - 旧版项目数据结构迁移到 v2（用于历史数据库升级）。
-- `cleanup-v1-data.sql`
-  - 清理 v1 遗留数据。
-- `purge-deleted-tasks.sql`
-  - 回收站/软删除任务的清理相关。
-- `cleanup-cron-setup.sql`
-  - 为软删除任务/连接与清理日志配置 `pg_cron` 定时任务（运维接线脚本，幂等可重跑）。
+| 文件 | 定位 |
+|------|------|
+| `init-supabase.sql` | **唯一权威初始化脚本**（v3.8.0）。包含全部表、RLS、RPC、触发器、索引、视图、Realtime、Storage 策略。新增/修改任何数据库对象后，必须同步到此文件 |
 
-## 备份
+### 独立执行的（不合并进 init-supabase.sql）
 
-- `backup-setup.sql`
-  - 备份相关表/函数/策略（如有）。
-- `backup-cron-setup.sql`
-  - 备份相关的 pg_cron 任务配置（需要先启用 `pg_cron` 扩展）。
+| 文件 | 何时用 | 原因 |
+|------|--------|------|
+| `cleanup-cron-setup.sql` | 需要定时清理软删除数据时 | 依赖 pg_cron 扩展，非所有实例可用。init-supabase.sql 会自动尝试，失败时用此脚本重试 |
+| `backup-setup.sql` | 需要服务端备份功能时 | 创建备份元数据表和 Storage 桶，独立于核心业务 |
+| `backup-cron-setup.sql` | 需要定时自动备份时 | 依赖 pg_cron + pg_net + Edge Functions 已部署 |
 
-## 辅助脚本
+### 老用户迁移专用（新项目忽略）
 
-- `seed-supabase.js`
-  - 初始化/填充测试数据（开发用）。
-- `set-env.cjs`
-  - 环境变量辅助脚本。
-- `validate-env.cjs`
-  - 环境变量校验。
-- `setup-storage-bucket.cjs`
-  - Storage 桶初始化辅助（如果使用脚本方式创建桶）。
+| 文件 | 说明 |
+|------|------|
+| `migrate-to-v2.sql` | JSONB → 独立表迁移，仅老项目升级时用 |
+| `cleanup-v1-data.sql` | 迁移验证通过后清理 v1 遗留数据 |
+| `purge-deleted-tasks.sql` | 早期版本的软删除清理（功能已整合进 init-supabase.sql） |
 
-## legacy/ 目录
+### legacy/ — 已废弃，仅供考古
 
-旧版/历史脚本（保留用于参考，新项目无需使用）：
+全部内容已整合进 `init-supabase.sql`，不要执行。
 
-- `init-database.sql` - 旧版一次性初始化脚本
-- `supabase-setup.sql` - 核心表结构 + RLS（早期版本）
-- `storage-setup.sql` - Storage bucket RLS 策略（早期版本）
-- `attachment-rpc.sql` - 附件相关 RPC
-- `attachment-soft-delete.sql` - 附件软删除
-- `add-connection-title.sql` - connections 标题字段补丁
+## 非 SQL 工具脚本
 
-> 说明：如果你只是想让新项目"能跑起来"，优先执行 `init-supabase.sql` 即可。
+| 文件 | 用途 |
+|------|------|
+| `seed-supabase.js` | 填充测试数据（开发用） |
+| `set-env.cjs` | 写入环境变量 |
+| `validate-env.cjs` | 校验环境变量完整性 |
+| `setup-storage-bucket.cjs` | 脚本方式创建 Storage 桶 |
+| `run-ng.cjs` | Angular CLI 启动辅助 |
+| `patch-esbuild.cjs` | esbuild 补丁 |
+| `inject-modulepreload.cjs` | 构建后注入 modulepreload |
+| `analyze-bundle.sh` | 分析打包体积 |
+| `analyze-performance.sh` | Lighthouse 性能分析 |
+| `performance-benchmark.sh` | 性能基准测试 |
+| `verify-transcribe-setup.sh` | 诊断语音转写配置 |
+| `diagnose-transcribe-401.sh` | 排查转写 401 错误 |
+| `verify-cleanup.sh` | 验证清理结果 |
+| `cleanup-sensitive-files.sh` | 清理敏感文件 |
+| `scan-placeholder-interactions.sh` | 扫描未实现的占位交互 |
+| `start-chrome-debug.sh` | 启动 Chrome 调试实例 |
+
+## 改了数据库怎么办？
+
+```
+改了表/RLS/RPC/触发器/索引/视图
+  → 更新 init-supabase.sql
+  → npm run db:types（重新生成 src/types/supabase.ts）
+  → 手动同步 src/models/supabase-types.ts
+```

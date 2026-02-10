@@ -58,8 +58,8 @@
    chmod +x scripts/verify-transcribe-setup.sh
    ./scripts/verify-transcribe-setup.sh
    
-   # 方法 2: 使用诊断工具
-   # 打开 docs/transcribe-diagnostic-tool.html 在浏览器中测试
+   # 方法 2: 使用诊断工具（在浏览器中打开，填入 Supabase URL 和 Key 即可测试）
+   # 打开 docs/transcribe-diagnostic-tool.html
    ```
 
 5. **获取 API 密钥**
@@ -163,8 +163,10 @@
 
 | 快捷键 | 功能 | 说明 |
 |--------|------|------|
-| `Enter` | 提交 | 提交文本输入 |
-| `1` / `2` / `3` | 操作 | 条目操作快捷键 |
+| `Ctrl/⌘ + Enter` | 提交 | 提交文本输入 |
+| `R` | 已读 | 标记条目为已读 |
+| `C` | 完成 | 标记条目为完成 |
+| `A` | 归档 | 归档当前条目 |
 
 ---
 
@@ -541,13 +543,15 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 - `connections` - 任务连接
 - `user_preferences` - 用户偏好
 
-**辅助表（8 个）**
+**辅助表（10 个）**
 - `task_tombstones` / `connection_tombstones` - 永久删除记录
 - `cleanup_logs` - 清理日志
 - `circuit_breaker_logs` - 安全删除审计
 - `app_config` - 应用配置
 - `purge_rate_limits` - 速率限制
 - `attachment_scans` / `quarantined_files` - 病毒扫描相关
+- `black_box_entries` - 黑匣子条目存储
+- `transcription_usage` - 语音转写用量追踪
 
 **视图（2 个）**
 - `active_tasks` - 过滤已删除任务
@@ -573,8 +577,8 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 | `REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT` | 4 | 最大并发请求 |
 | `TIMEOUT_CONFIG.STANDARD` | 10000ms | API 超时 |
 | `AUTH_CONFIG.LOCAL_MODE_USER_ID` | 'local-user' | 离线模式 |
-| `FOCUS_CONFIG.DAILY_TRANSCRIPTION_LIMIT` | 50 | 每日转写配额 |
-| `FOCUS_CONFIG.MAX_SNOOZE_PER_DAY` | 3 | 大门每日最大跳过次数 |
+| `FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA` | 50 | 每日转写配额 |
+| `FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY` | 3 | 大门每日最大跳过次数 |
 
 ---
 
