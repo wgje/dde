@@ -309,6 +309,12 @@ export class RequestThrottleService {
    * 判断是否应该重试
    */
   private shouldRetry(error: unknown): boolean {
+    // 【#95057880 修复】PermanentFailureError 绝不重试（会话过期、版本冲突等）
+    if (error instanceof Error && 
+        ('isPermanentFailure' in error && (error as { isPermanentFailure?: boolean }).isPermanentFailure === true)) {
+      return false;
+    }
+    
     // Supabase 错误是普通对象 {code, message, details}，非 Error 实例
     if (!(error instanceof Error)) {
       const errObj = error as { code?: string; message?: string };

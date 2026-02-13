@@ -74,8 +74,8 @@ describe('GateOverlayComponent', () => {
 
   it('should render strata item titles without slice runtime errors', () => {
     expect(() => fixture.detectChanges()).not.toThrow();
-    expect(fixture.nativeElement.textContent).toContain('第一条记录');
-    expect(fixture.nativeElement.textContent).toContain('第二条记录');
+    // In new minimalist design, we only show the date, not the items
+    expect(fixture.nativeElement.textContent).toContain('2026-02-06');
   });
 
   it('should handle empty items list safely', () => {

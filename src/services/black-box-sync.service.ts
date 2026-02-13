@@ -100,18 +100,20 @@ export class BlackBoxSyncService {
     try {
       const entries = await this.loadFromLocal();
 
-      // 第一步：主动扫描并删除所有非法 ID 条目（不限 syncStatus）
+      // 第一步：主动扫描并删除所有含非法 UUID 字段的条目（不限 syncStatus）
       for (const entry of entries) {
-        if (!entry.id || !isValidUUID(entry.id)) {
-          console.warn('[BlackBoxSync] 启动清理脏数据:', entry.id);
-          this.logger.warn('BlackBoxSync', `启动清理：删除非法 ID "${entry.id}"`);
+        const hasInvalidId = !entry.id || !isValidUUID(entry.id);
+        const hasInvalidProjectId = !entry.projectId || !isValidUUID(entry.projectId);
+        if (hasInvalidId || hasInvalidProjectId) {
+          console.warn('[BlackBoxSync] 启动清理脏数据:', { id: entry.id, projectId: entry.projectId });
+          this.logger.warn('BlackBoxSync', `启动清理：删除非法 UUID 条目 id="${entry.id}", projectId="${entry.projectId}"`);
           try { await this.deleteFromLocal(entry.id); } catch { /* 忽略 */ }
         }
       }
 
       // 第二步：恢复合法 pending 条目到 RetryQueue
       const validPending = entries.filter(
-        e => e.syncStatus === 'pending' && e.id && isValidUUID(e.id)
+        e => e.syncStatus === 'pending' && e.id && isValidUUID(e.id) && e.projectId && isValidUUID(e.projectId)
       );
 
       if (validPending.length > 0) {
@@ -281,9 +283,13 @@ export class BlackBoxSyncService {
     this.pendingPushEntries.clear();
 
     for (const entry of entries) {
-      // 校验 ID 格式
+      // 校验所有 UUID 字段
       if (!entry.id || !isValidUUID(entry.id)) {
         this.logger.warn('BlackBoxSync', `flushPending: 跳过非法 ID "${entry.id}"`);
+        continue;
+      }
+      if (!entry.projectId || !isValidUUID(entry.projectId)) {
+        this.logger.warn('BlackBoxSync', `flushPending: 跳过非法 projectId "${entry.projectId}"，id="${entry.id}"`);
         continue;
       }
       if (this.retryQueueHandler) {
@@ -396,7 +402,7 @@ export class BlackBoxSyncService {
       return false;
     }
 
-    // 校验 ID 格式，跳过 IndexedDB 中的脏数据（如 "dev-preview"）
+    // 校验所有 UUID 字段，跳过 IndexedDB 中的脏数据（如 "dev-preview"、"dev-test"）
     if (!entry.id || !isValidUUID(entry.id)) {
       this.logger.warn('BlackBoxSync', `跳过非法 ID 的条目: "${entry.id}"，从本地清理`);
       try {
@@ -405,14 +411,23 @@ export class BlackBoxSyncService {
       return true; // 返回 true 让 RetryQueue 不再重试
     }
 
+    // 校验 projectId — Supabase project_id 列为 UUID 类型，非法值会导致 400 错误
+    if (!entry.projectId || !isValidUUID(entry.projectId)) {
+      this.logger.warn('BlackBoxSync', `跳过非法 projectId 的条目: id="${entry.id}", projectId="${entry.projectId}"，从本地清理`);
+      try {
+        await this.deleteFromLocal(entry.id);
+      } catch { /* 清理失败不阻塞 */ }
+      return true;
+    }
+
     try {
       const client = this.supabase.client();
 
-      // 【终极防线】upsert 前再次内联校验 ID 格式
+      // 【终极防线】upsert 前再次内联校验所有 UUID 字段
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      if (!uuidPattern.test(entry.id)) {
-        console.warn('[BlackBoxSync] 终极防线拦截非法 ID:', entry.id);
-        this.logger.warn('BlackBoxSync', `终极防线拦截非法 ID: "${entry.id}"`);
+      if (!uuidPattern.test(entry.id) || !uuidPattern.test(entry.projectId)) {
+        console.warn('[BlackBoxSync] 终极防线拦截非法 UUID 字段:', { id: entry.id, projectId: entry.projectId });
+        this.logger.warn('BlackBoxSync', `终极防线拦截非法 UUID 字段: id="${entry.id}", projectId="${entry.projectId}"`);
         try { await this.deleteFromLocal(entry.id); } catch { /* ignore */ }
         return true;
       }

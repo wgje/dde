@@ -44,6 +44,7 @@ const RETRYABLE_ERROR_TYPES = new Set([
   'OfflineError',
   'RateLimitError',  // 429 速率限制错误应该重试
   'UnknownServerError',  // 504 等服务端错误返回非 JSON 响应时的回退类型
+  'HtmlResponseError',  // 【#95057880】CDN/代理返回 HTML 替代 JSON，临时网络/缓存问题
   // 【关键修复】外键约束错误不可重试（意味着引用的数据不存在）
   // 'ForeignKeyError', // 23503 已移除
 ]);
@@ -68,6 +69,15 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
     const enhanced = Object.create(error) as EnhancedError;
     Object.assign(enhanced, { message: error.message, name: error.name, stack: error.stack });
     const lowerMsg = enhanced.message.toLowerCase();
+    
+    // 【#95057880 修复】识别 HTML 响应错误
+    // 当 CDN/代理返回 HTML 页面（如 index.html）替代 JSON 时，Supabase SDK 解析失败
+    if (lowerMsg.includes('<!doctype') || lowerMsg.includes('<html') || lowerMsg.includes('unexpected token <')) {
+      enhanced.errorType = 'HtmlResponseError';
+      enhanced.isRetryable = true;
+      enhanced.name = 'HtmlResponseError';
+      return enhanced;
+    }
     
     // 识别 Error 实例中的网络错误模式
     if (lowerMsg.includes('failed to fetch')) {
@@ -181,6 +191,13 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
     }
   }
   
+  // 【#95057880 修复】检测 HTML 响应内容（CDN/代理返回 HTML 页面替代 JSON）
+  if (message && typeof message === 'string' && 
+      (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('<!doctype'))) {
+    message = '收到 HTML 响应（可能是 CDN 缓存或代理错误），请稍后重试';
+    errorType = 'HtmlResponseError';
+  }
+  
   // 如果 message 仍然为空，使用默认消息
   // 注意：空错误对象通常意味着服务端返回了非标准响应（如 504 的 HTML 错误页面）
   if (!message) {
@@ -281,6 +298,8 @@ export function getFriendlyErrorMessage(error: unknown): string {
         return '当前离线，数据将在恢复连接后同步';
       case 'UnknownServerError':
         return '服务器响应异常，已加入重试队列';
+      case 'HtmlResponseError':
+        return '网络响应异常（CDN 缓存），已加入重试队列';
       case 'ForeignKeyError':
         return '关联数据尚未同步，已加入重试队列';
       case 'VersionConflictError':

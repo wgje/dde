@@ -419,12 +419,14 @@ export class GateService {
     // 清除今日检查记录
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
     
-    // 创建模拟的待处理条目
+    // 创建模拟的待处理条目（使用合法 UUID 避免同步时报错）
+    const mockProjectId = crypto.randomUUID();
+    const mockUserId = crypto.randomUUID();
     const mockEntries = [
       {
         id: crypto.randomUUID(),
-        projectId: 'dev-test',
-        userId: 'dev-user',
+        projectId: mockProjectId,
+        userId: mockUserId,
         content: '这是一条测试遗留条目 - 先做A模块，然后连B数据库，不对，那个接口有问题，要先弄C...',
         date: this.getYesterdayDate(),
         createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
@@ -440,8 +442,8 @@ export class GateService {
       },
       {
         id: crypto.randomUUID(),
-        projectId: 'dev-test',
-        userId: 'dev-user',
+        projectId: mockProjectId,
+        userId: mockUserId,
         content: '第二条测试条目 - 需要修复支付接口的bug，客户反馈订单状态没有正确更新',
         date: this.getYesterdayDate(),
         createdAt: new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString(),
@@ -457,8 +459,8 @@ export class GateService {
       },
       {
         id: crypto.randomUUID(),
-        projectId: 'dev-test',
-        userId: 'dev-user',
+        projectId: mockProjectId,
+        userId: mockUserId,
         content: '第三条 - 优化首页加载速度，现在太慢了',
         date: this.getYesterdayDate(),
         createdAt: new Date(Date.now() - 22 * 60 * 60 * 1000).toISOString(),

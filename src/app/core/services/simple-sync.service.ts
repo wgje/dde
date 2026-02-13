@@ -44,7 +44,7 @@ import {
   supabaseErrorToError,
   classifySupabaseClientFailure
 } from '../../../utils/supabase-error';
-import { PermanentFailureError } from '../../../utils/permanent-failure-error';
+import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
@@ -319,36 +319,67 @@ export class SimpleSyncService {
       return false;
     }
     
+    // 【#95057880 修复】支持自动刷新后重试的内部执行函数（与 pushTask 对齐）
+    const executeProjectPush = async (): Promise<void> => {
+      const { data: { session } } = await client.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) {
+        // 先尝试刷新会话，而非立即标记永久失败
+        const refreshed = await this.sessionManager.tryRefreshSession('pushProject.getSession');
+        if (refreshed) {
+          const { data: { session: newSession } } = await client.auth.getSession();
+          if (newSession?.user?.id) {
+            return await this.doProjectPush(client, project, newSession.user.id);
+          }
+        }
+        this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
+        return;
+      }
+      
+      return await this.doProjectPush(client, project, userId);
+    };
+    
     try {
       await this.throttle.execute(
         `push-project:${project.id}`,
-        async () => {
-          const { data: { session } } = await client.auth.getSession();
-          const userId = session?.user?.id;
-          if (!userId) {
-            this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
-            return;
-          }
-          
-          const { error } = await client
-            .from('projects')
-            .upsert({
-              id: project.id,
-              owner_id: userId,
-              title: project.name,
-              description: project.description,
-              version: project.version || 1,
-              updated_at: project.updatedAt || nowISO(),
-              migrated_to_v2: true
-            });
-          
-          if (error) throw supabaseErrorToError(error);
-        },
+        executeProjectPush,
         { priority: 'high', retries: 2 }
       );
       return true;
     } catch (e) {
+      // 【#95057880 修复】PermanentFailureError 直接向上冒泡，不做二次处理
+      if (isPermanentFailureError(e)) {
+        throw e;
+      }
+      
       const enhanced = supabaseErrorToError(e);
+      
+      // 【#95057880 修复】检测到认证错误时先尝试刷新 session（与 pushTask 对齐）
+      if (this.sessionManager.isSessionExpiredError(enhanced)) {
+        const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('pushProject', {
+          projectId: project.id,
+          errorCode: enhanced.code
+        });
+        if (canRetry) {
+          try {
+            await executeProjectPush();
+            return true;
+          } catch (retryError) {
+            if (isPermanentFailureError(retryError)) throw retryError;
+            const retryEnhanced = supabaseErrorToError(retryError);
+            if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+              this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
+                projectId: project.id,
+                errorCode: retryEnhanced.code
+              });
+              return false;
+            }
+          }
+        } else {
+          this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
+          return false;
+        }
+      }
       
       if (enhanced.errorType === 'VersionConflictError') {
         this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
@@ -360,6 +391,25 @@ export class SimpleSyncService {
       }
       return false;
     }
+  }
+  
+  /**
+   * 执行项目 upsert 操作（内部方法，由 pushProject 调用）
+   */
+  private async doProjectPush(client: SupabaseClient, project: Project, userId: string): Promise<void> {
+    const { error } = await client
+      .from('projects')
+      .upsert({
+        id: project.id,
+        owner_id: userId,
+        title: project.name,
+        description: project.description,
+        version: project.version || 1,
+        updated_at: project.updatedAt || nowISO(),
+        migrated_to_v2: true
+      });
+    
+    if (error) throw supabaseErrorToError(error);
   }
   
   async pullProjects(since?: string): Promise<Project[]> {

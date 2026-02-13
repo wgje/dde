@@ -24,55 +24,53 @@ import { LoggerService } from '../../../../../services/logger.service';
   standalone: true,
   imports: [CommonModule, FormsModule],
   template: `
-    <section class="gate-actions">
-      <div class="gate-actions__panel">
-        <div class="gate-actions__buttons" role="group" aria-label="大门处理操作">
+    <section class="max-w-md mx-auto">
+      <div class="flex flex-col gap-6">
+        <!-- 主要操作按钮 (圆形极简风) -->
+        <div class="flex items-center justify-center gap-8" role="group" aria-label="大门处理操作">
           <!-- 已读 -->
           <button
             data-testid="gate-read-button"
-            class="gate-action-btn gate-action-btn--read"
+            class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
             [disabled]="isProcessing()"
             (click)="markAsRead()">
-            <span class="gate-action-btn__glyph" aria-hidden="true">◌</span>
-            <span class="gate-action-btn__text">已读</span>
-            <span class="gate-action-btn__sub">知晓不处理</span>
+            <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">◎</span>
+            <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">已读</span>
           </button>
 
-          <!-- 完成 -->
+          <!-- 完成 (主操作，稍微大一点) -->
           <button
             data-testid="gate-complete-button"
-            class="gate-action-btn gate-action-btn--complete"
+            class="group relative w-20 h-20 rounded-full bg-black dark:bg-white hover:bg-gray-800 dark:hover:bg-gray-200 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-lg shadow-black/10"
             [disabled]="isProcessing()"
             (click)="markAsCompleted()">
-            <span class="gate-action-btn__glyph" aria-hidden="true">✓</span>
-            <span class="gate-action-btn__text">完成</span>
-            <span class="gate-action-btn__sub">立即结项</span>
+            <span class="text-3xl text-white dark:text-black font-light group-hover:scale-110 transition-transform">✓</span>
+             <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">完成</span>
           </button>
+
+           <!-- 稍后 (如有) -->
+           <button
+             *ngIf="canSnooze()"
+             data-testid="gate-snooze-button"
+             class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
+             [disabled]="isProcessing()"
+             (click)="snooze()">
+             <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">Zzz</span>
+             <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">稍后</span>
+           </button>
         </div>
 
-        <div class="gate-actions__quick">
-          <div class="gate-actions__quick-head">
-            <span class="gate-actions__quick-title">快速记录</span>
-            <span class="gate-actions__quick-hint">支持键盘回车与按住录音</span>
-          </div>
-
-          <div class="gate-actions__quick-row">
-            <input
-              type="text"
-              class="gate-actions__input"
-              placeholder="记录一个想法..."
-              [(ngModel)]="quickInputText"
-              [disabled]="isRecording() || isTranscribing()"
-              (keydown.enter)="submitQuickInput()"
-            />
-
+        <!-- 快速录入区 (iOS 搜索栏风格) -->
+        <div class="mt-4 relative bg-gray-100/80 dark:bg-white/5 backdrop-blur-xl rounded-2xl p-1 transition-all duration-300 ring-1 ring-black/5 dark:ring-white/10 focus-within:ring-blue-500/50 dark:focus-within:ring-blue-400/50 focus-within:bg-white dark:focus-within:bg-black/40">
+          <div class="flex items-center px-3 py-2">
+            <!-- 录音按钮 -->
             @if (speechSupported()) {
               <button
-                class="gate-actions__mic"
-                [class.gate-actions__mic--recording]="isRecording()"
-                [class.gate-actions__mic--transcribing]="isTranscribing()"
+                class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 mr-2"
+                [class.bg-red-500]="isRecording()"
+                [class.animate-pulse]="isRecording()"
+                [ngClass]="{'bg-gray-200': !isRecording() && !isTranscribing(), 'dark:bg-white/10': !isRecording() && !isTranscribing()}"
                 [disabled]="isTranscribing()"
-                [attr.aria-label]="isRecording() ? '松开停止录音' : isTranscribing() ? '正在转写' : '按住开始录音'"
                 (mousedown)="startRecording($event)"
                 (mouseup)="stopRecording()"
                 (mouseleave)="stopRecording()"
@@ -80,544 +78,147 @@ import { LoggerService } from '../../../../../services/logger.service';
                 (touchend)="stopRecording()"
                 (keydown.space)="startRecording($event)"
                 (keyup.space)="stopRecording()">
+                
                 @if (isTranscribing()) {
-                  <span class="gate-actions__mic-spinner" aria-hidden="true"></span>
+                  <svg class="animate-spin h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
                 } @else if (isRecording()) {
-                  <span class="gate-actions__mic-dot" aria-hidden="true"></span>
+                  <div class="w-3 h-3 bg-white rounded-[2px]"></div>
                 } @else {
-                  <span class="gate-actions__mic-icon" aria-hidden="true">◎</span>
+                  <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"></path>
+                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"></path>
+                  </svg>
                 }
               </button>
             }
-          </div>
 
-          @if (quickInputText() || isRecording() || isTranscribing()) {
-            <p class="gate-actions__helper">
-              @if (isTranscribing()) {
-                正在转写语音...
-              } @else if (isRecording()) {
-                松开即可停止录音
-              } @else {
-                按回车快速写入黑匣子
-              }
-            </p>
-          }
+            <input
+              type="text"
+              class="w-full bg-transparent border-0 p-0 text-base text-black dark:text-white placeholder:text-gray-400 focus:ring-0 leading-relaxed font-sans"
+              placeholder="快速记录想法..."
+              [(ngModel)]="quickInputText"
+              [disabled]="isRecording() || isTranscribing()"
+              (keydown.enter)="submitQuickInput()"
+            />
+            
+            <!-- 回车提交提示 -->
+            @if (quickInputText() && !isRecording() && !isTranscribing()) {
+              <button 
+                (click)="submitQuickInput()"
+                class="ml-2 w-7 h-7 bg-blue-500 rounded-full flex items-center justify-center text-white hover:bg-blue-600 transition-colors">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </button>
+            }
+          </div>
         </div>
+        
+        <!-- 状态提示 -->
+        @if (isRecording() || isTranscribing()) {
+           <p class="text-center text-xs text-gray-400 animate-pulse font-medium">
+             {{ isTranscribing() ? '正在转写语音...' : '正在录音...' }}
+           </p>
+        }
       </div>
     </section>
   `,
   styles: [`
-    .gate-actions {
-      width: 100%;
-      font-family: "Avenir Next", "Noto Sans SC", "PingFang SC", sans-serif;
-    }
-
-    .gate-actions__panel {
-      border-radius: 24px;
-      border: 1px solid rgba(255, 255, 255, 0.11);
-      background: linear-gradient(150deg, rgba(17, 20, 19, 0.82) 0%, rgba(24, 22, 18, 0.8) 100%);
-      padding: 16px;
-      backdrop-filter: blur(14px);
-      box-shadow:
-        0 18px 40px rgba(0, 0, 0, 0.28),
-        inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    }
-
-    .gate-actions__buttons {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-
-    .gate-action-btn {
-      position: relative;
-      overflow: hidden;
-      border-radius: 18px;
-      border: 1px solid rgba(255, 255, 255, 0.11);
-      min-height: 112px;
-      padding: 14px 10px 12px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      transition:
-        transform 0.18s ease,
-        border-color 0.2s ease,
-        background-color 0.2s ease,
-        box-shadow 0.25s ease,
-        color 0.2s ease;
-      cursor: pointer;
-      color: rgba(237, 241, 236, 0.84);
-      background: rgba(255, 255, 255, 0.03);
-    }
-
-    .gate-action-btn::before {
-      content: '';
-      position: absolute;
-      inset: -30% 15% auto;
-      height: 60%;
-      background: radial-gradient(closest-side, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0));
-      pointer-events: none;
-      opacity: 0.4;
-    }
-
-    .gate-action-btn:hover:not(:disabled) {
-      transform: translateY(-2px);
-      border-color: rgba(255, 255, 255, 0.22);
-    }
-
-    .gate-action-btn:active:not(:disabled) {
-      transform: translateY(0) scale(0.97);
-    }
-
-    .gate-action-btn:focus-visible {
-      outline: none;
-      box-shadow: 0 0 0 2px rgba(246, 187, 122, 0.28);
-    }
-
-    .gate-action-btn:disabled {
-      cursor: not-allowed;
-      opacity: 0.62;
-    }
-
-    .gate-action-btn__glyph {
-      font-size: 1.45rem;
-      line-height: 1;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-    }
-
-    .gate-action-btn__text {
-      font-size: 0.84rem;
-      line-height: 1.1;
-      font-weight: 700;
-      letter-spacing: 0.03em;
-    }
-
-    .gate-action-btn__sub {
-      font-size: 0.68rem;
-      line-height: 1.2;
-      color: rgba(237, 241, 236, 0.56);
-      letter-spacing: 0.02em;
-      text-align: center;
-    }
-
-    .gate-action-btn--read {
-      background: linear-gradient(155deg, rgba(53, 67, 83, 0.25), rgba(28, 35, 47, 0.28));
-      border-color: rgba(119, 150, 190, 0.2);
-    }
-
-    .gate-action-btn--read:hover:not(:disabled) {
-      box-shadow: 0 10px 22px rgba(52, 83, 114, 0.25);
-      color: rgba(225, 239, 255, 0.96);
-    }
-
-    .gate-action-btn--complete {
-      background: linear-gradient(160deg, rgba(231, 236, 227, 0.95), rgba(211, 219, 206, 0.92));
-      border-color: rgba(255, 255, 255, 0.55);
-      color: rgba(26, 36, 31, 0.9);
-    }
-
-    .gate-action-btn--complete .gate-action-btn__sub {
-      color: rgba(31, 41, 55, 0.48);
-    }
-
-    .gate-action-btn--complete:hover:not(:disabled) {
-      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.18);
-      color: rgba(16, 24, 18, 0.96);
-    }
-
-    .gate-actions__quick {
-      margin-top: 12px;
-      border-radius: 18px;
-      border: 1px solid rgba(255, 255, 255, 0.11);
-      background: rgba(7, 9, 10, 0.38);
-      padding: 12px;
-    }
-
-    .gate-actions__quick-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-
-    .gate-actions__quick-title {
-      font-size: 0.78rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: rgba(244, 247, 243, 0.82);
-      font-weight: 700;
-    }
-
-    .gate-actions__quick-hint {
-      font-size: 0.68rem;
-      color: rgba(244, 247, 243, 0.5);
-    }
-
-    .gate-actions__quick-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .gate-actions__input {
-      width: 100%;
-      flex: 1;
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: rgba(255, 255, 255, 0.08);
-      color: rgba(244, 247, 243, 0.92);
-      font-size: 0.9rem;
-      line-height: 1.2;
-      padding: 11px 12px;
-      outline: none;
-      transition: border-color 0.2s ease, background-color 0.2s ease;
-    }
-
-    .gate-actions__input::placeholder {
-      color: rgba(244, 247, 243, 0.42);
-    }
-
-    .gate-actions__input:focus {
-      border-color: rgba(248, 188, 120, 0.55);
-      background: rgba(255, 255, 255, 0.12);
-    }
-
-    .gate-actions__input:disabled {
-      opacity: 0.66;
-      cursor: not-allowed;
-    }
-
-    .gate-actions__mic {
-      width: 42px;
-      height: 42px;
-      border-radius: 9999px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      background: rgba(255, 255, 255, 0.07);
-      color: rgba(244, 247, 243, 0.92);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      flex: 0 0 auto;
-      transition: all 0.18s ease;
-    }
-
-    .gate-actions__mic:hover:not(:disabled) {
-      border-color: rgba(248, 188, 120, 0.44);
-      transform: translateY(-1px);
-      background: rgba(255, 255, 255, 0.12);
-    }
-
-    .gate-actions__mic:focus-visible {
-      outline: none;
-      box-shadow: 0 0 0 2px rgba(246, 187, 122, 0.25);
-    }
-
-    .gate-actions__mic:disabled {
-      opacity: 0.75;
-      cursor: wait;
-    }
-
-    .gate-actions__mic--recording {
-      border-color: rgba(254, 133, 133, 0.45);
-      background: rgba(127, 29, 29, 0.5);
-      box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.15);
-      animation: gate-mic-pulse 1.2s ease-in-out infinite;
-    }
-
-    .gate-actions__mic--transcribing {
-      border-color: rgba(129, 140, 248, 0.45);
-      background: rgba(67, 56, 202, 0.34);
-    }
-
-    .gate-actions__mic-icon {
-      font-size: 1.05rem;
-      line-height: 1;
-    }
-
-    .gate-actions__mic-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 9999px;
-      background: #fecaca;
-      box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.18);
-    }
-
-    .gate-actions__mic-spinner {
-      width: 15px;
-      height: 15px;
-      border-radius: 9999px;
-      border: 2px solid rgba(255, 255, 255, 0.22);
-      border-top-color: rgba(255, 255, 255, 0.9);
-      animation: gate-spin 0.9s linear infinite;
-    }
-
-    .gate-actions__helper {
-      margin-top: 8px;
-      font-size: 0.72rem;
-      color: rgba(244, 247, 243, 0.62);
-      letter-spacing: 0.01em;
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions {
-      font-family: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", sans-serif;
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__panel {
-      border-color: rgba(145, 116, 75, 0.24);
-      background: linear-gradient(162deg, rgba(243, 235, 216, 0.9) 0%, rgba(236, 224, 197, 0.88) 100%);
-      box-shadow:
-        0 18px 42px rgba(115, 86, 46, 0.17),
-        inset 0 1px 0 rgba(255, 255, 255, 0.86);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn {
-      color: rgba(69, 52, 30, 0.86);
-      border-color: rgba(135, 102, 59, 0.2);
-      background: rgba(255, 255, 255, 0.46);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn::before {
-      background: radial-gradient(closest-side, rgba(172, 134, 84, 0.2), rgba(172, 134, 84, 0));
-      opacity: 0.52;
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn__sub {
-      color: rgba(88, 67, 41, 0.62);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn--read {
-      background: linear-gradient(158deg, rgba(220, 229, 236, 0.7), rgba(209, 220, 230, 0.66));
-      border-color: rgba(96, 121, 151, 0.24);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn--read:hover:not(:disabled) {
-      box-shadow: 0 10px 22px rgba(78, 108, 138, 0.19);
-      color: rgba(44, 64, 84, 0.95);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn--complete {
-      background: linear-gradient(160deg, rgba(248, 245, 234, 0.96), rgba(236, 228, 208, 0.92));
-      border-color: rgba(149, 115, 72, 0.3);
-      color: rgba(53, 43, 28, 0.9);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn--complete .gate-action-btn__sub {
-      color: rgba(95, 75, 48, 0.58);
-    }
-
-    :host-context(.gate-theme--paper) .gate-action-btn--complete:hover:not(:disabled) {
-      box-shadow: 0 12px 24px rgba(115, 86, 46, 0.17);
-      color: rgba(43, 33, 20, 0.98);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__quick {
-      border-color: rgba(145, 116, 75, 0.22);
-      background: rgba(255, 253, 248, 0.58);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__quick-title {
-      color: rgba(80, 61, 36, 0.86);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__quick-hint {
-      color: rgba(90, 70, 43, 0.58);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__input {
-      border-color: rgba(145, 116, 75, 0.22);
-      background: rgba(255, 255, 255, 0.76);
-      color: rgba(54, 40, 24, 0.9);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__input::placeholder {
-      color: rgba(96, 74, 46, 0.48);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__input:focus {
-      border-color: rgba(185, 133, 72, 0.6);
-      background: rgba(255, 255, 255, 0.88);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__mic {
-      border-color: rgba(145, 116, 75, 0.24);
-      background: rgba(255, 255, 255, 0.72);
-      color: rgba(69, 52, 30, 0.85);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__mic:hover:not(:disabled) {
-      border-color: rgba(185, 133, 72, 0.52);
-      background: rgba(255, 255, 255, 0.9);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__mic--recording {
-      border-color: rgba(221, 108, 108, 0.45);
-      background: rgba(203, 75, 75, 0.2);
-      box-shadow: 0 0 0 6px rgba(203, 75, 75, 0.14);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__mic--transcribing {
-      border-color: rgba(107, 115, 210, 0.4);
-      background: rgba(107, 115, 210, 0.2);
-    }
-
-    :host-context(.gate-theme--paper) .gate-actions__helper {
-      color: rgba(86, 67, 40, 0.66);
-    }
-
-    @keyframes gate-mic-pulse {
-      0%,
-      100% {
-        transform: scale(1);
-      }
-      50% {
-        transform: scale(1.06);
-      }
-    }
-
-    @keyframes gate-spin {
-      from {
-        transform: rotate(0deg);
-      }
-      to {
-        transform: rotate(360deg);
-      }
-    }
-
-    @media (max-width: 640px) {
-      .gate-actions__panel {
-        padding: 12px;
-        border-radius: 20px;
-      }
-
-      .gate-actions__buttons {
-        gap: 8px;
-      }
-
-      .gate-action-btn {
-        min-height: 102px;
-        border-radius: 15px;
-      }
-
-      .gate-action-btn__glyph {
-        font-size: 1.3rem;
-      }
-
-      .gate-action-btn__text {
-        font-size: 0.8rem;
-      }
-
-      .gate-action-btn__sub {
-        font-size: 0.64rem;
-      }
-
-      .gate-actions__quick-head {
-        flex-direction: column;
-        align-items: flex-start;
-        margin-bottom: 8px;
-      }
-
-      .gate-actions__quick-hint {
-        font-size: 0.64rem;
-      }
-
-      .gate-actions__helper {
-        font-size: 0.68rem;
-      }
+    :host {
+      display: block;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class GateActionsComponent {
-  private gateService = inject(GateService);
-  private toast = inject(ToastService);
-  private blackBoxService = inject(BlackBoxService);
-  private speechService = inject(SpeechToTextService);
-  private readonly logger = inject(LoggerService);
+  // 注入服务
+  gateService = inject(GateService);
+  toast = inject(ToastService);
+  blackBoxService = inject(BlackBoxService);
+  speechService = inject(SpeechToTextService);
+  logger = inject(LoggerService);
 
-  // 动画期间禁用按钮
-  readonly isProcessing = computed(() =>
-    this.gateService.cardAnimation() !== 'idle'
-  );
+  // 状态信号
+  isProcessing = this.gateService.isProcessing; // 比如正在提交已读/完成
+  canSnooze = this.gateService.canSnooze; // 是否允许推迟
 
-  // 快速录入文本
-  readonly quickInputText = signal('');
+  // 快速录入相关
+  quickInputText = signal('');
+  
+  // 直接使用 Service 状态，保持全局一致
+  isRecording = this.speechService.isRecording;
+  isTranscribing = this.speechService.isTranscribing;
+  
+  speechSupported = signal(this.speechService.isSupported());
 
-  // 语音录入状态
-  readonly isRecording = this.speechService.isRecording;
-  readonly isTranscribing = this.speechService.isTranscribing;
-  readonly speechSupported = this.speechService.isSupported;
+  markAsRead() {
+    this.gateService.markAsRead();
+  }
 
-  /**
-   * 标记为已读
-   */
-  markAsRead(): void {
-    const result = this.gateService.markAsRead();
-    if (result.ok) {
-      // 可选：显示反馈
+  markAsCompleted() {
+    this.gateService.markAsCompleted();
+  }
+  
+  snooze() {
+    if (this.canSnooze()) {
+      this.gateService.snooze();
     }
   }
 
-  /**
-   * 标记为完成
-   */
-  markAsCompleted(): void {
-    const result = this.gateService.markAsCompleted();
-    if (result.ok) {
-      // 可选：显示反馈
-    }
-  }
+  // --- 快速录入逻辑 ---
 
-  /**
-   * 提交快速录入
-   */
-  submitQuickInput(): void {
+  async submitQuickInput() {
     const text = this.quickInputText().trim();
     if (!text) return;
 
-    const result = this.blackBoxService.create({ content: text });
+    // Use BlackBoxService.create to add entry
+    const result = this.blackBoxService.create({
+      content: text
+    });
+
     if (result.ok) {
-      this.quickInputText.set('');
-      this.toast.success('已记录', '想法已添加到黑匣子');
+        this.logger.info('Quick input submitted:', text);
+        this.quickInputText.set('');
+        this.toast.show({ message: '已记录', type: 'success' });
     } else {
-      this.toast.error('录入失败', result.error.message);
+        this.logger.error('Failed to submit quick input', result.error);
+        this.toast.show({ message: result.error.message || '记录失败', type: 'error' });
     }
   }
 
-  /**
-   * 开始语音录入
-   */
-  startRecording(event: Event): void {
-    event.preventDefault(); // 阻止触摸事件冒泡
-    this.speechService.startRecording();
+  // --- 语音逻辑 (简化版，复用现有服务) ---
+
+  startRecording(event: Event) {
+    if (event.type === 'keydown' && (event as KeyboardEvent).repeat) return;
+    event.preventDefault();
+
+    if (this.isTranscribing()) return;
+
+    // Service handles state update
+    this.speechService.startRecording().catch(err => {
+      this.logger.error('Failed to start recording', err);
+      this.toast.show({ message: '无法启动录音', type: 'error' });
+    });
   }
 
-  /**
-   * 停止语音录入并转写
-   */
-  async stopRecording(): Promise<void> {
+  async stopRecording() {
     if (!this.isRecording()) return;
-
+    
+    // Service handles state update
     try {
       const text = await this.speechService.stopAndTranscribe();
-      if (text && text.trim()) {
-        // 直接创建条目
-        const result = this.blackBoxService.create({ content: text.trim() });
-        if (result.ok) {
-          this.toast.success('已记录', '语音已转写并添加到黑匣子');
-        } else {
-          // 转写成功但创建失败，将文本放入输入框
-          this.quickInputText.set(text.trim());
-          this.toast.warning('创建失败', '请手动提交');
-        }
+      if (text) {
+        // 追加到输入框
+        const current = this.quickInputText();
+        this.quickInputText.set(current ? current + ' ' + text : text);
       }
-    } catch (error) {
-      // 记录错误便于排查
-      this.logger.error('GateActions', '语音转写失败', error);
-      this.toast.error('语音转写失败', '请重试或手动输入');
+    } catch (err) {
+      this.logger.error('Transcription failed', err);
+      // Service usually handles toast for errors, but we can add specific fallback
     }
   }
 }
