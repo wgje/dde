@@ -1,0 +1,46 @@
+{
+  "mode": "local",
+  "shard": "999/999",
+  "strategy": "mod",
+  "discoveredFiles": 104,
+  "effectiveFiles": 102,
+  "quarantineExcludedFiles": 2,
+  "shardFiles": 0,
+  "shardEstimatedWeightMs": 0,
+  "maxProcs": 1,
+  "scheduler": "fifo",
+  "lptRequested": true,
+  "lptEnabled": false,
+  "lptDisabledReason": "baseline_generated_at_missing",
+  "baselineAgeHours": null,
+  "includeQuarantine": false,
+  "quarantine": {
+    "path": "scripts/test-quarantine.json",
+    "loaded": true,
+    "entries": 2
+  },
+  "durationBaseline": {
+    "path": ".tmp/test-opt/baseline-missing-generatedAt.json",
+    "loaded": true,
+    "schemaVersion": 2,
+    "generatedAt": null,
+    "laneEntries": 0,
+    "fileEntries": 20
+  },
+  "timingInput": {
+    "requestedPaths": [],
+    "loadedPaths": [],
+    "fileEntries": 0
+  },
+  "lanes": [
+    {
+      "laneName": "lane_node_minimal",
+      "files": 0,
+      "exitCode": 0,
+      "durationMs": 0,
+      "segments": []
+    }
+  ],
+  "durationMs": 0,
+  "createdAt": "2026-02-15T14:01:15.255Z"
+}

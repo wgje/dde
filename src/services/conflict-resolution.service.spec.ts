@@ -19,6 +19,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { BlackBoxSyncService } from './black-box-sync.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { Project, Task, Connection } from '../models';
 
@@ -79,6 +80,10 @@ const mockChangeTrackerService = {
   unlockTaskField: vi.fn(),
   clearProjectFieldLocks: vi.fn(),
   isTaskFieldLocked: vi.fn().mockReturnValue(false),
+};
+
+const mockBlackBoxSyncService = {
+  pullChanges: vi.fn(),
 };
 
 // ========== 辅助函数 ==========
@@ -145,6 +150,7 @@ describe('ConflictResolutionService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+        { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
       ],
     });
 

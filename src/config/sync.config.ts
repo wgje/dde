@@ -3,14 +3,16 @@
 // 包含数据同步、离线缓存、冲突处理、请求限流相关常量
 // ============================================
 
+import { FEATURE_FLAGS } from './feature-flags.config';
+
 /**
  * 同步配置
- * 
+ *
  * 保守模式设计理念：优先保证数据不丢失，降低实时性
  * - 较长的防抖延迟，避免频繁同步导致冲突
  * - 本地优先，云端作为备份
  * - 永不主动丢弃用户数据
- * 
+ *
  * 【流量优化】2024-12-31
  * - 默认禁用 Realtime，改用轮询
  * - 字段筛选替代 SELECT *
@@ -64,9 +66,10 @@ export const SYNC_CONFIG = {
    * 是否启用 Realtime 订阅
    * 【流量优化】默认禁用，改用轮询节省 WebSocket 流量
    * 对于个人 PWA，轮询足够且更节省流量
+   *
+   * 【统一数据源】直接引用 FEATURE_FLAGS，消除双源不一致风险
    */
-  /** @see FEATURE_FLAGS.REALTIME_ENABLED — 高层功能门控 */
-  REALTIME_ENABLED: false,
+  get REALTIME_ENABLED(): boolean { return FEATURE_FLAGS.REALTIME_ENABLED; },
   /** 
    * 轮询间隔（毫秒）- 替代 Realtime 的轮询频率
    * 【流量优化 2026-01-12】从 30s 增加到 5 分钟
@@ -92,15 +95,22 @@ export const SYNC_CONFIG = {
    * - true: 使用 updated_at 增量拉取，仅同步变更数据
    * - false: 使用全量拉取（当前默认，待验证后切换）
    * @see docs/plan_save.md Phase 2
+   *
+   * 【统一数据源】直接引用 FEATURE_FLAGS，消除双源不一致风险
    */
-  /** @see FEATURE_FLAGS.INCREMENTAL_SYNC_ENABLED — 高层功能门控 */
-  DELTA_SYNC_ENABLED: false,
+  get DELTA_SYNC_ENABLED(): boolean { return FEATURE_FLAGS.INCREMENTAL_SYNC_ENABLED; },
   /** Delta 游标安全回看窗口（毫秒），抵御时钟漂移/读已提交边界 */
   CURSOR_SAFETY_LOOKBACK_MS: 30_000,
   /** 脏字段保护窗口（毫秒），超过窗口后允许远端合法更新覆盖 */
   DIRTY_PROTECTION_WINDOW_MS: 10 * 60 * 1000,
   /** Tombstone 本地保留时长（毫秒） */
   TOMBSTONE_RETENTION_MS: 30 * 24 * 60 * 60 * 1000,
+  /**
+   * 黑匣子拉取新鲜度窗口（毫秒）
+   * 在此窗口内重复调用 pullChanges() 会被跳过，防止多处并发触发产生重复请求
+   * 【性能优化 2026-02-14】解决登录后 black_box_entries 重复拉取问题
+   */
+  BLACKBOX_PULL_FRESHNESS_WINDOW: 30_000,
 } as const;
 
 /**
@@ -143,16 +153,23 @@ export const FIELD_SELECT_CONFIG = {
   /** 
    * 任务列表字段
    * 【P0 修复】必须包含 content，否则同步时会丢失任务内容
+   * 【P0-1 修复】必须包含 attachments，否则增量同步会清空附件列表
    */
-  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id',
+  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments',
   /** 任务详情字段（包含 content 和 attachments） */
   TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments',
+  /** 任务完整字段（用于全量加载，替代 select('*')） */
+  TASK_FULL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,created_at,project_id,priority,due_date,tags',
   /** 连接字段 */
   CONNECTION_FIELDS: 'id,source_id,target_id,title,description,deleted_at,updated_at',
+  /** 连接完整字段（用于全量加载，替代 select('*')） */
+  CONNECTION_FULL_FIELDS: 'id,project_id,source_id,target_id,title,description,deleted_at,updated_at',
   /** 项目列表字段 */
   PROJECT_LIST_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id',
+  /** 项目完整字段（用于全量加载，替代 select('*')） */
+  PROJECT_FULL_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id,migrated_to_v2',
   /** Tombstone 字段 */
-  TOMBSTONE_FIELDS: 'task_id',
+  TOMBSTONE_FIELDS: 'task_id,deleted_at,project_id',
 } as const;
 
 /**
@@ -384,10 +401,10 @@ export const INDEXEDDB_HEALTH_CONFIG = {
   REQUIRED_TASK_FIELDS: ['id', 'title'] as const,
   
   /** 项目必填字段 */
-  REQUIRED_PROJECT_FIELDS: ['id', 'name'] as const,
-  
+  REQUIRED_PROJECT_FIELDS: ['id', 'title'] as const,
+
   /** 连接必填字段 */
-  REQUIRED_CONNECTION_FIELDS: ['id', 'source', 'target'] as const,
+  REQUIRED_CONNECTION_FIELDS: ['id', 'source_id', 'target_id'] as const,
 } as const;
 
 /**

@@ -22,6 +22,7 @@ import {
 import { ExportData, EXPORT_CONFIG } from './export.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { LayoutService } from './layout.service';
 import { Project, Task, Connection } from '../models';
 
 describe('ImportService', () => {
@@ -43,6 +44,10 @@ describe('ImportService', () => {
     error: vi.fn(),
     warning: vi.fn(),
   };
+
+  const mockLayoutService = {
+    validateAndFixTree: vi.fn((project: Project) => ({ project, issues: [] })),
+  };
   
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,6 +56,7 @@ describe('ImportService', () => {
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
+        { provide: LayoutService, useValue: mockLayoutService },
       ],
     });
     

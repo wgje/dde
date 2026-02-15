@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-02-15T00:00:00.000Z",
+  "tasks": {},
+  "files": {
+    "src/a.spec.ts": 1000
+  },
+  "laneAverages": {},
+  "quarantine": []
+}

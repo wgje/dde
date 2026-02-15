@@ -153,10 +153,51 @@ export interface Database {
         Args: { p_project_id: string };
         Returns: Json;
       };
+      /** 获取单项目聚合同步水位 */
+      get_project_sync_watermark: {
+        Args: { p_project_id: string };
+        Returns: string | null;
+      };
+      /** 获取当前项目访问性 + 项目域聚合水位 */
+      get_accessible_project_probe: {
+        Args: { p_project_id: string };
+        Returns: {
+          project_id: string;
+          accessible: boolean;
+          watermark: string | null;
+        }[];
+      };
+      /** 恢复链路聚合探测（activeProject + 项目/黑匣子水位） */
+      get_resume_recovery_probe: {
+        Args: { p_project_id?: string | null };
+        Returns: {
+          active_project_id: string | null;
+          active_accessible: boolean;
+          active_watermark: string | null;
+          projects_watermark: string | null;
+          blackbox_watermark: string | null;
+          server_now: string | null;
+        }[];
+      };
+      /** 获取黑匣子域聚合水位 */
+      get_black_box_sync_watermark: {
+        Args: Record<string, never>;
+        Returns: string | null;
+      };
+      /** 获取当前用户项目域聚合水位 */
+      get_user_projects_watermark: {
+        Args: Record<string, never>;
+        Returns: string | null;
+      };
       /** 获取用户项目元数据（增量同步） */
       get_user_projects_meta: {
         Args: { p_since_timestamp?: string };
         Returns: Json;
+      };
+      /** 列出指定水位后的项目头变更 */
+      list_project_heads_since: {
+        Args: { p_since?: string | null };
+        Returns: { project_id: string; updated_at: string; version: number }[];
       };
       /** 获取服务器时间（时钟同步） */
       get_server_time: {

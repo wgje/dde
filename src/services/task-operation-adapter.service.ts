@@ -39,9 +39,29 @@ export class TaskOperationAdapterService {
   private optimisticState = inject(OptimisticStateService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOpsAdapter');
+  private warmupPromise: Promise<void> | null = null;
 
   constructor() {
     // Callbacks eliminated: TaskOperationService now uses direct DI
+  }
+
+  /**
+   * 交互层预热（P1）
+   * 仅触发轻量依赖访问，不阻断业务操作。
+   */
+  async warmup(): Promise<void> {
+    if (this.warmupPromise) return this.warmupPromise;
+
+    this.warmupPromise = Promise.resolve().then(() => {
+      void this.projectState.activeProjectId();
+      void this.uiState.isEditing;
+      void this.syncCoordinator.hasPendingLocalChanges();
+      void this.undoService.clearHistory();
+    }).finally(() => {
+      this.warmupPromise = null;
+    });
+
+    return this.warmupPromise;
   }
   
   // ========== 公共方法 ==========

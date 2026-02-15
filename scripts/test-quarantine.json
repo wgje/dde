@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-02-15T13:44:28.969Z",
+  "updatedBy": "scripts/update-test-quarantine.cjs@v1",
+  "thresholds": {
+    "p95Ms": 1200,
+    "failureRate7d": 0.01,
+    "recoveryDays": 7,
+    "minSamples": 1
+  },
+  "files": [
+    "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+    "src/services/user-session.service.spec.ts"
+  ],
+  "entries": [
+    {
+      "file": "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+      "reason": "slow-or-flaky-lane",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 0,
+      "sampleCount": 0,
+      "failureSamples": 0
+    },
+    {
+      "file": "src/services/user-session.service.spec.ts",
+      "reason": "slow-or-flaky-lane",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 0,
+      "sampleCount": 0,
+      "failureSamples": 0
+    }
+  ],
+  "sources": {
+    "vitestReportsRequested": [],
+    "vitestReportsLoaded": [],
+    "failureStatsRequested": [],
+    "failureStatsLoaded": []
+  }
+}

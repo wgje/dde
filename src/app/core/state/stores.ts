@@ -9,10 +9,49 @@
  *
  * 性能优化：Map/Set 类型 signal 使用 { equal: () => false }
  * 允许原地修改后触发变更通知，避免每次更新都 O(n) 全量克隆
+ *
+ * 【2026-02-15 修复】在 bulk 操作中增加脏检查，避免数据未变化时
+ * 触发级联 computed/effect 风暴导致页面卡死
  */
 
 import { Injectable, signal, computed } from '@angular/core';
 import { Project, Task, Connection } from '../../../models';
+
+/**
+ * 比较两个 Task 是否在业务关键字段上相同
+ * 用于脏检查，避免无变化时触发 signal 通知
+ */
+function isTaskEqual(a: Task, b: Task): boolean {
+  return a.updatedAt === b.updatedAt
+    && a.content === b.content
+    && a.title === b.title
+    && a.stage === b.stage
+    && a.order === b.order
+    && a.x === b.x
+    && a.y === b.y
+    && a.rank === b.rank
+    && a.parentId === b.parentId
+    && a.deletedAt === b.deletedAt;
+}
+
+/**
+ * 比较两个 Project 是否在业务关键字段上相同
+ */
+function isProjectEqual(a: Project, b: Project): boolean {
+  return a.updatedAt === b.updatedAt
+    && a.name === b.name
+    && a.description === b.description;
+}
+
+/**
+ * 比较两个 Connection 是否在业务关键字段上相同
+ */
+function isConnectionEqual(a: Connection, b: Connection): boolean {
+  return a.source === b.source
+    && a.target === b.target
+    && a.description === b.description
+    && a.deletedAt === b.deletedAt;
+}
 
 /**
  * 任务状态 Store
@@ -51,8 +90,11 @@ export class TaskStore {
       .filter((t): t is Task => !!t);
   }
   
-  /** 设置任务（单个）- 原地修改，O(1) */
+  /** 设置任务（单个）- 原地修改，O(1)，含脏检查 */
   setTask(task: Task, projectId: string): void {
+    const existing = this.tasksMap().get(task.id);
+    // 脏检查：数据未变化时跳过 signal 通知
+    if (existing && isTaskEqual(existing, task)) return;
     this.tasksMap.update(map => { map.set(task.id, task); return map; });
     this.tasksByProject.update(map => {
       if (!map.has(projectId)) map.set(projectId, new Set());
@@ -86,14 +128,30 @@ export class TaskStore {
     this.tasksByProject.update(map => { map.get(projectId)?.delete(id); return map; });
   }
 
-  /** 批量更新任务 */
+  /** 批量更新任务 - 含脏检查（仅在有变化时触发 signal 更新） */
   bulkSetTasks(tasks: Task[], projectId: string): void {
-    this.tasksMap.update(map => { for (const t of tasks) map.set(t.id, t); return map; });
-    this.tasksByProject.update(map => {
-      const existing = map.get(projectId) ?? new Set<string>();
+    const map = this.tasksMap();
+    let hasChange = false;
+    for (const t of tasks) {
+      const existing = map.get(t.id);
+      if (!existing || !isTaskEqual(existing, t)) {
+        map.set(t.id, t);
+        hasChange = true;
+      }
+    }
+    // 仅在有实际变化时才触发 signal 通知，避免级联风暴
+    if (hasChange) {
+      this.tasksMap.update(m => m);
+    }
+    this.tasksByProject.update(indexMap => {
+      const existing = indexMap.get(projectId) ?? new Set<string>();
+      const prevSize = existing.size;
       for (const t of tasks) existing.add(t.id);
-      map.set(projectId, existing);
-      return map;
+      // 只有索引变化时才触发
+      if (existing.size !== prevSize) {
+        indexMap.set(projectId, existing);
+      }
+      return indexMap;
     });
   }
 
@@ -169,8 +227,10 @@ export class ProjectStore {
     return this.projectsMap().get(id);
   }
   
-  /** 设置项目 - 原地修改，O(1) */
+  /** 设置项目 - 原地修改，O(1)，含脏检查 */
   setProject(project: Project): void {
+    const existing = this.projectsMap().get(project.id);
+    if (existing && isProjectEqual(existing, project)) return;
     this.projectsMap.update(map => { map.set(project.id, project); return map; });
   }
 
@@ -194,9 +254,20 @@ export class ProjectStore {
     this.removeProject(id);
   }
 
-  /** 批量更新项目 */
+  /** 批量更新项目 - 含脏检查 */
   bulkSetProjects(projects: Project[]): void {
-    this.projectsMap.update(map => { for (const p of projects) map.set(p.id, p); return map; });
+    const map = this.projectsMap();
+    let hasChange = false;
+    for (const p of projects) {
+      const existing = map.get(p.id);
+      if (!existing || !isProjectEqual(existing, p)) {
+        map.set(p.id, p);
+        hasChange = true;
+      }
+    }
+    if (hasChange) {
+      this.projectsMap.update(m => m);
+    }
   }
 
   /** 批量删除项目 */
@@ -251,8 +322,10 @@ export class ConnectionStore {
       .filter((c): c is Connection => !!c);
   }
   
-  /** 设置连接 - 原地修改，O(1) */
+  /** 设置连接 - 原地修改，O(1)，含脏检查 */
   setConnection(connection: Connection, projectId: string): void {
+    const existing = this.connectionsMap().get(connection.id);
+    if (existing && isConnectionEqual(existing, connection)) return;
     this.connectionsMap.update(map => { map.set(connection.id, connection); return map; });
     this.connectionsByProject.update(map => {
       if (!map.has(projectId)) map.set(projectId, new Set());
@@ -276,14 +349,28 @@ export class ConnectionStore {
     this.connectionsByProject.update(map => { map.get(projectId)?.delete(id); return map; });
   }
 
-  /** 批量更新连接 */
+  /** 批量更新连接 - 含脏检查 */
   bulkSetConnections(connections: Connection[], projectId: string): void {
-    this.connectionsMap.update(map => { for (const c of connections) map.set(c.id, c); return map; });
-    this.connectionsByProject.update(map => {
-      const existing = map.get(projectId) ?? new Set<string>();
+    const map = this.connectionsMap();
+    let hasChange = false;
+    for (const c of connections) {
+      const existing = map.get(c.id);
+      if (!existing || !isConnectionEqual(existing, c)) {
+        map.set(c.id, c);
+        hasChange = true;
+      }
+    }
+    if (hasChange) {
+      this.connectionsMap.update(m => m);
+    }
+    this.connectionsByProject.update(indexMap => {
+      const existing = indexMap.get(projectId) ?? new Set<string>();
+      const prevSize = existing.size;
       for (const c of connections) existing.add(c.id);
-      map.set(projectId, existing);
-      return map;
+      if (existing.size !== prevSize) {
+        indexMap.set(projectId, existing);
+      }
+      return indexMap;
     });
   }
 

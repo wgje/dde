@@ -24,6 +24,7 @@ describe('AuthService', () => {
   let mockSupabaseClient: {
     isConfigured: boolean;
     client: ReturnType<typeof vi.fn>;
+    clientAsync: ReturnType<typeof vi.fn>;
     getSession: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
   };
@@ -39,7 +40,7 @@ describe('AuthService', () => {
     }),
   };
   
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     authStateCallback = null;
     mockUnsubscribe = vi.fn();
@@ -49,24 +50,27 @@ describe('AuthService', () => {
       warning: vi.fn(),
     };
     
+    const authClient = {
+      auth: {
+        onAuthStateChange: vi.fn((callback: (event: string, session: unknown) => void) => {
+          authStateCallback = callback;
+          return {
+            data: {
+              subscription: { unsubscribe: mockUnsubscribe }
+            }
+          };
+        }),
+        getSession: vi.fn().mockResolvedValue({
+          data: { session: null },
+          error: null
+        }),
+      }
+    };
+
     mockSupabaseClient = {
       isConfigured: true,
-      client: vi.fn().mockReturnValue({
-        auth: {
-          onAuthStateChange: vi.fn((callback: (event: string, session: unknown) => void) => {
-            authStateCallback = callback;
-            return {
-              data: {
-                subscription: { unsubscribe: mockUnsubscribe }
-              }
-            };
-          }),
-          getSession: vi.fn().mockResolvedValue({
-            data: { session: null },
-            error: null
-          }),
-        }
-      }),
+      client: vi.fn().mockReturnValue(authClient),
+      clientAsync: vi.fn().mockResolvedValue(authClient),
       getSession: vi.fn().mockResolvedValue({
         data: { session: null },
         error: null
@@ -94,6 +98,8 @@ describe('AuthService', () => {
     });
     
     service = runInInjectionContext(injector, () => new AuthService());
+    await Promise.resolve();
+    await Promise.resolve();
   });
   
   afterEach(() => {
@@ -102,7 +108,7 @@ describe('AuthService', () => {
   
   describe('onAuthStateChange 监听', () => {
     it('应该注册认证状态变更监听器', () => {
-      expect(mockSupabaseClient.client).toHaveBeenCalled();
+      expect(mockSupabaseClient.clientAsync).toHaveBeenCalled();
       expect(authStateCallback).toBeDefined();
     });
     

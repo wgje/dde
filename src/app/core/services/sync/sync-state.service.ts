@@ -44,8 +44,6 @@ export interface ConflictData {
   local: Project;
   /** 远程版本 */
   remote: Project;
-  /** 远程数据（兼容旧接口别名） */
-  remoteData?: Project;
   /** 项目 ID */
   projectId: string;
 }

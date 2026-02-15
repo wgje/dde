@@ -1,0 +1,15 @@
+{
+  "shard": "1/4",
+  "lanes": [
+    {
+      "laneName": "lane_node_minimal",
+      "durationMs": 9000,
+      "segments": [{ "segmentName": "shared", "durationMs": 9000 }]
+    },
+    {
+      "laneName": "lane_browser_minimal",
+      "durationMs": 8000,
+      "segments": [{ "segmentName": "shared", "durationMs": 8000 }]
+    }
+  ]
+}

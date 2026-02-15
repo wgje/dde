@@ -1,0 +1,61 @@
+{
+  "command": "npm run test:run -- '--silent=passed-only'",
+  "rounds": 10,
+  "failures": 0,
+  "medianMs": 19784,
+  "minMs": 19052,
+  "maxMs": 24542,
+  "samples": [
+    {
+      "round": 1,
+      "exitCode": 0,
+      "durationMs": 19902
+    },
+    {
+      "round": 2,
+      "exitCode": 0,
+      "durationMs": 20872
+    },
+    {
+      "round": 3,
+      "exitCode": 0,
+      "durationMs": 19052
+    },
+    {
+      "round": 4,
+      "exitCode": 0,
+      "durationMs": 24542
+    },
+    {
+      "round": 5,
+      "exitCode": 0,
+      "durationMs": 19310
+    },
+    {
+      "round": 6,
+      "exitCode": 0,
+      "durationMs": 19561
+    },
+    {
+      "round": 7,
+      "exitCode": 0,
+      "durationMs": 19370
+    },
+    {
+      "round": 8,
+      "exitCode": 0,
+      "durationMs": 20175
+    },
+    {
+      "round": 9,
+      "exitCode": 0,
+      "durationMs": 19665
+    },
+    {
+      "round": 10,
+      "exitCode": 0,
+      "durationMs": 20736
+    }
+  ],
+  "createdAt": "2026-02-15T10:06:10.880Z"
+}

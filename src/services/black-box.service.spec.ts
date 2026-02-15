@@ -9,6 +9,7 @@ import { BlackBoxService } from './black-box.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
 import { ProjectStateService } from './project-state.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { 
   setBlackBoxEntries 
 } from '../state/focus-stores';
@@ -21,6 +22,7 @@ describe('BlackBoxService', () => {
   };
   let mockAuthService: {
     currentUserId: ReturnType<typeof vi.fn>;
+    isConfigured: boolean;
   };
   let mockProjectStateService: {
     activeProjectId: ReturnType<typeof signal>;
@@ -29,6 +31,7 @@ describe('BlackBoxService', () => {
   beforeEach(() => {
     // 重置状态
     setBlackBoxEntries([]);
+    localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
 
     mockSyncService = {
       scheduleSync: vi.fn(),
@@ -36,7 +39,8 @@ describe('BlackBoxService', () => {
     };
 
     mockAuthService = {
-      currentUserId: vi.fn().mockReturnValue('test-user')
+      currentUserId: vi.fn().mockReturnValue('test-user'),
+      isConfigured: true
     };
 
     mockProjectStateService = {
@@ -72,6 +76,30 @@ describe('BlackBoxService', () => {
       const result = service.create({ content: '测试内容' });
 
       expect(result.ok).toBe(false);
+    });
+
+    it('本地模式下无用户时应该回退到 local-user', () => {
+      mockAuthService.currentUserId.mockReturnValue(null);
+      localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
+
+      const result = service.create({ content: '本地模式条目' });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.userId).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      }
+    });
+
+    it('未配置 Supabase 时无用户也应该回退到 local-user', () => {
+      mockAuthService.currentUserId.mockReturnValue(null);
+      mockAuthService.isConfigured = false;
+
+      const result = service.create({ content: '开发模式条目' });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.userId).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      }
     });
 
     it('应该调用同步服务', () => {

@@ -5,6 +5,8 @@ export default defineConfig({
   ...base,
   test: {
     ...base.test,
+    // 显式固定组件套件默认 worker，避免 TestBed 初始化重复放大。
+    maxWorkers: 1,
     // 组件/Angular TestBed 类单测：尽量单线程，减少重复的 Angular/zone 初始化
     include: [
       'src/app/**/components/**/*.spec.ts',

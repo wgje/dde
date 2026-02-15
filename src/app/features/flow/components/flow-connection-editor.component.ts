@@ -1,4 +1,4 @@
-import { Component, input, output, signal, ElementRef, ViewChild, computed, OnInit, OnDestroy, HostListener, effect, inject } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, signal, ElementRef, ViewChild, computed, OnInit, OnDestroy, HostListener, effect, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Task } from '../../../../models';
@@ -34,6 +34,7 @@ export interface ConnectionTasks {
 @Component({
   selector: 'app-flow-connection-editor',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, FormsModule, SafeMarkdownPipe],
   template: `
     @if (data(); as connData) {

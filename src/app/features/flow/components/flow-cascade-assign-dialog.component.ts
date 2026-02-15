@@ -1,4 +1,4 @@
-import { Component, input, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 
@@ -25,6 +25,7 @@ export interface CascadeAssignDialogData {
 @Component({
   selector: 'app-flow-cascade-assign-dialog',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (data(); as dialog) {

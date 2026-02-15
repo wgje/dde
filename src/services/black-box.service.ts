@@ -7,9 +7,9 @@
 
 import { Injectable, inject } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
-import { Result, success, failure, ErrorCodes } from '../utils/result';
-import { 
-  blackBoxEntriesMap, 
+import { Result, success, failure, ErrorCodes, OperationError } from '../utils/result';
+import {
+  blackBoxEntriesMap,
   blackBoxEntriesGroupedByDate,
   unreadBlackBoxCount,
   updateBlackBoxEntry,
@@ -19,12 +19,7 @@ import {
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
 import { ProjectStateService } from './project-state.service';
-
-interface OperationError {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-}
+import { AUTH_CONFIG } from '../config/auth.config';
 
 @Injectable({
   providedIn: 'root'
@@ -54,7 +49,7 @@ export class BlackBoxService {
    * 遵循 Offline-first：本地写入 → UI 更新 → 后台推送
    */
   create(data: Partial<BlackBoxEntry>): Result<BlackBoxEntry, OperationError> {
-    const userId = this.auth.currentUserId();
+    const userId = this.resolveEffectiveUserId();
     const projectId = this.projectState.activeProjectId();
     
     if (!userId) {
@@ -89,6 +84,42 @@ export class BlackBoxService {
     this.syncService.scheduleSync(entry);
     
     return success(entry);
+  }
+
+  /**
+   * 解析当前有效用户 ID
+   * 优先登录用户；本地模式下回退到 LOCAL_MODE_USER_ID
+   */
+  private resolveEffectiveUserId(): string | null {
+    const currentUserId = this.auth.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    if (!this.auth.isConfigured) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    if (this.isLocalModeEnabled()) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    return null;
+  }
+
+  /**
+   * 判断是否启用本地模式
+   */
+  private isLocalModeEnabled(): boolean {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    try {
+      return localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true';
+    } catch {
+      return false;
+    }
   }
   
   /**
@@ -230,7 +261,7 @@ export class BlackBoxService {
    * 从服务器加载条目
    */
   async loadFromServer(): Promise<void> {
-    await this.syncService.pullChanges();
+    await this.syncService.pullChanges({ reason: 'manual' });
   }
   
   /**

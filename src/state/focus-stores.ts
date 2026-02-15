@@ -272,19 +272,9 @@ export const spotlightTask = signal<Task | null>(null);
 export const spotlightMode = signal<boolean>(false);
 
 /**
- * 兼容别名
- */
-export const isSpotlightMode = spotlightMode;
-
-/**
  * 聚光灯任务队列（预加载下几个任务）
  */
 export const spotlightQueue = signal<Task[]>([]);
-
-/**
- * 兼容别名
- */
-export const spotlightTaskQueue = spotlightQueue;
 
 // ============================================
 // 地质层状态

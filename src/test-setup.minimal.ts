@@ -7,6 +7,9 @@
  * @see docs/test-architecture-modernization-plan.md Section 2.1.2
  */
 
+// 纯测试环境仍有部分服务需要 JIT 注入器，显式引入编译器避免 "JIT compiler is not available"。
+import '@angular/compiler';
+
 // 导入全局 Mocks（Supabase/Sentry/浏览器 API）
 import './test-setup.mocks';
 
@@ -56,6 +59,15 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
     addEventListener: () => {},
     removeEventListener: () => {},
     dispatchEvent: () => true,
+  });
+}
+
+// confirm polyfill（happy-dom 的某些运行场景下不存在 confirm）。
+if (typeof window !== 'undefined' && typeof window.confirm !== 'function') {
+  Object.defineProperty(window, 'confirm', {
+    configurable: true,
+    writable: true,
+    value: () => true,
   });
 }
 

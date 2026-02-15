@@ -4,6 +4,7 @@ import 'zone.js/testing';
 import { mockSentryLazyLoaderService } from './test-setup.mocks';
 
 import { TestBed } from '@angular/core/testing';
+import { afterEach } from 'vitest';
 import { BrowserTestingModule, platformBrowserTesting } from '@angular/platform-browser/testing';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 
@@ -19,5 +20,14 @@ if (!g[globalKey]) {
     ]
   });
 }
+
+afterEach(() => {
+  // 服务套件也需要回收 TestBed，避免单 worker 模式下的跨文件状态干扰。
+  try {
+    TestBed.resetTestingModule();
+  } catch {
+    // noop
+  }
+});
 
 export { resetMocks, mockSentryLazyLoaderService } from './test-setup.mocks';

@@ -19,7 +19,8 @@ import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
-import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, AUTH_CONFIG } from '../../../../config';
+import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../../config/sync.config';
+import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -45,7 +46,7 @@ export class ProjectDataService {
   /**
    * 获取 Supabase 客户端
    */
-  private getSupabaseClient(): SupabaseClient | null {
+  private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
       this.logger.warn('无法获取 Supabase 客户端', failure);
@@ -53,7 +54,7 @@ export class ProjectDataService {
       return null;
     }
     try {
-      return this.supabase.client();
+      return await this.supabase.clientAsync();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
       this.logger.warn('无法获取 Supabase 客户端', {
@@ -74,7 +75,7 @@ export class ProjectDataService {
    * - 减少 ~70% 的网络往返时间
    */
   async loadFullProjectOptimized(projectId: string): Promise<Project | null> {
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) return null;
 
     try {
@@ -85,6 +86,32 @@ export class ProjectDataService {
       });
 
       if (error) {
+        // 【性能优化 2026-02-14】区分 Access Denied 与其他错误
+        // Access Denied（P0001）说明 projectId 无效或无权限，无需 fallback
+        const isAccessDenied = error.code === 'P0001' || error.message?.includes('Access denied');
+        if (isAccessDenied) {
+          this.logger.warn('项目访问被拒绝，跳过该项目（不走 fallback）', { projectId, errorCode: error.code });
+          // 【监控 2026-02-14】上报 RPC 400 Access Denied，用于 Sentry 告警
+          this.sentryLazyLoader.addBreadcrumb({
+            category: 'sync.rpc',
+            message: `RPC Access Denied: projectId=${projectId}`,
+            level: 'warning',
+            data: { projectId, errorCode: error.code },
+          });
+          this.sentryLazyLoader.captureMessage('RPC Access Denied (P0001, no fallback)', {
+            level: 'warning',
+            tags: {
+              operation: 'loadFullProjectOptimized',
+              classification: 'access_denied'
+            },
+            extra: {
+              projectId,
+              errorCode: error.code ?? 'P0001'
+            }
+          });
+          return null;
+        }
+        // 其他错误（网络、超时等）仍走 fallback 顺序加载
         this.logger.warn('RPC 调用失败，回退到顺序加载', { error: error.message });
         return this.loadFullProject(projectId);
       }
@@ -132,7 +159,7 @@ export class ProjectDataService {
    * 使用请求限流避免连接池耗尽
    */
   async loadFullProject(projectId: string): Promise<Project | null> {
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) return null;
     
     try {
@@ -165,10 +192,14 @@ export class ProjectDataService {
       const connectionsData = await this.throttle.execute(
         `connections:${projectId}`,
         async () => {
-          const { data } = await client
+          const { data, error } = await client
             .from('connections')
             .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
             .eq('project_id', projectId);
+          if (error) {
+            this.logger.error('连接查询失败', { projectId, error: error.message });
+            return [];
+          }
           return data || [];
         },
         { 
@@ -216,7 +247,7 @@ export class ProjectDataService {
       return [];
     }
 
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) return [];
     
     this.isLoadingRemote.set(true);
@@ -293,6 +324,221 @@ export class ProjectDataService {
    */
   async loadSingleProject(projectId: string): Promise<Project | null> {
     return this.loadFullProjectOptimized(projectId);
+  }
+
+  /**
+   * 获取项目同步水位（远端聚合最大更新时间）
+   *
+   * 用于恢复链路先判变更再决定是否拉取完整项目。
+   */
+  async getProjectSyncWatermark(projectId: string): Promise<string | null> {
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const { data, error } = await client.rpc('get_project_sync_watermark', {
+        p_project_id: projectId
+      });
+
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      if (typeof data === 'string') {
+        return data;
+      }
+
+      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+        return data[0];
+      }
+
+      return null;
+    } catch (e) {
+      this.logger.warn('获取项目同步水位失败', {
+        projectId,
+        error: supabaseErrorToError(e).message
+      });
+      // eslint-disable-next-line no-restricted-syntax -- 水位 RPC 失败时降级为慢路拉取，由调用方决定后续策略
+      return null;
+    }
+  }
+
+  /**
+   * 获取当前用户项目域聚合同步水位
+   */
+  async getUserProjectsWatermark(): Promise<string | null> {
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const { data, error } = await client.rpc('get_user_projects_watermark');
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      if (typeof data === 'string') {
+        return data;
+      }
+      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+        return data[0];
+      }
+      return null;
+    } catch (e) {
+      this.logger.warn('获取用户项目域同步水位失败', {
+        error: supabaseErrorToError(e).message
+      });
+      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时降级为全量拉取（null 触发 fallback）
+      return null;
+    }
+  }
+
+  /**
+   * 拉取给定水位之后发生变化的项目头信息
+   */
+  async listProjectHeadsSince(
+    watermark: string | null
+  ): Promise<Array<{ id: string; updatedAt: string; version: number }>> {
+    const client = await this.getSupabaseClient();
+    if (!client) return [];
+
+    try {
+      const { data, error } = await client.rpc('list_project_heads_since', {
+        p_since: watermark
+      });
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      const rows = Array.isArray(data) ? data : [];
+      return rows
+        .map((row) => ({
+          id: String((row as Record<string, unknown>)['project_id'] ?? ''),
+          updatedAt: String((row as Record<string, unknown>)['updated_at'] ?? ''),
+          version: Number((row as Record<string, unknown>)['version'] ?? 1),
+        }))
+        .filter((row) => !!row.id && !!row.updatedAt);
+    } catch (e) {
+      this.logger.warn('拉取项目头信息失败', {
+        watermark,
+        error: supabaseErrorToError(e).message
+      });
+      return [];
+    }
+  }
+
+  /**
+   * 获取当前 activeProject 的访问性与聚合水位
+   *
+   * 单次 RPC 完成“可访问性 + 是否有更新”探测，避免恢复链路多步串行请求。
+   */
+  async getAccessibleProjectProbe(projectId: string): Promise<{
+    projectId: string;
+    accessible: boolean;
+    watermark: string | null;
+  } | null> {
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const { data, error } = await client.rpc('get_accessible_project_probe', {
+        p_project_id: projectId
+      });
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row || typeof row !== 'object') {
+        return null;
+      }
+      const record = row as Record<string, unknown>;
+      return {
+        projectId: String(record['project_id'] ?? projectId),
+        accessible: Boolean(record['accessible']),
+        watermark: record['watermark'] ? String(record['watermark']) : null,
+      };
+    } catch (e) {
+      this.logger.warn('获取项目访问探测失败', {
+        projectId,
+        error: supabaseErrorToError(e).message
+      });
+      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时返回 null 触发调用方降级逻辑
+      return null;
+    }
+  }
+
+  /**
+   * 获取黑匣子域聚合同步水位（当前用户）
+   */
+  async getBlackBoxSyncWatermark(): Promise<string | null> {
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const { data, error } = await client.rpc('get_black_box_sync_watermark');
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      if (typeof data === 'string') {
+        return data;
+      }
+      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+        return data[0];
+      }
+      return null;
+    } catch (e) {
+      this.logger.warn('获取黑匣子同步水位失败', {
+        error: supabaseErrorToError(e).message
+      });
+      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时降级为明细拉取（null 触发 fallback）
+      return null;
+    }
+  }
+
+  /**
+   * 恢复链路聚合探测：一次 RPC 返回 activeProject + 项目域 + 黑匣子域水位
+   */
+  async getResumeRecoveryProbe(projectId?: string): Promise<{
+    activeProjectId: string | null;
+    activeAccessible: boolean;
+    activeWatermark: string | null;
+    projectsWatermark: string | null;
+    blackboxWatermark: string | null;
+    serverNow: string | null;
+  } | null> {
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const { data, error } = await client.rpc('get_resume_recovery_probe', {
+        p_project_id: projectId ?? null,
+      });
+      if (error) {
+        throw supabaseErrorToError(error);
+      }
+
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row || typeof row !== 'object') {
+        return null;
+      }
+      const record = row as Record<string, unknown>;
+      return {
+        activeProjectId: record['active_project_id'] ? String(record['active_project_id']) : null,
+        activeAccessible: Boolean(record['active_accessible']),
+        activeWatermark: record['active_watermark'] ? String(record['active_watermark']) : null,
+        projectsWatermark: record['projects_watermark'] ? String(record['projects_watermark']) : null,
+        blackboxWatermark: record['blackbox_watermark'] ? String(record['blackbox_watermark']) : null,
+        serverNow: record['server_now'] ? String(record['server_now']) : null,
+      };
+    } catch (e) {
+      this.logger.warn('恢复链路聚合探测失败，降级为分步探测', {
+        projectId,
+        error: supabaseErrorToError(e).message
+      });
+      // eslint-disable-next-line no-restricted-syntax -- 聚合 RPC 失败时降级为分步探测（null 触发调用方 fallback）
+      return null;
+    }
   }
   
   /**

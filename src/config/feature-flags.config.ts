@@ -10,6 +10,35 @@
 // 未来考虑：可通过 Supabase Edge Config 实现运行时动态开关
 // ============================================
 
+type RuntimeBootFlag =
+  | 'RESUME_INTERACTION_FIRST_V1'
+  | 'RESUME_WATERMARK_RPC_V1'
+  | 'RESUME_PULSE_DEDUP_V1'
+  | 'ROUTE_GUARD_LAZY_IMPORT_V1'
+  | 'WEB_VITALS_IDLE_BOOT_V2'
+  | 'FONT_AGGRESSIVE_DEFER_V2'
+  | 'SYNC_STATUS_DEFERRED_MOUNT_V1'
+  | 'PWA_PROMPT_DEFER_V2'
+  | 'RESUME_SESSION_SNAPSHOT_V1'
+  | 'USER_PROJECTS_WATERMARK_RPC_V1'
+  | 'RECOVERY_TICKET_DEDUP_V1'
+  | 'BLACKBOX_WATERMARK_PROBE_V1'
+  | 'WORKSPACE_SHELL_COMPOSITION_V3'
+  | 'RESUME_COMPOSITE_PROBE_RPC_V1'
+  | 'RESUME_METRICS_GATE_V1';
+
+function readRuntimeBooleanFlag(flag: RuntimeBootFlag, fallback: boolean): boolean {
+  if (typeof window === 'undefined') {
+    return fallback;
+  }
+
+  const bootFlags = (
+    window as Window & { __NANOFLOW_BOOT_FLAGS__?: Record<string, unknown> }
+  ).__NANOFLOW_BOOT_FLAGS__;
+  const runtimeValue = bootFlags?.[flag];
+  return typeof runtimeValue === 'boolean' ? runtimeValue : fallback;
+}
+
 /**
  * 特性开关
  * 
@@ -50,15 +79,14 @@ export const FEATURE_FLAGS = {
   // ==================== 同步功能 ====================
   /**
    * 是否启用 Realtime 订阅（替代轮询）
-   * @see SYNC_CONFIG.REALTIME_ENABLED — 运行时开关，两者必须保持一致
+   * SYNC_CONFIG.REALTIME_ENABLED 通过 getter 自动引用此值，无需手动保持一致
    */
   REALTIME_ENABLED: false, // 流量优化，默认使用轮询
   /**
    * 是否启用增量同步优化
-   * @see SYNC_CONFIG.DELTA_SYNC_ENABLED — 运行时开关，两者必须保持一致
-   * 此标志用于更高层的功能门控
+   * SYNC_CONFIG.DELTA_SYNC_ENABLED 通过 getter 自动引用此值，无需手动保持一致
    */
-  INCREMENTAL_SYNC_ENABLED: false, // 与 SYNC_CONFIG.DELTA_SYNC_ENABLED 保持一致
+  INCREMENTAL_SYNC_ENABLED: false,
   /** 同步成功语义：仅远端确认成功才视为成功 */
   SYNC_STRICT_SUCCESS_ENABLED: true,
   /** 队列耐久优先：禁用默认淘汰策略 */
@@ -71,6 +99,86 @@ export const FEATURE_FLAGS = {
   SYNC_UNIFIED_QUEUE_SEMANTICS_ENABLED: true,
   /** 离线快照使用 IndexedDB 替代 localStorage（缓解 5MB 上限） */
   OFFLINE_SNAPSHOT_IDB_ENABLED: false,
+
+  // ==================== PWA 生命周期与体验 ====================
+  /** 生命周期恢复编排（前后台切换自愈） */
+  LIFECYCLE_RECOVERY_V1: true,
+  /** 恢复链路交互优先（light/heavy 分级恢复） */
+  RESUME_INTERACTION_FIRST_V1: readRuntimeBooleanFlag('RESUME_INTERACTION_FIRST_V1', true),
+  /** 恢复链路项目水位 RPC 快路 */
+  RESUME_WATERMARK_RPC_V1: readRuntimeBooleanFlag('RESUME_WATERMARK_RPC_V1', true),
+  /** 恢复链路 pulse 去重（heavy 后抑制） */
+  RESUME_PULSE_DEDUP_V1: readRuntimeBooleanFlag('RESUME_PULSE_DEDUP_V1', true),
+  /** Flow 视图用户意图触发懒加载 */
+  FLOW_INTENT_LAZYLOAD_V1: true,
+  /** 黑匣子恢复拉取冷却窗口 */
+  BLACKBOX_PULL_COOLDOWN_V1: true,
+  /** PWA 安装提示与安装态体验 */
+  PWA_INSTALL_PROMPT_V1: true,
+  /** 禁用 index.html 首屏数据预加载 fetch（弱网优先） */
+  DISABLE_INDEX_DATA_PRELOAD_V1: true,
+  /** 字体极致首屏策略（增强字体延后加载） */
+  FONT_EXTREME_FIRSTPAINT_V1: true,
+  /** Focus 启动即时本地检查 + 远端节流拉取 */
+  FOCUS_STARTUP_THROTTLED_CHECK_V1: true,
+  /** activeProject 访问预判（避免无效 RPC 400） */
+  ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1: true,
+  /** Flow 状态感知恢复（桌面端智能恢复/弱网降级） */
+  FLOW_STATE_AWARE_RESTORE_V2: true,
+  /** 事件驱动同步脉冲（非常驻 WebSocket） */
+  EVENT_DRIVEN_SYNC_PULSE_V1: true,
+  /** 跨标签同步后的本地零网络回填 */
+  TAB_SYNC_LOCAL_REFRESH_V1: true,
+  /** 根组件启动依赖瘦身（重服务按需懒加载） */
+  ROOT_STARTUP_DEP_PRUNE_V1: true,
+  /** modulepreload 严格模式（默认移除静态 modulepreload） */
+  STRICT_MODULEPRELOAD_V2: true,
+  /** Root 组件移除 FormsModule（改为原生 input 事件绑定） */
+  ROOT_FORMS_FREE_V1: true,
+  /** UserSession 附件服务按需懒加载 */
+  USER_SESSION_ATTACHMENT_ON_DEMAND_V1: true,
+  /** UserSession 移除启动期 MigrationService 注入 */
+  USER_SESSION_MIGRATION_PRUNE_V1: true,
+  /** BootShell / WorkspaceShell 架构拆分 */
+  BOOT_SHELL_SPLIT_V1: true,
+  /** 分层启动水合（P0/P1/P2） */
+  TIERED_STARTUP_HYDRATION_V1: true,
+  /** Supabase SDK 延迟装载 */
+  SUPABASE_DEFERRED_SDK_V1: true,
+  /** 启动热路径禁用 config barrel 导入 */
+  CONFIG_BARREL_PRUNE_V1: true,
+  /** 侧栏工具链动态加载 */
+  SIDEBAR_TOOLS_DYNAMIC_LOAD_V1: true,
+  /** 路由守卫按需异步加载（移出 initial static） */
+  ROUTE_GUARD_LAZY_IMPORT_V1: readRuntimeBooleanFlag('ROUTE_GUARD_LAZY_IMPORT_V1', true),
+  /** Web Vitals 监控改为 idle 阶段动态初始化 */
+  WEB_VITALS_IDLE_BOOT_V2: readRuntimeBooleanFlag('WEB_VITALS_IDLE_BOOT_V2', true),
+  /** 字体增强样式激进延后加载策略 */
+  FONT_AGGRESSIVE_DEFER_V2: readRuntimeBooleanFlag('FONT_AGGRESSIVE_DEFER_V2', true),
+  /** 工作区壳层 V2 拆分 */
+  WORKSPACE_SHELL_SPLIT_V2: true,
+  /** 同步状态面板延后挂载 */
+  SYNC_STATUS_DEFERRED_MOUNT_V1: readRuntimeBooleanFlag('SYNC_STATUS_DEFERRED_MOUNT_V1', true),
+  /** PWA 安装提示延后初始化 */
+  PWA_PROMPT_DEFER_V2: readRuntimeBooleanFlag('PWA_PROMPT_DEFER_V2', true),
+  /** 恢复链路会话快照复用 */
+  RESUME_SESSION_SNAPSHOT_V1: readRuntimeBooleanFlag('RESUME_SESSION_SNAPSHOT_V1', true),
+  /** 用户项目清单水位 RPC 快路 */
+  USER_PROJECTS_WATERMARK_RPC_V1: readRuntimeBooleanFlag('USER_PROJECTS_WATERMARK_RPC_V1', true),
+  /** 热路径禁止 config barrel（构建/CI 门禁，非运行时回滚项） */
+  HOTPATH_CONFIG_BARREL_BAN_V1: true,
+  /** 恢复 ticket 去重（同 ticket 禁止重复 heavy/light） */
+  RECOVERY_TICKET_DEDUP_V1: readRuntimeBooleanFlag('RECOVERY_TICKET_DEDUP_V1', true),
+  /** 黑匣子 watermark 先判变更再拉明细 */
+  BLACKBOX_WATERMARK_PROBE_V1: readRuntimeBooleanFlag('BLACKBOX_WATERMARK_PROBE_V1', true),
+  /** Workspace Shell 组合式拆分（V3） */
+  WORKSPACE_SHELL_COMPOSITION_V3: readRuntimeBooleanFlag('WORKSPACE_SHELL_COMPOSITION_V3', true),
+  /** 恢复聚合探测 RPC（项目访问性+项目/黑匣子水位） */
+  RESUME_COMPOSITE_PROBE_RPC_V1: readRuntimeBooleanFlag('RESUME_COMPOSITE_PROBE_RPC_V1', true),
+  /** 恢复指标门禁（resume.* 埋点与预算校验） */
+  RESUME_METRICS_GATE_V1: readRuntimeBooleanFlag('RESUME_METRICS_GATE_V1', true),
+  /** 性能无回归门禁（构建/CI 门禁，非运行时回滚项） */
+  NO_REGRESSION_GUARD_V1: true,
   
   // ==================== 迁移功能 ====================
   /** 是否启用迁移快照 */
@@ -117,6 +225,9 @@ const CRITICAL_FLAGS: ReadonlyArray<{ flag: FeatureFlag; risk: string }> = [
   { flag: 'SYNC_STRICT_SUCCESS_ENABLED', risk: '禁用后部分同步失败可能被误判为成功，导致数据不一致' },
   { flag: 'SYNC_DURABILITY_FIRST_ENABLED', risk: '禁用后同步队列可能淘汰未推送的操作，导致数据丢失' },
   { flag: 'MIGRATION_SNAPSHOT_ENABLED', risk: '禁用后迁移前不创建快照，迁移失败时无法回滚' },
+  { flag: 'MIGRATION_CONFIRMATION_REQUIRED', risk: '禁用后迁移操作不需要二次确认，可能误触发不可逆迁移' },
+  { flag: 'SYNC_SERVER_CURSOR_ENABLED', risk: '禁用后 delta 游标降级为 client-now，时钟漂移时可能丢失变更' },
+  { flag: 'SYNC_TASK_LEVEL_CALLBACK_ENABLED', risk: '禁用后 Realtime 回调链路断开，实时更新失效' },
 ] as const;
 
 /**

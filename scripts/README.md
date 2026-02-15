@@ -57,6 +57,24 @@
 | `scan-placeholder-interactions.sh` | 扫描未实现的占位交互 |
 | `start-chrome-debug.sh` | 启动 Chrome 调试实例 |
 
+## 测试策略（本地反馈优先）
+
+| 命令 | 用途 |
+|------|------|
+| `npm run test:run:fast` | 本地默认阻塞门禁（排除 quarantine，优先反馈速度） |
+| `npm run test:run:full` | 本地全量测试（包含 quarantine） |
+| `npm run test:run:ci` | CI 分片全量（weighted + include-quarantine） |
+| `npm run test:baseline:update` | 基于 shard timing/vitest 报告刷新时长 baseline |
+| `npm run test:quarantine:update` | 根据 p95/失败率规则自动维护 quarantine 列表 |
+
+### 回滚指令
+
+如需立即恢复旧分片策略，可使用：
+
+```bash
+node scripts/run-test-matrix.cjs --strategy=mod --max-procs=2 --include-quarantine
+```
+
 ## 改了数据库怎么办？
 
 ```

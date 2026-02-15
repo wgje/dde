@@ -13,7 +13,7 @@
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { GOJS_CONFIG, UI_CONFIG } from '../../../../config';
+import { GOJS_CONFIG } from '../../../../config';
 import * as go from 'gojs';
 
 /**
@@ -50,8 +50,6 @@ export class FlowLayoutService {
   
   /** 位置保存定时器 */
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  // 【P1-12 修复】跟踪布局事务定时器，dispose 时清理
-  private layoutTimers: ReturnType<typeof setTimeout>[] = [];
   
   /**
    * 设置 Diagram 引用
@@ -75,6 +73,7 @@ export class FlowLayoutService {
       columnSpacing = GOJS_CONFIG.COLUMN_SPACING
     } = options;
     
+    // 【P1-12 根治】事务内同步完成布局 + 位置保存，不跨 setTimeout
     this.diagram.startTransaction('auto-layout');
     this.diagram.layout = $(go.LayeredDigraphLayout, {
       direction,
@@ -83,16 +82,9 @@ export class FlowLayoutService {
       setsPortSpots: false
     });
     this.diagram.layoutDiagram(true);
-    
-    // 【P1-12 修复】跟踪定时器，dispose 时可清理悬空事务
-    const timer = setTimeout(() => {
-      this.layoutTimers = this.layoutTimers.filter(t => t !== timer);
-      if (!this.diagram) return;
-      this.saveAllNodePositions();
-      this.diagram.layout = $(go.Layout);
-      this.diagram.commitTransaction('auto-layout');
-    }, UI_CONFIG.SHORT_DELAY);
-    this.layoutTimers.push(timer);
+    this.saveAllNodePositions();
+    this.diagram.layout = $(go.Layout);
+    this.diagram.commitTransaction('auto-layout');
     
     this.logger.info('自动布局已应用');
   }
@@ -109,6 +101,7 @@ export class FlowLayoutService {
       layerSpacing = GOJS_CONFIG.LAYER_SPACING
     } = options;
     
+    // 【P1-12 根治】事务内同步完成布局 + 位置保存，不跨 setTimeout
     this.diagram.startTransaction('tree-layout');
     this.diagram.layout = $(go.TreeLayout, {
       angle: 0,
@@ -116,16 +109,9 @@ export class FlowLayoutService {
       nodeSpacing: 20
     });
     this.diagram.layoutDiagram(true);
-    
-    // 【P1-12 修复】跟踪定时器，dispose 时可清理悬空事务
-    const timer = setTimeout(() => {
-      this.layoutTimers = this.layoutTimers.filter(t => t !== timer);
-      if (!this.diagram) return;
-      this.saveAllNodePositions();
-      this.diagram.layout = $(go.Layout);
-      this.diagram.commitTransaction('tree-layout');
-    }, UI_CONFIG.SHORT_DELAY);
-    this.layoutTimers.push(timer);
+    this.saveAllNodePositions();
+    this.diagram.layout = $(go.Layout);
+    this.diagram.commitTransaction('tree-layout');
     
     this.logger.info('树形布局已应用');
   }
@@ -265,19 +251,6 @@ export class FlowLayoutService {
       clearTimeout(this.positionSaveTimer);
       this.positionSaveTimer = null;
     }
-    // 【P1-12 修复】清理所有布局事务定时器，防止 dispose 后事务悬空
-    for (const timer of this.layoutTimers) {
-      clearTimeout(timer);
-    }
-    // 如果有未提交的事务，尝试回滚
-    if (this.diagram) {
-      try {
-        this.diagram.rollbackTransaction();
-      } catch {
-        // 可能没有活跃事务，忽略
-      }
-    }
-    this.layoutTimers = [];
     this.diagram = null;
   }
 }

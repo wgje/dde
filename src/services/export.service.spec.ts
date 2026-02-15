@@ -29,6 +29,8 @@ describe('ExportService', () => {
   };
   
   beforeEach(() => {
+    localStorage.removeItem('nanoflow.lastExportAt');
+
     mockToast = {
       success: vi.fn(),
       error: vi.fn(),
@@ -396,7 +398,7 @@ describe('ExportService', () => {
   
   describe('needsExportReminder', () => {
     it('从未导出过应需要提醒', () => {
-      // 初始状态下 lastExportTime 为 null
+      expect(localStorage.getItem('nanoflow.lastExportAt')).toBeNull();
       expect(service.needsExportReminder()).toBe(true);
     });
   });

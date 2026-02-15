@@ -1,0 +1,48 @@
+{
+  "rounds": 3,
+  "commandA": "node scripts/run-test-matrix.cjs --lane='lane_testbed_service' '--silent=passed-only'",
+  "commandB": "node scripts/run-test-matrix.cjs --lane='lane_testbed_component' '--silent=passed-only'",
+  "failures": 0,
+  "medianWallMs": 10976,
+  "medianCommandAMs": 10976,
+  "medianCommandBMs": 9257,
+  "samples": [
+    {
+      "round": 1,
+      "wallDurationMs": 11409,
+      "a": {
+        "exitCode": 0,
+        "durationMs": 11409
+      },
+      "b": {
+        "exitCode": 0,
+        "durationMs": 9229
+      }
+    },
+    {
+      "round": 2,
+      "wallDurationMs": 10976,
+      "a": {
+        "exitCode": 0,
+        "durationMs": 10976
+      },
+      "b": {
+        "exitCode": 0,
+        "durationMs": 9257
+      }
+    },
+    {
+      "round": 3,
+      "wallDurationMs": 10878,
+      "a": {
+        "exitCode": 0,
+        "durationMs": 10878
+      },
+      "b": {
+        "exitCode": 0,
+        "durationMs": 9295
+      }
+    }
+  ],
+  "createdAt": "2026-02-15T10:06:50.307Z"
+}

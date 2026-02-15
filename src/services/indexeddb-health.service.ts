@@ -18,7 +18,7 @@ import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { INDEXEDDB_HEALTH_CONFIG } from '../config';
+import { INDEXEDDB_HEALTH_CONFIG } from '../config/sync.config';
 import { IndexedDBService, DB_CONFIG } from '../core-bridge';
 
 /**

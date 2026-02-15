@@ -1,4 +1,4 @@
-import { Component, input, output, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -7,10 +7,13 @@ import { UserSessionService } from '../../../../services/user-session.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';
+import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
+import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 /** 任务详情面板 - 桌面端:浮动面板, 移动端:底部抽屉, 默认预览模式 */
 @Component({
   selector: 'app-flow-task-detail',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, FormsModule, SafeMarkdownPipe],
   providers: [FlowTaskDetailFormService],
   template: `
@@ -165,12 +168,12 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
           </div>
 
           @if (!isEditMode()) {
-              <div class="cursor-pointer" (click)="toggleEditMode(); $event.stopPropagation()">
+              <div class="cursor-pointer" (click)="onPreviewClick($event)">
                 <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '无标题' }}</h4>
-                  @if (task.content) {
+                  @if (localContent() || task.content) {
                       <div 
                           class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto overflow-x-hidden"
-                          [innerHTML]="task.content | safeMarkdown:'raw'">
+                          [innerHTML]="(localContent() || task.content) | safeMarkdown:'raw'">
                       </div>
                   } @else {
                       <div class="text-[11px] text-stone-400 dark:text-stone-500 italic">点击编辑内容...</div>
@@ -264,10 +267,10 @@ import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.ser
       </div>
 
       @if (!isEditMode()) {
-        <div class="cursor-pointer space-y-1" (click)="toggleEditMode(); $event.stopPropagation()">
+        <div class="cursor-pointer space-y-1" (click)="onPreviewClick($event)">
           <h4 class="text-xs font-medium text-stone-800 dark:text-stone-100 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
-          @if (task.content) {
-            <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="task.content | safeMarkdown:'raw'"></div>
+          @if (localContent() || task.content) {
+            <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="(localContent() || task.content) | safeMarkdown:'raw'"></div>
           }
         </div>
       } @else {
@@ -366,7 +369,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
   private readonly elementRef = inject(ElementRef);
+  private readonly cdr = inject(ChangeDetectorRef);
   readonly formService = inject(FlowTaskDetailFormService);
+  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
 
   @ViewChild('mobileDrawer') private mobileDrawer?: ElementRef<HTMLDivElement>;
   @ViewChild('mobileDrawerTitle') private mobileDrawerTitle?: ElementRef<HTMLDivElement>;
@@ -611,6 +616,30 @@ export class FlowTaskDetailComponent implements OnDestroy {
 
   /** 切换编辑模式 */
   toggleEditMode(): void { this.formService.toggleEditMode(); }
+
+  /**
+   * Markdown 预览区域点击处理
+   * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
+   */
+  onPreviewClick(event: MouseEvent): void {
+    event.stopPropagation();
+    const todoIndex = getTodoIndexFromClick(event);
+    if (todoIndex !== null) {
+      // 点击了待办 checkbox，切换状态
+      const currentTask = this.task();
+      if (!currentTask) return;
+      const currentContent = this.formService.localContent() || currentTask.content || '';
+      const newContent = toggleMarkdownTodo(currentContent, todoIndex);
+      this.formService.localContent.set(newContent);
+      // 直接更新 Store，确保顺序同步，避免父组件 Output 延迟
+      this.taskOpsAdapter.updateTaskContent(currentTask.id, newContent);
+      // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
+      this.cdr.markForCheck();
+    } else {
+      // 点击非 checkbox 区域，进入编辑模式
+      this.toggleEditMode();
+    }
+  }
   
   /** 监听 document 点击事件，编辑模式下点击非交互区域退出编辑 */
   @HostListener('document:click', ['$event'])

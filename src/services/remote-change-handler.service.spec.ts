@@ -126,6 +126,22 @@ describe('RemoteChangeHandlerService', () => {
       // 不应调用 loadSingleProject（handleIncrementalUpdate 的标志）
       expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
     });
+
+    it('配置 onRefreshActiveProject 时应优先走活动项目静默刷新', async () => {
+      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
+      const onRefreshActiveProject = vi.fn().mockResolvedValue(undefined);
+
+      service.setupCallbacks({
+        onLoadProjects,
+        onRefreshActiveProject,
+      });
+
+      await projectChangeCallback!({ eventType: 'polling', projectId: 'project-1' });
+
+      expect(onRefreshActiveProject).toHaveBeenCalledWith('remote:polling');
+      expect(onLoadProjects).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
+    });
     
     it('无 eventType 的事件应调用 onLoadProjects', async () => {
       const onLoadProjects = vi.fn().mockResolvedValue(undefined);

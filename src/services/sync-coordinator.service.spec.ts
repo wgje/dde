@@ -35,6 +35,8 @@ import { SentryAlertService } from './sentry-alert.service';
 import { SyncModeService } from './sync-mode.service';
 import { PersistSchedulerService } from './persist-scheduler.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
+import { TabSyncService } from './tab-sync.service';
+import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { Project, Task, SyncState } from '../models';
 import { success } from '../utils/result';
 
@@ -61,6 +63,7 @@ const mockSyncService = {
   saveProjectToCloud: vi.fn().mockResolvedValue({ success: true }),
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
   deleteProjectFromCloud: vi.fn().mockResolvedValue(true),
+  loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
   loadSingleProject: vi.fn().mockResolvedValue(null),
   getTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
   tryReloadConflictData: vi.fn().mockResolvedValue(undefined),
@@ -74,6 +77,12 @@ const mockSyncService = {
   destroy: vi.fn(),
   flushRetryQueueSync: vi.fn(),
   getLastSyncTime: vi.fn().mockReturnValue(null),
+  setLastSyncTime: vi.fn(),
+  getProjectSyncWatermark: vi.fn().mockResolvedValue(null),
+  getUserProjectsWatermark: vi.fn().mockResolvedValue(null),
+  listProjectHeadsSince: vi.fn().mockResolvedValue([]),
+  getAccessibleProjectProbe: vi.fn().mockResolvedValue(null),
+  getBlackBoxSyncWatermark: vi.fn().mockResolvedValue(null),
 };
 
 const mockActionQueueService = {
@@ -96,6 +105,12 @@ const mockRetryQueueService = {
 
 const mockBlackBoxSyncService = {
   forceSync: vi.fn().mockResolvedValue(undefined),
+  pullChanges: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockTabSyncService = {
+  notifyDataSynced: vi.fn(),
+  setOnDataSyncedCallback: vi.fn(),
 };
 
 const mockConflictService = {
@@ -115,6 +130,20 @@ const mockProjectStateService = {
   activeProjectId: signal<string | null>(null),
   updateProjects: vi.fn(),
   setProjects: vi.fn(),
+  getProject: vi.fn((id: string) => mockProjectStateService.projects().find((p: Project) => p.id === id)),
+};
+
+const bindProjectStateMockImplementations = () => {
+  mockProjectStateService.getProject.mockImplementation(
+    (id: string) => mockProjectStateService.projects().find((project: Project) => project.id === id)
+  );
+  mockProjectStateService.setProjects.mockImplementation((projects: Project[]) => {
+    mockProjectStateService.projects.set(projects);
+  });
+  mockProjectStateService.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
+    const current = mockProjectStateService.projects();
+    mockProjectStateService.projects.set(updater(current));
+  });
 };
 
 const mockAuthService = {
@@ -294,11 +323,17 @@ const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
 describe('SyncCoordinatorService', () => {
   let service: SyncCoordinatorService;
   let injector: Injector;
+  const originalResumeWatermarkFlag = FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1;
+  const originalUserProjectsWatermarkFlag = FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1;
+  const originalBlackBoxWatermarkFlag = FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1;
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     destroyCallbacks.length = 0;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = originalResumeWatermarkFlag;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = originalUserProjectsWatermarkFlag;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = originalBlackBoxWatermarkFlag;
     
     // 重置 mock signals
     mockSyncService.syncState.set(createMockSyncState());
@@ -307,9 +342,13 @@ describe('SyncCoordinatorService', () => {
     mockProjectStateService.projects.set([]);
     mockProjectStateService.activeProject.set(null);
     mockProjectStateService.activeProjectId.set(null);
-    mockProjectStateService.setProjects.mockImplementation((projects: Project[]) => {
-      mockProjectStateService.projects.set(projects);
-    });
+    bindProjectStateMockImplementations();
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('nanoflow.project-manifest-watermark');
+      localStorage.removeItem('nanoflow.blackbox-manifest-watermark');
+      localStorage.removeItem('nanoflow.project-manifest-watermark.user-123');
+      localStorage.removeItem('nanoflow.blackbox-manifest-watermark.user-123');
+    }
     mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
     mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
 
@@ -330,6 +369,7 @@ describe('SyncCoordinatorService', () => {
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
+        { provide: TabSyncService, useValue: mockTabSyncService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
@@ -345,6 +385,9 @@ describe('SyncCoordinatorService', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = originalResumeWatermarkFlag;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = originalUserProjectsWatermarkFlag;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = originalBlackBoxWatermarkFlag;
   });
 
   // ==================== 同步状态派生 ====================
@@ -395,7 +438,12 @@ describe('SyncCoordinatorService', () => {
 
   // ==================== 持久化状态管理 ====================
 
-  describe('持久化状态管理', () => {
+describe('持久化状态管理', () => {
+    it('initialize 应注册 TabSync data-synced 回调', () => {
+      expect(mockTabSyncService.setOnDataSyncedCallback).toHaveBeenCalledTimes(1);
+      expect(mockTabSyncService.setOnDataSyncedCallback).toHaveBeenCalledWith(expect.any(Function));
+    });
+
     it('markLocalChanges 应该设置 hasPendingLocalChanges 为 true', () => {
       expect(service.hasPendingLocalChanges()).toBe(false);
       
@@ -490,6 +538,44 @@ describe('SyncCoordinatorService', () => {
       }, { timeout: 500, interval: 20 });
       // 关键断言：存在冲突时不应调用云端保存
       expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    });
+
+    it('remoteConfirmed 后应广播 data-synced', async () => {
+      const project = createTestProject({ id: 'proj-1' });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true, newVersion: 3 });
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await vi.waitFor(() => {
+        expect(mockTabSyncService.notifyDataSynced).toHaveBeenCalledWith('proj-1', expect.any(String));
+      });
+    });
+
+    it('收到 data-synced 广播应走本地回填并受 cooldown 限制', () => {
+      const callback = mockTabSyncService.setOnDataSyncedCallback.mock.calls[0]?.[0] as
+        | ((projectId: string, updatedAt: string) => void)
+        | undefined;
+      expect(callback).toBeTypeOf('function');
+
+      const snapshotProject = createTestProject({
+        id: 'proj-1',
+        updatedAt: '2026-02-14T00:00:00.000Z',
+        tasks: [createTestTask({ id: 'task-1' })],
+      });
+
+      mockProjectStateService.projects.set([createTestProject({ id: 'proj-1' })]);
+      mockSyncService.loadOfflineSnapshot.mockReturnValue([snapshotProject]);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+
+      callback?.('proj-1', '2026-02-14T00:00:00.000Z');
+      callback?.('proj-1', '2026-02-14T00:00:01.000Z');
+
+      expect(mockProjectStateService.updateProjects).toHaveBeenCalledTimes(1);
+      expect(mockSyncService.loadProjectsFromCloud).not.toHaveBeenCalled();
     });
   });
 
@@ -658,6 +744,248 @@ describe('SyncCoordinatorService', () => {
       expect(mockProjectSyncOperationsService.resyncActiveProject).toHaveBeenCalledWith(
         expect.any(Function)
       );
+    });
+
+    it('refreshActiveProjectSilent 在水位未前进时应走快路跳过远端拉取', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = true;
+
+      const localUpdatedAt = '2026-02-14T08:00:00.000Z';
+      const localProject = createTestProject({
+        id: 'proj-1',
+        updatedAt: localUpdatedAt
+      });
+
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set('proj-1');
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      mockSyncService.getProjectSyncWatermark.mockResolvedValueOnce('2026-02-14T07:59:59.000Z');
+
+      const result = await service.refreshActiveProjectSilent('resume:test');
+
+      expect(result).toEqual({
+        refreshed: false,
+        skippedReason: 'watermark-not-newer',
+        fastPathHit: true
+      });
+      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-1', '2026-02-14T07:59:59.000Z');
+      expect(mockSyncService.loadFullProjectOptimized).not.toHaveBeenCalled();
+    });
+
+    it('refreshActiveProjectSilent 应基于本地任务/连接聚合水位命中快路', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = true;
+
+      const localProject = createTestProject({
+        id: 'proj-agg',
+        updatedAt: '2026-02-14T08:00:00.000Z',
+        tasks: [
+          createTestTask({
+            id: 'task-agg',
+            updatedAt: '2026-02-14T08:12:00.000Z'
+          })
+        ],
+        connections: [
+          {
+            id: 'conn-agg',
+            source: 'task-agg',
+            target: 'task-agg-target',
+            description: '',
+            updatedAt: '2026-02-14T08:11:00.000Z',
+            deletedAt: null,
+          }
+        ],
+      });
+
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set('proj-agg');
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      mockSyncService.getProjectSyncWatermark.mockResolvedValueOnce('2026-02-14T08:10:00.000Z');
+
+      const result = await service.refreshActiveProjectSilent('resume:test:aggregate-fastpath');
+
+      expect(result).toEqual({
+        refreshed: false,
+        skippedReason: 'watermark-not-newer',
+        fastPathHit: true
+      });
+      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-agg', '2026-02-14T08:10:00.000Z');
+      expect(mockSyncService.loadFullProjectOptimized).not.toHaveBeenCalled();
+    });
+
+    it('refreshActiveProjectSilent 在远端水位更新时应加载并静默合并活动项目', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = true;
+
+      const localProject = createTestProject({
+        id: 'proj-1',
+        updatedAt: '2026-02-14T08:00:00.000Z',
+        tasks: [createTestTask({ id: 'task-local', updatedAt: '2026-02-14T07:55:00.000Z' })],
+      });
+      const remoteProject = createTestProject({
+        id: 'proj-1',
+        updatedAt: '2026-02-14T08:10:00.000Z',
+        tasks: [createTestTask({ id: 'task-remote' })],
+      });
+
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set('proj-1');
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      mockSyncService.getProjectSyncWatermark.mockResolvedValueOnce('2026-02-14T08:10:00.000Z');
+      mockSyncService.loadFullProjectOptimized.mockResolvedValueOnce(remoteProject);
+      mockConflictService.smartMerge.mockReturnValueOnce({
+        project: remoteProject,
+        issues: [],
+        conflictCount: 0,
+      });
+
+      const result = await service.refreshActiveProjectSilent('resume:test');
+
+      expect(result.refreshed).toBe(true);
+      expect(mockSyncService.loadFullProjectOptimized).toHaveBeenCalledWith('proj-1');
+      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-1', expect.any(String));
+      expect(mockProjectStateService.projects()[0]?.updatedAt).toBe('2026-02-14T08:10:00.000Z');
+    });
+
+    it('refreshProjectManifestIfNeeded 命中用户水位快路时应跳过头信息刷新', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      mockSyncService.getUserProjectsWatermark.mockResolvedValueOnce('2026-02-15T07:59:59.000Z');
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:fast-path');
+
+      expect(result).toEqual({
+        skipped: true,
+        watermark: '2026-02-15T07:59:59.000Z',
+      });
+      expect(mockSyncService.listProjectHeadsSince).not.toHaveBeenCalled();
+    });
+
+    it('refreshProjectManifestIfNeeded 使用预加载水位时不应重复调用 RPC', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:prefetched', {
+        prefetchedRemoteWatermark: '2026-02-15T07:59:59.000Z',
+      });
+
+      expect(result).toEqual({
+        skipped: true,
+        watermark: '2026-02-15T07:59:59.000Z',
+      });
+      expect(mockSyncService.getUserProjectsWatermark).not.toHaveBeenCalled();
+      expect(mockSyncService.listProjectHeadsSince).not.toHaveBeenCalled();
+    });
+
+    it('refreshProjectManifestIfNeeded 冷启动无本地水位时不应调用 heads RPC 且不跳过慢路', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      mockSyncService.getUserProjectsWatermark.mockResolvedValueOnce('2026-02-15T08:20:00.000Z');
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:cold-start');
+
+      expect(result).toEqual({
+        skipped: false,
+        watermark: '2026-02-15T08:20:00.000Z',
+      });
+      expect(mockSyncService.listProjectHeadsSince).not.toHaveBeenCalled();
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:20:00.000Z');
+    });
+
+    it('refreshProjectManifestIfNeeded 远端更新且 heads 为空时也不应跳过慢路', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      mockSyncService.getUserProjectsWatermark.mockResolvedValueOnce('2026-02-15T08:20:00.000Z');
+      mockSyncService.listProjectHeadsSince.mockResolvedValueOnce([]);
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:heads-empty');
+
+      expect(result).toEqual({
+        skipped: false,
+        watermark: '2026-02-15T08:20:00.000Z',
+      });
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+    });
+
+    it('refreshProjectManifestIfNeeded 远端有更新时应拉取头信息并更新本地水位', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      mockProjectStateService.projects.set([
+        createTestProject({
+          id: 'proj-1',
+          updatedAt: '2026-02-15T08:00:00.000Z',
+          version: 1,
+        }),
+      ]);
+      mockSyncService.getUserProjectsWatermark.mockResolvedValueOnce('2026-02-15T08:20:00.000Z');
+      mockSyncService.listProjectHeadsSince.mockResolvedValueOnce([
+        {
+          id: 'proj-1',
+          updatedAt: '2026-02-15T08:19:00.000Z',
+          version: 3,
+        },
+      ]);
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:slow-path');
+
+      expect(result).toEqual({
+        skipped: false,
+        watermark: '2026-02-15T08:20:00.000Z',
+      });
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+      const updated = mockProjectStateService.projects()[0];
+      expect(updated?.updatedAt).toBe('2026-02-15T08:19:00.000Z');
+      expect(updated?.version).toBe(3);
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:20:00.000Z');
+    });
+
+    it('refreshBlackBoxWatermarkIfNeeded 命中快路时应跳过明细拉取', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.blackbox-manifest-watermark.user-123', '2026-02-16T10:00:00.000Z');
+      mockSyncService.getBlackBoxSyncWatermark.mockResolvedValueOnce('2026-02-16T10:00:00.000Z');
+
+      const result = await service.refreshBlackBoxWatermarkIfNeeded('resume:test');
+
+      expect(result).toEqual({
+        skipped: true,
+        watermark: '2026-02-16T10:00:00.000Z',
+      });
+      expect(mockBlackBoxSyncService.pullChanges).not.toHaveBeenCalled();
+    });
+
+    it('refreshBlackBoxWatermarkIfNeeded 远端前进时应拉取并更新本地水位', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.blackbox-manifest-watermark.user-123', '2026-02-16T10:00:00.000Z');
+      mockSyncService.getBlackBoxSyncWatermark.mockResolvedValueOnce('2026-02-16T10:05:00.000Z');
+
+      const result = await service.refreshBlackBoxWatermarkIfNeeded('resume:test');
+
+      expect(result).toEqual({
+        skipped: false,
+        watermark: '2026-02-16T10:05:00.000Z',
+      });
+      expect(mockBlackBoxSyncService.pullChanges).toHaveBeenCalledWith({ reason: 'resume' });
+      expect(localStorage.getItem('nanoflow.blackbox-manifest-watermark.user-123')).toBe('2026-02-16T10:05:00.000Z');
+    });
+
+    it('refreshBlackBoxWatermarkIfNeeded 使用预加载水位时不应重复调用 RPC', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.blackbox-manifest-watermark.user-123', '2026-02-16T10:00:00.000Z');
+
+      const result = await service.refreshBlackBoxWatermarkIfNeeded('resume:test', {
+        prefetchedRemoteWatermark: '2026-02-16T10:00:00.000Z',
+      });
+
+      expect(result).toEqual({
+        skipped: true,
+        watermark: '2026-02-16T10:00:00.000Z',
+      });
+      expect(mockSyncService.getBlackBoxSyncWatermark).not.toHaveBeenCalled();
+      expect(mockBlackBoxSyncService.pullChanges).not.toHaveBeenCalled();
     });
   });
 
@@ -945,6 +1273,7 @@ describe('SyncCoordinatorService 集成场景', () => {
     mockProjectStateService.projects.set([]);
     mockProjectStateService.activeProject.set(null);
     mockProjectStateService.activeProjectId.set(null);
+    bindProjectStateMockImplementations();
 
     injector = Injector.create({
       providers: [
@@ -963,6 +1292,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         { provide: SyncModeService, useValue: mockSyncModeService },
         { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
         { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
+        { provide: TabSyncService, useValue: mockTabSyncService },
         { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
         { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
         { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },

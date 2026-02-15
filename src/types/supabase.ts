@@ -785,10 +785,49 @@ export type Database = {
       current_user_id: { Args: never; Returns: string }
       get_dashboard_stats: { Args: never; Returns: Json }
       get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
+      get_project_sync_watermark: {
+        Args: { p_project_id: string }
+        Returns: string | null
+      }
+      get_accessible_project_probe: {
+        Args: { p_project_id: string }
+        Returns: {
+          project_id: string
+          accessible: boolean
+          watermark: string | null
+        }[]
+      }
+      get_resume_recovery_probe: {
+        Args: { p_project_id?: string | null }
+        Returns: {
+          active_project_id: string | null
+          active_accessible: boolean
+          active_watermark: string | null
+          projects_watermark: string | null
+          blackbox_watermark: string | null
+          server_now: string | null
+        }[]
+      }
+      get_black_box_sync_watermark: {
+        Args: never
+        Returns: string | null
+      }
+      get_user_projects_watermark: {
+        Args: never
+        Returns: string | null
+      }
       get_server_time: { Args: never; Returns: string }
       get_user_projects_meta: {
         Args: { p_since_timestamp?: string }
         Returns: Json
+      }
+      list_project_heads_since: {
+        Args: { p_since?: string | null }
+        Returns: {
+          project_id: string
+          updated_at: string
+          version: number
+        }[]
       }
       is_connection_tombstoned: {
         Args: { p_connection_id: string }

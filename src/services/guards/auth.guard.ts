@@ -241,14 +241,19 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
     return true;
   }
   
-  // 未登录且无本地缓存，这是阻断性场景：需要用户首次登录
-  // 只有这种情况才需要显式的交互提示
-  logger.debug('需要登录，显示登录模态框（不重定向，避免循环）');
-  
-  // 直接显示登录模态框，不做导航重定向（避免无限循环）
-  // 用户登录成功后会自动刷新当前路由
-  modalService.show('login', { returnUrl: state.url, message: '请登录以访问此页面' });
-  
-  // 返回 false 阻止导航，但不做重定向
-  return false;
+  // 未登录且无本地缓存：
+  // 为避免“路由被守卫拦截 + 登录 UI 在受保护壳层内”导致黑屏，
+  // 这里触发登录提示但不阻断路由挂载。
+  logger.debug('需要登录，触发登录提示并允许挂载壳层（避免黑屏）');
+
+  try {
+    // 用户登录成功后会自动刷新当前路由
+    modalService.show('login', { returnUrl: state.url, message: '请登录以访问此页面' });
+  } catch (error) {
+    // 模态框失败时也不阻断渲染，壳层会展示 showLoginRequired 兜底界面
+    logger.warn('登录模态框触发失败，降级为壳层登录提示', { error, targetUrl: state.url });
+  }
+
+  // 关键：允许工作区壳层渲染登录兜底 UI，彻底避免空白/黑屏
+  return true;
 };

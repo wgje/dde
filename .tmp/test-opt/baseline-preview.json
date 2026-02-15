@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-02-15T14:04:03.352Z",
+  "source": "ewma-update",
+  "alpha": 0.35,
+  "tasks": {
+    "lane_node_minimal/shared": 8000,
+    "lane_browser_minimal/shared": 7000
+  },
+  "files": {
+    "src/app/features/flow/components/flow-task-detail.component.spec.ts": 500,
+    "src/services/user-session.service.spec.ts": 600,
+    "src/tests/slow.spec.ts": 2200,
+    "src/tests/recovered.spec.ts": 200,
+    "src/tests/stable.spec.ts": 300
+  },
+  "laneAverages": {
+    "lane_node_minimal": 8000,
+    "lane_browser_minimal": 7000
+  },
+  "quarantine": [
+    "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+    "src/services/user-session.service.spec.ts"
+  ],
+  "samples": {
+    "timingFilesLoaded": 2,
+    "shardTimingFilesLoaded": 2,
+    "vitestReportsLoaded": 1,
+    "laneTaskSampleCount": 8,
+    "laneAverageSampleCount": 4,
+    "fileSampleCount": 5
+  },
+  "updatedBy": "scripts/update-test-duration-baseline.cjs@v2",
+  "inputs": {
+    "timingRequested": [
+      ".tmp/test-opt/vitest-shard-1.json",
+      ".tmp/test-opt/vitest-shard-2.json"
+    ],
+    "timingLoaded": [
+      ".tmp/test-opt/vitest-shard-1.json",
+      ".tmp/test-opt/vitest-shard-2.json"
+    ],
+    "shardTimingLoaded": [
+      ".tmp/test-opt/vitest-shard-1.json",
+      ".tmp/test-opt/vitest-shard-2.json"
+    ],
+    "vitestReportsRequested": [
+      ".tmp/test-opt/vitest-report-1.json"
+    ],
+    "vitestReportsLoaded": [
+      ".tmp/test-opt/vitest-report-1.json"
+    ]
+  }
+}

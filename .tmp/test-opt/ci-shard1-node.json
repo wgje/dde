@@ -1,0 +1,58 @@
+{
+  "mode": "ci",
+  "shard": "1/4",
+  "strategy": "weighted",
+  "discoveredFiles": 104,
+  "effectiveFiles": 104,
+  "quarantineExcludedFiles": 0,
+  "shardFiles": 26,
+  "shardEstimatedWeightMs": 194310,
+  "maxProcs": 1,
+  "scheduler": "fifo",
+  "lptRequested": false,
+  "lptEnabled": false,
+  "lptDisabledReason": null,
+  "baselineAgeHours": 0.322,
+  "includeQuarantine": true,
+  "quarantine": {
+    "path": "scripts/test-quarantine.json",
+    "loaded": true,
+    "entries": 2
+  },
+  "durationBaseline": {
+    "path": "scripts/test-duration-baseline.json",
+    "loaded": true,
+    "schemaVersion": 2,
+    "generatedAt": "2026-02-15T13:44:28.821Z",
+    "laneEntries": 4,
+    "fileEntries": 0
+  },
+  "timingInput": {
+    "requestedPaths": [],
+    "loadedPaths": [],
+    "fileEntries": 0
+  },
+  "lanes": [
+    {
+      "laneName": "lane_node_minimal",
+      "files": 10,
+      "exitCode": 0,
+      "durationMs": 5349,
+      "segments": [
+        {
+          "segmentName": "shared",
+          "files": 10,
+          "exitCode": 0,
+          "durationMs": 5349,
+          "queuedAt": 1771164227528,
+          "startedAt": 1771164227531,
+          "endedAt": 1771164232880,
+          "spawnOverheadMs": 9,
+          "status": "executed"
+        }
+      ]
+    }
+  ],
+  "durationMs": 5350,
+  "createdAt": "2026-02-15T14:03:52.881Z"
+}

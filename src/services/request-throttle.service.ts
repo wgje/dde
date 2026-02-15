@@ -73,6 +73,9 @@ export class RequestThrottleService {
     promise: Promise<unknown>; 
     expiresAt: number 
   }>();
+
+  /** 去重缓存最大容量，防止长时间运行后内存持续增长 */
+  private readonly MAX_DEDUPE_CACHE_SIZE = 500;
   
   /** 当前活跃请求数（可观察） */
   readonly activeRequests = signal(0);
@@ -379,12 +382,22 @@ export class RequestThrottleService {
   
   /**
    * 清理过期的去重缓存
+   * 【2026-02-15 修复】增加容量上限保护，防止长时间运行后 Map 无限增长
    */
   private cleanupDedupeCache(): void {
     const now = Date.now();
     for (const [key, value] of this.dedupeCache) {
       if (value.expiresAt < now) {
         this.dedupeCache.delete(key);
+      }
+    }
+    // 容量保护：超过上限时按过期时间排序淘汰最旧的条目
+    if (this.dedupeCache.size > this.MAX_DEDUPE_CACHE_SIZE) {
+      const entries = Array.from(this.dedupeCache.entries())
+        .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      const toRemove = entries.length - this.MAX_DEDUPE_CACHE_SIZE;
+      for (let i = 0; i < toRemove; i++) {
+        this.dedupeCache.delete(entries[i][0]);
       }
     }
   }

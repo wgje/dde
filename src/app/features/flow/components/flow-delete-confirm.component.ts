@@ -1,4 +1,4 @@
-import { Component, input, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Task } from '../../../../models';
 
@@ -9,6 +9,7 @@ import { Task } from '../../../../models';
 @Component({
   selector: 'app-flow-delete-confirm',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (task(); as t) {

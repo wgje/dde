@@ -10,14 +10,13 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { SimpleSyncService, TombstoneService } from '../core-bridge';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { TombstoneService } from '../app/core/services/sync/tombstone.service';
 @Injectable({
   providedIn: 'root'
 })
@@ -50,7 +49,7 @@ export class DeltaSyncCoordinatorService {
         return { taskChanges: 0, connectionChanges: 0 };
       }
 
-      const currentProject = this.projectState.projects().find(p => p.id === projectId);
+      const currentProject = this.projectState.getProject(projectId);
       if (!currentProject) {
         this.logger.warn('Delta Sync 项目不存在', { projectId });
         return { taskChanges: 0, connectionChanges: 0 };

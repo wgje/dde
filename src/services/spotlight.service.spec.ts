@@ -10,10 +10,10 @@ import { BlackBoxService } from './black-box.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskOperationService } from './task-operation.service';
 import { LoggerService } from './logger.service';
-import { 
+import {
   spotlightTask,
-  isSpotlightMode,
-  spotlightTaskQueue,
+  spotlightMode,
+  spotlightQueue,
   focusPreferences,
   setBlackBoxEntries
 } from '../state/focus-stores';
@@ -57,8 +57,8 @@ describe('SpotlightService', () => {
   beforeEach(() => {
     // 重置状态
     spotlightTask.set(null);
-    isSpotlightMode.set(false);
-    spotlightTaskQueue.set([]);
+    spotlightMode.set(false);
+    spotlightQueue.set([]);
     setBlackBoxEntries([]);
     focusPreferences.set({
       gateEnabled: true,
@@ -107,7 +107,7 @@ describe('SpotlightService', () => {
 
       service.enter();
 
-      expect(isSpotlightMode()).toBe(true);
+      expect(spotlightMode()).toBe(true);
       expect(spotlightTask()).not.toBeNull();
     });
 
@@ -116,7 +116,7 @@ describe('SpotlightService', () => {
 
       service.enter();
 
-      expect(isSpotlightMode()).toBe(false);
+      expect(spotlightMode()).toBe(false);
     });
 
     it('聚光灯禁用时不应该进入', () => {
@@ -125,20 +125,20 @@ describe('SpotlightService', () => {
 
       service.enter();
 
-      expect(isSpotlightMode()).toBe(false);
+      expect(spotlightMode()).toBe(false);
     });
   });
 
   describe('exit', () => {
     it('应该退出聚光灯模式', () => {
-      isSpotlightMode.set(true);
+      spotlightMode.set(true);
       spotlightTask.set(createMockTask());
 
       service.exit();
 
-      expect(isSpotlightMode()).toBe(false);
+      expect(spotlightMode()).toBe(false);
       expect(spotlightTask()).toBeNull();
-      expect(spotlightTaskQueue()).toEqual([]);
+      expect(spotlightQueue()).toEqual([]);
     });
   });
 
@@ -146,7 +146,7 @@ describe('SpotlightService', () => {
     it('应该完成当前任务', () => {
       const task = createMockTask();
       spotlightTask.set(task);
-      isSpotlightMode.set(true);
+      spotlightMode.set(true);
 
       service.completeCurrentTask();
 
@@ -167,13 +167,13 @@ describe('SpotlightService', () => {
       const task1 = createMockTask({ id: '1', title: '任务1' });
       const task2 = createMockTask({ id: '2', title: '任务2' });
       spotlightTask.set(task1);
-      spotlightTaskQueue.set([task2]);
-      isSpotlightMode.set(true);
+      spotlightQueue.set([task2]);
+      spotlightMode.set(true);
 
       service.skipCurrentTask();
 
       // 当前任务应该被放到队列末尾
-      const queue = spotlightTaskQueue();
+      const queue = spotlightQueue();
       expect(queue.some(t => t.id === '1')).toBe(true);
     });
   });
@@ -187,14 +187,14 @@ describe('SpotlightService', () => {
 
     it('队列中有任务时应该返回 true', () => {
       spotlightTask.set(null);
-      spotlightTaskQueue.set([createMockTask()]);
+      spotlightQueue.set([createMockTask()]);
 
       expect(service.hasTasks()).toBe(true);
     });
 
     it('无任务时应该返回 false', () => {
       spotlightTask.set(null);
-      spotlightTaskQueue.set([]);
+      spotlightQueue.set([]);
 
       expect(service.hasTasks()).toBe(false);
     });
@@ -204,7 +204,7 @@ describe('SpotlightService', () => {
     it('应该返回聚光灯模式状态', () => {
       expect(service.isActive()).toBe(false);
 
-      isSpotlightMode.set(true);
+      spotlightMode.set(true);
 
       expect(service.isActive()).toBe(true);
     });

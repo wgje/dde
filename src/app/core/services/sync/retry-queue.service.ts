@@ -68,6 +68,18 @@ export interface RetryOperationHandler {
   onProcessingStateChange(processing: boolean, pendingCount: number): void;
 }
 
+export interface RetryQueueSliceOptions {
+  maxItems?: number;
+  maxDurationMs?: number;
+}
+
+export interface RetryQueueSliceResult {
+  processed: number;
+  remaining: number;
+  durationMs: number;
+  completed: boolean;
+}
+
 /**
  * 重试队列服务
  * 
@@ -136,12 +148,18 @@ export class RetryQueueService {
   /** 队列处理锁 */
   private isProcessingQueue = false;
   private lastProcessTime = 0;
+  /** 队列处理超时保护（120s）—— 副作用是释放 isProcessingQueue 死锁 */
+  private readonly PROCESS_TIMEOUT = 120_000;
   /** 重试循环定时器 */
   private retryLoopTimer: ReturnType<typeof setInterval> | null = null;
   /** 熔断器状态 */
   private circuitState: 'closed' | 'open' | 'half-open' = 'closed';
   private consecutiveFailures = 0;
   private circuitOpenedAt = 0;
+
+  /** saveToStorage 防抖定时器，避免高频 IDB 写入风暴 */
+  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly SAVE_DEBOUNCE_MS = 500;
   
   /** 持久化 key */
   private readonly STORAGE_KEY = 'nanoflow.retry-queue';
@@ -164,7 +182,12 @@ export class RetryQueueService {
     
     this.destroyRef.onDestroy(() => {
       this.stopLoop();
-      this.saveToStorage();
+      // 销毁时立即刷新存储（跳过防抖）
+      if (this.saveDebounceTimer) {
+        clearTimeout(this.saveDebounceTimer);
+        this.saveDebounceTimer = null;
+      }
+      this.saveToStorageImmediate();
     });
   }
   
@@ -730,28 +753,61 @@ export class RetryQueueService {
   }
   
   /**
-   * 处理重试队列
-   * 使用独立处理锁防止并发，按类型排序处理（project → task → connection）
+   * 处理重试队列（兼容入口）
+   * 无参数时按历史语义尽量处理当前可处理项；有 maxItems 时限制处理条数。
    */
-  async processQueue(): Promise<void> {
-    if (this.isProcessingQueue || this.queue.length === 0 || !this.operationHandler) return;
-    if (this.operationHandler.isSessionExpired()) return;
-    
+  async processQueue(maxItems?: number): Promise<void> {
+    await this.processQueueSlice({
+      maxItems: typeof maxItems === 'number' && maxItems > 0 ? maxItems : undefined
+    });
+  }
+
+  /**
+   * 按“条数 + 时间预算”切片处理队列，避免恢复路径阻塞主线程。
+   */
+  async processQueueSlice(options: RetryQueueSliceOptions = {}): Promise<RetryQueueSliceResult> {
+    const sliceStartedAt = Date.now();
+    const maxItems = typeof options.maxItems === 'number' && options.maxItems > 0
+      ? options.maxItems
+      : Number.POSITIVE_INFINITY;
+    const maxDurationMs = typeof options.maxDurationMs === 'number' && options.maxDurationMs > 0
+      ? options.maxDurationMs
+      : Number.POSITIVE_INFINITY;
+
+    if (this.isProcessingQueue || this.queue.length === 0 || !this.operationHandler || this.operationHandler.isSessionExpired()) {
+      // 【2026-02-15 修复】处理锁超时保护：如果上次处理已超过 120s 仍未释放锁，强制释放
+      if (this.isProcessingQueue && this.lastProcessTime > 0 && (Date.now() - this.lastProcessTime > this.PROCESS_TIMEOUT)) {
+        this.logger.warn('processQueueSlice 处理锁超时，强制释放', {
+          lastProcessTime: this.lastProcessTime,
+          elapsed: Date.now() - this.lastProcessTime
+        });
+        this.isProcessingQueue = false;
+        // 强制释放后重新递归调用（带保护的单次重试）
+        return this.processQueueSlice(options);
+      }
+      return {
+        processed: 0,
+        remaining: this.queue.length,
+        durationMs: Date.now() - sliceStartedAt,
+        completed: true
+      };
+    }
+
     this.isProcessingQueue = true;
     this.lastProcessTime = Date.now();
+
     try {
       this.operationHandler.onProcessingStateChange(true, this.queue.length);
     } catch (error) {
       this.logger.warn('onProcessingStateChange(true) 回调失败，继续处理队列', error);
     }
+
     try {
-      // 按依赖排序（不清空原队列，逐条处理后移除）
       const sortedItems = [...this.queue].sort((a, b) => {
         const order: Record<string, number> = { project: 0, task: 1, connection: 2, blackbox: 3 };
         return order[a.type] - order[b.type];
       });
 
-      // 清理过期项
       const now = Date.now();
       const expiredIds = new Set<string>();
       const validItems: RetryQueueItem[] = [];
@@ -770,16 +826,23 @@ export class RetryQueueService {
 
       let successCount = 0;
       const processedIds = new Set<string>();
-      const initialCount = validItems.length;
-      let exceededCount = 0; // 重试超限计数器
+      let exceededCount = 0;
+      let processedCount = 0;
+      let stoppedByBudget = false;
 
       for (const item of validItems) {
+        if (processedCount >= maxItems || (Date.now() - sliceStartedAt >= maxDurationMs && processedCount > 0)) {
+          stoppedByBudget = true;
+          break;
+        }
+
+        processedCount++;
+
         if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
           processedIds.add(item.id);
           continue;
         }
 
-        // 校验实体 ID 格式，自动移除脏数据
         if (item.data?.id && !isValidUUID(item.data.id)) {
           this.logger.warn('队列中发现非法 ID，自动移除', { type: item.type, id: item.data.id });
           processedIds.add(item.id);
@@ -816,45 +879,61 @@ export class RetryQueueService {
           continue;
         }
 
-        // 处理失败：增加重试计数
         item.retryCount++;
         if (item.retryCount >= this.MAX_RETRIES) {
           processedIds.add(item.id);
           exceededCount++;
         }
-        // retryCount < MAX_RETRIES 的项留在队列中，下次处理
       }
 
-      // 批量汇总超限警告，避免日志刷屏
       if (exceededCount > 0) {
         this.logger.warn('重试次数超限，移除项目', { count: exceededCount });
         this.toast.error('部分数据同步失败，请检查网络连接');
       }
 
-      // 移除已处理的项（成功的 + 永久失败的 + 超限的）
       if (processedIds.size > 0) {
         this.queue = this.queue.filter(item => !processedIds.has(item.id));
       }
 
-      if (initialCount > 0) {
-        this.logger.info('processQueue 完成', {
-          initialCount, successCount, expiredCount: expiredIds.size,
-          remainingCount: this.queue.length, duration: Date.now() - this.lastProcessTime
+      const durationMs = Date.now() - sliceStartedAt;
+      if (processedCount > 0) {
+        this.logger.info('processQueueSlice 完成', {
+          processedCount,
+          successCount,
+          expiredCount: expiredIds.size,
+          remainingCount: this.queue.length,
+          maxItems: Number.isFinite(maxItems) ? maxItems : null,
+          maxDurationMs: Number.isFinite(maxDurationMs) ? maxDurationMs : null,
+          durationMs,
+          stoppedByBudget
         });
       }
 
       this.saveToStorage();
       this.checkCapacityWarning();
+
+      return {
+        processed: processedCount,
+        remaining: this.queue.length,
+        durationMs,
+        completed: !stoppedByBudget
+      };
     } catch (error) {
-      this.logger.error('processQueue 发生未捕获异常', error);
+      this.logger.error('processQueueSlice 发生未捕获异常', error);
       this.sentryLazyLoader.captureException(error, {
         tags: {
-          operation: 'retryQueue.processQueue'
+          operation: 'retryQueue.processQueueSlice'
         },
         extra: {
           queueSize: this.queue.length
         }
       });
+      return {
+        processed: 0,
+        remaining: this.queue.length,
+        durationMs: Date.now() - sliceStartedAt,
+        completed: false
+      };
     } finally {
       this.isProcessingQueue = false;
       try {
@@ -1041,11 +1120,27 @@ export class RetryQueueService {
   }
   
   /**
-   * 保存队列到存储
+   * 保存队列到存储（防抖版）
+   * 在 500ms 内的多次调用会合并为一次实际写入操作
+   *
+   * 【2026-02-15 修复】解决 processQueueSlice 循环中每处理一个项就触发一次
+   * IndexedDB 全量序列化+写入的性能问题
+   */
+  private saveToStorage(): void {
+    if (this.saveDebounceTimer) return; // 已有待执行的保存，跳过
+    this.saveDebounceTimer = setTimeout(() => {
+      this.saveDebounceTimer = null;
+      this.saveToStorageImmediate();
+    }, this.SAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * 立即保存队列到存储（无防抖）
+   * 用于组件销毁/beforeunload 等关键路径
    * 【P2-17 修复】添加 catch 处理，防止未捕获的 Promise rejection
    * 注意：调用方故意不 await，采用 fire-and-forget 模式以不阻塞主线程
    */
-  private async saveToStorage(): Promise<void> {
+  private async saveToStorageImmediate(): Promise<void> {
     try {
       const db = await this.initDb();
       

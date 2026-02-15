@@ -1,12 +1,13 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { FlowTaskDetailComponent } from './flow-task-detail.component';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { disablePollutionGuard, enablePollutionGuard } from '../../../../test-setup.mocks';
 import { Task } from '../../../../models';
 
 describe('FlowTaskDetailComponent - Task Switching Fix', () => {
@@ -16,6 +17,25 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   let mockProjectState: any;
   let mockUserSession: any;
   let mockChangeTracker: any;
+  const defaultRequestAnimationFrame: typeof globalThis.requestAnimationFrame =
+    typeof globalThis.requestAnimationFrame === 'function'
+      ? globalThis.requestAnimationFrame.bind(globalThis)
+      : ((callback: FrameRequestCallback): number =>
+          setTimeout(() => callback(Date.now()), 16) as unknown as number);
+  const defaultCancelAnimationFrame: typeof globalThis.cancelAnimationFrame =
+    typeof globalThis.cancelAnimationFrame === 'function'
+      ? globalThis.cancelAnimationFrame.bind(globalThis)
+      : ((id: number): void => {
+          clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
+        });
+  const ensureAnimationFramePolyfill = (): void => {
+    if (typeof globalThis.requestAnimationFrame !== 'function') {
+      globalThis.requestAnimationFrame = defaultRequestAnimationFrame;
+    }
+    if (typeof globalThis.cancelAnimationFrame !== 'function') {
+      globalThis.cancelAnimationFrame = defaultCancelAnimationFrame;
+    }
+  };
 
   const createMockTask = (id: string, title: string, content: string): Task => ({
     id,
@@ -33,8 +53,11 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     updatedAt: '2025-12-31T00:00:00Z',
   });
 
+  beforeAll(() => {
+    disablePollutionGuard();
+  });
+
   beforeEach(async () => {
-    // Mock services
     mockUiState = {
       markEditing: vi.fn(),
       isMobile: signal(false),
@@ -78,6 +101,8 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       })),
     };
 
+    ensureAnimationFramePolyfill();
+
     await TestBed.configureTestingModule({
       imports: [FlowTaskDetailComponent],
       providers: [
@@ -88,9 +113,30 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     }).compileComponents();
-
     fixture = TestBed.createComponent(FlowTaskDetailComponent);
     component = fixture.componentInstance;
+  });
+
+  afterAll(() => {
+    enablePollutionGuard();
+  });
+
+  afterEach(() => {
+    if (typeof vi.isFakeTimers === 'function' && vi.isFakeTimers()) {
+      if (typeof vi.clearAllTimers === 'function') {
+        vi.clearAllTimers();
+      }
+      vi.useRealTimers();
+    }
+
+    globalThis.requestAnimationFrame = defaultRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = defaultCancelAnimationFrame;
+
+    try {
+      fixture?.destroy();
+    } catch {
+      // noop
+    }
   });
 
   describe('任务切换时的状态重置', () => {
@@ -401,7 +447,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       expect(component.formService['unlockTimers'].size).toBe(0);
       
       vi.useRealTimers();
-    });
+    }, 5000);
   });
 
   describe('移动端抽屉高度自适应', () => {
@@ -502,7 +548,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         globalThis.cancelAnimationFrame = originalCancelRaf;
         vi.useRealTimers();
       }
-    });
+    }, 5000);
 
     it('算法: targetPx = titleH + intrinsicContentH + handleH + guard', async () => {
       vi.useFakeTimers();

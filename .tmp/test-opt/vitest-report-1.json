@@ -1,0 +1,29 @@
+{
+  "testResults": [
+    {
+      "name": "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+      "duration": 500,
+      "status": "passed"
+    },
+    {
+      "name": "src/services/user-session.service.spec.ts",
+      "duration": 600,
+      "status": "passed"
+    },
+    {
+      "name": "src/tests/slow.spec.ts",
+      "duration": 2200,
+      "status": "passed"
+    },
+    {
+      "name": "src/tests/recovered.spec.ts",
+      "duration": 200,
+      "status": "passed"
+    },
+    {
+      "name": "src/tests/stable.spec.ts",
+      "duration": 300,
+      "status": "passed"
+    }
+  ]
+}

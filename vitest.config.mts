@@ -11,13 +11,11 @@ const parsePositiveInt = (value: string | undefined): number | undefined => {
 
 // Vitest 会在每个 worker 都执行一次 setupFiles（Angular/zone 初始化等）
 // 当测试本身很快时，worker 过多会导致 setup/environment 时间占比暴涨。
-// 默认更保守：最多 4 个 threads，同时允许通过环境变量覆盖。
+// 默认更保守：最多 4 个 workers，同时允许通过环境变量覆盖。
 const cpuCount = Math.max(1, os.cpus()?.length ?? 1);
-const defaultMaxThreads = Math.min(4, cpuCount >= 4 ? cpuCount - 1 : cpuCount);
-const envMaxThreads = parsePositiveInt(process.env.VITEST_MAX_THREADS);
-const maxThreads = Math.max(1, envMaxThreads ?? defaultMaxThreads);
-const envMinThreads = parsePositiveInt(process.env.VITEST_MIN_THREADS);
-const minThreads = Math.max(1, Math.min(envMinThreads ?? Math.min(2, maxThreads), maxThreads));
+const defaultMaxWorkers = Math.min(4, cpuCount >= 4 ? cpuCount - 1 : cpuCount);
+const envMaxWorkers = parsePositiveInt(process.env.VITEST_MAX_WORKERS ?? process.env.VITEST_MAX_THREADS);
+const maxWorkers = Math.max(1, envMaxWorkers ?? defaultMaxWorkers);
 
 export default defineConfig({
   // 使用 cacheDir 替代弃用的 cache.dir
@@ -58,6 +56,12 @@ export default defineConfig({
     
     // 模拟 localStorage 和其他浏览器 API
     setupFiles: ['./src/test-setup.ts'],
+
+    // no-isolate 车道下强制清理 spy/stub，避免跨文件污染导致偶发失败。
+    clearMocks: true,
+    restoreMocks: true,
+    unstubGlobals: true,
+    unstubEnvs: true,
     
     // ============================================
     // 性能优化配置（参考架构审核报告）
@@ -65,18 +69,10 @@ export default defineConfig({
     
     // 使用 threads 池模式，比 forks 更快（共享内存）
     pool: 'threads',
-    poolOptions: {
-      threads: {
-        // 并行模式：充分利用多核 CPU
-        // 默认偏小，避免重复初始化成本；必要时用 VITEST_MAX_THREADS/VITEST_MIN_THREADS 覆盖
-        minThreads,
-        maxThreads,
-        // 隔离：共享 worker 减少初始化开销
-        isolate: false,
-        // 单线程模式可提高稳定性
-        singleThread: false,
-      },
-    },
+    // Vitest 4：使用 top-level maxWorkers 替代 test.poolOptions
+    maxWorkers,
+    // 隔离：共享 worker 减少初始化开销
+    isolate: false,
     
     // 减少隔离开销：文件间共享环境
     // 注意：需确保测试不互相污染状态

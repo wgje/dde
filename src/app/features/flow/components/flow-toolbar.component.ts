@@ -1,4 +1,4 @@
-import { Component, input, output, computed, inject, HostListener, ViewChild, ElementRef, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, computed, inject, HostListener, ViewChild, ElementRef, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -15,6 +15,7 @@ import { TIMEOUT_CONFIG } from '../../../../config';
 @Component({
   selector: 'app-flow-toolbar',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     <!-- 移动端顶部工具栏：侧边栏切换按钮 + 返回文本视图 -->

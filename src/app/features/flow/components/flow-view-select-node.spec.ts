@@ -33,11 +33,17 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
   
   const MAX_RETRIES = 5;
   const RETRY_DELAYS = [0, 16, 50, 100, 200];
+  const fallbackRequestAnimationFrame: typeof globalThis.requestAnimationFrame =
+    (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
+  const fallbackCancelAnimationFrame: typeof globalThis.cancelAnimationFrame =
+    (id: number) => clearTimeout(id as unknown as ReturnType<typeof setTimeout>);
   
   let ctx: TestContext;
   let selectNodeCalls: string[];
   let warnCalls: { message: string; data: unknown }[];
   let debugCalls: { message: string; data: unknown }[];
+  let originalRequestAnimationFrame: typeof globalThis.requestAnimationFrame | undefined;
+  let originalCancelAnimationFrame: typeof globalThis.cancelAnimationFrame | undefined;
   
   // 模拟 scheduleTimer 函数
   const scheduleTimer = (callback: () => void, delay: number): ReturnType<typeof setTimeout> => {
@@ -103,6 +109,10 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
   
   beforeEach(() => {
     vi.useFakeTimers();
+    originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = fallbackRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = fallbackCancelAnimationFrame;
     selectNodeCalls = [];
     warnCalls = [];
     debugCalls = [];
@@ -124,7 +134,12 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
   
   afterEach(() => {
     cleanup();
+    if (typeof vi.clearAllTimers === 'function') {
+      vi.clearAllTimers();
+    }
     vi.useRealTimers();
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame ?? fallbackRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame ?? fallbackCancelAnimationFrame;
   });
   
   describe('节点存在时', () => {

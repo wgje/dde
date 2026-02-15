@@ -19,6 +19,7 @@ import { Injectable, signal, computed, DestroyRef, inject } from '@angular/core'
 })
 export class UiStateService {
   private destroyRef = inject(DestroyRef);
+  private static readonly LAST_ACTIVE_VIEW_STORAGE_KEY = 'nanoflow.last-active-view';
   
   // ========== 响应式状态 ==========
   
@@ -31,6 +32,12 @@ export class UiStateService {
   /** 文本视图分栏比例 */
   readonly textColumnRatio = signal(50);
   
+  /** 文本栏是否折叠（桌面端） */
+  readonly isTextColumnCollapsed = signal(false);
+  
+  /** 是否正在拖拽调整分栏大小（拖拽期间禁用 CSS 过渡动画，避免卡顿） */
+  readonly isResizing = signal(false);
+  
   /** 布局方向 */
   readonly layoutDirection = signal<'ltr' | 'rtl'>('ltr');
   
@@ -39,6 +46,8 @@ export class UiStateService {
   
   /** 当前视图 */
   readonly activeView = signal<'text' | 'flow' | null>('text');
+  /** 上次活跃视图（用于启动恢复策略） */
+  private readonly lastActiveViewSignal = signal<'text' | 'flow' | null>(null);
   
   // ========== 筛选器状态 ==========
   
@@ -128,7 +137,11 @@ export class UiStateService {
    */
   toggleView(view: 'text' | 'flow') {
     const current = this.activeView();
-    this.activeView.set(current === view ? null : view);
+    const nextView = current === view ? null : view;
+    this.activeView.set(nextView);
+    if (nextView) {
+      this.persistActiveView(nextView);
+    }
   }
   
   /**
@@ -136,6 +149,27 @@ export class UiStateService {
    */
   ensureView(view: 'text' | 'flow') {
     this.activeView.set(view);
+    this.persistActiveView(view);
+  }
+
+  /**
+   * 获取上次活跃视图（启动恢复矩阵使用）
+   */
+  getLastActiveView(): 'text' | 'flow' | null {
+    return this.lastActiveViewSignal();
+  }
+
+  /**
+   * 持久化当前活跃视图
+   */
+  persistActiveView(view: 'text' | 'flow'): void {
+    this.lastActiveViewSignal.set(view);
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(UiStateService.LAST_ACTIVE_VIEW_STORAGE_KEY, view);
+    } catch {
+      // 持久化失败不影响主流程
+    }
   }
   
   /**
@@ -205,19 +239,31 @@ export class UiStateService {
   }
   
   /**
+   * 切换文本栏折叠状态（桌面端）
+   * 折叠后仅显示项目栏和流程图栏
+   */
+  toggleTextColumnCollapsed(): void {
+    this.isTextColumnCollapsed.update(v => !v);
+  }
+  
+  /**
    * 设置布局方向
    */
   setLayoutDirection(direction: 'ltr' | 'rtl') {
     this.layoutDirection.set(direction);
-    localStorage.setItem('nanoflow.layout-direction', direction);
+    try {
+      localStorage.setItem('nanoflow.layout-direction', direction);
+    } catch { /* ignore quota / private browsing errors */ }
   }
-  
+
   /**
    * 设置浮动窗口偏好
    */
   setFloatingWindowPref(pref: 'auto' | 'fixed') {
     this.floatingWindowPref.set(pref);
-    localStorage.setItem('nanoflow.floating-window-pref', pref);
+    try {
+      localStorage.setItem('nanoflow.floating-window-pref', pref);
+    } catch { /* ignore quota / private browsing errors */ }
   }
   
   /**
@@ -317,6 +363,11 @@ export class UiStateService {
     const floatingPref = localStorage.getItem('nanoflow.floating-window-pref') as 'auto' | 'fixed' | null;
     if (floatingPref) {
       this.floatingWindowPref.set(floatingPref);
+    }
+
+    const lastActiveView = localStorage.getItem(UiStateService.LAST_ACTIVE_VIEW_STORAGE_KEY);
+    if (lastActiveView === 'text' || lastActiveView === 'flow') {
+      this.lastActiveViewSignal.set(lastActiveView);
     }
   }
 }

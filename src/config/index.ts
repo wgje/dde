@@ -129,5 +129,15 @@ export {
   PERF_MONITORING_CONFIG
 } from './performance.config';
 
-// 流程图样式（独立文件，保持不变）
-export * from './flow-styles';
+// 应用生命周期配置
+export {
+  APP_LIFECYCLE_CONFIG
+} from './app-lifecycle.config';
+
+// 启动性能配置
+export {
+  STARTUP_PERF_CONFIG
+} from './startup-performance.config';
+
+// 注意：flow-styles 不再通过 barrel 导出，避免首屏静态依赖误引入。
+// 如需使用请直接从 `config/flow-styles` 导入。

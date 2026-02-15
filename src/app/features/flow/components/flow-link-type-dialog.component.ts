@@ -1,4 +1,4 @@
-import { Component, input, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Task } from '../../../../models';
 
@@ -19,6 +19,7 @@ export interface LinkTypeDialogData {
 @Component({
   selector: 'app-flow-link-type-dialog',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (data(); as dialog) {

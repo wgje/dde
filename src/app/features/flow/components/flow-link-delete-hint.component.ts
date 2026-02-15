@@ -1,4 +1,4 @@
-import { Component, input, output, computed } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 import type { LinkDeleteHint } from '../../../../models/flow-view-state';
@@ -9,6 +9,7 @@ import type { LinkDeleteHint } from '../../../../models/flow-view-state';
 @Component({
   selector: 'app-flow-link-delete-hint',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (hint(); as h) {

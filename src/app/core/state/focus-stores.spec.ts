@@ -11,7 +11,7 @@ import {
   getTodayDate,
   getYesterdayDate,
   getDaysAgoDate,
-} from './focus-stores';
+} from '../../../state/focus-stores';
 import type { BlackBoxEntry } from '../../../models/focus';
 
 describe('focus-stores', () => {

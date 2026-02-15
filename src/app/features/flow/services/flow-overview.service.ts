@@ -99,16 +99,18 @@ export class FlowOverviewService {
         // 优化渲染：强制浏览器使用更高对比度和锐利度的图像渲染算法
         container.style.imageRendering = 'auto'; // 基础回退
         if ('imageRendering' in container.style) {
-          // 尝试各种浏览器的锐化选项
-          (container.style as any).imageRendering = '-webkit-optimize-contrast';
-          if (container.style.imageRendering !== '-webkit-optimize-contrast') {
-             (container.style as any).imageRendering = 'crisp-edges';
+          // 尝试各种浏览器的锐化选项（非标准属性需类型断言）
+          const style = container.style as CSSStyleDeclaration & Record<string, string>;
+          style.imageRendering = '-webkit-optimize-contrast';
+          if (style.imageRendering !== '-webkit-optimize-contrast') {
+             style.imageRendering = 'crisp-edges';
           }
         }
         
-        // 提升抗锯齿效果
-        (container.style as any).webkitFontSmoothing = 'antialiased';
-        (container.style as any).mozOsxFontSmoothing = 'grayscale';
+        // 提升抗锯齿效果（非标准 vendor-prefixed 属性）
+        const vendorStyle = container.style as CSSStyleDeclaration & Record<string, string>;
+        vendorStyle['webkitFontSmoothing'] = 'antialiased';
+        vendorStyle['mozOsxFontSmoothing'] = 'grayscale';
         
         // 创建 Overview 实例
         this.overview = new go.Overview(container, {

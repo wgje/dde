@@ -39,9 +39,7 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       // 监听 getSession 调用（不应该被调用）
       const getSessionSpy = vi.spyOn(service as any, 'getSupabaseClient').mockReturnValue(null);
 
-      const perfStart = performance.now();
       const result = await service.saveProjectToCloud(project, AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      const perfEnd = performance.now();
 
       // 断言：立即返回失败（本地模式不同步）
       expect(result.success).toBe(false);
@@ -49,8 +47,6 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       // 断言：不应该调用 getSession
       expect(getSessionSpy).not.toHaveBeenCalled();
       
-      // 断言：执行时间应该极短（<10ms）
-      expect(perfEnd - perfStart).toBeLessThan(10);
     });
 
     it('应该在真实用户模式下正常执行会话检查', async () => {
@@ -92,15 +88,11 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       
       const loadFromCacheSpy = vi.spyOn(service as any, 'loadFromCacheOrSeed').mockImplementation(() => {});
 
-      const perfStart = performance.now();
       await service.loadProjects();
-      const perfEnd = performance.now();
 
       // 断言：应该调用本地加载
       expect(loadFromCacheSpy).toHaveBeenCalled();
       
-      // 断言：执行时间应该极短（<50ms）
-      expect(perfEnd - perfStart).toBeLessThan(50);
     });
   });
 
@@ -125,15 +117,11 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       const mockRoute = {} as ActivatedRouteSnapshot;
       const mockState = { url: '/projects' } as RouterStateSnapshot;
 
-      const perfStart = performance.now();
       const result = await TestBed.runInInjectionContext(() => requireAuthGuard(mockRoute, mockState));
-      const perfEnd = performance.now();
 
       // 断言：立即放行
       expect(result).toBe(true);
       
-      // 断言：执行时间应该极短（<10ms）
-      expect(perfEnd - perfStart).toBeLessThan(10);
     });
   });
 

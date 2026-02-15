@@ -67,6 +67,9 @@ export class RealtimePollingService {
 
   /** 用户活跃状态事件清理函数 */
   private activityCleanupFns: (() => void)[] = [];
+
+  /** 轮询回调是否正在执行（互斥锁，防止并发 poll） */
+  private isPolling = false;
   
   /** Realtime 是否启用（运行时可切换） */
   readonly isRealtimeEnabled = signal<boolean>(SYNC_CONFIG.REALTIME_ENABLED);
@@ -144,6 +147,13 @@ export class RealtimePollingService {
   }
 
   /**
+   * 是否已注册远程变更回调
+   */
+  hasRemoteChangeCallback(): boolean {
+    return this.onRemoteChangeCallback !== null;
+  }
+
+  /**
    * 设置用户偏好变更回调
    */
   setUserPreferencesChangeCallback(callback: UserPreferencesChangeCallback | null): void {
@@ -152,6 +162,32 @@ export class RealtimePollingService {
 
   setTaskChangeCallback(callback: TaskChangeCallback | null): void {
     this.onTaskChangeCallback = callback;
+  }
+
+  /**
+   * 触发一次立即远程变更检查（用于前后台恢复等场景）
+   *
+   * @returns 是否成功触发回调
+   */
+  async triggerRemoteChange(
+    payload?: { eventType?: string; projectId?: string }
+  ): Promise<boolean> {
+    if (!this.onRemoteChangeCallback || this.realtimePaused) {
+      return false;
+    }
+
+    const effectivePayload = payload ?? {
+      eventType: 'manual',
+      projectId: this.currentProjectId ?? undefined
+    };
+
+    try {
+      await this.onRemoteChangeCallback(effectivePayload);
+      return true;
+    } catch (error) {
+      this.logger.warn('触发立即远程同步失败', { error, payload: effectivePayload });
+      return false;
+    }
   }
 
   /**
@@ -194,6 +230,8 @@ export class RealtimePollingService {
 
   /**
    * 启动轮询
+   * 【2026-02-15 修复】添加互斥锁防止 poll 并发执行
+   * 确保上一次 poll 完成后才调度下一次，避免同步回调堆积
    */
   private startPolling(projectId: string): void {
     if (this.pollingTimer) {
@@ -204,7 +242,12 @@ export class RealtimePollingService {
     
     const poll = async () => {
       if (!this.syncState.syncState().isOnline || this.realtimePaused) return;
-      
+      // 互斥锁：如果上一次 poll 回调尚未完成，跳过本次
+      if (this.isPolling) {
+        this.logger.debug('轮询跳过：上一次 poll 仍在执行');
+        return;
+      }
+      this.isPolling = true;
       try {
         if (this.onRemoteChangeCallback) {
           await this.onRemoteChangeCallback({ 
@@ -214,6 +257,8 @@ export class RealtimePollingService {
         }
       } catch (e) {
         this.logger.debug('轮询检查失败', e);
+      } finally {
+        this.isPolling = false;
       }
     };
     
@@ -285,11 +330,11 @@ export class RealtimePollingService {
             });
           }
 
-          // DELETE 事件不依赖 payload 字段，统一触发项目级增量拉取 + tombstone 校验
-          if (payload.eventType === 'DELETE' && this.onRemoteChangeCallback) {
-            this.onRemoteChangeCallback({ 
-              eventType: payload.eventType, 
-              projectId 
+          // 所有事件类型统一触发项目级增量拉取
+          if (this.onRemoteChangeCallback) {
+            this.onRemoteChangeCallback({
+              eventType: payload.eventType,
+              projectId
             }).catch(e => {
               this.logger.debug('任务级事件触发项目增量拉取失败', e);
             });

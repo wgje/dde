@@ -1,6 +1,6 @@
 import { Pipe, PipeTransform, inject } from '@angular/core';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
-import { renderMarkdownSafe, renderMarkdown } from '../../../utils/markdown';
+import { renderMarkdownSafe, renderMarkdownRawSafe } from '../../../utils/markdown';
 
 /**
  * 安全 Markdown 渲染管道
@@ -11,7 +11,7 @@ import { renderMarkdownSafe, renderMarkdown } from '../../../utils/markdown';
  * 用法（返回 SafeHtml，支持 DomSanitizer）：
  *   <div [innerHTML]="content | safeMarkdown"></div>
  * 
- * 用法（返回 string，不经过 DomSanitizer，已经 DOMPurify 处理）：
+ * 用法（返回 string，经过 DOMPurify 处理但不经过 DomSanitizer）：
  *   <div [innerHTML]="content | safeMarkdown:'raw'"></div>
  */
 @Pipe({
@@ -26,7 +26,8 @@ export class SafeMarkdownPipe implements PipeTransform {
     if (!content) return '';
     
     if (mode === 'raw') {
-      return renderMarkdown(content);
+      // 【P2-3 修复】raw 模式也经过 DOMPurify 保持深度防御
+      return renderMarkdownRawSafe(content);
     }
     
     return renderMarkdownSafe(content, this.sanitizer);

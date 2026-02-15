@@ -4,13 +4,14 @@
  * 对讲机式交互：按住说话，松开转文字
  */
 
-import { 
-  Component, 
-  ChangeDetectionStrategy, 
+import {
+  Component,
+  ChangeDetectionStrategy,
   inject,
-  Output,
-  EventEmitter,
-  signal
+  signal,
+  input,
+  output,
+  OnDestroy
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { SpeechToTextService } from '../../../../../services/speech-to-text.service';
@@ -24,8 +25,7 @@ import { LoggerService } from '../../../../../services/logger.service';
     <div class="black-box-recorder">
       <!-- 转写结果预览 -->
       @if (transcription()) {
-        <div class="mb-2 p-2 bg-amber-100/80 dark:bg-stone-700 rounded-lg text-xs
-                    text-stone-700 dark:text-stone-200 animate-fade-in">
+        <div class="mb-2 p-2 rounded-lg text-xs animate-fade-in" [class]="transcriptionPreviewClass()">
           <p class="line-clamp-3">{{ transcription() }}</p>
         </div>
       }
@@ -55,16 +55,16 @@ import { LoggerService } from '../../../../../services/logger.service';
         @if (voiceService.isTranscribing()) {
           <span class="w-4 h-4 border-2 border-stone-400 border-t-transparent 
                        rounded-full animate-spin"></span>
-          <span>Thinking...</span>
+          <span>转写中...</span>
         } @else if (voiceService.isRecording()) {
           <span class="recording-dot w-3 h-3 rounded-full bg-white"></span>
-          <span>Listening...</span>
+          <span>录音中...</span>
           <span class="text-white/70 text-xs font-mono ml-1">
             {{ recordingDuration() }}s
           </span>
         } @else {
           <span class="text-lg">🎤</span>
-          <span>Hold to Dump Brain</span>
+          <span>按住开始录音</span>
         }
       </button>
       
@@ -116,31 +116,54 @@ import { LoggerService } from '../../../../../services/logger.service';
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class BlackBoxRecorderComponent {
+export class BlackBoxRecorderComponent implements OnDestroy {
   voiceService = inject(SpeechToTextService);
   private readonly logger = inject(LoggerService);
+  appearance = input<'default' | 'obsidian'>('default');
+  onTranscribed = input<((text: string) => void) | null>(null);
   
   transcription = signal('');
   recordingDuration = signal(0);
   
   private durationTimer: ReturnType<typeof setInterval> | null = null;
   
-  @Output() transcribed = new EventEmitter<string>();
+  transcribed = output<string>();
+
+  ngOnDestroy(): void {
+    if (this.durationTimer) {
+      clearInterval(this.durationTimer);
+      this.durationTimer = null;
+    }
+  }
 
   /**
    * 获取按钮样式类
    */
   getButtonClass(): string {
     if (this.voiceService.isTranscribing()) {
+      if (this.appearance() === 'obsidian') {
+        return 'bg-stone-700 text-stone-300 cursor-wait';
+      }
       return 'bg-stone-200 dark:bg-stone-600 text-stone-500 dark:text-stone-300 cursor-wait';
     }
     if (this.voiceService.isRecording()) {
       return 'recording bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[0.98] border-2 border-dashed border-red-400';
     }
+    if (this.appearance() === 'obsidian') {
+      return `bg-stone-800 text-amber-300 border border-stone-600/70
+              hover:bg-stone-700 active:scale-[0.98]`;
+    }
     return `bg-amber-100/80 dark:bg-stone-700/80 
             text-amber-700 dark:text-amber-300 
             hover:bg-amber-200 dark:hover:bg-stone-600 
             active:scale-[0.98]`;
+  }
+
+  transcriptionPreviewClass(): string {
+    if (this.appearance() === 'obsidian') {
+      return 'bg-stone-800 border border-stone-700 text-stone-200';
+    }
+    return 'bg-amber-100/80 dark:bg-stone-700 text-stone-700 dark:text-stone-200';
   }
   
   /**
@@ -189,6 +212,7 @@ export class BlackBoxRecorderComponent {
       if (text.trim()) {
         this.transcription.set(text);
         this.transcribed.emit(text);
+        this.onTranscribed()?.(text);
         
         // 3秒后清除预览
         setTimeout(() => {

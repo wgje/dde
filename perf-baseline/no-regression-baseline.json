@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-02-16T00:00:00.000Z",
+  "metrics": {
+    "startup.lcp_ms": 3000,
+    "startup.fcp_ms": 2000,
+    "startup.long_task_total_ms": 3000,
+    "startup.data_requests": 20,
+    "startup.blackbox_pulls": 1,
+    "startup.rpc_400_count": 0,
+    "startup.preflow_large_chunks": 0,
+    "startup.modulepreload_links": 0,
+    "resume.interaction_ready_ms": 150,
+    "resume.background_refresh_ms": 10000,
+    "build.initial_static_kb": 340,
+    "build.workspace_chunk_kb": 125,
+    "build.main_static_imports": 10
+  }
+}

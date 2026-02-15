@@ -72,6 +72,37 @@ interface Window {
   showDirectoryPicker?(options?: DirectoryPickerOptions): Promise<FileSystemDirectoryHandle>;
   showOpenFilePicker?(options?: OpenFilePickerOptions): Promise<FileSystemFileHandle[]>;
   showSaveFilePicker?(options?: SaveFilePickerOptions): Promise<FileSystemFileHandle>;
+  __NANOFLOW_BOOT_FLAGS__?: NanoFlowBootFlags;
+}
+
+interface NanoFlowBootFlags {
+  DISABLE_INDEX_DATA_PRELOAD_V1?: boolean;
+  FONT_EXTREME_FIRSTPAINT_V1?: boolean;
+  FLOW_STATE_AWARE_RESTORE_V2?: boolean;
+  EVENT_DRIVEN_SYNC_PULSE_V1?: boolean;
+  TAB_SYNC_LOCAL_REFRESH_V1?: boolean;
+  STRICT_MODULEPRELOAD_V2?: boolean;
+  ROOT_STARTUP_DEP_PRUNE_V1?: boolean;
+  BOOT_SHELL_SPLIT_V1?: boolean;
+  TIERED_STARTUP_HYDRATION_V1?: boolean;
+  SUPABASE_DEFERRED_SDK_V1?: boolean;
+  CONFIG_BARREL_PRUNE_V1?: boolean;
+  SIDEBAR_TOOLS_DYNAMIC_LOAD_V1?: boolean;
+  RESUME_INTERACTION_FIRST_V1?: boolean;
+  RESUME_WATERMARK_RPC_V1?: boolean;
+  RESUME_PULSE_DEDUP_V1?: boolean;
+  ROUTE_GUARD_LAZY_IMPORT_V1?: boolean;
+  WEB_VITALS_IDLE_BOOT_V2?: boolean;
+  FONT_AGGRESSIVE_DEFER_V2?: boolean;
+  SYNC_STATUS_DEFERRED_MOUNT_V1?: boolean;
+  PWA_PROMPT_DEFER_V2?: boolean;
+  RESUME_SESSION_SNAPSHOT_V1?: boolean;
+  USER_PROJECTS_WATERMARK_RPC_V1?: boolean;
+  RECOVERY_TICKET_DEDUP_V1?: boolean;
+  BLACKBOX_WATERMARK_PROBE_V1?: boolean;
+  WORKSPACE_SHELL_COMPOSITION_V3?: boolean;
+  RESUME_COMPOSITE_PROBE_RPC_V1?: boolean;
+  RESUME_METRICS_GATE_V1?: boolean;
 }
 
 interface DirectoryPickerOptions {
@@ -99,11 +130,20 @@ interface FilePickerAcceptType {
   accept: Record<string, string[]>;
 }
 
-type StartInDirectory = 
-  | 'desktop' 
-  | 'documents' 
-  | 'downloads' 
-  | 'music' 
-  | 'pictures' 
+type StartInDirectory =
+  | 'desktop'
+  | 'documents'
+  | 'downloads'
+  | 'music'
+  | 'pictures'
   | 'videos'
   | FileSystemHandle;
+
+// ============================================
+// CSS module declarations
+// ============================================
+// Allow importing .css files as modules (used for lazy-loaded styles)
+declare module '*.css' {
+  const content: Record<string, string>;
+  export default content;
+}

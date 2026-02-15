@@ -60,7 +60,7 @@ describe('requireAuthGuard', () => {
     expect(show).not.toHaveBeenCalled();
   });
 
-  it('会话检查超时且无缓存时应阻断并弹登录框', async () => {
+  it('会话检查超时且无缓存时应允许壳层挂载并弹登录框', async () => {
     vi.useFakeTimers();
 
     const show = vi.fn();
@@ -84,14 +84,14 @@ describe('requireAuthGuard', () => {
     await vi.advanceTimersByTimeAsync(GUARD_CONFIG.SESSION_CHECK_TIMEOUT + 100);
     const result = await resultPromise;
 
-    expect(result).toBe(false);
+    expect(result).toBe(true);
     expect(show).toHaveBeenCalledWith('login', {
       returnUrl: '/projects',
       message: '请登录以访问此页面',
     });
   });
 
-  it('已完成会话检查且未登录时应阻断并弹登录框', async () => {
+  it('已完成会话检查且未登录时应允许壳层挂载并弹登录框', async () => {
     const show = vi.fn();
     const authMock = {
       isConfigured: true,
@@ -111,10 +111,36 @@ describe('requireAuthGuard', () => {
     const mockState = { url: '/projects' } as RouterStateSnapshot;
     const result = await TestBed.runInInjectionContext(() => requireAuthGuard(mockRoute, mockState));
 
-    expect(result).toBe(false);
+    expect(result).toBe(true);
     expect(show).toHaveBeenCalledWith('login', {
       returnUrl: '/projects',
       message: '请登录以访问此页面',
     });
+  });
+
+  it('登录模态框触发异常时也不应阻断路由（避免黑屏）', async () => {
+    const show = vi.fn(() => {
+      throw new Error('modal unavailable');
+    });
+    const authMock = {
+      isConfigured: true,
+      authState: vi.fn().mockReturnValue({ isCheckingSession: false, userId: null }),
+      currentUserId: vi.fn().mockReturnValue(null),
+    };
+
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: AuthService, useValue: authMock },
+        { provide: ModalService, useValue: { show } },
+        { provide: LoggerService, useValue: createLoggerServiceMock() },
+      ],
+    });
+
+    const mockRoute = {} as ActivatedRouteSnapshot;
+    const mockState = { url: '/projects' } as RouterStateSnapshot;
+    const result = await TestBed.runInInjectionContext(() => requireAuthGuard(mockRoute, mockState));
+
+    expect(result).toBe(true);
+    expect(show).toHaveBeenCalled();
   });
 });

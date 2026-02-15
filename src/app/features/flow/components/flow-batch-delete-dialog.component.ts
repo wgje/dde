@@ -1,4 +1,4 @@
-import { Component, input, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 /**
@@ -38,6 +38,7 @@ export interface BatchDeleteDialogData {
 @Component({
   selector: 'app-flow-batch-delete-dialog',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
     @if (data(); as d) {

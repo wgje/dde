@@ -9,6 +9,8 @@ export default defineConfig({
   ...base,
   test: {
     ...base.test,
+    // 显式固定 pure 套件默认 worker，便于与 test:run 的分桶执行保持一致。
+    maxWorkers: 1,
     // 使用最小化初始化（不加载 Angular/zone.js）
     setupFiles: ['./src/test-setup.minimal.ts'],
     include: [

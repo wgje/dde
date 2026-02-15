@@ -40,7 +40,13 @@ export class TaskAttributeService {
       const updatedTasks = p.tasks.map(t => {
         if (t.id !== taskId) return t;
         
-        const updatedTask = { ...t, content: newContent, updatedAt: now };
+        const updatedTask = {
+          ...t,
+          content: newContent,
+          // 同步更新 hasIncompleteTask，保持待办状态与内容一致
+          hasIncompleteTask: this.layoutService.detectIncomplete(newContent),
+          updatedAt: now
+        };
         // 如果 content 和 title 都为空，给 title 设置默认值
         if ((!newContent || newContent.trim() === '') && (!t.title || t.title.trim() === '')) {
           updatedTask.title = '新任务';

@@ -19,8 +19,8 @@ import { StrataItem } from '../../../../../models';
   template: `
     <div 
       class="strata-item p-1.5 rounded-lg mb-1 last:mb-0
-             bg-stone-200/30 dark:bg-stone-700/30
-             hover:bg-stone-200/50 dark:hover:bg-stone-700/50
+             bg-stone-800/70
+             hover:bg-stone-700/75
              transition-all duration-150"
       role="article"
       [attr.aria-label]="'已完成: ' + item.title"
@@ -34,13 +34,13 @@ import { StrataItem } from '../../../../../models';
         
         <!-- 内容 -->
         <div class="flex-1 min-w-0">
-          <p class="text-xs text-stone-600 dark:text-stone-300 
+          <p class="text-xs text-stone-300 
                     truncate leading-relaxed">
             {{ item.title }}
           </p>
           
           <!-- 时间 -->
-          <span class="text-[9px] text-stone-400 dark:text-stone-500 font-mono">
+          <span class="text-[9px] text-stone-500 font-mono">
             {{ item.completedAt | date:'HH:mm' }}
           </span>
         </div>

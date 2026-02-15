@@ -264,4 +264,49 @@ describe('RetryQueueService', () => {
     // 95% 应触发 error 级别日志
     expect(loggerCategory.error).toHaveBeenCalled();
   });
+
+  it('processQueueSlice 应按 maxItems 切片并返回未完成状态', async () => {
+    service.add('task', 'upsert', createTask('slice-1'), 'p-1');
+    service.add('task', 'upsert', createTask('slice-2'), 'p-1');
+    service.add('task', 'upsert', createTask('slice-3'), 'p-1');
+    online = true;
+
+    const result = await service.processQueueSlice({ maxItems: 2, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(2);
+    expect(result.completed).toBe(false);
+    expect(result.remaining).toBe(1);
+    expect(handler.pushTask).toHaveBeenCalledTimes(2);
+  });
+
+  it('processQueueSlice 应按 maxDurationMs 切片并可续跑完成', async () => {
+    let fakeNow = 1000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      fakeNow += 220;
+      return true;
+    });
+
+    service.add('task', 'upsert', createTask('budget-1'), 'p-1');
+    service.add('task', 'upsert', createTask('budget-2'), 'p-1');
+    service.add('task', 'upsert', createTask('budget-3'), 'p-1');
+    online = true;
+
+    const first = await service.processQueueSlice({ maxItems: 30, maxDurationMs: 150 });
+    expect(first.processed).toBe(1);
+    expect(first.completed).toBe(false);
+    expect(first.remaining).toBe(2);
+
+    const second = await service.processQueueSlice({ maxItems: 30, maxDurationMs: 150 });
+    expect(second.processed).toBe(1);
+    expect(second.completed).toBe(false);
+    expect(second.remaining).toBe(1);
+
+    const third = await service.processQueueSlice({ maxItems: 30, maxDurationMs: 150 });
+    expect(third.processed).toBe(1);
+    expect(third.completed).toBe(true);
+    expect(third.remaining).toBe(0);
+
+    nowSpy.mockRestore();
+  });
 });

@@ -113,10 +113,11 @@ const mockLoggerService = {
 
 const mockSyncCoordinatorService = {
   markLocalChanges: vi.fn(),
+  hasPendingLocalChanges: vi.fn(() => false),
 };
 
 const mockChangeTrackerService = {};
-const mockUndoService = {};
+const mockUndoService = { clearHistory: vi.fn() };
 const mockUiStateService = { 
   isEditing: false, 
   isMobile: vi.fn(() => false),
@@ -313,5 +314,13 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     
     expect(result.ok).toBe(true);
     expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到待分配区');
+  });
+
+  it('warmup 应幂等且不抛错', async () => {
+    await expect(service.warmup()).resolves.toBeUndefined();
+
+    const p1 = service.warmup();
+    const p2 = service.warmup();
+    await expect(Promise.all([p1, p2])).resolves.toBeDefined();
   });
 });

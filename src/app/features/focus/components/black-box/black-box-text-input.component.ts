@@ -40,14 +40,8 @@ import { FormsModule } from '@angular/forms';
             'dark:border-stone-500': isPressed(),
             'border-solid': !isPressed()
           }"
-          class="w-full px-3 py-2.5 rounded-xl text-sm
-                 bg-amber-50/80 dark:bg-stone-700/80
-                 border-2 transition-colors duration-200
-                 text-stone-700 dark:text-stone-200
-                 placeholder:text-stone-400 dark:placeholder:text-stone-500
-                 focus:outline-none focus:border-dashed focus:border-amber-400 
-                 dark:focus:border-amber-500 resize-none"
-          rows="3"
+          [class]="'block w-full px-2 py-1.5 rounded-lg text-sm border-2 transition-colors duration-200 focus:outline-none focus:border-dashed focus:border-amber-400 dark:focus:border-amber-500 resize-none ' + textareaToneClass()"
+          rows="2"
           placeholder="记录你的想法..."
           (keydown.enter)="onEnterKey($event)"
           (touchstart)="isPressed.set(true)"
@@ -59,23 +53,16 @@ import { FormsModule } from '@angular/forms';
         
         <!-- 提交按钮 -->
         <button
-          class="absolute right-2 bottom-2 px-3 py-1.5 rounded-lg text-xs font-medium
-                 transition-all duration-150"
-          [class]="inputText().trim() 
-            ? 'bg-amber-500 text-white hover:bg-amber-600 active:scale-95' 
-            : 'bg-stone-200 dark:bg-stone-600 text-stone-400 cursor-not-allowed'"
-          [disabled]="!inputText().trim()"
+          class="absolute right-1 bottom-1 px-2.5 py-0.5 rounded-br-md rounded-tl-md text-xs font-medium
+                 transition-all duration-200 border-l border-t"
+          [class]="submitBtnClass()"
+          [disabled]="!inputText.trim()"
           (click)="submit()"
           aria-label="提交"
           data-testid="black-box-submit">
           保存
         </button>
       </div>
-      
-      <!-- 提示 -->
-      <p class="mt-1.5 text-center text-[10px] text-stone-400 dark:text-stone-500">
-        按 Ctrl+Enter 快速保存
-      </p>
     </div>
   `,
   styles: [`
@@ -86,8 +73,9 @@ import { FormsModule } from '@angular/forms';
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class BlackBoxTextInputComponent {
-  inputText = signal('');
+  inputText = '';
   @Input() showFallbackHint = true;
+  @Input() appearance: 'default' | 'obsidian' = 'default';
   isPressed = signal(false);
   
   @Output() submitted = new EventEmitter<string>();
@@ -106,10 +94,41 @@ export class BlackBoxTextInputComponent {
    * 提交文字
    */
   submit(): void {
-    const text = this.inputText().trim();
+    const text = this.inputText.trim();
     if (text) {
       this.submitted.emit(text);
-      this.inputText.set('');
+      this.inputText = '';
     }
+  }
+
+  textareaToneClass(): string {
+    if (this.appearance === 'obsidian') {
+      return `bg-stone-900/70 border-stone-700/80 text-stone-200
+              placeholder:text-stone-500`;
+    }
+    return `bg-amber-50/80 dark:bg-stone-700/80 text-stone-700 dark:text-stone-200
+            placeholder:text-stone-400 dark:placeholder:text-stone-500`;
+  }
+
+  submitBtnClass(): string {
+    const hasContent = !!this.inputText.trim();
+    
+    if (this.appearance === 'obsidian') {
+      if (hasContent) {
+        return `bg-amber-500/5 text-amber-500/20 border-stone-700/30
+                hover:bg-amber-500 hover:text-white hover:border-amber-500 hover:opacity-100
+                active:scale-95 cursor-pointer`;
+      }
+      return 'bg-transparent text-stone-600/10 border-transparent cursor-not-allowed';
+    }
+
+    // Default appearance
+    if (hasContent) {
+      return `bg-amber-500/5 text-amber-600/30 border-amber-200/30
+              dark:text-amber-400/20 dark:border-stone-600/30
+              hover:bg-amber-500 hover:text-white hover:border-amber-500 hover:opacity-100
+              active:scale-95 cursor-pointer`;
+    }
+    return 'bg-transparent text-stone-400/10 dark:text-stone-500/10 border-transparent cursor-not-allowed';
   }
 }

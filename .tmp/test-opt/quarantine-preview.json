@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-02-15T00:00:00.000Z",
+  "updatedBy": "scripts/update-test-quarantine.cjs@v1",
+  "thresholds": {
+    "p95Ms": 1200,
+    "failureRate7d": 0.01,
+    "recoveryDays": 7,
+    "minSamples": 1
+  },
+  "files": [
+    "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+    "src/services/user-session.service.spec.ts",
+    "src/tests/flaky.spec.ts",
+    "src/tests/slow.spec.ts"
+  ],
+  "entries": [
+    {
+      "file": "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+      "reason": "slow-or-flaky-lane",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 1,
+      "p95Ms": 500,
+      "failureRate7d": 0,
+      "sampleCount": 1,
+      "failureSamples": 0
+    },
+    {
+      "file": "src/services/user-session.service.spec.ts",
+      "reason": "slow-or-flaky-lane",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 1,
+      "p95Ms": 600,
+      "failureRate7d": 0,
+      "sampleCount": 1,
+      "failureSamples": 0
+    },
+    {
+      "file": "src/tests/flaky.spec.ts",
+      "reason": "fail-rate>1.00%",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 0,
+      "failureRate7d": 0.05,
+      "sampleCount": 100,
+      "failureSamples": 5
+    },
+    {
+      "file": "src/tests/slow.spec.ts",
+      "reason": "p95>1200ms",
+      "firstSeenAt": "2026-02-15T00:00:00.000Z",
+      "lastSeenAt": "2026-02-15T00:00:00.000Z",
+      "healthyStreakDays": 0,
+      "p95Ms": 2200,
+      "failureRate7d": 0,
+      "sampleCount": 1,
+      "failureSamples": 0
+    }
+  ],
+  "sources": {
+    "seedFilesPinned": [
+      "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+      "src/services/user-session.service.spec.ts"
+    ],
+    "vitestReportsRequested": [
+      ".tmp/test-opt/vitest-report-1.json"
+    ],
+    "vitestReportsLoaded": [
+      ".tmp/test-opt/vitest-report-1.json"
+    ],
+    "failureStatsRequested": [
+      ".tmp/test-opt/failure-stats-1.json"
+    ],
+    "failureStatsLoaded": [
+      ".tmp/test-opt/failure-stats-1.json"
+    ]
+  }
+}

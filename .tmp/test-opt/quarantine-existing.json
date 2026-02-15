@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-02-14T00:00:00.000Z",
+  "entries": [
+    {
+      "file": "src/app/features/flow/components/flow-task-detail.component.spec.ts",
+      "reason": "manual_seed",
+      "firstSeenAt": "2026-02-01T00:00:00.000Z",
+      "lastSeenAt": "2026-02-14T00:00:00.000Z",
+      "healthyStreakDays": 6,
+      "sampleCount": 10,
+      "failureSamples": 0
+    },
+    {
+      "file": "src/services/user-session.service.spec.ts",
+      "reason": "manual_seed",
+      "firstSeenAt": "2026-02-01T00:00:00.000Z",
+      "lastSeenAt": "2026-02-14T00:00:00.000Z",
+      "healthyStreakDays": 6,
+      "sampleCount": 10,
+      "failureSamples": 0
+    },
+    {
+      "file": "src/tests/recovered.spec.ts",
+      "reason": "p95>1200ms",
+      "firstSeenAt": "2026-01-20T00:00:00.000Z",
+      "lastSeenAt": "2026-02-14T00:00:00.000Z",
+      "healthyStreakDays": 6,
+      "sampleCount": 14,
+      "failureSamples": 0
+    }
+  ]
+}

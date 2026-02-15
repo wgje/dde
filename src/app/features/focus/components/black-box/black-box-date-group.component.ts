@@ -22,20 +22,21 @@ import { BlackBoxEntryComponent } from './black-box-entry.component';
   template: `
     <div class="mt-3">
       <!-- 日期标题 -->
-      <div class="text-[10px] text-stone-400 dark:text-stone-500 
-                  font-mono mb-1.5 px-1 flex items-center gap-2">
-        <span class="flex-1 h-px bg-stone-200 dark:bg-stone-600"></span>
+      <div class="text-[10px] font-mono mb-1.5 px-1 flex items-center gap-2" [class]="dateLabelClass()">
+        <span class="flex-1 h-px" [class]="dividerClass()"></span>
         <span>{{ getDateLabel() }}</span>
-        <span class="flex-1 h-px bg-stone-200 dark:bg-stone-600"></span>
+        <span class="flex-1 h-px" [class]="dividerClass()"></span>
       </div>
       
       <!-- 条目列表 -->
       @for (entry of group.entries; track entry.id) {
         <app-black-box-entry 
           [entry]="entry"
+          [appearance]="appearance"
           (markRead)="markRead.emit($event)"
           (markCompleted)="markCompleted.emit($event)"
-          (archive)="archive.emit($event)" />
+          (archive)="archive.emit($event)"
+          (delete)="delete.emit($event)" />
       }
     </div>
   `,
@@ -43,10 +44,26 @@ import { BlackBoxEntryComponent } from './black-box-entry.component';
 })
 export class BlackBoxDateGroupComponent {
   @Input({ required: true }) group!: BlackBoxDateGroup;
+  @Input() appearance: 'default' | 'obsidian' = 'default';
   
   @Output() markRead = new EventEmitter<string>();
   @Output() markCompleted = new EventEmitter<string>();
   @Output() archive = new EventEmitter<string>();
+  @Output() delete = new EventEmitter<string>();
+
+  dateLabelClass(): string {
+    if (this.appearance === 'obsidian') {
+      return 'text-stone-400';
+    }
+    return 'text-stone-400 dark:text-stone-500';
+  }
+
+  dividerClass(): string {
+    if (this.appearance === 'obsidian') {
+      return 'bg-stone-700/80';
+    }
+    return 'bg-stone-200 dark:bg-stone-600';
+  }
   
   /**
    * 获取日期显示标签

@@ -252,14 +252,59 @@ const localStorageMock = {
 Object.defineProperty(globalThis, 'localStorage', {
   value: localStorageMock,
   writable: true,
-});
-
-// navigator.onLine mock
-Object.defineProperty(globalThis.navigator, 'onLine', {
-  value: true,
-  writable: true,
   configurable: true,
 });
+
+// sessionStorage mock（node 环境下可能不存在）
+const sessionStorageStore: Record<string, string> = {};
+const sessionStorageMock = {
+  getItem: (key: string) => sessionStorageStore[key] ?? null,
+  setItem: (key: string, value: string) => {
+    sessionStorageStore[key] = value;
+  },
+  removeItem: (key: string) => {
+    delete sessionStorageStore[key];
+  },
+  clear: () => {
+    Object.keys(sessionStorageStore).forEach((key) => delete sessionStorageStore[key]);
+  },
+  get length() {
+    return Object.keys(sessionStorageStore).length;
+  },
+  key: (index: number) => Object.keys(sessionStorageStore)[index] || null,
+};
+
+if (typeof globalThis.sessionStorage === 'undefined') {
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    value: sessionStorageMock,
+    writable: true,
+    configurable: true,
+  });
+}
+
+const ensureNavigator = (): Navigator & Record<string, unknown> => {
+  const globalWithNavigator = globalThis as typeof globalThis & { navigator?: Navigator & Record<string, unknown> };
+  if (typeof globalWithNavigator.navigator === 'undefined') {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {},
+      writable: true,
+      configurable: true,
+    });
+  }
+  return globalWithNavigator.navigator as Navigator & Record<string, unknown>;
+};
+
+// navigator.onLine mock（node 环境兼容）
+const navigatorRef = ensureNavigator();
+try {
+  Object.defineProperty(navigatorRef, 'onLine', {
+    value: true,
+    writable: true,
+    configurable: true,
+  });
+} catch {
+  (navigatorRef as { onLine?: boolean }).onLine = true;
+}
 
 // crypto.randomUUID mock
 if (!globalThis.crypto) {
@@ -393,6 +438,9 @@ export const mockDestroyRef = {
 
 export function resetMocks() {
   localStorageMock.clear();
+  if (typeof globalThis.sessionStorage !== 'undefined') {
+    globalThis.sessionStorage.clear();
+  }
   if (isIndexedDbFallback) {
     Object.keys(indexedDBStores).forEach(k => delete indexedDBStores[k]);
   } else if (typeof indexedDB !== 'undefined') {
@@ -560,8 +608,23 @@ const checkLeakWarning = (message: string) => {
   console.warn(message);
 };
 
+const normalizeTimersAfterEach = () => {
+  // 防止某些用例遗漏 useRealTimers，导致后续文件/用例超时或行为异常。
+  if (typeof vi.isFakeTimers !== 'function' || !vi.isFakeTimers()) {
+    return;
+  }
+
+  if (typeof vi.clearAllTimers === 'function') {
+    vi.clearAllTimers();
+  }
+  vi.useRealTimers();
+};
+
 afterEach(() => {
-  if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) return;
+  if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) {
+    normalizeTimersAfterEach();
+    return;
+  }
 
   const leakedListeners = Array.from(listenerRegistry.values())
     .reduce((count, registry) => {
@@ -581,4 +644,5 @@ afterEach(() => {
   }
 
   cleanupEventListeners();
+  normalizeTimersAfterEach();
 });

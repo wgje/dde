@@ -1,4 +1,3 @@
-import '@angular/compiler';
 import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
@@ -12,12 +11,6 @@ import { provideServiceWorker } from '@angular/service-worker';
 // 3. 错误队列机制确保初始化前的错误不丢失
 // 
 // 预期收益：Render Delay -200~300ms，LCP 显著改善
-import { SentryLazyLoaderService } from './src/services/sentry-lazy-loader.service';
-import { AppComponent } from './src/app.component';
-import { routes } from './src/app.routes';
-import { GlobalErrorHandler } from './src/services/global-error-handler.service';
-import { WebVitalsService } from './src/services/web-vitals.service';
-
 // ============= Sentry 懒加载（非阻塞初始化）=============
 // 【性能优化 2026-02-01】Sentry SDK 现由 SentryLazyLoaderService 管理
 // - 首屏渲染完成后通过 requestIdleCallback 异步初始化
@@ -26,7 +19,9 @@ import { WebVitalsService } from './src/services/web-vitals.service';
 
 // ============= BUILD ID: 2025-12-04-v19-TOGGLE-ALIGN =============
 const BUILD_ID = '2025-12-04-v19-TOGGLE-ALIGN';
-console.log('%c [NanoFlow] Main.ts Loaded: ' + BUILD_ID, 'background: #222; color: #bada55; font-size: 20px');
+if (isDevMode()) {
+  console.log('%c [NanoFlow] Main.ts Loaded: ' + BUILD_ID, 'background: #222; color: #bada55; font-size: 20px');
+}
 const START_TIME = Date.now();
 const VERSION_STORAGE_KEY = 'nanoflow.app-version';
 const FORCE_CLEAR_KEY = 'nanoflow.force-clear-cache';
@@ -50,6 +45,13 @@ const scheduleIdleTask = (task: () => void) => {
   } else {
     setTimeout(task, 0);
   }
+};
+
+const readBootFlag = (key: string, fallback: boolean): boolean => {
+  if (typeof window === 'undefined') return fallback;
+  const flags = (window as Window & { __NANOFLOW_BOOT_FLAGS__?: Record<string, unknown> }).__NANOFLOW_BOOT_FLAGS__;
+  const value = flags?.[key];
+  return typeof value === 'boolean' ? value : fallback;
 };
 
 // ========== 版本检测与缓存清理 ==========
@@ -114,28 +116,33 @@ async function checkAndClearCacheIfNeeded(): Promise<boolean> {
 }
 
 // ========== 强制清理缓存工具函数（暴露到全局供紧急使用）==========
-(window as any).__NANOFLOW_FORCE_CLEAR_CACHE__ = async function() {
-  log('🧹 用户触发强制清理缓存...');
-  localStorage.setItem(FORCE_CLEAR_KEY, 'true');
-  
-  try {
-    if ('caches' in window) {
-      const cacheNames = await caches.keys();
-      await Promise.all(cacheNames.map(name => caches.delete(name)));
+function registerForceClearCacheTool(): void {
+  (window as any).__NANOFLOW_FORCE_CLEAR_CACHE__ = async function() {
+    log('🧹 用户触发强制清理缓存...');
+    localStorage.setItem(FORCE_CLEAR_KEY, 'true');
+    
+    try {
+      if ('caches' in window) {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map(name => caches.delete(name)));
+      }
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map(reg => reg.unregister()));
+      }
+      // 清除可能导致问题的本地数据
+      localStorage.removeItem('nanoflow.offline-cache-v2');
+      localStorage.removeItem('nanoflow.escape-pod');
+    } catch (e) {
+      logError('强制清理失败', e);
     }
-    if ('serviceWorker' in navigator) {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(registrations.map(reg => reg.unregister()));
-    }
-    // 清除可能导致问题的本地数据
-    localStorage.removeItem('nanoflow.offline-cache-v2');
-    localStorage.removeItem('nanoflow.escape-pod');
-  } catch (e) {
-    logError('强制清理失败', e);
-  }
-  
-  window.location.reload();
-};
+    
+    window.location.reload();
+  };
+}
+
+// 将维护工具注册放到浏览器空闲阶段，避免阻塞启动热路径。
+scheduleIdleTask(() => registerForceClearCacheTool());
 
 log('Build: ' + BUILD_ID);
 log('🚀 main.ts 开始执行');
@@ -203,6 +210,22 @@ async function startApplication() {
   }, 15000);
   
   try {
+    const [
+      appComponentModule,
+      appRoutesModule,
+      globalErrorHandlerModule,
+      sentryLoaderModule
+    ] = await Promise.all([
+      import('./src/app.component'),
+      import('./src/app.routes'),
+      import('./src/services/global-error-handler.service'),
+      import('./src/services/sentry-lazy-loader.service'),
+    ]);
+    const AppComponent = appComponentModule.AppComponent;
+    const routes = appRoutesModule.routes;
+    const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
+    const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
+
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
         // ============= 错误处理器（使用 GlobalErrorHandler）=============
@@ -218,7 +241,7 @@ async function startApplication() {
         // Sentry 将在浏览器空闲时通过 requestIdleCallback 初始化
         {
           provide: APP_INITIALIZER,
-          useFactory: (sentryLoader: SentryLazyLoaderService) => () => {
+          useFactory: (sentryLoader: { triggerLazyInit: () => void }) => () => {
             // 使用 queueMicrotask 确保不阻塞当前任务
             queueMicrotask(() => sentryLoader.triggerLazyInit());
             return Promise.resolve();
@@ -264,12 +287,26 @@ async function startApplication() {
         log('🎉 应用完全就绪，Zone.js 正常工作');
       });
       
-      // 【性能优化 2026-01-17】初始化 Web Vitals RUM 监控
-      // 参考: docs/performance-analysis-report.md
-      const webVitals = appRef.injector.get(WebVitalsService);
-      webVitals.init();
     } catch (e) {
       logError('Zone.js 运行时检查失败', e);
+    }
+
+    const initWebVitals = () => {
+      void import('./src/services/web-vitals.service')
+        .then((module) => {
+          const webVitals = appRef.injector.get(module.WebVitalsService);
+          webVitals.init();
+        })
+        .catch((error) => {
+          logError('Web Vitals 延迟初始化失败', error);
+        });
+    };
+    const webVitalsIdleBootEnabled = readBootFlag('WEB_VITALS_IDLE_BOOT_V2', true);
+    if (webVitalsIdleBootEnabled) {
+      // Web Vitals 监控下沉到 idle 阶段，避免主路径静态依赖膨胀。
+      scheduleIdleTask(initWebVitals);
+    } else {
+      void initWebVitals();
     }
 
     // 启动后维护任务：版本检查/缓存清理/SW 注销
@@ -333,7 +370,7 @@ function showStartupError(title: string, description: string, err: any) {
   
   // 显示用户可见的错误界面
   const errorDiv = document.createElement('div');
-  errorDiv.style.cssText = 'position:fixed;inset:0;background:#fff;color:#333;padding:2rem;font-family:"LXGW WenKai", sans-serif;z-index:99998;overflow:auto;';
+  errorDiv.style.cssText = 'position:fixed;inset:0;background:#fff;color:#333;padding:2rem;font-family:"LXGW WenKai Screen", sans-serif;z-index:99998;overflow:auto;';
   errorDiv.innerHTML = `
     <div style="max-width:600px;margin:0 auto;">
       <h1 style="color:#dc2626;margin-bottom:1rem;font-size:1.5rem;">${title}</h1>

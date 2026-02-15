@@ -15,8 +15,8 @@ import { TaskOperationService } from './task-operation.service';
 import { LoggerService } from './logger.service';
 import {
   spotlightTask,
-  isSpotlightMode,
-  spotlightTaskQueue,
+  spotlightMode,
+  spotlightQueue,
   blackBoxEntriesMap,
   focusPreferences
 } from '../state/focus-stores';
@@ -36,8 +36,8 @@ export class SpotlightService {
   
   // 暴露状态给组件
   readonly currentTask = spotlightTask;
-  readonly isActive = isSpotlightMode;
-  readonly taskQueue = spotlightTaskQueue;
+  readonly isActive = spotlightMode;
+  readonly taskQueue = spotlightQueue;
   
   /**
    * 是否有待处理的任务
@@ -62,7 +62,7 @@ export class SpotlightService {
     const task = this.selectNextTask();
     if (task) {
       spotlightTask.set(task);
-      isSpotlightMode.set(true);
+      spotlightMode.set(true);
       this.preloadQueue();
       this.logger.info('Spotlight', 'Entered spotlight mode');
       return true;
@@ -84,7 +84,7 @@ export class SpotlightService {
     }
     
     spotlightTask.set(task);
-    isSpotlightMode.set(true);
+    spotlightMode.set(true);
     this.preloadQueue();
     this.logger.info('Spotlight', `Entered spotlight with task: ${task.id}`);
   }
@@ -93,7 +93,7 @@ export class SpotlightService {
    * 设置任务队列
    */
   setQueue(tasks: Task[]): void {
-    spotlightTaskQueue.set(tasks);
+    spotlightQueue.set(tasks);
     this.logger.debug('Spotlight', `Set queue with ${tasks.length} tasks`);
   }
   
@@ -103,8 +103,8 @@ export class SpotlightService {
   exit(): void {
     this.clearNextTaskTimer();
     spotlightTask.set(null);
-    isSpotlightMode.set(false);
-    spotlightTaskQueue.set([]);
+    spotlightMode.set(false);
+    spotlightQueue.set([]);
     this.logger.info('Spotlight', 'Exited spotlight mode');
   }
 
@@ -138,7 +138,7 @@ export class SpotlightService {
     if (!current) return;
     
     // 将当前任务放到队列末尾
-    spotlightTaskQueue.update(queue => [...queue, current]);
+    spotlightQueue.update(queue => [...queue, current]);
     
     this.showNextTask();
     this.logger.debug('Spotlight', `Spotlight task skipped: ${current.id}`);
@@ -148,12 +148,12 @@ export class SpotlightService {
    * 显示下一个任务
    */
   private showNextTask(): void {
-    const queue = spotlightTaskQueue();
+    const queue = spotlightQueue();
     
     if (queue.length > 0) {
       const [next, ...rest] = queue;
       spotlightTask.set(next);
-      spotlightTaskQueue.set(rest);
+      spotlightQueue.set(rest);
       this.preloadQueue();
     } else {
       // 尝试获取更多任务
@@ -175,7 +175,7 @@ export class SpotlightService {
     const currentId = this.currentTask()?.id;
     const existingIds = new Set([
       currentId,
-      ...spotlightTaskQueue().map(t => t.id)
+      ...spotlightQueue().map(t => t.id)
     ].filter(Boolean));
     
     // 获取更多任务填充队列
@@ -184,7 +184,7 @@ export class SpotlightService {
       .slice(0, 3);
     
     if (moreTasks.length > 0) {
-      spotlightTaskQueue.update(queue => [...queue, ...moreTasks]);
+      spotlightQueue.update(queue => [...queue, ...moreTasks]);
     }
   }
   

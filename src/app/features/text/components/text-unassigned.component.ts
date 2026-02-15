@@ -1,10 +1,11 @@
-import { Component, inject, Input, Output, EventEmitter, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
+import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
+import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
 
 /**
  * 待分配区组件
@@ -18,7 +19,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
   template: `
     <section 
       class="flex-none transition-all duration-300 overflow-hidden"
-      [ngClass]="{'mx-4 mt-2 mb-4 max-h-[1000px]': !isMobile && uiState.isTextSidebarVisible(), 'mx-2 mt-1 mb-2 max-h-[1000px]': isMobile && uiState.isTextSidebarVisible(), 'max-h-0 opacity-0 m-0 p-0 border-none pointer-events-none': !uiState.isTextSidebarVisible()}">
+      [ngClass]="{'mx-4 mt-2 mb-4 max-h-[1000px]': !isMobile() && uiState.isTextSidebarVisible(), 'mx-2 mt-1 mb-2 max-h-[1000px]': isMobile() && uiState.isTextSidebarVisible(), 'max-h-0 opacity-0 m-0 p-0 border-none pointer-events-none': !uiState.isTextSidebarVisible()}">
       
       <div class="px-2 pb-1 rounded-xl bg-retro-teal/10 dark:bg-retro-teal/5 border border-retro-teal/30 dark:border-retro-teal/20">
         <header 
@@ -26,7 +27,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
           class="py-2 cursor-pointer flex justify-between items-center group select-none touch-manipulation"
           style="-webkit-tap-highlight-color: transparent;">
           <span class="font-bold text-retro-dark dark:text-stone-200 flex items-center gap-2 tracking-tight pointer-events-none"
-                [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}">
+                [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
             <span class="w-1.5 h-1.5 rounded-full bg-retro-teal shadow-[0_0_6px_rgba(74,140,140,0.4)]"></span>
             待分配
           </span>
@@ -34,7 +35,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
             <button 
               (click)="onCreateClick($event)"
               class="flex items-center gap-1 px-2 py-1 rounded-md border border-retro-teal/50 bg-retro-teal/10 text-retro-teal hover:bg-retro-teal hover:text-white transition-colors"
-              [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">
+              [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">
               <span class="text-base leading-none">+</span>
               新建
             </button>
@@ -46,7 +47,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
         @if (uiState.isTextUnassignedOpen()) {
           <div class="pb-2 animate-collapse-open">
             <div class="flex flex-wrap" 
-                 [ngClass]="{'gap-2': !isMobile, 'gap-1.5': isMobile}"
+                 [ngClass]="{'gap-2': !isMobile(), 'gap-1.5': isMobile()}"
                  (dragover)="handleDragOverUnassigned($event)"
                  (dragleave)="handleDragLeaveUnassigned($event)"
                  (drop)="handleDropUnassigned($event)">
@@ -66,7 +67,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
                         <input #editInput
                           data-title-input
                           class="w-full bg-transparent border-none focus:ring-0 text-retro-dark dark:text-stone-200 p-0 mb-1"
-                          [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}"
+                          [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}"
                           [value]="localTitle()"
                           (input)="localTitle.set(editInput.value)"
                           (keydown.enter)="saveTask(task)"
@@ -77,7 +78,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
                         <textarea
                           #contentInput
                           class="w-full border border-stone-200 dark:border-stone-700 rounded-md bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300 focus:ring-1 focus:ring-retro-teal focus:border-retro-teal outline-none resize-none"
-                          [ngClass]="{'text-xs p-2 min-h-[90px]': !isMobile, 'text-[11px] p-1.5 min-h-[100px]': isMobile}"
+                          [ngClass]="{'text-xs p-2 min-h-[90px]': !isMobile(), 'text-[11px] p-1.5 min-h-[100px]': isMobile()}"
                           [value]="localContent()"
                           (input)="localContent.set(contentInput.value)"
                           (keydown.meta.enter)="saveTask(task)"
@@ -92,14 +93,14 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
                     } @else {
                       <div class="flex justify-between items-start gap-2 group/preview">
                         <!-- 【修复】点击内容区域直接进入编辑，不触发卡片切换逻辑 -->
-                        <div class="flex-1 min-w-0 cursor-text" (click)="enterEdit(task); $event.stopPropagation()">
+                        <div class="flex-1 min-w-0 cursor-text" (click)="onContentPreviewClick($event, task)">
                           <div class="font-medium text-retro-dark dark:text-stone-200 truncate"
-                               [ngClass]="{'text-sm': !isMobile, 'text-xs': isMobile}">
+                               [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
                             {{task.title}}
                           </div>
                           @if (task.content) {
                             <div class="prose prose-stone dark:prose-invert max-w-none mt-1 opacity-80"
-                                 [ngClass]="{'text-xs': !isMobile, 'text-[10px] line-clamp-2': isMobile}"
+                                 [ngClass]="{'text-xs': !isMobile(), 'text-[10px] line-clamp-2': isMobile()}"
                                  [innerHTML]="task.content | safeMarkdown">
                             </div>
                           }
@@ -134,9 +135,9 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
                     (touchcancel)="handleTouchCancel($event)"
                     class="px-2 py-1 bg-white/60 dark:bg-stone-800/60 rounded-lg border border-retro-teal/20 dark:border-retro-teal/40 hover:border-retro-teal/50 hover:bg-white dark:hover:bg-stone-800 transition-all cursor-move active:scale-[0.98] select-none touch-none"
                     [ngClass]="{
-                      'text-xs': !isMobile, 
-                      'text-[10px]': isMobile,
-                      'opacity-40 scale-98 border border-retro-teal border-dashed bg-retro-teal/10': draggingTaskId === task.id
+                      'text-xs': !isMobile(), 
+                      'text-[10px]': isMobile(),
+                      'opacity-40 scale-98 border border-retro-teal border-dashed bg-retro-teal/10': draggingTaskId() === task.id
                     }">
                     <span class="text-retro-dark dark:text-stone-300">{{task.title || '未命名任务'}}
                       <span *ngIf="task.content" class="ml-1 text-[10px] text-stone-400">· 内容</span>
@@ -147,7 +148,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
             </div>
             @if (projectState.unassignedTasks().length === 0) {
               <div class="px-3 py-4 text-center">
-                <p class="text-stone-400 italic font-light" [ngClass]="{'text-xs': !isMobile, 'text-[10px]': isMobile}">无待分配任务</p>
+                <p class="text-stone-400 italic font-light" [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">无待分配任务</p>
               </div>
             }
           </div>
@@ -168,17 +169,17 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
   `]
 })
 export class TextUnassignedComponent implements OnDestroy {
-  @Input() isMobile = false;
-  @Input() draggingTaskId: string | null = null;
+  isMobile = input(false);
+  draggingTaskId = input<string | null>(null);
 
-  @Output() taskClick = new EventEmitter<Task>();
-  @Output() createUnassigned = new EventEmitter<void>();
-  @Output() dragStart = new EventEmitter<{ event: DragEvent; task: Task }>();
-  @Output() dragEnd = new EventEmitter<void>();
-  @Output() touchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
-  @Output() touchMove = new EventEmitter<TouchEvent>();
-  @Output() touchEnd = new EventEmitter<TouchEvent>();
-  @Output() touchCancel = new EventEmitter<TouchEvent>();
+  taskClick = output<Task>();
+  createUnassigned = output<void>();
+  dragStart = output<{ event: DragEvent; task: Task }>();
+  dragEnd = output<void>();
+  touchStart = output<{ event: TouchEvent; task: Task }>();
+  touchMove = output<TouchEvent>();
+  touchEnd = output<TouchEvent>();
+  touchCancel = output<TouchEvent>();
   
   protected taskAdapter = inject(TaskOperationAdapterService);
   protected uiState = inject(UiStateService);
@@ -271,6 +272,25 @@ export class TextUnassignedComponent implements OnDestroy {
     this.isEditMode.set(true);
     this.localTitle.set(task.title || '');
     this.localContent.set(task.content || '');
+  }
+
+  /**
+   * 内容预览区域点击处理
+   * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
+   */
+  protected onContentPreviewClick(event: MouseEvent, task: Task): void {
+    event.stopPropagation();
+    const todoIndex = getTodoIndexFromClick(event);
+    if (todoIndex !== null) {
+      // 点击了待办 checkbox，切换状态
+      const newContent = toggleMarkdownTodo(task.content || '', todoIndex);
+      this.taskAdapter.updateTaskContent(task.id, newContent);
+      // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
+      this.cdr.markForCheck();
+    } else {
+      // 点击非 checkbox 区域，进入编辑模式
+      this.enterEdit(task);
+    }
   }
 
   /**

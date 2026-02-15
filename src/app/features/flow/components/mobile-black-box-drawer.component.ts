@@ -10,6 +10,7 @@ import { CommonModule } from '@angular/common';
 import { BlackBoxService } from '../../../../services/black-box.service';
 import { SpeechToTextService } from '../../../../services/speech-to-text.service';
 import { FocusPreferenceService } from '../../../../services/focus-preference.service';
+import { ToastService } from '../../../../services/toast.service';
 import { BlackBoxRecorderComponent } from '../../focus/components/black-box/black-box-recorder.component';
 import { BlackBoxTextInputComponent } from '../../focus/components/black-box/black-box-text-input.component';
 import { BlackBoxDateGroupComponent } from '../../focus/components/black-box/black-box-date-group.component';
@@ -148,6 +149,7 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
   private blackBoxService = inject(BlackBoxService);
   readonly speechService = inject(SpeechToTextService);
   readonly focusPrefs = inject(FocusPreferenceService);
+  private readonly toast = inject(ToastService);
   
   readonly pendingDeleteId = signal<string | null>(null);
   readonly entriesByDate = this.blackBoxService.entriesByDate;
@@ -169,7 +171,10 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
    */
   onTranscribed(text: string): void {
     if (text.trim()) {
-      this.blackBoxService.create({ content: text.trim() });
+      const result = this.blackBoxService.create({ content: text.trim() });
+      if (!result.ok) {
+        this.toast.warning('保存失败', result.error.message);
+      }
     }
   }
   

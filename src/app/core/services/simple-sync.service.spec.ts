@@ -24,7 +24,7 @@ import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
-import { TombstoneService, RealtimePollingService, SessionManagerService, SyncOperationHelperService, UserPreferencesSyncService, ProjectDataService, BatchSyncService, TaskSyncOperationsService, ConnectionSyncOperationsService, RetryQueueService } from './sync';
+import { TombstoneService, RealtimePollingService, SessionManagerService, SyncOperationHelperService, UserPreferencesSyncService, ProjectDataService, BatchSyncService, TaskSyncOperationsService, ConnectionSyncOperationsService, RetryQueueService, SyncStateService } from './sync';
 import type { RetryQueueItem } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
@@ -257,6 +257,7 @@ describe('SimpleSyncService', () => {
     mockRealtimePolling = {
       isRealtimeEnabled: vi.fn().mockImplementation(() => mockRealtimeEnabledState),
       setOnRemoteChange: vi.fn(),
+      hasRemoteChangeCallback: vi.fn().mockReturnValue(true),
       setUserPreferencesChangeCallback: vi.fn(),
       setRealtimeEnabled: vi.fn().mockImplementation((enabled: boolean) => {
         mockRealtimeEnabledState = enabled;
@@ -265,7 +266,8 @@ describe('SimpleSyncService', () => {
       unsubscribeFromProject: vi.fn().mockResolvedValue(undefined),
       pauseRealtimeUpdates: vi.fn(),
       resumeRealtimeUpdates: vi.fn(),
-      getCurrentProjectId: vi.fn().mockReturnValue(null)
+      getCurrentProjectId: vi.fn().mockReturnValue(null),
+      triggerRemoteChange: vi.fn().mockResolvedValue(true)
     };
     
     mockSessionManager = {
@@ -287,7 +289,8 @@ describe('SimpleSyncService', () => {
       tryRefreshSession: vi.fn().mockResolvedValue(false),
       handleAuthErrorWithRefresh: vi.fn().mockResolvedValue(false),
       resetSessionExpired: vi.fn(),
-      validateSession: vi.fn().mockResolvedValue({ valid: true, userId: 'test-user' })
+      validateSession: vi.fn().mockResolvedValue({ valid: true, userId: 'test-user' }),
+      getRecentValidationSnapshot: vi.fn().mockReturnValue(null)
     };
     
     // Sprint 9 新增子服务 Mock（SyncOperationHelper, UserPreferencesSync, ProjectData）
@@ -399,6 +402,12 @@ describe('SimpleSyncService', () => {
       stopLoop: vi.fn(),
       flushSync: vi.fn(),
       processQueue: vi.fn(),
+      processQueueSlice: vi.fn().mockResolvedValue({
+        processed: 0,
+        remaining: 0,
+        durationMs: 0,
+        completed: true
+      }),
       checkCircuitBreaker: vi.fn().mockReturnValue(true),
       recordCircuitSuccess: vi.fn(),
       recordCircuitFailure: vi.fn()
@@ -426,6 +435,7 @@ describe('SimpleSyncService', () => {
         { provide: TaskSyncOperationsService, useValue: mockTaskSyncOps },
         { provide: ConnectionSyncOperationsService, useValue: mockConnectionSyncOps },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
+        { provide: SyncStateService, useClass: SyncStateService },
         { provide: BlackBoxSyncService, useValue: mockBlackBoxSync },
         // Sentry 懒加载服务 mock
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService }
@@ -2614,6 +2624,229 @@ describe('SimpleSyncService', () => {
       const queueItem = mockRetryQueueService.queue[0];
       expect(queueItem.retryCount).toBe(0);
       
+      vi.useRealTimers();
+    });
+  });
+
+  describe('recoverAfterResume', () => {
+    it('在线时应处理重试队列并触发远程回调链路', async () => {
+      mockRetryQueueService.queue = [{
+        id: 'resume-item',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: 'resume-task' }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+      mockRealtimePolling.getCurrentProjectId.mockReturnValue('project-1');
+      mockRealtimePolling.triggerRemoteChange.mockResolvedValue(true);
+
+      await service.recoverAfterResume('visibility-threshold');
+
+      expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledTimes(1);
+      expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledWith({
+        maxItems: 30,
+        maxDurationMs: 150
+      });
+      expect(mockRealtimePolling.resumeRealtimeUpdates).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledWith({
+        eventType: 'resume',
+        projectId: 'project-1'
+      });
+      expect(
+        mockRealtimePolling.resumeRealtimeUpdates.mock.invocationCallOrder[0]
+      ).toBeLessThan(mockRealtimePolling.triggerRemoteChange.mock.invocationCallOrder[0]);
+    });
+
+    it('light 模式应只处理队列，不触发远端探测', async () => {
+      mockRetryQueueService.queue = [{
+        id: 'resume-item-light',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: 'resume-task-light' }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+
+      await service.recoverAfterResume('pulse:focus', { mode: 'light', allowRemoteProbe: false, force: true });
+
+      expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.triggerRemoteChange).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.resumeRealtimeUpdates).toHaveBeenCalledTimes(1);
+    });
+
+    it('compensation 阶段应跳过重试队列与 realtime resume', async () => {
+      mockRetryQueueService.queue = [{
+        id: 'resume-item-compensation',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: 'resume-task-compensation' }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        stage: 'compensation',
+        allowRemoteProbe: false,
+        force: true,
+        sessionValidated: true
+      });
+
+      expect(mockRetryQueueService.processQueueSlice).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.resumeRealtimeUpdates).not.toHaveBeenCalled();
+    });
+
+    it('interaction-first 路径下无回调时不应全量加载所有项目', async () => {
+      mockRealtimePolling.triggerRemoteChange.mockResolvedValue(false);
+      mockRealtimePolling.hasRemoteChangeCallback.mockReturnValue(false);
+      const loadProjectsSpy = vi.spyOn(service as unknown as {
+        loadProjectsFromCloud: (userId: string, silent?: boolean) => Promise<unknown[]>;
+      }, 'loadProjectsFromCloud');
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        force: true
+      });
+
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(1);
+      expect(loadProjectsSpy).not.toHaveBeenCalled();
+    });
+
+    it('离线时应跳过恢复流程', async () => {
+      Object.defineProperty(navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+
+      await service.recoverAfterResume('online');
+
+      expect(mockRetryQueueService.processQueueSlice).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.triggerRemoteChange).not.toHaveBeenCalled();
+
+      Object.defineProperty(navigator, 'onLine', {
+        value: true,
+        configurable: true,
+      });
+    });
+
+    it('sessionValidated=true 时不应重复执行会话校验', async () => {
+      mockRetryQueueService.queue = [];
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: false,
+        sessionValidated: true,
+        force: true
+      });
+
+      expect(mockSessionManager.validateSession).not.toHaveBeenCalled();
+    });
+
+    it('retryProcessing=background 时应快速返回并后台续跑切片', async () => {
+      vi.useFakeTimers();
+      mockRetryQueueService.queue = [{
+        id: 'resume-item-bg',
+        type: 'task' as const,
+        operation: 'upsert' as const,
+        data: createMockTask({ id: 'resume-task-bg' }),
+        projectId: 'project-1',
+        retryCount: 0,
+        createdAt: Date.now()
+      }];
+      mockRetryQueueService.processQueueSlice
+        .mockResolvedValueOnce({
+          processed: 1,
+          remaining: 5,
+          durationMs: 120,
+          completed: false
+        })
+        .mockResolvedValueOnce({
+          processed: 1,
+          remaining: 0,
+          durationMs: 60,
+          completed: true
+        });
+
+      const promise = service.recoverAfterResume('visibility-threshold', {
+        mode: 'light',
+        allowRemoteProbe: false,
+        force: true,
+        retryProcessing: 'background'
+      });
+
+      await promise;
+      expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledTimes(1);
+
+      await vi.runOnlyPendingTimersAsync();
+      expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    it('realtime 回调首次未触发时应执行一次兜底 probe', async () => {
+      mockRealtimePolling.hasRemoteChangeCallback.mockReturnValue(true);
+      mockRealtimePolling.triggerRemoteChange
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        force: true,
+        sessionValidated: true
+      });
+
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(2);
+    });
+
+    it('同一 recoveryTicketId + 同模式恢复不应重复触发远端 probe', async () => {
+      mockRealtimePolling.hasRemoteChangeCallback.mockReturnValue(true);
+      mockRealtimePolling.triggerRemoteChange.mockResolvedValue(true);
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        sessionValidated: true,
+        recoveryTicketId: 'ticket-1',
+      });
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        sessionValidated: true,
+        recoveryTicketId: 'ticket-1',
+      });
+
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(1);
+    });
+
+    it('probe 超时后应按 backgroundProbeDelayMs 调度后台补偿', async () => {
+      vi.useFakeTimers();
+      mockRealtimePolling.hasRemoteChangeCallback.mockReturnValue(true);
+      mockRealtimePolling.triggerRemoteChange.mockImplementation(
+        () => new Promise<boolean>(() => {
+          // 持续 pending，触发超时分支
+        })
+      );
+
+      const promise = service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        force: true,
+        sessionValidated: true,
+        resumeProbeTimeoutMs: 500,
+        backgroundProbeDelayMs: 120,
+      });
+
+      await vi.advanceTimersByTimeAsync(500);
+      await promise;
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(120);
+      expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(2);
       vi.useRealTimers();
     });
   });

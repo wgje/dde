@@ -31,12 +31,15 @@ import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SentryAlertService } from './sentry-alert.service';
+import { TabSyncService } from './tab-sync.service';
 // Sprint 4 技术债务修复：提取的子服务
 import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
 import { Project } from '../models';
-import { SYNC_CONFIG } from '../config';
+import { SYNC_CONFIG } from '../config/sync.config';
+import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
+import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { Result, OperationError } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
@@ -102,6 +105,7 @@ export class SyncCoordinatorService {
   private toastService = inject(ToastService);
   private layoutService = inject(LayoutService);
   private sentryAlert = inject(SentryAlertService);
+  private tabSync = inject(TabSyncService);
   private retryQueue = inject(RetryQueueService);
   private destroyRef = inject(DestroyRef);
   
@@ -164,9 +168,6 @@ export class SyncCoordinatorService {
   
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   
-  /** 本地自动保存定时器 - 保守模式：每秒自动保存到本地 */
-  private localAutosaveTimer: ReturnType<typeof setInterval> | null = null;
-  
   /** 
    * 冲突事件 Subject - 使用发布-订阅模式替代回调
    * 
@@ -191,6 +192,14 @@ export class SyncCoordinatorService {
 
   /** 是否已初始化（幂等保护） */
   private isInitialized = false;
+  /** 跨标签本地回填冷却时间戳（按项目） */
+  private tabSyncLocalRefreshAt = new Map<string, number>();
+  /** 跨标签本地回填计数（观测用） */
+  private tabSyncLocalRefreshCount = 0;
+  /** 项目清单水位本地缓存键前缀（按用户隔离） */
+  private readonly projectManifestWatermarkKeyPrefix = 'nanoflow.project-manifest-watermark';
+  /** 黑匣子同步水位本地缓存键前缀（按用户隔离） */
+  private readonly blackBoxManifestWatermarkKeyPrefix = 'nanoflow.blackbox-manifest-watermark';
 
   constructor() {
     // 【性能审计 2026-02-07】延迟初始化：构造函数仅注入依赖，不启动副作用
@@ -199,9 +208,7 @@ export class SyncCoordinatorService {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer);
       }
-      if (this.localAutosaveTimer) {
-        clearInterval(this.localAutosaveTimer);
-      }
+      this.persistScheduler.stopLocalAutosave();
       this.destroy();
     });
   }
@@ -221,6 +228,7 @@ export class SyncCoordinatorService {
     this.validateRequiredProcessors();
     this.startLocalAutosave();
     this.setupSyncModeCallback();
+    this.setupTabSyncLocalRefresh();
   }
   
   // ========== 借鉴思源笔记的同步增强方法 ==========
@@ -402,23 +410,29 @@ export class SyncCoordinatorService {
   
   /**
    * 启动本地自动保存
-   * 保守模式核心机制：定期保存到本地，确保用户数据永不丢失
+   * 委托给 PersistSchedulerService 统一管理，消除双重定时器
    */
   private startLocalAutosave(): void {
-    // 【性能审计 2026-02-07】每 3s 自动保存到本地缓存（含脏检查，无变更时跳过写入）
-    this.localAutosaveTimer = setInterval(() => {
-      const projects = this.projectState.projects();
-      if (projects.length === 0) return;
+    // 【双重写入修复】使用 PersistSchedulerService 统一管理自动保存定时器
+    this.persistScheduler.setCallbacks({
+      saveSnapshot: () => {
+        const projects = this.projectState.projects();
+        if (projects.length === 0) return;
 
-      // 脏检查：计算简易哈希，跳过无变更的写入
-      const hash = projects.map(p => `${p.id}:${p.updatedAt ?? ''}:${p.version ?? 0}`).join('|');
-      if (hash === this.lastSnapshotHash) return;
+        // 脏检查：计算简易哈希，跳过无变更的写入
+        const hash = projects.map(p => `${p.id}:${p.updatedAt ?? ''}:${p.version ?? 0}`).join('|');
+        if (hash === this.lastSnapshotHash) return;
 
-      this.lastSnapshotHash = hash;
-      this.core.saveOfflineSnapshot(projects);
-    }, SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+        this.lastSnapshotHash = hash;
+        this.core.saveOfflineSnapshot(projects);
+      },
+      doPersist: async () => {
+        // 持久化交由 saveSnapshot 逻辑统一处理
+      }
+    });
+    this.persistScheduler.startLocalAutosave();
 
-    this.logger.info('本地自动保存已启动', {
+    this.logger.info('本地自动保存已启动（委托 PersistSchedulerService）', {
       interval: `${SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL}ms`,
       dirtyCheck: true
     });
@@ -527,6 +541,72 @@ export class SyncCoordinatorService {
     this.core.setRemoteChangeCallback(onRemoteChange);
     this.core.setTaskChangeCallback(onTaskChange);
   }
+
+  /**
+   * 跨标签页本地回填：
+   * 收到 data-synced 广播后优先使用本地快照刷新内存，不触发网络请求。
+   */
+  private setupTabSyncLocalRefresh(): void {
+    if (!FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
+      return;
+    }
+
+    this.tabSync.setOnDataSyncedCallback((projectId, updatedAt) => {
+      this.handleTabSyncLocalRefresh(projectId, updatedAt);
+    });
+  }
+
+  private handleTabSyncLocalRefresh(projectId: string, updatedAt: string): void {
+    const now = Date.now();
+    const lastRefreshAt = this.tabSyncLocalRefreshAt.get(projectId) ?? 0;
+    if (now - lastRefreshAt < STARTUP_PERF_CONFIG.TAB_SYNC_LOCAL_REFRESH_COOLDOWN_MS) {
+      return;
+    }
+    this.tabSyncLocalRefreshAt.set(projectId, now);
+
+    if (this.hasPendingChangesForProject(projectId) || this.changeTracker.hasProjectChanges(projectId)) {
+      return;
+    }
+
+    const snapshot = this.core.loadOfflineSnapshot();
+    if (!snapshot || snapshot.length === 0) {
+      return;
+    }
+
+    const snapshotProject = snapshot.find((project) => project.id === projectId);
+    if (!snapshotProject) {
+      return;
+    }
+
+    const currentProjects = this.projectState.projects();
+    if (!currentProjects.some((project) => project.id === projectId)) {
+      return;
+    }
+
+    this.projectState.updateProjects((projects) => projects.map((project) => {
+      if (project.id !== projectId) {
+        return project;
+      }
+
+      return this.validateAndRebalance({
+        ...snapshotProject,
+        pendingSync: false,
+        syncSource: 'synced',
+      });
+    }));
+
+    this.tabSyncLocalRefreshCount += 1;
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'tabsync',
+      message: 'tabsync.local_refresh.count',
+      level: 'info',
+      data: {
+        projectId,
+        updatedAt,
+        count: this.tabSyncLocalRefreshCount,
+      },
+    });
+  }
   
   // ============================================================
   // 【按需加载优化 2026-01-27】单项目加载与待同步检测
@@ -620,6 +700,334 @@ export class SyncCoordinatorService {
     return this.projectSyncOps.resyncActiveProject(
       (projectId) => this.getTombstoneIds(projectId)
     );
+  }
+
+  /**
+   * 静默刷新当前活动项目
+   *
+   * 恢复链路专用：优先走水位快路，只有检测到远端更新时才拉取完整项目。
+   */
+  async refreshActiveProjectSilent(reason: string): Promise<{
+    refreshed: boolean;
+    skippedReason?: string;
+    fastPathHit?: boolean;
+  }> {
+    const projectId = this.projectState.activeProjectId();
+    if (!projectId) {
+      return { refreshed: false, skippedReason: 'no-active-project' };
+    }
+
+    const userId = this.authService.currentUserId();
+    if (!userId) {
+      return { refreshed: false, skippedReason: 'unauthenticated' };
+    }
+
+    const localProject = this.projectState.getProject(projectId);
+    const localWatermarkMs = this.computeLocalProjectWatermark(localProject);
+
+    if (FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1) {
+      const remoteWatermark = await this.core.getProjectSyncWatermark(projectId);
+      if (remoteWatermark) {
+        const remoteUpdatedAtMs = new Date(remoteWatermark).getTime();
+        if (Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs <= localWatermarkMs) {
+          this.core.setLastSyncTime(projectId, remoteWatermark);
+          this.sentryLazyLoader.addBreadcrumb({
+            category: 'sync',
+            message: 'resume.refresh.fast_path_hit',
+            level: 'info',
+            data: {
+              reason,
+              projectId,
+              remoteWatermark,
+              localWatermark: localWatermarkMs > 0 ? new Date(localWatermarkMs).toISOString() : null
+            }
+          });
+          return {
+            refreshed: false,
+            skippedReason: 'watermark-not-newer',
+            fastPathHit: true
+          };
+        }
+      }
+    }
+
+    const remoteProject = await this.loadSingleProjectFromCloud(projectId);
+    if (!remoteProject) {
+      return { refreshed: false, skippedReason: 'remote-project-missing' };
+    }
+
+    const mergedProject = localProject
+      ? this.smartMerge(localProject, remoteProject, await this.getTombstoneIds(projectId)).project
+      : remoteProject;
+
+    const validatedProject = this.validateAndRebalance(mergedProject);
+
+    this.projectState.updateProjects((projects) => {
+      const exists = projects.some(project => project.id === validatedProject.id);
+      if (!exists) {
+        return [...projects, validatedProject];
+      }
+      return projects.map(project => project.id === validatedProject.id ? validatedProject : project);
+    });
+
+    this.core.setLastSyncTime(projectId, new Date().toISOString());
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'sync',
+      message: 'resume.refresh.applied',
+      level: 'info',
+      data: {
+        reason,
+        projectId,
+        taskCount: validatedProject.tasks.length,
+        connectionCount: validatedProject.connections.length
+      }
+    });
+
+    return { refreshed: true, fastPathHit: false };
+  }
+
+  /**
+   * 刷新项目清单元数据（恢复/后台同步快路）
+   *
+   * 仅在远端用户项目水位更新时才同步项目头信息，避免无效项目列表重拉。
+   */
+  async refreshProjectManifestIfNeeded(
+    reason: string,
+    options?: { prefetchedRemoteWatermark?: string | null }
+  ): Promise<{ skipped: boolean; watermark?: string }> {
+    if (!FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1) {
+      return { skipped: false };
+    }
+
+    const userId = this.authService.currentUserId();
+    if (!userId) {
+      return { skipped: true };
+    }
+
+    const hasPrefetchedWatermark = options
+      ? Object.prototype.hasOwnProperty.call(options, 'prefetchedRemoteWatermark')
+      : false;
+    const remoteWatermark = hasPrefetchedWatermark
+      ? (options?.prefetchedRemoteWatermark ?? null)
+      : await this.core.getUserProjectsWatermark();
+    if (!remoteWatermark) {
+      return { skipped: false };
+    }
+
+    const localWatermark = this.readProjectManifestWatermark(userId);
+    const remoteMs = new Date(remoteWatermark).getTime();
+    const localMs = localWatermark ? new Date(localWatermark).getTime() : Number.NaN;
+    const hasValidLocalWatermark = !!localWatermark && Number.isFinite(localMs);
+
+    if (
+      Number.isFinite(remoteMs) &&
+      hasValidLocalWatermark &&
+      remoteMs <= localMs
+    ) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'manifest.refresh.fast_path_hit',
+        level: 'info',
+        data: { reason, localWatermark, remoteWatermark }
+      });
+      return { skipped: true, watermark: remoteWatermark };
+    }
+
+    // 冷启动/本地无水位时，不执行头信息 RPC，直接交由慢路元数据同步。
+    if (!hasValidLocalWatermark) {
+      this.writeProjectManifestWatermark(remoteWatermark, userId);
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'manifest.refresh.cold_start_deferred',
+        level: 'info',
+        data: { reason, remoteWatermark }
+      });
+      return { skipped: false, watermark: remoteWatermark };
+    }
+
+    const heads = await this.core.listProjectHeadsSince(localWatermark);
+    if (heads.length > 0) {
+      const headsById = new Map(heads.map(head => [head.id, head]));
+      this.projectState.updateProjects((projects) => projects.map((project) => {
+        const head = headsById.get(project.id);
+        if (!head) return project;
+
+        return {
+          ...project,
+          updatedAt: head.updatedAt || project.updatedAt,
+          version: Number.isFinite(head.version) ? head.version : (project.version ?? 1),
+        };
+      }));
+    }
+
+    this.writeProjectManifestWatermark(remoteWatermark, userId);
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'sync',
+      message: 'manifest.refresh.applied',
+      level: 'info',
+      data: {
+        reason,
+        changedProjects: heads.length,
+        localWatermark,
+        remoteWatermark
+      }
+    });
+    // heads 为空并不代表远端无变更，不允许据此跳过后续慢路。
+    return { skipped: false, watermark: remoteWatermark };
+  }
+
+  /**
+   * 刷新黑匣子域水位（恢复链路快路）
+   *
+   * 无变更时仅 watermark RPC；有变更时再拉取明细。
+   */
+  async refreshBlackBoxWatermarkIfNeeded(
+    reason: string,
+    options?: { prefetchedRemoteWatermark?: string | null }
+  ): Promise<{ skipped: boolean; watermark?: string }> {
+    if (!FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
+      await this.blackBoxSync.pullChanges({ reason: reason.includes('resume') ? 'resume' : 'startup' });
+      return { skipped: false };
+    }
+
+    const hasPrefetchedWatermark = options
+      ? Object.prototype.hasOwnProperty.call(options, 'prefetchedRemoteWatermark')
+      : false;
+    const remoteWatermark = hasPrefetchedWatermark
+      ? (options?.prefetchedRemoteWatermark ?? null)
+      : await this.core.getBlackBoxSyncWatermark();
+    if (!remoteWatermark) {
+      await this.blackBoxSync.pullChanges({ reason: reason.includes('resume') ? 'resume' : 'startup' });
+      return { skipped: false };
+    }
+
+    const userId = this.authService.currentUserId();
+    const localWatermark = this.readBlackBoxManifestWatermark(userId);
+    const remoteMs = new Date(remoteWatermark).getTime();
+    const localMs = localWatermark ? new Date(localWatermark).getTime() : 0;
+
+    if (
+      Number.isFinite(remoteMs) &&
+      Number.isFinite(localMs) &&
+      remoteMs <= localMs
+    ) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'blackbox.refresh.fast_path_hit',
+        level: 'info',
+        data: { reason, remoteWatermark, localWatermark }
+      });
+      return { skipped: true, watermark: remoteWatermark };
+    }
+
+    await this.blackBoxSync.pullChanges({ reason: reason.includes('resume') ? 'resume' : 'startup' });
+    this.writeBlackBoxManifestWatermark(remoteWatermark, userId);
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'sync',
+      message: 'blackbox.refresh.applied',
+      level: 'info',
+      data: { reason, remoteWatermark, localWatermark }
+    });
+    return { skipped: false, watermark: remoteWatermark };
+  }
+
+  private computeLocalProjectWatermark(project: Project | undefined): number {
+    if (!project) return 0;
+
+    let maxUpdatedAtMs = 0;
+    const track = (value?: string | null) => {
+      if (!value) return;
+      const ts = new Date(value).getTime();
+      if (Number.isFinite(ts)) {
+        maxUpdatedAtMs = Math.max(maxUpdatedAtMs, ts);
+      }
+    };
+
+    track(project.updatedAt);
+    for (const task of project.tasks ?? []) {
+      track(task.updatedAt);
+      track(task.deletedAt);
+    }
+    for (const connection of project.connections ?? []) {
+      track(connection.updatedAt);
+      track(connection.deletedAt);
+    }
+
+    return maxUpdatedAtMs;
+  }
+
+  private resolveScopedWatermarkKey(prefix: string, userId: string | null | undefined): string | null {
+    const normalizedUserId = userId?.trim();
+    if (!normalizedUserId) {
+      return null;
+    }
+    return `${prefix}.${normalizedUserId}`;
+  }
+
+  private readProjectManifestWatermark(userId: string | null): string | null {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
+
+    const scopedKey = this.resolveScopedWatermarkKey(this.projectManifestWatermarkKeyPrefix, userId);
+    if (!scopedKey) {
+      return null;
+    }
+
+    try {
+      return localStorage.getItem(scopedKey);
+    } catch {
+      // eslint-disable-next-line no-restricted-syntax -- localStorage 读取在隐私模式/存储满时可能抛异常，此处降级返回 null 触发全量拉取
+      return null;
+    }
+  }
+
+  private writeProjectManifestWatermark(watermark: string, userId: string | null): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    const scopedKey = this.resolveScopedWatermarkKey(this.projectManifestWatermarkKeyPrefix, userId);
+    if (!scopedKey) {
+      return;
+    }
+
+    try {
+      localStorage.setItem(scopedKey, watermark);
+    } catch (error) {
+      this.logger.debug('写入项目清单水位失败', { error });
+    }
+  }
+
+  private readBlackBoxManifestWatermark(userId: string | null): string | null {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
+    const scopedKey = this.resolveScopedWatermarkKey(this.blackBoxManifestWatermarkKeyPrefix, userId);
+    if (!scopedKey) {
+      return null;
+    }
+    try {
+      return localStorage.getItem(scopedKey);
+    } catch {
+      // eslint-disable-next-line no-restricted-syntax -- localStorage 读取在隐私模式/存储满时可能抛异常，此处降级返回 null 触发全量拉取
+      return null;
+    }
+  }
+
+  private writeBlackBoxManifestWatermark(watermark: string, userId: string | null): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+    const scopedKey = this.resolveScopedWatermarkKey(this.blackBoxManifestWatermarkKeyPrefix, userId);
+    if (!scopedKey) {
+      return;
+    }
+    try {
+      localStorage.setItem(scopedKey, watermark);
+    } catch (error) {
+      this.logger.debug('写入黑匣子水位失败', { error });
+    }
   }
   
   /**
@@ -747,6 +1155,10 @@ export class SyncCoordinatorService {
   destroy() {
     // 完成冲突事件 Subject
     this.conflict$.complete();
+    this.tabSyncLocalRefreshAt.clear();
+    if (FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
+      this.tabSync.setOnDataSyncedCallback(() => {});
+    }
     this.core.destroy();
   }
   
@@ -848,6 +1260,10 @@ export class SyncCoordinatorService {
         // 【关键】同步成功后，解锁该项目的所有字段锁
         this.changeTracker.clearProjectFieldLocks(project.id);
         this.changeTracker.clearProjectChanges(project.id);
+
+        if (FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
+          this.tabSync.notifyDataSynced(project.id, now);
+        }
         
         // 如果有验证警告，记录日志但不打扰用户
         if (result.validationWarnings && result.validationWarnings.length > 0) {

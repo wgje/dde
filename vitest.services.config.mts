@@ -5,6 +5,8 @@ export default defineConfig({
   ...base,
   test: {
     ...base.test,
+    // 显式固定服务套件默认 worker，减少 setup/environment 重复开销。
+    maxWorkers: 1,
     setupFiles: ['./src/test-setup.services.ts'],
     // 主要跑纯服务/逻辑类单测：更适合 threads 并行
     include: [

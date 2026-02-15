@@ -8,6 +8,7 @@ import { ToastService } from '../../services/toast.service';
 import { SentryAlertService } from '../../services/sentry-alert.service';
 import { SentryLazyLoaderService } from '../../services/sentry-lazy-loader.service';
 import { NetworkAwarenessService } from '../../services/network-awareness.service';
+import { RetryQueueService } from '../../app/core/services/sync/retry-queue.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
 import type { Task, Connection } from '../../models';
@@ -39,6 +40,10 @@ const mockSentryAlertService = {
 
 const mockNetworkAwarenessService = {
   setStoragePressure: vi.fn(),
+};
+
+const mockRetryQueueService = {
+  removeByEntity: vi.fn(() => false),
 };
 
 const createTask = (id: string, overrides?: Partial<Task>): Task => ({
@@ -88,6 +93,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
         { provide: SentryAlertService, useValue: mockSentryAlertService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });

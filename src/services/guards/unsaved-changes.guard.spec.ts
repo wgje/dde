@@ -44,8 +44,6 @@ describe('UnsavedChangesGuard', () => {
   };
   
   beforeEach(() => {
-    // 启用 fake timers 避免真实超时等待
-    vi.useFakeTimers();
     vi.clearAllMocks();
     
     mockSyncService = {
@@ -70,6 +68,9 @@ describe('UnsavedChangesGuard', () => {
   });
   
   afterEach(() => {
+    if (typeof vi.clearAllTimers === 'function') {
+      vi.clearAllTimers();
+    }
     vi.useRealTimers();
   });
   
@@ -90,6 +91,8 @@ describe('UnsavedChangesGuard', () => {
     currentUrl: string,
     nextUrl: string
   ): Promise<boolean> {
+    vi.useFakeTimers();
+
     const resultPromise = guard.canDeactivate(
       component,
       createActivatedRouteSnapshot(),
@@ -97,8 +100,9 @@ describe('UnsavedChangesGuard', () => {
       createRouteSnapshot(nextUrl)
     );
     
-    // 快进所有定时器（包括 AUTO_SAVE_TIMEOUT）
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(
+      ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT + 1
+    );
     
     return resultPromise;
   }
@@ -374,8 +378,6 @@ describe('ProjectSwitchGuardService', () => {
   };
   
   beforeEach(() => {
-    // 启用 fake timers 避免真实超时等待
-    vi.useFakeTimers();
     vi.clearAllMocks();
     
     mockSyncService = {
@@ -399,6 +401,9 @@ describe('ProjectSwitchGuardService', () => {
   });
   
   afterEach(() => {
+    if (typeof vi.clearAllTimers === 'function') {
+      vi.clearAllTimers();
+    }
     vi.useRealTimers();
   });
   
@@ -421,13 +426,14 @@ describe('ProjectSwitchGuardService', () => {
       });
       
       const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      vi.useFakeTimers();
       
-      // 使用 Promise + 快进定时器模式
       const resultPromise = service.canSwitchProject();
-      await vi.runAllTimersAsync();
-      await resultPromise;
+      await vi.advanceTimersByTimeAsync(5001);
+      const result = await resultPromise;
       
       expect(confirmSpy).toHaveBeenCalled();
+      expect(result).toBe('proceed');
       
       confirmSpy.mockRestore();
     });

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2020-01-01T00:00:00.000Z",
+  "tasks": {},
+  "files": {
+    "src/a.spec.ts": 1000,
+    "src/b.spec.ts": 1000,
+    "src/c.spec.ts": 1000,
+    "src/d.spec.ts": 1000,
+    "src/e.spec.ts": 1000,
+    "src/f.spec.ts": 1000,
+    "src/g.spec.ts": 1000,
+    "src/h.spec.ts": 1000,
+    "src/i.spec.ts": 1000,
+    "src/j.spec.ts": 1000,
+    "src/k.spec.ts": 1000,
+    "src/l.spec.ts": 1000,
+    "src/m.spec.ts": 1000,
+    "src/n.spec.ts": 1000,
+    "src/o.spec.ts": 1000,
+    "src/p.spec.ts": 1000,
+    "src/q.spec.ts": 1000,
+    "src/r.spec.ts": 1000,
+    "src/s.spec.ts": 1000,
+    "src/t.spec.ts": 1000
+  },
+  "laneAverages": {},
+  "quarantine": []
+}

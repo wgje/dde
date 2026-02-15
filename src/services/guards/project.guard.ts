@@ -164,8 +164,7 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   const dataResult = await ensureDataAvailable(projectState, syncCoordinator, userSession, toast);
   
   // 快速检查项目是否存在于本地
-  let projects = projectState.projects();
-  let project = projects.find(p => p.id === projectId);
+  let project = projectState.getProject(projectId);
   
   if (project) {
     // 项目存在于本地缓存，立即放行
@@ -189,8 +188,7 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
     
     if (waitResult.loaded) {
       // 重新检查项目是否存在
-      projects = projectState.projects();
-      project = projects.find(p => p.id === projectId);
+      project = projectState.getProject(projectId);
       
       if (project) {
         return true;

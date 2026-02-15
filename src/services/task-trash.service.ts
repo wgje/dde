@@ -242,41 +242,60 @@ export class TaskTrashService {
     const restoredConnectionIds: string[] = [];
     
     this.recordAndUpdate(p => {
-      const restoredTasks = p.tasks.map(t => {
-        if (idsToRestore.has(t.id)) {
-          const meta = t.deletedMeta as DeletedTaskMeta | undefined;
-          const { deletedConnections: _deletedConnections, deletedMeta: _deletedMeta, ...rest } = t;
-          
-          let restored;
-          if (meta) {
-            // 【P1-15 修复】恢复前验证父任务是否仍然存在且未被删除
-            const parentStillExists = meta.parentId 
-              ? p.tasks.some(pt => pt.id === meta.parentId && !pt.deletedAt)
-              : true;
-            
-            restored = {
+      const restoredDraftById = new Map<string, Task>();
+
+      // 第一阶段：恢复每个任务的基础字段（不做父子合法性裁决）
+      for (const task of p.tasks) {
+        if (!idsToRestore.has(task.id)) continue;
+
+        const meta = task.deletedMeta as DeletedTaskMeta | undefined;
+        const { deletedConnections: _deletedConnections, deletedMeta: _deletedMeta, ...rest } = task;
+
+        const restoredTask: Task = meta
+          ? {
               ...rest,
               deletedAt: null,
-              parentId: parentStillExists ? meta.parentId : null,
-              stage: parentStillExists ? meta.stage : (meta.stage ?? 1),
+              parentId: meta.parentId,
+              stage: meta.stage,
               order: meta.order,
               rank: meta.rank,
               x: meta.x,
               y: meta.y,
-            };
-          } else {
-            restored = { ...rest, deletedAt: null };
-          }
-          
-          // 🔴 数据库约束：确保 title 和 content 不能同时为空
-          if ((!restored.title || restored.title.trim() === '') && 
-              (!restored.content || restored.content.trim() === '')) {
-            restored.title = '新任务';
-          }
-          
-          return restored;
+            }
+          : { ...rest, deletedAt: null };
+
+        // 🔴 数据库约束：确保 title 和 content 不能同时为空
+        if ((!restoredTask.title || restoredTask.title.trim() === '')
+          && (!restoredTask.content || restoredTask.content.trim() === '')) {
+          restoredTask.title = '新任务';
         }
-        return t;
+
+        restoredDraftById.set(task.id, restoredTask);
+      }
+
+      // 第二阶段：父子关系裁决
+      for (const [id, restoredTask] of restoredDraftById.entries()) {
+        const parentId = restoredTask.parentId;
+        if (!parentId) continue;
+
+        const parentInRestoreSet = restoredDraftById.has(parentId);
+        const parentAlreadyActive = p.tasks.some(
+          (candidate) => candidate.id === parentId && !candidate.deletedAt && !idsToRestore.has(candidate.id)
+        );
+        const parentStillExists = parentInRestoreSet || parentAlreadyActive;
+
+        if (!parentStillExists) {
+          restoredDraftById.set(id, {
+            ...restoredTask,
+            parentId: null,
+            stage: restoredTask.stage ?? 1,
+          });
+        }
+      }
+
+      const restoredTasks = p.tasks.map(t => {
+        if (!idsToRestore.has(t.id)) return t;
+        return restoredDraftById.get(t.id) ?? { ...t, deletedAt: null };
       });
       
       const existingConnKeys = new Set(

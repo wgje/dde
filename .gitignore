@@ -39,6 +39,10 @@ src/environments/environment.development.ts
 # Test coverage
 coverage/
 
+# Test results
+test-results/
+playwright-report/
+
 # Build cache
 .cache/
 .parcel-cache/

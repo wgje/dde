@@ -12,11 +12,14 @@
  * - 启动时扫描 IndexedDB 中 syncStatus=pending 的条目，恢复未完成的同步
  */
 
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, DestroyRef } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { SYNC_CONFIG } from '../config/sync.config';
+import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
+import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isValidUUID } from '../utils/validation';
+import { supabaseErrorToError } from '../utils/supabase-error';
 import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
@@ -25,6 +28,7 @@ import {
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 
 /**
  * IndexedDB 中的黑匣子条目格式
@@ -40,13 +44,21 @@ interface IDBBlackBoxEntry extends BlackBoxEntry {
  */
 type RetryQueueHandler = (entry: BlackBoxEntry) => void;
 
+export interface PullChangesOptions {
+  reason?: 'startup' | 'resume' | 'manual';
+  force?: boolean;
+}
+
 @Injectable({
   providedIn: 'root'
 })
 export class BlackBoxSyncService {
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
-  private logger = inject(LoggerService);
+  private readonly loggerService = inject(LoggerService);
+  private readonly logger = this.loggerService.category('BlackBoxSync');
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly destroyRef = inject(DestroyRef);
 
   private db: IDBDatabase | null = null;
   private lastSyncTime: string | null = null;
@@ -58,9 +70,11 @@ export class BlackBoxSyncService {
   private pushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPushEntries: Map<string, BlackBoxEntry> = new Map();
 
-  // 防重保护：避免重复拉取
-  private isPulling = false;
-  private pullPromise: Promise<void> | null = null;
+  // 防重保护：single-flight + freshness window
+  private pullInFlight: Promise<void> | null = null;
+  /** 上次成功拉取的时间戳（毫秒），用于 freshness window 判断 */
+  private lastPullTime = 0;
+  private lastResumePullAt = 0;
 
   private readonly IDB_NAME = FOCUS_CONFIG.SYNC.IDB_NAME;
   private readonly IDB_VERSION = FOCUS_CONFIG.SYNC.IDB_VERSION;
@@ -105,8 +119,7 @@ export class BlackBoxSyncService {
         const hasInvalidId = !entry.id || !isValidUUID(entry.id);
         const hasInvalidProjectId = !entry.projectId || !isValidUUID(entry.projectId);
         if (hasInvalidId || hasInvalidProjectId) {
-          console.warn('[BlackBoxSync] 启动清理脏数据:', { id: entry.id, projectId: entry.projectId });
-          this.logger.warn('BlackBoxSync', `启动清理：删除非法 UUID 条目 id="${entry.id}", projectId="${entry.projectId}"`);
+          this.logger.warn(`启动清理：删除非法 UUID 条目 id="${entry.id}", projectId="${entry.projectId}"`);
           try { await this.deleteFromLocal(entry.id); } catch { /* 忽略 */ }
         }
       }
@@ -117,14 +130,13 @@ export class BlackBoxSyncService {
       );
 
       if (validPending.length > 0) {
-        this.logger.info('BlackBoxSync', `Recovering ${validPending.length} pending entries to RetryQueue`);
+        this.logger.info(`Recovering ${validPending.length} pending entries to RetryQueue`);
         for (const entry of validPending) {
           this.retryQueueHandler(entry);
         }
       }
     } catch (e) {
-      this.logger.error('BlackBoxSync', 'Failed to recover pending entries',
-        e instanceof Error ? e.message : String(e));
+      this.logger.error('Failed to recover pending entries', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -136,13 +148,13 @@ export class BlackBoxSyncService {
       const request = indexedDB.open(this.IDB_NAME, this.IDB_VERSION);
 
       request.onerror = () => {
-        this.logger.error('BlackBoxSync', 'Failed to open IndexedDB for focus mode', request.error?.message || 'Unknown error');
+        this.logger.error('Failed to open IndexedDB for focus mode', request.error?.message || 'Unknown error');
         reject(request.error);
       };
 
       request.onsuccess = async () => {
         this.db = request.result;
-        this.logger.debug('BlackBoxSync', 'IndexedDB opened for focus mode');
+        this.logger.debug('IndexedDB opened for focus mode');
 
         // 从 IndexedDB 恢复上次同步时间
         await this.loadLastSyncTime();
@@ -194,18 +206,18 @@ export class BlackBoxSyncService {
         request.onsuccess = () => {
           if (request.result) {
             this.lastSyncTime = request.result.value;
-            this.logger.debug('BlackBoxSync', `Loaded lastSyncTime: ${this.lastSyncTime}`);
+            this.logger.debug(`Loaded lastSyncTime: ${this.lastSyncTime}`);
           }
           resolve();
         };
 
         request.onerror = () => {
-          this.logger.warn('BlackBoxSync', 'Failed to load lastSyncTime');
+          this.logger.warn('Failed to load lastSyncTime');
           resolve();
         };
       } catch (e) {
         // 降级处理：Store 可能不存在（首次升级前）
-        this.logger.debug('loadLastSyncTime', 'IndexedDB store 不存在', { error: e });
+        this.logger.debug('IndexedDB store 不存在', { error: e });
         resolve();
       }
     });
@@ -226,7 +238,7 @@ export class BlackBoxSyncService {
         tx.onerror = () => resolve();
       } catch (e) {
         // 降级处理：保存失败时静默继续
-        this.logger.debug('saveLastSyncTime', '保存同步时间失败', { error: e });
+        this.logger.debug('保存同步时间失败', { error: e });
         resolve();
       }
     });
@@ -235,11 +247,22 @@ export class BlackBoxSyncService {
   /**
    * 设置网络状态监听
    * 网络恢复时，扫描并恢复未同步条目
+   * 【2026-02-15 修复】保存监听器引用并在 DestroyRef 中清理
    */
   private setupNetworkListener(): void {
-    window.addEventListener('online', () => {
-      this.logger.info('BlackBoxSync', 'Network restored, recovering pending entries');
+    if (typeof window === 'undefined') return;
+    const onOnline = () => {
+      this.logger.info('Network restored, recovering pending entries');
       this.recoverPendingEntries();
+    };
+    window.addEventListener('online', onOnline);
+    this.destroyRef.onDestroy(() => {
+      window.removeEventListener('online', onOnline);
+      // 清理防抖定时器
+      if (this.pushDebounceTimer) {
+        clearTimeout(this.pushDebounceTimer);
+        this.pushDebounceTimer = null;
+      }
     });
   }
 
@@ -254,7 +277,7 @@ export class BlackBoxSyncService {
   scheduleSync(entry: BlackBoxEntry): void {
     // 校验 ID，拦截脏数据进入同步流程
     if (!entry.id || !isValidUUID(entry.id)) {
-      this.logger.warn('BlackBoxSync', `scheduleSync: 拦截非法 ID "${entry.id}"，不进入同步`);
+      this.logger.warn(`scheduleSync: 拦截非法 ID "${entry.id}"，不进入同步`);
       return;
     }
 
@@ -285,11 +308,11 @@ export class BlackBoxSyncService {
     for (const entry of entries) {
       // 校验所有 UUID 字段
       if (!entry.id || !isValidUUID(entry.id)) {
-        this.logger.warn('BlackBoxSync', `flushPending: 跳过非法 ID "${entry.id}"`);
+        this.logger.warn(`flushPending: 跳过非法 ID "${entry.id}"`);
         continue;
       }
       if (!entry.projectId || !isValidUUID(entry.projectId)) {
-        this.logger.warn('BlackBoxSync', `flushPending: 跳过非法 projectId "${entry.projectId}"，id="${entry.id}"`);
+        this.logger.warn(`flushPending: 跳过非法 projectId "${entry.projectId}"，id="${entry.id}"`);
         continue;
       }
       if (this.retryQueueHandler) {
@@ -398,13 +421,13 @@ export class BlackBoxSyncService {
    */
   async pushToServer(entry: BlackBoxEntry): Promise<boolean> {
     if (!this.supabase.isConfigured) {
-      this.logger.debug('BlackBoxSync', 'Supabase 未配置，跳过推送');
+      this.logger.debug('Supabase 未配置，跳过推送');
       return false;
     }
 
     // 校验所有 UUID 字段，跳过 IndexedDB 中的脏数据（如 "dev-preview"、"dev-test"）
     if (!entry.id || !isValidUUID(entry.id)) {
-      this.logger.warn('BlackBoxSync', `跳过非法 ID 的条目: "${entry.id}"，从本地清理`);
+      this.logger.warn(`跳过非法 ID 的条目: "${entry.id}"，从本地清理`);
       try {
         await this.deleteFromLocal(entry.id);
       } catch { /* 清理失败不阻塞 */ }
@@ -413,7 +436,7 @@ export class BlackBoxSyncService {
 
     // 校验 projectId — Supabase project_id 列为 UUID 类型，非法值会导致 400 错误
     if (!entry.projectId || !isValidUUID(entry.projectId)) {
-      this.logger.warn('BlackBoxSync', `跳过非法 projectId 的条目: id="${entry.id}", projectId="${entry.projectId}"，从本地清理`);
+      this.logger.warn(`跳过非法 projectId 的条目: id="${entry.id}", projectId="${entry.projectId}"，从本地清理`);
       try {
         await this.deleteFromLocal(entry.id);
       } catch { /* 清理失败不阻塞 */ }
@@ -421,13 +444,15 @@ export class BlackBoxSyncService {
     }
 
     try {
-      const client = this.supabase.client();
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return false;
+      }
 
       // 【终极防线】upsert 前再次内联校验所有 UUID 字段
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(entry.id) || !uuidPattern.test(entry.projectId)) {
-        console.warn('[BlackBoxSync] 终极防线拦截非法 UUID 字段:', { id: entry.id, projectId: entry.projectId });
-        this.logger.warn('BlackBoxSync', `终极防线拦截非法 UUID 字段: id="${entry.id}", projectId="${entry.projectId}"`);
+        this.logger.warn(`终极防线拦截非法 UUID 字段: id="${entry.id}", projectId="${entry.projectId}"`);
         try { await this.deleteFromLocal(entry.id); } catch { /* ignore */ }
         return true;
       }
@@ -454,7 +479,8 @@ export class BlackBoxSyncService {
         });
 
       if (error) {
-        this.logger.error('BlackBoxSync', 'Failed to push entry to server', error.message || 'Unknown error');
+        const enhanced = supabaseErrorToError(error);
+        this.logger.error('Failed to push entry to server', enhanced.message);
         return false;
       }
 
@@ -463,10 +489,10 @@ export class BlackBoxSyncService {
       await this.saveToLocal(synced);
       updateBlackBoxEntry(synced);
 
-      this.logger.debug('BlackBoxSync', `Entry synced to server: ${entry.id}`);
+      this.logger.debug(`Entry synced to server: ${entry.id}`);
       return true;
     } catch (error) {
-      this.logger.error('BlackBoxSync', 'Sync error', error instanceof Error ? error.message : String(error));
+      this.logger.error('Sync error', error instanceof Error ? error.message : String(error));
       return false;
     }
   }
@@ -474,28 +500,71 @@ export class BlackBoxSyncService {
   /**
    * 从服务器拉取变更（增量同步）
    */
-  async pullChanges(): Promise<void> {
-    // 防重保护：如果正在拉取，返回现有 Promise
-    if (this.isPulling && this.pullPromise) {
-      this.logger.debug('BlackBoxSync', 'Pull already in progress, reusing promise');
-      return this.pullPromise;
+  async pullChanges(options?: PullChangesOptions): Promise<void> {
+    const reason = options?.reason ?? 'manual';
+    const force = options?.force ?? false;
+
+    if (
+      FEATURE_FLAGS.BLACKBOX_PULL_COOLDOWN_V1 &&
+      reason === 'resume' &&
+      !force &&
+      this.lastResumePullAt > 0 &&
+      Date.now() - this.lastResumePullAt < APP_LIFECYCLE_CONFIG.RESUME_PULL_COOLDOWN_MS
+    ) {
+      this.logger.debug('Resume pull skipped by cooldown');
+      return;
+    }
+
+    // 【性能优化 2026-02-14】freshness window 守卫：窗口内已拉取过则跳过
+    const freshnessWindow = SYNC_CONFIG.BLACKBOX_PULL_FRESHNESS_WINDOW;
+    if (!force && this.lastPullTime > 0 && Date.now() - this.lastPullTime < freshnessWindow) {
+      const elapsedSec = Math.round((Date.now() - this.lastPullTime) / 1000);
+      this.logger.debug(`Freshness window 内跳过拉取 (${elapsedSec}s < ${freshnessWindow / 1000}s)`);
+      // 【监控 2026-02-14】记录被阻断的重复拉取，用于 Sentry 告警观测
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync.blackbox',
+        message: `Duplicate pull blocked by freshness window (${elapsedSec}s)`,
+        level: 'info',
+        data: { reason, elapsedSec, freshnessWindow: freshnessWindow / 1000 },
+      });
+      return;
+    }
+
+    // 防重保护：single-flight 复用进行中的拉取
+    if (this.pullInFlight) {
+      this.logger.debug('Pull already in progress, reusing promise');
+      return this.pullInFlight;
     }
 
     if (!this.supabase.isConfigured || !this.network.isOnline()) {
-      this.logger.debug('BlackBoxSync', 'Offline or unconfigured, loading from local');
+      this.logger.debug('Offline or unconfigured, loading from local');
       await this.loadFromLocal();
       return;
     }
 
-    this.isPulling = true;
-    this.pullPromise = this.doPullChanges();
-
-    try {
-      await this.pullPromise;
-    } finally {
-      this.isPulling = false;
-      this.pullPromise = null;
+    if (reason === 'resume') {
+      this.lastResumePullAt = Date.now();
     }
+
+    this.pullInFlight = this.doPullChanges()
+      .then(() => {
+        this.lastPullTime = Date.now();
+      })
+      .catch((err) => {
+        // 【监控 2026-02-14】拉取失败记录 Sentry breadcrumb，便于事后排查
+        this.sentryLazyLoader.addBreadcrumb({
+          category: 'sync.blackbox',
+          message: 'Pull failed',
+          level: 'warning',
+          data: { reason, error: err instanceof Error ? err.message : String(err) },
+        });
+        throw err;
+      })
+      .finally(() => {
+        this.pullInFlight = null;
+      });
+
+    await this.pullInFlight;
   }
 
   /**
@@ -503,21 +572,55 @@ export class BlackBoxSyncService {
    */
   private async doPullChanges(): Promise<void> {
     try {
-      const client = this.supabase.client();
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        await this.loadFromLocal();
+        return;
+      }
 
-      // 获取上次同步时间
-      const lastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
-      this.logger.debug('BlackBoxSync', `Pulling changes since: ${lastSync}`);
+      // 获取上次同步时间。首次拉取优先复用本地最大 updatedAt，避免直接从 epoch 慢拉。
+      let lastSync = this.lastSyncTime;
+      if (!lastSync) {
+        lastSync = await this.deriveLocalSyncCursor();
+        if (lastSync) {
+          this.lastSyncTime = lastSync;
+          await this.saveLastSyncTime();
+        }
+      }
+      const effectiveLastSync = lastSync || '1970-01-01T00:00:00Z';
+
+      if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
+        const remoteWatermark = await this.getRemoteBlackBoxWatermark(client);
+        const remoteMs = remoteWatermark ? new Date(remoteWatermark).getTime() : NaN;
+        const localMs = new Date(effectiveLastSync).getTime();
+        if (
+          remoteWatermark &&
+          Number.isFinite(remoteMs) &&
+          Number.isFinite(localMs) &&
+          remoteMs <= localMs
+        ) {
+          this.lastSyncTime = remoteWatermark;
+          await this.saveLastSyncTime();
+          this.logger.debug('BlackBox watermark 快路命中，跳过明细拉取', {
+            remoteWatermark,
+            localCursor: effectiveLastSync
+          });
+          return;
+        }
+      }
+
+      this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
       // 增量拉取（使用字段筛选优化，减少 ~30% 数据传输）
       const { data, error } = await client
         .from('black_box_entries')
         .select('id,project_id,user_id,content,date,created_at,updated_at,is_read,is_completed,is_archived,snooze_until,snooze_count,deleted_at')
-        .gt('updated_at', lastSync)
+        .gt('updated_at', effectiveLastSync)
         .order('updated_at', { ascending: true });
 
       if (error) {
-        this.logger.error('BlackBoxSync', 'Failed to pull changes', error.message || 'Unknown error');
+        const enhanced = supabaseErrorToError(error);
+        this.logger.error('Failed to pull changes', enhanced.message);
         await this.loadFromLocal();
         return;
       }
@@ -534,11 +637,65 @@ export class BlackBoxSyncService {
         await this.saveLastSyncTime();
       }
 
-      this.logger.info('BlackBoxSync', `Pulled changes from server: ${data?.length ?? 0} entries`);
+      this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);
     } catch (error) {
-      this.logger.error('BlackBoxSync', 'Pull changes error', error instanceof Error ? error.message : String(error));
+      this.logger.error('Pull changes error', error instanceof Error ? error.message : String(error));
       await this.loadFromLocal();
     }
+  }
+
+  private async getRemoteBlackBoxWatermark(
+    client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>
+  ): Promise<string | null> {
+    if (!client) return null;
+    try {
+      const { data, error } = await client.rpc('get_black_box_sync_watermark');
+      if (error) {
+        this.logger.debug('BlackBox watermark RPC 失败，降级为明细拉取', { message: error.message });
+        return null;
+      }
+      if (typeof data === 'string') {
+        return data;
+      }
+      // RPC 返回类型可能为数组形式，需要 unknown 过渡处理
+      const raw = data as unknown;
+      if (Array.isArray(raw) && raw.length > 0 && typeof raw[0] === 'string') {
+        return raw[0];
+      }
+      return null;
+    } catch (error) {
+      this.logger.debug('BlackBox watermark RPC 异常，降级为明细拉取', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // eslint-disable-next-line no-restricted-syntax -- RPC 不可用时降级为明细拉取（返回 null 触发 fallback 路径）
+      return null;
+    }
+  }
+
+  private async deriveLocalSyncCursor(): Promise<string | null> {
+    try {
+      const localEntries = await this.loadFromLocal();
+      let maxUpdatedAtMs = 0;
+
+      for (const entry of localEntries) {
+        const ts = entry.updatedAt ? new Date(entry.updatedAt).getTime() : 0;
+        if (Number.isFinite(ts)) {
+          maxUpdatedAtMs = Math.max(maxUpdatedAtMs, ts);
+        }
+      }
+
+      if (maxUpdatedAtMs > 0) {
+        const cursor = new Date(maxUpdatedAtMs).toISOString();
+        this.logger.debug(`首次拉取采用本地游标: ${cursor}`);
+        return cursor;
+      }
+    } catch (error) {
+      this.logger.debug('推导本地同步游标失败，降级为 epoch', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    return null;
   }
 
   /**
@@ -594,6 +751,6 @@ export class BlackBoxSyncService {
     }
     this.flushPendingToRetryQueue();
 
-    await this.pullChanges();
+    await this.pullChanges({ reason: 'manual', force: true });
   }
 }

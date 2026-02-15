@@ -282,7 +282,7 @@ export class AttachmentService {
     }
 
     const attachmentId = crypto.randomUUID();
-    const fileExt = sanitizePathSegment(file.name.split('.').pop() || 'bin');
+    const _fileExt = sanitizePathSegment(file.name.split('.').pop() || 'bin');
     const filePath = this.buildStoragePath(userId, projectId, taskId, attachmentId, file.name);
     
     // 创建取消控制器

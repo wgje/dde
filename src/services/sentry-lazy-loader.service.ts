@@ -191,7 +191,7 @@ export class SentryLazyLoaderService {
       // 发送队列中的待处理事件
       this.flushPendingEvents();
 
-      // 使用 console.log 避免在 Sentry breadcrumbs 中产生 warning 级别噪音
+      // eslint-disable-next-line no-console -- 故意使用 console.log：Sentry 尚未就绪前 logger 不可用，且 warn/error 会在 breadcrumbs 中产生误导噪音
       console.log('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
       console.error('[SentryLazyLoader] Sentry 初始化失败:', error);
@@ -329,9 +329,7 @@ export class SentryLazyLoaderService {
       return;
     }
     
-    // 使用 console.log 避免在 Sentry breadcrumbs 中产生 warning 级别噪音
-    // 背景: Sentry Issue #91206571 中 "[SentryLazyLoader] 发送 2 个待处理事件" 以 warning 级别
-    //        出现在 breadcrumbs 中，被误判为性能问题根因
+    // eslint-disable-next-line no-console -- 故意使用 console.log：避免在 Sentry breadcrumbs 中产生 warning 级别噪音（Sentry Issue #91206571）
     console.log(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
     const now = Date.now();

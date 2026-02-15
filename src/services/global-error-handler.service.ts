@@ -3,7 +3,7 @@ import { Router } from '@angular/router';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { TOAST_CONFIG } from '../config';
+import { TOAST_CONFIG } from '../config/ui.config';
 
 /**
  * 错误级别

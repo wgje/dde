@@ -211,10 +211,10 @@ export class ProjectOperationService {
     const conflictData = this.syncCoordinator.conflictData();
     if (!conflictData || conflictData.projectId !== projectId) return;
     
-    const localProject = this.projectState.projects().find(p => p.id === projectId);
+    const localProject = this.projectState.getProject(projectId);
     if (!localProject) return;
     
-    const remoteProject = conflictData.remoteData as Project | undefined;
+    const remoteProject = conflictData.remote as Project | undefined;
     
     const result = await this.syncCoordinator.resolveConflict(
       projectId,

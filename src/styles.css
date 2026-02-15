@@ -1,13 +1,33 @@
-@import './app/features/focus/focus.animations.css';
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ========== 根布局高度链（修复 h-full 压缩问题） ========== */
+html,
+body {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100dvh;
+}
+
+app-root,
+app-workspace-shell,
+app-project-shell {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+}
+
 /* ========== 字体设置说明 ========== */
-/* @font-face 规则已内联到 index.html 的 <style> 中，以配合 preload 优化 */
-/* 关键字体子集（117/118/119）预加载 + 内联 @font-face，确保首屏快速渲染 */
-/* 其他字体子集通过异步加载的 style.css 按需加载（unicode-range 自动匹配） */
+/* index.html 首屏仅内联并 preload subset-119（弱网优先，避免与 JS 抢带宽） */
+/* subset-117/118 与其他子集由 /fonts/lxgw-wenkai-screen.css 按需加载 */
+/* 目标：首屏稳定 + 后续字体一致性收敛 */
 
 /* 全局字体设置 - 霞鹜文楷屏幕阅读版 + 中文系统字体回退 */
 /* font-display: swap 生效时，LXGW 未加载前使用系统中文字体渲染，避免 FOIT */

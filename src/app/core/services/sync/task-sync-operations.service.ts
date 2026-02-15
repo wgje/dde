@@ -266,6 +266,7 @@ export class TaskSyncOperationsService {
               y: task.y,
               short_id: task.shortId,
               deleted_at: task.deletedAt || null,
+              attachments: task.attachments ?? [],
             })
             .select('updated_at')
             .single();
@@ -347,14 +348,10 @@ export class TaskSyncOperationsService {
     }
     
     try {
-      // 【P2-18 修复】使用 nowISO() 保持与 doTaskPush 时间源一致
-      const { data: updatedData, error } = await client
+      // 【P2-2 修复】不发送客户端 updated_at，让 DB 触发器统一设置，与 pushTask 一致
+      const { data, error } = await client
         .from('tasks')
-        .update({ 
-          x, 
-          y, 
-          updated_at: nowISO()
-        })
+        .update({ x, y })
         .eq('id', taskId)
         .select('updated_at')
         .single();
@@ -366,6 +363,11 @@ export class TaskSyncOperationsService {
           this.safeAddToRetryQueue('task', 'upsert', { id: taskId, x, y } as unknown as Task, projectId);
         }
         return false;
+      }
+
+      // 记录服务端时间戳，保持时钟同步
+      if (data?.updated_at) {
+        this.clockSync.recordServerTimestamp(data.updated_at, taskId);
       }
       
       this.retryQueueService.recordCircuitSuccess();
@@ -424,7 +426,7 @@ export class TaskSyncOperationsService {
     }
   }
   
-  /** 删除云端任务 */
+  /** 删除云端任务（优先 purge RPC 写入 tombstone，降级为软删除） */
   async deleteTask(taskId: string, projectId: string): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId });
@@ -438,12 +440,21 @@ export class TaskSyncOperationsService {
     }
     
     try {
-      const { error } = await client
-        .from('tasks')
-        .delete()
-        .eq('id', taskId);
-      
-      if (error) throw supabaseErrorToError(error);
+      // 【P0-2 修复】优先走 purge RPC（写入 tombstone + 删除行），阻断旧端 upsert 复活
+      const purgeResult = await client.rpc('purge_tasks', {
+        p_task_ids: [taskId]
+      });
+
+      if (purgeResult.error) {
+        // RPC 不可用时降级为软删除（不再使用物理 DELETE，防止任务复活）
+        this.logger.warn('purge_tasks RPC 不可用，降级为软删除', { taskId });
+        const { error } = await client
+          .from('tasks')
+          .update({ deleted_at: new Date().toISOString() })
+          .eq('id', taskId);
+
+        if (error) throw supabaseErrorToError(error);
+      }
       
       this.tombstoneService.invalidateCache(projectId);
       return true;

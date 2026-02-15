@@ -176,8 +176,9 @@ describe('MobileSyncStrategyService', () => {
       
       service.registerBatchFlushCallback(callback);
       
-      // 不抛出异常即为成功
-      expect(true).toBe(true);
+      expect(
+        (service as unknown as { batchFlushCallback: unknown }).batchFlushCallback
+      ).toBe(callback);
     });
     
     it('应该将请求加入批量队列', async () => {

@@ -339,8 +339,8 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
       const parsed = new URL(url);
       if (!ALLOWED_PROTOCOLS.includes(parsed.protocol)) return '';
     } catch {
-      // 相对路径或 blob URL 允许通过
-      if (url.startsWith('javascript:') || url.startsWith('data:text/html')) return '';
+      // 相对路径或 blob URL 允许通过；阻止 protocol-relative URL 和危险协议
+      if (url.startsWith('javascript:') || url.startsWith('data:text/html') || url.startsWith('//')) return '';
     }
     return url;
   };
@@ -429,7 +429,7 @@ export function sanitizeTask(rawTask: unknown): Task {
     displayId: String(task.displayId || '?'),
     shortId: typeof task.shortId === 'string' ? task.shortId : undefined,
     hasIncompleteTask: Boolean(task.hasIncompleteTask),
-    deletedAt: typeof task.deletedAt === 'string' ? task.deletedAt : (task.deletedAt === null ? null : null),
+    deletedAt: typeof task.deletedAt === 'string' ? task.deletedAt : null,
     attachments,
     tags,
     priority,
@@ -482,6 +482,24 @@ export function sanitizeProject(rawProject: unknown): Project {
         .filter((c: Connection) => taskIds.has(c.source) && taskIds.has(c.target) && c.source !== c.target)
     : [];
 
+  const rawViewState = project.viewState as Record<string, unknown> | undefined;
+  const hasValidViewState =
+    rawViewState
+    && typeof rawViewState.scale === 'number'
+    && Number.isFinite(rawViewState.scale)
+    && typeof rawViewState.positionX === 'number'
+    && Number.isFinite(rawViewState.positionX)
+    && typeof rawViewState.positionY === 'number'
+    && Number.isFinite(rawViewState.positionY);
+
+  const viewState = hasValidViewState
+    ? {
+        scale: Number(rawViewState.scale),
+        positionX: Number(rawViewState.positionX),
+        positionY: Number(rawViewState.positionY),
+      }
+    : undefined;
+
   return {
     id: String(project.id || crypto.randomUUID()),
     name: String(project.name || '未命名项目'),
@@ -490,7 +508,10 @@ export function sanitizeProject(rawProject: unknown): Project {
     tasks: fixedTasks,
     connections,
     updatedAt: (typeof project.updatedAt === 'string' ? project.updatedAt : undefined) || nowISO(),
-    version: typeof project.version === 'number' ? project.version : 0
+    version: typeof project.version === 'number' ? project.version : 0,
+    viewState,
+    flowchartUrl: typeof project.flowchartUrl === 'string' ? project.flowchartUrl : undefined,
+    flowchartThumbnailUrl: typeof project.flowchartThumbnailUrl === 'string' ? project.flowchartThumbnailUrl : undefined,
   };
 }
 

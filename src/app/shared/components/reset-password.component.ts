@@ -1,7 +1,7 @@
 import { Component, inject, signal, OnInit, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router, ActivatedRoute } from '@angular/router';
+import { Router } from '@angular/router';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
@@ -158,7 +158,6 @@ import { LoggerService } from '../../../services/logger.service';
 export class ResetPasswordComponent implements OnInit {
   private supabase = inject(SupabaseClientService);
   private router = inject(Router);
-  private route = inject(ActivatedRoute);
   private toast = inject(ToastService);
   private readonly logger = inject(LoggerService);
 
@@ -175,6 +174,14 @@ export class ResetPasswordComponent implements OnInit {
     await this.verifyResetToken();
   }
 
+  private async getSupabaseClientOrThrow() {
+    const client = await this.supabase.clientAsync();
+    if (!client) {
+      throw new Error('认证服务尚未就绪，请稍后重试');
+    }
+    return client;
+  }
+
   /**
    * 验证重置令牌
    * Supabase 会在 URL hash 中传递 access_token 和 refresh_token
@@ -188,6 +195,8 @@ export class ResetPasswordComponent implements OnInit {
     }
 
     try {
+      const client = await this.getSupabaseClientOrThrow();
+
       // 检查 URL hash 中是否有 token（Supabase 默认行为）
       const hash = window.location.hash;
       
@@ -200,7 +209,7 @@ export class ResetPasswordComponent implements OnInit {
 
         if (type === 'recovery' && accessToken && refreshToken) {
           // 设置会话
-          const { error } = await this.supabase.client().auth.setSession({
+          const { error } = await client.auth.setSession({
             access_token: accessToken,
             refresh_token: refreshToken
           });
@@ -218,7 +227,7 @@ export class ResetPasswordComponent implements OnInit {
         }
       } else {
         // 检查是否已有有效会话（可能是页面刷新）
-        const { data: { session } } = await this.supabase.client().auth.getSession();
+        const { data: { session } } = await client.auth.getSession();
         
         if (session) {
           this.isValid.set(true);
@@ -254,7 +263,9 @@ export class ResetPasswordComponent implements OnInit {
     this.isSubmitting.set(true);
 
     try {
-      const { error } = await this.supabase.client().auth.updateUser({
+      const client = await this.getSupabaseClientOrThrow();
+
+      const { error } = await client.auth.updateUser({
         password: this.newPassword
       });
 
@@ -266,7 +277,7 @@ export class ResetPasswordComponent implements OnInit {
       this.toast.success('密码重置成功', '请使用新密码登录');
 
       // 登出并跳转到登录页
-      await this.supabase.client().auth.signOut();
+      await client.auth.signOut();
       
       setTimeout(() => {
         void this.router.navigate(['/projects']);

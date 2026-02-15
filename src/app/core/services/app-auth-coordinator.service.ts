@@ -1,18 +1,19 @@
-import { Injectable, inject, signal, computed } from '@angular/core';
+import { Injectable, inject, signal, computed, Injector } from '@angular/core';
 import { Router } from '@angular/router';
 import { AuthService } from '../../../services/auth.service';
 import { UserSessionService } from '../../../services/user-session.service';
 import { ProjectStateService } from '../../../services/project-state.service';
-import { MigrationService } from '../../../services/migration.service';
 import { ModalService, type LoginData } from '../../../services/modal.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { OptimisticStateService } from '../../../services/optimistic-state.service';
 import { UndoService } from '../../../services/undo.service';
-import { AttachmentService } from '../../../services/attachment.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
 import { getErrorMessage, isFailure, humanizeErrorMessage } from '../../../utils/result';
-import { AUTH_CONFIG } from '../../../config';
+import { AUTH_CONFIG } from '../../../config/auth.config';
+import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
+import type { AttachmentService } from '../../../services/attachment.service';
+import type { MigrationService } from '../../../services/migration.service';
 
 /**
  * 应用认证协调器
@@ -29,16 +30,20 @@ export class AppAuthCoordinatorService {
   private readonly BOOTSTRAP_DATA_LOAD_TIMEOUT_MS = AUTH_CONFIG.SESSION_CHECK_TIMEOUT;
 
   private readonly logger = inject(LoggerService).category('Auth');
+  private readonly injector = inject(Injector);
   private readonly auth = inject(AuthService);
   private readonly userSession = inject(UserSessionService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly migrationService = inject(MigrationService);
   private readonly modal = inject(ModalService);
   private readonly toast = inject(ToastService);
   private readonly router = inject(Router);
   private readonly optimisticState = inject(OptimisticStateService);
   private readonly undoService = inject(UndoService);
-  private readonly attachmentService = inject(AttachmentService);
+
+  private attachmentServiceRef: AttachmentService | null = null;
+  private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
+  private migrationServiceRef: MigrationService | null = null;
+  private migrationServicePromise: Promise<MigrationService | null> | null = null;
 
   // ========== 认证状态 Signals ==========
   readonly authEmail = signal('');
@@ -73,6 +78,14 @@ export class AppAuthCoordinatorService {
   private bootstrapScheduled = false;
   /** 会话引导是否正在执行（防并发） */
   private bootstrapInFlight = false;
+
+  constructor() {
+    // 回滚开关关闭时，恢复旧策略：启动阶段预热重型依赖。
+    if (!FEATURE_FLAGS.ROOT_STARTUP_DEP_PRUNE_V1) {
+      void this.getAttachmentServiceLazy();
+      void this.getMigrationServiceLazy();
+    }
+  }
 
   // ========== 会话引导 ==========
 
@@ -253,7 +266,8 @@ export class AppAuthCoordinatorService {
       this.toast.success('登录成功', `欢迎回来`);
       await this.checkMigrationAfterLogin();
       this.isReloginMode.set(false);
-      const loginData = this.modal.getData('login') as LoginData | undefined;
+      const rawLoginData = this.modal.getData('login');
+      const loginData = this.isLoginData(rawLoginData) ? rawLoginData : undefined;
       const returnUrl = loginData?.returnUrl;
       this.modal.closeByType('login', { success: true, userId: userId ?? undefined });
       if (opts?.closeSettings) {
@@ -297,7 +311,14 @@ export class AppAuthCoordinatorService {
         this.authError.set('注册成功！请查收邮件并点击验证链接完成注册。');
       } else if (this.auth.currentUserId()) {
         this.sessionEmail.set(this.auth.sessionEmail());
-        await this.userSession.setCurrentUser(this.auth.currentUserId(), { forceLoad: true });
+        // 【修复】与 handleLogin 对齐，增加超时保护防止数据加载卡死
+        const SIGNUP_DATA_LOAD_TIMEOUT_MS = 8000;
+        const loadPromise = this.userSession.setCurrentUser(this.auth.currentUserId(), { forceLoad: true });
+        const loadStatus = await this.waitWithTimeout(loadPromise, SIGNUP_DATA_LOAD_TIMEOUT_MS);
+        if (loadStatus === 'timeout') {
+          this.logger.warn('[Signup] 数据加载超时，转后台继续', { timeoutMs: SIGNUP_DATA_LOAD_TIMEOUT_MS });
+          void loadPromise.catch(e => this.logger.error('[Signup] 后台数据加载失败', e));
+        }
         this.toast.success('注册成功', '欢迎使用');
         this.modal.closeByType('login', { success: true, userId: this.auth.currentUserId() ?? undefined });
         this.isSignupMode.set(false);
@@ -372,6 +393,64 @@ export class AppAuthCoordinatorService {
   // ========== 登出 ==========
 
   /**
+   * 按需获取 AttachmentService，避免其重型依赖进入启动主链路。
+   * single-flight：并发请求复用同一个 Promise。
+   */
+  async getAttachmentServiceLazy(): Promise<AttachmentService | null> {
+    if (this.attachmentServiceRef) {
+      return this.attachmentServiceRef;
+    }
+    if (this.attachmentServicePromise) {
+      return this.attachmentServicePromise;
+    }
+
+    this.attachmentServicePromise = import('../../../services/attachment.service')
+      .then(({ AttachmentService: AttachmentServiceToken }) => {
+        const service = this.injector.get(AttachmentServiceToken);
+        this.attachmentServiceRef = service;
+        return service;
+      })
+      .catch((error: unknown) => {
+        this.logger.warn('AttachmentService 懒加载失败，降级继续', error);
+        return null;
+      })
+      .finally(() => {
+        this.attachmentServicePromise = null;
+      });
+
+    return this.attachmentServicePromise;
+  }
+
+  /**
+   * 按需获取 MigrationService，避免登录前把迁移链路静态打入首屏。
+   * single-flight：并发请求复用同一个 Promise。
+   */
+  async getMigrationServiceLazy(): Promise<MigrationService | null> {
+    if (this.migrationServiceRef) {
+      return this.migrationServiceRef;
+    }
+    if (this.migrationServicePromise) {
+      return this.migrationServicePromise;
+    }
+
+    this.migrationServicePromise = import('../../../services/migration.service')
+      .then(({ MigrationService: MigrationServiceToken }) => {
+        const service = this.injector.get(MigrationServiceToken);
+        this.migrationServiceRef = service;
+        return service;
+      })
+      .catch((error: unknown) => {
+        this.logger.warn('MigrationService 懒加载失败，降级跳过迁移检查', error);
+        return null;
+      })
+      .finally(() => {
+        this.migrationServicePromise = null;
+      });
+
+    return this.migrationServicePromise;
+  }
+
+  /**
    * 执行认证相关的登出清理
    * 返回后，调用方需要自行清理组件级别的状态
    */
@@ -383,7 +462,8 @@ export class AppAuthCoordinatorService {
     try {
       this.optimisticState.onUserLogout();
       this.undoService.onUserLogout();
-      this.attachmentService.onUserLogout();
+      const attachmentService = await this.getAttachmentServiceLazy();
+      attachmentService?.onUserLogout();
     } catch (e) {
       this.logger.warn('onUserLogout 清理过程中出错，继续登出流程', e);
     }
@@ -432,7 +512,8 @@ export class AppAuthCoordinatorService {
     this.modal.closeByType('login', { success: true, userId: AUTH_CONFIG.LOCAL_MODE_USER_ID });
     void this.userSession.loadProjects();
     this.toast.info('本地模式', '数据仅保存在本地，不会同步到云端');
-    const loginData = this.modal.getData('login') as LoginData | undefined;
+    const rawLoginData = this.modal.getData('login');
+    const loginData = this.isLoginData(rawLoginData) ? rawLoginData : undefined;
     const returnUrl = loginData?.returnUrl || '/projects';
     void this.router.navigateByUrl(returnUrl);
   }
@@ -440,8 +521,11 @@ export class AppAuthCoordinatorService {
   // ========== 迁移检查 ==========
 
   private async checkMigrationAfterLogin(): Promise<void> {
+    const migrationService = await this.getMigrationServiceLazy();
+    if (!migrationService) return;
+
     const remoteProjects = this.projectState.projects();
-    const needsMigration = this.migrationService.checkMigrationNeeded(remoteProjects);
+    const needsMigration = migrationService.checkMigrationNeeded(remoteProjects);
     if (needsMigration) {
       this.modal.show('migration');
     }
@@ -456,5 +540,12 @@ export class AppAuthCoordinatorService {
   closeMigrationModal(): void {
     this.modal.closeByType('migration');
     this.toast.info('您可以稍后在设置中处理数据迁移');
+  }
+
+  // ========== 私有工具 ==========
+
+  /** 类型守卫：校验模态数据是否为 LoginData */
+  private isLoginData(data: unknown): data is LoginData {
+    return data != null && typeof data === 'object' && 'returnUrl' in (data as Record<string, unknown>);
   }
 }

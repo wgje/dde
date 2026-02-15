@@ -18,7 +18,7 @@ import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { STORAGE_QUOTA_CONFIG } from '../config';
+import { STORAGE_QUOTA_CONFIG } from '../config/sync.config';
 
 /**
  * 存储配额级别

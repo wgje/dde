@@ -6,7 +6,7 @@ import { SentryAlertService } from './sentry-alert.service';
 import { extractErrorMessage } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
-import { RetryQueueService, RetryableEntityType } from '../app/core/services/sync/retry-queue.service';
+import { RetryQueueService, type RetryableEntityType } from '../core-bridge';
 import { 
   OperationPriority, 
   TaskPayload, 

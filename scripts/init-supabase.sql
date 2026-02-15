@@ -1,10 +1,13 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.8.0
--- 最后验证: 2026-02-10
+-- 版本: 3.9.0
+-- 最后验证: 2026-02-15
 --
 -- 更新日志：
+--   3.9.0 (2026-02-15): 集成 Resume 水位 RPC（get_project_sync_watermark / get_user_projects_watermark /
+--                       list_project_heads_since / get_accessible_project_probe / get_black_box_sync_watermark /
+--                       get_resume_recovery_probe）及配套索引
 --   3.8.0 (2026-02-10): pg_cron 段与 cleanup-cron-setup.sql 对齐（函数存在性校验 + namespace 校验）
 --   3.7.0 (2026-02-09): 一次性初始化增强：自动尝试配置 pg_cron 清理任务（幂等 + 容错）
 --                       同步清理脚本说明，避免“已自动配置/仍提示手动配置”冲突
@@ -3009,6 +3012,501 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project_order
 
 CREATE INDEX IF NOT EXISTS idx_connections_project 
   ON public.connections(project_id);
+
+-- ============================================================
+-- [RESUME] Resume 水位 RPC 函数 + 配套索引
+-- 来源：supabase/migrations/20260214~20260218 合并
+-- ============================================================
+
+-- ============================================
+-- Resume 索引补强（幂等）
+-- ============================================
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner_updated_desc
+  ON public.projects (owner_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_projects_id_owner_updated_desc
+  ON public.projects (id, owner_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_desc
+  ON public.tasks (project_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_connections_project_updated_desc
+  ON public.connections (project_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
+  ON public.task_tombstones (project_id, deleted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
+  ON public.connection_tombstones (project_id, deleted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated_desc
+  ON public.black_box_entries (user_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_project_members_user_project
+  ON public.project_members (user_id, project_id);
+
+-- ============================================
+-- get_project_sync_watermark：单项目聚合同步水位
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.get_project_sync_watermark(
+  p_project_id UUID
+)
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+  v_watermark TIMESTAMPTZ;
+BEGIN
+  v_user_id := auth.uid();
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = p_project_id
+      AND (
+        p.owner_id = v_user_id
+        OR EXISTS (
+          SELECT 1
+          FROM public.project_members pm
+          WHERE pm.project_id = p_project_id
+            AND pm.user_id = v_user_id
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'Access denied to project %', p_project_id;
+  END IF;
+
+  -- 注：tasks/connections 表无 user_id 列，访问权限通过 project_id -> projects.owner_id 关联保障
+  SELECT GREATEST(
+    COALESCE((SELECT p.updated_at FROM public.projects p WHERE p.id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id = p_project_id), '-infinity'::timestamptz)
+  )
+  INTO v_watermark;
+
+  IF v_watermark = '-infinity'::timestamptz THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN v_watermark;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_project_sync_watermark(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_project_sync_watermark(UUID) TO authenticated;
+
+COMMENT ON FUNCTION public.get_project_sync_watermark IS
+  '返回单项目聚合同步水位（project/tasks/connections/tombstones 最大时间戳）';
+
+-- ============================================
+-- get_user_projects_watermark：用户项目域全局水位（性能优化版）
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.get_user_projects_watermark()
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+  v_watermark TIMESTAMPTZ;
+BEGIN
+  v_user_id := auth.uid();
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  WITH accessible_projects AS (
+    SELECT p.id
+    FROM public.projects p
+    WHERE p.owner_id = v_user_id
+    UNION
+    SELECT pm.project_id
+    FROM public.project_members pm
+    WHERE pm.user_id = v_user_id
+  ),
+  domain_max AS (
+    SELECT MAX(p.updated_at) AS ts
+    FROM public.projects p
+    JOIN accessible_projects ap ON ap.id = p.id
+
+    UNION ALL
+
+    SELECT MAX(t.updated_at) AS ts
+    FROM public.tasks t
+    JOIN accessible_projects ap ON ap.id = t.project_id
+
+    UNION ALL
+
+    SELECT MAX(c.updated_at) AS ts
+    FROM public.connections c
+    JOIN accessible_projects ap ON ap.id = c.project_id
+
+    UNION ALL
+
+    SELECT MAX(tt.deleted_at) AS ts
+    FROM public.task_tombstones tt
+    JOIN accessible_projects ap ON ap.id = tt.project_id
+
+    UNION ALL
+
+    SELECT MAX(ct.deleted_at) AS ts
+    FROM public.connection_tombstones ct
+    JOIN accessible_projects ap ON ap.id = ct.project_id
+  )
+  SELECT MAX(dm.ts)
+  INTO v_watermark
+  FROM domain_max dm;
+
+  RETURN v_watermark;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_user_projects_watermark() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_user_projects_watermark() TO authenticated;
+
+COMMENT ON FUNCTION public.get_user_projects_watermark IS
+  '返回当前用户可访问项目域聚合最大时间戳（优化版聚合路径）';
+
+-- ============================================
+-- list_project_heads_since：变更项目头信息（性能优化版）
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.list_project_heads_since(
+  p_since TIMESTAMPTZ DEFAULT NULL
+)
+RETURNS TABLE (
+  project_id UUID,
+  updated_at TIMESTAMPTZ,
+  version INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+BEGIN
+  v_user_id := auth.uid();
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  RETURN QUERY
+  WITH accessible_projects AS (
+    SELECT p.id
+    FROM public.projects p
+    WHERE p.owner_id = v_user_id
+    UNION
+    SELECT pm.project_id
+    FROM public.project_members pm
+    WHERE pm.user_id = v_user_id
+  ),
+  project_heads AS (
+    SELECT
+      p.id AS project_id,
+      p.updated_at AS project_updated_at,
+      COALESCE(p.version, 1)::INTEGER AS version
+    FROM public.projects p
+    JOIN accessible_projects ap ON ap.id = p.id
+  ),
+  task_changes AS (
+    SELECT
+      t.project_id,
+      MAX(t.updated_at) AS updated_at
+    FROM public.tasks t
+    JOIN accessible_projects ap ON ap.id = t.project_id
+    WHERE p_since IS NULL OR t.updated_at > p_since
+    GROUP BY t.project_id
+  ),
+  connection_changes AS (
+    SELECT
+      c.project_id,
+      MAX(c.updated_at) AS updated_at
+    FROM public.connections c
+    JOIN accessible_projects ap ON ap.id = c.project_id
+    WHERE p_since IS NULL OR c.updated_at > p_since
+    GROUP BY c.project_id
+  ),
+  task_tombstone_changes AS (
+    SELECT
+      tt.project_id,
+      MAX(tt.deleted_at) AS deleted_at
+    FROM public.task_tombstones tt
+    JOIN accessible_projects ap ON ap.id = tt.project_id
+    WHERE p_since IS NULL OR tt.deleted_at > p_since
+    GROUP BY tt.project_id
+  ),
+  connection_tombstone_changes AS (
+    SELECT
+      ct.project_id,
+      MAX(ct.deleted_at) AS deleted_at
+    FROM public.connection_tombstones ct
+    JOIN accessible_projects ap ON ap.id = ct.project_id
+    WHERE p_since IS NULL OR ct.deleted_at > p_since
+    GROUP BY ct.project_id
+  ),
+  project_changes AS (
+    SELECT
+      ph.project_id,
+      GREATEST(
+        COALESCE(ph.project_updated_at, '-infinity'::timestamptz),
+        COALESCE(tc.updated_at, '-infinity'::timestamptz),
+        COALESCE(cc.updated_at, '-infinity'::timestamptz),
+        COALESCE(ttc.deleted_at, '-infinity'::timestamptz),
+        COALESCE(ctc.deleted_at, '-infinity'::timestamptz)
+      ) AS updated_at,
+      ph.version
+    FROM project_heads ph
+    LEFT JOIN task_changes tc ON tc.project_id = ph.project_id
+    LEFT JOIN connection_changes cc ON cc.project_id = ph.project_id
+    LEFT JOIN task_tombstone_changes ttc ON ttc.project_id = ph.project_id
+    LEFT JOIN connection_tombstone_changes ctc ON ctc.project_id = ph.project_id
+  )
+  SELECT
+    pc.project_id,
+    pc.updated_at,
+    pc.version
+  FROM project_changes pc
+  WHERE pc.updated_at > COALESCE(p_since, '-infinity'::timestamptz)
+  ORDER BY pc.updated_at ASC;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) TO authenticated;
+
+COMMENT ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) IS
+  '返回当前用户在给定水位后变更的项目头信息（聚合 JOIN 优化版）';
+
+-- ============================================
+-- get_accessible_project_probe：项目可访问探测 + 水位
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.get_accessible_project_probe(
+  p_project_id UUID
+)
+RETURNS TABLE (
+  project_id UUID,
+  accessible BOOLEAN,
+  watermark TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+  v_accessible BOOLEAN := FALSE;
+  v_watermark TIMESTAMPTZ;
+BEGIN
+  v_user_id := auth.uid();
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = p_project_id
+      AND (
+        p.owner_id = v_user_id
+        OR EXISTS (
+          SELECT 1
+          FROM public.project_members pm
+          WHERE pm.project_id = p_project_id
+            AND pm.user_id = v_user_id
+        )
+      )
+  )
+  INTO v_accessible;
+
+  IF NOT v_accessible THEN
+    RETURN QUERY
+    SELECT p_project_id, FALSE, NULL::TIMESTAMPTZ;
+    RETURN;
+  END IF;
+
+  SELECT GREATEST(
+    COALESCE((SELECT p.updated_at FROM public.projects p WHERE p.id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id = p_project_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id = p_project_id), '-infinity'::timestamptz)
+  )
+  INTO v_watermark;
+
+  IF v_watermark = '-infinity'::timestamptz THEN
+    v_watermark := NULL;
+  END IF;
+
+  RETURN QUERY
+  SELECT p_project_id, TRUE, v_watermark;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_accessible_project_probe(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_accessible_project_probe(UUID) TO authenticated;
+
+COMMENT ON FUNCTION public.get_accessible_project_probe IS
+  '返回当前项目可访问性与项目域聚合水位（project/tasks/connections/tombstones）';
+
+-- ============================================
+-- get_black_box_sync_watermark：黑匣子域同步水位
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.get_black_box_sync_watermark()
+RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+  v_watermark TIMESTAMPTZ;
+BEGIN
+  v_user_id := auth.uid();
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  SELECT MAX(updated_at)
+  INTO v_watermark
+  FROM public.black_box_entries
+  WHERE user_id = v_user_id;
+
+  RETURN v_watermark;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_black_box_sync_watermark() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_black_box_sync_watermark() TO authenticated;
+
+COMMENT ON FUNCTION public.get_black_box_sync_watermark IS
+  '返回当前用户黑匣子域聚合同步水位（MAX(updated_at)）';
+
+-- ============================================
+-- get_resume_recovery_probe：恢复链路聚合探测
+-- ============================================
+
+CREATE OR REPLACE FUNCTION public.get_resume_recovery_probe(
+  p_project_id UUID DEFAULT NULL
+)
+RETURNS TABLE (
+  active_project_id UUID,
+  active_accessible BOOLEAN,
+  active_watermark TIMESTAMPTZ,
+  projects_watermark TIMESTAMPTZ,
+  blackbox_watermark TIMESTAMPTZ,
+  server_now TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_user_id UUID;
+  v_active_accessible BOOLEAN := FALSE;
+  v_active_watermark TIMESTAMPTZ := NULL;
+  v_projects_watermark TIMESTAMPTZ := NULL;
+  v_blackbox_watermark TIMESTAMPTZ := NULL;
+BEGIN
+  v_user_id := auth.uid();
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  IF p_project_id IS NOT NULL THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.projects p
+      WHERE p.id = p_project_id
+        AND (
+          p.owner_id = v_user_id
+          OR EXISTS (
+            SELECT 1
+            FROM public.project_members pm
+            WHERE pm.project_id = p_project_id
+              AND pm.user_id = v_user_id
+          )
+        )
+    )
+    INTO v_active_accessible;
+
+    IF v_active_accessible THEN
+      SELECT GREATEST(
+        COALESCE((SELECT p.updated_at FROM public.projects p WHERE p.id = p_project_id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p_project_id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id = p_project_id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id = p_project_id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id = p_project_id), '-infinity'::timestamptz)
+      )
+      INTO v_active_watermark;
+
+      IF v_active_watermark = '-infinity'::timestamptz THEN
+        v_active_watermark := NULL;
+      END IF;
+    END IF;
+  END IF;
+
+  WITH accessible_projects AS (
+    SELECT p.id
+    FROM public.projects p
+    WHERE p.owner_id = v_user_id
+    UNION
+    SELECT pm.project_id
+    FROM public.project_members pm
+    WHERE pm.user_id = v_user_id
+  )
+  SELECT GREATEST(
+    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz)
+  )
+  INTO v_projects_watermark;
+
+  IF v_projects_watermark = '-infinity'::timestamptz THEN
+    v_projects_watermark := NULL;
+  END IF;
+
+  SELECT MAX(updated_at)
+  INTO v_blackbox_watermark
+  FROM public.black_box_entries
+  WHERE user_id = v_user_id;
+
+  RETURN QUERY
+  SELECT
+    p_project_id,
+    v_active_accessible,
+    v_active_watermark,
+    v_projects_watermark,
+    v_blackbox_watermark,
+    NOW();
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_resume_recovery_probe(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_resume_recovery_probe(UUID) TO authenticated;
+
+COMMENT ON FUNCTION public.get_resume_recovery_probe IS
+  '恢复链路聚合探测：active project 可访问性 + active/project/blackbox 水位 + server_now';
 
 -- ============================================================
 -- 权限收口：SECURITY DEFINER RPC 禁止 PUBLIC / anon

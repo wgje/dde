@@ -419,6 +419,12 @@ export class GateService {
     // 清除今日检查记录
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
     
+    // 确保大门开关已启用（用户可能在设置中关闭了）
+    if (!focusPreferences().gateEnabled) {
+      focusPreferences.update(p => ({ ...p, gateEnabled: true }));
+      this.logger.info('Gate', '[DEV] Auto-enabled gateEnabled for testing');
+    }
+    
     // 创建模拟的待处理条目（使用合法 UUID 避免同步时报错）
     const mockProjectId = crypto.randomUUID();
     const mockUserId = crypto.randomUUID();

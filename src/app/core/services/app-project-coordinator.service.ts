@@ -156,7 +156,7 @@ export class AppProjectCoordinatorService {
   private ensureProjectDraft(projectId: string) {
     const drafts = this.projectDrafts();
     if (drafts[projectId]) return drafts[projectId];
-    const project = this.projectState.projects().find(p => p.id === projectId);
+    const project = this.projectState.getProject(projectId);
     if (!project) return null;
     const draft = {
       description: project.description ?? '',
@@ -181,7 +181,7 @@ export class AppProjectCoordinatorService {
   }
 
   onFocusFlowNode(taskId: string): void {
-    const task = this.projectState.tasks().find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task) return;
     const projectId = this.projectState.activeProjectId();
     if (projectId) {
@@ -229,8 +229,7 @@ export class AppProjectCoordinatorService {
   }
 
   async handleImportComplete(project: Project): Promise<void> {
-    const existingProjects = this.projectState.projects();
-    const existingProject = existingProjects.find(p => p.id === project.id);
+    const existingProject = this.projectState.getProject(project.id);
     if (existingProject) {
       this.projectState.updateProjects(projects =>
         projects.map(p => p.id === project.id ? project : p)

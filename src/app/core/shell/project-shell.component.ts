@@ -26,6 +26,15 @@ import { DynamicModalService } from '../../../services/dynamic-modal.service';
 import { AppProjectCoordinatorService } from '../services/app-project-coordinator.service';
 import { TextViewComponent } from '../../features/text';
 import { FlowViewComponent } from '../../features/flow';
+import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
+import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
+
+interface NetworkInformationLike {
+  effectiveType?: '4g' | '3g' | '2g' | 'slow-2g';
+  saveData?: boolean;
+  downlink?: number;
+  rtt?: number;
+}
 
 /**
  * 项目视图外壳组件
@@ -58,6 +67,16 @@ import { FlowViewComponent } from '../../features/flow';
       height: 100%;
       min-height: 0;
     }
+    /* 文本栏折叠时内容隐藏：收起时立即隐藏，展开时延迟显示，避免内容在窄宽度下崩坏 */
+    .text-col-inner {
+      opacity: 1;
+      transition: opacity 50ms ease-out 250ms;
+    }
+    .text-col-inner--hidden {
+      opacity: 0 !important;
+      transition: opacity 0ms ease-out 0ms;
+      pointer-events: none;
+    }
   `],
   template: `
     <!-- 隐藏的 router-outlet：子路由（text/flow/task）无组件，仅用于 URL 匹配 -->
@@ -65,9 +84,12 @@ import { FlowViewComponent } from '../../features/flow';
     <div class="relative flex h-full w-full min-h-0 overflow-hidden" style="background-color: var(--theme-bg);">
       @if (projectState.activeProjectId()) {
         <!-- Text Column - 允许滑动手势切换 -->
-        <div class="flex flex-col min-w-[300px] min-h-0" 
+        <div class="flex flex-col min-h-0 overflow-hidden"
+             [class.transition-all]="!uiState.isResizing() || collapseAnimating()"
+             [class.duration-300]="!uiState.isResizing() || collapseAnimating()"
+             [class.ease-in-out]="!uiState.isResizing() || collapseAnimating()" 
              style="background-color: var(--theme-bg); border-color: var(--theme-border);"
-             [class.border-r]="!uiState.isMobile()"
+             [class.border-r]="!uiState.isMobile() && !uiState.isTextColumnCollapsed()"
              [class.absolute]="uiState.isMobile()"
              [class.inset-0]="uiState.isMobile()"
              [class.w-full]="uiState.isMobile()"
@@ -77,11 +99,15 @@ import { FlowViewComponent } from '../../features/flow';
              [class.pointer-events-none]="uiState.isMobile() && uiState.activeView() !== 'text'"
              [class.z-10]="uiState.isMobile() && uiState.activeView() === 'text'"
              [class.z-0]="uiState.isMobile() && uiState.activeView() !== 'text'"
-             [style.width.%]="uiState.isMobile() ? 100 : uiState.textColumnRatio()"
+             [style.width.%]="uiState.isMobile() ? 100 : (uiState.isTextColumnCollapsed() ? 0 : uiState.textColumnRatio())"
+             [style.min-width.px]="uiState.isMobile() ? 0 : (uiState.isTextColumnCollapsed() || uiState.isResizing() ? 0 : 300)"
              (touchstart)="onTextViewTouchStart($event)"
              (touchmove)="onTextViewTouchMove($event)"
              (touchend)="onTextViewTouchEnd($event)">
           
+          <!-- 内容包装：折叠时立即隐藏内容，避免窄宽度下内容崩坏 -->
+          <div class="text-col-inner flex flex-col flex-1 min-h-0"
+               [class.text-col-inner--hidden]="!uiState.isMobile() && uiState.isTextColumnCollapsed()">
           <!-- Header for Text Column -->
           <div class="shrink-0 z-10"
                [ngClass]="{'h-6 mx-6 mt-4': !uiState.isMobile(), 'mx-2 mt-1 mb-1': uiState.isMobile()}">
@@ -99,6 +125,16 @@ import { FlowViewComponent } from '../../features/flow';
                    </button>
                    <span class="font-bold text-stone-800 dark:text-stone-200 text-lg tracking-tight">文本视图</span>
                  </div>
+                 
+                 <!-- 折叠文本栏按钮 -->
+                 <button (click)="toggleTextColumn()" 
+                         class="text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 transition-colors p-1.5 hover:bg-stone-200/50 dark:hover:bg-stone-700/50 rounded-lg ml-auto mr-2" 
+                         aria-label="折叠文本栏"
+                         title="折叠文本栏">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                    </svg>
+                 </button>
                  
                  <!-- Filter -->
                  <div class="relative flex items-center gap-2">
@@ -210,13 +246,33 @@ import { FlowViewComponent } from '../../features/flow';
               </button>
             </div>
           }
+          </div><!-- /text-col-inner -->
         </div>
 
-        <!-- Content Resizer -->
-        @if(!uiState.isMobile()) {
+        <!-- Content Resizer（文本栏折叠时隐藏） -->
+        @if(!uiState.isMobile() && !uiState.isTextColumnCollapsed()) {
           <div class="w-1 hover:w-1.5 bg-transparent hover:bg-stone-300 dark:hover:bg-stone-600 cursor-col-resize z-20 flex-shrink-0 relative group"
                (mousedown)="startContentResize($event)">
                <div class="absolute inset-y-0 left-0 w-px bg-stone-200 dark:bg-stone-700 group-hover:bg-stone-400 dark:group-hover:bg-stone-500 transition-colors"></div>
+          </div>
+        }
+
+        <!-- 文本栏折叠时：一条细分界线 + 居中小箭头按钮 -->
+        @if (!uiState.isMobile() && uiState.isTextColumnCollapsed()) {
+          <div class="w-px flex-shrink-0 relative z-20 group"
+               style="background-color: var(--theme-border);">
+            <!-- 居中非实心箭头按钮 -->
+            <button (click)="expandTextColumnToMin()"
+                    class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-8 flex items-center justify-center rounded-r-md
+                           bg-white dark:bg-stone-800 border border-l-0 border-stone-200 dark:border-stone-700
+                           hover:bg-stone-50 dark:hover:bg-stone-700 hover:border-stone-300 dark:hover:border-stone-600
+                           shadow-sm cursor-pointer transition-colors z-30"
+                    aria-label="展开文本栏"
+                    title="展开文本栏">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-stone-400 dark:text-stone-500 group-hover:text-stone-600 dark:group-hover:text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
           </div>
         }
 
@@ -229,7 +285,8 @@ import { FlowViewComponent } from '../../features/flow';
              [class.absolute]="uiState.isMobile()"
              [class.inset-0]="uiState.isMobile()"
              [class.w-full]="uiState.isMobile()"
-             [class.z-10]="uiState.isMobile()">
+             [class.z-10]="uiState.isMobile()"
+             (click)="activateFlowIntent('click')">
            <div class="flex items-center justify-between shrink-0 z-10"
                 [ngClass]="{'h-12 mx-4 mt-2': !uiState.isMobile(), 'mx-2 mt-1 mb-0.5': uiState.isMobile()}">
               <span class="text-stone-700 dark:text-stone-200" [ngClass]="{'text-lg font-bold text-stone-800 dark:text-stone-200 tracking-tight': !uiState.isMobile(), 'text-base font-bold': uiState.isMobile()}">
@@ -242,13 +299,21 @@ import { FlowViewComponent } from '../../features/flow';
               }
            </div>
            <!-- @defer 块用于懒加载流程图组件 -->
-           <!-- 【性能优化 2026-02-07】改用 on idle 触发，避免桌面端 on viewport 首帧即加载 GoJS -->
-           <!-- prefetch: 当浏览器空闲时预取 GoJS 代码，但不立即执行 -->
-           @defer (on idle; prefetch on idle) {
+           <!-- 【性能优化 2026-02-14】改为用户意图触发，避免桌面首屏自动拉取 GoJS 大 chunk -->
+           <!-- prefetch: 支持弱网场景仅预热 chunk，不主动切换视图 -->
+           @defer (when shouldLoadFlowNow(); prefetch when shouldPrefetchFlowChunk()) {
              <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
            } @placeholder {
              <div class="flex-1 flex items-center justify-center text-stone-400">
-               <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+               @if (shouldLoadFlowNow()) {
+                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+               } @else {
+                 <button
+                   (click)="activateFlowIntent('click')"
+                   class="px-3 py-1.5 rounded-lg border border-stone-300/80 dark:border-stone-600/80 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-800/80 transition-colors">
+                   加载流程图
+                 </button>
+               }
              </div>
            } @error {
              <div class="flex-1 flex flex-col items-center justify-center text-stone-500 p-4 gap-4">
@@ -299,9 +364,19 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
   // Shell 通过命令服务发布意图，FlowView 订阅并响应
   private readonly flowCommand = inject(FlowCommandService);
+  private readonly flowIntentLazyLoadEnabled = FEATURE_FLAGS.FLOW_INTENT_LAZYLOAD_V1;
+  private readonly flowStateAwareRestoreEnabled = FEATURE_FLAGS.FLOW_STATE_AWARE_RESTORE_V2;
   
   // UI 状态
   isFilterOpen = signal(false);
+  readonly flowIntentActivated = signal(!FEATURE_FLAGS.FLOW_INTENT_LAZYLOAD_V1);
+  readonly flowPrefetchOnlyActivated = signal(false);
+  readonly shouldLoadFlowNow = computed(() =>
+    !this.flowIntentLazyLoadEnabled || this.flowIntentActivated()
+  );
+  readonly shouldPrefetchFlowChunk = computed(() =>
+    this.shouldLoadFlowNow() || this.flowPrefetchOnlyActivated()
+  );
   // 使用 uiState.activeView 代替本地的 mobileActiveView，使其他组件可以访问当前视图状态
   
   // 内容调整状态
@@ -321,12 +396,18 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private isDestroyed = false;
   // 任务深链接重试定时器 - 用于组件销毁时取消
   private deepLinkRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Flow 智能恢复定时器
+  private flowRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private flowIdlePreloadTimer: ReturnType<typeof setTimeout> | null = null;
+  private flowRestoreIdleCallbackId: number | null = null;
+  private flowPreloadIdleCallbackId: number | null = null;
+  private lastFlowRestoreProjectId: string | null = null;
   
   // 【P2-23 修复】从普通方法改为 computed() 避免每次变更检测重复遍历
   currentFilterLabel = computed(() => {
     const filterId = this.uiState.filterMode();
     if (filterId === 'all') return '全部任务';
-    const task = this.projectState.rootTasks().find(t => t.id === filterId);
+    const task = this.projectState.getTask(filterId);
     if (!task) return '全部任务';
     return task.title || task.displayId || '未命名任务';
   });
@@ -342,6 +423,20 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     ).subscribe(() => {
       this.handleRouteChange();
     });
+  }
+
+  /**
+   * Flow 视图意图触发器
+   * 默认只在用户有明确意图时加载 GoJS 大块代码
+   */
+  activateFlowIntent(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): void {
+    if (!this.flowIntentLazyLoadEnabled || this.flowIntentActivated()) {
+      return;
+    }
+
+    this.flowIntentActivated.set(true);
+    this.flowPrefetchOnlyActivated.set(false);
+    this.logger.debug('Flow lazy-load intent activated', { source });
   }
   
   /**
@@ -359,7 +454,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     // 处理项目切换
     if (projectId && projectId !== this.projectState.activeProjectId()) {
       this.projectState.setActiveProjectId(projectId);
-      const project = this.projectState.projects().find(p => p.id === projectId);
+      const project = this.projectState.getProject(projectId);
       if (project) {
         this.tabSync.notifyProjectOpen(projectId, project.name);
       }
@@ -372,13 +467,220 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     
     // 根据 URL 确定视图模式
     const currentUrl = this.router.url;
-    if (currentUrl.endsWith('/flow')) {
-      this.uiState.activeView.set('flow');
-    } else if (currentUrl.endsWith('/text')) {
-      this.uiState.activeView.set('text');
-    } else if (currentUrl.includes('/task/')) {
-      this.uiState.activeView.set('flow');
+    const isFlowRoute = currentUrl.endsWith('/flow');
+    const isTaskDeepLink = currentUrl.includes('/task/');
+
+    if (isFlowRoute || isTaskDeepLink) {
+      this.cancelFlowStateAwareTimers();
+      this.activateFlowIntent(isTaskDeepLink ? 'deeplink' : 'route');
+      this.setActiveView('flow');
+      return;
     }
+
+    if (currentUrl.endsWith('/text')) {
+      this.cancelFlowStateAwareTimers();
+      this.setActiveView('text');
+      return;
+    }
+
+    this.applyStateAwareFlowRestore(currentUrl, projectId);
+  }
+
+  private applyStateAwareFlowRestore(currentUrl: string, projectId?: string): void {
+    if (!this.flowStateAwareRestoreEnabled || !projectId) {
+      return;
+    }
+    this.flowPrefetchOnlyActivated.set(false);
+
+    if (this.uiState.isMobile()) {
+      this.uiState.activeView.set('text');
+      this.reportFlowRestoreMode('degraded', {
+        reason: 'mobile-default-text',
+        projectId,
+      });
+      return;
+    }
+
+    // 仅在 /projects/:projectId 根路由应用智能恢复矩阵
+    if (!/^\/projects\/[^/?#]+$/.test(currentUrl)) {
+      return;
+    }
+
+    if (this.lastFlowRestoreProjectId === projectId) {
+      return;
+    }
+    this.lastFlowRestoreProjectId = projectId;
+    this.cancelFlowStateAwareTimers();
+
+    const lastView = this.uiState.getLastActiveView();
+    if (lastView !== 'flow') {
+      this.setActiveView('text');
+      this.reportFlowRestoreMode('degraded', {
+        reason: 'last-view-text',
+        projectId,
+      });
+      return;
+    }
+
+    const weakNetwork = this.isWeakNetworkForFlowRestore();
+    if (weakNetwork) {
+      this.uiState.activeView.set('text');
+      this.scheduleWeakNetworkIdlePreload(projectId);
+      this.reportFlowRestoreMode('degraded', {
+        reason: 'weak-network-preload-only',
+        projectId,
+      });
+      return;
+    }
+
+    this.scheduleFlowIdleRestore(projectId);
+  }
+
+  private scheduleFlowIdleRestore(projectId: string): void {
+    const triggerRestore = () => {
+      if (this.isDestroyed) return;
+      this.activateFlowIntent('restore-idle');
+      this.setActiveView('flow');
+      this.reportFlowRestoreMode('applied', {
+        reason: 'desktop-idle-restore',
+        projectId,
+      });
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      const requestIdle = (window as Window & {
+        requestIdleCallback: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      }).requestIdleCallback;
+
+      this.flowRestoreIdleCallbackId = requestIdle(() => {
+        this.flowRestoreIdleCallbackId = null;
+        triggerRestore();
+      }, { timeout: STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS });
+      return;
+    }
+
+    this.flowRestoreTimer = setTimeout(() => {
+      this.flowRestoreTimer = null;
+      triggerRestore();
+    }, STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS);
+  }
+
+  private scheduleWeakNetworkIdlePreload(projectId: string): void {
+    const triggerPreload = () => {
+      if (this.isDestroyed || this.flowIntentActivated()) return;
+      this.flowPrefetchOnlyActivated.set(true);
+      this.reportFlowRestoreMode('degraded', {
+        reason: 'weak-network-idle-preload',
+        projectId,
+      });
+    };
+
+    this.flowIdlePreloadTimer = setTimeout(() => {
+      this.flowIdlePreloadTimer = null;
+
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        const requestIdle = (window as Window & {
+          requestIdleCallback: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number;
+        }).requestIdleCallback;
+        this.flowPreloadIdleCallbackId = requestIdle(() => {
+          this.flowPreloadIdleCallbackId = null;
+          triggerPreload();
+        }, { timeout: STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS });
+        return;
+      }
+
+      triggerPreload();
+    }, STARTUP_PERF_CONFIG.FLOW_IDLE_PRELOAD_DELAY_MS);
+  }
+
+  private isWeakNetworkForFlowRestore(): boolean {
+    if (typeof navigator === 'undefined') {
+      return false;
+    }
+
+    const nav = navigator as Navigator & {
+      connection?: NetworkInformationLike;
+      mozConnection?: NetworkInformationLike;
+      webkitConnection?: NetworkInformationLike;
+    };
+    const connection = nav.connection ?? nav.mozConnection ?? nav.webkitConnection;
+    if (!connection) {
+      return false;
+    }
+
+    if (connection.saveData) {
+      return true;
+    }
+
+    const effectiveType = connection.effectiveType ?? '';
+    if (effectiveType === '2g' || effectiveType === 'slow-2g') {
+      return true;
+    }
+
+    const rtt = typeof connection.rtt === 'number' ? connection.rtt : 0;
+    if (rtt > STARTUP_PERF_CONFIG.FLOW_RESTORE_MAX_RTT_MS) {
+      return true;
+    }
+
+    const downlink = typeof connection.downlink === 'number' ? connection.downlink : 0;
+    if (
+      downlink > 0 &&
+      downlink < STARTUP_PERF_CONFIG.FLOW_IDLE_PRELOAD_MIN_DOWNLINK_MBPS
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private setActiveView(view: 'text' | 'flow'): void {
+    this.flowPrefetchOnlyActivated.set(false);
+    this.uiState.activeView.set(view);
+    this.uiState.persistActiveView(view);
+  }
+
+  private cancelFlowStateAwareTimers(): void {
+    if (this.flowRestoreTimer) {
+      clearTimeout(this.flowRestoreTimer);
+      this.flowRestoreTimer = null;
+    }
+    if (this.flowIdlePreloadTimer) {
+      clearTimeout(this.flowIdlePreloadTimer);
+      this.flowIdlePreloadTimer = null;
+    }
+    if (
+      this.flowRestoreIdleCallbackId !== null &&
+      typeof window !== 'undefined' &&
+      'cancelIdleCallback' in window
+    ) {
+      (window as Window & { cancelIdleCallback: (handle: number) => void })
+        .cancelIdleCallback(this.flowRestoreIdleCallbackId);
+      this.flowRestoreIdleCallbackId = null;
+    }
+    if (
+      this.flowPreloadIdleCallbackId !== null &&
+      typeof window !== 'undefined' &&
+      'cancelIdleCallback' in window
+    ) {
+      (window as Window & { cancelIdleCallback: (handle: number) => void })
+        .cancelIdleCallback(this.flowPreloadIdleCallbackId);
+      this.flowPreloadIdleCallbackId = null;
+    }
+  }
+
+  private reportFlowRestoreMode(
+    mode: 'applied' | 'degraded',
+    data: Record<string, unknown>
+  ): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('nanoflow:flow-restore-status', {
+      detail: {
+        mode,
+        ...data,
+      },
+    }));
   }
   
   /**
@@ -398,13 +700,14 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       
       retries++;
       const tasks = this.projectState.tasks();
-      const task = tasks.find(t => t.id === taskId);
+      const task = this.projectState.getTask(taskId);
       const isLoading = this.syncCoordinator.isLoadingRemote?.() ?? (tasks.length === 0);
       
       if (task) {
         // 任务存在，通过命令服务发送居中请求
         // FlowCommandService 会缓存命令直到 FlowView 就绪
-        this.uiState.activeView.set('flow');
+        this.activateFlowIntent('deeplink');
+        this.setActiveView('flow');
         
         // 等待图表渲染后定位
         this.deepLinkRetryTimer = setTimeout(() => {
@@ -421,7 +724,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       } else {
         // 超时未找到任务，导航到流程图视图并提示用户
         // 🔥 不再更新 URL - 避免触发路由导航销毁组件
-        this.uiState.activeView.set('flow');
+        this.activateFlowIntent('deeplink');
+        this.setActiveView('flow');
         
         // 根据情况显示不同提示，并提供明确的下一步操作
         if (!isLoading && !task) {
@@ -465,6 +769,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   ngOnDestroy() {
     // 设置销毁标志，停止所有递归 setTimeout
     this.isDestroyed = true;
+    this.cancelFlowStateAwareTimers();
     
     // 清理待执行的定时器
     if (this.deepLinkRetryTimer) {
@@ -482,12 +787,15 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * 移动端：使用条件渲染，FlowView 组件会被完全销毁/重建
    */
   switchToFlow() {
-    this.uiState.activeView.set('flow');
+    this.cancelFlowStateAwareTimers();
+    this.activateFlowIntent('click');
+    this.setActiveView('flow');
   }
   
   switchToText() {
     this.logger.debug('switchToText 被调用');
-    this.uiState.activeView.set('text');
+    this.cancelFlowStateAwareTimers();
+    this.setActiveView('text');
   }
   
   // ========== 侧边栏控制 ==========
@@ -496,6 +804,19 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     // 通过事件通知父组件切换侧边栏
     // 移动端和桌面端都使用全局事件来控制侧边栏
     window.dispatchEvent(new CustomEvent('toggle-sidebar'));
+  }
+
+  // ========== 文本栏折叠控制（桌面端） ==========
+
+  /** 切换文本栏的折叠/展开状态 */
+  toggleTextColumn() {
+    this.uiState.isTextColumnCollapsed.update(v => !v);
+  }
+
+  /** 从折叠状态展开文本栏到最小可用宽度（25%） */
+  expandTextColumnToMin() {
+    this.uiState.textColumnRatio.set(25);
+    this.uiState.isTextColumnCollapsed.set(false);
   }
   
   private navigateToProjectList() {
@@ -506,6 +827,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   onFocusFlowNode(taskId: string) {
     if (!this.uiState.isMobile()) {
+      this.activateFlowIntent('click');
       // 通过命令服务发送居中请求，无需检查 flowView 实例
       this.flowCommand.centerOnNode(taskId, false);
     }
@@ -513,9 +835,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   // ========== 内容区域调整 ==========
   
+  private resizeRafId = 0;
+
   startContentResize(e: MouseEvent) {
     e.preventDefault();
     this.isResizingContent = true;
+    this.uiState.isResizing.set(true);
     this.startX = e.clientX;
     this.startRatio = this.uiState.textColumnRatio();
     
@@ -526,21 +851,78 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     document.body.style.userSelect = 'none';
   }
   
+  /** 拖拽到最小阈值以下时自动折叠的百分比 */
+  private static readonly COLLAPSE_THRESHOLD = 15;
+  /** 拖拽过程中是否处于"临时折叠"状态（鼠标未松开） */
+  private isDragCollapsed = false;
+  /** 折叠/展开动画进行中（临时恢复 CSS transition） */
+  readonly collapseAnimating = signal(false);
+  private collapseAnimTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 临时启用 CSS 过渡动画（300ms 后自动关闭） */
+  private enableCollapseAnimation(): void {
+    if (this.collapseAnimTimer) clearTimeout(this.collapseAnimTimer);
+    this.collapseAnimating.set(true);
+    this.collapseAnimTimer = setTimeout(() => {
+      this.collapseAnimating.set(false);
+      this.collapseAnimTimer = null;
+    }, 320); // 略大于 CSS duration-300
+  }
+
   @HostListener('document:mousemove', ['$event'])
   onMouseMove(e: MouseEvent) {
-    if (this.isResizingContent) {
-      e.preventDefault();
-      const delta = e.clientX - this.startX;
+    if (!this.isResizingContent) return;
+    e.preventDefault();
+    // 使用 rAF 节流，避免每个 mousemove 都触发布局计算
+    if (this.resizeRafId) return;
+    const clientX = e.clientX;
+    this.resizeRafId = requestAnimationFrame(() => {
+      this.resizeRafId = 0;
+      const delta = clientX - this.startX;
       const deltaPercent = (delta / this.mainContentWidth) * 100;
-      const newRatio = Math.max(25, Math.min(75, this.startRatio + deltaPercent));
+      const rawRatio = this.startRatio + deltaPercent;
+
+      if (rawRatio < ProjectShellComponent.COLLAPSE_THRESHOLD) {
+        // 低于阈值 → 临时折叠（启用过渡动画做丝滑收缩）
+        if (!this.isDragCollapsed) {
+          this.isDragCollapsed = true;
+          this.enableCollapseAnimation();
+          this.uiState.textColumnRatio.set(0);
+          this.uiState.isTextColumnCollapsed.set(true);
+        }
+        return;
+      }
+
+      // 回到阈值之上 → 取消折叠，启用过渡动画做丝滑展开
+      if (this.isDragCollapsed) {
+        this.isDragCollapsed = false;
+        this.enableCollapseAnimation();
+        this.uiState.isTextColumnCollapsed.set(false);
+        // 从最小可用值开始，而非跳到 rawRatio
+        const newRatio = Math.max(25, Math.min(75, rawRatio));
+        this.uiState.textColumnRatio.set(newRatio);
+        return;
+      }
+
+      const newRatio = Math.max(25, Math.min(75, rawRatio));
       this.uiState.textColumnRatio.set(newRatio);
-    }
+    });
   }
   
   @HostListener('document:mouseup')
   onMouseUp() {
     if (this.isResizingContent) {
+      if (this.resizeRafId) {
+        cancelAnimationFrame(this.resizeRafId);
+        this.resizeRafId = 0;
+      }
+      // 松开时若处于临时折叠 → 保持折叠并启用过渡动画
+      if (this.isDragCollapsed) {
+        this.enableCollapseAnimation();
+      }
+      this.isDragCollapsed = false;
       this.isResizingContent = false;
+      this.uiState.isResizing.set(false);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     }
@@ -575,7 +957,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
 
       // 重要：一旦判断为“切换手势”，立刻阻止默认滚动/事件穿透。
       // 否则在切换到 Flow 后，同一触摸事件的后续阶段可能被 GoJS 捕获，引发画布抖动/跳位。
-      e.preventDefault();
+      if (e.cancelable) {
+        e.preventDefault();
+      }
       e.stopPropagation();
     }
   }
@@ -611,7 +995,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    */
   retryTextView(): void {
     // 强制刷新当前视图
-    this.uiState.activeView.set('text');
+    this.setActiveView('text');
   }
   
   /**
@@ -620,7 +1004,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    */
   retryFlowView(): void {
     // 触发流程图重新初始化
-    this.uiState.activeView.set('flow');
+    this.activateFlowIntent('click');
+    this.setActiveView('flow');
     // 通过命令服务发送重试命令
     // 命令会被缓存直到 FlowView 就绪
     this.flowCommand.retryDiagram();

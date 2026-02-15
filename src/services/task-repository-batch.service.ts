@@ -3,6 +3,7 @@ import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import type { TaskRow, ConnectionRow } from './task-repository.types';
 
 /**
@@ -139,28 +140,32 @@ export class TaskRepositoryBatchService {
         return titleChanged || descChanged || deletedAtChanged;
       });
 
-      // 6. 批量删除操作（提升性能）
+      // 6. 批量软删除操作（【P1-2 修复】防止连接复活）
       if (toDelete.length > 0) {
         const BATCH_SIZE = 50;
+        const deletedAt = new Date().toISOString();
         for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
           const batch = toDelete.slice(i, i + BATCH_SIZE);
           let success = false;
           
           for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-            // 使用 IN 查询批量删除
-            const _deleteKeys = batch.map(c => `(${c.source},${c.target})`);
-            const { error } = await this.supabase.client()
-              .from('connections')
-              .delete()
-              .eq('project_id', projectId)
-              .in('source_id', batch.map(c => c.source))
-              .in('target_id', batch.map(c => c.target));
+            // 使用软删除替代硬删除
+            const batchErrors: string[] = [];
+            for (const c of batch) {
+              const { error } = await this.supabase.client()
+                .from('connections')
+                .update({ deleted_at: deletedAt })
+                .eq('project_id', projectId)
+                .eq('source_id', c.source)
+                .eq('target_id', c.target);
+              if (error) batchErrors.push(error.message);
+            }
             
-            if (error) {
+            if (batchErrors.length > 0) {
               if (retry < MAX_RETRIES) {
                 await new Promise(r => setTimeout(r, 100 * (retry + 1)));
               } else {
-                errors.push(`批量删除连接失败（${i}-${i + batch.length}）: ${error.message}`);
+                errors.push(`批量软删除连接失败（${i}-${i + batch.length}）: ${batchErrors.join(', ')}`);
               }
             } else {
               success = true;
@@ -427,8 +432,9 @@ export class TaskRepositoryBatchService {
     const BATCH_SIZE = 50;
     const MAX_RETRIES = 2;
 
-    // 1. 批量删除连接
+    // 1. 批量软删除连接（【P1-2 修复】防止连接复活）
     if (connectionsToDelete.length > 0) {
+      const deletedAt = new Date().toISOString();
       for (let i = 0; i < connectionsToDelete.length; i += BATCH_SIZE) {
         const batch = connectionsToDelete.slice(i, i + BATCH_SIZE);
         
@@ -437,7 +443,7 @@ export class TaskRepositoryBatchService {
           for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
             const { error } = await this.supabase.client()
               .from('connections')
-              .delete()
+              .update({ deleted_at: deletedAt })
               .eq('project_id', projectId)
               .eq('source_id', conn.source)
               .eq('target_id', conn.target);
@@ -592,11 +598,12 @@ export class TaskRepositoryBatchService {
 
     const errors: string[] = [];
 
-    // 连接没有好的批量删除方式（复合主键），逐个删除
+    // 【P1-2 修复】软删除替代硬删除，防止连接复活
+    const deletedAt = new Date().toISOString();
     for (const conn of connections) {
       const { error } = await this.supabase.client()
         .from('connections')
-        .delete()
+        .update({ deleted_at: deletedAt })
         .eq('project_id', projectId)
         .eq('source_id', conn.source)
         .eq('target_id', conn.target);
@@ -622,9 +629,10 @@ export class TaskRepositoryBatchService {
   private async loadConnections(projectId: string): Promise<Connection[]> {
     if (!this.supabase.isConfigured) return [];
 
+    // 【P2-4 修复】使用具体字段替代 select('*')
     const { data, error } = await this.supabase.client()
       .from('connections')
-      .select('*')
+      .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
       .eq('project_id', projectId)
       .is('deleted_at', null);
 

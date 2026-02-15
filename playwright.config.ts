@@ -4,6 +4,10 @@ import { defineConfig, devices } from '@playwright/test';
  * Playwright 配置文件
  * 用于 NanoFlow 项目的 E2E 测试
  */
+const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || 'http://localhost:4200';
+const webServerCommand = process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] || 'npm run start';
+const webServerTimeout = Number(process.env['PLAYWRIGHT_WEB_SERVER_TIMEOUT'] || 240_000);
+
 export default defineConfig({
   testDir: './e2e',
   /* 每个测试的超时时间 */
@@ -28,7 +32,7 @@ export default defineConfig({
   /* 共享设置 */
   use: {
     /* 基础URL */
-    baseURL: 'http://localhost:4200',
+    baseURL,
     /* 收集失败测试的trace */
     trace: 'on-first-retry',
     /* 截图 */
@@ -52,9 +56,9 @@ export default defineConfig({
 
   /* 测试前启动开发服务器 */
   webServer: {
-    command: 'npm run start',
-    url: 'http://localhost:4200',
-    reuseExistingServer: !process.env['CI'],
-    timeout: 120 * 1000,
+    command: webServerCommand,
+    url: baseURL,
+    reuseExistingServer: !process.env['CI'] && !process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'],
+    timeout: webServerTimeout,
   },
 });

@@ -45,7 +45,9 @@ import {
   classifySupabaseClientFailure
 } from '../../../utils/supabase-error';
 import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
-import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config';
+import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config/sync.config';
+import { APP_LIFECYCLE_CONFIG } from '../../../config/app-lifecycle.config';
+import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
@@ -53,27 +55,11 @@ import { BlackBoxEntry } from '../../../models/focus';
 import { SyncStateService } from './sync/sync-state.service';
 
 /**
- * 同步状态
- */
-interface SyncState {
-  isSyncing: boolean;
-  isOnline: boolean;
-  offlineMode: boolean;
-  sessionExpired: boolean;
-  lastSyncTime: string | null;
-  pendingCount: number;
-  syncError: string | null;
-  hasConflict: boolean;
-  conflictData: ConflictData | null;
-}
-
-/**
  * 冲突数据
  */
 interface ConflictData {
   local: Project;
   remote: Project;
-  remoteData?: Project;
   projectId: string;
 }
 
@@ -85,6 +71,25 @@ export type TaskChangeCallback = (payload: { eventType: string; taskId: string; 
 
 /** 用户偏好变更回调 */
 export type UserPreferencesChangeCallback = (payload: { eventType: string; userId: string }) => void;
+
+/** 恢复链路参数 */
+export interface ResumeRecoverOptions {
+  mode?: 'light' | 'heavy';
+  stage?: 'full' | 'compensation';
+  allowRemoteProbe?: boolean;
+  force?: boolean;
+  sessionValidated?: boolean;
+  retryProcessing?: 'background' | 'blocking';
+  interactionBudgetMs?: number;
+  skipSessionValidationWithinMs?: number;
+  resumeProbeTimeoutMs?: number;
+  backgroundDrainMaxRounds?: number;
+  deferBlackBoxPull?: boolean;
+  backgroundProbeDelayMs?: number;
+  recoveryTicketId?: string;
+  skipRetryQueue?: boolean;
+  skipRealtimeResume?: boolean;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -117,7 +122,7 @@ export class SimpleSyncService {
   /**
    * 获取 Supabase 客户端
    */
-  private getSupabaseClient(): SupabaseClient | null {
+  private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
       this.syncState.update(s => ({ ...s, syncError: failure.message }));
@@ -125,7 +130,7 @@ export class SimpleSyncService {
       return null;
     }
     try {
-      return this.supabase.client();
+      return await this.supabase.clientAsync();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
       this.syncState.update(s => ({ ...s, syncError: failure.message }));
@@ -163,6 +168,11 @@ export class SimpleSyncService {
   /** 配置常量 */
   private readonly RETRY_INTERVAL = 5000;
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
+  /** 恢复 ticket 状态缓存（防止同 ticket 重复 heavy/light） */
+  private readonly recoveryTicketState = new Map<
+    string,
+    { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean }
+  >();
   
   constructor() {
     // 订阅会话恢复事件
@@ -244,6 +254,358 @@ export class SimpleSyncService {
   flushRetryQueueSync(): void {
     this.retryQueueService.flushSync();
   }
+
+  /**
+   * 页面恢复后的同步自愈流程
+   * 顺序：重试队列 -> 远程增量/全量拉取回调 -> 恢复实时更新
+   */
+  async recoverAfterResume(reason: string, options: ResumeRecoverOptions = {}): Promise<void> {
+    const startedAt = Date.now();
+    const mode = options.mode ?? 'heavy';
+    const stage = options.stage ?? 'full';
+    const interactionFirstEnabled = FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1 || options.force === true;
+    const allowRemoteProbe = options.allowRemoteProbe ?? mode === 'heavy';
+    const force = options.force === true;
+    const retryProcessing = options.retryProcessing ?? 'background';
+    const skipRetryQueue = options.skipRetryQueue ?? stage === 'compensation';
+    const skipRealtimeResume = options.skipRealtimeResume ?? stage === 'compensation';
+    const recoveryTicketId = options.recoveryTicketId?.trim() || null;
+    const recoveryTicketDedupEnabled = FEATURE_FLAGS.RECOVERY_TICKET_DEDUP_V1;
+    const deferBlackBoxPull = options.deferBlackBoxPull ?? true;
+    const interactionBudgetMs = Math.max(
+      80,
+      options.interactionBudgetMs ?? APP_LIFECYCLE_CONFIG.RESUME_INTERACTION_BUDGET_MS
+    );
+    const skipSessionValidationWithinMs = Math.max(
+      0,
+      options.skipSessionValidationWithinMs ?? (FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1 ? 10_000 : 0)
+    );
+    const resumeProbeTimeoutMs = Math.max(200, options.resumeProbeTimeoutMs ?? 1500);
+    const backgroundProbeDelayMs = Math.max(0, options.backgroundProbeDelayMs ?? 150);
+    const backgroundDrainMaxRounds = Math.max(1, options.backgroundDrainMaxRounds ?? 5);
+    const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : this.state().isOnline;
+    this.state.update(s => ({ ...s, isOnline: onlineNow }));
+
+    this.cleanupRecoveryTicketState(startedAt);
+    let ticketState: { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean } | null = null;
+    let duplicateModeInSameTicket = false;
+    if (recoveryTicketId && recoveryTicketDedupEnabled) {
+      ticketState = this.recoveryTicketState.get(recoveryTicketId) ?? {
+        createdAt: startedAt,
+        modes: new Set<'light' | 'heavy'>(),
+        probeCompleted: false,
+      };
+      duplicateModeInSameTicket = ticketState.modes.has(mode);
+      this.recoveryTicketState.set(recoveryTicketId, ticketState);
+    }
+
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'lifecycle',
+      message: 'recovery.step',
+      level: 'info',
+      data: {
+        step: 'sync-recovery-start',
+        reason,
+        mode,
+        stage,
+        isOnline: onlineNow,
+        interactionFirstEnabled,
+        recoveryTicketId,
+        deferBlackBoxPull,
+        skipRetryQueue,
+        skipRealtimeResume
+      }
+    });
+
+    if (!onlineNow && !force) {
+      this.logger.info('页面恢复时处于离线状态，跳过恢复同步', { reason });
+      return;
+    }
+
+    let session: { valid: boolean; userId?: string } | null = null;
+    if (options.sessionValidated !== true) {
+      if (skipSessionValidationWithinMs > 0) {
+        const snapshot = this.sessionManager.getRecentValidationSnapshot(skipSessionValidationWithinMs);
+        if (snapshot?.valid) {
+          session = { valid: true, userId: snapshot.userId };
+        }
+      }
+
+      // light/heavy 都执行会话校验，确保恢复链路在无效会话下快速退出
+      session = session ?? await this.sessionManager.validateSession();
+      if (!session.valid && !force) {
+        this.logger.info('页面恢复时会话无效，跳过远端恢复链路', { reason, mode });
+        return;
+      }
+    }
+
+    // 1) 先处理离线积压队列
+    if (!skipRetryQueue && this.retryQueueService.length > 0) {
+      const retrySlice = Math.max(1, APP_LIFECYCLE_CONFIG.RESUME_RETRY_SLICE_MAX_ITEMS);
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'lifecycle',
+        message: 'recovery.step',
+        level: 'info',
+        data: {
+          step: 'retry-queue-process',
+          reason,
+          mode,
+          stage,
+          pendingCount: this.retryQueueService.length,
+          retrySlice,
+          retryProcessing,
+          interactionBudgetMs
+        }
+      });
+
+      if (retryProcessing === 'blocking') {
+        await this.retryQueueService.processQueueSlice({
+          maxItems: retrySlice,
+          maxDurationMs: interactionBudgetMs
+        });
+      } else {
+        const firstSlice = await this.retryQueueService.processQueueSlice({
+          maxItems: retrySlice,
+          maxDurationMs: interactionBudgetMs
+        });
+        if (!firstSlice.completed) {
+          this.scheduleRetryQueueContinuation(
+            reason,
+            mode,
+            retrySlice,
+            interactionBudgetMs,
+            backgroundDrainMaxRounds
+          );
+        }
+      }
+    }
+
+    // 2) 恢复实时更新状态（若之前被暂停），并在 heavy 下探测远端变更
+    if (!skipRealtimeResume) {
+      this.realtimePollingService.resumeRealtimeUpdates();
+    }
+
+    if (duplicateModeInSameTicket) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'lifecycle',
+        message: 'recovery.step',
+        level: 'info',
+        data: {
+          step: 'ticket-duplicate-mode-skipped',
+          reason,
+          mode,
+          stage,
+          recoveryTicketId,
+        }
+      });
+      this.logger.debug('同一 recovery ticket 重复恢复已跳过主流程', { reason, mode, stage, recoveryTicketId });
+    }
+
+    if (ticketState && !duplicateModeInSameTicket) {
+      ticketState.modes.add(mode);
+    }
+
+    // light 模式只做本地状态恢复，不触发远端探测
+    if (mode === 'heavy' && allowRemoteProbe && !duplicateModeInSameTicket && !(ticketState?.probeCompleted)) {
+      const currentProjectId = this.realtimePollingService.getCurrentProjectId();
+      const payload = {
+        eventType: 'resume',
+        projectId: currentProjectId ?? undefined
+      };
+      const firstProbe = await this.triggerRemoteProbeWithTimeout(payload, resumeProbeTimeoutMs);
+      let triggered = firstProbe.triggered;
+      const hasCallback = this.realtimePollingService.hasRemoteChangeCallback();
+
+      if (!triggered && hasCallback && !firstProbe.timedOut) {
+        this.sentryLazyLoader.addBreadcrumb({
+          category: 'lifecycle',
+          message: 'recovery.step',
+          level: 'info',
+          data: { step: 'remote-probe-retry', reason, mode }
+        });
+        const retryProbe = await this.triggerRemoteProbeWithTimeout(payload, resumeProbeTimeoutMs);
+        triggered = retryProbe.triggered;
+      }
+
+      if (!triggered && firstProbe.timedOut && hasCallback) {
+        setTimeout(() => {
+          void this.realtimePollingService.triggerRemoteChange(payload);
+        }, backgroundProbeDelayMs);
+        this.sentryLazyLoader.addBreadcrumb({
+          category: 'lifecycle',
+          message: 'recovery.step',
+          level: 'info',
+          data: {
+            step: 'remote-probe-timeout-background-fallback',
+            reason,
+            mode,
+            stage,
+            recoveryTicketId,
+            backgroundProbeDelayMs
+          }
+        });
+      }
+
+      // 3) 灰度开关关闭时保留旧兜底；开启后禁止全量 loadProjectsFromCloud
+      if (!triggered) {
+        if (!interactionFirstEnabled) {
+          this.sentryLazyLoader.addBreadcrumb({
+            category: 'lifecycle',
+            message: 'recovery.step',
+            level: 'info',
+            data: { step: 'fallback-cloud-load', reason, mode }
+          });
+
+          const fallbackSession = session ?? await this.sessionManager.validateSession();
+          if (fallbackSession.valid && fallbackSession.userId) {
+            await this.loadProjectsFromCloud(fallbackSession.userId, true);
+          }
+        } else if (!hasCallback) {
+          this.sentryLazyLoader.addBreadcrumb({
+            category: 'lifecycle',
+            message: 'recovery.step',
+            level: 'info',
+            data: {
+              step: 'skip-fallback-no-callback',
+              reason,
+              mode,
+              stage
+            }
+          });
+          this.logger.info('恢复链路未注册远端回调，已跳过全量云端加载兜底', { reason, mode });
+        }
+      }
+
+      if (ticketState) {
+        ticketState.probeCompleted = triggered || firstProbe.timedOut;
+      }
+    } else if (mode === 'heavy' && ticketState?.probeCompleted) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'lifecycle',
+        message: 'recovery.step',
+        level: 'info',
+        data: {
+          step: 'remote-probe-skipped-ticket-probed',
+          reason,
+          mode,
+          stage,
+          recoveryTicketId
+        }
+      });
+    }
+
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'lifecycle',
+      message: 'recovery.step',
+      level: 'info',
+      data: {
+        step: 'sync-recovery-complete',
+        reason,
+        mode,
+        stage,
+        elapsedMs: Date.now() - startedAt
+      }
+    });
+  }
+
+  private cleanupRecoveryTicketState(nowMs: number): void {
+    if (this.recoveryTicketState.size === 0) {
+      return;
+    }
+
+    const ttlMs = APP_LIFECYCLE_CONFIG.RESUME_HEAVY_COOLDOWN_MS * 4;
+    for (const [ticketId, state] of this.recoveryTicketState.entries()) {
+      if (nowMs - state.createdAt > ttlMs) {
+        this.recoveryTicketState.delete(ticketId);
+      }
+    }
+  }
+
+  private scheduleRetryQueueContinuation(
+    reason: string,
+    mode: 'light' | 'heavy',
+    retrySlice: number,
+    maxDurationMs: number,
+    maxRounds: number,
+    round = 1
+  ): void {
+    if (round > maxRounds) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'lifecycle',
+        message: 'recovery.step',
+        level: 'warning',
+        data: {
+          step: 'retry-queue-background-drain-max-rounds',
+          reason,
+          mode,
+          maxRounds
+        }
+      });
+      return;
+    }
+
+    const backoffDelaysMs = [200, 500, 1000, 1000, 1000];
+    const backoffMs = backoffDelaysMs[Math.min(round - 1, backoffDelaysMs.length - 1)];
+    const runSlice = () => {
+      void this.retryQueueService.processQueueSlice({
+        maxItems: retrySlice,
+        maxDurationMs
+      }).then((result) => {
+        if (!result.completed && result.remaining > 0) {
+          this.scheduleRetryQueueContinuation(reason, mode, retrySlice, maxDurationMs, maxRounds, round + 1);
+          return;
+        }
+
+        this.sentryLazyLoader.addBreadcrumb({
+          category: 'lifecycle',
+          message: 'recovery.step',
+          level: 'info',
+          data: {
+            step: 'retry-queue-background-drain',
+            reason,
+            mode,
+            remaining: result.remaining,
+            processed: result.processed,
+            durationMs: result.durationMs,
+            round
+          }
+        });
+      }).catch((error) => {
+        this.logger.warn('恢复链路后台重试切片失败', { reason, mode, error });
+        this.scheduleRetryQueueContinuation(reason, mode, retrySlice, maxDurationMs, maxRounds, round + 1);
+      });
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (
+        window as Window & {
+          requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+        }
+      ).requestIdleCallback(() => runSlice(), { timeout: backoffMs });
+      return;
+    }
+    setTimeout(runSlice, backoffMs);
+  }
+
+  private async triggerRemoteProbeWithTimeout(
+    payload: { eventType?: string; projectId?: string },
+    timeoutMs: number
+  ): Promise<{ triggered: boolean; timedOut: boolean }> {
+    try {
+      const result = await Promise.race([
+        this.realtimePollingService.triggerRemoteChange(payload).then(triggered => ({
+          triggered,
+          timedOut: false
+        })),
+        new Promise<{ triggered: false; timedOut: true }>((resolve) =>
+          setTimeout(() => resolve({ triggered: false, timedOut: true }), timeoutMs)
+        )
+      ]);
+      return result;
+    } catch {
+      return { triggered: false, timedOut: false };
+    }
+  }
   
   // ==================== 任务同步（委托） ====================
   
@@ -313,7 +675,7 @@ export class SimpleSyncService {
       return false;
     }
     
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) {
       if (!fromRetryQueue) this.addToRetryQueue('project', 'upsert', project);
       return false;
@@ -397,6 +759,7 @@ export class SimpleSyncService {
    * 执行项目 upsert 操作（内部方法，由 pushProject 调用）
    */
   private async doProjectPush(client: SupabaseClient, project: Project, userId: string): Promise<void> {
+    // 【P2-1 修复】不发送客户端 updated_at，让 DB 触发器统一设置，避免时钟偏移影响 LWW 判定
     const { error } = await client
       .from('projects')
       .upsert({
@@ -405,7 +768,6 @@ export class SimpleSyncService {
         title: project.name,
         description: project.description,
         version: project.version || 1,
-        updated_at: project.updatedAt || nowISO(),
         migrated_to_v2: true
       });
     
@@ -413,13 +775,15 @@ export class SimpleSyncService {
   }
   
   async pullProjects(since?: string): Promise<Project[]> {
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) return [];
-    
+
     try {
+      const userId = this.sessionManager.getRecentValidationSnapshot(60_000)?.userId;
       let query = client.from('projects').select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS);
+      if (userId) query = query.eq('owner_id', userId);
       if (since) query = query.gt('updated_at', since);
-      
+
       const { data, error } = await query;
       if (error) throw supabaseErrorToError(error);
       
@@ -529,7 +893,7 @@ export class SimpleSyncService {
   // ==================== Delta Sync ====================
   
   async checkForDrift(projectId: string): Promise<{ tasks: Task[]; connections: Connection[] }> {
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client || !SYNC_CONFIG.DELTA_SYNC_ENABLED) {
       return { tasks: [], connections: [] };
     }
@@ -681,11 +1045,15 @@ export class SimpleSyncService {
   }
   
   async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
-    const client = this.getSupabaseClient();
+    const client = await this.getSupabaseClient();
     if (!client) return false;
     
     try {
-      const { error } = await client.from('projects').delete().eq('id', projectId).eq('owner_id', userId);
+      // 【P1-3 修复】软删除替代硬删除，防止离线端 pushProject 使项目复活
+      const { error } = await client.from('projects')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', projectId)
+        .eq('owner_id', userId);
       if (error) throw supabaseErrorToError(error);
       return true;
     } catch (e) {
@@ -696,6 +1064,43 @@ export class SimpleSyncService {
   
   async loadSingleProject(projectId: string, userId: string): Promise<Project | null> {
     return this.loadFullProject(projectId, userId);
+  }
+
+  async getProjectSyncWatermark(projectId: string): Promise<string | null> {
+    return this.projectDataService.getProjectSyncWatermark(projectId);
+  }
+
+  async getUserProjectsWatermark(): Promise<string | null> {
+    return this.projectDataService.getUserProjectsWatermark();
+  }
+
+  async listProjectHeadsSince(
+    watermark: string | null
+  ): Promise<Array<{ id: string; updatedAt: string; version: number }>> {
+    return this.projectDataService.listProjectHeadsSince(watermark);
+  }
+
+  async getAccessibleProjectProbe(projectId: string): Promise<{
+    projectId: string;
+    accessible: boolean;
+    watermark: string | null;
+  } | null> {
+    return this.projectDataService.getAccessibleProjectProbe(projectId);
+  }
+
+  async getBlackBoxSyncWatermark(): Promise<string | null> {
+    return this.projectDataService.getBlackBoxSyncWatermark();
+  }
+
+  async getResumeRecoveryProbe(projectId?: string): Promise<{
+    activeProjectId: string | null;
+    activeAccessible: boolean;
+    activeWatermark: string | null;
+    projectsWatermark: string | null;
+    blackboxWatermark: string | null;
+    serverNow: string | null;
+  } | null> {
+    return this.projectDataService.getResumeRecoveryProbe(projectId);
   }
   
   async tryReloadConflictData(userId: string, _findProject?: (id: string) => Project | undefined): Promise<Project | undefined> {

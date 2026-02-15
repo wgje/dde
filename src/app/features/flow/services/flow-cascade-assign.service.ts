@@ -28,14 +28,14 @@ export class FlowCascadeAssignService {
     targetParentId: string | null
   ): void {
     const tasks = this.projectState.tasks();
-    const task = tasks.find(t => t.id === taskId);
+    const task = this.projectState.getTask(taskId);
     if (!task) return;
 
     // 计算子树信息
     const subtreeCount = this.countSubtree(taskId, tasks);
     const subtreeDepth = this.getSubtreeDepth(taskId, tasks);
 
-    const targetParent = targetParentId ? tasks.find(t => t.id === targetParentId) : null;
+    const targetParent = targetParentId ? (this.projectState.getTask(targetParentId) ?? null) : null;
 
     this.dialogData.set({
       show: true,

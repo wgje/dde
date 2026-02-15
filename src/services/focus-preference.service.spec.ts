@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { FocusPreferenceService } from './focus-preference.service';
 import { PreferenceService } from './preference.service';
+import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { focusPreferences } from '../state/focus-stores';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
@@ -13,9 +14,11 @@ import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 describe('FocusPreferenceService', () => {
   let service: FocusPreferenceService;
   let mockLoggerService: {
+    category: ReturnType<typeof vi.fn>;
     debug: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
     error: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -26,15 +29,18 @@ describe('FocusPreferenceService', () => {
     focusPreferences.set({ ...DEFAULT_FOCUS_PREFERENCES });
 
     mockLoggerService = {
+      category: vi.fn(),
       debug: vi.fn(),
       info: vi.fn(),
-      error: vi.fn()
+      error: vi.fn(),
+      warn: vi.fn(),
     };
 
     TestBed.configureTestingModule({
       providers: [
         FocusPreferenceService,
         { provide: PreferenceService, useValue: {} },
+        { provide: AuthService, useValue: { currentUserId: vi.fn(() => null) } },
         { provide: LoggerService, useValue: mockLoggerService }
       ]
     });

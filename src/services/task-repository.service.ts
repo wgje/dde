@@ -4,6 +4,7 @@ import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import { 
   TaskRow, 
   ConnectionRow, 
@@ -38,10 +39,10 @@ export class TaskRepositoryService {
   async loadTasks(projectId: string): Promise<Task[]> {
     if (!this.supabase.isConfigured) return [];
 
-    // 1. 加载所有任务
+    // 1. 加载所有任务（【P2-4 修复】使用具体字段替代 select('*')）
     const { data, error } = await this.supabase.client()
       .from('tasks')
-      .select('*')
+      .select(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS)
       .eq('project_id', projectId)
       .order('created_at', { ascending: true });
 
@@ -140,9 +141,10 @@ export class TaskRepositoryService {
   async loadConnections(projectId: string): Promise<Connection[]> {
     if (!this.supabase.isConfigured) return [];
 
+    // 【P2-4 修复】使用具体字段替代 select('*')
     const { data, error } = await this.supabase.client()
       .from('connections')
-      .select('*')
+      .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
       .eq('project_id', projectId)
       .is('deleted_at', null);
 
@@ -421,9 +423,10 @@ export class TaskRepositoryService {
       (a: Attachment) => a.id !== attachmentId
     );
 
+    // 【P2-1 修复】与 addAttachmentFallback 保持一致，显式更新 updated_at
     const { error } = await this.supabase.client()
       .from('tasks')
-      .update({ attachments: newAttachments })
+      .update({ attachments: newAttachments, updated_at: new Date().toISOString() })
       .eq('id', taskId);
 
     if (error) {
@@ -460,14 +463,15 @@ export class TaskRepositoryService {
   }
 
   /**
-   * 删除连接
+   * 删除连接（软删除，防止离线端 upsert 复活）
    */
   async deleteConnection(projectId: string, sourceId: string, targetId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
+    // 【P1-2 修复】软删除替代硬删除，防止连接复活
     const { error } = await this.supabase.client()
       .from('connections')
-      .delete()
+      .update({ deleted_at: new Date().toISOString() })
       .eq('project_id', projectId)
       .eq('source_id', sourceId)
       .eq('target_id', targetId);
@@ -489,7 +493,7 @@ export class TaskRepositoryService {
     const [projectResult, tasksResult, connectionsResult] = await Promise.all([
       this.supabase.client()
         .from('projects')
-        .select('*')
+        .select(FIELD_SELECT_CONFIG.PROJECT_FULL_FIELDS)
         .eq('id', projectId)
         .maybeSingle(),
       this.loadTasks(projectId),
@@ -537,9 +541,10 @@ export class TaskRepositoryService {
   async getUpdatedTasks(projectId: string, since: string): Promise<Task[]> {
     if (!this.supabase.isConfigured) return [];
 
+    // 【P2-4 修复】使用具体字段替代 select('*')
     const { data, error } = await this.supabase.client()
       .from('tasks')
-      .select('*')
+      .select(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS)
       .eq('project_id', projectId)
       .gt('updated_at', since);
 

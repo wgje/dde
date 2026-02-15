@@ -8,8 +8,7 @@ import {
   Component, 
   ChangeDetectionStrategy, 
   Input,
-  inject,
-  signal
+  inject
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { StrataLayer } from '../../../../../models';
@@ -22,7 +21,7 @@ import { StrataItemComponent } from './strata-item.component';
   imports: [CommonModule, StrataItemComponent],
   template: `
         <div
-          class="strata-layer entering border-b border-stone-200/30 dark:border-stone-600/20
+          class="strata-layer entering border-b border-stone-700/70
             last:border-b-0"
           [style.opacity]="layer.opacity"
           data-testid="strata-layer"
@@ -30,14 +29,7 @@ import { StrataItemComponent } from './strata-item.component';
 
       <!-- 日期标题 -->
       <div class="px-3 py-1.5 flex items-center gap-2
-                  text-[10px] text-stone-400 dark:text-stone-500
-                  cursor-pointer select-none"
-           role="button"
-           tabindex="0"
-           (click)="toggleCollapsed()"
-           (keydown.enter)="toggleCollapsed()"
-           (keydown.space)="toggleCollapsed(); $event.preventDefault()"
-           [attr.aria-expanded]="!isCollapsed()"
+                  text-[10px] text-stone-400"
            data-testid="strata-layer-header">
         <span class="font-mono">{{ getLabel() }}</span>
         <span class="flex-1 h-px" [class]="getLineClass()"></span>
@@ -45,13 +37,11 @@ import { StrataItemComponent } from './strata-item.component';
       </div>
       
       <!-- 项目列表 -->
-      @if (!isCollapsed()) {
-        <div class="px-2 pb-2" data-testid="strata-layer-content">
-          @for (item of layer.items; track item.id) {
-            <app-strata-item [item]="item" />
-          }
-        </div>
-      }
+      <div class="px-2 pb-2" data-testid="strata-layer-content">
+        @for (item of layer.items; track item.id) {
+          <app-strata-item [item]="item" />
+        }
+      </div>
     </div>
   `,
   styles: [`
@@ -62,7 +52,6 @@ import { StrataItemComponent } from './strata-item.component';
 export class StrataLayerComponent {
   @Input({ required: true }) layer!: StrataLayer;
   @Input() index: number = 0;
-  isCollapsed = signal(false);
   
   private strataService = inject(StrataService);
   
@@ -77,13 +66,8 @@ export class StrataLayerComponent {
    * 获取分隔线样式
    */
   getLineClass(): string {
-    return this.strataService.getLayerColorClass(this.index);
-  }
-
-  /**
-   * 折叠/展开
-   */
-  toggleCollapsed(): void {
-    this.isCollapsed.update(v => !v);
+    if (this.index === 0) return 'bg-amber-300/55';
+    if (this.index === 1) return 'bg-cyan-300/45';
+    return 'bg-stone-500/45';
   }
 }

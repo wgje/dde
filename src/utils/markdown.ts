@@ -166,6 +166,7 @@ export function renderMarkdown(content: string): string {
   let inCodeBlock = false;
   let codeBlockContent: string[] = [];
   let listItems: string[] = [];
+  let todoIndex = 0; // 待办事项索引，用于交互式切换
   
   const flushList = () => {
     if (listItems.length > 0) {
@@ -226,10 +227,11 @@ export function renderMarkdown(content: string): string {
       flushList();
       const isChecked = todoMatch[1].toLowerCase() === 'x';
       const text = parseInline(todoMatch[2]);
-      const checkedClass = isChecked ? 'line-through text-stone-400' : 'text-stone-700';
-      const checkboxClass = isChecked ? 'text-emerald-500' : 'text-stone-300';
+      const checkedClass = isChecked ? 'line-through text-stone-400 dark:text-stone-500' : 'text-stone-700 dark:text-stone-300';
+      const checkboxClass = isChecked ? 'text-emerald-500' : 'text-stone-300 dark:text-stone-500';
+      const currentIndex = todoIndex++;
       htmlLines.push(`<div class="flex items-start gap-2 my-1">
-        <span class="${checkboxClass}">${isChecked ? '☑' : '☐'}</span>
+        <span class="${checkboxClass} cursor-pointer hover:scale-110 transition-transform select-none" data-todo-index="${currentIndex}" role="checkbox" aria-checked="${isChecked}">${isChecked ? '☑' : '☐'}</span>
         <span class="${checkedClass}">${text}</span>
       </div>`);
       continue;
@@ -296,7 +298,7 @@ const DOMPURIFY_CONFIG = {
     'strong', 'em', 'del', 'code', 'pre',
     'a', 'blockquote', 'div', 'span',
   ],
-  ALLOWED_ATTR: ['href', 'class', 'target', 'rel'],
+  ALLOWED_ATTR: ['href', 'class', 'target', 'rel', 'data-todo-index', 'role', 'aria-checked'],
   ALLOW_DATA_ATTR: false,
   ADD_ATTR: ['target', 'rel'], // 确保链接安全属性被保留
 };
@@ -313,6 +315,58 @@ export function renderMarkdownSafe(content: string, sanitizer: DomSanitizer): Sa
   // 🔒 使用 DOMPurify 作为额外安全层
   const cleanHtml = DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
   return sanitizer.bypassSecurityTrustHtml(cleanHtml);
+}
+
+/**
+ * 渲染 Markdown 并返回经过 DOMPurify 处理的纯 HTML 字符串
+ * 【P2-3 修复】用于 raw 模式，不经过 Angular DomSanitizer 但仍有 DOMPurify 深度防御
+ */
+export function renderMarkdownRawSafe(content: string): string {
+  const html = renderMarkdown(content);
+  return DOMPurify.sanitize(html, DOMPURIFY_CONFIG) as string;
+}
+
+/**
+ * 切换 Markdown 内容中指定索引的待办事项状态
+ * 将 - [ ] 切换为 - [x]，或将 - [x] 切换为 - [ ]
+ * @param content 原始 Markdown 内容
+ * @param todoIndex 待办事项索引（从 0 开始，按出现顺序）
+ * @returns 切换后的 Markdown 内容
+ */
+export function toggleMarkdownTodo(content: string, todoIndex: number): string {
+  if (!content) return content;
+
+  const lines = content.split('\n');
+  let currentIndex = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const todoMatch = lines[i].match(/^(-\s*\[)([ xX])(\]\s*.+)$/);
+    if (todoMatch) {
+      if (currentIndex === todoIndex) {
+        // 切换状态：未完成 -> 完成，完成 -> 未完成
+        const isChecked = todoMatch[2].toLowerCase() === 'x';
+        lines[i] = `${todoMatch[1]}${isChecked ? ' ' : 'x'}${todoMatch[3]}`;
+        break;
+      }
+      currentIndex++;
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * 从点击事件中提取待办索引（如果点击了待办 checkbox）
+ * @returns 待办索引，如果不是点击 checkbox 则返回 null
+ */
+export function getTodoIndexFromClick(event: MouseEvent): number | null {
+  const target = event.target as HTMLElement;
+  const todoIndexAttr = target?.getAttribute?.('data-todo-index');
+  if (todoIndexAttr !== null && todoIndexAttr !== undefined) {
+    const index = parseInt(todoIndexAttr, 10);
+    return isNaN(index) ? null : index;
+  }
+  return null;
 }
 
 /**

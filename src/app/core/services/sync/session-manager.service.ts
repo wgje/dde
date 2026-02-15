@@ -20,6 +20,13 @@ import { PermanentFailureError } from '../../../../utils/permanent-failure-error
 import { EnhancedError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+
+interface SessionValidationSnapshot {
+  valid: boolean;
+  userId?: string;
+  at: number;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -32,6 +39,7 @@ export class SessionManagerService {
   private readonly eventBus = inject(EventBusService);
   private readonly syncState = inject(SyncStateService);
   private readonly destroyRef = inject(DestroyRef);
+  private lastValidationSnapshot: SessionValidationSnapshot | null = null;
 
   constructor() {
     // 订阅会话恢复事件
@@ -41,29 +49,46 @@ export class SessionManagerService {
   }
 
   /**
-   * 获取 Supabase 客户端
+   * 获取 Supabase 客户端（异步，兼容延迟 SDK 装载）
    */
-  private getSupabaseClient(): SupabaseClient | null {
+  private async getSupabaseClient(): Promise<{
+    client: SupabaseClient | null;
+    reason?: 'client-unready';
+  }> {
     if (!this.supabase.isConfigured) {
-      return null;
+      return { client: null, reason: 'client-unready' };
     }
+
     try {
-      return this.supabase.client();
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return { client: null, reason: 'client-unready' };
+      }
+      return { client };
     } catch {
-      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：客户端不可用时静默降级
-      return null;
+      return { client: null, reason: 'client-unready' };
     }
   }
 
   /**
    * 检查错误是否为会话过期错误
+   * 仅匹配 401/42501 状态码和特定 AuthError 消息，排除速率限制、邮箱未确认等无关错误
    */
   isSessionExpiredError(error: EnhancedError): boolean {
-    return (
-      error.errorType === 'AuthError' ||
-      error.code === 401 || error.code === '401' ||
-      error.code === 42501 || error.code === '42501'
-    );
+    if (error.code === 401 || error.code === '401' ||
+        error.code === 42501 || error.code === '42501') {
+      return true;
+    }
+    if (error.errorType === 'AuthError') {
+      const msg = (error.message || '').toLowerCase();
+      return msg.includes('token') ||
+             msg.includes('expired') ||
+             msg.includes('refresh') ||
+             msg.includes('invalid claim') ||
+             msg.includes('not authenticated') ||
+             msg.includes('session_not_found');
+    }
+    return false;
   }
 
   /**
@@ -89,15 +114,43 @@ export class SessionManagerService {
    * 尝试刷新会话
    */
   async tryRefreshSession(context: string): Promise<boolean> {
+    const result = await this.tryRefreshSessionDetailed(context);
+    return result.refreshed;
+  }
+
+  getRecentValidationSnapshot(maxAgeMs: number): { valid: boolean; userId?: string; at: number } | null {
+    if (!this.lastValidationSnapshot) {
+      return null;
+    }
+
+    if (Date.now() - this.lastValidationSnapshot.at > maxAgeMs) {
+      return null;
+    }
+
+    return { ...this.lastValidationSnapshot };
+  }
+
+  markValidationSnapshot(valid: boolean, userId?: string): void {
+    this.lastValidationSnapshot = {
+      valid,
+      userId,
+      at: Date.now()
+    };
+  }
+
+  private async tryRefreshSessionDetailed(context: string): Promise<{
+    refreshed: boolean;
+    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
+  }> {
     if (this.syncState.isSessionExpired()) {
       this.logger.debug('会话已标记过期，跳过刷新尝试', { context });
-      return false;
+      return { refreshed: false, reason: 'refresh-failed' };
     }
     
-    const client = this.getSupabaseClient();
+    const { client, reason } = await this.getSupabaseClient();
     if (!client) {
       this.logger.debug('Supabase 客户端不可用，无法刷新会话', { context });
-      return false;
+      return { refreshed: false, reason };
     }
     
     try {
@@ -107,10 +160,11 @@ export class SessionManagerService {
       
       if (error) {
         this.logger.warn('会话刷新失败', { context, error: error.message });
-        return false;
+        return { refreshed: false, reason: 'refresh-failed' };
       }
       
       if (data.session) {
+        this.markValidationSnapshot(true, data.session.user.id);
         this.logger.info('会话刷新成功', { 
           context, 
           userId: data.session.user.id,
@@ -122,14 +176,14 @@ export class SessionManagerService {
           this.logger.info('会话过期标志已重置');
         }
         
-        return true;
+        return { refreshed: true };
       } else {
         this.logger.warn('刷新返回空 session', { context });
-        return false;
+        return { refreshed: false, reason: 'no-session' };
       }
     } catch (e) {
       this.logger.warn('会话刷新异常', { context, error: e });
-      return false;
+      return { refreshed: false, reason: 'refresh-failed' };
     }
   }
 
@@ -179,20 +233,81 @@ export class SessionManagerService {
    * 验证当前会话是否有效
    */
   async validateSession(): Promise<{ valid: boolean; userId?: string }> {
-    const client = this.getSupabaseClient();
+    const { client } = await this.getSupabaseClient();
     if (!client) {
+      this.markValidationSnapshot(false);
       return { valid: false };
     }
     
     try {
       const { data: { session } } = await client.auth.getSession();
       if (session?.user?.id) {
+        this.markValidationSnapshot(true, session.user.id);
         return { valid: true, userId: session.user.id };
       }
+      this.markValidationSnapshot(false);
       return { valid: false };
     } catch (e) {
       this.logger.error('Session 验证失败', e);
+      this.markValidationSnapshot(false);
       return { valid: false };
     }
+  }
+
+  /**
+   * 页面恢复（resume）时校验会话
+   *
+   * 策略：
+   * 1. 先做轻量会话校验
+   * 2. 无效时优先尝试 refreshSession
+   * 3. 刷新仍失败才标记会话过期并提示用户
+   */
+  async validateOrRefreshOnResume(context: string): Promise<{
+    ok: boolean;
+    refreshed: boolean;
+    deferred: boolean;
+    reason?: 'client-unready' | 'no-session' | 'refresh-failed';
+  }> {
+    const sessionCheck = await this.getSupabaseClient();
+    if (!sessionCheck.client) {
+      this.logger.info('Resume 会话校验延后：Supabase 客户端未就绪', { context });
+      return { ok: false, refreshed: false, deferred: true, reason: 'client-unready' };
+    }
+
+    const validated = await this.validateSession();
+
+    if (validated.valid) {
+      if (this.syncState.isSessionExpired()) {
+        this.syncState.setSessionExpired(false);
+        this.logger.info('Resume 会话校验通过，重置过期标记', { context, userId: validated.userId });
+      }
+      return { ok: true, refreshed: false, deferred: false };
+    }
+
+    // 允许在 resume 场景重试刷新会话（即使之前已标记过期）
+    if (this.syncState.isSessionExpired()) {
+      this.syncState.setSessionExpired(false);
+      this.logger.debug('Resume 场景临时清除过期标记，尝试刷新会话', { context });
+    }
+
+    const refreshResult = await this.tryRefreshSessionDetailed(`${context}.resume`);
+    if (refreshResult.refreshed) {
+      return { ok: true, refreshed: true, deferred: false };
+    }
+
+    if (refreshResult.reason === 'client-unready') {
+      this.logger.info('Resume 会话刷新延后：Supabase 客户端未就绪', { context });
+      return { ok: false, refreshed: false, deferred: true, reason: 'client-unready' };
+    }
+
+    if (!this.syncState.isSessionExpired()) {
+      this.syncState.setSessionExpired(true);
+      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+    }
+    this.markValidationSnapshot(false);
+
+    const reason = refreshResult.reason === 'no-session' ? 'no-session' : 'refresh-failed';
+    this.logger.warn('Resume 会话校验/刷新失败', { context, reason });
+    return { ok: false, refreshed: false, deferred: false, reason };
   }
 }

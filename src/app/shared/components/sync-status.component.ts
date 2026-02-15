@@ -9,7 +9,7 @@ import { ConflictStorageService } from '../../../services/conflict-storage.servi
 import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
-import { SYNC_CONFIG } from '../../../config';
+import { SYNC_CONFIG } from '../../../config/sync.config';
 
 /**
  * 同步状态组件

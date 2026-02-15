@@ -76,7 +76,7 @@ export class PermissionDeniedHandlerService {
       level: 'warning',
       tags: {
         service: 'PermissionDeniedHandler',
-        errorCode: error.code,
+        errorCode: String(error.code ?? 'UNKNOWN'),
         dataType: rejectedData[0] ? ('source' in rejectedData[0] ? 'connection' : 'task') : 'unknown'
       },
       extra: {

@@ -73,7 +73,6 @@ import { GateService } from '../../../../../services/gate.service';
   styles: [`
     :host {
       display: block;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
 
     .animate-card-enter {

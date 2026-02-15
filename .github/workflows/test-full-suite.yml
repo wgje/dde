@@ -1,0 +1,235 @@
+name: test-full-suite
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  vitest-full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Full Vitest Suite (Shard ${{ matrix.shard }}/4)
+        run: |
+          set -eo pipefail
+          mkdir -p test-results
+          npm run test:run:ci -- --shard=${{ matrix.shard }}/4 --timing-out=test-results/vitest-shard-${{ matrix.shard }}.json | tee test-results/vitest-shard-${{ matrix.shard }}.log
+
+      - name: Upload Shard Timing Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-shard-${{ matrix.shard }}-timing
+          path: |
+            test-results/vitest-shard-${{ matrix.shard }}.json
+            test-results/vitest-shard-${{ matrix.shard }}.log
+          if-no-files-found: warn
+
+  shard-balance-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - vitest-full-suite
+
+    steps:
+      - name: Download Shard Timing Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-shard-*-timing
+          path: test-results
+          merge-multiple: true
+
+      - name: Compute Shard Balance
+        id: shard_balance
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const ROOT = path.join(process.cwd(), 'test-results');
+          const FILE_RE = /vitest-shard-\d+\.json$/;
+          const THRESHOLD = 1.4;
+
+          function walk(dir) {
+            if (!fs.existsSync(dir)) return [];
+            const out = [];
+            const stack = [dir];
+            while (stack.length > 0) {
+              const current = stack.pop();
+              const entries = fs.readdirSync(current, { withFileTypes: true });
+              for (const entry of entries) {
+                const absolute = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                  stack.push(absolute);
+                  continue;
+                }
+                if (entry.isFile() && FILE_RE.test(path.basename(absolute))) {
+                  out.push(absolute);
+                }
+              }
+            }
+            return out.sort();
+          }
+
+          function percentile50(values) {
+            if (values.length === 0) return null;
+            const sorted = [...values].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            return sorted.length % 2 === 1
+              ? sorted[mid]
+              : (sorted[mid - 1] + sorted[mid]) / 2;
+          }
+
+          const files = walk(ROOT);
+          const durations = [];
+          for (const file of files) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+              const duration = Number(parsed?.durationMs);
+              if (Number.isFinite(duration) && duration > 0) {
+                durations.push(duration);
+              }
+            } catch {
+              // Ignore invalid JSON files.
+            }
+          }
+
+          let status = 'pass';
+          let maxMin = null;
+          let maxMedian = null;
+
+          if (durations.length < 2) {
+            status = 'insufficient';
+          } else {
+            const min = Math.min(...durations);
+            const max = Math.max(...durations);
+            const median = percentile50(durations);
+            maxMin = max / min;
+            maxMedian = median ? max / median : null;
+            if (maxMin >= THRESHOLD) {
+              status = 'fail';
+            }
+          }
+
+          console.log(`[shard-balance] durations=${durations.join(',') || 'none'}`);
+          console.log(`[shard-balance] max/min=${maxMin ?? 'n/a'} max/median=${maxMedian ?? 'n/a'} status=${status}`);
+
+          if (process.env.GITHUB_OUTPUT) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status=${status}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `max_min=${maxMin ?? ''}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `max_median=${maxMedian ?? ''}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `duration_count=${durations.length}\n`);
+          }
+          NODE
+
+      - name: Warn On Pull Request Imbalance
+        if: github.event_name == 'pull_request' && steps.shard_balance.outputs.status != 'pass'
+        run: |
+          echo "::warning::Shard balance is suboptimal (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Threshold requires max/min < 1.4 on protected branches."
+
+      - name: Enforce Balance On Main Branches
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.shard_balance.outputs.status != 'pass'
+        run: |
+          echo "::error::Shard balance gate failed (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Required: max/min < 1.4."
+          exit 1
+
+  update-duration-baseline:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - vitest-full-suite
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Download Shard Timing Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-shard-*-timing
+          path: test-results
+          merge-multiple: true
+
+      - name: Update Test Duration Baseline
+        run: |
+          set -eo pipefail
+          npm run test:baseline:update
+          npm run test:quarantine:update
+
+      - name: Upload Updated Baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-duration-baseline-v2
+          path: scripts/test-duration-baseline.json
+
+      - name: Upload Updated Quarantine
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-quarantine-v2
+          path: scripts/test-quarantine.json
+
+  vitest-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Perf Vitest (Non-blocking)
+        continue-on-error: true
+        run: |
+          set -eo pipefail
+          mkdir -p test-results
+          npm run test:perf | tee test-results/vitest-perf.log
+
+      - name: Upload Perf Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-perf-log
+          path: test-results/vitest-perf.log
+          if-no-files-found: warn

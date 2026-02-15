@@ -129,7 +129,6 @@ import { LoggerService } from '../../../../../services/logger.service';
   styles: [`
     :host {
       display: block;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -143,7 +142,7 @@ export class GateActionsComponent {
   logger = inject(LoggerService);
 
   // 状态信号
-  isProcessing = this.gateService.isProcessing; // 比如正在提交已读/完成
+  isProcessing = computed(() => this.gateService.cardAnimation() !== 'idle'); // 比如正在提交已读/完成
   canSnooze = this.gateService.canSnooze; // 是否允许推迟
 
   // 快速录入相关
@@ -183,10 +182,10 @@ export class GateActionsComponent {
     if (result.ok) {
         this.logger.info('Quick input submitted:', text);
         this.quickInputText.set('');
-        this.toast.show({ message: '已记录', type: 'success' });
+        this.toast.success('已记录');
     } else {
-        this.logger.error('Failed to submit quick input', result.error);
-        this.toast.show({ message: result.error.message || '记录失败', type: 'error' });
+        this.logger.error('Failed to submit quick input', result.error.message);
+        this.toast.error(result.error.message || '记录失败');
     }
   }
 
@@ -201,7 +200,7 @@ export class GateActionsComponent {
     // Service handles state update
     this.speechService.startRecording().catch(err => {
       this.logger.error('Failed to start recording', err);
-      this.toast.show({ message: '无法启动录音', type: 'error' });
+      this.toast.error('无法启动录音');
     });
   }
 
@@ -217,7 +216,7 @@ export class GateActionsComponent {
         this.quickInputText.set(current ? current + ' ' + text : text);
       }
     } catch (err) {
-      this.logger.error('Transcription failed', err);
+      this.logger.error('Transcription failed', err instanceof Error ? err.message : String(err));
       // Service usually handles toast for errors, but we can add specific fallback
     }
   }

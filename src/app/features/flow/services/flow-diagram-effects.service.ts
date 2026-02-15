@@ -35,6 +35,7 @@ export class FlowDiagramEffectsService {
   /**
    * 使用 requestAnimationFrame 调度图表更新
    * 将多个 signal 变化合并到同一帧
+   * 【2026-02-15 优化】增加 rAF 合并窗口，确保同一帧内的多个 effect 触发只执行一次更新
    */
   scheduleRafDiagramUpdate(tasks: Task[], forceUpdate: boolean, isDestroyed: boolean): void {
     if (forceUpdate) this.diagramUpdatePending = true;
@@ -42,7 +43,9 @@ export class FlowDiagramEffectsService {
     this.pendingRafId = requestAnimationFrame(() => {
       this.pendingRafId = null;
       if (isDestroyed || !this.diagram.isInitialized) return;
-      this.diagram.updateDiagram(this.projectState.tasks(), this.diagramUpdatePending);
+      // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
+      const currentTasks = untracked(() => this.projectState.tasks());
+      this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
       this.diagramUpdatePending = false;
     });
   }

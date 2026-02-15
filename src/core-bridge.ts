@@ -13,8 +13,15 @@
 // SimpleSyncService — 被 9 个 services 使用
 export { SimpleSyncService } from './app/core/services/simple-sync.service';
 
-// RetryQueueService — 被 sync-coordinator 使用
+// RetryQueueService + RetryableEntityType — 被 sync-coordinator, action-queue 使用
 export { RetryQueueService } from './app/core/services/sync/retry-queue.service';
+export type { RetryableEntityType } from './app/core/services/sync/retry-queue.service';
+
+// SessionManagerService — 被 app-lifecycle-orchestrator, event-driven-sync-pulse 使用
+export { SessionManagerService } from './app/core/services/sync/session-manager.service';
+
+// TombstoneService — 被 delta-sync-coordinator 使用
+export { TombstoneService } from './app/core/services/sync/tombstone.service';
 
 // IndexedDB — 被 indexeddb-health 使用
 export { IndexedDBService, DB_CONFIG } from './app/core/state/persistence/indexeddb.service';

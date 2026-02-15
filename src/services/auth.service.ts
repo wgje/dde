@@ -86,7 +86,7 @@ export class AuthService {
   
   constructor() {
     // 初始化认证状态监听
-    this.initAuthStateListener();
+    void this.initAuthStateListener();
     
     // 组件销毁时清理订阅
     this.destroyRef.onDestroy(() => {
@@ -361,8 +361,15 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
+        this.authState.update(s => ({ ...s, error: errorMsg }));
+        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
+      }
+
       // 【P0 修复 2026-02-08】给注册加超时保护
-      const signUpPromise = this.supabase.client().auth.signUp({
+      const signUpPromise = client.auth.signUp({
         email,
         password
       });
@@ -422,8 +429,15 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
+        this.authState.update(s => ({ ...s, error: errorMsg }));
+        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
+      }
+
       // 【P1 修复 2026-02-08】给重置密码加超时保护
-      const resetPromise = this.supabase.client().auth.resetPasswordForEmail(email, {
+      const resetPromise = client.auth.resetPasswordForEmail(email, {
         redirectTo: `${window.location.origin}/reset-password`
       });
       const timeoutPromise = new Promise<never>((_, reject) =>
@@ -518,14 +532,17 @@ export class AuthService {
    * - SIGNED_IN: 用户登录
    * - USER_UPDATED: 用户信息更新
    */
-  private initAuthStateListener(): void {
+  private async initAuthStateListener(): Promise<void> {
     if (!this.supabase.isConfigured) {
       this.logger.debug('Supabase 未配置，跳过认证状态监听');
       return;
     }
     
-    const client = this.supabase.client();
-    if (!client) return;
+    const client = await this.supabase.clientAsync();
+    if (!client) {
+      this.logger.warn('Supabase 客户端未就绪，跳过认证状态监听初始化');
+      return;
+    }
     
     const { data } = client.auth.onAuthStateChange((event, session) => {
       this.logger.debug('认证状态变更', { event, hasSession: !!session });

@@ -14,7 +14,8 @@ import {
   OnDestroy,
   computed,
   effect,
-  signal
+  signal,
+  output
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
@@ -100,7 +101,7 @@ const GATE_VISUAL_THEME_KEY = 'focus_gate_visual_theme';
 
             <div>
               <h2 id="gate-title" class="text-3xl font-semibold text-black dark:text-white tracking-tight transition-colors duration-500">每日清算</h2>
-              <p class="mt-2 text-base text-black/60 dark:text-white/60 transition-colors duration-500">回顾昨日，开启新的一天。</p>
+              <p id="gate-description" class="mt-2 text-base text-black/60 dark:text-white/60 transition-colors duration-500">回顾昨日，开启新的一天。</p>
             </div>
           </header>
 
@@ -155,7 +156,6 @@ const GATE_VISUAL_THEME_KEY = 'focus_gate_visual_theme';
   styles: [`
     :host {
       display: block;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
     }
     
     .animate-gate-enter {
@@ -186,6 +186,9 @@ export class GateOverlayComponent implements OnDestroy {
   gateService = inject(GateService);
   private strataService = inject(StrataService);
 
+  /** 大门关闭事件 */
+  readonly closed = output<void>();
+
   // 获取地质层数据
   readonly strataLayers = computed(() => this.strataService.layers());
   readonly visualTheme = signal<GateVisualTheme>(this.readTheme());
@@ -197,6 +200,7 @@ export class GateOverlayComponent implements OnDestroy {
         document.body.style.overflow = 'hidden';
       } else {
         document.body.style.overflow = '';
+        this.closed.emit();
       }
     });
   }

@@ -23,7 +23,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
 import { Project, Task } from '../models';
 import { SupabaseError, supabaseErrorToError } from '../utils/supabase-error';
-import { SYNC_CONFIG } from '../config';
+import { SYNC_CONFIG } from '../config/sync.config';
 
 /**
  * 远程项目变更载荷
@@ -44,6 +44,11 @@ export interface RemoteTaskChangePayload {
   eventType: 'INSERT' | 'UPDATE' | 'DELETE';
   taskId: string;
   projectId: string;
+}
+
+export interface RemoteChangeCallbacks {
+  onLoadProjects?: () => Promise<void>;
+  onRefreshActiveProject?: (reason: string) => Promise<void>;
 }
 
 @Injectable({
@@ -96,11 +101,15 @@ export class RemoteChangeHandlerService {
    * 应在应用启动时调用一次
    * @throws 如果重复调用会记录警告
    */
-  setupCallbacks(onLoadProjects: () => Promise<void>): void {
+  setupCallbacks(callbacks: RemoteChangeCallbacks | (() => Promise<void>)): void {
     if (this.callbacksInitialized) {
       this.logger.warn('setupCallbacks 已被调用过，跳过重复初始化');
       return;
     }
+
+    const normalizedCallbacks: RemoteChangeCallbacks = typeof callbacks === 'function'
+      ? { onLoadProjects: callbacks }
+      : callbacks;
     
     this.callbacksInitialized = true;
     this.logger.info('远程变更回调已初始化');
@@ -121,9 +130,10 @@ export class RemoteChangeHandlerService {
           
           if (isRealtimeEvent && payload?.projectId) {
             await this.handleIncrementalUpdate(payload as RemoteProjectChangePayload);
-          } else {
-            // polling 事件或无 eventType 时，执行完整的项目加载
-            await onLoadProjects();
+          } else if (normalizedCallbacks.onRefreshActiveProject) {
+            await normalizedCallbacks.onRefreshActiveProject(`remote:${eventType ?? 'unknown'}`);
+          } else if (normalizedCallbacks.onLoadProjects) {
+            await normalizedCallbacks.onLoadProjects();
           }
         } catch (e) {
           this.logger.error('处理远程变更失败', e);
@@ -234,7 +244,7 @@ export class RemoteChangeHandlerService {
         connections: (remoteProject.connections || []).filter(c => !c.deletedAt)
       };
 
-      const localProject = this.projectState.projects().find(p => p.id === projectId);
+      const localProject = this.projectState.getProject(projectId);
 
       if (!localProject) {
         const validated = this.syncCoordinator.validateAndRebalance(cleanedRemoteProject);
@@ -285,7 +295,7 @@ export class RemoteChangeHandlerService {
           const tombstoneIds = await this.syncCoordinator.getTombstoneIds(projectId);
           
           // 获取最新的本地项目状态（可能已被上面的删除操作更新）
-          const currentLocalProject = this.projectState.projects().find(p => p.id === projectId);
+          const currentLocalProject = this.projectState.getProject(projectId);
           if (!currentLocalProject) return;
           
           const mergeResult = this.syncCoordinator.smartMerge(currentLocalProject, cleanedRemoteProject, tombstoneIds);
@@ -442,7 +452,7 @@ export class RemoteChangeHandlerService {
             // 【关键优化】幂等检查 - 来自高级顾问建议
             // 避免 REST 同步和 Realtime 事件的竞态问题
             // 如果本地已有更新或同版本的数据，跳过处理
-            const localProject = this.projectState.projects().find(proj => proj.id === targetProjectId);
+            const localProject = this.projectState.getProject(targetProjectId);
             const existingLocalTask = localProject?.tasks.find(t => t.id === taskId);
             
             if (existingLocalTask && remoteTask.updatedAt && existingLocalTask.updatedAt) {
@@ -622,7 +632,7 @@ export class RemoteChangeHandlerService {
               });
               
               // 通知权限拒绝处理器
-              const localProject = this.projectState.projects().find(p => p.id === targetProjectId);
+              const localProject = this.projectState.getProject(targetProjectId);
               if (localProject) {
                 const affectedTasks = [
                   localProject.tasks.find(t => t.id === taskId)

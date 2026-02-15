@@ -1,17 +1,18 @@
 /** UserSessionService - 用户会话管理：登录/登出清理、项目切换、数据加载 */
-import { Injectable, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef, Injector } from '@angular/core';
 import { AuthService } from './auth.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
-import { AttachmentService } from './attachment.service';
-import { MigrationService } from './migration.service';
+import type { AttachmentService } from './attachment.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { Project, Task, Connection } from '../models';
-import { CACHE_CONFIG, AUTH_CONFIG, SYNC_CONFIG } from '../config';
+import { CACHE_CONFIG, SYNC_CONFIG } from '../config/sync.config';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 
@@ -26,22 +27,69 @@ export class UserSessionService {
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
-  private attachmentService = inject(AttachmentService);
-  private migrationService = inject(MigrationService);
+  private injector = inject(Injector);
   private layoutService = inject(LayoutService);
   private toastService = inject(ToastService);
   private supabase = inject(SupabaseClientService);
   private destroyRef = inject(DestroyRef);
+  private attachmentServiceRef: AttachmentService | null = null;
+  private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
 
   /** 当前用户 ID (代理 AuthService) */
   readonly currentUserId = this.authService.currentUserId;
 
   constructor() {
     this.destroyRef.onDestroy(() => {
-      // 清理附件服务回调，防止内存泄漏
-      this.attachmentService.clearUrlRefreshCallback();
-      this.attachmentService.clearMonitoredAttachments();
+      // 仅在附件服务已初始化时清理，避免销毁阶段反向触发懒加载
+      const loadedService = this.attachmentServiceRef;
+      if (loadedService) {
+        loadedService.clearUrlRefreshCallback();
+        loadedService.clearMonitoredAttachments();
+        return;
+      }
+
+      const pendingService = this.attachmentServicePromise;
+      if (!pendingService) return;
+
+      void pendingService
+        .then((service) => {
+          service?.clearUrlRefreshCallback();
+          service?.clearMonitoredAttachments();
+        })
+        .catch(() => {
+          // 销毁阶段静默忽略
+        });
     });
+
+    if (!FEATURE_FLAGS.USER_SESSION_ATTACHMENT_ON_DEMAND_V1) {
+      void this.getAttachmentServiceLazy();
+    }
+  }
+
+  async getAttachmentServiceLazy(): Promise<AttachmentService | null> {
+    if (this.attachmentServiceRef) {
+      return this.attachmentServiceRef;
+    }
+
+    if (this.attachmentServicePromise) {
+      return this.attachmentServicePromise;
+    }
+
+    this.attachmentServicePromise = import('./attachment.service')
+      .then((module) => {
+        const service = this.injector.get(module.AttachmentService);
+        this.attachmentServiceRef = service;
+        return service;
+      })
+      .catch((error) => {
+        this.logger.warn('AttachmentService 懒加载失败，降级为无附件监控', error);
+        return null;
+      })
+      .finally(() => {
+        this.attachmentServicePromise = null;
+      });
+
+    return this.attachmentServicePromise;
   }
 
   /**
@@ -64,7 +112,7 @@ export class UserSessionService {
     // 清理旧用户的附件监控和回调，防止内存泄漏
     if (isUserChange || forceLoad) {
       try {
-        this.attachmentService.clearMonitoredAttachments();
+        this.attachmentServiceRef?.clearMonitoredAttachments();
         this.projectState.setActiveProjectId(null);
         // 【P0 修复 2026-02-08】不再先清空再加载，避免双重 setProjects 触发信号风暴
         // 旧行为：setProjects([]) → loadData → setProjects(data) — 两次信号通知
@@ -135,12 +183,12 @@ export class UserSessionService {
 
     // 更新附件 URL 监控
     if (projectId) {
-      const newProject = this.projectState.projects().find(p => p.id === projectId);
+      const newProject = this.projectState.getProject(projectId);
       if (newProject) {
-        this.monitorProjectAttachments(newProject);
+        void this.monitorProjectAttachments(newProject);
       }
     } else {
-      this.attachmentService.clearMonitoredAttachments();
+      this.attachmentServiceRef?.clearMonitoredAttachments();
     }
   }
 
@@ -190,7 +238,7 @@ export class UserSessionService {
     if (userId) {
       const prefixToRemove = `nanoflow.preference.${userId}`;
       try {
-        Object.keys(localStorage)
+        this.listLocalStorageKeys()
           .filter(key => key.startsWith(prefixToRemove))
           .forEach(key => localStorage.removeItem(key));
       } catch (e) {
@@ -200,7 +248,7 @@ export class UserSessionService {
     
     // 清理旧偏好键（兼容迁移）
     try {
-      Object.keys(localStorage)
+      this.listLocalStorageKeys()
         .filter(key => key.startsWith('nanoflow.preference.') && !key.includes('.user-'))
         .forEach(key => localStorage.removeItem(key));
     } catch (e) {
@@ -223,31 +271,49 @@ export class UserSessionService {
   }
   private async clearIndexedDB(dbName: string): Promise<void> {
     if (typeof indexedDB === 'undefined') return;
-    
+
+    // 设置超时上限：blocked 场景最多等 3 秒后放弃等待
+    const CLEAR_TIMEOUT_MS = 3000;
+
     return new Promise<void>((resolve) => {
       try {
+        const timeoutId = setTimeout(() => {
+          this.logger.warn(`IndexedDB ${dbName} 删除超时 (${CLEAR_TIMEOUT_MS}ms)，继续流程`);
+          resolve();
+        }, CLEAR_TIMEOUT_MS);
+
         const request = indexedDB.deleteDatabase(dbName);
-        
+
         request.onsuccess = () => {
+          clearTimeout(timeoutId);
           this.logger.debug(`IndexedDB ${dbName} 已删除`);
           resolve();
         };
-        
+
         request.onerror = () => {
+          clearTimeout(timeoutId);
           this.logger.warn(`删除 IndexedDB ${dbName} 失败`, request.error);
           resolve(); // 不阻塞流程
         };
-        
+
         request.onblocked = () => {
-          // 数据库被其他连接占用，记录日志但继续
-          this.logger.warn(`IndexedDB ${dbName} 删除被阻塞，可能存在未关闭的连接`);
-          resolve(); // 不阻塞流程
+          // 数据库被其他连接占用，不立即 resolve，等待 onsuccess/onerror 或超时
+          this.logger.warn(`IndexedDB ${dbName} 删除被阻塞，等待其他连接关闭或超时`);
         };
       } catch (e) {
         this.logger.warn(`清理 IndexedDB ${dbName} 异常`, e);
         resolve();
       }
     });
+  }
+
+  private listLocalStorageKeys(): string[] {
+    const keys: string[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key) keys.push(key);
+    }
+    return keys;
   }
 
   /**
@@ -314,7 +380,7 @@ export class UserSessionService {
         // 设置附件监控
         const activeProject = validProjects.find(p => p.id === this.projectState.activeProjectId());
         if (activeProject) {
-          this.monitorProjectAttachments(activeProject);
+          void this.monitorProjectAttachments(activeProject);
         }
         
         this.logger.debug('本地数据已渲染，用户可以操作');
@@ -357,7 +423,100 @@ export class UserSessionService {
 
     this.logger.debug('开始后台同步');
 
-    const activeProjectId = this.projectState.activeProjectId();
+    let activeProjectId = this.projectState.activeProjectId();
+    let resumeProbe: {
+      activeProjectId: string | null;
+      activeAccessible: boolean;
+      activeWatermark: string | null;
+      projectsWatermark: string | null;
+      blackboxWatermark: string | null;
+      serverNow: string | null;
+    } | null = null;
+
+    if (FEATURE_FLAGS.RESUME_COMPOSITE_PROBE_RPC_V1) {
+      try {
+        resumeProbe = await this.syncCoordinator.core.getResumeRecoveryProbe(activeProjectId ?? undefined);
+      } catch (error) {
+        this.logger.warn('恢复聚合探测失败，降级为分步探测', error);
+      }
+    }
+
+    if (FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 && activeProjectId) {
+      try {
+        const probe = resumeProbe && resumeProbe.activeProjectId === activeProjectId
+          ? {
+            projectId: activeProjectId,
+            accessible: resumeProbe.activeAccessible,
+            watermark: resumeProbe.activeWatermark,
+          }
+          : await this.syncCoordinator.core.getAccessibleProjectProbe(activeProjectId);
+        if (probe && !probe.accessible) {
+          this.logger.warn('activeProject 探测为不可访问，提前清理避免无效 RPC', { projectId: activeProjectId });
+          this.projectState.setActiveProjectId(null);
+          this.toastService.info('当前项目不可访问，已自动切换');
+          activeProjectId = null;
+        } else if (probe?.watermark) {
+          this.syncCoordinator.core.setLastSyncTime(activeProjectId, probe.watermark);
+        }
+      } catch (error) {
+        this.logger.warn('activeProject 可访问性探测失败，继续走常规路径', error);
+      }
+    }
+
+    let skipProjectSyncSlowPath = false;
+    if (FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1) {
+      try {
+        const manifestResult = resumeProbe
+          ? await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync', {
+            prefetchedRemoteWatermark: resumeProbe.projectsWatermark,
+          })
+          : await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync');
+        if (manifestResult.skipped && manifestResult.watermark) {
+          this.logger.debug('命中项目清单水位快路，跳过后台项目同步', {
+            watermark: manifestResult.watermark
+          });
+          skipProjectSyncSlowPath = true;
+        }
+      } catch (error) {
+        this.logger.warn('项目清单水位快路失败，降级为常规后台同步', error);
+      }
+    }
+
+    if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
+      try {
+        if (resumeProbe) {
+          await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync', {
+            prefetchedRemoteWatermark: resumeProbe.blackboxWatermark,
+          });
+        } else {
+          await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync');
+        }
+      } catch (error) {
+        this.logger.warn('黑匣子水位快路失败，降级为常规流程', error);
+      }
+    }
+
+    let accessibleProjectIds = new Set<string>();
+    if (!skipProjectSyncSlowPath) {
+      try {
+        accessibleProjectIds = await this.syncProjectListMetadata(userId);
+      } catch (e) {
+        this.logger.warn('项目列表元数据同步失败', e);
+      }
+
+      activeProjectId = this.projectState.activeProjectId();
+
+      if (
+        FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 &&
+        activeProjectId &&
+        !accessibleProjectIds.has(activeProjectId)
+      ) {
+        this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: activeProjectId });
+        this.projectState.setActiveProjectId(null);
+        this.toastService.info('当前项目不可访问，已自动切换');
+        activeProjectId = null;
+      }
+    }
     
     // === 策略 1: 优先使用 Delta Sync（增量同步）===
     // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
@@ -377,49 +536,51 @@ export class UserSessionService {
     // === 策略 2: 如果 Delta Sync 失败，只加载当前项目（按需加载）===
     // 【优化 2026-01-27】不自动加载其他项目，节省带宽
     // 其他项目在用户切换项目时再加载
-    if (!currentProjectSynced && activeProjectId) {
+    if (!skipProjectSyncSlowPath && !currentProjectSynced && activeProjectId) {
       try {
         this.logger.debug('按需加载当前项目', { projectId: activeProjectId });
         const currentProject = await this.syncCoordinator.loadSingleProjectFromCloud(activeProjectId);
         if (currentProject) {
           await this.mergeSingleProject(currentProject, userId);
           currentProjectSynced = true;
+        } else {
+          // 【性能优化 2026-02-14】RPC 返回 null 说明项目不可访问（Access Denied 或已删除）
+          // 清理不可访问的 activeProjectId，避免后续重复触发无效 RPC 请求链
+          this.logger.warn('清理不可访问的 activeProjectId', { projectId: activeProjectId });
+          this.projectState.setActiveProjectId(null);
+          this.toastService.info('当前项目不可访问，已自动切换');
         }
       } catch (e) {
         this.logger.warn('当前项目同步失败', e);
       }
     }
     
-    // === 策略 3: 后台增量更新项目列表元数据（不加载完整数据）===
-    // 只获取项目列表的 id/title/updated_at，不加载 tasks/connections
-    try {
-      await this.syncProjectListMetadata(userId);
-    } catch (e) {
-      this.logger.warn('项目列表元数据同步失败', e);
-    }
-    
     this.logger.debug('后台同步完成', { currentProjectSynced });
   }
   
   /** 同步项目列表元数据（不加载完整数据） */
-  private async syncProjectListMetadata(userId: string): Promise<void> {
-    const client = this.supabase.client();
-    if (!client) return;
+  private async syncProjectListMetadata(userId: string): Promise<Set<string>> {
+    const localProjects = this.projectState.projects();
+    const fallbackIds = new Set(localProjects.map(p => p.id));
+
+    const client = await this.supabase.clientAsync();
+    if (!client) return fallbackIds;
     
     const { data, error } = await client
       .from('projects')
-      .select('id,title,description,created_date,updated_at,version')
+      .select('id,title,description,created_date,updated_at,version,owner_id')
       .eq('owner_id', userId)
       .order('updated_at', { ascending: false });
     
     if (error) {
       this.logger.warn('获取项目列表失败', { message: error.message });
-      return;
+      return fallbackIds;
     }
+
+    const accessibleProjectIds = new Set<string>((data || []).map(row => String(row.id)));
     
     // 更新本地项目列表的元数据（不覆盖 tasks/connections）
-    const localProjects = this.projectState.projects();
-    const updatedProjects = [...localProjects];
+    let updatedProjects = [...localProjects];
     let hasChanges = false;
     
     for (const remote of data || []) {
@@ -451,21 +612,59 @@ export class UserSessionService {
         }
       }
     }
+
+    // 深度优化：清理“远端不可访问且无本地待同步改动”的项目壳数据
+    // 避免 UI 残留无权限项目，减少后续无效同步链路与错误日志噪声
+    //
+    // 【安全守卫 2026-02-14】防止服务端返回空/截断结果时误删全部本地项目：
+    // 1. 服务端返回 0 条 → 跳过裁剪（极可能是网络/RLS 异常）
+    // 2. 本地 ≥ 3 个项目且服务端 < 50% → 跳过裁剪（疑似响应截断）
+    // 3. 不裁剪当前 activeProjectId 对应的项目（由调用方另行处理）
+    const activeProjectId = this.projectState.activeProjectId();
+    const beforePruneCount = updatedProjects.length;
+    const shouldSkipPruning =
+      accessibleProjectIds.size === 0 ||
+      (beforePruneCount >= 3 && accessibleProjectIds.size < beforePruneCount * 0.5);
+
+    if (shouldSkipPruning) {
+      this.logger.warn('项目裁剪被安全守卫拦截，跳过裁剪', {
+        localCount: beforePruneCount,
+        remoteCount: accessibleProjectIds.size,
+      });
+    } else {
+      updatedProjects = updatedProjects.filter(project => {
+        if (accessibleProjectIds.has(project.id)) return true;
+        // 不裁剪当前活跃项目，交由调用方处理
+        if (project.id === activeProjectId) return true;
+        const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(project.id);
+        return hasPendingLocalChanges;
+      });
+      if (updatedProjects.length !== beforePruneCount) {
+        hasChanges = true;
+      }
+    }
     
     if (hasChanges) {
       this.projectState.setProjects(updatedProjects);
+
+      const activeProjectIdForPrune = this.projectState.activeProjectId();
+      if (activeProjectIdForPrune && !updatedProjects.some(p => p.id === activeProjectIdForPrune)) {
+        this.projectState.setActiveProjectId(null);
+        this.toastService.info('当前项目不可访问，已自动切换');
+      }
       this.logger.debug('项目列表元数据已更新');
     }
+
+    return accessibleProjectIds;
   }
   
   /** 合并单个项目数据（LWW 竞态保护） */
   private async mergeSingleProject(cloudProject: Project, _userId: string): Promise<void> {
-    const localProjects = this.projectState.projects();
-    const localProject = localProjects.find(p => p.id === cloudProject.id);
+    const localProject = this.projectState.getProject(cloudProject.id);
     
     if (!localProject) {
       // 新项目，直接添加
-      this.projectState.setProjects([...localProjects, cloudProject]);
+      this.projectState.setProjects([...this.projectState.projects(), cloudProject]);
       return;
     }
     
@@ -488,13 +687,13 @@ export class UserSessionService {
         connections: mergedConnections
       };
       
-      const updatedProjects = localProjects.map(p => 
+      const updatedProjects = this.projectState.projects().map((p: Project) =>
         p.id === cloudProject.id ? mergedProject : p
       );
       this.projectState.setProjects(updatedProjects);
     } else {
       // 无本地修改，直接覆盖
-      const updatedProjects = localProjects.map(p => 
+      const updatedProjects = this.projectState.projects().map((p: Project) =>
         p.id === cloudProject.id ? cloudProject : p
       );
       this.projectState.setProjects(updatedProjects);
@@ -623,7 +822,7 @@ export class UserSessionService {
     // 更新附件监控
     const activeProject = mergedProjects.find(p => p.id === this.projectState.activeProjectId());
     if (activeProject) {
-      this.monitorProjectAttachments(activeProject);
+      void this.monitorProjectAttachments(activeProject);
     }
   }
   
@@ -693,7 +892,7 @@ export class UserSessionService {
     });
 
     this.syncCoordinator.tryReloadConflictData(userId, (id) =>
-      this.projectState.projects().find(p => p.id === id)
+      this.projectState.getProject(id)
     ).catch(e => {
       this.logger.warn('冲突数据重载失败（后台）', e);
       // 冲突数据重载失败不影响核心功能，静默处理
@@ -815,18 +1014,26 @@ export class UserSessionService {
   }
 
   /** 监控项目附件 URL */
-  private monitorProjectAttachments(project: Project): void {
+  private async monitorProjectAttachments(project: Project): Promise<void> {
     const userId = this.currentUserId();
     if (!userId) return;
 
-    this.attachmentService.clearMonitoredAttachments();
+    const taskAttachmentPairs = project.tasks.flatMap(task =>
+      (task.attachments ?? []).map(attachment => ({ taskId: task.id, attachment }))
+    );
 
-    for (const task of project.tasks) {
-      if (task.attachments && task.attachments.length > 0) {
-        for (const attachment of task.attachments) {
-          this.attachmentService.monitorAttachment(userId, project.id, task.id, attachment);
-        }
-      }
+    // 无附件快速路径：不触发 AttachmentService 懒加载
+    if (taskAttachmentPairs.length === 0) {
+      this.attachmentServiceRef?.clearMonitoredAttachments();
+      return;
+    }
+
+    const attachmentService = await this.getAttachmentServiceLazy();
+    if (!attachmentService) return;
+
+    attachmentService.clearMonitoredAttachments();
+    for (const pair of taskAttachmentPairs) {
+      attachmentService.monitorAttachment(userId, project.id, pair.taskId, pair.attachment);
     }
   }
 }

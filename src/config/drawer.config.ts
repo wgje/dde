@@ -3,13 +3,6 @@
 // 双向抽屉交互相关常量
 // ============================================
 
-/** 吸附点配置类型 */
-interface SnapPointsConfig {
-  COLLAPSED: number;
-  HALF: number;
-  EXPANDED: number;
-}
-
 /**
  * 抽屉配置
  */

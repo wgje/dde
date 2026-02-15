@@ -1,0 +1,14 @@
+{
+  "entries": [
+    {
+      "file": "src/tests/flaky.spec.ts",
+      "runs": 100,
+      "failures": 5
+    },
+    {
+      "file": "src/tests/recovered.spec.ts",
+      "runs": 100,
+      "failures": 0
+    }
+  ]
+}

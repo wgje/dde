@@ -30,12 +30,10 @@
     {
       "name": "local-fonts",
       "installMode": "lazy",
-      "updateMode": "prefetch",
+      "updateMode": "lazy",
       "resources": {
         "files": [
-          "/fonts/**/*.woff2",
-          "/fonts/**/*.css",
-          "/**/*.(otf|ttf|woff|woff2)"
+          "/fonts/**"
         ]
       }
     }
@@ -61,9 +59,8 @@
       "cacheConfig": {
         "strategy": "freshness",
         "maxSize": 100,
-        "maxAge": "5m",
-        "timeout": "5s",
-        "networkTimeoutSeconds": 5
+        "maxAge": "1m",
+        "timeout": "3s"
       }
     },
     {

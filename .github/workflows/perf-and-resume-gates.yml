@@ -1,0 +1,110 @@
+name: perf-and-resume-gates
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  perf-and-resume-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Perf Guard
+        run: npm run perf:guard
+
+      - name: Hotpath Config Barrel Ban
+        env:
+          HOTPATH_CONFIG_BARREL_BAN_ENABLED: 'true'
+        run: node scripts/perf-startup-guard.cjs
+
+      - name: Resume Core Tests
+        run: >-
+          npx vitest run
+          src/app/core/services/simple-sync.service.spec.ts
+          src/services/app-lifecycle-orchestrator.service.spec.ts
+          src/services/event-driven-sync-pulse.service.spec.ts
+          src/services/sync-coordinator.service.spec.ts
+          src/services/remote-change-handler.service.spec.ts
+
+      - name: Validate Perf Auth Env
+        env:
+          E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
+          E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
+        run: |
+          test -n "$E2E_PERF_EMAIL" || (echo "Missing secret: E2E_PERF_EMAIL" && exit 1)
+          test -n "$E2E_PERF_PASSWORD" || (echo "Missing secret: E2E_PERF_PASSWORD" && exit 1)
+
+      - name: Weak Network E2E Budget
+        env:
+          PERF_BUDGET_TEST: '1'
+          PLAYWRIGHT_WEB_SERVER_COMMAND: python3 -m http.server 4200 --directory dist/browser
+          PLAYWRIGHT_WEB_SERVER_TIMEOUT: '120000'
+          E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
+          E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
+          E2E_PERF_PROJECT_ID: ${{ secrets.E2E_PERF_PROJECT_ID }}
+        run: >-
+          npx playwright test
+          e2e/perf/weak-network-startup.spec.ts
+          e2e/weak-network-budget.spec.ts
+          e2e/perf/resume-budget.spec.ts
+
+      - name: Upload Perf Metrics Snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-current-metrics
+          path: test-results/perf/current-metrics.json
+          if-no-files-found: error
+
+  no-regression-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - perf-and-resume-gates
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Perf Metrics Snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-current-metrics
+          path: test-results/perf
+
+      - name: Build Stats For Regression Guard
+        run: npm run build:dev -- --stats-json
+
+      - name: No Regression Guard
+        run: npm run perf:guard:no-regression
