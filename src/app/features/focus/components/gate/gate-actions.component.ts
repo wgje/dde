@@ -2,14 +2,18 @@
  * 大门按钮组组件
  *
  * 已读、完成、稍后提醒按钮，以及快速录入区域
+ * 录音支持长按区域交互：超出区域取消录音
  */
 
 import {
   Component,
   ChangeDetectionStrategy,
   inject,
-  computed,
-  signal
+  signal,
+  isDevMode,
+  OnDestroy,
+  viewChild,
+  ElementRef
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -49,35 +53,61 @@ import { LoggerService } from '../../../../../services/logger.service';
           </button>
 
            <!-- 稍后 (如有) -->
-           <button
-             *ngIf="canSnooze()"
-             data-testid="gate-snooze-button"
-             class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
-             [disabled]="isProcessing()"
-             (click)="snooze()">
-             <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">Zzz</span>
-             <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">稍后</span>
-           </button>
+           @if (canSnooze()) {
+             <button
+               data-testid="gate-snooze-button"
+               class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
+               [disabled]="isProcessing()"
+               (click)="snooze()">
+               <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">Zzz</span>
+               <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">稍后</span>
+             </button>
+           }
         </div>
+
+        <!-- 转写结果编辑区 -->
+        @if (pendingTranscription()) {
+          <div class="mt-2 rounded-2xl bg-white/80 dark:bg-black/40 backdrop-blur-xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden animate-fade-in">
+            <textarea
+              class="w-full bg-transparent border-0 text-sm leading-relaxed resize-none
+                     focus:ring-0 focus:outline-none p-3 text-black dark:text-white
+                     placeholder:text-gray-400"
+              rows="3"
+              [(ngModel)]="editableTranscription"
+              placeholder="编辑转录内容...">
+            </textarea>
+            <div class="flex items-center justify-end gap-2 px-3 pb-2">
+              <button
+                class="px-3 py-1 rounded-lg text-xs bg-gray-200 dark:bg-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-white/20 transition-colors"
+                (click)="cancelPendingTranscription()">
+                取消
+              </button>
+              <button
+                class="px-3 py-1 rounded-lg text-xs bg-blue-500 text-white hover:bg-blue-600 transition-colors"
+                (click)="confirmPendingTranscription()">
+                保存
+              </button>
+            </div>
+          </div>
+        }
 
         <!-- 快速录入区 (iOS 搜索栏风格) -->
         <div class="mt-4 relative bg-gray-100/80 dark:bg-white/5 backdrop-blur-xl rounded-2xl p-1 transition-all duration-300 ring-1 ring-black/5 dark:ring-white/10 focus-within:ring-blue-500/50 dark:focus-within:ring-blue-400/50 focus-within:bg-white dark:focus-within:bg-black/40">
           <div class="flex items-center px-3 py-2">
-            <!-- 录音按钮 -->
-            @if (speechSupported()) {
-              <button
-                class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 mr-2"
+            <!-- 录音按钮区域 - 长按开始，超出取消 -->
+            @if (speechSupported() || isDevMode) {
+              <div
+                #recordBtn
+                class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 mr-2 select-none touch-none cursor-pointer"
                 [class.bg-red-500]="isRecording()"
-                [class.animate-pulse]="isRecording()"
+                [class.animate-pulse]="isRecording() && !isOutOfZone()"
+                [class.opacity-50]="isOutOfZone()"
                 [ngClass]="{'bg-gray-200': !isRecording() && !isTranscribing(), 'dark:bg-white/10': !isRecording() && !isTranscribing()}"
-                [disabled]="isTranscribing()"
-                (mousedown)="startRecording($event)"
-                (mouseup)="stopRecording()"
-                (mouseleave)="stopRecording()"
-                (touchstart)="startRecording($event)"
-                (touchend)="stopRecording()"
-                (keydown.space)="startRecording($event)"
-                (keyup.space)="stopRecording()">
+                [class.pointer-events-none]="isTranscribing()"
+                (mousedown)="onRecordMouseDown($event)"
+                (touchstart)="onRecordTouchStart($event)"
+                (keydown.space)="onRecordKeyStart($event)"
+                (keyup.space)="onRecordKeyStop()">
                 
                 @if (isTranscribing()) {
                   <svg class="animate-spin h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -92,7 +122,7 @@ import { LoggerService } from '../../../../../services/logger.service';
                     <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"></path>
                   </svg>
                 }
-              </button>
+              </div>
             }
 
             <input
@@ -118,9 +148,15 @@ import { LoggerService } from '../../../../../services/logger.service';
         </div>
         
         <!-- 状态提示 -->
-        @if (isRecording() || isTranscribing()) {
+        @if (isRecording()) {
+           <p class="text-center text-xs text-gray-400 font-medium"
+              [class.animate-pulse]="!isOutOfZone()">
+             {{ isOutOfZone() ? '松开取消录音' : '正在录音... 超出按钮区域将取消' }}
+           </p>
+        }
+        @if (isTranscribing()) {
            <p class="text-center text-xs text-gray-400 animate-pulse font-medium">
-             {{ isTranscribing() ? '正在转写语音...' : '正在录音...' }}
+             正在转写语音...
            </p>
         }
       </div>
@@ -130,10 +166,17 @@ import { LoggerService } from '../../../../../services/logger.service';
     :host {
       display: block;
     }
+    .animate-fade-in {
+      animation: fade-in 0.2s ease-out;
+    }
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(-5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class GateActionsComponent {
+export class GateActionsComponent implements OnDestroy {
   // 注入服务
   gateService = inject(GateService);
   toast = inject(ToastService);
@@ -141,9 +184,31 @@ export class GateActionsComponent {
   speechService = inject(SpeechToTextService);
   logger = inject(LoggerService);
 
-  // 状态信号
-  isProcessing = computed(() => this.gateService.cardAnimation() !== 'idle'); // 比如正在提交已读/完成
-  canSnooze = this.gateService.canSnooze; // 是否允许推迟
+  /**
+   * 动画处理中状态 - 禁用操作按钮
+   *
+   * 【Bug Fix #96645099】从 class field (computed signal) 改为原型方法
+   * 原因：极端情况下（如 Service Worker 缓存导致 chunk 不一致），
+   * class field 可能未正确初始化，导致模板调用时
+   * 报 "n.isProcessing is not a function"。
+   * 原型方法始终存在于类原型上，不受实例初始化影响。
+   */
+  isProcessing(): boolean {
+    try {
+      return this.gateService.cardAnimation() !== 'idle';
+    } catch {
+      return false;
+    }
+  }
+
+  /** 是否可以跳过（原型方法，同上理由） */
+  canSnooze(): boolean {
+    try {
+      return this.gateService.canSnooze();
+    } catch {
+      return false;
+    }
+  }
 
   // 快速录入相关
   quickInputText = signal('');
@@ -153,6 +218,25 @@ export class GateActionsComponent {
   isTranscribing = this.speechService.isTranscribing;
   
   speechSupported = signal(this.speechService.isSupported());
+  
+  /** 开发模式标志，用于展示录音按钮 UI（即使浏览器不支持录音） */
+  readonly isDevMode = isDevMode();
+  
+  /** 鼠标/手指是否超出录音按钮区域 */
+  isOutOfZone = signal(false);
+  /** 待确认的转录文本 */
+  pendingTranscription = signal('');
+  /** 可编辑的转录文本 */
+  editableTranscription = '';
+  
+  /** 全局事件清理函数 */
+  private globalCleanups: (() => void)[] = [];
+  
+  readonly recordBtn = viewChild<ElementRef<HTMLElement>>('recordBtn');
+
+  ngOnDestroy(): void {
+    this.removeGlobalListeners();
+  }
 
   markAsRead() {
     this.gateService.markAsRead();
@@ -174,10 +258,7 @@ export class GateActionsComponent {
     const text = this.quickInputText().trim();
     if (!text) return;
 
-    // Use BlackBoxService.create to add entry
-    const result = this.blackBoxService.create({
-      content: text
-    });
+    const result = this.blackBoxService.create({ content: text });
 
     if (result.ok) {
         this.logger.info('Quick input submitted:', text);
@@ -189,35 +270,158 @@ export class GateActionsComponent {
     }
   }
 
-  // --- 语音逻辑 (简化版，复用现有服务) ---
+  // --- 转录确认/取消 ---
 
-  startRecording(event: Event) {
-    if (event.type === 'keydown' && (event as KeyboardEvent).repeat) return;
+  confirmPendingTranscription(): void {
+    const text = this.editableTranscription.trim();
+    if (text) {
+      // 追加到输入框（如果有内容），或直接写入
+      const current = this.quickInputText();
+      this.quickInputText.set(current ? current + ' ' + text : text);
+    }
+    this.pendingTranscription.set('');
+    this.editableTranscription = '';
+  }
+
+  cancelPendingTranscription(): void {
+    this.logger.debug('GateActions', 'Transcription cancelled by user');
+    this.pendingTranscription.set('');
+    this.editableTranscription = '';
+  }
+
+  // --- 录音区域交互 ---
+
+  onRecordMouseDown(event: MouseEvent): void {
     event.preventDefault();
+    if (this.isTranscribing() || this.pendingTranscription()) return;
+    
+    this.doStartRecording();
+    
+    const onMouseMove = (e: MouseEvent) => this.checkInRecordZone(e.clientX, e.clientY);
+    const onMouseUp = () => this.doStopOrCancel();
+    
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    
+    this.globalCleanups.push(
+      () => document.removeEventListener('mousemove', onMouseMove),
+      () => document.removeEventListener('mouseup', onMouseUp)
+    );
+  }
 
-    if (this.isTranscribing()) return;
+  onRecordTouchStart(event: TouchEvent): void {
+    event.preventDefault();
+    if (this.isTranscribing() || this.pendingTranscription()) return;
+    
+    this.doStartRecording();
+    
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        this.checkInRecordZone(e.touches[0].clientX, e.touches[0].clientY);
+      }
+    };
+    const onTouchEnd = () => this.doStopOrCancel();
+    
+    document.addEventListener('touchmove', onTouchMove, { passive: true });
+    document.addEventListener('touchend', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchEnd);
+    
+    this.globalCleanups.push(
+      () => document.removeEventListener('touchmove', onTouchMove),
+      () => document.removeEventListener('touchend', onTouchEnd),
+      () => document.removeEventListener('touchcancel', onTouchEnd)
+    );
+  }
 
-    // Service handles state update
+  onRecordKeyStart(event: Event): void {
+    if ((event as KeyboardEvent).repeat) return;
+    event.preventDefault();
+    if (this.isTranscribing() || this.pendingTranscription()) return;
+    this.doStartRecording();
+  }
+
+  onRecordKeyStop(): void {
+    if (!this.isRecording()) return;
+    this.isOutOfZone.set(false);
+    this.doTranscribe();
+  }
+
+  // --- 内部方法 ---
+
+  /** 开发模式模拟转写文本，用于 UI 调试 */
+  private static readonly DEV_MOCK_TRANSCRIPTIONS = [
+    '先把登录模块的样式调一下，按钮间距太紧了，还有那个输入框的圆角要改成 8px',
+    '明天和设计师确认一下大门卡片的动画时长，现在感觉有点快',
+    '这个 bug 的根因是同步时 content 字段被漏掉了，需要在查询里加上',
+  ];
+
+  private doStartRecording(): void {
+    // 开发模式下浏览器不支持录音时，直接注入模拟转写文本，便于 UI 调试
+    if (!this.speechService.isSupported()) {
+      this.logger.debug('GateActions', '[DEV] 录音不可用，注入模拟转写文本');
+      const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
+      const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
+      this.pendingTranscription.set(mockText);
+      this.editableTranscription = mockText;
+      return;
+    }
+    this.isOutOfZone.set(false);
     this.speechService.startRecording().catch(err => {
       this.logger.error('Failed to start recording', err);
       this.toast.error('无法启动录音');
     });
   }
 
-  async stopRecording() {
+  private checkInRecordZone(clientX: number, clientY: number): void {
     if (!this.isRecording()) return;
     
-    // Service handles state update
+    const btn = this.recordBtn()?.nativeElement;
+    if (!btn) return;
+    
+    const rect = btn.getBoundingClientRect();
+    // 较大容差（40px），因为录音按钮较小
+    const tolerance = 40;
+    const inZone = clientX >= rect.left - tolerance &&
+                   clientX <= rect.right + tolerance &&
+                   clientY >= rect.top - tolerance &&
+                   clientY <= rect.bottom + tolerance;
+    
+    this.isOutOfZone.set(!inZone);
+  }
+
+  private doStopOrCancel(): void {
+    this.removeGlobalListeners();
+    
+    if (!this.isRecording()) return;
+    
+    if (this.isOutOfZone()) {
+      this.speechService.cancelRecording();
+      this.isOutOfZone.set(false);
+      this.logger.debug('GateActions', 'Recording cancelled: pointer left zone');
+    } else {
+      this.doTranscribe();
+    }
+  }
+
+  private async doTranscribe(): Promise<void> {
+    this.removeGlobalListeners();
+    
     try {
       const text = await this.speechService.stopAndTranscribe();
-      if (text) {
-        // 追加到输入框
-        const current = this.quickInputText();
-        this.quickInputText.set(current ? current + ' ' + text : text);
+      if (text && text.trim()) {
+        // 显示可编辑的转录结果，等待用户确认
+        this.pendingTranscription.set(text);
+        this.editableTranscription = text;
       }
     } catch (err) {
       this.logger.error('Transcription failed', err instanceof Error ? err.message : String(err));
-      // Service usually handles toast for errors, but we can add specific fallback
     }
+  }
+
+  private removeGlobalListeners(): void {
+    for (const cleanup of this.globalCleanups) {
+      cleanup();
+    }
+    this.globalCleanups = [];
   }
 }

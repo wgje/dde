@@ -297,6 +297,12 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
   theme VARCHAR(20) DEFAULT 'default',
   layout_direction VARCHAR(10) DEFAULT 'ltr',
   floating_window_pref VARCHAR(20) DEFAULT 'auto',
+  -- 【2026-02-17 新增】跨设备同步字段
+  color_mode VARCHAR(10) DEFAULT 'system' CHECK (color_mode IS NULL OR color_mode IN ('light', 'dark', 'system')),
+  auto_resolve_conflicts BOOLEAN DEFAULT true,
+  local_backup_enabled BOOLEAN DEFAULT false,
+  local_backup_interval_ms INTEGER DEFAULT 3600000,
+  focus_preferences JSONB DEFAULT '{"gateEnabled":true,"spotlightEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(user_id)
@@ -3557,6 +3563,149 @@ REVOKE EXECUTE ON FUNCTION public.trigger_set_updated_at() FROM PUBLIC, anon;
 -- 维护/清理函数（不应默认对外暴露）
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon;
+
+-- ============================================
+-- 备份系统表（合并自 backup-setup.sql）
+-- ============================================
+
+-- 备份元数据表
+CREATE TABLE IF NOT EXISTS public.backup_metadata (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type TEXT NOT NULL CHECK (type IN ('full', 'incremental')),
+  path TEXT NOT NULL UNIQUE,
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  project_count INTEGER NOT NULL DEFAULT 0,
+  task_count INTEGER NOT NULL DEFAULT 0,
+  connection_count INTEGER NOT NULL DEFAULT 0,
+  attachment_count INTEGER NOT NULL DEFAULT 0,
+  user_preferences_count INTEGER NOT NULL DEFAULT 0,
+  black_box_entry_count INTEGER NOT NULL DEFAULT 0,
+  project_member_count INTEGER NOT NULL DEFAULT 0,
+  size_bytes BIGINT NOT NULL DEFAULT 0,
+  compressed BOOLEAN NOT NULL DEFAULT true,
+  encrypted BOOLEAN NOT NULL DEFAULT false,
+  checksum TEXT NOT NULL,
+  checksum_algorithm TEXT NOT NULL DEFAULT 'SHA-256',
+  encryption_algorithm TEXT,
+  encryption_key_id TEXT,
+  validation_passed BOOLEAN NOT NULL DEFAULT true,
+  validation_warnings JSONB DEFAULT '[]'::jsonb,
+  backup_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  backup_completed_at TIMESTAMPTZ,
+  base_backup_id UUID REFERENCES public.backup_metadata(id) ON DELETE SET NULL,
+  incremental_since TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ,
+  retention_tier TEXT CHECK (retention_tier IN ('hourly', 'daily', 'weekly', 'monthly')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'expired')),
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE public.backup_metadata IS '备份元数据表，记录所有备份的信息';
+
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_type ON public.backup_metadata(type);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_status ON public.backup_metadata(status);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_created_at ON public.backup_metadata(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires_at ON public.backup_metadata(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_id ON public.backup_metadata(user_id) WHERE user_id IS NOT NULL;
+
+ALTER TABLE public.backup_metadata ENABLE ROW LEVEL SECURITY;
+
+-- 备份恢复历史表
+CREATE TABLE IF NOT EXISTS public.backup_restore_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  backup_id UUID NOT NULL REFERENCES public.backup_metadata(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL CHECK (mode IN ('replace', 'merge')),
+  scope TEXT NOT NULL CHECK (scope IN ('all', 'project')),
+  project_id UUID,
+  pre_restore_snapshot_id UUID REFERENCES public.backup_metadata(id) ON DELETE SET NULL,
+  projects_restored INTEGER NOT NULL DEFAULT 0,
+  tasks_restored INTEGER NOT NULL DEFAULT 0,
+  connections_restored INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'rolled_back')),
+  error_message TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+COMMENT ON TABLE public.backup_restore_history IS '备份恢复历史，记录用户的恢复操作';
+
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id ON public.backup_restore_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_id ON public.backup_restore_history(backup_id);
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_created_at ON public.backup_restore_history(created_at DESC);
+
+ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY;
+
+-- 备份加密密钥表
+CREATE TABLE IF NOT EXISTS public.backup_encryption_keys (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated', 'retired')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deprecated_at TIMESTAMPTZ,
+  retired_at TIMESTAMPTZ,
+  algorithm TEXT NOT NULL DEFAULT 'AES-256-GCM',
+  notes TEXT
+);
+COMMENT ON TABLE public.backup_encryption_keys IS '备份加密密钥元数据，用于密钥轮换管理';
+
+ALTER TABLE public.backup_encryption_keys ENABLE ROW LEVEL SECURITY;
+
+-- 备份表 RLS 策略
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_service_role_all' AND tablename = 'backup_metadata') THEN
+    CREATE POLICY backup_metadata_service_role_all ON public.backup_metadata
+      FOR ALL USING (auth.jwt()->>'role' = 'service_role') WITH CHECK (auth.jwt()->>'role' = 'service_role');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_select' AND tablename = 'backup_metadata') THEN
+    CREATE POLICY backup_metadata_user_select ON public.backup_metadata
+      FOR SELECT USING (user_id = (SELECT auth.uid()));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_select' AND tablename = 'backup_restore_history') THEN
+    CREATE POLICY backup_restore_history_user_select ON public.backup_restore_history
+      FOR SELECT USING (user_id = (SELECT auth.uid()));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_service_role_all' AND tablename = 'backup_restore_history') THEN
+    CREATE POLICY backup_restore_history_service_role_all ON public.backup_restore_history
+      FOR ALL USING (auth.jwt()->>'role' = 'service_role') WITH CHECK (auth.jwt()->>'role' = 'service_role');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_encryption_keys_service_role_all' AND tablename = 'backup_encryption_keys') THEN
+    CREATE POLICY backup_encryption_keys_service_role_all ON public.backup_encryption_keys
+      FOR ALL USING (auth.jwt()->>'role' = 'service_role') WITH CHECK (auth.jwt()->>'role' = 'service_role');
+  END IF;
+END $$;
+
+-- 备份辅助函数
+CREATE OR REPLACE FUNCTION public.get_latest_completed_backup(backup_type TEXT DEFAULT 'full')
+RETURNS public.backup_metadata
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
+BEGIN
+  RETURN (SELECT * FROM public.backup_metadata WHERE type = backup_type AND status = 'completed' ORDER BY backup_completed_at DESC LIMIT 1);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_expired_backups()
+RETURNS INTEGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
+DECLARE expired_count INTEGER;
+BEGIN
+  UPDATE public.backup_metadata SET status = 'expired' WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
+  GET DIAGNOSTICS expired_count = ROW_COUNT;
+  RETURN expired_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.cleanup_expired_backups()
+RETURNS TABLE (expired_count INTEGER, paths_to_delete TEXT[])
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
+DECLARE v_expired_count INTEGER; v_paths TEXT[];
+BEGIN
+  SELECT array_agg(path) INTO v_paths FROM public.backup_metadata WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
+  UPDATE public.backup_metadata SET status = 'expired' WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
+  GET DIAGNOSTICS v_expired_count = ROW_COUNT;
+  RETURN QUERY SELECT v_expired_count, COALESCE(v_paths, ARRAY[]::TEXT[]);
+END;
+$$;
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_logs() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_deleted_attachments(integer) FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_expired_scan_records() FROM PUBLIC, anon;

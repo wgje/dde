@@ -195,14 +195,18 @@ export class GateOverlayComponent implements OnDestroy {
 
   constructor() {
     // 响应式追踪 gate 激活状态，动态管理 body 滚动锁定
-    effect(() => {
-      if (this.gateService.isActive()) {
-        document.body.style.overflow = 'hidden';
-      } else {
-        document.body.style.overflow = '';
-        this.closed.emit();
-      }
-    });
+    try {
+      effect(() => {
+        if (this.gateService.isActive()) {
+          document.body.style.overflow = 'hidden';
+        } else {
+          document.body.style.overflow = '';
+          this.closed.emit();
+        }
+      });
+    } catch {
+      // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
+    }
   }
 
   setTheme(theme: GateVisualTheme): void {
@@ -257,8 +261,19 @@ export class GateOverlayComponent implements OnDestroy {
     }
   }
 
-  // 是否显示完成提示
-  readonly showCompletionMessage = this.gateService.showCompletionMessage;
+  /**
+   * 是否显示完成提示（原型方法）
+   *
+   * 【Bug Fix】从 class field 改为原型方法，防止 SW chunk 不一致
+   * 导致 class field 未初始化时模板调用报错。
+   */
+  showCompletionMessage(): boolean {
+    try {
+      return this.gateService?.showCompletionMessage?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
 
   ngOnDestroy(): void {
     document.body.style.overflow = '';

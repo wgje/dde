@@ -1,6 +1,6 @@
 import { Component, signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GateService } from '../../../../../services/gate.service';
 import { StrataService } from '../../../../../services/strata.service';
@@ -25,6 +25,8 @@ class StubGateActionsComponent {}
 
 describe('GateOverlayComponent', () => {
   let fixture: ComponentFixture<GateOverlayComponent>;
+  const testBedFlags = globalThis as Record<string, unknown>;
+  const testBedResetSkipKey = '__vitest_skip_testbed_reset__';
 
   const layers = signal<StrataLayer[]>([]);
   const mockGateService = {
@@ -40,18 +42,8 @@ describe('GateOverlayComponent', () => {
     layers,
   };
 
-  beforeEach(async () => {
-    layers.set([
-      {
-        date: '2026-02-06',
-        items: [
-          { type: 'black_box', id: 'bb-1', title: '第一条记录', completedAt: '2026-02-06T10:00:00Z' },
-          { type: 'task', id: 'task-1', title: '第二条记录', completedAt: '2026-02-06T11:00:00Z' },
-        ],
-        opacity: 1,
-      },
-    ]);
-
+  beforeAll(async () => {
+    testBedFlags[testBedResetSkipKey] = true;
     await TestBed.configureTestingModule({
       imports: [GateOverlayComponent],
       providers: [
@@ -68,8 +60,34 @@ describe('GateOverlayComponent', () => {
         },
       })
       .compileComponents();
+  });
+
+  beforeEach(() => {
+    layers.set([
+      {
+        date: '2026-02-06',
+        items: [
+          { type: 'black_box', id: 'bb-1', title: '第一条记录', completedAt: '2026-02-06T10:00:00Z' },
+          { type: 'task', id: 'task-1', title: '第二条记录', completedAt: '2026-02-06T11:00:00Z' },
+        ],
+        opacity: 1,
+      },
+    ]);
 
     fixture = TestBed.createComponent(GateOverlayComponent);
+  });
+
+  afterEach(() => {
+    fixture?.destroy();
+  });
+
+  afterAll(() => {
+    testBedFlags[testBedResetSkipKey] = false;
+    try {
+      TestBed.resetTestingModule();
+    } catch {
+      // noop
+    }
   });
 
   it('should render strata item titles without slice runtime errors', () => {

@@ -10,9 +10,9 @@ echo "🚀 Running pre-push checks..."
 echo "🔍 Running lint..."
 npm run lint
 
-# 2. Fast test gate
-echo "🧪 Running fast test gate..."
-npm run test:run:fast
+# 2. Full unit test gate
+echo "🧪 Running full unit test gate..."
+npm run test:run:verify
 
 # 3. Build
 echo "🏗️ Building project..."

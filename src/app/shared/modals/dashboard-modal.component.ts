@@ -478,7 +478,21 @@ export class DashboardModalComponent implements OnInit {
   readonly pendingCount = this.actionQueue.queueSize;
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
-  readonly isProcessing = this.actionQueue.isProcessing;
+
+  /**
+   * 队列是否正在处理（原型方法）
+   *
+   * 【Bug Fix】从 class field 改为原型方法，与 gate-actions.component.ts 保持一致。
+   * 原因：SW 缓存导致 chunk 不一致时，class field 可能未初始化，
+   * 模板调用 isProcessing() 报 "n.isProcessing is not a function"。
+   */
+  isProcessing(): boolean {
+    try {
+      return this.actionQueue?.isProcessing?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
   readonly conflictCount = this.conflictStorage.conflictCount;
   readonly hasUnresolvedConflicts = this.conflictStorage.hasUnresolvedConflicts;
   readonly isOnline = computed(() => this.syncService.syncState().isOnline);

@@ -163,13 +163,25 @@ describe('TaskRepositoryBatchService', () => {
 
     it('should return failure with failed count on error', async () => {
       supabaseMock.upsert.mockResolvedValue({ error: { message: 'Server error' } });
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+        ((handler: TimerHandler): ReturnType<typeof setTimeout> => {
+          if (typeof handler === 'function') {
+            handler();
+          }
+          return 0 as unknown as ReturnType<typeof setTimeout>;
+        }) as typeof setTimeout
+      );
 
-      const tasks = [createTask()];
-      const result = await service.saveTasks('proj-1', tasks);
+      try {
+        const tasks = [createTask()];
+        const result = await service.saveTasks('proj-1', tasks);
 
-      expect(result.success).toBe(false);
-      expect(result.failedCount).toBeDefined();
-      expect(result.error).toContain('Server error');
+        expect(result.success).toBe(false);
+        expect(result.failedCount).toBeDefined();
+        expect(result.error).toContain('Server error');
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
     });
 
     it('should skip operation when supabase is not configured', async () => {

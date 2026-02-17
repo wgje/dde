@@ -1,7 +1,11 @@
 /**
  * 黑匣子录音按钮组件
  * 
- * 对讲机式交互：按住说话，松开转文字
+ * 长按录音区域交互：
+ * - 在区域内长按开始录音
+ * - 手指/鼠标超出区域则取消本次录音
+ * - 录音完成后显示可编辑的转录文本
+ * - 用户可确认保存或取消（取消不存入黑匣子）
  */
 
 import {
@@ -11,43 +15,67 @@ import {
   signal,
   input,
   output,
-  OnDestroy
+  OnDestroy,
+  ElementRef,
+  viewChild
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { SpeechToTextService } from '../../../../../services/speech-to-text.service';
 import { LoggerService } from '../../../../../services/logger.service';
 
 @Component({
   selector: 'app-black-box-recorder',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
     <div class="black-box-recorder">
-      <!-- 转写结果预览 -->
+      <!-- 转写结果编辑区 -->
       @if (transcription()) {
-        <div class="mb-2 p-2 rounded-lg text-xs animate-fade-in" [class]="transcriptionPreviewClass()">
-          <p class="line-clamp-3">{{ transcription() }}</p>
+        <div class="mb-2 rounded-lg animate-fade-in" [class]="transcriptionPreviewClass()">
+          <textarea
+            class="w-full bg-transparent border-0 text-xs leading-relaxed resize-none
+                   focus:ring-0 focus:outline-none p-2"
+            [class]="transcriptionTextClass()"
+            rows="3"
+            [(ngModel)]="editableText"
+            placeholder="编辑转录内容..."
+            data-testid="transcription-editor">
+          </textarea>
+          <div class="flex items-center justify-end gap-2 px-2 pb-2">
+            <button
+              class="px-3 py-1 rounded text-[10px] transition-colors"
+              [class]="cancelBtnClass()"
+              (click)="cancelTranscription()"
+              data-testid="transcription-cancel">
+              取消
+            </button>
+            <button
+              class="px-3 py-1 rounded text-[10px] transition-colors"
+              [class]="confirmBtnClass()"
+              (click)="confirmTranscription()"
+              data-testid="transcription-confirm">
+              保存
+            </button>
+          </div>
         </div>
       }
 
-      <!-- 录音按钮 -->
-      <button
-        class="record-btn w-full px-4 py-5 rounded-xl transition-all duration-200
+      <!-- 录音区域 - 长按开始，超出取消 -->
+      <div
+        #recordZone
+        class="record-zone w-full px-4 py-5 rounded-xl transition-all duration-200
                flex items-center justify-center gap-2 text-sm font-medium
-               select-none touch-none
+               select-none touch-none cursor-pointer
                border-2 border-solid border-transparent
                hover:border-dashed hover:border-amber-300/50
                dark:hover:border-stone-500/50"
         [class]="getButtonClass()"
-        [disabled]="voiceService.isTranscribing()"
-        (mousedown)="start($event)"
-        (mouseup)="stop()"
-        (mouseleave)="stop()"
-        (touchstart)="start($event)"
-        (touchend)="stop()"
-        (touchcancel)="stop()"
-        (keydown.space)="start($event)"
-        (keyup.space)="stop()"
+        [class.pointer-events-none]="voiceService.isTranscribing()"
+        (mousedown)="onZoneMouseDown($event)"
+        (touchstart)="onZoneTouchStart($event)"
+        (keydown.space)="onKeyStart($event)"
+        (keyup.space)="onKeyStop()"
         [attr.aria-pressed]="voiceService.isRecording()"
         [attr.aria-label]="getAriaLabel()"
         data-testid="black-box-recorder">
@@ -60,31 +88,39 @@ import { LoggerService } from '../../../../../services/logger.service';
           <span class="recording-dot w-3 h-3 rounded-full bg-white"></span>
           <span>录音中...</span>
           <span class="text-white/70 text-xs font-mono ml-1">
-            {{ recordingDuration() }}s
+            {{ formatDuration(recordingDuration()) }}
           </span>
+          @if (isOutOfZone()) {
+            <span class="text-white/50 text-[10px] ml-1">松开取消</span>
+          }
         } @else {
           <span class="text-lg">🎤</span>
-          <span>按住开始录音</span>
+          <span>长按开始录音</span>
         }
-      </button>
+      </div>
       
       <!-- 提示文字 -->
-      @if (!voiceService.isRecording() && !voiceService.isTranscribing()) {
+      @if (!voiceService.isRecording() && !voiceService.isTranscribing() && !transcription()) {
         <p class="mt-1.5 text-center text-[10px] text-stone-400 dark:text-stone-500">
-          按住说话，松开自动转写
+          长按说话，松开自动转写 · 超出区域则取消
         </p>
       }
     </div>
   `,
   styles: [`
-    .record-btn {
+    .record-zone {
       user-select: none;
       -webkit-user-select: none;
       -webkit-touch-callout: none;
     }
     
-    .record-btn.recording {
+    .record-zone.recording {
       animation: recording-pulse 1.5s ease-in-out infinite;
+    }
+    
+    .record-zone.out-of-zone {
+      animation: none;
+      opacity: 0.6;
     }
     
     @keyframes recording-pulse {
@@ -122,23 +158,141 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   appearance = input<'default' | 'obsidian'>('default');
   onTranscribed = input<((text: string) => void) | null>(null);
   
+  /** 原始转录文本（非空时显示编辑区） */
   transcription = signal('');
+  /** 用户可编辑的文本 */
+  editableText = '';
+  /** 录音时长（秒） */
   recordingDuration = signal(0);
+  /** 鼠标/手指是否已超出录音区域 */
+  isOutOfZone = signal(false);
   
   private durationTimer: ReturnType<typeof setInterval> | null = null;
+  private recordingStartTime = 0;
+  /** 全局事件清理函数集合 */
+  private globalCleanups: (() => void)[] = [];
+  
+  readonly recordZone = viewChild<ElementRef<HTMLElement>>('recordZone');
   
   transcribed = output<string>();
 
   ngOnDestroy(): void {
-    if (this.durationTimer) {
-      clearInterval(this.durationTimer);
-      this.durationTimer = null;
-    }
+    this.clearDurationTimer();
+    this.removeGlobalListeners();
+  }
+
+  // ===============================================
+  // 公共 API
+  // ===============================================
+
+  /**
+   * 格式化录音时长为 mm:ss 格式
+   */
+  formatDuration(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
   /**
-   * 获取按钮样式类
+   * 确认保存转录内容
    */
+  confirmTranscription(): void {
+    const text = this.editableText.trim();
+    if (text) {
+      this.transcribed.emit(text);
+      this.onTranscribed()?.(text);
+    }
+    this.clearTranscription();
+  }
+
+  /**
+   * 取消转录内容（不存入黑匣子）
+   */
+  cancelTranscription(): void {
+    this.logger.debug('BlackBoxRecorder', 'Transcription cancelled by user');
+    this.clearTranscription();
+  }
+
+  // ===============================================
+  // 鼠标事件处理（桌面端）
+  // ===============================================
+
+  /**
+   * 录音区域鼠标按下 - 开始录音
+   */
+  onZoneMouseDown(event: MouseEvent): void {
+    event.preventDefault();
+    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    
+    this.startRecording();
+    
+    // 绑定全局 mousemove 和 mouseup
+    const onMouseMove = (e: MouseEvent) => this.checkMouseInZone(e.clientX, e.clientY);
+    const onMouseUp = () => this.stopOrCancel();
+    
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    
+    this.globalCleanups.push(
+      () => document.removeEventListener('mousemove', onMouseMove),
+      () => document.removeEventListener('mouseup', onMouseUp)
+    );
+  }
+
+  // ===============================================
+  // 触摸事件处理（移动端）
+  // ===============================================
+
+  /**
+   * 录音区域触摸开始 - 开始录音
+   */
+  onZoneTouchStart(event: TouchEvent): void {
+    event.preventDefault();
+    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    
+    this.startRecording();
+    
+    // 绑定全局 touchmove 和 touchend/touchcancel
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        this.checkMouseInZone(e.touches[0].clientX, e.touches[0].clientY);
+      }
+    };
+    const onTouchEnd = () => this.stopOrCancel();
+    
+    document.addEventListener('touchmove', onTouchMove, { passive: true });
+    document.addEventListener('touchend', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchEnd);
+    
+    this.globalCleanups.push(
+      () => document.removeEventListener('touchmove', onTouchMove),
+      () => document.removeEventListener('touchend', onTouchEnd),
+      () => document.removeEventListener('touchcancel', onTouchEnd)
+    );
+  }
+
+  // ===============================================
+  // 键盘事件处理
+  // ===============================================
+
+  onKeyStart(event: Event): void {
+    event.preventDefault();
+    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    if ((event as KeyboardEvent).repeat) return;
+    this.startRecording();
+  }
+
+  onKeyStop(): void {
+    if (!this.voiceService.isRecording()) return;
+    this.isOutOfZone.set(false);
+    this.doStopAndTranscribe();
+  }
+
+  // ===============================================
+  // 样式方法
+  // ===============================================
+
   getButtonClass(): string {
     if (this.voiceService.isTranscribing()) {
       if (this.appearance() === 'obsidian') {
@@ -147,7 +301,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
       return 'bg-stone-200 dark:bg-stone-600 text-stone-500 dark:text-stone-300 cursor-wait';
     }
     if (this.voiceService.isRecording()) {
-      return 'recording bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[0.98] border-2 border-dashed border-red-400';
+      const base = 'bg-red-500 text-white shadow-lg shadow-red-500/30 scale-[0.98] border-2 border-dashed border-red-400';
+      return this.isOutOfZone() ? `${base} out-of-zone` : `recording ${base}`;
     }
     if (this.appearance() === 'obsidian') {
       return `bg-stone-800 text-amber-300 border border-stone-600/70
@@ -165,62 +320,142 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     }
     return 'bg-amber-100/80 dark:bg-stone-700 text-stone-700 dark:text-stone-200';
   }
-  
-  /**
-   * 获取 ARIA 标签
-   */
+
+  transcriptionTextClass(): string {
+    if (this.appearance() === 'obsidian') {
+      return 'text-stone-200 placeholder-stone-500';
+    }
+    return 'text-stone-700 dark:text-stone-200 placeholder-stone-400';
+  }
+
+  cancelBtnClass(): string {
+    if (this.appearance() === 'obsidian') {
+      return 'bg-stone-700 text-stone-300 hover:bg-stone-600';
+    }
+    return 'bg-stone-200 dark:bg-stone-600 text-stone-600 dark:text-stone-300 hover:bg-stone-300 dark:hover:bg-stone-500';
+  }
+
+  confirmBtnClass(): string {
+    if (this.appearance() === 'obsidian') {
+      return 'bg-amber-600 text-white hover:bg-amber-500';
+    }
+    return 'bg-amber-500 text-white hover:bg-amber-600';
+  }
+
   getAriaLabel(): string {
     if (this.voiceService.isTranscribing()) return '正在转写';
     if (this.voiceService.isRecording()) return '松开停止录音';
-    return '按住开始录音';
+    return '长按开始录音';
   }
 
+  // ===============================================
+  // 内部方法
+  // ===============================================
+
   /**
-   * 开始录音
+   * 开始录音 + 启动计时器
    */
-  start(event: Event): void {
-    event.preventDefault();
-    
-    if (this.voiceService.isTranscribing()) return;
-    
+  private startRecording(): void {
     this.transcription.set('');
+    this.editableText = '';
     this.recordingDuration.set(0);
+    this.isOutOfZone.set(false);
+    this.recordingStartTime = Date.now();
     
-    // 开始计时
+    // 使用 Date.now() 差值计算，避免 setInterval 漂移
     this.durationTimer = setInterval(() => {
-      this.recordingDuration.update(d => d + 1);
-    }, 1000);
+      const elapsed = Math.round((Date.now() - this.recordingStartTime) / 1000);
+      this.recordingDuration.set(elapsed);
+    }, 500); // 每 500ms 更新一次，提高精度
     
     this.voiceService.startRecording();
   }
 
   /**
-   * 停止录音并转写
+   * 检测鼠标/手指是否在录音区域内
    */
-  async stop(): Promise<void> {
+  private checkMouseInZone(clientX: number, clientY: number): void {
     if (!this.voiceService.isRecording()) return;
     
-    // 停止计时
-    if (this.durationTimer) {
-      clearInterval(this.durationTimer);
-      this.durationTimer = null;
+    const zone = this.recordZone()?.nativeElement;
+    if (!zone) return;
+    
+    const rect = zone.getBoundingClientRect();
+    // 留 20px 容差，避免边缘误取消
+    const tolerance = 20;
+    const inZone = clientX >= rect.left - tolerance &&
+                   clientX <= rect.right + tolerance &&
+                   clientY >= rect.top - tolerance &&
+                   clientY <= rect.bottom + tolerance;
+    
+    this.isOutOfZone.set(!inZone);
+  }
+
+  /**
+   * 松开时根据是否在区域内决定保存或取消
+   */
+  private stopOrCancel(): void {
+    this.clearDurationTimer();
+    this.removeGlobalListeners();
+    
+    if (!this.voiceService.isRecording()) return;
+    
+    if (this.isOutOfZone()) {
+      // 超出区域 → 取消录音
+      this.voiceService.cancelRecording();
+      this.isOutOfZone.set(false);
+      this.logger.debug('BlackBoxRecorder', 'Recording cancelled: pointer left zone');
+    } else {
+      // 在区域内 → 正常停止并转写
+      this.doStopAndTranscribe();
     }
+  }
+
+  /**
+   * 停止录音并进行转写
+   */
+  private async doStopAndTranscribe(): Promise<void> {
+    this.clearDurationTimer();
+    this.removeGlobalListeners();
     
     try {
       const text = await this.voiceService.stopAndTranscribe();
       
       if (text.trim()) {
+        // 显示可编辑的转录结果，等待用户确认
         this.transcription.set(text);
-        this.transcribed.emit(text);
-        this.onTranscribed()?.(text);
-        
-        // 3秒后清除预览
-        setTimeout(() => {
-          this.transcription.set('');
-        }, 3000);
+        this.editableText = text;
       }
     } catch (e) {
       this.logger.error('BlackBoxRecorder', 'Recording failed', e);
     }
+  }
+
+  /**
+   * 清除转录状态
+   */
+  private clearTranscription(): void {
+    this.transcription.set('');
+    this.editableText = '';
+  }
+
+  /**
+   * 清除计时器
+   */
+  private clearDurationTimer(): void {
+    if (this.durationTimer) {
+      clearInterval(this.durationTimer);
+      this.durationTimer = null;
+    }
+  }
+
+  /**
+   * 移除所有全局事件监听
+   */
+  private removeGlobalListeners(): void {
+    for (const cleanup of this.globalCleanups) {
+      cleanup();
+    }
+    this.globalCleanups = [];
   }
 }

@@ -121,21 +121,25 @@ export class TextTaskCardComponent {
   touchCancel = output<TouchEvent>();
 
   constructor() {
-    let prevTask: Task | undefined;
-    effect(() => {
-      const curr = this.task();
-      if (prevTask?.displayId && prevTask.displayId !== '?' && curr?.displayId === '?') {
-        this.logger.warn('TextTaskCard', 'displayId changed from valid to "?"', {
-          taskId: curr?.id?.slice(-4) ?? 'unknown',
-          prevDisplayId: prevTask.displayId,
-          currDisplayId: curr.displayId,
-          title: curr?.title || 'untitled',
-          stage: curr?.stage,
-          parentId: curr?.parentId?.slice(-4) ?? null,
-        });
-      }
-      prevTask = curr;
-    });
+    try {
+      let prevTask: Task | undefined;
+      effect(() => {
+        const curr = this.task();
+        if (prevTask?.displayId && prevTask.displayId !== '?' && curr?.displayId === '?') {
+          this.logger.warn('TextTaskCard', 'displayId changed from valid to "?"', {
+            taskId: curr?.id?.slice(-4) ?? 'unknown',
+            prevDisplayId: prevTask.displayId,
+            currDisplayId: curr.displayId,
+            title: curr?.title || 'untitled',
+            stage: curr?.stage,
+            parentId: curr?.parentId?.slice(-4) ?? null,
+          });
+        }
+        prevTask = curr;
+      });
+    } catch {
+      // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
+    }
   }
 
   get cardClasses() {

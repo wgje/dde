@@ -45,6 +45,7 @@ describe('SpeechToTextService', () => {
   };
 
   beforeEach(() => {
+    vi.useRealTimers();
     originalMediaDevices = navigator.mediaDevices;
 
     // 重置 signals
@@ -101,6 +102,9 @@ describe('SpeechToTextService', () => {
   });
 
   afterEach(() => {
+    if (typeof vi.isFakeTimers === 'function' && vi.isFakeTimers()) {
+      vi.useRealTimers();
+    }
     vi.restoreAllMocks();
     setMediaDevices(originalMediaDevices);
   });
@@ -218,8 +222,32 @@ describe('SpeechToTextService', () => {
 
   describe('processOfflineCache', () => {
     it('应该处理离线缓存', async () => {
-      const results = await service.processOfflineCache();
-      expect(Array.isArray(results)).toBe(true);
+      const request: {
+        result: unknown[];
+        onsuccess: (() => void) | null;
+        onerror: (() => void) | null;
+        error: unknown;
+      } = {
+        result: [],
+        onsuccess: null,
+        onerror: null,
+        error: null,
+      };
+      const store = {
+        getAll: vi.fn(() => request),
+      };
+      const tx = {
+        objectStore: vi.fn(() => store),
+      };
+      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
+        transaction: vi.fn(() => tx),
+      };
+
+      const processing = service.processOfflineCache();
+      request.onsuccess?.();
+
+      const results = await processing;
+      expect(results).toEqual([]);
     });
   });
 });

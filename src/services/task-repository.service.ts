@@ -615,7 +615,8 @@ export class TaskRepositoryService {
       target: row.target_id,
       title: row.title ?? undefined,
       description: row.description ?? undefined,
-      deletedAt: row.deleted_at ?? undefined
+      deletedAt: row.deleted_at ?? undefined,
+      updatedAt: row.updated_at ?? undefined
     };
   }
 }

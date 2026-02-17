@@ -130,7 +130,9 @@ export const blackBoxEntriesGroupedByDate = computed<BlackBoxDateGroup[]>(() => 
   const groups = new Map<string, BlackBoxEntry[]>();
   
   for (const entry of entries) {
-    if (!entry.isArchived) {
+    // 已归档和已完成的条目不显示在条目仓中
+    // 已完成条目会进入项目历史回顾
+    if (!entry.isArchived && !entry.isCompleted) {
       const existing = groups.get(entry.date) || [];
       existing.push(entry);
       groups.set(entry.date, existing);
@@ -187,7 +189,7 @@ export const pendingBlackBoxEntries = computed(() => {
  * 未读条目数量
  */
 export const unreadBlackBoxCount = computed(() => 
-  blackBoxEntries().filter(e => !e.isRead && !e.isArchived).length
+  blackBoxEntries().filter(e => !e.isRead && !e.isArchived && !e.isCompleted).length
 );
 
 /**

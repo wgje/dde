@@ -155,9 +155,9 @@ export const FIELD_SELECT_CONFIG = {
    * 【P0 修复】必须包含 content，否则同步时会丢失任务内容
    * 【P0-1 修复】必须包含 attachments，否则增量同步会清空附件列表
    */
-  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments',
+  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,created_at',
   /** 任务详情字段（包含 content 和 attachments） */
-  TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments',
+  TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,created_at',
   /** 任务完整字段（用于全量加载，替代 select('*')） */
   TASK_FULL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,created_at,project_id,priority,due_date,tags',
   /** 连接字段 */

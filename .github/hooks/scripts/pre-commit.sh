@@ -14,8 +14,8 @@ npm run lint
 echo "📝 Running TypeScript check..."
 npx tsc --noEmit
 
-# 3. Unit tests
-echo "🧪 Running unit tests..."
+# 3. Fast unit tests
+echo "🧪 Running fast unit tests..."
 npm run test:run
 
 echo "✅ All pre-commit checks passed!"

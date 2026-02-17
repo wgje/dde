@@ -326,19 +326,29 @@ export class TextTaskEditorComponent implements OnDestroy {
   constructor() {
     // Split-Brain 核心逻辑：仅在输入框非聚焦时从 Store 同步到本地
     // 这确保用户正在输入时，远程更新不会覆盖本地内容
-    effect(() => {
-      const task = this.task();
+    try {
+      effect(() => {
+        const task = this.task();
+        if (task) {
+          // 仅当标题输入框未聚焦时才同步标题
+          if (!this.isTitleFocused) {
+            this.localTitle.set(task.title || '');
+          }
+          // 仅当内容输入框未聚焦时才同步内容
+          if (!this.isContentFocused) {
+            this.localContent.set(task.content || '');
+          }
+        }
+      });
+    } catch {
+      // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
+      // 回退：直接初始化本地状态
+      const task = this.task?.();
       if (task) {
-        // 仅当标题输入框未聚焦时才同步标题
-        if (!this.isTitleFocused) {
-          this.localTitle.set(task.title || '');
-        }
-        // 仅当内容输入框未聚焦时才同步内容
-        if (!this.isContentFocused) {
-          this.localContent.set(task.content || '');
-        }
+        this.localTitle.set(task.title || '');
+        this.localContent.set(task.content || '');
       }
-    });
+    }
   }
 
   ngOnDestroy(): void {

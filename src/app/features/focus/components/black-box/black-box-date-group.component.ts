@@ -35,7 +35,6 @@ import { BlackBoxEntryComponent } from './black-box-entry.component';
           [appearance]="appearance"
           (markRead)="markRead.emit($event)"
           (markCompleted)="markCompleted.emit($event)"
-          (archive)="archive.emit($event)"
           (delete)="delete.emit($event)" />
       }
     </div>
@@ -48,7 +47,6 @@ export class BlackBoxDateGroupComponent {
   
   @Output() markRead = new EventEmitter<string>();
   @Output() markCompleted = new EventEmitter<string>();
-  @Output() archive = new EventEmitter<string>();
   @Output() delete = new EventEmitter<string>();
 
   dateLabelClass(): string {

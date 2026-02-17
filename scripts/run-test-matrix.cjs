@@ -114,6 +114,15 @@ const parsePathList = (value) => {
     .filter(Boolean);
 };
 
+const sanitizeFilePart = (value) => String(value)
+  .replace(/[^a-zA-Z0-9._-]+/g, '-')
+  .replace(/^-+|-+$/g, '');
+
+const toProjectPathOrAbsolute = (absolutePath) => {
+  const relative = toPosix(path.relative(projectRoot, absolutePath));
+  return relative.startsWith('..') ? absolutePath : relative;
+};
+
 function collectTestFiles(rootDir) {
   const files = [];
   const stack = [rootDir];
@@ -178,6 +187,7 @@ function parseArgs(argv) {
   let timingOut;
   let durationBaselinePath;
   const timingInputPaths = [];
+  let vitestJsonOutDir;
   let enableLpt = process.env.TEST_LPT_SCHEDULER === '1';
   let lptRequireFreshBaseline = parseBooleanOption(process.env.TEST_LPT_REQUIRE_FRESH_BASELINE);
   let baselineMaxAgeHours = parsePositiveNumber(process.env.TEST_BASELINE_MAX_AGE_HOURS);
@@ -300,6 +310,16 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg.startsWith('--vitest-json-out-dir=')) {
+      vitestJsonOutDir = arg.slice('--vitest-json-out-dir='.length).trim();
+      continue;
+    }
+    if (arg === '--vitest-json-out-dir') {
+      vitestJsonOutDir = String(argv[i + 1] ?? '').trim();
+      i += 1;
+      continue;
+    }
+
     if (arg.startsWith('--baseline=')) {
       durationBaselinePath = arg.slice('--baseline='.length);
       continue;
@@ -414,6 +434,10 @@ function parseArgs(argv) {
     timingInputPaths.push(...parsePathList(process.env.TEST_TIMING_IN));
   }
 
+  if (!vitestJsonOutDir && process.env.TEST_VITEST_JSON_OUT_DIR) {
+    vitestJsonOutDir = process.env.TEST_VITEST_JSON_OUT_DIR.trim();
+  }
+
   if (!durationBaselinePath) {
     durationBaselinePath = process.env.TEST_DURATION_BASELINE || DEFAULT_DURATION_BASELINE;
   }
@@ -454,6 +478,7 @@ function parseArgs(argv) {
     overridesPath,
     timingOut,
     timingInputPaths,
+    vitestJsonOutDir,
     durationBaselinePath,
     enableLpt,
     lptRequireFreshBaseline,
@@ -716,7 +741,18 @@ function isIsolateArg(arg) {
     || arg.startsWith('--no-isolate=');
 }
 
-function buildVitestArgs(laneName, files, passthrough, forceIsolate) {
+function buildVitestJsonReportPath(vitestJsonOutDir, task) {
+  if (!vitestJsonOutDir) return null;
+  const absoluteDir = path.isAbsolute(vitestJsonOutDir)
+    ? vitestJsonOutDir
+    : path.join(projectRoot, vitestJsonOutDir);
+  const safeLane = sanitizeFilePart(task.laneName) || 'lane';
+  const safeSegment = sanitizeFilePart(task.segmentName) || 'segment';
+  const safeOrder = String(task.order).padStart(2, '0');
+  return path.join(absoluteDir, `vitest-report-${safeLane}-${safeSegment}-${safeOrder}.json`);
+}
+
+function buildVitestArgs(laneName, files, passthrough, forceIsolate, vitestJsonReportPath) {
   const lane = laneConfig[laneName];
   const args = ['vitest', 'run', '--config', lane.config];
   const lanePassthrough = forceIsolate === undefined
@@ -735,6 +771,15 @@ function buildVitestArgs(laneName, files, passthrough, forceIsolate) {
   const hasMaxWorkers = hasOption(lanePassthrough, ['--maxWorkers']);
   if (!hasMaxWorkers) {
     args.push('--maxWorkers=1');
+  }
+
+  const hasReporter = hasOption(lanePassthrough, ['--reporter']);
+  if (vitestJsonReportPath) {
+    if (!hasReporter) {
+      args.push('--reporter=default');
+    }
+    args.push('--reporter=json');
+    args.push(`--outputFile=${vitestJsonReportPath}`);
   }
 
   if (lane.extraArgs) {
@@ -1142,6 +1187,7 @@ function markDependencyFailures(pendingTasks, completed, laneResults) {
       spawnOverheadMs: 0,
       status: 'skipped_dependency_failure',
       segmentOrder: task.segmentOrder,
+      vitestJsonReportPath: null,
     };
 
     completed.set(task.id, { exitCode: 1 });
@@ -1156,8 +1202,19 @@ async function runLaneTask(task, passthrough) {
   const taskLabel = `${task.laneName}/${task.segmentName}`;
   console.log(`[test:run] start ${taskLabel}: ${task.files.length} files`);
 
+  const vitestJsonReportPath = buildVitestJsonReportPath(task.vitestJsonOutDir, task);
+  if (vitestJsonReportPath) {
+    fs.mkdirSync(path.dirname(vitestJsonReportPath), { recursive: true });
+  }
+
   const startedAt = Date.now();
-  const args = buildVitestArgs(task.laneName, task.files, passthrough, task.forceIsolate);
+  const args = buildVitestArgs(
+    task.laneName,
+    task.files,
+    passthrough,
+    task.forceIsolate,
+    vitestJsonReportPath
+  );
   const result = await spawnVitest(args);
   const endedAt = Date.now();
 
@@ -1172,13 +1229,14 @@ async function runLaneTask(task, passthrough) {
     spawnOverheadMs: result.spawnOverheadMs,
     status: 'executed',
     segmentOrder: task.segmentOrder,
+    vitestJsonReportPath: vitestJsonReportPath ? toProjectPathOrAbsolute(vitestJsonReportPath) : null,
   };
 
   console.log(`[test:run] finish ${taskLabel}: exit=${segmentResult.exitCode} durationMs=${segmentResult.durationMs}`);
   return segmentResult;
 }
 
-async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enableLpt) {
+async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enableLpt, vitestJsonOutDir) {
   const pendingTasks = [...taskQueue];
   const completed = new Map();
   let active = 0;
@@ -1207,7 +1265,10 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
         pendingTasks.splice(index, 1);
         active += 1;
 
-        runLaneTask(task, passthrough)
+        runLaneTask({
+          ...task,
+          vitestJsonOutDir,
+        }, passthrough)
           .then((segmentResult) => {
             completed.set(task.id, { exitCode: segmentResult.exitCode });
             appendSegmentResult(laneResults, task.laneName, segmentResult);
@@ -1224,6 +1285,7 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
               spawnOverheadMs: 0,
               status: 'runner_error',
               segmentOrder: task.segmentOrder,
+              vitestJsonReportPath: null,
             };
             completed.set(task.id, { exitCode: 1 });
             appendSegmentResult(laneResults, task.laneName, failed);
@@ -1305,13 +1367,23 @@ async function main() {
   console.log(`[test:run] durationBaseline=${durationBaseline.path} loaded=${durationBaseline.exists} baselineAgeHours=${lptState.baselineAgeHours === null ? 'unknown' : lptState.baselineAgeHours.toFixed(2)}`);
   console.log(`[test:run] shardEstimatedWeightMs=${shardEstimatedWeightMs}`);
   console.log(`[test:run] timingIn loaded=${timingInputs.loadedPaths.length}/${options.timingInputPaths.length} includeQuarantine=${options.includeQuarantine}`);
+  if (options.vitestJsonOutDir) {
+    console.log(`[test:run] vitestJsonOutDir=${options.vitestJsonOutDir}`);
+  }
 
   if (tasks.length === 0) {
     console.log('[test:run] no tasks to execute.');
   }
 
   const startedAt = Date.now();
-  await runWithPool(tasks, laneResults, maxProcs, options.passthrough, lptState.lptEnabled);
+  await runWithPool(
+    tasks,
+    laneResults,
+    maxProcs,
+    options.passthrough,
+    lptState.lptEnabled,
+    options.vitestJsonOutDir
+  );
   const totalDurationMs = Date.now() - startedAt;
 
   const laneOutput = selectedLanes.map((laneName) => {
@@ -1354,6 +1426,7 @@ async function main() {
       ? null
       : Number(lptState.baselineAgeHours.toFixed(3)),
     includeQuarantine: options.includeQuarantine,
+    vitestJsonOutDir: options.vitestJsonOutDir ?? null,
     quarantine: {
       path: options.quarantinePath,
       loaded: quarantine.exists,

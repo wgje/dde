@@ -14,6 +14,7 @@ import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 // 初始化 Angular TestBed 环境（只初始化一次）
 // 在 threads pool 下，每个 worker 都会执行一次 setupFiles，因此需要避免重复 initTestEnvironment。
 const globalKey = '__vitest_angular_testbed_init__';
+const testBedResetSkipKey = '__vitest_skip_testbed_reset__';
 const g = globalThis as Record<string, unknown>;
 if (!g[globalKey]) {
   g[globalKey] = true;
@@ -58,6 +59,9 @@ const ensureAnimationFramePolyfill = () => {
 ensureAnimationFramePolyfill();
 
 afterEach(() => {
+  if (g[testBedResetSkipKey] === true) {
+    return;
+  }
   // 单 worker 全量运行时，强制回收 TestBed 状态，避免跨文件污染。
   try {
     TestBed.resetTestingModule();

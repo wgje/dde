@@ -4,6 +4,7 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { BlackBoxService } from '../../../../services/black-box.service';
 import { FocusPreferenceService } from '../../../../services/focus-preference.service';
+import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { Task } from '../../../../models';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
 import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
@@ -256,26 +257,27 @@ import { StrataViewComponent } from '../../focus/components/strata/strata-view.c
           </div>
         </div>
         
-        <!-- 4. 底部: 历史沉积 -->
-        <div class="shrink-0 bg-white dark:bg-stone-900 border-t border-stone-200 dark:border-stone-800 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-           <button class="w-full px-4 py-3 flex items-center justify-between hover:bg-stone-50 dark:hover:bg-stone-800 transition-colors"
+        <!-- 4. 底部: 沉积岩层历史回顾 -->
+        <div class="shrink-0 bg-stone-950/50 dark:bg-stone-950/80 border-t border-amber-500/10 dark:border-amber-400/10 shadow-[0_-4px_12px_-1px_rgba(244,192,37,0.06)]">
+           <button class="w-full px-4 py-3 flex items-center justify-between hover:bg-stone-900/40 dark:hover:bg-stone-900/60 transition-colors group"
                    (click)="toggleHistory()">
-              <span class="text-xs font-bold text-stone-700 dark:text-stone-300 flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <span class="text-xs font-bold text-stone-600 dark:text-stone-300 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-amber-500/60 group-hover:text-amber-400/80 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                 </svg>
-                项目历史回顾
+                <span class="tracking-wide">项目历史回顾</span>
+                <span class="text-[9px] font-mono text-amber-500/40 tracking-widest uppercase ml-1">Strata</span>
               </span>
               <span class="transform transition-transform duration-300" [class.rotate-180]="isHistoryExpanded()">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3 text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                 </svg>
               </span>
            </button>
            
            @if (isHistoryExpanded()) {
-             <div class="h-48 border-t border-dashed border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-900/50 animate-slide-in-bottom">
-               <app-strata-view class="block h-full w-full"></app-strata-view>
+             <div class="h-72 border-t border-stone-800/50 dark:border-stone-800/70 bg-stone-950/40 dark:bg-stone-950/60 animate-slide-in-bottom">
+               <app-strata-view class="block h-full w-full" [alwaysShow]="true" (restoreItem)="onRestoreFromHistory($event)"></app-strata-view>
              </div>
            }
         </div>
@@ -302,6 +304,7 @@ export class FlowPaletteComponent implements OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly blackBoxService = inject(BlackBoxService);
   readonly focusPrefs = inject(FocusPreferenceService);
+  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   readonly workbenchSectionRef = viewChild<ElementRef<HTMLElement>>('workbenchSection');
   readonly blackboxSectionRef = viewChild<ElementRef<HTMLElement>>('blackboxSection');
 
@@ -384,6 +387,23 @@ export class FlowPaletteComponent implements OnDestroy {
 
   toggleHistory() {
     this.isHistoryExpanded.set(!this.isHistoryExpanded());
+  }
+
+  /**
+   * 从沉积层历史中恢复条目
+   * - task → 状态设回 active，切换到任务列表并定位节点
+   * - black_box → 取消完成标记，切换到黑匣子 tab
+   */
+  onRestoreFromHistory(event: { id: string; type: 'task' | 'black_box' }): void {
+    if (event.type === 'task') {
+      this.taskOpsAdapter.updateTaskStatus(event.id, 'active');
+      this.setWorkbenchTab('unfinished');
+      this.centerOnNode.emit(event.id);
+    } else {
+      // black_box：取消完成，恢复为待处理
+      this.blackBoxService.update(event.id, { isCompleted: false });
+      this.setWorkbenchTab('blackbox');
+    }
   }
 
   setWorkbenchTab(tab: 'unfinished' | 'unassigned' | 'blackbox'): void {

@@ -75,23 +75,12 @@ import {
             </div>
           }
           
-          <!-- 剩余配额提示 -->
-          @if (speechService.remainingQuota() <= 10) {
-            <div class="px-2 py-1.5 bg-stone-100 dark:bg-stone-700 
-                        rounded-lg text-xs text-stone-500 dark:text-stone-400
-                        flex items-center gap-2">
-              <span>⚡</span>
-              <span>今日剩余 {{ speechService.remainingQuota() }} 次转写</span>
-            </div>
-          }
-          
           <!-- 条目列表（按日期分组） -->
           @for (group of entriesByDate(); track group.date) {
             <app-black-box-date-group 
               [group]="group"
               (markRead)="onMarkRead($event)"
               (markCompleted)="onMarkCompleted($event)"
-              (archive)="onArchive($event)"
               (delete)="onDeleteRequested($event)" />
           }
           
@@ -192,13 +181,6 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
     this.blackBoxService.markAsCompleted(id);
   }
   
-  /**
-   * 归档
-   */
-  onArchive(id: string): void {
-    this.blackBoxService.archive(id);
-  }
-
   /**
    * 请求删除
    */

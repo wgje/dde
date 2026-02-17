@@ -219,13 +219,9 @@ export class SpeechToTextService {
       
       this.logger.debug('SpeechToText', `Recording started with mimeType: ${mimeType}`);
       
-      // 设置最大录音时长限制
-      setTimeout(() => {
-        if (this.isRecording()) {
-          this.logger.warn('SpeechToText', 'Recording reached max duration, stopping');
-          this.stopRecording();
-        }
-      }, FOCUS_CONFIG.BLACK_BOX.MAX_RECORDING_DURATION * 1000);
+      // 个人使用，不设时长限制（MediaRecorder 自身无硬性时长上限）
+      // 注意：浏览器在极长录音时可能因内存问题自行中断
+      // 每 1000ms ondataavailable 已确保数据分片收集，不会因单次 Blob 过大而丢失
       
     } catch (err) {
       this.logger.error('SpeechToText', 'Failed to start recording', err instanceof Error ? err.message : String(err));
@@ -256,6 +252,25 @@ export class SpeechToTextService {
       this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
       isRecording.set(false);
     }
+  }
+  
+  /**
+   * 取消录音（丢弃所有数据，不转写）
+   * 用于用户手指/鼠标超出录音区域时的取消操作
+   */
+  cancelRecording(): void {
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      // 清除 onstop 回调，防止触发转写
+      this.mediaRecorder.onstop = null;
+      this.mediaRecorder.stop();
+      this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+    }
+    // 丢弃所有已收集的音频数据
+    this.audioChunks = [];
+    this.recordingStartTime = 0;
+    isRecording.set(false);
+    isTranscribing.set(false);
+    this.logger.debug('SpeechToText', 'Recording cancelled, all data discarded');
   }
   
   /**
@@ -424,9 +439,6 @@ export class SpeechToTextService {
     
     // ✅ 成功日志
     this.logger.info('SpeechToText', `Transcription successful: ${data.text?.length || 0} chars, duration=${data.duration}s`);
-    
-    // 更新剩余配额
-    remainingQuota.update(q => Math.max(0, q - 1));
     
     return data.text;
   }

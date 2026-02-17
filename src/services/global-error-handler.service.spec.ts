@@ -119,4 +119,79 @@ describe('GlobalErrorHandler', () => {
       window.location = originalLocation;
     }
   });
+
+  it('should detect Angular DI version skew error and trigger reload', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      // 模拟 SW 缓存不一致导致的 Angular DI 错误
+      const error = new TypeError("Cannot read properties of undefined (reading 'factory')");
+      // 模拟 Angular 框架堆栈
+      error.stack = `TypeError: Cannot read properties of undefined (reading 'factory')
+    at e0 (https://example.com/chunk-VLM5U4MR.js:7:114442)
+    at vn (https://example.com/chunk-J5YVUOYO.js:1:27525)
+    at executeTemplate (https://example.com/chunk-VLM5U4MR.js:7:45648)
+    at renderView (https://example.com/chunk-VLM5U4MR.js:7:48086)`;
+
+      service.handleError(error);
+
+      expect(reloadSpy).toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
+
+  it('should detect Angular DI onDestroy version skew error', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      const error = new TypeError("Cannot read properties of undefined (reading 'onDestroy')");
+      error.stack = `TypeError: Cannot read properties of undefined (reading 'onDestroy')
+    at e0 (https://example.com/chunk-ABC.js:7:114368)
+    at createEmbeddedView (https://example.com/chunk-XYZ.js:7:48701)`;
+
+      service.handleError(error);
+
+      expect(reloadSpy).toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
+
+  it('should NOT treat non-Angular TypeError as DI version skew', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      // 非 Angular DI 的普通 TypeError
+      const error = new TypeError("Cannot read properties of undefined (reading 'factory')");
+      error.stack = `TypeError: Cannot read properties of undefined (reading 'factory')
+    at myFunction (https://example.com/app.js:1:100)
+    at main (https://example.com/app.js:2:200)`;
+
+      service.handleError(error);
+
+      // 不应触发 reload，因为堆栈不匹配 Angular DI 模式
+      expect(reloadSpy).not.toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
 });

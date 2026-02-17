@@ -402,6 +402,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     this.spotlightTriggerLoadPromise = import('./app/features/focus/components/spotlight/spotlight-trigger.component')
       .then((module) => {
         const component = module.SpotlightTriggerComponent as Type<unknown>;
+        // 防御性校验：确保动态导入的组件是有效的构造函数
+        // 在 SW 缓存不一致时，导入可能成功但导出值为 undefined
+        if (typeof component !== 'function') {
+          this.logger.warn('SpotlightTriggerComponent 导入值无效（疑似 chunk 版本偏移）', { type: typeof component });
+          return null;
+        }
         this.spotlightTriggerComponent.set(component);
         return component;
       })
@@ -424,6 +430,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     this.blackBoxRecorderLoadPromise = import('./app/features/focus/components/black-box/black-box-recorder.component')
       .then((module) => {
         const component = module.BlackBoxRecorderComponent as Type<unknown>;
+        // 防御性校验：确保动态导入的组件是有效的构造函数
+        // 在 SW 缓存不一致时，导入可能成功但导出值为 undefined
+        if (typeof component !== 'function') {
+          this.logger.warn('BlackBoxRecorderComponent 导入值无效（疑似 chunk 版本偏移）', { type: typeof component });
+          return null;
+        }
         this.blackBoxRecorderComponent.set(component);
         return component;
       })

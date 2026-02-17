@@ -52,6 +52,8 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
           <div class="flex-1 min-h-0 overflow-hidden">
             @defer (when gestureService.hasOpenedTop() || gestureService.topPanelHeight() > collapsedThreshold) {
               <ng-content select="[slot=top]"></ng-content>
+            } @error {
+              <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
             }
           </div>
 
@@ -96,6 +98,8 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
           <div class="flex-1 min-h-0 overflow-hidden">
             @defer (when gestureService.hasOpenedBottom() || gestureService.bottomPanelHeight() > collapsedThreshold) {
               <ng-content select="[slot=bottom]"></ng-content>
+            } @error {
+              <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
             }
           </div>
         </div>

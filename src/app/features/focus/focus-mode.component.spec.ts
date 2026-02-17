@@ -36,7 +36,7 @@ describe('FocusModeComponent', () => {
     const injector = Injector.create({
       providers: [
         { provide: FocusModeComponent, useClass: FocusModeComponent },
-        { provide: GateService, useValue: { checkGate } },
+        { provide: GateService, useValue: { checkGate, devForceActive: () => false } },
         { provide: BlackBoxSyncService, useValue: { loadFromLocal, pullChanges } },
         {
           provide: LoggerService,

@@ -80,7 +80,11 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     this.ensureFocusAnimationStyleLoaded();
     this.logger.debug('FocusMode', '初始化');
 
-    if (FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
+    // [DEV] 开发强制模式下跳过 loadFromLocal + checkGate，防止覆盖模拟数据
+    if (this.gateService.devForceActive()) {
+      this.logger.debug('FocusMode', '[DEV] 开发强制模式，跳过初始化检查');
+      // 监听页面可见性仍然启用，但不做初始化拉取
+    } else if (FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
       void this.initializeLocalGateCheck();
     } else {
       this.scheduleLegacyInitialGateCheck();

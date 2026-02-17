@@ -78,16 +78,6 @@ import { BlackBoxEntry } from '../../../../../models';
             </button>
           }
 
-          <!-- 归档按钮 -->
-          <button
-            class="entry-action-btn text-stone-400 dark:text-stone-500"
-            [class.obsidian]="appearance() === 'obsidian'"
-            (click)="onArchive($event)"
-            title="归档"
-            aria-label="归档">
-            📁
-          </button>
-
           <!-- 删除按钮 -->
           <button
             class="entry-action-btn text-red-500 dark:text-red-400"
@@ -136,7 +126,6 @@ export class BlackBoxEntryComponent {
 
   markRead = output<string>();
   markCompleted = output<string>();
-  archive = output<string>();
   delete = output<string>();
 
   /**
@@ -152,9 +141,6 @@ export class BlackBoxEntryComponent {
     } else if (key === 'c') {
       event.preventDefault();
       this.onMarkCompleted(event);
-    } else if (key === 'a') {
-      event.preventDefault();
-      this.onArchive(event);
     }
   }
 
@@ -166,11 +152,6 @@ export class BlackBoxEntryComponent {
   onMarkCompleted(event: Event): void {
     event.stopPropagation();
     this.markCompleted.emit(this.entry().id);
-  }
-
-  onArchive(event: Event): void {
-    event.stopPropagation();
-    this.archive.emit(this.entry().id);
   }
 
   onDelete(event: Event): void {

@@ -37,8 +37,8 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
   };
 }
 
-/** 每用户每日转写限额 */
-const DAILY_QUOTA_PER_USER = 50
+/** 每用户每日转写限额 - 个人使用，不设限制 */
+const DAILY_QUOTA_PER_USER = 999999
 
 /** Groq API 端点 */
 const GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions'

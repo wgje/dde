@@ -38,12 +38,12 @@ export const FOCUS_CONFIG = {
   
   // 黑匣子配置
   BLACK_BOX: {
-    /** 录音最大时长（秒） */
-    MAX_RECORDING_DURATION: 120,
+    /** 录音最大时长（秒）- 个人使用，不设上限，设置为极大值 */
+    MAX_RECORDING_DURATION: 86400,
     /** 转写 API 超时（毫秒）- Groq 极快，通常 1-2 秒 */
     TRANSCRIBE_TIMEOUT: 10000,
     /** 条目每日显示上限 */
-    MAX_ENTRIES_PER_DAY: 50,
+    MAX_ENTRIES_PER_DAY: 999999,
   },
   
   // 语音转文字配置（Groq + whisper-large-v3）
@@ -60,8 +60,8 @@ export const FOCUS_CONFIG = {
       'audio/ogg;codecs=opus',
       'audio/wav'
     ] as const,
-    /** 每日配额限制 */
-    DAILY_QUOTA: 50,
+    /** 每日配额限制 - 个人使用，不设限制 */
+    DAILY_QUOTA: 999999,
     /** Edge Function 名称 */
     EDGE_FUNCTION_NAME: 'transcribe',
     /** 最大文件大小（字节）- Groq 限制 25MB */

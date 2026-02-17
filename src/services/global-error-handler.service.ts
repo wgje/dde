@@ -108,6 +108,9 @@ export class GlobalErrorHandler implements ErrorHandler {
     // Chunk 加载错误（动态导入失败，由重试机制处理）
     // 包括：ChunkLoadError, Failed to fetch chunk, Failed to fetch dynamically imported module
     { pattern: /ChunkLoadError|Failed to fetch.*chunk|Loading chunk.*failed|Failed to fetch dynamically imported module/i, severity: ErrorSeverity.SILENT },
+    // Angular DI 版本偏移（SW 缓存不一致），由 handleError 中拦截并触发页面刷新
+    // 这里做分类兜底，避免被其他 NOTIFY 规则误匹配
+    { pattern: /Cannot read properties of undefined \(reading '(?:factory|onDestroy)'\)/i, severity: ErrorSeverity.SILENT },
     
     // === 提示级错误 ===
     // UUID 格式错误
@@ -206,6 +209,13 @@ export class GlobalErrorHandler implements ErrorHandler {
     // 特殊处理：Chunk 加载失败（通常是版本更新导致），尝试刷新页面
     if (/ChunkLoadError|Failed to fetch.*chunk|Loading chunk.*failed|Failed to fetch dynamically imported module/i.test(errorMessage)) {
       this.handleChunkLoadError(errorMessage);
+      return;
+    }
+
+    // 特殊处理：Angular DI 版本偏移（SW 缓存不一致导致 tView.data 槽位为 undefined）
+    // 典型错误：Cannot read properties of undefined (reading 'factory'/'onDestroy')
+    if (this.isAngularDIVersionSkewError(errorMessage, error)) {
+      this.handleChunkLoadError(`[DI-version-skew] ${errorMessage}`);
       return;
     }
 
@@ -315,6 +325,23 @@ export class GlobalErrorHandler implements ErrorHandler {
       current.resolve('dismiss');
       this.recoverableError.set(null);
     }
+  }
+
+  /**
+   * 检测 Angular DI 版本偏移错误
+   * 当 SW 缓存导致不同版本的 chunk 混用时，Angular 的 tView.data 中
+   * provider 定义可能为 undefined，导致访问 .factory 或 .onDestroy 失败
+   */
+  private isAngularDIVersionSkewError(message: string, error: unknown): boolean {
+    // 必须是 TypeError 且涉及典型 DI 属性读取
+    if (!(error instanceof TypeError)) return false;
+    if (!/Cannot read properties of undefined \(reading '(?:factory|onDestroy|type|providers|viewProviders|ngMetadataName)'\)/i.test(message)) {
+      return false;
+    }
+    // 二次确认：堆栈应来自 Angular 框架内部 DI 链路
+    const stack = error.stack ?? '';
+    return /executeTemplate|getOrCreateInjectable|renderView|createEmbeddedView|refreshView/i.test(stack)
+      || /\be0\b.*chunk-.*\.js/.test(stack);
   }
 
   /**

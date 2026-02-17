@@ -263,7 +263,7 @@ interface NetworkInformationLike {
                style="background-color: var(--theme-border);">
             <!-- 居中非实心箭头按钮 -->
             <button (click)="expandTextColumnToMin()"
-                    class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-8 flex items-center justify-center rounded-r-md
+                    class="absolute top-1/3 -translate-y-1/2 -right-3 w-6 h-8 flex items-center justify-center rounded-r-md
                            bg-white dark:bg-stone-800 border border-l-0 border-stone-200 dark:border-stone-700
                            hover:bg-stone-50 dark:hover:bg-stone-700 hover:border-stone-300 dark:hover:border-stone-600
                            shadow-sm cursor-pointer transition-colors z-30"

@@ -57,7 +57,9 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     disablePollutionGuard();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
     mockUiState = {
       markEditing: vi.fn(),
       isMobile: signal(false),
@@ -73,7 +75,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         name: 'Test Project',
         description: '',
         tasks: [],
-        connections: []
+        connections: [],
       }),
       getTask: vi.fn((taskId: string) => {
         const proj = mockProjectState.activeProject();
@@ -89,7 +91,6 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       lockTaskField: vi.fn(),
       unlockTaskField: vi.fn(),
     };
-    // Add static property needed by FlowTaskDetailFormService
     (mockChangeTracker as any).constructor = { TEXT_INPUT_LOCK_TIMEOUT_MS: 3600000 };
 
     const mockLoggerService = {
@@ -103,7 +104,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
 
     ensureAnimationFramePolyfill();
 
-    await TestBed.configureTestingModule({
+    TestBed.configureTestingModule({
       imports: [FlowTaskDetailComponent],
       providers: [
         { provide: UiStateService, useValue: mockUiState },
@@ -112,13 +113,18 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
-    }).compileComponents();
+    });
+
+    mockProjectState.activeProject.set({
+      id: 'project-1',
+      name: 'Test Project',
+      description: '',
+      tasks: [],
+      connections: [],
+    });
+
     fixture = TestBed.createComponent(FlowTaskDetailComponent);
     component = fixture.componentInstance;
-  });
-
-  afterAll(() => {
-    enablePollutionGuard();
   });
 
   afterEach(() => {
@@ -137,6 +143,10 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     } catch {
       // noop
     }
+  });
+
+  afterAll(() => {
+    enablePollutionGuard();
   });
 
   describe('任务切换时的状态重置', () => {

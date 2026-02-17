@@ -116,6 +116,24 @@ export interface Database {
         Insert: AppConfigInsert;
         Update: AppConfigUpdate;
       };
+      /** 备份元数据表 */
+      backup_metadata: {
+        Row: BackupMetadataRow;
+        Insert: BackupMetadataInsert;
+        Update: BackupMetadataUpdate;
+      };
+      /** 备份恢复历史表 */
+      backup_restore_history: {
+        Row: BackupRestoreHistoryRow;
+        Insert: BackupRestoreHistoryInsert;
+        Update: BackupRestoreHistoryUpdate;
+      };
+      /** 备份加密密钥表 */
+      backup_encryption_keys: {
+        Row: BackupEncryptionKeyRow;
+        Insert: BackupEncryptionKeyInsert;
+        Update: BackupEncryptionKeyUpdate;
+      };
     };
     Views: {
       /** 活跃任务视图（排除软删除） */
@@ -462,6 +480,16 @@ export interface UserPreferencesRow {
   theme: string | null;
   layout_direction: string | null;
   floating_window_pref: string | null;
+  /** 颜色模式：light/dark/system */
+  color_mode: string | null;
+  /** 自动解决冲突开关 */
+  auto_resolve_conflicts: boolean | null;
+  /** 本地自动备份开关 */
+  local_backup_enabled: boolean | null;
+  /** 本地自动备份间隔（毫秒） */
+  local_backup_interval_ms: number | null;
+  /** 专注模式偏好（JSONB） */
+  focus_preferences: Json | null;
   created_at: string;
   updated_at: string;
 }
@@ -473,6 +501,11 @@ export interface UserPreferencesInsert {
   theme?: string | null;
   layout_direction?: string | null;
   floating_window_pref?: string | null;
+  color_mode?: string | null;
+  auto_resolve_conflicts?: boolean | null;
+  local_backup_enabled?: boolean | null;
+  local_backup_interval_ms?: number | null;
+  focus_preferences?: Json | null;
 }
 
 /** 用户偏好设置更新数据 */
@@ -480,6 +513,11 @@ export interface UserPreferencesUpdate {
   theme?: string | null;
   layout_direction?: string | null;
   floating_window_pref?: string | null;
+  color_mode?: string | null;
+  auto_resolve_conflicts?: boolean | null;
+  local_backup_enabled?: boolean | null;
+  local_backup_interval_ms?: number | null;
+  focus_preferences?: Json | null;
 }
 
 // ============================================
@@ -831,4 +869,186 @@ export interface AppConfigUpdate {
 export interface PurgeResult {
   purged_count: number | null;
   attachment_paths: string[] | null;
+}
+
+// ============================================
+// 备份元数据表 (backup_metadata)
+// ============================================
+
+/** 备份类型 */
+export type BackupTypeDb = 'full' | 'incremental';
+
+/** 备份状态 */
+export type BackupStatusDb = 'pending' | 'in_progress' | 'completed' | 'failed' | 'expired';
+
+/** 保留策略级别 */
+export type RetentionTierDb = 'hourly' | 'daily' | 'weekly' | 'monthly';
+
+/** 备份元数据行数据 */
+export interface BackupMetadataRow {
+  id: string;
+  type: BackupTypeDb;
+  path: string;
+  user_id: string | null;
+  project_count: number;
+  task_count: number;
+  connection_count: number;
+  attachment_count: number;
+  user_preferences_count: number;
+  black_box_entry_count: number;
+  project_member_count: number;
+  size_bytes: number;
+  compressed: boolean;
+  encrypted: boolean;
+  checksum: string;
+  checksum_algorithm: string;
+  encryption_algorithm: string | null;
+  encryption_key_id: string | null;
+  validation_passed: boolean;
+  validation_warnings: Json | null;
+  backup_started_at: string;
+  backup_completed_at: string | null;
+  base_backup_id: string | null;
+  incremental_since: string | null;
+  expires_at: string | null;
+  retention_tier: RetentionTierDb | null;
+  status: BackupStatusDb;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 备份元数据插入数据 */
+export interface BackupMetadataInsert {
+  id?: string;
+  type: BackupTypeDb;
+  path: string;
+  user_id?: string | null;
+  project_count?: number;
+  task_count?: number;
+  connection_count?: number;
+  attachment_count?: number;
+  user_preferences_count?: number;
+  black_box_entry_count?: number;
+  project_member_count?: number;
+  size_bytes?: number;
+  compressed?: boolean;
+  encrypted?: boolean;
+  checksum: string;
+  checksum_algorithm?: string;
+  encryption_algorithm?: string | null;
+  encryption_key_id?: string | null;
+  validation_passed?: boolean;
+  validation_warnings?: Json | null;
+  backup_started_at?: string;
+  base_backup_id?: string | null;
+  incremental_since?: string | null;
+  expires_at?: string | null;
+  retention_tier?: RetentionTierDb | null;
+  status?: BackupStatusDb;
+  error_message?: string | null;
+}
+
+/** 备份元数据更新数据 */
+export interface BackupMetadataUpdate {
+  status?: BackupStatusDb;
+  backup_completed_at?: string | null;
+  error_message?: string | null;
+  size_bytes?: number;
+  validation_passed?: boolean;
+  validation_warnings?: Json | null;
+  expires_at?: string | null;
+  retention_tier?: RetentionTierDb | null;
+}
+
+// ============================================
+// 备份恢复历史表 (backup_restore_history)
+// ============================================
+
+/** 恢复模式 */
+export type RestoreModeDb = 'replace' | 'merge';
+
+/** 恢复范围 */
+export type RestoreScopeDb = 'all' | 'project';
+
+/** 恢复状态 */
+export type RestoreStatusDb = 'pending' | 'in_progress' | 'completed' | 'failed' | 'rolled_back';
+
+/** 备份恢复历史行数据 */
+export interface BackupRestoreHistoryRow {
+  id: string;
+  backup_id: string;
+  user_id: string;
+  mode: RestoreModeDb;
+  scope: RestoreScopeDb;
+  project_id: string | null;
+  pre_restore_snapshot_id: string | null;
+  projects_restored: number;
+  tasks_restored: number;
+  connections_restored: number;
+  status: RestoreStatusDb;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
+}
+
+/** 备份恢复历史插入数据 */
+export interface BackupRestoreHistoryInsert {
+  id?: string;
+  backup_id: string;
+  user_id: string;
+  mode: RestoreModeDb;
+  scope: RestoreScopeDb;
+  project_id?: string | null;
+  pre_restore_snapshot_id?: string | null;
+  projects_restored?: number;
+  tasks_restored?: number;
+  connections_restored?: number;
+  status?: RestoreStatusDb;
+  error_message?: string | null;
+}
+
+/** 备份恢复历史更新数据 */
+export interface BackupRestoreHistoryUpdate {
+  status?: RestoreStatusDb;
+  error_message?: string | null;
+  completed_at?: string | null;
+  projects_restored?: number;
+  tasks_restored?: number;
+  connections_restored?: number;
+}
+
+// ============================================
+// 备份加密密钥表 (backup_encryption_keys)
+// ============================================
+
+/** 密钥状态 */
+export type EncryptionKeyStatusDb = 'active' | 'deprecated' | 'retired';
+
+/** 备份加密密钥行数据 */
+export interface BackupEncryptionKeyRow {
+  id: string;
+  status: EncryptionKeyStatusDb;
+  created_at: string;
+  deprecated_at: string | null;
+  retired_at: string | null;
+  algorithm: string;
+  notes: string | null;
+}
+
+/** 备份加密密钥插入数据 */
+export interface BackupEncryptionKeyInsert {
+  id: string;
+  status?: EncryptionKeyStatusDb;
+  algorithm?: string;
+  notes?: string | null;
+}
+
+/** 备份加密密钥更新数据 */
+export interface BackupEncryptionKeyUpdate {
+  status?: EncryptionKeyStatusDb;
+  deprecated_at?: string | null;
+  retired_at?: string | null;
+  notes?: string | null;
 }

@@ -183,16 +183,17 @@ export class BlackBoxService {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
     }
     
+    const now = new Date().toISOString();
     const deleted: BlackBoxEntry = {
       ...entry,
-      deletedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      deletedAt: now,
+      updatedAt: now
     };
     
-    // 更新状态
-    updateBlackBoxEntry(deleted);
+    // 使用 deleteBlackBoxEntry 确保同时清理日期索引
+    _deleteFromStore(id);
     
-    // 同步删除
+    // 同步删除操作到服务器
     this.syncService.scheduleSync(deleted);
     
     return success(undefined);

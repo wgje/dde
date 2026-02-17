@@ -68,6 +68,13 @@ export class GateService {
   readonly showCompletionMessage = signal<boolean>(false);
   
   /**
+   * [DEV] 开发模式强制显示标志
+   * 为 true 时，FocusModeComponent 跳过 loadFromLocal + checkGate，
+   * 防止模拟数据被 IndexedDB 空数据覆盖
+   */
+  readonly devForceActive = signal<boolean>(false);
+  
+  /**
    * 大门是否激活（正在审查条目）
    */
   readonly isActive = isGateActive;
@@ -179,6 +186,9 @@ export class GateService {
    * 在应用启动时调用
    */
   checkGate(): void {
+    // 正常 checkGate 调用时清除开发强制标志
+    this.devForceActive.set(false);
+    
     const preferences = focusPreferences();
     
     // 检查用户是否禁用了大门
@@ -367,6 +377,7 @@ export class GateService {
    * 注意：这不会标记条目为已处理
    */
   forceBypass(): void {
+    this.devForceActive.set(false);
     gateState.set('bypassed');
     localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
     this.logger.warn('Gate', 'Gate force bypassed');
@@ -376,6 +387,7 @@ export class GateService {
    * 重置大门状态（用于测试或用户重新触发）
    */
   reset(): void {
+    this.devForceActive.set(false);
     resetGateState();
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
     this.logger.debug('Gate', 'Gate state reset');
@@ -416,6 +428,9 @@ export class GateService {
    * 创建模拟的待处理条目并激活大门
    */
   devForceShowGate(): void {
+    // 标记开发强制模式，防止 FocusModeComponent 重新检查时覆盖模拟数据
+    this.devForceActive.set(true);
+    
     // 清除今日检查记录
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
     

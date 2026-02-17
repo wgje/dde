@@ -826,7 +826,12 @@ export class ProjectDataService {
       updatedAt: row.updated_at,
       displayId: '',
       shortId: row.short_id || undefined,
-      deletedAt: row.deleted_at || undefined
+      deletedAt: row.deleted_at || undefined,
+      // 【修复】同步层必须映射所有持久化字段，防止增量同步覆盖丢失
+      attachments: (row.attachments as unknown as import('../../../../models').Attachment[]) ?? [],
+      tags: (row.tags as unknown as string[]) ?? [],
+      priority: (row.priority as 'low' | 'medium' | 'high' | 'urgent') ?? undefined,
+      dueDate: row.due_date ?? undefined
     };
   }
   

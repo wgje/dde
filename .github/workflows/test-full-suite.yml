@@ -37,7 +37,7 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p test-results
-          npm run test:run:ci -- --shard=${{ matrix.shard }}/4 --timing-out=test-results/vitest-shard-${{ matrix.shard }}.json | tee test-results/vitest-shard-${{ matrix.shard }}.log
+          npm run test:run:ci -- --shard=${{ matrix.shard }}/4 --timing-out=test-results/vitest-shard-${{ matrix.shard }}.json --vitest-json-out-dir=test-results/vitest-reports/shard-${{ matrix.shard }} | tee test-results/vitest-shard-${{ matrix.shard }}.log
 
       - name: Upload Shard Timing Artifact
         if: always()
@@ -47,6 +47,7 @@ jobs:
           path: |
             test-results/vitest-shard-${{ matrix.shard }}.json
             test-results/vitest-shard-${{ matrix.shard }}.log
+            test-results/vitest-reports/shard-${{ matrix.shard }}/
           if-no-files-found: warn
 
   shard-balance-gate:
