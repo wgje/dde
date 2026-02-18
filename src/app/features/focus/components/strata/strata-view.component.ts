@@ -57,7 +57,7 @@ import { StrataLayerComponent, StrataRestoreEvent } from './strata-layer.compone
                   <div class="absolute right-0 top-[9px]"
                        [class]="strataService.isMajorTick(layer.date) ? 'w-2 h-px bg-amber-600/35' : 'w-1 h-px bg-amber-700/20'">
                   </div>
-                  <span class="text-[10px] font-mono leading-none mt-[5px] mr-0.5 select-none whitespace-nowrap"
+                  <span class="text-[10px] font-mono leading-none mt-[5px] mr-1.5 select-none whitespace-nowrap"
                         [class]="strataService.isMajorTick(layer.date) ? 'text-amber-500/50' : 'text-stone-600/40'">
                     {{ strataService.getDepthLabel(layer.date) }}
                   </span>

@@ -220,11 +220,12 @@ describe('StrataService', () => {
   });
 
   describe('getLayerLabel', () => {
-    it('今天应该返回今日', () => {
+    it('今天应该返回具体日期（如 2月18日）', () => {
       const today = new Date().toISOString().split('T')[0];
       const label = service.getLayerLabel(today);
-
-      expect(label).toBe('今日');
+      const d = new Date(today);
+      const expected = `${d.getMonth() + 1}月${d.getDate()}日`;
+      expect(label).toBe(expected);
     });
 
     it('其他日期应该返回格式化日期', () => {

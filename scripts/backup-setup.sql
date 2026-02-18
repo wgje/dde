@@ -67,11 +67,13 @@ CREATE TABLE IF NOT EXISTS backup_metadata (
 );
 
 -- 索引
-CREATE INDEX idx_backup_metadata_type ON backup_metadata(type);
-CREATE INDEX idx_backup_metadata_status ON backup_metadata(status);
-CREATE INDEX idx_backup_metadata_created_at ON backup_metadata(created_at DESC);
-CREATE INDEX idx_backup_metadata_expires_at ON backup_metadata(expires_at) WHERE expires_at IS NOT NULL;
-CREATE INDEX idx_backup_metadata_user_id ON backup_metadata(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_type ON backup_metadata(type);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_status ON backup_metadata(status);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_created_at ON backup_metadata(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires_at ON backup_metadata(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_id ON backup_metadata(user_id) WHERE user_id IS NOT NULL;
+-- base_backup_id FK 索引（避免全表扫描）
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id ON backup_metadata(base_backup_id) WHERE base_backup_id IS NOT NULL;
 
 -- 更新触发器
 CREATE OR REPLACE FUNCTION update_backup_metadata_updated_at()
@@ -124,9 +126,11 @@ CREATE TABLE IF NOT EXISTS backup_restore_history (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_backup_restore_history_user_id ON backup_restore_history(user_id);
-CREATE INDEX idx_backup_restore_history_backup_id ON backup_restore_history(backup_id);
-CREATE INDEX idx_backup_restore_history_created_at ON backup_restore_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id ON backup_restore_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_id ON backup_restore_history(backup_id);
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_created_at ON backup_restore_history(created_at DESC);
+-- pre_restore_snapshot_id FK 索引（避免全表扫描）
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id ON backup_restore_history(pre_restore_snapshot_id) WHERE pre_restore_snapshot_id IS NOT NULL;
 
 -- ===========================================
 -- 3. 创建加密密钥元数据表（用于密钥轮换）
@@ -159,36 +163,40 @@ ALTER TABLE backup_metadata ENABLE ROW LEVEL SECURITY;
 ALTER TABLE backup_restore_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE backup_encryption_keys ENABLE ROW LEVEL SECURITY;
 
--- backup_metadata: 仅 service_role 可访问
--- 普通用户通过 Edge Function 间接访问
+-- backup_metadata: service_role 天然绕过 RLS，无需策略
+-- 使用 (SELECT auth.uid()) 子查询避免 initplan 逐行重评估（性能优化）
 
--- 管理员/Service Role 可以访问所有备份元数据
-CREATE POLICY backup_metadata_service_role_all ON backup_metadata
-  FOR ALL
-  USING (auth.jwt()->>'role' = 'service_role')
-  WITH CHECK (auth.jwt()->>'role' = 'service_role');
-
--- 用户可以查看自己的备份（如果有用户级备份）
+-- 用户可以查看自己的备份
 CREATE POLICY backup_metadata_user_select ON backup_metadata
-  FOR SELECT
-  USING (user_id = auth.uid());
+  FOR SELECT TO authenticated
+  USING (user_id = (SELECT auth.uid()));
+
+-- 用户可以创建自己的备份
+CREATE POLICY backup_metadata_user_insert ON backup_metadata
+  FOR INSERT TO authenticated
+  WITH CHECK (user_id = (SELECT auth.uid()));
+
+-- 用户可以更新自己的备份
+CREATE POLICY backup_metadata_user_update ON backup_metadata
+  FOR UPDATE TO authenticated
+  USING (user_id = (SELECT auth.uid()));
 
 -- backup_restore_history: 用户可以查看自己的恢复历史
 CREATE POLICY backup_restore_history_user_select ON backup_restore_history
-  FOR SELECT
-  USING (user_id = auth.uid());
+  FOR SELECT TO authenticated
+  USING (user_id = (SELECT auth.uid()));
 
--- backup_restore_history: Service Role 可以管理所有恢复历史
-CREATE POLICY backup_restore_history_service_role_all ON backup_restore_history
-  FOR ALL
-  USING (auth.jwt()->>'role' = 'service_role')
-  WITH CHECK (auth.jwt()->>'role' = 'service_role');
+-- backup_restore_history: 用户可以创建恢复记录
+CREATE POLICY backup_restore_history_user_insert ON backup_restore_history
+  FOR INSERT TO authenticated
+  WITH CHECK (user_id = (SELECT auth.uid()));
 
--- backup_encryption_keys: 仅 service_role 可访问
-CREATE POLICY backup_encryption_keys_service_role_all ON backup_encryption_keys
-  FOR ALL
-  USING (auth.jwt()->>'role' = 'service_role')
-  WITH CHECK (auth.jwt()->>'role' = 'service_role');
+-- backup_restore_history: 用户可以更新恢复记录
+CREATE POLICY backup_restore_history_user_update ON backup_restore_history
+  FOR UPDATE TO authenticated
+  USING (user_id = (SELECT auth.uid()));
+
+-- backup_encryption_keys: 无 RLS 策略（仅 service_role 访问，天然绕过 RLS）
 
 -- ===========================================
 -- 5. 创建备份存储 bucket

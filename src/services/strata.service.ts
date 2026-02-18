@@ -239,13 +239,11 @@ export class StrataService {
     const today = this.getLocalDaysAgo(0);
     const yesterday = this.getLocalDaysAgo(1);
     
-    if (date === today) return '今日';
-    if (date === yesterday) return '昨日';
-    
-    // 格式化日期
+    // 今日显示具体日期（如 2月18日），昨日保留"昨日"标签
     const d = new Date(date);
     const month = d.getMonth() + 1;
     const day = d.getDate();
+    if (date === yesterday) return '昨日';
     return `${month}月${day}日`;
   }
 
