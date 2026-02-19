@@ -236,7 +236,6 @@ export class StrataService {
    * 获取层的显示标签
    */
   getLayerLabel(date: string): string {
-    const today = this.getLocalDaysAgo(0);
     const yesterday = this.getLocalDaysAgo(1);
     
     // 今日显示具体日期（如 2月18日），昨日保留"昨日"标签

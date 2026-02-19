@@ -4,6 +4,10 @@ import path from 'node:path';
 const outDir = path.resolve(process.cwd(), 'test-results', 'perf');
 const outPath = path.join(outDir, 'current-metrics.json');
 
+export function initPerfMetrics(initialMetrics: Record<string, number> = {}): void {
+  mergePerfMetrics(initialMetrics);
+}
+
 export function mergePerfMetrics(metrics: Record<string, number>): void {
   mkdirSync(outDir, { recursive: true });
 

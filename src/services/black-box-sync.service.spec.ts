@@ -4,11 +4,13 @@ import { BlackBoxSyncService } from './black-box-sync.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 
 describe('BlackBoxSyncService', () => {
   let service: BlackBoxSyncService;
   let initDbSpy: ReturnType<typeof vi.spyOn>;
   let setupNetworkSpy: ReturnType<typeof vi.spyOn>;
+  let mockSentry: { addBreadcrumb: ReturnType<typeof vi.fn>; captureMessage: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     initDbSpy = vi.spyOn(
@@ -19,6 +21,11 @@ describe('BlackBoxSyncService', () => {
       BlackBoxSyncService.prototype as unknown as { setupNetworkListener: () => void },
       'setupNetworkListener'
     ).mockImplementation(() => {});
+
+    mockSentry = {
+      addBreadcrumb: vi.fn(),
+      captureMessage: vi.fn(),
+    };
 
     TestBed.configureTestingModule({
       providers: [
@@ -46,6 +53,10 @@ describe('BlackBoxSyncService', () => {
               error: vi.fn(),
             })),
           },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: mockSentry,
         },
       ],
     });
@@ -98,5 +109,31 @@ describe('BlackBoxSyncService', () => {
 
     resolvePull?.();
     await Promise.all([p1, p2]);
+  });
+
+  it('should block duplicate pull by freshness window and report to Sentry', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(undefined);
+
+    // 首次拉取成功
+    await service.pullChanges({ reason: 'manual', force: true });
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+
+    // 窗口内第二次调用应被阻断
+    await service.pullChanges({ reason: 'manual' });
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+
+    // 验证结构化 Sentry 上报
+    expect(mockSentry.captureMessage).toHaveBeenCalledWith(
+      'BlackBox duplicate pull blocked',
+      expect.objectContaining({
+        level: 'info',
+        tags: expect.objectContaining({
+          classification: 'duplicate_blocked',
+        }),
+      })
+    );
   });
 });

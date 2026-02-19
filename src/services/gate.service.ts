@@ -1,6 +1,6 @@
 /**
  * 大门服务
- * 
+ *
  * 负责大门机制的状态管理和交互逻辑
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
@@ -10,7 +10,6 @@ import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { BlackBoxService } from './black-box.service';
-import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
 import {
   gateState,
@@ -41,17 +40,23 @@ const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
 const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
 
 /** 动画超时时间（毫秒）- 防止动画卡死导致按钮永久禁用 */
-const ANIMATION_TIMEOUT_MS = 1000;
+const ANIMATION_TIMEOUT_MS = 1200;
+
+export type GateMotionState =
+  | 'idle'
+  | 'entering'
+  | 'heave_read'
+  | 'heavy_drop'
+  | 'settling';
 
 @Injectable({
   providedIn: 'root'
 })
 export class GateService {
-  private blackBoxService = inject(BlackBoxService);
-  private preferenceService = inject(PreferenceService);
-  private logger = inject(LoggerService);
-  private ngZone = inject(NgZone);
-  
+  private readonly blackBoxService = inject(BlackBoxService);
+  private readonly logger = inject(LoggerService);
+  private readonly ngZone = inject(NgZone);
+
   // 暴露状态给组件
   readonly state = gateState;
   readonly pendingItems = gatePendingItems;
@@ -60,318 +65,308 @@ export class GateService {
   readonly currentEntry = gateCurrentEntry;
   readonly progress = gateProgress;
   readonly canSnooze = canSnooze;
-  
-  // 卡片动画状态：entering=首次入场, sinking=下沉, emerging=浮现, idle=静止
-  readonly cardAnimation = signal<'idle' | 'entering' | 'sinking' | 'emerging'>('idle');
-  
+
+  /** 门体动效状态 */
+  readonly cardAnimation = signal<GateMotionState>('idle');
+
+  /** 完成落地冲击节拍（用于触发 Overlay 震动） */
+  readonly impactTick = signal(0);
+
   // 是否显示完成提示
   readonly showCompletionMessage = signal<boolean>(false);
-  
+
   /**
    * [DEV] 开发模式强制显示标志
    * 为 true 时，FocusModeComponent 跳过 loadFromLocal + checkGate，
    * 防止模拟数据被 IndexedDB 空数据覆盖
    */
   readonly devForceActive = signal<boolean>(false);
-  
+
   /**
    * 大门是否激活（正在审查条目）
    */
   readonly isActive = isGateActive;
-  
+
   /** 动画超时定时器 - 用于防止动画卡死 */
   private animationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  
+
+  /** 当前动作动画（用于防止 timeout + animationend 双触发） */
+  private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
+
   /**
    * 检测用户是否启用了减少动画（prefers-reduced-motion）
    * 使用响应式 signal 支持运行时变化
-   * 
-   * 【Bug Fix】之前是一个只读属性，在构造时检测一次
-   * 现在改为 signal 并监听 matchMedia 变化事件
    */
   private readonly prefersReducedMotionSignal = signal<boolean>(
-    typeof window !== 'undefined' && 
+    typeof window !== 'undefined' &&
     window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   );
-  
-  /**
-   * 向后兼容的只读访问器
-   */
+
+  /** 向后兼容的只读访问器 */
   private get prefersReducedMotion(): boolean {
     return this.prefersReducedMotionSignal();
   }
-  
+
   constructor() {
     this.setupReducedMotionListener();
   }
-  
+
   /**
    * 监听 prefers-reduced-motion 变化
    * 当用户在运行时切换减少动画偏好时，立即响应
    */
   private setupReducedMotionListener(): void {
     if (typeof window === 'undefined') return;
-    
+
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    
-    // 监听变化
+
     mediaQuery.addEventListener('change', (e) => {
       this.prefersReducedMotionSignal.set(e.matches);
       this.logger.debug('Gate', `prefers-reduced-motion changed to: ${e.matches}`);
-      
-      // 如果当前在动画状态且启用了减少动画，立即切换到 idle
+
       if (e.matches && this.cardAnimation() !== 'idle') {
         this.logger.info('Gate', 'Reduced motion enabled, forcing idle state');
         this.cardAnimation.set('idle');
+        this.actionInFlight = null;
         this.clearAnimationTimeout();
       }
     });
   }
-  
+
   /**
    * 设置动画状态并启动超时保护
-   * 
-   * 【Bug Fix】防止动画因任何原因（如 CSS 被禁用、事件未触发）卡死
-   * 超时后自动恢复到 idle 状态，确保按钮可点击
-   * 
-   * 【Bug Fix】使用 NgZone.run() 包装超时回调，确保在 Angular 区域内执行，
-   * 正确触发 OnPush 组件的变更检测
    */
   private setCardAnimationWithTimeout(
-    state: 'idle' | 'entering' | 'sinking' | 'emerging'
+    state: GateMotionState,
+    onTimeout?: () => void
   ): void {
-    // 清除之前的超时
     this.clearAnimationTimeout();
-    
-    // 如果用户启用了减少动画，直接设置 idle
+
     if (state !== 'idle' && this.prefersReducedMotion) {
       this.cardAnimation.set('idle');
       this.logger.debug('Gate', `Reduced motion: skipping animation state '${state}'`);
+      onTimeout?.();
       return;
     }
-    
+
     this.cardAnimation.set(state);
-    
-    // 非 idle 状态设置超时保护
+
     if (state !== 'idle') {
       this.animationTimeoutId = setTimeout(() => {
-        // 使用 NgZone.run() 确保在 Angular 区域内执行，正确触发变更检测
         this.ngZone.run(() => {
-          if (this.cardAnimation() === state) {
-            this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
-            this.cardAnimation.set('idle');
-            
-            // 如果是 sinking 状态超时，需要完成状态切换
-            if (state === 'sinking') {
-              this.onSinkingComplete();
-            }
-          }
+          if (this.cardAnimation() !== state) return;
+
+          this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
+          this.cardAnimation.set('idle');
+          onTimeout?.();
         });
       }, ANIMATION_TIMEOUT_MS);
     }
   }
-  
-  /**
-   * 清除动画超时定时器
-   */
+
+  /** 清除动画超时定时器 */
   private clearAnimationTimeout(): void {
-    if (this.animationTimeoutId) {
-      clearTimeout(this.animationTimeoutId);
-      this.animationTimeoutId = null;
-    }
+    if (!this.animationTimeoutId) return;
+    clearTimeout(this.animationTimeoutId);
+    this.animationTimeoutId = null;
   }
-  
+
   /**
    * 检查是否需要显示大门
    * 在应用启动时调用
    */
   checkGate(): void {
-    // 正常 checkGate 调用时清除开发强制标志
     this.devForceActive.set(false);
-    
+    this.showCompletionMessage.set(false);
+    this.actionInFlight = null;
+
     const preferences = focusPreferences();
-    
-    // 检查用户是否禁用了大门
+
     if (!preferences.gateEnabled) {
       gateState.set('disabled');
       this.logger.debug('Gate', 'Gate disabled by user preference');
       return;
     }
-    
-    // 重置每日跳过次数
+
     this.resetDailySnoozeCount();
-    
-    // 获取待处理条目（未读 + 未完成 + 未归档 + 未删除 + snoozeUntil 未到期）
+
     const pending = pendingBlackBoxEntries();
-    
+
     if (pending.length > 0) {
-      // 只要有待处理条目，就显示大门
       gatePendingItems.set(pending);
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
-      
-      // 使用带超时保护的动画状态设置
-      // 这会自动处理 prefers-reduced-motion 情况
-      this.setCardAnimationWithTimeout('entering');
+      this.setCardAnimationWithTimeout('entering', () => this.onEnteringComplete());
       this.logger.info('Gate', `Gate activated with ${pending.length} pending items`);
-    } else {
-      // 没有待处理条目，跳过大门
-      gateState.set('bypassed');
-      this.logger.debug('Gate', 'No pending items, gate bypassed');
+      return;
     }
+
+    gateState.set('bypassed');
+    this.logger.debug('Gate', 'No pending items, gate bypassed');
   }
-  
-  /**
-   * 标记当前条目为已读
-   */
+
+  /** 标记当前条目为已读 */
   markAsRead(): Result<void, OperationError> {
     const current = this.getCurrentEntry();
     if (!current) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
-    
+
     const result = this.blackBoxService.markAsRead(current.id);
     if (result.ok) {
-      this.nextEntry();
+      this.startActionTransition('heave_read');
     }
-    
+
     return success(undefined);
   }
-  
-  /**
-   * 标记当前条目为完成
-   */
+
+  /** 标记当前条目为完成 */
   markAsCompleted(): Result<void, OperationError> {
     const current = this.getCurrentEntry();
     if (!current) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
-    
+
     const result = this.blackBoxService.markAsCompleted(current.id);
     if (result.ok) {
-      this.nextEntry();
+      this.startActionTransition('heavy_drop');
     }
-    
+
     return success(undefined);
   }
-  
+
   /**
    * 跳过当前条目（稍后提醒）
+   * 兼容保留：UI 已隐藏此动作
    */
   snooze(): Result<void, OperationError> {
     if (!canSnooze()) {
       return failure(
-        ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED, 
+        ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED,
         ErrorMessages[ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED]
       );
     }
-    
+
     const current = this.getCurrentEntry();
     if (!current) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
-    
+
     const tomorrow = getTomorrowDate();
     const result = this.blackBoxService.snooze(current.id, tomorrow);
-    
+
     if (result.ok) {
       gateSnoozeCount.update(c => c + 1);
-      this.nextEntry();
+
+      // 兼容路径：在新门体里统一使用 heave_read 过渡
+      this.startActionTransition('heave_read');
     }
-    
+
     return success(undefined);
   }
-  
+
   /**
-   * 切换到下一个条目（触发下沉动画）
-   * 动画完成后由 onSinkingComplete() 处理状态切换
-   * 
-   * 使用带超时保护的动画设置，确保即使动画卡死也能恢复
+   * 启动动作动画并在结束后推进到下一条
    */
-  private nextEntry(): void {
-    // 使用带超时保护的动画设置
-    // 如果是减少动画模式，会自动设置为 idle 并跳过动画
-    this.setCardAnimationWithTimeout('sinking');
-    
-    // 如果减少动画模式，setCardAnimationWithTimeout 已设置 idle
-    // 需要手动触发状态切换
-    if (this.prefersReducedMotion) {
-      this.onSinkingComplete();
+  private startActionTransition(state: 'heave_read' | 'heavy_drop'): void {
+    this.actionInFlight = state;
+    this.setCardAnimationWithTimeout(state, () => this.finalizeActionTransition(state));
+  }
+
+  /**
+   * 动作动画结束（含 timeout 兜底）
+   */
+  private finalizeActionTransition(state: 'heave_read' | 'heavy_drop'): void {
+    if (this.actionInFlight !== state) return;
+
+    this.actionInFlight = null;
+    this.clearAnimationTimeout();
+
+    if (state === 'heavy_drop') {
+      this.impactTick.update(v => v + 1);
     }
-  }
-  
-  /**
-   * 入场动画完成回调
-   * 由 GateCardComponent 的 animationend 事件触发
-   */
-  onEnteringComplete(): void {
-    this.clearAnimationTimeout();
-    this.cardAnimation.set('idle');
-  }
-  
-  /**
-   * 下沉动画完成回调
-   * 由 GateCardComponent 的 animationend 事件触发
-   */
-  onSinkingComplete(): void {
-    this.clearAnimationTimeout();
-    
+
     const nextIndex = gateCurrentIndex() + 1;
     const total = gatePendingItems().length;
-    
+
     if (nextIndex >= total) {
-      // 全部处理完毕 - 显示完成提示
       gateState.set('completed');
       this.showCompletionMessage.set(true);
       this.cardAnimation.set('idle');
-      
+
       this.logger.info('Gate', 'Gate completed, all items processed');
-      
-      // 1.5秒后隐藏完成提示
+
       setTimeout(() => {
         this.showCompletionMessage.set(false);
       }, 1500);
-    } else {
-      // 切换到下一个条目
-      gateCurrentIndex.set(nextIndex);
-      
-      // 使用带超时保护的动画设置
-      this.setCardAnimationWithTimeout('emerging');
+      return;
     }
+
+    gateCurrentIndex.set(nextIndex);
+    this.setCardAnimationWithTimeout('settling', () => this.onSettlingComplete());
   }
-  
-  /**
-   * 浮现动画完成回调
-   * 由 GateCardComponent 的 animationend 事件触发
-   */
-  onEmergingComplete(): void {
+
+  /** 入场动画完成回调 */
+  onEnteringComplete(): void {
+    if (this.cardAnimation() !== 'entering') return;
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
   }
-  
+
+  /** 已读抛掷动画完成回调 */
+  onHeaveReadComplete(): void {
+    if (this.cardAnimation() !== 'heave_read' && !this.prefersReducedMotion) return;
+    this.finalizeActionTransition('heave_read');
+  }
+
+  /** 完成重落动画完成回调 */
+  onHeavyDropComplete(): void {
+    if (this.cardAnimation() !== 'heavy_drop' && !this.prefersReducedMotion) return;
+    this.finalizeActionTransition('heavy_drop');
+  }
+
+  /** 新条目沉降动画完成回调 */
+  onSettlingComplete(): void {
+    if (this.cardAnimation() !== 'settling') return;
+    this.clearAnimationTimeout();
+    this.cardAnimation.set('idle');
+  }
+
   /**
-   * 获取当前条目
+   * 兼容旧 GateCard 回调名称
+   * @deprecated 请使用 onHeavyDropComplete
    */
+  onSinkingComplete(): void {
+    this.onHeavyDropComplete();
+  }
+
+  /**
+   * 兼容旧 GateCard 回调名称
+   * @deprecated 请使用 onSettlingComplete
+   */
+  onEmergingComplete(): void {
+    this.onSettlingComplete();
+  }
+
+  /** 获取当前条目 */
   getCurrentEntry(): BlackBoxEntry | null {
     const items = gatePendingItems();
     const index = gateCurrentIndex();
     return items[index] ?? null;
   }
-  
-  /**
-   * 重置每日跳过次数
-   */
+
+  /** 重置每日跳过次数 */
   private resetDailySnoozeCount(): void {
     const today = getTodayDate();
     const lastResetDate = localStorage.getItem(GATE_SNOOZE_RESET_DATE_KEY);
-    
+
     if (lastResetDate !== today) {
       gateSnoozeCount.set(0);
       localStorage.setItem(GATE_SNOOZE_RESET_DATE_KEY, today);
       this.logger.debug('Gate', 'Daily snooze count reset');
     }
   }
-  
+
   /**
    * 强制跳过大门（用于紧急情况）
    * 注意：这不会标记条目为已处理
@@ -382,65 +377,58 @@ export class GateService {
     localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
     this.logger.warn('Gate', 'Gate force bypassed');
   }
-  
-  /**
-   * 重置大门状态（用于测试或用户重新触发）
-   */
+
+  /** 重置大门状态（用于测试或用户重新触发） */
   reset(): void {
     this.devForceActive.set(false);
+    this.showCompletionMessage.set(false);
+    this.actionInFlight = null;
+    this.clearAnimationTimeout();
+    this.cardAnimation.set('idle');
     resetGateState();
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
     this.logger.debug('Gate', 'Gate state reset');
   }
-  
-  /**
-   * 处理键盘快捷键
-   */
+
+  /** 处理键盘快捷键 */
   handleKeydown(event: KeyboardEvent): boolean {
     if (!this.isActive()) return false;
-    
+
     const key = event.key;
     const config = FOCUS_CONFIG.KEYBOARD;
-    
-    // 标记已读
+
     if ((config.GATE_MARK_READ as readonly string[]).includes(key)) {
       event.preventDefault();
       this.markAsRead();
       return true;
     }
-    
-    // 标记完成
+
     if ((config.GATE_MARK_COMPLETED as readonly string[]).includes(key)) {
       event.preventDefault();
       this.markAsCompleted();
       return true;
     }
-    
+
     return false;
   }
-  
+
   // ============================================
   // 开发环境测试方法
   // ============================================
-  
+
   /**
    * [DEV] 强制显示大门（用于开发测试）
    * 创建模拟的待处理条目并激活大门
    */
   devForceShowGate(): void {
-    // 标记开发强制模式，防止 FocusModeComponent 重新检查时覆盖模拟数据
     this.devForceActive.set(true);
-    
-    // 清除今日检查记录
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
-    
-    // 确保大门开关已启用（用户可能在设置中关闭了）
+
     if (!focusPreferences().gateEnabled) {
       focusPreferences.update(p => ({ ...p, gateEnabled: true }));
       this.logger.info('Gate', '[DEV] Auto-enabled gateEnabled for testing');
     }
-    
-    // 创建模拟的待处理条目（使用合法 UUID 避免同步时报错）
+
     const mockProjectId = crypto.randomUUID();
     const mockUserId = crypto.randomUUID();
     const mockEntries = [
@@ -496,28 +484,24 @@ export class GateService {
         snoozeUntil: undefined
       }
     ];
-    
-    // 设置待处理条目并激活大门
-    // 1. 先将模拟条目存入 blackBoxEntriesMap（这样按钮操作才能找到条目）
+
     for (const entry of mockEntries) {
       updateBlackBoxEntry(entry);
     }
-    
-    // 2. 设置大门待处理列表
+
     gatePendingItems.set(mockEntries);
     gateCurrentIndex.set(0);
     gateSnoozeCount.set(0);
     gateState.set('reviewing');
-    
-    // 3. 设置动画状态（与正常流程一致）
-    this.setCardAnimationWithTimeout('entering');
-    
+    this.showCompletionMessage.set(false);
+    this.actionInFlight = null;
+
+    this.setCardAnimationWithTimeout('entering', () => this.onEnteringComplete());
+
     this.logger.info('Gate', '[DEV] Gate force shown with mock entries');
   }
-  
-  /**
-   * 获取昨天日期
-   */
+
+  /** 获取昨天日期 */
   private getYesterdayDate(): string {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);

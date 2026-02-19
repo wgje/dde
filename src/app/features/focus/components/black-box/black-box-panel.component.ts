@@ -79,7 +79,7 @@ import {
                 [appearance]="'obsidian'"
                 (markRead)="onMarkRead($event)"
                 (markCompleted)="onMarkCompleted($event)"
-                (delete)="onDeleteRequested($event)" />
+                (confirmDelete)="onConfirmDelete($event)" />
             }
 
             <!-- 空状态 -->
@@ -87,28 +87,6 @@ import {
               <div class="py-6 text-center text-xs text-stone-500">
                 <p class="mb-1">暂无条目沉积</p>
                 <p class="opacity-60">按住项目栏录音按钮即可快速记录</p>
-              </div>
-            }
-
-            <!-- 删除确认栏 -->
-            @if (pendingDeleteId()) {
-              <div class="mt-2 px-2 py-1.5 bg-red-900/30 rounded-lg text-xs text-red-200 flex items-center justify-between gap-2">
-                <span>确认删除该条目？</span>
-                <div class="flex items-center gap-1.5">
-                  <button
-                    class="px-2 py-1 rounded bg-red-500 text-white text-[10px] hover:bg-red-600 transition-colors"
-                    data-testid="confirm-delete"
-                    aria-label="确认删除"
-                    (click)="confirmDelete()">
-                    删除
-                  </button>
-                  <button
-                    class="px-2 py-1 rounded bg-stone-700 text-stone-300 text-[10px] hover:bg-stone-600 transition-colors"
-                    aria-label="取消删除"
-                    (click)="cancelDelete()">
-                    取消
-                  </button>
-                </div>
               </div>
             }
           </div>
@@ -125,7 +103,6 @@ export class BlackBoxPanelComponent implements OnInit {
   private readonly toast = inject(ToastService);
   readonly expandToken = input(0);
   
-  pendingDeleteId = signal<string | null>(null);
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
   
@@ -170,27 +147,10 @@ export class BlackBoxPanelComponent implements OnInit {
   }
   
   /**
-   * 请求删除
+   * 确认删除条目
    */
-  onDeleteRequested(id: string): void {
-    this.pendingDeleteId.set(id);
-  }
-
-  /**
-   * 确认删除
-   */
-  confirmDelete(): void {
-    const id = this.pendingDeleteId();
-    if (!id) return;
+  onConfirmDelete(id: string): void {
     this.blackBoxService.delete(id);
-    this.pendingDeleteId.set(null);
-  }
-
-  /**
-   * 取消删除
-   */
-  cancelDelete(): void {
-    this.pendingDeleteId.set(null);
   }
   
   // ===============================================

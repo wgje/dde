@@ -396,21 +396,7 @@ interface TaskAttachmentMetadata {
                 </button>
               </div>
               
-              <!-- 每日跳过次数 -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div>
-                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">跳过限制</div>
-                  <div class="text-[10px] text-slate-400 dark:text-stone-500">每日最多跳过大门次数</div>
-                </div>
-                <select 
-                  (change)="updateMaxSnooze($event)"
-                  class="px-2 py-1 text-xs bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-slate-700 dark:text-stone-300">
-                  <option [value]="1" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 1">1 次</option>
-                  <option [value]="2" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 2">2 次</option>
-                  <option [value]="3" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 3">3 次</option>
-                  <option [value]="5" [selected]="focusPreferenceService.preferences().maxSnoozePerDay === 5">5 次</option>
-                </select>
-              </div>
+              <!-- Snooze 配置兼容保留：Gate UI 已移除跳过动作，这里隐藏入口 -->
               
               <!-- 开发工具（仅开发模式可见） -->
               @if (isDev) {

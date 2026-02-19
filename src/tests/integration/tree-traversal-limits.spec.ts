@@ -308,4 +308,70 @@ describe('树遍历深度限制 (Tree Traversal Limits)', () => {
       expect(root?.stage).toBeNull();
     });
   });
+
+  describe('cascadeUpdateChildrenStage 深度边界', () => {
+    let subtreeService: SubtreeOperationsService;
+
+    beforeEach(() => {
+      subtreeService = TestBed.inject(SubtreeOperationsService);
+    });
+
+    it('应该在恰好 MAX_SUBTREE_DEPTH(100) 层时正确级联更新 stage', () => {
+      const depth = FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH; // 100
+      const tasks = createDeepNestedTasks(depth);
+      // 给所有任务初始 stage = 1
+      tasks.forEach(t => t.stage = 1);
+
+      // 更新根节点 stage 为 5，级联更新子节点
+      subtreeService.cascadeUpdateChildrenStage('task-0', 5, tasks);
+
+      // 深度 1 的子节点 stage = 5 + 1 = 6
+      const child1 = tasks.find(t => t.id === 'task-1');
+      expect(child1?.stage).toBe(6);
+
+      // 最深的可达节点（task-99 在 BFS depth=99）
+      // stage = parentNewStage + depth = 5 + 99 = 104
+      const deepest = tasks.find(t => t.id === `task-${depth - 1}`);
+      expect(deepest?.stage).toBe(5 + depth - 1); // parentNewStage + depth
+    });
+
+    it('应该在超过 MAX_SUBTREE_DEPTH(100) 层时安全截断，不崩溃', () => {
+      // 创建 102 层树（task-0 到 task-101）
+      // task-101 在 BFS 中 depth=101 > MAX_SUBTREE_DEPTH=100，应被跳过
+      const tasks = createDeepNestedTasks(102);
+      tasks.forEach(t => t.stage = 1);
+
+      // 不应抛出错误
+      expect(() => {
+        subtreeService.cascadeUpdateChildrenStage('task-0', 5, tasks);
+      }).not.toThrow();
+
+      // depth=100 的节点（task-100）：100 > 100 为 false，仍会被处理
+      const atLimit = tasks.find(t => t.id === 'task-100');
+      expect(atLimit?.stage).not.toBe(1); // 被级联更新
+
+      // depth=101 的节点（task-101）：101 > 100 为 true，被跳过
+      const beyondLimit = tasks.find(t => t.id === 'task-101');
+      expect(beyondLimit?.stage).toBe(1); // 保持原始值，未被级联
+    });
+
+    it('级联更新使用 FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH 而非硬编码值', () => {
+      // 验证配置值确实是 100
+      expect(FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH).toBe(100);
+      
+      // 创建 150 层树，确认超过 depth=100 的节点不被更新
+      const tasks = createDeepNestedTasks(150);
+      tasks.forEach(t => t.stage = 1);
+
+      subtreeService.cascadeUpdateChildrenStage('task-0', 0, tasks);
+
+      // depth=100 的节点仍被处理（100 > 100 为 false）
+      const atLimit = tasks.find(t => t.id === 'task-100');
+      expect(atLimit?.stage).not.toBe(1); // 被更新
+
+      // depth=101 的节点被跳过（101 > 100 为 true）
+      const beyondLimit = tasks.find(t => t.id === 'task-101');
+      expect(beyondLimit?.stage).toBe(1); // 未被级联更新
+    });
+  });
 });

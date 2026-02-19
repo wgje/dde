@@ -71,7 +71,8 @@ export interface ImportOptions {
   conflictStrategy: ImportConflictStrategy;
   /** 是否跳过校验和验证 */
   skipChecksumValidation?: boolean;
-  /** 是否生成新的 ID */
+  /** 是否生成新的 ID（默认 true，符合 Hard Rule: ID 必须客户端 UUID）
+   * 设为 false 保留原始 ID 仅限高级场景，存在冲突/碰撞风险 */
   generateNewIds?: boolean;
 }
 
@@ -429,7 +430,7 @@ export class ImportService {
     options: ImportOptions,
     onProjectImported?: (project: Project) => Promise<void>
   ): Promise<ImportProjectResult> {
-    const { conflictStrategy, generateNewIds } = options;
+    const { conflictStrategy, generateNewIds = true } = options;
     
     // 标记是否为覆盖操作
     let isOverwrite = false;
@@ -551,9 +552,16 @@ export class ImportService {
   /**
    * 转换导出项目为 Project
    * 【P2-44 修复】对导入数据执行 sanitizeProject 消毒
+   * 
+   * Hard Rule: ID 必须客户端 UUID。默认强制生成新 ID，
+   * 保留旧 ID 仅作为显式高级选项（generateNewIds=false），存在冲突/碰撞风险。
    */
-  private convertToProject(exportProject: ExportProject, generateNewIds?: boolean): Project {
+  private convertToProject(exportProject: ExportProject, generateNewIds: boolean = true): Project {
     const projectId = generateNewIds ? crypto.randomUUID() : exportProject.id;
+    
+    if (!generateNewIds) {
+      this.logger.warn('导入项目', '使用原始 ID 导入，可能导致 ID 冲突', { projectId: exportProject.id });
+    }
     
     // 构建 ID 映射（用于更新引用）
     const idMap = new Map<string, string>();

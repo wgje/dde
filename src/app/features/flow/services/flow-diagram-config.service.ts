@@ -400,10 +400,8 @@ export class FlowDiagramConfigService {
         toSpot: go.Spot.AllSides     // 让连接线像水珠一样沿边界滑动
       },
       new go.Binding("fill", "color"),
-      new go.Binding("stroke", "", (data: go.ObjectData, obj: go.GraphObject) => {
-        if (obj.part?.isSelected) return (data.selectedBorderColor as string) || "#0d9488";
-        return (data.borderColor as string) || "#e7e5e4";
-      }).ofObject(),
+      // stroke 初始值由 borderColor 数据属性决定；选中态由 Node 的 selectionChanged 回调处理
+      new go.Binding("stroke", "borderColor"),
       new go.Binding("strokeWidth", "borderWidth")),
       
       $(go.Panel, "Vertical",

@@ -85,8 +85,9 @@ export const FEATURE_FLAGS = {
   /**
    * 是否启用增量同步优化
    * SYNC_CONFIG.DELTA_SYNC_ENABLED 通过 getter 自动引用此值，无需手动保持一致
+   * Hard Rule：读路径必须走增量拉取，此开关仅用于紧急回滚
    */
-  INCREMENTAL_SYNC_ENABLED: false,
+  INCREMENTAL_SYNC_ENABLED: true,
   /** 同步成功语义：仅远端确认成功才视为成功 */
   SYNC_STRICT_SUCCESS_ENABLED: true,
   /** 队列耐久优先：禁用默认淘汰策略 */

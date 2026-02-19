@@ -25,6 +25,7 @@ import {
   DEFAULT_FOCUS_PREFERENCES,
   StrataLayer
 } from '../models/focus';
+import { FOCUS_CONFIG } from '../config/focus.config';
 
 // StrataItem 类型已从 focus 模型导出，供外部模块使用
 export type { StrataItem } from '../models/focus';
@@ -332,8 +333,9 @@ export const offlinePendingCount = signal<number>(0);
 
 /**
  * 今日剩余配额
+ * 初始值与 FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA 保持一致
  */
-export const remainingQuota = signal<number>(50);
+export const remainingQuota = signal<number>(FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA);
 
 // ============================================
 // UI 状态

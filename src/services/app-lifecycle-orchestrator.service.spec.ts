@@ -206,6 +206,25 @@ describe('AppLifecycleOrchestratorService', () => {
     expect(metrics?.backgroundRefreshMs).toBeGreaterThanOrEqual(0);
   });
 
+  it('应优先使用高精度时钟计算 interactionReadyMs（避免同毫秒 0ms 抖动）', async () => {
+    let clock = 1000;
+    const perfNowSpy = vi.spyOn(performance, 'now').mockImplementation(() => {
+      clock += 0.35;
+      return clock;
+    });
+
+    try {
+      await service.triggerResume('visibility-quick');
+      await vi.runAllTimersAsync();
+
+      const metrics = service.getLastRecoveryMetrics();
+      expect(metrics).toBeTruthy();
+      expect(metrics?.interactionReadyMs ?? 0).toBeGreaterThan(0);
+    } finally {
+      perfNowSpy.mockRestore();
+    }
+  });
+
   it('should ignore non-persisted pageshow events on cold startup', async () => {
     service.initialize();
 

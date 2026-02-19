@@ -12,6 +12,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
 /**
  * 允许的来源白名单
  * 安全修复：限制 CORS 来源，防止任意网站调用 API
+ * 只允许项目级前缀的 Vercel 预览域名，而非任意 .vercel.app 子域
  */
 const ALLOWED_ORIGINS = [
   'https://dde-eight.vercel.app',
@@ -20,14 +21,20 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',      // Vite 开发服务器
 ];
 
+/** Vercel 预览域名项目级前缀（受控模式） */
+const VERCEL_PREVIEW_PREFIX = 'dde-';
+
 /**
  * 根据请求来源返回 CORS 头
- * 只有白名单中的来源才会被允许
+ * 只有白名单中的来源或项目级前缀的 Vercel 预览域名才会被允许
  */
 function getCorsHeaders(origin: string | null): Record<string, string> {
-  const isAllowed = origin && ALLOWED_ORIGINS.some(allowed => 
-    origin === allowed || origin.endsWith('.vercel.app')
-  );
+  let isAllowed = false;
+  if (origin) {
+    isAllowed = ALLOWED_ORIGINS.includes(origin) ||
+      // 只允许项目级前缀的 Vercel 预览域名
+      (origin.endsWith('.vercel.app') && origin.includes(`://${VERCEL_PREVIEW_PREFIX}`));
+  }
   
   return {
     'Access-Control-Allow-Origin': isAllowed ? origin! : ALLOWED_ORIGINS[0],

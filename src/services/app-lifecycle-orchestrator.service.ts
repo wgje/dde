@@ -359,7 +359,7 @@ export class AppLifecycleOrchestratorService {
       return { deferred: false, reason: session.reason };
     }
 
-    const interactionStartAt = Date.now();
+    const interactionStartAt = this.monotonicNow();
     if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
       this.recordRecoveryStep('sync-recovery-light', reason);
       await this.simpleSync.recoverAfterResume(reason, {
@@ -372,7 +372,7 @@ export class AppLifecycleOrchestratorService {
         recoveryTicketId: recoveryTicketId ?? undefined,
       });
     }
-    const interactionReadyMs = Date.now() - interactionStartAt;
+    const interactionReadyMs = this.monotonicNow() - interactionStartAt;
     if (perfPrefix) {
       this.markPerformance(`${perfPrefix}:interaction-ready`);
       this.measurePerformance('resume.interaction_ready_ms', `${perfPrefix}:start`, `${perfPrefix}:interaction-ready`);
@@ -439,7 +439,7 @@ export class AppLifecycleOrchestratorService {
     this.compensationTicketIdSignal.set(recoveryTicket.id);
 
     const runCompensation = async () => {
-      const backgroundStartAt = Date.now();
+      const backgroundStartAt = this.monotonicNow();
       const perfPrefix = `nanoflow:resume:${recoveryTicket.id}`;
       this.markPerformance(`${perfPrefix}:background-start`);
       let fastPathHit: boolean | undefined;
@@ -482,7 +482,7 @@ export class AppLifecycleOrchestratorService {
           recoveryTicketId: recoveryTicket.id,
         });
       } finally {
-        const backgroundRefreshMs = Date.now() - backgroundStartAt;
+        const backgroundRefreshMs = this.monotonicNow() - backgroundStartAt;
         this.markPerformance(`${perfPrefix}:background-end`);
         this.measurePerformance(
           'resume.background_refresh_ms',
@@ -555,6 +555,16 @@ export class AppLifecycleOrchestratorService {
       return;
     }
     performance.mark(markName);
+  }
+
+  /**
+   * 使用高精度单调时钟计算阶段耗时，避免 Date.now() 同毫秒下出现 0ms 抖动误判。
+   */
+  private monotonicNow(): number {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+    return Date.now();
   }
 
   private measurePerformance(measureName: string, startMark: string, endMark: string): void {

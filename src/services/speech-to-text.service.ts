@@ -5,7 +5,7 @@
  * 支持离线缓存和自动重试
  */
 
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, DestroyRef } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { AuthService } from './auth.service';
 import { BlackBoxService } from './black-box.service';
@@ -38,6 +38,8 @@ export class SpeechToTextService {
   private audioChunks: Blob[] = [];
   private recordingStartTime: number = 0;
   private db: IDBDatabase | null = null;
+  private onlineHandler: (() => void) | null = null;
+  private readonly destroyRef = inject(DestroyRef);
   
   // 使用 Signal 管理状态，组件直接读取
   readonly isRecording = isRecording;
@@ -82,11 +84,21 @@ export class SpeechToTextService {
   
   /**
    * 设置网络恢复监听
+   * 保存 handler 引用以便在销毁时解绑，避免测试污染
    */
   private setupNetworkListener(): void {
-    window.addEventListener('online', () => {
+    this.onlineHandler = () => {
       this.logger.info('SpeechToText', 'Network restored, processing offline audio cache');
       this.processOfflineCacheAndCreateEntries();
+    };
+    window.addEventListener('online', this.onlineHandler);
+
+    // 在服务销毁时清理监听器
+    this.destroyRef.onDestroy(() => {
+      if (this.onlineHandler) {
+        window.removeEventListener('online', this.onlineHandler);
+        this.onlineHandler = null;
+      }
     });
   }
 

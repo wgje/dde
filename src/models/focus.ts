@@ -2,6 +2,8 @@
 // 专注模式数据模型定义
 // ============================================
 
+import { FOCUS_CONFIG } from '../config/focus.config';
+
 /**
  * 黑匣子条目状态
  */
@@ -112,13 +114,15 @@ export interface FocusPreferences {
 
 /**
  * 默认专注模式偏好
+ * 默认值从 FOCUS_CONFIG 派生，避免重复硬编码
+ * @see FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY
  */
 export const DEFAULT_FOCUS_PREFERENCES: FocusPreferences = {
   gateEnabled: true,
   spotlightEnabled: true,
   strataEnabled: true,
   blackBoxEnabled: true,
-  maxSnoozePerDay: 3
+  maxSnoozePerDay: FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY,
 };
 
 /**

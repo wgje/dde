@@ -1,21 +1,22 @@
 /**
- * 大门遮罩层组件
+ * 大门遮罩层组件（深色简洁卡片）
  *
- * 全屏遮罩层，阻止用户访问应用其他部分
- * 直到所有遗留条目处理完毕
- * 底部显示地质层（已完成任务堆叠预览）
+ * 用深色全屏遮罩承载 Gate：
+ * - 顶部标题 + 碎石带计数
+ * - 中央卡片内容（由 GateCardComponent 渲染）
+ * - 底部地层预览
  */
 
 import {
-  Component,
   ChangeDetectionStrategy,
-  inject,
+  Component,
   HostListener,
   OnDestroy,
   computed,
   effect,
+  inject,
+  output,
   signal,
-  output
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
@@ -23,20 +24,15 @@ import { StrataService } from '../../../../../services/strata.service';
 import { GateCardComponent } from './gate-card.component';
 import { GateActionsComponent } from './gate-actions.component';
 
-type GateVisualTheme = 'stone' | 'paper';
-
-const GATE_VISUAL_THEME_KEY = 'focus_gate_visual_theme';
-
 @Component({
   selector: 'app-gate-overlay',
   standalone: true,
   imports: [CommonModule, GateCardComponent, GateActionsComponent],
   template: `
-    <!-- 审查中状态 -->
     @if (gateService.isActive()) {
       <div
-        class="gate-overlay fixed inset-0 z-[9999] flex flex-col items-center justify-center overflow-hidden bg-white/80 dark:bg-black/80 backdrop-blur-2xl transition-all duration-500"
-        [class.dark]="visualTheme() === 'stone'"
+        class="gate-overlay"
+        [class.shake-y]="shakePulse()"
         data-testid="gate-overlay"
         role="dialog"
         aria-modal="true"
@@ -44,111 +40,50 @@ const GATE_VISUAL_THEME_KEY = 'focus_gate_visual_theme';
         aria-describedby="gate-description"
         tabindex="-1">
 
-        <!-- 极简背景 -->
-        <div class="absolute inset-0 pointer-events-none overflow-hidden">
-          <!-- 顶部柔光 -->
-          <div class="absolute -top-[20%] left-1/2 -translate-x-1/2 w-[80%] h-[60%] rounded-full bg-blue-500/10 blur-[120px] dark:bg-blue-400/5 transition-colors duration-500"></div>
-          <!-- 底部柔光 -->
-          <div class="absolute -bottom-[20%] left-1/2 -translate-x-1/2 w-[80%] h-[60%] rounded-full bg-indigo-500/10 blur-[120px] dark:bg-indigo-400/5 transition-colors duration-500"></div>
-        </div>
+        <header class="gate-header">
+          <h2 id="gate-title">沉积之门</h2>
+          <p id="gate-description">上推已读，下拉落地。把昨日重量变成今日地基。</p>
 
-        <!-- 底部堆叠预览 (简化版) -->
-        <div class="absolute bottom-0 left-0 right-0 pointer-events-none flex flex-col items-center justify-end h-[30vh] overflow-hidden pb-8">
-          @for (layer of strataLayers(); track layer.date; let i = $index) {
-            @if (i < 5) {
-              <div
-                class="absolute bottom-0 transition-all duration-500 ease-[cubic-bezier(0.25,1,0.5,1)]"
-                [style.transform]="'translateY(' + (40 + i * 12) + 'px) scale(' + (0.95 - i * 0.05) + ')'"
-                [style.z-index]="10 - i"
-                [style.opacity]="0.6 - i * 0.1">
-                
-                <div class="w-[300px] sm:w-[500px] h-16 rounded-t-2xl bg-white dark:bg-[#1c1c1e] shadow-[0_-4px_20px_rgba(0,0,0,0.05)] border-t border-x border-black/5 dark:border-white/10 flex items-center justify-center transition-colors duration-500">
-                  <span class="text-xs font-medium text-black/40 dark:text-white/40 tracking-wide uppercase">{{ layer.date }}</span>
-                </div>
-              </div>
-            }
+          @if (progress().total > 0) {
+            <div class="rubble-track" aria-label="剩余待处理计数">
+              @for (chip of rubbleChips(); track chip.index) {
+                <span class="rubble-chip" [class.cleared]="chip.cleared"></span>
+              }
+            </div>
           }
-        </div>
+        </header>
 
-        <!-- 主内容区域 -->
-        <section class="relative z-10 w-full max-w-xl px-6 flex flex-col items-center animate-gate-enter">
-          
-          <!-- 标题区 -->
-          <header class="text-center mb-10 flex flex-col items-center gap-6">
-            <!-- 主题切换 (iOS 分段控件风格) -->
-            <div class="p-1 rounded-full bg-gray-100 dark:bg-white/10 flex items-center shadow-inner transition-colors duration-500">
-              <button 
-                type="button"
-                (click)="setTheme('paper')"
-                class="px-4 py-1.5 rounded-full text-xs font-medium transition-all duration-300"
-                [class.bg-white]="visualTheme() === 'paper'"
-                [class.shadow-sm]="visualTheme() === 'paper'"
-                [class.text-black]="visualTheme() === 'paper'"
-                [class.text-gray-500]="visualTheme() !== 'paper'">
-                Light
-              </button>
-              <button 
-                type="button"
-                (click)="setTheme('stone')"
-                class="px-4 py-1.5 rounded-full text-xs font-medium transition-all duration-300"
-                [class.bg-gray-600]="visualTheme() === 'stone'"
-                [class.shadow-sm]="visualTheme() === 'stone'"
-                [class.text-white]="visualTheme() === 'stone'"
-                [class.text-gray-400]="visualTheme() !== 'stone'">
-                Dark
-              </button>
-            </div>
+        <main class="gate-main">
+          <app-gate-card />
+        </main>
 
-            <div>
-              <h2 id="gate-title" class="text-3xl font-semibold text-black dark:text-white tracking-tight transition-colors duration-500">每日清算</h2>
-              <p id="gate-description" class="mt-2 text-base text-black/60 dark:text-white/60 transition-colors duration-500">回顾昨日，开启新的一天。</p>
-            </div>
-          </header>
+        <footer class="gate-footer">
+          <app-gate-actions />
+        </footer>
 
-          <!-- 卡片容器 -->
-          <div class="w-full mb-10 perspective-1000">
-            <app-gate-card class="block w-full" />
-          </div>
-
-          <!-- 操作区 -->
-          <div class="w-full">
-            <app-gate-actions class="block w-full" />
-          </div>
-
-        </section>
-
-        <!-- 快捷键提示 (胶囊样式) -->
-        <div class="absolute bottom-8 left-1/2 -translate-x-1/2 hidden md:flex items-center gap-1.5 px-4 py-2 rounded-full bg-white/40 dark:bg-white/5 backdrop-blur-xl border border-white/20 dark:border-white/5 shadow-sm transition-colors duration-500">
-          <span class="text-[11px] font-medium text-black/50 dark:text-white/50 flex items-center gap-1.5">
-            <kbd class="font-sans min-w-[1.4em] h-[1.4em] flex items-center justify-center bg-white dark:bg-white/10 rounded-[4px] shadow-sm border border-black/5 dark:border-white/5">1</kbd> 已读
-          </span>
-          <span class="w-px h-3 bg-black/10 dark:bg-white/10 mx-2"></span>
-          <span class="text-[11px] font-medium text-black/50 dark:text-white/50 flex items-center gap-1.5">
-            <kbd class="font-sans min-w-[1.4em] h-[1.4em] flex items-center justify-center bg-white dark:bg-white/10 rounded-[4px] shadow-sm border border-black/5 dark:border-white/5">2</kbd> 完成
-          </span>
-           <span class="w-px h-3 bg-black/10 dark:bg-white/10 mx-2"></span>
-           <span class="text-[11px] font-medium text-black/50 dark:text-white/50 flex items-center gap-1.5">
-            <kbd class="font-sans min-w-[1.4em] h-[1.4em] flex items-center justify-center bg-white dark:bg-white/10 rounded-[4px] shadow-sm border border-black/5 dark:border-white/5">3</kbd> 稍后
-          </span>
-        </div>
+        @if (strataLayers().length > 0) {
+          <aside class="strata-preview" aria-hidden="true">
+            @for (layer of strataLayers(); track layer.date; let i = $index) {
+              @if (i < 5) {
+                <div
+                  class="strata-row"
+                  [style.--layer-index]="i"
+                  [style.--layer-opacity]="0.7 - i * 0.12">
+                  <span>{{ layer.date }}</span>
+                </div>
+              }
+            }
+          </aside>
+        }
       </div>
     }
 
-    <!-- 完成状态 (iOS 风格弹窗) -->
     @if (showCompletionMessage()) {
-      <div
-        class="gate-completion fixed inset-0 z-[9999] flex items-center justify-center p-6 bg-black/20 dark:bg-black/60 backdrop-blur-xl transition-all duration-500"
-        role="status"
-        aria-live="polite">
-
-        <div class="bg-white dark:bg-[#1c1c1e] rounded-[2rem] p-12 shadow-2xl flex flex-col items-center justify-center text-center max-w-sm w-full animate-pop-in border border-black/5 dark:border-white/10">
-          <div class="w-20 h-20 rounded-full bg-green-500 flex items-center justify-center mb-6 shadow-lg shadow-green-500/30 scale-100">
-            <svg class="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h3 class="text-2xl font-semibold text-black dark:text-white mb-2 tracking-tight">全部完成</h3>
-          <p class="text-base text-gray-500 dark:text-gray-400">准备好开始新的一天了嗎？</p>
+      <div class="gate-completion" role="status" aria-live="polite">
+        <div class="completion-card">
+          <div class="completion-mark">✓</div>
+          <h3>沉积完成</h3>
+          <p>门已开启，开始今天。</p>
         </div>
       </div>
     }
@@ -157,115 +92,286 @@ const GATE_VISUAL_THEME_KEY = 'focus_gate_visual_theme';
     :host {
       display: block;
     }
-    
-    .animate-gate-enter {
-      animation: gateEnter 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+
+    .gate-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.2rem;
+      padding: clamp(1rem, 2vw, 1.8rem) clamp(0.85rem, 2vw, 2rem);
+      background: rgba(9, 9, 11, 0.96);
+      overflow: hidden;
+      transform: translateY(0);
     }
 
-    .animate-pop-in {
-      animation: popIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    .gate-header,
+    .gate-main,
+    .gate-footer {
+      position: relative;
+      z-index: 1;
+      width: min(980px, 100%);
     }
 
-    @keyframes gateEnter {
-      from { opacity: 0; transform: scale(0.98) translateY(20px); }
-      to { opacity: 1; transform: scale(1) translateY(0); }
+    .gate-header {
+      text-align: center;
+      color: rgba(255, 255, 255, 0.9);
+      margin-bottom: 0.2rem;
     }
 
-    @keyframes popIn {
-      from { opacity: 0; transform: scale(0.8); }
-      to { opacity: 1; transform: scale(1); }
+    .gate-header h2 {
+      margin: 0;
+      font-size: clamp(1.35rem, 1.2rem + 0.75vw, 1.9rem);
+      font-weight: 700;
+      letter-spacing: 0.08em;
     }
 
-    .perspective-1000 {
-      perspective: 1000px;
+    .gate-header p {
+      margin: 0.35rem auto 0;
+      max-width: 40rem;
+      font-size: 0.86rem;
+      color: rgba(255, 255, 255, 0.5);
+      line-height: 1.45;
+    }
+
+    .rubble-track {
+      margin: 0.9rem auto 0;
+      max-width: 480px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(10px, 1fr));
+      gap: 0.35rem;
+      align-items: center;
+    }
+
+    .rubble-chip {
+      height: 6px;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.35);
+      transition: opacity 220ms ease, transform 220ms ease;
+    }
+
+    .rubble-chip.cleared {
+      opacity: 0.08;
+      transform: translateY(4px) scale(0.88);
+    }
+
+    .gate-main {
+      min-height: 45vh;
+    }
+
+    .gate-footer {
+      margin-top: 0.35rem;
+      display: flex;
+      justify-content: center;
+    }
+
+    .strata-preview {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: min(24vh, 180px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      pointer-events: none;
+      gap: 0.2rem;
+      padding-bottom: 0.65rem;
+      z-index: 0;
+    }
+
+    .strata-row {
+      width: min(640px, calc(100vw - 2rem));
+      height: 22px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 8px 8px 0 0;
+      background: rgba(255, 255, 255, 0.04);
+      transform: translateY(calc(var(--layer-index) * 5px)) scaleX(calc(1 - (var(--layer-index) * 0.04)));
+      opacity: var(--layer-opacity);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 0.68rem;
+      letter-spacing: 0.03em;
+    }
+
+    .gate-completion {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+    }
+
+    .completion-card {
+      width: min(340px, calc(100vw - 2rem));
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(24, 24, 27, 0.95);
+      padding: 1.5rem 1.25rem;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+      animation: completion-pop 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .completion-mark {
+      margin: 0 auto 0.7rem;
+      width: 46px;
+      height: 46px;
+      border-radius: 9999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.35rem;
+      background: rgba(34, 197, 94, 0.85);
+      color: #fff;
+    }
+
+    .completion-card h3 {
+      margin: 0;
+      font-size: 1.15rem;
+      letter-spacing: 0.04em;
+    }
+
+    .completion-card p {
+      margin: 0.45rem 0 0;
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 0.84rem;
+    }
+
+    @keyframes completion-pop {
+      from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.95);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    .shake-y {
+      animation: gate-shake-y 210ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes gate-shake-y {
+      0% { transform: translateY(0); }
+      20% { transform: translateY(-7px); }
+      42% { transform: translateY(4px); }
+      68% { transform: translateY(-2px); }
+      100% { transform: translateY(0); }
+    }
+
+    @media (max-width: 640px) {
+      .gate-overlay {
+        justify-content: flex-start;
+        padding-top: 1.4rem;
+      }
+
+      .gate-main {
+        min-height: 52vh;
+      }
+
+      .strata-row {
+        height: 18px;
+        font-size: 0.62rem;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .gate-overlay,
+      .shake-y,
+      .completion-card,
+      .rubble-chip {
+        animation: none !important;
+        transition: none !important;
+        transform: none !important;
+      }
     }
   `],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class GateOverlayComponent implements OnDestroy {
-  gateService = inject(GateService);
-  private strataService = inject(StrataService);
+  readonly gateService = inject(GateService);
+  private readonly strataService = inject(StrataService);
 
   /** 大门关闭事件 */
   readonly closed = output<void>();
 
-  // 获取地质层数据
+  /** 地层预览 */
   readonly strataLayers = computed(() => this.strataService.layers());
-  readonly visualTheme = signal<GateVisualTheme>(this.readTheme());
+  readonly progress = this.gateService.progress;
+  readonly shakePulse = signal(false);
+
+  readonly rubbleChips = computed(() => {
+    const progress = this.progress();
+    const total = progress.total;
+    const handled = Math.max(0, progress.current - 1);
+
+    return Array.from({ length: total }, (_, index) => ({
+      index,
+      cleared: index < handled,
+    }));
+  });
 
   constructor() {
-    // 响应式追踪 gate 激活状态，动态管理 body 滚动锁定
     try {
       effect(() => {
         if (this.gateService.isActive()) {
           document.body.style.overflow = 'hidden';
-        } else {
-          document.body.style.overflow = '';
-          this.closed.emit();
+          return;
         }
+
+        document.body.style.overflow = '';
+        this.closed.emit();
+      });
+
+      effect(() => {
+        const tick = this.gateService.impactTick();
+        if (!this.gateService.isActive() || tick <= 0) return;
+        this.triggerShake();
       });
     } catch {
-      // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
-    }
-  }
-
-  setTheme(theme: GateVisualTheme): void {
-    this.visualTheme.set(theme);
-
-    try {
-      localStorage.setItem(GATE_VISUAL_THEME_KEY, theme);
-    } catch {
-      // ignore localStorage failures
-    }
-  }
-
-  private readTheme(): GateVisualTheme {
-    try {
-      const stored = localStorage.getItem(GATE_VISUAL_THEME_KEY);
-      return stored === 'paper' ? 'paper' : 'stone';
-    } catch {
-      return 'stone';
+      // 防御：SSR 或异常注入上下文
     }
   }
 
   /**
    * 键盘快捷键
-   * 1: 已读, 2: 完成, 3: 稍后
+   * 1: 已读, 2: 完成
    */
   @HostListener('document:keydown', ['$event'])
   handleKeydown(event: KeyboardEvent): void {
     if (!this.gateService.isActive()) return;
 
-    // 忽略带修饰键的情况
     if (event.ctrlKey || event.metaKey || event.altKey) return;
 
-    // 忽略用户在输入框中的按键
     const target = event.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
-    switch (event.key) {
-      case '1':
-        event.preventDefault();
-        this.gateService.markAsRead();
-        break;
-      case '2':
-        event.preventDefault();
-        this.gateService.markAsCompleted();
-        break;
-      case '3':
-        event.preventDefault();
-        if (this.gateService.canSnooze()) {
-          this.gateService.snooze();
-        }
-        break;
+    if (event.key === '1') {
+      event.preventDefault();
+      this.gateService.markAsRead();
+      return;
+    }
+
+    if (event.key === '2') {
+      event.preventDefault();
+      this.gateService.markAsCompleted();
     }
   }
 
   /**
    * 是否显示完成提示（原型方法）
-   *
-   * 【Bug Fix】从 class field 改为原型方法，防止 SW chunk 不一致
-   * 导致 class field 未初始化时模板调用报错。
    */
   showCompletionMessage(): boolean {
     try {
@@ -277,5 +383,19 @@ export class GateOverlayComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     document.body.style.overflow = '';
+  }
+
+  private triggerShake(): void {
+    this.shakePulse.set(false);
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this.shakePulse.set(true));
+    } else {
+      this.shakePulse.set(true);
+    }
+
+    setTimeout(() => {
+      this.shakePulse.set(false);
+    }, 220);
   }
 }

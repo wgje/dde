@@ -1,0 +1,91 @@
+name: perf-nightly-audit
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      audit_date:
+        description: '审计日期（YYYY-MM-DD，默认当天）'
+        required: false
+        type: string
+      rounds:
+        description: '弱网/恢复轮次（默认 5）'
+        required: false
+        type: string
+      strict_thresholds:
+        description: '是否启用阈值硬校验（1/0，默认 1）'
+        required: false
+        type: string
+
+jobs:
+  perf-nightly-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Dist (dev)
+        run: npm run build:dev
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Validate Perf Auth Env
+        env:
+          E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
+          E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
+        run: |
+          test -n "$E2E_PERF_EMAIL" || (echo "Missing secret: E2E_PERF_EMAIL" && exit 1)
+          test -n "$E2E_PERF_PASSWORD" || (echo "Missing secret: E2E_PERF_PASSWORD" && exit 1)
+
+      - name: Run Perf Audit Batch
+        env:
+          PERF_BUDGET_TEST: '1'
+          PLAYWRIGHT_WEB_SERVER_COMMAND: python3 -m http.server 4200 --directory dist/browser
+          PLAYWRIGHT_WEB_SERVER_TIMEOUT: '120000'
+          E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
+          E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
+          E2E_PERF_PROJECT_ID: ${{ secrets.E2E_PERF_PROJECT_ID }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL || secrets.E2E_PERF_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD || secrets.E2E_PERF_PASSWORD }}
+        run: |
+          DATE_ARG="${{ github.event.inputs.audit_date }}"
+          ROUNDS_ARG="${{ github.event.inputs.rounds }}"
+          STRICT_ARG="${{ github.event.inputs.strict_thresholds }}"
+
+          if [ -z "$DATE_ARG" ]; then
+            DATE_ARG="$(date +%F)"
+          fi
+          if [ -z "$ROUNDS_ARG" ]; then
+            ROUNDS_ARG="5"
+          fi
+          if [ -z "$STRICT_ARG" ]; then
+            STRICT_ARG="1"
+          fi
+
+          node scripts/run-perf-audit-batch.cjs \
+            --date="$DATE_ARG" \
+            --rounds="$ROUNDS_ARG" \
+            --strict-thresholds="$STRICT_ARG"
+
+      - name: Upload Perf Audit Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-nightly-audit-${{ github.run_id }}
+          path: |
+            test-results/perf/**
+            tmp/perf-audit/**
+          if-no-files-found: warn

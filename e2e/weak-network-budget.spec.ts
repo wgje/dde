@@ -6,14 +6,16 @@
  * - LCP < 3,000ms
  * - FCP < 2,000ms
  * - Long Task 总时长 < 3,000ms
- * - 认证态首阶段数据请求(fetch/xhr) > 0 且 <= 20
+ * - 分层请求门禁：
+ *   - cold-path: totalDataRequests > 0
+ *   - warm-path: 允许 totalDataRequests = 0（记录告警标记）且 startup-window <= 20
  *
  * 此测试用于 CI 回归检测，防止性能退化。
  */
 
 import { test, expect } from '@playwright/test';
 import { ensurePerfAuthenticated, getPerfTargetPath } from './perf/authenticated-perf.setup';
-import { mergePerfMetrics } from './perf/perf-metrics';
+import { initPerfMetrics, mergePerfMetrics } from './perf/perf-metrics';
 
 // 弱网性能预算阈值
 const BUDGET = {
@@ -46,7 +48,8 @@ test.describe('弱网性能预算门禁', () => {
   );
 
   test('弱网场景下首屏加载性能在预算内', async ({ page }) => {
-    await ensurePerfAuthenticated(page);
+    initPerfMetrics();
+    const authResult = await ensurePerfAuthenticated(page);
 
     // 模拟 Slow 3G 网络条件
     const cdpSession = await page.context().newCDPSession(page);
@@ -114,18 +117,20 @@ test.describe('弱网性能预算门禁', () => {
     });
 
     // 统计首阶段 fetch/xhr 请求数（仅数据请求，不包含脚本/样式/字体）
-    const dataRequests = allResponses.filter(
+    const startupWindowRequests = allResponses.filter(
       (item) => item.resourceType === 'fetch' || item.resourceType === 'xhr'
     );
-    const initialFetchCount = dataRequests.length;
+    const startupWindowFetchCount = startupWindowRequests.length;
+    const totalDataRequests = authResult.authStageDataRequests + startupWindowFetchCount;
+    const warmZeroFetch = authResult.pathMode === 'warm' && totalDataRequests === 0;
 
     // 统计 black_box_entries 请求数
-    const blackboxPulls = dataRequests.filter(
+    const blackboxPulls = startupWindowRequests.filter(
       (r) => r.url.includes('black_box_entries')
     ).length;
 
     // 统计 RPC 400 错误
-    const rpc400Count = dataRequests.filter(
+    const rpc400Count = startupWindowRequests.filter(
       (r) => r.url.includes('rpc/get_full_project_data') && r.status === 400
     ).length;
 
@@ -144,14 +149,22 @@ test.describe('弱网性能预算门禁', () => {
 
     // 断言性能预算
     console.log(
-      `[弱网预算] LCP: ${lcp}ms, FCP: ${fcp}ms, Long Task: ${longTaskMetrics.totalDuration}ms (${longTaskMetrics.count}次), DataFetch: ${initialFetchCount}, AllResponses: ${allResponses.length}, BlackBox: ${blackboxPulls}, RPC400: ${rpc400Count}, LargeChunks: ${preFlowLargeChunks}, ModulePreload: ${modulepreloadLinks}`
+      `[弱网预算] Path=${authResult.pathMode}, LCP: ${lcp}ms, FCP: ${fcp}ms, Long Task: ${longTaskMetrics.totalDuration}ms (${longTaskMetrics.count}次), AuthFetch: ${authResult.authStageDataRequests}, WindowFetch: ${startupWindowFetchCount}, TotalFetch: ${totalDataRequests}, AllResponses: ${allResponses.length}, BlackBox: ${blackboxPulls}, RPC400: ${rpc400Count}, LargeChunks: ${preFlowLargeChunks}, ModulePreload: ${modulepreloadLinks}`
+    );
+    console.log(
+      `[weak-budget] path=${authResult.pathMode} login=${authResult.loginSucceeded ? 1 : 0} authFetch=${authResult.authStageDataRequests} windowFetch=${startupWindowFetchCount} totalFetch=${totalDataRequests} warmZero=${warmZeroFetch ? 1 : 0}`
     );
 
     mergePerfMetrics({
+      'auth.login_success_flag': authResult.loginSucceeded ? 1 : 0,
       'startup.lcp_ms': Number(lcp || 0),
       'startup.fcp_ms': Number(fcp || 0),
       'startup.long_task_total_ms': Number(longTaskMetrics.totalDuration || 0),
-      'startup.data_requests': Number(initialFetchCount),
+      'startup.auth_data_requests': Number(authResult.authStageDataRequests),
+      'startup.window_data_requests': Number(startupWindowFetchCount),
+      'startup.total_data_requests': Number(totalDataRequests),
+      'startup.data_requests': Number(startupWindowFetchCount),
+      'startup.warm_zero_fetch_flag': Number(warmZeroFetch ? 1 : 0),
       'startup.blackbox_pulls': Number(blackboxPulls),
       'startup.rpc_400_count': Number(rpc400Count),
       'startup.preflow_large_chunks': Number(preFlowLargeChunks),
@@ -175,14 +188,18 @@ test.describe('弱网性能预算门禁', () => {
       `Long Task 总时长超出预算 (${longTaskMetrics.totalDuration}ms > ${BUDGET.MAX_LONG_TASK_TOTAL_MS}ms)`
     ).toBeLessThanOrEqual(BUDGET.MAX_LONG_TASK_TOTAL_MS);
 
-    expect(
-      initialFetchCount,
-      `认证态首阶段数据请求必须大于 0，当前=${initialFetchCount}`
-    ).toBeGreaterThan(0);
+    if (authResult.pathMode === 'cold') {
+      expect(
+        totalDataRequests,
+        `cold-path 总数据请求必须大于 0，当前=${totalDataRequests}`
+      ).toBeGreaterThan(0);
+    } else if (warmZeroFetch) {
+      console.warn('[Weak Budget Guard] warm-path totalDataRequests=0，记录为告警样本');
+    }
 
     expect(
-      initialFetchCount,
-      `首阶段 fetch 数超出预算 (${initialFetchCount} > ${BUDGET.MAX_INITIAL_FETCH_COUNT})`
+      startupWindowFetchCount,
+      `首阶段 fetch 数超出预算 (${startupWindowFetchCount} > ${BUDGET.MAX_INITIAL_FETCH_COUNT})`
     ).toBeLessThanOrEqual(BUDGET.MAX_INITIAL_FETCH_COUNT);
 
     expect(

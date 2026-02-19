@@ -4,6 +4,10 @@
  * 从 critical-paths.spec.ts 抽取的共享代码
  */
 import { expect, Page } from '@playwright/test';
+import {
+  ensureAuthenticated as ensureSharedAuthenticated,
+  ensureLoginModalVisible,
+} from '../shared/auth-helpers';
 
 // ============================================================================
 // 类型定义
@@ -24,6 +28,8 @@ export interface CreatedTestData {
 /** 测试辅助函数接口 */
 export interface TestHelpers {
   waitForAppReady(page: Page): Promise<void>;
+  ensureCloudAuthenticated(page: Page): Promise<void>;
+  ensureEditorReady(page: Page, options?: { requireCloud?: boolean }): Promise<void>;
   createTestProject(page: Page, projectName: string): Promise<string | null>;
   uniqueId(): string;
   cleanupTestTasks(page: Page): Promise<void>;
@@ -65,6 +71,52 @@ export const testHelpers: TestHelpers = {
     await page.waitForSelector('[data-testid="app-container"]', { timeout: 10000 });
     // 等待loading状态消失
     await expect(page.locator('[data-testid="loading-indicator"]')).not.toBeVisible({ timeout: 10000 });
+  },
+
+  /** 强制使用云账号完成认证 */
+  async ensureCloudAuthenticated(page: Page): Promise<void> {
+    const { TEST_USER_EMAIL, TEST_USER_PASSWORD } = getTestEnvConfig();
+    if (!TEST_USER_EMAIL || !TEST_USER_PASSWORD) {
+      throw new Error('未配置 TEST_USER_EMAIL / TEST_USER_PASSWORD，无法执行云同步用例');
+    }
+
+    await ensureSharedAuthenticated(
+      page,
+      { email: TEST_USER_EMAIL, password: TEST_USER_PASSWORD },
+      {
+        projectsPath: '/#/projects',
+        maxAttempts: 3,
+        submitTimeoutMs: 15_000,
+      }
+    );
+  },
+
+  /**
+   * 确保进入可编辑态：
+   * 1) 已有 add-task-btn 直接通过
+   * 2) 有云凭据优先登录云账号
+   * 3) 无云凭据时降级进入本地模式
+   */
+  async ensureEditorReady(page: Page, options?: { requireCloud?: boolean }): Promise<void> {
+    const addTaskBtn = page.locator('[data-testid="add-task-btn"]');
+    if (await addTaskBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
+      return;
+    }
+
+    const { TEST_USER_EMAIL, TEST_USER_PASSWORD } = getTestEnvConfig();
+    const hasCloudCreds = !!TEST_USER_EMAIL && !!TEST_USER_PASSWORD;
+    const requireCloud = options?.requireCloud ?? false;
+
+    if (hasCloudCreds) {
+      await testHelpers.ensureCloudAuthenticated(page);
+    } else if (!requireCloud) {
+      await ensureLoginModalVisible(page);
+      await page.click('[data-testid="local-mode-btn"]');
+    } else {
+      throw new Error('该用例要求云登录，但未配置 TEST_USER_EMAIL / TEST_USER_PASSWORD');
+    }
+
+    await addTaskBtn.waitFor({ state: 'visible', timeout: 15_000 });
   },
 
   /** 访客模式下创建测试项目，返回项目 ID */

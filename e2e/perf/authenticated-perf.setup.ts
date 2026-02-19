@@ -1,9 +1,17 @@
-import { expect, Page } from '@playwright/test';
+import { expect, Page, Response } from '@playwright/test';
+import {
+  ensureAuthenticated,
+  type AuthEnsureResult,
+} from '../shared/auth-helpers';
 
 interface PerfAuthConfig {
   email: string;
   password: string;
   projectId?: string;
+}
+
+export interface PerfAuthResult extends AuthEnsureResult {
+  authStageDataRequests: number;
 }
 
 function readPerfAuthConfig(): PerfAuthConfig {
@@ -25,38 +33,40 @@ export function getPerfTargetPath(): string {
   return projectId ? `/#/projects/${projectId}` : '/#/projects';
 }
 
-async function ensureLoginModalVisible(page: Page): Promise<void> {
-  const loginModal = page.locator('[data-testid="login-modal"]');
-  if (await loginModal.isVisible({ timeout: 1000 }).catch(() => false)) {
-    return;
-  }
-
-  const loginButton = page.locator('[data-testid="login-btn"]');
-  if (await loginButton.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await loginButton.click();
-  }
-
-  await page.waitForSelector('[data-testid="login-modal"]', { timeout: 10000 });
-}
-
 /**
  * 确保页面处于已登录状态（用于认证态弱网预算测试）。
  */
-export async function ensurePerfAuthenticated(page: Page): Promise<void> {
+export async function ensurePerfAuthenticated(page: Page): Promise<PerfAuthResult> {
   const { email, password } = readPerfAuthConfig();
+  let authStageDataRequests = 0;
 
-  await page.goto('/#/projects', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  const onResponse = (response: Response) => {
+    const type = response.request().resourceType();
+    if (type === 'fetch' || type === 'xhr') {
+      authStageDataRequests += 1;
+    }
+  };
+  page.on('response', onResponse);
 
-  const userMenu = page.locator('[data-testid="user-menu"]');
-  if (await userMenu.isVisible({ timeout: 1500 }).catch(() => false)) {
-    return;
+  try {
+    const authResult = await ensureAuthenticated(
+      page,
+      { email, password },
+      {
+        projectsPath: '/#/projects',
+        maxAttempts: 3,
+        submitTimeoutMs: 15_000,
+        modalTimeoutMs: 10_000,
+        retryDelayMs: 600,
+      }
+    );
+
+    await expect(page).toHaveURL(/#\/projects(?:$|[/?])/);
+    return {
+      ...authResult,
+      authStageDataRequests,
+    };
+  } finally {
+    page.off('response', onResponse);
   }
-
-  await ensureLoginModalVisible(page);
-  await page.fill('[data-testid="email-input"]', email);
-  await page.fill('[data-testid="password-input"]', password);
-  await page.click('[data-testid="submit-login"]');
-
-  await expect(page.locator('[data-testid="login-modal"]')).not.toBeVisible({ timeout: 15_000 });
-  await expect(page).toHaveURL(/#\/projects/);
 }

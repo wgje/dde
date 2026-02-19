@@ -10,6 +10,7 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
   test('任务拖拽应更新父级关系', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     // 创建父任务
     const parentTitle = `父任务-${testHelpers.uniqueId()}`;
@@ -54,6 +55,7 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
   test('流程图视图拖拽应更新位置', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     // 切换到流程图视图
     const flowViewTab = page.locator('[data-testid="flow-view-tab"]');
@@ -111,13 +113,8 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
-    
-    // 登录
-    await page.click('[data-testid="login-btn"]');
-    await page.fill('[data-testid="email-input"]', testEmail);
-    await page.fill('[data-testid="password-input"]', testPassword);
-    await page.click('[data-testid="submit-login"]');
-    await expect(page.locator('[data-testid="login-modal"]')).not.toBeVisible({ timeout: 10000 });
+    await testHelpers.ensureCloudAuthenticated(page);
+    await testHelpers.ensureEditorReady(page, { requireCloud: true });
     
     // 模拟离线
     await context.setOffline(true);
@@ -135,6 +132,7 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     // 离线状态下刷新页面，验证 IndexedDB 持久化
     await page.reload();
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { requireCloud: true });
     await expect(page.locator(`[data-testid="task-card"]:has-text("${offlineTaskTitle}")`)).toBeVisible({ timeout: 10000 });
     
     // 恢复在线
@@ -143,6 +141,7 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     
     await page.reload();
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { requireCloud: true });
     await expect(page.locator(`[data-testid="task-card"]:has-text("${offlineTaskTitle}")`)).toBeVisible({ timeout: 10000 });
   });
 
@@ -161,14 +160,7 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     const pageB = await contextB.newPage();
 
     const login = async (p: Page) => {
-      await p.goto('/');
-      await testHelpers.waitForAppReady(p);
-      await p.click('[data-testid="login-btn"]');
-      await p.waitForSelector('[data-testid="login-modal"]');
-      await p.fill('[data-testid="email-input"]', testEmail);
-      await p.fill('[data-testid="password-input"]', testPassword);
-      await p.click('[data-testid="submit-login"]');
-      await expect(p.locator('[data-testid="login-modal"]')).not.toBeVisible({ timeout: 10000 });
+      await testHelpers.ensureCloudAuthenticated(p);
       await expect(p.locator('[data-testid="user-menu"]')).toBeVisible({ timeout: 10000 });
     };
 
@@ -312,6 +304,7 @@ test.describe('性能基准', () => {
   test('大量任务下仍能响应', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     for (let i = 0; i < 10; i++) {
       const taskTitle = `批量任务-${i}-${testHelpers.uniqueId()}`;
@@ -334,6 +327,7 @@ test.describe('撤销功能压力测试', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
   });
 
   test('帕金森测试 - 快速连续撤销不崩溃', async ({ page }) => {

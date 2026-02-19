@@ -1,8 +1,9 @@
 /**
- * 大门按钮组组件
+ * 大门动作区组件
  *
- * 已读、完成、稍后提醒按钮，以及快速录入区域
- * 录音支持长按区域交互：超出区域取消录音
+ * 保留两个主动作：已读 / 完成。
+ * 快速录入悬浮按钮：短按打开面板，长按直接录音。
+ * 录音过程中手指/鼠标离开按钮范围则自动撤销。
  */
 
 import {
@@ -13,7 +14,7 @@ import {
   isDevMode,
   OnDestroy,
   viewChild,
-  ElementRef
+  ElementRef,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -28,171 +29,496 @@ import { LoggerService } from '../../../../../services/logger.service';
   standalone: true,
   imports: [CommonModule, FormsModule],
   template: `
-    <section class="max-w-md mx-auto">
-      <div class="flex flex-col gap-6">
-        <!-- 主要操作按钮 (圆形极简风) -->
-        <div class="flex items-center justify-center gap-8" role="group" aria-label="大门处理操作">
-          <!-- 已读 -->
-          <button
-            data-testid="gate-read-button"
-            class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
-            [disabled]="isProcessing()"
-            (click)="markAsRead()">
-            <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">◎</span>
-            <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">已读</span>
-          </button>
+    <section class="gate-actions-wrap">
+      <div class="primary-actions" role="group" aria-label="大门处理操作">
+        <button
+          data-testid="gate-read-button"
+          class="action-btn action-read"
+          [disabled]="isProcessing()"
+          (click)="markAsRead()">
+          <span class="action-icon">↑</span>
+          <span class="action-label">已读</span>
+        </button>
 
-          <!-- 完成 (主操作，稍微大一点) -->
-          <button
-            data-testid="gate-complete-button"
-            class="group relative w-20 h-20 rounded-full bg-black dark:bg-white hover:bg-gray-800 dark:hover:bg-gray-200 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-lg shadow-black/10"
-            [disabled]="isProcessing()"
-            (click)="markAsCompleted()">
-            <span class="text-3xl text-white dark:text-black font-light group-hover:scale-110 transition-transform">✓</span>
-             <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">完成</span>
-          </button>
+        <button
+          data-testid="gate-complete-button"
+          class="action-btn action-complete"
+          [disabled]="isProcessing()"
+          (click)="markAsCompleted()">
+          <span class="action-icon">↓</span>
+          <span class="action-label">完成</span>
+        </button>
+      </div>
 
-           <!-- 稍后 (如有) -->
-           @if (canSnooze()) {
-             <button
-               data-testid="gate-snooze-button"
-               class="group relative w-16 h-16 rounded-full bg-gray-100 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/20 active:scale-95 transition-all duration-200 flex items-center justify-center shadow-sm"
-               [disabled]="isProcessing()"
-               (click)="snooze()">
-               <span class="text-2xl text-black dark:text-white font-light group-hover:scale-110 transition-transform">Zzz</span>
-               <span class="absolute -bottom-8 text-xs font-medium text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity">稍后</span>
-             </button>
-           }
-        </div>
-
-        <!-- 转写结果编辑区 -->
-        @if (pendingTranscription()) {
-          <div class="mt-2 rounded-2xl bg-white/80 dark:bg-black/40 backdrop-blur-xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden animate-fade-in">
-            <textarea
-              class="w-full bg-transparent border-0 text-sm leading-relaxed resize-none
-                     focus:ring-0 focus:outline-none p-3 text-black dark:text-white
-                     placeholder:text-gray-400"
-              rows="3"
-              [(ngModel)]="editableTranscription"
-              placeholder="编辑转录内容...">
-            </textarea>
-            <div class="flex items-center justify-end gap-2 px-3 pb-2">
-              <button
-                class="px-3 py-1 rounded-lg text-xs bg-gray-200 dark:bg-white/10 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-white/20 transition-colors"
-                (click)="cancelPendingTranscription()">
-                取消
-              </button>
-              <button
-                class="px-3 py-1 rounded-lg text-xs bg-blue-500 text-white hover:bg-blue-600 transition-colors"
-                (click)="confirmPendingTranscription()">
-                保存
-              </button>
-            </div>
-          </div>
+      <button
+        #captureFab
+        type="button"
+        class="quick-capture-fab"
+        [class.fab-recording]="isFabRecording()"
+        [class.fab-out-of-zone]="isFabOutOfZone()"
+        [class.fab-transcribing]="isFabTranscribing()"
+        [disabled]="isProcessing()"
+        (mousedown)="onFabMouseDown($event)"
+        (touchstart)="onFabTouchStart($event)"
+        aria-label="快速录入：点按打开面板，长按录音"
+        data-testid="gate-quick-capture-toggle">
+        @if (isFabTranscribing()) {
+          <span class="fab-spinner"></span>
+        } @else if (isFabRecording()) {
+          <span class="fab-pulse"></span>
+        } @else {
+          <span class="fab-icon">+</span>
         }
+      </button>
 
-        <!-- 快速录入区 (iOS 搜索栏风格) -->
-        <div class="mt-4 relative bg-gray-100/80 dark:bg-white/5 backdrop-blur-xl rounded-2xl p-1 transition-all duration-300 ring-1 ring-black/5 dark:ring-white/10 focus-within:ring-blue-500/50 dark:focus-within:ring-blue-400/50 focus-within:bg-white dark:focus-within:bg-black/40">
-          <div class="flex items-center px-3 py-2">
-            <!-- 录音按钮区域 - 长按开始，超出取消 -->
+      @if (isFabRecording() || isFabTranscribing()) {
+        <div class="fab-hint" aria-live="polite">
+          @if (isFabOutOfZone()) {
+            松开取消
+          } @else if (isFabTranscribing()) {
+            转写中…
+          } @else {
+            松开结束录音
+          }
+        </div>
+      }
+
+      @if (quickCaptureOpen()) {
+        <div class="quick-capture-mask" (click)="closeQuickCapture()"></div>
+
+        <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
+          <header class="panel-header">
+            <h3>快速记录</h3>
+            <button type="button" class="panel-close" (click)="closeQuickCapture()">关闭</button>
+          </header>
+
+          @if (pendingTranscription()) {
+            <div class="transcription-editor">
+              <textarea
+                class="transcription-input"
+                rows="3"
+                [(ngModel)]="editableTranscription"
+                placeholder="编辑转写内容...">
+              </textarea>
+              <div class="transcription-actions">
+                <button type="button" class="ghost-btn" (click)="cancelPendingTranscription()">取消</button>
+                <button type="button" class="solid-btn" (click)="confirmPendingTranscription()">使用</button>
+              </div>
+            </div>
+          }
+
+          <div class="capture-input-row">
             @if (speechSupported() || isDevMode) {
-              <div
+              <button
                 #recordBtn
-                class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 mr-2 select-none touch-none cursor-pointer"
-                [class.bg-red-500]="isRecording()"
-                [class.animate-pulse]="isRecording() && !isOutOfZone()"
-                [class.opacity-50]="isOutOfZone()"
-                [ngClass]="{'bg-gray-200': !isRecording() && !isTranscribing(), 'dark:bg-white/10': !isRecording() && !isTranscribing()}"
-                [class.pointer-events-none]="isTranscribing()"
+                type="button"
+                class="record-btn"
+                [class.recording]="isRecording()"
+                [class.out-of-zone]="isOutOfZone()"
+                [disabled]="isTranscribing()"
                 (mousedown)="onRecordMouseDown($event)"
                 (touchstart)="onRecordTouchStart($event)"
                 (keydown.space)="onRecordKeyStart($event)"
                 (keyup.space)="onRecordKeyStop()">
-                
                 @if (isTranscribing()) {
-                  <svg class="animate-spin h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
+                  <span class="spinner"></span>
                 } @else if (isRecording()) {
-                  <div class="w-3 h-3 bg-white rounded-[2px]"></div>
+                  <span class="record-stop"></span>
                 } @else {
-                  <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"></path>
-                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"></path>
-                  </svg>
+                  <span>🎤</span>
                 }
-              </div>
-            }
-
-            <input
-              type="text"
-              class="w-full bg-transparent border-0 p-0 text-base text-black dark:text-white placeholder:text-gray-400 focus:ring-0 leading-relaxed font-sans"
-              placeholder="快速记录想法..."
-              [(ngModel)]="quickInputText"
-              [disabled]="isRecording() || isTranscribing()"
-              (keydown.enter)="submitQuickInput()"
-            />
-            
-            <!-- 回车提交提示 -->
-            @if (quickInputText() && !isRecording() && !isTranscribing()) {
-              <button 
-                (click)="submitQuickInput()"
-                class="ml-2 w-7 h-7 bg-blue-500 rounded-full flex items-center justify-center text-white hover:bg-blue-600 transition-colors">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
-                </svg>
               </button>
             }
+
+            <textarea
+              class="capture-input"
+              rows="3"
+              [ngModel]="quickInputText()"
+              (ngModelChange)="quickInputText.set($event)"
+              [disabled]="isRecording() || isTranscribing()"
+              placeholder="记录一个待处理想法...">
+            </textarea>
           </div>
-        </div>
-        
-        <!-- 状态提示 -->
-        @if (isRecording()) {
-           <p class="text-center text-xs text-gray-400 font-medium"
-              [class.animate-pulse]="!isOutOfZone()">
-             {{ isOutOfZone() ? '松开取消录音' : '正在录音... 超出按钮区域将取消' }}
-           </p>
-        }
-        @if (isTranscribing()) {
-           <p class="text-center text-xs text-gray-400 animate-pulse font-medium">
-             正在转写语音...
-           </p>
-        }
-      </div>
+
+          <footer class="panel-footer">
+            @if (isRecording()) {
+              <span class="hint">{{ isOutOfZone() ? '松开取消录音' : '录音中，离开按钮区域会取消' }}</span>
+            } @else if (isTranscribing()) {
+              <span class="hint">正在转写语音...</span>
+            } @else {
+              <span class="hint">在门内快速补录，不打断当前结算流程</span>
+            }
+
+            <button
+              type="button"
+              class="solid-btn"
+              [disabled]="!quickInputText().trim()"
+              (click)="submitQuickInput()">
+              保存
+            </button>
+          </footer>
+        </section>
+      }
     </section>
   `,
   styles: [`
     :host {
       display: block;
+      width: 100%;
     }
-    .animate-fade-in {
-      animation: fade-in 0.2s ease-out;
+
+    .gate-actions-wrap {
+      position: relative;
+      width: 100%;
+      padding: 0.35rem 0.25rem 0.6rem;
     }
-    @keyframes fade-in {
-      from { opacity: 0; transform: translateY(-5px); }
-      to { opacity: 1; transform: translateY(0); }
+
+    .primary-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.9rem;
+    }
+
+    .action-btn {
+      min-width: 132px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 0.72rem 1.2rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.85);
+      transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, background-color 180ms ease;
+      font-size: 0.84rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .action-btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .action-btn:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    .action-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .action-complete {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .action-icon {
+      font-size: 1rem;
+      line-height: 1;
+    }
+
+    .quick-capture-fab {
+      position: absolute;
+      right: -0.2rem;
+      bottom: -2.8rem;
+      width: 56px;
+      height: 56px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(24, 24, 27, 0.92);
+      color: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+      transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease, background-color 200ms ease;
+      z-index: 4;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .quick-capture-fab:hover:not(:disabled):not(.fab-recording) {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 28px -8px rgba(0, 0, 0, 0.6);
+    }
+
+    .quick-capture-fab:disabled {
+      opacity: 0.4;
+    }
+
+    .quick-capture-fab.fab-recording {
+      background: rgba(220, 38, 38, 0.85);
+      border-color: rgba(248, 113, 113, 0.4);
+      box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.2), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+      animation: fab-breathe 1.5s ease-in-out infinite;
+    }
+
+    .quick-capture-fab.fab-recording.fab-out-of-zone {
+      background: rgba(82, 82, 91, 0.7);
+      border-color: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+      animation: none;
+      opacity: 0.6;
+    }
+
+    .quick-capture-fab.fab-transcribing {
+      background: rgba(24, 24, 27, 0.92);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .fab-icon {
+      font-size: 1.5rem;
+      font-weight: 300;
+      line-height: 1;
+    }
+
+    .fab-pulse {
+      width: 14px;
+      height: 14px;
+      border-radius: 9999px;
+      background: white;
+    }
+
+    .fab-spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255, 255, 255, 0.25);
+      border-top-color: rgba(255, 255, 255, 0.9);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+
+    .fab-hint {
+      position: absolute;
+      right: 0;
+      bottom: -4.6rem;
+      white-space: nowrap;
+      font-size: 0.7rem;
+      color: rgba(255, 255, 255, 0.5);
+      letter-spacing: 0.02em;
+      z-index: 4;
+      pointer-events: none;
+    }
+
+    @keyframes fab-breathe {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+
+    .quick-capture-mask {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(4px);
+      z-index: 90;
+    }
+
+    .quick-capture-panel {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      width: min(420px, calc(100vw - 2rem));
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(24, 24, 27, 0.96);
+      box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+      padding: 0.85rem;
+      z-index: 91;
+      color: rgba(255, 255, 255, 0.9);
+      animation: panel-up 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @keyframes panel-up {
+      from {
+        opacity: 0;
+        transform: translateY(14px) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.6rem;
+    }
+
+    .panel-header h3 {
+      margin: 0;
+      font-size: 0.87rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .panel-close {
+      border: none;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+
+    .transcription-editor {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 0.5rem;
+      margin-bottom: 0.55rem;
+      background: rgba(0, 0, 0, 0.25);
+    }
+
+    .transcription-input,
+    .capture-input {
+      width: 100%;
+      resize: none;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.2);
+      color: rgba(255, 255, 255, 0.92);
+      padding: 0.55rem;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+
+    .transcription-input:focus,
+    .capture-input:focus {
+      outline: 1px solid rgba(255, 255, 255, 0.2);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .transcription-actions {
+      margin-top: 0.45rem;
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.45rem;
+    }
+
+    .capture-input-row {
+      display: flex;
+      gap: 0.55rem;
+      align-items: stretch;
+      margin-bottom: 0.65rem;
+    }
+
+    .record-btn {
+      width: 42px;
+      min-width: 42px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.85);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background-color 160ms ease, opacity 160ms ease;
+      touch-action: none;
+    }
+
+    .record-btn.recording {
+      background: rgba(220, 38, 38, 0.82);
+    }
+
+    .record-btn.out-of-zone {
+      opacity: 0.58;
+    }
+
+    .record-stop {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: white;
+    }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(245, 245, 244, 0.38);
+      border-top-color: rgba(245, 245, 244, 1);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .panel-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.65rem;
+    }
+
+    .hint {
+      font-size: 0.72rem;
+      color: rgba(255, 255, 255, 0.45);
+      line-height: 1.35;
+    }
+
+    .ghost-btn,
+    .solid-btn {
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 0.35rem 0.62rem;
+      font-size: 0.76rem;
+      cursor: pointer;
+    }
+
+    .ghost-btn {
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .solid-btn {
+      background: rgba(255, 255, 255, 0.9);
+      color: rgba(9, 9, 11, 0.95);
+      font-weight: 700;
+    }
+
+    .solid-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    @media (max-width: 640px) {
+      .quick-capture-fab {
+        right: 0;
+        width: 52px;
+        height: 52px;
+      }
+
+      .action-btn {
+        min-width: 118px;
+      }
+
+      .quick-capture-panel {
+        right: 0.75rem;
+        left: 0.75rem;
+        width: auto;
+      }
     }
   `],
-  changeDetection: ChangeDetectionStrategy.OnPush
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class GateActionsComponent implements OnDestroy {
-  // 注入服务
   gateService = inject(GateService);
   toast = inject(ToastService);
   blackBoxService = inject(BlackBoxService);
   speechService = inject(SpeechToTextService);
   logger = inject(LoggerService);
 
-  /**
-   * 动画处理中状态 - 禁用操作按钮
-   *
-   * 【Bug Fix #96645099】从 class field (computed signal) 改为原型方法
-   * 原因：极端情况下（如 Service Worker 缓存导致 chunk 不一致），
-   * class field 可能未正确初始化，导致模板调用时
-   * 报 "n.isProcessing is not a function"。
-   * 原型方法始终存在于类原型上，不受实例初始化影响。
-   */
+  /** 动画处理中状态 - 禁用操作按钮 */
   isProcessing(): boolean {
     try {
       return this.gateService.cardAnimation() !== 'idle';
@@ -201,108 +527,268 @@ export class GateActionsComponent implements OnDestroy {
     }
   }
 
-  /** 是否可以跳过（原型方法，同上理由） */
-  canSnooze(): boolean {
-    try {
-      return this.gateService.canSnooze();
-    } catch {
-      return false;
-    }
-  }
+  quickCaptureOpen = signal(false);
 
-  // 快速录入相关
   quickInputText = signal('');
-  
-  // 直接使用 Service 状态，保持全局一致
+
   isRecording = this.speechService.isRecording;
   isTranscribing = this.speechService.isTranscribing;
-  
+
   speechSupported = signal(this.speechService.isSupported());
-  
-  /** 开发模式标志，用于展示录音按钮 UI（即使浏览器不支持录音） */
   readonly isDevMode = isDevMode();
-  
-  /** 鼠标/手指是否超出录音按钮区域 */
+
   isOutOfZone = signal(false);
-  /** 待确认的转录文本 */
   pendingTranscription = signal('');
-  /** 可编辑的转录文本 */
   editableTranscription = '';
-  
-  /** 全局事件清理函数 */
+
+  /** FAB 按钮上的录音状态 */
+  isFabRecording = signal(false);
+  isFabOutOfZone = signal(false);
+  isFabTranscribing = signal(false);
+
   private globalCleanups: (() => void)[] = [];
-  
+
+  /** 长按定时器 */
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 长按是否已触发（用于区分短按 vs 长按） */
+  private longPressTriggered = false;
+  /** 长按检测阈值（ms） */
+  private static readonly LONG_PRESS_DELAY = 350;
+  /** FAB 录音区域容差（px） */
+  private static readonly FAB_ZONE_TOLERANCE = 60;
+
   readonly recordBtn = viewChild<ElementRef<HTMLElement>>('recordBtn');
+  readonly captureFab = viewChild<ElementRef<HTMLElement>>('captureFab');
 
   ngOnDestroy(): void {
+    this.clearLongPressTimer();
     this.removeGlobalListeners();
   }
 
-  markAsRead() {
+  markAsRead(): void {
     this.gateService.markAsRead();
   }
 
-  markAsCompleted() {
+  markAsCompleted(): void {
     this.gateService.markAsCompleted();
   }
-  
-  snooze() {
-    if (this.canSnooze()) {
-      this.gateService.snooze();
+
+  toggleQuickCapture(): void {
+    this.quickCaptureOpen.update(open => !open);
+  }
+
+  closeQuickCapture(): void {
+    this.quickCaptureOpen.set(false);
+    this.removeGlobalListeners();
+    this.isOutOfZone.set(false);
+  }
+
+  // ─── FAB 长按录音逻辑 ───
+
+  /** 鼠标按下 FAB：启动长按检测 */
+  onFabMouseDown(event: MouseEvent): void {
+    event.preventDefault();
+    if (this.isFabTranscribing()) return;
+
+    this.longPressTriggered = false;
+
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTriggered = true;
+      this.startFabRecording();
+    }, GateActionsComponent.LONG_PRESS_DELAY);
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (this.isFabRecording()) {
+        this.checkFabZone(e.clientX, e.clientY);
+      }
+    };
+    const onMouseUp = () => {
+      this.clearLongPressTimer();
+      if (this.isFabRecording()) {
+        this.stopFabRecording();
+      } else if (!this.longPressTriggered) {
+        // 短按 → 切换面板
+        this.toggleQuickCapture();
+      }
+      this.removeFabListeners();
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+
+    this.globalCleanups.push(
+      () => document.removeEventListener('mousemove', onMouseMove),
+      () => document.removeEventListener('mouseup', onMouseUp)
+    );
+  }
+
+  /** 触摸按下 FAB：启动长按检测 */
+  onFabTouchStart(event: TouchEvent): void {
+    event.preventDefault();
+    if (this.isFabTranscribing()) return;
+
+    this.longPressTriggered = false;
+
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTriggered = true;
+      this.startFabRecording();
+    }, GateActionsComponent.LONG_PRESS_DELAY);
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (this.isFabRecording() && e.touches.length > 0) {
+        this.checkFabZone(e.touches[0].clientX, e.touches[0].clientY);
+      }
+    };
+    const onTouchEnd = () => {
+      this.clearLongPressTimer();
+      if (this.isFabRecording()) {
+        this.stopFabRecording();
+      } else if (!this.longPressTriggered) {
+        this.toggleQuickCapture();
+      }
+      this.removeFabListeners();
+    };
+
+    document.addEventListener('touchmove', onTouchMove, { passive: true });
+    document.addEventListener('touchend', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchEnd);
+
+    this.globalCleanups.push(
+      () => document.removeEventListener('touchmove', onTouchMove),
+      () => document.removeEventListener('touchend', onTouchEnd),
+      () => document.removeEventListener('touchcancel', onTouchEnd)
+    );
+  }
+
+  /** 在 FAB 上开始录音 */
+  private startFabRecording(): void {
+    if (!this.speechService.isSupported()) {
+      // DEV mock
+      const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
+      const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
+      this.isFabRecording.set(false);
+      this.pendingTranscription.set(mockText);
+      this.editableTranscription = mockText;
+      this.quickCaptureOpen.set(true);
+      return;
+    }
+
+    this.isFabRecording.set(true);
+    this.isFabOutOfZone.set(false);
+
+    void this.speechService.startRecording().catch(err => {
+      this.logger.error('GateActions', 'FAB recording failed to start', err);
+      this.toast.error('无法启动录音');
+      this.isFabRecording.set(false);
+    });
+  }
+
+  /** 检查指针是否仍在 FAB 按钮区域内 */
+  private checkFabZone(clientX: number, clientY: number): void {
+    const fab = this.captureFab()?.nativeElement;
+    if (!fab) return;
+
+    const rect = fab.getBoundingClientRect();
+    const tolerance = GateActionsComponent.FAB_ZONE_TOLERANCE;
+    const inZone =
+      clientX >= rect.left - tolerance &&
+      clientX <= rect.right + tolerance &&
+      clientY >= rect.top - tolerance &&
+      clientY <= rect.bottom + tolerance;
+
+    this.isFabOutOfZone.set(!inZone);
+  }
+
+  /** 松开 FAB：根据是否在区域内决定转写或取消 */
+  private stopFabRecording(): void {
+    const outOfZone = this.isFabOutOfZone();
+    this.isFabRecording.set(false);
+    this.isFabOutOfZone.set(false);
+
+    if (outOfZone) {
+      this.speechService.cancelRecording();
+      this.logger.debug('GateActions', 'FAB recording cancelled: pointer left zone');
+      return;
+    }
+
+    // 正常结束 → 转写
+    this.isFabTranscribing.set(true);
+    void this.doFabTranscribe();
+  }
+
+  /** FAB 录音转写 → 结果写入面板 */
+  private async doFabTranscribe(): Promise<void> {
+    try {
+      const text = await this.speechService.stopAndTranscribe();
+      if (text && text.trim()) {
+        this.pendingTranscription.set(text);
+        this.editableTranscription = text;
+        this.quickCaptureOpen.set(true);
+      }
+    } catch (err) {
+      this.logger.error('GateActions', 'FAB transcription failed', err instanceof Error ? err.message : String(err));
+    } finally {
+      this.isFabTranscribing.set(false);
     }
   }
 
-  // --- 快速录入逻辑 ---
+  private clearLongPressTimer(): void {
+    if (this.longPressTimer !== null) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+  }
 
-  async submitQuickInput() {
+  private removeFabListeners(): void {
+    this.removeGlobalListeners();
+  }
+
+  // ─── 面板内录音逻辑（保留原有） ───
+
+  async submitQuickInput(): Promise<void> {
     const text = this.quickInputText().trim();
     if (!text) return;
 
     const result = this.blackBoxService.create({ content: text });
 
     if (result.ok) {
-        this.logger.info('Quick input submitted:', text);
-        this.quickInputText.set('');
-        this.toast.success('已记录');
-    } else {
-        this.logger.error('Failed to submit quick input', result.error.message);
-        this.toast.error(result.error.message || '记录失败');
+      this.logger.info('GateActions', 'Quick input submitted');
+      this.quickInputText.set('');
+      this.toast.success('已记录');
+      return;
     }
-  }
 
-  // --- 转录确认/取消 ---
+    this.logger.error('GateActions', 'Failed to submit quick input', result.error.message);
+    this.toast.error(result.error.message || '记录失败');
+  }
 
   confirmPendingTranscription(): void {
     const text = this.editableTranscription.trim();
     if (text) {
-      // 追加到输入框（如果有内容），或直接写入
       const current = this.quickInputText();
-      this.quickInputText.set(current ? current + ' ' + text : text);
+      this.quickInputText.set(current ? `${current} ${text}` : text);
     }
     this.pendingTranscription.set('');
     this.editableTranscription = '';
   }
 
   cancelPendingTranscription(): void {
-    this.logger.debug('GateActions', 'Transcription cancelled by user');
     this.pendingTranscription.set('');
     this.editableTranscription = '';
   }
 
-  // --- 录音区域交互 ---
-
   onRecordMouseDown(event: MouseEvent): void {
     event.preventDefault();
     if (this.isTranscribing() || this.pendingTranscription()) return;
-    
+
     this.doStartRecording();
-    
+
     const onMouseMove = (e: MouseEvent) => this.checkInRecordZone(e.clientX, e.clientY);
     const onMouseUp = () => this.doStopOrCancel();
-    
+
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-    
+
     this.globalCleanups.push(
       () => document.removeEventListener('mousemove', onMouseMove),
       () => document.removeEventListener('mouseup', onMouseUp)
@@ -312,20 +798,20 @@ export class GateActionsComponent implements OnDestroy {
   onRecordTouchStart(event: TouchEvent): void {
     event.preventDefault();
     if (this.isTranscribing() || this.pendingTranscription()) return;
-    
+
     this.doStartRecording();
-    
+
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches.length > 0) {
         this.checkInRecordZone(e.touches[0].clientX, e.touches[0].clientY);
       }
     };
     const onTouchEnd = () => this.doStopOrCancel();
-    
+
     document.addEventListener('touchmove', onTouchMove, { passive: true });
     document.addEventListener('touchend', onTouchEnd);
     document.addEventListener('touchcancel', onTouchEnd);
-    
+
     this.globalCleanups.push(
       () => document.removeEventListener('touchmove', onTouchMove),
       () => document.removeEventListener('touchend', onTouchEnd),
@@ -343,78 +829,74 @@ export class GateActionsComponent implements OnDestroy {
   onRecordKeyStop(): void {
     if (!this.isRecording()) return;
     this.isOutOfZone.set(false);
-    this.doTranscribe();
+    void this.doTranscribe();
   }
 
-  // --- 内部方法 ---
-
-  /** 开发模式模拟转写文本，用于 UI 调试 */
   private static readonly DEV_MOCK_TRANSCRIPTIONS = [
-    '先把登录模块的样式调一下，按钮间距太紧了，还有那个输入框的圆角要改成 8px',
-    '明天和设计师确认一下大门卡片的动画时长，现在感觉有点快',
-    '这个 bug 的根因是同步时 content 字段被漏掉了，需要在查询里加上',
+    '把今天没收尾的任务补到黑匣子，明天大门统一结算。',
+    '需要先修同步冲突，再看性能报警。',
+    '用户反馈入口动效过快，降低抖动幅度。',
   ];
 
   private doStartRecording(): void {
-    // 开发模式下浏览器不支持录音时，直接注入模拟转写文本，便于 UI 调试
     if (!this.speechService.isSupported()) {
-      this.logger.debug('GateActions', '[DEV] 录音不可用，注入模拟转写文本');
       const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
       const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
       this.pendingTranscription.set(mockText);
       this.editableTranscription = mockText;
       return;
     }
+
     this.isOutOfZone.set(false);
-    this.speechService.startRecording().catch(err => {
-      this.logger.error('Failed to start recording', err);
+    void this.speechService.startRecording().catch(err => {
+      this.logger.error('GateActions', 'Failed to start recording', err);
       this.toast.error('无法启动录音');
     });
   }
 
   private checkInRecordZone(clientX: number, clientY: number): void {
     if (!this.isRecording()) return;
-    
+
     const btn = this.recordBtn()?.nativeElement;
     if (!btn) return;
-    
+
     const rect = btn.getBoundingClientRect();
-    // 较大容差（40px），因为录音按钮较小
     const tolerance = 40;
-    const inZone = clientX >= rect.left - tolerance &&
-                   clientX <= rect.right + tolerance &&
-                   clientY >= rect.top - tolerance &&
-                   clientY <= rect.bottom + tolerance;
-    
+    const inZone =
+      clientX >= rect.left - tolerance &&
+      clientX <= rect.right + tolerance &&
+      clientY >= rect.top - tolerance &&
+      clientY <= rect.bottom + tolerance;
+
     this.isOutOfZone.set(!inZone);
   }
 
   private doStopOrCancel(): void {
     this.removeGlobalListeners();
-    
+
     if (!this.isRecording()) return;
-    
+
     if (this.isOutOfZone()) {
       this.speechService.cancelRecording();
       this.isOutOfZone.set(false);
       this.logger.debug('GateActions', 'Recording cancelled: pointer left zone');
-    } else {
-      this.doTranscribe();
+      return;
     }
+
+    void this.doTranscribe();
   }
 
   private async doTranscribe(): Promise<void> {
     this.removeGlobalListeners();
-    
+
     try {
       const text = await this.speechService.stopAndTranscribe();
       if (text && text.trim()) {
-        // 显示可编辑的转录结果，等待用户确认
         this.pendingTranscription.set(text);
         this.editableTranscription = text;
       }
     } catch (err) {
-      this.logger.error('Transcription failed', err instanceof Error ? err.message : String(err));
+      this.logger.error('GateActions', 'Transcription failed', err instanceof Error ? err.message : String(err));
     }
   }
 

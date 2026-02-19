@@ -204,7 +204,7 @@ export class SubtreeOperationsService {
    */
   cascadeUpdateChildrenStage(parentId: string, parentNewStage: number, tasks: Task[]): void {
     const taskMap = new Map(tasks.map(t => [t.id, t] as const));
-    const MAX_DEPTH = 500;
+    const MAX_DEPTH = FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH;
     const queue: { taskId: string; parentStage: number; depth: number }[] = [];
 
     // 获取父任务的直接子节点

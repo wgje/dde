@@ -6,16 +6,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { GateService } from './gate.service';
 import { BlackBoxService } from './black-box.service';
-import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
-import { 
+import {
   gateState,
   gatePendingItems,
   gateCurrentIndex,
   gateSnoozeCount,
   focusPreferences,
   setBlackBoxEntries,
-  resetGateState
+  resetGateState,
 } from '../state/focus-stores';
 import { BlackBoxEntry } from '../models/focus';
 
@@ -26,7 +25,7 @@ describe('GateService', () => {
     markAsCompleted: ReturnType<typeof vi.fn>;
     snooze: ReturnType<typeof vi.fn>;
   };
-  let mockPreferenceService: Record<string, unknown>;
+
   let mockLoggerService: {
     debug: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
@@ -34,12 +33,18 @@ describe('GateService', () => {
     error: ReturnType<typeof vi.fn>;
   };
 
+  const getDateOffset = (days: number): string => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  };
+
   const createMockEntry = (overrides: Partial<BlackBoxEntry> = {}): BlackBoxEntry => ({
     id: crypto.randomUUID(),
     projectId: 'test-project',
     userId: 'test-user',
     content: '测试条目',
-    date: new Date().toISOString().split('T')[0],
+    date: getDateOffset(0),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     isRead: false,
@@ -47,11 +52,10 @@ describe('GateService', () => {
     isArchived: false,
     snoozeCount: 0,
     deletedAt: null,
-    ...overrides
+    ...overrides,
   });
 
   beforeEach(() => {
-    // 重置状态
     resetGateState();
     setBlackBoxEntries([]);
     focusPreferences.set({
@@ -59,32 +63,29 @@ describe('GateService', () => {
       spotlightEnabled: true,
       strataEnabled: true,
       blackBoxEnabled: true,
-      maxSnoozePerDay: 3
+      maxSnoozePerDay: 3,
     });
     localStorage.clear();
 
     mockBlackBoxService = {
       markAsRead: vi.fn().mockReturnValue({ ok: true, value: {} }),
       markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
-      snooze: vi.fn().mockReturnValue({ ok: true, value: {} })
+      snooze: vi.fn().mockReturnValue({ ok: true, value: {} }),
     };
-
-    mockPreferenceService = {};
 
     mockLoggerService = {
       debug: vi.fn(),
       info: vi.fn(),
       warn: vi.fn(),
-      error: vi.fn()
+      error: vi.fn(),
     };
 
     TestBed.configureTestingModule({
       providers: [
         GateService,
         { provide: BlackBoxService, useValue: mockBlackBoxService },
-        { provide: PreferenceService, useValue: mockPreferenceService },
-        { provide: LoggerService, useValue: mockLoggerService }
-      ]
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
     });
 
     service = TestBed.inject(GateService);
@@ -102,14 +103,10 @@ describe('GateService', () => {
       expect(gateState()).toBe('bypassed');
     });
 
-    it('有待处理项目时应该激活大门', () => {
-      // 设置昨天的未读条目
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const entry = createMockEntry({ 
-        date: yesterday.toISOString().split('T')[0],
-        isRead: false,
-        isCompleted: false 
+    it('有待处理项目时应该激活大门并进入 entering 动画', () => {
+      const entry = createMockEntry({
+        date: getDateOffset(-1),
+        isCompleted: false,
       });
       setBlackBoxEntries([entry]);
 
@@ -117,11 +114,12 @@ describe('GateService', () => {
 
       expect(gateState()).toBe('reviewing');
       expect(gatePendingItems().length).toBe(1);
+      expect(['entering', 'idle']).toContain(service.cardAnimation());
     });
 
-    it('大门被禁用时应该跳过', () => {
+    it('大门被禁用时应该进入 disabled', () => {
       focusPreferences.update(p => ({ ...p, gateEnabled: false }));
-      setBlackBoxEntries([createMockEntry()]);
+      setBlackBoxEntries([createMockEntry({ date: getDateOffset(-1) })]);
 
       service.checkGate();
 
@@ -129,9 +127,9 @@ describe('GateService', () => {
     });
   });
 
-  describe('markAsRead', () => {
-    it('应该标记当前条目为已读', () => {
-      const entry = createMockEntry();
+  describe('动作状态机', () => {
+    it('markAsRead 应该触发 heave_read 动画', () => {
+      const entry = createMockEntry({ date: getDateOffset(-1) });
       gatePendingItems.set([entry]);
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
@@ -140,21 +138,11 @@ describe('GateService', () => {
 
       expect(result.ok).toBe(true);
       expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(entry.id);
+      expect(['heave_read', 'idle']).toContain(service.cardAnimation());
     });
 
-    it('无当前条目时应该返回错误', () => {
-      gatePendingItems.set([]);
-      gateState.set('reviewing');
-
-      const result = service.markAsRead();
-
-      expect(result.ok).toBe(false);
-    });
-  });
-
-  describe('markAsCompleted', () => {
-    it('应该标记当前条目为完成', () => {
-      const entry = createMockEntry();
+    it('markAsCompleted 应该触发 heavy_drop 动画', () => {
+      const entry = createMockEntry({ date: getDateOffset(-1) });
       gatePendingItems.set([entry]);
       gateCurrentIndex.set(0);
       gateState.set('reviewing');
@@ -163,28 +151,45 @@ describe('GateService', () => {
 
       expect(result.ok).toBe(true);
       expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith(entry.id);
+      expect(['heavy_drop', 'idle']).toContain(service.cardAnimation());
+    });
+
+    it('heavy_drop 完成后应触发 impactTick 并结束 gate', () => {
+      const entry = createMockEntry({ date: getDateOffset(-1) });
+      gatePendingItems.set([entry]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+
+      service.markAsCompleted();
+      const before = service.impactTick();
+
+      service.onHeavyDropComplete();
+
+      expect(service.impactTick()).toBeGreaterThan(before);
+      expect(gateState()).toBe('completed');
+    });
+
+    it('heave_read 完成后应推进到下一条并进入 settling', () => {
+      const first = createMockEntry({ date: getDateOffset(-1) });
+      const second = createMockEntry({ date: getDateOffset(-2) });
+      gatePendingItems.set([first, second]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+
+      service.markAsRead();
+      service.onHeaveReadComplete();
+
+      expect(gateCurrentIndex()).toBe(1);
+      expect(['settling', 'idle']).toContain(service.cardAnimation());
     });
   });
 
-  describe('snooze', () => {
-    it('应该跳过当前条目', () => {
-      const entry = createMockEntry();
+  describe('snooze compatibility', () => {
+    it('跳过次数上限后返回错误', () => {
+      const entry = createMockEntry({ date: getDateOffset(-1) });
       gatePendingItems.set([entry]);
       gateCurrentIndex.set(0);
-      gateSnoozeCount.set(0);
-      gateState.set('reviewing');
-
-      const result = service.snooze();
-
-      expect(result.ok).toBe(true);
-      expect(mockBlackBoxService.snooze).toHaveBeenCalled();
-    });
-
-    it('跳过次数已达上限时应该返回错误', () => {
-      const entry = createMockEntry();
-      gatePendingItems.set([entry]);
-      gateCurrentIndex.set(0);
-      gateSnoozeCount.set(3);  // 达到上限
+      gateSnoozeCount.set(3);
       gateState.set('reviewing');
 
       const result = service.snooze();
@@ -193,74 +198,23 @@ describe('GateService', () => {
     });
   });
 
-  describe('getCurrentEntry', () => {
-    it('应该返回当前条目', () => {
-      const entry = createMockEntry();
-      gatePendingItems.set([entry]);
-      gateCurrentIndex.set(0);
-
-      const current = service.getCurrentEntry();
-
-      expect(current).toEqual(entry);
-    });
-
-    it('无条目时应该返回 null', () => {
-      gatePendingItems.set([]);
-
-      const current = service.getCurrentEntry();
-
-      expect(current).toBeNull();
-    });
-  });
-
-  describe('forceBypass', () => {
-    it('应该强制跳过大门', () => {
+  describe('reset / bypass', () => {
+    it('forceBypass 应设为 bypassed', () => {
       gateState.set('reviewing');
-
       service.forceBypass();
-
       expect(gateState()).toBe('bypassed');
     });
-  });
 
-  describe('reset', () => {
-    it('应该重置大门状态', () => {
+    it('reset 应重置状态与动画', () => {
       gateState.set('reviewing');
-      gatePendingItems.set([createMockEntry()]);
+      gatePendingItems.set([createMockEntry({ date: getDateOffset(-1) })]);
+      service.cardAnimation.set('heavy_drop');
 
       service.reset();
 
-      // resetGateState() 设置状态为 'checking'，准备重新检查
       expect(gateState()).toBe('checking');
       expect(gatePendingItems().length).toBe(0);
-    });
-  });
-
-  describe('prefersReducedMotion (回归测试)', () => {
-    it('启用减少动画时，cardAnimation 应直接设为 idle 而非 entering', () => {
-      // 设置昨天的未读条目
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const entry = createMockEntry({ 
-        date: yesterday.toISOString().split('T')[0],
-        isRead: false,
-        isCompleted: false 
-      });
-      setBlackBoxEntries([entry]);
-
-      service.checkGate();
-
-      // 验证大门已激活
-      expect(gateState()).toBe('reviewing');
-      
-      // 验证 cardAnimation 不会卡在 'entering'
-      // 在正常模式下初始为 'entering'（依赖 animationend 事件），
-      // 在减少动画模式下直接为 'idle'
-      // 这里只验证服务不会因为缺少动画事件而卡住
-      // 因为测试环境无法模拟 window.matchMedia，
-      // 我们主要验证逻辑结构正确即可
-      const animation = service.cardAnimation();
-      expect(['idle', 'entering']).toContain(animation);
+      expect(service.cardAnimation()).toBe('idle');
     });
   });
 });

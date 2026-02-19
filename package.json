@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "engines": {
-    "node": ">=18.19.0 <24"
+    "node": ">=18.19.0"
   },
   "scripts": {
     "ng": "node scripts/run-ng.cjs",
@@ -53,6 +53,7 @@
     "perf:guard:nojit": "node scripts/check-main-no-jit.cjs",
     "perf:guard:startup": "node scripts/perf-startup-guard.cjs",
     "perf:guard:no-regression": "node scripts/perf-no-regression-guard.cjs",
+    "perf:audit:batch": "node scripts/run-perf-audit-batch.cjs --rounds=5 --strict-thresholds=1",
     "quality:guard:font-contract": "node scripts/check-font-subset-contract.cjs",
     "quality:guard:supabase-ready": "node scripts/check-supabase-ready-contract.cjs",
     "perf:guard": "npm run build:dev -- --stats-json && node scripts/inject-modulepreload.cjs && npm run perf:guard:nojit && npm run perf:guard:startup && npm run quality:guard:font-contract && npm run quality:guard:supabase-ready",

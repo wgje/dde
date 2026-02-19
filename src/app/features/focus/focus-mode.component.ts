@@ -27,6 +27,7 @@ import {
 import { LoggerService } from '../../../services/logger.service';
 import { FOCUS_CONFIG } from '../../../config/focus.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
+import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
 
 @Component({
   selector: 'app-focus-mode',
@@ -66,6 +67,8 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private visibilityHandler: (() => void) | null = null;
   /** 旧策略启动定时器（开关关闭时兼容） */
   private legacyInitialLoadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 远端拉取延迟定时器（避免首屏请求竞争） */
+  private remoteStartupPullTimer: ReturnType<typeof setTimeout> | null = null;
 
   // 计算属性 - 决定各组件是否可见
   readonly isGateVisible = computed(() => 
@@ -114,6 +117,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
       clearTimeout(this.legacyInitialLoadTimer);
       this.legacyInitialLoadTimer = null;
     }
+    if (this.remoteStartupPullTimer) {
+      clearTimeout(this.remoteStartupPullTimer);
+      this.remoteStartupPullTimer = null;
+    }
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = null;
@@ -155,13 +162,17 @@ export class FocusModeComponent implements OnInit, OnDestroy {
       this.checkGateOnStartup();
     }
 
-    // 延迟后台拉取远端数据，纠正可能过期的本地 gate 状态
-    this.blackBoxSyncService.pullChanges({ reason: 'startup' }).then(() => {
-      this.ngZone.run(() => this.checkGateOnStartup());
-    }).catch(pullError => {
-      this.logger.warn('FocusMode', '后台拉取失败（throttled）',
-        pullError instanceof Error ? pullError.message : String(pullError));
-    });
+    // 【性能优化 2026-02-18】延迟远端拉取，避免与主数据加载竞争首屏带宽
+    // 延迟时间由 STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS 控制(默认 4s)
+    this.remoteStartupPullTimer = setTimeout(() => {
+      this.remoteStartupPullTimer = null;
+      this.blackBoxSyncService.pullChanges({ reason: 'startup' }).then(() => {
+        this.ngZone.run(() => this.checkGateOnStartup());
+      }).catch(pullError => {
+        this.logger.warn('FocusMode', '后台拉取失败（throttled）',
+          pullError instanceof Error ? pullError.message : String(pullError));
+      });
+    }, STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS);
   }
 
   /**
@@ -213,12 +224,16 @@ export class FocusModeComponent implements OnInit, OnDestroy {
       await this.blackBoxSyncService.loadFromLocal();
       this.checkGateOnStartup();
 
-      this.blackBoxSyncService.pullChanges({ reason }).then(() => {
-        this.checkGateOnStartup();
-      }).catch(pullError => {
-        this.logger.warn('FocusMode', '后台拉取失败（legacy）',
-          pullError instanceof Error ? pullError.message : String(pullError));
-      });
+      // 【性能优化 2026-02-18】legacy 路径同样延迟远端拉取，避免首屏竞争
+      this.remoteStartupPullTimer = setTimeout(() => {
+        this.remoteStartupPullTimer = null;
+        this.blackBoxSyncService.pullChanges({ reason }).then(() => {
+          this.checkGateOnStartup();
+        }).catch(pullError => {
+          this.logger.warn('FocusMode', '后台拉取失败（legacy）',
+            pullError instanceof Error ? pullError.message : String(pullError));
+        });
+      }, STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS);
     } catch (error) {
       this.logger.error('FocusMode', '初始化失败', error instanceof Error ? error.message : String(error));
       this.checkGateOnStartup();

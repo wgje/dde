@@ -10,6 +10,7 @@ test.describe('关键路径 2: 创建任务 + 保存', () => {
   test('应能创建新任务', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     const taskTitle = `测试任务-${testHelpers.uniqueId()}`;
     testHelpers.trackTaskTitle(taskTitle);
@@ -38,6 +39,7 @@ test.describe('关键路径 2: 创建任务 + 保存', () => {
   test('任务修改应自动保存', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     const taskTitle = `自动保存测试-${testHelpers.uniqueId()}`;
     const updatedTitle = `已更新-${taskTitle}`;
@@ -68,6 +70,7 @@ test.describe('关键路径 2: 创建任务 + 保存', () => {
     // 刷新页面验证持久化
     await page.reload();
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     // 验证任务仍然存在（本地存储）
     await expect(page.locator(`[data-testid="task-card"]:has-text("${updatedTitle}")`)).toBeVisible({ timeout: 10000 });
@@ -76,6 +79,7 @@ test.describe('关键路径 2: 创建任务 + 保存', () => {
   test('撤销/重做应正常工作', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page);
     
     const taskTitle = `撤销测试-${testHelpers.uniqueId()}`;
     testHelpers.trackTaskTitle(taskTitle);

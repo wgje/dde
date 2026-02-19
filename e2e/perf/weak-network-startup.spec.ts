@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { ensurePerfAuthenticated, getPerfTargetPath } from './authenticated-perf.setup';
+import { initPerfMetrics, mergePerfMetrics } from './perf-metrics';
 
 const PERF_GUARD = {
   MAX_INITIAL_DATA_FETCH: 20,
@@ -18,7 +19,8 @@ test.describe('Weak Network Startup Guard', () => {
   );
 
   test('startup should avoid redundant requests before flow intent', async ({ page }) => {
-    await ensurePerfAuthenticated(page);
+    initPerfMetrics();
+    const authResult = await ensurePerfAuthenticated(page);
 
     const cdpSession = await page.context().newCDPSession(page);
     await cdpSession.send('Network.enable');
@@ -42,11 +44,14 @@ test.describe('Weak Network Startup Guard', () => {
     await page.goto(getPerfTargetPath(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await page.waitForTimeout(10_000);
 
-    const dataRequests = responses.filter(
+    const startupWindowRequests = responses.filter(
       (item) => item.resourceType === 'fetch' || item.resourceType === 'xhr'
     );
-    const blackBoxPulls = dataRequests.filter((item) => item.url.includes('black_box_entries')).length;
-    const rpc400Count = dataRequests.filter(
+    const startupWindowDataRequests = startupWindowRequests.length;
+    const totalDataRequests = authResult.authStageDataRequests + startupWindowDataRequests;
+    const warmZeroFetch = authResult.pathMode === 'warm' && totalDataRequests === 0;
+    const blackBoxPulls = startupWindowRequests.filter((item) => item.url.includes('black_box_entries')).length;
+    const rpc400Count = startupWindowRequests.filter(
       (item) => item.url.includes('rpc/get_full_project_data') && item.status === 400
     ).length;
     const preFlowLargeChunks = await page.evaluate((minBytes: number) => {
@@ -62,14 +67,32 @@ test.describe('Weak Network Startup Guard', () => {
       () => document.querySelectorAll('link[rel=\"modulepreload\"]').length
     );
 
-    expect(
-      dataRequests.length,
-      `认证态首阶段数据请求必须大于 0，当前=${dataRequests.length}`
-    ).toBeGreaterThan(0);
+    console.log(
+      `[weak-startup] path=${authResult.pathMode} login=${authResult.loginSucceeded ? 1 : 0} authFetch=${authResult.authStageDataRequests} windowFetch=${startupWindowDataRequests} totalFetch=${totalDataRequests} warmZero=${warmZeroFetch ? 1 : 0}`
+    );
+
+    mergePerfMetrics({
+      'auth.login_success_flag': authResult.loginSucceeded ? 1 : 0,
+      'startup.auth_data_requests': authResult.authStageDataRequests,
+      'startup.window_data_requests': startupWindowDataRequests,
+      'startup.total_data_requests': totalDataRequests,
+      'startup.warm_zero_fetch_flag': warmZeroFetch ? 1 : 0,
+      // 保持旧指标口径，避免破坏 no-regression baseline
+      'startup.data_requests': startupWindowDataRequests,
+    });
+
+    if (authResult.pathMode === 'cold') {
+      expect(
+        totalDataRequests,
+        `cold-path 总数据请求必须大于 0，当前=${totalDataRequests}`
+      ).toBeGreaterThan(0);
+    } else if (warmZeroFetch) {
+      console.warn('[Weak Startup Guard] warm-path totalDataRequests=0，记录为告警样本');
+    }
 
     expect(
-      dataRequests.length,
-      `认证态首阶段数据请求超限: ${dataRequests.length} > ${PERF_GUARD.MAX_INITIAL_DATA_FETCH}`
+      startupWindowDataRequests,
+      `认证态首阶段数据请求超限: ${startupWindowDataRequests} > ${PERF_GUARD.MAX_INITIAL_DATA_FETCH}`
     ).toBeLessThanOrEqual(PERF_GUARD.MAX_INITIAL_DATA_FETCH);
 
     expect(

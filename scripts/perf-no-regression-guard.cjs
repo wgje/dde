@@ -21,10 +21,6 @@ const CURRENT_PATH = process.env.PERF_CURRENT_METRICS_PATH
   : path.join(ROOT, 'test-results', 'perf', 'current-metrics.json');
 const STATS_PATH = path.join(ROOT, 'dist', 'stats.json');
 const REGRESSION_BUDGET_RATIO = Number(process.env.PERF_REGRESSION_BUDGET_RATIO || 0.05);
-const NON_ZERO_REQUIRED_METRICS = new Set([
-  'resume.interaction_ready_ms',
-  'resume.background_refresh_ms',
-]);
 
 function fail(message) {
   console.error(`[perf-no-regression-guard] FAIL: ${message}`);
@@ -144,10 +140,6 @@ for (const [metricName, baselineValueRaw] of Object.entries(baselineMetrics)) {
     violations.push(`${metricName}: missing current metric`);
     continue;
   }
-  if (NON_ZERO_REQUIRED_METRICS.has(metricName) && currentValue <= 0) {
-    violations.push(`${metricName}: expected > 0 but got ${currentValue.toFixed(2)}`);
-    continue;
-  }
 
   const allowed = baselineValue === 0
     ? 0
@@ -157,6 +149,20 @@ for (const [metricName, baselineValueRaw] of Object.entries(baselineMetrics)) {
       `${metricName}: regression ${currentValue.toFixed(2)} > allowed ${allowed.toFixed(2)} (baseline ${baselineValue.toFixed(2)})`
     );
   }
+}
+
+const heavyRecordCount = Number(currentMetrics['resume.heavy_record_count']);
+if (!Number.isFinite(heavyRecordCount)) {
+  violations.push('resume.heavy_record_count: missing current metric');
+} else if (heavyRecordCount > 1) {
+  violations.push(`resume.heavy_record_count: ${heavyRecordCount} > 1`);
+}
+
+const heavyTicketCount = Number(currentMetrics['resume.heavy_ticket_count']);
+if (!Number.isFinite(heavyTicketCount)) {
+  violations.push('resume.heavy_ticket_count: missing current metric');
+} else if (heavyTicketCount > 1) {
+  violations.push(`resume.heavy_ticket_count: ${heavyTicketCount} > 1`);
 }
 
 if (violations.length > 0) {

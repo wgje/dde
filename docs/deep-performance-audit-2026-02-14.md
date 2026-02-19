@@ -319,3 +319,37 @@
 - 后续实施建议按 P0->P1->P2 逐项上线，每项独立提交，确保可快速回滚。
 - 每项优化上线后必须复测三场景并对比本报告基线。
 
+---
+
+## 10. 实施状态更新（2026-02-18）
+
+### 10.1 已落地项（运行时）
+
+- Flow 大块加载：已改为用户意图触发 + 弱网降级预热。
+- BlackBox：已启用 `freshness window + single-flight + watermark probe`。
+- RPC 400：`P0001 Access denied` 已改为“不走 fallback”并配合 activeProject 预判。
+- 字体：首屏仅保留关键子集 preload，其余延后加载。
+
+### 10.2 本轮新增收口（门禁与可测性）
+
+- 认证前置统一：新增 `e2e/shared/auth-helpers.ts`，统一登录弹窗处理和重试。
+- 弱网门禁分层：`warm-path` 允许 `totalDataRequests=0`，并输出 `warm_zero` 观测标记。
+- 恢复门禁稳态：`resume.interaction_ready_ms` 改为高精度时钟计算，并移除 `>0` 硬断言误报。
+- 写路径可测性：`task-crud` / `sync-flow` 统一进入“可编辑态”前置，避免被登录模态拦截。
+- 夜间批次：新增 `scripts/run-perf-audit-batch.cjs` 与 `.github/workflows/perf-nightly-audit.yml`。
+
+### 10.3 当前默认阈值（夜间批次）
+
+- warm-path zero-fetch 占比：`<= 40%`
+- 登录前置成功率：`>= 95%`
+- `resume.interaction_ready_ms=0` 频率：`<= 20%`
+
+### 10.4 回滚点
+
+- 若分层门禁引入误判，可回退 `e2e/perf/weak-network-startup.spec.ts` 与 `e2e/weak-network-budget.spec.ts`。
+- 若恢复指标口径需回滚，可恢复 `src/services/app-lifecycle-orchestrator.service.ts` 的 `Date.now()` 计时。
+- 若夜间批次成本过高，可临时禁用 `.github/workflows/perf-nightly-audit.yml`。
+
+### 10.5 值班手册
+
+- 门禁执行与排障手册：`docs/perf-gate-runbook.md`

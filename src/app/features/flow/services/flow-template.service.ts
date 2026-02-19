@@ -163,6 +163,21 @@ export class FlowTemplateService {
         toLinkable: true,
         fromLinkableDuplicates: false,
         toLinkableDuplicates: true,
+        // 选中状态变化时立即更新边框样式
+        // 注意：.ofObject() 绑定在 isSelected（Part 属性）变化时不会自动重新求值，
+        // 必须通过 selectionChanged 回调主动刷新 SHAPE 的 stroke / strokeWidth
+        selectionChanged: (node: go.Part) => {
+          const shape = node.findObject('SHAPE') as go.Shape | null;
+          if (!shape) return;
+          const data = node.data as { selectedBorderColor?: string; borderColor?: string; borderWidth?: number } | undefined;
+          if (node.isSelected) {
+            shape.stroke = data?.selectedBorderColor || '#4A8C8C';
+            shape.strokeWidth = 2;
+          } else {
+            shape.stroke = data?.borderColor || '#78716C';
+            shape.strokeWidth = data?.borderWidth ?? 1;
+          }
+        },
         // 事件代理：通过全局事件总线发送信号
         click: ((e: go.InputEvent, node: go.GraphObject) => {
           // dragging 不是 go.InputEvent 的标准属性，使用 isTouchDevice + 检查 DraggingTool
@@ -256,10 +271,8 @@ export class FlowTemplateService {
           isPanelMain: true
         },
         new go.Binding("fill", "color"),
-        new go.Binding("stroke", "", (data: go.ObjectData, obj: go.GraphObject) => {
-          if ((obj.part as go.Node)?.isSelected) return (data as { selectedBorderColor?: string }).selectedBorderColor || "#4A8C8C";
-          return (data as { borderColor?: string }).borderColor || "#78716C";
-        }).ofObject(),
+        // stroke 初始值由 borderColor 数据属性决定；选中态由 selectionChanged 回调处理
+        new go.Binding("stroke", "borderColor"),
         new go.Binding("strokeWidth", "borderWidth")),
         
         $(go.Panel, "Vertical",

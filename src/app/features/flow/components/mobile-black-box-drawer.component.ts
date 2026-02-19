@@ -14,6 +14,9 @@ import { ToastService } from '../../../../services/toast.service';
 import { BlackBoxRecorderComponent } from '../../focus/components/black-box/black-box-recorder.component';
 import { BlackBoxTextInputComponent } from '../../focus/components/black-box/black-box-text-input.component';
 import { BlackBoxDateGroupComponent } from '../../focus/components/black-box/black-box-date-group.component';
+import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
+import { StrataRestoreEvent } from '../../focus/components/strata/strata-layer.component';
+import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { 
   SwipeGestureState, 
   SwipeDirection, 
@@ -28,7 +31,8 @@ import {
     CommonModule, 
     BlackBoxRecorderComponent, 
     BlackBoxTextInputComponent,
-    BlackBoxDateGroupComponent
+    BlackBoxDateGroupComponent,
+    StrataViewComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -81,7 +85,7 @@ import {
               [group]="group"
               (markRead)="onMarkRead($event)"
               (markCompleted)="onMarkCompleted($event)"
-              (delete)="onDeleteRequested($event)" />
+              (confirmDelete)="onConfirmDelete($event)" />
           }
           
           <!-- 空状态 -->
@@ -92,30 +96,19 @@ import {
             </div>
           }
 
-          <!-- 删除确认栏 -->
-          @if (pendingDeleteId()) {
-            <div class="px-2 py-1.5 bg-red-50 dark:bg-red-900/30 
-                        rounded-lg text-xs text-red-600 dark:text-red-300
-                        flex items-center justify-between gap-2">
-              <span>确认删除该条目？</span>
-              <div class="flex items-center gap-1.5">
-                <button
-                  class="px-2 py-1 rounded bg-red-500 text-white text-[10px]
-                         hover:bg-red-600 transition-colors"
-                  data-testid="confirm-delete"
-                  (click)="confirmDelete()">
-                  删除
-                </button>
-                <button
-                  class="px-2 py-1 rounded bg-stone-200 dark:bg-stone-700
-                         text-stone-600 dark:text-stone-300 text-[10px]
-                         hover:bg-stone-300 dark:hover:bg-stone-600 transition-colors"
-                  (click)="cancelDelete()">
-                  取消
-                </button>
-              </div>
+          <!-- 项目历史回顾（沉积岩层） -->
+          <div class="mt-4 border-t border-amber-500/10 dark:border-amber-400/10 pt-3">
+            <div class="flex items-center gap-2 px-1 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-amber-500/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              <span class="text-xs font-bold text-stone-600 dark:text-stone-300 tracking-wide">项目历史回顾</span>
+              <span class="text-[9px] font-mono text-amber-500/40 tracking-widest uppercase">Strata</span>
             </div>
-          }
+            <div class="h-72 rounded-lg overflow-hidden">
+              <app-strata-view class="block h-full w-full" [alwaysShow]="true" (restoreItem)="onRestoreFromHistory($event)"></app-strata-view>
+            </div>
+          </div>
           
         </div>
       </div>
@@ -139,8 +132,8 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
   readonly speechService = inject(SpeechToTextService);
   readonly focusPrefs = inject(FocusPreferenceService);
   private readonly toast = inject(ToastService);
+  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   
-  readonly pendingDeleteId = signal<string | null>(null);
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
   
@@ -180,29 +173,25 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
   onMarkCompleted(id: string): void {
     this.blackBoxService.markAsCompleted(id);
   }
-  
-  /**
-   * 请求删除
-   */
-  onDeleteRequested(id: string): void {
-    this.pendingDeleteId.set(id);
-  }
 
   /**
-   * 确认删除
+   * 确认删除条目
    */
-  confirmDelete(): void {
-    const id = this.pendingDeleteId();
-    if (!id) return;
+  onConfirmDelete(id: string): void {
     this.blackBoxService.delete(id);
-    this.pendingDeleteId.set(null);
   }
 
   /**
-   * 取消删除
+   * 从沉积层历史中恢复条目
+   * - task → 恢复为 active 状态
+   * - black_box → 取消完成标记
    */
-  cancelDelete(): void {
-    this.pendingDeleteId.set(null);
+  onRestoreFromHistory(event: StrataRestoreEvent): void {
+    if (event.type === 'task') {
+      this.taskOpsAdapter.updateTaskStatus(event.id, 'active');
+    } else {
+      this.blackBoxService.update(event.id, { isCompleted: false });
+    }
   }
   
   // ===============================================

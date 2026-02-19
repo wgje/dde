@@ -56,25 +56,62 @@ test.describe('Focus Mode - Gate (大门)', () => {
     await expect(page.locator('[data-testid="gate-overlay"]')).not.toBeVisible();
   });
 
-  test('贪睡功能应该暂时关闭大门', async ({ page }) => {
+  test('下拉门体手势应触发完成', async ({ page }) => {
     await page.goto('/');
     await page.waitForSelector('[data-testid="gate-overlay"]');
 
-    await page.click('[data-testid="gate-snooze-button"]');
+    const progressBefore = await page.locator('[data-testid="gate-progress"]').textContent();
+    const card = page.locator('[data-testid="gate-card"]');
+    const box = await card.boundingBox();
+    if (!box) throw new Error('gate-card bounding box not found');
 
-    await expect(page.locator('[data-testid="gate-overlay"]')).not.toBeVisible();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 140, { steps: 12 });
+    await page.mouse.up();
+
+    await page.waitForTimeout(700);
+
+    const progressAfter = await page.locator('[data-testid="gate-progress"]').textContent();
+    expect(progressBefore).not.toBe(progressAfter);
   });
 
-  test('键盘快捷键应该正常工作', async ({ page }) => {
+  test('上推门体手势应触发已读', async ({ page }) => {
     await page.goto('/');
     await page.waitForSelector('[data-testid="gate-overlay"]');
 
-    // Enter 键标记已读
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(300);
+    const progressBefore = await page.locator('[data-testid="gate-progress"]').textContent();
+    const card = page.locator('[data-testid="gate-card"]');
+    const box = await card.boundingBox();
+    if (!box) throw new Error('gate-card bounding box not found');
 
-    // 验证进度变化（如果还有项目的话）
-    // 或者验证大门关闭
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 140, { steps: 12 });
+    await page.mouse.up();
+
+    await page.waitForTimeout(700);
+
+    const progressAfter = await page.locator('[data-testid="gate-progress"]').textContent();
+    expect(progressBefore).not.toBe(progressAfter);
+  });
+
+  test('键盘 1/2 快捷键应该正常工作', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForSelector('[data-testid="gate-overlay"]');
+
+    const progressBefore = await page.locator('[data-testid="gate-progress"]').textContent();
+
+    await page.keyboard.press('1');
+    await page.waitForTimeout(700);
+
+    const progressAfterRead = await page.locator('[data-testid="gate-progress"]').textContent();
+    expect(progressBefore).not.toBe(progressAfterRead);
+
+    if (await page.locator('[data-testid="gate-overlay"]').isVisible()) {
+      await page.keyboard.press('2');
+      await page.waitForTimeout(700);
+    }
   });
 });
 
@@ -273,18 +310,11 @@ test.describe('Focus Mode - Settings', () => {
     await expect(page.locator('[data-testid="gate-overlay"]')).not.toBeVisible();
   });
 
-  test('应该能调整贪睡时长', async ({ page }) => {
+  test('Gate 设置中不再显示跳过时长配置', async ({ page }) => {
     await page.click('[data-testid="settings-button"]');
     await page.click('[data-testid="settings-focus-mode"]');
 
-    await page.fill('[data-testid="snooze-duration"]', '60');
-    await page.click('[data-testid="settings-save"]');
-
-    // 验证设置已保存
-    await page.click('[data-testid="settings-button"]');
-    await page.click('[data-testid="settings-focus-mode"]');
-    
-    await expect(page.locator('[data-testid="snooze-duration"]')).toHaveValue('60');
+    await expect(page.locator('[data-testid="snooze-duration"]')).toHaveCount(0);
   });
 });
 
@@ -340,9 +370,9 @@ test.describe('Focus Mode - Accessibility', () => {
     await page.keyboard.press('Tab');
     await expect(page.locator('[data-testid="gate-complete-button"]')).toBeFocused();
 
-    // Tab 到贪睡按钮
+    // Tab 到快速录入按钮
     await page.keyboard.press('Tab');
-    await expect(page.locator('[data-testid="gate-snooze-button"]')).toBeFocused();
+    await expect(page.locator('[data-testid="gate-quick-capture-toggle"]')).toBeFocused();
   });
 
   test('应该有正确的 ARIA 标签', async ({ page }) => {

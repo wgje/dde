@@ -94,7 +94,7 @@ describe('SpeechToTextService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SupabaseClientService, useValue: mockSupabaseClient },
-        { provide: NetworkAwarenessService, useValue: mockNetworkAwareness }
+        { provide: NetworkAwarenessService, useValue: mockNetworkAwareness },
       ]
     });
 
@@ -248,6 +248,45 @@ describe('SpeechToTextService', () => {
 
       const results = await processing;
       expect(results).toEqual([]);
+    });
+  });
+
+  describe('全局事件监听器清理', () => {
+    it('服务应保存 onlineHandler 引用以便清理', () => {
+      // 验证 onlineHandler 在构造后不为 null（意味着可以被移除）
+      const handler = (service as unknown as { onlineHandler: (() => void) | null }).onlineHandler;
+      expect(handler).not.toBeNull();
+      expect(typeof handler).toBe('function');
+    });
+
+    it('手动清理 onlineHandler 后应安全', () => {
+      const svc = service as unknown as { onlineHandler: (() => void) | null };
+      const handler = svc.onlineHandler;
+
+      // 模拟 destroy 行为：移除监听器并置空
+      if (handler) {
+        window.removeEventListener('online', handler);
+        svc.onlineHandler = null;
+      }
+
+      expect(svc.onlineHandler).toBeNull();
+    });
+
+    it('清理后重复移除不应抛出错误（幂等）', () => {
+      const svc = service as unknown as { onlineHandler: (() => void) | null };
+
+      // 第一次清理
+      if (svc.onlineHandler) {
+        window.removeEventListener('online', svc.onlineHandler);
+        svc.onlineHandler = null;
+      }
+      // 第二次清理（幂等）
+      expect(() => {
+        if (svc.onlineHandler) {
+          window.removeEventListener('online', svc.onlineHandler);
+          svc.onlineHandler = null;
+        }
+      }).not.toThrow();
     });
   });
 });
