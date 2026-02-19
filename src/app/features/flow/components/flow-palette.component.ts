@@ -6,6 +6,7 @@ import { BlackBoxService } from '../../../../services/black-box.service';
 import { FocusPreferenceService } from '../../../../services/focus-preference.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { Task } from '../../../../models';
+import { blackBoxEntriesMap } from '../../../../state/focus-stores';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
 import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
 
@@ -368,12 +369,31 @@ export class FlowPaletteComponent implements OnDestroy {
 
   readonly blackBoxPendingCount = this.blackBoxService.pendingCount;
 
-  readonly completionRate = computed(() =>
-    this.calculatePercent(this.completedTaskCount(), this.totalTaskCount())
-  );
+  /**
+   * 当前项目的黑匣子条目（未软删除）
+   * 包含已完成（在项目历史回顾中）和未完成（在黑匣子条目仓中）的条目
+   */
+  readonly projectBlackBoxEntries = computed(() => {
+    const projectId = this.projectState.activeProjectId();
+    if (!projectId) return [];
+    return Array.from(blackBoxEntriesMap().values())
+      .filter(e => !e.deletedAt && e.projectId === projectId);
+  });
+
+  /**
+   * 完成率 = 已完成的黑匣子条目 / 所有黑匣子条目
+   * 【修复 2026-02-19】基数改为当前项目所有录音内容（含黑匣子和项目历史回顾），
+   * 分子为项目历史回顾中的已完成条目
+   */
+  readonly completionRate = computed(() => {
+    const entries = this.projectBlackBoxEntries();
+    const total = entries.length;
+    const completed = entries.filter(e => e.isCompleted).length;
+    return this.calculatePercent(completed, total);
+  });
 
   readonly projectStatusLabel = computed(() => {
-    const total = this.totalTaskCount();
+    const total = this.projectBlackBoxEntries().length;
     if (total === 0) return '初始化';
     if (this.completionRate() >= 70) return '稳态推进';
     if (this.completionRate() >= 35) return '高效执行';

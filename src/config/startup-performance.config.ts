@@ -15,8 +15,9 @@ export const STARTUP_PERF_CONFIG = {
   /**
    * 增强字体样式兜底延迟加载时间（毫秒）
    * 无用户交互时到点自动加载
+   * 【修复 2026-02-19】从 8s → 4s，加快字体统一速度
    */
-  FONT_ENHANCED_LOAD_DELAY_MS: 8000,
+  FONT_ENHANCED_LOAD_DELAY_MS: 4000,
 
   /**
    * 增强字体优先交互触发（V2）
@@ -26,13 +27,15 @@ export const STARTUP_PERF_CONFIG = {
   /**
    * 增强字体强制兜底加载上限（毫秒）
    * 防止长时间停留在 fallback 字体
+   * 【修复 2026-02-19】从 15s → 8s，与 timeout 对齐，确保字体尽早加载
    */
-  FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS: 15000,
+  FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS: 8000,
 
   /**
    * 弱网/省流模式下，timeout 触发不抢首阶段带宽
+   * 【修复 2026-02-19】关闭弱网跳过，避免字体长期无法统一
    */
-  FONT_ENHANCED_SKIP_ON_CONSTRAINED_NETWORK: true,
+  FONT_ENHANCED_SKIP_ON_CONSTRAINED_NETWORK: false,
 
   /**
    * Focus 启动后远端拉取的最早触发时间（毫秒）

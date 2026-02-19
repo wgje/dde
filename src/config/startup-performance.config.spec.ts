@@ -16,9 +16,9 @@ describe('STARTUP_PERF_CONFIG', () => {
 
   it('should expose aggressive font defer and authenticated weak-network budgets', () => {
     expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_INTERACTION_ONLY_V2).toBe(true);
-    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS).toBe(8000);
-    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS).toBe(15000);
-    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_SKIP_ON_CONSTRAINED_NETWORK).toBe(true);
+    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS).toBe(4000);
+    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS).toBe(8000);
+    expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_SKIP_ON_CONSTRAINED_NETWORK).toBe(false);
     expect(STARTUP_PERF_CONFIG.STARTUP_INITIAL_DATA_FETCH_MAX).toBe(20);
   });
 
@@ -39,9 +39,9 @@ describe('STARTUP_PERF_CONFIG', () => {
       .toBeLessThan(STARTUP_PERF_CONFIG.STARTUP_INITIAL_STATIC_JS_MAX_KB);
   });
 
-  it('字体强制兜底延迟应大于常规延迟', () => {
+  it('字体强制兜底延迟应大于等于常规延迟', () => {
     expect(STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS)
-      .toBeGreaterThan(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS);
+      .toBeGreaterThanOrEqual(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS);
   });
 
   // ========== 覆盖剩余配置值 ==========

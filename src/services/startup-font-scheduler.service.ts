@@ -27,6 +27,10 @@ export class StartupFontSchedulerService {
   private loading = false;
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private forceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 【修复 2026-02-19】加载失败重试次数 */
+  private retryCount = 0;
+  private static readonly MAX_RETRY = 2;
+  private static readonly RETRY_DELAY_MS = 5000;
 
   private readonly firstInteractionHandler = () => {
     this.loadEnhancedFontStyles('interaction');
@@ -188,7 +192,18 @@ export class StartupFontSchedulerService {
 
     if (index >= candidates.length) {
       this.loading = false;
-      this.logger.warn('增强字体加载失败（所有候选路径均不可用）', { trigger, candidates });
+      // 【修复 2026-02-19】加载失败时延迟重试，确保字体最终统一
+      if (this.retryCount < StartupFontSchedulerService.MAX_RETRY) {
+        this.retryCount++;
+        this.logger.warn('增强字体加载失败，将在延迟后重试', {
+          trigger, candidates, retry: this.retryCount
+        });
+        setTimeout(() => {
+          this.loadEnhancedFontStyles('force');
+        }, StartupFontSchedulerService.RETRY_DELAY_MS);
+      } else {
+        this.logger.warn('增强字体加载失败（所有候选路径及重试均不可用）', { trigger, candidates });
+      }
       return;
     }
 

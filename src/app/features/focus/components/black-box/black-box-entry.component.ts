@@ -135,6 +135,9 @@ export class BlackBoxEntryComponent {
   handleKeydown(event: KeyboardEvent): void {
     const key = event.key.toLowerCase();
 
+    // 【修复 2026-02-19】排除修饰键组合，避免 Ctrl+C/Cmd+C 误触发标记完成
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+
     if (key === 'r') {
       event.preventDefault();
       this.onMarkRead(event);
