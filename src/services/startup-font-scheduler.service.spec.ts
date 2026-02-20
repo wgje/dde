@@ -62,6 +62,11 @@ describe('StartupFontSchedulerService', () => {
 
     appendedLinks[0].onload?.(new Event('load'));
     expect(service.isEnhancedFontLoaded()).toBe(true);
+
+    // 自托管字体加载成功后应注入 CDN 补充字体
+    expect(appendedLinks.length).toBe(2);
+    expect(appendedLinks[1].href).toContain('cdn.jsdelivr.net');
+    expect(appendedLinks[1].getAttribute('data-nanoflow-cdn-font')).toBe('true');
   });
 
   it('无交互时应在兜底延迟后加载增强字体', () => {
@@ -72,6 +77,9 @@ describe('StartupFontSchedulerService', () => {
 
     appendedLinks[0].onload?.(new Event('load'));
     expect(service.isEnhancedFontLoaded()).toBe(true);
+    // CDN 补充字体也应被注入
+    expect(appendedLinks.length).toBe(2);
+    expect(appendedLinks[1].getAttribute('data-nanoflow-cdn-font')).toBe('true');
   });
 
   it('重复 initialize 应保持幂等且只注入一次样式链接', () => {
@@ -117,5 +125,26 @@ describe('StartupFontSchedulerService', () => {
     service.initialize();
     vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS);
     expect(appendedLinks.length).toBe(1);
+  });
+
+  it('CDN 补充字体不应重复注入', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    appendedLinks[0].onload?.(new Event('load'));
+    // 第一次注入 CDN
+    expect(appendedLinks.length).toBe(2);
+
+    // 模拟 DOM 查询到已有 CDN link
+    const originalQuerySelector = document.querySelector.bind(document);
+    vi.spyOn(document, 'querySelector').mockImplementation((selector: string) => {
+      if (selector === 'link[data-nanoflow-cdn-font]') {
+        return appendedLinks[1]; // 返回已注入的 CDN link
+      }
+      return originalQuerySelector(selector);
+    });
+
+    // 再次触发不应增加新的 link
+    appendedLinks[0].onload?.(new Event('load'));
+    expect(appendedLinks.length).toBe(2);
   });
 });

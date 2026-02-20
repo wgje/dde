@@ -75,6 +75,12 @@ export class FlowDiagramService {
   // ========== 僵尸模式 ==========
   private isSuspended = false;
   private suspendedResizeObserver: ResizeObserver | null = null;
+
+  // ========== 字体加载重绘 ==========
+  /** 字体加载完成事件的回调引用，用于销毁时清理 */
+  private fontLoadingDoneHandler: (() => void) | null = null;
+  /** 防止 loadingdone 事件短时间内多次触发 GoJS 重绘 */
+  private fontRedrawDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   
   // ========== 主题变化监听 ==========
   private themeChangeEffect = effect(() => {
@@ -218,6 +224,11 @@ export class FlowDiagramService {
       
       // 初始化时设置正确的画布背景色
       this.applyCanvasBackground();
+      
+      // 【修复 2026-02-20】字体加载完成后强制重绘 GoJS Canvas
+      // Canvas 文本不受 CSS font-display: swap 影响，必须手动触发重绘
+      // 确保 LXGW WenKai Screen 字体就绪后 GoJS 使用正确字体度量渲染
+      this.schedulePostFontLoadRedraw();
       
       this.error.set(null);
       this.logger.info('GoJS Diagram 初始化成功');
@@ -494,6 +505,69 @@ export class FlowDiagramService {
     const flowStyles = getFlowStyles(theme, isDark ? 'dark' : 'light');
     this.diagram.div.style.backgroundColor = flowStyles.canvas.background;
   }
+
+  /**
+   * 【修复 2026-02-20】字体加载完成后强制重绘 GoJS Canvas
+   *
+   * 问题：GoJS 渲染到 <canvas>，Canvas 文本不受 CSS font-display: swap 影响。
+   * 当 GoJS 初始渲染时自定义字体 LXGW WenKai Screen 可能尚未加载完成，
+   * Canvas 会使用 fallback 字体（sans-serif）的度量绘制文本。
+   * 即使字体后续加载成功，已绘制的 Canvas 文本也不会自动更新。
+   *
+   * 解决方案（双保险）：
+   * 1. document.fonts.ready：等待首屏初始字体全部就绪后重绘
+   * 2. document.fonts loadingdone 事件：监听后续按需加载的字体子集就绪后重绘
+   *    （例如用户输入了罕用汉字，触发新的 unicode-range 子集下载）
+   */
+  private schedulePostFontLoadRedraw(): void {
+    if (typeof document === 'undefined' || !document.fonts) return;
+
+    // 1. 首屏字体就绪后立即重绘
+    document.fonts.ready.then(() => {
+      this.redrawForFontChange();
+    });
+
+    // 2. 持续监听后续字体子集加载完成事件（带防抖）
+    this.fontLoadingDoneHandler = () => {
+      // 防抖：500ms 内的多次 loadingdone 事件只触发一次重绘
+      if (this.fontRedrawDebounceTimer) {
+        clearTimeout(this.fontRedrawDebounceTimer);
+      }
+      this.fontRedrawDebounceTimer = setTimeout(() => {
+        this.redrawForFontChange();
+        this.fontRedrawDebounceTimer = null;
+      }, 500);
+    };
+    document.fonts.addEventListener('loadingdone', this.fontLoadingDoneHandler);
+  }
+
+  /**
+   * 字体变化后强制 GoJS Canvas 重绘
+   * 让 TextBlock 重新度量并使用新加载的字体渲染
+   */
+  private redrawForFontChange(): void {
+    if (!this.diagram || this.isDestroyed || this.isSuspended) return;
+
+    this.zone.runOutsideAngular(() => {
+      this.diagram!.updateAllTargetBindings();
+      this.diagram!.requestUpdate();
+      this.logger.debug('字体变化，GoJS Canvas 已重绘');
+    });
+  }
+
+  /**
+   * 清理字体加载事件监听
+   */
+  private cleanupFontLoadListener(): void {
+    if (this.fontLoadingDoneHandler && typeof document !== 'undefined' && document.fonts) {
+      document.fonts.removeEventListener('loadingdone', this.fontLoadingDoneHandler);
+      this.fontLoadingDoneHandler = null;
+    }
+    if (this.fontRedrawDebounceTimer) {
+      clearTimeout(this.fontRedrawDebounceTimer);
+      this.fontRedrawDebounceTimer = null;
+    }
+  }
   
   /**
    * 销毁小地图
@@ -553,6 +627,8 @@ export class FlowDiagramService {
     
     this.disposeOverview();
     this.clearAllTimers();
+    // 【修复 2026-02-20】清理字体加载事件监听
+    this.cleanupFontLoadListener();
     
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();

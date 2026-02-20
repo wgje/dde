@@ -82,7 +82,7 @@
       ],
       "cacheConfig": {
         "strategy": "performance",
-        "maxSize": 50,
+        "maxSize": 120,
         "maxAge": "365d"
       }
     },
