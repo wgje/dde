@@ -20,5 +20,9 @@ not dead
 not ie <= 11
 not ie_mob <= 11
 
+# 不支持不兼容 ES6+ 的浏览器（Angular CLI 不支持 ES5 输出）
+not kaios >= 0
+not op_mini all
+
 # 支持 Firefox ESR（企业版）
 Firefox ESR

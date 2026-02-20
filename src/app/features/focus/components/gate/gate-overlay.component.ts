@@ -101,9 +101,11 @@ import { GateActionsComponent } from './gate-actions.component';
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 1.2rem;
-      padding: clamp(1rem, 2vw, 1.8rem) clamp(0.85rem, 2vw, 2rem);
-      background: rgba(9, 9, 11, 0.96);
+      gap: 2rem;
+      padding: clamp(2rem, 4vw, 3.5rem) clamp(1.5rem, 4vw, 3.5rem);
+      background: radial-gradient(circle at 50% -20%, rgba(39, 39, 42, 0.85) 0%, rgba(9, 9, 11, 0.98) 100%);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
       overflow: hidden;
       transform: translateY(0);
     }
@@ -119,43 +121,53 @@ import { GateActionsComponent } from './gate-actions.component';
     .gate-header {
       text-align: center;
       color: rgba(255, 255, 255, 0.9);
-      margin-bottom: 0.2rem;
+      margin-bottom: 0.5rem;
     }
 
     .gate-header h2 {
       margin: 0;
-      font-size: clamp(1.35rem, 1.2rem + 0.75vw, 1.9rem);
-      font-weight: 700;
-      letter-spacing: 0.08em;
+      font-size: clamp(1.8rem, 1.6rem + 1.2vw, 2.6rem);
+      font-weight: 200;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      background: linear-gradient(180deg, #fff 0%, rgba(255, 255, 255, 0.5) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-shadow: 0 4px 16px rgba(255, 255, 255, 0.1);
     }
 
     .gate-header p {
-      margin: 0.35rem auto 0;
-      max-width: 40rem;
-      font-size: 0.86rem;
+      margin: 0.8rem auto 0;
+      max-width: 42rem;
+      font-size: 0.95rem;
       color: rgba(255, 255, 255, 0.5);
-      line-height: 1.45;
+      line-height: 1.6;
+      letter-spacing: 0.06em;
+      font-weight: 300;
     }
 
     .rubble-track {
-      margin: 0.9rem auto 0;
-      max-width: 480px;
+      margin: 1.5rem auto 0;
+      max-width: 520px;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(10px, 1fr));
-      gap: 0.35rem;
+      grid-template-columns: repeat(auto-fit, minmax(12px, 1fr));
+      gap: 0.5rem;
       align-items: center;
     }
 
     .rubble-chip {
-      height: 6px;
+      height: 4px;
       border-radius: 9999px;
-      background: rgba(255, 255, 255, 0.35);
-      transition: opacity 220ms ease, transform 220ms ease;
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.15) 100%);
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.15);
+      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
     }
 
     .rubble-chip.cleared {
-      opacity: 0.08;
-      transform: translateY(4px) scale(0.88);
+      opacity: 0.15;
+      background: rgba(255, 255, 255, 0.1);
+      transform: translateY(6px) scale(0.8);
+      box-shadow: none;
     }
 
     .gate-main {
@@ -179,25 +191,28 @@ import { GateActionsComponent } from './gate-actions.component';
       align-items: center;
       justify-content: flex-end;
       pointer-events: none;
-      gap: 0.2rem;
-      padding-bottom: 0.65rem;
+      gap: 0.25rem;
+      padding-bottom: 0.8rem;
       z-index: 0;
+      mask-image: linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 100%);
+      -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 100%);
     }
 
     .strata-row {
       width: min(640px, calc(100vw - 2rem));
-      height: 22px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 8px 8px 0 0;
-      background: rgba(255, 255, 255, 0.04);
-      transform: translateY(calc(var(--layer-index) * 5px)) scaleX(calc(1 - (var(--layer-index) * 0.04)));
+      height: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px 12px 0 0;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
+      transform: translateY(calc(var(--layer-index) * 6px)) scaleX(calc(1 - (var(--layer-index) * 0.05)));
       opacity: var(--layer-opacity);
       display: flex;
       align-items: center;
       justify-content: center;
-      color: rgba(255, 255, 255, 0.4);
-      font-size: 0.68rem;
-      letter-spacing: 0.03em;
+      color: rgba(255, 255, 255, 0.45);
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.2);
     }
 
     .gate-completion {
@@ -207,45 +222,49 @@ import { GateActionsComponent } from './gate-actions.component';
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(0, 0, 0, 0.5);
-      backdrop-filter: blur(8px);
+      background: rgba(9, 9, 11, 0.6);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
     }
 
     .completion-card {
-      width: min(340px, calc(100vw - 2rem));
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(24, 24, 27, 0.95);
-      padding: 1.5rem 1.25rem;
+      width: min(360px, calc(100vw - 2rem));
+      border-radius: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: linear-gradient(180deg, rgba(39, 39, 42, 0.8) 0%, rgba(24, 24, 27, 0.95) 100%);
+      padding: 2rem 1.5rem;
       text-align: center;
-      color: rgba(255, 255, 255, 0.92);
-      box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
-      animation: completion-pop 280ms cubic-bezier(0.22, 1, 0.36, 1);
+      color: rgba(255, 255, 255, 0.95);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 24px 48px -12px rgba(0, 0, 0, 0.8);
+      animation: completion-pop 400ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
     }
 
     .completion-mark {
-      margin: 0 auto 0.7rem;
-      width: 46px;
-      height: 46px;
+      margin: 0 auto 1rem;
+      width: 56px;
+      height: 56px;
       border-radius: 9999px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.35rem;
-      background: rgba(34, 197, 94, 0.85);
+      font-size: 1.5rem;
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.9) 0%, rgba(21, 128, 61, 0.95) 100%);
       color: #fff;
+      box-shadow: 0 8px 24px -6px rgba(34, 197, 94, 0.5);
     }
 
     .completion-card h3 {
       margin: 0;
-      font-size: 1.15rem;
-      letter-spacing: 0.04em;
+      font-size: 1.25rem;
+      letter-spacing: 0.06em;
+      font-weight: 400;
     }
 
     .completion-card p {
-      margin: 0.45rem 0 0;
-      color: rgba(255, 255, 255, 0.55);
-      font-size: 0.84rem;
+      margin: 0.6rem 0 0;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 0.9rem;
+      letter-spacing: 0.02em;
     }
 
     @keyframes completion-pop {

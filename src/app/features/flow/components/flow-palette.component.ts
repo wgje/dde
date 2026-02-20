@@ -370,30 +370,30 @@ export class FlowPaletteComponent implements OnDestroy {
   readonly blackBoxPendingCount = this.blackBoxService.pendingCount;
 
   /**
-   * 当前项目的黑匣子条目（未软删除）
-   * 包含已完成（在项目历史回顾中）和未完成（在黑匣子条目仓中）的条目
+   * 所有黑匣子条目（未软删除）
+   * 包含已完成（在项目历史回顾中）和未完成（在黑匣子待处理仓中）的条目
+   * 【修复 2026-02-20】不按 projectId 过滤，与黑匣子面板和项目历史回顾保持一致。
+   * 用户要求完成率基数 = 所有录音内容，分子 = 已完成的录音内容（项目历史回顾中的）
    */
-  readonly projectBlackBoxEntries = computed(() => {
-    const projectId = this.projectState.activeProjectId();
-    if (!projectId) return [];
+  readonly allBlackBoxEntries = computed(() => {
     return Array.from(blackBoxEntriesMap().values())
-      .filter(e => !e.deletedAt && e.projectId === projectId);
+      .filter(e => !e.deletedAt);
   });
 
   /**
    * 完成率 = 已完成的黑匣子条目 / 所有黑匣子条目
-   * 【修复 2026-02-19】基数改为当前项目所有录音内容（含黑匣子和项目历史回顾），
-   * 分子为项目历史回顾中的已完成条目
+   * 分母：所有录音内容（黑匣子 + 项目历史回顾中的）
+   * 分子：已完成的录音内容（项目历史回顾中的已完成条目）
    */
   readonly completionRate = computed(() => {
-    const entries = this.projectBlackBoxEntries();
+    const entries = this.allBlackBoxEntries();
     const total = entries.length;
     const completed = entries.filter(e => e.isCompleted).length;
     return this.calculatePercent(completed, total);
   });
 
   readonly projectStatusLabel = computed(() => {
-    const total = this.projectBlackBoxEntries().length;
+    const total = this.allBlackBoxEntries().length;
     if (total === 0) return '初始化';
     if (this.completionRate() >= 70) return '稳态推进';
     if (this.completionRate() >= 35) return '高效执行';

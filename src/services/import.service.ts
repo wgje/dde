@@ -560,7 +560,7 @@ export class ImportService {
     const projectId = generateNewIds ? crypto.randomUUID() : exportProject.id;
     
     if (!generateNewIds) {
-      this.logger.warn('导入项目', '使用原始 ID 导入，可能导致 ID 冲突', { projectId: exportProject.id });
+      this.logger.warn('使用原始 ID 导入，可能导致 ID 冲突', { projectId: exportProject.id });
     }
     
     // 构建 ID 映射（用于更新引用）

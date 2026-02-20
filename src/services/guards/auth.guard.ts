@@ -103,18 +103,29 @@ export function saveAuthCache(userId: string | null): void {
 }
 
 /**
- * 有上限等待会话检查完成，避免守卫直接放行受保护路由
+ * 等待会话初始化完成（首次 checkSession 执行完毕）
+ * 
+ * 解决核心竞态：isCheckingSession 初始值为 false，Guard 可能在
+ * bootstrap 启动之前就运行，误判为"会话检查已完成、用户未登录"。
+ * 改为轮询 sessionInitialized 信号，确保 Guard 等到真正的检查结果。
  */
 async function waitForSessionCheck(
   authService: AuthService,
   timeoutMs: number
 ): Promise<void> {
+  // 如果会话已初始化完成，直接返回
+  if (authService.sessionInitialized()) {
+    return;
+  }
+
   const start = Date.now();
   let interval: number = GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL;
 
-  while (authService.authState().isCheckingSession) {
+  // 等待条件：sessionInitialized 变为 true（覆盖"未开始"和"进行中"两种状态）
+  while (!authService.sessionInitialized()) {
     const elapsed = Date.now() - start;
     if (elapsed >= timeoutMs) {
+      guardLogger.warn('等待会话初始化超时', { timeoutMs, elapsed });
       break;
     }
 
@@ -206,15 +217,21 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
     return true;
   }
   
-  let authState = authService.authState();
-  logger.debug(`当前认证状态`, { isCheckingSession: authState.isCheckingSession, userId: authState.userId });
+  const authState = authService.authState();
+  const initialized = authService.sessionInitialized();
+  logger.debug(`当前认证状态`, {
+    isCheckingSession: authState.isCheckingSession,
+    sessionInitialized: initialized,
+    userId: authState.userId
+  });
   
-  if (authState.isCheckingSession) {
-    logger.debug('会话检查进行中，等待检查结果');
+  // 无论 isCheckingSession 当前是 true 还是 false，
+  // 只要 sessionInitialized 为 false 就说明首次检查尚未完成，必须等待
+  if (!initialized) {
+    logger.debug('会话初始化未完成，等待 bootstrap 完成');
     await waitForSessionCheck(authService, GUARD_CONFIG.SESSION_CHECK_TIMEOUT);
-    authState = authService.authState();
-    if (authState.isCheckingSession) {
-      logger.warn('会话检查超时，按未登录流程处理', {
+    if (!authService.sessionInitialized()) {
+      logger.warn('会话初始化超时，按未登录流程处理', {
         timeout: GUARD_CONFIG.SESSION_CHECK_TIMEOUT,
         targetUrl: state.url
       });

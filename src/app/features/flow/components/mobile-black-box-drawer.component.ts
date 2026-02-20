@@ -5,7 +5,7 @@
  * 专为移动端抽屉布局优化
  */
 
-import { Component, ChangeDetectionStrategy, inject, signal, OnInit, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, OnInit, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { BlackBoxService } from '../../../../services/black-box.service';
 import { SpeechToTextService } from '../../../../services/speech-to-text.service';

@@ -63,6 +63,7 @@ export class AppAuthCoordinatorService {
   /** 显示未登录提示界面 */
   readonly showLoginRequired = computed(() => {
     return this.auth.isConfigured &&
+      this.auth.sessionInitialized() &&  // 必须等首次会话检查完成，防止启动竞态误显示
       !this.userSession.currentUserId() &&
       !this.modal.isOpen('login') &&
       !this.isCheckingSession() &&

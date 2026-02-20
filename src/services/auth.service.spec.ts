@@ -141,6 +141,12 @@ describe('AuthService', () => {
   
   describe('会话过期检测', () => {
     it('非主动登出时应该触发会话过期处理', () => {
+      // 先建立已登录状态（必须有 currentUserId 才会被视为会话过期）
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+      expect(service.currentUserId()).toBe('user-1');
+
       // 触发 SIGNED_OUT 事件（非主动登出）
       authStateCallback!('SIGNED_OUT', null);
       

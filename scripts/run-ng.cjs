@@ -1,10 +1,43 @@
-const { spawnSync, execSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 
 const args = process.argv.slice(2);
 const ngPath = path.join(__dirname, '..', 'node_modules', '@angular', 'cli', 'bin', 'ng.js');
 const nodeMajor = Number(process.versions.node.split('.')[0]);
+
+/**
+ * 使用异步 spawn 启动子进程并正确转发信号
+ * 解决 spawnSync 在长时间运行时无法处理 SIGTERM/SIGINT 导致僵尸进程的问题
+ */
+function runWithSignalForwarding(nodeBin, scriptArgs) {
+  const child = spawn(nodeBin, scriptArgs, {
+    stdio: 'inherit',
+    env: process.env,
+  });
+
+  // 转发终止信号到子进程，确保 ng serve / esbuild 能正确清理退出
+  const forwardSignal = (sig) => {
+    if (!child.killed) {
+      child.kill(sig);
+    }
+  };
+  ['SIGTERM', 'SIGINT', 'SIGHUP'].forEach(sig => process.on(sig, () => forwardSignal(sig)));
+
+  child.on('exit', (code, signal) => {
+    // 子进程退出后，父进程也退出
+    if (code !== null) {
+      process.exit(code);
+    }
+    // 被信号终止时，以非零码退出
+    process.exit(signal ? 1 : 0);
+  });
+
+  child.on('error', (err) => {
+    console.error(`[run-ng] 子进程启动失败: ${err.message}`);
+    process.exit(1);
+  });
+}
 
 /**
  * Node 24+ 与 esbuild 存在 goroutine 通信问题，需要使用 Node 22 运行
@@ -30,33 +63,12 @@ if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
   // 方法2：使用 npx 下载并运行 Node 22（作为后备）
   if (!node22Path) {
     console.log('[run-ng] Node 24+ 检测到，使用 npx node@22 运行构建...');
-    // 设置 ESBUILD_BINARY_PATH 环境变量防止 esbuild 重新下载二进制
-    const env = { ...process.env };
-    
-    const result = spawnSync(
-      'npx',
-      ['-y', 'node@22.14.0', '--', ngPath, ...args],
-      { 
-        stdio: 'inherit', 
-        env,
-        // 增加超时和 kill 信号处理
-        killSignal: 'SIGTERM'
-      }
-    );
-    process.exit(result.status ?? 1);
+    runWithSignalForwarding('npx', ['-y', 'node@22.14.0', '--', ngPath, ...args]);
+  } else {
+    // 使用本地 Node 22
+    console.log(`[run-ng] Node 24+ 检测到，使用本地 Node 22: ${node22Path}`);
+    runWithSignalForwarding(node22Path, [ngPath, ...args]);
   }
-
-  // 使用本地 Node 22
-  console.log(`[run-ng] Node 24+ 检测到，使用本地 Node 22: ${node22Path}`);
-  const result = spawnSync(node22Path, [ngPath, ...args], {
-    stdio: 'inherit',
-    env: process.env,
-  });
-  process.exit(result.status ?? 1);
+} else {
+  runWithSignalForwarding(process.execPath, [ngPath, ...args]);
 }
-
-const result = spawnSync(process.execPath, [ngPath, ...args], {
-  stdio: 'inherit',
-  env: process.env,
-});
-process.exit(result.status ?? 1);

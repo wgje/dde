@@ -56,6 +56,13 @@ export class AuthService {
   /** 会话是否已过期 */
   readonly sessionExpired = signal(false);
   
+  /**
+   * 会话初始化是否完成（首次 checkSession 已执行完毕）
+   * 用于区分"尚未检查"与"检查完毕无会话"两种状态，
+   * 解决 Guard 与 bootstrap 间的竞态条件导致登录弹窗误弹出
+   */
+  readonly sessionInitialized = signal(false);
+  
   /** 认证状态变更订阅的取消函数 */
   private authStateSubscription: { unsubscribe: () => void } | null = null;
   
@@ -127,6 +134,7 @@ export class AuthService {
     if (!this.supabase.isConfigured) {
       this.logger.debug('Supabase 未配置，跳过会话检查');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
+      this.sessionInitialized.set(true);
       return { userId: null, email: null };
     }
     
@@ -223,8 +231,9 @@ export class AuthService {
       this.logger.debug('返回空会话，不阻断应用启动');
       return { userId: null, email: null };
     } finally {
-      this.logger.debug('设置 isCheckingSession = false');
+      this.logger.debug('设置 isCheckingSession = false, sessionInitialized = true');
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
+      this.sessionInitialized.set(true);
     }
   }
 
@@ -510,6 +519,7 @@ export class AuthService {
     this.currentUserId.set(null);
     this.sessionEmail.set(null);
     this.sessionExpired.set(false);
+    this.sessionInitialized.set(false);
     this.isManualSignOut = false;
     this.devAutoLoginAttempted = false;
     this.authState.set({
@@ -580,10 +590,14 @@ export class AuthService {
       this.logger.info('用户主动登出');
       // 重置标志
       this.isManualSignOut = false;
-    } else {
-      // 非主动登出，可能是 Token 过期
-      this.logger.warn('检测到非主动登出，可能是 Token 过期');
+    } else if (this.currentUserId()) {
+      // 仅当之前存在已登录用户时，才视为会话过期
+      // 防止启动阶段 Supabase 触发的初始 SIGNED_OUT 事件被误判为过期
+      this.logger.warn('检测到非主动登出，Token 过期');
       this.handleSessionExpired();
+    } else {
+      // 未登录状态下收到 SIGNED_OUT，非真正过期，仅记录日志
+      this.logger.debug('忽略 SIGNED_OUT 事件：当前无已登录用户，非会话过期');
     }
   }
   

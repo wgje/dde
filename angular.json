@@ -79,7 +79,7 @@
           "builder": "@angular/build:dev-server",
           "options": {
             "port": 3000,
-            "hmr": false  // 禁用 HMR: GoJS diagram 在 HMR 时无法正确重新初始化，导致未定义行为
+            "hmr": false
           },
           "configurations": {
             "production": {

@@ -8,7 +8,6 @@ import {
   Component, 
   ChangeDetectionStrategy, 
   inject,
-  signal,
   output,
   OnInit,
   input

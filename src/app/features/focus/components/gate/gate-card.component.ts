@@ -75,10 +75,15 @@ const DRAG_MAX_DISTANCE = 130;
       position: relative;
       min-height: 45vh;
       width: 100%;
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(24, 24, 27, 0.92);
-      box-shadow: 0 8px 32px -8px rgba(0, 0, 0, 0.5);
+      border-radius: 32px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(45, 45, 50, 0.65) 0%, rgba(24, 24, 27, 0.85) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
+        inset 0 -1px 1px rgba(0, 0, 0, 0.3),
+        0 20px 50px -12px rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(32px);
+      -webkit-backdrop-filter: blur(32px);
       overflow: hidden;
       will-change: transform, opacity, filter;
       transform: translate3d(0, var(--drag-offset), 0);
@@ -86,28 +91,41 @@ const DRAG_MAX_DISTANCE = 130;
       touch-action: none;
     }
 
+    .dark-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.06) 0%, transparent 80%);
+      pointer-events: none;
+    }
+
     .dark-card.dragging {
       transition: none;
-      box-shadow: 0 12px 40px -8px rgba(0, 0, 0, 0.6);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.2), 
+        inset 0 -1px 1px rgba(0, 0, 0, 0.3),
+        0 30px 60px -12px rgba(0, 0, 0, 0.9);
     }
 
     .card-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 1rem 1.25rem 0;
+      padding: 1.5rem 2rem 0;
       color: rgba(255, 255, 255, 0.5);
-      letter-spacing: 0.06em;
-      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      font-size: 0.75rem;
       text-transform: uppercase;
+      position: relative;
+      z-index: 1;
     }
 
     .card-caption {
-      font-weight: 600;
+      font-weight: 500;
     }
 
     .card-progress {
-      font-weight: 600;
+      font-weight: 500;
       font-variant-numeric: tabular-nums;
       color: rgba(255, 255, 255, 0.7);
     }
@@ -118,31 +136,38 @@ const DRAG_MAX_DISTANCE = 130;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 1.25rem;
-      padding: 2rem 1.5rem 2.5rem;
+      gap: 1.8rem;
+      padding: 2rem 2.5rem 3.5rem;
+      position: relative;
+      z-index: 1;
     }
 
     .card-text {
       margin: 0;
       max-width: 46rem;
       text-align: center;
-      font-size: clamp(1.15rem, 1.35rem + 0.35vw, 1.85rem);
-      line-height: 1.6;
-      color: rgba(255, 255, 255, 0.9);
+      font-size: clamp(1.35rem, 1.55rem + 0.4vw, 2.2rem);
+      line-height: 1.65;
+      color: rgba(255, 255, 255, 0.98);
+      font-weight: 300;
+      letter-spacing: 0.03em;
       word-break: break-word;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
     }
 
     .entry-meta {
       display: inline-flex;
       align-items: center;
-      gap: 0.4rem;
-      padding: 0.3rem 0.7rem;
+      gap: 0.5rem;
+      padding: 0.4rem 0.85rem;
       border-radius: 9999px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: rgba(255, 255, 255, 0.06);
-      color: rgba(255, 255, 255, 0.55);
-      font-size: 0.72rem;
-      letter-spacing: 0.02em;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.03);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
     }
 
     .meta-sep {

@@ -784,3 +784,71 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
 [data-color-mode="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
   border-color: var(--theme-border) !important;
 }
+
+/* ========== 高级感/典雅按钮设计 (Premium & Elegant Buttons) ========== */
+/* 基础按钮样式：圆滑、平滑过渡、简约 */
+.btn-base {
+  @apply inline-flex items-center justify-center gap-2 font-medium transition-all duration-300 ease-out select-none;
+  /* 增加圆滑度，消除干巴感 */
+  @apply rounded-full;
+  /* 触摸反馈 */
+  @apply active:scale-[0.97];
+}
+
+/* 主要按钮：高级感渐变或柔和纯色，带柔和阴影 */
+.btn-primary {
+  @apply btn-base px-6 py-2.5 text-sm text-white;
+  @apply bg-indigo-600 hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400;
+  @apply shadow-[0_4px_14px_0_rgba(79,70,229,0.39)] hover:shadow-[0_6px_20px_rgba(79,70,229,0.23)] hover:-translate-y-0.5;
+  @apply dark:shadow-[0_4px_14px_0_rgba(99,102,241,0.39)] dark:hover:shadow-[0_6px_20px_rgba(99,102,241,0.23)];
+  @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none;
+}
+
+/* 次要按钮：柔和背景，无边框或极细边框 */
+.btn-secondary {
+  @apply btn-base px-6 py-2.5 text-sm;
+  @apply text-stone-700 bg-stone-100 hover:bg-stone-200;
+  @apply dark:text-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700;
+  @apply shadow-sm hover:shadow-md hover:-translate-y-0.5;
+  @apply border border-transparent hover:border-stone-300 dark:hover:border-stone-600;
+}
+
+/* 幽灵按钮：透明背景，悬停时出现柔和背景 */
+.btn-ghost {
+  @apply btn-base px-4 py-2 text-sm;
+  @apply text-stone-600 hover:text-stone-900 hover:bg-stone-100/80;
+  @apply dark:text-stone-400 dark:hover:text-stone-100 dark:hover:bg-stone-800/80;
+}
+
+/* 图标按钮：完全圆形，柔和悬停 */
+.btn-icon {
+  @apply btn-base p-2;
+  @apply text-stone-500 hover:text-stone-800 hover:bg-stone-100;
+  @apply dark:text-stone-400 dark:hover:text-stone-200 dark:hover:bg-stone-800;
+}
+
+/* 紧凑按钮：用于工具栏等空间有限的地方 */
+.btn-compact-elegant {
+  @apply btn-base px-3 py-1.5 text-xs;
+  @apply text-stone-600 bg-white border border-stone-200 hover:bg-stone-50 hover:border-stone-300;
+  @apply dark:text-stone-300 dark:bg-stone-900 dark:border-stone-700 dark:hover:bg-stone-800 dark:hover:border-stone-600;
+  @apply shadow-sm hover:shadow;
+}
+
+/* 输入框高级感设计 */
+.input-elegant {
+  @apply w-full px-4 py-3 text-sm transition-all duration-300 ease-out;
+  @apply rounded-2xl border border-stone-200 bg-stone-50/50 text-stone-800;
+  @apply focus:bg-white focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none;
+  @apply dark:border-stone-700 dark:bg-stone-900/50 dark:text-stone-200;
+  @apply dark:focus:bg-stone-900 dark:focus:border-indigo-500 dark:focus:ring-indigo-500/20;
+  @apply placeholder:text-stone-400 dark:placeholder:text-stone-500;
+}
+
+/* 卡片高级感设计 */
+.card-elegant {
+  @apply bg-white/80 dark:bg-stone-900/80 backdrop-blur-xl;
+  @apply rounded-3xl border border-white/20 dark:border-stone-700/50;
+  @apply shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)];
+  @apply transition-all duration-500;
+}

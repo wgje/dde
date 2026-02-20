@@ -31,10 +31,12 @@ describe('requireAuthGuard', () => {
 
     const show = vi.fn();
     let authState = { isCheckingSession: true, userId: null as string | null };
+    let initialized = false;
     const authMock = {
       isConfigured: true,
       authState: vi.fn(() => authState),
       currentUserId: vi.fn(() => authState.userId),
+      sessionInitialized: vi.fn(() => initialized),
     };
 
     TestBed.configureTestingModule({
@@ -51,6 +53,7 @@ describe('requireAuthGuard', () => {
 
     setTimeout(() => {
       authState = { isCheckingSession: false, userId: 'user-1' };
+      initialized = true;
     }, 100);
     await vi.advanceTimersByTimeAsync(150);
 
@@ -68,6 +71,7 @@ describe('requireAuthGuard', () => {
       isConfigured: true,
       authState: vi.fn().mockReturnValue({ isCheckingSession: true, userId: null }),
       currentUserId: vi.fn().mockReturnValue(null),
+      sessionInitialized: vi.fn().mockReturnValue(false),
     };
 
     TestBed.configureTestingModule({
@@ -97,6 +101,7 @@ describe('requireAuthGuard', () => {
       isConfigured: true,
       authState: vi.fn().mockReturnValue({ isCheckingSession: false, userId: null }),
       currentUserId: vi.fn().mockReturnValue(null),
+      sessionInitialized: vi.fn().mockReturnValue(true),
     };
 
     TestBed.configureTestingModule({
@@ -126,6 +131,7 @@ describe('requireAuthGuard', () => {
       isConfigured: true,
       authState: vi.fn().mockReturnValue({ isCheckingSession: false, userId: null }),
       currentUserId: vi.fn().mockReturnValue(null),
+      sessionInitialized: vi.fn().mockReturnValue(true),
     };
 
     TestBed.configureTestingModule({

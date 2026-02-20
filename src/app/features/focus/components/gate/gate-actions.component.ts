@@ -36,7 +36,9 @@ import { LoggerService } from '../../../../../services/logger.service';
           class="action-btn action-read"
           [disabled]="isProcessing()"
           (click)="markAsRead()">
-          <span class="action-icon">↑</span>
+          <span class="action-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+          </span>
           <span class="action-label">已读</span>
         </button>
 
@@ -45,7 +47,9 @@ import { LoggerService } from '../../../../../services/logger.service';
           class="action-btn action-complete"
           [disabled]="isProcessing()"
           (click)="markAsCompleted()">
-          <span class="action-icon">↓</span>
+          <span class="action-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
+          </span>
           <span class="action-label">完成</span>
         </button>
       </div>
@@ -67,7 +71,9 @@ import { LoggerService } from '../../../../../services/logger.service';
         } @else if (isFabRecording()) {
           <span class="fab-pulse"></span>
         } @else {
-          <span class="fab-icon">+</span>
+          <span class="fab-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          </span>
         }
       </button>
 
@@ -181,59 +187,89 @@ import { LoggerService } from '../../../../../services/logger.service';
     }
 
     .action-btn {
-      min-width: 132px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 12px;
-      padding: 0.72rem 1.2rem;
+      min-width: 150px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 9999px;
+      padding: 0.9rem 1.8rem;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
-      background: rgba(255, 255, 255, 0.06);
-      color: rgba(255, 255, 255, 0.85);
-      transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, background-color 180ms ease;
-      font-size: 0.84rem;
-      font-weight: 600;
-      letter-spacing: 0.02em;
+      gap: 0.75rem;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
+        inset 0 -1px 1px rgba(0, 0, 0, 0.2),
+        0 8px 20px -4px rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      color: rgba(255, 255, 255, 0.95);
+      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
+      font-size: 0.95rem;
+      font-weight: 400;
+      letter-spacing: 0.06em;
+      cursor: pointer;
     }
 
     .action-btn:hover:not(:disabled) {
-      transform: translateY(-2px);
+      transform: translateY(-3px);
       border-color: rgba(255, 255, 255, 0.2);
-      background: rgba(255, 255, 255, 0.1);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.25), 
+        inset 0 -1px 1px rgba(0, 0, 0, 0.2),
+        0 12px 28px -6px rgba(0, 0, 0, 0.5);
     }
 
     .action-btn:active:not(:disabled) {
       transform: translateY(1px);
+      box-shadow: 
+        inset 0 1px 2px rgba(0, 0, 0, 0.2),
+        0 4px 12px -4px rgba(0, 0, 0, 0.3);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
     }
 
     .action-btn:disabled {
       opacity: 0.4;
       cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
     }
 
     .action-complete {
-      background: rgba(255, 255, 255, 0.1);
-      border-color: rgba(255, 255, 255, 0.15);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
+      border-color: rgba(255, 255, 255, 0.18);
     }
 
     .action-icon {
-      font-size: 1rem;
-      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.85;
+    }
+
+    .fab-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .quick-capture-fab {
       position: absolute;
-      right: -0.2rem;
-      bottom: -2.8rem;
-      width: 56px;
-      height: 56px;
+      right: 0;
+      bottom: -3.5rem;
+      width: 64px;
+      height: 64px;
       border-radius: 9999px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: rgba(24, 24, 27, 0.92);
-      color: rgba(255, 255, 255, 0.9);
-      box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
-      transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms ease, background-color 200ms ease;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: linear-gradient(135deg, rgba(45, 45, 50, 0.9) 0%, rgba(24, 24, 27, 0.95) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.2), 
+        inset 0 -1px 1px rgba(0, 0, 0, 0.4),
+        0 12px 32px -8px rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      color: rgba(255, 255, 255, 0.95);
+      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
       z-index: 4;
       touch-action: none;
       user-select: none;
@@ -241,11 +277,16 @@ import { LoggerService } from '../../../../../services/logger.service';
       display: flex;
       align-items: center;
       justify-content: center;
+      cursor: pointer;
     }
 
     .quick-capture-fab:hover:not(:disabled):not(.fab-recording) {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 28px -8px rgba(0, 0, 0, 0.6);
+      transform: translateY(-4px) scale(1.04);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.3), 
+        0 16px 40px -8px rgba(0, 0, 0, 0.8);
+      border-color: rgba(255, 255, 255, 0.3);
+      background: linear-gradient(135deg, rgba(55, 55, 60, 0.95) 0%, rgba(30, 30, 35, 0.98) 100%);
     }
 
     .quick-capture-fab:disabled {
@@ -273,9 +314,9 @@ import { LoggerService } from '../../../../../services/logger.service';
     }
 
     .fab-icon {
-      font-size: 1.5rem;
-      font-weight: 300;
-      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .fab-pulse {
@@ -321,23 +362,27 @@ import { LoggerService } from '../../../../../services/logger.service';
 
     .quick-capture-panel {
       position: fixed;
-      right: 1rem;
-      bottom: 1rem;
-      width: min(420px, calc(100vw - 2rem));
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(24, 24, 27, 0.96);
-      box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
-      padding: 0.85rem;
+      right: 1.5rem;
+      bottom: 1.5rem;
+      width: min(440px, calc(100vw - 3rem));
+      border-radius: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(45, 45, 50, 0.85) 0%, rgba(24, 24, 27, 0.95) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
+        0 32px 64px -16px rgba(0, 0, 0, 0.9);
+      backdrop-filter: blur(32px);
+      -webkit-backdrop-filter: blur(32px);
+      padding: 1.25rem;
       z-index: 91;
-      color: rgba(255, 255, 255, 0.9);
-      animation: panel-up 220ms cubic-bezier(0.22, 1, 0.36, 1);
+      color: rgba(255, 255, 255, 0.95);
+      animation: panel-up 400ms cubic-bezier(0.175, 0.885, 0.32, 1.1);
     }
 
     @keyframes panel-up {
       from {
         opacity: 0;
-        transform: translateY(14px) scale(0.98);
+        transform: translateY(20px) scale(0.95);
       }
       to {
         opacity: 1;
@@ -349,51 +394,60 @@ import { LoggerService } from '../../../../../services/logger.service';
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 0.6rem;
+      margin-bottom: 0.8rem;
     }
 
     .panel-header h3 {
       margin: 0;
-      font-size: 0.87rem;
-      font-weight: 700;
-      letter-spacing: 0.02em;
+      font-size: 0.9rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
     }
 
     .panel-close {
       border: none;
       background: transparent;
-      color: rgba(255, 255, 255, 0.6);
-      font-size: 0.78rem;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 0.8rem;
       cursor: pointer;
+      transition: color 200ms ease;
+    }
+
+    .panel-close:hover {
+      color: rgba(255, 255, 255, 0.9);
     }
 
     .transcription-editor {
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 10px;
-      padding: 0.5rem;
-      margin-bottom: 0.55rem;
-      background: rgba(0, 0, 0, 0.25);
+      border-radius: 12px;
+      padding: 0.6rem;
+      margin-bottom: 0.6rem;
+      background: rgba(0, 0, 0, 0.2);
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
     }
 
     .transcription-input,
     .capture-input {
       width: 100%;
       resize: none;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
-      background: rgba(0, 0, 0, 0.2);
-      color: rgba(255, 255, 255, 0.92);
-      padding: 0.55rem;
-      font-size: 0.82rem;
-      line-height: 1.45;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.25);
+      color: rgba(255, 255, 255, 0.95);
+      padding: 0.7rem;
+      font-size: 0.85rem;
+      line-height: 1.5;
       box-sizing: border-box;
       font-family: inherit;
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
+      transition: border-color 200ms ease, box-shadow 200ms ease;
     }
 
     .transcription-input:focus,
     .capture-input:focus {
-      outline: 1px solid rgba(255, 255, 255, 0.2);
-      border-color: rgba(255, 255, 255, 0.2);
+      outline: none;
+      border-color: rgba(255, 255, 255, 0.25);
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 0 2px rgba(255, 255, 255, 0.05);
     }
 
     .transcription-actions {
@@ -411,22 +465,36 @@ import { LoggerService } from '../../../../../services/logger.service';
     }
 
     .record-btn {
-      width: 42px;
-      min-width: 42px;
-      border-radius: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: rgba(255, 255, 255, 0.06);
-      color: rgba(255, 255, 255, 0.85);
+      width: 48px;
+      min-width: 48px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
+        0 4px 12px -2px rgba(0, 0, 0, 0.3);
+      color: rgba(255, 255, 255, 0.9);
       display: inline-flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      transition: background-color 160ms ease, opacity 160ms ease;
+      transition: all 250ms cubic-bezier(0.25, 0.8, 0.25, 1);
       touch-action: none;
     }
 
+    .record-btn:hover:not(:disabled) {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 
+        inset 0 1px 1px rgba(255, 255, 255, 0.25), 
+        0 6px 16px -2px rgba(0, 0, 0, 0.4);
+      transform: translateY(-2px);
+    }
+
     .record-btn.recording {
-      background: rgba(220, 38, 38, 0.82);
+      background: linear-gradient(180deg, rgba(239, 68, 68, 0.9) 0%, rgba(220, 38, 38, 0.95) 100%);
+      border-color: rgba(248, 113, 113, 0.5);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 16px rgba(220, 38, 38, 0.4);
     }
 
     .record-btn.out-of-zone {
@@ -468,27 +536,50 @@ import { LoggerService } from '../../../../../services/logger.service';
 
     .ghost-btn,
     .solid-btn {
-      border-radius: 8px;
+      border-radius: 12px;
       border: 1px solid rgba(255, 255, 255, 0.12);
-      padding: 0.35rem 0.62rem;
-      font-size: 0.76rem;
+      padding: 0.5rem 1rem;
+      font-size: 0.85rem;
       cursor: pointer;
+      transition: all 250ms cubic-bezier(0.25, 0.8, 0.25, 1);
+      letter-spacing: 0.04em;
     }
 
     .ghost-btn {
-      background: rgba(255, 255, 255, 0.06);
-      color: rgba(255, 255, 255, 0.8);
+      background: transparent;
+      color: rgba(255, 255, 255, 0.7);
+      border-color: transparent;
+    }
+
+    .ghost-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.95);
     }
 
     .solid-btn {
-      background: rgba(255, 255, 255, 0.9);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.85) 100%);
       color: rgba(9, 9, 11, 0.95);
-      font-weight: 700;
+      font-weight: 500;
+      border-color: transparent;
+      box-shadow: 0 2px 8px rgba(255, 255, 255, 0.15);
+    }
+
+    .solid-btn:hover:not(:disabled) {
+      background: linear-gradient(180deg, #fff 0%, rgba(255, 255, 255, 0.9) 100%);
+      box-shadow: 0 4px 16px rgba(255, 255, 255, 0.25);
+      transform: translateY(-2px);
+    }
+
+    .solid-btn:active:not(:disabled) {
+      transform: translateY(1px);
+      box-shadow: 0 2px 4px rgba(255, 255, 255, 0.1);
     }
 
     .solid-btn:disabled {
-      opacity: 0.45;
+      opacity: 0.5;
       cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
     }
 
     @media (max-width: 640px) {

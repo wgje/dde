@@ -90,7 +90,7 @@ describe('StartupFontSchedulerService', () => {
     expect(appendedLinks.length).toBe(1);
   });
 
-  it('弱网下 timeout 触发应跳过，force 兜底应在上限时间触发', () => {
+  it('弱网下 timeout 触发不应跳过（SKIP_ON_CONSTRAINED_NETWORK=false），直接加载', () => {
     Object.defineProperty(navigator, 'connection', {
       value: { effectiveType: '2g', downlink: 0.8, rtt: 500, saveData: true },
       configurable: true,
@@ -99,12 +99,7 @@ describe('StartupFontSchedulerService', () => {
 
     service.initialize();
     vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS);
-    expect(appendedLinks.length).toBe(0);
-
-    vi.advanceTimersByTime(
-      STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS -
-      STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS
-    );
+    // 【修复 2026-02-20】SKIP_ON_CONSTRAINED_NETWORK=false 时弱网也不跳过
     expect(appendedLinks.length).toBe(1);
   });
 
