@@ -33,10 +33,16 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       <!-- 头部信息 -->
       <div class="flex justify-between items-start"
            [ngClass]="{'mb-1': !isMobile(), 'mb-0.5': isMobile()}">
-        <span class="font-mono font-medium text-retro-muted dark:text-stone-400"
-              [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
-          {{projectState.compressDisplayId(task().displayId)}}
-        </span>
+        <div class="flex items-center gap-1">
+          <span class="font-mono font-medium text-retro-muted dark:text-stone-400"
+                [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
+            {{projectState.compressDisplayId(task().displayId)}}
+          </span>
+          @if (task().parkingMeta?.state === 'parked') {
+            <span class="text-[8px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium"
+                  title="已停泊 - 稍后处理">⏸ 停泊</span>
+          }
+        </div>
         <span class="text-retro-muted/60 dark:text-stone-500 font-light"
               [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
           {{task().createdDate | date:'yyyy/MM/dd HH:mm'}}
@@ -72,6 +78,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
           (addSibling)="addSibling.emit()"
           (addChild)="addChild.emit()"
           (deleteTask)="deleteTask.emit()"
+          (parkTask)="parkTask.emit()"
           (attachmentError)="attachmentError.emit($event)"
           (openLinkedTask)="openLinkedTask.emit($event)">
         </app-text-task-editor>
@@ -108,6 +115,7 @@ export class TextTaskCardComponent {
   addSibling = output<void>();
   addChild = output<void>();
   deleteTask = output<void>();
+  parkTask = output<void>();
   attachmentError = output<string>();
   openLinkedTask = output<{ task: Task; event: Event }>();
 

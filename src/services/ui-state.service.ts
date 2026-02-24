@@ -20,6 +20,7 @@ import { Injectable, signal, computed, DestroyRef, inject } from '@angular/core'
 export class UiStateService {
   private destroyRef = inject(DestroyRef);
   private static readonly LAST_ACTIVE_VIEW_STORAGE_KEY = 'nanoflow.last-active-view';
+  private static readonly PARKING_DOCK_OPEN_KEY = 'nanoflow.parking-dock-open';
   
   // ========== 响应式状态 ==========
   
@@ -79,6 +80,9 @@ export class UiStateService {
   
   /** 流程图视图 - 详情面板展开 */
   readonly isFlowDetailOpen = signal(false);
+
+  /** 停泊坞展开状态（localStorage 持久化） */
+  readonly isParkingDockOpen = signal(false);
   
   // ========== 搜索状态（纯 UI 状态） ==========
   
@@ -232,10 +236,15 @@ export class UiStateService {
   }
   
   /**
-   * 设置文本视图分栏比例
+   * 设置文本视图分栏比例（带 localStorage 持久化）
    */
   setTextColumnRatio(ratio: number) {
     this.textColumnRatio.set(Math.max(20, Math.min(80, ratio)));
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('nanoflow.text-column-ratio', String(this.textColumnRatio()));
+      }
+    } catch { /* ignore quota / private browsing errors */ }
   }
   
   /**
@@ -271,6 +280,29 @@ export class UiStateService {
    */
   toggleFlowDetailPanel() {
     this.isFlowDetailOpen.update(v => !v);
+  }
+
+  /**
+   * 切换停泊坞展开状态（带 localStorage 持久化）
+   */
+  toggleParkingDock(): void {
+    this.isParkingDockOpen.update(v => !v);
+    this.persistParkingDockState();
+  }
+
+  /**
+   * 设置停泊坞展开状态
+   */
+  setParkingDockOpen(open: boolean): void {
+    this.isParkingDockOpen.set(open);
+    this.persistParkingDockState();
+  }
+
+  private persistParkingDockState(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(UiStateService.PARKING_DOCK_OPEN_KEY, String(this.isParkingDockOpen()));
+    } catch { /* ignore */ }
   }
   
   /**
@@ -368,6 +400,20 @@ export class UiStateService {
     const lastActiveView = localStorage.getItem(UiStateService.LAST_ACTIVE_VIEW_STORAGE_KEY);
     if (lastActiveView === 'text' || lastActiveView === 'flow') {
       this.lastActiveViewSignal.set(lastActiveView);
+    }
+
+    const parkingDockOpen = localStorage.getItem(UiStateService.PARKING_DOCK_OPEN_KEY);
+    if (parkingDockOpen === 'true') {
+      this.isParkingDockOpen.set(true);
+    }
+
+    // 恢复文本列比例
+    const savedRatio = localStorage.getItem('nanoflow.text-column-ratio');
+    if (savedRatio) {
+      const ratio = Number(savedRatio);
+      if (!isNaN(ratio) && ratio >= 20 && ratio <= 80) {
+        this.textColumnRatio.set(ratio);
+      }
     }
   }
 }

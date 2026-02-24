@@ -10,11 +10,52 @@ const nodeMajor = Number(process.versions.node.split('.')[0]);
  * 使用异步 spawn 启动子进程并正确转发信号
  * 解决 spawnSync 在长时间运行时无法处理 SIGTERM/SIGINT 导致僵尸进程的问题
  */
+/**
+ * 防御性修正 esbuild 环境变量：
+ * - ESBUILD_WORKER_THREADS="0" 在 Node 中是 truthy，会意外启用 worker_threads 分支
+ * - 已观察到该配置会触发 esbuild 死锁（all goroutines are asleep - deadlock）
+ */
+function buildChildEnv() {
+  const childEnv = { ...process.env };
+  const workerThreads = childEnv.ESBUILD_WORKER_THREADS;
+  if (workerThreads === '0' || workerThreads === 'false') {
+    delete childEnv.ESBUILD_WORKER_THREADS;
+    console.warn(
+      `[run-ng] 检测到 ESBUILD_WORKER_THREADS=${workerThreads}，已自动移除以避免 esbuild 死锁。`
+    );
+  }
+  return childEnv;
+}
+
 function runWithSignalForwarding(nodeBin, scriptArgs) {
+  const childEnv = buildChildEnv();
+  const startedAt = Date.now();
+  const isBuildCommand = scriptArgs.some((arg) => arg === 'build');
+  const heartbeatIntervalMs = Number(process.env.RUN_NG_HEARTBEAT_INTERVAL_MS || 8000);
+
   const child = spawn(nodeBin, scriptArgs, {
     stdio: 'inherit',
-    env: process.env,
+    env: childEnv,
   });
+
+  let heartbeatTimer = null;
+  if (!process.stdout.isTTY && isBuildCommand && Number.isFinite(heartbeatIntervalMs) && heartbeatIntervalMs > 0) {
+    heartbeatTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+      console.log(`[run-ng] 构建仍在进行中... ${elapsedSec}s`);
+    }, heartbeatIntervalMs);
+    // 不阻止进程退出
+    if (typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref();
+    }
+  }
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
 
   // 转发终止信号到子进程，确保 ng serve / esbuild 能正确清理退出
   const forwardSignal = (sig) => {
@@ -25,6 +66,15 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
   ['SIGTERM', 'SIGINT', 'SIGHUP'].forEach(sig => process.on(sig, () => forwardSignal(sig)));
 
   child.on('exit', (code, signal) => {
+    stopHeartbeat();
+
+    if (code !== 0 || signal) {
+      const elapsedMs = Date.now() - startedAt;
+      console.error(
+        `[run-ng] ng 进程异常退出: code=${code ?? 'null'}, signal=${signal ?? 'none'}, elapsed=${elapsedMs}ms`
+      );
+    }
+
     // 子进程退出后，父进程也退出
     if (code !== null) {
       process.exit(code);
@@ -34,6 +84,7 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
   });
 
   child.on('error', (err) => {
+    stopHeartbeat();
     console.error(`[run-ng] 子进程启动失败: ${err.message}`);
     process.exit(1);
   });

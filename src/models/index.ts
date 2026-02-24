@@ -79,6 +79,13 @@ export interface Task {
   
   // 新增：截止日期（预留）
   dueDate?: string | null;
+
+  /**
+   * State Overlap 停泊元数据
+   * 仅 status === 'active' 的任务可持有此字段
+   * ⚠️ 禁止使用 overlap 前缀旧命名
+   */
+  parkingMeta?: import('./parking').TaskParkingMeta | null;
 }
 
 /**
@@ -231,6 +238,7 @@ export type UndoActionType =
   | 'task-delete'
   | 'task-update'
   | 'task-move'
+  | 'task-park'
   | 'connection-create'
   | 'connection-delete'
   | 'connection-update'
@@ -338,6 +346,11 @@ export * from './flow-view-state';
 // Focus Mode 类型导出
 // ============================================
 export * from './focus';
+
+// ============================================
+// State Overlap / Parking 类型导出
+// ============================================
+export * from './parking';
 
 // ============================================
 // API 类型定义（边境防御）

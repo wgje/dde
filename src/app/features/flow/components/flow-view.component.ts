@@ -662,6 +662,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   deleteTask(task: Task): void {
     this.deleteConfirmTask.set(task);
   }
+
+  /** 停泊任务——将任务放入「稍后处理」停泊槽 */
+  parkTaskAction(task: Task): void {
+    this.taskOps.parkTask(task);
+    this.selectedTaskId.set(null);
+  }
   
   confirmDelete(keepChildren: boolean): void {
     const task = this.deleteConfirmTask();

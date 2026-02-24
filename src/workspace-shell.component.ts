@@ -18,6 +18,7 @@ import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { SimpleSyncService } from './app/core/services/simple-sync.service';
 import { SearchService } from './services/search.service';
+import { ParkingService } from './services/parking.service';
 import { BlackBoxService } from './services/black-box.service';
 import { FocusPreferenceService } from './services/focus-preference.service';
 import { BeforeUnloadManagerService } from './services/before-unload-manager.service';
@@ -50,6 +51,7 @@ import { StartupFontSchedulerService } from './services/startup-font-scheduler.s
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
+import { TaskStore } from './services/stores';
 
 function readTextInputValue(event: Event | string): string {
   if (typeof event === 'string') return event;
@@ -110,11 +112,13 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly uiState = inject(UiStateService);
   private readonly ngZone = inject(NgZone);
   private readonly projectState = inject(ProjectStateService);
+  private readonly taskStore = inject(TaskStore);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly preferenceService = inject(PreferenceService);
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly searchService = inject(SearchService);
+  private readonly parkingService = inject(ParkingService);
   private readonly spotlightService = inject(SpotlightService);
   private readonly blackBoxService = inject(BlackBoxService);
   readonly focusPrefs = inject(FocusPreferenceService);
@@ -1503,6 +1507,21 @@ async signOut() {
   saveProjectDetails(projectId: string) { this.projectCoord.saveProjectDetails(projectId); }
   createNewProject() { void this.openNewProjectModal(); }
   onFocusFlowNode(taskId: string) { this.projectCoord.onFocusFlowNode(taskId); }
+  onSearchTaskClick(taskId: string, isParked: boolean): void {
+    const projectId = this.taskStore.getTaskProjectId(taskId)
+      ?? this.projectState.activeProjectId();
+    if (projectId && projectId !== this.projectState.activeProjectId()) {
+      this.projectState.setActiveProjectId(projectId);
+    }
+
+    if (isParked) {
+      this.uiState.setParkingDockOpen(true);
+      this.parkingService.previewTask(taskId);
+      return;
+    }
+
+    this.onFocusFlowNode(taskId);
+  }
   async confirmCreateProject(name: string, desc: string) { await this.projectCoord.confirmCreateProject(name, desc); }
   async confirmDeleteProject(projectId: string, projectName: string, event: Event) { await this.projectCoord.confirmDeleteProject(projectId, projectName, event); }
   async handleImportComplete(project: Project) { await this.projectCoord.handleImportComplete(project); }

@@ -267,6 +267,8 @@ export class TaskSyncOperationsService {
               short_id: task.shortId,
               deleted_at: task.deletedAt || null,
               attachments: task.attachments ?? [],
+              // State Overlap 停泊元数据（A3.2/A3.6）
+              parking_meta: task.parkingMeta ?? null,
             })
             .select('updated_at')
             .single();

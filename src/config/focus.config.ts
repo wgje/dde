@@ -60,8 +60,8 @@ export const FOCUS_CONFIG = {
       'audio/ogg;codecs=opus',
       'audio/wav'
     ] as const,
-    /** 每日配额限制 - 个人使用，不设限制 */
-    DAILY_QUOTA: 999999,
+    /** 每日配额限制 - 与 Edge Function DAILY_QUOTA_PER_USER 保持一致 */
+    DAILY_QUOTA: 50,
     /** Edge Function 名称 */
     EDGE_FUNCTION_NAME: 'transcribe',
     /** 最大文件大小（字节）- Groq 限制 25MB */
@@ -82,8 +82,8 @@ export const FOCUS_CONFIG = {
     IDB_PREFIX: 'focus_',
     /** IndexedDB 数据库名称 */
     IDB_NAME: 'focus_mode',
-    /** IndexedDB 版本 - 增加版本号以添加 sync_metadata store */
-    IDB_VERSION: 2,
+    /** IndexedDB 版本 - v3: 新增 parked_tasks store（State Overlap） */
+    IDB_VERSION: 3,
   },
   
   // IndexedDB Object Store 名称
@@ -92,6 +92,8 @@ export const FOCUS_CONFIG = {
     FOCUS_PREFERENCES: 'focus_preferences',
     OFFLINE_AUDIO_CACHE: 'offline_audio_cache',
     SYNC_METADATA: 'sync_metadata',
+    /** 停泊任务跨项目缓存（v3 新增） */
+    PARKED_TASKS: 'parked_tasks',
   },
   
   // 键盘快捷键

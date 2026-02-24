@@ -21,9 +21,37 @@ import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../../config/sync.config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
+import { FOCUS_CONFIG } from '../../../../config/focus.config';
 import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+
+interface ParkedTaskCacheRecord {
+  taskId: string;
+  projectId: string;
+  task: Task;
+  updatedAt: string;
+}
+
+interface ParkedTaskDeltaRow extends Partial<TaskRow> {
+  project_id?: string;
+}
+
+export interface ParkedTaskEntry {
+  task: Task;
+  projectId: string;
+}
+
+export interface ParkedTaskCacheSnapshot {
+  entries: ParkedTaskEntry[];
+  cursor: string | null;
+}
+
+export interface ParkedTaskDeltaResult {
+  entries: ParkedTaskEntry[];
+  removedTaskIds: string[];
+  nextCursor: string | null;
+}
 @Injectable({
   providedIn: 'root'
 })
@@ -42,6 +70,8 @@ export class ProjectDataService {
   /** 离线缓存配置 */
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
+  /** 停泊任务轻量缓存游标键（A3.4） */
+  private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
   
   /**
    * 获取 Supabase 客户端
@@ -766,6 +796,231 @@ export class ProjectDataService {
       this.logger.warn('清除离线快照失败', e);
     }
   }
+
+  // ==================== 停泊任务轻量缓存与增量拉取 ====================
+
+  /**
+   * 从 IndexedDB 读取停泊任务轻量缓存与同步游标
+   */
+  async loadParkedTasksCache(): Promise<ParkedTaskCacheSnapshot> {
+    if (typeof indexedDB === 'undefined') {
+      return { entries: [], cursor: null };
+    }
+
+    try {
+      const db = await this.openFocusModeDB();
+      return await new Promise<ParkedTaskCacheSnapshot>((resolve, reject) => {
+        const tx = db.transaction(
+          [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
+          'readonly'
+        );
+
+        const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
+        const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
+
+        const parkedReq = parkedStore.getAll();
+        const cursorReq = metaStore.get(this.PARKING_SYNC_CURSOR_KEY);
+
+        tx.oncomplete = () => {
+          const rows = Array.isArray(parkedReq.result) ? parkedReq.result : [];
+          const entries: ParkedTaskEntry[] = rows
+            .filter((row): row is ParkedTaskCacheRecord =>
+              !!row &&
+              typeof row === 'object' &&
+              'taskId' in row &&
+              'projectId' in row &&
+              'task' in row
+            )
+            .map((row) => ({
+              task: row.task,
+              projectId: row.projectId,
+            }));
+
+          const cursor = cursorReq.result?.value
+            ? String(cursorReq.result.value)
+            : null;
+
+          resolve({ entries, cursor });
+        };
+
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (error) {
+      this.logger.warn('读取停泊任务缓存失败，降级为空缓存', { error });
+      return { entries: [], cursor: null };
+    }
+  }
+
+  /**
+   * 保存停泊任务轻量缓存与同步游标
+   */
+  async saveParkedTasksCache(snapshot: ParkedTaskCacheSnapshot): Promise<void> {
+    if (typeof indexedDB === 'undefined') return;
+
+    try {
+      const db = await this.openFocusModeDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(
+          [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
+          'readwrite'
+        );
+        const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
+        const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
+
+        parkedStore.clear();
+        for (const entry of snapshot.entries) {
+          const updatedAt = entry.task.updatedAt ?? new Date().toISOString();
+          parkedStore.put({
+            taskId: entry.task.id,
+            projectId: entry.projectId,
+            task: entry.task,
+            updatedAt,
+          } as ParkedTaskCacheRecord);
+        }
+        metaStore.put({
+          key: this.PARKING_SYNC_CURSOR_KEY,
+          value: snapshot.cursor ?? null,
+        });
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (error) {
+      this.logger.warn('保存停泊任务缓存失败（不阻断主流程）', { error });
+    }
+  }
+
+  /**
+   * 轻量增量拉取停泊任务（仅 parking_meta 非空任务）
+   *
+   * 返回：
+   * - entries: 新增/更新的停泊任务
+   * - removedTaskIds: 已从停泊状态移除的任务 ID（由已知停泊任务集合推导）
+   * - nextCursor: 下一次增量拉取游标
+   */
+  async pullParkedTasksDelta(
+    since: string | null,
+    knownParkedTaskIds: string[]
+  ): Promise<ParkedTaskDeltaResult> {
+    const client = await this.getSupabaseClient();
+    if (!client) {
+      return { entries: [], removedTaskIds: [], nextCursor: since };
+    }
+
+    const selectFields = `project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`;
+    const updatedRows: ParkedTaskDeltaRow[] = [];
+    const entryMap = new Map<string, ParkedTaskEntry>();
+    const removedTaskIds = new Set<string>();
+
+    try {
+      let parkedQuery = client
+        .from('tasks')
+        .select(selectFields)
+        .not('parking_meta', 'is', null);
+
+      if (since) {
+        parkedQuery = parkedQuery.gt('updated_at', since);
+      }
+
+      const { data: parkedRows, error: parkedError } = await parkedQuery;
+      if (parkedError) {
+        throw supabaseErrorToError(parkedError);
+      }
+
+      for (const rawRow of (parkedRows ?? []) as ParkedTaskDeltaRow[]) {
+        const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
+        if (!projectId || !rawRow.id) continue;
+        const task = this.rowToTask(rawRow);
+        entryMap.set(task.id, { task, projectId });
+        updatedRows.push(rawRow);
+      }
+
+      // 仅对“已知停泊任务”做增量核验，找出已移出停泊的任务
+      if (since && knownParkedTaskIds.length > 0) {
+        for (const chunk of this.chunkTaskIds(knownParkedTaskIds, 100)) {
+          const { data: changedRows, error: changedError } = await client
+            .from('tasks')
+            .select(selectFields)
+            .in('id', chunk)
+            .gt('updated_at', since);
+
+          if (changedError) {
+            throw supabaseErrorToError(changedError);
+          }
+
+          for (const rawRow of (changedRows ?? []) as ParkedTaskDeltaRow[]) {
+            updatedRows.push(rawRow);
+            if (!rawRow.id) continue;
+
+            const isParked = (rawRow as { parking_meta?: unknown }).parking_meta !== null
+              && (rawRow as { parking_meta?: unknown }).parking_meta !== undefined;
+            if (!isParked) {
+              removedTaskIds.add(String(rawRow.id));
+              entryMap.delete(String(rawRow.id));
+              continue;
+            }
+
+            const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
+            if (!projectId) continue;
+            const task = this.rowToTask(rawRow);
+            entryMap.set(task.id, { task, projectId });
+          }
+        }
+      }
+
+      const nextCursor = this.computeParkedCursor(since, updatedRows);
+      return {
+        entries: Array.from(entryMap.values()),
+        removedTaskIds: Array.from(removedTaskIds),
+        nextCursor,
+      };
+    } catch (error) {
+      this.logger.warn('增量拉取停泊任务失败，保持现有缓存', { error, since });
+      return { entries: [], removedTaskIds: [], nextCursor: since };
+    }
+  }
+
+  private computeParkedCursor(since: string | null, rows: ParkedTaskDeltaRow[]): string | null {
+    let maxTs = since ? Date.parse(since) : 0;
+    for (const row of rows) {
+      if (!row.updated_at) continue;
+      const ts = Date.parse(String(row.updated_at));
+      if (!Number.isNaN(ts)) {
+        maxTs = Math.max(maxTs, ts);
+      }
+    }
+    if (!maxTs) return since;
+    return new Date(maxTs).toISOString();
+  }
+
+  private chunkTaskIds(taskIds: string[], size: number): string[][] {
+    if (taskIds.length <= size) return [taskIds];
+    const chunks: string[][] = [];
+    for (let i = 0; i < taskIds.length; i += size) {
+      chunks.push(taskIds.slice(i, i + size));
+    }
+    return chunks;
+  }
+
+  private openFocusModeDB(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME, FOCUS_CONFIG.SYNC.IDB_VERSION);
+
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
+          const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
+          parkedStore.createIndex('by-updatedAt', 'updatedAt', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
+          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
+        }
+      };
+
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
   
   // ==================== 数据转换（Public API）====================
   
@@ -831,7 +1086,9 @@ export class ProjectDataService {
       attachments: (row.attachments as unknown as import('../../../../models').Attachment[]) ?? [],
       tags: (row.tags as unknown as string[]) ?? [],
       priority: (row.priority as 'low' | 'medium' | 'high' | 'urgent') ?? undefined,
-      dueDate: row.due_date ?? undefined
+      dueDate: row.due_date ?? undefined,
+      // State Overlap 停泊元数据
+      parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../../../../models/parking').TaskParkingMeta | undefined ?? undefined,
     };
   }
   

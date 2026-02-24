@@ -187,6 +187,12 @@ export class BlackBoxSyncService {
         if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
           db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
         }
+
+        // 停泊任务跨项目缓存（v3 新增，State Overlap A3.15）
+        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
+          const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
+          parkedStore.createIndex('by-parkedAt', 'parkedAt', { unique: false });
+        }
       };
     });
   }

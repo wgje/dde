@@ -76,6 +76,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
               (addSibling)="addSibling.emit(task)"
               (addChild)="addChild.emit(task)"
               (deleteTask)="deleteTask.emit(task)"
+              (parkTask)="parkTask.emit(task)"
               (attachmentError)="attachmentError.emit($event)"
               (openLinkedTask)="openLinkedTask.emit($event)"
               (dragStart)="taskDragStart.emit($event)"
@@ -129,6 +130,7 @@ export class TextStageCardComponent {
   readonly addSibling = output<Task>();
   readonly addChild = output<Task>();
   readonly deleteTask = output<Task>();
+  readonly parkTask = output<Task>();
   readonly attachmentError = output<string>();
   readonly openLinkedTask = output<{ task: Task; event: Event }>();
   

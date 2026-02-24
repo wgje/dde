@@ -856,4 +856,18 @@ export class FlowDiagramService {
     // 使用类型断言绕过严格类型检查
     (this.overview as unknown as { fixedBounds: go.Rect | undefined }).fixedBounds = bounds ?? undefined;
   }
+
+  /**
+   * 获取当前流程图停泊快照（A5.2.5）
+   * 用于 ContextRestoreService 保存 flow 视图状态
+   */
+  getFlowParkingSnapshot(): { scale: number; selectedNodeId: string | null } | null {
+    if (!this.diagram || this.isDestroyed) return null;
+    const scale = this.zoomService.getZoom();
+    const selectedKeys = this.selectionService.getSelectedNodeKeys();
+    return {
+      scale,
+      selectedNodeId: selectedKeys.length === 1 ? selectedKeys[0] : null,
+    };
+  }
 }

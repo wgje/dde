@@ -9,6 +9,7 @@ import { Injectable, inject, computed, DestroyRef } from '@angular/core';
 import { Task } from '../models';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
+import { TaskStore } from './stores';
 import { BlackBoxService } from './black-box.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskOperationService } from './task-operation.service';
@@ -28,6 +29,7 @@ export class SpotlightService {
   private blackBoxService = inject(BlackBoxService);
   private projectState = inject(ProjectStateService);
   private taskOperation = inject(TaskOperationService);
+  private taskStore = inject(TaskStore);
   private logger = inject(LoggerService);
   private destroyRef = inject(DestroyRef);
 
@@ -219,10 +221,13 @@ export class SpotlightService {
     
     const tasks = this.projectState.tasks();
     
+    const parkedIds = this.taskStore.parkedTaskIds();
     return tasks
       .filter((t: Task) => 
         t.status === 'active' && 
-        !t.deletedAt
+        !t.deletedAt &&
+        // 停泊中的任务不参与聚光灯轮转（A3.8）
+        !parkedIds.has(t.id)
       )
       .sort((a: Task, b: Task) => {
         // 按 stage 和 order 排序

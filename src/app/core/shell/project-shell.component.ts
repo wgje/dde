@@ -26,6 +26,7 @@ import { DynamicModalService } from '../../../services/dynamic-modal.service';
 import { AppProjectCoordinatorService } from '../services/app-project-coordinator.service';
 import { TextViewComponent } from '../../features/text';
 import { FlowViewComponent } from '../../features/flow';
+import { ParkingDockComponent, ParkingNoticeComponent } from '../../features/parking';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
 
@@ -58,7 +59,7 @@ interface NetworkInformationLike {
   standalone: true,
   // 【P2-22 修复】添加 OnPush 变更检测策略
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, TextViewComponent, FlowViewComponent, RouterOutlet],
+  imports: [CommonModule, TextViewComponent, FlowViewComponent, RouterOutlet, ParkingDockComponent, ParkingNoticeComponent],
   styles: [`
     :host {
       display: flex;
@@ -328,6 +329,16 @@ interface NetworkInformationLike {
            }
           </div>
         }
+
+        <!-- 停泊坞：底部弹出面板（A6.9）——定时触发确保组件及时加载 -->
+        @defer (on timer(300)) {
+          <app-parking-dock></app-parking-dock>
+        } @placeholder { }
+
+        <!-- 停泊通知（A3.13）-->
+        @defer (on idle) {
+          <app-parking-notice></app-parking-notice>
+        } @placeholder { }
       } @else {
         <!-- 无活动项目时的占位 - 点击可创建新项目 -->
         <button 

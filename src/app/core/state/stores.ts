@@ -20,6 +20,7 @@ import { Project, Task, Connection } from '../../../models';
 /**
  * 比较两个 Task 是否在业务关键字段上相同
  * 用于脏检查，避免无变化时触发 signal 通知
+ * 【A3.2】新增 parkingMeta 关键字段比较，避免停泊状态变更被脏检查吞除
  */
 function isTaskEqual(a: Task, b: Task): boolean {
   return a.updatedAt === b.updatedAt
@@ -31,7 +32,12 @@ function isTaskEqual(a: Task, b: Task): boolean {
     && a.y === b.y
     && a.rank === b.rank
     && a.parentId === b.parentId
-    && a.deletedAt === b.deletedAt;
+    && a.deletedAt === b.deletedAt
+    && a.parkingMeta?.state === b.parkingMeta?.state
+    && a.parkingMeta?.parkedAt === b.parkingMeta?.parkedAt
+    && a.parkingMeta?.reminder?.reminderAt === b.parkingMeta?.reminder?.reminderAt
+    && a.parkingMeta?.reminder?.snoozeCount === b.parkingMeta?.reminder?.snoozeCount
+    && a.parkingMeta?.pinned === b.parkingMeta?.pinned;
 }
 
 /**
@@ -69,12 +75,49 @@ export class TaskStore {
 
   /** 按项目 ID 索引的任务 */
   private readonly tasksByProject = signal<Map<string, Set<string>>>(new Map(), { equal: () => false });
+
+  /** 任务所属项目索引（A3.4.4） */
+  private readonly taskProjectMap = signal<Map<string, string>>(new Map(), { equal: () => false });
+
+  /**
+   * 停泊任务 ID 二级索引（A3.4.4）
+   * 包含所有 parkingMeta 非 null 的任务 ID，O(1) 查找
+   * 实际 Task 对象通过 tasksMap.get(id) 获取，不产生数据冗余
+   */
+  readonly parkedTaskIds = signal<Set<string>>(new Set(), { equal: () => false });
+
+  /**
+   * 停泊任务列表（派生）——按 parkedAt 降序排列
+   */
+  readonly parkedTasks = computed(() => {
+    const ids = this.parkedTaskIds();
+    const map = this.tasksMap();
+    const tasks: Task[] = [];
+    for (const id of ids) {
+      const task = map.get(id);
+      if (task?.parkingMeta) tasks.push(task);
+    }
+    // 按 parkedAt 降序（最近停泊在上）
+    tasks.sort((a, b) => {
+      const aTime = a.parkingMeta?.parkedAt ?? '';
+      const bTime = b.parkingMeta?.parkedAt ?? '';
+      return bTime.localeCompare(aTime);
+    });
+    return tasks;
+  });
   
   /**
    * 获取单个任务 - O(1)
    */
   getTask(id: string): Task | undefined {
     return this.tasksMap().get(id);
+  }
+
+  /**
+   * O(1) 获取任务所属项目 ID（A3.4.4）
+   */
+  getTaskProjectId(taskId: string): string | null {
+    return this.taskProjectMap().get(taskId) ?? null;
   }
   
   /**
@@ -95,12 +138,23 @@ export class TaskStore {
     const existing = this.tasksMap().get(task.id);
     // 脏检查：数据未变化时跳过 signal 通知
     if (existing && isTaskEqual(existing, task)) return;
+    const previousProjectId = this.taskProjectMap().get(task.id);
     this.tasksMap.update(map => { map.set(task.id, task); return map; });
     this.tasksByProject.update(map => {
+      if (previousProjectId && previousProjectId !== projectId) {
+        map.get(previousProjectId)?.delete(task.id);
+      }
       if (!map.has(projectId)) map.set(projectId, new Set());
       map.get(projectId)!.add(task.id);
       return map;
     });
+    this.taskProjectMap.update(map => {
+      map.set(task.id, projectId);
+      return map;
+    });
+    // 维护停泊索引并触发 signal 通知
+    this.updateParkedIndex(task);
+    this.parkedTaskIds.update(s => s);
   }
 
   /** 批量设置任务（替换指定项目的全部任务） */
@@ -110,22 +164,39 @@ export class TaskStore {
       // 移除该项目的旧任务
       const oldIds = this.tasksByProject().get(projectId);
       if (oldIds) {
-        for (const id of oldIds) map.delete(id);
+        for (const id of oldIds) {
+          map.delete(id);
+          // 清理停泊索引
+          this.parkedTaskIds().delete(id);
+          this.taskProjectMap().delete(id);
+        }
       }
       // 添加新任务
-      tasks.forEach(t => map.set(t.id, t));
+      tasks.forEach(t => {
+        map.set(t.id, t);
+        this.taskProjectMap().set(t.id, projectId);
+      });
       return map;
     });
     this.tasksByProject.update(map => {
       map.set(projectId, new Set(tasks.map(t => t.id)));
       return map;
     });
+    this.taskProjectMap.update(m => m);
+    // 重建停泊索引
+    for (const t of tasks) this.updateParkedIndex(t);
+    this.parkedTaskIds.update(s => s);
   }
 
   /** 删除任务 - O(1) */
   removeTask(id: string, projectId: string): void {
     this.tasksMap.update(map => { map.delete(id); return map; });
     this.tasksByProject.update(map => { map.get(projectId)?.delete(id); return map; });
+    this.taskProjectMap.update(map => { map.delete(id); return map; });
+    // 移除停泊索引
+    if (this.parkedTaskIds().has(id)) {
+      this.parkedTaskIds.update(s => { s.delete(id); return s; });
+    }
   }
 
   /** 批量更新任务 - 含脏检查（仅在有变化时触发 signal 更新） */
@@ -136,12 +207,17 @@ export class TaskStore {
       const existing = map.get(t.id);
       if (!existing || !isTaskEqual(existing, t)) {
         map.set(t.id, t);
+        this.taskProjectMap().set(t.id, projectId);
         hasChange = true;
       }
     }
     // 仅在有实际变化时才触发 signal 通知，避免级联风暴
     if (hasChange) {
       this.tasksMap.update(m => m);
+      this.taskProjectMap.update(m => m);
+      // 维护停泊索引
+      for (const t of tasks) this.updateParkedIndex(t);
+      this.parkedTaskIds.update(s => s);
     }
     this.tasksByProject.update(indexMap => {
       const existing = indexMap.get(projectId) ?? new Set<string>();
@@ -163,18 +239,38 @@ export class TaskStore {
       if (existing) for (const id of taskIds) existing.delete(id);
       return map;
     });
+    this.taskProjectMap.update(map => {
+      for (const id of taskIds) map.delete(id);
+      return map;
+    });
+    // 移除停泊索引
+    this.parkedTaskIds.update(s => {
+      for (const id of taskIds) s.delete(id);
+      return s;
+    });
   }
 
   /** 批量设置多个项目的任务（用于 setProjects 场景） */
   setTasksForMultipleProjects(entries: { tasks: Task[]; projectId: string }[]): void {
     this.tasksMap.update(map => {
-      for (const { tasks } of entries) for (const t of tasks) map.set(t.id, t);
+      for (const { tasks, projectId } of entries) {
+        for (const t of tasks) {
+          map.set(t.id, t);
+          this.taskProjectMap().set(t.id, projectId);
+        }
+      }
       return map;
     });
     this.tasksByProject.update(map => {
       for (const { tasks, projectId } of entries) map.set(projectId, new Set(tasks.map(t => t.id)));
       return map;
     });
+    this.taskProjectMap.update(m => m);
+    // 维护停泊索引——批量加载时同步更新 parkedTaskIds
+    for (const { tasks } of entries) {
+      for (const t of tasks) this.updateParkedIndex(t);
+    }
+    this.parkedTaskIds.update(s => s);
   }
 
   /** 清除项目的所有任务 */
@@ -183,6 +279,15 @@ export class TaskStore {
     if (!taskIds) return;
     this.tasksMap.update(map => { taskIds.forEach(id => map.delete(id)); return map; });
     this.tasksByProject.update(map => { map.delete(projectId); return map; });
+    this.taskProjectMap.update(map => {
+      for (const id of taskIds) map.delete(id);
+      return map;
+    });
+    // 清理停泊索引——移除该项目中的停泊任务 ID
+    this.parkedTaskIds.update(s => {
+      for (const id of taskIds) s.delete(id);
+      return s;
+    });
   }
   
   /**
@@ -191,6 +296,22 @@ export class TaskStore {
   clear(): void {
     this.tasksMap.set(new Map());
     this.tasksByProject.set(new Map());
+    this.taskProjectMap.set(new Map());
+    this.parkedTaskIds.set(new Set());
+  }
+
+  // ─── 停泊索引维护 ───
+
+  /**
+   * 更新停泊任务二级索引
+   * 内部方法，由 setTask / bulkSetTasks 等调用
+   */
+  private updateParkedIndex(task: Task): void {
+    if (task.parkingMeta) {
+      this.parkedTaskIds().add(task.id);
+    } else {
+      this.parkedTaskIds().delete(task.id);
+    }
   }
 }
 

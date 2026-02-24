@@ -1,5 +1,6 @@
 import { Injectable, inject, computed } from '@angular/core';
 import { Task, Project } from '../models';
+import { TaskStore } from './stores';
 import { ProjectStateService } from './project-state.service';
 import { UiStateService } from './ui-state.service';
 
@@ -42,18 +43,24 @@ export interface ProjectSearchResult {
 export class SearchService {
   private projectState = inject(ProjectStateService);
   private uiState = inject(UiStateService);
+  private taskStore = inject(TaskStore);
   
   // ========== 计算属性 ==========
   
   /**
    * 任务搜索结果
+   * 包含当前项目任务 + 跨项目停泊任务（A3.10）
    */
   readonly searchResults = computed(() => {
     const query = this.normalizeSearchQuery(this.uiState.searchQuery());
     if (!query) return [];
     
     const tasks = this.projectState.tasks();
-    return tasks.filter(t => 
+    const parkedIds = this.taskStore.parkedTaskIds();
+    const tasksMap = this.taskStore.tasksMap();
+
+    // 搜索匹配函数
+    const matchesQuery = (t: Task): boolean =>
       !t.deletedAt && (
         this.fuzzyMatch(t.title, query) ||
         this.fuzzyMatch(t.content, query) ||
@@ -62,8 +69,29 @@ export class SearchService {
         (t.shortId ? this.fuzzyMatch(t.shortId, query) : false) ||
         (t.attachments?.some(a => this.fuzzyMatch(a.name, query)) ?? false) ||
         (t.tags?.some(tag => this.fuzzyMatch(tag, query)) ?? false)
-      )
-    );
+      );
+
+    // 当前项目任务搜索
+    const currentProjectTaskIds = new Set(tasks.map(t => t.id));
+    const currentResults = tasks.filter(matchesQuery);
+
+    // 跨项目停泊任务搜索（A3.10 / A15.2）
+    // 仅添加不在当前项目中的停泊任务，避免重复
+    const crossProjectParked: Task[] = [];
+    for (const parkedId of parkedIds) {
+      if (currentProjectTaskIds.has(parkedId)) continue; // 已在当前项目结果中
+      const task = tasksMap.get(parkedId);
+      if (task && matchesQuery(task)) {
+        crossProjectParked.push(task);
+      }
+    }
+
+    // 合并结果：当前项目在前，跨项目停泊在后
+    return [...currentResults, ...crossProjectParked].map(t => ({
+      ...t,
+      // 停泊中的任务附加视觉标识（A3.10）
+      _isParked: parkedIds.has(t.id),
+    }));
   });
   
   /**

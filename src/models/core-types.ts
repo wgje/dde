@@ -85,6 +85,12 @@ export interface Task {
   tags?: string[];
   priority?: 'low' | 'medium' | 'high' | 'urgent';
   dueDate?: string | null;
+
+  /**
+   * State Overlap 停泊元数据
+   * 仅 status === 'active' 的任务可持有此字段
+   */
+  parkingMeta?: import('./parking').TaskParkingMeta | null;
 }
 
 /**

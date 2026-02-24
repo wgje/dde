@@ -146,6 +146,8 @@ export interface ExportTask {
   hasIncompleteTask?: boolean;
   /** 软删除时间戳（回收站中的任务） */
   deletedAt?: string | null;
+  /** 停泊元数据（A3.11：导出时清除 contextSnapshot） */
+  parkingMeta?: import('../models/parking').TaskParkingMeta | null;
 }
 
 /**
@@ -530,6 +532,11 @@ export class ExportService {
       dueDate: task.dueDate,
       hasIncompleteTask: task.hasIncompleteTask,
       deletedAt: task.deletedAt,
+      // 导出保留停泊元数据但清除 contextSnapshot（A3.11）
+      parkingMeta: task.parkingMeta ? {
+        ...task.parkingMeta,
+        contextSnapshot: null,
+      } : null,
     };
     
     // 包含附件元数据

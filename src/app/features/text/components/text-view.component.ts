@@ -86,6 +86,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
           (addSibling)="ops.onAddSibling($event)"
           (addChild)="ops.onAddChild($event)"
           (deleteTask)="ops.onDeleteTask($event)"
+          (parkTask)="ops.onParkTask($event)"
           (attachmentError)="ops.onAttachmentError($event)"
           (openLinkedTask)="ops.onOpenLinkedTask($event)"
           (taskDragStart)="onDragStart($event)"

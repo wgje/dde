@@ -2,6 +2,7 @@ import { Injectable, inject, ElementRef } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../../services/toast.service';
+import { ParkingService } from '../../../../services/parking.service';
 import { Task, Attachment } from '../../../../models';
 import { isFailure, getErrorMessage } from '../../../../utils/result';
 import { UI_CONFIG } from '../../../../config';
@@ -29,6 +30,7 @@ export class FlowTaskOperationsService {
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly toast = inject(ToastService);
+  private readonly parkingService = inject(ParkingService);
   
   // ========== 任务属性更新 ==========
   
@@ -271,5 +273,14 @@ export class FlowTaskOperationsService {
    */
   dispose(): void {
     // 无状态服务，无需清理
+  }
+
+  // ========== 停泊操作 ==========
+
+  /**
+   * 停泊任务——将任务放入「稍后处理」停泊槽
+   */
+  parkTask(task: Task): void {
+    this.parkingService.parkTask(task.id);
   }
 }

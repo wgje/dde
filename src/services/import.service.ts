@@ -632,6 +632,19 @@ export class ImportService {
       dueDate: exportTask.dueDate,
       hasIncompleteTask: exportTask.hasIncompleteTask,
       deletedAt: exportTask.deletedAt,
+      // 导入恢复停泊元数据，刷新 lastVisitedAt，清除过期提醒（A3.11）
+      parkingMeta: (exportTask as { parkingMeta?: import('../models/parking').TaskParkingMeta | null }).parkingMeta
+        ? (() => {
+            const meta = (exportTask as { parkingMeta: import('../models/parking').TaskParkingMeta }).parkingMeta;
+            return {
+              ...meta,
+              lastVisitedAt: new Date().toISOString(),
+              contextSnapshot: null,
+              reminder: meta.reminder && new Date(meta.reminder.reminderAt).getTime() > Date.now()
+                ? meta.reminder : null,
+            };
+          })()
+        : null,
       // 附件需要重新上传，这里只保留元数据并标记为待上传
       attachments: exportTask.attachments?.map(att => ({
         id: att.id,

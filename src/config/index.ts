@@ -120,6 +120,11 @@ export {
   type DrawerDragEvent
 } from './drawer.config';
 
+// State Overlap / Parking 配置
+export {
+  PARKING_CONFIG
+} from './parking.config';
+
 // 性能优化配置（P0-P3 优化 2026-01-26）
 export {
   PERFORMANCE_FLAGS,

@@ -5,13 +5,13 @@
     "sessionStart": [
       {
         "type": "command",
-        "bash": "echo '🚀 NanoFlow session started at $(date)'",
+        "bash": "echo '{\"message\": \"NanoFlow session started at '$(date)'\"}'",
         "comment": "会话开始通知",
         "timeoutSec": 5
       },
       {
         "type": "command",
-        "bash": "cat .github/context/current-focus.md 2>/dev/null || echo 'No context file found'",
+        "bash": "if [ -f .github/context/current-focus.md ]; then jq -Rs '{message: .}' .github/context/current-focus.md 2>/dev/null || echo '{\"message\": \"context loaded\"}'; else echo '{\"message\": \"No context file found\"}'; fi",
         "comment": "恢复上次会话上下文",
         "timeoutSec": 10
       }
@@ -19,7 +19,7 @@
     "sessionEnd": [
       {
         "type": "command",
-        "bash": "echo '👋 NanoFlow session ended at $(date)'",
+        "bash": "echo '{\"message\": \"NanoFlow session ended at '$(date)'\"}'",
         "comment": "会话结束通知",
         "timeoutSec": 5
       }
@@ -36,7 +36,7 @@
     "postToolUse": [
       {
         "type": "command",
-        "bash": "echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Tool: ${TOOL_NAME:-unknown}\" >> .github/hooks/logs/audit.log 2>/dev/null || true",
+        "bash": "echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Tool: ${TOOL_NAME:-unknown}\" >> .github/hooks/logs/audit.log 2>/dev/null; echo '{\"message\": \"audit logged\"}'",
         "comment": "审计日志：记录工具调用",
         "timeoutSec": 5
       }
@@ -44,7 +44,7 @@
     "errorOccurred": [
       {
         "type": "command",
-        "bash": "echo '❌ Error occurred: ${ERROR_MESSAGE:-unknown}' >> .github/hooks/logs/errors.log 2>/dev/null || true",
+        "bash": "echo '❌ Error occurred: ${ERROR_MESSAGE:-unknown}' >> .github/hooks/logs/errors.log 2>/dev/null; echo '{\"message\": \"error logged\"}'",
         "comment": "错误日志记录",
         "timeoutSec": 5
       }

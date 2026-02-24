@@ -128,6 +128,7 @@ import { TextStageCardComponent } from './text-stage-card.component';
               (addSibling)="addSibling.emit($event)"
               (addChild)="addChild.emit($event)"
               (deleteTask)="deleteTask.emit($event)"
+              (parkTask)="parkTask.emit($event)"
               (attachmentError)="attachmentError.emit($event)"
               (openLinkedTask)="openLinkedTask.emit($event)"
               (taskDragStart)="taskDragStart.emit($event)"
@@ -184,6 +185,7 @@ export class TextStagesComponent {
   @Output() addSibling = new EventEmitter<Task>();
   @Output() addChild = new EventEmitter<Task>();
   @Output() deleteTask = new EventEmitter<Task>();
+  @Output() parkTask = new EventEmitter<Task>();
   @Output() attachmentError = new EventEmitter<string>();
   @Output() openLinkedTask = new EventEmitter<{ task: Task; event: Event }>();
   

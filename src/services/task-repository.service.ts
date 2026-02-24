@@ -581,7 +581,9 @@ export class TaskRepositoryService {
       attachments: row.attachments ?? [],
       tags: row.tags ?? [],
       priority: row.priority ?? undefined,
-      dueDate: row.due_date
+      dueDate: row.due_date,
+      // State Overlap 停泊元数据
+      parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../models/parking').TaskParkingMeta | undefined ?? undefined,
     });
   }
 
@@ -604,6 +606,8 @@ export class TaskRepositoryService {
       tags: task.tags ?? [],
       attachments: task.attachments ?? [],
       deleted_at: task.deletedAt ?? null,
+      // State Overlap 停泊元数据
+      parking_meta: task.parkingMeta ?? null,
       // 注意：不需要手动设置 updated_at，数据库触发器会自动更新
     };
   }

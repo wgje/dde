@@ -139,6 +139,9 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
               <div class="flex items-center gap-2 text-[10px]">
                   <span class="font-bold text-retro-muted dark:text-stone-400 bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
                   <span class="text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
+                @if (task.parkingMeta?.state === 'parked') {
+                  <span class="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium" title="已停泊">⏸ 停泊</span>
+                }
                 <span data-testid="flow-task-status-badge" class="px-1.5 py-0.5 rounded"
                         [ngClass]="{
                           'bg-emerald-100': task.status === 'completed',
@@ -233,6 +236,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                   title="归档后任务将从主视图隐藏，可在回收站中恢复">
                   {{task.status === 'archived' ? '取消归档' : '归档'}}
               </button>
+              <button (click)="parkTask.emit(task)"
+                  class="flex-1 px-2 py-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 text-[10px] font-medium rounded transition-all"
+                  title="停泊任务，稍后处理">
+                  停泊
+              </button>
                 <button data-testid="delete-task-btn" (click)="deleteTask.emit(task)"
                   class="px-2 py-1 bg-stone-50 dark:bg-stone-700 hover:bg-red-500 dark:hover:bg-red-600 text-stone-400 dark:text-stone-500 hover:text-white border border-stone-200 dark:border-stone-600 text-[10px] font-medium rounded transition-all">
                   删除
@@ -246,6 +254,9 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
       <div class="flex items-center gap-1.5 mb-1 flex-wrap">
         <span class="font-bold text-retro-muted dark:text-stone-400 text-[8px] tracking-wider bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
         <span class="text-[9px] text-stone-400">{{task.createdDate | date:'MM-dd'}}</span>
+        @if (task.parkingMeta?.state === 'parked') {
+          <span class="text-[8px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium" title="已停泊">⏸ 停泊</span>
+        }
         <span class="text-[9px] px-1 py-0.5 rounded"
               [ngClass]="{
                 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300': task.status === 'completed',
@@ -351,6 +362,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
             }">
             {{task.status === 'archived' ? '取消归档' : '归档'}}
           </button>
+          <button (click)="parkTask.emit(task)"
+            class="flex-1 px-1.5 py-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 text-[9px] font-medium rounded transition-all"
+            title="停泊任务，稍后处理">
+            停泊
+          </button>
           <button
             #mobileDeleteButton
             data-mobile-delete-button
@@ -424,6 +440,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly toggleStatus = output<Task>();
   readonly archiveTask = output<Task>();
   readonly deleteTask = output<Task>();
+  readonly parkTask = output<Task>();
   readonly quickTodoAdd = output<{ taskId: string; text: string }>();
   
   // 附件操作输出

@@ -194,6 +194,17 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               </label>
             } -->
             <button
+              (click)="parkTask.emit()"
+              class="flex-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 font-medium rounded-md flex items-center justify-center transition-all"
+              [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
+              title="停泊任务，稍后处理">
+              <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                <polyline points="17 21 17 13 7 13 7 21"/>
+              </svg>
+              停泊
+            </button>
+            <button
               (click)="deleteTask.emit()"
               data-testid="delete-task-btn"
               class="bg-stone-100 dark:bg-stone-700 hover:bg-red-500 text-stone-400 dark:text-stone-500 hover:text-white border border-stone-200 dark:border-stone-600 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-all"
@@ -295,6 +306,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   readonly addSibling = output<void>();
   readonly addChild = output<void>();
   readonly deleteTask = output<void>();
+  readonly parkTask = output<void>();
   readonly attachmentError = output<string>();
   readonly openLinkedTask = output<{ task: Task; event: Event }>();
   readonly previewModeChange = output<boolean>();

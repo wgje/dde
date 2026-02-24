@@ -4,6 +4,7 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
+import { ParkingService } from './parking.service';
 
 /**
  * 任务属性更新服务
@@ -18,6 +19,7 @@ export class TaskAttributeService {
   private readonly logger = this.loggerService.category('TaskAttribute');
   private readonly projectState = inject(ProjectStateService);
   private readonly recorder = inject(TaskRecordTrackingService);
+  private readonly parkingService = inject(ParkingService);
 
   private recordAndUpdate(mutator: (project: Project) => Project): void {
     this.recorder.recordAndUpdate(mutator);
@@ -97,6 +99,8 @@ export class TaskAttributeService {
       ...p,
       tasks: p.tasks.map(t => t.id === taskId ? { ...t, status, updatedAt: now } : t)
     }));
+    // 停泊联动：任务完成/归档时自动清除 parkingMeta（A3.9）
+    this.parkingService.handleTaskStatusChange(taskId, status);
   }
 
   /**

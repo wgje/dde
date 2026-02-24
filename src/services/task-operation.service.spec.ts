@@ -198,6 +198,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
       rank: 1100,
       x: 10,
       y: 20,
+      parkingMeta: null,
     });
     expect(afterDeleteParent.deletedConnections?.length).toBe(3);
 
@@ -210,6 +211,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
       rank: 1200,
       x: 30,
       y: 40,
+      parkingMeta: null,
     });
 
     // 未删除任务不应受影响

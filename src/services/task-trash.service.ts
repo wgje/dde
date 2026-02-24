@@ -19,6 +19,7 @@ import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
+import { ParkingService } from './parking.service';
 import { Project, Task, Connection } from '../models';
 import { TRASH_CONFIG } from '../config';
 
@@ -32,6 +33,8 @@ export interface DeletedTaskMeta {
   rank: number;
   x: number;
   y: number;
+  /** 停泊元数据快照——恢复时还原停泊状态（A5.1.5b） */
+  parkingMeta?: import('../models/parking').TaskParkingMeta | null;
 }
 
 /**
@@ -59,6 +62,7 @@ export class TaskTrashService {
   private readonly layoutService = inject(LayoutService);
   private readonly projectState = inject(ProjectStateService);
   private readonly recorder = inject(TaskRecordTrackingService);
+  private readonly parkingService = inject(ParkingService);
 
   private getActiveProject(): Project | null {
     return this.projectState.activeProject();
@@ -136,7 +140,9 @@ export class TaskTrashService {
               rank: t.rank,
               x: t.x,
               y: t.y,
+              parkingMeta: t.parkingMeta ?? null,
             },
+            parkingMeta: null,
             stage: null,
             deletedConnections
           };
@@ -155,7 +161,9 @@ export class TaskTrashService {
               rank: t.rank,
               x: t.x,
               y: t.y,
+              parkingMeta: t.parkingMeta ?? null,
             },
+            parkingMeta: null,
             stage: null,
             deletedConnections: childConnections.length > 0 ? childConnections : undefined
           };
@@ -167,6 +175,11 @@ export class TaskTrashService {
     
     this.logger.info(`软删除任务: ${taskId}, 共删除 ${idsToDelete.size} 个任务, ${deletedConnections.length} 条连接`);
     
+    // 停泊联动：清除被删除任务的预览状态（A5.1.5）
+    for (const id of idsToDelete) {
+      this.parkingService.handleTaskSoftDelete(id);
+    }
+
     return {
       deletedTaskIds: idsToDelete,
       deletedConnectionIds: deletedConnections.map(c => c.id)
@@ -261,6 +274,7 @@ export class TaskTrashService {
               rank: meta.rank,
               x: meta.x,
               y: meta.y,
+              parkingMeta: meta.parkingMeta ?? rest.parkingMeta ?? null,
             }
           : { ...rest, deletedAt: null };
 
