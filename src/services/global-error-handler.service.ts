@@ -108,9 +108,9 @@ export class GlobalErrorHandler implements ErrorHandler {
     // Chunk 加载错误（动态导入失败，由重试机制处理）
     // 包括：ChunkLoadError, Failed to fetch chunk, Failed to fetch dynamically imported module
     { pattern: /ChunkLoadError|Failed to fetch.*chunk|Loading chunk.*failed|Failed to fetch dynamically imported module/i, severity: ErrorSeverity.SILENT },
-    // Angular DI 版本偏移（SW 缓存不一致），由 handleError 中拦截并触发页面刷新
-    // 这里做分类兜底，避免被其他 NOTIFY 规则误匹配
-    { pattern: /Cannot read properties of undefined \(reading '(?:factory|onDestroy)'\)/i, severity: ErrorSeverity.SILENT },
+    // Angular DI 版本偏移（SW 缓存不一致）或 @defer 视图拆除竞态，由 handleError 中拦截并触发页面刷新
+    // 【P3-24 修复】同时匹配 ASCII 单引号和 Unicode 智能引号，避免不同浏览器/V8 版本的差异
+    { pattern: /Cannot read properties of undefined \(reading [\u2018\u2019'](?:factory|onDestroy)[\u2018\u2019']\)/i, severity: ErrorSeverity.SILENT },
     
     // === 提示级错误 ===
     // UUID 格式错误
@@ -328,19 +328,21 @@ export class GlobalErrorHandler implements ErrorHandler {
   }
 
   /**
-   * 检测 Angular DI 版本偏移错误
+   * 检测 Angular DI 版本偏移或视图生命周期竞态错误
    * 当 SW 缓存导致不同版本的 chunk 混用时，Angular 的 tView.data 中
-   * provider 定义可能为 undefined，导致访问 .factory 或 .onDestroy 失败
+   * provider 定义可能为 undefined，导致访问 .factory 或 .onDestroy 失败。
+   * 同样在 @defer 块重建/拆除时，如果 effect 清理与视图销毁竞态，
+   * 也会在 tick/CD 链路中触发相同的 TypeError。
    */
   private isAngularDIVersionSkewError(message: string, error: unknown): boolean {
-    // 必须是 TypeError 且涉及典型 DI 属性读取
+    // 必须是 TypeError 且涉及典型 DI/视图属性读取
     if (!(error instanceof TypeError)) return false;
-    if (!/Cannot read properties of undefined \(reading '(?:factory|onDestroy|type|providers|viewProviders|ngMetadataName)'\)/i.test(message)) {
+    if (!/Cannot read properties of undefined \(reading [\u2018\u2019'](?:factory|onDestroy|type|providers|viewProviders|ngMetadataName)[\u2018\u2019']\)/i.test(message)) {
       return false;
     }
-    // 二次确认：堆栈应来自 Angular 框架内部 DI 链路
+    // 二次确认：堆栈应来自 Angular 框架内部 DI/CD/tick 链路
     const stack = error.stack ?? '';
-    return /executeTemplate|getOrCreateInjectable|renderView|createEmbeddedView|refreshView/i.test(stack)
+    return /executeTemplate|getOrCreateInjectable|renderView|createEmbeddedView|refreshView|tickImpl|_tick\b|detectChangesInAttachedViews/i.test(stack)
       || /\be0\b.*chunk-.*\.js/.test(stack);
   }
 

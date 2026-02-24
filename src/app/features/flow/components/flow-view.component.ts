@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, effect } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, effect, EffectRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -174,6 +174,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 私有状态 ==========
   private isDestroyed = false;
 
+  /** 【2026-02-24】所有通过组件 injector 创建的 EffectRef，ngOnDestroy 时主动销毁 */
+  private readonly managedEffectRefs: EffectRef[] = [];
+
   /** 绑定的 saveToCloud 回调，传递给 toolbar 组件 */
   readonly saveToCloudBound = () => this.saveToCloud();
   
@@ -207,33 +210,38 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   constructor() {
+    // 【2026-02-24 修复】isDestroyed 使用 getter 函数，避免 rAF 回调捕获过期布尔值
     const scheduleRaf = (tasks: Task[], forceUpdate: boolean) =>
-      this.diagramEffects.scheduleRafDiagramUpdate(tasks, forceUpdate, this.isDestroyed);
+      this.diagramEffects.scheduleRafDiagramUpdate(tasks, forceUpdate, () => this.isDestroyed);
     
-    this.diagramEffects.createTasksEffect(this.injector, scheduleRaf);
-    this.diagramEffects.createConnectionsEffect(this.injector, scheduleRaf);
-    this.diagramEffects.createSearchEffect(this.injector, scheduleRaf);
-    this.diagramEffects.createThemeEffect(this.injector, scheduleRaf);
-    
-    this.diagramEffects.createSelectionSyncEffect(
-      this.injector,
-      this.selectedTaskId,
-      (taskId: string) => this.selectionService.selectNodeWithRetry(taskId, this.scheduleTimer.bind(this))
+    // 【2026-02-24 修复】收集所有 EffectRef，ngOnDestroy 中主动销毁以避免 @defer 拆除时竞态
+    this.managedEffectRefs.push(
+      this.diagramEffects.createTasksEffect(this.injector, scheduleRaf),
+      this.diagramEffects.createConnectionsEffect(this.injector, scheduleRaf),
+      this.diagramEffects.createSearchEffect(this.injector, scheduleRaf),
+      this.diagramEffects.createThemeEffect(this.injector, scheduleRaf),
+      this.diagramEffects.createSelectionSyncEffect(
+        this.injector,
+        this.selectedTaskId,
+        (taskId: string) => this.selectionService.selectNodeWithRetry(taskId, this.scheduleTimer.bind(this))
+      ),
+      this.diagramEffects.createCenterCommandEffect(this.injector, this.executeCenterOnNode.bind(this)),
+      this.diagramEffects.createRetryCommandEffect(this.injector, this.retryInitDiagram.bind(this)),
     );
-    this.diagramEffects.createCenterCommandEffect(this.injector, this.executeCenterOnNode.bind(this));
-    this.diagramEffects.createRetryCommandEffect(this.injector, this.retryInitDiagram.bind(this));
     
-    this.mobileDrawer.setupDrawerEffects(this.injector, {
-      paletteHeight: () => this.paletteHeight(),
-      drawerHeight: () => this.drawerHeight(),
-      drawerManualOverride: this.drawerManualOverride,
-      isResizingDrawerSignal: () => this.isResizingDrawerSignal(),
-      selectedTaskId: () => this.selectedTaskId(),
-      scheduleDrawerHeightUpdate: (vh) => this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, vh)
-    });
+    this.managedEffectRefs.push(
+      ...this.mobileDrawer.setupDrawerEffects(this.injector, {
+        paletteHeight: () => this.paletteHeight(),
+        drawerHeight: () => this.drawerHeight(),
+        drawerManualOverride: this.drawerManualOverride,
+        isResizingDrawerSignal: () => this.isResizingDrawerSignal(),
+        selectedTaskId: () => this.selectedTaskId(),
+        scheduleDrawerHeightUpdate: (vh) => this.mobileDrawer.scheduleDrawerHeightUpdate(this.drawerHeight, vh)
+      })
+    );
 
     // 移动端视图切换：离开 flow 清理选中与手动高度；返回 flow 后重置到最小提示态。
-    effect(() => {
+    this.managedEffectRefs.push(effect(() => {
       const isMobile = this.uiState.isMobile();
       const activeView = this.uiState.activeView();
 
@@ -257,7 +265,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.selectedTaskId.set(null);
       this.drawerManualOverride.set(false);
       this.drawerHeight.set(8);
-    }, { injector: this.injector });
+    }, { injector: this.injector }));
   }
   
   // ========== 生命周期 ==========
@@ -269,6 +277,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   ngOnDestroy() {
     this.isDestroyed = true;
+
+    // 【2026-02-24 修复】主动销毁所有 effect，避免 @defer 拆除时 Angular 内部清理竞态
+    // 必须在 Angular 拆除视图内部数据结构（LView/tView）之前完成
+    for (const ref of this.managedEffectRefs) {
+      ref.destroy();
+    }
+    this.managedEffectRefs.length = 0;
 
     // 通知服务组件销毁
     this.selectionService.markDestroyed();

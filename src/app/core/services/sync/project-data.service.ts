@@ -1002,9 +1002,27 @@ export class ProjectDataService {
     return chunks;
   }
 
-  private openFocusModeDB(): Promise<IDBDatabase> {
+  private async openFocusModeDB(): Promise<IDBDatabase> {
+    try {
+      return await this.openFocusModeDBInternal(FOCUS_CONFIG.SYNC.IDB_VERSION);
+    } catch (error) {
+      if (!this.isIDBVersionError(error)) {
+        throw error;
+      }
+
+      this.logger.warn('FocusMode IndexedDB version mismatch, reopen with existing version', {
+        requestedVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return this.openFocusModeDBInternal();
+    }
+  }
+
+  private openFocusModeDBInternal(version?: number): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME, FOCUS_CONFIG.SYNC.IDB_VERSION);
+      const request = version === undefined
+        ? indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME)
+        : indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME, version);
 
       request.onupgradeneeded = () => {
         const db = request.result;
@@ -1018,8 +1036,12 @@ export class ProjectDataService {
       };
 
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onerror = () => reject(request.error ?? new Error('Unknown IndexedDB error'));
     });
+  }
+
+  private isIDBVersionError(error: unknown): boolean {
+    return error instanceof DOMException && error.name === 'VersionError';
   }
   
   // ==================== 数据转换（Public API）====================

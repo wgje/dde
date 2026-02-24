@@ -1,4 +1,4 @@
-import { Injectable, inject, effect, Injector, WritableSignal } from '@angular/core';
+import { Injectable, inject, effect, Injector, WritableSignal, EffectRef } from '@angular/core';
 import { UiStateService } from '../../../../services/ui-state.service';
 
 /**
@@ -57,14 +57,18 @@ export class FlowMobileDrawerService {
   /**
    * 设置移动端抽屉高度相关的 effects
    * 将 effect 逻辑从组件迁移到服务，减少组件代码量
+   * 【2026-02-24】返回 EffectRef[] 以便组件在 ngOnDestroy 中主动销毁，避免 @defer 拆除时竞态
    * 
    * @param injector Angular 注入器
    * @param ctx 组件提供的信号和回调上下文
+   * @returns 创建的 EffectRef 数组，用于手动清理
    */
-  setupDrawerEffects(injector: Injector, ctx: DrawerEffectContext): void {
+  setupDrawerEffects(injector: Injector, ctx: DrawerEffectContext): EffectRef[] {
+    const refs: EffectRef[] = [];
+
     // 移动端详情抽屉高度由 FlowTaskDetailComponent 按内容自适应；
     // 这里仅维护开关状态与手动拖拽状态，不再回写固定预设高度。
-    effect(() => {
+    refs.push(effect(() => {
       const isDetailOpen = this.uiState.isFlowDetailOpen();
       const activeView = this.uiState.activeView();
 
@@ -82,13 +86,15 @@ export class FlowMobileDrawerService {
       if (!isDetailOpen) {
         ctx.drawerManualOverride.set(false);
       }
-    }, { injector });
+    }, { injector }));
 
     // 监听拖拽标记，用户一旦开始拖拽则启用手动覆盖
-    effect(() => {
+    refs.push(effect(() => {
       if (ctx.isResizingDrawerSignal()) {
         ctx.drawerManualOverride.set(true);
       }
-    }, { injector });
+    }, { injector }));
+
+    return refs;
   }
 }

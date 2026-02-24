@@ -318,6 +318,9 @@ export class ParkingService {
     // 保存快照然后停泊
     this.contextRestoreService.saveSnapshot(taskId);
     this.updateParkingMeta(taskId, meta);
+
+    // 全局统一视觉反馈
+    this.toastService.success('已停泊', `「${task.title || '未命名任务'}」已移至稍后处理`);
   }
 
   /**
@@ -406,11 +409,11 @@ export class ParkingService {
     const local = this.taskStore.getTask(task.id);
     const nextTask = local
       ? {
-          ...local,
-          ...task,
-          // 本地 displayId 由布局逻辑维护，远端轻量拉取不覆盖它
-          displayId: local.displayId || task.displayId,
-        }
+        ...local,
+        ...task,
+        // 本地 displayId 由布局逻辑维护，远端轻量拉取不覆盖它
+        displayId: local.displayId || task.displayId,
+      }
       : task;
 
     this.taskStore.setTask(nextTask, projectId);

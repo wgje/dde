@@ -144,57 +144,84 @@ export class BlackBoxSyncService {
    * 初始化 IndexedDB
    */
   private async initIndexedDB(): Promise<void> {
+    if (this.db) return;
+
+    try {
+      this.db = await this.openFocusModeDB(this.IDB_VERSION);
+    } catch (error) {
+      if (!this.isIDBVersionError(error)) {
+        this.logger.error('Failed to open IndexedDB for focus mode', error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+
+      // A newer schema may already exist in this browser (e.g. mixed app bundle versions).
+      this.logger.warn('IndexedDB version mismatch for focus mode, reopening with existing version', {
+        requestedVersion: this.IDB_VERSION,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.db = await this.openFocusModeDB();
+    }
+
+    this.logger.debug('IndexedDB opened for focus mode', { version: this.db.version });
+    await this.loadLastSyncTime();
+  }
+
+  private openFocusModeDB(version?: number): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.IDB_NAME, this.IDB_VERSION);
+      const request = version === undefined
+        ? indexedDB.open(this.IDB_NAME)
+        : indexedDB.open(this.IDB_NAME, version);
 
       request.onerror = () => {
-        this.logger.error('Failed to open IndexedDB for focus mode', request.error?.message || 'Unknown error');
-        reject(request.error);
+        reject(request.error ?? new Error('Unknown IndexedDB error'));
       };
 
-      request.onsuccess = async () => {
-        this.db = request.result;
-        this.logger.debug('IndexedDB opened for focus mode');
-
-        // 从 IndexedDB 恢复上次同步时间
-        await this.loadLastSyncTime();
-
-        resolve();
+      request.onsuccess = () => {
+        resolve(request.result);
       };
 
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
-
-        // 黑匣子条目存储
-        if (!db.objectStoreNames.contains(this.STORE_NAME)) {
-          const store = db.createObjectStore(this.STORE_NAME, { keyPath: 'id' });
-          store.createIndex('by-date', 'date', { unique: false });
-          store.createIndex('by-updated', 'updatedAt', { unique: false });
-          store.createIndex('by-sync-status', 'syncStatus', { unique: false });
-        }
-
-        // 离线音频缓存存储
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.OFFLINE_AUDIO_CACHE)) {
-          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.OFFLINE_AUDIO_CACHE, { keyPath: 'id' });
-        }
-
-        // 偏好设置存储
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES)) {
-          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES, { keyPath: 'key' });
-        }
-
-        // 同步元数据存储（v2 新增）
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
-          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
-        }
-
-        // 停泊任务跨项目缓存（v3 新增，State Overlap A3.15）
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
-          const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
-          parkedStore.createIndex('by-parkedAt', 'parkedAt', { unique: false });
-        }
+      request.onupgradeneeded = () => {
+        this.ensureFocusModeStores(request.result);
       };
     });
+  }
+
+  private ensureFocusModeStores(db: IDBDatabase): void {
+    if (!db.objectStoreNames.contains(this.STORE_NAME)) {
+      const store = db.createObjectStore(this.STORE_NAME, { keyPath: 'id' });
+      store.createIndex('by-date', 'date', { unique: false });
+      store.createIndex('by-updated', 'updatedAt', { unique: false });
+      store.createIndex('by-sync-status', 'syncStatus', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.OFFLINE_AUDIO_CACHE)) {
+      db.createObjectStore(FOCUS_CONFIG.IDB_STORES.OFFLINE_AUDIO_CACHE, { keyPath: 'id' });
+    }
+
+    if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES)) {
+      db.createObjectStore(FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES, { keyPath: 'key' });
+    }
+
+    if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
+      db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
+    }
+
+    if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
+      const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
+      parkedStore.createIndex('by-parkedAt', 'parkedAt', { unique: false });
+    }
+  }
+
+  private isIDBVersionError(error: unknown): boolean {
+    if (error instanceof DOMException) {
+      return error.name === 'VersionError';
+    }
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'VersionError'
+    );
   }
 
   /**
@@ -773,3 +800,4 @@ export class BlackBoxSyncService {
     await this.pullChanges({ reason: 'manual', force: true });
   }
 }
+

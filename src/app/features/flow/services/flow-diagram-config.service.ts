@@ -28,6 +28,8 @@ export interface GoJSNodeData {
   rootAncestorIndex?: number;
   /** 家族专属颜色（HSL 格式） */
   familyColor?: string;
+  /** 是否已被停泊 */
+  isParked?: boolean;
 }
 
 /**
@@ -75,22 +77,22 @@ export interface GoJSDiagramData {
 export class FlowDiagramConfigService {
   private readonly themeService = inject(ThemeService);
   private readonly lineageColorService = inject(LineageColorService);
-  
+
   /** 当前主题样式配置（响应式） */
   readonly currentStyles = computed(() => {
     const theme = this.themeService.theme() as FlowTheme;
     return getFlowStyles(theme);
   });
-  
+
   // ========== 图表配置常量 ==========
-  
+
   /** 布局配置 */
   readonly layoutConfig = {
     layerSpacing: GOJS_CONFIG.LAYER_SPACING,
     columnSpacing: GOJS_CONFIG.COLUMN_SPACING,
     scrollMargin: GOJS_CONFIG.SCROLL_MARGIN
   } as const;
-  
+
   /** 节点配置 */
   readonly nodeConfig = {
     unassignedWidth: GOJS_CONFIG.UNASSIGNED_NODE_WIDTH,
@@ -98,7 +100,7 @@ export class FlowDiagramConfigService {
     cornerRadius: 10,
     portSize: GOJS_CONFIG.PORT_SIZE
   } as const;
-  
+
   /** 连接线配置 */
   readonly linkConfig = {
     cornerRadius: 20,  // 增加圆角
@@ -113,7 +115,7 @@ export class FlowDiagramConfigService {
   } as const;
 
   // ========== 数据构建方法 ==========
-  
+
   /**
    * 从任务列表构建 GoJS 图表数据
    * @param tasks 任务列表
@@ -130,34 +132,36 @@ export class FlowDiagramConfigService {
     const styles = this.currentStyles();
     const nodeDataArray: GoJSNodeData[] = [];
     const linkDataArray: GoJSLinkData[] = [];
-    
+
     // 构建父子关系集合
     const parentChildPairs = new Set<string>();
     tasks.filter(t => t.parentId).forEach(t => {
       parentChildPairs.add(`${t.parentId}->${t.id}`);
     });
-    
+
     // 过滤显示的任务：只排除已归档的任务
     // 待分配任务（stage === null）也应该显示，不应该因为坐标为(0,0)而被过滤
     const tasksToShow = tasks.filter(t => t.status !== 'archived');
-    
+
     let newNodeIndex = 0;
     const searchLower = searchQuery.toLowerCase().trim();
-    
+
     for (const task of tasksToShow) {
       // 计算节点位置
       const loc = this.computeNodeLocation(task, existingNodeMap, newNodeIndex);
       if (!existingNodeMap.has(task.id) && task.x === 0 && task.y === 0) {
         newNodeIndex++;
       }
-      
+
       // 检查是否匹配搜索
       const isSearchMatch = this.isTaskSearchMatch(task, searchLower);
-      
+
       // 计算节点颜色
-      const { nodeColor, borderColor, borderWidth, titleColor } = 
+      const { nodeColor, borderColor, borderWidth, titleColor } =
         this.computeNodeColors(task, isSearchMatch, styles);
-      
+
+      const isParked = task.parkingMeta?.state === 'parked';
+
       nodeDataArray.push({
         key: task.id,
         title: task.title || '未命名任务',
@@ -165,16 +169,17 @@ export class FlowDiagramConfigService {
         stage: task.stage,
         loc,
         color: nodeColor,
-        borderColor,
-        borderWidth,
+        borderColor: isParked ? '#d97706' : borderColor, // Amber-600 outline if parked
+        borderWidth: isParked ? 2 : borderWidth,
         titleColor,
         displayIdColor: styles.text.displayIdColor,
         selectedBorderColor: styles.node.selectedBorder,
         isUnassigned: task.stage === null,
         isSearchMatch,
-        isSelected: false
+        isSelected: false,
+        isParked: isParked
       });
-      
+
       // 添加父子连接
       if (task.parentId) {
         linkDataArray.push({
@@ -185,14 +190,14 @@ export class FlowDiagramConfigService {
         });
       }
     }
-    
+
     // 添加跨树连接（过滤掉已软删除的连接）
     // 【P2-30 修复】使用 Set 实现 O(1) 查找，避免 O(n*m)
     const taskIdSet = new Set(tasksToShow.map(t => t.id));
     for (const conn of project.connections) {
       // 跳过已软删除的连接
       if (conn.deletedAt) continue;
-      
+
       const pairKey = `${conn.source}->${conn.target}`;
       if (!parentChildPairs.has(pairKey)) {
         if (taskIdSet.has(conn.source) && taskIdSet.has(conn.target)) {
@@ -207,7 +212,7 @@ export class FlowDiagramConfigService {
         }
       }
     }
-    
+
     // ========== 血缘追溯预处理 ==========
     // 在数据加载进 GoJS Model 之前，为每个节点和连线注入始祖信息和家族颜色
     // 这是"领地热力图"效果的数据基础
@@ -216,10 +221,10 @@ export class FlowDiagramConfigService {
       linkDataArray,
       tasksToShow
     );
-    
+
     return enhancedData;
   }
-  
+
   /**
    * 计算节点位置
    */
@@ -229,7 +234,7 @@ export class FlowDiagramConfigService {
     newNodeIndex: number
   ): string {
     const existingNode = existingNodeMap.get(task.id);
-    
+
     if (existingNode?.loc) {
       // 优先保持现有位置
       return existingNode.loc;
@@ -243,13 +248,13 @@ export class FlowDiagramConfigService {
       return `${stageX} ${indexY}`;
     }
   }
-  
+
   /**
    * 检查任务是否匹配搜索
    */
   private isTaskSearchMatch(task: Task, searchLower: string): boolean {
     if (!searchLower) return false;
-    
+
     return (
       task.title.toLowerCase().includes(searchLower) ||
       task.content.toLowerCase().includes(searchLower) ||
@@ -258,7 +263,7 @@ export class FlowDiagramConfigService {
       (task.tags?.some(tag => tag.toLowerCase().includes(searchLower)) ?? false)
     );
   }
-  
+
   /**
    * 计算节点颜色
    */
@@ -302,25 +307,25 @@ export class FlowDiagramConfigService {
       };
     }
   }
-  
+
   /**
    * 压缩 displayId 显示（如 A,A,A,A,A → A⁵）
    */
   private compressDisplayId(displayId: string): string {
     if (!displayId || displayId === '?') return displayId;
-    
+
     const parts = displayId.split(',');
     const result: string[] = [];
     let i = 0;
-    
+
     while (i < parts.length) {
       const current = parts[i];
       let count = 1;
-      
+
       while (i + count < parts.length && parts[i + count] === current) {
         count++;
       }
-      
+
       if (count >= 5) {
         const superscript = String(count).split('').map(d => SUPERSCRIPT_DIGITS[d] || d).join('');
         result.push(current + superscript);
@@ -329,13 +334,13 @@ export class FlowDiagramConfigService {
           result.push(current);
         }
       }
-      
+
       i += count;
     }
-    
+
     return result.join(',');
   }
-  
+
   // ========== 模板工厂方法 ==========
 
   /**
@@ -349,7 +354,7 @@ export class FlowDiagramConfigService {
    */
   createPort($: typeof go.GraphObject.make, name: string, spot: go.Spot, output: boolean, input: boolean, isMobile: boolean = false): go.Shape {
     const portSize = isMobile ? 24 : 8;  // 移动端增大到 24px 便于触摸
-    
+
     return $(go.Shape, "Circle", {
       fill: "transparent",
       stroke: "transparent",
@@ -379,48 +384,69 @@ export class FlowDiagramConfigService {
       }
     });
   }
-  
+
   /**
    * 获取节点主面板配置
    */
   getNodeMainPanelConfig($: typeof go.GraphObject.make): go.Panel {
-    return $(go.Panel, "Auto",
-      new go.Binding("width", "isUnassigned", (isUnassigned: boolean) => 
-        isUnassigned ? this.nodeConfig.unassignedWidth : this.nodeConfig.assignedWidth),
-      $(go.Shape, "RoundedRectangle", {
-        fill: "white",
-        stroke: "#e7e5e4",
-        strokeWidth: 1,
-        parameter1: this.nodeConfig.cornerRadius,
-        portId: "",              // 主体端口（用于连接线终点计算）
-        fromLinkable: false,     // 不直接从主体拉线（由边缘小圆点触发后切换）
-        toLinkable: true,        // 允许连接到主体（配合 findTargetPort 实现边界吸附）
-        cursor: "move",
-        fromSpot: go.Spot.AllSides,  // Perimeter Intersection：动态计算边界交点
-        toSpot: go.Spot.AllSides     // 让连接线像水珠一样沿边界滑动
-      },
-      new go.Binding("fill", "color"),
-      // stroke 初始值由 borderColor 数据属性决定；选中态由 Node 的 selectionChanged 回调处理
-      new go.Binding("stroke", "borderColor"),
-      new go.Binding("strokeWidth", "borderWidth")),
-      
-      $(go.Panel, "Vertical",
-        new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
-        $(go.TextBlock, { font: "bold 9px 'LXGW WenKai Screen', sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
-          new go.Binding("text", "displayId"),
-          new go.Binding("stroke", "displayIdColor"),
-          new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
-        $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: "400 12px 'LXGW WenKai Screen', sans-serif", stroke: "#57534e" },
-          new go.Binding("text", "title"),
-          new go.Binding("font", "isUnassigned", (isUnassigned: boolean) => 
-            isUnassigned ? "500 11px 'LXGW WenKai Screen', sans-serif" : "400 12px 'LXGW WenKai Screen', sans-serif"),
-          new go.Binding("stroke", "titleColor"),
-          new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) => 
-            isUnassigned ? new go.Size(120, NaN) : new go.Size(160, NaN)))
+    return $(go.Panel, "Spot",
+      $(go.Panel, "Auto",
+        new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
+          isUnassigned ? this.nodeConfig.unassignedWidth : this.nodeConfig.assignedWidth),
+        $(go.Shape, "RoundedRectangle", {
+          fill: "white",
+          stroke: "#e7e5e4",
+          strokeWidth: 1,
+          parameter1: this.nodeConfig.cornerRadius,
+          portId: "",              // 主体端口（用于连接线终点计算）
+          fromLinkable: false,     // 不直接从主体拉线（由边缘小圆点触发后切换）
+          toLinkable: true,        // 允许连接到主体（配合 findTargetPort 实现边界吸附）
+          cursor: "move",
+          fromSpot: go.Spot.AllSides,  // Perimeter Intersection：动态计算边界交点
+          toSpot: go.Spot.AllSides     // 让连接线像水珠一样沿边界滑动
+        },
+          new go.Binding("fill", "color"),
+          // stroke 初始值由 borderColor 数据属性决定；选中态由 Node 的 selectionChanged 回调处理
+          new go.Binding("stroke", "borderColor"),
+          new go.Binding("strokeWidth", "borderWidth")),
+
+        $(go.Panel, "Vertical",
+          new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
+          $(go.TextBlock, { font: "bold 9px 'LXGW WenKai Screen', sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
+            new go.Binding("text", "displayId"),
+            new go.Binding("stroke", "displayIdColor"),
+            new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
+          $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: "400 12px 'LXGW WenKai Screen', sans-serif", stroke: "#57534e" },
+            new go.Binding("text", "title"),
+            new go.Binding("font", "isUnassigned", (isUnassigned: boolean) =>
+              isUnassigned ? "500 11px 'LXGW WenKai Screen', sans-serif" : "400 12px 'LXGW WenKai Screen', sans-serif"),
+            new go.Binding("stroke", "titleColor"),
+            new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) =>
+              isUnassigned ? new go.Size(120, NaN) : new go.Size(160, NaN)))
+        )
+      ),
+      // 停泊徽章 (Parked Badge)
+      $(go.Panel, "Auto",
+        {
+          alignment: new go.Spot(1, 0, -4, 4), // Top-right corner, slightly inset
+          visible: false
+        },
+        new go.Binding("visible", "isParked"),
+        $(go.Shape, "RoundedRectangle", {
+          fill: "#fef3c7", // amber-50
+          stroke: "#d97706", // amber-600
+          strokeWidth: 1,
+          parameter1: 4
+        }),
+        $(go.TextBlock, "⏸ 停泊", {
+          font: "500 8px 'LXGW WenKai Screen', sans-serif",
+          stroke: "#d97706",
+          margin: new go.Margin(2, 4, 2, 4)
+        })
       )
     );
   }
-  
+
   /**
    * 获取连接线主体配置
    * 
@@ -431,18 +457,18 @@ export class FlowDiagramConfigService {
    */
   getLinkMainShapesConfig($: typeof go.GraphObject.make, isMobile: boolean): go.Shape[] {
     const styles = this.currentStyles();
-    
+
     return [
       // 透明粗线便于选择（触控区域）
-      $(go.Shape, { 
-        isPanelMain: true, 
-        strokeWidth: isMobile ? this.linkConfig.mobileStrokeWidth : this.linkConfig.desktopStrokeWidth, 
+      $(go.Shape, {
+        isPanelMain: true,
+        strokeWidth: isMobile ? this.linkConfig.mobileStrokeWidth : this.linkConfig.desktopStrokeWidth,
         stroke: "transparent",
         strokeCap: "round",
         strokeJoin: "round"
       }),
       // 可见线 - 使用家族颜色（血缘聚类）
-      $(go.Shape, { 
+      $(go.Shape, {
         isPanelMain: true,   // 标记为主路径线，让 GoJS 正确计算曲线路径
         strokeWidth: this.linkConfig.visibleStrokeWidth,
         strokeCap: "round",  // 线端圆润（解决锐度问题）
@@ -460,7 +486,7 @@ export class FlowDiagramConfigService {
       // 2. fill 和 stroke 必须一致，才能看起来是纯色填充
       // 3. strokeWidth 要足够大（3-5），让 strokeJoin: round 有足够空间画出圆弧
       // 4. scale 调小补偿粗描边带来的视觉膨胀
-      $(go.Shape, { 
+      $(go.Shape, {
         toArrow: this.linkConfig.arrowType,
         scale: this.linkConfig.arrowScale,
         strokeWidth: this.linkConfig.arrowStrokeWidth,
@@ -482,7 +508,7 @@ export class FlowDiagramConfigService {
         }))
     ];
   }
-  
+
   /**
    * 获取联系块标签配置
    */
@@ -492,24 +518,24 @@ export class FlowDiagramConfigService {
       segmentFraction: 0.5,
       cursor: "pointer"
     },
-    new go.Binding("visible", "isCrossTree"),
-    $(go.Shape, "RoundedRectangle", {
-      fill: "#f5f3ff",
-      stroke: "#8b5cf6",
-      strokeWidth: 1,
-      parameter1: 4
-    }),
-    $(go.Panel, "Horizontal",
-      { margin: 3, defaultAlignment: go.Spot.Center },
-      $(go.TextBlock, "🔗", { font: "8px 'LXGW WenKai Screen', sans-serif" }),
-      $(go.TextBlock, {
-        font: "500 8px 'LXGW WenKai Screen', sans-serif",
-        stroke: "#6d28d9",
-        maxSize: new go.Size(50, 14),
-        overflow: go.TextBlock.OverflowEllipsis,
-        margin: new go.Margin(0, 0, 0, 2)
-      },
-      new go.Binding("text", "description", (desc: string) => desc ? desc.substring(0, 6) : "..."))
-    ));
+      new go.Binding("visible", "isCrossTree"),
+      $(go.Shape, "RoundedRectangle", {
+        fill: "#f5f3ff",
+        stroke: "#8b5cf6",
+        strokeWidth: 1,
+        parameter1: 4
+      }),
+      $(go.Panel, "Horizontal",
+        { margin: 3, defaultAlignment: go.Spot.Center },
+        $(go.TextBlock, "🔗", { font: "8px 'LXGW WenKai Screen', sans-serif" }),
+        $(go.TextBlock, {
+          font: "500 8px 'LXGW WenKai Screen', sans-serif",
+          stroke: "#6d28d9",
+          maxSize: new go.Size(50, 14),
+          overflow: go.TextBlock.OverflowEllipsis,
+          margin: new go.Margin(0, 0, 0, 2)
+        },
+          new go.Binding("text", "description", (desc: string) => desc ? desc.substring(0, 6) : "..."))
+      ));
   }
 }

@@ -63,25 +63,45 @@ export class SpeechToTextService {
    * 初始化 IndexedDB
    */
   private async initIndexedDB(): Promise<void> {
+    try {
+      this.db = await this.openFocusModeDB(FOCUS_CONFIG.SYNC.IDB_VERSION);
+    } catch (error) {
+      if (!this.isIDBVersionError(error)) {
+        throw error;
+      }
+
+      this.logger.warn('SpeechToText', 'IndexedDB version mismatch, reopen with existing version', {
+        requestedVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.db = await this.openFocusModeDB();
+    }
+
+    this.updateOfflinePendingCount();
+  }
+
+  private openFocusModeDB(version?: number): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.IDB_NAME, FOCUS_CONFIG.SYNC.IDB_VERSION);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        this.db = request.result;
-        this.updateOfflinePendingCount();
-        resolve();
-      };
-      
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
+      const request = version === undefined
+        ? indexedDB.open(this.IDB_NAME)
+        : indexedDB.open(this.IDB_NAME, version);
+
+      request.onerror = () => reject(request.error ?? new Error('Unknown IndexedDB error'));
+      request.onsuccess = () => resolve(request.result);
+
+      request.onupgradeneeded = () => {
+        const db = request.result;
         if (!db.objectStoreNames.contains(this.CACHE_STORE)) {
           db.createObjectStore(this.CACHE_STORE, { keyPath: 'id' });
         }
       };
     });
   }
-  
+
+  private isIDBVersionError(error: unknown): boolean {
+    return error instanceof DOMException && error.name === 'VersionError';
+  }
+
   /**
    * 设置网络恢复监听
    * 保存 handler 引用以便在销毁时解绑，避免测试污染
@@ -591,3 +611,4 @@ export class SpeechToTextService {
     return Math.round((Date.now() - this.recordingStartTime) / 1000);
   }
 }
+

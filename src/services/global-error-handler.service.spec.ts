@@ -194,4 +194,27 @@ describe('GlobalErrorHandler', () => {
       window.location = originalLocation;
     }
   });
+
+  it('should detect onDestroy error from Angular tick/CD frames as version skew', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      const error = new TypeError("Cannot read properties of undefined (reading 'onDestroy')");
+      error.stack = `TypeError: Cannot read properties of undefined (reading 'onDestroy')
+    at tickImpl (https://dde-eight.vercel.app/chunk-VLM5U4MR.js:7:55119)
+    at _tick (https://dde-eight.vercel.app/chunk-VLM5U4MR.js:7:55000)`;
+
+      service.handleError(error);
+
+      expect(reloadSpy).toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
 });

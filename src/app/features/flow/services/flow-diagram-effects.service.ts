@@ -1,4 +1,4 @@
-import { Injectable, inject, effect, untracked, Injector, Signal } from '@angular/core';
+import { Injectable, inject, effect, untracked, Injector, Signal, EffectRef } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { PreferenceService } from '../../../../services/preference.service';
@@ -36,13 +36,14 @@ export class FlowDiagramEffectsService {
    * 使用 requestAnimationFrame 调度图表更新
    * 将多个 signal 变化合并到同一帧
    * 【2026-02-15 优化】增加 rAF 合并窗口，确保同一帧内的多个 effect 触发只执行一次更新
+   * 【2026-02-24 修复】isDestroyed 改为 getter 函数，避免 rAF 回调捕获到过期的布尔值
    */
-  scheduleRafDiagramUpdate(tasks: Task[], forceUpdate: boolean, isDestroyed: boolean): void {
+  scheduleRafDiagramUpdate(tasks: Task[], forceUpdate: boolean, isDestroyed: () => boolean): void {
     if (forceUpdate) this.diagramUpdatePending = true;
     if (this.pendingRafId !== null) return;
     this.pendingRafId = requestAnimationFrame(() => {
       this.pendingRafId = null;
-      if (isDestroyed || !this.diagram.isInitialized) return;
+      if (isDestroyed() || !this.diagram.isInitialized) return;
       // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
       const currentTasks = untracked(() => this.projectState.tasks());
       this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
@@ -64,12 +65,13 @@ export class FlowDiagramEffectsService {
   /**
    * 创建任务数据变化 effect
    * 监听任务数据变化，使用 rAF 对齐渲染帧更新图表
+   * 【2026-02-24】返回 EffectRef 以便组件在 ngOnDestroy 中主动销毁，避免 @defer 拆除时竞态
    */
   createTasksEffect(
     injector: Injector,
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const tasks = this.projectState.tasks();
       if (this.diagram.isInitialized) {
         scheduleRafDiagramUpdate(tasks, false);
@@ -87,8 +89,8 @@ export class FlowDiagramEffectsService {
   createConnectionsEffect(
     injector: Injector,
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const project = this.projectState.activeProject();
       // 构建有效连接的签名（过滤掉 deletedAt，只统计活跃连接）
       const activeConnections = project?.connections?.filter((c: { deletedAt?: string | null }) => !c.deletedAt) ?? [];
@@ -104,14 +106,15 @@ export class FlowDiagramEffectsService {
     }, { injector });
   }
 
+
   /**
    * 创建搜索查询变化 effect
    */
   createSearchEffect(
     injector: Injector,
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const _query = this.uiState.searchQuery();
       if (this.diagram.isInitialized) {
         scheduleRafDiagramUpdate(this.projectState.tasks(), true);
@@ -125,8 +128,8 @@ export class FlowDiagramEffectsService {
   createThemeEffect(
     injector: Injector,
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const _theme = this.preference.theme();
       if (this.diagram.isInitialized) {
         scheduleRafDiagramUpdate(this.projectState.tasks(), true);
@@ -142,8 +145,8 @@ export class FlowDiagramEffectsService {
     injector: Injector,
     selectedTaskId: Signal<string | null>,
     selectNodeWithRetry: (taskId: string) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const selectedId = selectedTaskId();
       if (selectedId && this.diagram.isInitialized) {
         selectNodeWithRetry(selectedId);
@@ -157,8 +160,8 @@ export class FlowDiagramEffectsService {
   createCenterCommandEffect(
     injector: Injector,
     executeCenterOnNode: (taskId: string, openDetail: boolean) => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const cmd = this.flowCommand.centerNodeCommand();
       if (cmd) {
         untracked(() => {
@@ -177,8 +180,8 @@ export class FlowDiagramEffectsService {
   createRetryCommandEffect(
     injector: Injector,
     retryInitDiagram: () => void
-  ): void {
-    effect(() => {
+  ): EffectRef {
+    return effect(() => {
       const count = this.flowCommand.retryDiagramCommand();
       if (count > 0) {
         untracked(() => {

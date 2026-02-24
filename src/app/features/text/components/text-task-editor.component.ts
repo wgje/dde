@@ -195,14 +195,19 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             } -->
             <button
               (click)="parkTask.emit()"
-              class="flex-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 font-medium rounded-md flex items-center justify-center transition-all"
-              [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
-              title="停泊任务，稍后处理">
+              class="flex-1 font-medium rounded-md flex items-center justify-center transition-all duration-200"
+              [ngClass]="{
+                'px-2 py-1 text-xs gap-1': !isMobile(), 
+                'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile(),
+                'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-600': task().parkingMeta?.state === 'parked',
+                'bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500': task().parkingMeta?.state !== 'parked'
+              }"
+              [title]="task().parkingMeta?.state === 'parked' ? '任务已在停泊坞中' : '停泊任务，稍后处理'">
               <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                 <polyline points="17 21 17 13 7 13 7 21"/>
               </svg>
-              停泊
+              {{ task().parkingMeta?.state === 'parked' ? '已停泊' : '停泊' }}
             </button>
             <button
               (click)="deleteTask.emit()"

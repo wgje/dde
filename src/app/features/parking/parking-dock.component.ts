@@ -58,14 +58,14 @@ import { Task } from '../../../models';
     .dock-trigger:hover {
       transform: translateX(-50%) translateY(-2px);
     }
-    /* 触发条提醒闪烁动画——边框琥珀色闪烁一次（1s） */
-    .dock-trigger-flash {
-      animation: triggerAmberFlash 1s ease-in-out 1;
+    /* 触发条提醒脉冲动画（持续） */
+    .dock-trigger-pulse {
+      animation: triggerAmberPulse 2s infinite ease-in-out;
     }
-    @keyframes triggerAmberFlash {
-      0%   { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(252, 211, 77, 0.4); }
-      50%  { border-color: rgb(245, 158, 11); box-shadow: 0 0 8px 2px rgba(245, 158, 11, 0.3); }
-      100% { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(252, 211, 77, 0); }
+    @keyframes triggerAmberPulse {
+      0%   { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+      50%  { border-color: rgb(245, 158, 11); box-shadow: 0 0 10px 3px rgba(245, 158, 11, 0.2); transform: translateX(-50%) translateY(-1px); }
+      100% { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
     }
     .dock-panel {
       pointer-events: auto;
@@ -94,14 +94,23 @@ import { Task } from '../../../models';
       from { transform: translateY(100%); }
       to   { transform: translateY(0); }
     }
-    /* 停泊卡片左侧标记条 */
+    /* 停泊卡片左侧标记条 & 悬停特效 */
+    .park-card {
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .park-card:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+    }
     .park-card-bar {
       width: 3px;
       border-radius: 2px;
-      background-color: rgba(99, 102, 241, 0.4);
+      background-color: rgba(99, 102, 241, 0.3);
+      transition: all 0.2s ease;
     }
     .park-card:hover .park-card-bar {
-      background-color: rgba(99, 102, 241, 0.7);
+      background-color: rgba(99, 102, 241, 0.8);
+      width: 4px;
     }
     /* 即将清理标签 */
     .stale-tag {
@@ -135,7 +144,7 @@ import { Task } from '../../../models';
            [style.left.%]="triggerLeftPercent()"
            style="min-width: 200px;"
            [class.border-amber-300]="hasUpcomingReminder()"
-           [class.dock-trigger-flash]="hasUpcomingReminder() && !isOpen()"
+           [class.dock-trigger-pulse]="hasUpcomingReminder() && !isOpen()"
            [style.z-index]="isOpen() ? 60 : 50"
            (click)="toggleDock()"
            (keydown.enter)="toggleDock()"
@@ -166,8 +175,8 @@ import { Task } from '../../../models';
                [style.left.px]="panelLeft()"
                [style.bottom]="'0px'"
                [class.dock-panel-exit]="isPanelClosing()"
-               style="background: color-mix(in srgb, var(--theme-bg) 80%, transparent); backdrop-filter: blur(16px);
-                      box-shadow: 0 -4px 24px rgba(0,0,0,0.08);"
+               style="background: color-mix(in srgb, var(--theme-bg) 85%, transparent); backdrop-filter: blur(24px);
+                      box-shadow: 0 -8px 32px rgba(0,0,0,0.06), 0 -2px 8px rgba(0,0,0,0.04);"
                (keydown.escape)="closeDock()">
             
             <!-- 顶部栏 -->
@@ -193,13 +202,16 @@ import { Task } from '../../../models';
               @if (parkedCount() === 0) {
                 <!-- 空态引导 -->
                 <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <svg class="h-10 w-10 text-stone-300 dark:text-stone-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-                    <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <p class="text-sm text-stone-500 dark:text-stone-400 font-medium">暂无停泊任务</p>
-                  <p class="text-xs text-stone-400 dark:text-stone-500 leading-relaxed max-w-[280px]">
-                    在任务编辑器中点击「停泊」按钮，可将当前任务暂存到此处，方便稍后继续处理。
+                  <div class="w-16 h-16 rounded-2xl bg-stone-50 dark:bg-stone-800/50 flex items-center justify-center mb-2 border border-stone-100 dark:border-stone-700/50 shadow-sm relative group overflow-hidden">
+                    <div class="absolute inset-0 bg-gradient-to-tr from-indigo-50 to-amber-50 dark:from-indigo-900/10 dark:to-amber-900/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
+                    <svg class="h-8 w-8 text-stone-400 dark:text-stone-500 transform group-hover:scale-110 transition-transform duration-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+                      <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </div>
+                  <p class="text-sm text-stone-700 dark:text-stone-300 font-medium">暂无停泊任务</p>
+                  <p class="text-xs text-stone-500 dark:text-stone-400 leading-relaxed max-w-[280px]">
+                    在任务编辑器中点击「停泊」按钮，可将当前任务暂存到此处，保持工作区清爽。
                   </p>
                   <div class="flex items-center gap-1.5 mt-1 text-[10px] text-stone-400 dark:text-stone-500">
                     <kbd class="px-1.5 py-0.5 rounded bg-stone-100 dark:bg-stone-700 border border-stone-200 dark:border-stone-600 font-mono">
@@ -432,13 +444,15 @@ import { Task } from '../../../models';
               @if (parkedCount() === 0) {
                 <!-- 移动端空态引导 -->
                 <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <svg class="h-10 w-10 text-stone-300 dark:text-stone-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-                    <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <p class="text-sm text-stone-500 dark:text-stone-400 font-medium">暂无停泊任务</p>
-                  <p class="text-xs text-stone-400 dark:text-stone-500 leading-relaxed">
-                    在任务编辑器中点击「停泊」按钮，可将任务暂存到此处稍后处理。
+                  <div class="w-16 h-16 rounded-2xl bg-stone-50 dark:bg-stone-800/50 flex items-center justify-center mb-2 border border-stone-100 dark:border-stone-700/50 shadow-sm">
+                    <svg class="h-8 w-8 text-stone-400 dark:text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+                      <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </div>
+                  <p class="text-sm text-stone-700 dark:text-stone-300 font-medium">暂无停泊任务</p>
+                  <p class="text-[11px] text-stone-500 dark:text-stone-400 leading-relaxed">
+                    在任务编辑器中点击「停泊」按钮暂存任务。
                   </p>
                 </div>
               }
