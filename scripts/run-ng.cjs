@@ -91,20 +91,32 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
 }
 
 /**
- * Node 24+ 与 esbuild 存在 goroutine 通信问题，需要使用 Node 22 运行
- * 问题表现：构建时 esbuild 进程挂起，报 "goroutine chan receive" 错误
+ * Node 24+ 与旧版 esbuild 存在 goroutine 通信问题。
+ * 该问题已在 esbuild >= 0.23.0 中修复。
+ * 当前项目锁定 esbuild 0.25.4，Node 24+ 可直接运行，无需降级。
+ * 如需在 esbuild < 0.23.0 的环境运行，请安装本地 Node 22 并通过 nvm 切换。
  */
-if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
-  // 尝试查找本地已安装的 Node 22
+function getEsbuildMajorMinor() {
+  try {
+    const esbuildPkg = path.join(__dirname, '..', 'node_modules', 'esbuild', 'package.json');
+    const { version } = JSON.parse(fs.readFileSync(esbuildPkg, 'utf8'));
+    const [, minor] = version.split('.').map(Number);
+    return minor; // 只需要 minor 来判断 >= 0.23
+  } catch {
+    return 999; // 无法读取时保守地认为版本足够新
+  }
+}
+
+if (Number.isFinite(nodeMajor) && nodeMajor >= 24 && getEsbuildMajorMinor() < 23) {
+  // esbuild < 0.23.0 + Node 24+ 有 goroutine 死锁问题，尝试使用 Node 22
   let node22Path = null;
-  
-  // 方法1：检查 nvm 安装的 Node 22
+
+  // 方法1：检查 nvm (Linux/macOS) 安装的 Node 22
   const nvmDir = process.env.NVM_DIR || path.join(process.env.HOME || '', '.nvm');
   const nvmNode22Versions = path.join(nvmDir, 'versions', 'node');
   if (fs.existsSync(nvmNode22Versions)) {
     const versions = fs.readdirSync(nvmNode22Versions).filter(v => v.startsWith('v22.'));
     if (versions.length > 0) {
-      // 选择最新的 v22 版本
       versions.sort().reverse();
       node22Path = path.join(nvmNode22Versions, versions[0], 'bin', 'node');
       if (!fs.existsSync(node22Path)) node22Path = null;
@@ -113,11 +125,11 @@ if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
 
   // 方法2：使用 npx 下载并运行 Node 22（作为后备）
   if (!node22Path) {
-    console.log('[run-ng] Node 24+ 检测到，使用 npx node@22 运行构建...');
-    runWithSignalForwarding('npx', ['-y', 'node@22.14.0', '--', ngPath, ...args]);
+    console.log('[run-ng] Node 24+ + esbuild < 0.23 检测到，使用 npx node@22 运行构建...');
+    const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+    runWithSignalForwarding(npxCmd, ['-y', 'node@22.14.0', '--', ngPath, ...args]);
   } else {
-    // 使用本地 Node 22
-    console.log(`[run-ng] Node 24+ 检测到，使用本地 Node 22: ${node22Path}`);
+    console.log(`[run-ng] Node 24+ + esbuild < 0.23 检测到，使用本地 Node 22: ${node22Path}`);
     runWithSignalForwarding(node22Path, [ngPath, ...args]);
   }
 } else {
