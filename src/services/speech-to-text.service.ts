@@ -14,6 +14,7 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { ErrorCodes, ErrorMessages } from '../utils/result';
+import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import { environment } from '../environments/environment';
 import { 
   isRecording, 
@@ -38,6 +39,7 @@ export class SpeechToTextService {
   private audioChunks: Blob[] = [];
   private recordingStartTime: number = 0;
   private db: IDBDatabase | null = null;
+  private initIndexedDBPromise: Promise<void> | null = null;
   private onlineHandler: (() => void) | null = null;
   private readonly destroyRef = inject(DestroyRef);
   
@@ -53,7 +55,9 @@ export class SpeechToTextService {
   
   constructor() {
     // 初始化 IndexedDB
-    this.initIndexedDB();
+    void this.initIndexedDB().catch(error => {
+      this.logger.warn('SpeechToText', 'Initial IndexedDB setup deferred', error instanceof Error ? error.message : String(error));
+    });
     
     // 监听网络恢复
     this.setupNetworkListener();
@@ -63,43 +67,30 @@ export class SpeechToTextService {
    * 初始化 IndexedDB
    */
   private async initIndexedDB(): Promise<void> {
-    try {
-      this.db = await this.openFocusModeDB(FOCUS_CONFIG.SYNC.IDB_VERSION);
-    } catch (error) {
-      if (!this.isIDBVersionError(error)) {
-        throw error;
-      }
+    if (this.db) return;
+    if (this.initIndexedDBPromise) return this.initIndexedDBPromise;
 
-      this.logger.warn('SpeechToText', 'IndexedDB version mismatch, reopen with existing version', {
-        requestedVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    this.initIndexedDBPromise = (async () => {
       this.db = await this.openFocusModeDB();
-    }
+      this.updateOfflinePendingCount();
+    })().finally(() => {
+      this.initIndexedDBPromise = null;
+    });
 
-    this.updateOfflinePendingCount();
+    return this.initIndexedDBPromise;
   }
 
-  private openFocusModeDB(version?: number): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = version === undefined
-        ? indexedDB.open(this.IDB_NAME)
-        : indexedDB.open(this.IDB_NAME, version);
-
-      request.onerror = () => reject(request.error ?? new Error('Unknown IndexedDB error'));
-      request.onsuccess = () => resolve(request.result);
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
+  private openFocusModeDB(): Promise<IDBDatabase> {
+    return openIndexedDBAdaptive({
+      dbName: this.IDB_NAME,
+      targetVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
+      requiredStores: [this.CACHE_STORE],
+      ensureStores: db => {
         if (!db.objectStoreNames.contains(this.CACHE_STORE)) {
           db.createObjectStore(this.CACHE_STORE, { keyPath: 'id' });
         }
-      };
+      }
     });
-  }
-
-  private isIDBVersionError(error: unknown): boolean {
-    return error instanceof DOMException && error.name === 'VersionError';
   }
 
   /**

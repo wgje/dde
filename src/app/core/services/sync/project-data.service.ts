@@ -19,6 +19,7 @@ import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
+import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../../config/sync.config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { FOCUS_CONFIG } from '../../../../config/focus.config';
@@ -1003,29 +1004,14 @@ export class ProjectDataService {
   }
 
   private async openFocusModeDB(): Promise<IDBDatabase> {
-    try {
-      return await this.openFocusModeDBInternal(FOCUS_CONFIG.SYNC.IDB_VERSION);
-    } catch (error) {
-      if (!this.isIDBVersionError(error)) {
-        throw error;
-      }
-
-      this.logger.warn('FocusMode IndexedDB version mismatch, reopen with existing version', {
-        requestedVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return this.openFocusModeDBInternal();
-    }
-  }
-
-  private openFocusModeDBInternal(version?: number): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = version === undefined
-        ? indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME)
-        : indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME, version);
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
+    return openIndexedDBAdaptive({
+      dbName: FOCUS_CONFIG.SYNC.IDB_NAME,
+      targetVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
+      requiredStores: [
+        FOCUS_CONFIG.IDB_STORES.PARKED_TASKS,
+        FOCUS_CONFIG.IDB_STORES.SYNC_METADATA,
+      ],
+      ensureStores: db => {
         if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
           const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
           parkedStore.createIndex('by-updatedAt', 'updatedAt', { unique: false });
@@ -1033,15 +1019,8 @@ export class ProjectDataService {
         if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
           db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
         }
-      };
-
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error('Unknown IndexedDB error'));
+      }
     });
-  }
-
-  private isIDBVersionError(error: unknown): boolean {
-    return error instanceof DOMException && error.name === 'VersionError';
   }
   
   // ==================== 数据转换（Public API）====================

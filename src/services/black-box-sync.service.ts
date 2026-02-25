@@ -20,6 +20,7 @@ import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isValidUUID } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
@@ -80,10 +81,13 @@ export class BlackBoxSyncService {
   private readonly IDB_VERSION = FOCUS_CONFIG.SYNC.IDB_VERSION;
   private readonly STORE_NAME = FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES;
   private readonly DEBOUNCE_DELAY = SYNC_CONFIG.DEBOUNCE_DELAY;
+  private initIndexedDBPromise: Promise<void> | null = null;
 
   constructor() {
     // 初始化 IndexedDB
-    this.initIndexedDB();
+    void this.initIndexedDB().catch(error => {
+      this.logger.warn('Initial IndexedDB setup deferred', error instanceof Error ? error.message : String(error));
+    });
 
     // 监听网络状态变化
     this.setupNetworkListener();
@@ -145,45 +149,33 @@ export class BlackBoxSyncService {
    */
   private async initIndexedDB(): Promise<void> {
     if (this.db) return;
+    if (this.initIndexedDBPromise) return this.initIndexedDBPromise;
 
-    try {
-      this.db = await this.openFocusModeDB(this.IDB_VERSION);
-    } catch (error) {
-      if (!this.isIDBVersionError(error)) {
+    this.initIndexedDBPromise = (async () => {
+      try {
+        this.db = await openIndexedDBAdaptive({
+          dbName: this.IDB_NAME,
+          targetVersion: this.IDB_VERSION,
+          requiredStores: [
+            this.STORE_NAME,
+            FOCUS_CONFIG.IDB_STORES.OFFLINE_AUDIO_CACHE,
+            FOCUS_CONFIG.IDB_STORES.FOCUS_PREFERENCES,
+            FOCUS_CONFIG.IDB_STORES.SYNC_METADATA,
+            FOCUS_CONFIG.IDB_STORES.PARKED_TASKS
+          ],
+          ensureStores: db => this.ensureFocusModeStores(db),
+        });
+        this.logger.debug('IndexedDB opened for focus mode', { version: this.db.version });
+        await this.loadLastSyncTime();
+      } catch (error) {
         this.logger.error('Failed to open IndexedDB for focus mode', error instanceof Error ? error.message : String(error));
         throw error;
+      } finally {
+        this.initIndexedDBPromise = null;
       }
+    })();
 
-      // A newer schema may already exist in this browser (e.g. mixed app bundle versions).
-      this.logger.warn('IndexedDB version mismatch for focus mode, reopening with existing version', {
-        requestedVersion: this.IDB_VERSION,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      this.db = await this.openFocusModeDB();
-    }
-
-    this.logger.debug('IndexedDB opened for focus mode', { version: this.db.version });
-    await this.loadLastSyncTime();
-  }
-
-  private openFocusModeDB(version?: number): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = version === undefined
-        ? indexedDB.open(this.IDB_NAME)
-        : indexedDB.open(this.IDB_NAME, version);
-
-      request.onerror = () => {
-        reject(request.error ?? new Error('Unknown IndexedDB error'));
-      };
-
-      request.onsuccess = () => {
-        resolve(request.result);
-      };
-
-      request.onupgradeneeded = () => {
-        this.ensureFocusModeStores(request.result);
-      };
-    });
+    return this.initIndexedDBPromise;
   }
 
   private ensureFocusModeStores(db: IDBDatabase): void {
@@ -210,18 +202,6 @@ export class BlackBoxSyncService {
       const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
       parkedStore.createIndex('by-parkedAt', 'parkedAt', { unique: false });
     }
-  }
-
-  private isIDBVersionError(error: unknown): boolean {
-    if (error instanceof DOMException) {
-      return error.name === 'VersionError';
-    }
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'name' in error &&
-      (error as { name?: unknown }).name === 'VersionError'
-    );
   }
 
   /**
