@@ -118,6 +118,18 @@ async function waitForSessionCheck(
     return;
   }
 
+  // 主动触发一次会话检查，避免 Guard 先于 bootstrap 执行时出现被动等待超时
+  const maybeCheckSession = (authService as unknown as {
+    checkSession?: () => Promise<unknown>;
+  }).checkSession;
+  if (typeof maybeCheckSession === 'function') {
+    void maybeCheckSession.call(authService).catch((error) => {
+      guardLogger.debug('会话引导触发失败（忽略）', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
   const start = Date.now();
   let interval: number = GUARD_CONFIG.SESSION_CHECK_POLL_INTERVAL;
 
@@ -125,7 +137,7 @@ async function waitForSessionCheck(
   while (!authService.sessionInitialized()) {
     const elapsed = Date.now() - start;
     if (elapsed >= timeoutMs) {
-      guardLogger.warn('等待会话初始化超时', { timeoutMs, elapsed });
+      guardLogger.debug('等待会话初始化超时', { timeoutMs, elapsed });
       break;
     }
 
@@ -231,10 +243,17 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
     logger.debug('会话初始化未完成，等待 bootstrap 完成');
     await waitForSessionCheck(authService, GUARD_CONFIG.SESSION_CHECK_TIMEOUT);
     if (!authService.sessionInitialized()) {
-      logger.warn('会话初始化超时，按未登录流程处理', {
+      const stillCheckingSession = authService.authState().isCheckingSession;
+      const payload = {
         timeout: GUARD_CONFIG.SESSION_CHECK_TIMEOUT,
-        targetUrl: state.url
-      });
+        targetUrl: state.url,
+        stillCheckingSession
+      };
+      if (stillCheckingSession) {
+        logger.debug('会话初始化仍在进行，先按未登录流程挂载壳层', payload);
+      } else {
+        logger.warn('会话初始化超时，按未登录流程处理', payload);
+      }
     }
   }
   

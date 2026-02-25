@@ -131,6 +131,11 @@ export class FlowDiagramService {
   
   /**
    * 初始化 GoJS Diagram
+   * 
+   * 【2026-02-25 性能优化】整个初始化在 NgZone 外部执行
+   * GoJS 内部所有鼠标移动、画布重绘、工具激活（拖拽/平移/连线）
+   * 都不再触发 Angular 变更检测，显著降低 50+ 节点时的交互卡顿。
+   * 需要触发 CD 的回调（节点点击等）在 FlowEventService 中显式 zone.run()。
    */
   initialize(container: HTMLDivElement): boolean {
     if (typeof go === 'undefined') {
@@ -138,6 +143,15 @@ export class FlowDiagramService {
       return false;
     }
     
+    // 【性能关键】在 Angular Zone 外部创建和配置 GoJS Diagram
+    // 避免 GoJS 内部事件（鼠标移动、canvas 重绘、工具切换等）触发不必要的变更检测
+    return this.zone.runOutsideAngular(() => this._initializeOutsideZone(container));
+  }
+
+  /**
+   * 在 NgZone 外部执行的 Diagram 初始化逻辑
+   */
+  private _initializeOutsideZone(container: HTMLDivElement): boolean {
     try {
       this.isDestroyed = false;
       this.diagramDiv = container;
@@ -195,7 +209,10 @@ export class FlowDiagramService {
         linkKeyProperty: 'key',
         nodeKeyProperty: 'key',
         linkFromPortIdProperty: 'fromPortId',
-        linkToPortIdProperty: 'toPortId'
+        linkToPortIdProperty: 'toPortId',
+        // 【2026-02-25 性能优化】启用 link 分类模板
+        // 父子链接使用默认模板（无 label panel），跨树链接使用 'crossTree' 模板（含 label）
+        linkCategoryProperty: 'category'
       });
       
       // 【关键】拦截 GoJS 默认删除行为，强制单向数据流 (Store -> Signal -> Diagram)
@@ -454,21 +471,16 @@ export class FlowDiagramService {
       
       this.diagram.requestUpdate();
       
-      requestAnimationFrame(() => {
-        if (!this.diagram || this.isDestroyed) return;
-        
-        this.diagram.nodes.each((node: go.Node) => {
-          node.invalidateLayout();
+      // 【2026-02-25 性能优化】恢复时仅请求一次更新，不再全量 invalidateRoute
+      // GoJS 在 requestUpdate() 时会自动重新路由需要更新的链接
+      this.zone.runOutsideAngular(() => {
+        requestAnimationFrame(() => {
+          if (!this.diagram || this.isDestroyed) return;
+          this.diagram.requestUpdate();
+          if (this.overview) {
+            this.overview.requestUpdate();
+          }
         });
-        this.diagram.links.each((link: go.Link) => {
-          link.invalidateRoute();
-        });
-        
-        this.diagram.requestUpdate();
-        
-        if (this.overview) {
-          this.overview.requestUpdate();
-        }
       });
     } catch (error) {
       this.logger.error('恢复图表失败:', error);

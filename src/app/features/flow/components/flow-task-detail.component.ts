@@ -16,10 +16,16 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, FormsModule, SafeMarkdownPipe],
   providers: [FlowTaskDetailFormService],
+  // 【修复】host 默认 pointer-events: none，防止组件宿主元素（即使是0高度）
+  // 在 GoJS 画布上方意外拦截鼠标/触摸事件，导致拖拽卡死。
+  // 各内部可交互元素通过 pointer-events-auto 类显式恢复事件接收。
+  host: { style: 'pointer-events: none' },
   template: `
     <!-- 桌面端可拖动浮动面板 -->
     @if (!uiState.isMobile() && uiState.isFlowDetailOpen()) {
       <div class="absolute z-20 pointer-events-auto"
+           draggable="false"
+           (dragstart)="$event.preventDefault(); $event.stopPropagation()"
            [style.right.px]="position().x < 0 ? 0 : null"
            [style.top.px]="position().y < 0 ? 24 : position().y"
            [style.left.px]="position().x >= 0 ? position().x : null">
@@ -41,7 +47,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                  </button>
              </div>
                  
-             <div class="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+             <div class="flex-1 overflow-y-auto px-3 py-2 space-y-2 select-none">
                  @if (task(); as t) {
                      <ng-container *ngTemplateOutlet="taskContent; context: { $implicit: t }"></ng-container>
                  } @else if (projectState.activeProject()) {
@@ -63,7 +69,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
     <!-- 桌面端详情开启按钮 -->
     @if (!uiState.isMobile() && !uiState.isFlowDetailOpen()) {
       <button (click)="uiState.isFlowDetailOpen.set(true)" 
-              class="absolute top-6 right-2 z-20 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-stone-200 dark:border-stone-600 rounded-lg p-2 shadow-sm hover:bg-white dark:hover:bg-stone-700 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 transition-all flex items-center gap-1">
+              class="absolute top-6 right-2 z-20 pointer-events-auto bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-stone-200 dark:border-stone-600 rounded-lg p-2 shadow-sm hover:bg-white dark:hover:bg-stone-700 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 transition-all flex items-center gap-1">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -75,7 +81,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
     @if (uiState.isMobile() && !uiState.isFlowDetailOpen()) {
       <button 
         (click)="uiState.isFlowDetailOpen.set(true)"
-        class="absolute top-2 right-2 z-25 bg-white/90 dark:bg-stone-800/90 backdrop-blur rounded-lg shadow-sm border border-stone-200 dark:border-stone-600 px-2 py-1 flex items-center gap-1 text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200">
+        class="absolute top-2 right-2 z-25 pointer-events-auto bg-white/90 dark:bg-stone-800/90 backdrop-blur rounded-lg shadow-sm border border-stone-200 dark:border-stone-600 px-2 py-1 flex items-center gap-1 text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
@@ -87,7 +93,9 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
     @if (uiState.isMobile() && uiState.isFlowDetailOpen()) {
        <div
          #mobileDrawer
-         class="absolute left-0 right-0 z-30 bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border-b border-stone-200 dark:border-stone-700 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col transition-all duration-100"
+         draggable="false"
+         (dragstart)="$event.preventDefault(); $event.stopPropagation()"
+         class="absolute left-0 right-0 z-30 pointer-events-auto bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border-b border-stone-200 dark:border-stone-700 shadow-[0_4px_20px_rgba(0,0,0,0.1)] rounded-b-2xl flex flex-col transition-all duration-100"
            [style.top.px]="0"
            [style.height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
@@ -715,10 +723,25 @@ export class FlowTaskDetailComponent implements OnDestroy {
     document.addEventListener('mouseup', this.stopDrag);
     document.addEventListener('touchmove', this.onDrag);
     document.addEventListener('touchend', this.stopDrag);
+    // 【修复】窗口失焦时（如鼠标移出浏览器后释放），mouseup 不会触发，
+    // 导致 isDragging 一直为 true，后续在画布上的任何移动都会移动面板（形成「卡死」）。
+    // 通过监听 window blur 作为兜底清理。
+    window.addEventListener('blur', this.stopDrag);
   }
   
   private onDrag = (event: MouseEvent | TouchEvent) => {
     if (!this.dragState.isDragging) return;
+    // 【修复】检测「幽灵拖拽」状态：鼠标在浏览器外已松开（buttons===0），
+    // 此时 mouseup 未能触发 stopDrag，导致面板继续跟随光标移动。
+    // 同理检查 touch：touches 为空说明手指已离开屏幕。
+    if (event instanceof MouseEvent && event.buttons === 0) {
+      this.stopDrag();
+      return;
+    }
+    if (event instanceof TouchEvent && event.touches.length === 0) {
+      this.stopDrag();
+      return;
+    }
     
     const clientX = event instanceof MouseEvent ? event.clientX : event.touches[0].clientX;
     const clientY = event instanceof MouseEvent ? event.clientY : event.touches[0].clientY;
@@ -745,6 +768,8 @@ export class FlowTaskDetailComponent implements OnDestroy {
     document.removeEventListener('mouseup', this.stopDrag);
     document.removeEventListener('touchmove', this.onDrag);
     document.removeEventListener('touchend', this.stopDrag);
+    // 清理 blur 兜底监听器
+    window.removeEventListener('blur', this.stopDrag);
   };
 
   /** 重置面板位置到默认位置（右上角） */

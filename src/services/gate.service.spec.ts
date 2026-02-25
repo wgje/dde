@@ -24,6 +24,7 @@ describe('GateService', () => {
     markAsRead: ReturnType<typeof vi.fn>;
     markAsCompleted: ReturnType<typeof vi.fn>;
     snooze: ReturnType<typeof vi.fn>;
+    loadFromServer: ReturnType<typeof vi.fn>;
   };
 
   let mockLoggerService: {
@@ -71,6 +72,7 @@ describe('GateService', () => {
       markAsRead: vi.fn().mockReturnValue({ ok: true, value: {} }),
       markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
       snooze: vi.fn().mockReturnValue({ ok: true, value: {} }),
+      loadFromServer: vi.fn().mockResolvedValue(undefined),
     };
 
     mockLoggerService = {
@@ -92,6 +94,7 @@ describe('GateService', () => {
   });
 
   afterEach(() => {
+    service.reset();
     vi.clearAllMocks();
     localStorage.clear();
   });
@@ -115,6 +118,30 @@ describe('GateService', () => {
       expect(gateState()).toBe('reviewing');
       expect(gatePendingItems().length).toBe(1);
       expect(['entering', 'idle']).toContain(service.cardAnimation());
+    });
+    it('should refresh pending queue when checkGate is called during reviewing', () => {
+      const first = createMockEntry({
+        date: getDateOffset(-2),
+        createdAt: '2026-02-01T08:00:00.000Z',
+        updatedAt: '2026-02-01T08:00:00.000Z',
+      });
+      setBlackBoxEntries([first]);
+      service.checkGate();
+      expect(gatePendingItems().map(item => item.id)).toEqual([first.id]);
+
+      const second = createMockEntry({
+        date: getDateOffset(-1),
+        createdAt: '2026-02-01T09:00:00.000Z',
+        updatedAt: '2026-02-01T09:00:00.000Z',
+      });
+      setBlackBoxEntries([first, second]);
+
+      service.checkGate();
+
+      const ids = gatePendingItems().map(item => item.id);
+      expect(ids).toContain(first.id);
+      expect(ids).toContain(second.id);
+      expect(gateState()).toBe('reviewing');
     });
 
     it('大门被禁用时应该进入 disabled', () => {

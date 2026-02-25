@@ -229,11 +229,55 @@ export class FlowLinkTemplateService {
           )
         )
       },
+      // 【2026-02-25 性能优化】默认模板不含 label panel（仅用于父子链接）
+      // 跨树链接使用 'crossTree' category 模板，含 label panel + tooltip
+      ...this.configService.getLinkMainShapesConfig($, isMobile)
+    );
+    
+    // 【2026-02-25 性能优化】跨树链接专用模板——包含 label panel + tooltip
+    // 父子链接（占大多数）不再承载隐藏的 label panel，每条节省 ~6 个 GraphObject
+    const crossTreeLinkTemplate = $(go.Link,
+      {
+        layerName: 'Links',
+        routing: go.Link.Normal,
+        curve: go.Link.Bezier,
+        getLinkPoint: freeAngleLinkPoint,
+        toShortLength: this.configService.linkConfig.toShortLength,
+        fromEndSegmentLength: 22,
+        toEndSegmentLength: 22,
+        selectable: true,
+        selectionAdorned: true,
+        relinkableFrom: true,
+        relinkableTo: true,
+        reshapable: true,
+        resegmentable: false,
+        click: isMobile
+          ? () => { /* 移动端空处理器 */ }
+          : ((e: go.InputEvent, link: go.GraphObject) => {
+              if (e.handled) return;
+              e.handled = true;
+              flowTemplateEventHandlers.onLinkClick?.(link as go.Link);
+            }) as GojsClickHandler,
+        contextMenu: $(go.Adornment, "Vertical",
+          $("ContextMenuButton",
+            $(go.TextBlock, "删除连接", { margin: 5 }),
+            {
+              click: ((e: go.InputEvent, obj: go.GraphObject) => {
+                const link = (obj.part as go.Adornment)?.adornedPart;
+                if ((link as go.Link)?.data) {
+                  flowTemplateEventHandlers.onLinkDeleteRequest?.(link as go.Link);
+                }
+              }) as GojsClickHandler
+            }
+          )
+        )
+      },
       ...this.configService.getLinkMainShapesConfig($, isMobile),
       this.createConnectionLabelPanel($)
     );
+    diagram.linkTemplateMap.add('crossTree', crossTreeLinkTemplate);
     
-    this.logger.debug('连接线模板已设置');
+    this.logger.debug('连接线模板已设置（含 crossTree 分类模板）');
   }
 
   /**
@@ -248,26 +292,31 @@ export class FlowLinkTemplateService {
     return function(this: go.Link, node, port, spot, from, _ortho, otherNode, otherPort) {
       let actualNode: go.Node | null = null;
       
-      // 策略1: 从连接线的 fromNode/toNode 获取
+      // 【2026-02-25 性能优化】快速路径——绝大多数正常渲染场景下 fromNode/toNode 有效
+      // 直接取用并跳过后续 3 个 fallback 策略，避免 findObject('BODY') 等 O(子节点数) 查找
+      // 仅在 fromNode/toNode 为 null（linking/relinking 工具活跃时）才走 fallback
       if (from) {
-        if (this.fromNode) {
-          const nodeExt = this.fromNode as go.Node & GojsNodeExt;
-          const hasData = !!nodeExt.data;
-          const hasBody = !!nodeExt.findObject?.('BODY');
-          if (hasData || hasBody) {
-            actualNode = this.fromNode;
-          }
+        if (this.fromNode?.data) {
+          actualNode = this.fromNode;
         }
       } else {
-        if (this.toNode) {
-          const nodeExt = this.toNode as go.Node & GojsNodeExt;
-          const hasData = !!nodeExt.data;
-          const hasBody = !!nodeExt.findObject?.('BODY');
-          if (hasData || hasBody) {
-            actualNode = this.toNode;
-          }
+        if (this.toNode?.data) {
+          actualNode = this.toNode;
         }
       }
+      
+      // 快速路径命中——跳过策略 2/3/4
+      if (actualNode) {
+        const doc = actualNode.diagram;
+        const target = otherPort?.getDocumentPoint(go.Spot.Center)
+          || otherNode?.getDocumentPoint(go.Spot.Center)
+          || doc?.lastInput?.documentPoint
+          || actualNode.getDocumentPoint(go.Spot.Center);
+        
+        return self.computeNodeEdgePoint(actualNode, target);
+      }
+      
+      // ——以下为 fallback 路径（仅在 linking/relinking 工具活跃或异常场景时执行）——
       
       // 策略2: 使用传入的 node 参数
       if (!actualNode && node instanceof go.Node) {
@@ -586,7 +635,8 @@ export class FlowLinkTemplateService {
           flowTemplateEventHandlers.onCrossTreeLabelClick?.(link, viewX, viewY);
         }
       },
-      new go.Binding("visible", "isCrossTree"),
+      // 【2026-02-25 性能优化】不再需要 visible 绑定——此 panel 仅在 crossTree 模板中使用
+      // new go.Binding("visible", "isCrossTree"), // 已由模板分类取代
       $(go.Shape, "RoundedRectangle", {
         fill: "#f5f3ff",
         stroke: "#8b5cf6",

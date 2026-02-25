@@ -50,6 +50,15 @@ export class FlowDiagramDataService {
   private _familyColorLogged = false;
   private pendingAutoFitToContents = false;
 
+  // ========== 【2026-02-25 性能优化】增量更新缓存 ==========
+  /**
+   * 上一次成功更新图表时的任务指纹（key: updatedAt + title + parentId + stage + status + parkingMeta）
+   * 用于跳过无变化的 buildDiagramData 全量重建
+   */
+  private lastTaskFingerprint = '';
+  private lastConnectionSignatureForData = '';
+  private lastSearchQuery = '';
+
   // ========== 外部设置 ==========
 
   /**
@@ -227,6 +236,21 @@ export class FlowDiagramDataService {
         return;
       }
 
+      // 【2026-02-25 性能优化】快速指纹检查——跳过无变化的全量重建
+      // 对比任务的关键属性指纹和连接签名，若无变化则完全跳过 buildDiagramData + merge 操作
+      const searchQuery = this.uiState.searchQuery();
+      if (!forceRefresh) {
+        const taskFingerprint = this.computeTaskFingerprint(activeTasks);
+        const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
+        const connSig = activeConns.map(c => `${c.source}->${c.target}`).sort().join('|');
+        
+        if (taskFingerprint === this.lastTaskFingerprint 
+            && connSig === this.lastConnectionSignatureForData
+            && searchQuery === this.lastSearchQuery) {
+          return; // 数据无变化，跳过重建
+        }
+      }
+
       const existingNodeMap = new Map<string, go.ObjectData>();
       (this.diagram.model as go.GraphLinksModel).nodeDataArray.forEach((n: go.ObjectData) => {
         if (n.key) {
@@ -234,9 +258,8 @@ export class FlowDiagramDataService {
         }
       });
 
-      const searchQuery = this.uiState.searchQuery();
       const diagramData = this.configService.buildDiagramData(
-        tasks.filter(t => !t.deletedAt),
+        activeTasks,
         project,
         searchQuery,
         existingNodeMap
@@ -274,6 +297,12 @@ export class FlowDiagramDataService {
       this.diagram.skipsUndoManager = false;
       this.diagram.commitTransaction('update');
 
+      // 【2026-02-25 性能优化】更新指纹缓存，下次无变化时可快速跳过
+      this.lastTaskFingerprint = this.computeTaskFingerprint(activeTasks);
+      const activeConnsForCache = project.connections?.filter(c => !c.deletedAt) ?? [];
+      this.lastConnectionSignatureForData = activeConnsForCache.map(c => `${c.source}->${c.target}`).sort().join('|');
+      this.lastSearchQuery = searchQuery;
+
       if (selectedKeys.size > 0) {
         this.diagram.nodes.each((node: go.Node) => {
           if (selectedKeys.has(node.data?.key)) {
@@ -282,9 +311,11 @@ export class FlowDiagramDataService {
         });
       }
 
-      this.diagram.links.each((link: go.Link) => {
-        link.invalidateRoute();
-      });
+      // 【2026-02-25 性能优化】移除全量 invalidateRoute() 调用
+      // GoJS 的 mergeNodeDataArray/mergeLinkDataArray 已内置路由失效机制，
+      // 仅在节点位置或 link 端点变化时自动更新受影响的连线。
+      // 此前对所有 link 调用 invalidateRoute() 强制重算所有贝塞尔曲线，
+      // 配合自定义 getLinkPoint 4 策略回退，50 节点 + 50-100 链接时造成严重卡顿。
 
       // Debug 日志
       const linkData = model.linkDataArray;
@@ -452,5 +483,32 @@ export class FlowDiagramDataService {
     this.isFirstLoad = true;
     this._familyColorLogged = false;
     this.pendingAutoFitToContents = false;
+    this.lastTaskFingerprint = '';
+    this.lastConnectionSignatureForData = '';
+    this.lastSearchQuery = '';
+  }
+
+  // ========== 【2026-02-25 性能优化】增量更新辅助 ==========
+
+  /**
+   * 计算任务列表的快速指纹
+   * 包含影响图表显示的所有关键属性，用于跳过无变化的全量重建
+   * O(n) 字符串拼接，但远比 buildDiagramData + merge + GC 开销小
+   */
+  private computeTaskFingerprint(tasks: Task[]): string {
+    // 使用数组 join 代替字符串拼接，减少中间字符串分配
+    const parts: string[] = [];
+    for (const t of tasks) {
+      parts.push(
+        t.id, '|',
+        t.title, '|',
+        t.updatedAt || '', '|',
+        t.parentId || '', '|',
+        String(t.stage), '|',
+        t.status || '', '|',
+        t.parkingMeta?.state || '', ';'
+      );
+    }
+    return parts.join('');
   }
 }

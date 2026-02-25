@@ -184,7 +184,8 @@ export class SimpleSyncService {
     this.batchSyncService.setCallbacks({
       pushProject: (p, f) => this.pushProject(p, f),
       pushTask: (t, pid, s, f) => this.pushTask(t, pid, s, f),
-      pushTaskPosition: (tid, x, y) => this.pushTaskPosition(tid, x, y),
+      pushTaskPosition: (tid, x, y, pid, fallbackTask) =>
+        this.pushTaskPosition(tid, x, y, pid, fallbackTask),
       pushConnection: (c, pid, s, te, f) => this.pushConnection(c, pid, s, te, f),
       getTombstoneIds: (pid) => this.getTombstoneIds(pid),
       getConnectionTombstoneIds: (pid) => this.getConnectionTombstoneIds(pid),
@@ -198,7 +199,8 @@ export class SimpleSyncService {
       pushTask: (task, pid) => this.pushTask(task, pid, true, true),
       deleteTask: (tid, pid) => this.deleteTask(tid, pid),
       pushProject: (project) => this.pushProject(project, true),
-      pushConnection: (conn, pid) => this.pushConnection(conn, pid, true, true, true),
+      // 重试连接时保留任务存在性校验，避免 23503 外键错误风暴
+      pushConnection: (conn, pid) => this.pushConnection(conn, pid, true, false, true),
       pushBlackBoxEntry: (entry: BlackBoxEntry) => this.blackBoxSync.pushToServer(entry),
       isSessionExpired: () => this.syncState().sessionExpired,
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
@@ -613,8 +615,14 @@ export class SimpleSyncService {
     return this.taskSyncOps.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue);
   }
   
-  async pushTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
-    return this.taskSyncOps.pushTaskPosition(taskId, x, y);
+  async pushTaskPosition(
+    taskId: string,
+    x: number,
+    y: number,
+    projectId?: string,
+    fallbackTask?: Task
+  ): Promise<boolean> {
+    return this.taskSyncOps.pushTaskPosition(taskId, x, y, projectId, fallbackTask);
   }
   
   async pullTasks(projectId: string, since?: string): Promise<Task[]> {

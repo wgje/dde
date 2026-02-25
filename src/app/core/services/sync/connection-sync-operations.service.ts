@@ -203,8 +203,31 @@ export class ConnectionSyncOperationsService {
         );
         
         if (!validationResult.valid) {
+          if (!fromRetryQueue) {
+            this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+          }
           return false;
         }
+      }
+
+      // 预检查：同一 source/target 已存在不同 id 时视为幂等成功，避免 409 冲突刷屏
+      const { data: existingByEndpoints, error: existingByEndpointsError } = await client
+        .from('connections')
+        .select('id')
+        .eq('project_id', projectId)
+        .eq('source_id', connection.source)
+        .eq('target_id', connection.target)
+        .maybeSingle();
+
+      if (!existingByEndpointsError && existingByEndpoints && existingByEndpoints.id !== connection.id) {
+        this.logger.info('连接已存在（按 source/target 去重，视为幂等成功）', {
+          connectionId: connection.id,
+          existingConnectionId: existingByEndpoints.id,
+          projectId,
+          source: connection.source,
+          target: connection.target
+        });
+        return true;
       }
       
       // 执行 upsert
@@ -389,6 +412,10 @@ export class ConnectionSyncOperationsService {
         target: connection.target,
         errorCode: enhanced.code
       });
+
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+      }
       
       return false;
     }

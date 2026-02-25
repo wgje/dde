@@ -333,7 +333,13 @@ export class TaskSyncOperationsService {
   }
   
   /** 推送任务位置到云端（仅更新 x,y 坐标） */
-  async pushTaskPosition(taskId: string, x: number, y: number, projectId?: string): Promise<boolean> {
+  async pushTaskPosition(
+    taskId: string,
+    x: number,
+    y: number,
+    projectId?: string,
+    _fallbackTask?: Task
+  ): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
       return false;
@@ -355,31 +361,32 @@ export class TaskSyncOperationsService {
         .from('tasks')
         .update({ x, y })
         .eq('id', taskId)
-        .select('updated_at')
-        .single();
+        .select('updated_at');
       
       if (error) {
         this.logger.debug('pushTaskPosition 失败', { taskId, error: error.message });
-        // 【P1-17 修复】失败时入队重试，防止离线位置变更丢失
-        if (projectId) {
-          this.safeAddToRetryQueue('task', 'upsert', { id: taskId, x, y } as unknown as Task, projectId);
-        }
+        return false;
+      }
+
+      // 未命中远端行时返回 false，让调用方回退到完整任务 upsert
+      const updatedAt = Array.isArray(data) && data.length > 0
+        ? String((data[0] as { updated_at?: string | null }).updated_at ?? '')
+        : '';
+      if (!updatedAt) {
+        this.logger.warn('pushTaskPosition 未命中远端任务，需回退完整推送', {
+          taskId,
+          projectId: projectId ?? null
+        });
         return false;
       }
 
       // 记录服务端时间戳，保持时钟同步
-      if (data?.updated_at) {
-        this.clockSync.recordServerTimestamp(data.updated_at, taskId);
-      }
+      this.clockSync.recordServerTimestamp(updatedAt, taskId);
       
       this.retryQueueService.recordCircuitSuccess();
       return true;
     } catch (e) {
       this.logger.debug('pushTaskPosition 异常', { taskId, error: e });
-      // 【P1-17 修复】异常时入队重试
-      if (projectId) {
-        this.safeAddToRetryQueue('task', 'upsert', { id: taskId, x, y } as unknown as Task, projectId);
-      }
       return false;
     }
   }

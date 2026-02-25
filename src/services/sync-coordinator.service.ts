@@ -726,7 +726,18 @@ export class SyncCoordinatorService {
     const localWatermarkMs = this.computeLocalProjectWatermark(localProject);
 
     if (FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1) {
-      const remoteWatermark = await this.core.getProjectSyncWatermark(projectId);
+      let remoteWatermark: string | null = null;
+      const probe = await this.core.getAccessibleProjectProbe(projectId);
+      if (probe) {
+        if (!probe.accessible) {
+          return { refreshed: false, skippedReason: 'remote-project-missing' };
+        }
+        remoteWatermark = probe.watermark;
+      } else {
+        // probe 不可用时回退到旧水位 RPC
+        remoteWatermark = await this.core.getProjectSyncWatermark(projectId);
+      }
+
       if (remoteWatermark) {
         const remoteUpdatedAtMs = new Date(remoteWatermark).getTime();
         if (Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs <= localWatermarkMs) {

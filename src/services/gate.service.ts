@@ -5,10 +5,11 @@
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
 
-import { Injectable, inject, signal, NgZone } from '@angular/core';
+import { Injectable, inject, signal, NgZone, effect } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';
+import { SYNC_CONFIG } from '../config/sync.config';
 import { BlackBoxService } from './black-box.service';
 import { LoggerService } from './logger.service';
 import {
@@ -41,6 +42,7 @@ const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
 
 /** 动画超时时间（毫秒）- 防止动画卡死导致按钮永久禁用 */
 const ANIMATION_TIMEOUT_MS = 1200;
+const GATE_REVIEW_SYNC_INTERVAL_MS = Math.max(30_000, SYNC_CONFIG.BLACKBOX_PULL_FRESHNESS_WINDOW);
 
 export type GateMotionState =
   | 'idle'
@@ -92,6 +94,8 @@ export class GateService {
 
   /** 当前动作动画（用于防止 timeout + animationend 双触发） */
   private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
+  private reviewSyncTimerId: ReturnType<typeof setInterval> | null = null;
+  private reviewSyncInFlight = false;
 
   /**
    * 检测用户是否启用了减少动画（prefers-reduced-motion）
@@ -109,6 +113,123 @@ export class GateService {
 
   constructor() {
     this.setupReducedMotionListener();
+    this.setupLivePendingEntrySync();
+  }
+
+  private setupLivePendingEntrySync(): void {
+    effect(() => {
+      const state = gateState();
+      const pending = pendingBlackBoxEntries();
+
+      if (state !== 'reviewing') {
+        this.stopReviewingRemoteSync();
+        return;
+      }
+
+      this.syncReviewingQueueWithPending(pending, 'signal');
+      this.ensureReviewingRemoteSync();
+    });
+  }
+
+  private ensureReviewingRemoteSync(): void {
+    if (typeof window === 'undefined') return;
+    if (this.reviewSyncTimerId) return;
+
+    this.reviewSyncTimerId = setInterval(() => {
+      if (gateState() !== 'reviewing') {
+        this.stopReviewingRemoteSync();
+        return;
+      }
+
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+
+      if (this.reviewSyncInFlight) {
+        return;
+      }
+
+      this.reviewSyncInFlight = true;
+
+      this.blackBoxService.loadFromServer()
+        .then(() => {
+          this.ngZone.run(() => {
+            if (gateState() !== 'reviewing') return;
+            this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'remote');
+          });
+        })
+        .catch((error: unknown) => {
+          this.logger.debug('Gate', 'Remote pull while gate reviewing failed', {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        })
+        .finally(() => {
+          this.reviewSyncInFlight = false;
+        });
+    }, GATE_REVIEW_SYNC_INTERVAL_MS);
+  }
+
+  private stopReviewingRemoteSync(): void {
+    if (this.reviewSyncTimerId) {
+      clearInterval(this.reviewSyncTimerId);
+      this.reviewSyncTimerId = null;
+    }
+    this.reviewSyncInFlight = false;
+  }
+
+  private syncReviewingQueueWithPending(
+    latestPending: BlackBoxEntry[],
+    source: 'checkGate' | 'signal' | 'remote'
+  ): void {
+    const currentItems = gatePendingItems();
+    const currentIndex = gateCurrentIndex();
+    const safeIndex = Math.min(Math.max(currentIndex, 0), currentItems.length);
+
+    if (safeIndex !== currentIndex) {
+      gateCurrentIndex.set(safeIndex);
+    }
+
+    const handledPrefix = currentItems.slice(0, safeIndex);
+    const handledIds = new Set(handledPrefix.map(item => item.id));
+    const nextUnprocessed = latestPending.filter(item => !handledIds.has(item.id));
+    const nextItems = [...handledPrefix, ...nextUnprocessed];
+
+    if (!this.isSameQueue(currentItems, nextItems)) {
+      gatePendingItems.set(nextItems);
+      this.logger.debug('Gate', `Gate queue refreshed from ${source}`, {
+        before: currentItems.length,
+        after: nextItems.length,
+        handled: safeIndex
+      });
+    }
+
+    if (safeIndex >= nextItems.length) {
+      this.completeGateSession('queue-empty');
+    }
+  }
+
+  private isSameQueue(a: BlackBoxEntry[], b: BlackBoxEntry[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].id !== b[i].id) return false;
+      if (a[i].updatedAt !== b[i].updatedAt) return false;
+    }
+    return true;
+  }
+
+  private completeGateSession(reason: 'all-processed' | 'queue-empty'): void {
+    gateState.set('completed');
+    this.showCompletionMessage.set(true);
+    this.cardAnimation.set('idle');
+    this.actionInFlight = null;
+    this.clearAnimationTimeout();
+    this.stopReviewingRemoteSync();
+
+    this.logger.info('Gate', `Gate completed (${reason})`);
+
+    setTimeout(() => {
+      this.showCompletionMessage.set(false);
+    }, 1500);
   }
 
   /**
@@ -178,7 +299,8 @@ export class GateService {
   checkGate(): void {
     // 如果大门已经在审查中，不要重复初始化（避免动画叠加和状态重置）
     if (gateState() === 'reviewing') {
-      this.logger.debug('Gate', 'Gate already reviewing, skipping re-init');
+      this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'checkGate');
+      this.logger.debug('Gate', 'Gate already reviewing, queue refreshed');
       return;
     }
 
@@ -296,15 +418,7 @@ export class GateService {
     const total = gatePendingItems().length;
 
     if (nextIndex >= total) {
-      gateState.set('completed');
-      this.showCompletionMessage.set(true);
-      this.cardAnimation.set('idle');
-
-      this.logger.info('Gate', 'Gate completed, all items processed');
-
-      setTimeout(() => {
-        this.showCompletionMessage.set(false);
-      }, 1500);
+      this.completeGateSession('all-processed');
       return;
     }
 
@@ -379,6 +493,7 @@ export class GateService {
    */
   forceBypass(): void {
     this.devForceActive.set(false);
+    this.stopReviewingRemoteSync();
     gateState.set('bypassed');
     localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
     this.logger.warn('Gate', 'Gate force bypassed');
@@ -389,6 +504,7 @@ export class GateService {
     this.devForceActive.set(false);
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
+    this.stopReviewingRemoteSync();
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
     resetGateState();
@@ -428,6 +544,7 @@ export class GateService {
    */
   devForceShowGate(): void {
     this.devForceActive.set(true);
+    this.stopReviewingRemoteSync();
     localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
 
     if (!focusPreferences().gateEnabled) {

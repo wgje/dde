@@ -796,11 +796,20 @@ function spawnVitest(commandArgs) {
     const invokedAt = Date.now();
     let spawnedAt = invokedAt;
 
-    const child = spawn(npxBin, commandArgs, {
+    // On Windows, spawning .cmd files (like npx.cmd) with stdio:'inherit' can
+    // fail with EINVAL in Node.js v22+ when the parent's stdio is a pipe
+    // (e.g. VS Code integrated terminal). Using shell:true routes through
+    // cmd.exe and avoids the EINVAL error.
+    const spawnOpts = {
       cwd: projectRoot,
       env: process.env,
       stdio: 'inherit',
-    });
+    };
+    if (process.platform === 'win32') {
+      spawnOpts.shell = true;
+    }
+
+    const child = spawn(npxBin, commandArgs, spawnOpts);
 
     child.on('spawn', () => {
       spawnedAt = Date.now();

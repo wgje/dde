@@ -41,7 +41,13 @@ export interface BatchSyncResult {
 export interface BatchSyncCallbacks {
   pushProject: (project: Project, fromRetryQueue?: boolean) => Promise<boolean>;
   pushTask: (task: Task, projectId: string, skipTombstoneCheck?: boolean, fromRetryQueue?: boolean) => Promise<boolean>;
-  pushTaskPosition: (taskId: string, x: number, y: number) => Promise<boolean>;
+  pushTaskPosition: (
+    taskId: string,
+    x: number,
+    y: number,
+    projectId?: string,
+    fallbackTask?: Task
+  ) => Promise<boolean>;
   pushConnection: (connection: Connection, projectId: string, skipTombstoneCheck?: boolean, skipTaskExistenceCheck?: boolean, fromRetryQueue?: boolean) => Promise<boolean>;
   getTombstoneIds: (projectId: string) => Promise<Set<string>>;
   getConnectionTombstoneIds: (projectId: string) => Promise<Set<string>>;
@@ -107,6 +113,44 @@ export class BatchSyncService {
    */
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 查询远端已存在的任务 ID。
+   * 仅用于连接推送前做依赖校验，避免外键约束错误风暴。
+   */
+  private async fetchRemoteExistingTaskIds(
+    client: SupabaseClient,
+    projectId: string,
+    taskIds: string[]
+  ): Promise<Set<string>> {
+    const existingIds = new Set<string>();
+    if (taskIds.length === 0) return existingIds;
+
+    const CHUNK_SIZE = 100;
+    for (let offset = 0; offset < taskIds.length; offset += CHUNK_SIZE) {
+      const chunk = taskIds.slice(offset, offset + CHUNK_SIZE);
+      const { data, error } = await client
+        .from('tasks')
+        .select('id')
+        .eq('project_id', projectId)
+        .in('id', chunk);
+
+      if (error) {
+        this.logger.warn('查询远端任务存在性失败，连接依赖校验降级为本地成功集', {
+          projectId,
+          chunkSize: chunk.length,
+          error: error.message
+        });
+        return existingIds;
+      }
+
+      for (const row of (data || [])) {
+        if (row.id) existingIds.add(String(row.id));
+      }
+    }
+
+    return existingIds;
   }
   
   /**
@@ -241,7 +285,21 @@ export class BatchSyncService {
           
           let success: boolean;
           if (isPositionOnlyUpdate) {
-            success = await this.callbacks.pushTaskPosition(task.id, task.x, task.y);
+            success = await this.callbacks.pushTaskPosition(
+              task.id,
+              task.x,
+              task.y,
+              projectSnapshot.id,
+              task
+            );
+            // 位置增量更新失败时，立即回退到完整 upsert，避免 406 导致依赖断裂
+            if (!success) {
+              this.logger.warn('任务位置增量推送失败，回退完整任务推送', {
+                projectId: projectSnapshot.id,
+                taskId: task.id
+              });
+              success = await this.callbacks.pushTask(task, projectSnapshot.id, true);
+            }
           } else {
             success = await this.callbacks.pushTask(task, projectSnapshot.id, true);
           }
@@ -264,31 +322,53 @@ export class BatchSyncService {
       
       // 5. 批量保存连接
       const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(projectSnapshot.id);
-      // 包含当前批次成功的任务 + 已经存在于远端的 tombstone 排除后的任务
-      const allSyncedTaskIds = new Set(successfulTaskIds);
-      // 所有本地任务中不在 tombstone 列表里的任务视为远端可能已存在
-      for (const task of projectSnapshot.tasks) {
-        if (!tombstoneIds.has(task.id)) {
-          allSyncedTaskIds.add(task.id);
-        }
-      }
-      const connectionsToSync = projectSnapshot.connections.filter(conn => {
+      const activeConnections = projectSnapshot.connections.filter(conn => {
         if (conn.deletedAt) return false;
         if (connectionTombstoneIds.has(conn.id)) return false;
-        // 连接的两端都必须是已同步或已知存在的任务
-        if (!allSyncedTaskIds.has(conn.source) || !allSyncedTaskIds.has(conn.target)) {
-          this.logger.warn('跳过连接（引用任务未同步）', { connectionId: conn.id });
-          return false;
-        }
         return true;
       });
+
+      const referencedTaskIds = Array.from(
+        new Set(activeConnections.flatMap(conn => [conn.source, conn.target]))
+      );
+      const remoteExistingTaskIds = await this.fetchRemoteExistingTaskIds(
+        client,
+        projectSnapshot.id,
+        referencedTaskIds
+      );
+      const allSyncedTaskIds = new Set<string>([...successfulTaskIds, ...remoteExistingTaskIds]);
+
+      const blockedConnections: Connection[] = [];
+      const connectionsToSync = activeConnections.filter(conn => {
+        const ready =
+          allSyncedTaskIds.has(conn.source) &&
+          allSyncedTaskIds.has(conn.target);
+        if (!ready) {
+          blockedConnections.push(conn);
+        }
+        return ready;
+      });
+
+      for (const blocked of blockedConnections) {
+        this.logger.warn('跳过连接（引用任务未同步）', {
+          connectionId: blocked.id,
+          projectId: projectSnapshot.id,
+          source: blocked.source,
+          target: blocked.target,
+          sourceReady: allSyncedTaskIds.has(blocked.source),
+          targetReady: allSyncedTaskIds.has(blocked.target)
+        });
+        failedConnectionIds.push(blocked.id);
+        retryEnqueued.push(`connection:${blocked.id}`);
+        this.callbacks.addToRetryQueue('connection', 'upsert', blocked, projectSnapshot.id);
+      }
       
       for (let i = 0; i < connectionsToSync.length; i++) {
         if (i > 0) await this.delay(200);
         
         try {
           const connection = connectionsToSync[i];
-          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, true);
+          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false);
           if (!pushed) {
             failedConnectionIds.push(connection.id);
             retryEnqueued.push(`connection:${connection.id}`);

@@ -44,6 +44,12 @@ export interface GoJSLinkData {
   rootAncestorIndex?: number;
   /** 家族专属颜色（HSL 格式） */
   familyColor?: string;
+  /**
+   * 【2026-02-25 性能优化】GoJS link template category
+   * 空字符串 = 默认模板（父子链接，无 label panel）
+   * 'crossTree' = 跨树链接模板（含 label panel + tooltip）
+   */
+  category?: string;
 }
 
 /**
