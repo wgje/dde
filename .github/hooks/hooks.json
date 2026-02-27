@@ -1,52 +1,12 @@
 {
   "version": 1,
-  "description": "NanoFlow Copilot Hooks - 映射自 everything-claude-code",
+  "description": "NanoFlow Copilot Hooks",
   "hooks": {
-    "sessionStart": [
-      {
-        "type": "command",
-        "bash": "echo '{\"message\": \"NanoFlow session started at '$(date)'\"}'",
-        "comment": "会话开始通知",
-        "timeoutSec": 5
-      },
-      {
-        "type": "command",
-        "bash": "if [ -f .github/context/current-focus.md ]; then jq -Rs '{message: .}' .github/context/current-focus.md 2>/dev/null || echo '{\"message\": \"context loaded\"}'; else echo '{\"message\": \"No context file found\"}'; fi",
-        "comment": "恢复上次会话上下文",
-        "timeoutSec": 10
-      }
-    ],
-    "sessionEnd": [
-      {
-        "type": "command",
-        "bash": "echo '{\"message\": \"NanoFlow session ended at '$(date)'\"}'",
-        "comment": "会话结束通知",
-        "timeoutSec": 5
-      }
-    ],
     "preToolUse": [
       {
         "type": "command",
-        "bash": ".github/hooks/scripts/pre-tool-check.sh",
-        "powershell": ".github/hooks/scripts/pre-tool-check.ps1",
-        "comment": "工具调用前的安全检查（阻止危险命令）",
+        "command": "powershell.exe -NoProfile -NonInteractive -OutputFormat Text -File .github/hooks/scripts/pre-tool-check.ps1",
         "timeoutSec": 10
-      }
-    ],
-    "postToolUse": [
-      {
-        "type": "command",
-        "bash": "echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Tool: ${TOOL_NAME:-unknown}\" >> .github/hooks/logs/audit.log 2>/dev/null; echo '{\"message\": \"audit logged\"}'",
-        "comment": "审计日志：记录工具调用",
-        "timeoutSec": 5
-      }
-    ],
-    "errorOccurred": [
-      {
-        "type": "command",
-        "bash": "echo '❌ Error occurred: ${ERROR_MESSAGE:-unknown}' >> .github/hooks/logs/errors.log 2>/dev/null; echo '{\"message\": \"error logged\"}'",
-        "comment": "错误日志记录",
-        "timeoutSec": 5
       }
     ]
   }
