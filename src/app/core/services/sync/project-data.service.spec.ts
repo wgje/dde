@@ -144,4 +144,71 @@ describe('ProjectDataService', () => {
     expect(rpc).toHaveBeenCalledWith('get_project_sync_watermark', { p_project_id: 'proj-1' });
     expect(watermark).toBe('2026-02-14T08:10:00.000Z');
   });
+
+  it('Supabase 未配置且处于离线模式时应仅记录一次 info 且不设置同步错误', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const syncState = {
+      setSyncError: vi.fn(),
+    };
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            isOfflineMode: () => true,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: syncState,
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const getSupabaseClient = (service as unknown as { getSupabaseClient: () => Promise<unknown> }).getSupabaseClient.bind(service);
+
+    await getSupabaseClient();
+    await getSupabaseClient();
+
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(syncState.setSyncError).not.toHaveBeenCalled();
+  });
 });

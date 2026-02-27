@@ -630,6 +630,14 @@ export class ImportService {
       tags: exportTask.tags,
       priority: exportTask.priority,
       dueDate: exportTask.dueDate,
+      expected_minutes:
+        typeof exportTask.expected_minutes === 'number' ? exportTask.expected_minutes : null,
+      cognitive_load:
+        exportTask.cognitive_load === 'high' || exportTask.cognitive_load === 'low'
+          ? exportTask.cognitive_load
+          : null,
+      wait_minutes:
+        typeof exportTask.wait_minutes === 'number' ? exportTask.wait_minutes : null,
       hasIncompleteTask: exportTask.hasIncompleteTask,
       deletedAt: exportTask.deletedAt,
       // 导入恢复停泊元数据，刷新 lastVisitedAt，清除过期提醒（A3.11）

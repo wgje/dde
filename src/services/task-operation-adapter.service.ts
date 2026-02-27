@@ -190,6 +190,24 @@ export class TaskOperationAdapterService {
     this.core.updateTaskDueDate(taskId, dueDate);
   }
 
+  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
+    this.markEditing();
+    this.recorder.lastUpdateType = 'content';
+    this.core.updateTaskExpectedMinutes(taskId, expectedMinutes);
+  }
+
+  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
+    this.markEditing();
+    this.recorder.lastUpdateType = 'content';
+    this.core.updateTaskCognitiveLoad(taskId, load);
+  }
+
+  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
+    this.markEditing();
+    this.recorder.lastUpdateType = 'content';
+    this.core.updateTaskWaitMinutes(taskId, waitMinutes);
+  }
+
   updateTaskTags(taskId: string, tags: string[]): void {
     this.markEditing();
     this.recorder.lastUpdateType = 'content';

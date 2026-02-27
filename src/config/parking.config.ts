@@ -1,111 +1,105 @@
 // ============================================
-// State Overlap — 停泊功能配置常量
-// 策划案 A9 配置常量规范
+// Parking / Dock feature constants
 // ============================================
 
-/**
- * 停泊功能配置
- *
- * ⚠️ 禁止新增以下已废弃常量：
- * MAX_PARKED_TASKS, MISSION_CONTROL_THRESHOLD, OVERLAP_NOTICE_DURATION,
- * LATER_TODAY_CAP, LATER_TODAY_HIDDEN_AFTER, TOMORROW_MORNING,
- * LATER_TODAY, SIDEBAR_PARKING_HEIGHT
- */
 export const PARKING_CONFIG = {
-  /** 72h 覆盖完整周末（周五下午 → 周一上午） */
+  // Core
   PARKED_TASK_STALE_THRESHOLD: 72 * 60 * 60 * 1000,
-  /** 距 72h 剩余 8h 时显示"即将清理"橙色标签 */
   PARKED_TASK_STALE_WARNING: 64 * 60 * 60 * 1000,
-  /** 只警告，不强删（此值待 MVP 验证后调整） */
   PARKED_TASK_SOFT_LIMIT: 10,
 
-  /** 最短可见时长（毫秒），防误消散 */
   NOTICE_MIN_VISIBLE_MS: 2500,
-  /** 无操作兜底淡出时长（毫秒） */
   NOTICE_FALLBACK_TIMEOUT_MS: 15000,
-  /** 提醒通知前 5s 不被外部交互消散（三阶段渐进消散的第一阶段） */
   REMINDER_IMMUNE_MS: 5000,
-
-  /** 恢复高亮闪烁时长——亮起→保持→淡出三段式 */
   EDIT_LINE_FLASH_DURATION: 1000,
 
-  /** Snooze 预设时间（毫秒） */
   SNOOZE_PRESETS: {
-    /** 5 分钟 */
     QUICK: 5 * 60 * 1000,
-    /** 30 分钟 */
     NORMAL: 30 * 60 * 1000,
-    /**
-     * 2h-later = 当前时间 + 2h，不封顶
-     * ⚠️ 不使用 "later-today" 命名——用户在 23:00 操作时 +2h 会跨天，
-     * "today" 暗示日内，产生认知歧义
-     */
     TWO_HOURS_LATER: 2 * 60 * 60 * 1000,
-    /** 备选第三档：当前时间 + 24h */
     TOMORROW_SAME_TIME: 24 * 60 * 60 * 1000,
   },
 
-  /**
-   * Snooze 软上限
-   * 5 次后视觉弱化但不禁止继续 snooze
-   * 3 次在高强度工作日一上午即可用完，放宽至 5
-   */
   MAX_SNOOZE_COUNT: 5,
-
-  /** 最小触控目标尺寸（px），符合 WCAG 2.1 */
   MIN_TOUCH_TARGET: 44,
-
-  /**
-   * 手动移除停泊项后 Snackbar 撤回窗口（毫秒）
-   * 5s 符合 Material Design 默认值，留够阅读+决策时间
-   */
   REMOVE_UNDO_TIMEOUT_MS: 5000,
-
-  /**
-   * 自动衰老清理后 Snackbar 撤回窗口（毫秒）
-   * 系统行为需更长理解时间
-   */
   EVICTION_UNDO_TIMEOUT_MS: 8000,
-
-  /**
-   * 衰老清理在启动后延迟执行的等待时间（毫秒）
-   * 用户首次交互后再延迟此毫秒数
-   */
   EVICTION_STARTUP_DELAY_MS: 3000,
 
-  // ─── Dock 布局 ───
-  /**
-   * 触发条基准宽度（收起态胶囊），实际 180-220px 自适应文案长度
-   */
+  // Dock layout
   DOCK_TRIGGER_WIDTH: 200,
-  /** 触发条高度 */
   DOCK_TRIGGER_HEIGHT: 32,
-  /**
-   * 展开态面板最大宽度
-   * CSS: min(720px, 80vw)
-   */
-  DOCK_EXPANDED_MAX_WIDTH: 720,
-  /**
-   * 展开态面板基准高度 vh
-   * CSS: clamp(280px, 45vh, min(480px, 70vh))
-   */
-  DOCK_EXPANDED_HEIGHT_VH: 45,
-  /** 展开/收起动画时长（毫秒） */
+  DOCK_EXPANDED_MAX_WIDTH: 860,
+  DOCK_BAR_HEIGHT: 120,
   DOCK_ANIMATION_MS: 200,
-  /** 左侧列表栏占展开面板宽度比例 */
-  DOCK_LIST_RATIO: 0.4,
-  /** 移动端 Bottom Sheet 最大高度（vh 百分比） */
   DOCK_MOBILE_MAX_HEIGHT_VH: 70,
-  /** 移动端下拉收起阈值（px） */
   DOCK_MOBILE_DISMISS_THRESHOLD: 80,
 
-  // ─── 提醒红点 ───
-  /** 提醒通知连续被兜底淡出此次数后显示红点 */
-  REMINDER_BADGE_THRESHOLD: 2,
+  // Focus shell (v3)
+  DOCK_V3_STRICT_SAMPLE_UI: false,
+  DOCK_V3_SHOW_ADVANCED_UI: true,
+  DOCK_V3_SHOW_HELP_HINTS: true,
+  DOCK_FOCUS_BG_IMAGE_URL:
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 900'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%230b1020'/%3E%3Cstop offset='55%25' stop-color='%231a1f3b'/%3E%3Cstop offset='100%25' stop-color='%23230f2f'/%3E%3C/linearGradient%3E%3CradialGradient id='r1' cx='25%25' cy='30%25' r='40%25'%3E%3Cstop offset='0%25' stop-color='%234f46e5' stop-opacity='0.35'/%3E%3Cstop offset='100%25' stop-color='%234f46e5' stop-opacity='0'/%3E%3C/radialGradient%3E%3CradialGradient id='r2' cx='75%25' cy='70%25' r='45%25'%3E%3Cstop offset='0%25' stop-color='%2310b981' stop-opacity='0.2'/%3E%3Cstop offset='100%25' stop-color='%2310b981' stop-opacity='0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='1600' height='900' fill='url(%23g)'/%3E%3Crect width='1600' height='900' fill='url(%23r1)'/%3E%3Crect width='1600' height='900' fill='url(%23r2)'/%3E%3C/svg%3E",
+  DOCK_FOCUS_BACKDROP_BLUR_PX: 24,
+  DOCK_FOCUS_BACKDROP_ALPHA: 0.5,
+  DOCK_STAGE_OFFSET_Y_PX: 48,
 
-  // ─── BeforeUnload ───
-  /** BeforeUnload 注册优先级（高于默认 10） */
+  // Console stack
+  CONSOLE_CARD_WIDTH: 340,
+  CONSOLE_CARD_HEIGHT: 440,
+  CONSOLE_STACK_SCALE: 0.85,
+  CONSOLE_STACK_Y_OFFSET: -60,
+  CONSOLE_STACK_BG_OPACITY: 0.4,
+  CONSOLE_FLY_OUT_MS: 600,
+  CONSOLE_PUSH_IN_MS: 500,
+  CONSOLE_DRAW_MS: 600,
+  CONSOLE_SINK_MS: 500,
+  CONSOLE_SILENT_APPEAR_MS: 400,
+  CONSOLE_PUSH_BACK_MS: 400,
+  CONSOLE_MAGNET_PULL_MS: 500,
+
+  // Radar
+  RADAR_STRONG_RADIUS: 280,
+  RADAR_WEAK_RADIUS: 420,
+  RADAR_STRONG_OPACITY: 0.6,
+  RADAR_WEAK_OPACITY: 0.25,
+  RADAR_WEAK_SCALE: 0.9,
+  RADAR_CREATE_FORM_WIDTH: 240,
+  RADAR_FLOAT_DURATION_S: 3.5,
+  RADAR_HIGHLIGHT_PULSE_MS: 800,
+
+  // Status machine
+  STATUS_MACHINE_MIN_WIDTH: 220,
+  STATUS_RING_PULSE_MS: 2000,
+  STATUS_MACHINE_NOTIFICATION_TONE_HZ: 440,
+  STATUS_MACHINE_NOTIFICATION_DURATION_MS: 200,
+  STATUS_RING_STROKE_WIDTH: 2.5,
+  STATUS_RING_RADIUS: 9,
+  STATUS_RING_WAIT_STROKE: '#f59e0b',
+  STATUS_RING_EXPIRED_STROKE: '#fbbf24',
+
+  // Scheduling
+  SCHEDULE_TIGHT_THRESHOLD_MINUTES: 2,
+  SCHEDULE_STRONG_ZONE_WEIGHT: 35,
+  SCHEDULE_WEAK_ZONE_WEIGHT: 20,
+  SCHEDULE_LOW_LOAD_WEIGHT: 20,
+  SCHEDULE_HIGH_LOAD_WEIGHT: 8,
+  SCHEDULE_TIME_TIGHT_MATCH_WEIGHT: 30,
+  SCHEDULE_TIME_NORMAL_MATCH_WEIGHT: 20,
+  SCHEDULE_TIME_SMALL_OVERRUN_WEIGHT: 12,
+  SCHEDULE_TIME_MISMATCH_PENALTY: -10,
+  SCHEDULE_WAIT_CHILD_WEIGHT: 8,
+  SCHEDULE_OVER_RUN_ALLOWANCE_MINUTES: 10,
+  SCHEDULE_TIGHT_REMAINING_MINUTES: 5,
+  SCHEDULE_CANDIDATE_C_TOO_LONG_RATIO: 1.5,
+  SCHEDULE_CANDIDATE_C_TOO_SHORT_RATIO: 0.35,
+  PENDING_DECISION_TTL_MS: 3 * 60 * 1000,
+  FRAGMENT_PHASE_AUTO_POPUP: true,
+
+  // Misc
+  REMINDER_BADGE_THRESHOLD: 2,
   BEFORE_UNLOAD_PRIORITY: 5,
-  /** localStorage 草稿 key */
   SNAPSHOT_DRAFT_KEY: 'parking-snapshot-draft',
+  DOCK_SNAPSHOT_STORAGE_KEY: 'nanoflow.dock-snapshot.v3',
 } as const;

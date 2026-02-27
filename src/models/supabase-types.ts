@@ -375,6 +375,9 @@ export interface TaskRow {
   short_id: string | null;
   priority: TaskPriorityDb;
   due_date: string | null;
+  expected_minutes: number | null;
+  cognitive_load: 'high' | 'low' | null;
+  wait_minutes: number | null;
   tags: Json;
   attachments: Json;
   deleted_at: string | null;
@@ -400,6 +403,9 @@ export interface TaskInsert {
   short_id?: string | null;
   priority?: TaskPriorityDb;
   due_date?: string | null;
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
   tags?: Json;
   attachments?: Json;
   deleted_at?: string | null;
@@ -421,6 +427,9 @@ export interface TaskUpdate {
   short_id?: string | null;
   priority?: TaskPriorityDb;
   due_date?: string | null;
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
   tags?: Json;
   attachments?: Json;
   deleted_at?: string | null;
@@ -496,6 +505,8 @@ export interface UserPreferencesRow {
   local_backup_interval_ms: number | null;
   /** 专注模式偏好（JSONB） */
   focus_preferences: Json | null;
+  /** 停泊坞快照（JSONB） */
+  dock_snapshot: Json | null;
   created_at: string;
   updated_at: string;
 }
@@ -512,6 +523,7 @@ export interface UserPreferencesInsert {
   local_backup_enabled?: boolean | null;
   local_backup_interval_ms?: number | null;
   focus_preferences?: Json | null;
+  dock_snapshot?: Json | null;
 }
 
 /** 用户偏好设置更新数据 */
@@ -524,6 +536,7 @@ export interface UserPreferencesUpdate {
   local_backup_enabled?: boolean | null;
   local_backup_interval_ms?: number | null;
   focus_preferences?: Json | null;
+  dock_snapshot?: Json | null;
 }
 
 // ============================================

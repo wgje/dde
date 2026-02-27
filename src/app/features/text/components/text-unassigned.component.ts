@@ -6,6 +6,7 @@ import { ProjectStateService } from '../../../../services/project-state.service'
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
+import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 
 /**
  * 待分配区组件
@@ -398,12 +399,12 @@ export class TextUnassignedComponent implements OnDestroy {
     event.preventDefault();
     event.stopPropagation();
 
-    // 提取拖放数据
-    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
-    if (!data) return;
-
+    const payload = event.dataTransfer ? readTaskDragPayload(event.dataTransfer) : null;
+    const fallbackData = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
     try {
-      const draggedTask = JSON.parse(data) as Task;
+      const draggedTask = payload
+        ? this.projectState.getTask(payload.taskId)
+        : fallbackData ? (JSON.parse(fallbackData) as Task) : null;
       
       // 只处理待分配块之间的拖放（都是 stage === null）
       if (draggedTask?.id && draggedTask.stage === null) {
@@ -428,8 +429,18 @@ export class TextUnassignedComponent implements OnDestroy {
           this.dragStart.emit({ event: new DragEvent('drop'), task: draggedTask });
         }
       }
-    } catch (err) {
-      // 数据解析失败，忽略
+    } catch {
+      if (!fallbackData) return;
+      // 数据解析失败，尝试按纯任务 ID 解析
+      const draggedTask = this.projectState.getTask(fallbackData);
+      if (!draggedTask || draggedTask.stage !== null) return;
+      const unassignedTasks = this.projectState.unassignedTasks().filter(t => t.id !== draggedTask.id);
+      if (unassignedTasks.length === 0) return;
+      const targetTask = unassignedTasks[0];
+      const result = this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+      if (result.ok) {
+        this.dragStart.emit({ event: new DragEvent('drop'), task: draggedTask });
+      }
     }
   }
 

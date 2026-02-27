@@ -9,6 +9,7 @@ import { Task } from '../../../../models';
 import { blackBoxEntriesMap } from '../../../../state/focus-stores';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
 import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
+import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 
 /**
  * 流程图侧边栏组件 (原 Palette/Strata Panel)
@@ -493,8 +494,14 @@ export class FlowPaletteComponent implements OnDestroy {
   // 拖动事件
   onDragStart(event: DragEvent, task: Task) {
     if (event.dataTransfer) {
-      event.dataTransfer.setData('text', JSON.stringify(task));
-      event.dataTransfer.setData('application/json', JSON.stringify(task));
+      writeTaskDragPayload(event.dataTransfer, {
+        v: 1,
+        type: 'task',
+        taskId: task.id,
+        projectId: this.projectState.activeProjectId(),
+        fromProjectId: this.projectState.activeProjectId(),
+        source: 'flow',
+      });
       event.dataTransfer.effectAllowed = 'move';
     }
     this.taskDragStart.emit({ event, task });
@@ -510,14 +517,17 @@ export class FlowPaletteComponent implements OnDestroy {
   onDrop(event: DragEvent) {
     event.preventDefault();
 
-    const data = event.dataTransfer?.getData('application/json') || event.dataTransfer?.getData('text');
-    if (!data) {
+    const payload = event.dataTransfer ? readTaskDragPayload(event.dataTransfer) : null;
+    const fallbackData = event.dataTransfer?.getData('application/json') || event.dataTransfer?.getData('text');
+    if (!payload && !fallbackData) {
       this.taskDrop.emit({ event });
       return;
     }
 
     try {
-      const draggedTask = JSON.parse(data) as { id?: string; stage?: number | null };
+      const draggedTask = payload
+        ? this.projectState.getTask(payload.taskId)
+        : (JSON.parse(fallbackData ?? '') as { id?: string; stage?: number | null });
 
       if (draggedTask?.id && draggedTask.stage === null) {
         this.taskDrop.emit({ event });

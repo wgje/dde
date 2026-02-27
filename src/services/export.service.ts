@@ -142,6 +142,9 @@ export interface ExportTask {
   priority?: 'low' | 'medium' | 'high' | 'urgent';
   /** 截止日期 */
   dueDate?: string | null;
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
   /** 是否包含未完成待办项 */
   hasIncompleteTask?: boolean;
   /** 软删除时间戳（回收站中的任务） */
@@ -530,6 +533,9 @@ export class ExportService {
       tags: task.tags,
       priority: task.priority,
       dueDate: task.dueDate,
+      expected_minutes: task.expected_minutes ?? null,
+      cognitive_load: task.cognitive_load ?? null,
+      wait_minutes: task.wait_minutes ?? null,
       hasIncompleteTask: task.hasIncompleteTask,
       deletedAt: task.deletedAt,
       // 导出保留停泊元数据但清除 contextSnapshot（A3.11）

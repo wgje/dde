@@ -189,6 +189,35 @@ export class ConflictDetectionService {
     }
 
     // 标签：智能合并两边的标签
+    if (local.expected_minutes !== remote.expected_minutes) {
+      hasConflict = true;
+      if (isFieldLocked('expected_minutes')) {
+        mergedTask.expected_minutes = local.expected_minutes;
+      } else {
+        mergedTask.expected_minutes =
+          remoteTime > localTime ? remote.expected_minutes : local.expected_minutes;
+      }
+    }
+
+    if (local.cognitive_load !== remote.cognitive_load) {
+      hasConflict = true;
+      if (isFieldLocked('cognitive_load')) {
+        mergedTask.cognitive_load = local.cognitive_load;
+      } else {
+        mergedTask.cognitive_load =
+          remoteTime > localTime ? remote.cognitive_load : local.cognitive_load;
+      }
+    }
+
+    if (local.wait_minutes !== remote.wait_minutes) {
+      hasConflict = true;
+      if (isFieldLocked('wait_minutes')) {
+        mergedTask.wait_minutes = local.wait_minutes;
+      } else {
+        mergedTask.wait_minutes = remoteTime > localTime ? remote.wait_minutes : local.wait_minutes;
+      }
+    }
+
     if (local.tags || remote.tags) {
       const localTags = local.tags || [];
       const remoteTags = remote.tags || [];

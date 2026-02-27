@@ -460,10 +460,12 @@ export type Database = {
       tasks: {
         Row: {
           attachments: Json | null
+          cognitive_load: string | null
           content: string | null
           created_at: string | null
           deleted_at: string | null
           due_date: string | null
+          expected_minutes: number | null
           id: string
           order: number | null
           parent_id: string | null
@@ -476,15 +478,18 @@ export type Database = {
           tags: Json | null
           title: string
           updated_at: string | null
+          wait_minutes: number | null
           x: number | null
           y: number | null
         }
         Insert: {
           attachments?: Json | null
+          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
+          expected_minutes?: number | null
           id?: string
           order?: number | null
           parent_id?: string | null
@@ -497,15 +502,18 @@ export type Database = {
           tags?: Json | null
           title?: string
           updated_at?: string | null
+          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }
         Update: {
           attachments?: Json | null
+          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
+          expected_minutes?: number | null
           id?: string
           order?: number | null
           parent_id?: string | null
@@ -518,6 +526,7 @@ export type Database = {
           tags?: Json | null
           title?: string
           updated_at?: string | null
+          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }
@@ -571,28 +580,46 @@ export type Database = {
       }
       user_preferences: {
         Row: {
+          auto_resolve_conflicts: boolean | null
+          color_mode: string | null
           created_at: string | null
+          dock_snapshot: Json | null
           floating_window_pref: string | null
+          focus_preferences: Json | null
           id: string
           layout_direction: string | null
+          local_backup_enabled: boolean | null
+          local_backup_interval_ms: number | null
           theme: string | null
           updated_at: string | null
           user_id: string
         }
         Insert: {
+          auto_resolve_conflicts?: boolean | null
+          color_mode?: string | null
           created_at?: string | null
+          dock_snapshot?: Json | null
           floating_window_pref?: string | null
+          focus_preferences?: Json | null
           id?: string
           layout_direction?: string | null
+          local_backup_enabled?: boolean | null
+          local_backup_interval_ms?: number | null
           theme?: string | null
           updated_at?: string | null
           user_id: string
         }
         Update: {
+          auto_resolve_conflicts?: boolean | null
+          color_mode?: string | null
           created_at?: string | null
+          dock_snapshot?: Json | null
           floating_window_pref?: string | null
+          focus_preferences?: Json | null
           id?: string
           layout_direction?: string | null
+          local_backup_enabled?: boolean | null
+          local_backup_interval_ms?: number | null
           theme?: string | null
           updated_at?: string | null
           user_id?: string
@@ -676,10 +703,12 @@ export type Database = {
       active_tasks: {
         Row: {
           attachments: Json | null
+          cognitive_load: string | null
           content: string | null
           created_at: string | null
           deleted_at: string | null
           due_date: string | null
+          expected_minutes: number | null
           id: string | null
           order: number | null
           parent_id: string | null
@@ -692,15 +721,18 @@ export type Database = {
           tags: Json | null
           title: string | null
           updated_at: string | null
+          wait_minutes: number | null
           x: number | null
           y: number | null
         }
         Insert: {
           attachments?: Json | null
+          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
+          expected_minutes?: number | null
           id?: string | null
           order?: number | null
           parent_id?: string | null
@@ -713,15 +745,18 @@ export type Database = {
           tags?: Json | null
           title?: string | null
           updated_at?: string | null
+          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }
         Update: {
           attachments?: Json | null
+          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
+          expected_minutes?: number | null
           id?: string | null
           order?: number | null
           parent_id?: string | null
@@ -734,6 +769,7 @@ export type Database = {
           tags?: Json | null
           title?: string | null
           updated_at?: string | null
+          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }

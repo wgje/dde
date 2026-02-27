@@ -272,6 +272,30 @@ export class TaskOperationService {
   updateTaskDueDate(taskId: string, dueDate: string | null): void {
     this.taskAttr.updateTaskDueDate(taskId, dueDate);
   }
+
+  /**
+   * 更新任务预计时长（分钟）
+   * @see TaskAttributeService.updateTaskExpectedMinutes
+   */
+  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
+    this.taskAttr.updateTaskExpectedMinutes(taskId, expectedMinutes);
+  }
+
+  /**
+   * 更新任务认知负荷
+   * @see TaskAttributeService.updateTaskCognitiveLoad
+   */
+  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
+    this.taskAttr.updateTaskCognitiveLoad(taskId, load);
+  }
+
+  /**
+   * 更新任务等待时长（分钟）
+   * @see TaskAttributeService.updateTaskWaitMinutes
+   */
+  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
+    this.taskAttr.updateTaskWaitMinutes(taskId, waitMinutes);
+  }
   
   /**
    * 更新任务标签

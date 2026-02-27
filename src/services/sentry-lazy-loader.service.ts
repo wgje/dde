@@ -95,6 +95,7 @@ export class SentryLazyLoaderService {
   
   /** 初始化 Promise（防止重复初始化） */
   private initPromise: Promise<void> | null = null;
+  private hasLoggedMissingDsn = false;
 
   /**
    * 触发 Sentry 懒加载初始化
@@ -111,6 +112,10 @@ export class SentryLazyLoaderService {
     
     // 开发环境跳过 Sentry 初始化（除非有 DSN）
     if (!environment.SENTRY_DSN) {
+      if (this.hasLoggedMissingDsn) {
+        return;
+      }
+      this.hasLoggedMissingDsn = true;
       console.warn('[SentryLazyLoader] 无 SENTRY_DSN，跳过初始化');
       return;
     }

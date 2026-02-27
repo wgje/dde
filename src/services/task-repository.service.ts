@@ -582,6 +582,9 @@ export class TaskRepositoryService {
       tags: row.tags ?? [],
       priority: row.priority ?? undefined,
       dueDate: row.due_date,
+      expected_minutes: row.expected_minutes ?? null,
+      cognitive_load: row.cognitive_load ?? null,
+      wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
       parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../models/parking').TaskParkingMeta | undefined ?? undefined,
     });
@@ -603,6 +606,9 @@ export class TaskRepositoryService {
       short_id: task.shortId ?? null,
       priority: task.priority ?? null,
       due_date: task.dueDate ?? null,
+      expected_minutes: task.expected_minutes ?? null,
+      cognitive_load: task.cognitive_load ?? null,
+      wait_minutes: task.wait_minutes ?? null,
       tags: task.tags ?? [],
       attachments: task.attachments ?? [],
       deleted_at: task.deletedAt ?? null,

@@ -104,14 +104,16 @@ export class AppProjectCoordinatorService {
 
   startRenameProject(projectId: string, currentName: string, event: Event): void {
     event.stopPropagation();
+    const normalizedName = typeof currentName === 'string' ? currentName : '';
     this.renamingProjectId.set(projectId);
-    this.renameProjectName.set(currentName);
-    this.originalProjectName = currentName;
+    this.renameProjectName.set(normalizedName);
+    this.originalProjectName = normalizedName;
   }
 
   executeRenameProject(): void {
     const projectId = this.renamingProjectId();
-    const newName = this.renameProjectName().trim();
+    const rawName = this.renameProjectName();
+    const newName = (typeof rawName === 'string' ? rawName : '').trim();
     if (projectId && newName && newName !== this.originalProjectName) {
       this.projectState.renameProject(projectId, newName);
       this.toast.success('项目重命名成功');

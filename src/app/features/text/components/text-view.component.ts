@@ -8,6 +8,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
 import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
+import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 
 // 子组件导入
 import { TextViewLoadingComponent } from './text-view-loading.component';
@@ -313,8 +314,17 @@ export class TextViewComponent implements OnInit, OnDestroy {
   onDragStart(data: { event: DragEvent; task: Task }) {
     const { event, task } = data;
     this.dragDropService.startDrag(task);
-    event.dataTransfer?.setData('application/json', JSON.stringify(task));
-    event.dataTransfer!.effectAllowed = 'move';
+    if (event.dataTransfer) {
+      writeTaskDragPayload(event.dataTransfer, {
+        v: 1,
+        type: 'task',
+        taskId: task.id,
+        projectId: this.projectState.activeProjectId(),
+        fromProjectId: this.projectState.activeProjectId(),
+        source: 'text',
+      });
+      event.dataTransfer.effectAllowed = 'move';
+    }
     
     const container = this.ops.getScrollContainer();
     if (container) {
@@ -386,23 +396,35 @@ export class TextViewComponent implements OnInit, OnDestroy {
     event.preventDefault();
     
     if (this.dragDropService.isTouchDragging) return;
-    
-    const jsonData = event.dataTransfer?.getData('application/json');
-    if (jsonData) {
-      const task = JSON.parse(jsonData) as Task;
-      const dropInfo = this.dragDropService.dropTargetInfo();
-      const beforeTaskId = dropInfo?.beforeTaskId ?? null;
-      const inferredParentId = this.ops.inferParentIdForDrop(stageNumber, beforeTaskId);
 
-      const result = this.taskOpsAdapter.moveTaskToStage(task.id, stageNumber, beforeTaskId, inferredParentId);
-      
-      if (isFailure(result)) {
-        this.ops.onAttachmentError(`无法将任务移动到阶段 ${stageNumber}：${getErrorMessage(result.error)}`);
-      } else {
-        this.stagesRef?.expandStage(stageNumber);
+    const payload = event.dataTransfer ? readTaskDragPayload(event.dataTransfer) : null;
+    const fallbackTask = (() => {
+      const jsonData = event.dataTransfer?.getData('application/json');
+      if (!jsonData) return null;
+      try {
+        return JSON.parse(jsonData) as Task;
+      } catch {
+        return null;
       }
+    })();
+    const taskId = payload?.taskId ?? fallbackTask?.id ?? null;
+    if (taskId) {
+      const task = this.projectState.getTask(taskId);
+      if (task) {
+        const dropInfo = this.dragDropService.dropTargetInfo();
+        const beforeTaskId = dropInfo?.beforeTaskId ?? null;
+        const inferredParentId = this.ops.inferParentIdForDrop(stageNumber, beforeTaskId);
 
-      this.ops.collapseSourceStageIfNeeded(stageNumber);
+        const result = this.taskOpsAdapter.moveTaskToStage(task.id, stageNumber, beforeTaskId, inferredParentId);
+        
+        if (isFailure(result)) {
+          this.ops.onAttachmentError(`无法将任务移动到阶段 ${stageNumber}：${getErrorMessage(result.error)}`);
+        } else {
+          this.stagesRef?.expandStage(stageNumber);
+        }
+
+        this.ops.collapseSourceStageIfNeeded(stageNumber);
+      }
     }
     
     const mouseExpandedStages = this.dragDropService.endDrag();

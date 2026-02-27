@@ -15,6 +15,7 @@ import {
   startSwipeTracking, 
   detectHorizontalSwipe 
 } from '../../../../utils/gesture';
+import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 
 @Component({
   selector: 'app-mobile-todo-drawer',
@@ -206,8 +207,14 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   // 拖动事件
   onDragStart(event: DragEvent, task: Task): void {
     if (event.dataTransfer) {
-      event.dataTransfer.setData('text', JSON.stringify(task));
-      event.dataTransfer.setData('application/json', JSON.stringify(task));
+      writeTaskDragPayload(event.dataTransfer, {
+        v: 1,
+        type: 'task',
+        taskId: task.id,
+        projectId: this.projectState.activeProjectId(),
+        fromProjectId: this.projectState.activeProjectId(),
+        source: 'flow',
+      });
       event.dataTransfer.effectAllowed = 'move';
     }
     this.taskDragStart.emit({ event, task });

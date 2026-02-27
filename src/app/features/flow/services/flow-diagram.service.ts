@@ -16,6 +16,8 @@ import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
 import { UI_CONFIG } from '../../../../config';
+import { ProjectStateService } from '../../../../services/project-state.service';
+import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
@@ -45,6 +47,7 @@ export class FlowDiagramService {
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
   private readonly themeService = inject(ThemeService);
+  private readonly projectState = inject(ProjectStateService);
   
   // ========== 委托的子服务 ==========
   private readonly layoutService = inject(FlowLayoutService);
@@ -750,18 +753,30 @@ export class FlowDiagramService {
     
     const dropHandler = (e: DragEvent) => {
       e.preventDefault();
-      const jsonData = e.dataTransfer?.getData("application/json");
-      const textData = e.dataTransfer?.getData("text");
-      const data = jsonData || textData;
-      if (!data || !this.diagram || !this.diagramDiv) return;
-      
-      const trimmed = data.trim();
-      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-        return;
-      }
-      
+      if (!e.dataTransfer || !this.diagram || !this.diagramDiv) return;
+
       try {
-        const task = JSON.parse(data);
+        const payload = readTaskDragPayload(e.dataTransfer);
+        let task: Task | null = payload ? this.projectState.getTask(payload.taskId) ?? null : null;
+
+        if (!task) {
+          const jsonData = e.dataTransfer.getData("application/json");
+          const textData = e.dataTransfer.getData("text");
+          const data = jsonData || textData;
+          if (!data) return;
+
+          const trimmed = data.trim();
+          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            const raw = JSON.parse(data) as Partial<Task> & { id?: unknown };
+            const candidateId = typeof raw.id === 'string' ? raw.id : null;
+            task = candidateId ? this.projectState.getTask(candidateId) ?? (raw as Task) : null;
+          } else {
+            task = this.projectState.getTask(trimmed) ?? null;
+          }
+        }
+
+        if (!task) return;
+
         // 使用 DragEvent 的坐标计算准确的拖放位置
         // diagram.lastInput.viewPoint 在拖放场景下可能不准确
         const rect = this.diagramDiv.getBoundingClientRect();

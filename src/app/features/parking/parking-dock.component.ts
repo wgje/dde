@@ -1,952 +1,658 @@
-/**
- * ParkingDockComponent — 停泊坞面板
- *
- * 策划案 A6.9 规范
- * 底部向上弹出的停泊任务管理面板，定位于 Text / Flow 分隔线中心
- * 统一桌面 / 移动端 / Text / Flow 所有场景
- *
- * 收起态：胶囊触发条「停泊 (N) ▲」
- * 展开态：列表 + 预览双栏面板（移动端单栏）
- */
-
-import {
+﻿import {
+  ChangeDetectionStrategy,
   Component,
+  HostListener,
+  OnDestroy,
+  computed,
   inject,
   signal,
-  computed,
-  OnDestroy,
-  ChangeDetectionStrategy,
-  HostListener,
-  ElementRef,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { UiStateService } from '../../../services/ui-state.service';
-import { ParkingService } from '../../../services/parking.service';
-import { SimpleReminderService } from '../../../services/simple-reminder.service';
-import { SpotlightService } from '../../../services/spotlight.service';
-import { TaskStore, ProjectStore } from '../../core/state/stores';
+import { DockEngineService } from '../../../services/dock-engine.service';
+import { TaskStore } from '../../core/state/stores';
+import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
+import { LoggerService } from '../../../services/logger.service';
 import { PARKING_CONFIG } from '../../../config/parking.config';
-import { Task } from '../../../models';
+import { AffinityZone, CognitiveLoad, DockPendingDecisionEntry } from '../../../models/parking-dock';
+import { getErrorMessage } from '../../../utils/result';
+import { readTaskDragPayload } from '../../../utils/task-drag-payload';
+import { DockConsoleStackComponent } from './components/dock-console-stack.component';
+import { DockRadarZoneComponent } from './components/dock-radar-zone.component';
+import { DockStatusMachineComponent } from './components/dock-status-machine.component';
+import { DockDailySlotComponent } from './components/dock-daily-slot.component';
 
 @Component({
   selector: 'app-parking-dock',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, FormsModule],
+  imports: [
+    CommonModule,
+    FormsModule,
+    DockConsoleStackComponent,
+    DockRadarZoneComponent,
+    DockStatusMachineComponent,
+    DockDailySlotComponent,
+  ],
   styles: [`
     :host {
       display: block;
       position: absolute;
-      bottom: 0;
-      left: 0;
-      width: 100%;
+      inset: 0;
       z-index: 50;
       pointer-events: none;
-      /* 禁止在宿主上使用 transform，否则会打破子元素的 position:fixed 参照系 */
     }
-    .dock-trigger {
+
+    /* ── 专注模式背景图 ── */
+    .focus-bg-image {
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 1s ease;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    .focus-bg-image.active {
+      opacity: 1;
+    }
+
+    /* ── 专注模式遮罩 ── */
+    .focus-backdrop {
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.8s ease, backdrop-filter 0.8s ease, background-color 0.8s ease;
+    }
+    .focus-backdrop.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* ── 玻璃拟态基础 ── */
+    .glass-card {
+      background: rgba(28, 25, 23, 0.45);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+    }
+
+    /* ── 底部坞栏 ── */
+    .dock-bar {
+      pointer-events: auto;
+      transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s ease;
+    }
+    /* 专注模式 - 收起：滑出底部 */
+    .dock-bar.focus-collapsed {
+      transform: translateX(-50%) translateY(calc(100% + 40px));
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* 专注模式 - 展开：从底部滑入 */
+    .dock-bar.focus-expanded {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    /* ── 半圆形停泊坞入口 ── */
+    .dock-semicircle {
       position: absolute;
       bottom: 0;
-      transform: translateX(-50%);
+      left: 50%;
+      z-index: 41;
       pointer-events: auto;
       cursor: pointer;
-      user-select: none;
-      transition: transform 120ms ease-out;
-      height: 32px;
+      transform: translateX(-50%);
+      width: 72px;
+      height: 36px;
+      border-radius: 72px 72px 0 0;
+      background: rgba(28, 25, 23, 0.88);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-bottom: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: width 0.25s ease, height 0.25s ease, background 0.2s ease,
+        box-shadow 0.2s ease;
+      box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
     }
-    .dock-trigger:hover {
-      transform: translateX(-50%) translateY(-2px);
+    .dock-semicircle:hover {
+      width: 90px;
+      height: 44px;
+      background: rgba(50, 44, 38, 0.95);
+      box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
     }
-    /* 触发条提醒脉冲动画（持续） */
-    .dock-trigger-pulse {
-      animation: triggerAmberPulse 2s infinite ease-in-out;
+    .dock-semicircle.expanded {
+      width: 90px;
+      background: rgba(45, 40, 35, 0.92);
     }
-    @keyframes triggerAmberPulse {
-      0%   { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
-      50%  { border-color: rgb(245, 158, 11); box-shadow: 0 0 10px 3px rgba(245, 158, 11, 0.2); transform: translateX(-50%) translateY(-1px); }
-      100% { border-color: rgb(252, 211, 77); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+    @keyframes semicircleIn {
+      from { opacity: 0; transform: translateX(-50%) translateY(36px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
     }
-    .dock-panel {
-      pointer-events: auto;
-      animation: dockSlideUp 200ms ease-out;
+    .dock-semicircle-enter {
+      animation: semicircleIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
     }
-    .dock-panel-exit {
-      animation: dockSlideDown 200ms ease-out forwards;
-    }
-    @keyframes dockSlideUp {
-      from { opacity: 0; transform: translateY(16px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes dockSlideDown {
-      from { opacity: 1; transform: translateY(0); }
-      to   { opacity: 0; transform: translateY(16px); }
-    }
-    .dock-backdrop {
-      pointer-events: auto;
-    }
-    /* 移动端 Bottom Sheet */
-    .dock-sheet {
-      pointer-events: auto;
-      animation: sheetSlideUp 200ms ease-out;
-    }
-    @keyframes sheetSlideUp {
-      from { transform: translateY(100%); }
-      to   { transform: translateY(0); }
-    }
-    /* 停泊卡片左侧标记条 & 悬停特效 */
-    .park-card {
+
+    /* ── 坞栏卡片 ── */
+    .dock-card {
       transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      cursor: pointer;
     }
-    .park-card:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+    .dock-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
-    .park-card-bar {
-      width: 3px;
-      border-radius: 2px;
-      background-color: rgba(99, 102, 241, 0.3);
+    .load-badge-high {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+    }
+    .load-badge-low {
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+    }
+
+    /* ── 拖放区域 ── */
+    .drop-zone {
       transition: all 0.2s ease;
     }
-    .park-card:hover .park-card-bar {
-      background-color: rgba(99, 102, 241, 0.8);
-      width: 4px;
+    .drop-zone.active {
+      border-color: rgba(99, 102, 241, 0.6);
+      background: rgba(99, 102, 241, 0.1);
     }
-    /* 即将清理标签 */
-    .stale-tag {
-      font-size: 10px;
-      padding: 1px 6px;
-      border-radius: 4px;
-      background-color: rgb(251, 191, 36);
-      color: rgb(120, 53, 15);
+
+    /* ── 主控台舞台 —— 3D 透视容器 ── */
+    .console-stage {
+      pointer-events: auto;
+      perspective: 1200px;
+      transform: translateY(48px);
     }
-    /* 移动端触发条底部安全距离（A6.9.5） */
-    @media (max-width: 767px) {
-      .dock-trigger {
-        margin-bottom: max(8px, env(safe-area-inset-bottom, 8px));
-      }
+
+    /* ── 碎片阶段日常任务浮层 ── */
+    .fragment-overlay {
+      pointer-events: auto;
     }
+    @keyframes overlayFadeIn {
+      from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+      to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+    .fragment-overlay-enter {
+      animation: overlayFadeIn 400ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .hide-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .hide-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    .new-task-form {
+      animation: slideDown 220ms ease-out;
+    }
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
     @media (prefers-reduced-motion: reduce) {
-      .dock-panel, .dock-sheet { animation: none; }
-      .dock-panel-exit { animation-duration: 0ms; }
-      .dock-trigger:hover { transform: translateX(-50%); }
-      .dock-trigger-flash { animation: none; }
+      .focus-bg-image,
+      .focus-backdrop,
+      .dock-bar,
+      .dock-card,
+      .new-task-form,
+      .fragment-overlay-enter,
+      .dock-semicircle,
+      .dock-semicircle-enter {
+        transition: none;
+        animation: none;
+      }
     }
   `],
   template: `
-    @if (parkedCount() > 0 || isOpen()) {
-      <!-- ═══ 触发条：N=0 且关闭时隐藏，零视觉负担（A6.8） ═══ -->
-      <div class="dock-trigger flex items-center justify-center gap-1.5 px-4 rounded-t-xl
-                  bg-white/80 dark:bg-stone-800/80 backdrop-blur-md
-                  border border-b-0 border-stone-200 dark:border-stone-700
-                  shadow-sm text-xs font-medium text-stone-600 dark:text-stone-300"
-           data-testid="parking-dock-trigger"
-           [style.left.%]="triggerLeftPercent()"
-           style="min-width: 200px;"
-           [class.border-amber-300]="hasUpcomingReminder()"
-           [class.dock-trigger-pulse]="hasUpcomingReminder() && !isOpen()"
-           [style.z-index]="isOpen() ? 60 : 50"
-           (click)="toggleDock()"
-           (keydown.enter)="toggleDock()"
-           (keydown.space)="toggleDock(); $event.preventDefault()"
-           tabindex="0"
-           role="button"
-           [attr.aria-expanded]="isOpen()"
-           aria-label="展开停泊坞">
-        <span>停泊 ({{ parkedCount() }}) {{ isOpen() ? '▼' : '▲' }}</span>
-        @if (reminderLabel() && !isOpen()) {
-          <span class="text-amber-600 dark:text-amber-400">· {{ reminderLabel() }}</span>
-        }
+    <div
+      class="focus-bg-image fixed inset-0 z-[5]"
+      [class.active]="engine.focusMode()"
+      [style.background-image]="'url(' + focusBackgroundUrl + ')'">
+    </div>
+
+    <div
+      class="focus-backdrop fixed inset-0 z-10"
+      [class.active]="engine.focusMode()"
+      [style.backdrop-filter]="engine.focusMode() ? focusBackdropFilter : 'blur(0px)'"
+      [style.webkitBackdropFilter]="engine.focusMode() ? focusBackdropFilter : 'blur(0px)'"
+      [style.background-color]="engine.focusMode() ? focusBackdropColor : 'rgba(0,0,0,0)'"
+      [style.pointer-events]="engine.focusMode() ? 'auto' : 'none'"
+      (click)="onBackdropClick()">
+    </div>
+
+    @if (engine.focusMode()) {
+      <div class="fixed top-6 right-8 z-50" style="pointer-events: auto;">
+        <app-dock-status-machine></app-dock-status-machine>
       </div>
     }
 
-    <!-- ═══ 展开态 ═══ -->
-    @if (isOpen()) {
-        <!-- 背景遮罩（点击收起） -->
-        <div class="dock-backdrop fixed inset-0 z-40" (click)="closeDock()"></div>
+    @if (engine.focusMode()) {
+      <div
+        class="fixed inset-0 z-30 flex items-center justify-center console-stage"
+        data-testid="dock-v3-focus-stage">
+        <app-dock-console-stack class="relative z-20"></app-dock-console-stack>
 
-        <!-- ─── 桌面端：面板 ─── -->
-        @if (!isMobile()) {
-          <div class="dock-panel fixed z-50 rounded-t-xl overflow-hidden flex flex-col
-                      border border-b-0 border-stone-200 dark:border-stone-700"
-               data-testid="parking-dock-panel"
-               [style.width.px]="panelWidth()"
-               [style.height.px]="panelHeight()"
-               [style.left.px]="panelLeft()"
-               [style.bottom]="'0px'"
-               [class.dock-panel-exit]="isPanelClosing()"
-               style="background: color-mix(in srgb, var(--theme-bg) 85%, transparent); backdrop-filter: blur(24px);
-                      box-shadow: 0 -8px 32px rgba(0,0,0,0.06), 0 -2px 8px rgba(0,0,0,0.04);"
-               (keydown.escape)="closeDock()">
-            
-            <!-- 顶部栏 -->
-            <div class="flex items-center justify-between px-4 py-2 border-b border-stone-100 dark:border-stone-700 shrink-0">
-              <span class="text-sm font-semibold text-stone-800 dark:text-stone-200">稍后处理</span>
-              <div class="flex items-center gap-2">
-                @if (isOverSoftLimit()) {
-                  <span class="text-[10px] text-amber-600 dark:text-amber-400">停泊任务较多</span>
-                }
-                <button (click)="closeDock()" 
-                        class="p-1 rounded hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-400 dark:text-stone-500"
-                        style="min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center;"
-                        aria-label="收起停泊坞">
-                  <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-                  </svg>
-                </button>
-              </div>
+        @if (!strictSampleMode && pendingDecisionEntries().length >= 2) {
+          <div
+            class="absolute left-1/2 -translate-x-1/2 -top-24 z-30 glass-card rounded-2xl px-3 py-2.5 border border-indigo-400/30 shadow-xl min-w-[360px] max-w-[520px]"
+            data-testid="dock-v3-pending-decision">
+            <div class="text-[10px] text-indigo-300/80 font-mono tracking-wide">
+              {{ engine.pendingDecision()?.reason || '候选任务时长匹配异常，请手动二选一' }}
             </div>
-
-            <!-- 双栏内容 -->
-            <div class="flex flex-1 min-h-0">
-              @if (parkedCount() === 0) {
-                <!-- 空态引导 -->
-                <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <div class="w-16 h-16 rounded-2xl bg-stone-50 dark:bg-stone-800/50 flex items-center justify-center mb-2 border border-stone-100 dark:border-stone-700/50 shadow-sm relative group overflow-hidden">
-                    <div class="absolute inset-0 bg-gradient-to-tr from-indigo-50 to-amber-50 dark:from-indigo-900/10 dark:to-amber-900/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                    <svg class="h-8 w-8 text-stone-400 dark:text-stone-500 transform group-hover:scale-110 transition-transform duration-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-                      <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
+            <div class="text-[10px] text-stone-500 mt-1">
+              主任务剩余窗口 {{ formatTime(Math.ceil(engine.pendingDecision()?.rootRemainingMinutes || 0)) }}
+            </div>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              @for (entry of pendingDecisionEntries(); track entry.taskId; let i = $index) {
+                <button
+                  type="button"
+                  class="rounded-xl border px-3 py-2 text-left transition-all hover:-translate-y-0.5"
+                  [ngClass]="i === 0 ? 'border-amber-400/50 bg-amber-500/10' : 'border-indigo-400/50 bg-indigo-500/10'"
+                  (click)="choosePendingCandidate(entry.taskId)"
+                  [attr.data-testid]="'dock-v3-pending-choice-' + i">
+                  <div class="text-[10px] font-mono mb-1" [class.text-amber-300]="i === 0" [class.text-indigo-300]="i === 1">
+                    {{ i === 0 ? '候选 C（原序）' : '推荐 D（替换）' }}
                   </div>
-                  <p class="text-sm text-stone-700 dark:text-stone-300 font-medium">暂无停泊任务</p>
-                  <p class="text-xs text-stone-500 dark:text-stone-400 leading-relaxed max-w-[280px]">
-                    在任务编辑器中点击「停泊」按钮，可将当前任务暂存到此处，保持工作区清爽。
-                  </p>
-                  <div class="flex items-center gap-1.5 mt-1 text-[10px] text-stone-400 dark:text-stone-500">
-                    <kbd class="px-1.5 py-0.5 rounded bg-stone-100 dark:bg-stone-700 border border-stone-200 dark:border-stone-600 font-mono">
-                      {{ quickSwitchShortcutLabel() }}
-                    </kbd>
-                    <span>快速回切上一个停泊任务</span>
+                  <div class="text-xs text-stone-100 font-medium truncate">{{ entry.title }}</div>
+                  <div class="mt-1 text-[10px] text-stone-400">
+                    {{ entry.zone === 'strong' ? '强关联' : '弱关联' }} · {{ entry.load === 'low' ? '低负荷' : '高负荷' }}
                   </div>
-                </div>
-              } @else {
-              <div class="overflow-y-auto border-r border-stone-100 dark:border-stone-700 p-2 flex flex-col gap-1"
-                   role="listbox"
-                   [style.width.%]="40">
-                @for (task of sortedParkedTasks(); track task.id) {
-                  <div class="park-card flex items-stretch gap-2 px-2 py-2 rounded-lg cursor-pointer
-                              hover:bg-stone-50 dark:hover:bg-stone-700/50 transition-colors group"
-                       data-testid="parking-dock-item"
-                       [ngClass]="{'bg-indigo-50 dark:bg-indigo-950/40': selectedTaskId() === task.id}"
-                       (click)="selectTask(task.id)"
-                       (keydown.enter)="startWorkOnSelected()"
-                       tabindex="0"
-                       role="option"
-                       [attr.aria-selected]="selectedTaskId() === task.id">
-
-                    <!-- 左侧蓝色条 -->
-                    <div class="park-card-bar shrink-0"></div>
-
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-1">
-                        <!-- 标题 -->
-                        <span class="text-xs font-medium text-stone-700 dark:text-stone-200 truncate">
-                          {{ task.title || '未命名任务' }}
-                        </span>
-                        <!-- 红点徽章 -->
-                        @if (hasBadge(task.id)) {
-                          <span class="w-2 h-2 rounded-full bg-red-500 shrink-0"></span>
-                        }
-                        <!-- 固定图标 -->
-                        @if (task.parkingMeta?.pinned) {
-                          <svg class="h-3 w-3 text-stone-400 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.617 1.738 5.42a1 1 0 01-.285 1.05 3.001 3.001 0 01-4.462-.308l-.125.168a1 1 0 01-1.06.343L10 14.32V18a1 1 0 11-2 0v-3.68l-1.02.342a1 1 0 01-1.06-.343l-.124-.168a3.001 3.001 0 01-4.463.308 1 1 0 01-.285-1.05l1.738-5.42-1.233-.616a1 1 0 01.894-1.79l1.6.8L9 4.324V3a1 1 0 011-1z"/>
-                          </svg>
-                        }
-                      </div>
-                      <!-- 项目名 + 停泊时长 -->
-                      <div class="flex items-center gap-1 mt-0.5 min-h-[18px]">
-                        <span class="text-[10px] text-stone-400 dark:text-stone-500 truncate">
-                          {{ getProjectName(task) }}
-                        </span>
-                        <span class="text-[10px] text-stone-400 dark:text-stone-500">
-                          · {{ formatDuration(task.parkingMeta?.parkedAt) }}
-                        </span>
-                      </div>
-                      <!-- 状态标签 -->
-                      <div class="flex items-center gap-1 mt-0.5">
-                        @if (isStaleWarning(task)) {
-                          <span class="stale-tag">即将清理</span>
-                          <button (click)="keepParked(task.id); $event.stopPropagation()"
-                                  class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-800/40 transition-colors"
-                                  aria-label="保留此任务">
-                            保留
-                          </button>
-                        }
-                        @if (hasUpcomingReminderForTask(task)) {
-                          <span class="text-[10px] px-1 rounded bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
-                            {{ formatReminderCountdown(task) }}
-                          </span>
-                        }
-                      </div>
-                    </div>
-
-                    <!-- 移除按钮 -->
-                    <button (click)="removeTask(task.id, $event)"
-                            class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-stone-200 dark:hover:bg-stone-600 text-stone-400 transition-opacity shrink-0 self-start"
-                            style="min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center;"
-                            title="移回任务列表"
-                            aria-label="移回任务列表">
-                      <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                      </svg>
-                    </button>
+                  <div class="mt-0.5 text-[10px] text-stone-500 font-mono">
+                    {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '未设置时间' }}
                   </div>
-                }
-              </div>
-
-              <!-- 右半区：预览详情 -->
-              <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-3" [style.width.%]="60">
-                @if (selectedTask(); as task) {
-                  <!-- 状态提示 -->
-                  <div class="text-xs text-stone-400 dark:text-stone-500 italic">
-                    稍后处理中（未切换到此任务）
-                  </div>
-
-                  <!-- 标题编辑 -->
-                  <input type="text"
-                         [ngModel]="task.title"
-                         (ngModelChange)="onTitleChange(task.id, $event)"
-                         class="text-sm font-semibold text-stone-800 dark:text-stone-200 bg-transparent border-b border-transparent hover:border-stone-300 dark:hover:border-stone-600 focus:border-indigo-500 outline-none py-0.5 w-full transition-colors"
-                         aria-label="编辑任务标题"/>
-
-                  <!-- 内容摘要 -->
-                  <div class="text-xs text-stone-600 dark:text-stone-300 leading-relaxed max-h-32 overflow-y-auto whitespace-pre-wrap">
-                    {{ getContentPreview(task) }}
-                  </div>
-
-                  <!-- 上下文锚点 -->
-                  @if (getAnchorDisplay(task); as anchor) {
-                    <div class="text-[10px] text-stone-400 dark:text-stone-500 flex items-center gap-1">
-                      <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
-                      </svg>
-                      <span>{{ anchor }}</span>
-                    </div>
-                  }
-
-                  <!-- 备注输入 -->
-                  <div class="mt-auto">
-                    <input type="text"
-                           [(ngModel)]="noteInput"
-                           (keydown.enter)="submitNote(task.id)"
-                           class="w-full text-xs py-1.5 px-2 rounded-lg border border-stone-200 dark:border-stone-600 bg-transparent text-stone-600 dark:text-stone-300 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus:border-indigo-400 outline-none transition-colors"
-                           placeholder="添加一条备注…"
-                           aria-label="添加备注"/>
-                  </div>
-
-                  <!-- 操作区 -->
-                  <div class="flex items-center gap-2">
-                    <button (click)="startWork(task.id)"
-                            class="flex-1 py-2 rounded-lg text-xs font-medium transition-colors"
-                            [class.bg-indigo-500]="!isSpotlightActive()"
-                            [class.text-white]="!isSpotlightActive()"
-                            [class.hover:bg-indigo-600]="!isSpotlightActive()"
-                            [class.bg-stone-300]="isSpotlightActive()"
-                            [class.dark:bg-stone-600]="isSpotlightActive()"
-                            [class.text-stone-500]="isSpotlightActive()"
-                            [class.dark:text-stone-400]="isSpotlightActive()"
-                            [class.cursor-not-allowed]="isSpotlightActive()"
-                            [disabled]="isSpotlightActive()"
-                            [title]="isSpotlightActive() ? '请先退出 Spotlight 模式' : ''"
-                            style="min-height: 44px;"
-                            aria-label="切换到此任务">
-                      切换到此任务
-                    </button>
-
-                    <!-- 更多菜单 -->
-                    <div class="relative">
-                      <button (click)="toggleMoreMenu($event)"
-                              class="p-2 rounded-lg hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-400 transition-colors"
-                              style="min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center;"
-                              aria-label="更多操作">
-                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01"/>
-                        </svg>
-                      </button>
-                      @if (showMoreMenu()) {
-                        <div class="absolute bottom-full right-0 mb-1 w-40 bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg shadow-lg py-1 z-10">
-                          <button (click)="togglePinned(task.id)"
-                                  class="w-full text-left px-3 py-2 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-stone-700">
-                            {{ task.parkingMeta?.pinned ? '取消固定' : '固定（不自动清理）' }}
-                          </button>
-                          <button (click)="showReminderPresets(task.id)"
-                                  class="w-full text-left px-3 py-2 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-stone-700">
-                            设置提醒…
-                          </button>
-                          @if (showReminderPresetsMenu()) {
-                            <div class="px-2 py-1 space-y-0.5">
-                              <button (click)="setReminderPreset(task.id, 'QUICK')"
-                                      class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-stone-700 rounded">
-                                5 分钟后
-                              </button>
-                              <button (click)="setReminderPreset(task.id, 'NORMAL')"
-                                      class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-stone-700 rounded">
-                                30 分钟后
-                              </button>
-                              <button (click)="setReminderPreset(task.id, 'TWO_HOURS_LATER')"
-                                      class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-stone-700 rounded">
-                                2 小时后
-                              </button>
-                            </div>
-                          }
-                          <div class="h-px bg-stone-100 dark:bg-stone-700 my-1"></div>
-                          <button (click)="removeTask(task.id)"
-                                  class="w-full text-left px-3 py-2 text-xs text-red-500 dark:text-red-400 hover:bg-stone-50 dark:hover:bg-stone-700">
-                            移回任务列表
-                          </button>
-                        </div>
-                      }
-                    </div>
-                  </div>
-                } @else {
-                  <!-- 空态 -->
-                  <div class="flex-1 flex items-center justify-center text-xs text-stone-400 dark:text-stone-500">
-                    点击左侧任务查看详情
-                  </div>
-                }
-              </div>
-              } <!-- /parkedCount > 0 @else -->
+                </button>
+              }
             </div>
           </div>
         }
 
-        <!-- ─── 移动端：Bottom Sheet ─── -->
-        @if (isMobile()) {
-          <div class="dock-sheet fixed left-0 right-0 bottom-0 z-50 rounded-t-2xl overflow-hidden flex flex-col
-                      border-t border-stone-200 dark:border-stone-700"
-               data-testid="parking-dock-sheet"
-               style="height: 60vh; max-height: 70vh; background-color: var(--theme-bg);
-                      padding-bottom: env(safe-area-inset-bottom, 0px);
-                      box-shadow: 0 -8px 32px rgba(0,0,0,0.12);"
-               (touchstart)="onSheetTouchStart($event)"
-               (touchmove)="onSheetTouchMove($event)"
-               (touchend)="onSheetTouchEnd()">
+        <app-dock-radar-zone
+          class="absolute left-1/2 top-1/2 z-10"
+          style="width: 0; height: 0;">
+        </app-dock-radar-zone>
+      </div>
 
-            <!-- 拖拽把手 -->
-            <div class="flex justify-center py-2 shrink-0">
-              <div class="w-10 h-1 rounded-full bg-stone-300 dark:bg-stone-600"></div>
+      @if (engine.isFragmentPhase()) {
+        <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40"
+             style="pointer-events: auto;">
+          <app-dock-daily-slot></app-dock-daily-slot>
+        </div>
+      }
+    }
+
+    <div
+      class="dock-semicircle dock-semicircle-enter"
+      [class.expanded]="dockExpanded()"
+      (click)="toggleDockExpanded()"
+      data-testid="dock-v3-semicircle"
+      [attr.aria-label]="dockExpanded() ? '收起停泊坞' : '展开停泊坞'"
+      role="button"
+      tabindex="0"
+      (keydown.enter)="toggleDockExpanded()"
+      (keydown.space)="$event.preventDefault(); toggleDockExpanded()">
+      @if (dockExpanded()) {
+        <!-- 向下箭头：收起 -->
+        <svg class="w-4 h-4 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      } @else {
+        <!-- 向上箭头：展开 -->
+        <svg class="w-4 h-4 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+        </svg>
+      }
+    </div>
+
+    <div
+      class="dock-bar absolute bottom-6 left-1/2 -translate-x-1/2 z-40 w-full max-w-4xl px-4"
+      [class.focus-collapsed]="!dockExpanded()"
+      [class.focus-expanded]="dockExpanded()"
+      data-testid="dock-v3-panel">
+      <div class="glass-card rounded-2xl p-4 flex flex-col gap-4 border border-stone-700/50 shadow-2xl" data-testid="dock-v3-shell">
+        <div class="flex items-center justify-between px-2">
+          <div class="flex items-center gap-3">
+            <h3 class="text-sm font-semibold text-stone-200 tracking-wide">
+              停泊坞
+              <span class="text-stone-500 font-mono text-xs">{{ engine.dockedCount() }} 块</span>
+            </h3>
+          </div>
+
+          <div class="flex items-center gap-2">
+            @if (showAdvancedUi) {
+              <button
+                type="button"
+                (click)="toggleNewTaskForm()"
+                class="px-3 py-1.5 rounded-full text-xs text-stone-400 hover:text-stone-200 hover:bg-stone-700/50 transition-colors"
+                style="min-height: 44px;"
+                data-testid="dock-v3-create-toggle">
+                + 新建
+              </button>
+            }
+
+            <button
+              type="button"
+              (click)="engine.toggleFocusMode()"
+              class="px-4 py-1.5 rounded-full text-xs font-bold transition-all"
+              [class.bg-stone-100]="engine.focusMode()"
+              [class.text-stone-900]="engine.focusMode()"
+              [class.bg-stone-800]="!engine.focusMode()"
+              [class.text-stone-300]="!engine.focusMode()"
+              [class.hover:bg-stone-700]="!engine.focusMode()"
+              [style.box-shadow]="engine.focusMode() ? '0 0 15px rgba(255,255,255,0.4)' : 'none'"
+              style="min-height: 44px;"
+              data-testid="dock-v3-focus-toggle">
+              {{ engine.focusMode() ? '✖ 退出专注' : '⚡ 专注模式' }}
+            </button>
+          </div>
+        </div>
+
+        @if (showAdvancedUi && showNewTaskForm()) {
+          <div class="new-task-form flex flex-col gap-2 px-2">
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                [(ngModel)]="newTaskTitle"
+                (keydown.enter)="createTask()"
+                class="flex-1 text-xs py-2 px-3 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-200 placeholder:text-stone-500 focus:border-indigo-500 outline-none"
+                placeholder="输入任务名称…" />
+              <select
+                [(ngModel)]="newTaskZone"
+                class="text-xs py-2 px-2 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-300 outline-none">
+                <option value="strong">强关联</option>
+                <option value="weak">弱关联</option>
+              </select>
+              <select
+                [(ngModel)]="newTaskLoad"
+                class="text-xs py-2 px-2 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-300 outline-none">
+                <option value="low">低负荷</option>
+                <option value="high">高负荷</option>
+              </select>
             </div>
-
-            <!-- 顶部栏 -->
-            <div class="flex items-center justify-between px-4 py-1 shrink-0">
-              <span class="text-sm font-semibold text-stone-800 dark:text-stone-200">稍后处理</span>
-              <button (click)="closeDock()" class="p-1.5 rounded-lg active:bg-stone-100 dark:active:bg-stone-700 text-stone-400">
-                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                </svg>
+            <div class="grid grid-cols-4 gap-2">
+              <input
+                type="number"
+                [(ngModel)]="newTaskExpectedMinutes"
+                min="1"
+                placeholder="预计(min)"
+                class="text-xs py-2 px-2 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-200 placeholder:text-stone-500 focus:border-indigo-500 outline-none" />
+              <input
+                type="number"
+                [(ngModel)]="newTaskWaitMinutes"
+                min="1"
+                placeholder="等待(min)"
+                class="text-xs py-2 px-2 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-200 placeholder:text-stone-500 focus:border-indigo-500 outline-none" />
+              <input
+                type="text"
+                [(ngModel)]="newTaskDetail"
+                placeholder="任务详情（可选）"
+                class="col-span-2 text-xs py-2 px-2 rounded-lg bg-stone-800/80 border border-stone-700 text-stone-200 placeholder:text-stone-500 focus:border-indigo-500 outline-none" />
+            </div>
+            <div class="flex justify-end">
+              <button
+                type="button"
+                (click)="createTask()"
+                class="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                style="min-height: 44px;"
+                data-testid="dock-v3-create-submit">
+                添加
               </button>
             </div>
-
-            <!-- 单栏列表 -->
-            <div class="flex-1 overflow-y-auto px-3 py-1 flex flex-col gap-2" role="listbox">
-              @if (parkedCount() === 0) {
-                <!-- 移动端空态引导 -->
-                <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                  <div class="w-16 h-16 rounded-2xl bg-stone-50 dark:bg-stone-800/50 flex items-center justify-center mb-2 border border-stone-100 dark:border-stone-700/50 shadow-sm">
-                    <svg class="h-8 w-8 text-stone-400 dark:text-stone-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-                      <polyline points="17 21 17 13 7 13 7 21" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                  </div>
-                  <p class="text-sm text-stone-700 dark:text-stone-300 font-medium">暂无停泊任务</p>
-                  <p class="text-[11px] text-stone-500 dark:text-stone-400 leading-relaxed">
-                    在任务编辑器中点击「停泊」按钮暂存任务。
-                  </p>
-                </div>
-              }
-              @for (task of sortedParkedTasks(); track task.id) {
-                <div class="park-card flex items-center gap-2 px-3 py-3 rounded-xl
-                            bg-stone-50 dark:bg-stone-800 border border-stone-100 dark:border-stone-700"
-                     (click)="selectTask(task.id)">
-                  <div class="park-card-bar self-stretch shrink-0"></div>
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-1">
-                      <span class="text-sm font-medium text-stone-700 dark:text-stone-200 truncate flex-1">
-                        {{ task.title || '未命名任务' }}
-                      </span>
-                      @if (hasBadge(task.id)) {
-                        <span class="w-2 h-2 rounded-full bg-red-500 shrink-0"></span>
-                      }
-                      @if (task.parkingMeta?.pinned) {
-                        <svg class="h-3 w-3 text-stone-400 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.617 1.738 5.42a1 1 0 01-.285 1.05 3.001 3.001 0 01-4.462-.308l-.125.168a1 1 0 01-1.06.343L10 14.32V18a1 1 0 11-2 0v-3.68l-1.02.342a1 1 0 01-1.06-.343l-.124-.168a3.001 3.001 0 01-4.463.308 1 1 0 01-.285-1.05l1.738-5.42-1.233-.616a1 1 0 01.894-1.79l1.6.8L9 4.324V3a1 1 0 011-1z"/>
-                        </svg>
-                      }
-                    </div>
-                    <div class="text-[11px] text-stone-400 dark:text-stone-500 mt-0.5">
-                      {{ getProjectName(task) }} · {{ formatDuration(task.parkingMeta?.parkedAt) }}
-                    </div>
-                    @if (hasUpcomingReminderForTask(task)) {
-                      <span class="text-[10px] px-1 rounded bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 mt-0.5 inline-block">
-                        {{ formatReminderCountdown(task) }}
-                      </span>
-                    }
-                    @if (isStaleWarning(task)) {
-                      <span class="stale-tag mt-1 inline-block">即将清理</span>
-                      <button (click)="keepParked(task.id); $event.stopPropagation()"
-                              class="text-[10px] mt-1 px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 active:bg-amber-200 inline-block"
-                              aria-label="保留此任务">
-                        保留
-                      </button>
-                    }
-                  </div>
-                  <button (click)="startWork(task.id); $event.stopPropagation()"
-                          class="px-3 py-2 text-xs font-medium rounded-lg"
-                          [class.bg-indigo-500]="!isSpotlightActive()"
-                          [class.text-white]="!isSpotlightActive()"
-                          [class.active:bg-indigo-600]="!isSpotlightActive()"
-                          [class.bg-stone-300]="isSpotlightActive()"
-                          [class.dark:bg-stone-600]="isSpotlightActive()"
-                          [class.text-stone-500]="isSpotlightActive()"
-                          [class.dark:text-stone-400]="isSpotlightActive()"
-                          [class.cursor-not-allowed]="isSpotlightActive()"
-                          [disabled]="isSpotlightActive()"
-                          [title]="isSpotlightActive() ? '请先退出 Spotlight 模式' : ''"
-                          style="min-height: 44px;"
-                          aria-label="切换到此任务">
-                    切换
-                  </button>
-                </div>
-
-                <!-- 移动端内联展开详情 -->
-                @if (selectedTaskId() === task.id) {
-                  <div class="px-3 py-2 bg-stone-50/50 dark:bg-stone-800/50 rounded-lg border border-stone-100 dark:border-stone-700">
-                    <div class="text-xs text-stone-400 italic mb-1">稍后处理中</div>
-                    <div class="text-xs text-stone-600 dark:text-stone-300 leading-relaxed max-h-24 overflow-y-auto whitespace-pre-wrap">
-                      {{ getContentPreview(task) }}
-                    </div>
-                    <div class="flex items-center gap-2 mt-2">
-                      <button (click)="togglePinned(task.id)"
-                              class="text-[11px] px-2 py-1 rounded bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-400 active:bg-stone-200"
-                              style="min-height: 44px;">
-                        {{ task.parkingMeta?.pinned ? '取消固定' : '固定' }}
-                      </button>
-                      <!-- 更多菜单（A6.2.4: 移动端通过"更多菜单 > 移回任务列表"操作） -->
-                      <div class="relative">
-                        <button (click)="toggleMobileMoreMenu($event)"
-                                class="text-[11px] px-2 py-1 rounded bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-400 active:bg-stone-200"
-                                style="min-height: 44px;"
-                                aria-label="更多操作">
-                          更多 ▾
-                        </button>
-                        @if (showMobileMoreMenu()) {
-                          <div class="absolute bottom-full right-0 mb-1 w-36 bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg shadow-lg py-1 z-10">
-                            <button (click)="showReminderPresets(task.id)"
-                                    class="w-full text-left px-3 py-2 text-xs text-stone-600 dark:text-stone-300 active:bg-stone-50 dark:active:bg-stone-700">
-                              设置提醒…
-                            </button>
-                            @if (showReminderPresetsMenu()) {
-                              <div class="px-2 py-1 space-y-0.5">
-                                <button (click)="setReminderPreset(task.id, 'QUICK')"
-                                        class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 active:bg-stone-50 dark:active:bg-stone-700 rounded">
-                                  5 分钟后
-                                </button>
-                                <button (click)="setReminderPreset(task.id, 'NORMAL')"
-                                        class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 active:bg-stone-50 dark:active:bg-stone-700 rounded">
-                                  30 分钟后
-                                </button>
-                                <button (click)="setReminderPreset(task.id, 'TWO_HOURS_LATER')"
-                                        class="w-full text-left px-2 py-1.5 text-[11px] text-stone-500 dark:text-stone-400 active:bg-stone-50 dark:active:bg-stone-700 rounded">
-                                  2 小时后
-                                </button>
-                              </div>
-                            }
-                            <div class="h-px bg-stone-100 dark:bg-stone-700 my-1"></div>
-                            <button (click)="removeTask(task.id)"
-                                    class="w-full text-left px-3 py-2 text-xs text-red-500 dark:text-red-400 active:bg-stone-50 dark:active:bg-stone-700">
-                              移回任务列表
-                            </button>
-                          </div>
-                        }
-                      </div>
-                    </div>
-                  </div>
-                }
-              }
-            </div>
           </div>
         }
-      }
+
+        <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x" (dragover)="onDragOver($event)" (drop)="onDrop($event)">
+          @for (entry of engine.dockedEntries(); track entry.taskId) {
+            <div
+              class="dock-card flex-shrink-0 w-48 p-3 rounded-xl border snap-start"
+              [ngClass]="{
+                'bg-indigo-500/20 border-indigo-500/50': entry.isMain,
+                'bg-stone-800/50 border-stone-700/50 hover:bg-stone-800': !entry.isMain
+              }"
+              (wheel)="onCardWheel($event, entry.taskId)"
+              (click)="onDockCardClick(entry.taskId)"
+              (touchstart)="onTouchStart($event, entry.taskId)"
+              (touchmove)="onTouchMove($event, entry.taskId)"
+              (touchend)="onTouchEnd()"
+              draggable="false"
+              data-testid="dock-v3-item">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-[9px] px-1.5 py-0.5 rounded font-medium" [class.load-badge-high]="entry.load === 'high'" [class.load-badge-low]="entry.load === 'low'">
+                  {{ entry.load === 'high' ? '高负荷' : '低负荷' }}
+                </span>
+                <span class="text-[10px] text-stone-500 font-mono">
+                  @if (entry.expectedMinutes) {
+                    {{ formatTime(entry.expectedMinutes) }}
+                  }
+                </span>
+              </div>
+              <div class="text-xs font-medium text-stone-200 line-clamp-2">{{ entry.title }}</div>
+            </div>
+          }
+
+          <div
+            class="drop-zone flex-shrink-0 w-48 rounded-xl border border-dashed border-stone-600 bg-stone-800/20 flex flex-col items-center justify-center text-stone-500 text-xs gap-2"
+            [class.active]="isDragOver()"
+            (dragover)="onDragOver($event)"
+            (dragleave)="onDragLeave()"
+            (drop)="onDrop($event)"
+            style="min-height: 80px;"
+            data-testid="dock-v3-drop-zone">
+            <svg class="w-5 h-5 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+            拖入任务块
+          </div>
+        </div>
+      </div>
+    </div>
+
+    @if (showHelpHints) {
+      <div class="absolute top-4 left-4 z-50 text-white/40 text-[10px] space-y-1 pointer-events-none"
+           data-testid="dock-v3-help-hints">
+        <p>使用鼠标拖拽模拟任务交互（内部状态接管）</p>
+        <p>滚动: 鼠标放在任务上按住 Alt + 滚轮 切换任务认知负荷</p>
+        <p>提示: 进入专注模式查看 3D 叠层与雷达轨道界面</p>
+      </div>
+    }
   `,
 })
 export class ParkingDockComponent implements OnDestroy {
-  private readonly elRef = inject(ElementRef);
-  readonly uiState = inject(UiStateService);
-  readonly parkingService = inject(ParkingService);
-  private readonly reminderService = inject(SimpleReminderService);
-  private readonly spotlightService = inject(SpotlightService);
+  readonly engine = inject(DockEngineService);
   private readonly taskStore = inject(TaskStore);
-  private readonly projectStore = inject(ProjectStore);
+  private readonly taskOps = inject(TaskOperationAdapterService);
+  private readonly logger = inject(LoggerService).category('ParkingDock');
 
-  /** 停泊坞展开状态——与 UiStateService 双向同步并持久化到 localStorage */
-  readonly isOpen = this.uiState.isParkingDockOpen;
+  readonly showNewTaskForm = signal(false);
+  readonly isDragOver = signal(false);
+  readonly dockExpanded = computed(() => this.engine.dockExpanded());
+  readonly strictSampleMode = PARKING_CONFIG.DOCK_V3_STRICT_SAMPLE_UI;
+  readonly showAdvancedUi = !this.strictSampleMode && PARKING_CONFIG.DOCK_V3_SHOW_ADVANCED_UI;
+  readonly showHelpHints = PARKING_CONFIG.DOCK_V3_SHOW_HELP_HINTS;
 
-  /** Spotlight 模式激活状态——激活时禁止从停泊列表切换任务（A3.8） */
-  readonly isSpotlightActive = computed(() => this.spotlightService.isActive());
+  newTaskTitle = '';
+  newTaskZone: AffinityZone = 'strong';
+  newTaskLoad: CognitiveLoad = 'low';
+  newTaskExpectedMinutes: string | number = '';
+  newTaskWaitMinutes: string | number = '';
+  newTaskDetail = '';
 
-  /** 当前选中任务 ID */
-  readonly selectedTaskId = signal<string | null>(null);
+  readonly dockMaxWidth = PARKING_CONFIG.DOCK_EXPANDED_MAX_WIDTH;
+  readonly focusBackgroundUrl = PARKING_CONFIG.DOCK_FOCUS_BG_IMAGE_URL;
+  readonly focusBackdropFilter = `blur(${PARKING_CONFIG.DOCK_FOCUS_BACKDROP_BLUR_PX}px)`;
+  readonly focusBackdropColor = `rgba(0,0,0,${PARKING_CONFIG.DOCK_FOCUS_BACKDROP_ALPHA})`;
 
-  /** 更多菜单 */
-  readonly showMoreMenu = signal(false);
+  private touchStartY = 0;
+  private touchTaskId: string | null = null;
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** 提醒预设子菜单 */
-  readonly showReminderPresetsMenu = signal(false);
-
-  /** 面板关闭动画标记 */
-  readonly isPanelClosing = signal(false);
-
-  /** 移动端更多菜单 */
-  readonly showMobileMoreMenu = signal(false);
-
-  /** 备注输入 */
-  noteInput = '';
-
-  // ─── computed ───
-
-  readonly isMobile = computed(() => this.uiState.isMobile());
-
-  /** 触发条 left 百分比——居中于 Resizer 分隔线（A6.9.3） */
-  readonly triggerLeftPercent = computed(() => {
-    return this.uiState.isTextColumnCollapsed() ? 50 : this.uiState.textColumnRatio();
-  });
-
-  readonly parkedCount = computed(() => this.parkingService.parkedCount());
-
-  readonly hasUpcomingReminder = computed(() => this.parkingService.hasUpcomingReminder());
-
-  readonly isOverSoftLimit = computed(() => this.parkingService.isOverSoftLimit());
-
-  private readonly isMacPlatform = computed(() => {
-    if (typeof navigator === 'undefined') return false;
-    return /(Mac|iPhone|iPad|iPod)/i.test(navigator.platform);
-  });
-
-  readonly quickSwitchShortcutLabel = computed(() =>
-    this.isMacPlatform() ? 'Ctrl+Shift+P' : 'Alt+Shift+P'
-  );
-
-  readonly sortedParkedTasks = computed(() => {
-    const tasks = this.taskStore.parkedTasks();
-    const now = Date.now();
-
-    return tasks
-      .map((task, index) => {
-        const parkedAtTs = task.parkingMeta?.parkedAt
-          ? Date.parse(task.parkingMeta.parkedAt)
-          : 0;
-        const reminderAt = task.parkingMeta?.reminder?.reminderAt;
-        const reminderTs = reminderAt ? Date.parse(reminderAt) : 0;
-        const hasUpcomingReminder = reminderTs > now && reminderTs - now < 60 * 60 * 1000;
-        return {
-          task,
-          index,
-          parkedAtTs: Number.isNaN(parkedAtTs) ? 0 : parkedAtTs,
-          hasUpcomingReminder,
-        };
-      })
-      .sort((a, b) => {
-        if (a.hasUpcomingReminder !== b.hasUpcomingReminder) {
-          return a.hasUpcomingReminder ? -1 : 1;
-        }
-        if (a.parkedAtTs !== b.parkedAtTs) {
-          return b.parkedAtTs - a.parkedAtTs;
-        }
-        return a.index - b.index;
-      })
-      .map(item => item.task);
-  });
-
-  readonly selectedTask = computed(() => {
-    const id = this.selectedTaskId();
-    if (!id) return null;
-    return this.taskStore.getTask(id) ?? null;
-  });
-
-  /** 提醒标签文案 */
-  readonly reminderLabel = computed(() => {
-    if (!this.hasUpcomingReminder()) return '';
-    return '1 个提醒即将到期';
-  });
-
-  /** 面板宽度——clamp(480, 40vw, min(720, 80vw)) */
-  readonly panelWidth = computed(() => {
-    if (typeof window === 'undefined') return 560;
-    const vw = window.innerWidth;
-    const desired = Math.max(480, vw * 0.4);
-    const max = Math.min(PARKING_CONFIG.DOCK_EXPANDED_MAX_WIDTH, vw * 0.8);
-    return Math.min(desired, max);
-  });
-
-  /** 面板高度——clamp(280, 45vh, min(480, 70vh)) */
-  readonly panelHeight = computed(() => {
-    if (typeof window === 'undefined') return 360;
-    const vh = window.innerHeight;
-    const desired = Math.max(280, vh * 0.45);
-    const max = Math.min(480, vh * 0.7);
-    return Math.min(desired, max);
-  });
-
-  /** 面板 left 定位——居中于 Resizer（视口坐标）
-   * 宿主元素不再使用 transform，position:fixed 子元素的 left 直接相对于视口。
-   */
-  readonly panelLeft = computed(() => {
-    if (typeof window === 'undefined') return 0;
-    const vw = window.innerWidth;
-    const ratio = this.uiState.isTextColumnCollapsed()
-      ? 0
-      : this.uiState.textColumnRatio();
-    // 获取父容器（ProjectShell 主内容区）的位置，以计算 Resizer 的视口坐标
-    const parentEl = this.elRef.nativeElement?.parentElement;
-    const parentLeft = parentEl ? parentEl.getBoundingClientRect().left : 0;
-    const parentWidth = parentEl ? parentEl.getBoundingClientRect().width : vw;
-    // Resizer 的视口 x 坐标 = 父容器左偏移 + 父容器宽度 × 比例
-    const resizerCenterVp = parentLeft + (parentWidth * ratio) / 100;
-    const halfPanel = this.panelWidth() / 2;
-    // 钳制面板左边缘，确保不超出视口
-    return Math.max(8, Math.min(resizerCenterVp - halfPanel, vw - this.panelWidth() - 8));
-  });
-
-  // ─── 移动端拖拽收起 ───
-  private sheetTouchStartY = 0;
-  private sheetTouchDeltaY = 0;
-
-  // ──── Keyboard shortcut ────
   @HostListener('document:keydown', ['$event'])
   onKeydown(event: KeyboardEvent): void {
-    const key = event.key.toLowerCase();
-    const isQuickSwitch = key === 'p'
-      && event.shiftKey
-      && (
-        (this.isMacPlatform() && event.ctrlKey && !event.altKey && !event.metaKey)
-        || (!this.isMacPlatform() && event.altKey && !event.ctrlKey && !event.metaKey)
-      );
-
-    // 快速回切（Win/Linux: Alt+Shift+P; macOS: Ctrl+Shift+P）
-    if (isQuickSwitch) {
-      event.preventDefault();
-      if (this.isSpotlightActive()) return;
-      if (this.parkedCount() > 0) {
-        this.parkingService.quickSwitch();
-      }
-      return;
-    }
-    // Escape 收起
-    if (event.key === 'Escape' && this.isOpen()) {
-      this.closeDock();
-      return;
-    }
-    // ArrowUp / ArrowDown 键盘导航停泊列表（A6.7 ARIA listbox 语义）
-    if (this.isOpen() && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-      event.preventDefault();
-      const tasks = this.sortedParkedTasks();
-      if (tasks.length === 0) return;
-      const currentId = this.selectedTaskId();
-      const currentIdx = currentId ? tasks.findIndex(t => t.id === currentId) : -1;
-      let nextIdx: number;
-      if (event.key === 'ArrowDown') {
-        nextIdx = currentIdx < tasks.length - 1 ? currentIdx + 1 : 0;
-      } else {
-        nextIdx = currentIdx > 0 ? currentIdx - 1 : tasks.length - 1;
-      }
-      this.selectTask(tasks[nextIdx].id);
+    if (event.key === 'Escape' && this.engine.focusMode()) {
+      this.engine.toggleFocusMode();
     }
   }
 
   ngOnDestroy(): void {
-    // 清理
+    if (this.longPressTimer) clearTimeout(this.longPressTimer);
   }
 
-  // ─── 公开方法 ───
-
-  toggleDock(): void {
-    this.uiState.toggleParkingDock();
-    if (!this.isOpen()) {
-      this.selectedTaskId.set(null);
-      this.showMoreMenu.set(false);
-    }
+  toggleNewTaskForm(): void {
+    if (!this.showAdvancedUi) return;
+    this.showNewTaskForm.update(value => !value);
   }
 
-  closeDock(): void {
-    if (this.isMobile()) {
-      // 移动端直接关闭（sheet 自身有滑出动画）
-      this.uiState.setParkingDockOpen(false);
-      this.selectedTaskId.set(null);
-      this.showMoreMenu.set(false);
+  toggleDockExpanded(): void {
+    this.engine.setDockExpanded(!this.engine.dockExpanded());
+  }
+
+  onBackdropClick(): void {
+    if (!this.engine.focusMode()) return;
+    this.engine.toggleFocusMode();
+  }
+
+  createTask(): void {
+    if (!this.showAdvancedUi) return;
+    const title = this.newTaskTitle.trim();
+    if (!title) return;
+
+    const detail = this.newTaskDetail.trim();
+    const expectedMinutes = this.parseOptionalMinutes(this.newTaskExpectedMinutes);
+    const waitMinutes = this.parseOptionalMinutes(this.newTaskWaitMinutes);
+    const result = this.taskOps.addTask(title, detail, null, null, false);
+
+    if (!result.ok) {
+      this.logger.error('停泊坞新建任务失败', getErrorMessage(result.error));
       return;
     }
-    // 桌面端：播放关闭动画后再移除面板
-    this.isPanelClosing.set(true);
-    setTimeout(() => {
-      this.uiState.setParkingDockOpen(false);
-      this.selectedTaskId.set(null);
-      this.showMoreMenu.set(false);
-      this.isPanelClosing.set(false);
-    }, 200);
+
+    this.engine.dockTask(result.value, this.newTaskZone, {
+      sourceKind: 'dock-created',
+      sourceSection: 'dock-create',
+      load: this.newTaskLoad,
+      expectedMinutes,
+      waitMinutes,
+      detail,
+      zoneSource: 'manual',
+    });
+
+    this.newTaskTitle = '';
+    this.newTaskExpectedMinutes = '';
+    this.newTaskWaitMinutes = '';
+    this.newTaskDetail = '';
+    this.showNewTaskForm.set(false);
   }
 
-  selectTask(taskId: string): void {
-    this.selectedTaskId.set(taskId);
-    this.showMoreMenu.set(false);
-    this.showMobileMoreMenu.set(false);
-    // 刷新 lastVisitedAt（A6.1b.5）
-    this.parkingService.previewTask(taskId);
+  onDockCardClick(taskId: string): void {
+    this.engine.setMainTask(taskId);
   }
 
-  startWork(taskId: string): void {
-    // A3.8: Spotlight 激活时禁止切换
-    if (this.isSpotlightActive()) return;
-    this.parkingService.startWork(taskId);
-    this.closeDock();
+  onCardWheel(event: WheelEvent, taskId: string): void {
+    if (!event.altKey) return;
+    event.preventDefault();
+    this.engine.toggleLoad(taskId, event.deltaY > 0 ? 'down' : 'up');
   }
 
-  startWorkOnSelected(): void {
-    const id = this.selectedTaskId();
-    if (id) this.startWork(id);
+  onTouchStart(event: TouchEvent, taskId: string): void {
+    this.touchStartY = event.touches[0].clientY;
+    this.touchTaskId = taskId;
+    if (this.longPressTimer) clearTimeout(this.longPressTimer);
+    this.longPressTimer = setTimeout(() => {
+      this.touchTaskId = taskId;
+    }, 500);
   }
 
-  removeTask(taskId: string, event?: Event): void {
-    event?.stopPropagation();
-    this.parkingService.removeParkedTask(taskId);
-    if (this.selectedTaskId() === taskId) {
-      this.selectedTaskId.set(null);
+  onTouchMove(event: TouchEvent): void {
+    if (!this.touchTaskId) return;
+    const deltaY = event.touches[0].clientY - this.touchStartY;
+    if (Math.abs(deltaY) > 30) {
+      this.engine.toggleLoad(this.touchTaskId, deltaY > 0 ? 'down' : 'up');
+      this.touchStartY = event.touches[0].clientY;
     }
   }
 
-  togglePinned(taskId: string): void {
-    this.parkingService.togglePinned(taskId);
-    this.showMoreMenu.set(false);
+  onTouchEnd(): void {
+    if (this.longPressTimer) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+    this.touchTaskId = null;
   }
 
-  /** 保留任务（重置 stale 计时） */
-  keepParked(taskId: string): void {
-    this.parkingService.keepParked(taskId);
+  onDragOver(event: DragEvent): void {
+    event.preventDefault();
+    this.isDragOver.set(true);
   }
 
-  /** 展开提醒预设子菜单 */
-  showReminderPresets(_taskId: string): void {
-    this.showReminderPresetsMenu.update(v => !v);
+  onDragLeave(): void {
+    this.isDragOver.set(false);
   }
 
-  /** 按预设设置提醒 */
-  setReminderPreset(taskId: string, preset: 'QUICK' | 'NORMAL' | 'TWO_HOURS_LATER'): void {
-    const delay = PARKING_CONFIG.SNOOZE_PRESETS[preset];
-    const reminderAt = new Date(Date.now() + delay).toISOString();
-    this.reminderService.setReminder(taskId, reminderAt);
-    this.showReminderPresetsMenu.set(false);
-    this.showMoreMenu.set(false);
-  }
+  onDrop(event: DragEvent): void {
+    event.preventDefault();
+    this.isDragOver.set(false);
 
-  /** 格式化提醒倒计时 */
-  formatReminderCountdown(task: Task): string {
-    if (!task.parkingMeta?.reminder) return '';
-    const remaining = new Date(task.parkingMeta.reminder.reminderAt).getTime() - Date.now();
-    if (remaining <= 0) return '即将提醒';
-    const minutes = Math.ceil(remaining / 60_000);
-    if (minutes < 60) return `${minutes}分钟后提醒`;
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    return mins > 0 ? `${hours}小时${mins}分后` : `${hours}小时后提醒`;
-  }
+    const dataTransfer = event.dataTransfer;
+    if (!dataTransfer) return;
 
-  toggleMoreMenu(event: Event): void {
-    event.stopPropagation();
-    this.showMoreMenu.update(v => !v);
-  }
+    const payload = readTaskDragPayload(dataTransfer);
+    if (payload?.taskId) {
+      const sourceSection = payload.source === 'text' || payload.source === 'flow'
+        ? payload.source
+        : undefined;
+      const zoneHint = payload.relationHint === 'strong' || payload.relationHint === 'weak'
+        ? payload.relationHint
+        : undefined;
+      this.engine.dockTask(payload.taskId, zoneHint, {
+        sourceSection,
+        zoneSource: zoneHint ? 'manual' : 'auto',
+      });
+      return;
+    }
 
-  /** 移动端更多菜单切换（A6.2.4: "更多菜单 > 移回任务列表" 模式） */
-  toggleMobileMoreMenu(event: Event): void {
-    event.stopPropagation();
-    this.showMobileMoreMenu.update(v => !v);
-  }
-
-  submitNote(taskId: string): void {
-    if (!this.noteInput.trim()) return;
-    this.parkingService.addNote(taskId, this.noteInput.trim());
-    this.noteInput = '';
-  }
-
-  onTitleChange(taskId: string, newTitle: string): void {
-    const task = this.taskStore.getTask(taskId);
-    if (!task) return;
-    const projectId = this.findProjectId(taskId);
-    if (!projectId) return;
-    this.taskStore.setTask({ ...task, title: newTitle, updatedAt: new Date().toISOString() }, projectId);
-  }
-
-  // ─── 移动端 Bottom Sheet 手势 ───
-
-  onSheetTouchStart(event: TouchEvent): void {
-    this.sheetTouchStartY = event.touches[0].clientY;
-    this.sheetTouchDeltaY = 0;
-  }
-
-  onSheetTouchMove(event: TouchEvent): void {
-    this.sheetTouchDeltaY = event.touches[0].clientY - this.sheetTouchStartY;
-  }
-
-  onSheetTouchEnd(): void {
-    // 下拉超过配置阈值收起
-    if (this.sheetTouchDeltaY > PARKING_CONFIG.DOCK_MOBILE_DISMISS_THRESHOLD) {
-      this.closeDock();
+    const text = dataTransfer.getData('text/plain');
+    if (!text) return;
+    const task = this.taskStore.getTask(text);
+    if (task) {
+      this.engine.dockTask(text);
     }
   }
 
-  // ─── 辅助方法 ───
-
-  getProjectName(task: Task): string {
-    const projectId = this.findProjectId(task.id);
-    if (!projectId) return '';
-    const project = this.projectStore.getProject(projectId);
-    return project?.name ?? '';
+  formatTime(minutes: number): string {
+    if (minutes >= 1440) {
+      const d = Math.floor(minutes / 1440);
+      const remainH = Math.floor((minutes % 1440) / 60);
+      return remainH > 0 ? `${d}d${remainH}h` : `${d}d`;
+    }
+    if (minutes >= 60) {
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      return m > 0 ? `${h}h${m}m` : `${h}h`;
+    }
+    return `${minutes}m`;
   }
 
-  formatDuration(parkedAt: string | null | undefined): string {
-    if (!parkedAt) return '';
-    const diff = Date.now() - new Date(parkedAt).getTime();
-    const minutes = Math.floor(diff / 60_000);
-    if (minutes < 60) return `${minutes}分钟前`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}小时前`;
-    const days = Math.floor(hours / 24);
-    return `${days}天前`;
+  private parseOptionalMinutes(raw: string | number | null | undefined): number | null {
+    if (raw === null || raw === undefined) return null;
+    const value = typeof raw === 'string' ? raw.trim() : String(raw).trim();
+    if (!value) return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.floor(parsed);
   }
 
-  getContentPreview(task: Task): string {
-    if (!task.content) return '无内容';
-    return task.content.substring(0, 300);
+  pendingDecisionEntries(): DockPendingDecisionEntry[] {
+    return this.engine.pendingDecisionEntries().slice(0, 2);
   }
 
-  getAnchorDisplay(task: Task): string | null {
-    const anchor = task.parkingMeta?.contextSnapshot?.structuralAnchor;
-    if (!anchor) return null;
-    // A4: 当 type === 'fallback' 且 label 与标题重复时不显示
-    if (anchor.type === 'fallback' && anchor.label === task.title) return null;
-    return anchor.label;
-  }
-
-  isStaleWarning(task: Task): boolean {
-    if (!task.parkingMeta?.lastVisitedAt) return false;
-    if (task.parkingMeta.pinned) return false;
-    const elapsed = Date.now() - new Date(task.parkingMeta.lastVisitedAt).getTime();
-    return elapsed >= PARKING_CONFIG.PARKED_TASK_STALE_WARNING;
-  }
-
-  hasUpcomingReminderForTask(task: Task): boolean {
-    if (!task.parkingMeta?.reminder) return false;
-    const remaining = new Date(task.parkingMeta.reminder.reminderAt).getTime() - Date.now();
-    return remaining > 0 && remaining < 60 * 60 * 1000; // <1h
-  }
-
-  hasBadge(taskId: string): boolean {
-    return this.parkingService.badgedTaskIds().has(taskId);
-  }
-
-  private findProjectId(taskId: string): string | null {
-    return this.taskStore.getTaskProjectId(taskId)
-      ?? this.projectStore.activeProjectId()
-      ?? null;
+  choosePendingCandidate(taskId: string): void {
+    this.engine.choosePendingDecisionCandidate(taskId);
   }
 }

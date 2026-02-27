@@ -23,6 +23,9 @@ export interface TaskRow {
   short_id: string | null;
   priority: 'low' | 'medium' | 'high' | 'urgent' | null;
   due_date: string | null;
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
   tags: string[];
   attachments: Attachment[];
   deleted_at: string | null;

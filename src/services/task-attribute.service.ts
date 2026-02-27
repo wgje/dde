@@ -175,6 +175,45 @@ export class TaskAttributeService {
   }
 
   /**
+   * 更新任务预计时长（分钟）
+   */
+  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
+    const now = new Date().toISOString();
+    this.recordAndUpdate(p => ({
+      ...p,
+      tasks: p.tasks.map(t =>
+        t.id === taskId ? { ...t, expected_minutes: expectedMinutes, updatedAt: now } : t,
+      ),
+    }));
+  }
+
+  /**
+   * 更新任务认知负荷
+   */
+  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
+    const now = new Date().toISOString();
+    this.recordAndUpdate(p => ({
+      ...p,
+      tasks: p.tasks.map(t =>
+        t.id === taskId ? { ...t, cognitive_load: load, updatedAt: now } : t,
+      ),
+    }));
+  }
+
+  /**
+   * 更新任务等待时长（分钟）
+   */
+  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
+    const now = new Date().toISOString();
+    this.recordAndUpdate(p => ({
+      ...p,
+      tasks: p.tasks.map(t =>
+        t.id === taskId ? { ...t, wait_minutes: waitMinutes, updatedAt: now } : t,
+      ),
+    }));
+  }
+
+  /**
    * 更新任务标签列表
    */
   updateTaskTags(taskId: string, tags: string[]): void {

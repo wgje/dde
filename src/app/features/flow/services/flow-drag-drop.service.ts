@@ -7,6 +7,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { GOJS_CONFIG, UI_CONFIG } from '../../../../config';
 import { getErrorMessage } from '../../../../utils/result';
+import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
 
 /**
@@ -76,9 +77,14 @@ export class FlowDragDropService {
    */
   startDrag(event: DragEvent, task: Task): void {
     if (event.dataTransfer) {
-      const data = JSON.stringify(task);
-      event.dataTransfer.setData("text", data);
-      event.dataTransfer.setData("application/json", data);
+      writeTaskDragPayload(event.dataTransfer, {
+        v: 1,
+        type: 'task',
+        taskId: task.id,
+        projectId: this.projectState.activeProjectId(),
+        fromProjectId: this.projectState.activeProjectId(),
+        source: 'flow',
+      });
       event.dataTransfer.effectAllowed = "move";
     }
   }
@@ -125,21 +131,14 @@ export class FlowDragDropService {
   handleDropToUnassigned(event: DragEvent): boolean {
     event.preventDefault();
     this.isDropTargetActive.set(false);
-    
-    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
-    if (!data) return false;
-    
-    try {
-      const task = JSON.parse(data);
-      if (task?.id && task.stage !== null) {
-        this.taskOps.detachTask(task.id);
-        this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
-        return true;
-      }
-    } catch (err) {
-      this.logger.error('Drop to unassigned error:', err);
+
+    const task = this.resolveDroppedTask(event.dataTransfer);
+    if (!task) return false;
+    if (task.stage !== null) {
+      this.taskOps.detachTask(task.id);
+      this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
+      return true;
     }
-    
     return false;
   }
   
@@ -155,22 +154,16 @@ export class FlowDragDropService {
     callback: DropResultCallback
   ): void {
     event.preventDefault();
-    
-    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
-    if (!data) return;
-    
-    try {
-      const task = JSON.parse(data) as Task;
-      const pt = diagram.lastInput.viewPoint;
-      const loc = diagram.transformViewToDoc(pt);
-      
-      // 查找插入位置
-      const insertInfo = this.findInsertPosition(loc, diagram);
-      
-      callback(task, insertInfo, loc);
-    } catch (err) {
-      this.logger.error('Drop to diagram error:', err);
-    }
+
+    const task = this.resolveDroppedTask(event.dataTransfer);
+    if (!task) return;
+    const pt = diagram.lastInput.viewPoint;
+    const loc = diagram.transformViewToDoc(pt);
+
+    // 查找插入位置
+    const insertInfo = this.findInsertPosition(loc, diagram);
+
+    callback(task, insertInfo, loc);
   }
   
   /**
@@ -449,39 +442,58 @@ export class FlowDragDropService {
   handleFullUnassignedDrop(event: DragEvent): boolean {
     event.preventDefault();
 
-    const data = event.dataTransfer?.getData("application/json") || event.dataTransfer?.getData("text");
-    if (!data) {
+    const draggedTask = this.resolveDroppedTask(event.dataTransfer);
+    if (!draggedTask) {
       return this.handleDropToUnassigned(event);
     }
 
-    try {
-      const draggedTask = JSON.parse(data) as Task;
-
-      // 场景1：已分配任务拖回待分配区 → 解除分配
-      if (draggedTask?.id && draggedTask.stage !== null) {
-        return this.handleDropToUnassigned(event);
-      }
-
-      // 场景2：待分配块之间拖放 → 改变父子关系
-      if (draggedTask?.id && draggedTask.stage === null) {
-        const unassignedTasks = this.projectState.unassignedTasks();
-        const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
-
-        if (targetCandidates.length > 0) {
-          const targetTask = targetCandidates[0];
-          const result = this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
-          if (!result.ok) {
-            this.toast.error('重新挂载失败', getErrorMessage(result.error));
-          } else {
-            this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
-          }
-          return result.ok;
-        }
-      }
-    } catch {
+    // 场景1：已分配任务拖回待分配区 → 解除分配
+    if (draggedTask.stage !== null) {
       return this.handleDropToUnassigned(event);
+    }
+
+    // 场景2：待分配块之间拖放 → 改变父子关系
+    if (draggedTask.stage === null) {
+      const unassignedTasks = this.projectState.unassignedTasks();
+      const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
+
+      if (targetCandidates.length > 0) {
+        const targetTask = targetCandidates[0];
+        const result = this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+        if (!result.ok) {
+          this.toast.error('重新挂载失败', getErrorMessage(result.error));
+        } else {
+          this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
+        }
+        return result.ok;
+      }
     }
     return false;
+  }
+
+  private resolveDroppedTask(dataTransfer: DataTransfer | null | undefined): Task | null {
+    if (!dataTransfer) return null;
+
+    const payload = readTaskDragPayload(dataTransfer);
+    if (payload) {
+      const task = this.projectState.getTask(payload.taskId);
+      if (task) return task;
+    }
+
+    const jsonData = dataTransfer.getData("application/json") || dataTransfer.getData("text");
+    if (!jsonData) return null;
+
+    try {
+      const raw = JSON.parse(jsonData) as Partial<Task> & { id?: unknown };
+      const candidateId = typeof raw.id === 'string' ? raw.id : null;
+      if (candidateId) {
+        return this.projectState.getTask(candidateId) ?? (raw as Task);
+      }
+      return null;
+    } catch {
+      // legacy plain task id
+      return this.projectState.getTask(jsonData) ?? null;
+    }
   }
 
   /**

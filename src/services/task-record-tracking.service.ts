@@ -349,6 +349,9 @@ export class TaskRecordTrackingService {
     if (before.y !== after.y) fields.push('y');
     if (before.priority !== after.priority) fields.push('priority');
     if (before.dueDate !== after.dueDate) fields.push('dueDate');
+    if (before.expected_minutes !== after.expected_minutes) fields.push('expected_minutes');
+    if (before.cognitive_load !== after.cognitive_load) fields.push('cognitive_load');
+    if (before.wait_minutes !== after.wait_minutes) fields.push('wait_minutes');
     if (before.deletedAt !== after.deletedAt) fields.push('deletedAt');
 
     const tagsChanged = (before.tags?.length ?? 0) !== (after.tags?.length ?? 0) ||

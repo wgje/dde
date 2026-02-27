@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { environment } from '../environments/environment';
 
 type MutableService = SentryLazyLoaderService & {
   pendingEvents: Array<Record<string, unknown>>;
@@ -88,5 +89,23 @@ describe('SentryLazyLoaderService', () => {
     expect(sentryMock.captureMessage).not.toHaveBeenCalled();
     expect(scope.setExtra).toHaveBeenCalledWith('operation', 'sync');
     expect(scope.setExtra).toHaveBeenCalledWith('delayedCapture', true);
+  });
+});
+
+describe('SentryLazyLoaderService triggerLazyInit', () => {
+  it('缺少 DSN 时仅提示一次', () => {
+    const originalDsn = environment.SENTRY_DSN;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
+    const service = new SentryLazyLoaderService();
+
+    service.triggerLazyInit();
+    service.triggerLazyInit();
+
+    expect(warnSpy.mock.calls.length + infoSpy.mock.calls.length).toBe(1);
+
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
   });
 });

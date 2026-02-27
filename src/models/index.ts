@@ -1,64 +1,56 @@
-// ============================================
-// NanoFlow 数据模型定义
+﻿// ============================================
+// NanoFlow 鏁版嵁妯″瀷瀹氫箟
 // ============================================
 
 /**
- * 任务状态枚举
- * - active: 活动状态，正在进行中
- * - completed: 已完成
- * - archived: 已归档，不显示在主视图中但仍可搜索和恢复
+ * Task status enum.
  */
 export type TaskStatus = 'active' | 'completed' | 'archived';
 
 /**
- * 附件类型
+ * Attachment type enum.
  */
 export type AttachmentType = 'image' | 'document' | 'link' | 'file';
 
 /**
- * 附件模型
+ * Attachment model.
  */
 export interface Attachment {
   id: string;
   type: AttachmentType;
   name: string;
-  url: string; // 对于存储在 Supabase Storage 的文件，这是签名 URL
-  thumbnailUrl?: string; // 图片缩略图
+  url: string;
+  thumbnailUrl?: string;
   mimeType?: string;
-  size?: number; // 文件大小（字节）
+  size?: number;
   createdAt: string;
-  /** URL 签名时间戳，用于准确判断签名 URL 是否过期 */
   signedAt?: string;
-  /** 软删除时间戳，存在表示已标记删除，等待后台清理 */
   deletedAt?: string;
 }
 
 /**
- * 任务模型
+ * Task model.
  */
 export interface Task {
   id: string;
   title: string;
-  content: string; // Markdown 内容
-  stage: number | null; // null 表示未分配阶段
+  content: string;
+  stage: number | null;
   parentId: string | null;
-  order: number; // 阶段内排序
-  rank: number; // 基于重力的排序权重
+  order: number;
+  rank: number;
   status: TaskStatus;
-  x: number; // 流程图 X 坐标
-  y: number; // 流程图 Y 坐标
+  x: number;
+  y: number;
   createdDate: string;
-  updatedAt?: string; // 最后更新时间戳，用于冲突解决时的版本比较
-  displayId: string; // 显示 ID，如 "1", "1,a", "2,b" (动态计算，会随位置变化)
-  shortId?: string; // 永久短 ID，如 "NF-A1B2" (创建时生成，永不改变)
-  hasIncompleteTask?: boolean; // 是否包含未完成的待办项
-  deletedAt?: string | null; // 软删除时间戳，null 表示未删除
-  
-  // ⚠️ 以下字段仅用于客户端状态管理，不会同步到数据库
-  // 删除任务时保存的连接，用于恢复时还原
-  deletedConnections?: Connection[];
+  updatedAt?: string;
+  displayId: string;
+  shortId?: string;
+  hasIncompleteTask?: boolean;
+  deletedAt?: string | null;
 
-  // 删除任务时保存的位置信息，用于恢复时尽可能回到原位置/层级
+  // Client-only restore metadata (not persisted as task columns).
+  deletedConnections?: Connection[];
   deletedMeta?: {
     parentId: string | null;
     stage: number | null;
@@ -67,47 +59,41 @@ export interface Task {
     x: number;
     y: number;
   };
-  
-  // 新增：附件支持
+
   attachments?: Attachment[];
-  
-  // 新增：标签支持（预留）
   tags?: string[];
-  
-  // 新增：优先级（预留）
   priority?: 'low' | 'medium' | 'high' | 'urgent';
-  
-  // 新增：截止日期（预留）
+
   dueDate?: string | null;
 
-  /**
-   * State Overlap 停泊元数据
-   * 仅 status === 'active' 的任务可持有此字段
-   * ⚠️ 禁止使用 overlap 前缀旧命名
-   */
+  // Dock planning attributes (nullable by design)
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
+
+  // Dock/parking metadata for active task overlays.
   parkingMeta?: import('./parking').TaskParkingMeta | null;
 }
 
 /**
- * 连接模型（任务之间的关联）
- */
+ * 杩炴帴妯″瀷锛堜换鍔′箣闂寸殑鍏宠仈锛? */
 export interface Connection {
-  /** 连接的唯一标识符（必需，用于同步和恢复） */
+  /** 杩炴帴鐨勫敮涓€鏍囪瘑绗︼紙蹇呴渶锛岀敤浜庡悓姝ュ拰鎭㈠锛?*/
   id: string;
   source: string;
   target: string;
-  /** 联系块标题（外显内容，类似维基百科的预览标题） */
+  /** 鑱旂郴鍧楁爣棰橈紙澶栨樉鍐呭锛岀被浼肩淮鍩虹櫨绉戠殑棰勮鏍囬锛?*/
   title?: string;
-  /** 联系块详细描述（悬停/点击时显示） */
+  /** 鑱旂郴鍧楄缁嗘弿杩帮紙鎮仠/鐐瑰嚮鏃舵樉绀猴級 */
   description?: string;
-  /** 软删除时间戳，存在表示已标记删除，等待恢复或永久删除 */
+  /** 杞垹闄ゆ椂闂存埑锛屽瓨鍦ㄨ〃绀哄凡鏍囪鍒犻櫎锛岀瓑寰呮仮澶嶆垨姘镐箙鍒犻櫎 */
   deletedAt?: string | null;
-  /** 最后更新时间戳 */
+  /** 鏈€鍚庢洿鏂版椂闂存埑 */
   updatedAt?: string;
 }
 
 /**
- * 项目模型
+ * 椤圭洰妯″瀷
  */
 export interface Project {
   id: string;
@@ -116,31 +102,27 @@ export interface Project {
   createdDate: string;
   tasks: Task[];
   connections: Connection[];
-  updatedAt?: string; // 用于冲突检测
-  version?: number; // 数据版本号
-  /** 同步来源标记：本地仅存在或已与云端建立对应 */
+  updatedAt?: string;
+  version?: number;
+  /** Sync source marker for local-only vs cloud-linked project. */
   syncSource?: 'local-only' | 'synced';
-  /** 是否存在待同步的本地变更（用于下载合并后保留本地项目） */
+  /** Whether there are unsynced local changes. */
   pendingSync?: boolean;
-  // 视图状态持久化
   viewState?: ViewState;
-  // 流程图缩略图
   flowchartUrl?: string;
   flowchartThumbnailUrl?: string;
 }
 
 /**
- * 视图状态（用于持久化流程图视口位置）
- */
+ * 瑙嗗浘鐘舵€侊紙鐢ㄤ簬鎸佷箙鍖栨祦绋嬪浘瑙嗗彛浣嶇疆锛? */
 export interface ViewState {
-  scale: number; // 缩放比例
-  positionX: number; // 视口 X 位置
-  positionY: number; // 视口 Y 位置
+  scale: number; // 缂╂斁姣斾緥
+  positionX: number; // 瑙嗗彛 X 浣嶇疆
+  positionY: number; // 瑙嗗彛 Y 浣嶇疆
 }
 
 /**
- * 未完成项目模型（待办事项）
- */
+ * 鏈畬鎴愰」鐩ā鍨嬶紙寰呭姙浜嬮」锛? */
 export interface UnfinishedItem {
   taskId: string;
   taskDisplayId: string;
@@ -148,51 +130,49 @@ export interface UnfinishedItem {
 }
 
 /**
- * 用户偏好设置
+ * 鐢ㄦ埛鍋忓ソ璁剧疆
  */
 export interface UserPreferences {
   theme: ThemeType;
-  /** 颜色模式（云端默认值，本地可覆盖） */
+  /** 棰滆壊妯″紡锛堜簯绔粯璁ゅ€硷紝鏈湴鍙鐩栵級 */
   colorMode?: ColorMode;
   layoutDirection: 'ltr' | 'rtl';
   floatingWindowPref: 'auto' | 'fixed';
   /** 
-   * 自动解决冲突开关
-   * true: 使用 LWW (Last-Write-Wins) 自动解决冲突
-   * false: 所有冲突进入仪表盘由用户手动处理
-   */
+   * 鑷姩瑙ｅ喅鍐茬獊寮€鍏?   * true: 浣跨敤 LWW (Last-Write-Wins) 鑷姩瑙ｅ喅鍐茬獊
+   * false: 鎵€鏈夊啿绐佽繘鍏ヤ华琛ㄧ洏鐢辩敤鎴锋墜鍔ㄥ鐞?   */
   autoResolveConflicts?: boolean;
   /**
-   * 本地自动备份开关
-   * 仅同步开关状态，目录路径不同步（不同设备路径不同）
-   */
+   * 鏈湴鑷姩澶囦唤寮€鍏?   * 浠呭悓姝ュ紑鍏崇姸鎬侊紝鐩綍璺緞涓嶅悓姝ワ紙涓嶅悓璁惧璺緞涓嶅悓锛?   */
   localBackupEnabled?: boolean;
   /**
-   * 本地自动备份间隔（毫秒）
+   * 鏈湴鑷姩澶囦唤闂撮殧锛堟绉掞級
    */
   localBackupIntervalMs?: number;
   /**
-   * 专注模式偏好设置（跨设备同步）
-   */
+   * 涓撴敞妯″紡鍋忓ソ璁剧疆锛堣法璁惧鍚屾锛?   */
   focusPreferences?: import('./focus').FocusPreferences;
+  /**
+   * 鍋滄硦鍧?v3 蹇収锛堣法璁惧鍚屾锛屽叏灞€璧勬簮姹狅級
+   */
+  dockSnapshot?: import('./parking-dock').DockSnapshot;
 }
 
 /**
- * 主题类型（色调）
+ * 涓婚绫诲瀷锛堣壊璋冿級
  */
 export type ThemeType = 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender';
 
 /**
- * 颜色模式（明暗）
- * - light: 浅色模式
- * - dark: 深色模式  
- * - system: 跟随系统设置
+ * 棰滆壊妯″紡锛堟槑鏆楋級
+ * - light: 娴呰壊妯″紡
+ * - dark: 娣辫壊妯″紡  
+ * - system: 璺熼殢绯荤粺璁剧疆
  */
 export type ColorMode = 'light' | 'dark' | 'system';
 
 /**
- * Supabase 项目行数据结构
- * 支持 v1 (JSONB) 和 v2 (独立表) 两种格式
+ * Supabase 椤圭洰琛屾暟鎹粨鏋? * 鏀寔 v1 (JSONB) 鍜?v2 (鐙珛琛? 涓ょ鏍煎紡
  */
 export interface ProjectRow {
   id: string;
@@ -202,19 +182,18 @@ export interface ProjectRow {
   created_date?: string | null;
   updated_at?: string | null;
   version?: number;
-  /** v1 格式: 存储 tasks 和 connections 的 JSONB 列 */
+  /** v1 鏍煎紡: 瀛樺偍 tasks 鍜?connections 鐨?JSONB 鍒?*/
   data?: {
     tasks?: Task[];
     connections?: Connection[];
     version?: number;
   } | null;
-  /** v2 格式: 标记是否已迁移到独立表 */
+  /** v2 鏍煎紡: 鏍囪鏄惁宸茶縼绉诲埌鐙珛琛?*/
   migrated_to_v2?: boolean;
 }
 
 /**
- * 同步状态
- */
+ * 鍚屾鐘舵€? */
 export interface SyncState {
   isSyncing: boolean;
   isOnline: boolean;
@@ -224,14 +203,14 @@ export interface SyncState {
   hasConflict: boolean;
   conflictData: { 
     local: Project; 
-    /** 冲突时的远程项目数据 */
+    /** 鍐茬獊鏃剁殑杩滅▼椤圭洰鏁版嵁 */
     remote: Project;
     projectId: string;
   } | null;
 }
 
 /**
- * 撤销/重做操作类型
+ * 鎾ら攢/閲嶅仛鎿嶄綔绫诲瀷
  */
 export type UndoActionType = 
   | 'task-create'
@@ -245,13 +224,13 @@ export type UndoActionType =
   | 'project-update';
 
 /**
- * 撤销/重做操作记录
+ * 鎾ら攢/閲嶅仛鎿嶄綔璁板綍
  */
 export interface UndoAction {
   type: UndoActionType;
   timestamp: number;
   projectId: string;
-  /** 记录操作时的项目版本号，用于检测远程更新冲突 */
+  /** 璁板綍鎿嶄綔鏃剁殑椤圭洰鐗堟湰鍙凤紝鐢ㄤ簬妫€娴嬭繙绋嬫洿鏂板啿绐?*/
   projectVersion?: number;
   data: {
     before: Partial<Project>;
@@ -260,56 +239,54 @@ export interface UndoAction {
 }
 
 // ============================================
-// 同步相关类型定义
+// 鍚屾鐩稿叧绫诲瀷瀹氫箟
 // ============================================
 
 /**
- * 同步模式
- * - automatic: 自动模式 - 按间隔自动同步
- * - manual: 手动模式 - 仅在用户手动触发或应用启动/退出时同步
- * - completely-manual: 完全手动模式 - 用户必须明确选择"上传"或"下载"
+ * 鍚屾妯″紡
+ * - automatic: 鑷姩妯″紡 - 鎸夐棿闅旇嚜鍔ㄥ悓姝? * - manual: 鎵嬪姩妯″紡 - 浠呭湪鐢ㄦ埛鎵嬪姩瑙﹀彂鎴栧簲鐢ㄥ惎鍔?閫€鍑烘椂鍚屾
+ * - completely-manual: 瀹屽叏鎵嬪姩妯″紡 - 鐢ㄦ埛蹇呴』鏄庣‘閫夋嫨"涓婁紶"鎴?涓嬭浇"
  */
 export type SyncMode = 'automatic' | 'manual' | 'completely-manual';
 
 /**
- * 同步方向
+ * 鍚屾鏂瑰悜
  */
 export type SyncDirection = 'upload' | 'download' | 'both';
 
 /**
- * 设备信息
+ * 璁惧淇℃伅
  */
 export interface DeviceInfo {
-  /** 设备唯一ID */
+  /** 璁惧鍞竴ID */
   deviceId: string;
-  /** 设备名称 */
+  /** 璁惧鍚嶇О */
   deviceName: string;
-  /** 操作系统 */
+  /** 鎿嶄綔绯荤粺 */
   os: string;
-  /** 应用版本 */
+  /** 搴旂敤鐗堟湰 */
   version: string;
-  /** 最后活跃时间 */
+  /** 鏈€鍚庢椿璺冩椂闂?*/
   lastSeen: number;
 }
 
 /**
- * 同步状态扩展
- */
+ * 鍚屾鐘舵€佹墿灞? */
 export interface ExtendedSyncState extends SyncState {
-  /** 同步模式 */
+  /** 鍚屾妯″紡 */
   mode: SyncMode;
-  /** 是否启用感知 */
+  /** 鏄惁鍚敤鎰熺煡 */
   perceptionEnabled: boolean;
-  /** 在线设备数量 */
+  /** 鍦ㄧ嚎璁惧鏁伴噺 */
   onlineDeviceCount: number;
-  /** 最后同步时间 */
+  /** 鏈€鍚庡悓姝ユ椂闂?*/
   lastSyncAt: number | null;
-  /** 下次自动同步时间（仅自动模式） */
+  /** 涓嬫鑷姩鍚屾鏃堕棿锛堜粎鑷姩妯″紡锛?*/
   nextSyncAt: number | null;
 }
 
 /**
- * 冲突原因
+ * 鍐茬獊鍘熷洜
  */
 export type ConflictReason = 
   | 'version_mismatch'
@@ -320,7 +297,7 @@ export type ConflictReason =
   | 'merge_conflict';
 
 /**
- * 解决策略
+ * 瑙ｅ喅绛栫暐
  */
 export type ResolutionStrategy = 
   | 'use_local'
@@ -330,38 +307,42 @@ export type ResolutionStrategy =
   | 'auto_rebase';
 
 // ============================================
-// GoJS 边界类型导出
+// GoJS 杈圭晫绫诲瀷瀵煎嚭
 // ============================================
-// 【性能优化 2026-02-07】移除 barrel export，防止 GoJS ~800KB 被拉入 main bundle
-// GoJS 运行时函数已迁移到 src/app/features/flow/types/gojs-runtime.ts
-// 纯类型接口保留在 gojs-boundary.ts（无 GoJS 运行时依赖）
-// 需要使用时请直接 import from './gojs-boundary' 或对应 flow 目录文件
+// 銆愭€ц兘浼樺寲 2026-02-07銆戠Щ闄?barrel export锛岄槻姝?GoJS ~800KB 琚媺鍏?main bundle
+// GoJS 杩愯鏃跺嚱鏁板凡杩佺Щ鍒?src/app/features/flow/types/gojs-runtime.ts
+// 绾被鍨嬫帴鍙ｄ繚鐣欏湪 gojs-boundary.ts锛堟棤 GoJS 杩愯鏃朵緷璧栵級
+// 闇€瑕佷娇鐢ㄦ椂璇风洿鎺?import from './gojs-boundary' 鎴栧搴?flow 鐩綍鏂囦欢
 
 // ============================================
-// 流程图视图状态导出
-// ============================================
+// 娴佺▼鍥捐鍥剧姸鎬佸鍑?// ============================================
 export * from './flow-view-state';
 
 // ============================================
-// Focus Mode 类型导出
+// Focus Mode 绫诲瀷瀵煎嚭
 // ============================================
 export * from './focus';
 
 // ============================================
-// State Overlap / Parking 类型导出
+// State Overlap / Parking 绫诲瀷瀵煎嚭
 // ============================================
 export * from './parking';
 
 // ============================================
-// API 类型定义（边境防御）
-// 注意：api-types.ts 中的类型当前未被使用
-// 如需类型守卫功能，可从 './api-types' 直接导入
+// 鍋滄硦鍧?v2 鈥?涓绘帶鍙?+ 闆疯揪 + 鐘舵€佹満
+// ============================================
+export * from './parking-dock';
+
+// ============================================
+// API 绫诲瀷瀹氫箟锛堣竟澧冮槻寰★級
+// 娉ㄦ剰锛歛pi-types.ts 涓殑绫诲瀷褰撳墠鏈浣跨敤
+// 濡傞渶绫诲瀷瀹堝崼鍔熻兘锛屽彲浠?'./api-types' 鐩存帴瀵煎叆
 // ============================================
 
 // ============================================
-// Supabase 映射器（仅供 Service 层使用）
+// Supabase 鏄犲皠鍣紙浠呬緵 Service 灞備娇鐢級
 // ============================================
-// 注意：supabase-mapper.ts 中的映射函数当前未被使用
-// simple-sync.service.ts 有自己的私有 mapper 方法
-// 如需统一映射逻辑，可从 './supabase-mapper' 直接导入
-// supabase-types.ts 不在此导出，应直接 import from './supabase-types'
+// 娉ㄦ剰锛歴upabase-mapper.ts 涓殑鏄犲皠鍑芥暟褰撳墠鏈浣跨敤
+// simple-sync.service.ts 鏈夎嚜宸辩殑绉佹湁 mapper 鏂规硶
+// 濡傞渶缁熶竴鏄犲皠閫昏緫锛屽彲浠?'./supabase-mapper' 鐩存帴瀵煎叆
+// supabase-types.ts 涓嶅湪姝ゅ鍑猴紝搴旂洿鎺?import from './supabase-types'

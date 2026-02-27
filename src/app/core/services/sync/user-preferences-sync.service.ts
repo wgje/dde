@@ -13,6 +13,7 @@ import { SupabaseClientService } from '../../../../services/supabase-client.serv
 import { LoggerService } from '../../../../services/logger.service';
 import { UserPreferences, ThemeType, ColorMode } from '../../../../models';
 import { FocusPreferences, DEFAULT_FOCUS_PREFERENCES } from '../../../../models/focus';
+import { DockSnapshot } from '../../../../models/parking-dock';
 import { nowISO } from '../../../../utils/date';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -50,7 +51,7 @@ export class UserPreferencesSyncService {
     try {
       const { data, error } = await client
         .from('user_preferences')
-        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,focus_preferences')
+        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,focus_preferences,dock_snapshot')
         .eq('user_id', userId)
         .maybeSingle();
       
@@ -69,6 +70,14 @@ export class UserPreferencesSyncService {
           maxSnoozePerDay: (fp['maxSnoozePerDay'] as number) ?? DEFAULT_FOCUS_PREFERENCES.maxSnoozePerDay
         };
       }
+
+      let dockSnapshot: DockSnapshot | undefined;
+      if (data.dock_snapshot && typeof data.dock_snapshot === 'object') {
+        const snapshotRaw = data.dock_snapshot as { version?: unknown };
+        if (snapshotRaw.version === 2 || snapshotRaw.version === 3) {
+          dockSnapshot = data.dock_snapshot as DockSnapshot;
+        }
+      }
       
       return {
         theme: (data.theme as ThemeType) || 'default',
@@ -78,7 +87,8 @@ export class UserPreferencesSyncService {
         autoResolveConflicts: data.auto_resolve_conflicts ?? true,
         localBackupEnabled: data.local_backup_enabled ?? false,
         localBackupIntervalMs: data.local_backup_interval_ms ?? 3600000,
-        focusPreferences
+        focusPreferences,
+        dockSnapshot,
       };
     } catch (e) {
       this.logger.error('加载用户偏好失败', e);
@@ -111,6 +121,7 @@ export class UserPreferencesSyncService {
       if (preferences.localBackupEnabled !== undefined) payload['local_backup_enabled'] = preferences.localBackupEnabled;
       if (preferences.localBackupIntervalMs !== undefined) payload['local_backup_interval_ms'] = preferences.localBackupIntervalMs;
       if (preferences.focusPreferences !== undefined) payload['focus_preferences'] = preferences.focusPreferences;
+      if (preferences.dockSnapshot !== undefined) payload['dock_snapshot'] = preferences.dockSnapshot;
       
       const { error } = await client
         .from('user_preferences')

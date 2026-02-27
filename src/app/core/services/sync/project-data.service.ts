@@ -73,6 +73,20 @@ export class ProjectDataService {
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
   /** 停泊任务轻量缓存游标键（A3.4） */
   private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
+  /** 避免本地离线模式重复打印“未配置”告警 */
+  private hasLoggedSupabaseMissingConfig = false;
+
+  private isSupabaseOfflineMode(): boolean {
+    const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
+    if (typeof maybeSignal === 'function') {
+      try {
+        return Boolean(maybeSignal());
+      } catch {
+        return false;
+      }
+    }
+    return Boolean(maybeSignal);
+  }
   
   /**
    * 获取 Supabase 客户端
@@ -80,8 +94,15 @@ export class ProjectDataService {
   private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
-      this.logger.warn('无法获取 Supabase 客户端', failure);
-      this.syncState.setSyncError(failure.message);
+      if (!this.hasLoggedSupabaseMissingConfig) {
+        if (this.isSupabaseOfflineMode()) {
+          this.logger.info('Supabase 未配置，保持离线模式', failure);
+        } else {
+          this.logger.warn('无法获取 Supabase 客户端', failure);
+          this.syncState.setSyncError(failure.message);
+        }
+        this.hasLoggedSupabaseMissingConfig = true;
+      }
       return null;
     }
     try {
@@ -1088,6 +1109,9 @@ export class ProjectDataService {
       tags: (row.tags as unknown as string[]) ?? [],
       priority: (row.priority as 'low' | 'medium' | 'high' | 'urgent') ?? undefined,
       dueDate: row.due_date ?? undefined,
+      expected_minutes: row.expected_minutes ?? null,
+      cognitive_load: row.cognitive_load ?? null,
+      wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
       parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../../../../models/parking').TaskParkingMeta | undefined ?? undefined,
     };
