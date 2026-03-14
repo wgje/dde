@@ -193,6 +193,7 @@ export class FlowEventService {
     flowTemplateEventHandlers.onLinkClick = undefined;
     flowTemplateEventHandlers.onLinkDeleteRequest = undefined;
     flowTemplateEventHandlers.onCrossTreeLabelClick = undefined;
+    flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
   }
 
   /**

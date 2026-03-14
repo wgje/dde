@@ -84,7 +84,7 @@ export class SentryLazyLoaderService {
   /** Sentry 是否已初始化 */
   readonly isInitialized = computed(() => this.sentryModule() !== null);
   
-  /** 是否正在初始化中 */
+  /** 是否正在初始化中（同步设置，防止 requestIdleCallback 窗口期内重复调度）*/
   private isInitializing = false;
   
   /** 待发送事件队列（初始化前捕获的消息/异常） */
@@ -96,6 +96,12 @@ export class SentryLazyLoaderService {
   /** 初始化 Promise（防止重复初始化） */
   private initPromise: Promise<void> | null = null;
   private hasLoggedMissingDsn = false;
+
+  /**
+   * 待应用的用户身份（Sentry 初始化前调用 setUser 时缓存）
+   * undefined = 未曾调用过；null = 显式登出；object = 用户信息
+   */
+  private pendingUser: { id: string; email?: string } | null | undefined = undefined;
 
   /**
    * 触发 Sentry 懒加载初始化
@@ -119,6 +125,9 @@ export class SentryLazyLoaderService {
       console.warn('[SentryLazyLoader] 无 SENTRY_DSN，跳过初始化');
       return;
     }
+
+    // 同步设置 isInitializing，防止在 requestIdleCallback 调度窗口期（最长 5s）内重复调度
+    this.isInitializing = true;
 
     const initCallback = () => {
       this.initPromise = this.initSentry();
@@ -172,10 +181,11 @@ export class SentryLazyLoaderService {
           /^The operation was aborted/,  // AbortController 取消
           /^The user aborted a request/, // 用户取消
         ],
-        // 【P3-15 修复】过滤 URL 中的 auth 参数，防止 Supabase PKCE 回调泄露到 Sentry
+        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment，防止 Supabase 回调 token 泄露到 Sentry
+        // 仅移除 # 及之后内容，保留 query string（含调试信息）
         beforeSend(event) {
           if (event.request?.url) {
-            event.request.url = event.request.url.replace(/[#?].*$/, '');
+            event.request.url = event.request.url.replace(/#.*$/, '');
           }
           return event;
         },
@@ -183,7 +193,7 @@ export class SentryLazyLoaderService {
           if (breadcrumb.category === 'navigation' && breadcrumb.data) {
             for (const key of ['from', 'to']) {
               if (typeof breadcrumb.data[key] === 'string') {
-                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/[#?].*$/, '');
+                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/#.*$/, '');
               }
             }
           }
@@ -327,13 +337,23 @@ export class SentryLazyLoaderService {
 
   /**
    * 发送待处理事件队列
+   * 同时应用初始化前缓存的用户身份信息
    */
   private flushPendingEvents(): void {
     const sentry = this.sentryModule();
-    if (!sentry || this.pendingEvents.length === 0) {
+    if (!sentry) {
       return;
     }
-    
+
+    // 应用初始化前缓存的用户身份（undefined 表示未曾调用过 setUser，跳过）
+    if (this.pendingUser !== undefined) {
+      sentry.setUser(this.pendingUser);
+    }
+
+    if (this.pendingEvents.length === 0) {
+      return;
+    }
+
     // eslint-disable-next-line no-console -- 故意使用 console.log：避免在 Sentry breadcrumbs 中产生 warning 级别噪音（Sentry Issue #91206571）
     console.log(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
@@ -362,13 +382,17 @@ export class SentryLazyLoaderService {
 
   /**
    * 设置用户信息（登录后调用）
+   *
+   * 若 Sentry 尚未初始化，用户信息会被缓存，
+   * 待初始化完成后在 flushPendingEvents 中一并应用。
    */
   setUser(user: { id: string; email?: string } | null): void {
+    // 始终缓存，确保 Sentry 初始化后可以应用
+    this.pendingUser = user;
     const sentry = this.sentryModule();
     if (sentry) {
       sentry.setUser(user);
     }
-    // 如果 Sentry 未初始化，用户信息将在下次初始化时通过 auth 事件设置
   }
 
   /**

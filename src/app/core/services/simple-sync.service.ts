@@ -125,7 +125,7 @@ export class SimpleSyncService {
   private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.update({ syncError: failure.message });
       this.logger.warn('无法获取 Supabase 客户端', failure);
       return null;
     }
@@ -133,7 +133,7 @@ export class SimpleSyncService {
       return await this.supabase.clientAsync();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.update({ syncError: failure.message });
       this.logger.warn('无法获取 Supabase 客户端', {
         category: failure.category,
         message: failure.message
@@ -206,7 +206,7 @@ export class SimpleSyncService {
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
       isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),
       onProcessingStateChange: (processing, pendingCount) =>
-        this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }))
+        this.syncStateService.update({ isSyncing: processing, pendingCount })
     });
 
     // 将黑匣子同步集成到主同步体系的 RetryQueue
@@ -228,7 +228,7 @@ export class SimpleSyncService {
     
     const handleOnline = () => {
       this.logger.info('网络恢复');
-      this.state.update(s => ({ ...s, isOnline: true }));
+      this.syncStateService.update({ isOnline: true });
       if (this.retryQueueService.length > 0) {
         this.retryQueueService.processQueue();
       }
@@ -236,7 +236,7 @@ export class SimpleSyncService {
     
     const handleOffline = () => {
       this.logger.info('网络断开');
-      this.state.update(s => ({ ...s, isOnline: false }));
+      this.syncStateService.update({ isOnline: false });
     };
     
     window.addEventListener('online', handleOnline);
@@ -286,7 +286,7 @@ export class SimpleSyncService {
     const backgroundProbeDelayMs = Math.max(0, options.backgroundProbeDelayMs ?? 150);
     const backgroundDrainMaxRounds = Math.max(1, options.backgroundDrainMaxRounds ?? 5);
     const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : this.state().isOnline;
-    this.state.update(s => ({ ...s, isOnline: onlineNow }));
+    this.syncStateService.update({ isOnline: onlineNow });
 
     this.cleanupRecoveryTicketState(startedAt);
     let ticketState: { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean } | null = null;
@@ -824,16 +824,16 @@ export class SimpleSyncService {
     }
     const enqueued = this.retryQueueService.add(type, operation, data, projectId);
     if (enqueued) {
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
+      this.syncStateService.update({ pendingCount: this.retryQueueService.length });
     } else {
-      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+      this.syncStateService.update({ syncError: '同步队列已满，暂未写入重试队列' });
     }
   }
   
   clearRetryQueue(): void {
     const count = this.retryQueueService.length;
     this.retryQueueService.clear();
-    this.state.update(s => ({ ...s, pendingCount: 0 }));
+    this.syncStateService.update({ pendingCount: 0 });
     this.logger.info(`已清理 ${count} 个重试项`);
     this.toast.info(`已清理 ${count} 个待同步项`);
   }
@@ -1022,11 +1022,11 @@ export class SimpleSyncService {
   
   resolveConflict(projectId: string, resolvedProject: Project, strategy: 'local' | 'remote'): void {
     this.logger.info('解决冲突', { projectId, strategy });
-    this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
+    this.syncStateService.update({ hasConflict: false, conflictData: null });
   }
   
   setConflict(conflictData: ConflictData): void {
-    this.syncState.update(s => ({ ...s, hasConflict: true, conflictData }));
+    this.syncStateService.update({ hasConflict: true, conflictData });
   }
   
   // ==================== 项目加载 ====================
@@ -1120,7 +1120,7 @@ export class SimpleSyncService {
   
   clearOfflineCache(): void {
     this.retryQueueService.clear();
-    this.syncState.update(s => ({ ...s, pendingCount: 0 }));
+    this.syncStateService.update({ pendingCount: 0 });
     this.logger.info('离线缓存已清除');
   }
   
@@ -1138,7 +1138,7 @@ export class SimpleSyncService {
     if (!this.syncState().sessionExpired) return;
     
     const previousQueueLength = this.retryQueueService.length;
-    this.syncState.update(s => ({ ...s, sessionExpired: false }));
+    this.syncStateService.update({ sessionExpired: false });
     
     this.logger.info('会话状态已重置', { previousQueueLength });
     
