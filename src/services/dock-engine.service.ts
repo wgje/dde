@@ -24,8 +24,6 @@ import {
   HighLoadCounter,
   StatusMachineEntry,
 } from '../models/parking-dock';
-import { BlackBoxFocusMeta } from '../models/focus';
-import { Task } from '../models';
 import { SimpleSyncService, TaskStore } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { BlackBoxService } from './black-box.service';
@@ -39,16 +37,13 @@ import {
   checkBurnoutThreshold,
   computeThreeDimensionalRecommendation,
   createRuleDecision,
-  determineFragmentDefenseLevel,
   effectiveExecMin,
   evaluateTimeRemaining,
-  rankDockCandidates,
   updateHighLoadCounter,
 } from './dock-scheduler.rules';
 import { sanitizePlannerFields } from '../utils/planner-fields';
 import {
   DockSnapshotPersistenceService,
-  normalizeNullableNumber,
   type SnapshotNormalizeContext,
 } from './dock-snapshot-persistence.service';
 import { DockCloudSyncService } from './dock-cloud-sync.service';
@@ -56,7 +51,23 @@ import { DockCompletionFlowService } from './dock-completion-flow.service';
 import { DockDailySlotService } from './dock-daily-slot.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockInlineCreationService } from './dock-inline-creation.service';
+import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
+import {
+  buildConsoleVisibleOrderHint,
+  buildOverflowMeta,
+  findConsoleEvictionCandidate,
+  getWaitRemainingSeconds,
+  isAutoPromotableStatus,
+  isConsoleBackgroundStatus,
+  isWaitExpired,
+  isWaitingLike,
+  mapDockStatusToFocusStatus,
+  mapDockStatusToUiStatus,
+  resolveOrderingWindowMinutes,
+  sortDockEntriesForDisplay,
+  toStatusMachineEntry,
+} from './dock-engine.utils';
 
 @Injectable({
   providedIn: 'root',
@@ -79,6 +90,7 @@ export class DockEngineService implements OnDestroy {
   private readonly completionFlow = inject(DockCompletionFlowService);
   private readonly inlineCreation = inject(DockInlineCreationService);
   private readonly dailySlotService = inject(DockDailySlotService);
+  private readonly taskSync = inject(DockTaskSyncService);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly entries = signal<DockEntry[]>([]);
@@ -163,7 +175,11 @@ export class DockEngineService implements OnDestroy {
   private visibilityListener: (() => void) | null = null;
 
   readonly dockedEntries = computed(() => this.entries().filter(entry => entry.status !== 'completed'));
-  readonly orderedDockEntries = computed(() => this.sortDockEntriesForDisplay(this.dockedEntries()));
+  readonly orderedDockEntries = computed(() => sortDockEntriesForDisplay(
+    this.dockedEntries(),
+    (entry) => this.completionFlow.toSchedulerCandidate(entry),
+    (entry) => this.zoneService.resolveSourceProjectId(entry),
+  ));
   readonly dockedCount = computed(() => this.dockedEntries().length);
   readonly dockedTaskIds = computed(() => new Set(this.dockedEntries().map(entry => entry.taskId)));
   readonly dockCapacity = computed(() => {
@@ -187,7 +203,7 @@ export class DockEngineService implements OnDestroy {
     this.entries().filter(
       entry =>
         entry.status !== 'completed' &&
-        (entry.isMain || entry.status === 'focusing' || this.completionFlow.isConsoleBackgroundStatus(entry.status)),
+        (entry.isMain || entry.status === 'focusing' || isConsoleBackgroundStatus(entry.status)),
     ),
   );
   /**
@@ -207,7 +223,7 @@ export class DockEngineService implements OnDestroy {
     this.entries().find(entry => entry.status === 'focusing') ?? null,
   );
   readonly suspendedEntries = computed(() =>
-    this.consoleVisibleEntries().filter(entry => this.completionFlow.isWaitingLike(entry.status)),
+    this.consoleVisibleEntries().filter(entry => isWaitingLike(entry.status)),
   );
   // v3.0 组合选择区域（策划案 §4.2 zone 重命名）
   // 排除 isMain / focusing / waitingLike，这些已在 consoleEntries（主控台）中展示
@@ -218,7 +234,7 @@ export class DockEngineService implements OnDestroy {
         entry.lane === 'combo-select' &&
         entry.status !== 'completed' &&
         entry.status !== 'focusing' &&
-        !this.completionFlow.isConsoleBackgroundStatus(entry.status),
+        !isConsoleBackgroundStatus(entry.status),
     ),
   );
   // v3.0 备选区域（策划案 §4.3 zone 重命名）
@@ -230,7 +246,7 @@ export class DockEngineService implements OnDestroy {
         entry.lane === 'backup' &&
         entry.status !== 'completed' &&
         entry.status !== 'focusing' &&
-        !this.completionFlow.isConsoleBackgroundStatus(entry.status),
+        !isConsoleBackgroundStatus(entry.status),
     ),
   );
   // v3.0 倦怠状态（策划案 §7.8 NG-16b）
@@ -240,7 +256,7 @@ export class DockEngineService implements OnDestroy {
     return (
       this.fragmentEntryCountdown() === null
       && docked.length > 0
-      && docked.every(entry => this.completionFlow.isWaitingLike(entry.status))
+      && docked.every(entry => isWaitingLike(entry.status))
       && !this.fragmentRest.isFragmentDismissed()
     );
   });
@@ -253,7 +269,7 @@ export class DockEngineService implements OnDestroy {
       entry =>
         entry.status !== 'completed' &&
         entry.status !== 'focusing' &&
-        !this.completionFlow.isWaitingLike(entry.status),
+        !isWaitingLike(entry.status),
     ),
   );
   readonly statusMachineEntries = computed<StatusMachineEntry[]>(() => {
@@ -267,7 +283,7 @@ export class DockEngineService implements OnDestroy {
           entry.status === 'wait_finished' ||
           entry.status === 'stalled',
       )
-      .map(entry => this.toStatusMachineEntry(entry));
+      .map(entry => toStatusMachineEntry(entry));
   });
   readonly pendingDecisionEntries = computed<DockPendingDecisionEntry[]>(() => {
     const pending = this.pendingDecision();
@@ -334,6 +350,16 @@ export class DockEngineService implements OnDestroy {
         this.highlightedIds.set(new Set());
         this.entries.update(prev => this.completionFlow.clearSystemSelectionOnEntries(prev));
       },
+      entries: this.entries,
+      focusMode: this.focusMode,
+      schedulerPhase: this.schedulerPhase,
+      fragmentDefenseLevel: this.fragmentDefenseLevel,
+      burnoutTriggeredAt: this.burnoutTriggeredAt,
+      highLoadCounter: this.highLoadCounter,
+      focusingEntry: this.focusingEntry,
+      lastRuleDecision: this.lastRuleDecision,
+      isFragmentPhase: this.isFragmentPhase,
+      getWaitRemainingSeconds: (entry) => getWaitRemainingSeconds(entry),
     });
 
     // Initialize inline creation service with engine signal references and callbacks
@@ -371,10 +397,10 @@ export class DockEngineService implements OnDestroy {
       this.checkPendingDecisionExpiry();
       this.dailySlotService.resetDailySlotsIfNeeded();
       // v3.0 倦怠冷却检查（§7.8 NG-16b）
-      this.checkBurnoutCooldown();
+      this.fragmentRest.checkBurnoutCooldown();
       // v3.0 碎片阶段防御等级动态更新
       if (this.focusMode()) {
-        this.updateFragmentDefenseLevel();
+        this.fragmentRest.updateFragmentDefenseLevel();
       }
       // GAP-1: 休息时间累计专注时长检查
       this.fragmentRest.tickRestReminderAccumulator(this.focusMode(), this.focusingEntry()?.load ?? null);
@@ -524,7 +550,7 @@ export class DockEngineService implements OnDestroy {
     }
     if (!this.inlineCreation.ensureDockCapacity(task.title || 'Untitled task')) return false;
 
-    const sourceProjectId = this.resolveTaskProjectId(taskId);
+    const sourceProjectId = this.taskSync.resolveTaskProjectId(taskId);
     const zoneSource: DockZoneSource = options?.zoneSource ?? (lane ? 'manual' : 'auto');
     const inferredRelation = lane
       ? {
@@ -574,7 +600,7 @@ export class DockEngineService implements OnDestroy {
 
     this.entries.update(prev => [...prev, entry]);
     this.rebalanceAutoZones();
-    this.syncTaskPlannerFields(taskId, {
+    this.taskSync.syncTaskPlannerFields(taskId, {
       expected_minutes: entry.expectedMinutes,
       cognitive_load: entry.load,
       wait_minutes: entry.waitMinutes,
@@ -666,7 +692,7 @@ export class DockEngineService implements OnDestroy {
     // 2. 主任务永不被退回备选区
     // 3. 动画窗口内不会临时出现第 5 张卡
     if (preVisible.length >= PARKING_CONFIG.CONSOLE_STACK_VISIBLE_MAX) {
-      evictedTaskId = this.findConsoleEvictionCandidate(preVisible, currentFocusId);
+      evictedTaskId = findConsoleEvictionCandidate(preVisible, currentFocusId);
     }
 
     // Phase 1: 仅切换 focusing/stalled 状态，不立即淘汰。
@@ -698,7 +724,7 @@ export class DockEngineService implements OnDestroy {
       this.lastConsoleDemotedTaskId.set(currentFocusId);
     }
     this.consoleVisibleOrderHint.set(
-      this.buildConsoleVisibleOrderHint(preVisible, taskId, evictedTaskId),
+      buildConsoleVisibleOrderHint(preVisible, taskId, evictedTaskId),
     );
 
     // 设置协调信号：inserted 信号供 console-stack 触发 C 位入场动画。
@@ -859,7 +885,7 @@ export class DockEngineService implements OnDestroy {
     this.entries.update(prev =>
       prev.map(entry => (entry.taskId === taskId ? { ...entry, load: nextLoad } : entry)),
     );
-    this.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
+    this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
   }
 
   setExpectedTime(taskId: string, minutes: number | null): void {
@@ -883,7 +909,7 @@ export class DockEngineService implements OnDestroy {
     if (plannerFields.adjusted) {
       this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
     }
-    this.syncTaskPlannerFields(taskId, {
+    this.taskSync.syncTaskPlannerFields(taskId, {
       expected_minutes: plannerFields.expectedMinutes,
       wait_minutes: plannerFields.waitMinutes,
     });
@@ -910,7 +936,7 @@ export class DockEngineService implements OnDestroy {
     if (plannerFields.adjusted) {
       this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
     }
-    this.syncTaskPlannerFields(taskId, {
+    this.taskSync.syncTaskPlannerFields(taskId, {
       expected_minutes: plannerFields.expectedMinutes,
       wait_minutes: plannerFields.waitMinutes,
     });
@@ -920,7 +946,10 @@ export class DockEngineService implements OnDestroy {
     this.entries.update(prev =>
       prev.map(entry => (entry.taskId === taskId ? { ...entry, detail } : entry)),
     );
-    this.syncTaskDetail(taskId, detail);
+    this.taskSync.syncTaskDetail(taskId, detail, {
+      entries: this.entries(),
+      focusSessionContext: this.focusSessionContext(),
+    });
   }
 
   setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): void {
@@ -930,131 +959,6 @@ export class DockEngineService implements OnDestroy {
     if (zoneSource === 'auto') {
       this.rebalanceAutoZones();
     }
-  }
-
-  private resolveTaskProjectId(taskId: string, fallbackProjectId?: string | null): string | null {
-    const directProjectId = this.taskStore.getTaskProjectId(taskId);
-    if (directProjectId) return directProjectId;
-    if (fallbackProjectId) return fallbackProjectId;
-
-    const project = this.projectState.projects().find(candidate =>
-      candidate.tasks.some(task => task.id === taskId),
-    );
-    return project?.id ?? this.projectState.activeProjectId() ?? null;
-  }
-
-  private syncTaskDetail(taskId: string, detail: string): void {
-    const inlineEntry = this.entries().find(entry => entry.taskId === taskId) ?? null;
-    if (inlineEntry?.sourceKind === 'dock-created') {
-      if (!inlineEntry.sourceBlackBoxEntryId) return;
-      this.blackBoxService.update(inlineEntry.sourceBlackBoxEntryId, {
-        content: detail.trim() || inlineEntry.title,
-        focusMeta: {
-          source: 'focus-console-inline',
-          sessionId: this.focusSessionContext()?.id ?? crypto.randomUUID(),
-          title: inlineEntry.title,
-          detail: detail.trim() || null,
-          lane: inlineEntry.lane,
-          expectedMinutes: normalizeNullableNumber(inlineEntry.expectedMinutes),
-          waitMinutes: normalizeNullableNumber(inlineEntry.waitMinutes),
-          cognitiveLoad: inlineEntry.load,
-          dockEntryId: inlineEntry.taskId,
-        },
-      });
-      return;
-    }
-
-    const task = this.taskStore.getTask(taskId);
-    if (!task) return;
-    const projectId = this.resolveTaskProjectId(taskId, inlineEntry?.sourceProjectId ?? null);
-    if (!projectId) return;
-
-    if (this.projectState.activeProjectId() === projectId) {
-      this.taskOps.updateTaskContent(taskId, detail);
-      return;
-    }
-
-    this.applyCrossProjectTaskPatch(taskId, projectId, {
-      content: detail,
-    });
-  }
-
-  private syncTaskPlannerFields(
-    taskId: string,
-    patch: {
-      expected_minutes?: number | null;
-      cognitive_load?: CognitiveLoad | null;
-      wait_minutes?: number | null;
-    },
-  ): void {
-    const task = this.taskStore.getTask(taskId);
-    if (!task) return;
-    const projectId = this.resolveTaskProjectId(taskId);
-    if (!projectId) return;
-
-    const normalizedPatch: {
-      expected_minutes?: number | null;
-      cognitive_load?: CognitiveLoad | null;
-      wait_minutes?: number | null;
-    } = {};
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes:
-        'expected_minutes' in patch ? patch.expected_minutes : task.expected_minutes,
-      waitMinutes:
-        'wait_minutes' in patch ? patch.wait_minutes : task.wait_minutes,
-      cognitiveLoad:
-        'cognitive_load' in patch ? patch.cognitive_load : task.cognitive_load,
-    });
-    if ('expected_minutes' in patch || ('wait_minutes' in patch && plannerFields.adjusted)) {
-      normalizedPatch.expected_minutes = plannerFields.expectedMinutes;
-    }
-    if ('cognitive_load' in patch) {
-      normalizedPatch.cognitive_load = plannerFields.cognitiveLoad;
-    }
-    if ('wait_minutes' in patch) {
-      normalizedPatch.wait_minutes = plannerFields.waitMinutes;
-    }
-
-    if (this.projectState.activeProjectId() === projectId) {
-      if ('expected_minutes' in normalizedPatch) {
-        this.taskOps.updateTaskExpectedMinutes(taskId, normalizedPatch.expected_minutes ?? null);
-      }
-      if ('cognitive_load' in normalizedPatch) {
-        this.taskOps.updateTaskCognitiveLoad(taskId, normalizedPatch.cognitive_load ?? null);
-      }
-      if ('wait_minutes' in normalizedPatch) {
-        this.taskOps.updateTaskWaitMinutes(taskId, normalizedPatch.wait_minutes ?? null);
-      }
-      return;
-    }
-
-    this.applyCrossProjectTaskPatch(taskId, projectId, normalizedPatch);
-  }
-
-  private applyCrossProjectTaskPatch(
-    taskId: string,
-    projectId: string,
-    patch: Partial<Task>,
-  ): void {
-    const currentTask = this.taskStore.getTask(taskId);
-    if (!currentTask) return;
-
-    const updatedTask: Task = {
-      ...currentTask,
-      ...patch,
-      updatedAt: new Date().toISOString(),
-    };
-    this.taskStore.setTask(updatedTask, projectId);
-    this.projectState.updateProjects(projects =>
-      projects.map(project =>
-        project.id === projectId
-          ? {
-              ...project,
-              tasks: project.tasks.map(item => (item.id === taskId ? updatedTask : item)),
-            }
-          : project,
-      ),
-    );
   }
 
   toggleFocusMode(): void {
@@ -1071,7 +975,7 @@ export class DockEngineService implements OnDestroy {
       this.schedulerPhase.set('active');
       const focused = this.focusingEntry();
       if (!focused) {
-        const candidate = this.consoleEntries().find(entry => this.completionFlow.isAutoPromotableStatus(entry.status));
+        const candidate = this.consoleEntries().find(entry => isAutoPromotableStatus(entry.status));
         if (candidate) {
           this.completionFlow.promoteCandidate(candidate.taskId);
           this.lastRuleDecision.set(
@@ -1093,7 +997,7 @@ export class DockEngineService implements OnDestroy {
       }
 
       // v3.0 进入专注模式时更新碎片阶段防御等级（§7.8）
-      this.updateFragmentDefenseLevel();
+      this.fragmentRest.updateFragmentDefenseLevel();
       return;
     }
 
@@ -1205,12 +1109,12 @@ export class DockEngineService implements OnDestroy {
     );
 
     const task = this.taskStore.getTask(taskId);
-    const projectId = this.resolveTaskProjectId(taskId);
+    const projectId = this.taskSync.resolveTaskProjectId(taskId);
     if (task && projectId) {
       if (this.projectState.activeProjectId() === projectId) {
         this.taskOps.updateTaskStatus(taskId, 'completed');
       } else {
-        this.applyCrossProjectTaskPatch(taskId, projectId, {
+        this.taskSync.applyCrossProjectTaskPatch(taskId, projectId, {
           status: 'completed',
         });
       }
@@ -1244,7 +1148,7 @@ export class DockEngineService implements OnDestroy {
           : entry,
       ),
     );
-    this.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
+    this.taskSync.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
 
     // 多层挂起嵌套检测（策划案 §7.9）：≥3 层同时挂起 → 直接进入碎片阶段
     const suspendNestingDepth = this.entries().filter(
@@ -1286,7 +1190,7 @@ export class DockEngineService implements OnDestroy {
     if (currentFocusId && currentFocusId !== taskId) {
       this.lastConsoleDemotedTaskId.set(currentFocusId);
     }
-    this.consoleVisibleOrderHint.set(this.buildConsoleVisibleOrderHint(preVisible, taskId));
+    this.consoleVisibleOrderHint.set(buildConsoleVisibleOrderHint(preVisible, taskId));
     this.scheduleSwitchMaintenance();
 
     if (result.unlockSuspendChain) {
@@ -1344,7 +1248,7 @@ export class DockEngineService implements OnDestroy {
         if (cleared !== next) { next = cleared; changed = true; }
       }
 
-      const hasSuspended = next.some(entry => this.completionFlow.isWaitingLike(entry.status));
+      const hasSuspended = next.some(entry => isWaitingLike(entry.status));
       if (!hasSuspended) {
         unlockSuspendChain = true;
         const unlocked = this.completionFlow.clearSuspendRecommendationStateOnEntries(next);
@@ -1465,14 +1369,7 @@ export class DockEngineService implements OnDestroy {
   }
 
   dismissZenMode(): void {
-    if (!this.focusMode()) return;
-    if (this.isFragmentPhase()) {
-      this.fragmentDefenseLevel.set(2);
-      this.schedulerPhase.set('paused');
-      return;
-    }
-    this.fragmentDefenseLevel.set(1);
-    this.schedulerPhase.set('active');
+    this.fragmentRest.dismissZenMode();
   }
 
   /**
@@ -1481,7 +1378,7 @@ export class DockEngineService implements OnDestroy {
    * 从预置列表中随机选取一个推荐给用户
    */
   getFragmentEventRecommendation(): FragmentEventEntry | null {
-    return this.fragmentRest.getFragmentEventRecommendation(this.fragmentDefenseLevel());
+    return this.fragmentRest.getFragmentEventRecommendation();
   }
 
   /**
@@ -1489,11 +1386,7 @@ export class DockEngineService implements OnDestroy {
    * 完成后不连发，直接进入 Zen Mode
    */
   completeFragmentEvent(): void {
-    if (this.fragmentRest.completeFragmentEvent()) {
-      // Level 3→4：碎片做完后直接进入 Zen Mode（不连发）
-      this.fragmentDefenseLevel.set(4);
-      this.schedulerPhase.set('paused');
-    }
+    this.fragmentRest.completeFragmentEvent();
   }
 
   /**
@@ -1523,15 +1416,11 @@ export class DockEngineService implements OnDestroy {
   }
 
   getWaitRemainingSeconds(entry: DockEntry): number | null {
-    if (!entry.waitStartedAt || !entry.waitMinutes) return null;
-    const elapsed = Date.now() - new Date(entry.waitStartedAt).getTime();
-    const total = entry.waitMinutes * 60_000;
-    return Math.max(0, Math.ceil((total - elapsed) / 1000));
+    return getWaitRemainingSeconds(entry);
   }
 
   isWaitExpired(entry: DockEntry): boolean {
-    const remaining = this.getWaitRemainingSeconds(entry);
-    return remaining !== null && remaining <= 0;
+    return isWaitExpired(entry);
   }
 
   exportSnapshot(): DockSnapshot {
@@ -1569,7 +1458,7 @@ export class DockEngineService implements OnDestroy {
       estimatedMinutes: entry.expectedMinutes,
       waitMinutes: entry.waitMinutes,
       cognitiveLoad: entry.load,
-      focusStatus: this.mapDockStatusToFocusStatus(entry.status),
+      focusStatus: mapDockStatusToFocusStatus(entry.status),
       zone,
       zoneIndex: idx,
       isMaster: entry.isMain,
@@ -1624,17 +1513,6 @@ export class DockEngineService implements OnDestroy {
     };
     this.focusSessionContext.set(next);
     return next;
-  }
-
-  private mapDockStatusToFocusStatus(status: DockTaskStatus): FocusTaskSlot['focusStatus'] {
-    switch (status) {
-      case 'focusing': return 'focusing';
-      case 'suspended_waiting': return 'suspend-waiting';
-      case 'wait_finished': return 'wait-ended';
-      case 'stalled': return 'stalled';
-      case 'completed': return 'completed';
-      default: return 'pending';
-    }
   }
 
   restoreSnapshot(snapshot: DockSnapshot): void {
@@ -1787,7 +1665,7 @@ export class DockEngineService implements OnDestroy {
     return {
       muteWaitTone: this.muteWaitTone(),
       todayDateKey: this.dailySlotService.todayDateKey(),
-      buildOverflowMeta: (entries) => this.buildOverflowMeta(entries),
+      buildOverflowMeta: (entries) => buildOverflowMeta(entries),
     };
   }
 
@@ -1797,111 +1675,6 @@ export class DockEngineService implements OnDestroy {
 
   private rebalanceAutoZones(): void {
     this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
-  }
-
-  private findConsoleEvictionCandidate(
-    visibleEntries: DockEntry[],
-    currentFocusId: string | null,
-  ): string | null {
-    for (let index = visibleEntries.length - 1; index >= 0; index -= 1) {
-      const entry = visibleEntries[index];
-      if (!entry || entry.taskId === currentFocusId || entry.status === 'focusing' || entry.isMain) {
-        continue;
-      }
-      return entry.taskId;
-    }
-    return null;
-  }
-
-  private buildConsoleVisibleOrderHint(
-    preVisibleEntries: ReadonlyArray<Pick<DockEntry, 'taskId'>>,
-    selectedTaskId: string,
-    evictedTaskId: string | null = null,
-  ): string[] {
-    return [
-      selectedTaskId,
-      ...preVisibleEntries
-        .map(entry => entry.taskId)
-        .filter(taskId => taskId !== selectedTaskId && taskId !== evictedTaskId),
-    ].slice(0, PARKING_CONFIG.CONSOLE_STACK_VISIBLE_MAX);
-  }
-
-  private sortDockEntriesForDisplay(entries: DockEntry[]): DockEntry[] {
-    if (entries.length <= 1) return entries;
-    const root =
-      entries.find(entry => entry.status === 'focusing') ??
-      entries.find(entry => entry.isMain) ??
-      entries[0] ??
-      null;
-    const rootProjectId = root ? this.zoneService.resolveSourceProjectId(root) : null;
-    const remainingMinutes = this.resolveOrderingWindowMinutes(root);
-    const scoreMap = new Map<string, number>();
-    const ranked = rankDockCandidates(
-      entries.map(entry => this.completionFlow.toSchedulerCandidate(entry)),
-      remainingMinutes,
-      {
-        rootLoad: root?.load ?? null,
-        rootProjectId,
-      },
-    );
-    for (const item of ranked) {
-      scoreMap.set(item.taskId, item.score);
-    }
-
-    // 排序优先级：主任务 > 手动序 > 调度分数 > 同项目（最低优先级） > 入坞序 > 稳定ID
-    // 策划案规定"同项目为最低优先级"，树距离/调度分数应主导排列
-    return [...entries].sort((a, b) => {
-      if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
-
-      const aManual = normalizeNullableNumber(a.manualOrder);
-      const bManual = normalizeNullableNumber(b.manualOrder);
-      if (aManual !== null || bManual !== null) {
-        if (aManual === null) return 1;
-        if (bManual === null) return -1;
-        if (aManual !== bManual) return aManual - bManual;
-      }
-
-      const aScore = scoreMap.get(a.taskId) ?? Number.MIN_SAFE_INTEGER;
-      const bScore = scoreMap.get(b.taskId) ?? Number.MIN_SAFE_INTEGER;
-      if (aScore !== bScore) return bScore - aScore;
-
-      // 同项目为最低优先级弱上下文，仅在调度分数一致时参与排序
-      const aSameProject = rootProjectId && this.zoneService.resolveSourceProjectId(a) === rootProjectId ? 1 : 0;
-      const bSameProject = rootProjectId && this.zoneService.resolveSourceProjectId(b) === rootProjectId ? 1 : 0;
-      if (aSameProject !== bSameProject) return bSameProject - aSameProject;
-
-      if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
-      return a.taskId.localeCompare(b.taskId);
-    });
-  }
-
-  private resolveOrderingWindowMinutes(root: DockEntry | null): number {
-    if (!root) return 30;
-    const waitSeconds = this.getWaitRemainingSeconds(root);
-    if (waitSeconds !== null && waitSeconds > 0) {
-      return Math.max(1, Math.ceil(waitSeconds / 60));
-    }
-    if (root.expectedMinutes && root.expectedMinutes > 0) {
-      return root.expectedMinutes;
-    }
-    return 30;
-  }
-
-  private buildOverflowMeta(entries: DockEntry[]): { comboSelectOverflow: number; backupOverflow: number } {
-    const comboCount = entries.filter(entry => !entry.isMain && entry.lane === 'combo-select').length;
-    const backupCount = entries.filter(entry => !entry.isMain && entry.lane === 'backup').length;
-    return {
-      comboSelectOverflow: Math.max(0, comboCount - PARKING_CONFIG.RADAR_COMBO_VISIBLE_LIMIT),
-      backupOverflow: Math.max(0, backupCount - PARKING_CONFIG.RADAR_BACKUP_VISIBLE_LIMIT),
-    };
-  }
-
-  private nextManualOrder(): number {
-    const orders = this.entries()
-      .map(entry => entry.manualOrder)
-      .filter((value): value is number => Number.isFinite(value));
-    if (orders.length === 0) return this.entries().length;
-    return Math.max(...orders) + 1;
   }
 
   private startFirstMainSelectionWindow(taskId: string): void {
@@ -1920,11 +1693,6 @@ export class DockEngineService implements OnDestroy {
       this.firstMainSelectionTimer = null;
     }
     this.firstMainSelectionWindow.set(null);
-  }
-
-  private hasActiveWaitTimer(entry: DockEntry): boolean {
-    if (!entry.waitStartedAt || !entry.waitMinutes) return false;
-    return !this.isWaitExpired(entry);
   }
 
   private buildSessionState(entries: DockEntry[] = this.entries()): DockSessionState {
@@ -1950,7 +1718,7 @@ export class DockEngineService implements OnDestroy {
       burnoutTriggeredAt: this.burnoutTriggeredAt(),
       hasFirstBatchSelected: this.firstDragIntervened(),
       schedulerPhase: this.schedulerPhase(),
-      overflowMeta: this.buildOverflowMeta(activeEntries),
+      overflowMeta: buildOverflowMeta(activeEntries),
     };
   }
 
@@ -2002,7 +1770,7 @@ export class DockEngineService implements OnDestroy {
   }
 
   private refreshSuspendRecommendationLock(): void {
-    const hasSuspended = this.entries().some(entry => this.completionFlow.isWaitingLike(entry.status));
+    const hasSuspended = this.entries().some(entry => isWaitingLike(entry.status));
     if (hasSuspended) return;
 
     this.suspendRecommendationLocked.set(false);
@@ -2020,7 +1788,7 @@ export class DockEngineService implements OnDestroy {
       for (let index = 0; index < prev.length; index += 1) {
         const entry = prev[index];
         if (entry.status !== 'suspended_waiting' || !entry.waitStartedAt || !entry.waitMinutes) continue;
-        if (!this.isWaitExpired(entry)) continue;
+        if (!isWaitExpired(entry)) continue;
         changed = true;
         if (!this.waitEndNotifiedIds.has(entry.taskId)) {
           this.waitEndNotifiedIds.add(entry.taskId);
@@ -2080,48 +1848,6 @@ export class DockEngineService implements OnDestroy {
     }
   }
 
-  private toStatusMachineEntry(entry: DockEntry): StatusMachineEntry {
-    const remainingSec = this.getWaitRemainingSeconds(entry);
-    const totalSec = entry.waitMinutes ? entry.waitMinutes * 60 : null;
-    const uiStatus = this.mapDockStatusToUiStatus(entry.status);
-    let label: StatusMachineEntry['label'];
-
-    switch (uiStatus) {
-      case 'focusing':
-        label = '专注中';
-        break;
-      case 'waiting_done':
-        label = '等待结束';
-        break;
-      case 'suspended_waiting':
-        label = '挂起等待';
-        break;
-      case 'stalled':
-        label = '停滞中';
-        break;
-      default:
-        label = '待启动';
-        break;
-    }
-
-    return {
-      taskId: entry.taskId,
-      title: entry.title,
-      uiStatus,
-      label,
-      waitRemainingSeconds: remainingSec,
-      waitTotalSeconds: totalSec,
-    };
-  }
-
-  private mapDockStatusToUiStatus(status: DockTaskStatus): DockUiStatus {
-    if (status === 'focusing') return 'focusing';
-    if (status === 'suspended_waiting') return 'suspended_waiting';
-    if (status === 'wait_finished') return 'waiting_done';
-    if (status === 'stalled') return 'stalled';
-    return 'queued';
-  }
-
   private scheduleLocalPersist(_snapshot: DockSnapshot | null, userId: string | null): void {
     this.snapshotPersistence.scheduleLocalPersist(
       () => this.exportSnapshot(),
@@ -2143,57 +1869,6 @@ export class DockEngineService implements OnDestroy {
       return;
     }
     this.reset();
-  }
-
-  // ============================================
-  // v3.0 碎片阶段防御等级（§7.8）
-  // ============================================
-
-  /**
-   * 更新碎片阶段防御等级（策划案 §7.8 四级防御体系）
-   * 基于最短等待时间和倦怠状态判定
-   */
-  private updateFragmentDefenseLevel(): void {
-    if (this.fragmentDefenseLevel() === 4 && this.isFragmentPhase()) {
-      this.schedulerPhase.set('paused');
-      return;
-    }
-
-    const waitingEntries = this.entries().filter(
-      entry => entry.status === 'suspended_waiting' && entry.waitStartedAt && entry.waitMinutes,
-    );
-    if (waitingEntries.length === 0) {
-      this.fragmentRest.stopFragmentEntryCountdown();
-      this.fragmentRest.setFragmentDismissed(false);
-      this.fragmentDefenseLevel.set(1);
-      this.schedulerPhase.set('active');
-      return;
-    }
-
-    const shortestWaitMin = Math.min(
-      ...waitingEntries.map(entry => {
-        const remaining = this.getWaitRemainingSeconds(entry);
-        return remaining !== null ? remaining / 60 : Infinity;
-      }),
-    );
-
-    const hasBurnout = this.burnoutTriggeredAt() !== null;
-    this.fragmentDefenseLevel.set(determineFragmentDefenseLevel(shortestWaitMin, hasBurnout));
-    this.schedulerPhase.set('paused');
-  }
-
-  /**
-   * 倦怠冷却检查（策划案 §7.8 NG-16b）
-   * 在 tick 中调用，检查倦怠冷却期是否已过
-   */
-  private checkBurnoutCooldown(): void {
-    const burnoutAt = this.burnoutTriggeredAt();
-    if (burnoutAt === null) return;
-    if (Date.now() - burnoutAt > PARKING_CONFIG.BURNOUT_COOLDOWN_MS) {
-      this.burnoutTriggeredAt.set(null);
-      this.highLoadCounter.set({ count: 0, windowStartAt: 0 });
-      this.logger.info('倦怠冷却期结束，计数器重置');
-    }
   }
 
   // ============================================
@@ -2242,7 +1917,7 @@ export class DockEngineService implements OnDestroy {
 
     const mainSlot = this.completionFlow.toFocusTaskSlot(suspendedEntry, 'command', 0);
     const pendingEntries = this.entries().filter(
-      e => this.completionFlow.isAutoPromotableStatus(e.status) && e.taskId !== suspendedTaskId,
+      e => isAutoPromotableStatus(e.status) && e.taskId !== suspendedTaskId,
     );
     const pendingSlots = pendingEntries.map((e, i) => this.completionFlow.toFocusTaskSlot(e, 'combo-select', i));
 
