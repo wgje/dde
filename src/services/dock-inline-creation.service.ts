@@ -51,10 +51,20 @@ export class DockInlineCreationService {
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly projectState = inject(ProjectStateService);
 
-  private ctx!: DockInlineCreationContext;
+  private _ctx: DockInlineCreationContext | null = null;
+
+  private get ctx(): DockInlineCreationContext {
+    if (!this._ctx) {
+      throw new Error('DockInlineCreationService.init() must be called before use');
+    }
+    return this._ctx;
+  }
 
   init(ctx: DockInlineCreationContext): void {
-    this.ctx = ctx;
+    if (this._ctx) {
+      this.logger.warn('init() called again — overwriting previous context');
+    }
+    this._ctx = ctx;
   }
 
   // ---------------------------------------------------------------------------

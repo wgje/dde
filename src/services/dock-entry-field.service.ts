@@ -31,10 +31,20 @@ export class DockEntryFieldService {
   private readonly taskSync = inject(DockTaskSyncService);
   private readonly toast = inject(ToastService);
 
-  private ctx!: DockEntryFieldContext;
+  private _ctx: DockEntryFieldContext | null = null;
+
+  private get ctx(): DockEntryFieldContext {
+    if (!this._ctx) {
+      throw new Error('DockEntryFieldService.init() must be called before use');
+    }
+    return this._ctx;
+  }
 
   init(ctx: DockEntryFieldContext): void {
-    this.ctx = ctx;
+    if (this._ctx) {
+      console.warn('[DockEntryField] init() called again — overwriting previous context');
+    }
+    this._ctx = ctx;
   }
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {

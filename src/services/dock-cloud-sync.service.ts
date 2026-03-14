@@ -64,6 +64,9 @@ export class DockCloudSyncService {
    * DockEngineService construction before any sync operations.
    */
   init(callbacks: CloudSyncEngineCallbacks): void {
+    if (this.callbacks) {
+      this.logger.warn('init() called again — overwriting previous callbacks');
+    }
     this.callbacks = callbacks;
   }
 

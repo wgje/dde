@@ -5,7 +5,7 @@
  * Extracted from DockEngineService to separate timer-based
  * fragment/rest monitoring from core dock state logic.
  */
-import { Injectable, Signal, WritableSignal, inject, signal } from '@angular/core';
+import { Injectable, Signal, WritableSignal, inject, signal, DestroyRef } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   DockEntry,
@@ -47,6 +47,11 @@ export interface FragmentRestEngineCallbacks {
 export class DockFragmentRestService {
   private readonly focusPreferenceService = inject(FocusPreferenceService);
   private readonly logger = inject(LoggerService).category('DockFragmentRest');
+  private readonly destroyRef = inject(DestroyRef);
+
+  constructor() {
+    this.destroyRef.onDestroy(() => this.resetAll());
+  }
 
   // ─── Signals (owned here, re-exported by DockEngine) ───
 
@@ -78,14 +83,24 @@ export class DockFragmentRestService {
     remainingMinutes?: number;
   } | null = null;
 
-  private callbacks: FragmentRestEngineCallbacks | null = null;
+  private _callbacks: FragmentRestEngineCallbacks | null = null;
+
+  private get callbacks(): FragmentRestEngineCallbacks {
+    if (!this._callbacks) {
+      throw new Error('DockFragmentRestService.init() must be called before use');
+    }
+    return this._callbacks;
+  }
 
   /**
    * Initialize with engine callbacks. Must be called once during
    * DockEngineService construction.
    */
   init(callbacks: FragmentRestEngineCallbacks): void {
-    this.callbacks = callbacks;
+    if (this._callbacks) {
+      this.logger.warn('init() called again — overwriting previous callbacks');
+    }
+    this._callbacks = callbacks;
   }
 
   // ─── Fragment Entry Countdown ─────────────────
@@ -105,7 +120,7 @@ export class DockFragmentRestService {
   }): void {
     this.stopFragmentEntryCountdown(false);
     if (!context?.preservePendingDecision) {
-      this.callbacks?.clearPendingDecisionState();
+      this._callbacks?.clearPendingDecisionState();
     }
     this.fragmentEntryDismissed.set(false);
     this.fragmentCountdownContext = {
@@ -158,7 +173,7 @@ export class DockFragmentRestService {
   private enterFragmentPhaseFromCountdown(): void {
     const context = this.fragmentCountdownContext;
     this.fragmentCountdownContext = null;
-    this.callbacks?.enterFragmentPhase(
+    this._callbacks?.enterFragmentPhase(
       context?.reason ?? '碎片时间倒计时结束/用户确认，进入碎片阶段',
       context?.rootTaskId,
       context?.remainingMinutes,
@@ -237,7 +252,7 @@ export class DockFragmentRestService {
    * 从预置列表中随机选取一个推荐给用户
    */
   getFragmentEventRecommendation(): FragmentEventEntry | null {
-    const defenseLevel = this.callbacks!.fragmentDefenseLevel();
+    const defenseLevel = this.callbacks.fragmentDefenseLevel();
     if (defenseLevel < 2) return null;
 
     // 按分类优先级排列候选
@@ -268,8 +283,8 @@ export class DockFragmentRestService {
     if (!this.activeFragmentEvent()) return false;
     this.activeFragmentEvent.set(null);
     // Level 3→4：碎片做完后直接进入 Zen Mode（不连发）
-    this.callbacks!.fragmentDefenseLevel.set(4);
-    this.callbacks!.schedulerPhase.set('paused');
+    this.callbacks.fragmentDefenseLevel.set(4);
+    this.callbacks.schedulerPhase.set('paused');
     this.logger.info('碎片事件完成，进入 Zen Mode（Level 4）');
     return true;
   }
@@ -298,7 +313,7 @@ export class DockFragmentRestService {
 
   /** 碎片阶段防御等级动态更新（每 10s tick 调用） */
   updateFragmentDefenseLevel(): void {
-    const ctx = this.callbacks!;
+    const ctx = this.callbacks;
     if (ctx.fragmentDefenseLevel() === 4 && ctx.isFragmentPhase()) {
       ctx.schedulerPhase.set('paused');
       return;
@@ -332,7 +347,7 @@ export class DockFragmentRestService {
    * 在 tick 中调用，检查倦怠冷却期是否已过
    */
   checkBurnoutCooldown(): void {
-    const ctx = this.callbacks!;
+    const ctx = this.callbacks;
     const burnoutAt = ctx.burnoutTriggeredAt();
     if (burnoutAt === null) return;
     if (Date.now() - burnoutAt > PARKING_CONFIG.BURNOUT_COOLDOWN_MS) {
@@ -344,7 +359,7 @@ export class DockFragmentRestService {
 
   /** 退出 Zen Mode，回退到碎片/活跃阶段 */
   dismissZenMode(): void {
-    const ctx = this.callbacks!;
+    const ctx = this.callbacks;
     if (!ctx.focusMode()) return;
     if (ctx.isFragmentPhase()) {
       ctx.fragmentDefenseLevel.set(2);

@@ -1,4 +1,4 @@
-import { DestroyRef, Injectable, OnDestroy, computed, effect, inject, signal } from '@angular/core';
+import { DestroyRef, Injectable, computed, effect, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
@@ -63,17 +63,16 @@ import {
   isConsoleBackgroundStatus,
   isWaitExpired,
   isWaitingLike,
-  mapDockStatusToFocusStatus,
-  mapDockStatusToUiStatus,
   resolveOrderingWindowMinutes,
   sortDockEntriesForDisplay,
+  toFocusTaskSlot,
   toStatusMachineEntry,
 } from './dock-engine.utils';
 
 @Injectable({
   providedIn: 'root',
 })
-export class DockEngineService implements OnDestroy {
+export class DockEngineService {
   private readonly taskStore = inject(TaskStore);
   private readonly auth = inject(AuthService);
   private readonly focusPreferenceService = inject(FocusPreferenceService);
@@ -149,6 +148,30 @@ export class DockEngineService implements OnDestroy {
   // GAP-2: 碎片时间进入倒计时（策划案：给用户一个选择是否进入碎片时间的短时间倒计时）
   /** 碎片进入倒计时剩余秒数（null=不在倒计时状态） */
   readonly fragmentEntryCountdown = computed(() => this.fragmentRest.fragmentEntryCountdown());
+
+  /**
+   * 持久化脏标记：聚合所有影响快照持久化的信号为一个递增版本号。
+   * effect 监听此单一 computed，避免多个信号同时变更时触发多次冗余持久化。
+   */
+  private readonly persistenceVersion = computed(() => {
+    // 读取所有持久化相关信号以建立依赖关系
+    this.entries();
+    this.focusMode();
+    this.dockExpanded();
+    this.muteWaitTone();
+    this.focusScrimOn();
+    this.firstDragIntervened();
+    this.dailySlots();
+    this.suspendChainRootTaskId();
+    this.suspendRecommendationLocked();
+    this.pendingDecision();
+    this.lastRuleDecision();
+    this.dailyResetDate();
+    this.focusSessionContext();
+    // 返回递增版本号，确保 effect 在任意依赖变更时触发
+    return ++this._persistenceCounter;
+  });
+  private _persistenceCounter = 0;
 
   private readonly firstDragIntervened = signal(false);
   private readonly firstMainSelectionWindow = signal<{ taskId: string; expiresAt: number } | null>(null);
@@ -443,21 +466,9 @@ export class DockEngineService implements OnDestroy {
       if (userId) this.cloudSync.scheduleCloudPull(userId, true);
     });
 
-    // 状态变更时触发本地持久化和云端推送
+    // 状态变更时触发本地持久化和云端推送（通过 persistenceVersion 聚合信号，避免冗余触发）
     effect(() => {
-      this.entries();
-      this.focusMode();
-      this.dockExpanded();
-      this.muteWaitTone();
-      this.focusScrimOn();
-      this.firstDragIntervened();
-      this.dailySlots();
-      this.suspendChainRootTaskId();
-      this.suspendRecommendationLocked();
-      this.pendingDecision();
-      this.lastRuleDecision();
-      this.dailyResetDate();
-      this.focusSessionContext();
+      this.persistenceVersion();
       if (this.isRestoringSnapshot) return;
 
       this.scheduleLocalPersist(null, this.currentSnapshotUserId);
@@ -515,6 +526,7 @@ export class DockEngineService implements OnDestroy {
 
   private registerDestroyCleanup(): void {
     this.destroyRef.onDestroy(() => {
+      // 合并所有清理逻辑到 DestroyRef（避免 ngOnDestroy + DestroyRef 双注册）
       if (this.tickTimer) {
         clearInterval(this.tickTimer);
         this.tickTimer = null;
@@ -533,26 +545,22 @@ export class DockEngineService implements OnDestroy {
         clearTimeout(this.audioStopTimer);
         this.audioStopTimer = null;
       }
+      if (this.localPersistTimer) {
+        clearTimeout(this.localPersistTimer);
+        this.localPersistTimer = null;
+      }
+      this.cloudSync.cancelTimers();
+      if (this.firstMainSelectionTimer) {
+        clearTimeout(this.firstMainSelectionTimer);
+        this.firstMainSelectionTimer = null;
+      }
+      this.fragmentRest.resetAll();
+      this.cancelSwitchMaintenance();
+      if (this.visibilityListener && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', this.visibilityListener);
+        this.visibilityListener = null;
+      }
     });
-  }
-
-  ngOnDestroy(): void {
-    if (this.localPersistTimer) {
-      clearTimeout(this.localPersistTimer);
-      this.localPersistTimer = null;
-    }
-    this.cloudSync.cancelTimers();
-    if (this.firstMainSelectionTimer) {
-      clearTimeout(this.firstMainSelectionTimer);
-      this.firstMainSelectionTimer = null;
-    }
-    // GAP-2: 清除碎片进入倒计时
-    this.fragmentRest.resetAll();
-    this.cancelSwitchMaintenance();
-    if (this.visibilityListener && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.visibilityListener);
-      this.visibilityListener = null;
-    }
   }
 
   // Public API
@@ -1033,7 +1041,12 @@ export class DockEngineService implements OnDestroy {
     }
     this.isProcessingCompletion = true;
     const taskId = this.completionQueue.shift()!;
-    this.executeCompleteTask(taskId);
+    try {
+      this.executeCompleteTask(taskId);
+    } catch (error) {
+      // 防止 executeCompleteTask 异常导致队列永久卡死
+      this.logger.error('executeCompleteTask 抛出异常，跳过该任务继续处理队列', { taskId, error });
+    }
     // 300ms 间隔处理下一个，给动画和信号传播留余量
     if (this.completionQueue.length > 0) {
       this.completionDrainTimer = setTimeout(() => {
@@ -1419,37 +1432,16 @@ export class DockEngineService implements OnDestroy {
   private buildFocusSessionState(): FocusSessionState {
     const context = this.ensureFocusSessionContext();
     const activeEntries = this.entries().filter(e => e.status !== 'completed');
-    const toSlot = (entry: DockEntry, zone: 'command' | 'combo-select' | 'backup', idx: number): FocusTaskSlot => ({
-      slotId: entry.taskId,
-      taskId: entry.taskId,
-      estimatedMinutes: entry.expectedMinutes,
-      waitMinutes: entry.waitMinutes,
-      cognitiveLoad: entry.load,
-      focusStatus: mapDockStatusToFocusStatus(entry.status),
-      zone,
-      zoneIndex: idx,
-      isMaster: entry.isMain,
-      waitStartedAt: entry.waitStartedAt ? new Date(entry.waitStartedAt).getTime() : null,
-      waitEndAt: entry.waitStartedAt && entry.waitMinutes
-        ? new Date(entry.waitStartedAt).getTime() + entry.waitMinutes * 60_000
-        : null,
-      sourceProjectId: entry.sourceProjectId ?? null,
-      sourceBlockType: entry.sourceKind === 'dock-created' ? 'text' : null,
-      draggedInAt: Date.now(),
-      isFirstBatch: entry.dockedOrder === 0,
-      inlineTitle: entry.title,
-      inlineDetail: entry.detail ?? null,
-    });
 
     const commandTasks = activeEntries
       .filter(e => e.isMain)
-      .map((e, i) => toSlot(e, 'command', i));
+      .map((e, i) => toFocusTaskSlot(e, 'command', i));
     const comboSelectTasks = activeEntries
       .filter(e => !e.isMain && e.lane === 'combo-select')
-      .map((e, i) => toSlot(e, 'combo-select', i));
+      .map((e, i) => toFocusTaskSlot(e, 'combo-select', i));
     const backupTasks = activeEntries
       .filter(e => !e.isMain && e.lane === 'backup')
-      .map((e, i) => toSlot(e, 'backup', i));
+      .map((e, i) => toFocusTaskSlot(e, 'backup', i));
 
     return {
       schemaVersion: 2,
@@ -1565,33 +1557,30 @@ export class DockEngineService implements OnDestroy {
     this.lastConsoleDemotedTaskId.set(null);
   }
 
+  /**
+   * 延迟执行区域重平衡与挂起推荐锁刷新。
+   * 使用 requestIdleCallback（有 fallback setTimeout）确保动画帧优先，
+   * 同时尊重 holdNonCriticalWork 暂停窗口。
+   */
   private scheduleSwitchMaintenance(): void {
     this.cancelSwitchMaintenance();
-    const scheduleCore = () => {
+    const token = ++this.switchMaintenanceToken;
+
+    const execute = () => {
+      if (token !== this.switchMaintenanceToken) return;
+      this.switchMaintenanceIdleId = null;
+      this.switchMaintenanceFallbackTimer = null;
+      this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
+      this.refreshSuspendRecommendationLock();
+    };
+
+    const schedule = () => {
+      if (token !== this.switchMaintenanceToken) return;
       const holdDelay = this.getNonCriticalHoldDelay();
       if (holdDelay > 0) {
-        this.switchMaintenanceFallbackTimer = setTimeout(scheduleCore, holdDelay);
+        this.switchMaintenanceFallbackTimer = setTimeout(schedule, holdDelay);
         return;
       }
-
-      const token = ++this.switchMaintenanceToken;
-      const run = () => {
-        if (token !== this.switchMaintenanceToken) return;
-        // 互斥清理：无论是 idleCallback 还是 fallback 先触发，都清除对方
-        if (this.switchMaintenanceIdleId !== null) {
-          const gi = globalThis as typeof globalThis & { cancelIdleCallback?: (handle: number) => void };
-          if (typeof gi.cancelIdleCallback === 'function') {
-            gi.cancelIdleCallback(this.switchMaintenanceIdleId);
-          }
-          this.switchMaintenanceIdleId = null;
-        }
-        if (this.switchMaintenanceFallbackTimer) {
-          clearTimeout(this.switchMaintenanceFallbackTimer);
-          this.switchMaintenanceFallbackTimer = null;
-        }
-        this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
-        this.refreshSuspendRecommendationLock();
-      };
 
       const g = globalThis as typeof globalThis & {
         requestIdleCallback?: (
@@ -1601,18 +1590,18 @@ export class DockEngineService implements OnDestroy {
       };
 
       if (typeof g.requestIdleCallback === 'function') {
-        this.switchMaintenanceIdleId = g.requestIdleCallback(() => run(), { timeout: 120 });
-        this.switchMaintenanceFallbackTimer = setTimeout(run, 140);
-        return;
+        this.switchMaintenanceIdleId = g.requestIdleCallback(() => execute(), { timeout: 120 });
+      } else {
+        this.switchMaintenanceFallbackTimer = setTimeout(execute, 0);
       }
-
-      this.switchMaintenanceFallbackTimer = setTimeout(run, 0);
     };
 
-    scheduleCore();
+    schedule();
   }
 
   private cancelSwitchMaintenance(): void {
+    ++this.switchMaintenanceToken;
+
     const g = globalThis as typeof globalThis & {
       cancelIdleCallback?: (handle: number) => void;
     };

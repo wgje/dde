@@ -515,3 +515,24 @@ export interface DockSnapshot {
   /** v3.0 专注会话状态快照（策划案 §2.5） */
   focusSessionState?: FocusSessionState | null;
 }
+
+// ---------------------------------------------------------------------------
+//  DockEntry 类型守卫（sourceKind 辨识）
+// ---------------------------------------------------------------------------
+
+/** 就地创建条目：携带 inline 专属字段 */
+export function isInlineDockEntry(entry: DockEntry): entry is DockEntry & {
+  sourceKind: 'dock-created';
+  sourceBlackBoxEntryId: string | null;
+  inlineArchiveStatus: 'pending' | 'archiving' | 'archived' | 'failed';
+  inlineArchivedTaskId: string | null;
+} {
+  return entry.sourceKind === 'dock-created';
+}
+
+/** 项目任务条目：来自现有项目任务 */
+export function isProjectDockEntry(entry: DockEntry): entry is DockEntry & {
+  sourceKind: 'project-task';
+} {
+  return entry.sourceKind === 'project-task';
+}

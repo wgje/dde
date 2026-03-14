@@ -30,13 +30,13 @@ import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockZoneService } from './dock-zone.service';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import {
+  entryOrder,
   getWaitRemainingSeconds,
   hasActiveWaitTimer,
   isAutoPromotableStatus,
-  isConsoleBackgroundStatus,
   isRunnableStatus,
   isWaitingLike,
-  mapDockStatusToFocusStatus,
+  toFocusTaskSlot,
 } from './dock-engine.utils';
 
 // ---------------------------------------------------------------------------
@@ -66,30 +66,20 @@ export class DockCompletionFlowService {
   private readonly zoneService = inject(DockZoneService);
   private readonly fragmentRest = inject(DockFragmentRestService);
 
-  private ctx!: DockCompletionContext;
+  private _ctx: DockCompletionContext | null = null;
+
+  private get ctx(): DockCompletionContext {
+    if (!this._ctx) {
+      throw new Error('DockCompletionFlowService.init() must be called before use');
+    }
+    return this._ctx;
+  }
 
   init(ctx: DockCompletionContext): void {
-    this.ctx = ctx;
-  }
-
-  // ---------------------------------------------------------------------------
-  //  Status helpers（委托至 dock-engine.utils 纯函数）
-  // ---------------------------------------------------------------------------
-
-  isWaitingLike(status: DockTaskStatus): boolean {
-    return isWaitingLike(status);
-  }
-
-  isRunnableStatus(status: DockTaskStatus): boolean {
-    return isRunnableStatus(status);
-  }
-
-  isAutoPromotableStatus(status: DockTaskStatus): boolean {
-    return isAutoPromotableStatus(status);
-  }
-
-  isConsoleBackgroundStatus(status: DockTaskStatus): boolean {
-    return isConsoleBackgroundStatus(status);
+    if (this._ctx) {
+      console.warn('[DockCompletionFlow] init() called again — overwriting previous context');
+    }
+    this._ctx = ctx;
   }
 
   // ---------------------------------------------------------------------------
@@ -121,27 +111,7 @@ export class DockCompletionFlowService {
   }
 
   toFocusTaskSlot(entry: DockEntry, zone: 'command' | 'combo-select' | 'backup' = 'command', idx = 0): FocusTaskSlot {
-    return {
-      slotId: entry.taskId,
-      taskId: entry.taskId,
-      estimatedMinutes: entry.expectedMinutes,
-      waitMinutes: entry.waitMinutes,
-      cognitiveLoad: entry.load,
-      focusStatus: mapDockStatusToFocusStatus(entry.status),
-      zone,
-      zoneIndex: idx,
-      isMaster: entry.isMain,
-      waitStartedAt: entry.waitStartedAt ? new Date(entry.waitStartedAt).getTime() : null,
-      waitEndAt: entry.waitStartedAt && entry.waitMinutes
-        ? new Date(entry.waitStartedAt).getTime() + entry.waitMinutes * 60_000
-        : null,
-      sourceProjectId: entry.sourceProjectId ?? null,
-      sourceBlockType: entry.sourceKind === 'dock-created' ? 'text' : null,
-      draggedInAt: Date.now(),
-      isFirstBatch: entry.dockedOrder === 0,
-      inlineTitle: entry.title,
-      inlineDetail: entry.detail ?? null,
-    };
+    return toFocusTaskSlot(entry, zone, idx);
   }
 
   getWaitRemainingSeconds(entry: DockEntry): number | null {
@@ -347,7 +317,7 @@ export class DockCompletionFlowService {
   private resolveWithRecoveredMain(rootRemainingSeconds: number | null): boolean {
     const recoveredMain = this.ctx.entries()
       .filter(entry => entry.isMain && entry.status === 'wait_finished')
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (!recoveredMain) return false;
 
     this.ctx.pendingDecision.set(null);
@@ -401,13 +371,13 @@ export class DockCompletionFlowService {
   ): DockEntry | null {
     const excluded = new Set(excludedIds.filter(Boolean));
     const mainIdle = this.ctx.entries()
-      .filter(entry => entry.isMain && this.isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId))
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b));
+      .filter(entry => entry.isMain && isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId))
+      .sort((a, b) => entryOrder(a) - entryOrder(b));
     if (mainIdle.length > 0) return mainIdle[0];
 
     const stalled = this.ctx.entries()
       .filter(entry => entry.status === 'stalled' && !excluded.has(entry.taskId))
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b));
+      .sort((a, b) => entryOrder(a) - entryOrder(b));
     if (stalled.length > 0) return stalled[0];
 
     return this.pickBestCandidate(
@@ -429,7 +399,7 @@ export class DockCompletionFlowService {
   ): DockEntry | null {
     const excluded = new Set(excludedIds.filter(Boolean));
     const candidates = this.ctx.entries().filter(
-      entry => this.isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
+      entry => isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
     );
     if (candidates.length === 0) return null;
 
@@ -460,7 +430,7 @@ export class DockCompletionFlowService {
     const excluded = new Set(excludedTaskIds.filter(Boolean));
     const mainSlot = this.toFocusTaskSlot(rootEntry, 'command', 0);
     const pendingEntries = this.ctx.entries().filter(
-      entry => this.isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
+      entry => isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
     );
     const pendingSlots = pendingEntries.map((entry, idx) =>
       this.toFocusTaskSlot(entry, entry.lane, idx),
@@ -550,7 +520,7 @@ export class DockCompletionFlowService {
   ) {
     const excluded = new Set(excludedTaskIds.filter(Boolean));
     const candidateEntries = this.ctx.entries().filter(
-      entry => this.isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
+      entry => isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
     );
     return rankDockCandidates(
       candidateEntries.map(entry => this.toSchedulerCandidate(entry)),
@@ -566,7 +536,7 @@ export class DockCompletionFlowService {
   promoteNext(): void {
     const stalled = this.ctx.entries()
       .filter(entry => entry.status === 'stalled')
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (stalled) {
       this.ctx.schedulerPhase.set('active');
       this.promoteCandidate(stalled.taskId);
@@ -582,8 +552,8 @@ export class DockCompletionFlowService {
     }
 
     const mainIdle = this.ctx.entries()
-      .filter(entry => entry.isMain && this.isAutoPromotableStatus(entry.status))
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+      .filter(entry => entry.isMain && isAutoPromotableStatus(entry.status))
+      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (mainIdle) {
       this.ctx.schedulerPhase.set('active');
       this.promoteCandidate(mainIdle.taskId);
@@ -598,7 +568,7 @@ export class DockCompletionFlowService {
     }
 
     const radarCandidates = this.ctx.entries().filter(
-      entry => !entry.isMain && this.isAutoPromotableStatus(entry.status),
+      entry => !entry.isMain && isAutoPromotableStatus(entry.status),
     );
     const focusReference = this.ctx.focusingEntry();
     const rankedRadar = rankDockCandidates(
@@ -632,7 +602,7 @@ export class DockCompletionFlowService {
 
     const recoveredMain = this.ctx.entries()
       .filter(entry => entry.isMain && entry.status === 'wait_finished')
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (recoveredMain) {
       this.ctx.schedulerPhase.set('active');
       this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
@@ -710,7 +680,7 @@ export class DockCompletionFlowService {
 
       const nextMaster =
         active.find(entry => entry.status === 'focusing') ??
-        active.find(entry => this.isRunnableStatus(entry.status)) ??
+        active.find(entry => isRunnableStatus(entry.status)) ??
         active[0];
       if (!nextMaster) return prev;
 
@@ -956,7 +926,7 @@ export class DockCompletionFlowService {
       return changed ? cleared : entries;
     }
 
-    const ordered = [...activeEntries].sort((a, b) => this.entryOrder(a) - this.entryOrder(b));
+    const ordered = [...activeEntries].sort((a, b) => entryOrder(a) - entryOrder(b));
     const preferredMain = preferredTaskId
       ? activeEntries.find(entry => entry.taskId === preferredTaskId) ?? null
       : null;
@@ -1026,8 +996,8 @@ export class DockCompletionFlowService {
       if (aStalled && !bStalled) return -1;
       if (bStalled && !aStalled) return 1;
 
-      const aSuspended = this.isWaitingLike(a.status);
-      const bSuspended = this.isWaitingLike(b.status);
+      const aSuspended = isWaitingLike(a.status);
+      const bSuspended = isWaitingLike(b.status);
       if (aSuspended && !bSuspended) return 1;
       if (bSuspended && !aSuspended) return -1;
 
@@ -1037,11 +1007,4 @@ export class DockCompletionFlowService {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  //  Private helpers
-  // ---------------------------------------------------------------------------
-
-  private entryOrder(entry: DockEntry): number {
-    return this.zoneService.entryOrder(entry);
-  }
 }
