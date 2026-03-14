@@ -1,0 +1,275 @@
+    <div class="orbit-ring orbit-ring-combo" [style.--combo-r.px]="comboRadius"></div>
+    <div class="orbit-ring orbit-ring-backup" [style.--backup-r.px]="backupRadius"></div>
+
+    @if (comboItems().length > 0) {
+      <div
+        class="region-label absolute text-slate-400 font-mono"
+        [style.left.px]="0"
+        [style.top.px]="-(comboRadius + 30)"
+        style="transform: translateX(-50%);">
+        组合选择区
+      </div>
+    }
+    @if (backupItems().length > 0) {
+      <div
+        class="region-label absolute text-slate-500 font-mono"
+        [style.left.px]="0"
+        [style.top.px]="-(backupRadius + 30)"
+        style="transform: translateX(-50%);">
+        备选区
+      </div>
+    }
+    @if (groupSwitchEnabled()) {
+      <div
+        class="region-label absolute text-indigo-300/70 font-mono"
+        [style.left.px]="0"
+        [style.top.px]="-18"
+        style="transform: translateX(-50%);"
+        data-testid="dock-v3-radar-group-indicator">
+        当前组：{{ activeGroupLabel() }}
+      </div>
+    }
+
+    @if (comboOverflowCount() > 0) {
+      <button
+        type="button"
+        class="absolute z-30 px-2 py-1 text-[10px] rounded-full bg-slate-800/90 border border-slate-600/70 text-slate-200 hover:bg-slate-700"
+        [style.left.px]="comboRadius * 0.72"
+        [style.top.px]="-(comboRadius + 24)"
+        style="pointer-events: auto;"
+        (click)="onComboOverflowTriggerClick($event)"
+        [attr.aria-label]="'查看组合选择区隐藏任务，共 ' + comboOverflowCount() + ' 项'"
+        data-testid="dock-v3-radar-combo-overflow-trigger">
+        +{{ comboOverflowCount() }}
+      </button>
+    }
+
+    @if (backupOverflowCount() > 0) {
+      <button
+        type="button"
+        class="absolute z-30 px-2 py-1 text-[10px] rounded-full bg-slate-800/90 border border-slate-600/70 text-slate-200 hover:bg-slate-700"
+        [style.left.px]="backupRadius * 0.78"
+        [style.top.px]="-(backupRadius + 22)"
+        style="pointer-events: auto;"
+        (click)="onBackupOverflowTriggerClick($event)"
+        [attr.aria-label]="'查看备选区隐藏任务，共 ' + backupOverflowCount() + ' 项'"
+        data-testid="dock-v3-radar-backup-overflow-trigger">
+        +{{ backupOverflowCount() }}
+      </button>
+    }
+
+
+    @for (item of comboItems(); track item.entry.taskId) {
+      <div
+        class="radar-item absolute glass-pill px-4 py-2.5 rounded-full"
+        [class.radar-float]="shouldAnimate(item.entry.taskId)"
+        [class.glass-pill-high-load]="item.entry.load === 'high'"
+        [class.radar-highlight]="isHighlighted(item.entry.taskId)"
+        [class.magnet-slide]="isMagnetSliding(item.entry.taskId)"
+        [style.left.px]="item.x"
+        [style.top.px]="item.y"
+        [style.opacity]="resolveOpacity(item.entry.taskId, comboOpacity)"
+        [style.--float-duration]="floatDuration"
+        [style.--float-delay]="getFloatDelay(item.entry.taskId, 'combo-select')"
+        [style.--magnet-dx.px]="-item.x"
+        [style.--magnet-dy.px]="-item.y"
+        (click)="onRadarItemClick($event, item.entry.taskId)"
+        (dblclick)="onRadarItemDoubleClick($event, 'combo-select')"
+        (wheel)="onWheel($event, item.entry.taskId)"
+        (touchstart)="onTouchStart($event, item.entry.taskId)"
+        (touchmove)="onTouchMove($event, item.entry.taskId)"
+        (touchend)="onTouchEnd()"
+        role="button"
+        tabindex="0"
+        [attr.aria-label]="'设为主任务：' + item.entry.title + '，来源项目：' + resolveProjectName(item.entry)"
+        [attr.title]="'来源项目：' + resolveProjectName(item.entry)"
+        (keydown)="onRadarItemKeydown($event, item.entry.taskId)"
+        (mouseenter)="onRadarItemEnter(item.entry.taskId)"
+        (mouseleave)="onRadarItemLeave(item.entry.taskId)"
+        (focus)="onRadarItemFocus(item.entry.taskId)"
+        (blur)="onRadarItemBlur(item.entry.taskId)"
+        data-testid="dock-v3-radar-combo-item">
+        <div class="radar-item-inner flex items-center gap-2.5"
+          [class.radar-entering]="isEntering(item.entry.taskId)"
+          [class.radar-returning]="isRadarReturning(item.entry.taskId)"
+          [style.--appear-dx]="(-item.x * 0.65) + 'px'"
+          [style.--appear-dy]="(-item.y * 0.65) + 'px'"
+          [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'combo-select')">
+          <div
+            class="w-2.5 h-2.5 rounded-full shrink-0 border border-slate-300/30"
+            [style.background-color]="resolveProjectColor(item.entry)"
+            [attr.aria-label]="'来源项目：' + resolveProjectName(item.entry)"
+            [attr.title]="'来源项目：' + resolveProjectName(item.entry)">
+          </div>
+          <div
+            class="w-2.5 h-2.5 rounded-full shrink-0"
+            [class.load-dot-high]="item.entry.load === 'high'"
+            [class.load-dot-low]="item.entry.load === 'low'">
+          </div>
+          <span class="text-xs text-slate-100 font-medium whitespace-nowrap">{{ item.entry.title }}</span>
+          @if (item.entry.expectedMinutes) {
+            <span class="text-[10px] text-slate-500 font-mono">{{ formatTime(item.entry.expectedMinutes) }}</span>
+          }
+        </div>
+      </div>
+    }
+
+    @for (item of backupItems(); track item.entry.taskId) {
+      <div
+        class="radar-item absolute glass-pill-backup px-3 py-1.5 rounded-full"
+        [class.radar-float]="shouldAnimate(item.entry.taskId)"
+        [class.radar-highlight]="isHighlighted(item.entry.taskId)"
+        [class.magnet-slide]="isMagnetSliding(item.entry.taskId)"
+        [style.left.px]="item.x"
+        [style.top.px]="item.y"
+        [style.opacity]="resolveOpacity(item.entry.taskId, backupOpacity)"
+        [style.--float-duration]="backupFloatDuration"
+        [style.--float-delay]="getFloatDelay(item.entry.taskId, 'backup')"
+        [style.--magnet-dx.px]="-item.x"
+        [style.--magnet-dy.px]="-item.y"
+        (click)="onRadarItemClick($event, item.entry.taskId)"
+        (dblclick)="onRadarItemDoubleClick($event, 'backup')"
+        (wheel)="onWheel($event, item.entry.taskId)"
+        (touchstart)="onTouchStart($event, item.entry.taskId)"
+        (touchmove)="onTouchMove($event, item.entry.taskId)"
+        (touchend)="onTouchEnd()"
+        role="button"
+        tabindex="0"
+        [attr.aria-label]="'设为主任务：' + item.entry.title + '，来源项目：' + resolveProjectName(item.entry)"
+        [attr.title]="'来源项目：' + resolveProjectName(item.entry)"
+        (keydown)="onRadarItemKeydown($event, item.entry.taskId)"
+        (mouseenter)="onRadarItemEnter(item.entry.taskId)"
+        (mouseleave)="onRadarItemLeave(item.entry.taskId)"
+        (focus)="onRadarItemFocus(item.entry.taskId)"
+        (blur)="onRadarItemBlur(item.entry.taskId)"
+        data-testid="dock-v3-radar-backup-item">
+        <div class="radar-item-inner flex items-center gap-2"
+          [class.radar-entering]="isEntering(item.entry.taskId)"
+          [class.radar-returning]="isRadarReturning(item.entry.taskId)"
+          [style.--appear-dx]="(-item.x * 0.5) + 'px'"
+          [style.--appear-dy]="(-item.y * 0.5) + 'px'"
+          [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'backup')">
+          <div
+            class="w-1.5 h-1.5 rounded-full shrink-0 border border-slate-300/30"
+            [style.background-color]="resolveProjectColor(item.entry)"
+            [attr.aria-label]="'来源项目：' + resolveProjectName(item.entry)"
+            [attr.title]="'来源项目：' + resolveProjectName(item.entry)">
+          </div>
+          <div
+            class="w-1.5 h-1.5 rounded-full shrink-0"
+            [class.load-dot-high]="item.entry.load === 'high'"
+            [class.load-dot-low]="item.entry.load === 'low'">
+          </div>
+          <span class="text-[10px] text-slate-400 whitespace-nowrap">{{ item.entry.title }}</span>
+          @if (item.entry.expectedMinutes) {
+            <span class="text-[9px] text-slate-600 font-mono">{{ formatTime(item.entry.expectedMinutes) }}</span>
+          }
+        </div>
+      </div>
+    }
+
+    @if (showComboOverflowPanel() && comboOverflowCount() > 0) {
+      <div
+        class="absolute z-40 rounded-xl border border-slate-600/70 bg-slate-900/95 p-2.5 w-[220px] max-h-[220px] overflow-y-auto"
+        [style.left.px]="comboRadius * 0.44"
+        [style.top.px]="-(comboRadius - 4)"
+        style="pointer-events: auto;"
+        data-testid="dock-v3-radar-combo-overflow-panel">
+        <div class="text-[10px] text-slate-300 font-mono mb-2">组合选择区隐藏任务</div>
+        @for (entry of comboOverflowEntries(); track entry.taskId) {
+          <button
+            type="button"
+            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] text-slate-200 hover:bg-slate-700/60"
+            (click)="onOverflowEntryClick($event, entry.taskId)">
+            <span
+              class="w-2 h-2 rounded-full border border-slate-300/30 shrink-0"
+              [style.background-color]="resolveProjectColor(entry)"
+              [attr.title]="'来源项目：' + resolveProjectName(entry)">
+            </span>
+            <span class="truncate flex-1">{{ entry.title }}</span>
+          </button>
+        }
+      </div>
+    }
+
+    @if (showBackupOverflowPanel() && backupOverflowCount() > 0) {
+      <div
+        class="absolute z-40 rounded-xl border border-slate-600/70 bg-slate-900/95 p-2.5 w-[220px] max-h-[220px] overflow-y-auto"
+        [style.left.px]="backupRadius * 0.48"
+        [style.top.px]="-(backupRadius - 8)"
+        style="pointer-events: auto;"
+        data-testid="dock-v3-radar-backup-overflow-panel">
+        <div class="text-[10px] text-slate-300 font-mono mb-2">备选区隐藏任务</div>
+        @for (entry of backupOverflowEntries(); track entry.taskId) {
+          <button
+            type="button"
+            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] text-slate-200 hover:bg-slate-700/60"
+            (click)="onOverflowEntryClick($event, entry.taskId)">
+            <span
+              class="w-2 h-2 rounded-full border border-slate-300/30 shrink-0"
+              [style.background-color]="resolveProjectColor(entry)"
+              [attr.title]="'来源项目：' + resolveProjectName(entry)">
+            </span>
+            <span class="truncate flex-1">{{ entry.title }}</span>
+          </button>
+        }
+      </div>
+    }
+
+    @if (createFormLane()) {
+      <div
+        class="radar-create-form absolute rounded-xl p-3 flex flex-col gap-2"
+        [style.left.px]="createFormX"
+        [style.top.px]="createFormY"
+        [style.width.px]="createFormWidth"
+        style="transform: translate(-50%, -50%);"
+        (click)="$event.stopPropagation()"
+        data-testid="dock-v3-radar-create-form">
+        <div class="text-[10px] text-slate-400 font-mono mb-1">
+          Create {{ createFormLane() === 'combo-select' ? 'Combo-select' : 'Backup' }} Task
+        </div>
+        <input
+          type="text"
+          [(ngModel)]="createTitle"
+          (keydown.enter)="submitCreate()"
+          (keydown.escape)="closeCreateForm()"
+          class="text-xs py-1.5 px-2 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-200 placeholder:text-slate-500 focus:border-indigo-500 outline-none"
+          placeholder="Task title..." />
+        <div class="flex items-center gap-2">
+          <select
+            [(ngModel)]="createLoad"
+            class="text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 outline-none flex-1">
+            <option value="low">Low Load</option>
+            <option value="high">High Load</option>
+          </select>
+          <input
+            type="number"
+            [(ngModel)]="createExpected"
+            min="1"
+            placeholder="min"
+            class="w-14 text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-200 outline-none text-center" />
+        </div>
+        <div class="flex items-center gap-2">
+          <input
+            type="number"
+            [(ngModel)]="createWait"
+            min="0"
+            placeholder="Wait (min)"
+            class="flex-1 text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-200 outline-none" />
+          <button
+            type="button"
+            (click)="submitCreate()"
+            class="px-2.5 py-1 text-[10px] rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+            style="min-height: 28px;">
+            Add
+          </button>
+          <button
+            type="button"
+            (click)="closeCreateForm()"
+            class="px-2 py-1 text-[10px] rounded-lg hover:bg-slate-700/60 text-slate-400 transition-colors"
+            style="min-height: 28px;">
+            Close
+          </button>
+        </div>
+      </div>
+    }

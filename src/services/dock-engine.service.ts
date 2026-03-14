@@ -51,6 +51,7 @@ import { DockCompletionFlowService } from './dock-completion-flow.service';
 import { DockDailySlotService } from './dock-daily-slot.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockInlineCreationService } from './dock-inline-creation.service';
+import { DockEntryFieldService } from './dock-entry-field.service';
 import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
 import {
@@ -91,6 +92,7 @@ export class DockEngineService implements OnDestroy {
   private readonly inlineCreation = inject(DockInlineCreationService);
   private readonly dailySlotService = inject(DockDailySlotService);
   private readonly taskSync = inject(DockTaskSyncService);
+  private readonly entryField = inject(DockEntryFieldService);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly entries = signal<DockEntry[]>([]);
@@ -386,6 +388,13 @@ export class DockEngineService implements OnDestroy {
       schedulerPhase: this.schedulerPhase,
       fragmentDefenseLevel: this.fragmentDefenseLevel,
       isFragmentPhase: this.isFragmentPhase,
+    });
+
+    // Initialize entry field service with engine signal references and callbacks
+    this.entryField.init({
+      entries: this.entries,
+      focusSessionContext: () => this.focusSessionContext(),
+      rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
 
     // 10 秒一次 tick，配合 CSS transition 平滑过渡（避免 1s 频率导致动画卡顿）
@@ -881,84 +890,23 @@ export class DockEngineService implements OnDestroy {
   }
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {
-    const nextLoad: CognitiveLoad = direction === 'up' ? 'high' : 'low';
-    this.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, load: nextLoad } : entry)),
-    );
-    this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
+    this.entryField.toggleLoad(taskId, direction);
   }
 
   setExpectedTime(taskId: string, minutes: number | null): void {
-    const currentEntry = this.entries().find(entry => entry.taskId === taskId) ?? null;
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: minutes,
-      waitMinutes: currentEntry?.waitMinutes ?? null,
-      cognitiveLoad: currentEntry?.load ?? null,
-    });
-    this.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              expectedMinutes: plannerFields.expectedMinutes,
-              waitMinutes: plannerFields.waitMinutes,
-            }
-          : entry,
-      ),
-    );
-    if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
-    }
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: plannerFields.expectedMinutes,
-      wait_minutes: plannerFields.waitMinutes,
-    });
+    this.entryField.setExpectedTime(taskId, minutes);
   }
 
   setWaitTime(taskId: string, minutes: number | null): void {
-    const currentEntry = this.entries().find(entry => entry.taskId === taskId) ?? null;
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: currentEntry?.expectedMinutes ?? null,
-      waitMinutes: minutes,
-      cognitiveLoad: currentEntry?.load ?? null,
-    });
-    this.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              expectedMinutes: plannerFields.expectedMinutes,
-              waitMinutes: plannerFields.waitMinutes,
-            }
-          : entry,
-      ),
-    );
-    if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
-    }
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: plannerFields.expectedMinutes,
-      wait_minutes: plannerFields.waitMinutes,
-    });
+    this.entryField.setWaitTime(taskId, minutes);
   }
 
   setDetail(taskId: string, detail: string): void {
-    this.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, detail } : entry)),
-    );
-    this.taskSync.syncTaskDetail(taskId, detail, {
-      entries: this.entries(),
-      focusSessionContext: this.focusSessionContext(),
-    });
+    this.entryField.setDetail(taskId, detail);
   }
 
   setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): void {
-    this.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, lane, zoneSource } : entry)),
-    );
-    if (zoneSource === 'auto') {
-      this.rebalanceAutoZones();
-    }
+    this.entryField.setLane(taskId, lane, zoneSource);
   }
 
   toggleFocusMode(): void {

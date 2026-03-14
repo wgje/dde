@@ -5,23 +5,40 @@
  * Extracted from DockEngineService to separate timer-based
  * fragment/rest monitoring from core dock state logic.
  */
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, Signal, WritableSignal, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
+  DockEntry,
+  DockRuleDecision,
+  DockSchedulerPhase,
   FragmentDefenseLevel,
   FragmentEventEntry,
+  HighLoadCounter,
   PRESET_FRAGMENT_EVENTS,
 } from '../models/parking-dock';
+import { determineFragmentDefenseLevel } from './dock-scheduler.rules';
 import { FocusPreferenceService } from './focus-preference.service';
 import { LoggerService } from './logger.service';
 
 /**
- * Callbacks provided by DockEngineService for engine state mutations
- * that must happen during fragment phase transitions.
+ * Callbacks and signal references provided by DockEngineService
+ * for engine state mutations during fragment phase transitions,
+ * defense-level updates, and burnout cooldown checks.
  */
 export interface FragmentRestEngineCallbacks {
   enterFragmentPhase: (reason: string, rootTaskId?: string, remainingMinutes?: number) => void;
   clearPendingDecisionState: () => void;
+  // Signal references for fragment defense & burnout methods
+  entries: Signal<DockEntry[]>;
+  focusMode: Signal<boolean>;
+  schedulerPhase: WritableSignal<DockSchedulerPhase>;
+  fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
+  burnoutTriggeredAt: WritableSignal<number | null>;
+  highLoadCounter: WritableSignal<HighLoadCounter>;
+  focusingEntry: Signal<DockEntry | null>;
+  lastRuleDecision: WritableSignal<DockRuleDecision | null>;
+  isFragmentPhase: Signal<boolean>;
+  getWaitRemainingSeconds: (entry: DockEntry) => number | null;
 }
 
 @Injectable({
@@ -219,7 +236,8 @@ export class DockFragmentRestService {
    * 按 physical-crossover > digital-janitor > micro-progress 优先级
    * 从预置列表中随机选取一个推荐给用户
    */
-  getFragmentEventRecommendation(defenseLevel: FragmentDefenseLevel): FragmentEventEntry | null {
+  getFragmentEventRecommendation(): FragmentEventEntry | null {
+    const defenseLevel = this.callbacks!.fragmentDefenseLevel();
     if (defenseLevel < 2) return null;
 
     // 按分类优先级排列候选
@@ -249,6 +267,9 @@ export class DockFragmentRestService {
   completeFragmentEvent(): boolean {
     if (!this.activeFragmentEvent()) return false;
     this.activeFragmentEvent.set(null);
+    // Level 3→4：碎片做完后直接进入 Zen Mode（不连发）
+    this.callbacks!.fragmentDefenseLevel.set(4);
+    this.callbacks!.schedulerPhase.set('paused');
     this.logger.info('碎片事件完成，进入 Zen Mode（Level 4）');
     return true;
   }
@@ -271,6 +292,67 @@ export class DockFragmentRestService {
 
   setFragmentDismissed(value: boolean): void {
     this.fragmentEntryDismissed.set(value);
+  }
+
+  // ─── Fragment Defense & Burnout ────────────────
+
+  /** 碎片阶段防御等级动态更新（每 10s tick 调用） */
+  updateFragmentDefenseLevel(): void {
+    const ctx = this.callbacks!;
+    if (ctx.fragmentDefenseLevel() === 4 && ctx.isFragmentPhase()) {
+      ctx.schedulerPhase.set('paused');
+      return;
+    }
+
+    const waitingEntries = ctx.entries().filter(
+      entry => entry.status === 'suspended_waiting' && entry.waitStartedAt && entry.waitMinutes,
+    );
+    if (waitingEntries.length === 0) {
+      this.stopFragmentEntryCountdown();
+      this.setFragmentDismissed(false);
+      ctx.fragmentDefenseLevel.set(1);
+      ctx.schedulerPhase.set('active');
+      return;
+    }
+
+    const shortestWaitMin = Math.min(
+      ...waitingEntries.map(entry => {
+        const remaining = ctx.getWaitRemainingSeconds(entry);
+        return remaining !== null ? remaining / 60 : Infinity;
+      }),
+    );
+
+    const hasBurnout = ctx.burnoutTriggeredAt() !== null;
+    ctx.fragmentDefenseLevel.set(determineFragmentDefenseLevel(shortestWaitMin, hasBurnout));
+    ctx.schedulerPhase.set('paused');
+  }
+
+  /**
+   * 倦怠冷却检查（策划案 §7.8 NG-16b）
+   * 在 tick 中调用，检查倦怠冷却期是否已过
+   */
+  checkBurnoutCooldown(): void {
+    const ctx = this.callbacks!;
+    const burnoutAt = ctx.burnoutTriggeredAt();
+    if (burnoutAt === null) return;
+    if (Date.now() - burnoutAt > PARKING_CONFIG.BURNOUT_COOLDOWN_MS) {
+      ctx.burnoutTriggeredAt.set(null);
+      ctx.highLoadCounter.set({ count: 0, windowStartAt: 0 });
+      this.logger.info('倦怠冷却期结束，计数器重置');
+    }
+  }
+
+  /** 退出 Zen Mode，回退到碎片/活跃阶段 */
+  dismissZenMode(): void {
+    const ctx = this.callbacks!;
+    if (!ctx.focusMode()) return;
+    if (ctx.isFragmentPhase()) {
+      ctx.fragmentDefenseLevel.set(2);
+      ctx.schedulerPhase.set('paused');
+      return;
+    }
+    ctx.fragmentDefenseLevel.set(1);
+    ctx.schedulerPhase.set('active');
   }
 
   // ─── Full Reset ───────────────────────────────

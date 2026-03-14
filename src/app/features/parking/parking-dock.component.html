@@ -1,0 +1,893 @@
+    <app-dock-focus-scene
+      [active]="engine.focusMode()"
+      [scrimOn]="engine.focusScrimOn()"
+      [sceneMode]="focusSceneMode()"
+      [performanceTier]="performanceTier()"
+      [reducedMotion]="reducedMotion()"
+      [transitionPhase]="engine.focusTransition()?.phase ?? null"
+      [stageTransform]="focusStageTransform()"
+      [backgroundImageUrl]="focusBackgroundUrl"
+      (backdropClick)="onBackdropClick()"
+      (transitionSettled)="onFocusTransitionSettled($event)">
+      @if (engine.focusMode()) {
+        <!-- 中央卡片堆 -->
+        <app-dock-console-stack class="relative z-20 pointer-events-auto"></app-dock-console-stack>
+
+        @if (!strictSampleMode && engine.pendingDecision() && pendingDecisionEntries().length > 0) {
+          <div
+            class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl
+                   px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
+            style="top: 40px; pointer-events: auto;"
+            data-testid="dock-v3-pending-decision">
+            <div class="flex items-center gap-2 mb-2.5">
+              <div class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></div>
+              <div class="text-[10px] text-indigo-300/80 font-mono tracking-wide flex-1">
+                {{ engine.pendingDecision()?.reason || '候选任务时长匹配异常，请手动决策' }}
+              </div>
+              <button
+                type="button"
+                class="text-[9px] px-2 py-1 rounded border border-slate-600/70 text-slate-300 hover:bg-slate-700/50"
+                (click)="cancelPendingAutoPromote()"
+                data-testid="dock-v3-pending-cancel">
+                收起推荐
+              </button>
+            </div>
+            <div class="text-[10px] text-stone-500 mb-3 font-mono">
+              主任务剩余窗口
+              <span class="text-stone-400 font-semibold">
+                {{ formatTime(pendingDecisionRemainingMinutes()) }}
+              </span>
+            </div>
+            <div class="grid grid-cols-3 gap-2.5">
+              @for (entry of pendingDecisionEntries(); track entry.taskId; let i = $index) {
+                <button
+                  type="button"
+                  class="decision-card rounded-xl border px-3.5 py-2.5 text-left transition-colors transition-transform transition-shadow"
+                  [ngClass]="i % 3 === 0
+                    ? 'border-amber-400/40 bg-amber-500/8 hover:bg-amber-500/15'
+                    : (i % 3 === 1
+                      ? 'border-indigo-400/40 bg-indigo-500/8 hover:bg-indigo-500/15'
+                      : 'border-emerald-400/40 bg-emerald-500/8 hover:bg-emerald-500/15')"
+                  (click)="choosePendingCandidate(entry.taskId)"
+                  [attr.data-testid]="'dock-v3-pending-choice-' + i">
+                  <div class="text-[10px] font-mono mb-1.5 font-semibold"
+                    [class.text-amber-300]="i % 3 === 0"
+                    [class.text-indigo-300]="i % 3 === 1"
+                    [class.text-emerald-300]="i % 3 === 2">
+                    {{ groupLabel(entry.group) }}
+                  </div>
+                  <div class="text-xs text-stone-100 font-medium truncate mb-1.5">{{ entry.title }}</div>
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded"
+                      [ngClass]="entry.lane === 'combo-select'
+                        ? 'bg-sky-500/15 text-sky-400 border border-sky-500/20'
+                        : 'bg-teal-500/15 text-teal-400 border border-teal-500/20'">
+                      {{ entry.lane === 'combo-select' ? '组合选择' : '备选' }}
+                    </span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded"
+                      [ngClass]="entry.load === 'high'
+                        ? 'bg-red-500/15 text-red-400 border border-red-500/20'
+                        : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'">
+                      {{ entry.load === 'low' ? '低负荷' : '高负荷' }}
+                    </span>
+                    <span class="text-[9px] text-stone-500 font-mono">
+                      {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '—' }}
+                    </span>
+                  </div>
+                </button>
+              }
+            </div>
+          </div>
+        }
+
+        @if (!strictSampleMode && blankPeriodActive()) {
+          <div
+            class="blank-period-card blank-period-enter absolute left-1/2 top-10 -translate-x-1/2 z-30 w-[min(92vw,420px)] rounded-[28px] px-5 py-4"
+            style="pointer-events: auto;"
+            data-testid="dock-v3-blank-period-card">
+            <div class="flex items-start gap-3">
+              <div class="blank-period-icon shrink-0 mt-0.5"></div>
+              <div class="flex-1 min-w-0">
+                <div class="text-[10px] font-mono tracking-[0.18em] uppercase text-amber-200/70 mb-2">
+                  Blank Period
+                </div>
+                <div class="text-base text-slate-50 font-semibold mb-1.5">紧张留白期</div>
+                <div class="text-xs text-slate-300/85 leading-5 mb-3">
+                  {{ engine.pendingDecision()?.reason || '当前窗口过短，不建议再插入新任务。' }}
+                </div>
+                <div class="flex items-center gap-3 text-[11px] text-slate-300/80">
+                  <span class="blank-period-chip">剩余窗口 {{ formatTime(pendingDecisionRemainingMinutes()) }}</span>
+                  <span class="blank-period-chip">5 秒内可取消</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        }
+
+        <app-dock-radar-zone
+          class="absolute left-1/2 top-1/2 z-10 pointer-events-auto"
+          style="width: 0; height: 0;">
+        </app-dock-radar-zone>
+      }
+    </app-dock-focus-scene>
+
+    @if (engine.focusMode()) {
+      @if (showHelpNudge() && !showHelpOverlay()) {
+        <div
+          class="fixed left-1/2 top-6 z-[66] -translate-x-1/2 rounded-full border border-indigo-400/30 bg-slate-900/88 px-4 py-2 text-[11px] text-slate-100 shadow-lg backdrop-blur-sm"
+          data-testid="dock-v3-help-nudge">
+          按 <span class="font-mono text-indigo-300">Alt + H</span> 或状态机问号按钮查看专注操作帮助
+        </div>
+      }
+
+      <button
+        type="button"
+        class="fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform"
+        [ngClass]="canCreateBackupTask()
+          ? 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-900/45 border-indigo-300/40 hover:scale-105 active:scale-95'
+          : 'bg-slate-800/90 text-slate-500 border-slate-600/50 shadow-none cursor-not-allowed'"
+        [disabled]="!canCreateBackupTask()"
+        style="pointer-events: auto;"
+        (click)="createBackupTaskFromFab()"
+        aria-label="创建备选任务"
+        data-testid="dock-v3-backup-fab">
+        +
+      </button>
+    }
+
+    @if (flipGhost(); as ghost) {
+      <div
+        class="dock-v4-flip-ghost"
+        [class.active]="flipGhostActive()"
+        [style.left.px]="ghost.from.left"
+        [style.top.px]="ghost.from.top"
+        [style.width.px]="ghost.from.width"
+        [style.height.px]="ghost.from.height"
+        [style.--flip-dx.px]="ghost.to.left - ghost.from.left"
+        [style.--flip-dy.px]="ghost.to.top - ghost.from.top"
+        [style.--flip-sx]="(ghost.to.width / ghost.from.width).toString()"
+        [style.--flip-sy]="(ghost.to.height / ghost.from.height).toString()"
+        [style.--flip-duration]="((engine.focusTransition()?.durationMs ?? motion.focus.enterMs) + 'ms')"
+        [style.--flip-ease]="motion.easing.enter"
+        [style.--flip-opacity]="PARKING_CONFIG.DOCK_FOCUS_FLIP_GHOST_OPACITY"
+        [style.z-index]="PARKING_CONFIG.DOCK_FOCUS_FLIP_Z_INDEX"
+        data-testid="dock-v4-flip-ghost">
+      </div>
+    }
+
+    @if (engine.focusMode()) {
+      <div
+        class="fixed z-[66]"
+        [ngStyle]="hudContainerStyle()"
+        style="pointer-events: auto;"
+        data-testid="dock-v3-status-machine-container">
+        <div
+          class="status-machine-shell"
+          [class.status-machine-shell-minimal]="hudMinimalMode()"
+          (pointerdown)="onHudPointerDown($event)">
+          <app-dock-status-machine
+            [forcedMode]="engine.focusScrimOn() ? 'full' : 'minimal'">
+          </app-dock-status-machine>
+        </div>
+      </div>
+
+      @if (showHelpOverlay()) {
+        <div
+          class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4"
+          style="pointer-events: auto;"
+          role="dialog"
+          aria-modal="true"
+          aria-label="专注操作帮助"
+          (click)="closeHelpOverlay()"
+          data-testid="dock-v3-help-overlay">
+          <div
+            class="w-[min(92vw,860px)] rounded-[28px] border border-slate-600/70 bg-slate-900/96 p-5 text-slate-100 shadow-2xl backdrop-blur-md"
+            (click)="$event.stopPropagation()">
+            <div class="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <div class="text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-300/80">Focus Help</div>
+                <h4 class="mt-1 text-lg font-semibold">专注操作帮助</h4>
+                <p class="mt-1 text-sm text-slate-300">
+                  先用显式按钮完成主要操作，快捷方式只作为加速器，不再承担主路径。
+                </p>
+              </div>
+              <button
+                type="button"
+                class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl border border-slate-600/70 bg-slate-800/80 px-3 py-2 text-[11px] text-slate-200 hover:bg-slate-700"
+                (click)="closeHelpOverlay()"
+                data-testid="dock-v3-help-close">
+                关闭
+              </button>
+            </div>
+            <div class="grid gap-3 md:grid-cols-3">
+              @for (section of focusHelpSections; track section.title) {
+                <section class="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-4">
+                  <div class="text-[11px] font-semibold text-slate-100">{{ section.title }}</div>
+                  <div class="mt-1 text-[11px] text-slate-400">{{ section.subtitle }}</div>
+                  <div class="mt-3 space-y-2 text-[12px] leading-5 text-slate-300">
+                    @for (item of section.items; track item) {
+                      <p>{{ item }}</p>
+                    }
+                  </div>
+                </section>
+              }
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- GAP-2: 碎片时间进入倒计时选择 -->
+      @if (engine.fragmentEntryCountdown() !== null) {
+        <div class="fixed inset-0 z-[48] flex items-center justify-center"
+             style="pointer-events: auto;">
+          <div class="fragment-countdown-card rounded-2xl border border-emerald-500/30 bg-slate-900/95 px-6 py-5 text-center shadow-2xl max-w-[320px]">
+            <div class="text-emerald-400 text-[11px] font-semibold tracking-widest mb-2 uppercase">碎片时间</div>
+            <div class="text-slate-100 text-sm mb-3">
+              检测到短暂空闲，即将进入碎片任务推荐
+            </div>
+            <div class="text-3xl font-mono text-emerald-300 mb-4" data-testid="fragment-countdown-number">
+              {{ engine.fragmentEntryCountdown() }}s
+            </div>
+            <div class="flex gap-3 justify-center">
+              <button
+                type="button"
+                class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
+                (click)="engine.acceptFragmentEntry()"
+                data-testid="fragment-countdown-accept">
+                立即进入
+              </button>
+              <button
+                type="button"
+                class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs transition-colors"
+                (click)="engine.skipFragmentEntry()"
+                data-testid="fragment-countdown-skip">
+                跳过
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- 碎片阶段日常任务浮层 -->
+      @if (engine.isFragmentPhase()) {
+        <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2
+                    -translate-x-1/2 -translate-y-1/2 z-40"
+             style="pointer-events: auto;">
+          <app-dock-daily-slot></app-dock-daily-slot>
+        </div>
+      }
+
+      <app-dock-zen-mode
+        [isActive]="showZenMode()"
+        (exit)="onZenExit()">
+      </app-dock-zen-mode>
+
+      @if (showExitConfirm()) {
+        <div
+          class="fixed inset-0 z-[72] bg-black/45 flex items-center justify-center"
+          style="pointer-events: auto;"
+          role="dialog"
+          aria-modal="true"
+          aria-label="退出专注模式确认"
+          data-testid="dock-v3-exit-confirm">
+          <div class="w-[min(92vw,500px)] rounded-2xl border border-slate-600/70 bg-slate-900/95 p-4 text-slate-100 shadow-2xl">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h4 class="text-sm font-semibold">退出专注模式</h4>
+                <p class="mt-1 text-xs text-slate-300">
+                  {{ exitFlowStep() === 'primary'
+                    ? '先决定是否继续保留当前专注上下文。'
+                    : '只有在你确认结束专注时，才会出现保留或清空停泊坞的选择。' }}
+                </p>
+              </div>
+              @if (exitFlowStep() === 'destructive') {
+                <button
+                  type="button"
+                  class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-slate-600/70 px-3 py-2 text-[11px] text-slate-300 hover:bg-slate-800"
+                  (click)="confirmExitFocus('back')"
+                  data-testid="dock-v3-exit-back">
+                  返回
+                </button>
+              }
+            </div>
+
+            @if (exitFlowStep() === 'primary') {
+              <div class="flex flex-col gap-2">
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl border border-slate-600/70 bg-slate-800/85 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                  aria-keyshortcuts="Escape"
+                  (click)="confirmExitFocus('cancel')"
+                  data-testid="dock-v3-exit-cancel">
+                  继续专注
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-slate-700 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-600"
+                  aria-keyshortcuts="Alt+K"
+                  (click)="confirmExitFocus('keep-focus-hide-scrim')"
+                  data-testid="dock-v3-exit-keep">
+                  仅关闭背景虚化
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                  aria-keyshortcuts="Enter"
+                  (click)="confirmExitFocus('request-end-focus')"
+                  data-testid="dock-v3-exit-request-end">
+                  结束专注…
+                </button>
+              </div>
+            } @else {
+              <div class="flex flex-col gap-2">
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                  (click)="confirmExitFocus('save-exit')"
+                  data-testid="dock-v3-exit-save">
+                  结束专注并保留停泊坞
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-rose-700/80 px-3 py-2 text-xs font-medium text-white hover:bg-rose-600"
+                  (click)="confirmExitFocus('clear-exit')"
+                  data-testid="dock-v3-exit-clear">
+                  结束专注并清空停泊坞
+                </button>
+              </div>
+            }
+          </div>
+        </div>
+      }
+
+      @if (showRestoreHint()) {
+        <div
+          class="fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
+          data-testid="dock-v3-exit-restore-hint">
+          已保留专注会话，可随时重新开启虚化。
+        </div>
+      }
+
+      @if (dockActionFeedback(); as feedback) {
+        <div
+          class="fixed left-1/2 z-[71] -translate-x-1/2 rounded-full border px-4 py-2 text-[11px] shadow-lg backdrop-blur-sm"
+          [ngClass]="feedback.tone === 'success'
+            ? 'border-emerald-400/25 bg-slate-900/88 text-emerald-100'
+            : 'border-indigo-400/25 bg-slate-900/88 text-slate-100'"
+          [style.bottom]="'calc(' + dockBottomInset + ' + 148px)'"
+          data-testid="dock-v3-dock-feedback">
+          {{ feedback.message }}
+        </div>
+      }
+    }
+
+    <!-- ═══ 半圆形停泊坞入口（始终可见） ═══ -->
+    <div
+      class="dock-semicircle dock-semicircle-enter"
+      [class.expanded]="semicircleExpanded()"
+      [class.drag-active]="dropState() !== 'idle' && dropState() !== 'reject'"
+      [style.left]="dockCenterLeft()"
+      [style.bottom]="dockSemicircleBottomInset()"
+      [style.--dock-semicircle-scale-x]="semicircleExpanded() ? '1' : '0.5'"
+      [style.--dock-semicircle-scale-y]="semicircleExpanded() ? '1' : '0.77'"
+      (click)="toggleDockExpanded()"
+      (mouseenter)="onSemicircleMouseEnter()"
+      (mouseleave)="onSemicircleMouseLeave()"
+      (dragover)="onSemicircleDragOver($event)"
+      (dragleave)="onSemicircleDragLeave()"
+      (drop)="onDrop($event)"
+      data-testid="dock-v3-semicircle"
+      [attr.aria-label]="dockExpanded() ? '收起停泊坞' : '展开停泊坞'"
+      [attr.aria-expanded]="dockExpanded()"
+      [attr.aria-disabled]="gateActive() ? 'true' : null"
+      [style.--dock-semicircle-lift]="dockExpanded() ? '0px' : (PARKING_CONFIG.MOTION.distance.semicircleLiftPx + 'px')"
+      role="button"
+      tabindex="0"
+      (keydown.enter)="toggleDockExpanded()"
+      (keydown.space)="$event.preventDefault(); toggleDockExpanded()">
+      @if (engine.dockedCount() > 0) {
+        <span class="count-badge">{{ engine.dockedCount() }}</span>
+      }
+      @if (dockExpanded()) {
+        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+        </svg>
+      } @else {
+        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
+        </svg>
+      }
+    </div>
+
+    @if (firstMainSelectionPending()) {
+      <div
+        class="fixed left-1/2 -translate-x-1/2 z-[45] px-3 py-2 rounded-full border border-indigo-400/30 bg-slate-900/90 text-[11px] text-slate-100 shadow-lg"
+        [style.bottom]="'calc(' + dockBottomInset + ' + 132px)'"
+        data-testid="dock-v3-first-main-hint">
+        初始主任务已选定，15 秒内可点击其他任务改选。
+      </div>
+    }
+
+    <!-- ═══ 底部坞栏面板 ═══ -->
+    <div
+      class="dock-bar fixed -translate-x-1/2 z-40 w-full px-4"
+      [style.left]="dockCenterLeft()"
+      [style.--dock-sidebar-width]="sidebarEffectiveWidth() + 'px'"
+      [style.bottom]="dockBottomInset"
+      [style.--dock-focus-dim-opacity]="PARKING_CONFIG.DOCK_FOCUS_DIM_OPACITY"
+      [style.--dock-focus-dim-translate-y]="PARKING_CONFIG.DOCK_FOCUS_DIM_TRANSLATE_Y_PX + 'px'"
+      [class.focus-collapsed]="!dockExpanded() && dropState() === 'idle'"
+      [class.focus-expanded]="dockExpanded() && !dockSecondaryRailActive()"
+      [class.focus-secondary]="dockExpanded() && dockSecondaryRailActive()"
+      [class.drag-peek]="!dockExpanded() && dropState() !== 'idle'"
+      [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+      data-testid="dock-v3-panel">
+      <div class="glass-card dock-shell rounded-2xl p-4 flex flex-col gap-4 border border-slate-700/30 shadow-2xl max-h-full overflow-visible"
+           [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+           data-testid="dock-v3-shell">
+
+        <!-- 顶部标题栏 -->
+        <div class="flex items-center justify-between px-2 flex-shrink-0">
+          <div class="flex items-center gap-3">
+            <h3 class="text-sm font-semibold text-slate-200 tracking-wide flex items-center gap-2">
+              停泊坞
+              <span class="text-slate-500 font-mono text-xs tabular-nums">{{ engine.dockedCount() }} 块</span>
+            </h3>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              (click)="toggleNewTaskForm()"
+              [disabled]="!canUseInlineDockCreate()"
+              class="px-4 py-1.5 rounded-full text-xs font-semibold transition-colors"
+              [ngClass]="showNewTaskForm()
+                ? 'bg-indigo-500/90 text-white hover:bg-indigo-400'
+                : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'"
+              style="min-height: 44px;"
+              data-testid="dock-v3-create-toggle">
+              {{ showNewTaskForm() ? '收起新建' : '+ 新建' }}
+            </button>
+
+            <button
+              type="button"
+              (click)="toggleHelpOverlay()"
+              class="px-4 py-1.5 rounded-full text-xs font-semibold text-slate-200 bg-slate-800/80 hover:bg-slate-700 transition-colors"
+              style="min-height: 44px;"
+              data-testid="dock-v3-help-trigger-inline">
+              操作帮助
+            </button>
+
+            <button
+              type="button"
+              (click)="onScrimToggle()"
+              [disabled]="!canToggleScrim()"
+              class="px-4 py-1.5 rounded-full text-xs font-bold transition-colors"
+              [ngClass]="engine.focusMode() && engine.focusScrimOn()
+                ? 'bg-gradient-to-r from-indigo-500 to-violet-500 text-white'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+              [style.box-shadow]="engine.focusMode() && engine.focusScrimOn()
+                ? '0 0 20px rgba(99,102,241,0.35), 0 0 6px rgba(139,92,246,0.4)'
+                : 'none'"
+              style="min-height: 44px;"
+              data-testid="dock-v3-focus-toggle">
+              {{ !engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '背景虚化开启' : '背景虚化关闭') }}
+            </button>
+          </div>
+        </div>
+
+        @if (bannerPlannerTarget() || plannerActiveEntry()) {
+          <div class="relative z-[3] flex-shrink-0">
+            @if (bannerPlannerTarget()) {
+              <div
+                class="mx-2 flex flex-wrap items-stretch gap-2.5 text-[11px] text-slate-200"
+                data-testid="dock-v3-secondary-rail-banner">
+                @if (bannerPlannerTarget(); as bannerTarget) {
+                  <div class="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-amber-400/18 bg-amber-500/8 px-2.5 py-2">
+                    <span class="shrink-0 text-[9px] font-semibold uppercase tracking-[0.16em] text-amber-200/80">补全</span>
+                    <div class="min-w-0 flex flex-1 items-center gap-2">
+                        @if (bannerPlannerMissingCount() > 0) {
+                          <span class="shrink-0 rounded-full bg-amber-500/14 px-1.5 py-0.5 text-[9px] font-semibold text-amber-100">
+                            {{ bannerPlannerMissingCount() }} 项
+                          </span>
+                        } @else {
+                          <span class="shrink-0 rounded-full bg-emerald-500/14 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-100">
+                            已完整
+                          </span>
+                        }
+                        <span class="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-100">
+                          {{ bannerTarget.title }}
+                        </span>
+                        <span class="shrink-0 rounded-full border border-slate-700/70 bg-slate-950/55 px-2 py-0.5 text-[9px] text-slate-300">
+                          {{ bannerTarget.isMain ? '主任务' : (bannerTarget.lane === 'combo-select' ? '副任务' : '备选任务') }}
+                        </span>
+                        <span class="hidden shrink-0 text-[10px] text-slate-400 lg:inline">
+                          {{ bannerTarget.expectedMinutes === null ? '预计投入未设' : ('预计 ' + formatTime(bannerTarget.expectedMinutes)) }}
+                        </span>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="dock-v3-planner-toggle"
+                      [attr.data-planner-task-id]="bannerTarget.taskId"
+                      class="shrink-0 rounded-lg border border-amber-300/30 bg-amber-500/12 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition-colors hover:bg-amber-500/20"
+                      (click)="togglePlannerQuickEdit(bannerTarget.taskId)">
+                      编辑
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+            @if (plannerActiveEntry(); as plannerEntry) {
+              <div
+                #plannerPanel
+                [ngClass]="plannerPanelClasses()"
+                [attr.data-presentation]="plannerPresentation()"
+                tabindex="-1"
+                [attr.role]="plannerPresentation() === 'sheet' ? 'dialog' : 'region'"
+                [attr.aria-modal]="plannerPresentation() === 'sheet' ? 'true' : null"
+                aria-label="补全任务属性"
+                data-testid="dock-v3-planner-panel"
+                (click)="$event.stopPropagation()"
+                (pointerdown)="$event.stopPropagation()">
+                <div class="flex items-start gap-2.5">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span class="rounded-full border border-indigo-400/20 bg-indigo-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-indigo-100">
+                        Planner
+                      </span>
+                      <span class="rounded-full border border-slate-700/70 bg-slate-900/80 px-1.5 py-0.5 text-[9px] text-slate-300">
+                        {{ plannerEntry.isMain ? '主任务' : (plannerEntry.lane === 'combo-select' ? '副任务' : '备选任务') }}
+                      </span>
+                      @if (plannerMissingFieldCount() > 0) {
+                        <span class="rounded-full border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-200">
+                          {{ plannerMissingFieldCount() }} 项待补
+                        </span>
+                      } @else {
+                        <span class="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-200">
+                          已完整 ✓
+                        </span>
+                      }
+                    </div>
+                    <div class="mt-2 flex items-start gap-2">
+                      <h4 class="min-w-0 flex-1 truncate text-sm font-semibold text-slate-50">{{ plannerEntry.title }}</h4>
+                      <div class="flex flex-wrap items-center justify-end gap-1.5 text-[9px] text-slate-400">
+                        <span class="rounded-full border border-slate-800/80 bg-slate-900/70 px-1.5 py-0.5">
+                          当前负荷
+                          <span class="ml-1 font-semibold" [ngClass]="plannerEntry.load === 'high' ? 'text-indigo-200' : 'text-emerald-200'">
+                            {{ plannerEntry.load === 'high' ? '高负荷' : '低负荷' }}
+                          </span>
+                        </span>
+                        <span class="rounded-full border border-slate-800/80 bg-slate-900/70 px-1.5 py-0.5">
+                          预计
+                          <span class="ml-1 font-semibold text-slate-200">
+                            {{ plannerEntry.expectedMinutes === null ? '未设' : formatTime(plannerEntry.expectedMinutes) }}
+                          </span>
+                        </span>
+                        <span class="rounded-full border border-slate-800/80 bg-slate-900/70 px-1.5 py-0.5">
+                          等待
+                          <span class="ml-1 font-semibold text-slate-200">
+                            {{ plannerEntry.waitMinutes === null ? '未设' : formatTime(plannerEntry.waitMinutes) }}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="inline-flex min-h-[32px] shrink-0 items-center justify-center rounded-lg border border-slate-800/80 bg-slate-900/70 px-2.5 text-[10px] font-medium text-slate-300 transition-colors hover:border-slate-600/70 hover:bg-slate-800 hover:text-slate-100"
+                    (click)="closePlannerQuickEdit()"
+                    data-testid="dock-v3-planner-close">
+                    收起
+                  </button>
+                </div>
+
+                <div class="mt-2.5 grid gap-2.5">
+                  <section class="rounded-2xl border border-indigo-400/16 bg-slate-900/82 p-3">
+                    <div class="flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                      <div class="uppercase tracking-[0.18em] text-indigo-100/80">预计投入</div>
+                      <span class="font-mono text-sm text-slate-100">
+                        {{ plannerEntry.expectedMinutes === null ? '未设' : formatTime(plannerEntry.expectedMinutes) }}
+                      </span>
+                    </div>
+                    <div class="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                      @for (preset of plannerExpectedPresets; track preset) {
+                        <button
+                          type="button"
+                          class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
+                          [ngClass]="plannerEntry.expectedMinutes === preset
+                            ? 'border-indigo-400/45 bg-indigo-500/15 text-indigo-200'
+                            : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                          (click)="setPlannerQuickEditExpected(plannerEntry.taskId, preset)"
+                          style="min-height: 36px;"
+                          data-testid="dock-v3-planner-expected">
+                          {{ formatTime(preset) }}
+                        </button>
+                      }
+                    </div>
+                  </section>
+
+                  <div class="grid gap-2.5 sm:grid-cols-[8.5rem_minmax(0,1fr)]">
+                    <section class="rounded-2xl border border-slate-700/60 bg-slate-900/82 p-3">
+                      <div class="flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                        <div class="uppercase tracking-[0.18em]">认知负荷</div>
+                        <span class="font-semibold" [ngClass]="plannerEntry.load === 'high' ? 'text-indigo-200' : 'text-emerald-200'">
+                          {{ plannerEntry.load === 'high' ? '高' : '低' }}
+                        </span>
+                      </div>
+                      <div class="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-1">
+                        <button
+                          type="button"
+                          class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
+                          [ngClass]="plannerEntry.load === 'low'
+                            ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+                            : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                          (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'low')"
+                          style="min-height: 34px;"
+                          data-testid="dock-v3-planner-load-low">
+                          低负荷
+                        </button>
+                        <button
+                          type="button"
+                          class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
+                          [ngClass]="plannerEntry.load === 'high'
+                            ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200'
+                            : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                          (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'high')"
+                          style="min-height: 34px;"
+                          data-testid="dock-v3-planner-load-high">
+                          高负荷
+                        </button>
+                      </div>
+                    </section>
+
+                    <section class="rounded-2xl border border-slate-700/60 bg-slate-900/82 p-3">
+                      <div class="flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                        <div class="uppercase tracking-[0.18em]">
+                          等待窗口
+                          <span class="ml-1 normal-case text-slate-600">选填</span>
+                        </div>
+                        <span class="font-mono text-slate-300">
+                          {{ plannerEntry.waitMinutes === null ? '未设' : formatTime(plannerEntry.waitMinutes) }}
+                        </span>
+                      </div>
+                      <div class="mt-2 grid grid-cols-4 gap-1.5">
+                        <button
+                          type="button"
+                          class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
+                          [ngClass]="plannerEntry.waitMinutes === null
+                            ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                            : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                          (click)="setPlannerQuickEditWait(plannerEntry.taskId, null)"
+                          style="min-height: 36px;"
+                          data-testid="dock-v3-planner-wait-none">
+                          无
+                        </button>
+                        @for (preset of plannerWaitPresets; track preset) {
+                          <button
+                            type="button"
+                            class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
+                            [ngClass]="plannerEntry.waitMinutes === preset
+                              ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                              : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                            (click)="setPlannerQuickEditWait(plannerEntry.taskId, preset)"
+                            style="min-height: 36px;"
+                            data-testid="dock-v3-planner-wait">
+                            {{ formatTime(preset) }}
+                          </button>
+                        }
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              </div>
+            }
+          </div>
+        }
+
+
+
+        <!-- 表单 + 卡片列表：当面板高度受限时可垂直滚动 -->
+        <div class="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto hide-scrollbar">
+        <!-- 新建任务表单 -->
+        @if (showAdvancedUi && showNewTaskForm()) {
+          <div class="new-task-form flex flex-col gap-2.5 px-2">
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                [(ngModel)]="newTaskTitle"
+                (keydown.enter)="createTask()"
+                class="flex-1 text-xs py-2.5 px-3 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors"
+                placeholder="输入任务名称…" />
+              <select
+                [(ngModel)]="newTaskLane"
+                class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+                <option value="backup">备选区</option>
+                <option value="combo-select">组合选择区</option>
+              </select>
+              <select
+                [(ngModel)]="newTaskLoad"
+                class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+                <option value="low">低负荷</option>
+                <option value="high">高负荷</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-4 gap-2">
+              <input
+                type="number"
+                [(ngModel)]="newTaskExpectedMinutes"
+                min="1"
+                placeholder="预计(min)"
+                class="text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+              <input
+                type="number"
+                [(ngModel)]="newTaskWaitMinutes"
+                min="1"
+                placeholder="等待(min)"
+                class="text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+              <input
+                type="text"
+                [(ngModel)]="newTaskDetail"
+                placeholder="任务详情（可选）"
+                class="col-span-2 text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+            </div>
+            <div class="flex justify-end">
+              <button
+                type="button"
+                (click)="createTask()"
+                [disabled]="!newTaskTitle.trim() || !canUseInlineDockCreate()"
+                class="px-4 py-2 text-xs rounded-lg bg-indigo-600/90 hover:bg-indigo-500
+                       text-white font-medium transition-colors shadow-lg shadow-indigo-600/15
+                       disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-indigo-600/90"
+                style="min-height: 44px;"
+                data-testid="dock-v3-create-submit">
+                添加到停泊坞
+              </button>
+            </div>
+          </div>
+        }
+
+        <!-- 任务卡片列表 -->
+        <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x"
+             (dragover)="onDockRailDragOver($event)"
+             (dragleave)="onDockRailDragLeave()"
+             (drop)="onDrop($event)">
+          @for (entry of engine.orderedDockEntries(); track entry.taskId) {
+            <div
+              class="dock-card flex-shrink-0 w-48 p-3 pl-4 rounded-xl border snap-start"
+              [class.main-card]="entry.isMain"
+              [class.secondary-card]="dockSecondaryRailActive()"
+              [class.secondary-active]="dockSecondaryRailActive() && entry.isMain"
+              [class.planner-open]="isPlannerQuickEditOpen(entry.taskId)"
+              [class.ring-1]="recentlyDockedTaskId() === entry.taskId"
+              [class.shadow-lg]="recentlyDockedTaskId() === entry.taskId"
+              [ngClass]="entry.isMain
+                ? (recentlyDockedTaskId() === entry.taskId ? 'ring-amber-400/40' : '')
+                : 'bg-slate-800/40 border-slate-600/30 hover:bg-slate-800/60'
+                  + (recentlyDockedTaskId() === entry.taskId ? ' ring-amber-400/40' : '')"
+              (wheel)="onCardWheel($event, entry.taskId)"
+              (click)="onDockCardClick(entry.taskId)"
+              (touchstart)="onTouchStart($event, entry.taskId)"
+              (touchmove)="onTouchMove($event, entry.taskId)"
+              (touchend)="onTouchEnd()"
+              (dragstart)="onDockCardDragStart($event, entry.taskId)"
+              (dragover)="onDockCardDragOver($event, entry.taskId)"
+              (drop)="onDockCardDrop($event, entry.taskId)"
+              (dragend)="onDockCardDragEnd()"
+              [attr.draggable]="canReorderDockCards() ? 'true' : null"
+              tabindex="0"
+              role="button"
+              [attr.aria-label]="entry.isMain ? ('主任务：' + entry.title) : (entry.lane === 'combo-select' ? '副任务：' : '备选任务：') + entry.title"
+              [attr.aria-disabled]="dockSecondaryRailActive() && entry.isMain ? 'true' : null"
+              (keydown.enter)="onDockCardClick(entry.taskId)"
+              (keydown.space)="$event.preventDefault(); onDockCardClick(entry.taskId)"
+              data-testid="dock-v3-item">
+              <!-- 策划案：左侧认知负荷侧边色彩条 -->
+              <div class="dock-card-load-bar"
+                [class.high]="entry.load === 'high'"
+                [class.low]="entry.load === 'low'">
+              </div>
+              <!-- 负荷 + 时间 -->
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-[9px] px-1.5 py-0.5 rounded font-medium"
+                  [class.load-badge-high]="entry.load === 'high'"
+                  [class.load-badge-low]="entry.load === 'low'">
+                  {{ entry.load === 'high' ? '高负荷' : '低负荷' }}
+                </span>
+                <div class="flex items-center gap-1.5">
+                  @if (entry.waitMinutes) {
+                    <span class="dock-card-wait-badge">
+                      ⏱ {{ formatTime(entry.waitMinutes) }}
+                    </span>
+                  }
+                  <span class="text-[10px] text-slate-500 font-mono tabular-nums">
+                    @if (entry.expectedMinutes) {
+                      {{ formatTime(entry.expectedMinutes) }}
+                    }
+                  </span>
+                </div>
+              </div>
+              <!-- 标题 -->
+              <div class="text-xs font-medium text-slate-200 line-clamp-2 mb-2">{{ entry.title }}</div>
+              <div class="mb-2 text-[10px] text-slate-400">
+                @if (entry.isMain) {
+                  主任务
+                } @else if (entry.lane === 'combo-select') {
+                  副任务
+                } @else {
+                  备选任务
+                }
+              </div>
+              <!-- 底部状态 + 策划快编触发器（同一行，减少卡片留白） -->
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <div class="status-dot"
+                    [class.focusing]="entry.status === 'focusing'"
+                    [class.suspended]="entry.status === 'suspended_waiting' || entry.status === 'wait_finished'"
+                    [class.idle]="entry.status === 'pending_start'">
+                  </div>
+                  @if (entry.isMain) {
+                    <span class="text-[9px] text-indigo-300 font-semibold">主任务</span>
+                  } @else if (entry.lane === 'combo-select') {
+                    <span class="text-[9px] text-slate-500">副任务</span>
+                  } @else {
+                    <span class="text-[9px] text-slate-500">备选任务</span>
+                  }
+                </div>
+
+                @if (canUsePlannerQuickEdit()) {
+                  <button
+                    type="button"
+                    class="inline-flex min-h-[24px] items-center whitespace-nowrap rounded-full border border-slate-600/45 bg-slate-900/55 px-2 py-0.5 text-[9px] font-medium leading-none text-slate-300 transition-all hover:-translate-y-[1px] hover:border-amber-300/45 hover:bg-amber-500/10 hover:text-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/35"
+                    [attr.data-planner-task-id]="entry.taskId"
+                    (click)="$event.stopPropagation(); togglePlannerQuickEdit(entry.taskId)"
+                    data-testid="dock-v3-planner-toggle">
+                    补全属性
+                  </button>
+                }
+              </div>
+
+            </div>
+          }
+
+          <!-- 拖放区域 -->
+          <div
+            class="drop-zone flex-shrink-0 w-48 rounded-xl border-2 border-dashed border-slate-600/40
+                   bg-slate-800/10 flex flex-col items-center justify-center text-slate-500 text-xs gap-2.5"
+            [class.can-drop]="dropState() === 'canDrop'"
+            [class.active]="dropState() === 'isOver'"
+            [class.reject]="dropState() === 'reject'"
+            [class.opacity-50]="!canAcceptExternalDrop()"
+            [style.--dock-drop-reject-shake-ms]="PARKING_CONFIG.DOCK_DROP_REJECT_SHAKE_MS + 'ms'"
+            (dragover)="onDropZoneDragOver($event)"
+            (dragleave)="onDropZoneDragLeave()"
+            (drop)="onDrop($event)"
+            style="min-height: 80px;"
+            role="region"
+            aria-label="停泊坞任务投放区"
+            [attr.aria-disabled]="!canAcceptExternalDrop()"
+            data-testid="dock-v3-drop-zone">
+            <svg class="w-5 h-5 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+            <span class="text-[10px]">
+              @if (dropState() === 'reject') {
+                无法放入
+              } @else {
+                拖入任务块
+              }
+            </span>
+          </div>
+        </div>
+
+        </div><!-- /scrollable body -->
+      </div>
+    </div>

@@ -2,6 +2,7 @@
 import os from 'node:os';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
+import { angularComponentInlinePlugin } from './vitest-angular-inline.plugin';
 
 const parsePositiveInt = (value: string | undefined): number | undefined => {
   if (!value) return undefined;
@@ -20,6 +21,9 @@ const maxWorkers = Math.max(1, envMaxWorkers ?? defaultMaxWorkers);
 export default defineConfig({
   // 使用 cacheDir 替代弃用的 cache.dir
   cacheDir: 'node_modules/.vitest',
+
+  // Angular templateUrl/styleUrl 内联插件（仅 Vitest 环境使用）
+  plugins: [angularComponentInlinePlugin()],
   
   test: {
     // 使用 happy-dom 作为测试环境（比 jsdom 更快）
