@@ -58,8 +58,8 @@ export interface ConflictData {
 })
 export class SyncStateService {
   
-  /** 同步状态 Signal */
-  readonly syncState = signal<SyncState>({
+  /** 同步状态 Signal（内部可写，外部只读）*/
+  private readonly _syncState = signal<SyncState>({
     isSyncing: false,
     isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
     offlineMode: false,
@@ -70,25 +70,29 @@ export class SyncStateService {
     hasConflict: false,
     conflictData: null
   });
-  
-  /** 兼容旧接口：state 别名 */
+
+  /** 同步状态只读视图 */
+  readonly syncState = this._syncState.asReadonly();
+
+  /** 兼容旧接口：state 别名（只读）*/
   readonly state = this.syncState;
-  
+
   /** 便捷 computed 属性 */
   readonly isOnline = computed(() => this.syncState().isOnline);
   readonly isSyncing = computed(() => this.syncState().isSyncing);
   readonly hasConflict = computed(() => this.syncState().hasConflict);
   readonly sessionExpired = computed(() => this.syncState().sessionExpired);
   readonly pendingCount = computed(() => this.syncState().pendingCount);
-  
-  /** 是否正在从远程加载 */
-  readonly isLoadingRemote = signal(false);
-  
+
+  /** 是否正在从远程加载（内部可写，外部只读）*/
+  private readonly _isLoadingRemote = signal(false);
+  readonly isLoadingRemote = this._isLoadingRemote.asReadonly();
+
   /**
    * 更新同步状态
    */
   update(partial: Partial<SyncState>): void {
-    this.syncState.update(state => ({ ...state, ...partial }));
+    this._syncState.update(state => ({ ...state, ...partial }));
   }
   
   /**
@@ -186,9 +190,9 @@ export class SyncStateService {
    * 设置正在加载远程数据
    */
   setLoadingRemote(loading: boolean): void {
-    this.isLoadingRemote.set(loading);
+    this._isLoadingRemote.set(loading);
   }
-  
+
   /**
    * 检查会话是否已过期
    * 返回 boolean 而非 Signal，便于在非响应式代码中使用

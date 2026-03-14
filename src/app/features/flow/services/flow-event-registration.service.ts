@@ -186,16 +186,18 @@ export class FlowEventRegistrationService {
     this.eventService.onSelectionMoved((movedNodes) => {
       // 多节点移动时使用批处理模式，合并为单个撤销单元
       const needsBatch = movedNodes.length > 1;
-      
+
       if (needsBatch) {
         this.taskOpsAdapter.beginPositionBatch();
       }
-      
+
+      // 循环前读取一次 diagramInstance，避免在热路径中重复访问
+      const diagramInstance = this.diagram.diagramInstance;
+
       try {
         movedNodes.forEach(node => {
           if (node.isUnassigned) {
             // 检测是否拖到连接线上
-            const diagramInstance = this.diagram.diagramInstance;
             if (diagramInstance) {
               const loc = new go.Point(node.x, node.y);
               handleNodeMoved(node.key, loc, true, diagramInstance);

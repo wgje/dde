@@ -25,8 +25,8 @@ export interface PersistState {
   lastPersistAt: number;
   /** 是否有本地未同步的变更 */
   hasPendingLocalChanges: boolean;
-  /** 上次更新类型 */
-  lastUpdateType: 'content' | 'structure' | 'position';
+  /** 上次更新类型；null 表示初始化后尚未有任何更新 */
+  lastUpdateType: 'content' | 'structure' | 'position' | null;
 }
 
 /**
@@ -58,7 +58,7 @@ export class PersistSchedulerService {
     hasPending: false,
     lastPersistAt: 0,
     hasPendingLocalChanges: false,
-    lastUpdateType: 'structure'
+    lastUpdateType: null
   });
   
   /** 只读状态访问器 */
@@ -81,8 +81,14 @@ export class PersistSchedulerService {
   
   /**
    * 设置持久化回调
+   *
+   * 注：PersistSchedulerService 是 root-scoped 单例，多个调用方注册时后者覆盖前者。
+   * 如发生意外覆盖，此处会记录警告。
    */
   setCallbacks(callbacks: PersistCallbacks): void {
+    if (this.callbacks) {
+      this.logger.warn('PersistScheduler.setCallbacks: 覆盖已有回调，请检查调用方是否重复注册');
+    }
     this.callbacks = callbacks;
   }
   
@@ -141,7 +147,7 @@ export class PersistSchedulerService {
   /**
    * 获取上次更新类型
    */
-  getLastUpdateType(): 'content' | 'structure' | 'position' {
+  getLastUpdateType(): 'content' | 'structure' | 'position' | null {
     return this._state().lastUpdateType;
   }
   
@@ -185,48 +191,71 @@ export class PersistSchedulerService {
   
   /**
    * 立即执行待处理的持久化
+   *
+   * 如果当前正在持久化中，等待其完成后再执行一次，
+   * 而非直接跳过（避免"已在进行中则不执行"导致的数据丢失）。
    */
   async flushPendingPersist(): Promise<void> {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
-    
-    if (this._state().hasPending) {
+
+    if (this._state().hasPending || this._state().isPersisting) {
       await this.executePersist();
     }
   }
-  
+
   /**
    * 执行持久化
+   *
+   * 修复：
+   * 1. callbacks 为 null 时提前返回，不标记 lastPersistAt（避免虚假成功）
+   * 2. isPersisting 时重新调度而非直接跳过（避免并发写入丢失）
    */
   private async executePersist(): Promise<void> {
-    if (this._state().isPersisting) {
-      this.logger.debug('持久化正在进行中，跳过');
+    if (!this.callbacks) {
+      this.logger.warn('executePersist 调用但 callbacks 未设置，跳过');
       return;
     }
-    
+
+    if (this._state().isPersisting) {
+      // 当前正在持久化，说明有并发请求——等待当前完成后立即再执行一次
+      this.logger.debug('持久化正在进行中，标记 hasPending 待下次执行');
+      this._state.update(s => ({ ...s, hasPending: true }));
+      return;
+    }
+
     this._state.update(s => ({
       ...s,
       isPersisting: true,
       hasPending: false
     }));
-    
+
     try {
-      await this.callbacks?.doPersist();
-      
+      await this.callbacks.doPersist();
+
       this._state.update(s => ({
         ...s,
         isPersisting: false,
         lastPersistAt: Date.now(),
         hasPendingLocalChanges: false
       }));
+
+      // 如果在本次持久化过程中有新的变更进来，立即再执行一次
+      if (this._state().hasPending) {
+        this.logger.debug('持久化完成后发现新 hasPending，立即再次执行');
+        await this.executePersist();
+      }
     } catch (error) {
       this.logger.error('持久化失败', error);
-      
+
+      // 失败时保留 hasPending = true，确保下次 schedulePersist() 触发时仍会重试，
+      // 避免本次异常导致数据变更永久丢失。
       this._state.update(s => ({
         ...s,
-        isPersisting: false
+        isPersisting: false,
+        hasPending: true
       }));
     }
   }
