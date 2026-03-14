@@ -493,7 +493,52 @@ describe('ParkingDockComponent v4', () => {
     expect(panel).toBeTruthy();
     expect(card?.contains(panel as Node)).toBe(false);
     expect(panel?.className).toContain('rounded-2xl');
-    expect(panel?.className).toContain('animate-[plannerSlideOpen_200ms_ease-out]');
+    expect(panel?.className).toContain('absolute');
+    expect(panel?.className).toContain('bottom-full');
+    expect(panel?.className).toContain('animate-[plannerSlideOpen_220ms_ease-out]');
+    expect(panel?.getAttribute('data-presentation')).toBe('popover');
+    expect(panel?.textContent).toContain('当前负荷');
+    expect(panel?.textContent).toContain('预计投入');
+  });
+
+  it('secondary rail banner should follow the current focusing task when opening planner quick edit', () => {
+    dockedEntries.set([
+      {
+        taskId: 'focus-prev',
+        title: 'Previous Focus',
+        status: 'stalled',
+        load: 'low',
+        lane: 'backup',
+        expectedMinutes: 30,
+        waitMinutes: null,
+        isMain: true,
+      },
+      {
+        taskId: 'focus-current',
+        title: 'Current Focus',
+        status: 'focusing',
+        load: 'high',
+        lane: 'combo-select',
+        expectedMinutes: null,
+        waitMinutes: null,
+        isMain: false,
+      },
+    ]);
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    fixture.detectChanges();
+
+    const bannerToggle = fixture.nativeElement.querySelector(
+      '[data-testid="dock-v3-secondary-rail-banner"] [data-testid="dock-v3-planner-toggle"]',
+    ) as HTMLButtonElement | null;
+
+    expect(component.bannerPlannerTarget()?.taskId).toBe('focus-current');
+    expect(fixture.nativeElement.textContent).toContain('Current Focus');
+
+    bannerToggle?.click();
+    fixture.detectChanges();
+
+    expect(component.plannerActiveEntry()?.taskId).toBe('focus-current');
   });
 
   it('desktop planner quick edit should close on outside pointer down', () => {
@@ -768,6 +813,40 @@ describe('ParkingDockComponent v4', () => {
     expect(style.top).toBe(`${PARKING_CONFIG.HUD_FULL_DEFAULT_TOP_PX}px`);
     expect(style.left).toBe(`${window.innerWidth - PARKING_CONFIG.HUD_FULL_MAX_WIDTH_PX - 12}px`);
     expect(style.right).toBe('auto');
+  });
+
+  it('focus takeover should raise the dock host above workspace chrome', () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    fixture.detectChanges();
+
+    expect(component.focusHostZIndex()).toBe('60');
+    expect((fixture.nativeElement as HTMLElement).style.zIndex).toBe('60');
+
+    focusMode.set(false);
+    fixture.detectChanges();
+    expect(component.focusHostZIndex()).toBeNull();
+  });
+
+  it('sidebar offset should collapse to viewport center during focus takeover', () => {
+    uiState.isMobile.set(false);
+    uiState.sidebarOpen.set(true);
+    uiState.sidebarWidth.set(320);
+
+    expect(component.sidebarEffectiveWidth()).toBe(320);
+
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    fixture.detectChanges();
+
+    expect(component.sidebarEffectiveWidth()).toBe(0);
+    expect(component.dockCenterLeft()).toBe('50%');
+
+    focusMode.set(false);
+    focusTransition.set({ phase: 'entering' });
+    fixture.detectChanges();
+
+    expect(component.sidebarEffectiveWidth()).toBe(0);
   });
 
   it('should render fragment countdown overlay and wire accept/skip actions', () => {

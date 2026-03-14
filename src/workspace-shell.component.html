@@ -127,10 +127,11 @@
   <!-- Left Sidebar: Project List -->
   <app-workspace-sidebar>
     <aside data-testid="project-selector" class="border-r flex flex-col shrink-0 shadow-[4px_0_24px_rgba(0,0,0,0.02)] z-10 overflow-hidden" [class.transition-all]="!isResizingAny" [class.duration-75]="!isResizingAny" style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
-           [style.filter]="focusBlurActive() ? 'blur(22px) brightness(0.4)' : 'none'"
-           [style.pointer-events]="focusBlurActive() ? 'none' : 'auto'"
-           [style.transition]="'filter 0.7s cubic-bezier(0.4, 0, 0.2, 1)'"
-           [style.width.px]="isSidebarOpen() ? (isMobile() ? 240 : sidebarWidth()) : 0"
+           [style.opacity]="workspaceSidebarOpacity()"
+           [style.transform]="workspaceSidebarTransform()"
+           [style.pointer-events]="focusWorkspaceTakeoverActive() ? 'none' : 'auto'"
+           [style.transition]="workspaceSidebarTransition"
+           [style.width.px]="workspaceSidebarWidthPx()"
            [class.w-0]="!isSidebarOpen()"
            (touchstart)="onSidebarTouchStart($event)"
            (touchmove)="onSidebarTouchMove($event)"
@@ -528,9 +529,9 @@
   <!-- Sidebar Resizer -->
   @if (!isMobile()) {
     <div class="w-1 hover:w-1.5 bg-transparent hover:bg-indigo-300/60 dark:hover:bg-indigo-600/40 cursor-col-resize transition-all z-20 flex-shrink-0 relative group"
-         [class.pointer-events-none]="focusBlurActive()"
-         [class.opacity-0]="focusBlurActive()"
-         [style.transition]="'opacity 0.7s cubic-bezier(0.4, 0, 0.2, 1)'"
+         [class.pointer-events-none]="focusWorkspaceTakeoverActive()"
+         [class.opacity-0]="focusWorkspaceTakeoverActive()"
+         [style.transition]="'opacity 180ms cubic-bezier(0.2, 0.8, 0.2, 1)'"
          (mousedown)="startSidebarResize($event)">
          <div class="absolute inset-y-0 left-0 w-px bg-stone-200/80 dark:bg-stone-700/80 group-hover:bg-indigo-400 dark:group-hover:bg-indigo-500 transition-colors"></div>
     </div>

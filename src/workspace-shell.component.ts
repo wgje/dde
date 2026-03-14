@@ -224,6 +224,45 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   readonly focusBlurActive = computed(
     () => this.dockEngine.focusMode() && this.dockEngine.focusScrimOn(),
   );
+  /**
+   * 专注接管激活：进入/退出专注的整个接管窗口内，
+   * 工作区外层 chrome（侧边栏、分隔条）统一退场。
+   *
+   * 根因：
+   * - 左侧项目栏曾单独做 filter blur，右侧项目内容又走另一套 blur；
+   * - 两个 stacking context 叠在一起，导致左侧虚影类型、透明度、高度都与右侧不一致；
+   * - HUD 拖到左侧时，会被更外层的 sidebar blur 面盖住。
+   *
+   * 处理：外层 chrome 不再单独 blur，而是在接管期直接收起并禁用交互，
+   * 让右侧 ProjectShell 的统一 focus content effect 成为唯一背景层。
+   */
+  readonly focusWorkspaceTakeoverActive = computed(() => this.resolveFocusWorkspaceTakeoverActive());
+  readonly workspaceSidebarWidthPx = computed(() => this.resolveWorkspaceSidebarWidth());
+  readonly workspaceSidebarOpacity = computed(
+    () => this.focusWorkspaceTakeoverActive() ? '0' : '1',
+  );
+  readonly workspaceSidebarTransform = computed(
+    () => this.focusWorkspaceTakeoverActive()
+      ? 'translateX(-12px) scale(0.985)'
+      : 'translateX(0) scale(1)',
+  );
+  readonly workspaceSidebarTransition =
+    'width 220ms cubic-bezier(0.22, 1, 0.36, 1),'
+    + ' opacity 180ms cubic-bezier(0.2, 0.8, 0.2, 1),'
+    + ' transform 220ms cubic-bezier(0.22, 1, 0.36, 1)';
+
+  private resolveFocusWorkspaceTakeoverActive(): boolean {
+    const transition = this.dockEngine.focusTransition();
+    return this.focusBlurActive()
+      || transition?.phase === 'entering'
+      || transition?.phase === 'exiting';
+  }
+
+  private resolveWorkspaceSidebarWidth(): number {
+    if (this.resolveFocusWorkspaceTakeoverActive()) return 0;
+    if (!this.uiState.sidebarOpen()) return 0;
+    return this.uiState.isMobile() ? 240 : this.uiState.sidebarWidth();
+  }
 
   /** FocusMode 用户明确交互信号（点击/按键后激活） */
   readonly focusModeIntentActivated = signal(!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1);

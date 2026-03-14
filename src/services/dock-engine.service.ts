@@ -313,7 +313,20 @@ export class DockEngineService implements OnDestroy {
   });
 
   constructor() {
-    // Initialize completion flow service with engine signal references
+    this.initSubServices();
+    this.startTickTimer();
+    this.restoreInitialSnapshot();
+    this.registerEffects();
+    this.registerVisibilityListener();
+    this.triggerInitialCloudPull();
+    this.registerDestroyCleanup();
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Constructor 子初始化流程
+  // ---------------------------------------------------------------------------
+
+  private initSubServices(): void {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     this.completionFlow.init({
@@ -332,7 +345,6 @@ export class DockEngineService implements OnDestroy {
       highlightClearTimer: { get current() { return self.highlightClearTimer; }, set current(v) { self.highlightClearTimer = v; } },
     });
 
-    // Initialize cloud sync service with engine callbacks
     this.cloudSync.init({
       exportSnapshot: () => this.exportSnapshot(),
       restoreSnapshot: (snapshot: DockSnapshot) => this.restoreSnapshot(snapshot),
@@ -364,7 +376,6 @@ export class DockEngineService implements OnDestroy {
       getWaitRemainingSeconds: (entry) => getWaitRemainingSeconds(entry),
     });
 
-    // Initialize inline creation service with engine signal references and callbacks
     this.inlineCreation.init({
       entries: this.entries,
       dockedCount: this.dockedCount,
@@ -381,7 +392,6 @@ export class DockEngineService implements OnDestroy {
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
 
-    // Initialize daily slot service with engine signal references
     this.dailySlotService.init({
       dailySlots: this.dailySlots,
       dailyResetDate: this.dailyResetDate,
@@ -390,37 +400,38 @@ export class DockEngineService implements OnDestroy {
       isFragmentPhase: this.isFragmentPhase,
     });
 
-    // Initialize entry field service with engine signal references and callbacks
     this.entryField.init({
       entries: this.entries,
       focusSessionContext: () => this.focusSessionContext(),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
+  }
 
-    // 10 秒一次 tick，配合 CSS transition 平滑过渡（避免 1s 频率导致动画卡顿）
+  /** 10 秒一次 tick，配合 CSS transition 平滑过渡（避免 1s 频率导致动画卡顿） */
+  private startTickTimer(): void {
     this.tickTimer = setInterval(() => {
       this.tick.update(value => value + 1);
-      // 将 signal 写入操作移到 setInterval 回调中，避免在 effect 中写入 entries
-      // （Angular signal 反模式：effect 中读 tick → 写 entries → 级联 10+ computed 重算）
       this.checkWaitExpiry();
       this.checkPendingDecisionExpiry();
       this.dailySlotService.resetDailySlotsIfNeeded();
-      // v3.0 倦怠冷却检查（§7.8 NG-16b）
       this.fragmentRest.checkBurnoutCooldown();
-      // v3.0 碎片阶段防御等级动态更新
       if (this.focusMode()) {
         this.fragmentRest.updateFragmentDefenseLevel();
       }
-      // GAP-1: 休息时间累计专注时长检查
       this.fragmentRest.tickRestReminderAccumulator(this.focusMode(), this.focusingEntry()?.load ?? null);
     }, 10_000);
+  }
 
+  private restoreInitialSnapshot(): void {
     this.currentSnapshotUserId = this.auth.currentUserId();
     this.isRestoringSnapshot = true;
     void this.restoreLocalSnapshot(this.currentSnapshotUserId).finally(() => {
       this.isRestoringSnapshot = false;
     });
+  }
 
+  private registerEffects(): void {
+    // 用户切换时重新加载快照
     effect(() => {
       const userId = this.auth.currentUserId();
       if (userId === this.currentSnapshotUserId) return;
@@ -432,6 +443,7 @@ export class DockEngineService implements OnDestroy {
       if (userId) this.cloudSync.scheduleCloudPull(userId, true);
     });
 
+    // 状态变更时触发本地持久化和云端推送
     effect(() => {
       this.entries();
       this.focusMode();
@@ -448,25 +460,26 @@ export class DockEngineService implements OnDestroy {
       this.focusSessionContext();
       if (this.isRestoringSnapshot) return;
 
-      // 延迟序列化到 persist 回调中执行（原来在此同步调用 exportSnapshot →
-      // JSON.stringify 阻塞主线程 → 与动画帧竞争导致掉帧）
       this.scheduleLocalPersist(null, this.currentSnapshotUserId);
       if (this.currentSnapshotUserId) {
         this.cloudSync.scheduleCloudPush(this.currentSnapshotUserId, null);
       }
     });
 
+    // 软限制通知重置
     effect(() => {
       if (this.dockedCount() < PARKING_CONFIG.DOCK_CONSOLE_SOFT_LIMIT && this.softLimitNoticeShown()) {
         this.softLimitNoticeShown.set(false);
       }
     }, { allowSignalWrites: true });
 
+    // 每日重置时间偏好变更
     effect(() => {
       this.focusPreferenceService.preferences().routineResetHourLocal;
       this.dailySlotService.resetDailySlotsIfNeeded();
     }, { allowSignalWrites: true });
 
+    // 外部完成的任务协调
     effect(() => {
       const taskMap = this.taskStore.tasksMap();
       if (!taskMap) return;
@@ -481,7 +494,9 @@ export class DockEngineService implements OnDestroy {
         this.reconcileExternallyCompletedTasks(externallyCompletedIds);
       });
     });
+  }
 
+  private registerVisibilityListener(): void {
     if (typeof document !== 'undefined') {
       this.visibilityListener = () => {
         if (document.visibilityState !== 'visible') return;
@@ -490,11 +505,15 @@ export class DockEngineService implements OnDestroy {
       };
       document.addEventListener('visibilitychange', this.visibilityListener);
     }
+  }
 
+  private triggerInitialCloudPull(): void {
     if (this.currentSnapshotUserId) {
       this.cloudSync.scheduleCloudPull(this.currentSnapshotUserId, true);
     }
+  }
 
+  private registerDestroyCleanup(): void {
     this.destroyRef.onDestroy(() => {
       if (this.tickTimer) {
         clearInterval(this.tickTimer);

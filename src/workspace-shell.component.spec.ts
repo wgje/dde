@@ -35,4 +35,84 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
 
     expect(updateProjectDraft).toHaveBeenCalledWith('proj-1', 'description', 'Project intro');
   });
+
+  it('focus workspace takeover 应覆盖进入与退出过渡', () => {
+    const enteringContext = {
+      focusBlurActive: () => false,
+      dockEngine: {
+        focusTransition: () => ({ phase: 'entering' }),
+      },
+    } as unknown as WorkspaceShellComponent;
+    const exitingContext = {
+      focusBlurActive: () => false,
+      dockEngine: {
+        focusTransition: () => ({ phase: 'exiting' }),
+      },
+    } as unknown as WorkspaceShellComponent;
+    const idleContext = {
+      focusBlurActive: () => false,
+      dockEngine: {
+        focusTransition: () => null,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveFocusWorkspaceTakeoverActive: (this: WorkspaceShellComponent) => boolean;
+      }).resolveFocusWorkspaceTakeoverActive.call(enteringContext),
+    ).toBe(true);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveFocusWorkspaceTakeoverActive: (this: WorkspaceShellComponent) => boolean;
+      }).resolveFocusWorkspaceTakeoverActive.call(exitingContext),
+    ).toBe(true);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveFocusWorkspaceTakeoverActive: (this: WorkspaceShellComponent) => boolean;
+      }).resolveFocusWorkspaceTakeoverActive.call(idleContext),
+    ).toBe(false);
+  });
+
+  it('resolveWorkspaceSidebarWidth 应在专注接管期收起侧边栏', () => {
+    const collapsedContext = {
+      resolveFocusWorkspaceTakeoverActive: () => true,
+      uiState: {
+        sidebarOpen: () => true,
+        isMobile: () => false,
+        sidebarWidth: () => 320,
+      },
+    } as unknown as WorkspaceShellComponent;
+    const desktopContext = {
+      resolveFocusWorkspaceTakeoverActive: () => false,
+      uiState: {
+        sidebarOpen: () => true,
+        isMobile: () => false,
+        sidebarWidth: () => 320,
+      },
+    } as unknown as WorkspaceShellComponent;
+    const mobileContext = {
+      resolveFocusWorkspaceTakeoverActive: () => false,
+      uiState: {
+        sidebarOpen: () => true,
+        isMobile: () => true,
+        sidebarWidth: () => 320,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarWidth: (this: WorkspaceShellComponent) => number;
+      }).resolveWorkspaceSidebarWidth.call(collapsedContext),
+    ).toBe(0);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarWidth: (this: WorkspaceShellComponent) => number;
+      }).resolveWorkspaceSidebarWidth.call(desktopContext),
+    ).toBe(320);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarWidth: (this: WorkspaceShellComponent) => number;
+      }).resolveWorkspaceSidebarWidth.call(mobileContext),
+    ).toBe(240);
+  });
 });

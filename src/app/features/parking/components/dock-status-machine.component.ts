@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   Input,
+  OnDestroy,
   computed,
   effect,
   inject,
@@ -379,10 +380,12 @@ import { StatusMachineEntry } from '../../../../models/parking-dock';
     }
   `,
 })
-export class DockStatusMachineComponent {
+export class DockStatusMachineComponent implements OnDestroy {
   private readonly engine = inject(DockEngineService);
   private readonly performanceTierService = inject(PerformanceTierService);
   private readonly forcedModeInput = signal<'full' | 'minimal' | null>(null);
+  private mqlRef: MediaQueryList | null = null;
+  private mqlHandler: ((e: MediaQueryListEvent) => void) | null = null;
 
   @Input()
   set forcedMode(value: 'full' | 'minimal' | null) {
@@ -415,10 +418,12 @@ export class DockStatusMachineComponent {
   });
 
   constructor() {
-    // Listen for prefers-reduced-motion changes
+    // Listen for prefers-reduced-motion changes (store ref for cleanup)
     if (typeof window !== 'undefined' && window.matchMedia) {
       const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
-      mql.addEventListener('change', (e) => this.prefersReducedMotion.set(e.matches));
+      this.mqlHandler = (e: MediaQueryListEvent) => this.prefersReducedMotion.set(e.matches);
+      mql.addEventListener('change', this.mqlHandler);
+      this.mqlRef = mql;
     }
     // 借助 engine tick 定周期刷新 tickNow，驱动 isGlowDegraded 重算
     effect(() => {
@@ -563,6 +568,14 @@ export class DockStatusMachineComponent {
 
   dismissRestReminder(): void {
     this.engine.dismissRestReminder();
+  }
+
+  ngOnDestroy(): void {
+    if (this.mqlRef && this.mqlHandler) {
+      this.mqlRef.removeEventListener('change', this.mqlHandler);
+      this.mqlRef = null;
+      this.mqlHandler = null;
+    }
   }
 
 }

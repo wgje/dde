@@ -180,160 +180,192 @@ export class DockCompletionFlowService {
     const rootEntry = rootTaskId ? this.ctx.entries().find(entry => entry.taskId === rootTaskId) ?? null : null;
     const rootRemainingSeconds = rootEntry ? this.getWaitRemainingSeconds(rootEntry) : null;
 
+    // 主路径：主任务仍在等待中，尝试推荐候选或碎片倒计时
     if (rootEntry && rootRemainingSeconds !== null && rootRemainingSeconds > 0) {
-      const rootRemainingMinutes = rootRemainingSeconds / 60;
-      const excluded = [completedTaskId, rootTaskId];
-      const recommendation = this.buildTwoStageRecommendationCandidateGroups(
-        rootEntry,
-        excluded.filter((id): id is string => id !== null),
-        rootRemainingMinutes,
-      );
-      const waitFitMode: DockWaitFitMode = recommendation.mode === 'strict' ? 'strict' : 'relaxed';
-      const primaryCandidate = this.pickPrimaryCandidate(
-        excluded.filter(Boolean) as string[],
-        rootRemainingMinutes,
-        rootEntry,
-        waitFitMode,
-      );
-      const branch = evaluateTimeRemaining(
-        rootRemainingMinutes,
-        primaryCandidate ? effectiveExecMin(this.toFocusTaskSlot(primaryCandidate)) : null,
-      );
-      // GAP-A: 组合任务完成后始终触发碎片过渡倒计时，不以绝对的任务饱和为目标
-      // 有候选时同时展示推荐（preservePendingDecision），用户可选择休息或切换任务
-      const hasCandidates =
-        recommendation.groups.some(g => g.taskIds.length > 0) || primaryCandidate !== null;
-
-      if (!hasCandidates) {
-        // 无候选：纯碎片倒计时
-        this.fragmentRest.startFragmentEntryCountdown({
-          reason: '主任务仍在等待且暂无合适候选，进入碎片时间倒计时',
-          rootTaskId: rootTaskId ?? undefined,
-          remainingMinutes: rootRemainingMinutes,
-        });
-        return;
-      }
-
-      if (branch === 'tight-blank') {
-        const chainRootTaskId = rootTaskId ?? rootEntry.taskId;
-        this.setPendingDecision(
-          chainRootTaskId,
-          rootRemainingMinutes,
-          [],
-          'tight-blank: 留白窗口紧张，5s 后进入留白期',
-          5000,
-        );
-        this.ctx.lastRuleDecision.set(
-          createRuleDecision({
-            type: 'pending_decision',
-            reason: 'tight-blank: 留白窗口紧张，等待用户取消或确认',
-            rootTaskId: rootTaskId ?? undefined,
-            recommendedTaskIds: [],
-            remainingMinutes: rootRemainingMinutes,
-          }),
-        );
-        return;
-      }
-
-      if (branch === 'mismatch-recompute') {
-        const candidateGroups = recommendation.groups;
-        if (candidateGroups.length > 0) {
-          const chainRootTaskId = rootTaskId ?? rootEntry.taskId;
-          const reason =
-            recommendation.mode === 'strict'
-              ? 'mismatch-recompute: 时间偏差过大，触发三组重算'
-              : recommendation.mode === 'relaxed'
-                ? 'mismatch-recompute: 放宽时窗后触发候选重算'
-                : 'mismatch-recompute: 规则引擎回退候选重算';
-          this.setPendingDecision(
-            chainRootTaskId,
-            rootRemainingMinutes,
-            candidateGroups,
-            reason,
-          );
-          this.ctx.highlightedIds.set(new Set(candidateGroups.flatMap(group => group.taskIds)));
-          this.ctx.lastRuleDecision.set(
-            createRuleDecision({
-              type: 'pending_decision',
-              reason:
-                recommendation.mode === 'strict'
-                  ? 'mismatch-recompute: 三组候选已重算，等待用户手动决策'
-                  : recommendation.mode === 'relaxed'
-                    ? 'mismatch-recompute: 已放宽时窗并重算候选，等待用户手动决策'
-                    : 'mismatch-recompute: 回退候选已生成，等待用户手动决策',
-              rootTaskId: rootTaskId ?? undefined,
-              recommendedTaskIds: candidateGroups.flatMap(group => group.taskIds),
-              remainingMinutes: rootRemainingMinutes,
-            }),
-          );
-          // GAP-A: 碎片过渡倒计时，不以绝对任务饱和为目标，保留推荐同时给用户休息选择
-          this.fragmentRest.startFragmentEntryCountdown({
-            reason: '组合任务完成，碎片过渡期，可选择休息或切换任务',
-            rootTaskId: rootTaskId ?? undefined,
-            remainingMinutes: rootRemainingMinutes,
-            preservePendingDecision: true,
-            countdownSeconds: PARKING_CONFIG.FRAGMENT_TRANSITION_COUNTDOWN_S,
-          });
-          return;
-        }
-      }
-
-      if (primaryCandidate) {
-        this.setPendingDecision(
-          rootTaskId ?? rootEntry.taskId,
-          rootRemainingMinutes,
-          [{ type: 'homologous-advancement', taskIds: [primaryCandidate.taskId] }],
-          branch === 'time-match'
-            ? 'time-match: 候选时长匹配，等待用户决定是否切换'
-            : recommendation.mode === 'strict'
-              ? '候选不足，保留最优下一步供用户手动选择'
-              : '候选不足，已放宽时窗后保留最优下一步供用户手动选择',
-        );
-        this.ctx.highlightedIds.set(new Set([primaryCandidate.taskId]));
-        this.ctx.lastRuleDecision.set(
-          createRuleDecision({
-            type: 'completion_followup',
-            reason:
-              branch === 'time-match'
-                ? 'time-match: 候选时长匹配，保持高亮等待用户切换'
-                : recommendation.mode === 'strict'
-                  ? '候选不足，保留最优下一步'
-                  : '候选不足，已放宽时窗后保留最优下一步',
-            rootTaskId: rootTaskId ?? undefined,
-            recommendedTaskIds: [primaryCandidate.taskId],
-            remainingMinutes: rootRemainingMinutes,
-          }),
-        );
-        // GAP-A: 碎片过渡倒计时，不以绝对任务饱和为目标，保留推荐同时给用户休息选择
-        this.fragmentRest.startFragmentEntryCountdown({
-          reason: '组合任务完成，碎片过渡期，可选择休息或切换任务',
-          rootTaskId: rootTaskId ?? undefined,
-          remainingMinutes: rootRemainingMinutes,
-          preservePendingDecision: true,
-          countdownSeconds: PARKING_CONFIG.FRAGMENT_TRANSITION_COUNTDOWN_S,
-        });
+      if (this.resolveWithActiveRoot(completedTaskId, rootTaskId, rootEntry, rootRemainingSeconds)) {
         return;
       }
     }
 
-    const recoveredMain = this.ctx.entries()
-      .filter(entry => entry.isMain && entry.status === 'wait_finished')
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
-    if (recoveredMain) {
-      this.ctx.pendingDecision.set(null);
-      this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'completion_followup',
-          reason: '主任务等待结束，置顶高亮等待用户恢复',
-          rootTaskId: recoveredMain.taskId,
-          recommendedTaskIds: [recoveredMain.taskId],
-          remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
-        }),
-      );
+    // 恢复路径：有 wait_finished 的主任务，高亮等待用户恢复
+    if (this.resolveWithRecoveredMain(rootRemainingSeconds)) {
       return;
     }
 
+    // 兜底路径：无主任务等待，自动推进下一候选
+    this.resolveFallbackPromotion(rootTaskId, rootRemainingSeconds);
+  }
+
+  // ---------------------------------------------------------------------------
+  //  resolveAfterCompletion 子流程
+  // ---------------------------------------------------------------------------
+
+  /** 主任务仍在等待时，按时间分支推荐候选。返回 true 表示已处理。 */
+  private resolveWithActiveRoot(
+    completedTaskId: string,
+    rootTaskId: string | null,
+    rootEntry: DockEntry,
+    rootRemainingSeconds: number,
+  ): boolean {
+    const rootRemainingMinutes = rootRemainingSeconds / 60;
+    const excluded = [completedTaskId, rootTaskId].filter((id): id is string => id !== null);
+    const recommendation = this.buildTwoStageRecommendationCandidateGroups(
+      rootEntry, excluded, rootRemainingMinutes,
+    );
+    const waitFitMode: DockWaitFitMode = recommendation.mode === 'strict' ? 'strict' : 'relaxed';
+    const primaryCandidate = this.pickPrimaryCandidate(
+      excluded, rootRemainingMinutes, rootEntry, waitFitMode,
+    );
+    const branch = evaluateTimeRemaining(
+      rootRemainingMinutes,
+      primaryCandidate ? effectiveExecMin(this.toFocusTaskSlot(primaryCandidate)) : null,
+    );
+    const hasCandidates =
+      recommendation.groups.some(g => g.taskIds.length > 0) || primaryCandidate !== null;
+
+    if (!hasCandidates) {
+      this.fragmentRest.startFragmentEntryCountdown({
+        reason: '主任务仍在等待且暂无合适候选，进入碎片时间倒计时',
+        rootTaskId: rootTaskId ?? undefined,
+        remainingMinutes: rootRemainingMinutes,
+      });
+      return true;
+    }
+
+    if (branch === 'tight-blank') {
+      this.handleTightBlankBranch(rootTaskId, rootEntry, rootRemainingMinutes);
+      return true;
+    }
+
+    if (branch === 'mismatch-recompute' && recommendation.groups.length > 0) {
+      this.handleMismatchRecompute(rootTaskId, rootEntry, rootRemainingMinutes, recommendation);
+      return true;
+    }
+
+    if (primaryCandidate) {
+      this.handlePrimaryCandidate(rootTaskId, rootEntry, rootRemainingMinutes, primaryCandidate, branch, recommendation);
+      return true;
+    }
+
+    return false;
+  }
+
+  /** tight-blank 分支：留白窗口紧张，5s 后进入留白期 */
+  private handleTightBlankBranch(
+    rootTaskId: string | null,
+    rootEntry: DockEntry,
+    rootRemainingMinutes: number,
+  ): void {
+    const chainRootTaskId = rootTaskId ?? rootEntry.taskId;
+    this.setPendingDecision(
+      chainRootTaskId, rootRemainingMinutes, [],
+      'tight-blank: 留白窗口紧张，5s 后进入留白期', 5000,
+    );
+    this.ctx.lastRuleDecision.set(
+      createRuleDecision({
+        type: 'pending_decision',
+        reason: 'tight-blank: 留白窗口紧张，等待用户取消或确认',
+        rootTaskId: rootTaskId ?? undefined,
+        recommendedTaskIds: [],
+        remainingMinutes: rootRemainingMinutes,
+      }),
+    );
+  }
+
+  /** mismatch-recompute 分支：时间偏差过大，展示重算候选并启动碎片过渡倒计时 */
+  private handleMismatchRecompute(
+    rootTaskId: string | null,
+    rootEntry: DockEntry,
+    rootRemainingMinutes: number,
+    recommendation: { mode: string; groups: { type: RecommendationGroupType; taskIds: string[] }[] },
+  ): void {
+    const chainRootTaskId = rootTaskId ?? rootEntry.taskId;
+    const candidateGroups = recommendation.groups;
+    const reason =
+      recommendation.mode === 'strict'
+        ? 'mismatch-recompute: 时间偏差过大，触发三组重算'
+        : recommendation.mode === 'relaxed'
+          ? 'mismatch-recompute: 放宽时窗后触发候选重算'
+          : 'mismatch-recompute: 规则引擎回退候选重算';
+    this.setPendingDecision(chainRootTaskId, rootRemainingMinutes, candidateGroups, reason);
+    this.ctx.highlightedIds.set(new Set(candidateGroups.flatMap(group => group.taskIds)));
+    this.ctx.lastRuleDecision.set(
+      createRuleDecision({
+        type: 'pending_decision',
+        reason:
+          recommendation.mode === 'strict'
+            ? 'mismatch-recompute: 三组候选已重算，等待用户手动决策'
+            : recommendation.mode === 'relaxed'
+              ? 'mismatch-recompute: 已放宽时窗并重算候选，等待用户手动决策'
+              : 'mismatch-recompute: 回退候选已生成，等待用户手动决策',
+        rootTaskId: rootTaskId ?? undefined,
+        recommendedTaskIds: candidateGroups.flatMap(group => group.taskIds),
+        remainingMinutes: rootRemainingMinutes,
+      }),
+    );
+    this.startFragmentTransitionCountdown(rootTaskId, rootRemainingMinutes);
+  }
+
+  /** 单一最优候选分支：高亮候选并启动碎片过渡倒计时 */
+  private handlePrimaryCandidate(
+    rootTaskId: string | null,
+    rootEntry: DockEntry,
+    rootRemainingMinutes: number,
+    primaryCandidate: DockEntry,
+    branch: string,
+    recommendation: { mode: string; groups: { type: RecommendationGroupType; taskIds: string[] }[] },
+  ): void {
+    this.setPendingDecision(
+      rootTaskId ?? rootEntry.taskId,
+      rootRemainingMinutes,
+      [{ type: 'homologous-advancement' as RecommendationGroupType, taskIds: [primaryCandidate.taskId] }],
+      branch === 'time-match'
+        ? 'time-match: 候选时长匹配，等待用户决定是否切换'
+        : recommendation.mode === 'strict'
+          ? '候选不足，保留最优下一步供用户手动选择'
+          : '候选不足，已放宽时窗后保留最优下一步供用户手动选择',
+    );
+    this.ctx.highlightedIds.set(new Set([primaryCandidate.taskId]));
+    this.ctx.lastRuleDecision.set(
+      createRuleDecision({
+        type: 'completion_followup',
+        reason:
+          branch === 'time-match'
+            ? 'time-match: 候选时长匹配，保持高亮等待用户切换'
+            : recommendation.mode === 'strict'
+              ? '候选不足，保留最优下一步'
+              : '候选不足，已放宽时窗后保留最优下一步',
+        rootTaskId: rootTaskId ?? undefined,
+        recommendedTaskIds: [primaryCandidate.taskId],
+        remainingMinutes: rootRemainingMinutes,
+      }),
+    );
+    this.startFragmentTransitionCountdown(rootTaskId, rootRemainingMinutes);
+  }
+
+  /** 恢复路径：高亮 wait_finished 的主任务。返回 true 表示已处理。 */
+  private resolveWithRecoveredMain(rootRemainingSeconds: number | null): boolean {
+    const recoveredMain = this.ctx.entries()
+      .filter(entry => entry.isMain && entry.status === 'wait_finished')
+      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+    if (!recoveredMain) return false;
+
+    this.ctx.pendingDecision.set(null);
+    this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
+    this.ctx.lastRuleDecision.set(
+      createRuleDecision({
+        type: 'completion_followup',
+        reason: '主任务等待结束，置顶高亮等待用户恢复',
+        rootTaskId: recoveredMain.taskId,
+        recommendedTaskIds: [recoveredMain.taskId],
+        remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
+      }),
+    );
+    return true;
+  }
+
+  /** 兜底路径：清除待决策，自动推进下一候选 */
+  private resolveFallbackPromotion(rootTaskId: string | null, rootRemainingSeconds: number | null): void {
     this.ctx.pendingDecision.set(null);
     this.promoteNext();
     const focused = this.ctx.focusingEntry();
@@ -348,6 +380,17 @@ export class DockCompletionFlowService {
         }),
       );
     }
+  }
+
+  /** GAP-A: 碎片过渡倒计时，不以绝对任务饱和为目标，保留推荐同时给用户休息选择 */
+  private startFragmentTransitionCountdown(rootTaskId: string | null, rootRemainingMinutes: number): void {
+    this.fragmentRest.startFragmentEntryCountdown({
+      reason: '组合任务完成，碎片过渡期，可选择休息或切换任务',
+      rootTaskId: rootTaskId ?? undefined,
+      remainingMinutes: rootRemainingMinutes,
+      preservePendingDecision: true,
+      countdownSeconds: PARKING_CONFIG.FRAGMENT_TRANSITION_COUNTDOWN_S,
+    });
   }
 
   pickPrimaryCandidate(
