@@ -47,7 +47,12 @@ export class LoggerService {
   /** 是否启用持久化日志 */
   private persistLogs = false;
   
-  /** CategoryLogger 缓存 */
+  /**
+   * CategoryLogger 缓存
+   * TODO: categoryLoggers Map 会随着不同 category 调用持续增长且永不收缩。
+   * 对于当前项目规模（类别数有限）影响可忽略，但超长会话或动态类别场景下
+   * 应考虑 LRU 淘汰或定期清理。
+   */
   private categoryLoggers = new Map<string, CategoryLogger>();
   
   constructor() {
@@ -123,10 +128,10 @@ export class LoggerService {
    */
   private log(level: LogLevel, category: string, message: string, data?: unknown): void {
     if (level < this.level) return;
-    
-    // 🔒 安全：清洗敏感字段
+
+    // 安全：清洗敏感字段
     const sanitizedData = this.sanitizeData(data);
-    
+
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       level,
@@ -134,7 +139,7 @@ export class LoggerService {
       message,
       data: sanitizedData
     };
-    
+
     // 持久化日志
     if (this.persistLogs) {
       this.recentLogs.push(entry);
@@ -142,11 +147,11 @@ export class LoggerService {
         this.recentLogs.shift();
       }
     }
-    
-    // 控制台输出 - LoggerService 是唯一允许使用 console 的地方
+
+    // 控制台输出：LoggerService 是唯一允许使用 console 的地方
     const prefix = `[${this.getLevelName(level)}] [${category}]`;
     const args = sanitizedData !== undefined ? [prefix, message, sanitizedData] : [prefix, message];
-    
+
     /* eslint-disable no-console -- LoggerService 是唯一合法的 console 输出入口 */
     switch (level) {
       case LogLevel.DEBUG:
@@ -182,7 +187,9 @@ export class LoggerService {
     'apikey',
     'authorization',
     'auth',
-    'key',
+    'secretKey',
+    'encryptionKey',
+    'signingKey',
     'credential',
     'credentials',
     'private',
@@ -197,11 +204,43 @@ export class LoggerService {
   private sanitizeData(data: unknown, depth = 0): unknown {
     // 防止无限递归
     if (depth > 5) return '[MAX_DEPTH]';
-    
+
     if (data === null || data === undefined) {
       return data;
     }
-    
+
+    // Error 的 message / stack / cause 默认不可枚举，需显式保留
+    if (data instanceof Error) {
+      const errorData = data as Error & { cause?: unknown };
+      const result: Record<string, unknown> = {
+        name: errorData.name,
+        message: this.sanitizeData(errorData.message, depth + 1),
+      };
+
+      if (errorData.stack) {
+        result.stack = this.sanitizeData(errorData.stack, depth + 1);
+      }
+
+      if (errorData.cause !== undefined) {
+        result.cause = this.sanitizeData(errorData.cause, depth + 1);
+      }
+
+      // 兼容自定义 Error 子类上的可枚举字段
+      for (const [key, value] of Object.entries(errorData as unknown as Record<string, unknown>)) {
+        if (key in result) continue;
+        const lowerKey = key.toLowerCase();
+        if (LoggerService.SENSITIVE_FIELDS.has(lowerKey)) {
+          result[key] = '[REDACTED]';
+        } else if (typeof value === 'string' && value.startsWith('eyJ') && value.length > 50) {
+          result[key] = '[JWT_REDACTED]';
+        } else {
+          result[key] = this.sanitizeData(value, depth + 1);
+        }
+      }
+
+      return result;
+    }
+
     // 字符串：检查是否像 JWT token
     if (typeof data === 'string') {
       // JWT token 模式：eyJ... 开头
@@ -210,17 +249,17 @@ export class LoggerService {
       }
       return data;
     }
-    
+
     // 非对象类型直接返回
     if (typeof data !== 'object') {
       return data;
     }
-    
+
     // 数组：递归处理每个元素
     if (Array.isArray(data)) {
       return data.map(item => this.sanitizeData(item, depth + 1));
     }
-    
+
     // 对象：检查并清洗敏感字段
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(data as Record<string, unknown>)) {

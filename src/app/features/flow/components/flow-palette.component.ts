@@ -154,17 +154,20 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
         <div class="flex-1 flex flex-col min-h-0 bg-stone-50/50 dark:bg-stone-900/50">
           <div class="flex border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 sticky top-0 z-10 shadow-sm">
             <button class="tab-btn" 
+              data-testid="flow-palette-tab-unfinished"
               [class.active]="activeWorkbenchTab() === 'unfinished'"
               (click)="setWorkbenchTab('unfinished')">
               任务列表
             </button>
             <button class="tab-btn" 
+              data-testid="flow-palette-tab-unassigned"
               [class.active]="activeWorkbenchTab() === 'unassigned'"
               (click)="setWorkbenchTab('unassigned')">
               待分配区
             </button>
              @if (focusPrefs.isBlackBoxEnabled()) {
               <button class="tab-btn" 
+                data-testid="flow-palette-tab-blackbox"
                 [class.active]="activeWorkbenchTab() === 'blackbox'"
                 (click)="setWorkbenchTab('blackbox')">
                 黑匣子
@@ -294,7 +297,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
         class="flex items-center justify-center w-5 h-16 bg-white dark:bg-stone-800 border border-l-0 border-stone-200 dark:border-stone-700 rounded-r-lg shadow-md text-stone-400 hover:text-indigo-600 hover:w-6 transition-all focus:outline-none"
         [title]="isOpen() ? '收起侧边栏' : '展开侧边栏'">
         <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3 transition-transform duration-300" [class.rotate-180]="isOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
         </svg>
       </button>
     </div>

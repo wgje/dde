@@ -18,7 +18,6 @@ import {
 } from '../state/focus-stores';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
-import { ProjectStateService } from './project-state.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 
 @Injectable({
@@ -27,7 +26,6 @@ import { AUTH_CONFIG } from '../config/auth.config';
 export class BlackBoxService {
   private syncService = inject(BlackBoxSyncService);
   private auth = inject(AuthService);
-  private projectState = inject(ProjectStateService);
   
   /**
    * 按日期分组的条目（暴露给组件）
@@ -50,7 +48,6 @@ export class BlackBoxService {
    */
   create(data: Partial<BlackBoxEntry>): Result<BlackBoxEntry, OperationError> {
     const userId = this.resolveEffectiveUserId();
-    const projectId = this.projectState.activeProjectId();
     
     if (!userId) {
       return failure(ErrorCodes.PERMISSION_DENIED, '请先登录');
@@ -61,7 +58,8 @@ export class BlackBoxService {
     const { id: _ignoreId, ...safeData } = data;
     const entry: BlackBoxEntry = {
       id: crypto.randomUUID(),
-      projectId: projectId ?? '',
+      // 黑匣子条目仓为跨项目共享容器，projectId 固定为 null。
+      projectId: null,
       userId,
       content: safeData.content ?? '',
       date: getTodayDate(),

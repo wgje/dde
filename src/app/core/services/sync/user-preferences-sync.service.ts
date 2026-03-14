@@ -13,7 +13,6 @@ import { SupabaseClientService } from '../../../../services/supabase-client.serv
 import { LoggerService } from '../../../../services/logger.service';
 import { UserPreferences, ThemeType, ColorMode } from '../../../../models';
 import { FocusPreferences, DEFAULT_FOCUS_PREFERENCES } from '../../../../models/focus';
-import { DockSnapshot } from '../../../../models/parking-dock';
 import { nowISO } from '../../../../utils/date';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -51,11 +50,11 @@ export class UserPreferencesSyncService {
     try {
       const { data, error } = await client
         .from('user_preferences')
-        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,focus_preferences,dock_snapshot')
+        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,focus_preferences')
         .eq('user_id', userId)
         .maybeSingle();
       
-      if (error) throw error;
+      if (error) throw supabaseErrorToError(error);
       if (!data) return null;
       
       // 解析 focusPreferences（JSONB → 领域模型）
@@ -67,18 +66,16 @@ export class UserPreferencesSyncService {
           spotlightEnabled: (fp['spotlightEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.spotlightEnabled,
           strataEnabled: (fp['strataEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.strataEnabled,
           blackBoxEnabled: (fp['blackBoxEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.blackBoxEnabled,
-          maxSnoozePerDay: (fp['maxSnoozePerDay'] as number) ?? DEFAULT_FOCUS_PREFERENCES.maxSnoozePerDay
+          maxSnoozePerDay: (fp['maxSnoozePerDay'] as number) ?? DEFAULT_FOCUS_PREFERENCES.maxSnoozePerDay,
+          routineResetHourLocal:
+            (fp['routineResetHourLocal'] as number) ?? DEFAULT_FOCUS_PREFERENCES.routineResetHourLocal,
+          restReminderHighLoadMinutes:
+            (fp['restReminderHighLoadMinutes'] as number) ?? DEFAULT_FOCUS_PREFERENCES.restReminderHighLoadMinutes,
+          restReminderLowLoadMinutes:
+            (fp['restReminderLowLoadMinutes'] as number) ?? DEFAULT_FOCUS_PREFERENCES.restReminderLowLoadMinutes,
         };
       }
 
-      let dockSnapshot: DockSnapshot | undefined;
-      if (data.dock_snapshot && typeof data.dock_snapshot === 'object') {
-        const snapshotRaw = data.dock_snapshot as { version?: unknown };
-        if (snapshotRaw.version === 2 || snapshotRaw.version === 3) {
-          dockSnapshot = data.dock_snapshot as DockSnapshot;
-        }
-      }
-      
       return {
         theme: (data.theme as ThemeType) || 'default',
         layoutDirection: (data.layout_direction as 'ltr' | 'rtl') || 'ltr',
@@ -88,7 +85,6 @@ export class UserPreferencesSyncService {
         localBackupEnabled: data.local_backup_enabled ?? false,
         localBackupIntervalMs: data.local_backup_interval_ms ?? 3600000,
         focusPreferences,
-        dockSnapshot,
       };
     } catch (e) {
       this.logger.error('加载用户偏好失败', e);
@@ -121,7 +117,6 @@ export class UserPreferencesSyncService {
       if (preferences.localBackupEnabled !== undefined) payload['local_backup_enabled'] = preferences.localBackupEnabled;
       if (preferences.localBackupIntervalMs !== undefined) payload['local_backup_interval_ms'] = preferences.localBackupIntervalMs;
       if (preferences.focusPreferences !== undefined) payload['focus_preferences'] = preferences.focusPreferences;
-      if (preferences.dockSnapshot !== undefined) payload['dock_snapshot'] = preferences.dockSnapshot;
       
       const { error } = await client
         .from('user_preferences')

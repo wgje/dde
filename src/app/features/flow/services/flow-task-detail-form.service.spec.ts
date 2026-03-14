@@ -328,6 +328,8 @@ describe('FlowTaskDetailFormService', () => {
       const task = createMockTask();
 
       // 模拟任务切换状态：通过访问私有属性
+      // 【L-19】Angular 测试中常见的 (service as any).private 模式，
+      // 理想情况下应通过公共 API 或 spy 驱动，但当前用于设置不可通过公共接口触达的内部状态。
       (service as any).isTaskSwitching = true;
 
       const result = service.onLocalTitleChange('New Title', task);

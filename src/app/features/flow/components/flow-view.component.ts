@@ -28,6 +28,7 @@ import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service'
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { SimpleSyncService } from '../../../core/services/simple-sync.service';
 import { AuthService } from '../../../../services/auth.service';
+import { ParkingService } from '../../../../services/parking.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, TIMEOUT_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';
@@ -74,8 +75,8 @@ import * as go from 'gojs';
   templateUrl: './flow-view.component.html'
 })
 export class FlowViewComponent implements AfterViewInit, OnDestroy {
-  readonly diagramDiv = viewChild.required<ElementRef>('diagramDiv');
-  readonly overviewDiv = viewChild.required<ElementRef>('overviewDiv');
+  readonly diagramDiv = viewChild<ElementRef>('diagramDiv');
+  readonly overviewDiv = viewChild<ElementRef>('overviewDiv');
   readonly goBackToText = output<void>();
   
   // ========== P2-1 迁移：直接注入子服务 ==========
@@ -330,6 +331,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
           // 延迟执行，确保图表完全渲染
           this.scheduleTimer(() => {
             this.executeCenterOnNode(pendingCmd.taskId, pendingCmd.openDetail);
+            this.flowCommand.clearCenterCommand();
           }, 100);
         }
       }
@@ -337,7 +339,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   private initDiagram(): void {
-    if (!this.diagramDiv()?.nativeElement) {
+    const divRef = this.diagramDiv();
+    if (!divRef?.nativeElement) {
       this.logger.warn('[FlowView] diagramDiv 未准备好，跳过初始化');
       return;
     }
@@ -346,7 +349,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance);
     this.touch.endDiagramNodeDragGhost();
 
-    const success = this.diagram.initialize(this.diagramDiv().nativeElement);
+    const success = this.diagram.initialize(divRef.nativeElement);
     if (!success) return;
     
     this.eventRegistration.registerAllEvents({
@@ -401,8 +404,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   retryInitDiagram(): void {
+    // 先清空错误态，确保模板重新渲染 diagramDiv 容器
+    this.diagram.error.set(null);
+
     this.diagramRetry.retryInitDiagram(
-      this.diagramDiv(),
+      () => this.diagramDiv(),
       () => this.initDiagram(),
       (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
       this.scheduleTimer.bind(this)
@@ -411,8 +417,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 完全重置图表并重新初始化 */
   resetAndRetryDiagram(): void {
+    // 先清空错误态，确保模板重新渲染 diagramDiv 容器
+    this.diagram.error.set(null);
+
     this.diagramRetry.resetAndRetryDiagram(
-      this.diagramDiv(),
+      () => this.diagramDiv(),
       () => this.initDiagram(),
       (delayMs) => this.onDiagramInitialized(delayMs ?? 0),
       this.scheduleTimer.bind(this)
@@ -505,7 +514,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   /** 居中到指定节点 */
   centerOnNode(taskId: string, openDetail: boolean = true): void {
-    this.executeCenterOnNode(taskId, openDetail);
+    this.flowCommand.centerOnNode(taskId, openDetail);
   }
   
   private executeCenterOnNode(taskId: string, openDetail: boolean): void {
@@ -678,12 +687,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.deleteConfirmTask.set(task);
   }
 
-  /** 停泊任务——将任务放入「稍后处理」停泊槽 */
-  parkTaskAction(task: Task): void {
-    this.taskOps.parkTask(task);
-    this.selectedTaskId.set(null);
-  }
-  
   confirmDelete(keepChildren: boolean): void {
     const task = this.deleteConfirmTask();
     if (task) {
@@ -810,8 +813,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 移动端抽屉内点击节点定位（关闭抽屉后定位） */
   onMobileDrawerCenterOnNode(taskId: string): void {
-    // 延迟执行，等待抽屉关闭动画
-    setTimeout(() => {
+    // 【修复 H-28】使用 scheduleTimer 替代原始 setTimeout，确保组件销毁时自动清理
+    this.scheduleTimer(() => {
       this.centerOnNode(taskId);
     }, 350);
   }

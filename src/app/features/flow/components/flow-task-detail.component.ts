@@ -1,4 +1,4 @@
-﻿import { Component, ChangeDetectionStrategy, input, output, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild, ChangeDetectorRef } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, computed, inject, OnDestroy, HostListener, ElementRef, effect, untracked, ViewChild, ChangeDetectorRef, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -7,9 +7,14 @@ import { UserSessionService } from '../../../../services/user-session.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';
+import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
 import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-/** 浠诲姟璇︽儏闈㈡澘 - 妗岄潰绔?娴姩闈㈡澘, 绉诲姩绔?搴曢儴鎶藉眽, 榛樿棰勮妯″紡 */
+import { SimpleReminderService } from '../../../../services/simple-reminder.service';
+
+const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
+
+/** 任务详情面板 - 桌面端：浮动面板, 移动端：底部抽屉, 默认预览模式 */
 @Component({
   selector: 'app-flow-task-detail',
   standalone: true,
@@ -19,7 +24,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
   // Host defaults to pointer-events none; interactive children explicitly opt in.
   host: { style: 'pointer-events: none' },
   template: `
-    <!-- 妗岄潰绔彲鎷栧姩娴姩闈㈡澘 -->
+    <!-- 桌面端可拖动浮动面板 -->
     @if (!uiState.isMobile() && uiState.isFlowDetailOpen()) {
       <div class="absolute z-20 pointer-events-auto"
            draggable="false"
@@ -28,7 +33,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
            [style.top.px]="position().y < 0 ? 24 : position().y"
            [style.left.px]="position().x >= 0 ? position().x : null">
          <div class="w-64 max-h-96 bg-white/95 dark:bg-stone-800/95 backdrop-blur-xl border border-stone-200/50 dark:border-stone-600/50 shadow-xl overflow-hidden flex flex-col rounded-xl">
-             <!-- 鍙嫋鍔ㄦ爣棰樻爮 - 鍙屽嚮閲嶇疆浣嶇疆 -->
+             <!-- 可拖动标题栏 - 双击重置位置 -->
              <div class="px-3 py-2 border-b border-stone-100 dark:border-stone-700 flex justify-between items-center cursor-move select-none bg-gradient-to-r from-stone-50 dark:from-stone-700 to-white dark:to-stone-800"
                   (mousedown)="startDrag($event)"
                   (touchstart)="startDrag($event)"
@@ -56,7 +61,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                      </div>
                  } @else {
                      <div class="py-4 text-center text-stone-400 dark:text-stone-500 text-[10px]">
-                         鍙屽嚮鑺傜偣鏌ョ湅璇︽儏
+                         双击节点查看详情
                      </div>
                  }
              </div>
@@ -64,18 +69,18 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
       </div>
     }
     
-    <!-- 妗岄潰绔鎯呭紑鍚寜閽?-->
+    <!-- 桌面端详情开启按钮 -->
     @if (!uiState.isMobile() && !uiState.isFlowDetailOpen()) {
       <button (click)="uiState.isFlowDetailOpen.set(true)" 
               class="absolute top-6 right-2 z-20 pointer-events-auto bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-stone-200 dark:border-stone-600 rounded-lg p-2 shadow-sm hover:bg-white dark:hover:bg-stone-700 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 transition-all flex items-center gap-1">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span class="text-[10px] font-medium">璇︽儏</span>
+          <span class="text-[10px] font-medium">详情</span>
       </button>
     }
 
-    <!-- 绉诲姩绔《閮ㄥ皬鍨嬫爣绛捐Е鍙戝櫒 -->
+    <!-- 移动端顶部小型标签触发器 -->
     @if (uiState.isMobile() && !uiState.isFlowDetailOpen()) {
       <button 
         (click)="uiState.isFlowDetailOpen.set(true)"
@@ -83,11 +88,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
         <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-        <span class="text-[10px] font-medium">璇︽儏</span>
+        <span class="text-[10px] font-medium">详情</span>
       </button>
     }
     
-    <!-- 绉诲姩绔《閮ㄤ笅鎷夋娊灞夐潰鏉?-->
+    <!-- 移动端顶部下拉抽屉面板 -->
     @if (uiState.isMobile() && uiState.isFlowDetailOpen()) {
        <div
          #mobileDrawer
@@ -97,14 +102,14 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
            [style.top.px]="0"
            [style.height.vh]="drawerHeight()"
            style="transform: translateZ(0); backface-visibility: hidden;">
-        <!-- 鏍囬鏍?- 宸﹁竟鐣欏嚭绌洪棿閬垮紑瀵艰埅鎸夐挳锛岀揣鍑戝竷灞€ -->
+        <!-- 标题栏 - 左边留出空间避开导航按钮，紧凑布局 -->
          <div
            #mobileDrawerTitle
            class="pr-3 pl-3 pt-0.5 pb-0 flex justify-between items-center flex-shrink-0">
-          <h3 class="font-bold text-stone-700 dark:text-stone-200 text-xs">浠诲姟璇︽儏</h3>
+          <h3 class="font-bold text-stone-700 dark:text-stone-200 text-xs">任务详情</h3>
         </div>
         
-        <!-- 鍐呭鍖哄煙 - 鏇寸揣鍑?-->
+        <!-- 内容区域 - 更紧凑 -->
         <div
              #mobileDrawerContent
              class="mobile-drawer-content flex-1 overflow-y-auto px-3 pb-1 overscroll-contain"
@@ -114,11 +119,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
           @if (task(); as t) {
             <ng-container *ngTemplateOutlet="mobileTaskContent; context: { $implicit: t }"></ng-container>
           } @else {
-            <div class="text-center text-stone-400 text-xs py-1">鍙屽嚮鑺傜偣鏌ョ湅璇︽儏</div>
+            <div class="text-center text-stone-400 text-xs py-1">双击节点查看详情</div>
           }
         </div>
         
-        <!-- 鎷栧姩鏉?- 绱у噾 -->
+        <!-- 拖动条 - 紧凑 -->
            <div
              #mobileDrawerHandle
              class="relative flex justify-center py-1 cursor-grab active:cursor-grabbing touch-none flex-shrink-0"
@@ -138,7 +143,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
       </div>
     }
     
-    <!-- 妗岄潰绔换鍔″唴瀹规ā鏉?-->
+    <!-- 桌面端任务内容模板 -->
     <ng-template #taskContent let-task>
       <div class="space-y-2">
           <div class="flex items-center justify-between">
@@ -163,29 +168,29 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                   </span>
               </div>
               <button 
-                  (click)="toggleEditMode()"
+                  (click)="onEditToggleClick()"
                 data-testid="flow-edit-toggle-btn"
                   class="text-[9px] px-1.5 py-0.5 rounded transition-all duration-200"
                   [ngClass]="{
                     'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300': isEditMode(),
                     'bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20': !isEditMode(),
-                    'scale-95 opacity-70': isTogglingMode
+                    'scale-95 opacity-70': isTogglingMode()
                   }"
-                  [disabled]="isTogglingMode">
-                  {{ isEditMode() ? '棰勮' : '缂栬緫' }}
+                  [disabled]="isTogglingMode()">
+                  {{ isEditMode() ? '预览' : '编辑' }}
               </button>
           </div>
 
           @if (!isEditMode()) {
               <div class="cursor-pointer" (click)="onPreviewClick($event)">
-                <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '鏃犳爣棰? }}</h4>
+                <h4 data-testid="flow-task-title" class="text-xs font-medium text-stone-800 dark:text-stone-200 mb-1">{{ task.title || '无标题' }}</h4>
                   @if (localContent() || task.content) {
                       <div 
                           class="text-[11px] text-stone-600 dark:text-stone-300 leading-relaxed markdown-preview bg-retro-muted/5 border border-retro-muted/20 rounded-lg p-2 max-h-32 overflow-y-auto overflow-x-hidden"
                           [innerHTML]="(localContent() || task.content) | safeMarkdown:'raw'">
                       </div>
                   } @else {
-                      <div class="text-[11px] text-stone-400 dark:text-stone-500 italic">鐐瑰嚮缂栬緫鍐呭...</div>
+                      <div class="text-[11px] text-stone-400 dark:text-stone-500 italic">点击编辑内容...</div>
                   }
               </div>
           } @else {
@@ -198,7 +203,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                   (mouseup)="formService.isSelecting = false"
                   spellcheck="false"
                   class="w-full text-xs font-medium text-stone-800 dark:text-stone-100 border border-stone-200 dark:border-stone-600 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700"
-                  placeholder="浠诲姟鏍囬">
+                  placeholder="任务标题">
               
               <textarea 
                   [ngModel]="localContent()" 
@@ -210,7 +215,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                   (mouseup)="formService.isSelecting = false"
                   spellcheck="false"
                   class="w-full text-[11px] text-stone-600 dark:text-stone-300 border border-stone-200 dark:border-stone-600 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700 resize-none font-mono leading-relaxed"
-                  placeholder="杈撳叆鍐呭锛堟敮鎸?Markdown锛?.."></textarea>
+                  placeholder="输入内容（支持 Markdown）..."></textarea>
               <div class="grid grid-cols-3 gap-1.5">
                 <input
                   type="number"
@@ -240,11 +245,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
           <div class="flex gap-1.5 pt-1">
               <button (click)="addSibling.emit(task)"
                   class="flex-1 px-2 py-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 text-[10px] font-medium rounded transition-all">
-                  +鍚岀骇
+                  +同级
               </button>
               <button (click)="addChild.emit(task)"
                   class="flex-1 px-2 py-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 text-[10px] font-medium rounded transition-all">
-                  +涓嬬骇
+                  +下级
               </button>
               <button (click)="toggleStatus.emit(task)"
                   data-testid="toggle-task-status-btn"
@@ -253,7 +258,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                     'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700': task.status !== 'completed',
                     'bg-stone-50 dark:bg-stone-700 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-600': task.status === 'completed'
                   }">
-                  {{task.status === 'completed' ? '鎾ら攢' : '瀹屾垚'}}
+                  {{task.status === 'completed' ? '撤销' : '完成'}}
               </button>
           </div>
           <div class="flex gap-1.5">
@@ -264,22 +269,58 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
                     'bg-stone-50 dark:bg-stone-700 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-600': task.status === 'archived'
                   }"
                   title="归档后任务将从主视图隐藏，可在回收站恢复">
-                  {{task.status === 'archived' ? '鍙栨秷褰掓。' : '褰掓。'}}
+                  {{task.status === 'archived' ? '取消归档' : '归档'}}
               </button>
-              <button (click)="parkTask.emit(task)"
+              <button data-testid="flow-task-park-button" (click)="onParkTaskClick(task, $event)"
                   class="flex-1 px-2 py-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 text-[10px] font-medium rounded transition-all"
                   title="停泊任务，稍后处理">
-                  鍋滄硦
+                  停泊
               </button>
-                <button data-testid="delete-task-btn" (click)="deleteTask.emit(task)"
+              <div class="relative flex-1" (mouseleave)="closeReminderMenu()">
+                <button
+                  type="button"
+                  data-testid="flow-task-reminder-trigger"
+                  (click)="onReminderTriggerClick(task, $event)"
+                  class="w-full px-2 py-1 text-[10px] font-medium rounded transition-all border"
+                  [ngClass]="task.parkingMeta?.state === 'parked'
+                    ? 'bg-sky-50 dark:bg-sky-900/20 hover:bg-sky-500 text-sky-600 dark:text-sky-300 hover:text-white border-sky-200 dark:border-sky-700'
+                    : 'bg-sky-50/70 dark:bg-sky-900/15 text-sky-600 dark:text-sky-300 border-sky-200 dark:border-sky-700 hover:bg-sky-100 dark:hover:bg-sky-900/25'">
+                  {{ task.parkingMeta?.reminder ? '提醒已设' : '提醒' }}
+                </button>
+                @if (showReminderMenu()) {
+                  <div
+                    class="absolute bottom-full right-0 mb-2 min-w-[120px] rounded-lg border border-stone-200 dark:border-stone-700 bg-white/95 dark:bg-stone-800/95 shadow-lg p-1.5 z-10"
+                    data-testid="flow-task-reminder-menu">
+                    @for (preset of reminderPresets; track preset.minutes) {
+                      <button
+                        type="button"
+                        [attr.data-testid]="'flow-task-reminder-preset-' + preset.minutes"
+                        (click)="setReminderPreset(task.id, preset.minutes); $event.stopPropagation()"
+                        class="w-full text-left px-2 py-1 text-[10px] rounded hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-600 dark:text-stone-300">
+                        {{ preset.label }}
+                      </button>
+                    }
+                    @if (task.parkingMeta?.reminder) {
+                      <button
+                        type="button"
+                        data-testid="flow-task-reminder-clear"
+                        (click)="clearReminder(task.id); $event.stopPropagation()"
+                        class="w-full text-left px-2 py-1 text-[10px] rounded hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-500 dark:text-stone-400">
+                        取消提醒
+                      </button>
+                    }
+                  </div>
+                }
+              </div>
+              <button data-testid="delete-task-btn" (click)="deleteTask.emit(task)"
                   class="px-2 py-1 bg-stone-50 dark:bg-stone-700 hover:bg-red-500 dark:hover:bg-red-600 text-stone-400 dark:text-stone-500 hover:text-white border border-stone-200 dark:border-stone-600 text-[10px] font-medium rounded transition-all">
-                  鍒犻櫎
+                  删除
               </button>
           </div>
       </div>
     </ng-template>
     
-    <!-- 绉诲姩绔换鍔″唴瀹规ā鏉?-->
+    <!-- 移动端任务内容模式-->
     <ng-template #mobileTaskContent let-task>
       <div class="flex items-center gap-1.5 mb-1 flex-wrap">
         <span class="font-bold text-retro-muted dark:text-stone-400 text-[8px] tracking-wider bg-stone-100 dark:bg-stone-700 px-1.5 py-0.5 rounded">{{projectState.compressDisplayId(task.displayId)}}</span>
@@ -295,21 +336,21 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
           {{task.status === 'completed' ? '完成' : '进行中'}}
         </span>
         <button 
-          (click)="toggleEditMode()"
+          (click)="onEditToggleClick()"
           class="ml-auto text-[9px] px-1.5 py-0.5 rounded transition-all duration-200"
           [ngClass]="{
             'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300': !isEditMode(),
             'bg-stone-100 dark:bg-stone-700 text-stone-500 dark:text-stone-400': isEditMode(),
-            'scale-95 opacity-70': isTogglingMode
+            'scale-95 opacity-70': isTogglingMode()
           }"
-          [disabled]="isTogglingMode">
-          {{ isEditMode() ? '棰勮' : '缂栬緫' }}
+          [disabled]="isTogglingMode()">
+          {{ isEditMode() ? '预览' : '编辑' }}
         </button>
       </div>
 
       @if (!isEditMode()) {
         <div class="cursor-pointer space-y-1" (click)="onPreviewClick($event)">
-          <h4 class="text-xs font-medium text-stone-800 dark:text-stone-100 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '鏃犳爣棰? }}</h4>
+          <h4 class="text-xs font-medium text-stone-800 dark:text-stone-100 leading-tight" [class.line-clamp-1]="isCompactMode()">{{ task.title || '无标题' }}</h4>
           @if (localContent() || task.content) {
             <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="(localContent() || task.content) | safeMarkdown:'raw'"></div>
           }
@@ -325,7 +366,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
             (mouseup)="formService.isSelecting = false"
             spellcheck="false"
             class="w-full text-xs font-medium text-stone-800 dark:text-stone-100 border border-stone-200 dark:border-stone-600 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700"
-            placeholder="浠诲姟鏍囬">
+            placeholder="任务标题">
           <textarea 
             [ngModel]="localContent()" 
             (ngModelChange)="onLocalContentChange($event)" 
@@ -336,7 +377,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
             (mouseup)="formService.isSelecting = false"
             spellcheck="false"
             class="w-full text-[11px] text-stone-600 dark:text-stone-300 border border-stone-200 dark:border-stone-600 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700 resize-none font-mono"
-            placeholder="浠诲姟鍐呭锛堟敮鎸?Markdown锛?.."></textarea>
+            placeholder="任务内容（支持 Markdown）..."></textarea>
           <div class="grid grid-cols-3 gap-1">
             <input
               type="number"
@@ -369,7 +410,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
               (keydown.enter)="addQuickTodo(task.id, quickTodoInput)"
               spellcheck="false"
               class="flex-1 bg-transparent border-none outline-none text-stone-600 placeholder-stone-400 text-[10px] py-0.5 px-1"
-              placeholder="寰呭姙锛屽洖杞︽坊鍔?..">
+              placeholder="待办，回车添加...">
             <button
               (click)="addQuickTodo(task.id, quickTodoInput)"
               class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded p-0.5 mr-0.5 transition-all">
@@ -379,7 +420,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
         </div>
       }
       
-      <!-- 鎿嶄綔鎸夐挳 -->
+      <!-- 操作按钮 -->
       <div
            #mobileActionSection
            data-mobile-action-section
@@ -392,11 +433,11 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
         <div class="flex gap-1 mt-2">
           <button (click)="addSibling.emit(task)"
             class="flex-1 px-1.5 py-1 bg-retro-teal/10 text-retro-teal border border-retro-teal/30 text-[9px] font-medium rounded transition-all">
-            +鍚岀骇
+            +同级
           </button>
           <button (click)="addChild.emit(task)"
             class="flex-1 px-1.5 py-1 bg-retro-rust/10 text-retro-rust border border-retro-rust/30 text-[9px] font-medium rounded transition-all">
-            +涓嬬骇
+            +下级
           </button>
           <button (click)="toggleStatus.emit(task)"
             class="flex-1 px-1.5 py-1 text-[9px] font-medium rounded border transition-all"
@@ -404,7 +445,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
               'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700': task.status !== 'completed',
               'bg-stone-50 dark:bg-stone-700 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-600': task.status === 'completed'
             }">
-            {{task.status === 'completed' ? '鎾ら攢' : '瀹屾垚'}}
+            {{task.status === 'completed' ? '撤销' : '完成'}}
           </button>
         </div>
         <div class="flex gap-1 mt-1">
@@ -414,19 +455,19 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
               'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-300 border-violet-200 dark:border-violet-700': task.status !== 'archived',
               'bg-stone-50 dark:bg-stone-700 text-stone-600 dark:text-stone-300 border-stone-200 dark:border-stone-600': task.status === 'archived'
             }">
-            {{task.status === 'archived' ? '鍙栨秷褰掓。' : '褰掓。'}}
+            {{task.status === 'archived' ? '取消归档' : '归档'}}
           </button>
-          <button (click)="parkTask.emit(task)"
+          <button (click)="onParkTaskClick(task, $event)"
             class="flex-1 px-1.5 py-1 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500 text-[9px] font-medium rounded transition-all"
             title="停泊任务，稍后处理">
-            鍋滄硦
+            停泊
           </button>
           <button
             #mobileDeleteButton
             data-mobile-delete-button
             (click)="deleteTask.emit(task)"
             class="px-1.5 py-1 bg-stone-50 dark:bg-stone-700 text-stone-400 dark:text-stone-500 border border-stone-200 dark:border-stone-600 hover:bg-red-500 dark:hover:bg-red-600 hover:text-white hover:border-red-500 text-[9px] font-medium rounded transition-all">
-            鍒犻櫎
+            删除
           </button>
         </div>
       </div>
@@ -434,14 +475,16 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
   `
 })
 export class FlowTaskDetailComponent implements OnDestroy {
-  // P2-1 杩佺Щ锛氱洿鎺ユ敞鍏ュ瓙鏈嶅姟
+  // P2-1 迁移：直接注入子服务
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
   private readonly elementRef = inject(ElementRef);
   private readonly cdr = inject(ChangeDetectorRef);
   readonly formService = inject(FlowTaskDetailFormService);
+  private readonly flowTaskOps = inject(FlowTaskOperationsService);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
+  private readonly reminderService = inject(SimpleReminderService);
 
   @ViewChild('mobileDrawer') private mobileDrawer?: ElementRef<HTMLDivElement>;
   @ViewChild('mobileDrawerTitle') private mobileDrawerTitle?: ElementRef<HTMLDivElement>;
@@ -452,8 +495,14 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private static readonly MOBILE_DRAWER_MIN_VH = 8;
   private static readonly MOBILE_DRAWER_MAX_VH = 70;
   private static readonly MOBILE_DRAWER_HEIGHT_EPSILON_VH = 0.3;
+  readonly showReminderMenu = signal(false);
+  readonly reminderPresets = [
+    { label: '5m', minutes: 5 },
+    { label: '30m', minutes: 30 },
+    { label: '2h', minutes: 120 },
+  ] as const;
   
-  // 杈撳叆
+  // 输入
   readonly task = input<Task | null>(null);
   readonly position = input<{ x: number; y: number }>({ x: -1, y: -1 });
   readonly drawerHeight = input<number>(35); // vh unit
@@ -480,7 +529,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly drawerHeightChange = output<number>();
   readonly isResizingChange = output<boolean>();
   
-  // 浠诲姟鎿嶄綔杈撳嚭
+  // 任务操作输出
   readonly titleChange = output<{ taskId: string; title: string }>();
   readonly contentChange = output<{ taskId: string; content: string }>();
   readonly addSibling = output<Task>();
@@ -491,7 +540,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly parkTask = output<Task>();
   readonly quickTodoAdd = output<{ taskId: string; text: string }>();
   
-  // 闄勪欢鎿嶄綔杈撳嚭
+  // 附件操作输出
   readonly attachmentAdd = output<{ taskId: string; attachment: Attachment }>();
   readonly attachmentRemove = output<{ taskId: string; attachmentId: string }>();
   readonly attachmentsChange = output<{ taskId: string; attachments: Attachment[] }>();
@@ -507,12 +556,29 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private lastAutoHeightSignature = '';
   private lastEmittedVh = -1;
   private isComponentDestroyed = false;
+  private ignorePreviewClicksUntil = 0;
+  private suppressedDocumentClickStamp: number | null = null;
   
   constructor() {
-    // Split-Brain 鏍稿績閫昏緫锛氬鎵樼粰 formService
+    // Split-Brain 核心逻辑：委托给 formService
     this.formService.initSyncEffect(() => this.task());
 
-    // 馃敶 绉诲姩绔嚜鍔ㄩ珮搴︼細缁熶竴鐨勮Е鍙戝叆鍙ｏ紙浠诲姟/缂栬緫妯″紡鍙樺寲 + layoutTick 鍙樺寲锛?    // 鍚堝苟涓哄崟涓€ effect锛岄€氳繃绛惧悕鍘婚噸锛岄伩鍏嶅涓?effect 骞跺彂瑙﹀彂瀵艰嚧鎶栧姩
+    // 任务切换或详情面板重新打开后，短时间内忽略预览区点击，避免选择任务的同一击穿透到编辑态。
+    effect(() => {
+      const taskId = this.task()?.id ?? null;
+      const isOpen = this.uiState.isFlowDetailOpen();
+
+      if (!isOpen) {
+        this.ignorePreviewClicksUntil = 0;
+        return;
+      }
+
+      if (taskId) {
+        untracked(() => this.armPreviewEntryGuard());
+      }
+    });
+
+    // 🔴 移动端自动高度：统一的触发入口（任务/编辑模式变化 + layoutTick 变化）    // 合并为单一 effect，通过签名去重，避免多个 effect 并发触发导致抖动
     effect(() => {
       const task = this.task();
       const isEdit = this.isEditMode();
@@ -535,25 +601,31 @@ export class FlowTaskDetailComponent implements OnDestroy {
     });
   }
 
-  // ========== 琛ㄥ崟浜嬩欢濮旀墭 ==========
+  private armPreviewEntryGuard(): void {
+    this.ignorePreviewClicksUntil = Date.now() + IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS;
+  }
+
+  // ========== 表单事件委托 ==========
 
   /**
-   * 绉诲姩绔細璇锋眰鑷姩璋冩暣楂樺害浠ラ€傚簲鍐呭銆?   *
-   * 鏍稿績绠楁硶锛歵argetPx = titleH + intrinsicContentH + handleH + guard
-   * 鍙娇鐢ㄥ唴瀹瑰瓙鍏冪礌鐨勫浐鏈夐珮搴︼紝涓嶅紩鐢?containerH 鎴?contentClientH锛?   * 浠庤€岀‘淇濈畻娉曞箓绛夆€斺€旀棤璁哄綋鍓嶆娊灞夊楂橈紝璁＄畻缁撴灉閮芥槸涓€鏍风殑銆?   */
+   * 移动端：请求自动调整高度以适应内容。   *
+   * 核心算法：targetPx = titleH + intrinsicContentH + handleH + guard
+   * 只使用内容子元素的固有高度，不引入 containerH > contentClientH，
+   * 从而确保算法幂等，无论当前抽屉多高，计算结果都一致。
+   */
   private requestAutoHeight(): void {
     if (this.isComponentDestroyed) return;
     if (!this.uiState.isMobile() || !this.uiState.isFlowDetailOpen()) return;
     if (!this.autoHeightEnabled()) return;
 
-    // 鍙栨秷鍏堝墠鐨勬寕璧锋祴閲忥紝閬垮厤澶氭 emit
+    // 取消先前的挂起测量，避免多次 emit
     this.cancelPendingAutoHeight();
 
     this.autoHeightRafId = requestAnimationFrame(() => {
       this.autoHeightRafId = null;
       if (this.isComponentDestroyed) return;
       this.measureAndEmitHeight();
-      // 涓€娆″欢杩熸敹鏁涳細绛夊瓧浣?鏍峰紡绋冲畾鍚庡啀鏍￠獙
+      // 一次延迟收敛：等字段样式稳定后再校验
       this.autoHeightTimer = setTimeout(() => {
         this.autoHeightTimer = null;
         if (!this.isComponentDestroyed) this.measureAndEmitHeight();
@@ -562,7 +634,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   }
 
   /**
-   * 绾祴閲?+ 鍙戝皠锛氫笉渚濊禆褰撳墠瀹瑰櫒楂樺害锛屽彧鐢ㄥ瓙鍏冪礌鍥烘湁灏哄銆?   * 骞傜瓑锛氬悓鏍风殑鍐呭璋冪敤 N 娆＄粨鏋滀竴鑷达紝绗簩娆′笉浼?emit銆?   */
+   * 纯测量 + 发射：不依赖当前容器高度，只用子元素固有尺寸。   * 幂等：同样的内容调用 N 次结果一致，第二次不会 emit。   */
   private measureAndEmitHeight(): void {
     const container = this.mobileDrawer?.nativeElement
       ?? this.elementRef.nativeElement.querySelector('.absolute.left-0.right-0.z-30');
@@ -590,7 +662,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
       Math.min((clampedPx / viewportHeight) * 100, FlowTaskDetailComponent.MOBILE_DRAWER_MAX_VH)
     );
 
-    // 鍙湪涓庝笂涓€娆″彂灏勫€兼湁鏄捐憲宸紓鏃?emit
+    // 只在与上一次发射值有显著差异时 emit
     if (Math.abs(this.lastEmittedVh - targetVh) > FlowTaskDetailComponent.MOBILE_DRAWER_HEIGHT_EPSILON_VH) {
       this.lastEmittedVh = targetVh;
       this.drawerHeightChange.emit(targetVh);
@@ -604,7 +676,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   }
 
   /**
-   * 娴嬮噺鍐呭鍖烘墍鏈夊瓙鍏冪礌鐨勫浐鏈夐珮搴︽€诲拰锛堝惈 padding/margin锛夈€?   * 涓嶄緷璧?scrollHeight/clientHeight锛堝畠浠細闅忓鍣ㄥ昂瀵稿彉鍖栵級銆?   */
+   * 测量内容区所有子元素的固有高度总和（含 padding/margin）。   * 不依赖 scrollHeight/clientHeight（它们会随容器尺寸变化）。   */
   private measureIntrinsicContentHeight(contentEl: HTMLElement): number {
     if (typeof window === 'undefined') return 0;
     const children = Array.from(contentEl.children) as HTMLElement[];
@@ -637,13 +709,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
   }
   
-  /** 杈撳叆妗嗚仛鐒﹀鐞?*/
+  /** 输入框聚焦处理 */
   onInputFocus(field: 'title' | 'content') {
     this.uiState.markEditing();
     this.formService.onInputFocus(field, this.task());
   }
 
-  /** 杈撳叆妗嗗け鐒﹀鐞?*/
+  /** 输入框失焦处理 */
   onInputBlur(field: 'title' | 'content') {
     const result = this.formService.onInputBlur(field, this.task());
     if (result) {
@@ -655,7 +727,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
   }
   
-  /** 鏈湴鏍囬鍙樻洿 */
+  /** 本地标题变更 */
   onLocalTitleChange(value: string) {
     const result = this.formService.onLocalTitleChange(value, this.task());
     if (result) {
@@ -663,7 +735,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
   }
 
-  /** 鏈湴鍐呭鍙樻洿 */
+  /** 本地内容变更 */
   onLocalContentChange(value: string) {
     const result = this.formService.onLocalContentChange(value, this.task());
     if (result) {
@@ -683,12 +755,64 @@ export class FlowTaskDetailComponent implements OnDestroy {
     this.taskOpsAdapter.updateTaskCognitiveLoad(taskId, normalized);
   }
 
-  /** 鍒囨崲缂栬緫妯″紡 */
+  onParkTaskClick(task: Task, event?: Event): void {
+    event?.stopPropagation();
+    this.flowTaskOps.parkTask(task);
+    this.parkTask.emit(task);
+    this.cdr.markForCheck();
+  }
+
+  toggleReminderMenu(): void {
+    this.showReminderMenu.update(value => !value);
+  }
+
+  closeReminderMenu(): void {
+    this.showReminderMenu.set(false);
+  }
+
+  onReminderTriggerClick(task: Task, event?: Event): void {
+    event?.stopPropagation();
+    if (task.parkingMeta?.state !== 'parked') {
+      this.flowTaskOps.parkTask(task);
+      this.parkTask.emit(task);
+    }
+    this.toggleReminderMenu();
+  }
+
+  setReminderPreset(taskId: string, minutes: number): void {
+    const currentTask = this.task();
+    if (currentTask?.id === taskId && currentTask.parkingMeta?.state !== 'parked') {
+      this.flowTaskOps.parkTask(currentTask);
+      this.parkTask.emit(currentTask);
+    }
+    const reminderAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    this.reminderService.setReminder(taskId, reminderAt);
+    this.showReminderMenu.set(false);
+    this.cdr.markForCheck();
+  }
+
+  clearReminder(taskId: string): void {
+    this.reminderService.cancelReminder(taskId);
+    this.showReminderMenu.set(false);
+    this.cdr.markForCheck();
+  }
+
+  onEditToggleClick(): void {
+    if (Date.now() < this.ignorePreviewClicksUntil && this.isEditMode()) {
+      if (this.isTogglingMode()) {
+        this.isTogglingMode.set(false);
+      }
+      return;
+    }
+    this.toggleEditMode();
+  }
+
+  /** 切换编辑模式 */
   toggleEditMode(): void { this.formService.toggleEditMode(); }
 
   /**
-   * Markdown 棰勮鍖哄煙鐐瑰嚮澶勭悊
-   * 鐐瑰嚮寰呭姙 checkbox 鏃跺垏鎹㈠畬鎴愮姸鎬侊紱鐐瑰嚮鍏朵粬鍖哄煙杩涘叆缂栬緫妯″紡
+   * Markdown 预览区域点击处理
+   * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
   onPreviewClick(event: MouseEvent): void {
     event.stopPropagation();
@@ -699,24 +823,38 @@ export class FlowTaskDetailComponent implements OnDestroy {
       const currentContent = this.formService.localContent() || currentTask.content || '';
       const newContent = toggleMarkdownTodo(currentContent, todoIndex);
       this.formService.localContent.set(newContent);
-      // 鐩存帴鏇存柊 Store锛岀‘淇濋『搴忓悓姝ワ紝閬垮厤鐖剁粍浠?Output 寤惰繜
+      // 直接更新 Store，确保顺序同步，避免父组件 Output 延迟
       this.taskOpsAdapter.updateTaskContent(currentTask.id, newContent);
-      // 寮哄埗鏍囪缁勪欢闇€瑕侀噸鏂版娴嬶紝纭繚 OnPush 妯″紡涓?UI 鍒锋柊
+      // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
       this.cdr.markForCheck();
     } else {
+      if (Date.now() < this.ignorePreviewClicksUntil) {
+        return;
+      }
+      this.suppressedDocumentClickStamp = event.timeStamp;
       this.toggleEditMode();
     }
   }
   
-  /** 鐩戝惉 document 鐐瑰嚮浜嬩欢锛岀紪杈戞ā寮忎笅鐐瑰嚮闈炰氦浜掑尯鍩熼€€鍑虹紪杈?*/
+  /** 监听 document 点击事件，编辑模式下点击非交互区域退出编辑 */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
+    if (this.suppressedDocumentClickStamp !== null) {
+      const isSuppressedClick = Math.abs(event.timeStamp - this.suppressedDocumentClickStamp) < 1;
+      this.suppressedDocumentClickStamp = null;
+      if (isSuppressedClick) {
+        return;
+      }
+    }
     if (this.formService.shouldExitEditMode(event.target as HTMLElement, this.elementRef.nativeElement)) {
       this.isEditMode.set(false);
+      if (this.isTogglingMode()) {
+        this.isTogglingMode.set(false);
+      }
     }
   }
 
-  /** 鐩戝惉 document 瑙︽懜浜嬩欢锛堢Щ鍔ㄧ锛夛紝缂栬緫妯″紡涓嬭Е鎽搁潪浜や簰鍖哄煙閫€鍑虹紪杈?*/
+  /** 监听 document 触摸事件（移动端），编辑模式下触摸非交互区域退出编辑 */
   @HostListener('document:touchstart', ['$event'])
   onDocumentTouchStart(event: TouchEvent): void {
     const activeElement = document.activeElement;
@@ -725,6 +863,9 @@ export class FlowTaskDetailComponent implements OnDestroy {
     }
     if (this.formService.shouldExitEditMode(event.target as HTMLElement, this.elementRef.nativeElement)) {
       this.isEditMode.set(false);
+      if (this.isTogglingMode()) {
+        this.isTogglingMode.set(false);
+      }
     }
   }
 
@@ -782,10 +923,10 @@ export class FlowTaskDetailComponent implements OnDestroy {
     const deltaX = clientX - this.dragState.startX;
     const deltaY = clientY - this.dragState.startY;
     
-    // 闄愬埗闈㈡澘涓嶈兘琚嫋鍑哄彲瑙嗗尯鍩?    // 闈㈡澘瀹藉害 256px锛岄珮搴︽渶澶?384px (max-h-96)
+    // 限制面板不能被拖出可视区域    // 面板宽度 256px，高度最大 384px (max-h-96)
     const panelWidth = 256;
     const panelHeight = 384;
-    const maxX = Math.max(0, window.innerWidth - panelWidth - 20); // 鐣?20px 杈硅窛
+    const maxX = Math.max(0, window.innerWidth - panelWidth - 20); // 留 20px 边距
     const maxY = Math.max(0, window.innerHeight - panelHeight - 20);
     
     const newX = Math.max(0, Math.min(maxX, this.dragState.offsetX + deltaX));
@@ -803,13 +944,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
     window.removeEventListener('blur', this.stopDrag);
   };
 
-  /** 閲嶇疆闈㈡澘浣嶇疆鍒伴粯璁や綅缃紙鍙充笂瑙掞級 */
+  /** 重置面板位置到默认位置（右上角） */
   resetPosition() { this.positionChange.emit({ x: -1, y: -1 }); }
   
   startDrawerResize(event: TouchEvent | MouseEvent) {
     event.preventDefault();
     
-    // 鑾峰彇璧峰浣嶇疆
+    // 获取起始位置
     let startY: number;
     if (event instanceof TouchEvent) {
       if (event.touches.length !== 1) return;
@@ -823,7 +964,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     this.drawerStartY = startY;
     this.drawerStartHeight = this.drawerHeight();
 
-    // 鍥哄畾鏈€灏忛珮搴︿负 8vh锛岄伩鍏嶉绻佺殑 DOM 鏌ヨ
+    // 固定最小高度为 8vh，避免频繁的 DOM 查询
     const minHeight = 8;
     
     const drawerEl = this.elementRef.nativeElement.querySelector('.absolute.z-30') as HTMLElement;
@@ -838,7 +979,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
       if (!this.isResizingDrawer) return;
       ev.preventDefault();
       
-      // 鑾峰彇褰撳墠浣嶇疆
+      // 获取当前位置
       let currentY: number;
       if (ev instanceof TouchEvent) {
         if (ev.touches.length !== 1) return;
@@ -876,7 +1017,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
         drawerEl.style.willChange = 'auto';
       }
       
-      // 绉婚櫎鑷姩鍏抽棴閫昏緫锛屽厑璁哥敤鎴疯嚜鐢辫皟鏁村埌鏈€灏忛珮搴?      // 鏈€灏忛珮搴︾敱 Math.max(8, ...) 鎺у埗
+      // 移除自动关闭逻辑，允许用户自由调整到最小高度      // 最小高度由 Math.max(8, ...) 控制
       window.removeEventListener('touchmove', onMove as EventListener);
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
@@ -891,13 +1032,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
     window.addEventListener('mouseup', onEnd);
   }
   
-  // 鍐呭鍖哄煙瑙︽懜澶勭悊 - 闃叉鏃犻檺涓嬫媺
+  // 内容区域触摸处理 - 防止无限下拉
   onContentTouchStart(event: TouchEvent): void {
     const target = event.target as HTMLElement;
-    // 妫€鏌ユ槸鍚︽槸鍐呭鍖哄煙鏈韩鎴栧彲婊氬姩鐨勫瓙鍏冪礌
+    // 检查是否是内容区域本身或可滚动的子元素
     const scrollableParent = target.closest('.overflow-y-auto') as HTMLElement;
     if (scrollableParent) {
-      // 璁板綍鍒濆婊氬姩浣嶇疆
+      // 记录初始滚动位置
       scrollableParent.dataset['touchStartScrollTop'] = String(scrollableParent.scrollTop);
     }
   }
@@ -916,11 +1057,11 @@ export class FlowTaskDetailComponent implements OnDestroy {
       
       if ((scrollTop === 0 && scrollTop >= touchStartScrollTop) || 
           (scrollTop + clientHeight >= scrollHeight && scrollTop <= touchStartScrollTop)) {
-        // 鍏佽鍐呴儴婊氬姩锛屼笉闃绘浜嬩欢
+        // 允许内部滚动，不阻止事件
         return;
       }
       
-      // 鏇存柊婊氬姩浣嶇疆璁板綍
+      // 更新滚动位置记录
       scrollableParent.dataset['touchStartScrollTop'] = String(scrollTop);
     }
   }
@@ -944,7 +1085,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
     return Math.floor(parsed);
   }
 
-  // ========== 鐢熷懡鍛ㄦ湡绠＄悊 ==========  
+  // ========== 生命周期管理 ==========
   ngOnDestroy(): void {
     this.isComponentDestroyed = true;
     this.cancelPendingAutoHeight();
@@ -954,5 +1095,3 @@ export class FlowTaskDetailComponent implements OnDestroy {
     this.formService.cleanup();
   }
 }
-
-

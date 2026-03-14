@@ -1,6 +1,7 @@
 import { Injectable, inject, signal, NgZone } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { DockEngineService } from '../../../../services/dock-engine.service';
 import { FlowLayoutService } from './flow-layout.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
@@ -502,5 +503,214 @@ export class FlowDragDropService {
   dispose(): void {
     this.isDropTargetActive.set(false);
     this.draggingFromDiagramId = null;
+    this.endAltDragToDock();
+  }
+
+  // ========== Alt+拖拽到停泊坞 ==========
+
+  private readonly dockEngine = inject(DockEngineService);
+
+  /** 拖拽到停泊坞状态：当前正在拖拽的任务ID（单个） */
+  private altDragTaskId: string | null = null;
+  /** 拖拽到停泊坞状态：当前正在拖拽的任务ID列表（多选） */
+  private dragToDockTaskIds: string[] = [];
+  /** 拖拽到停泊坞状态：幽灵指示元素 */
+  private altDragGhost: HTMLElement | null = null;
+  /** 拖拽到停泊坞激活信号（供停泊坞监听悬停状态） */
+  readonly isAltDragActive = signal(false);
+
+  private boundAltDragMove: ((e: PointerEvent) => void) | null = null;
+  private boundAltDragUp: ((e: PointerEvent) => void) | null = null;
+
+  /**
+   * 开始 Alt+拖拽：从流程图节点拖到停泊坞（单个任务）
+   * 使用指针跟踪代替 HTML5 DnD（GoJS 内部拖拽与 HTML5 DnD 不兼容）
+   */
+  startAltDragToDock(taskId: string, clientX: number, clientY: number): void {
+    this.startDragToDock([taskId], clientX, clientY);
+  }
+
+  /**
+   * 开始拖拽到停泊坞：支持多选任务
+   * 当 GoJS 中的节点被拖出画布边界时触发，使用指针跟踪替代 HTML5 DnD
+   */
+  startDragToDock(taskIds: string[], clientX: number, clientY: number): void {
+    // 清理可能残留的前一次拖拽
+    this.endAltDragToDock();
+
+    // 过滤有效任务
+    const validTasks = taskIds
+      .map(id => this.projectState.getTask(id))
+      .filter((t): t is Task => t !== null && t !== undefined && t.status === 'active');
+
+    if (validTasks.length === 0) return;
+
+    this.dragToDockTaskIds = validTasks.map(t => t.id);
+    this.altDragTaskId = this.dragToDockTaskIds[0];
+    this.isAltDragActive.set(true);
+
+    // 创建幽灵提示元素（使用 DOM API 构建，避免 innerHTML/XSS 风险）
+    const ghost = document.createElement('div');
+    ghost.setAttribute('data-alt-drag-ghost', 'true');
+    ghost.className = 'fixed z-[9999] px-3 py-2 bg-indigo-500/90 text-white rounded-lg shadow-xl text-xs font-medium pointer-events-none whitespace-nowrap flex items-center gap-1.5';
+    this.buildGhostContent(ghost, validTasks[0].title || '未命名任务', validTasks.length);
+    ghost.style.left = `${clientX + 12}px`;
+    ghost.style.top = `${clientY - 16}px`;
+    document.body.appendChild(ghost);
+    this.altDragGhost = ghost;
+
+    // 自动展开停泊坞面板
+    if (!this.dockEngine.dockExpanded()) {
+      this.dockEngine.setDockExpanded(true);
+    }
+
+    // 绑定全局指针事件
+    this.boundAltDragMove = (e: PointerEvent) => this.onAltDragMove(e);
+    this.boundAltDragUp = (e: PointerEvent) => this.onAltDragUp(e);
+    document.addEventListener('pointermove', this.boundAltDragMove, { passive: true });
+    document.addEventListener('pointerup', this.boundAltDragUp);
+    document.addEventListener('pointercancel', this.boundAltDragUp);
+
+    this.logger.info('开始拖拽到停泊坞', {
+      taskIds: this.dragToDockTaskIds,
+      count: this.dragToDockTaskIds.length,
+      firstTitle: validTasks[0].title,
+    });
+  }
+
+  private onAltDragMove(e: PointerEvent): void {
+    if (!this.altDragGhost) return;
+    this.altDragGhost.style.left = `${e.clientX + 12}px`;
+    this.altDragGhost.style.top = `${e.clientY - 16}px`;
+
+    // 检测是否悬停在停泊坞 drop-zone 上方
+    const dropZone = document.querySelector('[data-testid="dock-v3-drop-zone"]');
+    if (dropZone) {
+      const rect = dropZone.getBoundingClientRect();
+      const isOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                     e.clientY >= rect.top && e.clientY <= rect.bottom;
+      // 使用 alt-drag-hover 类名提供视觉反馈（不与 Angular 的 [class.active] 绑定冲突）
+      if (isOver) {
+        dropZone.classList.add('alt-drag-hover');
+      } else {
+        dropZone.classList.remove('alt-drag-hover');
+      }
+    }
+
+    // 检测是否悬停在停泊坞卡片区域（整个坞栏面板）
+    const dockPanel = document.querySelector('[data-testid="dock-v3-panel"]');
+    if (dockPanel) {
+      const rect = dockPanel.getBoundingClientRect();
+      const isOverPanel = e.clientX >= rect.left && e.clientX <= rect.right &&
+                          e.clientY >= rect.top && e.clientY <= rect.bottom;
+      if (isOverPanel) {
+        const count = this.dragToDockTaskIds.length;
+        const firstTitle = this.projectState.getTask(this.dragToDockTaskIds[0])?.title || '未命名任务';
+        this.buildGhostContent(this.altDragGhost, firstTitle, count, '松开放入');
+      }
+    }
+  }
+
+  private onAltDragUp(e: PointerEvent): void {
+    const taskIds = [...this.dragToDockTaskIds];
+    if (taskIds.length === 0) {
+      this.endAltDragToDock();
+      return;
+    }
+
+    // 检测释放位置是否在停泊坞区域内（drop-zone 或整个坞栏面板）
+    const dockPanel = document.querySelector('[data-testid="dock-v3-panel"]');
+    const dropZone = document.querySelector('[data-testid="dock-v3-drop-zone"]');
+    let isOverDock = false;
+
+    if (dropZone) {
+      const rect = dropZone.getBoundingClientRect();
+      isOverDock = e.clientX >= rect.left && e.clientX <= rect.right &&
+                   e.clientY >= rect.top && e.clientY <= rect.bottom;
+    }
+    if (!isOverDock && dockPanel) {
+      const rect = dockPanel.getBoundingClientRect();
+      isOverDock = e.clientX >= rect.left && e.clientX <= rect.right &&
+                   e.clientY >= rect.top && e.clientY <= rect.bottom;
+    }
+
+    if (isOverDock) {
+      this.zone.run(() => {
+        let dockedCount = 0;
+        for (const taskId of taskIds) {
+          const task = this.projectState.getTask(taskId);
+          if (!task) continue;
+          this.dockEngine.dockTaskFromExternalDrag(taskId, 'flow');
+          dockedCount++;
+        }
+        if (dockedCount > 0) {
+          const msg = dockedCount === 1
+            ? '任务已从流程图拖入停泊坞'
+            : `${dockedCount} 个任务已从流程图拖入停泊坞`;
+          this.toast.success('已加入停泊坞', msg);
+        }
+      });
+    }
+
+    this.endAltDragToDock();
+  }
+
+  /** 结束拖拽到停泊坞，清理所有状态和 DOM */
+  private endAltDragToDock(): void {
+    this.altDragTaskId = null;
+    this.dragToDockTaskIds = [];
+    this.isAltDragActive.set(false);
+
+    if (this.altDragGhost) {
+      this.altDragGhost.remove();
+      this.altDragGhost = null;
+    }
+    // 防御性清理残留幽灵
+    document.querySelectorAll('[data-alt-drag-ghost="true"]').forEach(el => {
+      try { el.remove(); } catch { /* 防御性忽略 */ }
+    });
+
+    // 清理 drop-zone 上被直接添加的 class
+    const dropZone = document.querySelector('[data-testid="dock-v3-drop-zone"]');
+    if (dropZone) {
+      dropZone.classList.remove('alt-drag-hover');
+    }
+
+    if (this.boundAltDragMove) {
+      document.removeEventListener('pointermove', this.boundAltDragMove);
+      this.boundAltDragMove = null;
+    }
+    if (this.boundAltDragUp) {
+      document.removeEventListener('pointerup', this.boundAltDragUp);
+      document.removeEventListener('pointercancel', this.boundAltDragUp);
+      this.boundAltDragUp = null;
+    }
+  }
+
+  /** 使用 DOM API 安全构建幽灵元素内容（避免 innerHTML / XSS） */
+  private buildGhostContent(container: HTMLElement, title: string, count: number, suffix?: string): void {
+    container.textContent = '';
+
+    const icon = document.createElement('span');
+    icon.className = 'opacity-60';
+    icon.textContent = '⏸';
+    container.appendChild(icon);
+
+    container.appendChild(document.createTextNode(` ${title}`));
+
+    if (count > 1) {
+      const badge = document.createElement('span');
+      badge.className = 'bg-indigo-400/50 px-1.5 py-0.5 rounded-full text-[10px]';
+      badge.textContent = `+${count - 1}`;
+      container.appendChild(document.createTextNode(' '));
+      container.appendChild(badge);
+    }
+
+    if (suffix) {
+      const hint = document.createElement('span');
+      hint.className = 'ml-1 text-indigo-200 text-[10px]';
+      hint.textContent = suffix;
+      container.appendChild(hint);
+    }
   }
 }

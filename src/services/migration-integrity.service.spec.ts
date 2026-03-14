@@ -23,6 +23,26 @@ import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { MIGRATION_SNAPSHOT_CONFIG } from './migration.types';
 import type { Project, Task, Connection } from '../models';
 
+function createStorageMock(): Storage {
+  const store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = String(value);
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+    clear: () => {
+      Object.keys(store).forEach((key) => delete store[key]);
+    },
+    key: (index: number) => Object.keys(store)[index] ?? null,
+    get length() {
+      return Object.keys(store).length;
+    },
+  } as Storage;
+}
+
 const mockLoggerCategory = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -84,38 +104,29 @@ function createProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
-// Custom sessionStorage mock since vitest environment may not have it
-const sessionStorageStore: Record<string, string> = {};
-const sessionStorageMock = {
-  getItem: (key: string) => sessionStorageStore[key] ?? null,
-  setItem: (key: string, value: string) => { sessionStorageStore[key] = value; },
-  removeItem: (key: string) => { delete sessionStorageStore[key]; },
-  clear: () => { Object.keys(sessionStorageStore).forEach(k => delete sessionStorageStore[k]); },
-};
-
 describe('MigrationIntegrityService', () => {
   let service: MigrationIntegrityService;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let originalLocalStorage: Storage;
+  let originalSessionStorage: Storage;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorage.clear();
-    sessionStorageMock.clear();
+    originalLocalStorage = globalThis.localStorage;
+    originalSessionStorage = globalThis.sessionStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: createStorageMock(),
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: createStorageMock(),
+      configurable: true,
+      writable: true,
+    });
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    // Ensure sessionStorage is available
-    if (typeof sessionStorage === 'undefined') {
-      Object.defineProperty(globalThis, 'sessionStorage', {
-        value: sessionStorageMock,
-        writable: true,
-        configurable: true,
-      });
-    } else {
-      // Use real sessionStorage but clear it
-      try { sessionStorage.clear(); } catch { /* noop */ }
-    }
 
     const injector = Injector.create({
       providers: [
@@ -133,6 +144,16 @@ describe('MigrationIntegrityService', () => {
   afterEach(() => {
     consoleWarnSpy?.mockRestore();
     consoleErrorSpy?.mockRestore();
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: originalLocalStorage,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: originalSessionStorage,
+      configurable: true,
+      writable: true,
+    });
   });
 
   // ==================== saveMigrationSnapshot ====================

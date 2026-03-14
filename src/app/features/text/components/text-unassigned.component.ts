@@ -3,6 +3,10 @@ import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { ParkingService } from '../../../../services/parking.service';
+import { DockEngineService } from '../../../../services/dock-engine.service';
+import { SimpleReminderService } from '../../../../services/simple-reminder.service';
+import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
@@ -90,6 +94,56 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                           <button (click)="cancelEdit(); $event.stopPropagation()" class="text-[10px] text-stone-400 hover:text-stone-600">取消</button>
                           <button (click)="saveTask(task); $event.stopPropagation()" class="text-[10px] text-retro-teal hover:text-retro-teal/80 font-bold">保存</button>
                         </div>
+                        <div class="flex gap-2 items-center">
+                          <button
+                            type="button"
+                            data-testid="text-unassigned-park-button"
+                            (click)="parkTaskNow(task); $event.stopPropagation()"
+                            [disabled]="task.parkingMeta?.state === 'parked'"
+                            class="px-2 py-1 text-[10px] rounded border transition-colors"
+                            [ngClass]="task.parkingMeta?.state === 'parked'
+                              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700 opacity-70 cursor-default'
+                              : 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-700 hover:bg-amber-500 hover:text-white'">
+                            {{ task.parkingMeta?.state === 'parked' ? '已停泊' : '停泊' }}
+                          </button>
+                          <div class="relative" (mouseleave)="closeReminderMenu()">
+                            <button
+                              type="button"
+                              data-testid="text-unassigned-reminder-trigger"
+                              (click)="toggleReminderMenu(task.id); $event.stopPropagation()"
+                              [disabled]="task.parkingMeta?.state !== 'parked'"
+                              class="px-2 py-1 text-[10px] rounded border transition-colors"
+                              [ngClass]="task.parkingMeta?.state === 'parked'
+                                ? 'bg-sky-50 dark:bg-sky-900/20 text-sky-600 dark:text-sky-300 border-sky-200 dark:border-sky-700 hover:bg-sky-500 hover:text-white'
+                                : 'bg-stone-50 dark:bg-stone-700 text-stone-400 dark:text-stone-500 border-stone-200 dark:border-stone-600 opacity-60 cursor-not-allowed'">
+                              {{ task.parkingMeta?.reminder ? '提醒已设' : '提醒' }}
+                            </button>
+                            @if (reminderMenuTaskId() === task.id && task.parkingMeta?.state === 'parked') {
+                              <div
+                                class="absolute left-0 top-full mt-1 min-w-[120px] rounded-lg border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 shadow-lg p-1.5 z-10"
+                                data-testid="text-unassigned-reminder-menu">
+                                @for (preset of reminderPresets; track preset.minutes) {
+                                  <button
+                                    type="button"
+                                    [attr.data-testid]="'text-unassigned-reminder-preset-' + preset.minutes"
+                                    (click)="setReminderPreset(task.id, preset.minutes); $event.stopPropagation()"
+                                    class="w-full text-left px-2 py-1 text-[10px] rounded hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-600 dark:text-stone-300">
+                                    {{ preset.label }}
+                                  </button>
+                                }
+                                @if (task.parkingMeta?.reminder) {
+                                  <button
+                                    type="button"
+                                    data-testid="text-unassigned-reminder-clear"
+                                    (click)="clearReminder(task.id); $event.stopPropagation()"
+                                    class="w-full text-left px-2 py-1 text-[10px] rounded hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-500 dark:text-stone-400">
+                                    取消提醒
+                                  </button>
+                                }
+                              </div>
+                            }
+                          </div>
+                        </div>
                       </div>
                     } @else {
                       <div class="flex justify-between items-start gap-2 group/preview">
@@ -98,6 +152,15 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                           <div class="font-medium text-retro-dark dark:text-stone-200 truncate"
                                [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
                             {{task.title}}
+                          </div>
+                          <div
+                            data-testid="text-unassigned-status-badge"
+                            class="mt-1 inline-flex rounded px-1 py-0.5 text-[8px] font-medium"
+                            [ngClass]="{
+                              'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300': task.status === 'completed',
+                              'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300': task.status !== 'completed'
+                            }">
+                            {{ task.status === 'completed' ? 'Completed' : 'Active' }}
                           </div>
                           @if (task.content) {
                             <div class="prose prose-stone dark:prose-invert max-w-none mt-1 opacity-80"
@@ -185,12 +248,21 @@ export class TextUnassignedComponent implements OnDestroy {
   protected taskAdapter = inject(TaskOperationAdapterService);
   protected uiState = inject(UiStateService);
   protected projectState = inject(ProjectStateService);
+  protected parkingService = inject(ParkingService);
+  protected dockEngine = inject(DockEngineService);
+  protected reminderService = inject(SimpleReminderService);
   private cdr = inject(ChangeDetectorRef);
 
   protected editingTaskId = signal<string | null>(null);
   protected isEditMode = signal(false);
   protected localTitle = signal('');
   protected localContent = signal('');
+  protected reminderMenuTaskId = signal<string | null>(null);
+  protected readonly reminderPresets = [
+    { label: '5m', minutes: 5 },
+    { label: '30m', minutes: 30 },
+    { label: '2h', minutes: 120 },
+  ] as const;
 
   constructor() {
     effect(() => {
@@ -321,23 +393,34 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected saveTask(task: Task): void {
-    const title = this.localTitle().trim();
-    const content = this.localContent();
-    if (!title) {
-       this.cancelEdit();
-       return;
+    const persisted = this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: false });
+    if (!persisted) {
+      this.cancelEdit();
+      return;
     }
-    const titleChanged = title !== task.title;
-    const contentChanged = content !== (task.content || '');
-    
-    if (titleChanged) {
-      this.taskAdapter.updateTaskTitle(task.id, title);
-    }
-    if (contentChanged) {
-      this.taskAdapter.updateTaskContent(task.id, content);
-    }
-    
+
     // 保存后默认折叠为最小块，方便继续浏览
+    this.cancelEdit();
+    this.cdr.markForCheck();
+  }
+
+  protected parkTaskNow(task: Task): void {
+    if (task.parkingMeta?.state === 'parked') return;
+
+    // 停泊前先落盘当前编辑内容，避免用户点“停泊”丢掉刚输入的标题/正文。
+    if (this.editingTaskId() === task.id && this.isEditMode()) {
+      this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: true });
+    }
+
+    this.parkingService.parkTask(task.id);
+    if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
+      this.dockEngine.dockTask(task.id, undefined, {
+        sourceSection: 'text',
+        zoneSource: 'auto',
+      });
+    }
+
+    this.reminderMenuTaskId.set(null);
     this.cancelEdit();
     this.cdr.markForCheck();
   }
@@ -378,6 +461,52 @@ export class TextUnassignedComponent implements OnDestroy {
 
   protected handleTouchCancel(event: TouchEvent): void {
     this.touchCancel.emit(event);
+  }
+
+  protected toggleReminderMenu(taskId: string): void {
+    this.reminderMenuTaskId.update(current => (current === taskId ? null : taskId));
+  }
+
+  protected closeReminderMenu(): void {
+    this.reminderMenuTaskId.set(null);
+  }
+
+  protected setReminderPreset(taskId: string, minutes: number): void {
+    const reminderAt = new Date(Date.now() + minutes * 60_000).toISOString();
+    this.reminderService.setReminder(taskId, reminderAt);
+    this.reminderMenuTaskId.set(null);
+    this.cdr.markForCheck();
+  }
+
+  protected clearReminder(taskId: string): void {
+    this.reminderService.cancelReminder(taskId);
+    this.reminderMenuTaskId.set(null);
+    this.cdr.markForCheck();
+  }
+
+  private persistTaskDraft(
+    task: Task,
+    options?: { preserveExistingTitleWhenBlank?: boolean },
+  ): boolean {
+    const title = this.localTitle().trim();
+    const content = this.localContent();
+
+    if (!title && !options?.preserveExistingTitleWhenBlank) {
+      return false;
+    }
+
+    const nextTitle = title || task.title || '';
+    const titleChanged = !!nextTitle && nextTitle !== task.title;
+    const contentChanged = content !== (task.content || '');
+
+    if (titleChanged) {
+      this.taskAdapter.updateTaskTitle(task.id, nextTitle);
+    }
+    if (contentChanged) {
+      this.taskAdapter.updateTaskContent(task.id, content);
+    }
+
+    return !!nextTitle;
   }
 
   /**

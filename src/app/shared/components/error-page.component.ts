@@ -48,17 +48,20 @@ interface FatalErrorInfo {
         <!-- 操作按钮 -->
         <div class="flex flex-col sm:flex-row gap-3 justify-center mb-8">
           <button 
+            (click)="clearCacheAndReload()"
+            class="px-6 py-3 bg-red-600 rounded-lg text-white font-medium hover:bg-red-700 transition-colors shadow-md hover:shadow-lg flex items-center justify-center gap-2">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            清除缓存并刷新
+          </button>
+          <button 
             (click)="reloadApp()"
             class="px-6 py-3 bg-teal-600 rounded-lg text-white font-medium hover:bg-teal-700 transition-colors shadow-md hover:shadow-lg flex items-center justify-center gap-2">
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            重新加载应用
-          </button>
-          <button 
-            (click)="goHome()"
-            class="px-6 py-3 bg-white dark:bg-stone-800 border border-stone-300 dark:border-stone-600 rounded-lg text-stone-700 dark:text-stone-200 font-medium hover:bg-stone-50 dark:hover:bg-stone-700 transition-colors shadow-sm">
-            返回首页
+            简单刷新
           </button>
         </div>
         
@@ -80,11 +83,11 @@ interface FatalErrorInfo {
         
         <!-- 帮助信息 -->
         <div class="mt-8 text-xs text-stone-400 dark:text-stone-500">
-          <p>如果问题持续存在，请尝试：</p>
+          <p>推荐操作：</p>
           <ul class="mt-2 space-y-1">
-            <li>• 清除浏览器缓存后重试</li>
-            <li>• 检查网络连接</li>
-            <li>• 使用其他浏览器访问</li>
+            <li>• 点击上方「清除缓存并刷新」按钮（可修复大部分问题）</li>
+            <li>• 检查网络连接是否正常</li>
+            <li>• 如问题持续，尝试使用其他浏览器</li>
           </ul>
           <p class="mt-4">NanoFlow © {{ currentYear }}</p>
         </div>
@@ -136,6 +139,50 @@ export class ErrorPageComponent implements OnInit {
     this.clearErrorState();
     
     // 强制刷新页面
+    window.location.href = '/';
+  }
+
+  /**
+   * 清除所有缓存并重新加载应用
+   * 这是解决版本偏移/JIT 编译错误的最有效方法
+   */
+  clearCacheAndReload() {
+    // 清除错误状态
+    this.clearErrorState();
+
+    // 优先使用全局强制清缓存工具
+    type ForceClearCacheWindow = Window & {
+      __NANOFLOW_FORCE_CLEAR_CACHE__?: () => Promise<void> | void;
+    };
+    const forceClearCache = (window as ForceClearCacheWindow).__NANOFLOW_FORCE_CLEAR_CACHE__;
+
+    if (typeof forceClearCache === 'function') {
+      void Promise.resolve(forceClearCache()).catch(() => {
+        window.location.href = '/';
+      });
+      return;
+    }
+
+    // 回退：手动清理缓存
+    void this.forceClearCacheFallback();
+  }
+
+  /**
+   * 回退缓存清理逻辑
+   */
+  private async forceClearCacheFallback(): Promise<void> {
+    try {
+      if ('caches' in window) {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map(name => caches.delete(name)));
+      }
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map(reg => reg.unregister()));
+      }
+    } catch {
+      // 忽略清理错误
+    }
     window.location.href = '/';
   }
   

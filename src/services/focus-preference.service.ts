@@ -10,6 +10,8 @@
  */
 
 import { Injectable, inject } from '@angular/core';
+// TODO: DEFAULT_FOCUS_PREFERENCES is imported statically from models/focus.ts.
+// Consider moving it to a config token (InjectionToken) for easier test overrides.
 import { FocusPreferences, DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 import { PreferenceService } from './preference.service';
 import { AuthService } from './auth.service';
@@ -56,17 +58,19 @@ export class FocusPreferenceService {
    * 保存偏好设置（本地 + 云端）
    */
   private savePreferences(prefs: FocusPreferences): void {
+    // 【修复 P2-10】附加 updatedAt 用于 LWW 冲突解决
+    const withTimestamp = { ...prefs, updatedAt: new Date().toISOString() };
     // 1. 立即保存到本地（同步、即时响应）
     try {
-      localStorage.setItem(FOCUS_PREFERENCES_KEY, JSON.stringify(prefs));
-      focusPreferences.set(prefs);
-      this.logger.debug('FocusPreferences', 'saved locally', prefs);
+      localStorage.setItem(FOCUS_PREFERENCES_KEY, JSON.stringify(withTimestamp));
+      focusPreferences.set(withTimestamp);
+      this.logger.debug('FocusPreferences', 'saved locally', withTimestamp);
     } catch (e) {
       this.logger.error('FocusPreferences', 'Failed to save locally', e instanceof Error ? e.message : String(e));
     }
 
     // 2. 同步到云端（异步、不阻塞 UI）
-    this.syncToCloud(prefs);
+    this.syncToCloud(withTimestamp);
   }
 
   /**
@@ -93,9 +97,19 @@ export class FocusPreferenceService {
 
   /**
    * 应用从云端接收到的偏好（由偏好同步回调触发）
+   * 【修复 P2-10】增加 updatedAt 比较，避免旧云数据覆盖新本地数据
    */
   applyCloudPreferences(cloudPrefs: Partial<FocusPreferences>): void {
     const current = focusPreferences();
+
+    // 如果云端偏好携带 updatedAt 且旧于本地，跳过覆盖
+    const localTime = (current as unknown as Record<string, unknown>)['updatedAt'] as string | undefined;
+    const cloudTime = (cloudPrefs as unknown as Record<string, unknown>)['updatedAt'] as string | undefined;
+    if (localTime && cloudTime && cloudTime < localTime) {
+      this.logger.debug('FocusPreferences', 'cloud preference older than local, skipped', { localTime, cloudTime });
+      return;
+    }
+
     const merged = { ...current, ...cloudPrefs };
 
     // 更新本地存储和信号（不再触发云端同步，避免循环）
@@ -144,6 +158,16 @@ export class FocusPreferenceService {
   setMaxSnoozePerDay(count: number): void {
     const max = Math.max(0, Math.min(10, count));
     this.update({ maxSnoozePerDay: max });
+  }
+
+  setRestReminderHighLoadMinutes(minutes: number): void {
+    const normalized = Math.max(15, Math.min(240, Math.floor(minutes)));
+    this.update({ restReminderHighLoadMinutes: normalized });
+  }
+
+  setRestReminderLowLoadMinutes(minutes: number): void {
+    const normalized = Math.max(5, Math.min(120, Math.floor(minutes)));
+    this.update({ restReminderLowLoadMinutes: normalized });
   }
 
   /**

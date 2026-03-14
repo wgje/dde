@@ -51,18 +51,20 @@ type DismissReason = 'action' | 'interactive' | 'fallback';
       min-width: 320px;
     }
     .notice-enter {
-      animation: noticeSlideUp 200ms ease-out;
+      animation: noticeSlideUp var(--pk-notice-enter) var(--pk-ease-enter);
     }
     .notice-exit {
-      animation: noticeFadeOut 300ms ease-out forwards;
+      animation: noticeFadeOut var(--pk-notice-exit) var(--pk-ease-exit) forwards;
     }
     @keyframes noticeSlideUp {
-      from { opacity: 0; transform: translateY(16px); }
-      to   { opacity: 1; transform: translateY(0); }
+      0%   { opacity: 0; transform: translateY(6px) scale(0.99); }
+      50%  { opacity: 0.7; transform: translateY(1px) scale(0.998); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
     }
     @keyframes noticeFadeOut {
-      from { opacity: 1; }
-      to   { opacity: 0; pointer-events: none; }
+      0%   { opacity: 1; transform: scale(1); }
+      60%  { opacity: 0.5; transform: scale(0.996); }
+      100% { opacity: 0; transform: scale(0.99); pointer-events: none; }
     }
     @media (prefers-reduced-motion: reduce) {
       .notice-enter { animation: none; }
@@ -77,7 +79,7 @@ type DismissReason = 'action' | 'interactive' | 'fallback';
            [class.notice-exit]="isExiting()"
            [class.border-amber-300]="notice.type === 'eviction'"
            [class.border-indigo-300]="notice.type === 'reminder'"
-           style="background-color: var(--theme-bg); backdrop-filter: blur(16px);"
+           style="background-color: var(--theme-bg);"
            role="alert"
            aria-live="assertive">
         <div class="flex items-center gap-2">
@@ -188,7 +190,7 @@ export class ParkingNoticeComponent implements OnDestroy {
   readonly isMobile = computed(() => this.uiState.isMobile());
   readonly mobileExpanded = signal(false);
   readonly evictionExpanded = signal(false);
-  readonly dismissedEvictionTokenIds = signal<Set<string>>(new Set(), { equal: () => false });
+  readonly dismissedEvictionTokenIds = signal<Set<string>>(new Set());
 
   readonly currentNotice = computed<ParkingNotice | null>(() => {
     const reminder = this.reminderService.activeNotice();
@@ -303,8 +305,7 @@ export class ParkingNoticeComponent implements OnDestroy {
 
     this.parkingService.undoEviction(item.evictionTokenId);
     this.dismissedEvictionTokenIds.update((set) => {
-      set.add(item.evictionTokenId);
-      return set;
+      return new Set([...set, item.evictionTokenId]);
     });
 
     if (this.visibleEvictionItems(notice).length === 0) {

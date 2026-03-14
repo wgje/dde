@@ -4,6 +4,11 @@
  * 从 action-queue.service.ts 提取的类型定义
  */
 import { Project, Task, UserPreferences } from '../models';
+import {
+  FocusSessionRecord,
+  RoutineCompletionMutation,
+  RoutineTask,
+} from '../models/parking-dock';
 
 /**
  * 操作重要性级别
@@ -22,7 +27,10 @@ export type ActionPayload =
   | ProjectDeletePayload
   | TaskPayload
   | TaskDeletePayload
-  | PreferencePayload;
+  | PreferencePayload
+  | FocusSessionPayload
+  | RoutineTaskPayload
+  | RoutineCompletionPayload;
 
 export interface ProjectPayload {
   project: Project;
@@ -48,13 +56,26 @@ export interface PreferencePayload {
   userId: string;
 }
 
+export interface FocusSessionPayload {
+  record: FocusSessionRecord;
+}
+
+export interface RoutineTaskPayload {
+  userId: string;
+  routineTask: RoutineTask;
+}
+
+export interface RoutineCompletionPayload {
+  completion: RoutineCompletionMutation;
+}
+
 /**
  * 操作队列项
  */
 export interface QueuedAction<T extends ActionPayload = ActionPayload> {
   id: string;
   type: 'create' | 'update' | 'delete';
-  entityType: 'project' | 'task' | 'preference';
+  entityType: 'project' | 'task' | 'preference' | 'focus-session' | 'routine-task' | 'routine-completion';
   entityId: string;
   payload: T;
   timestamp: number;
@@ -74,7 +95,10 @@ export type EnqueueParams =
   | { type: 'delete'; entityType: 'project'; entityId: string; payload: ProjectDeletePayload; priority?: OperationPriority }
   | { type: 'create' | 'update'; entityType: 'task'; entityId: string; payload: TaskPayload; priority?: OperationPriority }
   | { type: 'delete'; entityType: 'task'; entityId: string; payload: TaskDeletePayload; priority?: OperationPriority }
-  | { type: 'create' | 'update' | 'delete'; entityType: 'preference'; entityId: string; payload: PreferencePayload; priority?: OperationPriority };
+  | { type: 'create' | 'update' | 'delete'; entityType: 'preference'; entityId: string; payload: PreferencePayload; priority?: OperationPriority }
+  | { type: 'create' | 'update'; entityType: 'focus-session'; entityId: string; payload: FocusSessionPayload; priority?: OperationPriority }
+  | { type: 'create' | 'update'; entityType: 'routine-task'; entityId: string; payload: RoutineTaskPayload; priority?: OperationPriority }
+  | { type: 'create' | 'update'; entityType: 'routine-completion'; entityId: string; payload: RoutineCompletionPayload; priority?: OperationPriority };
 
 /**
  * 死信队列项 - 永久失败的操作

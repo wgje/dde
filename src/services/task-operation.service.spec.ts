@@ -16,6 +16,7 @@ import { TaskCreationService } from './task-creation.service';
 import { TaskMoveService } from './task-move.service';
 import { TaskAttributeService } from './task-attribute.service';
 import { TaskConnectionService } from './task-connection.service';
+import { ParkingService } from './parking.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { Project, Task, Connection } from '../models';
@@ -29,6 +30,11 @@ const mockLoggerCategory = {
 
 const mockLoggerService = {
   category: vi.fn(() => mockLoggerCategory),
+};
+
+const mockParkingService = {
+  handleTaskSoftDelete: vi.fn(),
+  handleTaskStatusChange: vi.fn(),
 };
 
 function createTask(overrides: Partial<Task>): Task {
@@ -112,6 +118,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ParkingService, useValue: mockParkingService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },
@@ -277,6 +284,7 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ParkingService, useValue: mockParkingService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },
@@ -450,6 +458,7 @@ describe('TaskOperationService (database constraint validation)', () => {
         { provide: LayoutService, useClass: LayoutService },
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ParkingService, useValue: mockParkingService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },

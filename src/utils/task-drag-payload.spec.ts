@@ -1,15 +1,40 @@
 import { describe, expect, it } from 'vitest';
 import { readTaskDragPayload, writeTaskDragPayload } from './task-drag-payload';
 
+/**
+ * Minimal mock of the DataTransfer interface.
+ * Only getData/setData are exercised by the payload helpers;
+ * remaining stubs prevent future test failures if the surface grows.
+ */
 class MockDataTransfer {
   private store = new Map<string, string>();
+  readonly items = [] as unknown as DataTransferItemList;
+  readonly files = [] as unknown as FileList;
+  dropEffect: DataTransfer['dropEffect'] = 'none';
+  effectAllowed: DataTransfer['effectAllowed'] = 'uninitialized';
+  readonly types: string[] = [];
 
   setData(format: string, data: string): void {
     this.store.set(format, data);
+    if (!this.types.includes(format)) {
+      (this.types as string[]).push(format);
+    }
   }
 
   getData(format: string): string {
     return this.store.get(format) ?? '';
+  }
+
+  clearData(format?: string): void {
+    if (format) {
+      this.store.delete(format);
+    } else {
+      this.store.clear();
+    }
+  }
+
+  setDragImage(_img: Element, _xOffset: number, _yOffset: number): void {
+    // no-op in tests
   }
 }
 
@@ -30,7 +55,7 @@ describe('task-drag-payload', () => {
       taskId: 'task-1',
       projectId: 'project-1',
       source: 'flow',
-      relationHint: null,
+      laneHint: null,
       fromProjectId: 'project-1',
     });
   });
@@ -45,7 +70,7 @@ describe('task-drag-payload', () => {
       taskId: 'legacy-task',
       projectId: 'legacy-project',
       source: 'dock',
-      relationHint: null,
+      laneHint: null,
       fromProjectId: 'legacy-project',
     });
   });

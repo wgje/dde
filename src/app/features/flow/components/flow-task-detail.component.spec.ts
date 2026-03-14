@@ -7,6 +7,7 @@ import { ProjectStateService } from '../../../../services/project-state.service'
 import { UserSessionService } from '../../../../services/user-session.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
 import { disablePollutionGuard, enablePollutionGuard } from '../../../../test-setup.mocks';
 import { Task } from '../../../../models';
 
@@ -17,6 +18,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   let mockProjectState: any;
   let mockUserSession: any;
   let mockChangeTracker: any;
+  let mockFlowTaskOps: any;
   const defaultRequestAnimationFrame: typeof globalThis.requestAnimationFrame =
     typeof globalThis.requestAnimationFrame === 'function'
       ? globalThis.requestAnimationFrame.bind(globalThis)
@@ -52,6 +54,13 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     createdDate: '2025-12-31',
     updatedAt: '2025-12-31T00:00:00Z',
   });
+
+  const createClickEvent = (timeStamp: number, target: HTMLElement = document.createElement('div')): MouseEvent => {
+    const event = new MouseEvent('click', { bubbles: true });
+    Object.defineProperty(event, 'target', { value: target });
+    Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+    return event;
+  };
 
   beforeAll(() => {
     disablePollutionGuard();
@@ -93,6 +102,10 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     };
     (mockChangeTracker as any).constructor = { TEXT_INPUT_LOCK_TIMEOUT_MS: 3600000 };
 
+    mockFlowTaskOps = {
+      parkTask: vi.fn(),
+    };
+
     const mockLoggerService = {
       category: vi.fn(() => ({
         info: vi.fn(),
@@ -111,6 +124,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: UserSessionService, useValue: mockUserSession },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
+        { provide: FlowTaskOperationsService, useValue: mockFlowTaskOps },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
@@ -378,6 +392,107 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       component.toggleEditMode();
       expect(component.isEditMode()).toBe(true); // 仍然是 true
     });
+
+    it('编辑切换按钮只应在节流窗口内禁用', async () => {
+      vi.useFakeTimers();
+
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      const editButton = fixture.nativeElement.querySelector('[data-testid="flow-edit-toggle-btn"]') as HTMLButtonElement | null;
+      expect(editButton?.disabled).toBe(false);
+
+      component.toggleEditMode();
+      fixture.detectChanges();
+      expect(editButton?.disabled).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(300);
+      fixture.detectChanges();
+      expect(editButton?.disabled).toBe(false);
+
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    });
+
+    it('任务切换后立刻点击预览区不应进入编辑态或卡住节流', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
+
+      const taskA = createMockTask('task-a', 'Task A', 'Content A');
+      const taskB = createMockTask('task-b', 'Task B', 'Content B');
+
+      (component as any)['task'] = signal(taskA);
+      fixture.detectChanges();
+
+      (component as any)['task'].set(taskB);
+      fixture.detectChanges();
+
+      component.onPreviewClick(createClickEvent(100));
+
+      expect(component.isEditMode()).toBe(false);
+      expect(component['isTogglingMode']()).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('预览区主动进入编辑态时，同一点击不应被 document:click 立即撤销', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
+
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(181);
+
+      const previewClick = createClickEvent(200);
+      component.onPreviewClick(previewClick);
+      component.onDocumentClick(previewClick);
+
+      expect(component.isEditMode()).toBe(true);
+
+      vi.useRealTimers();
+    });
+
+    it('任务刚切换后的编辑按钮应确保保留编辑态，而不是把意外编辑态切回预览', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
+
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      component.isEditMode.set(true);
+      component['isTogglingMode'].set(true);
+
+      component.onEditToggleClick();
+
+      expect(component.isEditMode()).toBe(true);
+      expect(component['isTogglingMode']()).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('后续新的 document:click 仍应正常退出编辑态', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
+
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(181);
+
+      component.onPreviewClick(createClickEvent(300));
+      expect(component.isEditMode()).toBe(true);
+
+      component.onDocumentClick(createClickEvent(301));
+      expect(component.isEditMode()).toBe(false);
+      expect(component['isTogglingMode']()).toBe(false);
+
+      vi.useRealTimers();
+    });
   });
 
   describe('输入处理', () => {
@@ -433,6 +548,42 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         expect.any(Number)
       );
       expect(component.formService.isTitleFocused).toBe(true);
+    });
+
+    it('点击停泊按钮时应发射 parkTask 事件', () => {
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      let emittedTask: any = null;
+      component.parkTask.subscribe((event) => {
+        emittedTask = event;
+      });
+
+      const parkButton = fixture.nativeElement.querySelector('[data-testid="flow-task-park-button"]') as HTMLButtonElement | null;
+      parkButton?.click();
+
+      expect(mockFlowTaskOps.parkTask).toHaveBeenCalledWith(task);
+      expect(emittedTask?.id).toBe('task-a');
+    });
+
+    it('未停泊任务点击提醒按钮时应先发射 parkTask 事件并打开提醒菜单', () => {
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      let emittedTask: any = null;
+      component.parkTask.subscribe((event) => {
+        emittedTask = event;
+      });
+
+      const reminderButton = fixture.nativeElement.querySelector('[data-testid="flow-task-reminder-trigger"]') as HTMLButtonElement | null;
+      reminderButton?.click();
+      fixture.detectChanges();
+
+      expect(mockFlowTaskOps.parkTask).toHaveBeenCalledWith(task);
+      expect(emittedTask?.id).toBe('task-a');
+      expect(component.showReminderMenu()).toBe(true);
     });
 
     it('应该在失焦时延迟解锁字段', async () => {
@@ -541,16 +692,16 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
           (component as any)['drawerHeight'].set(value);
         });
 
-        // 第一次测量：应 emit
+        // 第一次测量：应 emit（advanceTimersByTime 避免 ParkingService 递归 setTimeout 导致 10000 timer 限制）
         (component as any).requestAutoHeight();
-        await vi.runAllTimersAsync();
+        vi.advanceTimersByTime(200);
 
         const firstEmitCount = emittedHeights.length;
         expect(firstEmitCount).toBeGreaterThan(0);
 
         // 第二次测量：内容不变，lastEmittedVh 已缓存，不应再 emit
         (component as any).requestAutoHeight();
-        await vi.runAllTimersAsync();
+        vi.advanceTimersByTime(200);
 
         expect(emittedHeights.length).toBe(firstEmitCount);
       } finally {
@@ -617,7 +768,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         });
 
         (component as any).requestAutoHeight();
-        await vi.runAllTimersAsync();
+        vi.advanceTimersByTime(200);
 
         // targetPx = 20 + (90+45) + 11 + 4 = 170
         const expectedPx = 20 + 135 + 11 + 4;

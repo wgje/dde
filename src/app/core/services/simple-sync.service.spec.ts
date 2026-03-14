@@ -24,7 +24,20 @@ import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
-import { TombstoneService, RealtimePollingService, SessionManagerService, SyncOperationHelperService, UserPreferencesSyncService, ProjectDataService, BatchSyncService, TaskSyncOperationsService, ConnectionSyncOperationsService, RetryQueueService, SyncStateService } from './sync';
+import {
+  TombstoneService,
+  RealtimePollingService,
+  SessionManagerService,
+  SyncOperationHelperService,
+  UserPreferencesSyncService,
+  FocusConsoleSyncService,
+  ProjectDataService,
+  BatchSyncService,
+  TaskSyncOperationsService,
+  ConnectionSyncOperationsService,
+  RetryQueueService,
+  SyncStateService,
+} from './sync';
 import type { RetryQueueItem } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
@@ -335,6 +348,15 @@ describe('SimpleSyncService', () => {
       loadUserPreferences: vi.fn().mockResolvedValue(null),
       saveUserPreferences: vi.fn().mockResolvedValue(true)
     };
+
+    const mockFocusConsoleSync = {
+      loadFocusSession: vi.fn().mockResolvedValue(null),
+      saveFocusSession: vi.fn().mockResolvedValue(true),
+      listRoutineTasks: vi.fn().mockResolvedValue([]),
+      upsertRoutineTask: vi.fn().mockResolvedValue(true),
+      incrementRoutineCompletion: vi.fn().mockResolvedValue(true),
+      importLegacyDockSnapshot: vi.fn().mockResolvedValue(null),
+    };
     
     const mockProjectData = {
       loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
@@ -429,6 +451,7 @@ describe('SimpleSyncService', () => {
         { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: SyncOperationHelperService, useValue: mockSyncOpHelper },
         { provide: UserPreferencesSyncService, useValue: mockUserPrefsSync },
+        { provide: FocusConsoleSyncService, useValue: mockFocusConsoleSync },
         { provide: ProjectDataService, useValue: mockProjectData },
         { provide: BatchSyncService, useValue: mockBatchSync },
         // 【技术债务重构】新增的子服务

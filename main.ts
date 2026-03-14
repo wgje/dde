@@ -17,8 +17,16 @@ import { provideServiceWorker } from '@angular/service-worker';
 // - 初始化前的错误会被队列缓存，初始化后自动发送
 // - 详见 src/services/sentry-lazy-loader.service.ts
 
-// ============= BUILD ID: 2025-12-04-v19-TOGGLE-ALIGN =============
-const BUILD_ID = '2025-12-04-v19-TOGGLE-ALIGN';
+// ============= BUILD ID =============
+// 使用入口 chunk URL 作为构建指纹，确保 outputHashing 变化能触发版本偏移恢复。
+const BUILD_ID = (() => {
+  try {
+    const entryUrl = new URL(import.meta.url, window.location.href);
+    return `${VERSION.full}:${entryUrl.pathname}${entryUrl.search}`;
+  } catch {
+    return `${VERSION.full}:runtime-unknown`;
+  }
+})();
 if (isDevMode()) {
   console.log('%c [NanoFlow] Main.ts Loaded: ' + BUILD_ID, 'background: #222; color: #bada55; font-size: 20px');
 }

@@ -1,19 +1,12 @@
-﻿import { Attachment, AttachmentType, Connection, Project, Task, TaskStatus } from '../models';
+import { Attachment, AttachmentType, Connection, Project, Task, TaskStatus } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 import { nowISO } from './date';
+import { sanitizePlannerFields } from './planner-fields';
 import { utilLogger } from './standalone-logger';
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-export function isValidUUID(str: string): boolean {
-  return UUID_REGEX.test(str);
-}
-
-export interface ValidationResult {
-  valid: boolean;
-  errors: string[];
-  warnings: string[];
-}
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_ATTACHMENT_SIZE = ATTACHMENT_CONFIG.MAX_FILE_SIZE;
+const MAX_ATTACHMENTS_PER_TASK = ATTACHMENT_CONFIG.MAX_ATTACHMENTS_PER_TASK;
 
 const ALLOWED_MIME_TYPES: Record<AttachmentType, string[]> = {
   image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'],
@@ -28,8 +21,15 @@ const ALLOWED_MIME_TYPES: Record<AttachmentType, string[]> = {
   file: [],
 };
 
-const MAX_ATTACHMENT_SIZE = ATTACHMENT_CONFIG.MAX_FILE_SIZE;
-const MAX_ATTACHMENTS_PER_TASK = ATTACHMENT_CONFIG.MAX_ATTACHMENTS_PER_TASK;
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export function isValidUUID(str: string): boolean {
+  return UUID_REGEX.test(str);
+}
 
 export function validateAttachment(attachment: Partial<Attachment>): ValidationResult {
   const errors: string[] = [];
@@ -42,7 +42,7 @@ export function validateAttachment(attachment: Partial<Attachment>): ValidationR
   if (!attachment.name || typeof attachment.name !== 'string') {
     errors.push('附件名称无效或缺失');
   } else if (attachment.name.length > 255) {
-    errors.push('附件名称过长（最多 255 字符）');
+    errors.push('附件名称过长（最大 255 字符）');
   }
 
   if (!attachment.url || typeof attachment.url !== 'string') {
@@ -73,7 +73,7 @@ export function validateAttachment(attachment: Partial<Attachment>): ValidationR
     if (typeof attachment.size !== 'number' || attachment.size < 0) {
       errors.push('附件大小无效');
     } else if (attachment.size > MAX_ATTACHMENT_SIZE) {
-      errors.push(`附件过大: ${(attachment.size / 1024 / 1024).toFixed(2)}MB（最多 10MB）`);
+      errors.push(`附件过大: ${(attachment.size / 1024 / 1024).toFixed(2)}MB（最大 10MB）`);
     }
   }
 
@@ -130,33 +130,41 @@ export function validateTask(task: Partial<Task>): ValidationResult {
     warnings.push(`任务 ${task.id} 的 Y 坐标无效`);
   }
 
+  if (task.parentId !== undefined && task.parentId !== null && typeof task.parentId !== 'string') {
+    errors.push(`任务 ${task.id} 的 parentId 无效`);
+  }
+
+  if (task.createdDate !== undefined && typeof task.createdDate !== 'string') {
+    warnings.push(`任务 ${task.id} 的 createdDate 无效`);
+  }
+
+  if (task.updatedAt !== undefined && task.updatedAt !== null && typeof task.updatedAt !== 'string') {
+    warnings.push(`任务 ${task.id} 的 updatedAt 无效`);
+  }
+
+  if (task.deletedAt !== undefined && task.deletedAt !== null && typeof task.deletedAt !== 'string') {
+    warnings.push(`任务 ${task.id} 的 deletedAt 无效`);
+  }
+
+  if (task.shortId !== undefined && task.shortId !== null && typeof task.shortId !== 'string') {
+    warnings.push(`任务 ${task.id} 的 shortId 无效`);
+  }
+
   if (task.attachments !== undefined) {
     if (!Array.isArray(task.attachments)) {
-      errors.push(`任务 ${task.id} 的附件列表必须是数组`);
+      errors.push(`任务 ${task.id} 的 attachments 必须为数组`);
     } else {
-      if (task.attachments.length > MAX_ATTACHMENTS_PER_TASK) {
-        errors.push(`任务 ${task.id} 附件数量超限（最多 ${MAX_ATTACHMENTS_PER_TASK} 个）`);
-      }
-
-      for (let index = 0; index < task.attachments.length; index += 1) {
-        const result = validateAttachment(task.attachments[index]);
-        errors.push(...result.errors.map(error => `附件[${index}]: ${error}`));
-        warnings.push(...result.warnings.map(warning => `附件[${index}]: ${warning}`));
-      }
-
-      const attachmentIds = new Set<string>();
       for (const attachment of task.attachments) {
-        if (attachment.id && attachmentIds.has(attachment.id)) {
-          errors.push(`任务 ${task.id} 存在重复的附件 ID: ${attachment.id}`);
-        }
-        if (attachment.id) attachmentIds.add(attachment.id);
+        const result = validateAttachment(attachment);
+        errors.push(...result.errors);
+        warnings.push(...result.warnings);
       }
     }
   }
 
   if (task.tags !== undefined) {
     if (!Array.isArray(task.tags)) {
-      errors.push(`任务 ${task.id} 的标签列表必须是数组`);
+      errors.push(`任务 ${task.id} 的 tags 必须为数组`);
     } else {
       for (const tag of task.tags) {
         if (typeof tag !== 'string' || tag.length === 0) {
@@ -205,6 +213,16 @@ export function validateTask(task: Partial<Task>): ValidationResult {
     ) {
       errors.push(`任务 ${task.id} 的等待时长无效`);
     }
+  }
+
+  if (
+    typeof task.expected_minutes === 'number' &&
+    Number.isFinite(task.expected_minutes) &&
+    typeof task.wait_minutes === 'number' &&
+    Number.isFinite(task.wait_minutes) &&
+    task.wait_minutes > task.expected_minutes
+  ) {
+    errors.push(`任务 ${task.id} 的等待时长不能超过预计时长`);
   }
 
   return {
@@ -273,7 +291,7 @@ export function validateProject(project: Partial<Project>): ValidationResult {
     }
 
     if (project.connections === undefined || project.connections === null) {
-      warnings.push('项目连接列表缺失，已初始化为空数组');
+      warnings.push('项目连接列表缺失，已视为无连接');
     } else if (!Array.isArray(project.connections)) {
       errors.push('项目连接列表必须是数组');
     } else {
@@ -309,7 +327,8 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
       const parsed = new URL(url);
       if (!allowedProtocols.includes(parsed.protocol)) return '';
     } catch {
-      if (url.startsWith('javascript:') || url.startsWith('data:text/html') || url.startsWith('//')) return '';
+      // catch 分支：URL 不可解析时，使用允许列表阻止危险协议
+      if (!/^https?:\/\/|^blob:|^\/|^storage\//.test(url)) return '';
     }
     return url;
   };
@@ -335,37 +354,28 @@ export function sanitizeTask(rawTask: unknown): Task {
     : undefined;
 
   const tags = Array.isArray(task.tags)
-    ? (task.tags as unknown[])
-        .filter((item): item is string => typeof item === 'string' && item.length > 0)
+    ? (task.tags as unknown[]).filter((item): item is string => typeof item === 'string' && item.length > 0)
     : undefined;
 
   const validPriorities = ['low', 'medium', 'high', 'urgent'] as const;
   const rawPriority = task.priority as string | undefined;
   const priority =
-    rawPriority && validPriorities.includes(rawPriority as 'low' | 'medium' | 'high' | 'urgent')
-      ? (rawPriority as 'low' | 'medium' | 'high' | 'urgent')
+    rawPriority && validPriorities.includes(rawPriority as (typeof validPriorities)[number])
+      ? (rawPriority as (typeof validPriorities)[number])
       : undefined;
 
-  let dueDate: string | null | undefined = undefined;
+  let dueDate: string | null | undefined;
   if (task.dueDate === null) {
     dueDate = null;
   } else if (typeof task.dueDate === 'string' && !Number.isNaN(new Date(task.dueDate).getTime())) {
     dueDate = task.dueDate;
   }
 
-  const expectedMinutes =
-    typeof task.expected_minutes === 'number' && Number.isFinite(task.expected_minutes) && task.expected_minutes > 0
-      ? Math.floor(task.expected_minutes)
-      : null;
-
-  const cognitiveLoad = task.cognitive_load === 'high' || task.cognitive_load === 'low'
-    ? task.cognitive_load
-    : null;
-
-  const waitMinutes =
-    typeof task.wait_minutes === 'number' && Number.isFinite(task.wait_minutes) && task.wait_minutes > 0
-      ? Math.floor(task.wait_minutes)
-      : null;
+  const plannerFields = sanitizePlannerFields({
+    expectedMinutes: task.expected_minutes,
+    waitMinutes: task.wait_minutes,
+    cognitiveLoad: task.cognitive_load,
+  });
 
   if (!task.id) fixes.push('id');
   if (!task.title || typeof task.title !== 'string') fixes.push('title');
@@ -374,10 +384,11 @@ export function sanitizeTask(rawTask: unknown): Task {
   if (!task.status || !['active', 'completed', 'archived'].includes(String(task.status))) fixes.push('status');
   if (typeof task.x !== 'number' || !Number.isFinite(task.x)) fixes.push('x');
   if (typeof task.y !== 'number' || !Number.isFinite(task.y)) fixes.push('y');
+  if (plannerFields.adjusted) fixes.push('planner');
 
   const isNgDevMode = Boolean((globalThis as { ngDevMode?: boolean }).ngDevMode);
   if (isNgDevMode && fixes.length > 0) {
-    utilLogger.warn(`sanitizeTask: 任务 ${String(task.id || 'unknown')} 修复字段: ${fixes.join(', ')}`);
+    utilLogger.warn(`sanitizeTask: task ${String(task.id || 'unknown')} fixed fields: ${fixes.join(', ')}`);
   }
 
   return {
@@ -388,10 +399,16 @@ export function sanitizeTask(rawTask: unknown): Task {
     parentId: typeof task.parentId === 'string' ? task.parentId : null,
     order: typeof task.order === 'number' && Number.isFinite(task.order) ? task.order : 0,
     rank: typeof task.rank === 'number' && Number.isFinite(task.rank) ? task.rank : 10000,
-    status: task.status === 'completed' ? 'completed' : task.status === 'archived' ? 'archived' : 'active',
+    status:
+      task.status === 'completed'
+        ? 'completed'
+        : task.status === 'archived'
+          ? 'archived'
+          : 'active',
     x: typeof task.x === 'number' && Number.isFinite(task.x) ? task.x : 0,
     y: typeof task.y === 'number' && Number.isFinite(task.y) ? task.y : 0,
     createdDate: typeof task.createdDate === 'string' ? task.createdDate : nowISO(),
+    updatedAt: typeof task.updatedAt === 'string' ? task.updatedAt : undefined,
     displayId: String(task.displayId || '?'),
     shortId: typeof task.shortId === 'string' ? task.shortId : undefined,
     hasIncompleteTask: Boolean(task.hasIncompleteTask),
@@ -400,10 +417,25 @@ export function sanitizeTask(rawTask: unknown): Task {
     tags,
     priority,
     dueDate,
-    expected_minutes: expectedMinutes,
-    cognitive_load: cognitiveLoad,
-    wait_minutes: waitMinutes,
-    parkingMeta: (task.parkingMeta as import('../models/parking').TaskParkingMeta | undefined) ?? undefined,
+    expected_minutes: plannerFields.expectedMinutes,
+    cognitive_load: plannerFields.cognitiveLoad,
+    wait_minutes: plannerFields.waitMinutes,
+    parkingMeta: sanitizeParkingMeta(task.parkingMeta),
+  };
+}
+
+/** 校验并清理停泊元数据，确保结构合法 */
+function sanitizeParkingMeta(value: unknown): import('../models/parking').TaskParkingMeta | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.state !== 'focused' && raw.state !== 'parked') return undefined;
+  return {
+    state: raw.state,
+    parkedAt: typeof raw.parkedAt === 'string' ? raw.parkedAt : null,
+    lastVisitedAt: typeof raw.lastVisitedAt === 'string' ? raw.lastVisitedAt : null,
+    contextSnapshot: (raw.contextSnapshot && typeof raw.contextSnapshot === 'object') ? raw.contextSnapshot as import('../models/parking').TaskParkingMeta['contextSnapshot'] : null,
+    reminder: (raw.reminder && typeof raw.reminder === 'object') ? raw.reminder as import('../models/parking').TaskParkingMeta['reminder'] : null,
+    pinned: typeof raw.pinned === 'boolean' ? raw.pinned : false,
   };
 }
 
@@ -439,9 +471,12 @@ export function sanitizeProject(rawProject: unknown): Project {
   const rawViewState = project.viewState as Record<string, unknown> | undefined;
   const hasValidViewState =
     rawViewState &&
-    typeof rawViewState.scale === 'number' && Number.isFinite(rawViewState.scale) &&
-    typeof rawViewState.positionX === 'number' && Number.isFinite(rawViewState.positionX) &&
-    typeof rawViewState.positionY === 'number' && Number.isFinite(rawViewState.positionY);
+    typeof rawViewState.scale === 'number' &&
+    Number.isFinite(rawViewState.scale) &&
+    typeof rawViewState.positionX === 'number' &&
+    Number.isFinite(rawViewState.positionX) &&
+    typeof rawViewState.positionY === 'number' &&
+    Number.isFinite(rawViewState.positionY);
 
   const viewState = hasValidViewState
     ? {
@@ -468,7 +503,7 @@ export function sanitizeProject(rawProject: unknown): Project {
 }
 
 export function detectCycles(tasks: Task[]): { hasCycle: boolean; cycleNodes: string[] } {
-  const taskMap = new Map(tasks.map(task => [task.id, task]));
+  const taskMap = new Map(tasks.map(task => [task.id, task] as const));
   const cycleNodes: string[] = [];
 
   for (const task of tasks) {

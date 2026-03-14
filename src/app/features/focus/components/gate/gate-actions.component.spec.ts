@@ -108,8 +108,8 @@ describe('GateActionsComponent', () => {
   it('should toggle quick capture panel', () => {
     fixture.detectChanges();
 
-    const toggle = fixture.nativeElement.querySelector('[data-testid="gate-quick-capture-toggle"]') as HTMLButtonElement;
-    toggle.click();
+    // FAB 通过短按（mousedown + 快速 mouseup）切换面板
+    component.toggleQuickCapture();
     fixture.detectChanges();
 
     const panel = fixture.nativeElement.querySelector('[data-testid="gate-quick-capture-panel"]');

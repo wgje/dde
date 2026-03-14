@@ -611,11 +611,7 @@ export class GateActionsComponent implements OnDestroy {
 
   /** 动画处理中状态 - 禁用操作按钮 */
   isProcessing(): boolean {
-    try {
-      return this.gateService.cardAnimation() !== 'idle';
-    } catch {
-      return false;
-    }
+    return this.gateService.cardAnimation() !== 'idle';
   }
 
   quickCaptureOpen = signal(false);
@@ -682,6 +678,8 @@ export class GateActionsComponent implements OnDestroy {
     if (this.isFabTranscribing()) return;
 
     this.longPressTriggered = false;
+    // 【修复 P4-02】清除上一次定时器，防止快速双击产生两个定时器
+    this.clearLongPressTimer();
 
     this.longPressTimer = setTimeout(() => {
       this.longPressTriggered = true;
@@ -719,6 +717,8 @@ export class GateActionsComponent implements OnDestroy {
     if (this.isFabTranscribing()) return;
 
     this.longPressTriggered = false;
+    // 【修复 P4-02】清除上一次定时器，防止快速双击产生两个定时器
+    this.clearLongPressTimer();
 
     this.longPressTimer = setTimeout(() => {
       this.longPressTriggered = true;
@@ -780,6 +780,8 @@ export class GateActionsComponent implements OnDestroy {
     if (!fab) return;
 
     const rect = fab.getBoundingClientRect();
+    // 【修复 P4-12】元素不可见时 rect 全为 0，跳过检测
+    if (rect.width === 0 || rect.height === 0) return;
     const tolerance = GateActionsComponent.FAB_ZONE_TOLERANCE;
     const inZone =
       clientX >= rect.left - tolerance &&

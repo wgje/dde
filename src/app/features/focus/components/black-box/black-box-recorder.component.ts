@@ -156,6 +156,12 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   voiceService = inject(SpeechToTextService);
   private readonly logger = inject(LoggerService);
   appearance = input<'default' | 'obsidian'>('default');
+  /**
+   * @deprecated Use the (transcribed) output event instead.
+   * This callback input is an anti-pattern. Callers should migrate to:
+   *   <app-black-box-recorder (transcribed)="onTranscribed($event)" />
+   * Retained temporarily for workspace-shell.component.ts compatibility.
+   */
   onTranscribed = input<((text: string) => void) | null>(null);
   
   /** 原始转录文本（非空时显示编辑区） */
@@ -223,7 +229,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    */
   onZoneMouseDown(event: MouseEvent): void {
     event.preventDefault();
-    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
+    if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
     this.startRecording();
     
@@ -249,7 +256,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    */
   onZoneTouchStart(event: TouchEvent): void {
     event.preventDefault();
-    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
+    if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
     this.startRecording();
     

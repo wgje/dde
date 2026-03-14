@@ -88,14 +88,25 @@ export class FlowSelectionService {
   /**
    * 同步 GoJS 选择状态到 Signal
    * 由 ChangedSelection 事件触发
+   * 
+   * 【2026-03-04 修复】过滤非法 key
+   * GoJS 自动生成的数字 key（如 -13）不是有效的任务 ID，
+   * 必须过滤掉，防止下游删除/操作时找不到任务。
    */
   private syncSelectionState(): void {
     if (!this.diagram) return;
     
     const keys = new Set<string>();
     this.diagram.selection.each((part: go.Part) => {
-      if (part instanceof go.Node && (part.data as { key?: string })?.key) {
-        keys.add((part.data as { key: string }).key);
+      if (part instanceof go.Node) {
+        const key = (part.data as { key?: unknown })?.key;
+        // 仅接受字符串类型的 key（合法的任务 UUID），
+        // 排除 GoJS 自动生成的数字 key（如 -1, -13）
+        if (typeof key === 'string' && key.length > 0) {
+          keys.add(key);
+        } else if (key !== undefined && key !== null) {
+          this.logger.warn(`检测到非法节点 key: ${String(key)}，已忽略（可能是 GoJS 幽灵节点）`);
+        }
       }
     });
     

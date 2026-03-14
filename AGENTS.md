@@ -1,6 +1,6 @@
 # NanoFlow - Global Agent Instructions
 
-> 最后更新：2026-02-10
+> 最后更新：2026-02-27
 > 说明：本文件按 VS Code 官方建议组织为「仓库上下文 + 编码标准 + 测试与验证流程」执行手册。
 
 ## 1. 目标与适用范围
@@ -67,10 +67,12 @@
 
 ### 6.1 状态存储（Signals）
 `src/app/core/state/stores.ts`
-- `tasksMap: Map<string, Task>`（O(1) 查找）
-- `tasksByProject: Map<string, Set<string>>`（项目索引）
-- `connectionsMap: Map<string, Connection>`（连接索引）
-- `projectsMap: Map<string, Project>`（项目索引）
+拆分为 3 个 `@Injectable` 单例：
+- **`TaskStore`**：`tasksMap`、`tasksByProject`（private）、`taskProjectMap`（private）、`parkedTaskIds`、`parkedTasks`
+- **`ProjectStore`**：`projectsMap`、`activeProjectId`、`activeProject`
+- **`ConnectionStore`**：`connectionsMap`、`connectionsByProject`（private）
+
+通过 `src/services/stores.ts` 重导出供服务层使用。
 
 要求：结构扁平、避免深层嵌套，统一使用 `signal()/computed()/effect()`。
 
@@ -92,6 +94,10 @@
 - `updatedAt`：LWW 冲突判定关键字段。
 - `content`：同步查询不可漏字段。
 - `deletedAt`：软删除标记。
+- `parking_meta`（JSONB，可空）：停泊坞元数据。结构 `{ state, parkedAt, lastVisitedAt, contextSnapshot, reminder, pinned }`，`NULL` 表示非停泊任务。
+- `expected_minutes`（INTEGER，可空）：预估耗时（规划字段）。
+- `cognitive_load`（TEXT，可空，枚举 `'high'|'low'`）：认知负荷（规划字段）。
+- `wait_minutes`（INTEGER，可空）：等待时间（规划字段）。
 
 ### 7.2 Connection / Attachment / Project
 - 均使用字符串 ID。
@@ -174,6 +180,8 @@
 ### 13.1 测试金字塔
 `E2E(少量关键路径) -> Integration(服务边界) -> Unit(大量快速)`
 
+测试执行基于 `scripts/run-test-matrix.cjs`，支持 Lane 分片、Quarantine 隔离和 LPT 调度策略。
+
 ### 13.2 常用命令
 
 ```bash
@@ -182,19 +190,33 @@ npm start
 npm run build
 npm run build:dev
 
-# 测试
-npm run test
-npm run test:run
-npm run test:run:pure
-npm run test:run:services
-npm run test:run:components
+# 测试（本地）
+npm run test                # 等同于 test:run（matrix 模式，排除 quarantine）
+npm run test:run            # 本地默认：lane_node_minimal + lane_browser_minimal
+npm run test:run:verify     # 全 lane 不分片（不含 quarantine）
+npm run test:run:full       # 全量含 quarantine
+npm run test:run:pure       # vitest.pure 纯函数
+npm run test:run:services   # vitest.services 服务层
+npm run test:run:components # vitest.components 组件层
+
+# 测试（CI）
+npm run test:run:ci         # weighted + include-quarantine
+
+# E2E
 npm run test:e2e
 npm run test:e2e:ui
+
+# 测试维护
+npm run test:baseline:update   # 刷新 shard timing baseline
+npm run test:quarantine:update # 按 p95/失败率更新 quarantine 列表
 
 # 质量
 npm run lint
 npm run lint:fix
 npx knip
+
+# 性能门禁
+npm run perf:guard          # 构建 + nojit 检查 + startup + font + supabase-ready
 
 # 数据库类型
 npm run db:types
@@ -207,8 +229,10 @@ src/
   app/core/                 # 核心单例（sync/state/shell）
   app/features/flow/        # GoJS 流程图
   app/features/text/        # 移动端默认文本视图
-  app/features/focus/       # 专注模式（gate/spotlight/strata/black-box）
-  services/                 # 业务服务层（任务/项目/同步/基础设施）
+  app/features/focus/       # 专注模式（components/gate|spotlight|strata|black-box）
+  app/features/parking/     # 停泊坞（任务暂存与提醒）
+  app/shared/               # 共享组件、模态框、管道
+  services/                 # 业务服务层（85+ 服务）
   config/                   # 配置常量
   models/                   # 数据模型
   utils/                    # 工具函数（Result、error 转换等）

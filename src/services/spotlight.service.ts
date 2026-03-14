@@ -35,6 +35,11 @@ export class SpotlightService {
 
   /** 延迟切换定时器引用（防止内存泄漏） */
   private nextTaskTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    // 【修复 L-22】使用 destroyRef 注册清理逻辑，确保服务销毁时清除定时器
+    this.destroyRef.onDestroy(() => this.clearNextTaskTimer());
+  }
   
   // 暴露状态给组件
   readonly currentTask = spotlightTask;
@@ -117,7 +122,7 @@ export class SpotlightService {
     const current = this.currentTask();
     if (!current) return;
 
-    // 更新任务状态
+    // 【修复 P3-04】完成任务后切换 UI
     this.taskOperation.updateTaskStatus(current.id, 'completed');
 
     // 清除已有定时器防止重复触发

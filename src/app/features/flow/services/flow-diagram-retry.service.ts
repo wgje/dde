@@ -88,7 +88,7 @@ export class FlowDiagramRetryService {
    * @param scheduleTimer 定时器调度函数
    */
   retryInitDiagram(
-    diagramDiv: ElementRef | undefined,
+    getDiagramDiv: () => ElementRef | undefined,
     initDiagram: () => void,
     onInitialized: (delayMs?: number) => void,
     scheduleTimer: (callback: () => void, delay: number) => void
@@ -121,14 +121,19 @@ export class FlowDiagramRetryService {
 
     scheduleTimer(() => {
       this.zone.run(() => {
+        const diagramDiv = getDiagramDiv();
+
         // 再次检查 DOM 是否准备好
         if (!diagramDiv || !diagramDiv.nativeElement) {
           this.logger.warn('[FlowDiagramRetry] 重试时 diagramDiv 仍未准备好，将再次重试');
           this.isRetrying.set(false);
           // 如果 DOM 未准备好，递归重试
-          scheduleTimer(() => this.retryInitDiagram(diagramDiv, initDiagram, onInitialized, scheduleTimer), 500);
+          scheduleTimer(() => this.retryInitDiagram(getDiagramDiv, initDiagram, onInitialized, scheduleTimer), 500);
           return;
         }
+
+        // 防止上一次失败留下半初始化状态，重试前先清理旧实例
+        this.diagram.dispose();
 
         initDiagram();
         if (this.diagram.isInitialized) {
@@ -152,7 +157,7 @@ export class FlowDiagramRetryService {
    * @param scheduleTimer 定时器调度函数
    */
   resetAndRetryDiagram(
-    diagramDiv: ElementRef | undefined,
+    getDiagramDiv: () => ElementRef | undefined,
     initDiagram: () => void,
     onInitialized: (delayMs?: number) => void,
     scheduleTimer: (callback: () => void, delay: number) => void
@@ -167,6 +172,8 @@ export class FlowDiagramRetryService {
 
     scheduleTimer(() => {
       this.zone.run(() => {
+        const diagramDiv = getDiagramDiv();
+
         // 检查 DOM 是否准备好
         if (!diagramDiv || !diagramDiv.nativeElement) {
           this.logger.error('[FlowDiagramRetry] 重置时 diagramDiv 不可用');

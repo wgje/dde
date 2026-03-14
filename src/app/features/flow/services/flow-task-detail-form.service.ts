@@ -255,6 +255,8 @@ export class FlowTaskDetailFormService {
     this.unlockTimers.forEach(timer => clearTimeout(timer));
     this.unlockTimers.clear();
 
+    // queueMicrotask: 延迟重置 isTaskSwitching，确保同步变更检测周期内
+    // 不会误触发 debounced save（task switch 的信号写入需在当前微任务后才生效）
     queueMicrotask(() => {
       this.isTaskSwitching = false;
     });
@@ -279,6 +281,7 @@ export class FlowTaskDetailFormService {
     this.unlockTimers.forEach(timer => clearTimeout(timer));
     this.unlockTimers.clear();
 
+    // queueMicrotask: 同上 handleTaskSwitch 注释 — 延迟到当前微任务之后重置标志
     queueMicrotask(() => {
       this.isTaskSwitching = false;
     });

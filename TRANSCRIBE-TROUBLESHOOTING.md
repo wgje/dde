@@ -240,10 +240,11 @@ console.log('Result:', data, error);
    - ✅ 是否有剩余配额
    - ✅ 请求频率是否在限制内
 
-#### Groq 免费层限制（2026年1月）
+#### Groq 免费层参考限制
 - 请求频率：30 requests/min
 - 每日配额：14,400 requests/day
-- 音频时长：每个文件最大 25MB
+- 文件大小：每个文件最大 25MB（`FOCUS_CONFIG.SPEECH_TO_TEXT.MAX_FILE_SIZE`）
+- 最新限制请查看：[console.groq.com/settings/limits](https://console.groq.com/settings/limits)
 
 ---
 

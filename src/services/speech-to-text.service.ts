@@ -98,6 +98,7 @@ export class SpeechToTextService {
    * 保存 handler 引用以便在销毁时解绑，避免测试污染
    */
   private setupNetworkListener(): void {
+    if (typeof window === 'undefined') return;
     this.onlineHandler = () => {
       this.logger.info('SpeechToText', 'Network restored, processing offline audio cache');
       this.processOfflineCacheAndCreateEntries();
@@ -223,10 +224,16 @@ export class SpeechToTextService {
         } 
       });
       
-      this.mediaRecorder = new MediaRecorder(stream, {
-        mimeType: mimeType || undefined,
-        audioBitsPerSecond: this.config.AUDIO_BITS_PER_SECOND
-      });
+      // 【修复 P2-03】MediaRecorder 构造失败时关闭 stream，防止麦克风泄漏
+      try {
+        this.mediaRecorder = new MediaRecorder(stream, {
+          mimeType: mimeType || undefined,
+          audioBitsPerSecond: this.config.AUDIO_BITS_PER_SECOND
+        });
+      } catch (recorderErr) {
+        stream.getTracks().forEach(track => track.stop());
+        throw recorderErr;
+      }
       this.audioChunks = [];
       this.recordingStartTime = Date.now();
 
@@ -291,6 +298,8 @@ export class SpeechToTextService {
     // 丢弃所有已收集的音频数据
     this.audioChunks = [];
     this.recordingStartTime = 0;
+    // 【修复 P2-06】清空 mediaRecorder 引用，防止后续误触发
+    this.mediaRecorder = null;
     isRecording.set(false);
     isTranscribing.set(false);
     this.logger.debug('SpeechToText', 'Recording cancelled, all data discarded');
@@ -333,8 +342,14 @@ export class SpeechToTextService {
           // 检查网络状态
           if (!this.network.isOnline()) {
             // 离线：暂存到 IndexedDB，稍后重试
-            await this.saveToOfflineCache(audioBlob);
-            this.toast.info('录音已保存', '已保存，联网后自动转写');
+            // 【修复 P2-04】try/catch 包裹离线缓存，确保 promise 不会永远挂起
+            try {
+              await this.saveToOfflineCache(audioBlob);
+              this.toast.info('录音已保存', '已保存，联网后自动转写');
+            } catch (cacheErr) {
+              this.logger.error('SpeechToText', '离线缓存失败', cacheErr instanceof Error ? cacheErr.message : String(cacheErr));
+              this.toast.error('保存失败', '无法保存录音，请重试');
+            }
             resolve('[离线录音，稍后转写]');
             return;
           }
@@ -345,8 +360,8 @@ export class SpeechToTextService {
         } catch (error) {
           this.logger.error('SpeechToText', 'Transcription failed', error instanceof Error ? error.message : String(error));
           
-          // 网络错误时也暂存
-          if (error instanceof TypeError && error.message.includes('fetch')) {
+          // 【修复 P5-12】使用 TypeError + 离线状态双重判断，避免依赖浏览器特定 error.message
+          if (error instanceof TypeError || !this.network.isOnline()) {
             await this.saveToOfflineCache(audioBlob);
             this.toast.warning('转写失败', ErrorMessages[ErrorCodes.FOCUS_NETWORK_ERROR]);
             resolve('[转写失败，稍后重试]');
@@ -382,7 +397,7 @@ export class SpeechToTextService {
     }
     
     // 📊 详细日志：帮助调试生产环境问题
-    this.logger.info('SpeechToText', `Starting transcription: size=${audioBlob.size}, type=${audioBlob.type}, userId=${userId.slice(0, 8)}...`);
+    this.logger.info('SpeechToText', `Starting transcription: size=${audioBlob.size}, type=${audioBlob.type}, userId=[REDACTED]`);
     
     const formData = new FormData();
     // 根据 mimeType 设置正确的文件扩展名
@@ -394,11 +409,12 @@ export class SpeechToTextService {
     this.logger.debug('SpeechToText', `Invoking Edge Function: ${this.config.EDGE_FUNCTION_NAME}`);
     
     // 🔧 获取当前 session 的 access_token
-    const { data: sessionData } = await this.supabaseClient.client().auth.getSession();
-    const accessToken = sessionData.session?.access_token;
+    // 【修复 P2-07】安全检查 session 和 error
+    const { data: sessionData, error: sessionError } = await this.supabaseClient.client().auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
     
-    if (!accessToken) {
-      this.logger.error('SpeechToText', 'No access token available');
+    if (sessionError || !accessToken) {
+      this.logger.error('SpeechToText', 'No access token available', sessionError?.message);
       this.toast.error('认证失败', '请重新登录后再试');
       throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
     }
@@ -458,12 +474,19 @@ export class SpeechToTextService {
       throw new Error(errorData.error || errorData.message || `HTTP ${response.status}: ${response.statusText}`);
     }
     
-    const data = JSON.parse(responseText);
+    // 【修复 P2-05】安全解析 JSON，防止 Edge Function 返回 HTML 时崩溃
+    let data: { text?: string; duration?: number };
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      this.logger.error('SpeechToText', '响应非 JSON 格式', { responseText: responseText.slice(0, 200) });
+      throw new Error('服务响应格式错误');
+    }
     
     // ✅ 成功日志
     this.logger.info('SpeechToText', `Transcription successful: ${data.text?.length || 0} chars, duration=${data.duration}s`);
     
-    return data.text;
+    return data.text ?? '';
   }
   
   /**

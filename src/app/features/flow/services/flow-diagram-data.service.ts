@@ -5,6 +5,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
 import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
+import { DockEngineService } from '../../../../services/dock-engine.service';
 import { FlowDiagramConfigService } from './flow-diagram-config.service';
 import { FlowZoomService } from './flow-zoom.service';
 import { Task } from '../../../../models';
@@ -34,6 +35,7 @@ export class FlowDiagramDataService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDiagramData');
   private readonly toast = inject(ToastService);
+  private readonly dockEngine = inject(DockEngineService);
   private readonly configService = inject(FlowDiagramConfigService);
   private readonly zoomService = inject(FlowZoomService);
 
@@ -58,6 +60,7 @@ export class FlowDiagramDataService {
   private lastTaskFingerprint = '';
   private lastConnectionSignatureForData = '';
   private lastSearchQuery = '';
+  private lastDockFingerprint = '';
 
   // ========== 外部设置 ==========
 
@@ -241,12 +244,14 @@ export class FlowDiagramDataService {
       const searchQuery = this.uiState.searchQuery();
       if (!forceRefresh) {
         const taskFingerprint = this.computeTaskFingerprint(activeTasks);
+        const dockFingerprint = this.computeDockFingerprint();
         const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
         const connSig = activeConns.map(c => `${c.source}->${c.target}`).sort().join('|');
         
         if (taskFingerprint === this.lastTaskFingerprint 
             && connSig === this.lastConnectionSignatureForData
-            && searchQuery === this.lastSearchQuery) {
+            && searchQuery === this.lastSearchQuery
+            && dockFingerprint === this.lastDockFingerprint) {
           return; // 数据无变化，跳过重建
         }
       }
@@ -262,7 +267,11 @@ export class FlowDiagramDataService {
         activeTasks,
         project,
         searchQuery,
-        existingNodeMap
+        existingNodeMap,
+        {
+          dockedTaskIds: this.dockEngine.dockedTaskIds(),
+          focusedTaskId: this.dockEngine.focusingEntry()?.taskId ?? null,
+        },
       );
 
       const selectedKeys = new Set<string>();
@@ -302,6 +311,7 @@ export class FlowDiagramDataService {
       const activeConnsForCache = project.connections?.filter(c => !c.deletedAt) ?? [];
       this.lastConnectionSignatureForData = activeConnsForCache.map(c => `${c.source}->${c.target}`).sort().join('|');
       this.lastSearchQuery = searchQuery;
+      this.lastDockFingerprint = this.computeDockFingerprint();
 
       if (selectedKeys.size > 0) {
         this.diagram.nodes.each((node: go.Node) => {
@@ -486,6 +496,7 @@ export class FlowDiagramDataService {
     this.lastTaskFingerprint = '';
     this.lastConnectionSignatureForData = '';
     this.lastSearchQuery = '';
+    this.lastDockFingerprint = '';
   }
 
   // ========== 【2026-02-25 性能优化】增量更新辅助 ==========
@@ -510,5 +521,11 @@ export class FlowDiagramDataService {
       );
     }
     return parts.join('');
+  }
+
+  private computeDockFingerprint(): string {
+    const dockedIds = Array.from(this.dockEngine.dockedTaskIds()).sort();
+    const focusedTaskId = this.dockEngine.focusingEntry()?.taskId ?? '';
+    return `${focusedTaskId}|${dockedIds.join(',')}`;
   }
 }

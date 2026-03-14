@@ -36,6 +36,7 @@
 
         <!-- 右侧小地图上方：展开项目列表 -->
         <button
+          data-testid="flow-open-right-panel"
           (click)="toggleRightPanel()"
           class="absolute right-0 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-r-0 border-stone-200 dark:border-stone-700 rounded-l-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
           style="bottom: 96px;" 
@@ -199,6 +200,7 @@
 
         <!-- 右侧小地图上方：展开项目列表 -->
         <button
+          data-testid="flow-open-right-panel"
           (click)="toggleRightPanel()"
           class="absolute right-0 z-40 flex items-center justify-center w-5 h-10 bg-white/90 dark:bg-stone-800/90 backdrop-blur border border-r-0 border-stone-200 dark:border-stone-700 rounded-l-lg shadow-md hover:bg-stone-50 dark:hover:bg-stone-700 hover:w-6 transition-all focus:outline-none"
           style="bottom: 96px;" 
@@ -353,7 +355,9 @@
       (addChild)="addChildTask($event)"
       (toggleStatus)="taskOps.toggleTaskStatus($event)"
       (archiveTask)="archiveTask($event)"
-      (deleteTask)="deleteTask($event)"        (parkTask)="parkTaskAction($event)"      (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
+      (deleteTask)="deleteTask($event)"
+      (parkTask)="parkTaskAction($event)"
+      (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
       (attachmentAdd)="taskOps.addTaskAttachment($event.taskId, $event.attachment)"
       (attachmentRemove)="taskOps.removeTaskAttachment($event.taskId, $event.attachmentId)"
       (attachmentsChange)="taskOps.updateTaskAttachments($event.taskId, $event.attachments)"

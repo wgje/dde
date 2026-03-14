@@ -24,11 +24,20 @@ import { ModalLoaderService } from '../services/modal-loader.service';
 import { LoggerService } from '../../../services/logger.service';
 import { DynamicModalService } from '../../../services/dynamic-modal.service';
 import { AppProjectCoordinatorService } from '../services/app-project-coordinator.service';
-import { TextViewComponent } from '../../features/text';
-import { FlowViewComponent } from '../../features/flow';
-import { ParkingDockComponent, ParkingNoticeComponent } from '../../features/parking';
+import { DockEngineService } from '../../../services/dock-engine.service';
+// 【重要】@defer 使用的组件必须直接引用源文件，禁止走 barrel（index.ts）
+// barrel 会把所有子组件一起 re-export，导致 esbuild 代码分割时 AOT 元数据丢失，
+// 触发运行时 JIT 编译失败（TextStageCardComponent / FlowView 等）
+import { TextViewComponent } from '../../features/text/components/text-view.component';
+import { FlowViewComponent } from '../../features/flow/components/flow-view.component';
+// @defer 使用的组件：直接引用源文件（同上理由）
+import { ParkingDockComponent } from '../../features/parking/parking-dock.component';
+import { ParkingNoticeComponent } from '../../features/parking/parking-notice.component';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
+import { PARKING_CONFIG } from '../../../config/parking.config';
+import { DockFocusTransitionPhase } from '../../../models/parking-dock';
+import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
 
 interface NetworkInformationLike {
   effectiveType?: '4g' | '3g' | '2g' | 'slow-2g';
@@ -78,12 +87,28 @@ interface NetworkInformationLike {
       transition: opacity 0ms ease-out 0ms;
       pointer-events: none;
     }
+    .dock-main-content {
+      transition:
+        opacity var(--pk-shell-exit) var(--pk-ease-standard),
+        transform var(--pk-shell-enter) var(--pk-ease-enter),
+        filter var(--pk-shell-enter) var(--pk-ease-standard);
+      will-change: opacity, transform, filter;
+    }
   `],
   template: `
     <!-- 隐藏的 router-outlet：子路由（text/flow/task）无组件，仅用于 URL 匹配 -->
     <router-outlet style="display:none"></router-outlet>
     <div class="relative flex h-full w-full min-h-0 overflow-hidden" style="background-color: var(--theme-bg);">
       @if (projectState.activeProjectId()) {
+        <div
+          class="flex flex-1 min-h-0 w-full dock-main-content"
+          data-testid="project-shell-main-content"
+          [attr.data-dock-takeover-phase]="dockTakeoverPhase()"
+          [class.pointer-events-none]="dockTakeoverMainNonInteractive()"
+          [class.invisible]="dockTakeoverMainHidden()"
+          [style.opacity]="dockTakeoverMainOpacity()"
+          [style.transform]="dockTakeoverMainTransform()"
+          [style.filter]="dockTakeoverMainFilter()">
         <!-- Text Column - 允许滑动手势切换 -->
         <div class="flex flex-col min-h-0 overflow-hidden"
              [class.transition-all]="!uiState.isResizing() || collapseAnimating()"
@@ -310,9 +335,10 @@ interface NetworkInformationLike {
                  <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
                } @else {
                  <button
-                   (click)="activateFlowIntent('click')"
+                   data-testid="flow-view-tab"
+                   (click)="switchToFlow()"
                    class="px-3 py-1.5 rounded-lg border border-stone-300/80 dark:border-stone-600/80 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-800/80 transition-colors">
-                   加载流程图
+                   进入流程图
                  </button>
                }
              </div>
@@ -330,15 +356,17 @@ interface NetworkInformationLike {
           </div>
         }
 
+        </div>
+
         <!-- 停泊坞：底部弹出面板（A6.9）——定时触发确保组件及时加载 -->
         @defer (on timer(300)) {
           <app-parking-dock></app-parking-dock>
-        } @placeholder { }
+        } @placeholder { } @error { }
 
         <!-- 停泊通知（A3.13）-->
         @defer (on idle) {
           <app-parking-notice></app-parking-notice>
-        } @placeholder { }
+        } @placeholder { } @error { }
       } @else {
         <!-- 无活动项目时的占位 - 点击可创建新项目 -->
         <button 
@@ -359,6 +387,57 @@ interface NetworkInformationLike {
 export class ProjectShellComponent implements OnInit, OnDestroy {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
+  private readonly dockEngine = inject(DockEngineService);
+  readonly dockTakeoverPhase = computed<DockFocusTransitionPhase>(() => {
+    const transition = this.dockEngine.focusTransition();
+    if (transition?.phase === 'entering') return 'entering';
+    if (transition?.phase === 'exiting') return 'exiting';
+    if (this.dockEngine.focusMode() && this.dockEngine.focusScrimOn()) return 'focused';
+    return 'idle';
+  });
+  readonly dockTakeoverMainHidden = computed(
+    () =>
+      PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT === 'hide'
+      && (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'focused'),
+  );
+  readonly dockTakeoverMainDimmed = computed(
+    () =>
+      PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT === 'dim'
+      && this.dockEngine.focusMode()
+      && this.dockEngine.focusScrimOn(),
+  );
+  readonly dockTakeoverMainNonInteractive = computed(
+    () => this.dockTakeoverPhase() !== 'idle',
+  );
+  readonly dockTakeoverMainOpacity = computed(() => {
+    if (this.dockTakeoverMainHidden()) return 0;
+    if (this.dockTakeoverMainDimmed()) {
+      return this.dockTakeoverPhase() === 'focused' ? 0.46 : 0.68;
+    }
+    if (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'exiting') {
+      return 0.8;
+    }
+    return 1;
+  });
+  readonly dockTakeoverMainFilter = computed(() => {
+    if (this.dockTakeoverMainDimmed()) {
+      return this.dockTakeoverPhase() === 'focused' ? 'blur(6px)' : 'blur(3px)';
+    }
+    if (this.dockTakeoverMainHidden()) return 'blur(8px)';
+    return 'none';
+  });
+  readonly dockTakeoverMainTransform = computed(() => {
+    if (this.dockTakeoverMainHidden()) return 'translateY(-12px) scale(0.985)';
+    if (this.dockTakeoverMainDimmed()) {
+      return this.dockTakeoverPhase() === 'focused'
+        ? 'translateY(-6px) scale(0.996)'
+        : 'translateY(-4px) scale(0.997)';
+    }
+    if (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'exiting') {
+      return 'translateY(-3px) scale(0.998)';
+    }
+    return 'translateY(0) scale(1)';
+  });
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private toast = inject(ToastService);
@@ -765,7 +844,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
               duration: 8000,
               action: {
                 label: '刷新页面',
-                onClick: () => window.location.reload()
+                onClick: () => reloadViaForceClearCache()
               }
             }
           );
@@ -815,6 +894,10 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     // 通过事件通知父组件切换侧边栏
     // 移动端和桌面端都使用全局事件来控制侧边栏
     window.dispatchEvent(new CustomEvent('toggle-sidebar'));
+  }
+
+  toggleDockFocusSession(): void {
+    window.dispatchEvent(new CustomEvent('dock-focus-session-toggle'));
   }
 
   // ========== 文本栏折叠控制（桌面端） ==========
@@ -1047,14 +1130,46 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   /**
    * 刷新页面 - 用于 @defer 加载失败时的恢复
-   * 清除可能导致问题的缓存并刷新
+   * 强制清除所有缓存并刷新，避免 Service Worker 再次返回过期/损坏的 chunk
    */
   reloadPage(): void {
-    // 清除 Service Worker 缓存（如果有）
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: 'SKIP_WAITING' });
+    this.logger.warn('Triggering force cache clear due to @defer error');
+    
+    // 优先使用全局强制清缓存工具（彻底清除 SW + caches API）
+    type ForceClearCacheWindow = Window & {
+      __NANOFLOW_FORCE_CLEAR_CACHE__?: () => Promise<void> | void;
+    };
+    const forceClearCache = (window as ForceClearCacheWindow).__NANOFLOW_FORCE_CLEAR_CACHE__;
+
+    if (typeof forceClearCache === 'function') {
+      void Promise.resolve(forceClearCache()).catch(() => {
+        window.location.reload();
+      });
+      return;
     }
-    // 强制刷新页面，绕过缓存
+
+    // 回退：手动清理缓存后刷新
+    void this.forceClearCacheFallback();
+  }
+
+  /**
+   * 回退缓存清理逻辑（当全局工具不可用时）
+   */
+  private async forceClearCacheFallback(): Promise<void> {
+    try {
+      // 清除所有 caches API 缓存
+      if ('caches' in window) {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map(name => caches.delete(name)));
+      }
+      // 注销所有 Service Worker
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map(reg => reg.unregister()));
+      }
+    } catch (e) {
+      this.logger.error('Force clear cache fallback failed', e);
+    }
     window.location.reload();
   }
 }

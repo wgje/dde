@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector, DestroyRef, signal, WritableSignal } from '@angular/core';
 import { UserSessionService } from './user-session.service';
 import { AuthService } from './auth.service';
@@ -12,6 +12,26 @@ import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
 import { Project, Task } from '../models';
+
+function createStorageMock(): Storage {
+  const store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = String(value);
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+    clear: () => {
+      Object.keys(store).forEach((key) => delete store[key]);
+    },
+    key: (index: number) => Object.keys(store)[index] ?? null,
+    get length() {
+      return Object.keys(store).length;
+    },
+  } as Storage;
+}
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -83,8 +103,23 @@ describe('UserSessionService', () => {
     getClient: ReturnType<typeof vi.fn>;
   };
   let userIdSignal: WritableSignal<string | null>;
+  let originalLocalStorage: Storage;
+  let originalSessionStorage: Storage;
 
   beforeEach(() => {
+    originalLocalStorage = globalThis.localStorage;
+    originalSessionStorage = globalThis.sessionStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: createStorageMock(),
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: createStorageMock(),
+      configurable: true,
+      writable: true,
+    });
+
     destroyCallbacks = [];
     let projectsState: Project[] = [];
 
@@ -191,6 +226,19 @@ describe('UserSessionService', () => {
     });
 
     service = injector.get(UserSessionService);
+  });
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: originalLocalStorage,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: originalSessionStorage,
+      configurable: true,
+      writable: true,
+    });
   });
 
   describe('switchActiveProject', () => {
@@ -477,7 +525,7 @@ describe('UserSessionService', () => {
       ).not.toHaveBeenCalled();
     });
 
-    it('项目清单快路命中时仍应执行黑匣子快路，但跳过项目慢路', async () => {
+    it('项目清单快路命中时仍应执行黑匣子快路，并仅保留当前项目的 Delta Sync', async () => {
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-1');
       (
         (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
@@ -506,7 +554,7 @@ describe('UserSessionService', () => {
       ).startBackgroundSync('user-1', null);
 
       expect(syncProjectListMetadataSpy).not.toHaveBeenCalled();
-      expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['performDeltaSync']).toHaveBeenCalledWith('proj-1');
       expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
       expect(mockSyncCoordinator['refreshBlackBoxWatermarkIfNeeded']).toHaveBeenCalledWith(
         'session-background-sync',

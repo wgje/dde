@@ -3,11 +3,24 @@
 // ============================================
 
 import { FOCUS_CONFIG } from '../config/focus.config';
+import { PARKING_CONFIG } from '../config/parking.config';
 
 /**
  * 黑匣子条目状态
  */
 export type BlackBoxSyncStatus = 'pending' | 'synced' | 'conflict';
+
+export interface BlackBoxFocusMeta {
+  source: 'focus-console-inline';
+  sessionId: string;
+  title: string;
+  detail: string | null;
+  lane: 'combo-select' | 'backup';
+  expectedMinutes: number | null;
+  waitMinutes: number | null;
+  cognitiveLoad: 'high' | 'low';
+  dockEntryId: string;
+}
 
 /**
  * 黑匣子条目
@@ -17,7 +30,7 @@ export interface BlackBoxEntry {
   /** UUID - 必须由客户端 crypto.randomUUID() 生成 */
   id: string;
   /** 所属项目 ID */
-  projectId: string;
+  projectId: string | null;
   /** 所属用户 ID */
   userId: string;
   
@@ -60,6 +73,7 @@ export interface BlackBoxEntry {
   // 元数据
   /** 原始音频时长（秒），转写后删除音频 */
   originalAudioDuration?: number;
+  focusMeta?: BlackBoxFocusMeta | null;
 }
 
 /**
@@ -110,6 +124,12 @@ export interface FocusPreferences {
   blackBoxEnabled: boolean;
   /** 每日最大跳过次数（默认 3） */
   maxSnoozePerDay: number;
+  /** 日常任务本地重置小时（0-23，默认 0 = 零点） */
+  routineResetHourLocal: number;
+  /** 高负荷累计专注多久后给休息轻提醒 */
+  restReminderHighLoadMinutes: number;
+  /** 低负荷累计专注多久后给休息轻提醒 */
+  restReminderLowLoadMinutes: number;
 }
 
 /**
@@ -123,6 +143,9 @@ export const DEFAULT_FOCUS_PREFERENCES: FocusPreferences = {
   strataEnabled: true,
   blackBoxEnabled: true,
   maxSnoozePerDay: FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY,
+  routineResetHourLocal: 0,
+  restReminderHighLoadMinutes: Math.floor(PARKING_CONFIG.REST_REMINDER_HIGH_LOAD_THRESHOLD_MS / 60_000),
+  restReminderLowLoadMinutes: Math.floor(PARKING_CONFIG.REST_REMINDER_LOW_LOAD_THRESHOLD_MS / 60_000),
 };
 
 /**
@@ -138,7 +161,7 @@ export interface StrataItem {
   /** 完成时间 */
   completedAt: string;
   /** 原始数据源（可选，用于详情展示） */
-  source?: BlackBoxEntry | unknown;
+  source?: BlackBoxEntry | Record<string, unknown> | object;
 }
 
 /**

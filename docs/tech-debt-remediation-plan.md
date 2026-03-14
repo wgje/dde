@@ -4,57 +4,58 @@
 > **创建日期**: 2026-01-31  
 > **审查日期**: 2026-01-31  
 > **深度验证日期**: 2026-01-31  
-> **最后更新**: 2026-01-31 (进度更新)  
+> **最后更新**: 2026-02-27 (进度更新)  
 > **审查状态**: ✅ 深度审查完成（数据已验证）  
 > **基于**: Gilfoyle 代码审查报告 + AI 深度研究
 
 ---
 
-## 📊 实施进度跟踪（2026-02-01 更新）
+## 📊 实施进度跟踪（2026-02-27 更新）
 
 ### 完成状态
 
 | 文件 | 初始行数 | 当前行数 | 目标 | 状态 | 减少行数 |
 |------|----------|----------|------|------|----------|
-| StorePersistenceService | 1551 | 790 | ≤800 | ✅ 完成 | -761 |
-| SyncCoordinatorService | 1466 | 826 | ≤800 | ✅ 接近目标 | -640 |
-| TaskOperationService | 2060 | 1673 | ≤800 | 🔄 进行中 | -387 |
-| FlowViewComponent | 2555 | 988 | ≤800 | ✅ 接近目标 | -1567 |
-| SimpleSyncService | 4945 | 4627 | ≤800 | 🔄 基础设施就位 | -318 |
+| StorePersistenceService | 1551 | 819 | ≤800 | ✅ 接近目标 | -732 |
+| SyncCoordinatorService | 1466 | 1286 | ≤800 | 🔄 仍需拆分 | -180 |
+| TaskOperationService | 2060 | 678 | ≤800 | ✅ 完成 | -1382 |
+| FlowViewComponent | 2555 | 866 | ≤800 | ✅ 接近目标 | -1689 |
+| SimpleSyncService | 4945 | 1142 | ≤800 | 🔄 大幅缩减，仍需继续 | -3803 |
 
 ### 新增子服务
 
 | 服务 | 行数 | 用途 |
 |------|------|------|
-| SubtreeOperationsService | 430 | 子树操作（从 TaskOperationService 提取） |
-| TaskCreationService | 266 | 任务创建（预备，尚未集成） |
-| ProjectSyncOperationsService | 322 | 项目同步操作（从 SyncCoordinatorService 提取） |
-| DeltaSyncCoordinatorService | 185 | Delta Sync 协调（从 SyncCoordinatorService 提取） |
-| FlowDiagramRetryService | 205 | GoJS 图表重试逻辑（从 FlowViewComponent 提取） |
-| FlowBatchToolbarComponent | 83 | 批量操作工具栏（从 FlowViewComponent 提取） |
-| SyncOperationHelperService | 411 | 同步操作包装器（Session/Auth 处理） |
+| SubtreeOperationsService | 422 | 子树操作（从 TaskOperationService 提取） |
+| TaskCreationService | 249 | 任务创建 |
+| ProjectSyncOperationsService | 318 | 项目同步操作（从 SyncCoordinatorService 提取） |
+| FlowDiagramRetryService | 179 | GoJS 图表重试逻辑（从 FlowViewComponent 提取） |
+| FlowBatchToolbarComponent | 77 | 批量操作工具栏（从 FlowViewComponent 提取） |
+| SyncOperationHelperService | 392 | 同步操作包装器（Session/Auth 处理） |
 
 ### sync 子服务架构
 
-SimpleSyncService (4627 行) 的子服务已就位，待逐步委托：
+SimpleSyncService (1142 行) 的子服务已就位并执行委托：
 
 | 服务 | 行数 | 状态 | 用途 |
 |------|------|------|------|
-| TaskSyncService | 509 | ✅ 已创建 | 任务同步（pushTask, pullTasks, deleteTask） |
-| ProjectSyncService | 178 | ✅ 已创建 | 项目同步 |
-| ConnectionSyncService | 217 | ✅ 已创建 | 连接同步 |
-| TombstoneService | 355 | ✅ 已创建 | 墓碑管理 |
-| RetryQueueService | 663 | ✅ 已创建 | 重试队列 |
-| SessionManagerService | 197 | ✅ 已创建 | 会话管理 |
-| SyncStateService | 201 | ✅ 已创建 | 同步状态 |
-| RealtimePollingService | 391 | ✅ 已创建 | 实时订阅 |
-| SyncOperationHelperService | 411 | ✅ 新增 | 操作包装器 |
+| TaskSyncOperationsService | 814 | ✅ 已创建 | 任务同步（pushTask, pullTasks, deleteTask） |
+| ProjectDataService | 1103 | ✅ 已创建 | 项目数据同步 |
+| ConnectionSyncOperationsService | 493 | ✅ 已创建 | 连接同步 |
+| TombstoneService | 473 | ✅ 已创建 | 墓碑管理 |
+| RetryQueueService | 1233 | ✅ 已创建 | 重试队列 |
+| SessionManagerService | 305 | ✅ 已创建 | 会话管理 |
+| SyncStateService | 185 | ✅ 已创建 | 同步状态 |
+| RealtimePollingService | 495 | ✅ 已创建 | 实时订阅 |
+| SyncOperationHelperService | 392 | ✅ 已创建 | 操作包装器 |
+| BatchSyncService | 412 | ✅ 新增 | 批量同步 |
+| UserPreferencesSyncService | 132 | ✅ 新增 | 用户偏好同步 |
 
-**SimpleSyncService 重构策略**：
-1. ✅ 子服务已注入但未委托（Sprint 7-9）
+**SimpleSyncService 重构进展**：
+1. ✅ 子服务已注入并委托执行
 2. ✅ SyncOperationHelperService 提供统一的 Auth/Session 处理
-3. ⏳ 下一步：将 pushTask/pushConnection/pushProject 委托给子服务
-4. ⏳ 预计可减少 ~2000 行代码
+3. ✅ 已从 4945 行减少到 1142 行（-77%）
+4. ⏳ 下一步：继续拆分剩余逻辑至目标 ≤800 行
 
 ### Git 提交记录
 

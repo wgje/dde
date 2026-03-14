@@ -118,20 +118,31 @@ export class ActionQueueStorageService {
   private readonly FROZEN_RETRY_MAX_DELAY = 300000;
 
   // ========== 来自主服务的上下文引用 ==========
-  private ctx!: ActionQueueContext;
+  private _ctx: ActionQueueContext | null = null;
+  /** 安全访问上下文，未初始化时抛出明确错误而非 undefined 崩溃 */
+  private get ctx(): ActionQueueContext {
+    if (!this._ctx) {
+      throw new Error('[ActionQueueStorage] ctx 未初始化，请确保 ActionQueueService 已完成构造');
+    }
+    return this._ctx;
+  }
 
   /**
    * 初始化上下文引用（由 ActionQueueService 构造时调用）
    */
   init(ctx: ActionQueueContext): void {
-    this.ctx = ctx;
+    this._ctx = ctx;
   }
 
   // ========== 回调注册 ==========
 
-  /** 注册失败通知回调 */
-  onFailure(callback: (item: DeadLetterItem) => void): void {
+  /** 注册失败通知回调，返回取消订阅函数 */
+  onFailure(callback: (item: DeadLetterItem) => void): () => void {
     this.failureCallbacks.push(callback);
+    return () => {
+      const idx = this.failureCallbacks.indexOf(callback);
+      if (idx >= 0) this.failureCallbacks.splice(idx, 1);
+    };
   }
 
   /** 注册存储失败回调（逃生模式） */
@@ -368,13 +379,27 @@ export class ActionQueueStorageService {
 
   getActionDescription(action: QueuedAction): string {
     const typeMap: Record<string, string> = { 'create': '创建', 'update': '更新', 'delete': '删除' };
-    const entityMap: Record<string, string> = { 'project': '项目', 'task': '任务', 'preference': '设置' };
+    const entityMap: Record<string, string> = {
+      'project': '项目',
+      'task': '任务',
+      'preference': '设置',
+      'focus-session': '专注会话',
+      'routine-task': '日常任务',
+      'routine-completion': '日常计数',
+    };
     return `${typeMap[action.type] || action.type}${entityMap[action.entityType] || action.entityType}`;
   }
 
   getActionLabel(action: QueuedAction): string {
     const typeLabels: Record<string, string> = { create: '创建', update: '更新', delete: '删除' };
-    const entityLabels: Record<string, string> = { project: '项目', task: '任务', preference: '偏好设置' };
+    const entityLabels: Record<string, string> = {
+      project: '项目',
+      task: '任务',
+      preference: '偏好设置',
+      'focus-session': '专注会话',
+      'routine-task': '日常任务',
+      'routine-completion': '日常计数',
+    };
     return `${typeLabels[action.type]}${entityLabels[action.entityType]}`;
   }
 

@@ -23,6 +23,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
 import { Project, Task } from '../models';
 import { SupabaseError, supabaseErrorToError } from '../utils/supabase-error';
+import { reloadViaForceClearCache } from '../utils/force-clear-cache';
 import { SYNC_CONFIG } from '../config/sync.config';
 
 /**
@@ -654,7 +655,7 @@ export class RemoteChangeHandlerService {
               duration: 8000,
               action: {
                 label: '刷新页面',
-                onClick: () => window.location.reload()
+                onClick: () => reloadViaForceClearCache()
               }
             });
           });

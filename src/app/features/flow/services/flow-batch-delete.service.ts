@@ -31,17 +31,27 @@ export class FlowBatchDeleteService {
     const selectedIds = Array.from(this.selectionService.selectedTaskIds());
     if (selectedIds.length === 0) return null;
 
+    // 【防御】过滤掉 Store 中不存在的任务 ID（防止 GoJS 幽灵节点混入）
+    const validIds = selectedIds.filter(id => {
+      const exists = !!this.projectState.getTask(id);
+      if (!exists) {
+        this.logger.warn(`批量删除请求中发现无效任务 ID: ${id}，已过滤`);
+      }
+      return exists;
+    });
+    if (validIds.length === 0) return null;
+
     // 单选时返回单任务，由组件走单任务删除流程
-    if (selectedIds.length === 1) {
-      const task = this.projectState.getTask(selectedIds[0]);
+    if (validIds.length === 1) {
+      const task = this.projectState.getTask(validIds[0]);
       return task || null;
     }
 
     // 多选时计算删除影响并显示批量确认弹窗
-    const impact = this.taskOps.calculateBatchDeleteImpact(selectedIds);
+    const impact = this.taskOps.calculateBatchDeleteImpact(validIds);
 
     this.dialogData.set({
-      selectedIds,
+      selectedIds: validIds,
       impact
     });
 

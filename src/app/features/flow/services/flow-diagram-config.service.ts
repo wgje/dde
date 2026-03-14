@@ -30,6 +30,10 @@ export interface GoJSNodeData {
   familyColor?: string;
   /** 是否已被停泊 */
   isParked?: boolean;
+  /** 是否已入坞（本地专注控制台状态） */
+  isDocked?: boolean;
+  /** 是否为当前专注中的入坞任务 */
+  isDockFocused?: boolean;
 }
 
 /**
@@ -133,7 +137,8 @@ export class FlowDiagramConfigService {
     tasks: Task[],
     project: Project,
     searchQuery: string,
-    existingNodeMap: Map<string, go.ObjectData>
+    existingNodeMap: Map<string, go.ObjectData>,
+    dockState: { dockedTaskIds: ReadonlySet<string>; focusedTaskId: string | null },
   ): GoJSDiagramData {
     const styles = this.currentStyles();
     const nodeDataArray: GoJSNodeData[] = [];
@@ -167,6 +172,8 @@ export class FlowDiagramConfigService {
         this.computeNodeColors(task, isSearchMatch, styles);
 
       const isParked = task.parkingMeta?.state === 'parked';
+      const isDocked = dockState.dockedTaskIds.has(task.id);
+      const isDockFocused = dockState.focusedTaskId === task.id;
 
       nodeDataArray.push({
         key: task.id,
@@ -183,7 +190,9 @@ export class FlowDiagramConfigService {
         isUnassigned: task.stage === null,
         isSearchMatch,
         isSelected: false,
-        isParked: isParked
+        isParked: isParked,
+        isDocked,
+        isDockFocused,
       });
 
       // 添加父子连接

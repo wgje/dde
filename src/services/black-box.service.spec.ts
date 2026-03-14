@@ -67,6 +67,7 @@ describe('BlackBoxService', () => {
       if (result.ok) {
         expect(result.value.content).toBe('测试内容');
         expect(result.value.userId).toBe('test-user');
+        expect(result.value.projectId).toBeNull();
       }
     });
 
@@ -106,6 +107,38 @@ describe('BlackBoxService', () => {
       service.create({ content: '测试内容' });
 
       expect(mockSyncService.scheduleSync).toHaveBeenCalled();
+    });
+
+    it('should preserve focusMeta for inline focus-console entries', () => {
+      const result = service.create({
+        content: 'inline detail',
+        focusMeta: {
+          source: 'focus-console-inline',
+          sessionId: 'session-1',
+          title: 'Inline task',
+          detail: 'inline detail',
+          lane: 'combo-select',
+          expectedMinutes: 25,
+          waitMinutes: 5,
+          cognitiveLoad: 'high',
+          dockEntryId: 'dock-entry-1',
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.focusMeta).toEqual({
+          source: 'focus-console-inline',
+          sessionId: 'session-1',
+          title: 'Inline task',
+          detail: 'inline detail',
+          lane: 'combo-select',
+          expectedMinutes: 25,
+          waitMinutes: 5,
+          cognitiveLoad: 'high',
+          dockEntryId: 'dock-entry-1',
+        });
+      }
     });
   });
 

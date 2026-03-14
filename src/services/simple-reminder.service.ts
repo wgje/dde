@@ -34,6 +34,7 @@ export class SimpleReminderService implements OnDestroy {
 
   constructor() {
     // 每 30s 检查一次是否有提醒到期
+    // TODO(L-26): 优化机会 — 当无活跃提醒时可暂停此间隔，在 setReminder() 中按需恢复
     this.checkInterval = setInterval(() => this.checkReminders(), 30_000);
     // 立即检查一次
     this.checkReminders();
@@ -59,7 +60,11 @@ export class SimpleReminderService implements OnDestroy {
       return;
     }
 
-    const task = this.taskStore.getTask(taskId);
+    let task = this.taskStore.getTask(taskId);
+    if (task && !task.parkingMeta) {
+      this.parkingService.parkTask(taskId);
+      task = this.taskStore.getTask(taskId);
+    }
     if (!task?.parkingMeta) return;
 
     const reminder: ParkingReminder = {

@@ -173,7 +173,7 @@ export class ActionQueueService {
 
     // 设置默认优先级
     const defaultPriority: OperationPriority = 
-      action.entityType === 'project' ? 'critical' :
+      action.entityType === 'project' || action.entityType === 'focus-session' ? 'critical' :
       action.entityType === 'preference' ? 'low' : 'normal';
     
     const queuedAction: QueuedAction = {

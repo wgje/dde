@@ -35,6 +35,7 @@ export type { SyncOperationContext, SyncOperationOptions, SyncOperationResult } 
 
 // 用户偏好同步 (Sprint 9)
 export { UserPreferencesSyncService } from './user-preferences-sync.service';
+export { FocusConsoleSyncService } from './focus-console-sync.service';
 
 // 项目数据加载 (Sprint 9)
 export { ProjectDataService } from './project-data.service';

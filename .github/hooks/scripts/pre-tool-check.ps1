@@ -1,64 +1,59 @@
 # NanoFlow Pre-Tool Check Hook (PowerShell)
-# 映射自 everything-claude-code 的 PreToolUse 验证
+# Output MUST be a single JSON line on stdout.
+# [Console]::WriteLine() bypasses PS5.1 pipeline encoding (CP936 on Chinese Windows).
 
 param()
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ToolName = $env:TOOL_NAME
 $ToolArgs = $env:TOOL_ARGS
 
-# 危险命令模式
+$LogDir = Join-Path $PSScriptRoot '..\logs'
+if (-not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+}
+
 $DangerousPatterns = @(
-    "Remove-Item -Recurse -Force C:\",
-    "Remove-Item -Recurse -Force /",
-    "Format-",
-    "Clear-Disk"
+    'Remove-Item -Recurse -Force C:\',
+    'Remove-Item -Recurse -Force /',
+    'Format-',
+    'Clear-Disk'
 )
 
-# 敏感文件模式
 $SensitiveFiles = @(
-    ".env",
-    ".env.local",
-    ".env.production",
-    "secrets",
-    "credentials",
-    "private.key"
+    '.env', '.env.local', '.env.production',
+    'secrets', 'credentials', 'private.key'
 )
 
-function Test-DangerousCommand {
-    param([string]$Args)
-    foreach ($pattern in $DangerousPatterns) {
-        if ($Args -like "*$pattern*") {
-            return @{
-                permissionDecision = "deny"
-                permissionDecisionReason = "Dangerous command pattern detected: $pattern"
-            }
-        }
-    }
-    return $null
+function Write-Deny {
+    param([string]$Reason)
+    $safe = $Reason.Replace('\', '\\').Replace('"', '\"')
+    $json = '{"permissionDecision":"deny","permissionDecisionReason":"' + $safe + '"}'
+    [Console]::WriteLine($json)
+    exit 0
 }
 
-function Test-SensitiveFile {
-    param([string]$Args)
+function Write-AuditWarn {
+    param([string]$Msg)
+    $ts = [datetime]::Now.ToString('yyyy-MM-dd HH:mm:ss')
+    $line = $ts + ' [WARN] ' + $Msg
+    $line | Add-Content -LiteralPath (Join-Path $LogDir 'sensitive-access.log') -Encoding UTF8 -ErrorAction SilentlyContinue
+}
+
+foreach ($pattern in $DangerousPatterns) {
+    if ($ToolName -match 'runInTerminal|execute|shell|powershell' -and $ToolArgs -like "*$pattern*") {
+        Write-Deny ('Dangerous command pattern detected: ' + $pattern)
+    }
+}
+
+if ($ToolName -match 'editFiles|edit|Edit|Write') {
     foreach ($pattern in $SensitiveFiles) {
-        if ($Args -like "*$pattern*") {
-            Write-Warning "Accessing sensitive file pattern: $pattern"
+        if ($ToolArgs -like "*$pattern*") {
+            Write-AuditWarn ('Sensitive file access: ' + $pattern + ' | Tool=' + $ToolName)
         }
     }
 }
 
-# 主逻辑
-switch -Regex ($ToolName) {
-    "runInTerminal|execute|shell|powershell" {
-        $result = Test-DangerousCommand -Args $ToolArgs
-        if ($result) {
-            $result | ConvertTo-Json -Compress
-            exit 0
-        }
-    }
-    "editFiles|edit|Edit|Write" {
-        Test-SensitiveFile -Args $ToolArgs
-    }
-}
-
-# 默认允许
-@{ permissionDecision = "allow" } | ConvertTo-Json -Compress
+[Console]::WriteLine('{"permissionDecision":"allow"}')

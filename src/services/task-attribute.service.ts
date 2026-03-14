@@ -5,6 +5,8 @@ import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { ParkingService } from './parking.service';
+import { ToastService } from './toast.service';
+import { sanitizePlannerFields } from '../utils/planner-fields';
 
 /**
  * 任务属性更新服务
@@ -20,6 +22,8 @@ export class TaskAttributeService {
   private readonly projectState = inject(ProjectStateService);
   private readonly recorder = inject(TaskRecordTrackingService);
   private readonly parkingService = inject(ParkingService);
+  private readonly toast = inject(ToastService);
+  private readonly plannerAdjustmentNoticeAt = new Map<string, number>();
 
   private recordAndUpdate(mutator: (project: Project) => Project): void {
     this.recorder.recordAndUpdate(mutator);
@@ -31,6 +35,54 @@ export class TaskAttributeService {
 
   private getActiveProject(): Project | null {
     return this.projectState.activeProject();
+  }
+
+  private applyPlannerMinutesUpdate(
+    taskId: string,
+    patch: {
+      expectedMinutes?: number | null;
+      waitMinutes?: number | null;
+    },
+  ): void {
+    const currentTask = this.projectState.getTask(taskId);
+    if (!currentTask) return;
+
+    const normalized = sanitizePlannerFields({
+      expectedMinutes:
+        'expectedMinutes' in patch ? patch.expectedMinutes : currentTask.expected_minutes,
+      waitMinutes:
+        'waitMinutes' in patch ? patch.waitMinutes : currentTask.wait_minutes,
+      cognitiveLoad: currentTask.cognitive_load,
+    });
+    const now = new Date().toISOString();
+
+    this.recordAndUpdate(project => ({
+      ...project,
+      tasks: project.tasks.map(task =>
+        task.id === taskId
+          ? {
+              ...task,
+              expected_minutes: normalized.expectedMinutes,
+              wait_minutes: normalized.waitMinutes,
+              updatedAt: now,
+            }
+          : task,
+      ),
+    }));
+
+    if (normalized.adjusted) {
+      this.showPlannerAdjustmentNotice(taskId, normalized.expectedMinutes);
+    }
+  }
+
+  private showPlannerAdjustmentNotice(taskId: string, expectedMinutes: number | null): void {
+    const now = Date.now();
+    const lastShownAt = this.plannerAdjustmentNoticeAt.get(taskId) ?? 0;
+    if (now - lastShownAt < 3000) return;
+
+    this.plannerAdjustmentNoticeAt.set(taskId, now);
+    const expectedLabel = expectedMinutes ?? 0;
+    this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${expectedLabel} 分钟`);
   }
 
   /**
@@ -178,13 +230,7 @@ export class TaskAttributeService {
    * 更新任务预计时长（分钟）
    */
   updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
-    const now = new Date().toISOString();
-    this.recordAndUpdate(p => ({
-      ...p,
-      tasks: p.tasks.map(t =>
-        t.id === taskId ? { ...t, expected_minutes: expectedMinutes, updatedAt: now } : t,
-      ),
-    }));
+    this.applyPlannerMinutesUpdate(taskId, { expectedMinutes });
   }
 
   /**
@@ -204,13 +250,7 @@ export class TaskAttributeService {
    * 更新任务等待时长（分钟）
    */
   updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
-    const now = new Date().toISOString();
-    this.recordAndUpdate(p => ({
-      ...p,
-      tasks: p.tasks.map(t =>
-        t.id === taskId ? { ...t, wait_minutes: waitMinutes, updatedAt: now } : t,
-      ),
-    }));
+    this.applyPlannerMinutesUpdate(taskId, { waitMinutes });
   }
 
   /**

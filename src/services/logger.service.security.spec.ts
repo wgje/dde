@@ -202,6 +202,16 @@ describe('LoggerService Security', () => {
       expect(consoleSpy.mock.calls[2][2]).toBe(true);
     });
 
+    it('should preserve error details instead of serializing to empty object', () => {
+      const err = new Error('flow init failed');
+      logger.debug('test', 'Error payload', err);
+
+      const loggedData = consoleSpy.mock.calls[0][2] as Record<string, unknown>;
+      expect(loggedData.name).toBe('Error');
+      expect(loggedData.message).toBe('flow init failed');
+      expect(typeof loggedData.stack).toBe('string');
+    });
+
     it('should handle circular references gracefully via depth limit', () => {
       const obj: Record<string, unknown> = { name: 'test' };
       obj.self = obj; // 循环引用

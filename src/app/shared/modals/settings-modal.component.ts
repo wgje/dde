@@ -1,5 +1,6 @@
-import { Component, inject, output, input, signal, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, output, input, signal, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
@@ -9,6 +10,7 @@ import { AttachmentExportService } from '../../../services/attachment-export.ser
 import { AttachmentImportService, type AttachmentImportItem } from '../../../services/attachment-import.service';
 import { LocalBackupService } from '../../../services/local-backup.service';
 import { ThemeService } from '../../../services/theme.service';
+import { DockEngineService } from '../../../services/dock-engine.service';
 import { FocusPreferenceService } from '../../../services/focus-preference.service';
 import { GateService } from '../../../services/gate.service';
 import { ThemeType, ColorMode, Project } from '../../../models';
@@ -24,7 +26,7 @@ interface TaskAttachmentMetadata {
 @Component({
   selector: 'app-settings-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
@@ -399,6 +401,38 @@ interface TaskAttachmentMetadata {
               <!-- Snooze 配置兼容保留：Gate UI 已移除跳过动作，这里隐藏入口 -->
               
               <!-- 开发工具（仅开发模式可见） -->
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">高负荷休息提醒</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">累计高负荷专注多久后给轻提醒</div>
+                </div>
+                <select
+                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                  [value]="focusPreferenceService.preferences().restReminderHighLoadMinutes"
+                  (change)="updateRestReminderHighLoadMinutes($event)"
+                  data-testid="settings-rest-reminder-high">
+                  @for (minutes of restReminderHighLoadOptions; track minutes) {
+                    <option [value]="minutes">{{ formatReminderMinutes(minutes) }}</option>
+                  }
+                </select>
+              </div>
+
+              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div>
+                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">低负荷休息提醒</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500">累计低负荷专注多久后给轻提醒</div>
+                </div>
+                <select
+                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                  [value]="focusPreferenceService.preferences().restReminderLowLoadMinutes"
+                  (change)="updateRestReminderLowLoadMinutes($event)"
+                  data-testid="settings-rest-reminder-low">
+                  @for (minutes of restReminderLowLoadOptions; track minutes) {
+                    <option [value]="minutes">{{ formatReminderMinutes(minutes) }}</option>
+                  }
+                </select>
+              </div>
+
               @if (isDev) {
                 <div class="px-3 py-2.5 bg-orange-50 dark:bg-orange-900/20 border-t border-orange-200/50 dark:border-orange-800/30">
                   <div class="flex items-center justify-between gap-3">
@@ -407,6 +441,7 @@ interface TaskAttachmentMetadata {
                       <div class="text-[10px] text-orange-500 dark:text-orange-400/70">触发大门界面（带模拟数据）</div>
                     </div>
                     <button 
+                      data-testid="settings-dev-gate"
                       (click)="triggerDevGate()"
                       class="px-2.5 py-1 text-[10px] font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors shadow-sm">
                       测试大门
@@ -414,6 +449,87 @@ interface TaskAttachmentMetadata {
                   </div>
                 </div>
               }
+            </div>
+          </section>
+
+          <section class="space-y-1.5" #focusRoutineSection>
+            <h3 class="text-[10px] font-bold text-slate-400 dark:text-stone-500 uppercase tracking-wider px-1">日常任务</h3>
+
+            <div class="bg-white dark:bg-stone-800 border border-slate-200 dark:border-stone-700 rounded-xl shadow-sm overflow-hidden">
+              <div class="px-3 py-3 border-b border-slate-100 dark:border-stone-700 space-y-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">重置时间</div>
+                    <div class="text-[10px] text-slate-400 dark:text-stone-500">日常任务每日计数按本地小时切日</div>
+                  </div>
+                  <select
+                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                    [value]="focusPreferenceService.preferences().routineResetHourLocal"
+                    (change)="updateRoutineResetHour($event)">
+                    @for (hour of routineResetHours; track hour) {
+                      <option [value]="hour">{{ formatRoutineResetHour(hour) }}</option>
+                    }
+                  </select>
+                </div>
+
+                <div class="grid grid-cols-[1fr,84px,auto] gap-2 items-center">
+                  <input
+                    type="text"
+                    [(ngModel)]="newRoutineTitle"
+                    placeholder="新增日常任务，例如：喝水"
+                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-3 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none" />
+                  <input
+                    type="number"
+                    min="1"
+                    max="24"
+                    [(ngModel)]="newRoutineMaxCount"
+                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none"
+                    placeholder="次数" />
+                  <button
+                    type="button"
+                    class="rounded-lg bg-indigo-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                    (click)="addRoutineSlot()">
+                    添加
+                  </button>
+                </div>
+              </div>
+
+              <div class="divide-y divide-slate-100 dark:divide-stone-700">
+                @for (slot of routineSlots(); track slot.id) {
+                  <div class="px-3 py-2.5 flex items-center gap-2">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-xs font-semibold text-slate-700 dark:text-stone-200 truncate">{{ slot.title }}</div>
+                      <div class="text-[10px] text-slate-400 dark:text-stone-500">
+                        今日 {{ slot.todayCompletedCount }}/{{ slot.maxDailyCount }}
+                        · {{ slot.isEnabled ? '已启用' : '已停用' }}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="rounded-md border border-slate-200 dark:border-stone-600 px-2 py-1 text-[10px] text-slate-600 dark:text-stone-300 hover:bg-slate-100 dark:hover:bg-stone-700"
+                      [disabled]="!slot.isEnabled || slot.todayCompletedCount >= slot.maxDailyCount"
+                      (click)="completeRoutineSlot(slot.id)">
+                      计 1 次
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-md border border-slate-200 dark:border-stone-600 px-2 py-1 text-[10px] text-slate-600 dark:text-stone-300 hover:bg-slate-100 dark:hover:bg-stone-700"
+                      (click)="toggleRoutineSlot(slot.id, !slot.isEnabled)">
+                      {{ slot.isEnabled ? '停用' : '启用' }}
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-md border border-rose-200 dark:border-rose-800 px-2 py-1 text-[10px] text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/30"
+                      (click)="removeRoutineSlot(slot.id)">
+                      删除
+                    </button>
+                  </div>
+                } @empty {
+                  <div class="px-3 py-5 text-center text-[11px] text-slate-400 dark:text-stone-500">
+                    暂无日常任务，可在这里新增并手动记次。
+                  </div>
+                }
+              </div>
             </div>
           </section>
           
@@ -520,7 +636,16 @@ export class SettingsModalComponent {
     // 组件初始化 - 开发日志已移除
     // 设置项目提供者，用于自动备份恢复
     this.localBackupService.setProjectsProvider(() => this.projects());
+    effect(() => {
+      if (this.initialSection() !== 'focus-routines') return;
+      const section = this.focusRoutineSectionRef()?.nativeElement;
+      if (!section) return;
+      queueMicrotask(() => {
+        section.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      });
+    });
   }
+  readonly dockEngine = inject(DockEngineService);
   readonly userSession = inject(UserSessionService);
   readonly preferenceService = inject(PreferenceService);
   readonly exportService = inject(ExportService);
@@ -538,9 +663,11 @@ export class SettingsModalComponent {
   
   /** 当前登录用户邮箱 */
   sessionEmail = input<string | null>(null);
+  initialSection = input<'focus-routines' | null>(null);
   
   /** 所有项目（用于导出） */
   projects = input<Project[]>([]);
+  private readonly focusRoutineSectionRef = viewChild<ElementRef<HTMLElement>>('focusRoutineSection');
   
   readonly close = output<void>();
   readonly signOut = output<void>();
@@ -551,6 +678,11 @@ export class SettingsModalComponent {
   
   /** 导出提醒开关状态 */
   exportReminderEnabled = signal(true);
+  readonly routineSlots = computed(() =>
+    [...this.dockEngine.dailySlots()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+  );
+  newRoutineTitle = '';
+  newRoutineMaxCount = 1;
 
   /** 附件传输状态文案 */
   readonly attachmentTransferStatus = computed(() => {
@@ -577,6 +709,9 @@ export class SettingsModalComponent {
     { label: '1 小时', value: 60 * 60 * 1000 },
     { label: '2 小时', value: 2 * 60 * 60 * 1000 },
   ];
+  readonly routineResetHours = Array.from({ length: 24 }, (_, index) => index);
+  readonly restReminderHighLoadOptions = [45, 60, 75, 90, 120, 150, 180];
+  readonly restReminderLowLoadOptions = [10, 15, 20, 30, 45, 60, 90];
   
   /** 当前选择的备份间隔 */
   readonly selectedBackupInterval = computed(() => {
@@ -972,6 +1107,61 @@ export class SettingsModalComponent {
     if (!isNaN(value) && value > 0) {
       this.focusPreferenceService.update({ maxSnoozePerDay: value });
     }
+  }
+
+  updateRoutineResetHour(event: Event): void {
+    const select = event.target as HTMLSelectElement;
+    const value = Number.parseInt(select.value, 10);
+    if (Number.isNaN(value)) return;
+    this.focusPreferenceService.update({
+      routineResetHourLocal: Math.min(23, Math.max(0, value)),
+    });
+  }
+
+  updateRestReminderHighLoadMinutes(event: Event): void {
+    const select = event.target as HTMLSelectElement;
+    const value = Number.parseInt(select.value, 10);
+    if (Number.isNaN(value)) return;
+    this.focusPreferenceService.setRestReminderHighLoadMinutes(value);
+  }
+
+  updateRestReminderLowLoadMinutes(event: Event): void {
+    const select = event.target as HTMLSelectElement;
+    const value = Number.parseInt(select.value, 10);
+    if (Number.isNaN(value)) return;
+    this.focusPreferenceService.setRestReminderLowLoadMinutes(value);
+  }
+
+  formatRoutineResetHour(hour: number): string {
+    return `${String(hour).padStart(2, '0')}:00`;
+  }
+
+  formatReminderMinutes(minutes: number): string {
+    if (minutes >= 60 && minutes % 60 === 0) {
+      return `${minutes / 60} 小时`;
+    }
+    return `${minutes} 分钟`;
+  }
+
+  addRoutineSlot(): void {
+    const title = this.newRoutineTitle.trim();
+    if (!title) return;
+    const nextMax = Math.min(24, Math.max(1, Math.floor(Number(this.newRoutineMaxCount) || 1)));
+    this.dockEngine.addDailySlot(title, nextMax);
+    this.newRoutineTitle = '';
+    this.newRoutineMaxCount = 1;
+  }
+
+  completeRoutineSlot(id: string): void {
+    this.dockEngine.completeDailySlot(id);
+  }
+
+  toggleRoutineSlot(id: string, enabled: boolean): void {
+    this.dockEngine.setDailySlotEnabled(id, enabled);
+  }
+
+  removeRoutineSlot(id: string): void {
+    this.dockEngine.removeDailySlot(id);
   }
   
   /**

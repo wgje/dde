@@ -4,9 +4,10 @@ import { defineConfig, devices } from '@playwright/test';
  * Playwright 配置文件
  * 用于 NanoFlow 项目的 E2E 测试
  */
-const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || 'http://localhost:4200';
+const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || 'http://localhost:3000';
 const webServerCommand = process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] || 'npm run start';
-const webServerTimeout = Number(process.env['PLAYWRIGHT_WEB_SERVER_TIMEOUT'] || 240_000);
+// Angular dev server 首次编译耗时较长，默认给 8 分钟防止超时
+const webServerTimeout = Number(process.env['PLAYWRIGHT_WEB_SERVER_TIMEOUT'] || 480_000);
 
 export default defineConfig({
   testDir: './e2e',
@@ -33,6 +34,8 @@ export default defineConfig({
   use: {
     /* 基础URL */
     baseURL,
+    /* 浏览器语言环境：确保 DOM 文本提取与中文渲染一致 */
+    locale: 'zh-CN',
     /* 收集失败测试的trace */
     trace: 'on-first-retry',
     /* 截图 */

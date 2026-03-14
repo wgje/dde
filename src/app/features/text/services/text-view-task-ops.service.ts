@@ -5,9 +5,11 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ParkingService } from '../../../../services/parking.service';
+import { DockEngineService } from '../../../../services/dock-engine.service';
 import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
+import { PARKING_CONFIG } from '../../../../config/parking.config';
 
 /**
  * 组件上下文接口
@@ -44,6 +46,7 @@ export class TextViewTaskOpsService {
   private readonly ngZone = inject(NgZone);
   private readonly logger = inject(LoggerService).category('TextViewOps');
   private readonly parkingService = inject(ParkingService);
+  private readonly dockEngine = inject(DockEngineService);
 
   /** 组件上下文 */
   private ctx!: TextViewOpsContext;
@@ -279,6 +282,12 @@ export class TextViewTaskOpsService {
   /** 停泊任务——将当前任务放入「稍后处理」停泊槽 */
   onParkTask(task: Task): void {
     this.parkingService.parkTask(task.id);
+    if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
+      this.dockEngine.dockTask(task.id, undefined, {
+        sourceSection: 'text',
+        zoneSource: 'auto',
+      });
+    }
     // 停泊后取消选中，回到列表视图
     this.ctx.selectedTaskId.set(null);
   }

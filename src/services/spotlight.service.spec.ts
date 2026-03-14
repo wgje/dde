@@ -78,7 +78,7 @@ describe('SpotlightService', () => {
     };
 
     mockTaskOperationService = {
-      updateTaskStatus: vi.fn()
+      updateTaskStatus: vi.fn().mockResolvedValue(undefined)
     };
 
     mockLoggerService = {

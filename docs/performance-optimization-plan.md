@@ -94,7 +94,8 @@ Phase 3 (下周完成) ───────────────────
 
 **当前请求流程**（per project × 3 projects = 12+ 请求）：
 ```typescript
-// 现有代码：simple-sync.service.ts L4237-4300
+// 原始代码位置已变更（SimpleSyncService 已从 ~4627 行重构至 ~1142 行）
+// 以下为重构前的逻辑示意，实际实现已委托至 sync 子服务
 async loadProjectsFromCloud(userId) {
   const projectList = await client.from('projects').select(...);     // 请求 1
   

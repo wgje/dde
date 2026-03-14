@@ -49,7 +49,7 @@ const STRATA_COLOR_TIERS: StrataColorTier[] = [
   { bgClass: 'bg-teal-900/50 dark:bg-teal-950/60', borderClass: 'border-l-teal-700/40', textClass: 'text-teal-300/70 dark:text-teal-300/60', subTextClass: 'text-teal-400/30 dark:text-teal-400/25', lineClass: 'bg-teal-700/20' },
   // Tier 2: 2-3天前 — 深石板（页岩质感）
   { bgClass: 'bg-stone-800/60 dark:bg-stone-900/70', borderClass: 'border-l-stone-600/35', textClass: 'text-stone-400/70 dark:text-stone-400/60', subTextClass: 'text-stone-500/35 dark:text-stone-500/25', lineClass: 'bg-stone-600/15' },
-  // Tier 3: 4-6天前 — 深炭灰（�ite）
+  // Tier 3: 4-6天前 — 深炭灰（Graphite）
   { bgClass: 'bg-neutral-800/55 dark:bg-neutral-900/65', borderClass: 'border-l-neutral-700/25', textClass: 'text-neutral-500/60 dark:text-neutral-500/50', subTextClass: 'text-neutral-600/25 dark:text-neutral-600/20', lineClass: 'bg-neutral-700/12' },
   // Tier 4: 7天+ — 近黑色（黑曜石化石）
   { bgClass: 'bg-zinc-900/50 dark:bg-zinc-950/60', borderClass: 'border-l-zinc-800/20', textClass: 'text-zinc-600/50 dark:text-zinc-600/40', subTextClass: 'text-zinc-700/20 dark:text-zinc-700/15', lineClass: 'bg-zinc-800/10' },
@@ -167,13 +167,6 @@ export class StrataService {
       }));
   }
   
-  /**
-   * 从时间戳提取日期 YYYY-MM-DD（UTC 方式，向后兼容）
-   */
-  private getDateFromTimestamp(timestamp: string): string {
-    return timestamp.split('T')[0];
-  }
-
   /**
    * 从 ISO 时间戳提取本地日期 YYYY-MM-DD
    * 修复时区问题：UTC+8 用户在晚间完成的任务不会被误归到 UTC 的"次日"
@@ -348,7 +341,8 @@ export class StrataService {
    * 添加项目到对应日期的层
    */
   addItem(item: StrataItem): void {
-    const date = this.getDateFromTimestamp(item.completedAt);
+    // 【修复 P4-15】统一使用 getLocalDate 避免时区不一致
+    const date = this.getLocalDate(item.completedAt);
     const layers = strataLayers();
     const existingLayer = layers.find(l => l.date === date);
     
@@ -382,7 +376,8 @@ export class StrataService {
     const daysDiff = Math.floor(
       (new Date(today).getTime() - new Date(layer.date).getTime()) / (1000 * 60 * 60 * 24)
     );
-    return Math.max(config.MIN_OPACITY, 1 - (daysDiff * config.OPACITY_DECAY));
+    // 【修复 P4-05】上限 clamp 到 1，防止 daysDiff 为负时超 1
+    return Math.min(1, Math.max(config.MIN_OPACITY, 1 - (daysDiff * config.OPACITY_DECAY)));
   }
   
   /**
@@ -398,7 +393,11 @@ export class StrataService {
   clearOldLayers(retentionDays: number): void {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
-    const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+    // 【修复 P4-04】使用本地日期替代 UTC，与 getLocalDate 保持一致
+    const year = cutoffDate.getFullYear();
+    const month = String(cutoffDate.getMonth() + 1).padStart(2, '0');
+    const day = String(cutoffDate.getDate()).padStart(2, '0');
+    const cutoffDateStr = `${year}-${month}-${day}`;
     
     strataLayers.set(
       strataLayers().filter(l => l.date >= cutoffDateStr)

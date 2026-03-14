@@ -272,5 +272,25 @@ export class FlowEventRegistrationService {
     this.registerSelectionMovedHandler(options.handleNodeMoved);
     this.registerBackgroundClickHandler(options.isPaletteOpen);
     this.registerDeleteKeyHandler(options.handleDeleteKeyPressed);
+    this.registerAltDragHandler();
+    this.registerDragOutOfBoundsHandler();
+  }
+
+  /**
+   * 注册 Alt+拖拽到停泊坞事件
+   */
+  private registerAltDragHandler(): void {
+    this.eventService.onAltDragStart((taskId, clientX, clientY) => {
+      this.dragDrop.startAltDragToDock(taskId, clientX, clientY);
+    });
+  }
+
+  /**
+   * 注册拖拽出画布边界事件（多选拖入停泊坞）
+   */
+  private registerDragOutOfBoundsHandler(): void {
+    this.eventService.onDragOutOfBounds((taskIds, clientX, clientY) => {
+      this.dragDrop.startDragToDock(taskIds, clientX, clientY);
+    });
   }
 }

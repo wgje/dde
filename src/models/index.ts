@@ -1,5 +1,5 @@
-﻿// ============================================
-// NanoFlow 鏁版嵁妯″瀷瀹氫箟
+// ============================================
+// NanoFlow 数据模型定义
 // ============================================
 
 /**
@@ -76,24 +76,24 @@ export interface Task {
 }
 
 /**
- * 杩炴帴妯″瀷锛堜换鍔′箣闂寸殑鍏宠仈锛? */
+ * 连接模型（任务之间的关联） */
 export interface Connection {
-  /** 杩炴帴鐨勫敮涓€鏍囪瘑绗︼紙蹇呴渶锛岀敤浜庡悓姝ュ拰鎭㈠锛?*/
+  /** 连接的唯一标识符（必需，用于同步和恢复）*/
   id: string;
   source: string;
   target: string;
-  /** 鑱旂郴鍧楁爣棰橈紙澶栨樉鍐呭锛岀被浼肩淮鍩虹櫨绉戠殑棰勮鏍囬锛?*/
+  /** 联系块标题（外显内容，类似维基百科的预览标题）*/
   title?: string;
-  /** 鑱旂郴鍧楄缁嗘弿杩帮紙鎮仠/鐐瑰嚮鏃舵樉绀猴級 */
+  /** 联系块详细描述（悬停/点击时显示） */
   description?: string;
-  /** 杞垹闄ゆ椂闂存埑锛屽瓨鍦ㄨ〃绀哄凡鏍囪鍒犻櫎锛岀瓑寰呮仮澶嶆垨姘镐箙鍒犻櫎 */
+  /** 软删除时间戳，存在表示已标记删除，等待恢复或永久删除 */
   deletedAt?: string | null;
-  /** 鏈€鍚庢洿鏂版椂闂存埑 */
+  /** 最后更新时间戳 */
   updatedAt?: string;
 }
 
 /**
- * 椤圭洰妯″瀷
+ * 项目模型
  */
 export interface Project {
   id: string;
@@ -114,15 +114,15 @@ export interface Project {
 }
 
 /**
- * 瑙嗗浘鐘舵€侊紙鐢ㄤ簬鎸佷箙鍖栨祦绋嬪浘瑙嗗彛浣嶇疆锛? */
+ * 视图状态（用于持久化流程图视口位置） */
 export interface ViewState {
-  scale: number; // 缂╂斁姣斾緥
-  positionX: number; // 瑙嗗彛 X 浣嶇疆
-  positionY: number; // 瑙嗗彛 Y 浣嶇疆
+  scale: number; // 缩放比例
+  positionX: number; // 视口 X 位置
+  positionY: number; // 视口 Y 位置
 }
 
 /**
- * 鏈畬鎴愰」鐩ā鍨嬶紙寰呭姙浜嬮」锛? */
+ * 未完成项目模型（待办事项） */
 export interface UnfinishedItem {
   taskId: string;
   taskDisplayId: string;
@@ -130,49 +130,54 @@ export interface UnfinishedItem {
 }
 
 /**
- * 鐢ㄦ埛鍋忓ソ璁剧疆
+ * 用户偏好设置
  */
 export interface UserPreferences {
   theme: ThemeType;
-  /** 棰滆壊妯″紡锛堜簯绔粯璁ゅ€硷紝鏈湴鍙鐩栵級 */
+  /** 颜色模式（云端默认值，本地可覆盖） */
   colorMode?: ColorMode;
   layoutDirection: 'ltr' | 'rtl';
   floatingWindowPref: 'auto' | 'fixed';
   /** 
-   * 鑷姩瑙ｅ喅鍐茬獊寮€鍏?   * true: 浣跨敤 LWW (Last-Write-Wins) 鑷姩瑙ｅ喅鍐茬獊
-   * false: 鎵€鏈夊啿绐佽繘鍏ヤ华琛ㄧ洏鐢辩敤鎴锋墜鍔ㄥ鐞?   */
+   * 自动解决冲突开关   * true: 使用 LWW (Last-Write-Wins) 自动解决冲突
+   * false: 所有冲突进入仪表盘由用户手动处理   */
   autoResolveConflicts?: boolean;
   /**
-   * 鏈湴鑷姩澶囦唤寮€鍏?   * 浠呭悓姝ュ紑鍏崇姸鎬侊紝鐩綍璺緞涓嶅悓姝ワ紙涓嶅悓璁惧璺緞涓嶅悓锛?   */
+   * 本地自动备份开关   * 仅同步开关状态，目录路径不同步（不同设备路径不同步   */
   localBackupEnabled?: boolean;
   /**
-   * 鏈湴鑷姩澶囦唤闂撮殧锛堟绉掞級
+   * 本地自动备份间隔（毫秒）
    */
   localBackupIntervalMs?: number;
   /**
-   * 涓撴敞妯″紡鍋忓ソ璁剧疆锛堣法璁惧鍚屾锛?   */
+   * 专注模式偏好设置（跨设备同步）   */
   focusPreferences?: import('./focus').FocusPreferences;
   /**
-   * 鍋滄硦鍧?v3 蹇収锛堣法璁惧鍚屾锛屽叏灞€璧勬簮姹狅級
+   * 停泊坞 v3 快照（跨设备同步，全局资源池）
    */
   dockSnapshot?: import('./parking-dock').DockSnapshot;
 }
 
 /**
- * 涓婚绫诲瀷锛堣壊璋冿級
+ * 主题类型（色调）
  */
 export type ThemeType = 'default' | 'ocean' | 'forest' | 'sunset' | 'lavender';
 
 /**
- * 棰滆壊妯″紡锛堟槑鏆楋級
- * - light: 娴呰壊妯″紡
- * - dark: 娣辫壊妯″紡  
- * - system: 璺熼殢绯荤粺璁剧疆
+ * 颜色模式（明暗）
+ * - light: 浅色模式
+ * - dark: 深色模式  
+ * - system: 跟随系统设置
  */
 export type ColorMode = 'light' | 'dark' | 'system';
 
 /**
- * Supabase 椤圭洰琛屾暟鎹粨鏋? * 鏀寔 v1 (JSONB) 鍜?v2 (鐙珛琛? 涓ょ鏍煎紡
+ * Supabase 项目行数据结构
+ * 支持 v1 (JSONB) 和 v2 (独立表) 两种格式
+ *
+ * @deprecated Import {@link ProjectRow} from `src/models/supabase-types.ts` instead.
+ * This duplicate definition is kept for backward compatibility and will be
+ * removed in a future release.
  */
 export interface ProjectRow {
   id: string;
@@ -182,18 +187,18 @@ export interface ProjectRow {
   created_date?: string | null;
   updated_at?: string | null;
   version?: number;
-  /** v1 鏍煎紡: 瀛樺偍 tasks 鍜?connections 鐨?JSONB 鍒?*/
+  /** v1 格式: 存储 tasks 和 connections 的 JSONB 列 */
   data?: {
     tasks?: Task[];
     connections?: Connection[];
     version?: number;
   } | null;
-  /** v2 鏍煎紡: 鏍囪鏄惁宸茶縼绉诲埌鐙珛琛?*/
+  /** v2 格式: 标记是否已迁移到独立表 */
   migrated_to_v2?: boolean;
 }
 
 /**
- * 鍚屾鐘舵€? */
+ * 同步状态 */
 export interface SyncState {
   isSyncing: boolean;
   isOnline: boolean;
@@ -203,14 +208,14 @@ export interface SyncState {
   hasConflict: boolean;
   conflictData: { 
     local: Project; 
-    /** 鍐茬獊鏃剁殑杩滅▼椤圭洰鏁版嵁 */
+    /** 冲突时的远程项目数据 */
     remote: Project;
     projectId: string;
   } | null;
 }
 
 /**
- * 鎾ら攢/閲嶅仛鎿嶄綔绫诲瀷
+ * 撤销/重做操作类型
  */
 export type UndoActionType = 
   | 'task-create'
@@ -224,13 +229,13 @@ export type UndoActionType =
   | 'project-update';
 
 /**
- * 鎾ら攢/閲嶅仛鎿嶄綔璁板綍
+ * 撤销/重做操作记录
  */
 export interface UndoAction {
   type: UndoActionType;
   timestamp: number;
   projectId: string;
-  /** 璁板綍鎿嶄綔鏃剁殑椤圭洰鐗堟湰鍙凤紝鐢ㄤ簬妫€娴嬭繙绋嬫洿鏂板啿绐?*/
+  /** 记录操作时的项目版本号，用于检测远程更新冲突 */
   projectVersion?: number;
   data: {
     before: Partial<Project>;
@@ -239,54 +244,54 @@ export interface UndoAction {
 }
 
 // ============================================
-// 鍚屾鐩稿叧绫诲瀷瀹氫箟
+// 同步相关类型定义
 // ============================================
 
 /**
- * 鍚屾妯″紡
- * - automatic: 鑷姩妯″紡 - 鎸夐棿闅旇嚜鍔ㄥ悓姝? * - manual: 鎵嬪姩妯″紡 - 浠呭湪鐢ㄦ埛鎵嬪姩瑙﹀彂鎴栧簲鐢ㄥ惎鍔?閫€鍑烘椂鍚屾
- * - completely-manual: 瀹屽叏鎵嬪姩妯″紡 - 鐢ㄦ埛蹇呴』鏄庣‘閫夋嫨"涓婁紶"鎴?涓嬭浇"
+ * 同步模式
+ * - automatic: 自动模式 - 按间隔自动同步 * - manual: 手动模式 - 仅在用户手动触发或应用启动/退出时同步
+ * - completely-manual: 完全手动模式 - 用户必须明确选择"上传"/"下载"
  */
 export type SyncMode = 'automatic' | 'manual' | 'completely-manual';
 
 /**
- * 鍚屾鏂瑰悜
+ * 同步方向
  */
 export type SyncDirection = 'upload' | 'download' | 'both';
 
 /**
- * 璁惧淇℃伅
+ * 设备信息
  */
 export interface DeviceInfo {
-  /** 璁惧鍞竴ID */
+  /** 设备唯一ID */
   deviceId: string;
-  /** 璁惧鍚嶇О */
+  /** 设备名称 */
   deviceName: string;
-  /** 鎿嶄綔绯荤粺 */
+  /** 操作系统 */
   os: string;
-  /** 搴旂敤鐗堟湰 */
+  /** 应用版本 */
   version: string;
-  /** 鏈€鍚庢椿璺冩椂闂?*/
+  /** 最后活跃时间 */
   lastSeen: number;
 }
 
 /**
- * 鍚屾鐘舵€佹墿灞? */
+ * 同步状态扩展 */
 export interface ExtendedSyncState extends SyncState {
-  /** 鍚屾妯″紡 */
+  /** 同步模式 */
   mode: SyncMode;
-  /** 鏄惁鍚敤鎰熺煡 */
+  /** 是否启用感知 */
   perceptionEnabled: boolean;
-  /** 鍦ㄧ嚎璁惧鏁伴噺 */
+  /** 在线设备数量 */
   onlineDeviceCount: number;
-  /** 鏈€鍚庡悓姝ユ椂闂?*/
+  /** 最后同步时间 */
   lastSyncAt: number | null;
-  /** 涓嬫鑷姩鍚屾鏃堕棿锛堜粎鑷姩妯″紡锛?*/
+  /** 下次自动同步时间（仅自动模式） */
   nextSyncAt: number | null;
 }
 
 /**
- * 鍐茬獊鍘熷洜
+ * 冲突原因
  */
 export type ConflictReason = 
   | 'version_mismatch'
@@ -297,7 +302,7 @@ export type ConflictReason =
   | 'merge_conflict';
 
 /**
- * 瑙ｅ喅绛栫暐
+ * 解决策略
  */
 export type ResolutionStrategy = 
   | 'use_local'
@@ -307,42 +312,44 @@ export type ResolutionStrategy =
   | 'auto_rebase';
 
 // ============================================
-// GoJS 杈圭晫绫诲瀷瀵煎嚭
+// GoJS 边界类型导出
 // ============================================
-// 銆愭€ц兘浼樺寲 2026-02-07銆戠Щ闄?barrel export锛岄槻姝?GoJS ~800KB 琚媺鍏?main bundle
-// GoJS 杩愯鏃跺嚱鏁板凡杩佺Щ鍒?src/app/features/flow/types/gojs-runtime.ts
-// 绾被鍨嬫帴鍙ｄ繚鐣欏湪 gojs-boundary.ts锛堟棤 GoJS 杩愯鏃朵緷璧栵級
-// 闇€瑕佷娇鐢ㄦ椂璇风洿鎺?import from './gojs-boundary' 鎴栧搴?flow 鐩綍鏂囦欢
+// 【性能优化 2026-02-07】移除 barrel export，防止 GoJS ~800KB 被拉入 main bundle
+// GoJS 运行时函数已迁移到 src/app/features/flow/types/gojs-runtime.ts
+// 纯类型接口保留在 gojs-boundary.ts（无 GoJS 运行时依赖）
+// 需要使用时请直接 import from './gojs-boundary' 或对应 flow 目录文件
 
 // ============================================
-// 娴佺▼鍥捐鍥剧姸鎬佸鍑?// ============================================
+// 流程图视图状态导出
+// 【注意】Wildcard re-exports 可能引发循环依赖。各模块不应反向 import 本 barrel，
+// 而应直接 import 具体文件（如 './focus'、'./parking-dock'）。
 export * from './flow-view-state';
 
 // ============================================
-// Focus Mode 绫诲瀷瀵煎嚭
+// Focus Mode 类型导出
 // ============================================
 export * from './focus';
 
 // ============================================
-// State Overlap / Parking 绫诲瀷瀵煎嚭
+// State Overlap / Parking 类型导出
 // ============================================
 export * from './parking';
 
 // ============================================
-// 鍋滄硦鍧?v2 鈥?涓绘帶鍙?+ 闆疯揪 + 鐘舵€佹満
+// 停泊坞 v2 — 主控台 + 雷达 + 状态机
 // ============================================
 export * from './parking-dock';
 
 // ============================================
-// API 绫诲瀷瀹氫箟锛堣竟澧冮槻寰★級
-// 娉ㄦ剰锛歛pi-types.ts 涓殑绫诲瀷褰撳墠鏈浣跨敤
-// 濡傞渶绫诲瀷瀹堝崼鍔熻兘锛屽彲浠?'./api-types' 鐩存帴瀵煎叆
+// API 类型定义（边界防御）
+// 注意：api-types.ts 中的类型当前未被使用
+// 如需类型守卫功能，可从 './api-types' 直接导入
 // ============================================
 
 // ============================================
-// Supabase 鏄犲皠鍣紙浠呬緵 Service 灞備娇鐢級
+// Supabase 映射器（仅供 Service 层使用）
 // ============================================
-// 娉ㄦ剰锛歴upabase-mapper.ts 涓殑鏄犲皠鍑芥暟褰撳墠鏈浣跨敤
-// simple-sync.service.ts 鏈夎嚜宸辩殑绉佹湁 mapper 鏂规硶
-// 濡傞渶缁熶竴鏄犲皠閫昏緫锛屽彲浠?'./supabase-mapper' 鐩存帴瀵煎叆
-// supabase-types.ts 涓嶅湪姝ゅ鍑猴紝搴旂洿鎺?import from './supabase-types'
+// 注意：supabase-mapper.ts 中的映射函数当前未被使用
+// simple-sync.service.ts 有自己的私有 mapper 方法
+// 如需统一映射逻辑，可从 './supabase-mapper' 直接导入
+// supabase-types.ts 不在此处导出，应直接 import from './supabase-types'

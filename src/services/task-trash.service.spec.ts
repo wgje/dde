@@ -15,6 +15,7 @@ import { Injector, runInInjectionContext } from '@angular/core';
 import { TaskTrashService } from './task-trash.service';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
+import { ParkingService } from './parking.service';
 import { Project, Task } from '../models';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
@@ -95,6 +96,10 @@ describe('TaskTrashService', () => {
         }
       },
     };
+
+    const mockParkingService = {
+      handleTaskSoftDelete: vi.fn(),
+    };
     
     const injector = Injector.create({
       providers: [
@@ -102,6 +107,7 @@ describe('TaskTrashService', () => {
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: TaskRecordTrackingService, useValue: mockRecorder },
+        { provide: ParkingService, useValue: mockParkingService },
       ],
     });
     

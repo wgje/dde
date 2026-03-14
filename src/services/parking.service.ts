@@ -1,13 +1,15 @@
-﻿/**
- * ParkingService 鈥?鍋滄硦鍔熻兘鏍稿績鏈嶅姟
+/**
+ * ParkingService — 停泊功能核心服务
  *
- * 绛栧垝妗?A5.1 瀵瑰濂戠害
- * 鑱岃矗锛氬仠娉?鍙栨秷鍋滄硦銆佽“鑰佹竻鐞嗐€佸彲鎾ゅ洖銆乁ndo 闆嗘垚
+ * 策划桌 A5.1 对外契约
+ * 职责：停泊/取消停泊、衰老清理、可撤回、Undo 集成
  *
- * 渚濊禆娉ㄥ叆瑙勫垯锛? * - 绂佹 inject(StoreService)锛岀洿鎺ユ敞鍏?TaskStore
- * - 涓嶆毚闇?switchFocus() 缁?UI 灞傜洿鎺ヨ皟鐢? */
+ * 依赖注入规则：
+ * - 禁止 inject(StoreService)，直接注入 TaskStore
+ * - 不暴露 switchFocus() 给 UI 层直接调用
+ */
 
-import { Injectable, inject, signal, computed, effect } from '@angular/core';
+import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { TaskStore, ProjectStore } from './stores';
 import {
   Task,
@@ -41,8 +43,8 @@ interface SnapshotDraft {
 @Injectable({
   providedIn: 'root'
 })
-export class ParkingService {
-  // 鈹€鈹€鈹€ 渚濊禆娉ㄥ叆 鈹€鈹€鈹€
+export class ParkingService implements OnDestroy {
+  // ─── 依赖注入 ───
   private readonly taskStore = inject(TaskStore);
   private readonly projectStore = inject(ProjectStore);
   private readonly toastService = inject(ToastService);
@@ -54,56 +56,57 @@ export class ParkingService {
   private readonly contextRestoreService = inject(ContextRestoreService);
   private readonly projectDataService = inject(ProjectDataService);
 
-  // 鈹€鈹€鈹€ 鍐呴儴鐘舵€?鈹€鈹€鈹€
-  /** 琛拌€佹竻鐞?token Map锛堜粎鍐呭瓨锛屼笉鎸佷箙鍖栵級 */
+  // ─── 内部状态 ───
+  /** 衰老清理 token Map（仅内存，不持久化） */
   private readonly evictionTokens: EvictionTokenMap = new Map();
 
-  /** 閫氱煡闃熷垪锛圙ate 婵€娲绘椂鏆傚瓨锛?*/
+  /** 通知队列（Gate 激活时暂存） */
   private readonly _pendingNotices = signal<ParkingNotice[]>([]);
 
-  /** 瀵瑰鍙鐨勯€氱煡闃熷垪 */
+  /** 对外只读的通知队列 */
   readonly pendingNotices = this._pendingNotices.asReadonly();
 
-  /** 褰撳墠棰勮涓殑浠诲姟 ID */
+  /** 当前预览中的任务 ID */
   readonly previewingTaskId = signal<string | null>(null);
 
-  /** 琛拌€佹竻鐞嗘槸鍚﹀凡鍒濆鍖?*/
+  /** 衰老清理是否已初始化*/
   private evictionInitialized = false;
-  /** 鍋滄硦杞婚噺鏁版嵁鏄惁宸插垵濮嬪寲 */
-  private parkedLightweightInitialized = false;
-  /** 琛拌€佹鏌ヨ疆璇㈠畾鏃跺櫒 */
+  /** 停泊轻量数据初始化 Promise（防并发：多次调用返回同一 Promise） */
+  private parkedLightweightInitPromise: Promise<void> | null = null;
+  /** 衰老检查轮询定时器 */
   private evictionIntervalTimer: ReturnType<typeof setInterval> | null = null;
-  /** 鍋滄硦杞婚噺澧為噺鎷夊彇瀹氭椂鍣?*/
+  /** 停泊轻量增量拉取定时器 */
   private parkedDeltaTimer: ReturnType<typeof setInterval> | null = null;
-  /** 鍚姩寤惰繜鎵ц timer */
+  /** 启动延迟执行 timer */
   private startupEvictionTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 鍦ㄧ嚎浜嬩欢鐩戝惉鍣?*/
+  /** 在线事件监听器 */
   private onlineListener: (() => void) | null = null;
-  /** 棣栨浜や簰鐩戝惉鍣?*/
+  private visibilityChangeHandler: (() => void) | null = null;
+  /** 首次交互监听器 */
   private firstInteractionHandler: (() => void) | null = null;
-  /** 鍋滄硦杞婚噺鍚屾娓告爣 */
+  /** 停泊轻量同步游标 */
   private parkedCursor: string | null = null;
-  /** 琛拌€佹竻鐞嗗浐瀹氬贰妫€鍛ㄦ湡 */
+  /** 衰老清理固定巡检周期 */
   private static readonly EVICTION_CHECK_INTERVAL_MS = 60_000;
 
-  /** 鎻愰啋娣″嚭璁℃暟锛圞ey: taskId锛?*/
+  /** 提醒淡出计数（Key: taskId） */
   private readonly reminderFadeoutCounts = new Map<string, number>();
 
-  /** 闇€瑕佹樉绀虹孩鐐圭殑浠诲姟 ID 闆嗗悎 */
+  /** 需要显示红点的任务 ID 集合 */
   readonly badgedTaskIds = signal<Set<string>>(new Set(), { equal: () => false });
 
-  // 鈹€鈹€鈹€ 娲剧敓鐘舵€?鈹€鈹€鈹€
+  // ─── 派生状态 ───
 
-  /** 褰撳墠 focused 浠诲姟锛堝悓涓€鏃跺埢鏈€澶?1 涓紝A4 涓嶅彉閲忥級 */
+  /** 当前 focused 任务（同一时刻最多 1 个，A4 不变量） */
   readonly focusedTask = computed(() => {
     const parked = this.taskStore.parkedTasks();
     return parked.find(t => t.parkingMeta?.state === 'focused') ?? null;
   });
 
-  /** 鍋滄硦浠诲姟鏁伴噺 */
+  /** 停泊任务数量 */
   readonly parkedCount = computed(() => this.taskStore.parkedTaskIds().size);
 
-  /** 鏄惁鏈夊嵆灏嗗埌鏈熺殑鎻愰啋锛? 1h锛?*/
+  /** 是否有即将到期的提醒（< 1h） */
   readonly hasUpcomingReminder = computed(() => {
     const now = Date.now();
     const oneHour = 60 * 60 * 1000;
@@ -125,21 +128,13 @@ export class ParkingService {
 
     // Save full snapshot into IndexedDB when page becomes hidden.
     if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', () => {
+      this.visibilityChangeHandler = () => {
         if (document.visibilityState === 'hidden') {
           void this.saveSnapshotToIndexedDB();
         }
-      });
+      };
+      document.addEventListener('visibilitychange', this.visibilityChangeHandler);
     }
-
-    // Keep notices queued while gate is active.
-    effect(() => {
-      const gateActive = this.gateService.isActive();
-      if (!gateActive && this._pendingNotices().length > 0) {
-        // Notices remain in signal and will be consumed by ParkingNoticeComponent.
-        // 涓嶉渶瑕侀澶栨搷浣滐紙閫氱煡宸插湪 signal 涓級
-      }
-    });
 
     // Start stale parked-task eviction flow.
     this.initEviction();
@@ -148,11 +143,43 @@ export class ParkingService {
     void this.initParkedLightweightSync();
   }
 
-  // 鈹€鈹€鈹€ 瀵瑰 API锛圓5.1 濂戠害锛?鈹€鈹€鈹€
+  /**
+   * 【修复 P1-08】清理所有定时器和事件监听器，防止内存泄漏
+   */
+  ngOnDestroy(): void {
+    if (this.evictionIntervalTimer) {
+      clearInterval(this.evictionIntervalTimer);
+      this.evictionIntervalTimer = null;
+    }
+    if (this.parkedDeltaTimer) {
+      clearInterval(this.parkedDeltaTimer);
+      this.parkedDeltaTimer = null;
+    }
+    if (this.startupEvictionTimer) {
+      clearTimeout(this.startupEvictionTimer);
+      this.startupEvictionTimer = null;
+    }
+    if (this.onlineListener) {
+      window.removeEventListener('online', this.onlineListener);
+      this.onlineListener = null;
+    }
+    if (this.visibilityChangeHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
+      this.visibilityChangeHandler = null;
+    }
+    if (this.firstInteractionHandler) {
+      document.removeEventListener('keydown', this.firstInteractionHandler);
+      document.removeEventListener('click', this.firstInteractionHandler);
+      document.removeEventListener('scroll', this.firstInteractionHandler);
+      this.firstInteractionHandler = null;
+    }
+  }
+
+  // ─── 对外 API（A5.1 契约）───
 
   /**
-   * 棰勮浠诲姟鈥斺€斾笉鍒囨崲 Focus锛屼粎鎵撳紑璇︽儏
-   * 鍒锋柊 lastVisitedAt 闃叉琛拌€佹竻鐞嗭紙A6.1b.5锛?   */
+   * 预览任务——不切换 Focus，仅打开详情
+   * 刷新 lastVisitedAt 防止衰老清理（A6.1b.5）   */
   previewTask(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task?.parkingMeta) return;
@@ -160,7 +187,7 @@ export class ParkingService {
     // At any moment only one previewing task.
     this.previewingTaskId.set(taskId);
 
-    // 鍒锋柊 lastVisitedAt
+    // 刷新 lastVisitedAt
     this.updateParkingMeta(taskId, {
       ...task.parkingMeta,
       lastVisitedAt: new Date().toISOString(),
@@ -168,7 +195,7 @@ export class ParkingService {
   }
 
   /**
-   * 鍒囨崲鍒扮洰鏍囦换鍔♀€斺€斾繚瀛樺綋鍓?鈫?鍒囨崲 鈫?鎭㈠涓婁笅鏂?   * 瀵瑰鍞竴鍒囨崲鍏ュ彛锛圓5.1.2锛?   */
+   * 切换到目标任务——保存当前→切换→恢复上下文   * 对外唯一切换入口（A5.1.2）   */
   startWork(taskId: string): void {
     const targetTask = this.taskStore.getTask(taskId);
     if (!targetTask) {
@@ -176,9 +203,9 @@ export class ParkingService {
       return;
     }
 
-    // 鐩爣蹇呴』鏄?active 鐘舵€侊紙A4 涓嶅彉閲忥級
+    // 目标必须是 active 状态（A4 不变量）
     if (targetTask.status !== 'active') {
-      this.logger.warn('ParkingService', 'startWork: 鍙兘瀵?active 浠诲姟鎵ц', { taskId, status: targetTask.status });
+      this.logger.warn('ParkingService', 'startWork: 只能对 active 任务执行', { taskId, status: targetTask.status });
       return;
     }
 
@@ -195,7 +222,7 @@ export class ParkingService {
     if (currentFocused && currentFocused.id !== taskId) {
       this.contextRestoreService.saveSnapshot(currentFocused.id);
 
-      // 褰撳墠 focused 鈫?parked
+      // 当前 focused → parked
       this.updateParkingMeta(currentFocused.id, {
         ...currentFocused.parkingMeta!,
         state: 'parked',
@@ -204,7 +231,7 @@ export class ParkingService {
       });
     }
 
-    // 2. 鐩爣浠诲姟 鈫?focused
+    // 2. 目标任务 → focused
     const now = new Date().toISOString();
     const newMeta: TaskParkingMeta = targetTask.parkingMeta
       ? { ...targetTask.parkingMeta, state: 'focused', lastVisitedAt: now }
@@ -223,7 +250,7 @@ export class ParkingService {
       this.contextRestoreService.restore(taskId, targetTask.parkingMeta.contextSnapshot);
     }
 
-    // 4. 鍏抽棴棰勮
+    // 4. 关闭预览
     this.previewingTaskId.set(null);
 
     // 5) Record undo action.
@@ -231,14 +258,14 @@ export class ParkingService {
   }
 
   /**
-   * 浠庡仠娉婂垪琛ㄧЩ闄も€斺€旂Щ鍥炴櫘閫氫换鍔″垪琛?   * 5s 鍙挙鍥烇紙A6.2b锛?   */
+   * 从停泊列表移除——移回普通任务列表   * 5s 可撤回（A6.2b）   */
   removeParkedTask(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task?.parkingMeta) return;
 
     const previousMeta = { ...task.parkingMeta };
 
-    // 娓呴櫎 parkingMeta
+    // 清除 parkingMeta
     this.clearParkingMeta(taskId);
 
     // Close preview if we were previewing this task.
@@ -246,14 +273,14 @@ export class ParkingService {
       this.previewingTaskId.set(null);
     }
 
-    // 5s 鍙挙鍥?Snackbar
+    // 5s 可撤回 Snackbar
     this.toastService.info(
-      `銆?{task.title}銆嶅凡绉诲洖浠诲姟鍒楄〃`,
+      `「${task.title}」已移回任务列表`,
       undefined,
       {
         duration: PARKING_CONFIG.REMOVE_UNDO_TIMEOUT_MS,
         action: {
-          label: '鎾ゅ洖',
+          label: '撤回',
           onClick: () => this.restoreParkingMeta(taskId, previousMeta),
         },
       }
@@ -261,7 +288,7 @@ export class ParkingService {
   }
 
   /**
-   * 鎾ゅ洖琛拌€佹竻鐞嗭紙A5.1.4锛?   */
+   * 撤回衰老清理（A5.1.4）   */
   undoEviction(tokenId: string): void {
     const evictionToken = this.evictionTokens.get(tokenId);
     if (!evictionToken) {
@@ -287,7 +314,8 @@ export class ParkingService {
   }
 
   /**
-   * 鍋滄硦褰撳墠浠诲姟鈥斺€旂敤鎴蜂富鍔ㄥ皢浠诲姟鏀惧叆銆岀◢鍚庡鐞嗐€?   */
+   * 停泊当前任务——用户主动将任务放入「稍后处理」
+   */
   parkTask(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task || task.status !== 'active') return;
@@ -304,16 +332,17 @@ export class ParkingService {
         pinned: false,
       };
 
-    // 淇濆瓨蹇収鐒跺悗鍋滄硦
+    // 保存快照然后停泊
     this.contextRestoreService.saveSnapshot(taskId);
     this.updateParkingMeta(taskId, meta);
 
-    // 鍏ㄥ眬缁熶竴瑙嗚鍙嶉
+    // 全局统一视觉反馈
     this.toastService.success('已停泊', `「${task.title || '未命名任务'}」已移至稍后处理`);
   }
 
   /**
-   * 鍒囨崲 pinned 鐘舵€侊紙A6.4.7锛?   */
+   * 切换 pinned 状态（A6.4.7）
+   */
   togglePinned(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task?.parkingMeta) return;
@@ -325,7 +354,8 @@ export class ParkingService {
   }
 
   /**
-   * 蹇€熷洖鍒団€斺€斿垏鍥炴渶杩戝仠娉婁换鍔★紝璺宠繃棰勮锛圓6.1.4锛?   */
+   * 快速回切——切回最近停泊任务，跳过预览（A6.1.4）
+   */
   quickSwitch(): void {
     const parked = this.taskStore.parkedTasks();
     const mostRecent = parked.find(t => t.parkingMeta?.state === 'parked');
@@ -334,13 +364,17 @@ export class ParkingService {
     }
   }
 
-  // 鈹€鈹€鈹€ 鍋滄硦杞婚噺澧為噺鍚屾锛圓3.4锛?鈹€鈹€鈹€
+  // ─── 停泊轻量增量同步（A3.4）───
 
   private async initParkedLightweightSync(): Promise<void> {
-    if (this.parkedLightweightInitialized) return;
-    this.parkedLightweightInitialized = true;
+    if (this.parkedLightweightInitPromise) return this.parkedLightweightInitPromise;
+    this.parkedLightweightInitPromise = this.doInitParkedLightweightSync();
+    return this.parkedLightweightInitPromise;
+  }
 
-    // 1) 鍏堣缂撳瓨锛堝喎鍚姩蹇€熷彲瑙侊級
+  private async doInitParkedLightweightSync(): Promise<void> {
+
+    // 1) 先读缓存（冷启动快速可见）
     const cached = await this.projectDataService.loadParkedTasksCache();
     this.parkedCursor = cached.cursor;
     for (const entry of cached.entries) {
@@ -350,7 +384,7 @@ export class ParkingService {
     // 2) Pull one incremental delta in background.
     await this.syncParkedDelta();
 
-    // 3) 鍚姩鎭㈠鏃讹細浼樺厛浣跨敤 IDB 宸叉仮澶嶅揩鐓э紝闄嶇骇璇诲彇鑽夌骞舵竻鐞嗚崏绋块敭
+    // 3) 启动恢复时：优先使用 IDB 已恢复快照，降级读取草稿并清理草稿键
     this.restoreSnapshotDraftFromLocalStorage();
 
     // 4) Start periodic incremental refresh.
@@ -378,7 +412,7 @@ export class ParkingService {
 
     this.parkedCursor = delta.nextCursor ?? this.parkedCursor;
 
-    // 澧為噺缁撴灉鍥炲啓缂撳瓨锛堣鐩栧紡锛屾暟鎹噺灏忥級
+    // 增量结果回写缓存（覆盖式，数据量小）
     const entries = this.taskStore.parkedTasks()
       .map((task) => ({
         task,
@@ -414,10 +448,10 @@ export class ParkingService {
     this.taskStore.setTask({ ...task, parkingMeta: undefined }, projectId);
   }
 
-  // 鈹€鈹€鈹€ 琛拌€佹竻鐞嗭紙A6.4锛?鈹€鈹€鈹€
+  // ─── 衰老清理（A6.4）───
 
   /**
-   * 鍒濆鍖栬“鑰佹竻鐞嗏€斺€斿欢杩熷埌 p1 灏辩华 + 棣栨浜や簰鍚?3s锛圓5.1.6 / A6.4.5锛?   */
+   * 初始化衰老清理——延迟到 p1 就绪 + 首次交互后 3s（A5.1.6 / A6.4.5）   */
   initEviction(): void {
     if (this.evictionInitialized) return;
     this.evictionInitialized = true;
@@ -447,19 +481,7 @@ export class ParkingService {
       document.removeEventListener('scroll', this.firstInteractionHandler);
       this.firstInteractionHandler = null;
 
-      if (this.startupEvictionTimer) {
-        clearTimeout(this.startupEvictionTimer);
-      }
-      this.startupEvictionTimer = setTimeout(() => {
-        this.runEvictionCheck();
-        // After startup, switch to fixed interval checks.
-        if (!this.evictionIntervalTimer) {
-          this.evictionIntervalTimer = setInterval(
-            () => this.runEvictionCheck(),
-            ParkingService.EVICTION_CHECK_INTERVAL_MS
-          );
-        }
-      }, PARKING_CONFIG.EVICTION_STARTUP_DELAY_MS);
+      this.scheduleEvictionStartup();
     };
 
     document.addEventListener('keydown', this.firstInteractionHandler);
@@ -471,10 +493,28 @@ export class ParkingService {
       this.onlineListener = () => this.runEvictionCheck();
       window.addEventListener('online', this.onlineListener);
     }
+
+    // 首次交互监听器可能在用户早已完成首轮操作后才挂上；兜底启动避免整条清理链永远不上电。
+    this.scheduleEvictionStartup();
+  }
+
+  private scheduleEvictionStartup(): void {
+    if (this.startupEvictionTimer) return;
+    this.startupEvictionTimer = setTimeout(() => {
+      this.runEvictionCheck();
+      // After startup, switch to fixed interval checks.
+      if (!this.evictionIntervalTimer) {
+        this.evictionIntervalTimer = setInterval(
+          () => this.runEvictionCheck(),
+          ParkingService.EVICTION_CHECK_INTERVAL_MS
+        );
+      }
+      this.startupEvictionTimer = null;
+    }, PARKING_CONFIG.EVICTION_STARTUP_DELAY_MS);
   }
 
   /**
-   * 鎵ц琛拌€佹竻鐞嗘鏌?   */
+   * 执行衰老清理检查   */
   private runEvictionCheck(): void {
     if (!this.canRunEvictionNow()) return;
 
@@ -486,7 +526,7 @@ export class ParkingService {
 
     for (const task of tasks) {
       if (!task.parkingMeta || task.parkingMeta.state === 'focused') continue;
-      if (task.parkingMeta.pinned) continue; // 璞佸厤
+      if (task.parkingMeta.pinned) continue; // 豁免
 
       const lastVisited = task.parkingMeta.lastVisitedAt
         ? new Date(task.parkingMeta.lastVisitedAt).getTime()
@@ -534,7 +574,7 @@ export class ParkingService {
     };
     this.evictionTokens.set(tokenId, token);
 
-    // 娓呴櫎 parkingMeta
+    // 清除 parkingMeta
     this.clearParkingMeta(task.id);
     return token;
   }
@@ -554,7 +594,7 @@ export class ParkingService {
   }
 
   /**
-   * 鎵归噺娓呯悊閫氱煡锛氭眹鎬诲叆鍙?+ 閫愭潯鎾ゅ洖
+   * 批量清理通知：汇总入口 + 逐条撤回
    */
   private createEvictionNotice(items: ParkingNoticeEvictionItem[]): ParkingNotice {
     if (items.length === 1) {
@@ -569,8 +609,8 @@ export class ParkingService {
         reason: '72 小时未访问，已自动移回任务列表。',
         evictionTokenId: item.evictionTokenId,
         actions: [
-          { key: 'undo-eviction', label: '鎾ゅ洖' },
-          { key: 'keep-parked', label: '鍏抽棴' },
+          { key: 'undo-eviction', label: '撤回' },
+          { key: 'keep-parked', label: '关闭' },
         ],
       };
     }
@@ -579,19 +619,19 @@ export class ParkingService {
       id: crypto.randomUUID(),
       type: 'eviction',
       taskId: items[0].taskId,
-      taskTitle: `${items.length} 涓仠娉婁换鍔″凡绉诲洖浠诲姟鍒楄〃`,
+      taskTitle: `${items.length} 个停泊任务已移回任务列表`,
       minVisibleMs: PARKING_CONFIG.NOTICE_MIN_VISIBLE_MS,
       fallbackTimeoutMs: PARKING_CONFIG.NOTICE_FALLBACK_TIMEOUT_MS,
       reason: '72 小时未访问，已自动清理，可逐条撤回。',
       evictionItems: items,
       actions: [
-        { key: 'keep-parked', label: '鍏抽棴' },
+        { key: 'keep-parked', label: '关闭' },
       ],
     };
   }
 
   /**
-   * 鑾峰彇鍗曚釜娓呯悊 token锛堢敤浜庣粍浠跺垽鏂寜閽姸鎬侊級
+   * 获取单个清理 token（用于组件判断按钮状态）
    */
   getEvictionToken(tokenId: string): EvictionToken | null {
     const token = this.evictionTokens.get(tokenId) ?? null;
@@ -604,7 +644,7 @@ export class ParkingService {
   }
 
   /**
-   * Gate 婵€娲绘椂閫氱煡鍙帓闃燂紱鍏抽棴鍚庣敱缁勪欢娑堣垂灞曠ず
+   * Gate 激活时通知只排队；关闭后由组件消费展示
    */
   showNotice(notice: ParkingNotice): void {
     if (notice.type === 'eviction' && this.gateService.isActive()) {
@@ -614,11 +654,11 @@ export class ParkingService {
     this._pendingNotices.update(list => [...list, notice]);
   }
 
-  // 鈹€鈹€鈹€ 鍋滄硦浠诲姟琚蒋鍒犻櫎鑱斿姩锛圓5.1.5锛?鈹€鈹€鈹€
+  // ─── 停泊任务被软删除联动（A5.1.5）───
 
   /**
-   * 澶勭悊浠诲姟琚蒋鍒犻櫎鈥斺€斾粠鍋滄硦鍒楄〃绉婚櫎
-   * 鐢?TaskTrashService 鍦?deleteTask 鍐呰皟鐢?   */
+   * 处理任务被软删除——从停泊列表移除
+   * 由 TaskTrashService 在 deleteTask 内调用   */
   handleTaskSoftDelete(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (task?.parkingMeta) {
@@ -630,7 +670,7 @@ export class ParkingService {
   }
 
   /**
-   * 澶勭悊浠诲姟鏍囪瀹屾垚/褰掓。鈥斺€旀竻闄?parkingMeta锛圓3.9锛?   */
+   * 处理任务标记完成/归档——清除 parkingMeta（A3.9）   */
   handleTaskStatusChange(taskId: string, newStatus: string): void {
     if (newStatus === 'completed' || newStatus === 'archived') {
       const task = this.taskStore.getTask(taskId);
@@ -640,10 +680,10 @@ export class ParkingService {
     }
   }
 
-  // 鈹€鈹€鈹€ 鎻愰啋绾㈢偣锛圓5.3.5锛?鈹€鈹€鈹€
+  // ─── 提醒红点（A5.3.5）───
 
   /**
-   * 璁板綍鎻愰啋閫氱煡琚厹搴曟贰鍑?   */
+   * 记录提醒通知被从底部淡出   */
   recordReminderFadeout(taskId: string): void {
     const count = (this.reminderFadeoutCounts.get(taskId) || 0) + 1;
     this.reminderFadeoutCounts.set(taskId, count);
@@ -653,24 +693,24 @@ export class ParkingService {
   }
 
   /**
-   * 娓呴櫎鎻愰啋绾㈢偣
+   * 清除提醒红点
    */
   clearBadge(taskId: string): void {
     this.reminderFadeoutCounts.delete(taskId);
     this.badgedTaskIds.update(s => { s.delete(taskId); return s; });
   }
 
-  // 鈹€鈹€鈹€ 杞婚噺缂栬緫锛圓6.1b.3锛?鈹€鈹€鈹€
+  // ─── 轻量编辑（A6.1b.3）───
 
   /**
-   * 鍦ㄩ瑙堢姸鎬佽拷鍔犲娉?   * 浠?"\n---\n> 澶囨敞锛堝仠娉婃椂锛? {content}" 鏍煎紡杩藉姞鍒?content 鏈熬
+   * 在预览状态追加备注   * 以「\n---\n> 备注（停泊时）: {content}」格式追加到 content 末尾
    */
   addNote(taskId: string, noteContent: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task) return;
 
     const separator = '\n---\n';
-    const noteBlock = `> 澶囨敞锛堝仠娉婃椂锛? ${noteContent}`;
+    const noteBlock = `> 备注（停泊时）: ${noteContent}`;
     const updatedContent = task.content + separator + noteBlock;
 
     // Resolve project id for target task.
@@ -684,14 +724,14 @@ export class ParkingService {
     );
   }
 
-  // 鈹€鈹€鈹€ SOFT_LIMIT 璀﹀憡锛圓2.4 / P-21锛?鈹€鈹€鈹€
+  // ─── SOFT_LIMIT 警告（A2.4 / P-21）───
 
-  /** 鏄惁瓒呰繃杞笂闄?*/
+  /** 是否超过软上限 */
   readonly isOverSoftLimit = computed(() =>
     this.parkedCount() >= PARKING_CONFIG.PARKED_TASK_SOFT_LIMIT
   );
 
-  // 鈹€鈹€鈹€ 鍐呴儴杈呭姪 鈹€鈹€鈹€
+  // ─── 内部辅助 ───
 
   private updateParkingMeta(taskId: string, meta: TaskParkingMeta): void {
     const task = this.taskStore.getTask(taskId);
@@ -733,7 +773,7 @@ export class ParkingService {
   }
 
   /**
-   * 鏌ユ壘浠诲姟鎵€灞為」鐩?ID
+   * 查找任务所属项目 ID
    */
   private findProjectId(taskId: string): string | null {
     return this.taskStore.getTaskProjectId(taskId)
@@ -742,7 +782,8 @@ export class ParkingService {
   }
 
   /**
-   * 璁板綍 Undo 鎿嶄綔锛圓3.7锛?   */
+   * 记录 Undo 操作（A3.7）
+   */
   private captureParkUndoSnapshots(taskIds: Array<string | null>): Map<string, Partial<Project>> {
     const snapshots = new Map<string, Partial<Project>>();
     for (const taskId of taskIds) {
@@ -782,14 +823,14 @@ export class ParkingService {
   }
 
   /**
-   * 娑堣垂骞剁Щ闄ら槦棣栭€氱煡
+   * 消费并移除队首通知
    */
   consumeNotice(noticeId: string): void {
     this._pendingNotices.update(list => list.filter(n => n.id !== noticeId));
   }
 
   /**
-   * 淇濈暀鍋滄硦浠诲姟鈥斺€旈噸缃?lastVisitedAt锛屾竻闄ゅ嵆灏嗘竻鐞嗙姸鎬侊紙A6.4.2锛?   */
+   * 保留停泊任务——重置 lastVisitedAt，清除即将清理状态（A6.4.2）   */
   keepParked(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     if (!task?.parkingMeta) return;
@@ -800,10 +841,10 @@ export class ParkingService {
     this.toastService.info('已保留，不会被自动清理');
   }
 
-  // 鈹€鈹€鈹€ BeforeUnload 蹇収锛圓3.12锛?鈹€鈹€鈹€
+  // ─── BeforeUnload 快照（A3.12）───
 
   /**
-   * 鍚屾鍐欏叆 localStorage 绱ф€ュ揩鐓?   */
+   * 同步写入 localStorage 紧急快照   */
   private saveSnapshotToLocalStorage(): void {
     const focused = this.focusedTask();
     if (!focused?.parkingMeta?.contextSnapshot) return;
@@ -818,17 +859,17 @@ export class ParkingService {
       };
       localStorage.setItem(PARKING_CONFIG.SNAPSHOT_DRAFT_KEY, JSON.stringify(draft));
     } catch {
-      // localStorage 鍐欏叆澶辫触锛堝閲?闅愮妯″紡锛夛紝闈欓粯蹇界暐
+      // localStorage 写入失败（容量不足/隐私模式），静默忽略
     }
   }
 
   /**
-   * 寮傛鍐欏叆 IndexedDB 瀹屾暣蹇収
+   * 异步写入 IndexedDB 完整快照
    */
   private async saveSnapshotToIndexedDB(): Promise<void> {
     const focused = this.focusedTask();
     if (focused) {
-      // 瑙﹀彂 ContextRestoreService 淇濆瓨瀹屾暣蹇収
+      // 触发 ContextRestoreService 保存完整快照
       this.contextRestoreService.saveSnapshot(focused.id);
     }
     await this.persistParkedTasksToIndexedDB();
@@ -879,7 +920,7 @@ export class ParkingService {
       try {
         localStorage.removeItem(PARKING_CONFIG.SNAPSHOT_DRAFT_KEY);
       } catch {
-        // 蹇界暐 localStorage 娓呯悊澶辫触
+        // 忽略 localStorage 清理失败
       }
     }
   }
@@ -905,6 +946,7 @@ export class ParkingService {
         savedAt: parsed.savedAt,
       };
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- JSON.parse 失败时无法构造有效结果，返回 null 表示解析失败
       return null;
     }
   }

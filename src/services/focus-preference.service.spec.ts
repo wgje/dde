@@ -58,6 +58,8 @@ describe('FocusPreferenceService', () => {
 
       expect(prefs).toBeDefined();
       expect(prefs.gateEnabled).toBe(true);
+      expect(prefs.restReminderHighLoadMinutes).toBe(DEFAULT_FOCUS_PREFERENCES.restReminderHighLoadMinutes);
+      expect(prefs.restReminderLowLoadMinutes).toBe(DEFAULT_FOCUS_PREFERENCES.restReminderLowLoadMinutes);
     });
   });
 
@@ -113,6 +115,21 @@ describe('FocusPreferenceService', () => {
 
       service.setMaxSnoozePerDay(100);
       expect(focusPreferences().maxSnoozePerDay).toBe(10);
+    });
+  });
+
+  describe('rest reminder thresholds', () => {
+    it('should update the high-load threshold', () => {
+      service.setRestReminderHighLoadMinutes(120);
+      expect(focusPreferences().restReminderHighLoadMinutes).toBe(120);
+    });
+
+    it('should clamp the low-load threshold to the supported range', () => {
+      service.setRestReminderLowLoadMinutes(0);
+      expect(focusPreferences().restReminderLowLoadMinutes).toBe(5);
+
+      service.setRestReminderLowLoadMinutes(500);
+      expect(focusPreferences().restReminderLowLoadMinutes).toBe(120);
     });
   });
 

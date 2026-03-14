@@ -24,7 +24,8 @@ import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
-  updateBlackBoxEntry
+  updateBlackBoxEntry,
+  deleteBlackBoxEntry
 } from '../state/focus-stores';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
@@ -121,7 +122,10 @@ export class BlackBoxSyncService {
       // 第一步：主动扫描并删除所有含非法 UUID 字段的条目（不限 syncStatus）
       for (const entry of entries) {
         const hasInvalidId = !entry.id || !isValidUUID(entry.id);
-        const hasInvalidProjectId = !entry.projectId || !isValidUUID(entry.projectId);
+        const hasInvalidProjectId =
+          entry.projectId !== null &&
+          entry.projectId !== undefined &&
+          !isValidUUID(entry.projectId);
         if (hasInvalidId || hasInvalidProjectId) {
           this.logger.warn(`启动清理：删除非法 UUID 条目 id="${entry.id}", projectId="${entry.projectId}"`);
           try { await this.deleteFromLocal(entry.id); } catch { /* 忽略 */ }
@@ -130,7 +134,11 @@ export class BlackBoxSyncService {
 
       // 第二步：恢复合法 pending 条目到 RetryQueue
       const validPending = entries.filter(
-        e => e.syncStatus === 'pending' && e.id && isValidUUID(e.id) && e.projectId && isValidUUID(e.projectId)
+        e =>
+          e.syncStatus === 'pending' &&
+          e.id &&
+          isValidUUID(e.id) &&
+          (e.projectId == null || isValidUUID(e.projectId))
       );
 
       if (validPending.length > 0) {
@@ -168,10 +176,14 @@ export class BlackBoxSyncService {
         this.logger.debug('IndexedDB opened for focus mode', { version: this.db.version });
         await this.loadLastSyncTime();
       } catch (error) {
+        // 【H-13】Only null out the cached promise on failure so that a
+        // subsequent call retries initialization. On success, keep the
+        // resolved promise cached to avoid redundant open attempts
+        // (the old `finally` block nulled it unconditionally, creating a
+        // race where concurrent callers would each trigger a new open).
+        this.initIndexedDBPromise = null;
         this.logger.error('Failed to open IndexedDB for focus mode', error instanceof Error ? error.message : String(error));
         throw error;
-      } finally {
-        this.initIndexedDBPromise = null;
       }
     })();
 
@@ -287,7 +299,7 @@ export class BlackBoxSyncService {
    * 2. 防抖结束后通过 RetryQueue 推送（持久化队列）
    * 3. 即使浏览器崩溃，下次启动时 recoverPendingEntries 会恢复
    */
-  scheduleSync(entry: BlackBoxEntry): void {
+  async scheduleSync(entry: BlackBoxEntry): Promise<void> {
     // 校验 ID，拦截脏数据进入同步流程
     if (!entry.id || !isValidUUID(entry.id)) {
       this.logger.warn(`scheduleSync: 拦截非法 ID "${entry.id}"，不进入同步`);
@@ -296,7 +308,12 @@ export class BlackBoxSyncService {
 
     // 1. 立即保存到本地 IndexedDB（syncStatus=pending）
     const pendingEntry: BlackBoxEntry = { ...entry, syncStatus: 'pending' };
-    this.saveToLocal(pendingEntry);
+    // 【修复 P1-01】await IDB 写入，确保 crash 时不丢数据
+    try {
+      await this.saveToLocal(pendingEntry);
+    } catch (e) {
+      this.logger.error('scheduleSync: IDB 写入失败，条目加入内存队列等待重试', e instanceof Error ? e.message : String(e));
+    }
 
     // 2. 加入防抖批次
     this.pendingPushEntries.set(entry.id, pendingEntry);
@@ -324,7 +341,7 @@ export class BlackBoxSyncService {
         this.logger.warn(`flushPending: 跳过非法 ID "${entry.id}"`);
         continue;
       }
-      if (!entry.projectId || !isValidUUID(entry.projectId)) {
+      if (entry.projectId != null && !isValidUUID(entry.projectId)) {
         this.logger.warn(`flushPending: 跳过非法 projectId "${entry.projectId}"，id="${entry.id}"`);
         continue;
       }
@@ -333,7 +350,13 @@ export class BlackBoxSyncService {
         this.retryQueueHandler(entry);
       } else {
         // 降级：直接推送（不经过 RetryQueue）
-        this.pushToServer(entry);
+        // 【M-03】Must not fire-and-forget — attach .catch() to log errors
+        this.pushToServer(entry).catch(err => {
+          this.logger.error(
+            'Fire-and-forget pushToServer failed',
+            err instanceof Error ? err.message : String(err)
+          );
+        });
       }
     }
   }
@@ -447,8 +470,8 @@ export class BlackBoxSyncService {
       return true; // 返回 true 让 RetryQueue 不再重试
     }
 
-    // 校验 projectId — Supabase project_id 列为 UUID 类型，非法值会导致 400 错误
-    if (!entry.projectId || !isValidUUID(entry.projectId)) {
+    // 共享黑匣子仓允许 projectId=null；非空时必须是合法 UUID。
+    if (entry.projectId != null && !isValidUUID(entry.projectId)) {
       this.logger.warn(`跳过非法 projectId 的条目: id="${entry.id}", projectId="${entry.projectId}"，从本地清理`);
       try {
         await this.deleteFromLocal(entry.id);
@@ -464,7 +487,7 @@ export class BlackBoxSyncService {
 
       // 【终极防线】upsert 前再次内联校验所有 UUID 字段
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      if (!uuidPattern.test(entry.id) || !uuidPattern.test(entry.projectId)) {
+      if (!uuidPattern.test(entry.id) || (entry.projectId != null && !uuidPattern.test(entry.projectId))) {
         this.logger.warn(`终极防线拦截非法 UUID 字段: id="${entry.id}", projectId="${entry.projectId}"`);
         try { await this.deleteFromLocal(entry.id); } catch { /* ignore */ }
         return true;
@@ -478,6 +501,7 @@ export class BlackBoxSyncService {
           project_id: entry.projectId,
           user_id: entry.userId,
           content: entry.content,
+          focus_meta: (entry.focusMeta ?? null) as unknown as Record<string, unknown> | null,
           date: entry.date,
           created_at: entry.createdAt,
           updated_at: entry.updatedAt,
@@ -501,6 +525,12 @@ export class BlackBoxSyncService {
       const synced: BlackBoxEntry = { ...entry, syncStatus: 'synced' };
       await this.saveToLocal(synced);
       updateBlackBoxEntry(synced);
+
+      // 【修复 P1-02】推送成功后更新 lastSyncTime，避免重复拉取
+      if (entry.updatedAt && (!this.lastSyncTime || entry.updatedAt > this.lastSyncTime)) {
+        this.lastSyncTime = entry.updatedAt;
+        await this.saveLastSyncTime();
+      }
 
       this.logger.debug(`Entry synced to server: ${entry.id}`);
       return true;
@@ -637,10 +667,10 @@ export class BlackBoxSyncService {
 
       this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
-      // 增量拉取（使用字段筛选优化，减少 ~30% 数据传输）
+      // 增量拉取
       const { data, error } = await client
         .from('black_box_entries')
-        .select('id,project_id,user_id,content,date,created_at,updated_at,is_read,is_completed,is_archived,snooze_until,snooze_count,deleted_at')
+        .select('*')
         .gt('updated_at', effectiveLastSync)
         .order('updated_at', { ascending: true });
 
@@ -652,6 +682,11 @@ export class BlackBoxSyncService {
       }
 
       // 合并到本地
+      // 【M-04 Performance】Each entry is written to IDB sequentially via
+      // separate readwrite transactions. For large pull batches (100+ entries)
+      // this creates significant overhead. A future iteration should batch all
+      // writes into a single IDB readwrite transaction (or use a bulk-put
+      // helper) to reduce transaction commit overhead by ~10x.
       for (const row of data ?? []) {
         const entry = this.mapRowToEntry(row);
         await this.mergeWithLocal(entry);
@@ -731,9 +766,20 @@ export class BlackBoxSyncService {
     const local = blackBoxEntriesMap().get(remote.id);
 
     // LWW: 远程更新时间更新则使用远程
-    if (!local || remote.updatedAt > local.updatedAt) {
-      await this.saveToLocal(remote);
-      updateBlackBoxEntry(remote);
+    // 【修复 P1-05】等时用 id 字典序作为 tiebreaker，保证确定性
+    const shouldUseRemote = !local ||
+      remote.updatedAt > local.updatedAt ||
+      (remote.updatedAt === local.updatedAt && remote.id > local.id);
+
+    if (shouldUseRemote) {
+      // 【修复 P1-04】已删除条目从本地状态中移除，避免 UI 残留
+      if (remote.deletedAt) {
+        await this.saveToLocal(remote);
+        deleteBlackBoxEntry(remote.id);
+      } else {
+        await this.saveToLocal(remote);
+        updateBlackBoxEntry(remote);
+      }
     }
   }
 
@@ -743,9 +789,10 @@ export class BlackBoxSyncService {
   private mapRowToEntry(row: Record<string, unknown>): BlackBoxEntry {
     return {
       id: row['id'] as string,
-      projectId: (row['project_id'] as string) || '',
+      projectId: (row['project_id'] as string | null) ?? null,
       userId: (row['user_id'] as string) || '',
       content: (row['content'] as string) || '',  // 防止 content 为 null/undefined
+      focusMeta: (row['focus_meta'] as BlackBoxEntry['focusMeta']) ?? null,
       date: (row['date'] as string) || new Date().toISOString().split('T')[0],
       createdAt: (row['created_at'] as string) || new Date().toISOString(),
       updatedAt: (row['updated_at'] as string) || new Date().toISOString(),

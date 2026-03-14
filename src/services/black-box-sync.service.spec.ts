@@ -136,4 +136,49 @@ describe('BlackBoxSyncService', () => {
       })
     );
   });
+
+  it('should map focus_meta from database row into focusMeta', () => {
+    const mapRowToEntry = (service as unknown as {
+      mapRowToEntry: (row: Record<string, unknown>) => { focusMeta?: unknown };
+    }).mapRowToEntry.bind(service);
+
+    const mapped = mapRowToEntry({
+      id: 'entry-1',
+      project_id: null,
+      user_id: 'user-1',
+      content: 'inline detail',
+      focus_meta: {
+        source: 'focus-console-inline',
+        sessionId: 'session-1',
+        title: 'Inline task',
+        detail: 'inline detail',
+        lane: 'backup',
+        expectedMinutes: 20,
+        waitMinutes: 10,
+        cognitiveLoad: 'low',
+        dockEntryId: 'dock-entry-1',
+      },
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    });
+
+    expect(mapped.focusMeta).toEqual({
+      source: 'focus-console-inline',
+      sessionId: 'session-1',
+      title: 'Inline task',
+      detail: 'inline detail',
+      lane: 'backup',
+      expectedMinutes: 20,
+      waitMinutes: 10,
+      cognitiveLoad: 'low',
+      dockEntryId: 'dock-entry-1',
+    });
+  });
 });

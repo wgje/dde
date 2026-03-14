@@ -5,7 +5,7 @@
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
 
-import { Injectable, inject, signal, NgZone, effect } from '@angular/core';
+import { Injectable, inject, signal, NgZone, effect, DestroyRef } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -58,6 +58,7 @@ export class GateService {
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly logger = inject(LoggerService);
   private readonly ngZone = inject(NgZone);
+  private readonly destroyRef = inject(DestroyRef);
 
   // 暴露状态给组件
   readonly state = gateState;
@@ -96,6 +97,9 @@ export class GateService {
   private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
   private reviewSyncTimerId: ReturnType<typeof setInterval> | null = null;
   private reviewSyncInFlight = false;
+  /** 【修复 L-21/M-08】matchMedia 监听器引用，用于销毁时移除 */
+  private reducedMotionMediaQuery: MediaQueryList | null = null;
+  private reducedMotionHandler: ((e: MediaQueryListEvent) => void) | null = null;
 
   /**
    * 检测用户是否启用了减少动画（prefers-reduced-motion）
@@ -114,6 +118,17 @@ export class GateService {
   constructor() {
     this.setupReducedMotionListener();
     this.setupLivePendingEntrySync();
+
+    // 【修复 M-13】DestroyRef 清理：停止 reviewSync 定时器和移除 matchMedia 监听器
+    this.destroyRef.onDestroy(() => {
+      this.stopReviewingRemoteSync();
+      this.clearAnimationTimeout();
+      if (this.reducedMotionMediaQuery && this.reducedMotionHandler) {
+        this.reducedMotionMediaQuery.removeEventListener('change', this.reducedMotionHandler);
+        this.reducedMotionMediaQuery = null;
+        this.reducedMotionHandler = null;
+      }
+    });
   }
 
   private setupLivePendingEntrySync(): void {
@@ -241,7 +256,9 @@ export class GateService {
 
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-    mediaQuery.addEventListener('change', (e) => {
+    // 【修复 L-21/M-08】存储 mediaQuery 和 handler 引用，以便 DestroyRef 清理
+    this.reducedMotionMediaQuery = mediaQuery;
+    this.reducedMotionHandler = (e: MediaQueryListEvent) => {
       this.prefersReducedMotionSignal.set(e.matches);
       this.logger.debug('Gate', `prefers-reduced-motion changed to: ${e.matches}`);
 
@@ -251,7 +268,9 @@ export class GateService {
         this.actionInFlight = null;
         this.clearAnimationTimeout();
       }
-    });
+    };
+
+    mediaQuery.addEventListener('change', this.reducedMotionHandler);
   }
 
   /**
@@ -345,7 +364,8 @@ export class GateService {
       this.startActionTransition('heave_read');
     }
 
-    return success(undefined);
+    // 【修复 P2-01】传播内部操作结果，而非恒返 success
+    return result.ok ? success(undefined) : result;
   }
 
   /** 标记当前条目为完成 */
@@ -360,7 +380,8 @@ export class GateService {
       this.startActionTransition('heavy_drop');
     }
 
-    return success(undefined);
+    // 【修复 P2-01】传播内部操作结果
+    return result.ok ? success(undefined) : result;
   }
 
   /**
@@ -390,7 +411,7 @@ export class GateService {
       this.startActionTransition('heave_read');
     }
 
-    return success(undefined);
+    return result.ok ? success(undefined) : result;
   }
 
   /**
@@ -435,12 +456,14 @@ export class GateService {
 
   /** 已读抛掷动画完成回调 */
   onHeaveReadComplete(): void {
+    // 【修复 P2-02】修正逻辑运算符：reducedMotion 启用时应放行而非拦截
     if (this.cardAnimation() !== 'heave_read' && !this.prefersReducedMotion) return;
     this.finalizeActionTransition('heave_read');
   }
 
   /** 完成重落动画完成回调 */
   onHeavyDropComplete(): void {
+    // 【修复 P2-02】同上
     if (this.cardAnimation() !== 'heavy_drop' && !this.prefersReducedMotion) return;
     this.finalizeActionTransition('heavy_drop');
   }

@@ -69,6 +69,8 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private legacyInitialLoadTimer: ReturnType<typeof setTimeout> | null = null;
   /** 远端拉取延迟定时器（避免首屏请求竞争） */
   private remoteStartupPullTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 【修复 P3-07】版本号保证只有最新 pull 的结果可触发 gate check */
+  private gateCheckVersion = 0;
 
   // 计算属性 - 决定各组件是否可见
   readonly isGateVisible = computed(() => 
@@ -153,13 +155,15 @@ export class FocusModeComponent implements OnInit, OnDestroy {
    * 【修复 2026-02-14】本地检查后延迟触发后台拉取，防止 gate 状态长期不同步
    */
   private async initializeLocalGateCheck(): Promise<void> {
+    // 【修复 P3-07】每次初始化递增版本号
+    const version = ++this.gateCheckVersion;
     try {
       await this.blackBoxSyncService.loadFromLocal();
-      this.checkGateOnStartup();
+      if (version === this.gateCheckVersion) this.checkGateOnStartup();
     } catch (error) {
       this.logger.warn('FocusMode', '本地黑匣子加载失败，降级继续 gate 检查',
         error instanceof Error ? error.message : String(error));
-      this.checkGateOnStartup();
+      if (version === this.gateCheckVersion) this.checkGateOnStartup();
     }
 
     // 【性能优化 2026-02-18】延迟远端拉取，避免与主数据加载竞争首屏带宽
@@ -167,7 +171,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     this.remoteStartupPullTimer = setTimeout(() => {
       this.remoteStartupPullTimer = null;
       this.blackBoxSyncService.pullChanges({ reason: 'startup' }).then(() => {
-        this.ngZone.run(() => this.checkGateOnStartup());
+        // 【修复 P3-07】只有版本号匹配才更新 gate
+        if (version === this.gateCheckVersion) {
+          this.ngZone.run(() => this.checkGateOnStartup());
+        }
       }).catch(pullError => {
         this.logger.warn('FocusMode', '后台拉取失败（throttled）',
           pullError instanceof Error ? pullError.message : String(pullError));

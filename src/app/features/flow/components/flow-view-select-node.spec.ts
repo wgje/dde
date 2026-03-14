@@ -273,4 +273,88 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
       expect(warnCalls).toHaveLength(0);
     });
   });
+
+  describe('centerOnNode 命令缓存链', () => {
+    interface CenterCommandPayload {
+      taskId: string;
+      openDetail: boolean;
+    }
+
+    let pendingCenterCommand: CenterCommandPayload | null;
+    let centerNodeCommand: CenterCommandPayload | null;
+    let executedCommands: CenterCommandPayload[];
+    let clearCenterCommandCalls: number;
+
+    const flowCommand = {
+      centerOnNode(taskId: string, openDetail: boolean = true): void {
+        const payload = { taskId, openDetail };
+        centerNodeCommand = payload;
+        pendingCenterCommand = payload;
+      },
+      consumePendingCenterCommand(): CenterCommandPayload | null {
+        const command = pendingCenterCommand;
+        pendingCenterCommand = null;
+        return command;
+      },
+      clearCenterCommand(): void {
+        centerNodeCommand = null;
+        clearCenterCommandCalls += 1;
+      },
+    };
+
+    const executeCenterOnNode = (taskId: string, openDetail: boolean): void => {
+      executedCommands.push({ taskId, openDetail });
+    };
+
+    const centerOnNode = (taskId: string, openDetail: boolean = true): void => {
+      flowCommand.centerOnNode(taskId, openDetail);
+    };
+
+    const runCenterCommandEffect = (diagramInitialized: boolean): void => {
+      const command = centerNodeCommand;
+      if (!command || !diagramInitialized) return;
+      executeCenterOnNode(command.taskId, command.openDetail);
+      flowCommand.clearCenterCommand();
+    };
+
+    const onDiagramInitialized = (): void => {
+      const pendingCommand = flowCommand.consumePendingCenterCommand();
+      if (!pendingCommand) return;
+      executeCenterOnNode(pendingCommand.taskId, pendingCommand.openDetail);
+      flowCommand.clearCenterCommand();
+    };
+
+    beforeEach(() => {
+      pendingCenterCommand = null;
+      centerNodeCommand = null;
+      executedCommands = [];
+      clearCenterCommandCalls = 0;
+    });
+
+    it('diagram 未 ready 时应该在初始化后补执行一次待处理命令', () => {
+      centerOnNode('task-buffered');
+
+      runCenterCommandEffect(false);
+      expect(executedCommands).toHaveLength(0);
+      expect(centerNodeCommand).toEqual({ taskId: 'task-buffered', openDetail: true });
+
+      onDiagramInitialized();
+
+      expect(executedCommands).toEqual([{ taskId: 'task-buffered', openDetail: true }]);
+      expect(clearCenterCommandCalls).toBe(1);
+      expect(centerNodeCommand).toBeNull();
+      expect(pendingCenterCommand).toBeNull();
+    });
+
+    it('diagram 已 ready 时应该通过命令 effect 立即执行', () => {
+      centerOnNode('task-immediate', false);
+
+      runCenterCommandEffect(true);
+
+      expect(executedCommands).toEqual([{ taskId: 'task-immediate', openDetail: false }]);
+      expect(clearCenterCommandCalls).toBe(1);
+      expect(centerNodeCommand).toBeNull();
+      expect(pendingCenterCommand).toEqual({ taskId: 'task-immediate', openDetail: false });
+    });
+  });
 });

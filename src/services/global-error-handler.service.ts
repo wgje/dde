@@ -100,7 +100,7 @@ export class GlobalErrorHandler implements ErrorHandler {
     // ResizeObserver 循环警告（浏览器内部，无需处理）
     { pattern: /ResizeObserver loop/i, severity: ErrorSeverity.SILENT },
     // 用户取消操作
-    { pattern: /abort|cancel|user.*cancel/i, severity: ErrorSeverity.SILENT },
+    { pattern: /\bAbortError\b|user.*cancel|request.*abort|fetch.*abort/i, severity: ErrorSeverity.SILENT },
     // 非活动标签页的更新
     { pattern: /not active|inactive tab/i, severity: ErrorSeverity.SILENT },
     // 模态框加载超时（已由 ModalLoaderService 处理，静默记录）
@@ -216,6 +216,13 @@ export class GlobalErrorHandler implements ErrorHandler {
     // 典型错误：Cannot read properties of undefined (reading 'factory'/'onDestroy')
     if (this.isAngularDIVersionSkewError(errorMessage, error)) {
       this.handleChunkLoadError(`[DI-version-skew] ${errorMessage}`);
+      return;
+    }
+
+    // 特殊处理：Angular 触发运行时 JIT 编译（常见于 SW 缓存混用导致的版本偏移）
+    // 典型报错：JIT compilation failed for component class ... / getCompilerFacade
+    if (this.isAngularJITVersionSkewError(errorMessage, error)) {
+      this.handleChunkLoadError(`[JIT-version-skew] ${errorMessage}`);
       return;
     }
 
@@ -347,24 +354,82 @@ export class GlobalErrorHandler implements ErrorHandler {
   }
 
   /**
+   * 检测 Angular 运行时 JIT 编译错误（通常由缓存版本偏移触发）
+   * 典型关键字：
+   * - JIT compilation failed for component class
+   * - getCompilerFacade
+   * - needs to be compiled using the JIT compiler
+   */
+  private isAngularJITVersionSkewError(message: string, error: unknown): boolean {
+    // 先用 message 快速匹配
+    if (!/JIT compilation failed for component class|getCompilerFacade|needs to be compiled using the JIT compiler/i.test(message)) {
+      return false;
+    }
+
+    // 再用堆栈确认是 Angular core 链路，避免误判业务异常
+    const stack = error instanceof Error ? (error.stack ?? '') : '';
+    if (!stack) {
+      // 某些运行时无法提供 stack，只要 message 命中也按版本偏移处理
+      return true;
+    }
+
+    return /core\.mjs|getCompilerFacade|ɵɵngDeclareComponent|ngDeclareComponent/i.test(stack);
+  }
+
+  /**
    * 处理 Chunk 加载失败
-   * 尝试刷新页面，但防止死循环
+   * 尝试强制清除缓存后刷新页面，防止 SW 继续返回旧 chunk
    */
   private handleChunkLoadError(errorMessage: string): void {
     const KEY = 'chunk_load_error_reload_timestamp';
     const lastReload = parseInt(sessionStorage.getItem(KEY) || '0', 10);
     const now = Date.now();
 
-    // 如果 10 秒内已经刷新过，不再刷新，避免死循环
-    if (now - lastReload < 10000) {
+    // 如果 30 秒内已经尝试过清缓存刷新，不再刷新，避免死循环
+    if (now - lastReload < 30000) {
       this.logger.error('Chunk load error persisted after reload', { message: errorMessage });
       // 降级为 FATAL 错误，提示用户
-      this.handleFatalError('应用版本过旧或文件丢失，请尝试手动刷新页面', undefined, new Error(errorMessage));
+      this.handleFatalError('应用版本过旧或文件丢失，请尝试清除缓存后刷新页面', undefined, new Error(errorMessage));
       return;
     }
 
-    this.logger.warn('Chunk load error detected, reloading page...', { message: errorMessage });
+    this.logger.warn('Chunk load error detected, clearing cache and reloading...', { message: errorMessage });
     sessionStorage.setItem(KEY, now.toString());
+
+    // 优先走全局“强制清缓存并刷新”工具，避免继续命中旧 SW/HTTP 缓存
+    type ForceClearCacheWindow = Window & {
+      __NANOFLOW_FORCE_CLEAR_CACHE__?: () => Promise<void> | void;
+    };
+    const forceClearCache = (window as ForceClearCacheWindow).__NANOFLOW_FORCE_CLEAR_CACHE__;
+
+    if (typeof forceClearCache === 'function') {
+      void Promise.resolve(forceClearCache()).catch(() => {
+        // 如果全局工具失败，使用回退方案
+        void this.forceClearCacheFallback();
+      });
+      return;
+    }
+
+    // 全局工具不可用时使用回退方案
+    void this.forceClearCacheFallback();
+  }
+
+  /**
+   * 回退缓存清理逻辑（当全局工具不可用时）
+   */
+  private async forceClearCacheFallback(): Promise<void> {
+    try {
+      if ('caches' in window) {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map(name => caches.delete(name)));
+      }
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map(reg => reg.unregister()));
+      }
+    } catch (e) {
+      this.logger.error('Force clear cache fallback failed', e);
+    }
     window.location.reload();
   }
 
@@ -538,21 +603,26 @@ export class GlobalErrorHandler implements ErrorHandler {
 }
 
 /**
- * 错误边界装饰器
- * 用于包装异步方法，自动捕获并处理错误
- * 
+ * Method decorator that wraps async methods with automatic error reporting.
+ *
+ * **Important:** The decorated class **must** have a property named exactly
+ * `globalErrorHandler` of type {@link GlobalErrorHandler}. The decorator
+ * accesses `this.globalErrorHandler` at runtime to report caught errors.
+ * If the property is missing or named differently, errors will fall back to
+ * `console.error` instead of the structured error pipeline.
+ *
  * @example
  * class MyService {
- *   @CatchError(ErrorSeverity.NOTIFY)
- *   async loadData() {
- *     // ...
- *   }
+ *   constructor(private globalErrorHandler: GlobalErrorHandler) {}
+ *
+ *   \@CatchError(ErrorSeverity.NOTIFY)
+ *   async loadData() { ... }
  * }
  */
 export function CatchError(severity: ErrorSeverity = ErrorSeverity.NOTIFY, customMessage?: string) {
   return function (_target: unknown, propertyKey: string, descriptor: PropertyDescriptor) {
     const originalMethod = descriptor.value;
-    
+
     descriptor.value = async function (this: { globalErrorHandler?: GlobalErrorHandler }, ...args: unknown[]) {
       try {
         return await originalMethod.apply(this, args);

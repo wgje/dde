@@ -13,6 +13,7 @@ import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ModalService, type DeleteProjectData, type ConflictData, type LoginData } from './services/modal.service';
+import { WorkspaceModalCoordinatorService } from './services/workspace-modal-coordinator.service';
 import { DynamicModalService } from './services/dynamic-modal.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
@@ -52,6 +53,8 @@ import { FocusStartupProbeService } from './services/focus-startup-probe.service
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
 import { TaskStore } from './services/stores';
+import { DockEngineService } from './services/dock-engine.service';
+import { reloadViaForceClearCache } from './utils/force-clear-cache';
 
 function readTextInputValue(event: Event | string): string {
   if (typeof event === 'string') return event;
@@ -167,6 +170,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly modal = inject(ModalService);
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly dynamicModal = inject(DynamicModalService);
+  readonly modalCoord = inject(WorkspaceModalCoordinatorService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   readonly supabaseClient = inject(SupabaseClientService);
   private readonly simpleSync = inject(SimpleSyncService);
@@ -185,7 +189,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
-  isSidebarOpen = signal(true);
+  /** 代理 UiStateService.sidebarOpen，所有 .set()/.update() 调用均作用于服务层信号 */
+  get isSidebarOpen() { return this.uiState.sidebarOpen; }
   isFilterOpen = signal(false);
   readonly spotlightTriggerComponent = signal<Type<unknown> | null>(null);
   readonly blackBoxRecorderComponent = signal<Type<unknown> | null>(null);
@@ -213,6 +218,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     const notAuthLoading = !this.authCoord.isAuthLoading();
     return sessionCheckDone && hasUser && notAuthLoading;
   });
+
+  private readonly dockEngine = inject(DockEngineService);
+  /** 专注虚化激活：专注模式开启且虚化开关打开时，对背景内容施加模糊 */
+  readonly focusBlurActive = computed(
+    () => this.dockEngine.focusMode() && this.dockEngine.focusScrimOn(),
+  );
 
   /** FocusMode 用户明确交互信号（点击/按键后激活） */
   readonly focusModeIntentActivated = signal(!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1);
@@ -245,21 +256,17 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     return this.startupTier.isTierReady('p2') || hasSyncIssue;
   });
   
-  /** 模态框加载中状态（按类型跟踪，提供按钮级别反馈） */
-  readonly modalLoading = signal<Record<string, boolean>>({});
-  
+  /** 模态框加载中状态（委托到 modalCoord） */
+  readonly modalLoading = this.modalCoord.modalLoading;
+
   /** 检查指定类型的模态框是否正在加载 */
   isModalLoading(type: string): boolean {
-    return this.modalLoading()[type] ?? false;
+    return this.modalCoord.isModalLoading(type);
   }
-  
-  private setModalLoading(type: string, loading: boolean): void {
-    this.modalLoading.update(state => ({ ...state, [type]: loading }));
-  }
-  
-  /** 存储失败逃生数据 */
-  storageEscapeData = signal<StorageEscapeData | null>(null);
-  showStorageEscapeModal = signal(false);
+
+  /** 存储失败逃生数据（委托到 modalCoord） */
+  get storageEscapeData() { return this.modalCoord.storageEscapeData; }
+  get showStorageEscapeModal() { return this.modalCoord.showStorageEscapeModal; }
   
   // 手机端滑动切换状态
   private touchStartX = 0;
@@ -505,6 +512,21 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     this.setupStorageFailureHandler();
     this.setupBeforeUnloadHandler();
 
+    // Wire modal coordinator callbacks so the service can call back into
+    // component-level methods without creating a circular dependency.
+    this.modalCoord.initCallbacks({
+      signOut: () => this.signOut(),
+      updateTheme: (theme: ThemeType) => this.updateTheme(theme),
+      handleImportComplete: (project: Project) => void this.handleImportComplete(project),
+      handleLoginFromModal: (data) => void this.handleLoginFromModal(data),
+      handleSignupFromModal: (data) => void this.handleSignupFromModal(data),
+      handleResetPasswordFromModal: (email) => void this.handleResetPasswordFromModal(email),
+      handleLocalModeFromModal: () => this.handleLocalModeFromModal(),
+      confirmCreateProject: (name, desc) => void this.confirmCreateProject(name, desc),
+      handleMigrationComplete: () => this.handleMigrationComplete(),
+      closeMigrationModal: () => this.closeMigrationModal(),
+    });
+
     // ── Service Initialization Order ──────────────────────────────────────
     // The six startup services are initialized in a strict sequence to
     // respect dependency constraints and avoid competing for resources.
@@ -731,10 +753,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       if (loginRequested) {
         // 保存 returnUrl（closeByType 会清除 ModalService 数据）
         const loginData = this.modal.getData('login') as LoginData | undefined;
-        this._loginReturnUrl = loginData?.returnUrl ?? null;
+        this.modalCoord.loginReturnUrl = loginData?.returnUrl ?? null;
         this.modal.closeByType('login'); // 清除旧状态
         // 防止重复打开（当前登录模态框已在显示中）
-        if (!this._loginModalRef) {
+        if (!this.modalCoord.loginModalRef) {
           void this.openLoginModal();
         }
       }
@@ -1181,18 +1203,18 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
         projects: this.projectState.projects(), // 附加当前项目数据
         timestamp: new Date().toISOString()
       };
-      
-      this.storageEscapeData.set(escapeData);
+
+      this.modalCoord.storageEscapeData.set(escapeData);
       // 使用命令式方式打开存储逃生模态框
-      void this.openStorageEscapeModalImperative();
+      void this.modalCoord.openStorageEscapeModalImperative();
     });
   }
-  
+
   /**
    * 关闭存储逃生模态框
    */
   closeStorageEscapeModal(): void {
-    this.showStorageEscapeModal.set(false);
+    this.modalCoord.closeStorageEscapeModal();
   }
   
   /**
@@ -1263,82 +1285,29 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       takeUntilDestroyed(this.destroyRef)
     ).subscribe(({ localProject, remoteProject, projectId }) => {
       // 存储冲突数据供解决方法使用
-      this._pendingConflict = { localProject, remoteProject, projectId };
-      void this.openConflictModal({ localProject, remoteProject, projectId });
+      this.modalCoord.setPendingConflict({ localProject, remoteProject, projectId });
+      void this.modalCoord.openConflictModal({ localProject, remoteProject, projectId });
     });
   }
-  
-  /** 登录模态框引用（用于成功后关闭和动态更新 inputs） */
-  private _loginModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
-  /** 登录后的返回 URL（在 effect 清除 ModalService 状态前保存） */
-  private _loginReturnUrl: string | null = null;
 
-  /** 临时存储冲突数据 */
-  private _pendingConflict: ConflictData | null = null;
-  /** 冲突模态框引用 */
-  private _conflictModalRef: import('./services/dynamic-modal.service').ModalRef | null = null;
-
-  /**
-   * 打开冲突解决模态框（命令式）
-   */
-  private async openConflictModal(data: ConflictData): Promise<void> {
-    try {
-      const component = await this.modalLoader.loadConflictModal();
-      this._conflictModalRef = this.dynamicModal.open(component, {
-        inputs: { conflictData: data },
-        outputs: {
-          resolveLocal: () => this.resolveConflictLocal(),
-          resolveRemote: () => this.resolveConflictRemote(),
-          resolveMerge: () => this.resolveConflictMerge(),
-          cancel: () => this.cancelConflictResolution()
-        },
-        closeOnBackdropClick: false,
-        closeOnEscape: false
-      });
-    } catch {
-      this.toast.error('冲突解决组件加载失败', '请刷新页面重试');
-    }
-  }
-  
   // 解决冲突：使用本地版本
   async resolveConflictLocal() {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'local');
-    }
-    this._conflictModalRef?.close({ choice: 'local' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
+    await this.modalCoord.resolveConflictLocal();
   }
-  
+
   // 解决冲突：使用远程版本
   async resolveConflictRemote() {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'remote');
-    }
-    this._conflictModalRef?.close({ choice: 'remote' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
+    await this.modalCoord.resolveConflictRemote();
   }
-  
+
   // 解决冲突：智能合并
   async resolveConflictMerge() {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'merge');
-    }
-    this._conflictModalRef?.close({ choice: 'merge' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
+    await this.modalCoord.resolveConflictMerge();
   }
-  
+
   // 取消冲突解决（稍后处理）
   cancelConflictResolution() {
-    this._conflictModalRef?.close({ choice: 'cancel' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
-    this.toast.info('冲突待解决，下次同步时会再次提示');
+    this.modalCoord.cancelConflictResolution();
   }
   
   private setupSwUpdateListener() {
@@ -1358,7 +1327,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
               duration: 0, // 不自动关闭
               action: {
                 label: '立即刷新',
-                onClick: () => window.location.reload()
+                onClick: () => reloadViaForceClearCache()
               }
             }
           );
@@ -1526,201 +1495,18 @@ async signOut() {
   async confirmDeleteProject(projectId: string, projectName: string, event: Event) { await this.projectCoord.confirmDeleteProject(projectId, projectName, event); }
   async handleImportComplete(project: Project) { await this.projectCoord.handleImportComplete(project); }
   
-  /**
-   * 打开设置模态框（命令式加载，绕过 @defer 限制）
-   * 
-   * 修复：@defer when 是一次性触发器，加载失败后永远无法重试
-   * 改用 ModalLoaderService 提供：重试、超时保护、缓存、按钮反馈
-   */
-  async openSettings(): Promise<void> {
-    if (this.isModalLoading('settings')) return;
-    this.setModalLoading('settings', true);
-    try {
-      const component = await this.modalLoader.loadSettingsModal();
-      this.dynamicModal.open(component, {
-        inputs: {
-          sessionEmail: this.authCoord.sessionEmail(),
-          projects: this.projects()
-        },
-        outputs: {
-          close: () => this.closeSettings(),
-          signOut: () => this.signOut(),
-          themeChange: (theme: unknown) => this.updateTheme(theme as ThemeType),
-          openDashboard: () => this.openDashboardFromSettings(),
-          importComplete: (project: unknown) => this.handleImportComplete(project as Project)
-        }
-      });
-    } catch {
-      this.toast.error('设置面板加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('settings', false);
-    }
-  }
+  // ========== Modal methods (delegated to WorkspaceModalCoordinatorService) ==========
 
-  closeSettings() {
-    this.dynamicModal.close();
-    this.authCoord.isReloginMode.set(false);
-  }
-
-  /**
-   * 从设置页打开仪表盘
-   */
-  async openDashboardFromSettings(): Promise<void> {
-    this.dynamicModal.close(); // 先关闭设置
-    await this.openDashboard();
-  }
-  
-  /**
-   * 打开仪表盘模态框
-   */
-  async openDashboard(): Promise<void> {
-    if (this.isModalLoading('dashboard')) return;
-    this.setModalLoading('dashboard', true);
-    try {
-      const component = await this.modalLoader.loadDashboardModal();
-      this.dynamicModal.open(component, {
-        outputs: {
-          close: () => this.dynamicModal.close(),
-          openConflictCenter: () => this.openConflictCenterFromDashboard()
-        }
-      });
-    } catch {
-      this.toast.error('仪表盘加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('dashboard', false);
-    }
-  }
-  
-  openConflictCenterFromDashboard() {
-    this.dynamicModal.close(); // 先关闭仪表盘
-    this.toast.info('冲突解决中心', '请从项目列表中选择有冲突的项目进行处理');
-  }
-
-  // ========== 命令式模态框打开方法（替代 @defer 模板方案）==========
-  
-  /**
-   * 打开登录模态框
-   */
-  async openLoginModal(): Promise<void> {
-    if (this.isModalLoading('login')) return;
-    this.setModalLoading('login', true);
-    try {
-      const component = await this.modalLoader.loadLoginModal();
-      this._loginModalRef = this.dynamicModal.open(component, {
-        inputs: {
-          authError: this.authCoord.authError(),
-          isLoading: this.authCoord.isAuthLoading(),
-          resetPasswordSent: this.authCoord.resetPasswordSent()
-        },
-        outputs: {
-          close: () => { this._loginModalRef = null; },
-          login: (data: unknown) => this.handleLoginFromModal(data as { email: string; password: string }),
-          signup: (data: unknown) => this.handleSignupFromModal(data as { email: string; password: string; confirmPassword: string }),
-          resetPassword: (email: unknown) => this.handleResetPasswordFromModal(email as string),
-          localMode: () => this.handleLocalModeFromModal()
-        },
-        closeOnBackdropClick: false,
-        closeOnEscape: false
-      });
-    } catch {
-      this.toast.error('登录组件加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('login', false);
-    }
-  }
-  
-  /**
-   * 打开回收站模态框
-   */
-  async openTrashModal(): Promise<void> {
-    if (this.isModalLoading('trash')) return;
-    this.setModalLoading('trash', true);
-    try {
-      const component = await this.modalLoader.loadTrashModal();
-      this.dynamicModal.open(component, {
-        inputs: { show: true },
-        outputs: {
-          close: () => this.dynamicModal.close()
-        }
-      });
-    } catch {
-      this.toast.error('回收站加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('trash', false);
-    }
-  }
-  
-  /**
-   * 打开配置帮助模态框
-   */
-  async openConfigHelpModal(): Promise<void> {
-    if (this.isModalLoading('configHelp')) return;
-    this.setModalLoading('configHelp', true);
-    try {
-      const component = await this.modalLoader.loadConfigHelpModal();
-      this.dynamicModal.open(component, {
-        outputs: {
-          close: () => this.dynamicModal.close()
-        }
-      });
-    } catch {
-      this.toast.error('配置帮助加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('configHelp', false);
-    }
-  }
-  
-  /**
-   * 打开新建项目模态框
-   */
-  async openNewProjectModal(): Promise<void> {
-    if (this.isModalLoading('newProject')) return;
-    this.setModalLoading('newProject', true);
-    try {
-      const component = await this.modalLoader.loadNewProjectModal();
-      this.dynamicModal.open(component, {
-        outputs: {
-          close: () => this.dynamicModal.close(),
-          confirm: (data: unknown) => {
-            const { name, description } = data as { name: string; description: string };
-            this.dynamicModal.close();
-            void this.confirmCreateProject(name, description);
-          }
-        }
-      });
-    } catch {
-      this.toast.error('新建项目组件加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('newProject', false);
-    }
-  }
-  
-  /**
-   * 打开迁移模态框
-   */
-  async openMigrationModal(): Promise<void> {
-    if (this.isModalLoading('migration')) return;
-    this.setModalLoading('migration', true);
-    try {
-      const component = await this.modalLoader.loadMigrationModal();
-      this.dynamicModal.open(component, {
-        outputs: {
-          close: () => { this.dynamicModal.close(); this.closeMigrationModal(); },
-          migrated: () => { this.dynamicModal.close(); this.handleMigrationComplete(); }
-        },
-        closeOnBackdropClick: false,
-        closeOnEscape: false
-      });
-    } catch {
-      this.toast.error('迁移组件加载失败', '请检查网络连接后重试');
-    } finally {
-      this.setModalLoading('migration', false);
-    }
-  }
-  
-  /**
-   * 打开错误恢复模态框
-   */
+  async openSettings(): Promise<void> { await this.modalCoord.openSettings(); }
+  closeSettings() { this.modalCoord.closeSettings(); }
+  async openDashboardFromSettings(): Promise<void> { await this.modalCoord.openDashboardFromSettings(); }
+  async openDashboard(): Promise<void> { await this.modalCoord.openDashboard(); }
+  openConflictCenterFromDashboard() { this.modalCoord.openConflictCenterFromDashboard(); }
+  async openLoginModal(): Promise<void> { await this.modalCoord.openLoginModal(); }
+  async openTrashModal(): Promise<void> { await this.modalCoord.openTrashModal(); }
+  async openConfigHelpModal(): Promise<void> { await this.modalCoord.openConfigHelpModal(); }
+  async openNewProjectModal(): Promise<void> { await this.modalCoord.openNewProjectModal(); }
+  async openMigrationModal(): Promise<void> { await this.modalCoord.openMigrationModal(); }
   async openErrorRecoveryModal(error: {
     title: string;
     message: string;
@@ -1729,63 +1515,8 @@ async signOut() {
     defaultOptionId?: string;
     autoSelectIn?: number | null;
     resolve: (result: { optionId: string }) => void;
-  }): Promise<void> {
-    try {
-      const component = await this.modalLoader.loadErrorRecoveryModal();
-      this.dynamicModal.open(component, {
-        inputs: {
-          title: error.title,
-          message: error.message,
-          details: error.details,
-          options: error.options,
-          defaultOptionId: error.defaultOptionId,
-          autoSelectIn: error.autoSelectIn ?? null
-        },
-        outputs: {
-          select: (event: unknown) => {
-            error.resolve(event as { optionId: string });
-            this.dynamicModal.close();
-          },
-          close: () => {
-            this.errorHandler.dismissRecoveryDialog();
-            this.dynamicModal.close();
-          }
-        },
-        closeOnBackdropClick: false,
-        closeOnEscape: false
-      });
-    } catch {
-      this.toast.error('错误恢复组件加载失败', '请刷新页面重试');
-      this.errorHandler.dismissRecoveryDialog();
-    }
-  }
-  
-  /**
-   * 打开存储逃生模态框
-   */
-  async openStorageEscapeModalImperative(): Promise<void> {
-    const data = this.storageEscapeData();
-    if (!data) return;
-    try {
-      const component = await this.modalLoader.loadStorageEscapeModal();
-      this.dynamicModal.open(component, {
-        inputs: {
-          show: true,
-          data: data
-        },
-        outputs: {
-          close: () => {
-            this.closeStorageEscapeModal();
-            this.dynamicModal.close();
-          }
-        },
-        closeOnBackdropClick: false,
-        closeOnEscape: false
-      });
-    } catch {
-      this.toast.error('存储逃生组件加载失败', '请刷新页面重试');
-    }
-  }
+  }): Promise<void> { await this.modalCoord.openErrorRecoveryModal(error); }
+  async openStorageEscapeModalImperative(): Promise<void> { await this.modalCoord.openStorageEscapeModalImperative(); }
 
   updateLayoutDirection(e: Event) {
     const val = (e.target as HTMLSelectElement).value as 'ltr' | 'rtl';
@@ -1808,66 +1539,49 @@ async signOut() {
   
   // 适配 LoginModalComponent 事件 — 委托到 authCoord
   async handleLoginFromModal(data: { email: string; password: string }) {
-    this._loginModalRef?.componentRef.setInput('isLoading', true);
-    this._loginModalRef?.componentRef.setInput('authError', null);
+    this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', true);
+    this.modalCoord.loginModalRef?.componentRef.setInput('authError', null);
 
     await this.authCoord.handleLoginFromModal(data);
 
     if (!this.authCoord.authError()) {
       // 登录成功：关闭模态框并导航
-      this.closeLoginModal();
-      this.navigateAfterLogin();
+      this.modalCoord.closeLoginModal();
+      this.modalCoord.navigateAfterLogin();
     } else {
       // 登录失败：回显错误并恢复按钮
-      this._loginModalRef?.componentRef.setInput('isLoading', false);
-      this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+      this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', false);
+      this.modalCoord.loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
     }
   }
   async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }) {
-    this._loginModalRef?.componentRef.setInput('isLoading', true);
-    this._loginModalRef?.componentRef.setInput('authError', null);
+    this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', true);
+    this.modalCoord.loginModalRef?.componentRef.setInput('authError', null);
 
     await this.authCoord.handleSignupFromModal(data);
 
     if (!this.authCoord.authError() && this.currentUserId()) {
       // 注册成功（无需确认）：关闭模态框
-      this.closeLoginModal();
+      this.modalCoord.closeLoginModal();
     } else {
       // 注册失败或需要邮件确认：回显状态
-      this._loginModalRef?.componentRef.setInput('isLoading', false);
-      this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+      this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', false);
+      this.modalCoord.loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
     }
   }
   async handleResetPasswordFromModal(email: string) {
-    this._loginModalRef?.componentRef.setInput('isLoading', true);
-    this._loginModalRef?.componentRef.setInput('authError', null);
+    this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', true);
+    this.modalCoord.loginModalRef?.componentRef.setInput('authError', null);
 
     await this.authCoord.handleResetPasswordFromModal(email);
 
-    this._loginModalRef?.componentRef.setInput('isLoading', false);
-    this._loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
-    this._loginModalRef?.componentRef.setInput('resetPasswordSent', this.authCoord.resetPasswordSent());
+    this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', false);
+    this.modalCoord.loginModalRef?.componentRef.setInput('authError', this.authCoord.authError());
+    this.modalCoord.loginModalRef?.componentRef.setInput('resetPasswordSent', this.authCoord.resetPasswordSent());
   }
   handleLocalModeFromModal() {
     this.authCoord.handleLocalModeFromModal();
-    this.closeLoginModal();
-  }
-
-  /** 关闭登录模态框并清理引用 */
-  private closeLoginModal(): void {
-    if (this._loginModalRef) {
-      this._loginModalRef.close();
-      this._loginModalRef = null;
-    }
-  }
-
-  /** 登录成功后导航到 returnUrl（由 auth guard 保存） */
-  private navigateAfterLogin(): void {
-    const returnUrl = this._loginReturnUrl;
-    this._loginReturnUrl = null;
-    if (returnUrl && returnUrl !== '/') {
-      void this.router.navigateByUrl(returnUrl);
-    }
+    this.modalCoord.closeLoginModal();
   }
 
   handleMigrationComplete() {

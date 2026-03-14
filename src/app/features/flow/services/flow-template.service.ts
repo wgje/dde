@@ -292,6 +292,38 @@ export class FlowTemplateService {
       ),
       
       // 边缘连接手柄
+      $(go.Panel, "Auto",
+        {
+          alignment: new go.Spot(1, 0, -6, 6),
+          visible: false,
+        },
+        new go.Binding("visible", "isDocked"),
+        $(go.Shape, "RoundedRectangle", {
+          fill: "#e0f2fe",
+          stroke: "#0284c7",
+          strokeWidth: 1,
+          parameter1: 5,
+        }),
+        $(go.TextBlock, "入坞", {
+          font: "600 8px \"LXGW WenKai Screen\", sans-serif",
+          stroke: "#0369a1",
+          margin: new go.Margin(2, 5, 2, 5),
+        }),
+      ),
+
+      $(go.Shape, "RoundedRectangle", {
+        alignment: go.Spot.Center,
+        width: isMobile ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH + 10 : GOJS_CONFIG.ASSIGNED_NODE_WIDTH + 10,
+        height: 88,
+        parameter1: 12,
+        fill: null,
+        stroke: "#6366f1",
+        strokeWidth: 2,
+        opacity: 0.9,
+        visible: false,
+      },
+      new go.Binding("visible", "isDockFocused")),
+
       makePort("T", go.Spot.Top),
       makePort("B", go.Spot.Bottom),
       makePort("L", go.Spot.Left),

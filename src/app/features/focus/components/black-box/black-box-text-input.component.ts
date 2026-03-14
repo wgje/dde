@@ -4,13 +4,12 @@
  * 降级方案：当浏览器不支持录音时使用
  */
 
-import { 
-  Component, 
-  ChangeDetectionStrategy, 
-  Output,
-  EventEmitter,
+import {
+  Component,
+  ChangeDetectionStrategy,
   signal,
-  Input
+  input,
+  output,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -22,7 +21,7 @@ import { FormsModule } from '@angular/forms';
   template: `
     <div class="black-box-text-input">
       <!-- 不支持录音提示 -->
-      @if (showFallbackHint) {
+      @if (showFallbackHint()) {
         <div class="mb-2 px-2 py-1.5 bg-stone-100 dark:bg-stone-700 
                     rounded-lg text-xs text-stone-500 dark:text-stone-400
                     flex items-center gap-2">
@@ -43,6 +42,7 @@ import { FormsModule } from '@angular/forms';
           [class]="'block w-full px-2 py-1.5 rounded-lg text-sm border-2 transition-colors duration-200 focus:outline-none focus:border-dashed focus:border-amber-400 dark:focus:border-amber-500 resize-none ' + textareaToneClass()"
           rows="2"
           placeholder="记录你的想法..."
+          maxlength="10000"
           (keydown.enter)="onEnterKey($event)"
           (touchstart)="isPressed.set(true)"
           (touchend)="isPressed.set(false)"
@@ -74,11 +74,11 @@ import { FormsModule } from '@angular/forms';
 })
 export class BlackBoxTextInputComponent {
   inputText = '';
-  @Input() showFallbackHint = true;
-  @Input() appearance: 'default' | 'obsidian' = 'default';
+  readonly showFallbackHint = input(true);
+  readonly appearance = input<'default' | 'obsidian'>('default');
   isPressed = signal(false);
-  
-  @Output() submitted = new EventEmitter<string>();
+
+  readonly submitted = output<string>();
   
   /**
    * 处理 Enter 键
@@ -102,7 +102,7 @@ export class BlackBoxTextInputComponent {
   }
 
   textareaToneClass(): string {
-    if (this.appearance === 'obsidian') {
+    if (this.appearance() === 'obsidian') {
       return `bg-stone-900/70 border-stone-700/80 text-stone-200
               placeholder:text-stone-500`;
     }
@@ -113,7 +113,7 @@ export class BlackBoxTextInputComponent {
   submitBtnClass(): string {
     const hasContent = !!this.inputText.trim();
     
-    if (this.appearance === 'obsidian') {
+    if (this.appearance() === 'obsidian') {
       if (hasContent) {
         return `bg-amber-500/5 text-amber-500/20 border-stone-700/30
                 hover:bg-amber-500 hover:text-white hover:border-amber-500 hover:opacity-100

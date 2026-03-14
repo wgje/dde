@@ -86,14 +86,16 @@
 ```
 .github/
 ├── copilot-instructions.md          # 全局规则（432 行）
-├── instructions/                    # 分域规则（7 个文件）
+├── instructions/                    # 分域规则（9 个文件）
 │   ├── general.instructions.md      # 通用编码标准 → **/*
-│   ├── frontend.instructions.md     # Angular 19 规范 → src/**/*.ts,html,css
+│   ├── angular.instructions.md      # Angular 19 规范 → src/**/*.ts,html,scss,css
+│   ├── frontend.instructions.md     # 前端实现规范 → src/**/*.ts,html,scss,css
 │   ├── backend.instructions.md      # Supabase 规范 → supabase/**,**/api/**
 │   ├── testing.instructions.md      # 测试规范 → **/*.spec.ts,e2e/**
 │   ├── security.instructions.md     # 安全规范 → **/auth/**,supabase/**
 │   ├── git.instructions.md          # Git 工作流 → .git/**
-│   └── docs.instructions.md         # 文档规范 → **/*.md,docs/**
+│   ├── docs.instructions.md         # 文档规范 → **/*.md,docs/**
+│   └── task-implementation.instructions.md # 任务执行规范 → .copilot-tracking/**
 ├── agents/                          # 自定义代理（11 个）
 │   ├── planner.agent.md             # 规划师
 │   ├── architect.agent.md           # 架构师
@@ -106,20 +108,23 @@
 │   ├── doc-updater.agent.md         # 文档专家
 │   ├── build-error-resolver.agent.md# 构建修复专家
 │   └── database-reviewer.agent.md   # 数据库专家
-├── prompts/                         # 斜杠命令（13 个）
+├── prompts/                         # 斜杠命令（16 个）
 │   ├── plan.prompt.md               # /plan
-│   ├── design.prompt.md             # /design
 │   ├── implement.prompt.md          # /implement
-│   ├── tdd.prompt.md                # /tdd
 │   ├── code-review.prompt.md        # /code-review
 │   ├── security.prompt.md           # /security
 │   ├── build-fix.prompt.md          # /build-fix
 │   ├── e2e.prompt.md                # /e2e
 │   ├── refactor-clean.prompt.md     # /refactor-clean
-│   ├── docs.prompt.md               # /docs
-│   ├── verify.prompt.md             # /verify
-│   ├── checkpoint.prompt.md         # /checkpoint
-│   └── orchestrate.prompt.md        # /orchestrate
+│   ├── create-readme.prompt.md      # /create-readme
+│   ├── critical-thinking.prompt.md  # /critical-thinking
+│   ├── gem-documentation-writer.prompt.md # /gem-documentation-writer
+│   ├── gilfoyle.prompt.md           # /gilfoyle
+│   ├── research-technical-spike.prompt.md # /research-technical-spike
+│   ├── task-planner.agent.prompt.md # /task-planner
+│   ├── task-researcher.prompt.md    # /task-researcher
+│   ├── tdd-refactor.prompt.md       # /tdd-refactor
+│   └── Bug Context Fixer.prompt.md  # /Bug-Context-Fixer
 ├── skills/                          # 技能包
 │   ├── skill.md                     # 技能索引
 │   ├── tdd/                         # TDD 技能包
@@ -1568,14 +1573,16 @@ npm run update-types    # 更新 Supabase 类型
 **规则层（Instructions）**
 - [x] `copilot-instructions.md` - 全局规则（432 行）
 - [x] `AGENTS.md` - Agent 协作规则
-- [x] 7 个 instructions 文件 - 分域规则
+- [x] 9 个 instructions 文件 - 分域规则
   - [x] general.instructions.md
+  - [x] angular.instructions.md
   - [x] frontend.instructions.md
   - [x] backend.instructions.md
   - [x] testing.instructions.md
   - [x] security.instructions.md
   - [x] git.instructions.md
   - [x] docs.instructions.md
+  - [x] task-implementation.instructions.md
 
 **Agent 层（11 个）**
 - [x] planner.agent.md - 规划师
@@ -1590,24 +1597,23 @@ npm run update-types    # 更新 Supabase 类型
 - [x] build-error-resolver.agent.md - 构建修复专家
 - [x] database-reviewer.agent.md - 数据库专家
 
-**Prompt 层（13 个）**
+**Prompt 层（16 个）**
 - [x] plan.prompt.md - /plan
-- [x] design.prompt.md - /design
 - [x] implement.prompt.md - /implement
-- [x] tdd.prompt.md - /tdd
 - [x] code-review.prompt.md - /code-review
 - [x] security.prompt.md - /security
 - [x] build-fix.prompt.md - /build-fix
 - [x] e2e.prompt.md - /e2e
 - [x] refactor-clean.prompt.md - /refactor-clean
-- [x] docs.prompt.md - /docs
-- [x] verify.prompt.md - /verify
-- [x] checkpoint.prompt.md - /checkpoint
-- [x] orchestrate.prompt.md - /orchestrate
-- [x] resume.prompt.md - /resume ✨ 新增（映射自 SessionStart hook）
-- [x] session-summary.prompt.md - /session-summary ✨ 新增（映射自 Stop hook）
-- [x] patterns.prompt.md - /patterns ✨ 新增（映射自 /instinct-status）
-- [x] evolve-patterns.prompt.md - /evolve-patterns ✨ 新增（映射自 /evolve）
+- [x] create-readme.prompt.md - /create-readme
+- [x] critical-thinking.prompt.md - /critical-thinking
+- [x] gem-documentation-writer.prompt.md - /gem-documentation-writer
+- [x] gilfoyle.prompt.md - /gilfoyle
+- [x] research-technical-spike.prompt.md - /research-technical-spike
+- [x] task-planner.agent.prompt.md - /task-planner
+- [x] task-researcher.prompt.md - /task-researcher
+- [x] tdd-refactor.prompt.md - /tdd-refactor
+- [x] Bug Context Fixer.prompt.md - /Bug-Context-Fixer
 
 **Skill 层（9 个）**
 - [x] skill.md - 技能索引
@@ -1645,7 +1651,7 @@ npm run update-types    # 更新 Supabase 类型
 |----------------------------|----------|------|
 | rules/ | ✅ 完成 | instructions 文件 |
 | agents/ | ✅ 完成 | 11 个 agent 文件（含 tools 配置）|
-| commands/ | ✅ 完成 | 17 个 prompt 文件 |
+| commands/ | ✅ 完成 | 16 个 prompt 文件 |
 | skills/ | ✅ 完成 | 9 个 skill 目录 |
 | hooks/ | ✅ 完成 | hooks.json + prompts 替代方案 |
 | mcp-configs/ | ✅ 完成 | mcp.json |

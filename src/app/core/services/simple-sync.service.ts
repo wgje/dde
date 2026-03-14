@@ -29,6 +29,7 @@ import {
   SessionManagerService,
   SyncOperationHelperService,
   UserPreferencesSyncService,
+  FocusConsoleSyncService,
   ProjectDataService,
   BatchSyncService,
   TaskSyncOperationsService,
@@ -38,6 +39,12 @@ import {
   type RetryableOperation
 } from './sync';
 import { Task, Project, Connection, UserPreferences } from '../../../models';
+import {
+  DockSnapshot,
+  FocusSessionRecord,
+  RoutineCompletionMutation,
+  RoutineTask,
+} from '../../../models/parking-dock';
 import { ProjectRow, TaskRow, ConnectionRow } from '../../../models/supabase-types';
 import { nowISO } from '../../../utils/date';
 import {
@@ -110,6 +117,7 @@ export class SimpleSyncService {
   private readonly sessionManager = inject(SessionManagerService);
   private readonly syncOpHelper = inject(SyncOperationHelperService);
   private readonly userPrefsSync = inject(UserPreferencesSyncService);
+  private readonly focusConsoleSync = inject(FocusConsoleSyncService);
   private readonly projectDataService = inject(ProjectDataService);
   private readonly batchSyncService = inject(BatchSyncService);
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
@@ -211,7 +219,7 @@ export class SimpleSyncService {
 
     // 将黑匣子同步集成到主同步体系的 RetryQueue
     this.blackBoxSync.setRetryQueueHandler((entry: BlackBoxEntry) => {
-      this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId);
+      this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId ?? undefined);
     });
     
     // 启动网络监听和重试循环
@@ -896,6 +904,30 @@ export class SimpleSyncService {
   
   async saveUserPreferences(userId: string, preferences: Partial<UserPreferences>): Promise<boolean> {
     return this.userPrefsSync.saveUserPreferences(userId, preferences);
+  }
+
+  async loadFocusSession(userId: string): Promise<DockSnapshot | null> {
+    return this.focusConsoleSync.loadFocusSession(userId);
+  }
+
+  async saveFocusSession(record: FocusSessionRecord): Promise<boolean> {
+    return this.focusConsoleSync.saveFocusSession(record);
+  }
+
+  async listRoutineTasks(userId: string): Promise<RoutineTask[]> {
+    return this.focusConsoleSync.listRoutineTasks(userId);
+  }
+
+  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<boolean> {
+    return this.focusConsoleSync.upsertRoutineTask(userId, task);
+  }
+
+  async incrementRoutineCompletion(mutation: RoutineCompletionMutation): Promise<boolean> {
+    return this.focusConsoleSync.incrementRoutineCompletion(mutation);
+  }
+
+  async importLegacyDockSnapshot(userId: string): Promise<DockSnapshot | null> {
+    return this.focusConsoleSync.importLegacyDockSnapshot(userId);
   }
   
   // ==================== Delta Sync ====================

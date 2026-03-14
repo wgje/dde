@@ -1,0 +1,2917 @@
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  HostListener,
+  OnDestroy,
+  computed,
+  effect,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { DockEngineService } from '../../../services/dock-engine.service';
+import { DynamicModalService } from '../../../services/dynamic-modal.service';
+import { FocusDockLeaderService } from '../../../services/focus-dock-leader.service';
+import { GateService } from '../../../services/gate.service';
+import { PerformanceTierService, type FocusPerformanceTier } from '../../../services/performance-tier.service';
+import { ToastService } from '../../../services/toast.service';
+import { ModalLoaderService } from '../../core/services/modal-loader.service';
+import { ProjectStore, TaskStore } from '../../core/state/stores';
+import { UiStateService } from '../../../services/ui-state.service';
+import { PARKING_CONFIG } from '../../../config/parking.config';
+import {
+  CognitiveLoad,
+  DockExitAction,
+  DockLane,
+  DockFocusTransitionPhase,
+  DockFocusTransitionState,
+  DockPendingDecisionEntry,
+  DockSourceSection,
+} from '../../../models/parking-dock';
+import { readTaskDragPayload, hasTaskDragTypes } from '../../../utils/task-drag-payload';
+import {
+  buildFocusTransition,
+  createFlipGhostState,
+  type DockFlipGhostState,
+} from './utils/dock-flip-transition';
+import {
+  loadHudPosition as loadHudPositionUtil,
+  persistHudPosition as persistHudPositionUtil,
+  defaultHudPosition as defaultHudPositionUtil,
+  resolveHudSize as resolveHudSizeUtil,
+  clampHudPosition as clampHudPositionUtil,
+} from './utils/dock-hud-position';
+import { DockConsoleStackComponent } from './components/dock-console-stack.component';
+import { DockRadarZoneComponent } from './components/dock-radar-zone.component';
+import { DockStatusMachineComponent } from './components/dock-status-machine.component';
+import { DockDailySlotComponent } from './components/dock-daily-slot.component';
+import { DockZenModeComponent } from './components/dock-zen-mode.component';
+import { DockFocusSceneComponent, type DockFocusSceneMode } from './components/dock-focus-scene.component';
+import {
+  DockPlannerQuickEditComponent,
+  type DockPlannerQuickEditPresentation,
+} from './components/dock-planner-quick-edit.component';
+
+type DockDropState = 'idle' | 'canDrop' | 'isOver' | 'reject';
+
+interface DockDropCandidate {
+  taskId: string;
+  sourceSection?: 'text' | 'flow';
+}
+
+type FocusExitConfirmAction =
+  | 'save-exit'
+  | 'clear-exit'
+  | 'keep-focus-hide-scrim'
+  | 'cancel'
+  | 'request-end-focus'
+  | 'back';
+
+type FocusExitFlowStep = 'primary' | 'destructive';
+
+interface DockActionFeedback {
+  message: string;
+  tone: 'info' | 'success';
+}
+
+interface FocusHelpSection {
+  title: string;
+  subtitle: string;
+  items: string[];
+}
+
+const DOCK_REORDER_MIME = 'application/x-nanoflow-dock-reorder';
+const DOCK_CLOSE_TRANSIENT_SURFACES_EVENT = 'dock-close-transient-surfaces';
+
+@Component({
+  selector: 'app-parking-dock',
+  standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    CommonModule,
+    FormsModule,
+    DockConsoleStackComponent,
+    DockRadarZoneComponent,
+    DockStatusMachineComponent,
+    DockDailySlotComponent,
+    DockZenModeComponent,
+    DockFocusSceneComponent,
+    DockPlannerQuickEditComponent,
+  ],
+  styles: [`
+    :host {
+      /* 根源修复：不再创建全屏 position:absolute + inset:0 覆盖层。
+         原实现：z-50 全屏 absolute 容器，依赖 pointer-events:none 透传点击。
+         问题：部分浏览器 / GPU 合成场景下 pointer-events:none 对大面积
+               覆盖层 + fixed 子元素的命中检测不一致，导致停泊坞收起后
+               下方内容无法点击。
+         修复：host 改为 0×0 尺寸，不占据屏幕面积；所有子元素改用
+               position:fixed 独立定位，不依赖 host 做布局/堆叠上下文。 */
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    /* ══════════════════════════════════════════
+       玻璃拟态基础 — 清新自然系
+       ══════════════════════════════════════════ */
+    .glass-card {
+      background: linear-gradient(165deg, rgba(22, 28, 36, 0.92), rgba(16, 20, 28, 0.88));
+      border: 1px solid rgba(148, 163, 184, 0.10);
+      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35),
+                  0 2px 8px rgba(0, 0, 0, 0.12),
+                  inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
+      /* 不使用 backdrop-filter，避免与专注模式全屏 blur 叠加导致 GPU 合成瓶颈 */
+      contain: layout style;
+      transition:
+        border-color var(--pk-overlay-exit) var(--pk-ease-standard),
+        box-shadow var(--pk-overlay-exit) var(--pk-ease-standard);
+    }
+    /* 拖拽任务悬停在坞栏面板时的高亮反馈 */
+    .glass-card.drag-receiving {
+      border-color: rgba(99, 102, 241, 0.4);
+      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35),
+                  0 2px 8px rgba(0, 0, 0, 0.12),
+                  0 0 0 1px rgba(99, 102, 241, 0.25),
+                  0 0 24px rgba(99, 102, 241, 0.08),
+                  inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
+    }
+
+    /* ══════════════════════════════════════════
+       底部坞栏 — 从底部弹入/滑出
+       ══════════════════════════════════════════ */
+    .dock-bar {
+      pointer-events: auto;
+      transition:
+        transform var(--pk-panel-enter) var(--pk-ease-enter),
+        opacity var(--pk-panel-exit) var(--pk-ease-standard);
+      /* vp 缩放保护：停泊坞展开高度不超过视口 55%，防止覆盖主内容 */
+      max-height: calc(55dvh - env(safe-area-inset-bottom, 0px));
+      overflow: hidden;
+      /* 宽度限制：不超过 860px 且不超过内容区宽度（视口 - 侧边栏）再减去左右内边 32px */
+      max-width: min(860px, calc(100vw - var(--dock-sidebar-width, 0px) - 32px));
+      will-change: transform, opacity;
+    }
+    .dock-bar.focus-collapsed {
+      transform: translateX(-50%) translateY(calc(100% + var(--pk-dist-panel-lift))) scale(0.994);
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* 拖拽任务时即使停泊坞未展开，也让坞栏半透明浮起，提供拖放目标提示 */
+    .dock-bar.drag-peek {
+      transform: translateX(-50%) translateY(var(--pk-dist-panel-peek)) scale(0.997);
+      opacity: 0.82;
+      pointer-events: auto;
+    }
+    .dock-bar.focus-expanded {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    /* 专注模式下的背景操作轨：保持可读且显式表明“这是次级操作层”。 */
+    .dock-bar.focus-secondary {
+      transform: translateX(-50%) translateY(0) scale(1);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .dock-bar.focus-secondary .dock-shell {
+      background:
+        linear-gradient(180deg, rgba(17, 24, 39, 0.92), rgba(15, 23, 42, 0.88)),
+        linear-gradient(120deg, rgba(99, 102, 241, 0.07), transparent 35%);
+      border-color: rgba(129, 140, 248, 0.26);
+      box-shadow:
+        0 16px 40px rgba(2, 6, 23, 0.38),
+        0 0 0 1px rgba(129, 140, 248, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    .dock-bar.focus-secondary:hover,
+    .dock-bar.focus-secondary.drag-receiving {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* ══════════════════════════════════════════
+       半圆形停泊坞入口 — 底部中央 · 清新自然系
+       ══════════════════════════════════════════ */
+    .dock-semicircle {
+      position: fixed;
+      bottom: 0;
+      left: 50%;
+      z-index: 51;
+      pointer-events: auto;
+      cursor: pointer;
+      transform:
+        translateX(-50%)
+        translateY(var(--dock-semicircle-lift, var(--pk-dist-semicircle-lift)))
+        scale(var(--dock-semicircle-scale-x, 0.86), var(--dock-semicircle-scale-y, 0.92));
+      transform-origin: center bottom;
+      width: var(--pk-semicircle-w);
+      height: var(--pk-semicircle-h);
+      border-radius: 80px 80px 0 0;
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.92));
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-bottom: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      opacity: 0.32;
+      transition:
+        transform var(--pk-panel-enter) var(--pk-ease-enter),
+        opacity var(--pk-panel-exit) var(--pk-ease-standard),
+        background-color var(--pk-panel-exit) var(--pk-ease-standard),
+        box-shadow var(--pk-panel-exit) var(--pk-ease-standard);
+      box-shadow:
+        0 -8px 24px rgba(0, 0, 0, 0.24),
+        0 -1px 4px rgba(99, 102, 241, 0.08);
+    }
+    .dock-semicircle:hover {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1, 1);
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96));
+      box-shadow:
+        0 -12px 28px rgba(0, 0, 0, 0.3),
+        0 -2px 10px rgba(99, 102, 241, 0.14);
+    }
+    .dock-semicircle.expanded {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1, 1);
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.94));
+    }
+    /* 拖拽悬停反馈：任务块拖过半圆时提供明显的视觉提示 */
+    .dock-semicircle.drag-active {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1, 1);
+      background: linear-gradient(180deg, rgba(99, 102, 241, 0.25), rgba(30, 41, 59, 0.95));
+      box-shadow:
+        0 -12px 30px rgba(0, 0, 0, 0.3),
+        0 -2px 14px rgba(99, 102, 241, 0.2),
+        0 0 0 1px rgba(99, 102, 241, 0.24);
+    }
+    .dock-semicircle .count-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      border-radius: 8px;
+      background: rgba(99, 102, 241, 0.2);
+      color: rgba(165, 180, 252, 0.85);
+      font-size: 9px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    @keyframes semicircleIn {
+      0%   { opacity: 0; transform: translateX(-50%) translateY(calc(var(--pk-dist-semicircle-lift) + 6px)) scale(0.94); }
+      60%  { opacity: 0.24; transform: translateX(-50%) translateY(max(1px, calc(var(--pk-dist-semicircle-lift) - 4px))) scale(0.985); }
+      100% { opacity: 0.32; transform: translateX(-50%) translateY(var(--pk-dist-semicircle-lift)) scale(1); }
+    }
+    .dock-semicircle-enter {
+      animation: semicircleIn var(--pk-panel-enter) var(--pk-ease-enter) both;
+    }
+
+    /* ══════════════════════════════════════════
+       坞栏卡片 — 悬浮抬升 + 认知负荷侧边色条 · 清新系
+       ══════════════════════════════════════════ */
+    .dock-card {
+      /* 宽度随视口缩放：手机(≤375px)约144px，平板起固定192px */
+      width: clamp(9rem, calc(50vw - 3.5rem), 12rem);
+      transition:
+        transform var(--pk-micro-hover) var(--pk-ease-micro),
+        box-shadow var(--pk-micro-hover) var(--pk-ease-micro),
+        background-color var(--pk-card-reorder) var(--pk-ease-standard),
+        border-color var(--pk-card-reorder) var(--pk-ease-standard);
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+    .dock-card.planner-open {
+      overflow: visible;
+      z-index: 2;
+    }
+    .dock-card:focus-visible {
+      outline: none;
+      box-shadow:
+        0 0 0 2px rgba(129, 140, 248, 0.46),
+        0 8px 22px rgba(15, 23, 42, 0.22);
+    }
+    .dock-card:hover {
+      transform: translateY(calc(-1 * var(--pk-dist-card-hover-lift))) scale(var(--pk-dist-card-hover-scale));
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22),
+                  0 2px 6px rgba(99, 102, 241, 0.06);
+    }
+    .dock-card:active {
+      transform: translateY(0) scale(var(--pk-dist-card-press-scale));
+    }
+    .dock-card.main-card {
+      border-color: rgba(99, 102, 241, 0.35);
+      background: linear-gradient(145deg, rgba(99, 102, 241, 0.10), rgba(99, 102, 241, 0.05));
+      box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15),
+                  0 4px 20px rgba(99, 102, 241, 0.10),
+                  0 -1px 0 rgba(255, 255, 255, 0.04) inset;
+    }
+    .dock-card.main-card::before {
+      content: '';
+      position: absolute;
+      top: -1px; left: -1px; right: -1px;
+      height: 2px;
+      border-radius: 12px 12px 0 0;
+      background: linear-gradient(90deg, rgba(99,102,241,0.4), rgba(167,139,250,0.6), rgba(99,102,241,0.4));
+    }
+    .dock-card.secondary-card {
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.74), rgba(15, 23, 42, 0.68));
+      border-color: rgba(148, 163, 184, 0.2);
+      color: rgba(226, 232, 240, 0.98);
+    }
+    .dock-card.secondary-card:hover {
+      box-shadow:
+        0 10px 24px rgba(15, 23, 42, 0.28),
+        0 0 0 1px rgba(129, 140, 248, 0.18);
+    }
+    .dock-card.secondary-active {
+      border-color: rgba(129, 140, 248, 0.38);
+      box-shadow:
+        0 0 0 1px rgba(129, 140, 248, 0.18),
+        0 14px 32px rgba(15, 23, 42, 0.24);
+    }
+    .dock-card-secondary-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 20px;
+      padding: 0 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(15, 23, 42, 0.58);
+      color: rgba(191, 219, 254, 0.82);
+      font-size: 10px;
+      line-height: 1;
+    }
+
+    /* 策划案：窄的侧边色彩条，红色=高负荷，绿色=低负荷 · 柔和发光 */
+    .dock-card-load-bar {
+      position: absolute;
+      left: 0;
+      top: 8px;
+      bottom: 8px;
+      width: 3px;
+      border-radius: 0 4px 4px 0;
+      transition:
+        background-color var(--pk-micro-glow) var(--pk-ease-standard),
+        box-shadow var(--pk-micro-glow) var(--pk-ease-standard);
+    }
+    .dock-card-load-bar.high {
+      background: linear-gradient(180deg, #f87171, #ef4444);
+      box-shadow: 0 0 6px rgba(239, 68, 68, 0.35);
+    }
+    .dock-card-load-bar.low {
+      background: linear-gradient(180deg, #34d399, #10b981);
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.35);
+    }
+
+    /* 等待时间徽标 · 清新柔和 */
+    .dock-card-wait-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: rgba(245, 158, 11, 0.08);
+      color: rgba(251, 191, 36, 0.75);
+      font-size: 8px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .load-badge-high {
+      background: rgba(239, 68, 68, 0.08);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.15);
+    }
+    .load-badge-low {
+      background: rgba(16, 185, 129, 0.08);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.15);
+    }
+
+    /* ══════════════════════════════════════════
+       卡片状态指示点 — 左下角
+       ══════════════════════════════════════════ */
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+    .status-dot.focusing   { background: #818cf8; box-shadow: 0 0 6px rgba(129,140,248,0.5); }
+    .status-dot.suspended  { background: #f59e0b; }
+    .status-dot.idle       { background: #57534e; }
+
+    /* ══════════════════════════════════════════
+       拖放区域 — 虚线边框脉冲
+       ══════════════════════════════════════════ */
+    .drop-zone {
+      /* 与 dock-card 保持一致的响应式宽度 */
+      width: clamp(9rem, calc(50vw - 3.5rem), 12rem);
+      transition:
+        border-color var(--pk-panel-exit) var(--pk-ease-standard),
+        background-color var(--pk-panel-exit) var(--pk-ease-standard),
+        color var(--pk-panel-exit) var(--pk-ease-standard),
+        box-shadow var(--pk-panel-exit) var(--pk-ease-standard),
+        transform var(--pk-panel-exit) var(--pk-ease-standard);
+    }
+    .drop-zone.can-drop {
+      border-color: rgba(99, 102, 241, 0.5);
+      background: rgba(99, 102, 241, 0.06);
+      color: rgba(165, 180, 252, 0.9);
+    }
+    .drop-zone.active {
+      border-color: rgba(99, 102, 241, 0.6);
+      background: rgba(99, 102, 241, 0.08);
+      box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.06);
+      transform: translateY(-1px);
+    }
+    @keyframes dropRejectShake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-2.5px); }
+      40% { transform: translateX(2px); }
+      60% { transform: translateX(-1px); }
+      80% { transform: translateX(0.5px); }
+    }
+    .drop-zone.reject {
+      border-color: rgba(239, 68, 68, 0.75);
+      background: rgba(239, 68, 68, 0.12);
+      color: rgba(254, 202, 202, 0.95);
+      animation: dropRejectShake var(--dock-drop-reject-shake-ms, 180ms) ease-in-out;
+    }
+    /* Alt+拖拽悬停反馈（从 GoJS 画布指针跟踪方式拖拽，不经过 HTML5 DnD） */
+    .drop-zone.alt-drag-hover {
+      border-color: rgba(99, 102, 241, 0.6);
+      background: rgba(99, 102, 241, 0.08);
+      box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.06);
+      transform: translateY(-1px);
+    }
+
+    /* ══════════════════════════════════════════
+       主控台舞台 — 状态驱动的椭圆氛围场
+       （纵向位置随停泊坞展开/收起平滑过渡，
+         与 dock-bar 的 0.55s 动画同步）
+       ══════════════════════════════════════════ */
+    .console-stage {
+      pointer-events: auto;
+      --stage-primary-rgb: 99 102 241;
+      --stage-secondary-rgb: 52 211 153;
+      --stage-halo-opacity: 0.08;
+      --stage-secondary-opacity: 0.04;
+      --stage-ring-opacity: 0.08;
+      --stage-blur: 26px;
+      --stage-halo-width: 640px;
+      --stage-halo-height: 420px;
+      --stage-pulse-duration: 9s;
+    }
+
+    /* 同心椭圆主控台光晕背景 — 多层柔和辉光 */
+    .console-stage::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: var(--stage-halo-width);
+      height: var(--stage-halo-height);
+      transform: translate(-50%, -50%);
+      background:
+        radial-gradient(
+          ellipse 55% 40% at center,
+          rgba(var(--stage-primary-rgb), var(--stage-halo-opacity)) 0%,
+          rgba(var(--stage-primary-rgb), calc(var(--stage-halo-opacity) * 0.45)) 42%,
+          transparent 70%
+        ),
+        radial-gradient(
+          ellipse 80% 60% at center,
+          rgba(var(--stage-secondary-rgb), var(--stage-secondary-opacity)) 0%,
+          transparent 65%
+        );
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: -1;
+      filter: blur(var(--stage-blur));
+      animation: stageHaloPulse var(--stage-pulse-duration) ease-in-out infinite;
+    }
+    .console-stage::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: calc(var(--stage-halo-width) * 0.75);
+      height: calc(var(--stage-halo-height) * 0.76);
+      transform: translate(-50%, calc(-50% - 20px));
+      border: 1px solid rgba(var(--stage-primary-rgb), var(--stage-ring-opacity));
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: -1;
+    }
+    @keyframes stageHaloPulse {
+      0%, 100% {
+        opacity: 0.86;
+        transform: translate(-50%, -50%) scale(0.997);
+      }
+      50% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1.005);
+      }
+    }
+
+    /* ══════════════════════════════════════════
+       FLIP 幽灵卡片（进入/退出专注映射过渡）
+       ══════════════════════════════════════════ */
+    .dock-v4-flip-ghost {
+      position: fixed;
+      pointer-events: none;
+      border-radius: 20px;
+      background: linear-gradient(140deg, rgba(39, 39, 42, 0.92), rgba(24, 24, 27, 0.88));
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow:
+        0 18px 48px rgba(0, 0, 0, 0.5),
+        0 0 0 1px rgba(99, 102, 241, 0.2),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      opacity: 0.96;
+      transform-origin: top left;
+      transform: translate3d(0, 0, 0) scale(1);
+      transition:
+        transform var(--flip-duration, var(--pk-focus-enter)) var(--flip-ease, var(--pk-ease-enter)),
+        opacity var(--flip-duration, var(--pk-focus-enter)) var(--flip-ease, var(--pk-ease-enter));
+      /* will-change 仅在 .active 时设置，避免常驻占用 GPU 显存 */
+    }
+    .dock-v4-flip-ghost.active {
+      will-change: transform, opacity;
+      transform:
+        translate3d(var(--flip-dx, 0px), var(--flip-dy, 0px), 0)
+        scale(var(--flip-sx, 1), var(--flip-sy, 1));
+      opacity: var(--flip-opacity, 0.92);
+    }
+
+    /* ══════════════════════════════════════════
+       碎片阶段日常任务浮层
+       ══════════════════════════════════════════ */
+    .fragment-overlay {
+      pointer-events: auto;
+    }
+    @keyframes overlayFadeIn {
+      0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+      50%  { opacity: 0.6; transform: translate(-50%, -50%) scale(0.995); }
+      100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+    .fragment-overlay-enter {
+      animation: overlayFadeIn var(--pk-panel-enter) var(--pk-ease-enter);
+    }
+
+    /* ══════════════════════════════════════════
+       待决策面板 — 顶部浮现
+       ══════════════════════════════════════════ */
+    @keyframes decisionSlideIn {
+      0%   { opacity: 0; transform: translateX(-50%) translateY(-10px) scale(0.98); }
+      50%  { opacity: 0.65; transform: translateX(-50%) translateY(-2px) scale(0.998); }
+      100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+    }
+    .pending-decision-enter {
+      animation: decisionSlideIn var(--pk-hud-enter) var(--pk-ease-enter);
+    }
+    .decision-card {
+      transition:
+        transform var(--pk-card-reorder) var(--pk-ease-enter),
+        background-color var(--pk-card-reorder) var(--pk-ease-standard);
+    }
+    .decision-card:hover {
+      transform: translateY(-2px);
+    }
+
+    @keyframes blankPeriodRise {
+      0% {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-8px) scale(0.985);
+      }
+      50% {
+        opacity: 0.65;
+        transform: translateX(-50%) translateY(-1px) scale(0.998);
+      }
+      100% {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0) scale(1);
+      }
+    }
+    @keyframes blankPeriodBreathe {
+      0%, 100% {
+        opacity: 0.92;
+        transform: translateX(-50%) scale(0.998);
+      }
+      50% {
+        opacity: 1;
+        transform: translateX(-50%) scale(1.002);
+      }
+    }
+    .blank-period-card {
+      border: 1px solid rgba(251, 191, 36, 0.18);
+      background:
+        radial-gradient(circle at 18% 24%, rgba(251, 191, 36, 0.14), transparent 32%),
+        linear-gradient(155deg, rgba(28, 25, 23, 0.96), rgba(15, 23, 42, 0.92));
+      box-shadow:
+        0 22px 54px rgba(15, 23, 42, 0.38),
+        0 0 0 1px rgba(251, 191, 36, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    .blank-period-enter {
+      animation: blankPeriodRise var(--pk-focus-enter) var(--pk-ease-enter);
+    }
+    .blank-period-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 32% 28%, rgba(254, 243, 199, 0.82), rgba(251, 191, 36, 0.16) 62%, transparent 72%),
+        linear-gradient(180deg, rgba(251, 191, 36, 0.24), rgba(245, 158, 11, 0.08));
+      border: 1px solid rgba(251, 191, 36, 0.24);
+      box-shadow: 0 10px 24px rgba(245, 158, 11, 0.14);
+    }
+    .blank-period-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(251, 191, 36, 0.18);
+      background: rgba(251, 191, 36, 0.08);
+    }
+
+    @keyframes hudSettle {
+      0% {
+        opacity: 0;
+        transform: translateY(-6px) scale(0.985);
+      }
+      50% {
+        opacity: 0.6;
+        transform: translateY(-1px) scale(0.998);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+    .status-machine-shell {
+      display: inline-flex;
+      animation: hudSettle var(--pk-hud-enter) var(--pk-ease-enter) var(--pk-focus-scene-entry-hud) both;
+      transform-origin: top right;
+    }
+    .status-machine-shell-minimal {
+      transform-origin: top center;
+      animation-delay: 0ms;
+    }
+
+    .focus-top-rail {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: auto;
+    }
+    .focus-top-rail-button {
+      min-width: 44px;
+      min-height: 44px;
+    }
+
+    /* ══════════════════════════════════════════
+       滚动条隐藏
+       ══════════════════════════════════════════ */
+    .hide-scrollbar::-webkit-scrollbar { display: none; }
+    .hide-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* ══════════════════════════════════════════
+       新建表单下滑
+       ══════════════════════════════════════════ */
+    .new-task-form {
+      animation: slideDown var(--pk-panel-enter) var(--pk-ease-enter);
+    }
+    @keyframes slideDown {
+      0%   { opacity: 0; transform: translateY(-6px) scale(0.995); }
+      50%  { opacity: 0.6; transform: translateY(-1px) scale(0.999); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .dock-bar,
+      .dock-card,
+      .new-task-form,
+      .fragment-overlay-enter,
+      .dock-semicircle,
+      .dock-semicircle-enter,
+      .pending-decision-enter,
+      .decision-card,
+      .dock-v4-flip-ghost {
+        transition: none;
+        animation: none;
+      }
+      .drop-zone {
+        transition: none;
+        animation: none;
+      }
+    }
+
+    .console-stage[data-performance-tier='T1'] {
+      transition-duration: 0.35s;
+    }
+
+    .console-stage[data-performance-tier='T2'] {
+      transition: none !important;
+    }
+
+    @media (max-width: 640px) {
+      .dock-bar {
+        max-width: calc(100vw - 20px);
+        max-height: calc(34dvh - env(safe-area-inset-bottom, 0px));
+      }
+      .dock-card {
+        width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
+      }
+      .drop-zone {
+        width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
+      }
+      .focus-top-rail {
+        top: 16px;
+        right: 12px;
+      }
+    }
+
+    .console-stage[data-performance-tier='T2']::before,
+    .console-stage[data-performance-tier='T2']::after,
+    .console-stage[data-reduced-motion='true']::before,
+    .console-stage[data-reduced-motion='true']::after {
+      animation: none !important;
+    }
+
+    .console-stage[data-performance-tier='T2'] .pending-decision-enter,
+    .console-stage[data-performance-tier='T2'] .fragment-overlay-enter {
+      animation: none !important;
+    }
+  `],
+  template: `
+    <app-dock-focus-scene
+      [active]="engine.focusMode()"
+      [scrimOn]="engine.focusScrimOn()"
+      [sceneMode]="focusSceneMode()"
+      [performanceTier]="performanceTier()"
+      [reducedMotion]="reducedMotion()"
+      [transitionPhase]="engine.focusTransition()?.phase ?? null"
+      [stageTransform]="focusStageTransform()"
+      [backgroundImageUrl]="focusBackgroundUrl"
+      (backdropClick)="onBackdropClick()"
+      (transitionSettled)="onFocusTransitionSettled($event)">
+      @if (engine.focusMode()) {
+        <!-- 中央卡片堆 -->
+        <app-dock-console-stack class="relative z-20 pointer-events-auto"></app-dock-console-stack>
+
+        @if (!strictSampleMode && engine.pendingDecision() && pendingDecisionEntries().length > 0) {
+          <div
+            class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl
+                   px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
+            style="top: 40px; pointer-events: auto;"
+            data-testid="dock-v3-pending-decision">
+            <div class="flex items-center gap-2 mb-2.5">
+              <div class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></div>
+              <div class="text-[10px] text-indigo-300/80 font-mono tracking-wide flex-1">
+                {{ engine.pendingDecision()?.reason || '候选任务时长匹配异常，请手动决策' }}
+              </div>
+              <button
+                type="button"
+                class="text-[9px] px-2 py-1 rounded border border-slate-600/70 text-slate-300 hover:bg-slate-700/50"
+                (click)="cancelPendingAutoPromote()"
+                data-testid="dock-v3-pending-cancel">
+                收起推荐
+              </button>
+            </div>
+            <div class="text-[10px] text-stone-500 mb-3 font-mono">
+              主任务剩余窗口
+              <span class="text-stone-400 font-semibold">
+                {{ formatTime(pendingDecisionRemainingMinutes()) }}
+              </span>
+            </div>
+            <div class="grid grid-cols-3 gap-2.5">
+              @for (entry of pendingDecisionEntries(); track entry.taskId; let i = $index) {
+                <button
+                  type="button"
+                  class="decision-card rounded-xl border px-3.5 py-2.5 text-left transition-colors transition-transform transition-shadow"
+                  [ngClass]="i % 3 === 0
+                    ? 'border-amber-400/40 bg-amber-500/8 hover:bg-amber-500/15'
+                    : (i % 3 === 1
+                      ? 'border-indigo-400/40 bg-indigo-500/8 hover:bg-indigo-500/15'
+                      : 'border-emerald-400/40 bg-emerald-500/8 hover:bg-emerald-500/15')"
+                  (click)="choosePendingCandidate(entry.taskId)"
+                  [attr.data-testid]="'dock-v3-pending-choice-' + i">
+                  <div class="text-[10px] font-mono mb-1.5 font-semibold"
+                    [class.text-amber-300]="i % 3 === 0"
+                    [class.text-indigo-300]="i % 3 === 1"
+                    [class.text-emerald-300]="i % 3 === 2">
+                    {{ groupLabel(entry.group) }}
+                  </div>
+                  <div class="text-xs text-stone-100 font-medium truncate mb-1.5">{{ entry.title }}</div>
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded"
+                      [ngClass]="entry.lane === 'combo-select'
+                        ? 'bg-sky-500/15 text-sky-400 border border-sky-500/20'
+                        : 'bg-teal-500/15 text-teal-400 border border-teal-500/20'">
+                      {{ entry.lane === 'combo-select' ? '组合选择' : '备选' }}
+                    </span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded"
+                      [ngClass]="entry.load === 'high'
+                        ? 'bg-red-500/15 text-red-400 border border-red-500/20'
+                        : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'">
+                      {{ entry.load === 'low' ? '低负荷' : '高负荷' }}
+                    </span>
+                    <span class="text-[9px] text-stone-500 font-mono">
+                      {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '—' }}
+                    </span>
+                  </div>
+                </button>
+              }
+            </div>
+          </div>
+        }
+
+        @if (!strictSampleMode && blankPeriodActive()) {
+          <div
+            class="blank-period-card blank-period-enter absolute left-1/2 top-10 -translate-x-1/2 z-30 w-[min(92vw,420px)] rounded-[28px] px-5 py-4"
+            style="pointer-events: auto;"
+            data-testid="dock-v3-blank-period-card">
+            <div class="flex items-start gap-3">
+              <div class="blank-period-icon shrink-0 mt-0.5"></div>
+              <div class="flex-1 min-w-0">
+                <div class="text-[10px] font-mono tracking-[0.18em] uppercase text-amber-200/70 mb-2">
+                  Blank Period
+                </div>
+                <div class="text-base text-slate-50 font-semibold mb-1.5">紧张留白期</div>
+                <div class="text-xs text-slate-300/85 leading-5 mb-3">
+                  {{ engine.pendingDecision()?.reason || '当前窗口过短，不建议再插入新任务。' }}
+                </div>
+                <div class="flex items-center gap-3 text-[11px] text-slate-300/80">
+                  <span class="blank-period-chip">剩余窗口 {{ formatTime(pendingDecisionRemainingMinutes()) }}</span>
+                  <span class="blank-period-chip">5 秒内可取消</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        }
+
+        <app-dock-radar-zone
+          class="absolute left-1/2 top-1/2 z-10 pointer-events-auto"
+          style="width: 0; height: 0;">
+        </app-dock-radar-zone>
+      }
+    </app-dock-focus-scene>
+
+    @if (engine.focusMode()) {
+      <div class="focus-top-rail fixed right-4 top-4 z-[67]" data-testid="dock-v3-top-rail">
+        <button
+          type="button"
+          class="focus-top-rail-button rounded-full border border-slate-500/40 bg-slate-800/85 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors shadow-lg flex items-center justify-center"
+          style="pointer-events: auto;"
+          (click)="openFocusRoutineSettings()"
+          aria-label="打开专注设置"
+          data-testid="dock-v3-hud-settings">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317a1.724 1.724 0 013.35 0 1.724 1.724 0 002.573 1.066 1.724 1.724 0 012.36 2.36 1.724 1.724 0 001.065 2.572 1.724 1.724 0 010 3.35 1.724 1.724 0 00-1.066 2.573 1.724 1.724 0 01-2.36 2.36 1.724 1.724 0 00-2.572 1.065 1.724 1.724 0 01-3.35 0 1.724 1.724 0 00-2.573-1.066 1.724 1.724 0 01-2.36-2.36 1.724 1.724 0 00-1.065-2.572 1.724 1.724 0 010-3.35 1.724 1.724 0 001.066-2.573 1.724 1.724 0 012.36-2.36 1.724 1.724 0 002.572-1.065z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 15.75A3.75 3.75 0 1012 8.25a3.75 3.75 0 000 7.5z" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="focus-top-rail-button rounded-full border border-slate-500/40 bg-slate-800/85 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors shadow-lg flex items-center justify-center"
+          style="pointer-events: auto;"
+          (click)="toggleHelpOverlay()"
+          aria-label="打开专注操作帮助"
+          data-testid="dock-v3-help-trigger">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 9a3.75 3.75 0 117.5 0c0 1.83-1.203 2.463-2.29 3.035-.848.446-1.71.9-1.71 2.215m.75 3.75h.008v.008H12v-.008z" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="focus-top-rail-button rounded-full border border-slate-500/40 bg-slate-800/85 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors shadow-lg flex items-center justify-center"
+          style="pointer-events: auto;"
+          (click)="onFocusSessionToggle()"
+          aria-label="退出专注模式"
+          data-testid="dock-v3-focus-exit-btn">
+          <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" class="w-5 h-5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+
+      @if (showHelpNudge() && !showHelpOverlay()) {
+        <div
+          class="fixed left-1/2 top-6 z-[66] -translate-x-1/2 rounded-full border border-indigo-400/30 bg-slate-900/88 px-4 py-2 text-[11px] text-slate-100 shadow-lg backdrop-blur-sm"
+          data-testid="dock-v3-help-nudge">
+          按 <span class="font-mono text-indigo-300">Alt + H</span> 或右上角问号查看专注操作帮助
+        </div>
+      }
+
+      <button
+        type="button"
+        class="fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform"
+        [ngClass]="canCreateBackupTask()
+          ? 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-900/45 border-indigo-300/40 hover:scale-105 active:scale-95'
+          : 'bg-slate-800/90 text-slate-500 border-slate-600/50 shadow-none cursor-not-allowed'"
+        [disabled]="!canCreateBackupTask()"
+        style="pointer-events: auto;"
+        (click)="createBackupTaskFromFab()"
+        aria-label="创建备选任务"
+        data-testid="dock-v3-backup-fab">
+        +
+      </button>
+    }
+
+    @if (flipGhost(); as ghost) {
+      <div
+        class="dock-v4-flip-ghost"
+        [class.active]="flipGhostActive()"
+        [style.left.px]="ghost.from.left"
+        [style.top.px]="ghost.from.top"
+        [style.width.px]="ghost.from.width"
+        [style.height.px]="ghost.from.height"
+        [style.--flip-dx.px]="ghost.to.left - ghost.from.left"
+        [style.--flip-dy.px]="ghost.to.top - ghost.from.top"
+        [style.--flip-sx]="(ghost.to.width / ghost.from.width).toString()"
+        [style.--flip-sy]="(ghost.to.height / ghost.from.height).toString()"
+        [style.--flip-duration]="((engine.focusTransition()?.durationMs ?? motion.focus.enterMs) + 'ms')"
+        [style.--flip-ease]="motion.easing.enter"
+        [style.--flip-opacity]="PARKING_CONFIG.DOCK_FOCUS_FLIP_GHOST_OPACITY"
+        [style.z-index]="PARKING_CONFIG.DOCK_FOCUS_FLIP_Z_INDEX"
+        data-testid="dock-v4-flip-ghost">
+      </div>
+    }
+
+    @if (engine.focusMode()) {
+      <div
+        class="fixed z-[66]"
+        [ngStyle]="hudContainerStyle()"
+        style="pointer-events: auto;"
+        data-testid="dock-v3-status-machine-container">
+        <div
+          class="status-machine-shell"
+          [class.status-machine-shell-minimal]="hudMinimalMode()"
+          (pointerdown)="onHudPointerDown($event)">
+          <app-dock-status-machine
+            [forcedMode]="engine.focusScrimOn() ? 'full' : 'minimal'">
+          </app-dock-status-machine>
+        </div>
+      </div>
+
+      @if (showHelpOverlay()) {
+        <div
+          class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4"
+          style="pointer-events: auto;"
+          role="dialog"
+          aria-modal="true"
+          aria-label="专注操作帮助"
+          (click)="closeHelpOverlay()"
+          data-testid="dock-v3-help-overlay">
+          <div
+            class="w-[min(92vw,860px)] rounded-[28px] border border-slate-600/70 bg-slate-900/96 p-5 text-slate-100 shadow-2xl backdrop-blur-md"
+            (click)="$event.stopPropagation()">
+            <div class="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <div class="text-[11px] font-semibold tracking-[0.18em] uppercase text-indigo-300/80">Focus Help</div>
+                <h4 class="mt-1 text-lg font-semibold">专注操作帮助</h4>
+                <p class="mt-1 text-sm text-slate-300">
+                  先用显式按钮完成主要操作，快捷方式只作为加速器，不再承担主路径。
+                </p>
+              </div>
+              <button
+                type="button"
+                class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl border border-slate-600/70 bg-slate-800/80 px-3 py-2 text-[11px] text-slate-200 hover:bg-slate-700"
+                (click)="closeHelpOverlay()"
+                data-testid="dock-v3-help-close">
+                关闭
+              </button>
+            </div>
+            <div class="grid gap-3 md:grid-cols-3">
+              @for (section of focusHelpSections; track section.title) {
+                <section class="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-4">
+                  <div class="text-[11px] font-semibold text-slate-100">{{ section.title }}</div>
+                  <div class="mt-1 text-[11px] text-slate-400">{{ section.subtitle }}</div>
+                  <div class="mt-3 space-y-2 text-[12px] leading-5 text-slate-300">
+                    @for (item of section.items; track item) {
+                      <p>{{ item }}</p>
+                    }
+                  </div>
+                </section>
+              }
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- GAP-2: 碎片时间进入倒计时选择 -->
+      @if (engine.fragmentEntryCountdown() !== null) {
+        <div class="fixed inset-0 z-[48] flex items-center justify-center"
+             style="pointer-events: auto;">
+          <div class="fragment-countdown-card rounded-2xl border border-emerald-500/30 bg-slate-900/95 px-6 py-5 text-center shadow-2xl max-w-[320px]">
+            <div class="text-emerald-400 text-[11px] font-semibold tracking-widest mb-2 uppercase">碎片时间</div>
+            <div class="text-slate-100 text-sm mb-3">
+              检测到短暂空闲，即将进入碎片任务推荐
+            </div>
+            <div class="text-3xl font-mono text-emerald-300 mb-4" data-testid="fragment-countdown-number">
+              {{ engine.fragmentEntryCountdown() }}s
+            </div>
+            <div class="flex gap-3 justify-center">
+              <button
+                type="button"
+                class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
+                (click)="engine.acceptFragmentEntry()"
+                data-testid="fragment-countdown-accept">
+                立即进入
+              </button>
+              <button
+                type="button"
+                class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs transition-colors"
+                (click)="engine.skipFragmentEntry()"
+                data-testid="fragment-countdown-skip">
+                跳过
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- 碎片阶段日常任务浮层 -->
+      @if (engine.isFragmentPhase()) {
+        <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2
+                    -translate-x-1/2 -translate-y-1/2 z-40"
+             style="pointer-events: auto;">
+          <app-dock-daily-slot></app-dock-daily-slot>
+        </div>
+      }
+
+      <app-dock-zen-mode
+        [isActive]="showZenMode()"
+        (exit)="onZenExit()">
+      </app-dock-zen-mode>
+
+      @if (showExitConfirm()) {
+        <div
+          class="fixed inset-0 z-[72] bg-black/45 flex items-center justify-center"
+          style="pointer-events: auto;"
+          role="dialog"
+          aria-modal="true"
+          aria-label="退出专注模式确认"
+          data-testid="dock-v3-exit-confirm">
+          <div class="w-[min(92vw,500px)] rounded-2xl border border-slate-600/70 bg-slate-900/95 p-4 text-slate-100 shadow-2xl">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h4 class="text-sm font-semibold">退出专注模式</h4>
+                <p class="mt-1 text-xs text-slate-300">
+                  {{ exitFlowStep() === 'primary'
+                    ? '先决定是否继续保留当前专注上下文。'
+                    : '只有在你确认结束专注时，才会出现保留或清空停泊坞的选择。' }}
+                </p>
+              </div>
+              @if (exitFlowStep() === 'destructive') {
+                <button
+                  type="button"
+                  class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-slate-600/70 px-3 py-2 text-[11px] text-slate-300 hover:bg-slate-800"
+                  (click)="confirmExitFocus('back')"
+                  data-testid="dock-v3-exit-back">
+                  返回
+                </button>
+              }
+            </div>
+
+            @if (exitFlowStep() === 'primary') {
+              <div class="flex flex-col gap-2">
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl border border-slate-600/70 bg-slate-800/85 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                  aria-keyshortcuts="Escape"
+                  (click)="confirmExitFocus('cancel')"
+                  data-testid="dock-v3-exit-cancel">
+                  继续专注
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-slate-700 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-600"
+                  aria-keyshortcuts="Alt+K"
+                  (click)="confirmExitFocus('keep-focus-hide-scrim')"
+                  data-testid="dock-v3-exit-keep">
+                  仅关闭背景虚化
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                  aria-keyshortcuts="Enter"
+                  (click)="confirmExitFocus('request-end-focus')"
+                  data-testid="dock-v3-exit-request-end">
+                  结束专注…
+                </button>
+              </div>
+            } @else {
+              <div class="flex flex-col gap-2">
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                  (click)="confirmExitFocus('save-exit')"
+                  data-testid="dock-v3-exit-save">
+                  结束专注并保留停泊坞
+                </button>
+                <button
+                  type="button"
+                  class="min-h-[44px] rounded-xl bg-rose-700/80 px-3 py-2 text-xs font-medium text-white hover:bg-rose-600"
+                  (click)="confirmExitFocus('clear-exit')"
+                  data-testid="dock-v3-exit-clear">
+                  结束专注并清空停泊坞
+                </button>
+              </div>
+            }
+          </div>
+        </div>
+      }
+
+      @if (showRestoreHint()) {
+        <div
+          class="fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
+          data-testid="dock-v3-exit-restore-hint">
+          已保留专注会话，可随时重新开启虚化。
+        </div>
+      }
+
+      @if (dockActionFeedback(); as feedback) {
+        <div
+          class="fixed left-1/2 z-[71] -translate-x-1/2 rounded-full border px-4 py-2 text-[11px] shadow-lg backdrop-blur-sm"
+          [ngClass]="feedback.tone === 'success'
+            ? 'border-emerald-400/25 bg-slate-900/88 text-emerald-100'
+            : 'border-indigo-400/25 bg-slate-900/88 text-slate-100'"
+          [style.bottom]="'calc(' + dockBottomInset + ' + 148px)'"
+          data-testid="dock-v3-dock-feedback">
+          {{ feedback.message }}
+        </div>
+      }
+    }
+
+    <!-- ═══ 半圆形停泊坞入口（始终可见） ═══ -->
+    <div
+      class="dock-semicircle dock-semicircle-enter"
+      [class.expanded]="semicircleExpanded()"
+      [class.drag-active]="dropState() !== 'idle' && dropState() !== 'reject'"
+      [style.left]="dockCenterLeft()"
+      [style.bottom]="dockSemicircleBottomInset()"
+      [style.--dock-semicircle-scale-x]="semicircleExpanded() ? '1' : '0.5'"
+      [style.--dock-semicircle-scale-y]="semicircleExpanded() ? '1' : '0.77'"
+      (click)="toggleDockExpanded()"
+      (mouseenter)="onSemicircleMouseEnter()"
+      (mouseleave)="onSemicircleMouseLeave()"
+      (dragover)="onSemicircleDragOver($event)"
+      (dragleave)="onSemicircleDragLeave()"
+      (drop)="onDrop($event)"
+      data-testid="dock-v3-semicircle"
+      [attr.aria-label]="dockExpanded() ? '收起停泊坞' : '展开停泊坞'"
+      [attr.aria-expanded]="dockExpanded()"
+      [attr.aria-disabled]="gateActive() ? 'true' : null"
+      [style.--dock-semicircle-lift]="dockExpanded() ? '0px' : (PARKING_CONFIG.MOTION.distance.semicircleLiftPx + 'px')"
+      role="button"
+      tabindex="0"
+      (keydown.enter)="toggleDockExpanded()"
+      (keydown.space)="$event.preventDefault(); toggleDockExpanded()">
+      @if (engine.dockedCount() > 0) {
+        <span class="count-badge">{{ engine.dockedCount() }}</span>
+      }
+      @if (dockExpanded()) {
+        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+        </svg>
+      } @else {
+        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
+        </svg>
+      }
+    </div>
+
+    @if (firstMainSelectionPending()) {
+      <div
+        class="fixed left-1/2 -translate-x-1/2 z-[45] px-3 py-2 rounded-full border border-indigo-400/30 bg-slate-900/90 text-[11px] text-slate-100 shadow-lg"
+        [style.bottom]="'calc(' + dockBottomInset + ' + 132px)'"
+        data-testid="dock-v3-first-main-hint">
+        初始主任务已选定，15 秒内可点击其他任务改选。
+      </div>
+    }
+
+    <!-- ═══ 底部坞栏面板 ═══ -->
+    <div
+      class="dock-bar fixed -translate-x-1/2 z-40 w-full px-4"
+      [style.left]="dockCenterLeft()"
+      [style.--dock-sidebar-width]="sidebarEffectiveWidth() + 'px'"
+      [style.bottom]="dockBottomInset"
+      [style.--dock-focus-dim-opacity]="PARKING_CONFIG.DOCK_FOCUS_DIM_OPACITY"
+      [style.--dock-focus-dim-translate-y]="PARKING_CONFIG.DOCK_FOCUS_DIM_TRANSLATE_Y_PX + 'px'"
+      [class.focus-collapsed]="!dockExpanded() && dropState() === 'idle'"
+      [class.focus-expanded]="dockExpanded() && !dockSecondaryRailActive()"
+      [class.focus-secondary]="dockExpanded() && dockSecondaryRailActive()"
+      [class.drag-peek]="!dockExpanded() && dropState() !== 'idle'"
+      [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+      data-testid="dock-v3-panel">
+      <div class="glass-card dock-shell rounded-2xl p-4 flex flex-col gap-4 border border-slate-700/30 shadow-2xl max-h-full overflow-visible"
+           [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+           data-testid="dock-v3-shell">
+
+        <!-- 顶部标题栏 -->
+        <div class="flex items-center justify-between px-2 flex-shrink-0">
+          <div class="flex items-center gap-3">
+            <h3 class="text-sm font-semibold text-slate-200 tracking-wide flex items-center gap-2">
+              停泊坞
+              <span class="text-slate-500 font-mono text-xs tabular-nums">{{ engine.dockedCount() }} 块</span>
+            </h3>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              (click)="toggleNewTaskForm()"
+              [disabled]="!canUseInlineDockCreate()"
+              class="px-4 py-1.5 rounded-full text-xs font-semibold transition-colors"
+              [ngClass]="showNewTaskForm()
+                ? 'bg-indigo-500/90 text-white hover:bg-indigo-400'
+                : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'"
+              style="min-height: 44px;"
+              data-testid="dock-v3-create-toggle">
+              {{ showNewTaskForm() ? '收起新建' : '+ 新建' }}
+            </button>
+
+            <button
+              type="button"
+              (click)="toggleHelpOverlay()"
+              class="px-4 py-1.5 rounded-full text-xs font-semibold text-slate-200 bg-slate-800/80 hover:bg-slate-700 transition-colors"
+              style="min-height: 44px;"
+              data-testid="dock-v3-help-trigger-inline">
+              操作帮助
+            </button>
+
+            <button
+              type="button"
+              (click)="onScrimToggle()"
+              [disabled]="!canToggleScrim()"
+              class="px-4 py-1.5 rounded-full text-xs font-bold transition-colors"
+              [ngClass]="engine.focusMode() && engine.focusScrimOn()
+                ? 'bg-gradient-to-r from-indigo-500 to-violet-500 text-white'
+                : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+              [style.box-shadow]="engine.focusMode() && engine.focusScrimOn()
+                ? '0 0 20px rgba(99,102,241,0.35), 0 0 6px rgba(139,92,246,0.4)'
+                : 'none'"
+              style="min-height: 44px;"
+              data-testid="dock-v3-focus-toggle">
+              {{ !engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '背景虚化开启' : '背景虚化关闭') }}
+            </button>
+          </div>
+        </div>
+
+        @if (dockSecondaryRailActive() || bannerPlannerTarget()) {
+          <div
+            class="mx-2 rounded-2xl border border-indigo-400/20 bg-slate-900/55 px-3 py-2 text-[11px] text-slate-200 flex flex-wrap items-center gap-2"
+            data-testid="dock-v3-secondary-rail-banner">
+            @if (dockSecondaryRailActive()) {
+              <span class="font-medium text-indigo-200">背景操作轨</span>
+              <span class="text-slate-300">点击卡片切到前台。</span>
+            }
+            @if (bannerPlannerTarget(); as bannerTarget) {
+              <button
+                type="button"
+                class="ml-auto flex items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-500/10 px-2 py-0.5 cursor-pointer transition-colors hover:bg-amber-500/20"
+                (click)="togglePlannerQuickEdit(bannerTarget.taskId)">
+                <span class="font-medium text-amber-200">补全属性</span>
+                <span class="text-slate-300 truncate max-w-[100px]">{{ bannerTarget.title }}</span>
+                <span class="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200">
+                  待补 {{ bannerPlannerMissingCount() }} 项
+                </span>
+              </button>
+            }
+          </div>
+        }
+        @if (plannerActiveEntry(); as plannerEntry) {
+          <div
+            #plannerPanel
+            [ngClass]="plannerPanelClasses()"
+            tabindex="-1"
+            role="region"
+            aria-label="补全任务属性"
+            data-testid="dock-v3-planner-panel"
+            (click)="$event.stopPropagation()"
+            (pointerdown)="$event.stopPropagation()">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <div class="flex flex-wrap items-center gap-2 min-w-0">
+                <span class="text-xs font-semibold text-slate-100 truncate max-w-[200px]">{{ plannerEntry.title }}</span>
+                @if (plannerMissingFieldCount() > 0) {
+                  <span class="rounded-full border border-amber-400/25 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+                    待补 {{ plannerMissingFieldCount() }} 项
+                  </span>
+                } @else {
+                  <span class="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+                    已完整 ✓
+                  </span>
+                }
+              </div>
+              <button
+                type="button"
+                class="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg text-[11px] text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+                (click)="closePlannerQuickEdit()"
+                data-testid="dock-v3-planner-close">
+                ✕
+              </button>
+            </div>
+
+            <div class="grid gap-2.5 sm:grid-cols-3">
+              <div class="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-3">
+                <div class="mb-2 text-[10px] uppercase tracking-wide text-slate-500">认知负荷</div>
+                <div class="flex gap-1.5">
+                  <button
+                    type="button"
+                    class="flex-1 rounded-xl border px-3 py-3 text-[11px] font-medium transition-colors"
+                    [ngClass]="plannerEntry.load === 'low'
+                      ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+                      : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                    (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'low')"
+                    style="min-height: 40px;"
+                    data-testid="dock-v3-planner-load-low">
+                    低负荷
+                  </button>
+                  <button
+                    type="button"
+                    class="flex-1 rounded-xl border px-3 py-2.5 text-[11px] font-medium transition-colors"
+                    [ngClass]="plannerEntry.load === 'high'
+                      ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200'
+                      : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                    (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'high')"
+                    style="min-height: 40px;"
+                    data-testid="dock-v3-planner-load-high">
+                    高负荷
+                  </button>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-3">
+                <div class="mb-2 flex items-center justify-between text-[10px] text-slate-500">
+                  <div class="uppercase tracking-wide">预计投入</div>
+                  <span class="font-mono text-slate-300">{{ plannerEntry.expectedMinutes === null ? '未设' : formatTime(plannerEntry.expectedMinutes) }}</span>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  @for (preset of plannerExpectedPresets; track preset) {
+                    <button
+                      type="button"
+                      class="rounded-xl border px-3 py-2.5 text-[11px] font-medium transition-colors"
+                      [ngClass]="plannerEntry.expectedMinutes === preset
+                        ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200'
+                        : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                      (click)="setPlannerQuickEditExpected(plannerEntry.taskId, preset)"
+                      style="min-height: 44px;"
+                      data-testid="dock-v3-planner-expected">
+                      {{ formatTime(preset) }}
+                    </button>
+                  }
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-3">
+                <div class="mb-2 flex items-center justify-between text-[10px] text-slate-500">
+                  <div class="uppercase tracking-wide">等待窗口 <span class="normal-case text-slate-600">选填</span></div>
+                  <span class="font-mono text-slate-300">{{ plannerEntry.waitMinutes === null ? '未设' : formatTime(plannerEntry.waitMinutes) }}</span>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    class="rounded-xl border px-3 py-2.5 text-[11px] font-medium transition-colors"
+                    [ngClass]="plannerEntry.waitMinutes === null
+                      ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                      : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                    (click)="setPlannerQuickEditWait(plannerEntry.taskId, null)"
+                    style="min-height: 44px;"
+                    data-testid="dock-v3-planner-wait-none">
+                    无
+                  </button>
+                  @for (preset of plannerWaitPresets; track preset) {
+                    <button
+                      type="button"
+                      class="rounded-xl border px-3 py-2.5 text-[11px] font-medium transition-colors"
+                      [ngClass]="plannerEntry.waitMinutes === preset
+                        ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                        : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
+                      (click)="setPlannerQuickEditWait(plannerEntry.taskId, preset)"
+                      style="min-height: 44px;"
+                      data-testid="dock-v3-planner-wait">
+                      {{ formatTime(preset) }}
+                    </button>
+                  }
+                </div>
+              </div>
+            </div>
+          </div>
+        }
+
+        @if (showHelpHints()) {
+          <div
+            class="flex flex-wrap items-center gap-2 px-2 flex-shrink-0"
+            role="note"
+            aria-label="停泊坞快捷提示"
+            data-testid="dock-v3-help-hints">
+            <span class="px-2.5 py-1 rounded-full border border-slate-700/60 bg-slate-800/60 text-[10px] text-slate-300">
+              拖入任务块
+            </span>
+            <span class="px-2.5 py-1 rounded-full border border-slate-700/60 bg-slate-800/60 text-[10px] text-slate-300">
+              点 + 新建
+            </span>
+            <span class="px-2.5 py-1 rounded-full border border-slate-700/60 bg-slate-800/60 text-[10px] text-slate-300">
+              Alt+H 快捷帮助
+            </span>
+          </div>
+        }
+
+        <!-- 表单 + 卡片列表：当面板高度受限时可垂直滚动 -->
+        <div class="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto hide-scrollbar">
+        <!-- 新建任务表单 -->
+        @if (showAdvancedUi && showNewTaskForm()) {
+          <div class="new-task-form flex flex-col gap-2.5 px-2">
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                [(ngModel)]="newTaskTitle"
+                (keydown.enter)="createTask()"
+                class="flex-1 text-xs py-2.5 px-3 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors"
+                placeholder="输入任务名称…" />
+              <select
+                [(ngModel)]="newTaskLane"
+                class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+                <option value="backup">备选区</option>
+                <option value="combo-select">组合选择区</option>
+              </select>
+              <select
+                [(ngModel)]="newTaskLoad"
+                class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+                <option value="low">低负荷</option>
+                <option value="high">高负荷</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-4 gap-2">
+              <input
+                type="number"
+                [(ngModel)]="newTaskExpectedMinutes"
+                min="1"
+                placeholder="预计(min)"
+                class="text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+              <input
+                type="number"
+                [(ngModel)]="newTaskWaitMinutes"
+                min="1"
+                placeholder="等待(min)"
+                class="text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+              <input
+                type="text"
+                [(ngModel)]="newTaskDetail"
+                placeholder="任务详情（可选）"
+                class="col-span-2 text-xs py-2 px-2.5 rounded-lg bg-slate-800/80 border border-slate-600/40
+                       text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
+                       transition-colors" />
+            </div>
+            <div class="flex justify-end">
+              <button
+                type="button"
+                (click)="createTask()"
+                [disabled]="!newTaskTitle.trim() || !canUseInlineDockCreate()"
+                class="px-4 py-2 text-xs rounded-lg bg-indigo-600/90 hover:bg-indigo-500
+                       text-white font-medium transition-colors shadow-lg shadow-indigo-600/15
+                       disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-indigo-600/90"
+                style="min-height: 44px;"
+                data-testid="dock-v3-create-submit">
+                添加到停泊坞
+              </button>
+            </div>
+          </div>
+        }
+
+        <!-- 任务卡片列表 -->
+        <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x"
+             (dragover)="onDockRailDragOver($event)"
+             (dragleave)="onDockRailDragLeave()"
+             (drop)="onDrop($event)">
+          @for (entry of engine.orderedDockEntries(); track entry.taskId) {
+            <div
+              class="dock-card flex-shrink-0 w-48 p-3 pl-4 rounded-xl border snap-start"
+              [class.main-card]="entry.isMain"
+              [class.secondary-card]="dockSecondaryRailActive()"
+              [class.secondary-active]="dockSecondaryRailActive() && entry.isMain"
+              [class.planner-open]="isPlannerQuickEditOpen(entry.taskId)"
+              [class.ring-1]="recentlyDockedTaskId() === entry.taskId"
+              [class.shadow-lg]="recentlyDockedTaskId() === entry.taskId"
+              [ngClass]="entry.isMain
+                ? (recentlyDockedTaskId() === entry.taskId ? 'ring-amber-400/40' : '')
+                : 'bg-slate-800/40 border-slate-600/30 hover:bg-slate-800/60'
+                  + (recentlyDockedTaskId() === entry.taskId ? ' ring-amber-400/40' : '')"
+              (wheel)="onCardWheel($event, entry.taskId)"
+              (click)="onDockCardClick(entry.taskId)"
+              (touchstart)="onTouchStart($event, entry.taskId)"
+              (touchmove)="onTouchMove($event, entry.taskId)"
+              (touchend)="onTouchEnd()"
+              (dragstart)="onDockCardDragStart($event, entry.taskId)"
+              (dragover)="onDockCardDragOver($event, entry.taskId)"
+              (drop)="onDockCardDrop($event, entry.taskId)"
+              (dragend)="onDockCardDragEnd()"
+              [attr.draggable]="canReorderDockCards() ? 'true' : null"
+              tabindex="0"
+              role="button"
+              [attr.aria-label]="entry.isMain ? ('主任务：' + entry.title) : (entry.lane === 'combo-select' ? '副任务：' : '备选任务：') + entry.title"
+              [attr.aria-disabled]="dockSecondaryRailActive() && entry.isMain ? 'true' : null"
+              (keydown.enter)="onDockCardClick(entry.taskId)"
+              (keydown.space)="$event.preventDefault(); onDockCardClick(entry.taskId)"
+              data-testid="dock-v3-item">
+              <!-- 策划案：左侧认知负荷侧边色彩条 -->
+              <div class="dock-card-load-bar"
+                [class.high]="entry.load === 'high'"
+                [class.low]="entry.load === 'low'">
+              </div>
+              <!-- 负荷 + 时间 -->
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-[9px] px-1.5 py-0.5 rounded font-medium"
+                  [class.load-badge-high]="entry.load === 'high'"
+                  [class.load-badge-low]="entry.load === 'low'">
+                  {{ entry.load === 'high' ? '高负荷' : '低负荷' }}
+                </span>
+                <div class="flex items-center gap-1.5">
+                  @if (entry.waitMinutes) {
+                    <span class="dock-card-wait-badge">
+                      ⏱ {{ formatTime(entry.waitMinutes) }}
+                    </span>
+                  }
+                  <span class="text-[10px] text-slate-500 font-mono tabular-nums">
+                    @if (entry.expectedMinutes) {
+                      {{ formatTime(entry.expectedMinutes) }}
+                    }
+                  </span>
+                </div>
+              </div>
+              <!-- 标题 -->
+              <div class="text-xs font-medium text-slate-200 line-clamp-2 mb-2">{{ entry.title }}</div>
+              <div class="mb-2 text-[10px] text-slate-400">
+                @if (entry.isMain) {
+                  主任务
+                } @else if (entry.lane === 'combo-select') {
+                  副任务
+                } @else {
+                  备选任务
+                }
+              </div>
+              <!-- 底部状态 -->
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <div class="status-dot"
+                  [class.focusing]="entry.status === 'focusing'"
+                  [class.suspended]="entry.status === 'suspended_waiting' || entry.status === 'wait_finished'"
+                  [class.idle]="entry.status === 'pending_start'">
+                </div>
+                @if (entry.isMain) {
+                  <span class="text-[9px] text-indigo-300 font-semibold ml-auto">主任务</span>
+                } @else if (entry.lane === 'combo-select') {
+                  <span class="text-[9px] text-slate-500">副任务</span>
+                } @else {
+                  <span class="text-[9px] text-slate-500">备选任务</span>
+                }
+              </div>
+
+              <div class="mt-2 flex justify-end">
+                <app-dock-planner-quick-edit
+                  [taskId]="entry.taskId"
+                  [open]="isPlannerQuickEditOpen(entry.taskId)"
+                  [expectedMinutes]="entry.expectedMinutes"
+                  [waitMinutes]="entry.waitMinutes"
+                  [attention]="entry.expectedMinutes === null"
+                  [disabled]="!canUsePlannerQuickEdit()"
+                  (toggleRequested)="togglePlannerQuickEdit(entry.taskId)">
+                </app-dock-planner-quick-edit>
+              </div>
+            </div>
+          }
+
+          <!-- 拖放区域 -->
+          <div
+            class="drop-zone flex-shrink-0 w-48 rounded-xl border-2 border-dashed border-slate-600/40
+                   bg-slate-800/10 flex flex-col items-center justify-center text-slate-500 text-xs gap-2.5"
+            [class.can-drop]="dropState() === 'canDrop'"
+            [class.active]="dropState() === 'isOver'"
+            [class.reject]="dropState() === 'reject'"
+            [class.opacity-50]="!canAcceptExternalDrop()"
+            [style.--dock-drop-reject-shake-ms]="PARKING_CONFIG.DOCK_DROP_REJECT_SHAKE_MS + 'ms'"
+            (dragover)="onDropZoneDragOver($event)"
+            (dragleave)="onDropZoneDragLeave()"
+            (drop)="onDrop($event)"
+            style="min-height: 80px;"
+            role="region"
+            aria-label="停泊坞任务投放区"
+            [attr.aria-disabled]="!canAcceptExternalDrop()"
+            data-testid="dock-v3-drop-zone">
+            <svg class="w-5 h-5 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+            <span class="text-[10px]">
+              @if (dropState() === 'reject') {
+                无法放入
+              } @else {
+                拖入任务块
+              }
+            </span>
+          </div>
+        </div>
+
+        </div><!-- /scrollable body -->
+      </div>
+    </div>
+  `,
+})
+export class ParkingDockComponent implements OnDestroy {
+  private readonly hostElement = inject(ElementRef<HTMLElement>);
+  readonly engine = inject(DockEngineService);
+  private readonly focusLeader = inject(FocusDockLeaderService);
+  private readonly gateService = inject(GateService);
+  private readonly modalLoader = inject(ModalLoaderService);
+  private readonly dynamicModal = inject(DynamicModalService);
+  private readonly performanceTierService = inject(PerformanceTierService);
+  private readonly projectStore = inject(ProjectStore);
+  private readonly taskStore = inject(TaskStore);
+  private readonly toast = inject(ToastService);
+  private readonly uiState = inject(UiStateService);
+  readonly PARKING_CONFIG = PARKING_CONFIG;
+
+  /** 停泊坞和半圆入口的水平中心点：桌面端有侧边栏时向右偏移半个侧边栏宽度 */
+  readonly sidebarEffectiveWidth = computed(() => {
+    if (this.uiState.isMobile() || !this.uiState.sidebarOpen()) return 0;
+    return this.uiState.sidebarWidth();
+  });
+  readonly dockCenterLeft = computed(() => {
+    const offset = this.sidebarEffectiveWidth();
+    return offset === 0 ? '50%' : `calc(50% + ${offset / 2}px)`;
+  });
+
+  readonly showNewTaskForm = signal(false);
+  readonly showHelpOverlay = signal(false);
+  readonly showHelpNudge = signal(false);
+  readonly dropState = signal<DockDropState>('idle');
+  readonly dockActionFeedback = signal<DockActionFeedback | null>(null);
+  readonly flipGhost = signal<DockFlipGhostState | null>(null);
+  readonly flipGhostActive = signal(false);
+  readonly dockExpanded = computed(() => this.engine.dockExpanded());
+  readonly semicircleHoverExpanded = signal(false);
+  readonly semicircleExpanded = computed(() => this.dockExpanded() || this.semicircleHoverExpanded());
+  readonly hudSize = signal<{ width: number; height: number }>({
+    width: PARKING_CONFIG.HUD_FULL_MAX_WIDTH_PX,
+    height: PARKING_CONFIG.HUD_FULL_MAX_HEIGHT_PX,
+  });
+  readonly hudPosition = signal<{ x: number; y: number } | null>(this.loadHudPosition());
+  readonly hudDragging = signal(false);
+  readonly showExitConfirm = signal(false);
+  readonly exitFlowStep = signal<FocusExitFlowStep>('primary');
+  readonly showRestoreHint = signal(false);
+  readonly transitionPerformanceTierLock = signal<FocusPerformanceTier | null>(null);
+  readonly performanceTier = computed(
+    () => this.transitionPerformanceTierLock() ?? this.performanceTierService.tier(),
+  );
+  readonly takeoverBannerVisible = computed(
+    () => this.engine.focusMode() && this.focusLeader.isReadOnlyFollower(),
+  );
+  readonly gateActive = computed(() => this.gateService.isActive());
+  readonly canMutateDock = computed(
+    () => !this.gateActive() && !this.focusLeader.isReadOnlyFollower(),
+  );
+  readonly canUseInlineDockCreate = computed(
+    () => this.canMutateDock() && !(this.engine.focusMode() && this.engine.focusScrimOn()),
+  );
+  readonly canCreateBackupTask = computed(() => this.canMutateDock());
+  readonly canUsePlannerQuickEdit = computed(() => this.canMutateDock());
+  readonly canReorderDockCards = computed(
+    () => this.canMutateDock() && !(this.engine.focusMode() && this.engine.focusScrimOn()),
+  );
+  readonly canAcceptExternalDrop = computed(() => this.canReorderDockCards());
+  readonly canToggleScrim = computed(
+    () => this.engine.focusMode() && this.canMutateDock(),
+  );
+  readonly dockSecondaryRailActive = computed(
+    () => this.engine.focusMode() && this.engine.focusScrimOn(),
+  );
+  readonly focusMotionProfile = PARKING_CONFIG.FOCUS_MOTION_PROFILE;
+  readonly motion = PARKING_CONFIG.MOTION;
+  readonly reducedMotion = signal(this.prefersReducedMotion());
+  readonly strictSampleMode = PARKING_CONFIG.DOCK_V3_STRICT_SAMPLE_UI;
+  readonly showAdvancedUi = PARKING_CONFIG.DOCK_V3_SHOW_ADVANCED_UI;
+  readonly showHelpHints = computed(
+    () =>
+      this.showAdvancedUi
+      && PARKING_CONFIG.DOCK_V3_SHOW_HELP_HINTS
+      && this.dockExpanded()
+      && (!this.engine.focusMode() || !this.engine.focusScrimOn()),
+  );
+  readonly blankPeriodActive = computed(
+    () =>
+      this.engine.fragmentEntryCountdown() === null
+      && this.engine.pendingDecision() !== null
+      && this.engine.pendingDecisionEntries().length === 0,
+  );
+  readonly focusSceneMode = computed<DockFocusSceneMode>(() => {
+    if (this.engine.focusMode() && this.engine.fragmentDefenseLevel() >= 4) {
+      return 'zen';
+    }
+    if (this.engine.isBurnoutActive()) {
+      return 'burnout';
+    }
+    if (this.engine.isFragmentPhase() || this.blankPeriodActive()) {
+      return 'fragment';
+    }
+    if (this.engine.pendingDecision()) {
+      return 'decision';
+    }
+    return 'steady';
+  });
+  readonly showZenMode = computed(
+    () => this.engine.focusMode() && this.engine.fragmentDefenseLevel() >= 4,
+  );
+  readonly hudSafeRightInsetPx = PARKING_CONFIG.HUD_SAFE_RIGHT_INSET_PX;
+  readonly firstMainSelectionPending = computed(() => this.engine.firstMainSelectionPending());
+  readonly hudMinimalMode = computed(
+    () => this.engine.focusMode() && !this.engine.focusScrimOn(),
+  );
+  readonly focusStageTransform = computed(() => {
+    if (this.uiState.isMobile()) {
+      return this.dockExpanded() ? 'translateY(-128px)' : 'translateY(calc(50vh - 260px))';
+    }
+    return this.dockExpanded() ? 'translateY(-80px)' : 'translateY(calc(50vh - 240px))';
+  });
+  readonly hudContainerStyle = computed<Record<string, string>>(() => {
+    if (this.hudMinimalMode()) {
+      return {
+        top: `${PARKING_CONFIG.HUD_MINIMAL_TOP_PX}px`,
+        left: '50%',
+        right: 'auto',
+        transform: 'translateX(-50%)',
+        cursor: 'default',
+        width: `${PARKING_CONFIG.HUD_MINIMAL_WIDTH_PX}px`,
+      };
+    }
+    const position = this.hudPosition() ?? this.defaultHudPosition();
+    return {
+      top: `${position.y}px`,
+      left: `${position.x}px`,
+      right: 'auto',
+      transform: 'none',
+      cursor: this.hudDragging() ? 'grabbing' : 'default',
+      width: 'auto',
+    };
+  });
+
+  newTaskTitle = '';
+  newTaskLane: DockLane = 'backup';
+  newTaskLoad: CognitiveLoad = 'low';
+  newTaskExpectedMinutes: string | number = '';
+  newTaskWaitMinutes: string | number = '';
+  newTaskDetail = '';
+  readonly plannerQuickEditTaskId = signal<string | null>(null);
+  readonly recentlyDockedTaskId = signal<string | null>(null);
+  readonly plannerPresentation = computed<DockPlannerQuickEditPresentation>(
+    () => this.uiState.isMobile() ? 'sheet' : 'popover',
+  );
+  readonly plannerActiveEntry = computed(() => {
+    const taskId = this.plannerQuickEditTaskId();
+    if (!taskId) return null;
+    return this.engine.orderedDockEntries().find(entry => entry.taskId === taskId) ?? null;
+  });
+  readonly plannerBackdropVisible = computed(
+    () => this.plannerActiveEntry() !== null && this.plannerPresentation() === 'sheet',
+  );
+  readonly plannerMissingFieldCount = computed(() => {
+    const entry = this.plannerActiveEntry();
+    if (!entry) return 0;
+    let count = 0;
+    if (entry.expectedMinutes === null) count += 1;
+    // 等待时间为选填，不计入缺失数
+    return count;
+  });
+  /** 第一个存在必填属性缺失的停泊坞条目（不含 waitMinutes） */
+  readonly bannerPlannerTarget = computed(() => {
+    // 已有打开的 planner 面板时不再显示横幅
+    if (this.plannerActiveEntry()) return null;
+    const entries = this.engine.orderedDockEntries();
+    // 优先取主任务
+    const main = entries.find(e => e.isMain && e.expectedMinutes === null);
+    if (main) return main;
+    return entries.find(e => e.expectedMinutes === null) ?? null;
+  });
+  readonly bannerPlannerMissingCount = computed(() => {
+    const entry = this.bannerPlannerTarget();
+    if (!entry) return 0;
+    let count = 0;
+    if (entry.expectedMinutes === null) count += 1;
+    return count;
+  });
+  readonly plannerPanelClasses = computed(() => {
+    return 'mx-2 rounded-2xl border border-slate-600/55 bg-slate-950/97 p-3.5 shadow-[0_8px_32px_rgba(2,6,23,0.4)] backdrop-blur-md overflow-hidden animate-[plannerSlideOpen_200ms_ease-out]';
+  });
+  readonly plannerExpectedPresets = [15, 30, 45, 60, 90, 120];
+  readonly plannerWaitPresets = [5, 10, 15, 30, 45, 60];
+
+  readonly dockMaxWidth = PARKING_CONFIG.DOCK_EXPANDED_MAX_WIDTH;
+  readonly focusContentEffect = PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT;
+  readonly focusBackgroundUrl = PARKING_CONFIG.DOCK_FOCUS_BG_IMAGE_URL;
+  readonly dockBottomInset =
+    `calc(${PARKING_CONFIG.DOCK_BOTTOM_OFFSET_PX}px + env(safe-area-inset-bottom))`;
+  readonly dockSemicircleBottomInset = computed(() =>
+    this.uiState.isMobile() ? this.dockBottomInset : 'env(safe-area-inset-bottom)',
+  );
+  readonly focusHelpSections: FocusHelpSection[] = [
+    {
+      title: '点击',
+      subtitle: '把主要动作显式摆到眼前',
+      items: [
+        '点击背景卡片可切到前台，系统会给出“已切换到前台”的即时反馈。',
+        '补全属性按钮会打开属性面板，关闭后仍留在当前专注上下文。',
+        '右上角关闭按钮会先进入退出确认，而不是直接把你踢出专注。',
+      ],
+    },
+    {
+      title: '键盘',
+      subtitle: '保留快捷方式，但不让它们承担主路径',
+      items: [
+        'Alt + H 打开这份帮助。',
+        'Alt + Shift + F 切换背景虚化；Alt + Shift + D 展开或收起停泊坞。',
+        'Esc 只关闭当前层级：先关属性面板/帮助层，再处理虚化或退出确认。',
+      ],
+    },
+    {
+      title: '触控',
+      subtitle: '移动端不需要记忆隐藏手势也能完成主要操作',
+      items: [
+        '完成、等待、负荷切换都有明确按钮，优先用按钮而不是手势。',
+        '上滑完成仍可用，但现在属于专家快捷方式。',
+        'Planner 在手机上会以底部面板展开，便于单手补全属性。',
+      ],
+    },
+  ];
+
+  private touchStartY = 0;
+  private readonly plannerPanel = viewChild<ElementRef<HTMLElement>>('plannerPanel');
+  private touchTaskId: string | null = null;
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private flipTimer: ReturnType<typeof setTimeout> | null = null;
+  private dropRejectResetTimer: ReturnType<typeof setTimeout> | null = null;
+  private semicircleDragExpandTimer: ReturnType<typeof setTimeout> | null = null;
+  private semicircleAutoCollapseTimer: ReturnType<typeof setTimeout> | null = null;
+  private restoreHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private helpNudgeTimer: ReturnType<typeof setTimeout> | null = null;
+  private dockActionFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private hudDragPointerId: number | null = null;
+  private hudDragOffset: { x: number; y: number } | null = null;
+  private draggingDockTaskId: string | null = null;
+  private recentlyDockedTimer: ReturnType<typeof setTimeout> | null = null;
+  private helpNudgeShownOnce = false;
+
+  constructor() {
+    effect(() => {
+      const activeEntry = this.plannerActiveEntry();
+      if (!activeEntry) return;
+
+      setTimeout(() => {
+        this.focusPlannerPanel();
+        this.scrollPlannerPanelIntoView();
+      }, 0);
+    });
+
+    effect(() => {
+      if (!this.plannerQuickEditTaskId()) return;
+      if (this.plannerActiveEntry()) return;
+      this.closePlannerQuickEdit(false);
+    });
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Tab' && this.plannerBackdropVisible()) {
+      this.trapDialogFocus(event, '[data-testid="dock-v3-planner-panel"]');
+      return;
+    }
+
+    if (event.key === 'Tab' && this.showExitConfirm()) {
+      this.trapDialogFocus(event, '[data-testid="dock-v3-exit-confirm"]');
+      return;
+    }
+
+    // 抑制重复按键事件（按住键时操作系统会持续触发 keydown）。
+    // Tab 焦点陷阱不受影响，因为 Tab 的处理在此行之前已提前 return。
+    if (event.repeat) return;
+
+    if (event.key === 'Escape') {
+      this.handleEscapeKey(event);
+      return;
+    }
+
+    this.handleShortcutKey(event);
+  }
+
+  @HostListener('document:pointerdown', ['$event'])
+  onDocumentPointerDown(event: PointerEvent): void {
+    if (this.plannerPresentation() !== 'popover' || !this.plannerActiveEntry()) return;
+
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    if (target.closest('[data-testid="dock-v3-planner-panel"]')) return;
+    if (target.closest('[data-testid="dock-v3-planner-toggle"]')) return;
+
+    this.closePlannerQuickEdit(false);
+  }
+
+  /** Escape 键分级处理：先关闭当前临时表面，再处理虚化与退出。 */
+  private handleEscapeKey(event: KeyboardEvent): void {
+    if (this.closeTransientSurface()) {
+      event.preventDefault();
+      return;
+    }
+    if (this.showZenMode()) {
+      event.preventDefault();
+      this.onZenExit();
+      return;
+    }
+    if (this.engine.pendingDecision()) {
+      event.preventDefault();
+      this.cancelPendingAutoPromote();
+      return;
+    }
+    if (this.engine.focusMode() && this.engine.focusScrimOn()) {
+      event.preventDefault();
+      this.engine.setFocusScrim(false);
+      this.showRestoreHint.set(true);
+      if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
+      this.restoreHintTimer = setTimeout(() => {
+        this.showRestoreHint.set(false);
+        this.restoreHintTimer = null;
+      }, PARKING_CONFIG.DOCK_EXIT_CONFIRM_RESTORE_HINT_MS);
+      return;
+    }
+    // 遮罩已关闭时再按 Escape，弹出退出确认对话框
+    if (this.engine.focusMode() && !this.engine.focusScrimOn()) {
+      event.preventDefault();
+      this.onFocusSessionToggle();
+    }
+  }
+
+  /** Alt+Shift 快捷键分发 */
+  private handleShortcutKey(event: KeyboardEvent): void {
+    const key = event.key.toLowerCase();
+    if (event.altKey && event.shiftKey) {
+      if (key === 'l') { event.preventDefault(); this.onFocusSessionToggle(); return; }
+      if (key === 'f') { if (!this.engine.focusMode()) return; event.preventDefault(); this.onScrimToggle(); return; }
+      if (key === 'd') { event.preventDefault(); this.toggleDockExpanded(); return; }
+    }
+    if (event.altKey && !event.shiftKey && key === 'h') {
+      event.preventDefault();
+      this.toggleHelpOverlay();
+    }
+  }
+
+  toggleHelpOverlay(): void {
+    if (this.showHelpOverlay()) {
+      this.closeHelpOverlay();
+      return;
+    }
+    this.showHelpOverlay.set(true);
+    this.showHelpNudge.set(false);
+  }
+
+  closeHelpOverlay(): void {
+    this.showHelpOverlay.set(false);
+    this.showHelpNudge.set(false);
+  }
+
+  @HostListener('window:dock-focus-session-toggle')
+  onExternalFocusSessionToggle(): void {
+    if (this.gateActive()) return;
+    this.onFocusSessionToggle();
+  }
+
+  @HostListener('window:pointermove', ['$event'])
+  onHudPointerMove(event: PointerEvent): void {
+    if (!this.hudDragging()) return;
+    if (this.hudDragPointerId !== null && event.pointerId !== this.hudDragPointerId) return;
+    if (!this.hudDragOffset) return;
+    const next = this.clampHudPosition({
+      x: event.clientX - this.hudDragOffset.x,
+      y: event.clientY - this.hudDragOffset.y,
+    }, this.hudSize());
+    this.hudPosition.set(next);
+  }
+
+  @HostListener('window:pointerup', ['$event'])
+  @HostListener('window:pointercancel', ['$event'])
+  onHudPointerUp(event: PointerEvent): void {
+    if (!this.hudDragging()) return;
+    if (this.hudDragPointerId !== null && event.pointerId !== this.hudDragPointerId) return;
+    this.hudDragging.set(false);
+    this.hudDragPointerId = null;
+    this.hudDragOffset = null;
+    this.persistHudPosition();
+  }
+
+  ngOnDestroy(): void {
+    if (this.longPressTimer) clearTimeout(this.longPressTimer);
+    if (this.flipTimer) clearTimeout(this.flipTimer);
+    if (this.dropRejectResetTimer) clearTimeout(this.dropRejectResetTimer);
+    if (this.semicircleDragExpandTimer) clearTimeout(this.semicircleDragExpandTimer);
+    if (this.semicircleAutoCollapseTimer) clearTimeout(this.semicircleAutoCollapseTimer);
+    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
+    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
+    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
+    if (this.recentlyDockedTimer) clearTimeout(this.recentlyDockedTimer);
+    this.persistHudPosition();
+    this.transitionPerformanceTierLock.set(null);
+    this.engine.endFocusTransition();
+  }
+
+  toggleNewTaskForm(): void {
+    if (!this.showAdvancedUi) return;
+    if (!this.canUseInlineDockCreate()) return;
+    this.showNewTaskForm.update(value => !value);
+  }
+
+  toggleDockExpanded(): void {
+    if (this.gateActive()) return;
+    const next = !this.engine.dockExpanded();
+    this.engine.setDockExpanded(next);
+    if (next) {
+      this.semicircleHoverExpanded.set(true);
+      if (this.semicircleAutoCollapseTimer) {
+        clearTimeout(this.semicircleAutoCollapseTimer);
+        this.semicircleAutoCollapseTimer = null;
+      }
+      return;
+    }
+    this.plannerQuickEditTaskId.set(null);
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  onSemicircleMouseEnter(): void {
+    if (this.gateActive()) return;
+    this.semicircleHoverExpanded.set(true);
+    if (this.semicircleAutoCollapseTimer) {
+      clearTimeout(this.semicircleAutoCollapseTimer);
+      this.semicircleAutoCollapseTimer = null;
+    }
+  }
+
+  onSemicircleMouseLeave(): void {
+    if (this.gateActive()) return;
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  /**
+   * 半圆入口拖拽悬停处理 — 拖拽任务悬停在半圆上时自动展开停泊坞，
+   * 使坞栏 drop-zone 可见，用户可继续将任务拖入。
+   */
+  onSemicircleDragOver(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    if (!hasTaskDragTypes(event.dataTransfer)) return;
+    event.preventDefault();
+    // 设置拖放状态，触发半圆和坶栏的视觉反馈
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('canDrop');
+    }
+    // 自动展开停泊坞面板，使 drop-zone 可触达
+    if (!this.dockExpanded()) {
+      this.scheduleSemicircleDragExpand();
+    }
+  }
+
+  onSemicircleDragLeave(): void {
+    // 重置拖放状态，移除视觉反馈
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('idle');
+    }
+    // 不立即收起 — 给用户时间将任务移到展开后的 drop-zone
+  }
+
+  onHudPointerDown(event: PointerEvent): void {
+    if (this.hudMinimalMode()) return;
+    if (event.button !== 0) return;
+    const container = (event.currentTarget as HTMLElement)
+      .closest('[data-testid=\"dock-v3-status-machine-container\"]') as HTMLElement | null;
+    const rect = container?.getBoundingClientRect();
+    const size = this.resolveHudSize(rect);
+    this.hudSize.set(size);
+    const current = this.hudPosition() ?? this.defaultHudPosition(size);
+    const clamped = this.clampHudPosition(current, size);
+    this.hudPosition.set(clamped);
+    this.hudDragging.set(true);
+    this.hudDragPointerId = event.pointerId;
+    this.hudDragOffset = {
+      x: event.clientX - clamped.x,
+      y: event.clientY - clamped.y,
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  onBackdropClick(): void {
+    if (!this.engine.focusMode()) return;
+    this.closeTransientSurface();
+  }
+
+  onFocusTransitionSettled(phase: DockFocusTransitionPhase): void {
+    const transition = this.engine.focusTransition();
+    if (!transition) return;
+    if (phase === 'entering' && transition.phase === 'entering') {
+      this.finalizeEnterFocusTransition(transition);
+      return;
+    }
+    if (phase === 'exiting' && transition.phase === 'exiting') {
+      this.finalizeExitFocusTransition();
+    }
+  }
+
+  onFocusSessionToggle(): void {
+    if (this.gateActive()) return;
+    if (this.focusLeader.isReadOnlyFollower()) return;
+    const transition = this.engine.focusTransition();
+    if (transition?.phase === 'entering' || transition?.phase === 'exiting') return;
+
+    if (this.engine.focusMode()) {
+      this.exitFlowStep.set('primary');
+      this.showExitConfirm.set(true);
+      this.focusExitConfirmPrimaryAction();
+      return;
+    }
+
+    // 进入专注模式前，先将停泊坞面板收起下沉，避免坞栏与专注虚化遮罩叠加
+    if (this.engine.dockExpanded()) {
+      this.engine.setDockExpanded(false);
+      this.scheduleSemicircleAutoCollapse();
+    }
+
+    if (this.prefersReducedMotion()) {
+      this.engine.endFocusTransition();
+      this.engine.toggleFocusMode();
+      this.showFocusHelpNudgeOnce();
+      return;
+    }
+    this.showFocusHelpNudgeOnce();
+    this.runEnterFocusTransition();
+  }
+
+  confirmExitFocus(action: FocusExitConfirmAction): void {
+    if (action === 'cancel') {
+      this.showExitConfirm.set(false);
+      this.exitFlowStep.set('primary');
+      return;
+    }
+
+    if (action === 'back') {
+      this.exitFlowStep.set('primary');
+      this.focusExitConfirmPrimaryAction();
+      return;
+    }
+
+    if (action === 'request-end-focus') {
+      this.exitFlowStep.set('destructive');
+      this.focusExitConfirmPrimaryAction();
+      return;
+    }
+
+    if (action === 'keep-focus-hide-scrim') {
+      this.engine.markExitAction('keep_focus_hide_scrim');
+      this.engine.setFocusScrim(false);
+      this.showExitConfirm.set(false);
+      this.exitFlowStep.set('primary');
+      this.showRestoreHintToast();
+      return;
+    }
+
+    const exitAction: DockExitAction = action === 'clear-exit' ? 'clear_exit' : 'save_exit';
+    this.engine.markExitAction(exitAction);
+    this.showExitConfirm.set(false);
+    this.exitFlowStep.set('primary');
+    if (exitAction === 'clear_exit') {
+      this.engine.clearDockForExit();
+    }
+    if (this.prefersReducedMotion()) {
+      this.engine.endFocusTransition();
+      this.engine.toggleFocusMode();
+      return;
+    }
+    this.runExitFocusTransition();
+  }
+
+  takeOverFocusControl(): void {
+    this.focusLeader.tryTakeover();
+  }
+
+  onScrimToggle(): void {
+    if (!this.engine.focusMode()) return;
+    if (this.gateActive()) return;
+    if (this.focusLeader.isReadOnlyFollower()) return;
+    const nextScrimOn = !this.engine.focusScrimOn();
+    this.engine.toggleFocusScrim();
+    this.showDockFeedback(
+      nextScrimOn
+        ? '背景虚化已开启，底部停泊坞进入背景操作轨。'
+        : '背景虚化已关闭，底部停泊坞保持可操作。',
+      'info',
+    );
+  }
+
+  onZenExit(): void {
+    if (!this.engine.focusMode()) return;
+    if (this.focusLeader.isReadOnlyFollower()) return;
+    this.engine.dismissZenMode();
+  }
+
+  createTask(): void {
+    if (!this.showAdvancedUi) return;
+    if (!this.canUseInlineDockCreate()) return;
+    const title = this.newTaskTitle.trim();
+    if (!title) return;
+
+    const detail = this.newTaskDetail.trim();
+    const expectedMinutes = this.parseOptionalMinutes(this.newTaskExpectedMinutes);
+    const waitMinutes = this.parseOptionalMinutes(this.newTaskWaitMinutes);
+    const createdId = this.engine.createInDock(title, this.newTaskLane, this.newTaskLoad, {
+      expectedMinutes,
+      waitMinutes,
+      detail,
+    });
+    if (!createdId) return;
+
+    this.markRecentlyDocked(createdId);
+    this.newTaskTitle = '';
+    this.newTaskExpectedMinutes = '';
+    this.newTaskWaitMinutes = '';
+    this.newTaskDetail = '';
+    this.showNewTaskForm.set(false);
+  }
+
+  isPlannerQuickEditOpen(taskId: string): boolean {
+    return this.plannerQuickEditTaskId() === taskId;
+  }
+
+  togglePlannerQuickEdit(taskId: string): void {
+    if (!this.canUsePlannerQuickEdit()) return;
+    this.closeHelpOverlay();
+    if (this.plannerQuickEditTaskId() === taskId) {
+      this.closePlannerQuickEdit();
+      return;
+    }
+    this.plannerQuickEditTaskId.set(taskId);
+    this.engine.setDockExpanded(true);
+  }
+
+  closePlannerQuickEdit(restoreFocus = true): void {
+    const taskId = this.plannerQuickEditTaskId();
+    this.plannerQuickEditTaskId.set(null);
+    if (restoreFocus && taskId) {
+      this.restorePlannerTriggerFocus(taskId);
+    }
+  }
+
+  setPlannerQuickEditLoad(taskId: string, nextLoad: CognitiveLoad): void {
+    if (!this.canUsePlannerQuickEdit()) return;
+    const entry = this.engine.orderedDockEntries().find(item => item.taskId === taskId) ?? null;
+    if (!entry || entry.load === nextLoad) return;
+    this.engine.toggleLoad(taskId, nextLoad === 'high' ? 'up' : 'down');
+  }
+
+  setPlannerQuickEditExpected(taskId: string, minutes: number | null): void {
+    if (!this.canUsePlannerQuickEdit()) return;
+    this.engine.setExpectedTime(taskId, minutes);
+  }
+
+  setPlannerQuickEditWait(taskId: string, minutes: number | null): void {
+    if (!this.canUsePlannerQuickEdit()) return;
+    this.engine.setWaitTime(taskId, minutes);
+  }
+
+  private markRecentlyDocked(taskId: string): void {
+    this.recentlyDockedTaskId.set(taskId);
+    if (this.recentlyDockedTimer) {
+      clearTimeout(this.recentlyDockedTimer);
+    }
+    this.recentlyDockedTimer = setTimeout(() => {
+      this.recentlyDockedTaskId.set(null);
+      this.recentlyDockedTimer = null;
+    }, 3000);
+
+    this.plannerQuickEditTaskId.update(current => (current === taskId ? null : current));
+  }
+
+  createBackupTaskFromFab(): void {
+    if (!this.canCreateBackupTask()) return;
+    const createdId = this.engine.createInDock('新备选任务', 'backup', 'low');
+    if (!createdId) return;
+    this.engine.setDockExpanded(true);
+    this.semicircleHoverExpanded.set(true);
+    this.markRecentlyDocked(createdId);
+    if (this.engine.focusMode()) {
+      this.showDockFeedback('已添加备选任务，可在背景操作轨里随时切到前台。', 'success');
+    }
+  }
+
+  async openFocusRoutineSettings(): Promise<void> {
+    try {
+      const component = await this.modalLoader.loadSettingsModal();
+      this.dynamicModal.open(component, {
+        inputs: {
+          sessionEmail: null,
+          projects: this.projectStore.projects(),
+          initialSection: 'focus-routines',
+        },
+        outputs: {
+          close: () => this.dynamicModal.close(),
+        },
+      });
+    } catch {
+      this.toast.error('设置面板加载失败', '请稍后重试。');
+    }
+  }
+
+  onDockCardClick(taskId: string): void {
+    if (this.isDockSelectionBlocked()) return;
+    const entry = this.engine.orderedDockEntries().find(item => item.taskId === taskId) ?? null;
+    if (!entry) return;
+
+    if (!this.firstMainSelectionPending() && entry.isMain) {
+      if (this.dockSecondaryRailActive()) {
+        this.showDockFeedback(`当前已在前台：${entry.title}`, 'info');
+      }
+      return;
+    }
+
+    if (this.firstMainSelectionPending()) {
+      this.engine.overrideFirstMainTask(taskId);
+      if (this.engine.focusMode()) {
+        this.showDockFeedback(`已改选前台任务：${entry.title}`, 'success');
+      }
+      return;
+    }
+    this.engine.setMainTask(taskId);
+    if (this.engine.focusMode()) {
+      this.showDockFeedback(`已切换到前台：${entry.title}`, 'success');
+    }
+  }
+
+  onDockCardDragStart(event: DragEvent, taskId: string): void {
+    if (!this.canReorderDockCards()) return;
+    this.draggingDockTaskId = taskId;
+    if (!event.dataTransfer) return;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(DOCK_REORDER_MIME, taskId);
+    event.dataTransfer.setData('text/plain', taskId);
+  }
+
+  onDockCardDragOver(event: DragEvent, targetTaskId: string): void {
+    if (!this.canReorderDockCards()) return;
+    // dragover 期间 getData() 受浏览器安全限制返回空串，
+    // 改用 types 判断是否为坞内重排拖拽，并通过已缓存的 draggingDockTaskId 判断来源
+    if (!this.hasDockReorderType(event.dataTransfer)) return;
+    if (this.draggingDockTaskId === targetTaskId) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+  }
+
+  onDockCardDrop(event: DragEvent, targetTaskId: string): void {
+    if (!this.canReorderDockCards()) return;
+    const sourceTaskId = this.extractDockReorderTaskId(event.dataTransfer);
+    if (!sourceTaskId || sourceTaskId === targetTaskId) return;
+    event.preventDefault();
+    this.engine.reorderDockEntries(sourceTaskId, targetTaskId);
+    this.draggingDockTaskId = null;
+  }
+
+  onDockCardDragEnd(): void {
+    this.draggingDockTaskId = null;
+  }
+
+  onCardWheel(event: WheelEvent, taskId: string): void {
+    if (!this.canReorderDockCards()) return;
+    if (!event.altKey) return;
+    event.preventDefault();
+    this.engine.toggleLoad(taskId, event.deltaY > 0 ? 'down' : 'up');
+  }
+
+  onTouchStart(event: TouchEvent, taskId: string): void {
+    if (!this.canReorderDockCards()) return;
+    this.touchStartY = event.touches[0].clientY;
+    this.touchTaskId = taskId;
+    if (this.longPressTimer) clearTimeout(this.longPressTimer);
+    this.longPressTimer = setTimeout(() => {
+      this.touchTaskId = taskId;
+    }, 500);
+  }
+
+  onTouchMove(event: TouchEvent, _taskId?: string): void {
+    if (!this.canReorderDockCards()) return;
+    if (!this.touchTaskId) return;
+    const deltaY = event.touches[0].clientY - this.touchStartY;
+    if (Math.abs(deltaY) > 30) {
+      this.engine.toggleLoad(this.touchTaskId, deltaY > 0 ? 'down' : 'up');
+      this.touchStartY = event.touches[0].clientY;
+    }
+  }
+
+  onTouchEnd(): void {
+    if (this.longPressTimer) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+    this.touchTaskId = null;
+  }
+
+  onDockRailDragOver(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    // dragover 期间 getData() 受浏览器安全限制返回空串，改用 types 检查
+    if (this.hasDockReorderType(event.dataTransfer)) {
+      event.preventDefault();
+      this.dropState.set('idle');
+      return;
+    }
+    event.preventDefault();
+    if (!hasTaskDragTypes(event.dataTransfer)) {
+      if (this.dropState() !== 'reject') {
+        this.dropState.set('idle');
+      }
+      return;
+    }
+    this.scheduleSemicircleDragExpand();
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('canDrop');
+    }
+  }
+
+  onDockRailDragLeave(): void {
+    if (!this.canAcceptExternalDrop()) return;
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('idle');
+    }
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  onDropZoneDragOver(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    event.preventDefault();
+    // dragover 期间 getData() 受浏览器安全限制返回空串，只能检查 MIME types
+    if (!hasTaskDragTypes(event.dataTransfer)) {
+      this.triggerDropReject();
+      return;
+    }
+    this.scheduleSemicircleDragExpand();
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('isOver');
+    }
+  }
+
+  onDropZoneDragLeave(): void {
+    if (!this.canAcceptExternalDrop()) return;
+    if (this.dropState() === 'isOver') {
+      this.dropState.set('canDrop');
+    }
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  onDrop(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    event.preventDefault();
+    const reorderTaskId = this.extractDockReorderTaskId(event.dataTransfer);
+    if (reorderTaskId) {
+      this.draggingDockTaskId = null;
+      this.dropState.set('idle');
+      this.scheduleSemicircleAutoCollapse();
+      return;
+    }
+
+    const candidate = this.extractDropCandidate(event.dataTransfer);
+    if (!candidate || !this.canDropCandidate(candidate)) {
+      this.triggerDropReject();
+      return;
+    }
+    this.dropState.set('idle');
+    const docked = this.engine.dockTaskFromExternalDrag(candidate.taskId, candidate.sourceSection);
+    if (!docked) return;
+    this.markRecentlyDocked(candidate.taskId);
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  private extractDockReorderTaskId(dataTransfer: DataTransfer | null): string | null {
+    if (!dataTransfer) return null;
+    const value = dataTransfer.getData(DOCK_REORDER_MIME).trim();
+    return value || null;
+  }
+
+  private extractDropCandidate(dataTransfer: DataTransfer | null): DockDropCandidate | null {
+    if (!dataTransfer) return null;
+
+    const payload = readTaskDragPayload(dataTransfer);
+    if (payload?.taskId) {
+      const sourceSection: DockSourceSection | undefined =
+        payload.source === 'text' || payload.source === 'flow'
+          ? payload.source
+          : undefined;
+      return {
+        taskId: payload.taskId,
+        sourceSection,
+      };
+    }
+
+    const text = dataTransfer.getData('text/plain').trim();
+    if (!text) return null;
+    return { taskId: text };
+  }
+
+  private canDropCandidate(candidate: DockDropCandidate): boolean {
+    if (!this.canAcceptExternalDrop()) return false;
+    const alreadyDocked = this.engine.dockedEntries().some(entry => entry.taskId === candidate.taskId);
+    if (alreadyDocked) return false;
+    const task = this.taskStore.getTask(candidate.taskId);
+    return Boolean(task && task.status === 'active');
+  }
+
+  isEditingBlocked(): boolean {
+    return !this.canUseInlineDockCreate();
+  }
+
+  private isDockSelectionBlocked(): boolean {
+    return this.gateActive() || this.focusLeader.isReadOnlyFollower();
+  }
+
+  private closeTransientSurface(): boolean {
+    if (this.plannerQuickEditTaskId()) {
+      this.closePlannerQuickEdit();
+      return true;
+    }
+
+    if (this.hasVisibleWaitMenu()) {
+      this.dispatchCloseTransientSurfaceEvent();
+      return true;
+    }
+
+    if (this.showHelpOverlay()) {
+      this.closeHelpOverlay();
+      return true;
+    }
+
+    if (this.showExitConfirm()) {
+      if (this.exitFlowStep() === 'destructive') {
+        this.exitFlowStep.set('primary');
+        this.focusExitConfirmPrimaryAction();
+      } else {
+        this.showExitConfirm.set(false);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  private showRestoreHintToast(): void {
+    this.showRestoreHint.set(true);
+    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
+    this.restoreHintTimer = setTimeout(() => {
+      this.showRestoreHint.set(false);
+      this.restoreHintTimer = null;
+    }, PARKING_CONFIG.DOCK_EXIT_CONFIRM_RESTORE_HINT_MS);
+  }
+
+  private showFocusHelpNudgeOnce(): void {
+    if (this.helpNudgeShownOnce) return;
+    this.helpNudgeShownOnce = true;
+    this.showHelpNudge.set(true);
+    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
+    this.helpNudgeTimer = setTimeout(() => {
+      this.showHelpNudge.set(false);
+      this.helpNudgeTimer = null;
+    }, 4200);
+  }
+
+  private showDockFeedback(message: string, tone: DockActionFeedback['tone']): void {
+    this.dockActionFeedback.set({ message, tone });
+    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
+    this.dockActionFeedbackTimer = setTimeout(() => {
+      this.dockActionFeedback.set(null);
+      this.dockActionFeedbackTimer = null;
+    }, 2400);
+  }
+
+  private dispatchCloseTransientSurfaceEvent(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent(DOCK_CLOSE_TRANSIENT_SURFACES_EVENT));
+  }
+
+  private hasVisibleWaitMenu(): boolean {
+    if (typeof document === 'undefined') return false;
+    return Boolean(document.querySelector('[data-testid="dock-v3-wait-menu"].visible'));
+  }
+
+  /**
+   * 在 dragover 期间检查 dataTransfer 是否包含坞内重排 MIME 类型
+   * （浏览器安全限制导致 dragover 期间 getData 返回空串，只能通过 types 检查）
+   */
+  private hasDockReorderType(dataTransfer: DataTransfer | null): boolean {
+    if (!dataTransfer) return false;
+    return dataTransfer.types.includes(DOCK_REORDER_MIME);
+  }
+
+  private triggerDropReject(): void {
+    this.dropState.set('reject');
+    this.scheduleSemicircleAutoCollapse();
+    if (this.dropRejectResetTimer) {
+      clearTimeout(this.dropRejectResetTimer);
+    }
+    this.dropRejectResetTimer = setTimeout(() => {
+      this.dropState.set('idle');
+      this.dropRejectResetTimer = null;
+    }, PARKING_CONFIG.DOCK_DROP_REJECT_RESET_MS);
+  }
+
+  private scheduleSemicircleDragExpand(): void {
+    if (this.semicircleExpanded()) return;
+    if (this.semicircleDragExpandTimer) return;
+    this.semicircleDragExpandTimer = setTimeout(() => {
+      this.semicircleHoverExpanded.set(true);
+      // 拖拽悬停触发展开坞栏面板，使 drop-zone 可触达
+      this.engine.setDockExpanded(true);
+      this.semicircleDragExpandTimer = null;
+      this.scheduleSemicircleAutoCollapse();
+    }, PARKING_CONFIG.DOCK_SEMICIRCLE_DRAG_EXPAND_DELAY_MS);
+  }
+
+  private scheduleSemicircleAutoCollapse(): void {
+    if (this.semicircleDragExpandTimer) {
+      clearTimeout(this.semicircleDragExpandTimer);
+      this.semicircleDragExpandTimer = null;
+    }
+    if (this.semicircleAutoCollapseTimer) {
+      clearTimeout(this.semicircleAutoCollapseTimer);
+      this.semicircleAutoCollapseTimer = null;
+    }
+    if (this.dockExpanded()) return;
+    this.semicircleAutoCollapseTimer = setTimeout(() => {
+      if (!this.dockExpanded()) {
+        this.semicircleHoverExpanded.set(false);
+      }
+      this.semicircleAutoCollapseTimer = null;
+    }, PARKING_CONFIG.DOCK_SEMICIRCLE_AUTO_COLLAPSE_MS);
+  }
+
+  private loadHudPosition(): { x: number; y: number } | null {
+    return loadHudPositionUtil(this.hudSize());
+  }
+
+  private persistHudPosition(): void {
+    persistHudPositionUtil(this.hudPosition());
+  }
+
+  private defaultHudPosition(size: { width: number; height: number } = this.hudSize()): { x: number; y: number } {
+    return defaultHudPositionUtil(size, this.hudSafeRightInsetPx);
+  }
+
+  private resolveHudSize(rect?: Pick<DOMRect, 'width' | 'height'> | null): { width: number; height: number } {
+    return resolveHudSizeUtil(rect, this.hudSize());
+  }
+
+  private clampHudPosition(
+    position: { x: number; y: number },
+    size: { width: number; height: number } = this.hudSize(),
+  ): { x: number; y: number } {
+    return clampHudPositionUtil(
+      position,
+      size,
+      this.hudSafeRightInsetPx,
+      this.hudMinimalMode(),
+      this.focusLeader.isReadOnlyFollower(),
+    );
+  }
+
+  private runEnterFocusTransition(): void {
+    const transition = buildFocusTransition('enter', this.motion.focus, this.dockExpanded());
+    if (!transition) {
+      this.transitionPerformanceTierLock.set(null);
+      this.engine.toggleFocusMode();
+      return;
+    }
+
+    this.transitionPerformanceTierLock.set(this.performanceTierService.tier());
+    this.engine.holdNonCriticalWork(transition.durationMs! + 120);
+    this.engine.beginFocusTransition(transition);
+    this.startFlipGhost(transition);
+
+    requestAnimationFrame(() => {
+      this.engine.toggleFocusMode();
+    });
+
+    this.clearFlipTimer();
+    this.flipTimer = setTimeout(() => {
+      const current = this.engine.focusTransition();
+      if (current?.phase === 'entering') {
+        this.finalizeEnterFocusTransition(current);
+      }
+      this.flipTimer = null;
+    }, transition.durationMs!);
+  }
+
+  private runExitFocusTransition(): void {
+    const transition = buildFocusTransition('exit', this.motion.focus, this.dockExpanded());
+    if (!transition) {
+      this.transitionPerformanceTierLock.set(null);
+      this.engine.endFocusTransition();
+      this.engine.toggleFocusMode();
+      return;
+    }
+
+    this.transitionPerformanceTierLock.set(this.performanceTierService.tier());
+    this.engine.holdNonCriticalWork(transition.durationMs! + 120);
+    this.engine.beginFocusTransition(transition);
+    this.startFlipGhost(transition);
+
+    requestAnimationFrame(() => {
+      this.engine.toggleFocusMode();
+    });
+
+    this.clearFlipTimer();
+    this.flipTimer = setTimeout(() => {
+      const current = this.engine.focusTransition();
+      if (current?.phase === 'exiting') {
+        this.finalizeExitFocusTransition();
+      }
+      this.flipTimer = null;
+    }, transition.durationMs!);
+  }
+
+  private finalizeEnterFocusTransition(transition: DockFocusTransitionState): void {
+    this.clearFlipTimer();
+    this.engine.beginFocusTransition({
+      ...transition,
+      phase: 'focused',
+    });
+    this.clearFlipGhost();
+    this.transitionPerformanceTierLock.set(null);
+  }
+
+  private finalizeExitFocusTransition(): void {
+    this.clearFlipTimer();
+    this.engine.endFocusTransition();
+    this.clearFlipGhost();
+    this.transitionPerformanceTierLock.set(null);
+  }
+
+  private startFlipGhost(transition: DockFocusTransitionState): void {
+    const ghost = createFlipGhostState(transition);
+    if (!ghost) return;
+
+    this.flipGhost.set(ghost);
+    this.flipGhostActive.set(false);
+    // 单帧 rAF：让幽灵元素先渲染到初始位置，下一帧激活 CSS transition
+    requestAnimationFrame(() => this.flipGhostActive.set(true));
+  }
+
+  private clearFlipTimer(): void {
+    if (!this.flipTimer) return;
+    clearTimeout(this.flipTimer);
+    this.flipTimer = null;
+  }
+
+  private clearFlipGhost(): void {
+    this.flipGhost.set(null);
+    this.flipGhostActive.set(false);
+  }
+
+  private prefersReducedMotion(): boolean {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  private focusExitConfirmPrimaryAction(): void {
+    if (typeof document === 'undefined') return;
+    setTimeout(() => {
+      const selector = this.exitFlowStep() === 'destructive'
+        ? '[data-testid="dock-v3-exit-save"]'
+        : '[data-testid="dock-v3-exit-cancel"]';
+      const primary = document.querySelector<HTMLElement>(selector);
+      primary?.focus();
+    }, 0);
+  }
+
+  private trapDialogFocus(event: KeyboardEvent, selector: string): void {
+    if (typeof document === 'undefined') return;
+    const container = document.querySelector<HTMLElement>(selector);
+    if (!container) return;
+    const focusables = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        'button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter(node => !node.hasAttribute('disabled'));
+    if (focusables.length === 0) {
+      event.preventDefault();
+      return;
+    }
+
+    const active = document.activeElement as HTMLElement | null;
+    const currentIndex = focusables.findIndex(node => node === active);
+    const backward = event.shiftKey;
+    let nextIndex = 0;
+    if (currentIndex < 0) {
+      nextIndex = backward ? focusables.length - 1 : 0;
+    } else if (backward) {
+      nextIndex = currentIndex === 0 ? focusables.length - 1 : currentIndex - 1;
+    } else {
+      nextIndex = currentIndex === focusables.length - 1 ? 0 : currentIndex + 1;
+    }
+    event.preventDefault();
+    focusables[nextIndex]?.focus();
+  }
+
+  private focusPlannerPanel(): void {
+    this.plannerPanel()?.nativeElement.focus();
+  }
+
+  /** 内联面板打开后自动滚动到可见区域 */
+  private scrollPlannerPanelIntoView(): void {
+    this.plannerPanel()?.nativeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  private restorePlannerTriggerFocus(taskId: string): void {
+    const trigger = this.resolvePlannerTrigger(taskId);
+    trigger?.focus();
+  }
+
+  private resolvePlannerTrigger(taskId: string): HTMLButtonElement | null {
+    return this.hostElement.nativeElement.querySelector(
+      `[data-testid="dock-v3-planner-toggle"][data-planner-task-id="${taskId}"]`,
+    ) as HTMLButtonElement | null;
+  }
+
+  formatTime(minutes: number): string {
+    if (minutes >= 1440) {
+      const d = Math.floor(minutes / 1440);
+      const remainH = Math.floor((minutes % 1440) / 60);
+      return remainH > 0 ? `${d}d${remainH}h` : `${d}d`;
+    }
+    if (minutes >= 60) {
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      return m > 0 ? `${h}h${m}m` : `${h}h`;
+    }
+    return `${minutes}m`;
+  }
+
+  private parseOptionalMinutes(raw: string | number | null | undefined): number | null {
+    if (raw === null || raw === undefined) return null;
+    const value = typeof raw === 'string' ? raw.trim() : String(raw).trim();
+    if (!value) return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.floor(parsed);
+  }
+
+  /** 待决策候选任务（computed 避免模板每次 CD 重复调用） */
+  readonly pendingDecisionRemainingMinutes = computed(() => {
+    const remaining = this.engine.pendingDecision()?.rootRemainingMinutes ?? 0;
+    return remaining > 0 ? Math.ceil(remaining) : 0;
+  });
+
+  /** 待决策候选条目，最多取 2 个（computed 避免模板重复调用） */
+  readonly pendingDecisionEntries = computed(() =>
+    this.engine.pendingDecisionEntries(),
+  );
+
+  choosePendingCandidate(taskId: string): void {
+    this.engine.choosePendingDecisionCandidate(taskId);
+  }
+
+  cancelPendingAutoPromote(): void {
+    this.engine.cancelPendingDecisionAutoPromote();
+  }
+
+  groupLabel(group: DockPendingDecisionEntry['group']): string {
+    if (group === 'homologous-advancement') return '同源推进';
+    if (group === 'cognitive-downgrade') return '认知降级';
+    return '异步并发';
+  }
+}

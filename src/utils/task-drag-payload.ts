@@ -1,10 +1,12 @@
+import type { DockLane } from '../models/parking-dock';
+
 export interface TaskDragPayloadV1 {
   v: 1;
   type: 'task';
   taskId: string;
   projectId: string | null;
   source: 'text' | 'flow' | 'dock';
-  relationHint?: 'strong' | 'weak' | null;
+  laneHint?: DockLane | null;
   fromProjectId?: string | null;
 }
 
@@ -14,15 +16,19 @@ const MIME_TEXT = 'text/plain';
 const MIME_JSON = 'application/json';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function normalizeSource(value: unknown): TaskDragPayloadV1['source'] {
   return value === 'text' || value === 'flow' || value === 'dock' ? value : 'dock';
 }
 
-function normalizeRelationHint(value: unknown): 'strong' | 'weak' | null {
-  return value === 'strong' || value === 'weak' ? value : null;
+function normalizeLaneHint(value: unknown): DockLane | null {
+  if (value === 'combo-select' || value === 'backup') return value;
+  // legacy payload compatibility
+  if (value === 'strong') return 'combo-select';
+  if (value === 'weak') return 'backup';
+  return null;
 }
 
 function normalizeProjectId(value: unknown): string | null {
@@ -47,7 +53,7 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
       taskId: rawTaskId.trim(),
       projectId: normalizeProjectId(raw['projectId']),
       source: normalizeSource(raw['source']),
-      relationHint: normalizeRelationHint(raw['relationHint']),
+      laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
       fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId']),
     };
   }
@@ -61,7 +67,7 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
     taskId: legacyTaskId,
     projectId: normalizeProjectId(raw['projectId'] ?? raw['sourceProjectId']),
     source: normalizeSource(raw['source']),
-    relationHint: normalizeRelationHint(raw['relationHint']),
+    laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
     fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId'] ?? raw['sourceProjectId']),
   };
 }
@@ -101,7 +107,7 @@ export function writeTaskDragPayload(dataTransfer: DataTransfer, payload: TaskDr
     taskId,
     projectId: normalizeProjectId(payload.projectId),
     source: payload.source,
-    relationHint: normalizeRelationHint(payload.relationHint),
+    laneHint: normalizeLaneHint(payload.laneHint),
     fromProjectId: normalizeProjectId(payload.fromProjectId ?? payload.projectId),
   };
 
@@ -110,6 +116,17 @@ export function writeTaskDragPayload(dataTransfer: DataTransfer, payload: TaskDr
   safeSetData(dataTransfer, MIME_TASK_ID, normalized.taskId);
   safeSetData(dataTransfer, MIME_TEXT, normalized.taskId);
   safeSetData(dataTransfer, MIME_JSON, json);
+}
+
+/**
+ * 在 dragover 事件期间检查 dataTransfer 是否包含任务拖拽类型。
+ * 浏览器安全限制导致 dragover 期间无法通过 getData() 读取数据，
+ * 但可以通过 dataTransfer.types 检查 MIME 类型是否存在。
+ */
+export function hasTaskDragTypes(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) return false;
+  const types = dataTransfer.types;
+  return types.includes(MIME_TASK) || types.includes(MIME_TASK_ID);
 }
 
 export function readTaskDragPayload(dataTransfer: DataTransfer): TaskDragPayloadV1 | null {
@@ -127,7 +144,7 @@ export function readTaskDragPayload(dataTransfer: DataTransfer): TaskDragPayload
       taskId: fromTaskId,
       projectId: null,
       source: 'dock',
-      relationHint: null,
+      laneHint: null,
       fromProjectId: null,
     };
   }
@@ -144,7 +161,7 @@ export function readTaskDragPayload(dataTransfer: DataTransfer): TaskDragPayload
     taskId: textTaskId,
     projectId: null,
     source: 'dock',
-    relationHint: null,
+    laneHint: null,
     fromProjectId: null,
   };
 }

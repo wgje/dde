@@ -310,6 +310,12 @@ export interface Database {
 }
 
 // ============================================
+// Row / Insert / Update interfaces below use snake_case field names
+// intentionally — they mirror the Supabase (PostgreSQL) column names
+// so that the types stay 1-to-1 with the database schema.
+// ============================================
+
+// ============================================
 // 项目表 (projects)
 // ============================================
 
@@ -492,9 +498,9 @@ export type FloatingWindowPrefDb = 'auto' | 'fixed';
 export interface UserPreferencesRow {
   id: string;
   user_id: string;
-  theme: string | null;
-  layout_direction: string | null;
-  floating_window_pref: string | null;
+  theme: ThemeTypeDb | null;
+  layout_direction: LayoutDirectionDb | null;
+  floating_window_pref: FloatingWindowPrefDb | null;
   /** 颜色模式：light/dark/system */
   color_mode: string | null;
   /** 自动解决冲突开关 */
@@ -644,6 +650,7 @@ export interface BlackBoxEntryRow {
   project_id: string | null;
   user_id: string | null;
   content: string;
+  focus_meta: Json | null;
   date: string;
   created_at: string | null;
   updated_at: string | null;
@@ -659,6 +666,7 @@ export interface BlackBoxEntryRow {
 export interface BlackBoxEntryInsert {
   id: string;
   content: string;
+  focus_meta?: Json | null;
   date?: string;
   project_id?: string | null;
   user_id?: string | null;
@@ -675,6 +683,7 @@ export interface BlackBoxEntryInsert {
 /** 黑匣子条目更新数据 */
 export interface BlackBoxEntryUpdate {
   content?: string;
+  focus_meta?: Json | null;
   date?: string;
   project_id?: string | null;
   is_read?: boolean | null;

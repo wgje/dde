@@ -7,6 +7,7 @@ import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { SimpleSyncService, SessionManagerService } from '../core-bridge';
 import { SyncCoordinatorService } from './sync-coordinator.service';
+import { reloadViaForceClearCache } from '../utils/force-clear-cache';
 
 export type AppResumeReason =
   | 'visibility-threshold'
@@ -289,7 +290,7 @@ export class AppLifecycleOrchestratorService {
             duration: 0,
             action: {
               label: '立即刷新',
-              onClick: () => window.location.reload(),
+              onClick: () => reloadViaForceClearCache(),
             },
           }
         );
@@ -662,7 +663,7 @@ export class AppLifecycleOrchestratorService {
     });
 
     setTimeout(() => {
-      window.location.reload();
+      reloadViaForceClearCache();
     }, 1500);
   }
 

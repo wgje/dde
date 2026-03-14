@@ -310,7 +310,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
   
   // ========== 鼠标拖拽处理 ==========
-  
+
   onDragStart(data: { event: DragEvent; task: Task }) {
     const { event, task } = data;
     this.dragDropService.startDrag(task);

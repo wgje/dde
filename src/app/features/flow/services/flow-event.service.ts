@@ -117,6 +117,10 @@ export class FlowEventService {
   private linkGestureCallback: LinkGestureCallback | null = null;
   private selectionMovedCallback: SelectionMovedCallback | null = null;
   private backgroundClickCallback: BackgroundClickCallback | null = null;
+  /** Alt+拖拽节点到停泊坞的回调 */
+  private altDragCallback: ((taskId: string, clientX: number, clientY: number) => void) | null = null;
+  /** 拖拽节点出画布边界的回调（支持多选拖入停泊坞） */
+  private dragOutOfBoundsCallback: ((taskIds: string[], clientX: number, clientY: number) => void) | null = null;
   
   // ========== 监听器追踪 ==========
   private registeredListeners: RegisteredListener[] = [];
@@ -180,6 +184,20 @@ export class FlowEventService {
       const { windowX, windowY } = this.convertViewToWindowCoords(viewX, viewY);
       this.emitLinkClick(link.data, windowX, windowY, false);
     };
+
+    // Alt+拖拽节点到停泊坞 — 透传给 altDragCallback
+    flowTemplateEventHandlers.onNodeAltDragStart = (taskId: string, clientX: number, clientY: number) => {
+      if (this.altDragCallback) {
+        this.zone.run(() => this.altDragCallback!(taskId, clientX, clientY));
+      }
+    };
+
+    // 拖拽节点出画布边界 — 多选拖入停泊坞
+    flowTemplateEventHandlers.onNodesDragOutOfBounds = (taskIds: string[], clientX: number, clientY: number) => {
+      if (this.dragOutOfBoundsCallback) {
+        this.zone.run(() => this.dragOutOfBoundsCallback!(taskIds, clientX, clientY));
+      }
+    };
     
     this.logger.debug('模板事件处理器已注册');
   }
@@ -193,6 +211,11 @@ export class FlowEventService {
     flowTemplateEventHandlers.onLinkClick = undefined;
     flowTemplateEventHandlers.onLinkDeleteRequest = undefined;
     flowTemplateEventHandlers.onCrossTreeLabelClick = undefined;
+    flowTemplateEventHandlers.onNodeAltDragStart = undefined;
+    flowTemplateEventHandlers.onNodesDragOutOfBounds = undefined;
+    // 【修复 L-39】补充清理 onDeleteKeyPressed 和 onSelectionChanged
+    flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
+    flowTemplateEventHandlers.onSelectionChanged = undefined;
   }
 
   /**
@@ -246,6 +269,20 @@ export class FlowEventService {
   
   onBackgroundClick(callback: BackgroundClickCallback): void {
     this.backgroundClickCallback = callback;
+  }
+
+  /**
+   * 注册 Alt+拖拽节点回调（将任务拖入停泊坞）
+   */
+  onAltDragStart(callback: (taskId: string, clientX: number, clientY: number) => void): void {
+    this.altDragCallback = callback;
+  }
+
+  /**
+   * 注册拖拽节点出画布边界回调（支持多选拖入停泊坞）
+   */
+  onDragOutOfBounds(callback: (taskIds: string[], clientX: number, clientY: number) => void): void {
+    this.dragOutOfBoundsCallback = callback;
   }
   
   // ========== 事件监听器设置 ==========
@@ -595,6 +632,9 @@ export class FlowEventService {
     this.linkGestureCallback = null;
     this.selectionMovedCallback = null;
     this.backgroundClickCallback = null;
+    this.altDragCallback = null;
+    // 【修复 H-27】dragOutOfBoundsCallback 未在 clearCallbacks 中清除
+    this.dragOutOfBoundsCallback = null;
   }
   
   /**
@@ -607,6 +647,8 @@ export class FlowEventService {
     }
     this.removeAllListeners(this.diagram);
     this.clearCallbacks();
+    // 【修复 M-45】dispose 时清理模板事件处理器，防止全局对象残留回调
+    this.clearTemplateEventHandlers();
     this.diagram = null;
     this.diagramDiv = null;
   }

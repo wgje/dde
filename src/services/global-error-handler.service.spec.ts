@@ -170,6 +170,29 @@ describe('GlobalErrorHandler', () => {
     }
   });
 
+  it('should detect Angular JIT facade error and trigger reload', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      const error = new Error('JIT compilation failed for component class TextTaskEditorComponent2');
+      error.stack = `Error: JIT compilation failed for component class TextTaskEditorComponent2
+    at getCompilerFacade (https://example.com/core.mjs:2477:11)
+    at ɵɵngDeclareComponent (https://example.com/chunk-ABC.js:1:1234)`;
+
+      service.handleError(error);
+
+      expect(reloadSpy).toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
+
   it('should NOT treat non-Angular TypeError as DI version skew', () => {
     const reloadSpy = vi.fn();
     const originalLocation = window.location;

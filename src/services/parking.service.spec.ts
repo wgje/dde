@@ -161,6 +161,7 @@ describe('ParkingService', () => {
   });
 
   afterEach(() => {
+    service?.ngOnDestroy();
     vi.useRealTimers();
     TestBed.resetTestingModule();
   });

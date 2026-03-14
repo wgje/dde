@@ -1,4 +1,4 @@
-﻿import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy } from '@angular/core';
+import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
@@ -12,11 +12,14 @@ import { TextTaskConnectionsComponent } from './text-task-connections.component'
 import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
 
 /**
- * 浠诲姟缂栬緫鍣ㄧ粍浠讹紙灞曞紑鎬侊級
- * 鏄剧ず浠诲姟鐨勫畬鏁寸紪杈戠晫闈紝鍖呮嫭鏍囬銆佸唴瀹广€佸緟鍔炪€侀檮浠跺拰鎿嶄綔鎸夐挳
+ * 任务编辑器组件（展开态）
+ * 显示任务的完整编辑界面，包括标题、内容、待办、附件和操作按钮
  *
- * 棰勮妯″紡閫昏緫锛? * - 榛樿杩涘叆缂栬緫鐘舵€佹椂涓洪瑙堟ā寮? * - 鐐瑰嚮棰勮鍖哄煙杩涘叆缂栬緫妯″紡
- * - 鐐瑰嚮绌虹櫧鍖哄煙锛堢粍浠跺閮級鑷姩鍒囨崲鍥為瑙堟ā寮? * - 棰勮妯″紡涓嬮殣钘忓簳閮ㄦ搷浣滄寜閽紙娣诲姞鍚岀骇銆佹坊鍔犱笅绾с€佸垹闄わ級
+ * 预览模式逻辑：
+ * - 默认进入编辑状态时为预览模式
+ * - 点击预览区域进入编辑模式
+ * - 点击空白区域（组件外部）自动切换回预览模式
+ * - 预览模式下隐藏底部操作按钮（添加同级、添加下级、删除）
  */
 @Component({
   selector: 'app-text-task-editor',
@@ -28,10 +31,10 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
          (click)="$event.stopPropagation()"
          [ngClass]="{'mt-2 flex gap-3': !isMobile(), 'mt-1.5': isMobile()}">
 
-      <!-- 涓荤紪杈戝尯鍩?-->
+      <!-- 主编辑区域-->
       <div [ngClass]="{'flex-1 min-w-0 space-y-2': !isMobile(), 'space-y-1.5': isMobile()}">
 
-          <!-- 鏍囬缂栬緫 -->
+          <!-- 标题编辑 -->
         <input
           #titleInput
           data-title-input
@@ -50,11 +53,11 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             'bg-retro-muted/5 dark:bg-stone-800 border-retro-muted/20 dark:border-stone-700': isPreview(),
             'bg-white dark:bg-stone-700 border-stone-200 dark:border-stone-600': !isPreview()
           }"
-          placeholder="浠诲姟鍚嶇О...">
+          placeholder="任务名称...">
 
-        <!-- 鍐呭缂栬緫/棰勮 -->
+        <!-- 内容编辑/预览 -->
         <div class="relative">
-          <!-- 棰勮/缂栬緫鍒囨崲鎸夐挳 -->
+          <!-- 预览/编辑切换按钮 -->
           <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
             <button
               (click)="togglePreview(); $event.stopPropagation()"
@@ -63,22 +66,22 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
                 'bg-indigo-500 dark:bg-indigo-600 text-white': isPreview(),
                 'bg-stone-200 dark:bg-stone-600 text-stone-500 dark:text-stone-300 hover:bg-stone-300 dark:hover:bg-stone-500': !isPreview()
               }"
-              title="鍒囨崲棰勮/缂栬緫">
-              {{ isPreview() ? '缂栬緫' : '棰勮' }}
+              title="切换预览/编辑">
+              {{ isPreview() ? '编辑' : '预览' }}
             </button>
           </div>
 
           @if (isPreview()) {
-            <!-- Markdown 棰勮 - 鐐瑰嚮鍒囨崲鍒扮紪杈戞ā寮忥紝鐐瑰嚮 checkbox 鍒囨崲寰呭姙鐘舵€?-->
+            <!-- Markdown 预览 - 点击切换到编辑模式，点击 checkbox 切换待办状态 -->
             <div
               (click)="onPreviewClick($event)"
               class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
               [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
-              [innerHTML]="localContent() ? (localContent() | safeMarkdown) : '<span class=&quot;text-stone-400 italic&quot;>鐐瑰嚮杈撳叆鍐呭...</span>'"
-              title="鐐瑰嚮缂栬緫">
+              [innerHTML]="localContent() ? (localContent() | safeMarkdown) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
+              title="点击编辑">
             </div>
           } @else {
-            <!-- Markdown 缂栬緫 -->
+            <!-- Markdown 编辑 -->
             <textarea
               #contentInput
               [value]="localContent()"
@@ -90,16 +93,16 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               spellcheck="false"
               class="w-full border border-stone-200 dark:border-stone-600 rounded-lg focus:ring-1 focus:ring-stone-400 dark:focus:ring-stone-500 focus:border-stone-400 dark:focus:border-stone-500 outline-none font-mono text-stone-600 dark:text-stone-400 bg-white dark:bg-stone-700 resize-none touch-manipulation"
               [ngClass]="{'h-24 text-xs p-2 pr-14': !isMobile(), 'h-28 text-[11px] p-2 pr-14': isMobile()}"
-              placeholder="杈撳叆 Markdown 鍐呭..."></textarea>
+              placeholder="输入 Markdown 内容..."></textarea>
           }
         </div>
 
-        <!-- 蹇€熷緟鍔炶緭鍏?- 浠呭湪缂栬緫妯″紡涓嬫樉绀?-->
+        <!-- 快速待办输入 - 仅在编辑模式下显示 -->
         @if (!isPreview()) {
           <div class="flex items-center gap-1 bg-retro-rust/5 dark:bg-retro-rust/10 border border-retro-rust/20 dark:border-retro-rust/30 rounded-lg overflow-hidden"
                [ngClass]="{'p-1': !isMobile(), 'p-0.5': isMobile()}">
             <span class="text-retro-rust flex-shrink-0"
-                  [ngClass]="{'text-xs pl-2': !isMobile(), 'text-[10px] pl-1.5': isMobile()}">鈽?/span>
+                  [ngClass]="{'text-xs pl-2': !isMobile(), 'text-[10px] pl-1.5': isMobile()}">☰</span>
             <input
               #quickTodoInput
               type="text"
@@ -111,12 +114,12 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               spellcheck="false"
               class="flex-1 bg-transparent border-none outline-none text-stone-600 dark:text-stone-400 placeholder-stone-400 dark:placeholder-stone-500"
               [ngClass]="{'text-xs py-1.5 px-2': !isMobile(), 'text-[11px] py-1 px-1.5': isMobile()}"
-              placeholder="杈撳叆寰呭姙鍐呭锛屾寜鍥炶溅娣诲姞...">
+              placeholder="输入待办内容，按回车添加...">
             <button
               (click)="addQuickTodo(quickTodoInput)"
               class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded transition-all flex items-center justify-center"
               [ngClass]="{'p-1.5 mr-0.5': !isMobile(), 'p-1 mr-0.5': isMobile()}"
-              title="娣诲姞寰呭姙">
+              title="添加待办">
               <svg [ngClass]="{'w-3.5 h-3.5': !isMobile(), 'w-3 h-3': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                 <line x1="12" y1="5" x2="12" y2="19"/>
                 <line x1="5" y1="12" x2="19" y2="12"/>
@@ -155,7 +158,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           </div>
         }
 
-        <!-- 妗岄潰绔細闄勪欢绠＄悊鐙珛鏄剧ず - 鏆傛椂闅愯棌 -->
+        <!-- 桌面端：附件管理独立显示 - 暂时隐藏 -->
         <!-- @if (!isMobile() && userId() && projectId()) {
           <app-attachment-manager
             [userId]="userId()"
@@ -168,7 +171,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           </app-attachment-manager>
         } -->
 
-        <!-- 鎿嶄綔鎸夐挳 - 浠呭湪缂栬緫妯″紡涓嬫樉绀?-->
+        <!-- 操作按钮 - 仅在编辑模式下显示 -->
         @if (!isPreview()) {
           <div class="flex flex-wrap border-t border-stone-100 dark:border-stone-700"
                [ngClass]="{'gap-2 pt-2': !isMobile(), 'gap-1.5 pt-1.5': isMobile()}">
@@ -176,25 +179,25 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               (click)="addSibling.emit()"
               class="flex-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 font-medium rounded-md flex items-center justify-center transition-all"
               [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
-              title="娣诲姞鍚岀骇">
+              title="添加同级">
               <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"/>
                 <line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
-              鍚岀骇
+              同级
             </button>
             <button
               (click)="addChild.emit()"
               class="flex-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 font-medium rounded-md flex items-center justify-center transition-all"
               [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
-              title="娣诲姞涓嬬骇">
+              title="添加下级">
               <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="15 10 20 15 15 20"/>
                 <path d="M4 4v7a4 4 0 0 0 4 4h12"/>
               </svg>
-              涓嬬骇
+              下级
             </button>
-            <!-- 绉诲姩绔細闄勪欢鎸夐挳鏀惧湪鍚屼竴琛?- 鏆傛椂闅愯棌 -->
+            <!-- 移动端：附件按钮放在同一行 - 暂时隐藏 -->
             <!-- @if (isMobile() && userId() && projectId()) {
               <label
                 class="flex-1 cursor-pointer text-[10px] px-1.5 py-0.5 bg-stone-50 hover:bg-stone-100 text-stone-500 hover:text-stone-700 rounded-md border border-stone-200 transition-colors flex items-center justify-center gap-0.5"
@@ -204,8 +207,8 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
                   <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                 </svg>
                 @if (isUploading()) {
-                  涓婁紶涓?                } @else {
-                  闄勪欢
+                  上传                } @else {
+                  附件
                 }
                 @if (task().attachments && task().attachments.length > 0) {
                   <span class="text-[8px] bg-indigo-100 text-indigo-600 px-0.5 rounded">{{ task().attachments.length }}</span>
@@ -228,19 +231,19 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
                 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-600': task().parkingMeta?.state === 'parked',
                 'bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500': task().parkingMeta?.state !== 'parked'
               }"
-              [title]="task().parkingMeta?.state === 'parked' ? '浠诲姟宸插湪鍋滄硦鍧炰腑' : '鍋滄硦浠诲姟锛岀◢鍚庡鐞?">
+              [title]="task().parkingMeta?.state === 'parked' ? '任务已在停泊坞中' : '停泊任务，稍后处理'">
               <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                 <polyline points="17 21 17 13 7 13 7 21"/>
               </svg>
-              {{ task().parkingMeta?.state === 'parked' ? '宸插仠娉? : '鍋滄硦' }}
+              {{ task().parkingMeta?.state === 'parked' ? '已停泊' : '停泊' }}
             </button>
             <button
               (click)="deleteTask.emit()"
               data-testid="delete-task-btn"
               class="bg-stone-100 dark:bg-stone-700 hover:bg-red-500 text-stone-400 dark:text-stone-500 hover:text-white border border-stone-200 dark:border-stone-600 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-all"
               [ngClass]="{'px-2 py-1 text-xs': !isMobile(), 'px-1.5 py-0.5 text-[10px]': isMobile()}"
-              title="鍒犻櫎浠诲姟">
+              title="删除任务">
               <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"/>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -248,7 +251,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             </button>
           </div>
 
-          <!-- 绉诲姩绔細闄勪欢鍒楄〃鎶樺彔鍖猴紙濡傛灉鏈夐檮浠讹級- 鏆傛椂闅愯棌 -->
+          <!-- 移动端：附件列表折叠区（如果有附件）- 暂时隐藏 -->
           <!-- @if (isMobile() && task().attachments && task().attachments.length > 0) {
             <div class="mt-1.5">
               <button
@@ -258,7 +261,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
                   <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                   </svg>
-                  {{ task().attachments.length }} 涓檮浠?                </span>
+                  {{ task().attachments.length }} 个附件                </span>
                 <svg
                   class="w-3 h-3 transition-transform"
                   [class.rotate-180]="showAttachmentList()"
@@ -284,7 +287,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
                       <button
                         (click)="deleteAttachment(attachment, $event)"
                         class="text-stone-400 hover:text-red-500 transition-colors p-0.5"
-                        title="鍒犻櫎">
+                        title="删除">
                         <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                         </svg>
@@ -298,7 +301,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
         }
       </div>
 
-      <!-- 鍏宠仈鍖哄煙 -->
+      <!-- 关联区域 -->
       <app-text-task-connections
         [connections]="connections()"
         [isMobile]="isMobile()"
@@ -345,27 +348,27 @@ export class TextTaskEditorComponent implements OnDestroy {
   readonly showAttachmentList = signal(false);
   readonly isUploading = signal(false);
 
-  // ========== Split-Brain 鏈湴鐘舵€?==========
-  /** 鏈湴鏍囬锛堜笌 Store 瑙ｈ€︼紝浠呭湪闈炶仛鐒︽椂鍚屾锛?*/
+  // ========== Split-Brain 本地状态==========
+  /** 本地标题（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localTitle = signal('');
-  /** 鏈湴鍐呭锛堜笌 Store 瑙ｈ€︼紝浠呭湪闈炶仛鐒︽椂鍚屾锛?*/
+  /** 本地内容（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localContent = signal('');
   protected readonly localExpectedMinutes = signal('');
   protected readonly localWaitMinutes = signal('');
   protected readonly localCognitiveLoad = signal<'high' | 'low' | ''>('');
-  /** 鏍囬杈撳叆妗嗘槸鍚﹁仛鐒?*/
+  /** 标题输入框是否聚焦 */
   private isTitleFocused = false;
-  /** 鍐呭杈撳叆妗嗘槸鍚﹁仛鐒?*/
+  /** 内容输入框是否聚焦 */
   private isContentFocused = false;
-  /** 瑙ｉ攣寤惰繜瀹氭椂鍣?*/
+  /** 解锁延迟定时器*/
   private unlockTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
-  /** 鏍囪鏄惁姝ｅ湪杩涜鏂囨湰閫夋嫨鎿嶄綔 */
+  /** 标记是否正在进行文本选择操作 */
   isSelecting = false;
 
-  /** 鏈€澶ч檮浠舵暟閲?*/
+  /** 最大附件数量*/
   private readonly maxAttachments = 5;
-  /** 鏈€澶ф枃浠跺ぇ灏?10MB */
+  /** 最大文件大小 10MB */
   private readonly maxFileSize = 10 * 1024 * 1024;
 
   constructor() {
@@ -375,11 +378,11 @@ export class TextTaskEditorComponent implements OnDestroy {
       effect(() => {
         const task = this.task();
         if (task) {
-          // 浠呭綋鏍囬杈撳叆妗嗘湭鑱氱劍鏃舵墠鍚屾鏍囬
+          // 仅当标题输入框未聚焦时才同步标题
           if (!this.isTitleFocused) {
             this.localTitle.set(task.title || '');
           }
-          // 浠呭綋鍐呭杈撳叆妗嗘湭鑱氱劍鏃舵墠鍚屾鍐呭
+          // 仅当内容输入框未聚焦时才同步内容
           if (!this.isContentFocused) {
             this.localContent.set(task.content || '');
           this.localExpectedMinutes.set(task.expected_minutes == null ? '' : String(task.expected_minutes));
@@ -389,7 +392,7 @@ export class TextTaskEditorComponent implements OnDestroy {
         }
       });
     } catch {
-      // 銆愰槻寰°€慡W chunk 涓嶄竴鑷村彲鑳藉鑷?DestroyRef/injection context 涓㈠け
+      // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
       // 回退：直接初始化本地状态
       const task = this.task?.();
       if (task) {
@@ -403,16 +406,16 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    // 娓呯悊鎵€鏈夋湭瀹屾垚鐨勮В閿佸畾鏃跺櫒
+    // 清理所有未完成的解锁定时器
     for (const timer of this.unlockTimers.values()) {
       clearTimeout(timer);
     }
     this.unlockTimers.clear();
   }
 
-  // ========== Split-Brain 閿佸畾杈呭姪鏂规硶 ==========
+  // ========== Split-Brain 锁定辅助方法 ==========
 
-  /** 閿佸畾浠诲姟瀛楁锛堥槻姝㈣繙绋嬫洿鏂拌鐩栨湰鍦扮紪杈戯級 */
+  /** 锁定任务字段（防止远程更新覆盖本地编辑） */
   private lockTaskFields(taskId: string, fields: string[]): void {
     const projectId = this.projectId() || this.projectState.activeProjectId();
     if (!projectId) return;
@@ -421,7 +424,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     }
   }
 
-  /** 瑙ｉ攣浠诲姟瀛楁 */
+  /** 解锁任务字段 */
   private unlockTaskFields(taskId: string, fields: string[]): void {
     const projectId = this.projectId() || this.projectState.activeProjectId();
     if (!projectId) return;
@@ -431,21 +434,21 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * 鐩戝惉 document 鐐瑰嚮浜嬩欢
-   * 娉ㄦ剰锛氫换鍔″崱鐗囧唴鐨勭偣鍑荤敱 text-task-card 澶勭悊
-   * 杩欓噷鍙鐞嗙偣鍑诲埌缁勪欢瀹屽叏澶栭儴鐨勬儏鍐碉紙濡傞〉闈㈠叾浠栧尯鍩燂級
+   * 监听 document 点击事件
+   * 注意：任务卡片内的点击由 text-task-card 处理
+   * 这里只处理点击到组件完全外部的情况（如页面其他区域）
    */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
-    // 濡傛灉宸茬粡鏄瑙堟ā寮忥紝鏃犻渶澶勭悊
+    // 如果已经是预览模式，无需处理
     if (this.isPreview()) return;
 
-    // 濡傛灉姝ｅ湪杩涜鏂囨湰閫夋嫨锛屼笉澶勭悊
+    // 如果正在进行文本选择，不处理
     if (this.isSelecting) return;
 
     const selection = window.getSelection();
     if (selection && selection.toString().length > 0) {
-      // 鏈夋枃鏈閫変腑锛屼笉鍒囨崲妯″紡
+      // 有文本被选中，不切换模式
       return;
     }
 
@@ -459,11 +462,11 @@ export class TextTaskEditorComponent implements OnDestroy {
     const clickedInTaskCard = target.closest(`[data-task-id="${this.task().id}"]`);
 
     if (!clickedInTaskCard) {
-      // 鐐瑰嚮瀹屽叏鍦ㄤ换鍔″崱鐗囧锛屽垏鎹㈠埌棰勮妯″紡
+      // 点击完全在任务卡片外，切换到预览模式
       this.isPreview.set(true);
       this.previewModeChange.emit(true);
     }
-    // 濡傛灉鐐瑰嚮鍦ㄤ换鍔″崱鐗囧唴浣嗙紪杈戝櫒澶栵紙濡傚崱鐗囧ご閮級锛岀敱 text-task-card 澶勭悊
+    // 如果点击在任务卡片内但编辑器外（如卡片头部），由 text-task-card 处理
   }
 
   ngOnInit() {
@@ -482,7 +485,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * 澶栭儴璋冪敤锛氬己鍒跺垏鎹㈠埌棰勮妯″紡
+   * 外部调用：强制切换到预览模式
    */
   setPreviewMode() {
     if (!this.isPreview()) {
@@ -494,15 +497,15 @@ export class TextTaskEditorComponent implements OnDestroy {
 
 
   /**
-   * 杈撳叆妗嗚仛鐒﹀鐞嗭紙Split-Brain 妯″紡鏍稿績锛?   * 1. 鏍囪鍏ㄥ眬缂栬緫鐘舵€?   * 2. 閿佸畾瀵瑰簲瀛楁锛?灏忔椂锛岄槻姝㈣繙绋嬫洿鏂拌鐩栵級
-   * 3. 鏍囪鏈湴鑱氱劍鐘舵€侊紝闃绘 Store->Local 鍚屾
+   * 输入框聚焦处理（Split-Brain 模式核心）   * 1. 标记全局编辑状态   * 2. 锁定对应字段，防止远程更新覆盖
+   * 3. 标记本地聚焦状态，阻止 Store->Local 同步
    */
   onInputFocus(field: 'title' | 'content' | 'todo') {
     this.uiState.markEditing();
 
     if (field === 'title') {
       this.isTitleFocused = true;
-      // 娓呴櫎鍙兘瀛樺湪鐨勮В閿佸畾鏃跺櫒
+      // 清除可能存在的解锁定时器
       const existingTimer = this.unlockTimers.get('title');
       if (existingTimer) {
         clearTimeout(existingTimer);
@@ -518,21 +521,21 @@ export class TextTaskEditorComponent implements OnDestroy {
       }
       this.lockTaskFields(this.task().id, ['content']);
     }
-    // todo 瀛楁涓嶉渶瑕侀攣瀹氾紙涓嶄細琚繙绋嬫洿鏂拌鐩栵級
+    // todo 字段不需要锁定（不会被远程更新覆盖）
   }
 
   /**
-   * 杈撳叆妗嗗け鐒﹀鐞嗭紙Split-Brain 妯″紡鏍稿績锛?   * 1. 鎻愪氦鏈湴鍐呭鍒?Store
-   * 2. 寤惰繜 5 绉掑悗瑙ｉ攣瀛楁锛堢瓑寰呭悓姝ュ畬鎴愶紝闃叉鍥炲０瑕嗙洊锛?   * 3. 寤惰繜鍚庨噸鏂板惎鐢?Store->Local 鍚屾
+   * 输入框失焦处理（Split-Brain 模式核心）   * 1. 提交本地内容到 Store
+   * 2. 延迟 5 秒后解锁字段（等待同步完成，防止回声覆盖）   * 3. 延迟后重新启用 Store->Local 同步
    */
   onInputBlur(field: 'title' | 'content' | 'todo') {
-    // 寤惰繜娓呴櫎閫夋嫨鏍囪
+    // 延迟清除选择标记
     setTimeout(() => {
       this.isSelecting = false;
     }, 100);
 
     if (field === 'title') {
-      // 鎻愪氦鏈湴鍐呭鍒?Store
+      // 提交本地内容到 Store
       this.taskOpsAdapter.updateTaskTitle(this.task().id, this.localTitle());
 
       const timer = setTimeout(() => {
@@ -554,8 +557,8 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * 鏍囬杈撳叆澶勭悊
-   * 浠呮洿鏂版湰鍦扮姸鎬侊紝blur 鏃舵墠鎻愪氦鍒?Store
+   * 标题输入处理
+   * 仅更新本地状态，blur 时才提交到 Store
    */
   onTitleInput(value: string) {
     this.localTitle.set(value);
@@ -563,8 +566,8 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * 鍐呭杈撳叆澶勭悊
-   * 浠呮洿鏂版湰鍦扮姸鎬侊紝blur 鏃舵墠鎻愪氦鍒?Store
+   * 内容输入处理
+   * 仅更新本地状态，blur 时才提交到 Store
    */
   onContentInput(value: string) {
     this.localContent.set(value);
@@ -588,19 +591,19 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * Markdown 棰勮鍖哄煙鐐瑰嚮澶勭悊
-   * 鐐瑰嚮寰呭姙 checkbox 鏃跺垏鎹㈠畬鎴愮姸鎬侊紱鐐瑰嚮鍏朵粬鍖哄煙杩涘叆缂栬緫妯″紡
+   * Markdown 预览区域点击处理
+   * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
   onPreviewClick(event: MouseEvent) {
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
-      // 鐐瑰嚮浜嗗緟鍔?checkbox锛屽垏鎹㈢姸鎬佽€岄潪杩涘叆缂栬緫妯″紡
+      // 点击了待办 checkbox，切换状态而非进入编辑模式
       const currentContent = this.localContent() || this.task().content || '';
       const newContent = toggleMarkdownTodo(currentContent, todoIndex);
       this.localContent.set(newContent);
       this.taskOpsAdapter.updateTaskContent(this.task().id, newContent);
-      // 寮哄埗鏍囪缁勪欢闇€瑕侀噸鏂版娴嬶紝纭繚 OnPush 妯″紡涓?UI 鍒锋柊
+      // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
       this.cdr.markForCheck();
     } else {
       this.togglePreview();
@@ -620,7 +623,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.taskOpsAdapter.updateTaskAttachments(this.task().id, attachments);
   }
 
-  // ========== 绉诲姩绔檮浠剁鐞嗘柟娉?==========
+  // ========== 移动端附件管理方法 ==========
 
   toggleAttachmentList() {
     this.showAttachmentList.update(v => !v);
@@ -657,7 +660,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     // 检查文件大小
     for (const file of filesToUpload) {
       if (file.size > this.maxFileSize) {
-        this.toast.warning('鏂囦欢杩囧ぇ', `${file.name} 瓒呰繃 10MB 闄愬埗`);
+        this.toast.warning('文件过大', `${file.name} 超过 10MB 限制`);
         input.value = '';
         return;
       }
@@ -685,12 +688,12 @@ export class TextTaskEditorComponent implements OnDestroy {
       if (newAttachments.length > 0) {
         const updatedAttachments = [...(this.task().attachments || []), ...newAttachments];
         this.taskOpsAdapter.updateTaskAttachments(this.task().id, updatedAttachments);
-        this.toast.success('涓婁紶鎴愬姛', `${newAttachments.length} 涓枃浠跺凡涓婁紶`);
+        this.toast.success('上传成功', `${newAttachments.length} 个文件已上传`);
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : '涓婁紶澶辫触';
+      const errorMsg = error instanceof Error ? error.message : '上传失败';
       this.attachmentError.emit(errorMsg);
-      this.toast.error('涓婁紶澶辫触', errorMsg);
+      this.toast.error('上传失败', errorMsg);
     } finally {
       this.isUploading.set(false);
       input.value = '';
@@ -711,9 +714,9 @@ export class TextTaskEditorComponent implements OnDestroy {
       this.taskOpsAdapter.updateTaskAttachments(this.task().id, updatedAttachments);
       this.toast.success('删除成功', attachment.name + ' 已删除');
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : '鍒犻櫎澶辫触';
+      const errorMsg = error instanceof Error ? error.message : '删除失败';
       this.attachmentError.emit(errorMsg);
-      this.toast.error('鍒犻櫎澶辫触', errorMsg);
+      this.toast.error('删除失败', errorMsg);
     }
   }
 

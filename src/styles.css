@@ -42,6 +42,47 @@ body {
 
 /* ========== 主题变量 ========== */
 :root {
+  /* ========== Parking/Dock 动效令牌 (同步自 PARKING_CONFIG) ========== */
+  --pk-ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  --pk-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --pk-ease-exit: cubic-bezier(0.4, 0, 0.2, 1);
+  --pk-ease-micro: cubic-bezier(0.18, 0.75, 0.28, 1);
+  --pk-shell-enter: 320ms;
+  --pk-shell-exit: 260ms;
+  --pk-overlay-enter: 280ms;
+  --pk-overlay-exit: 220ms;
+  --pk-panel-enter: 220ms;
+  --pk-panel-exit: 180ms;
+  --pk-focus-enter: 340ms;
+  --pk-focus-exit: 280ms;
+  --pk-card-reorder: 180ms;
+  --pk-micro-hover: 140ms;
+  --pk-micro-glow: 160ms;
+  --pk-micro-pulse: 160ms;
+  --pk-hud-enter: 200ms;
+  --pk-notice-enter: 200ms;
+  --pk-notice-exit: 160ms;
+  --pk-status-ring-pulse: 320ms;
+  --pk-focus-scene-entry-hud: 120ms;
+  --pk-radar-hover: 140ms;
+  --pk-radar-appear: 220ms;
+  --pk-radar-return: 180ms;
+  --pk-radar-promote: 180ms;
+  --pk-radar-highlight-pulse: 320ms;
+  --pk-dist-panel-lift: 12px;
+  --pk-dist-panel-peek: 6px;
+  --pk-dist-semicircle-lift: 8px;
+  --pk-dist-card-hover-lift: 2px;
+  --pk-dist-card-hover-scale: 1.006;
+  --pk-dist-card-press-scale: 0.988;
+  --pk-dist-card-fly: 84px;
+  --pk-dist-focus-shift: 6px;
+  --pk-dist-focus-exit-shift: 8px;
+  --pk-dist-radar-float: 2px;
+  --pk-dist-card-push-start: 10px;
+  --pk-semicircle-w: 160px;
+  --pk-semicircle-h: 52px;
+
   /* 默认主题 - 原石色系 */
   --theme-bg: #F9F8F6;
   --theme-sidebar-bg: #F9F8F6;
@@ -311,6 +352,14 @@ body {
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+@keyframes plannerGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+  50% { box-shadow: 0 0 12px 3px rgba(245, 158, 11, 0.25), 0 0 4px 1px rgba(245, 158, 11, 0.15); }
+}
+@keyframes plannerSlideOpen {
+  from { opacity: 0; max-height: 0; transform: translateY(-8px); }
+  to { opacity: 1; max-height: 600px; transform: translateY(0); }
 }
 @keyframes scaleIn {
   from { opacity: 0; transform: scale(0.95); }

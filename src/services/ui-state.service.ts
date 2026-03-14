@@ -29,6 +29,9 @@ export class UiStateService {
   
   /** 侧边栏宽度 */
   readonly sidebarWidth = signal(280);
+
+  /** 侧边栏是否展开（供停泊坞等 fixed 元素感知布局偏移） */
+  readonly sidebarOpen = signal(true);
   
   /** 文本视图分栏比例 */
   readonly textColumnRatio = signal(50);
@@ -387,13 +390,13 @@ export class UiStateService {
   private loadLocalPreferences() {
     if (typeof localStorage === 'undefined') return;
     
-    const layoutDir = localStorage.getItem('nanoflow.layout-direction') as 'ltr' | 'rtl' | null;
-    if (layoutDir) {
+    const layoutDir = localStorage.getItem('nanoflow.layout-direction');
+    if (layoutDir === 'ltr' || layoutDir === 'rtl') {
       this.layoutDirection.set(layoutDir);
     }
-    
-    const floatingPref = localStorage.getItem('nanoflow.floating-window-pref') as 'auto' | 'fixed' | null;
-    if (floatingPref) {
+
+    const floatingPref = localStorage.getItem('nanoflow.floating-window-pref');
+    if (floatingPref === 'auto' || floatingPref === 'fixed') {
       this.floatingWindowPref.set(floatingPref);
     }
 

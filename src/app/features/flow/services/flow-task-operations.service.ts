@@ -3,9 +3,11 @@ import { ProjectStateService } from '../../../../services/project-state.service'
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../../services/toast.service';
 import { ParkingService } from '../../../../services/parking.service';
-import { Task, Attachment } from '../../../../models';
+import { DockEngineService } from '../../../../services/dock-engine.service';
+import { Task, Attachment, TaskParkingMeta } from '../../../../models';
 import { isFailure, getErrorMessage } from '../../../../utils/result';
 import { UI_CONFIG } from '../../../../config';
+import { PARKING_CONFIG } from '../../../../config/parking.config';
 
 /**
  * FlowTaskOperationsService - 任务操作代理服务
@@ -31,6 +33,7 @@ export class FlowTaskOperationsService {
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly toast = inject(ToastService);
   private readonly parkingService = inject(ParkingService);
+  private readonly dockEngine = inject(DockEngineService);
   
   // ========== 任务属性更新 ==========
   
@@ -282,5 +285,30 @@ export class FlowTaskOperationsService {
    */
   parkTask(task: Task): void {
     this.parkingService.parkTask(task.id);
+    const parkedTask = this.projectState.getTask(task.id) ?? task;
+    if (!parkedTask.parkingMeta) {
+      const now = new Date().toISOString();
+      const fallbackMeta: TaskParkingMeta = {
+        state: 'parked',
+        parkedAt: now,
+        lastVisitedAt: now,
+        contextSnapshot: null,
+        reminder: null,
+        pinned: false,
+      };
+      this.projectState.updateTask(
+        {
+          ...parkedTask,
+          parkingMeta: fallbackMeta,
+          updatedAt: now,
+        },
+      );
+    }
+    if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
+      this.dockEngine.dockTask(task.id, undefined, {
+        sourceSection: 'flow',
+        zoneSource: 'auto',
+      });
+    }
   }
 }

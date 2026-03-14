@@ -101,7 +101,7 @@ REVOKE EXECUTE ON FUNCTION public.get_dashboard_stats() FROM anon, public;
 
 #### 2.1 技术选型：扩展现有 IndexedDBAdapter
 
-> ⚠️ **重要决策**: 项目已有 `IndexedDBAdapter`（`src/app/core/index.ts` 导出）。
+> ⚠️ **重要决策**: 项目已有 IndexedDB 服务（`src/app/core/state/persistence/indexeddb.service.ts`）。
 > 引入 Dexie.js 会造成双重封装和潜在冲突。
 
 | 方案 | 优点 | 缺点 | 决策 |
@@ -118,7 +118,7 @@ REVOKE EXECUTE ON FUNCTION public.get_dashboard_stats() FROM anon, public;
 
 #### 2.2 现有数据库配置扩展
 
-> **现有实现**: `src/services/storage-adapter.service.ts` + `IndexedDBHealthService`
+> **现有实现**: `src/app/core/state/persistence/indexeddb.service.ts` + `src/services/indexeddb-health.service.ts`
 
 需在现有 `DB_CONFIG` 中添加 `updated_at` 索引：
 
@@ -429,7 +429,7 @@ private async handleRealtimeEvent(payload: RealtimePostgresChangesPayload<Task>)
 
 ---
 
-## � 多端网络环境流量策略
+## 多端网络环境流量策略
 
 ### 4.1 不同网络状况下的流量预估
 
@@ -674,7 +674,7 @@ function addFieldSelection(url) {
 
 ---
 
-## �🚨 监控与告警
+## 监控与告警
 
 ### Sentry Span 追踪（v8+ API）
 
@@ -745,7 +745,7 @@ async checkForDrift(): Promise<void> {
 
 ---
 
-## � 与现有架构的对齐
+## 与现有架构的对齐
 
 本策划案是对现有同步架构的**扩展**，而非替换。
 

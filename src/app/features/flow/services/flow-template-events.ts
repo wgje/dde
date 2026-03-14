@@ -28,6 +28,10 @@ export interface FlowTemplateEventHandlers {
   onDeleteKeyPressed?: () => void;
   /** 选择变化时触发 */
   onSelectionChanged?: (selectedNodeKeys: string[]) => void;
+  /** Alt+拖拽节点时触发（用于将任务拖入停泊坞） */
+  onNodeAltDragStart?: (taskId: string, clientX: number, clientY: number) => void;
+  /** 拖拽节点出画布边界时触发（支持多选拖入停泊坞） */
+  onNodesDragOutOfBounds?: (taskIds: string[], clientX: number, clientY: number) => void;
 }
 
 /**

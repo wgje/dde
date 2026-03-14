@@ -111,12 +111,14 @@
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
-| Angular | 19.x | 前端框架（Signals + 独立组件） |
+| Angular | 19.2.x | 前端框架（Signals + 独立组件 + OnPush） |
 | Supabase | ^2.84.0 | BaaS（认证 + 数据库 + 存储 + Edge Functions） |
-| GoJS | ^3.1.1 | 流程图渲染 |
+| GoJS | ^3.1.x | 流程图渲染 |
 | Groq | whisper-large-v3 | 语音转写（专注模式黑匣子） |
-| Sentry | ^10.32.1 | 错误监控 |
-| Vitest / Playwright | - | 单元测试 / E2E 测试 |
+| Sentry | ^10.32.1 | 错误监控 + 会话回放 |
+| Vitest | ^4.0.x | 单元 / 服务 / 组件测试（Lane + Quarantine 矩阵） |
+| Playwright | ^1.48.0 | E2E 测试 |
+| TypeScript | ~5.8.x | 严格类型 |
 
 ---
 
@@ -149,7 +151,6 @@
 |--------|------|------|
 | `1` | 已读 | 标记当前条目为已读 |
 | `2` | 完成 | 标记当前条目为完成 |
-| `3` | 稍后 | 跳过当前条目，稍后提醒 |
 
 ### 专注模式 - 聚光灯 (Spotlight)
 
@@ -166,7 +167,6 @@
 | `Ctrl/⌘ + Enter` | 提交 | 提交文本输入 |
 | `R` | 已读 | 标记条目为已读 |
 | `C` | 完成 | 标记条目为完成 |
-| `A` | 归档 | 归档当前条目 |
 
 ---
 
@@ -247,19 +247,33 @@
 ## 开发命令
 
 ```bash
-npm start              # 开发服务器
-npm run test           # Vitest watch 模式
-npm run test:run       # 单次运行测试
-npm run test:e2e       # Playwright E2E
-npm run lint:fix       # ESLint 自动修复
-npm run build          # 生产构建
-npx knip               # 检测未使用代码
+# 开发
+npm start                      # 开发服务器
+npm run build                  # 生产构建
+npm run build:dev              # 开发构建（跳过类型检查）
+
+# 测试（本地）
+npm run test                   # 本地默认（matrix + quarantine 排除）
+npm run test:run:full          # 全量含 quarantine
+npm run test:run:pure          # 纯函数 vitest.pure
+npm run test:run:services      # 服务层 vitest.services
+npm run test:run:components    # 组件层 vitest.components
+npm run test:e2e               # Playwright E2E
+
+# 质量
+npm run lint:fix               # ESLint 自动修复
+npx knip                       # 检测未使用代码
+npm run perf:guard             # 构建 + 性能门禁全套
+
+# 数据库
+npm run db:types               # 重新生成 Supabase TypeScript 类型
 ```
 
 ## 功能特性
 
 - 📝 **双视图模式**: 文本视图与流程图视图无缝切换
 - 🎯 **专注模式**: 大门强制结算 + 聚光灯单任务聚焦 + 地质层成就感 + 黑匣子语音记录
+- 🅿️ **停泊坞**: 暂存任务至停泊区，设置提醒，释放工作区注意力
 - 🔄 **云端同步**: 通过 Supabase 实现多设备数据同步（LWW 冲突解决）
 - 📱 **离线优先**: 本地 IndexedDB 存储，断网可用，联网自动同步
 - 🎙️ **语音转写**: Groq whisper-large-v3 极速语音转文字（1-2 秒响应）
@@ -443,9 +457,10 @@ src/
 │   ├── features/       # 业务模块
 │   │   ├── flow/       # 流程图视图（GoJS）
 │   │   ├── text/       # 文本视图（移动端默认）
-│   │   └── focus/      # 专注模式（Gate/Spotlight/Strata/BlackBox）
+│   │   ├── focus/      # 专注模式（Gate/Spotlight/Strata/BlackBox）
+│   │   └── parking/    # 停泊坞（任务暂存与提醒）
 │   └── shared/         # 共享组件与模态框
-├── services/           # 主服务层（70+ 服务）
+├── services/           # 主服务层（85+ 服务）
 ├── config/             # 配置常量
 ├── models/             # 数据模型
 └── utils/              # 工具函数
@@ -539,9 +554,9 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 **核心表（5 个）**
 - `projects` - 项目
 - `project_members` - 项目成员（协作预留）
-- `tasks` - 任务
+- `tasks` - 任务（含 `parking_meta` JSONB 停泊元数据、`expected_minutes`/`cognitive_load`/`wait_minutes` 规划字段）
 - `connections` - 任务连接
-- `user_preferences` - 用户偏好
+- `user_preferences` - 用户偏好（含 Dock 快照字段）
 
 **辅助表（10 个）**
 - `task_tombstones` / `connection_tombstones` - 永久删除记录
@@ -551,7 +566,7 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 - `purge_rate_limits` - 速率限制
 - `attachment_scans` / `quarantined_files` - 病毒扫描相关
 - `black_box_entries` - 黑匣子条目存储
-- `transcription_usage` - 语音转写用量追踪
+- `transcription_usage` - 语音转写用量追踪（每用户每日配额控制）
 
 **视图（2 个）**
 - `active_tasks` - 过滤已删除任务
@@ -562,6 +577,9 @@ SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT clean
 - `batch_upsert_tasks(tasks, project_id)` - 批量更新任务
 - `purge_tasks_v3(project_id, task_ids)` - 永久删除任务
 - `safe_delete_tasks(task_ids, project_id)` - 安全软删除
+- `get_all_projects_data()` / `get_projects_list()` - 批量加载项目（减少 N+1）
+- `get_project_sync_watermark()` / `get_user_projects_watermark()` - Resume 增量同步水位
+- `get_black_box_sync_watermark()` - 黑匣子同步水位
 
 完整函数和触发器清单请参考 `scripts/README.md`。
 

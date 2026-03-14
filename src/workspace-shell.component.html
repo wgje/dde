@@ -1,4 +1,4 @@
-﻿
+
 
 <!-- 整体布局容器 -->
 <div class="h-full min-h-screen w-full flex flex-col overflow-hidden">
@@ -127,6 +127,9 @@
   <!-- Left Sidebar: Project List -->
   <app-workspace-sidebar>
     <aside data-testid="project-selector" class="border-r flex flex-col shrink-0 shadow-[4px_0_24px_rgba(0,0,0,0.02)] z-10 overflow-hidden" [class.transition-all]="!isResizingAny" [class.duration-75]="!isResizingAny" style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
+           [style.filter]="focusBlurActive() ? 'blur(22px) brightness(0.4)' : 'none'"
+           [style.pointer-events]="focusBlurActive() ? 'none' : 'auto'"
+           [style.transition]="'filter 0.7s cubic-bezier(0.4, 0, 0.2, 1)'"
            [style.width.px]="isSidebarOpen() ? (isMobile() ? 240 : sidebarWidth()) : 0"
            [class.w-0]="!isSidebarOpen()"
            (touchstart)="onSidebarTouchStart($event)"
@@ -492,7 +495,7 @@
 
         <!-- 设置 + 回收站（水平排列，节省空间） -->
         <div class="flex items-center gap-1">
-          <button (click)="openSettings()" [disabled]="isModalLoading('settings')" class="flex-1 py-1.5 px-2 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-700/40 rounded-lg text-[11px] font-medium transition-all flex items-center justify-center gap-1.5 disabled:opacity-50" aria-label="打开设置">
+          <button data-testid="workspace-settings-button" (click)="openSettings()" [disabled]="isModalLoading('settings')" class="flex-1 py-1.5 px-2 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-700/40 rounded-lg text-[11px] font-medium transition-all flex items-center justify-center gap-1.5 disabled:opacity-50" aria-label="打开设置">
             @if (isModalLoading('settings')) {
               <svg class="animate-spin h-3.5 w-3.5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
             } @else {
@@ -525,6 +528,9 @@
   <!-- Sidebar Resizer -->
   @if (!isMobile()) {
     <div class="w-1 hover:w-1.5 bg-transparent hover:bg-indigo-300/60 dark:hover:bg-indigo-600/40 cursor-col-resize transition-all z-20 flex-shrink-0 relative group"
+         [class.pointer-events-none]="focusBlurActive()"
+         [class.opacity-0]="focusBlurActive()"
+         [style.transition]="'opacity 0.7s cubic-bezier(0.4, 0, 0.2, 1)'"
          (mousedown)="startSidebarResize($event)">
          <div class="absolute inset-y-0 left-0 w-px bg-stone-200/80 dark:bg-stone-700/80 group-hover:bg-indigo-400 dark:group-hover:bg-indigo-500 transition-colors"></div>
     </div>

@@ -1,10 +1,18 @@
 # Parking Dock 模块化重构策划案
 
-> 版本：v1.4（深度优化：去过度设计 + UX微交互 + DX新手引导 + 全键盘流 + 17项极致UX/DX增补，新增跨区联动与跨区深度融合）
-> 日期：2026-02-24
+> 版本：v1.5（专注控制台集成版：补全跨项目持久化、专注控制台三区协议、停泊坞命名规范更新）
+> 日期：2026-02-27
 > 状态：Draft for implementation
 > 基线：基于 `state-overlap-design.md` v10.0 全部规范
 > 原则：**逻辑微调、模块化拆分、强联动原版**——在不改变 State Overlap v10.0 业务语义的前提下，将停泊坞（Parking Dock）及其关联板块重构为**可独立操控、可拖拽编排、可热插拔的模块化组件体系**。
+
+> **v1.5 新增**：停泊坞正式命名为「**停泊坞**」（Docking Bay），专注控制台三区设计详见 [`focus-console-design.md`](./focus-console-design.md)。本文聚焦模块化组件结构；专注会话状态机、调度算法、UI 规范请以该文件为准。
+>
+> **2026-03-08 联动补记**：
+> - 停泊坞是“本轮专注周期的任务资源池”，不是项目列表副本。
+> - 专注控制台当前三区术语统一为：主控台 / 组合选择区域 / 备选区域。
+> - 主任务与当前 C 位分离；等待调度只推荐不强切。
+> - 专注态就地新建任务统一写入共享黑匣子（`sourceProjectId=null`），退出专注不强制归档，后续由用户在共享仓内手动归档。
 
 ---
 
@@ -36,7 +44,7 @@
 
 ### M1.1 为什么需要模块化
 
-现有 `ParkingDockComponent`（953 行）承载了触发条、列表、预览、动画、移动端适配、键盘导航等全部逻辑。随着 State Overlap 功能深入，单文件组件面临：
+现有 `ParkingDockComponent`（840 行）承载了触发条、列表、预览、动画、移动端适配、键盘导航等全部逻辑。随着 State Overlap 功能深入，单文件组件面临：
 
 1. **维护困难**：修改预览区备注功能时可能影响触发条脉冲动画。
 2. **复用受限**：停泊卡片无法在搜索结果、Spotlight 队列等其他场景复用。
@@ -142,6 +150,22 @@ interface DockUserLayout {
 | 移动端 Bottom Sheet | A6.9.5 | 100vw × 60vh，可拖拽至 70vh |
 | 与 Toast 层级 | A6.9.7 | z-index 低于 Toast |
 | UiState 协同 | A15.2 UiStateService 行 | `isParkingDockOpen` signal |
+| **跨项目持久化** | **focus-console-design.md §2.5** | **切换项目时 DockShell 不销毁不重建，内容保持不变。DockShell 挂载在应用层（AppShell），而非项目层（ProjectShell）** |
+
+> **⚠️ v1.5 架构变更**：停泊坞正式命名为**停泊坞**（Docking Bay），其 DockShell 宿主从 `ProjectShellComponent` 迁移至 `AppShellComponent`，确保跨项目切换时停泊坞状态完整保持。相关模块集成模板调整如下：
+>
+> ```html
+> <!-- AppShellComponent 模板（替代 ProjectShellComponent 中的停泊坞） -->
+> @defer (on timer(300)) {
+>   <app-dock-shell>
+>     <app-trigger-capsule slot="trigger" />
+>     <app-dock-header slot="header" />
+>     <app-park-card-list slot="list" />
+>     <app-preview-pane slot="preview" />
+>     <app-notice-bar slot="notice" />
+>   </app-dock-shell>
+> }
+> ```
 
 ### M3.3 组件设计
 

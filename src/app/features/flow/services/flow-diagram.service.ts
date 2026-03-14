@@ -65,9 +65,6 @@ export class FlowDiagramService {
   private resizeObserver: ResizeObserver | null = null;
   private isDestroyed = false;
   
-  // ========== 小地图状态 ==========
-  private overview: go.Overview | null = null;
-  private overviewContainer: HTMLDivElement | null = null;
 
   /** Idle 小地图初始化句柄 */
   private idleOverviewInitHandle: number | null = null;
@@ -78,6 +75,10 @@ export class FlowDiagramService {
   // ========== 僵尸模式 ==========
   private isSuspended = false;
   private suspendedResizeObserver: ResizeObserver | null = null;
+
+  // ========== 事件处理器引用（用于销毁时清理） ==========
+  /** ViewportBoundsChanged 监听器引用，防止泄漏 */
+  private viewportBoundsHandler: ((e: go.DiagramEvent) => void) | null = null;
 
   // ========== 字体加载重绘 ==========
   /** 字体加载完成事件的回调引用，用于销毁时清理 */
@@ -206,6 +207,11 @@ export class FlowDiagramService {
         this.setupDesktopPanAndSelectTools(this.diagram);
       }
       this.setupMultiSelectClickTool(this.diagram);
+
+      // 【2026-03-04】自定义 DraggingTool：检测节点拖出画布边界，触发拖入停泊坞流程
+      if (!isMobile) {
+        this.setupDragOutOfBoundsTool(this.diagram);
+      }
       
       // 初始化模型
       this.diagram!.model = new go.GraphLinksModel([], [], {
@@ -226,9 +232,11 @@ export class FlowDiagramService {
       this.eventService.setDiagram(this.diagram, this.diagramDiv);
       
       // 添加视口变化监听（用于保存视图状态）
-      this.diagram.addDiagramListener('ViewportBoundsChanged', () => {
+      // 【修复 C-07】存储 handler 引用，dispose() 时显式移除，防止监听器泄漏
+      this.viewportBoundsHandler = () => {
         this.dataService.saveViewState();
-      });
+      };
+      this.diagram.addDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
       
       // 设置 ResizeObserver
       this.setupResizeObserver();
@@ -415,6 +423,106 @@ export class FlowDiagramService {
       };
     }
   }
+
+  /**
+   * 【2026-03-04】自定义 DraggingTool：检测节点拖出画布边界
+   * 
+   * 问题根因：GoJS DraggingTool 在内部处理拖拽，节点始终保持在 Canvas 内部，
+   * 无法跨越到 HTML DOM 元素（如停泊坞 drop-zone）。
+   * 用户 Ctrl+Click 选中多个节点后拖动，节点向下移动但永远到不了停泊坞。
+   * 
+   * 解决方案：
+   * 1. 覆盖 DraggingTool.doMouseMove，在每次拖拽移动时检测鼠标是否超出画布边界
+   * 2. 当鼠标移出画布底部/左/右边界时，取消 GoJS 内部拖拽（doCancel）
+   * 3. 收集当前选中的所有节点 task ID，启动指针跟踪式拖入停泊坞流程
+   * 4. 还原节点原始位置，避免 GoJS 内部状态与 Store 不一致
+   */
+  private setupDragOutOfBoundsTool(diagram: go.Diagram): void {
+    const draggingTool = diagram.toolManager.draggingTool;
+    const self = this;
+
+    // 保存拖拽开始时各节点的初始位置，用于还原
+    let savedPositions: Map<string, go.Point> = new Map();
+    // 标志位：防止 dragOutOfBounds 重复触发
+    let hasFiredDragOut = false;
+
+    const originalDoActivate = draggingTool.doActivate.bind(draggingTool);
+    draggingTool.doActivate = function () {
+      savedPositions = new Map();
+      hasFiredDragOut = false;
+      // 记录所有选中节点的初始位置
+      diagram.selection.each((part: go.Part) => {
+        if (part instanceof go.Node && typeof part.key === 'string') {
+          savedPositions.set(part.key, part.location.copy());
+        }
+      });
+      originalDoActivate();
+    };
+
+    const originalDoMouseMove = draggingTool.doMouseMove.bind(draggingTool);
+    draggingTool.doMouseMove = function () {
+      if (hasFiredDragOut) return;
+
+      const e = diagram.lastInput;
+      if (!e || !self.diagramDiv) {
+        originalDoMouseMove();
+        return;
+      }
+
+      // 获取鼠标在浏览器窗口中的坐标
+      const divRect = self.diagramDiv.getBoundingClientRect();
+      const mouseClientX = divRect.left + e.viewPoint.x;
+      const mouseClientY = divRect.top + e.viewPoint.y;
+
+      // 检测鼠标是否超出画布边界（底部、左侧或右侧超出 40px 才触发，避免误触）
+      const outOfBoundsThreshold = 40;
+      const isOutBottom = mouseClientY > divRect.bottom + outOfBoundsThreshold;
+      const isOutLeft = mouseClientX < divRect.left - outOfBoundsThreshold;
+      const isOutRight = mouseClientX > divRect.right + outOfBoundsThreshold;
+      const isOutTop = mouseClientY < divRect.top - outOfBoundsThreshold;
+
+      if (isOutBottom || isOutLeft || isOutRight || isOutTop) {
+        hasFiredDragOut = true;
+
+        // 收集选中的任务 ID
+        const selectedTaskIds: string[] = [];
+        diagram.selection.each((part: go.Part) => {
+          if (part instanceof go.Node && typeof part.key === 'string') {
+            selectedTaskIds.push(part.key);
+          }
+        });
+
+        if (selectedTaskIds.length > 0) {
+          self.logger.info('节点拖出画布边界，启动拖入停泊坞流程', {
+            taskIds: selectedTaskIds,
+            count: selectedTaskIds.length,
+            direction: isOutBottom ? 'bottom' : isOutTop ? 'top' : isOutLeft ? 'left' : 'right',
+          });
+
+          // 取消 GoJS 内部拖拽
+          draggingTool.doCancel();
+
+          // 还原节点到原始位置（防止 GoJS 拖拽中途把节点位移了）
+          diagram.startTransaction('restore-drag-positions');
+          savedPositions.forEach((pos, key) => {
+            const node = diagram.findNodeForKey(key);
+            if (node) {
+              node.location = pos;
+            }
+          });
+          diagram.commitTransaction('restore-drag-positions');
+
+          // 触发拖入停泊坞流程（通过事件总线解耦）
+          flowTemplateEventHandlers.onNodesDragOutOfBounds?.(selectedTaskIds, mouseClientX, mouseClientY);
+        }
+        return;
+      }
+
+      originalDoMouseMove();
+    };
+
+    this.logger.debug('DraggingTool 边界检测已配置');
+  }
   
   /**
    * 暂停图表（僵尸模式）
@@ -435,11 +543,7 @@ export class FlowDiagramService {
       }
       
       this.clearAllTimers();
-      
-      if (this.overview) {
-        this.overview.animationManager.isEnabled = false;
-      }
-      
+
       this.isSuspended = true;
     } catch (error) {
       this.logger.error('暂停图表失败:', error);
@@ -467,22 +571,14 @@ export class FlowDiagramService {
         this.setupResizeObserver();
       }
       
-      if (this.overview) {
-        this.overview.animationManager.isEnabled = false;
-        this.overview.requestUpdate();
-      }
-      
       this.diagram.requestUpdate();
-      
+
       // 【2026-02-25 性能优化】恢复时仅请求一次更新，不再全量 invalidateRoute
       // GoJS 在 requestUpdate() 时会自动重新路由需要更新的链接
       this.zone.runOutsideAngular(() => {
         requestAnimationFrame(() => {
           if (!this.diagram || this.isDestroyed) return;
           this.diagram.requestUpdate();
-          if (this.overview) {
-            this.overview.requestUpdate();
-          }
         });
       });
     } catch (error) {
@@ -658,6 +754,11 @@ export class FlowDiagramService {
     this.eventService.dispose();
     
     if (this.diagram) {
+      // 【修复 C-07】显式移除 ViewportBoundsChanged 监听器，防止泄漏
+      if (this.viewportBoundsHandler) {
+        this.diagram.removeDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
+        this.viewportBoundsHandler = null;
+      }
       // 【P1-10 修复】先 clear() 清除数据和事件监听，再断开 DOM
       // 顺序：clear → removeDiagramListener → div = null
       this.diagram.clear();
@@ -805,12 +906,16 @@ export class FlowDiagramService {
   // ========== 私有方法 ==========
   
   /**
-   * 【关键】拦截 GoJS 默认删除行为
+   * 【关键】拦截 GoJS 默认命令行为
    * 
    * 设计原则：强制单向数据流 (Store -> Signal -> Diagram)
-   * - 禁止 GoJS 直接删除节点，避免"脑裂"问题
+   * - 禁止 GoJS 直接删除/复制/粘贴节点，避免"脑裂"问题
    * - Delete/Backspace 键触发自定义事件，由 Angular Service 处理
-   * - 所有删除操作必须先更新 Store，再由 Store 变化驱动 GoJS 刷新
+   * - 所有数据操作必须先更新 Store，再由 Store 变化驱动 GoJS 刷新
+   * 
+   * 【2026-03-04 修复】禁用 GoJS 默认复制粘贴
+   * 根因：GoJS copy-paste 会创建带自动生成数字 key（如 -13）的幽灵节点，
+   * 这些节点不存在于 Store 中，选中后执行删除会导致 "任务不存在: -13" 错误。
    */
   private setupDeleteKeyInterception(): void {
     if (!this.diagram) return;
@@ -820,6 +925,10 @@ export class FlowDiagramService {
     
     // 禁止 GoJS 默认的删除选中项行为
     diagram.commandHandler.canDeleteSelection = () => false;
+    
+    // 禁止 GoJS 默认的复制粘贴行为——防止创建幽灵节点
+    diagram.commandHandler.canCopySelection = () => false;
+    diagram.commandHandler.canPasteSelection = () => false;
     
     // 拦截 Delete/Backspace 键
     diagram.commandHandler.doKeyDown = () => {
@@ -835,7 +944,7 @@ export class FlowDiagramService {
       originalDoKeyDown();
     };
     
-    this.logger.info('Delete 键拦截已配置，GoJS 默认删除行为已禁用');
+    this.logger.info('GoJS 命令拦截已配置：删除/复制/粘贴行为已禁用');
   }
   
   private setupResizeObserver(): void {
@@ -874,14 +983,6 @@ export class FlowDiagramService {
     this.logger.error(`❌ Flow diagram error: ${userMessage}`, error);
     this.error.set(userMessage);
     this.toast.error('流程图错误', `${userMessage}。请刷新页面重试。`);
-  }
-
-  // TS 类型定义不允许 null，这里集中处理为 any 写入
-  private setOverviewFixedBounds(bounds: go.Rect | null): void {
-    if (!this.overview) return;
-    // GoJS 要求 fixedBounds 必须是 Rect 实例或 undefined，不能是 null
-    // 使用类型断言绕过严格类型检查
-    (this.overview as unknown as { fixedBounds: go.Rect | undefined }).fixedBounds = bounds ?? undefined;
   }
 
   /**
