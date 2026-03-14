@@ -209,6 +209,13 @@ export class SimpleReminderService implements OnDestroy {
     this.activeNotice.set(null);
   }
 
+  /**
+   * 清除当前活跃通知（外部组件不可直接操作 activeNotice signal）
+   */
+  clearActiveNotice(): void {
+    this.activeNotice.set(null);
+  }
+
   // ─── 内部辅助 ───
 
   private updateReminder(taskId: string, reminder: ParkingReminder | null): void {

@@ -1,4 +1,4 @@
-﻿import {
+import {
   ChangeDetectionStrategy,
   Component,
   computed,
@@ -213,7 +213,8 @@ export class DockDailySlotComponent {
   addSlot(): void {
     const title = this.newTitle.trim();
     if (!title) return;
-    this.engine.addDailySlot(title, this.newMaxCount || 1);
+    const count = Math.min(10, Math.max(1, Math.floor(this.newMaxCount || 1)));
+    this.engine.addDailySlot(title, count);
     this.newTitle = '';
     this.newMaxCount = 1;
     this.showAddForm.set(false);

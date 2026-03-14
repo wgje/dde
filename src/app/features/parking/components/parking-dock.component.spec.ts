@@ -1,4 +1,4 @@
-﻿import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ParkingDockComponent } from '../parking-dock.component';

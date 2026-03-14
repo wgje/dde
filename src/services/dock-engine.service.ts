@@ -1,4 +1,4 @@
-﻿import { Injectable, OnDestroy, computed, effect, inject, signal } from '@angular/core';
+import { Injectable, OnDestroy, computed, effect, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   AffinityZone,
@@ -57,6 +57,7 @@ export class DockEngineService implements OnDestroy {
   private cloudPushTimer: ReturnType<typeof setTimeout> | null = null;
   private cloudPullTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCloudPullAt = 0;
+  private audioCtx: AudioContext | null = null;
 
   private currentSnapshotUserId: string | null = null;
   private isRestoringSnapshot = false;
@@ -192,6 +193,10 @@ export class DockEngineService implements OnDestroy {
     if (this.visibilityListener && typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.visibilityListener);
       this.visibilityListener = null;
+    }
+    if (this.audioCtx && this.audioCtx.state !== 'closed') {
+      void this.audioCtx.close();
+      this.audioCtx = null;
     }
   }
 
@@ -1090,7 +1095,10 @@ export class DockEngineService implements OnDestroy {
   private playWaitEndSound(): void {
     if (this.muteWaitTone()) return;
     try {
-      const audio = new AudioContext();
+      if (!this.audioCtx || this.audioCtx.state === 'closed') {
+        this.audioCtx = new AudioContext();
+      }
+      const audio = this.audioCtx;
       const oscillator = audio.createOscillator();
       const gain = audio.createGain();
       oscillator.connect(gain);
@@ -1100,7 +1108,6 @@ export class DockEngineService implements OnDestroy {
       oscillator.start();
       setTimeout(() => {
         oscillator.stop();
-        void audio.close();
       }, PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_DURATION_MS + 20);
     } catch {
       // Ignore audio failures.
@@ -1125,6 +1132,7 @@ export class DockEngineService implements OnDestroy {
     return {
       taskId: entry.taskId,
       title: entry.title,
+      status: entry.status,
       label,
       waitRemainingSeconds: remainingSec,
       waitTotalSeconds: totalSec,
@@ -1168,7 +1176,7 @@ export class DockEngineService implements OnDestroy {
         this.reset();
         return;
       }
-      const parsed = JSON.parse(raw) as DockSnapshot;
+      const parsed: unknown = JSON.parse(raw);
       const normalized = this.normalizeSnapshot(parsed);
       if (!normalized) {
         this.reset();

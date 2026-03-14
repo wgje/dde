@@ -1,12 +1,15 @@
-﻿import {
+import {
   ChangeDetectionStrategy,
   Component,
+  OnDestroy,
   computed,
   inject,
+  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { formatDuration } from '../../../../utils/format-duration';
 
 /**
  * 雷达区域 — 半包围式同心椭圆轨道分布。
@@ -162,7 +165,7 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
     }
   `,
 })
-export class DockRadarZoneComponent {
+export class DockRadarZoneComponent implements OnDestroy {
   private readonly engine = inject(DockEngineService);
 
   readonly strongRadius = PARKING_CONFIG.RADAR_STRONG_RADIUS;
@@ -174,7 +177,8 @@ export class DockRadarZoneComponent {
   readonly weakFloatDuration = `${PARKING_CONFIG.RADAR_FLOAT_DURATION_S + 0.8}s`;
 
   private readonly highlightedIds = this.engine.highlightedIds;
-  private readonly magnetSlidingIds = new Set<string>();
+  /** 磁力滑入动画集合：改为 signal 以触发 OnPush 重渲染 */
+  private readonly magnetSlidingIds = signal<ReadonlySet<string>>(new Set());
 
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private touchActiveTaskId: string | null = null;
@@ -228,7 +232,7 @@ export class DockRadarZoneComponent {
   }
 
   isMagnetSliding(taskId: string): boolean {
-    return this.magnetSlidingIds.has(taskId);
+    return this.magnetSlidingIds().has(taskId);
   }
 
   onWheel(event: WheelEvent, taskId: string): void {
@@ -264,20 +268,31 @@ export class DockRadarZoneComponent {
     this.touchActiveTaskId = null;
   }
 
+  ngOnDestroy(): void {
+    if (this.longPressTimer) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+  }
+
   /** 点击雷达项 → 磁力滑入动画 → 推进到控制台 */
   promoteToConsole(taskId: string): void {
-    this.magnetSlidingIds.add(taskId);
+    this.magnetSlidingIds.update(s => {
+      const next = new Set(s);
+      next.add(taskId);
+      return next;
+    });
     setTimeout(() => {
-      this.magnetSlidingIds.delete(taskId);
+      this.magnetSlidingIds.update(s => {
+        const next = new Set(s);
+        next.delete(taskId);
+        return next;
+      });
       this.engine.setMainTask(taskId);
     }, PARKING_CONFIG.CONSOLE_MAGNET_PULL_MS);
   }
 
   formatTime(minutes: number): string {
-    if (minutes >= 1440) return `${Math.floor(minutes / 1440)}天`;
-    if (minutes < 60) return `${minutes}m`;
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return m > 0 ? `${h}h${m}m` : `${h}h`;
+    return formatDuration(minutes);
   }
 }

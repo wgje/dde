@@ -382,7 +382,7 @@ export class ParkingNoticeComponent implements OnDestroy {
       if (reason === 'fallback') {
         this.reminderService.handleNoticeFadeout(notice.taskId);
       } else {
-        this.reminderService.activeNotice.set(null);
+        this.reminderService.clearActiveNotice();
       }
       return;
     }

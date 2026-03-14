@@ -1,6 +1,7 @@
-﻿import {
+import {
   ChangeDetectionStrategy,
   Component,
+  OnDestroy,
   computed,
   inject,
   signal,
@@ -9,6 +10,7 @@ import { CommonModule } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { WAIT_PRESETS, DockEntry } from '../../../../models/parking-dock';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { formatDuration } from '../../../../utils/format-duration';
 
 /**
  * 主控台卡片堆叠 — 停泊坞专注模式的绝对 C 位区域。
@@ -345,7 +347,7 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
     </div>
   `,
 })
-export class DockConsoleStackComponent {
+export class DockConsoleStackComponent implements OnDestroy {
   readonly engine = inject(DockEngineService);
   readonly cardWidth = PARKING_CONFIG.CONSOLE_CARD_WIDTH;
   readonly cardHeight = PARKING_CONFIG.CONSOLE_CARD_HEIGHT;
@@ -362,6 +364,9 @@ export class DockConsoleStackComponent {
   readonly pushBackId = signal<string | null>(null);
   readonly magnetPullId = signal<string | null>(null);
   readonly waitPresetTaskId = signal<string | null>(null);
+
+  /** 所有动画定时器句柄，在 ngOnDestroy 中统一清除 */
+  private readonly animTimers: ReturnType<typeof setTimeout>[] = [];
 
   // ===== 手势追踪 =====
   private touchStartY = 0;
@@ -399,6 +404,22 @@ export class DockConsoleStackComponent {
     );
   }
 
+  ngOnDestroy(): void {
+    for (const timer of this.animTimers) clearTimeout(timer);
+    this.animTimers.length = 0;
+  }
+
+  /** 包装 setTimeout，自动追踪句柄以便在 ngOnDestroy 中清除；回调完成后自动移除句柄 */
+  private after(ms: number, fn: () => void): void {
+    let handle: ReturnType<typeof setTimeout>;
+    handle = setTimeout(() => {
+      fn();
+      const idx = this.animTimers.indexOf(handle);
+      if (idx !== -1) this.animTimers.splice(idx, 1);
+    }, ms);
+    this.animTimers.push(handle);
+  }
+
   /**
    * Z 轴景深卡片变换：
    * - C 位 (focusing): 原位，无 Z 偏移
@@ -434,36 +455,36 @@ export class DockConsoleStackComponent {
   onComplete(taskId: string): void {
     this.closeWaitPresets();
     this.flyingOutId.set(taskId);
-    setTimeout(() => {
+    this.after(PARKING_CONFIG.CONSOLE_FLY_OUT_MS, () => {
       this.flyingOutId.set(null);
       this.engine.completeTask(taskId);
       const next = this.engine.focusingEntry();
       if (next) {
         this.pushingInId.set(next.taskId);
-        setTimeout(() => this.pushingInId.set(null), PARKING_CONFIG.CONSOLE_PUSH_IN_MS);
+        this.after(PARKING_CONFIG.CONSOLE_PUSH_IN_MS, () => this.pushingInId.set(null));
       }
-    }, PARKING_CONFIG.CONSOLE_FLY_OUT_MS);
+    });
   }
 
   // ===== 挂起等待: sinkDown → suspendTask → silentAppear + pushIn =====
   onWait(taskId: string, minutes: number): void {
     this.closeWaitPresets();
     this.sinkingId.set(taskId);
-    setTimeout(() => {
+    this.after(PARKING_CONFIG.CONSOLE_SINK_MS, () => {
       this.sinkingId.set(null);
       this.engine.suspendTask(taskId, minutes);
 
       // 挂起的任务静悄悄出现在最后方
       this.silentAppearId.set(taskId);
-      setTimeout(() => this.silentAppearId.set(null), PARKING_CONFIG.CONSOLE_SILENT_APPEAR_MS);
+      this.after(PARKING_CONFIG.CONSOLE_SILENT_APPEAR_MS, () => this.silentAppearId.set(null));
 
       // 新 focusing 任务推进 C 位
       const next = this.engine.focusingEntry();
       if (next) {
         this.pushingInId.set(next.taskId);
-        setTimeout(() => this.pushingInId.set(null), PARKING_CONFIG.CONSOLE_PUSH_IN_MS);
+        this.after(PARKING_CONFIG.CONSOLE_PUSH_IN_MS, () => this.pushingInId.set(null));
       }
-    }, PARKING_CONFIG.CONSOLE_SINK_MS);
+    });
   }
 
   // ===== 点击后方卡片: cardDraw 抽卡到前面, 当前 C 位 pushBack =====
@@ -472,13 +493,13 @@ export class DockConsoleStackComponent {
     const currentFocus = this.engine.focusingEntry();
     if (currentFocus) {
       this.pushBackId.set(currentFocus.taskId);
-      setTimeout(() => this.pushBackId.set(null), PARKING_CONFIG.CONSOLE_PUSH_BACK_MS);
+      this.after(PARKING_CONFIG.CONSOLE_PUSH_BACK_MS, () => this.pushBackId.set(null));
     }
 
     // 被点击的卡片抽卡到前面
     this.cardDrawId.set(entry.taskId);
     this.engine.switchToTask(entry.taskId);
-    setTimeout(() => this.cardDrawId.set(null), PARKING_CONFIG.CONSOLE_DRAW_MS);
+    this.after(PARKING_CONFIG.CONSOLE_DRAW_MS, () => this.cardDrawId.set(null));
   }
 
   // ===== Alt+Scroll 切换认知负荷 =====
@@ -547,13 +568,6 @@ export class DockConsoleStackComponent {
   }
 
   formatTime(minutes: number): string {
-    if (minutes >= 1440) {
-      const d = Math.floor(minutes / 1440);
-      return `${d}天`;
-    }
-    if (minutes < 60) return `${minutes}m`;
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return m > 0 ? `${h}h${m}m` : `${h}h`;
+    return formatDuration(minutes);
   }
 }
