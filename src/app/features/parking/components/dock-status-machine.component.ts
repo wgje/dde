@@ -1,4 +1,4 @@
-﻿import {
+import {
   ChangeDetectionStrategy,
   Component,
   computed,
@@ -235,19 +235,19 @@ export class DockStatusMachineComponent {
   readonly muted = computed(() => this.engine.muteWaitTone());
 
   readonly focusingEntries = computed(() =>
-    this.allEntries().filter(e => e.label === '专注中'),
+    this.allEntries().filter(e => e.status === 'focusing'),
   );
 
   readonly suspendedEntries = computed(() =>
-    this.allEntries().filter(e => e.label === '挂起等待' || e.label === '等待结束'),
+    this.allEntries().filter(e => e.status === 'suspended_waiting' || e.status === 'wait_finished'),
   );
 
   readonly idleEntries = computed(() =>
-    this.allEntries().filter(e => e.label === '待启动'),
+    this.allEntries().filter(e => e.status === 'pending_start'),
   );
 
   isExpired(entry: StatusMachineEntry): boolean {
-    return entry.label === '等待结束' ||
+    return entry.status === 'wait_finished' ||
       (entry.waitRemainingSeconds !== null && entry.waitRemainingSeconds <= 0);
   }
 

@@ -1,4 +1,4 @@
-﻿// ============================================
+// ============================================
 // Dock v3 domain model
 // ============================================
 
@@ -55,6 +55,7 @@ export const WAIT_PRESETS: WaitPreset[] = [
 export interface StatusMachineEntry {
   taskId: string;
   title: string;
+  status: DockTaskStatus;
   label: StatusMachineLabel;
   waitRemainingSeconds: number | null;
   waitTotalSeconds: number | null;

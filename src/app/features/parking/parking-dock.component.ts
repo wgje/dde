@@ -1,4 +1,4 @@
-﻿import {
+import {
   ChangeDetectionStrategy,
   Component,
   HostListener,
@@ -17,6 +17,7 @@ import { PARKING_CONFIG } from '../../../config/parking.config';
 import { AffinityZone, CognitiveLoad, DockPendingDecisionEntry } from '../../../models/parking-dock';
 import { getErrorMessage } from '../../../utils/result';
 import { readTaskDragPayload } from '../../../utils/task-drag-payload';
+import { formatDuration } from '../../../utils/format-duration';
 import { DockConsoleStackComponent } from './components/dock-console-stack.component';
 import { DockRadarZoneComponent } from './components/dock-radar-zone.component';
 import { DockStatusMachineComponent } from './components/dock-status-machine.component';
@@ -248,7 +249,7 @@ import { DockDailySlotComponent } from './components/dock-daily-slot.component';
               {{ engine.pendingDecision()?.reason || '候选任务时长匹配异常，请手动二选一' }}
             </div>
             <div class="text-[10px] text-stone-500 mt-1">
-              主任务剩余窗口 {{ formatTime(Math.ceil(engine.pendingDecision()?.rootRemainingMinutes || 0)) }}
+              主任务剩余窗口 {{ formatTime(engine.pendingDecision()?.rootRemainingMinutes || 0) }}
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2">
               @for (entry of pendingDecisionEntries(); track entry.taskId; let i = $index) {
@@ -472,7 +473,7 @@ export class ParkingDockComponent implements OnDestroy {
 
   readonly showNewTaskForm = signal(false);
   readonly isDragOver = signal(false);
-  readonly dockExpanded = computed(() => this.engine.dockExpanded());
+  readonly dockExpanded = this.engine.dockExpanded;
   readonly strictSampleMode = PARKING_CONFIG.DOCK_V3_STRICT_SAMPLE_UI;
   readonly showAdvancedUi = !this.strictSampleMode && PARKING_CONFIG.DOCK_V3_SHOW_ADVANCED_UI;
   readonly showHelpHints = PARKING_CONFIG.DOCK_V3_SHOW_HELP_HINTS;
@@ -565,7 +566,7 @@ export class ParkingDockComponent implements OnDestroy {
     this.touchTaskId = taskId;
     if (this.longPressTimer) clearTimeout(this.longPressTimer);
     this.longPressTimer = setTimeout(() => {
-      this.touchTaskId = taskId;
+      this.engine.toggleLoad(taskId, 'up');
     }, 500);
   }
 
@@ -621,22 +622,12 @@ export class ParkingDockComponent implements OnDestroy {
     if (!text) return;
     const task = this.taskStore.getTask(text);
     if (task) {
-      this.engine.dockTask(text);
+      this.engine.dockTask(text, undefined, { zoneSource: 'auto' });
     }
   }
 
   formatTime(minutes: number): string {
-    if (minutes >= 1440) {
-      const d = Math.floor(minutes / 1440);
-      const remainH = Math.floor((minutes % 1440) / 60);
-      return remainH > 0 ? `${d}d${remainH}h` : `${d}d`;
-    }
-    if (minutes >= 60) {
-      const h = Math.floor(minutes / 60);
-      const m = minutes % 60;
-      return m > 0 ? `${h}h${m}m` : `${h}h`;
-    }
-    return `${minutes}m`;
+    return formatDuration(minutes);
   }
 
   private parseOptionalMinutes(raw: string | number | null | undefined): number | null {
@@ -648,9 +639,7 @@ export class ParkingDockComponent implements OnDestroy {
     return Math.floor(parsed);
   }
 
-  pendingDecisionEntries(): DockPendingDecisionEntry[] {
-    return this.engine.pendingDecisionEntries().slice(0, 2);
-  }
+  pendingDecisionEntries = computed<DockPendingDecisionEntry[]>(() => this.engine.pendingDecisionEntries().slice(0, 2));
 
   choosePendingCandidate(taskId: string): void {
     this.engine.choosePendingDecisionCandidate(taskId);
