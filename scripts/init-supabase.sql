@@ -1,10 +1,20 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 5.0.0
+-- 版本: 6.0.0
 -- 最后验证: 2026-03-15
 --
 -- 更新日志：
+--   6.0.0 (2026-03-15): 全量数据库优化：
+--                       - 清理 13 个确认冗余的未使用索引
+--                       - 备份表索引整合（13 个单列索引 → 4 个复合索引）
+--                       - backup_metadata/restore_history: FORCE RLS + CRUD 策略 + GRANT
+--                       - backup_restore_history 补充 updated_at 列 + 触发器
+--                       - connections UNIQUE 约束改为部分唯一索引（仅活跃行）
+--                       - 5 核心表 autovacuum 阈值调优
+--                       - cleanup 函数部分索引补充（deleted_at）
+--                       - authenticated 角色 statement_timeout = 30s
+--                       - transcription_usage SELECT 策略统一命名
 --   5.0.0 (2026-03-15): 全量安全加固 + Focus Console 汇总：
 --                       - FORCE RLS 覆盖全部 21 张表（含备份表）
 --                       - anon 角色零写入（仅 app_config SELECT）
@@ -284,9 +294,13 @@ CREATE TABLE IF NOT EXISTS public.connections (
   description TEXT,
   deleted_at TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  UNIQUE(project_id, source_id, target_id)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- 部分唯一索引：仅活跃连接约束（减少维护成本）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_connections_project_source_target_active
+  ON public.connections (project_id, source_id, target_id)
+  WHERE deleted_at IS NULL;
 
 -- 兼容旧表
 DO $$ 
@@ -316,6 +330,14 @@ CREATE INDEX IF NOT EXISTS idx_connections_project_updated ON public.connections
 -- - idx_connections_deleted_at: 被 idx_connections_project_active 替代
 -- - idx_connections_deleted_at_cleanup: 清理操作较少
 -- - idx_connections_updated_at: 被 idx_connections_project_updated 替代
+
+-- cleanup 函数所需的部分索引（仅索引已删除的行）
+CREATE INDEX IF NOT EXISTS idx_tasks_deleted_cleanup
+  ON public.tasks (deleted_at)
+  WHERE deleted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_connections_deleted_cleanup
+  ON public.connections (deleted_at)
+  WHERE deleted_at IS NOT NULL;
 
 -- ============================================
 -- 5. 用户偏好设置表 (user_preferences)
@@ -419,10 +441,7 @@ END $$;
 -- 索引（仅保留增量同步必需的索引）
 -- 注意：idx_black_box_user_date, idx_black_box_project, idx_black_box_pending 经验证未使用，已移除
 CREATE INDEX IF NOT EXISTS idx_black_box_updated_at ON public.black_box_entries(updated_at);
--- 共享仓增量同步索引
-CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_shared_updated
-  ON public.black_box_entries (user_id, updated_at DESC)
-  WHERE project_id IS NULL AND deleted_at IS NULL;
+-- 注：idx_black_box_entries_user_shared_updated 已移除（被 idx_black_box_entries_user_updated 替代）
 
 -- updated_at 自动更新触发器
 DROP TRIGGER IF EXISTS update_black_box_entries_updated_at ON public.black_box_entries;
@@ -483,8 +502,9 @@ CREATE INDEX IF NOT EXISTS idx_transcription_usage_user_date ON public.transcrip
 ALTER TABLE public.transcription_usage ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "transcription_usage_select_policy" ON public.transcription_usage;
-CREATE POLICY "transcription_usage_select_policy" ON public.transcription_usage 
-  FOR SELECT USING ((select auth.uid()) = user_id);
+DROP POLICY IF EXISTS "transcription_usage_select" ON public.transcription_usage;
+CREATE POLICY "transcription_usage_select" ON public.transcription_usage 
+  FOR SELECT TO authenticated USING ((SELECT auth.uid()) = user_id);
 
 -- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
 
@@ -501,8 +521,7 @@ CREATE TABLE IF NOT EXISTS public.focus_sessions (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_focus_sessions_user_id
-  ON public.focus_sessions (user_id);
+-- 注：idx_focus_sessions_user_id 已移除（被 idx_focus_sessions_user_updated_at 复合索引替代）
 CREATE INDEX IF NOT EXISTS idx_focus_sessions_user_updated_at
   ON public.focus_sessions (user_id, updated_at DESC);
 
@@ -560,8 +579,7 @@ CREATE TABLE IF NOT EXISTS public.routine_tasks (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_routine_tasks_user_id
-  ON public.routine_tasks (user_id);
+-- 注：idx_routine_tasks_user_id 已移除（被 idx_routine_tasks_user_updated 复合索引替代）
 CREATE INDEX IF NOT EXISTS idx_routine_tasks_user_updated
   ON public.routine_tasks (user_id, updated_at DESC);
 
@@ -690,8 +708,7 @@ CREATE TABLE IF NOT EXISTS public.task_tombstones (
 
 ALTER TABLE public.task_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id ON public.task_tombstones(project_id);
--- 外键索引：防止级联删除时全表扫描
-CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by ON public.task_tombstones(deleted_by);
+-- 注：idx_task_tombstones_deleted_by 已移除（deleted_by 极少作为查询条件）
 
 -- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
@@ -719,8 +736,7 @@ CREATE TABLE IF NOT EXISTS public.connection_tombstones (
 ALTER TABLE public.connection_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_id ON public.connection_tombstones(project_id);
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_at ON public.connection_tombstones(deleted_at);
--- 外键索引：防止级联删除时全表扫描
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by ON public.connection_tombstones(deleted_by);
+-- 注：idx_connection_tombstones_deleted_by 已移除（deleted_by 极少作为查询条件）
 
 -- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;
@@ -1611,8 +1627,7 @@ ALTER TABLE public.connections REPLICA IDENTITY FULL;
 -- ============================================
 
 -- 1) 性能：为未覆盖的外键列补齐索引
-CREATE INDEX IF NOT EXISTS idx_project_members_invited_by
-  ON public.project_members (invited_by);
+-- 注：idx_project_members_invited_by 已移除（invited_by 极少作为查询条件）
 
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id
   ON public.task_tombstones (project_id);
@@ -3307,8 +3322,7 @@ CREATE INDEX IF NOT EXISTS idx_connections_project_updated
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
   ON public.task_tombstones (project_id, deleted_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
-  ON public.connection_tombstones (project_id, deleted_at DESC);
+-- 注：idx_connection_tombstones_project_deleted_desc 已移除（被 idx_connection_tombstones_project_id + deleted_at 替代）
 
 CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated
   ON public.black_box_entries (user_id, updated_at DESC);
@@ -3325,21 +3339,11 @@ CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id
   ON public.backup_restore_history (pre_restore_snapshot_id)
   WHERE pre_restore_snapshot_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by
-  ON public.connection_tombstones (deleted_by)
-  WHERE deleted_by IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_project_members_invited_by
-  ON public.project_members (invited_by)
-  WHERE invited_by IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_quarantined_files_quarantined_by
-  ON public.quarantined_files (quarantined_by)
-  WHERE quarantined_by IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by
-  ON public.task_tombstones (deleted_by)
-  WHERE deleted_by IS NOT NULL;
+-- 注：以下冗余索引已移除（极少作为查询条件或被复合索引替代）：
+-- - idx_connection_tombstones_deleted_by
+-- - idx_project_members_invited_by
+-- - idx_quarantined_files_quarantined_by
+-- - idx_task_tombstones_deleted_by
 
 -- ============================================
 -- get_project_sync_watermark：单项目聚合同步水位
@@ -3894,11 +3898,17 @@ CREATE TABLE IF NOT EXISTS public.backup_metadata (
 );
 COMMENT ON TABLE public.backup_metadata IS '备份元数据表，记录所有备份的信息';
 
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_type ON public.backup_metadata(type);
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_status ON public.backup_metadata(status);
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_created_at ON public.backup_metadata(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires_at ON public.backup_metadata(expires_at) WHERE expires_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_id ON public.backup_metadata(user_id) WHERE user_id IS NOT NULL;
+-- 复合索引：cleanup + recovery listing
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_status_type_completed
+  ON public.backup_metadata (status, type, backup_completed_at DESC)
+  WHERE status = 'completed';
+-- 复合索引：access control + recovery
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_status
+  ON public.backup_metadata (user_id, status, backup_completed_at DESC);
+-- 过期清理索引
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires
+  ON public.backup_metadata (expires_at)
+  WHERE expires_at IS NOT NULL;
 
 ALTER TABLE public.backup_metadata ENABLE ROW LEVEL SECURITY;
 
@@ -3918,13 +3928,20 @@ CREATE TABLE IF NOT EXISTS public.backup_restore_history (
   error_message TEXT,
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 COMMENT ON TABLE public.backup_restore_history IS '备份恢复历史，记录用户的恢复操作';
 
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id ON public.backup_restore_history(user_id);
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_id ON public.backup_restore_history(backup_id);
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_created_at ON public.backup_restore_history(created_at DESC);
+-- updated_at 自动更新触发器
+DROP TRIGGER IF EXISTS trg_backup_restore_history_updated_at ON public.backup_restore_history;
+CREATE TRIGGER trg_backup_restore_history_updated_at
+  BEFORE UPDATE ON public.backup_restore_history
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- restore operations: WHERE backup_id = ? AND user_id = ?
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_user
+  ON public.backup_restore_history (backup_id, user_id);
 
 ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY;
 
@@ -3982,8 +3999,28 @@ DO $$ BEGIN
       FOR UPDATE TO authenticated
       USING (user_id = (SELECT auth.uid()));
   END IF;
+  -- backup_metadata: DELETE
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_delete' AND tablename = 'backup_metadata') THEN
+    CREATE POLICY backup_metadata_user_delete ON public.backup_metadata
+      FOR DELETE TO authenticated
+      USING (user_id = (SELECT auth.uid()));
+  END IF;
+  -- backup_restore_history: DELETE
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_delete' AND tablename = 'backup_restore_history') THEN
+    CREATE POLICY backup_restore_history_user_delete ON public.backup_restore_history
+      FOR DELETE TO authenticated
+      USING (user_id = (SELECT auth.uid()));
+  END IF;
   -- backup_encryption_keys: 无策略（仅 service_role 访问，天然绕过 RLS）
 END $$;
+
+-- 备份表 GRANT
+GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_metadata TO authenticated;
+GRANT ALL ON TABLE public.backup_metadata TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_restore_history TO authenticated;
+GRANT ALL ON TABLE public.backup_restore_history TO service_role;
+REVOKE ALL ON TABLE public.backup_encryption_keys FROM authenticated;
+GRANT ALL ON TABLE public.backup_encryption_keys TO service_role;
 
 -- 备份辅助函数
 CREATE OR REPLACE FUNCTION public.get_latest_completed_backup(backup_type TEXT DEFAULT 'full')
@@ -4169,8 +4206,18 @@ DO $$ BEGIN
   CREATE POLICY "cleanup_logs_authenticated_select" ON public.cleanup_logs FOR SELECT TO authenticated USING (true);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- 自动 VACUUM 阈值调优（小表默认 50 太高）
+ALTER TABLE public.tasks SET (autovacuum_vacuum_threshold = 10, autovacuum_analyze_threshold = 10);
+ALTER TABLE public.connections SET (autovacuum_vacuum_threshold = 10, autovacuum_analyze_threshold = 10);
+ALTER TABLE public.projects SET (autovacuum_vacuum_threshold = 10, autovacuum_analyze_threshold = 10);
+ALTER TABLE public.black_box_entries SET (autovacuum_vacuum_threshold = 10, autovacuum_analyze_threshold = 10);
+ALTER TABLE public.user_preferences SET (autovacuum_vacuum_threshold = 5, autovacuum_analyze_threshold = 5);
+
+-- 连接保护：防止长查询占用连接池
+ALTER ROLE authenticated SET statement_timeout = '30s';
+
 COMMENT ON SCHEMA public IS
-  '全量安全加固完成: FORCE RLS 全覆盖, anon 零写入, RPC 分级授权, JSONB/TEXT/数值溢出防护, batch_upsert 同步新字段';
+  '全量优化 v6.0.0: FORCE RLS 全覆盖, 冗余索引清理, 备份索引整合, autovacuum 调优, statement_timeout 30s';
 
 -- ============================================================
 -- 初始化完成
