@@ -305,6 +305,7 @@ export const PARKING_CONFIG = {
   STATUS_RING_PULSE_MS: 320,
   STATUS_MACHINE_NOTIFICATION_TONE_HZ: 440,
   STATUS_MACHINE_NOTIFICATION_DURATION_MS: 200,
+  STATUS_MACHINE_VISIBLE_LIMIT: 4,
   STATUS_RING_STROKE_WIDTH: 2.5,
   STATUS_RING_RADIUS: 9,
   STATUS_RING_WAIT_STROKE: '#f59e0b',
@@ -425,6 +426,9 @@ export const PARKING_CONFIG = {
   HUD_MINIMAL_WIDTH_PX: 200,
   HUD_FULL_MAX_WIDTH_PX: 290,
   HUD_FULL_MAX_HEIGHT_PX: 220,
+  STATUS_MACHINE_PIP_DEFAULT_WIDTH_PX: 392,
+  STATUS_MACHINE_PIP_DEFAULT_HEIGHT_PX: 500,
+  STATUS_MACHINE_PIP_SECONDARY_LIMIT: 4,
   HUD_FULL_DEFAULT_TOP_PX: 16,
   HUD_SAFE_RIGHT_INSET_PX: 104,
   HUD_EXPAND_ON_HOVER: true,
@@ -444,6 +448,125 @@ export const PARKING_CONFIG = {
   // Daily routine slots visible during fragment mode.
   ROUTINE_SLOTS_MAX_PER_DAY: 8,
   ROUTINE_RESET_HOUR_DEFAULT: 0,
+
+  // ── Scheduler ratio thresholds (dock-scheduler.rules.ts) ──
+  /** relaxed 模式：时间匹配桶位 3 的最小比率 */
+  SCHEDULE_RELAXED_BUCKET3_LOWER_RATIO: 0.65,
+  /** relaxed 模式：时间匹配桶位 3 的最大比率 */
+  SCHEDULE_RELAXED_BUCKET3_UPPER_RATIO: 1.6,
+  /** relaxed 模式：时间匹配桶位 2 的最小比率 */
+  SCHEDULE_RELAXED_BUCKET2_LOWER_RATIO: 0.3,
+  /** relaxed 模式：时间匹配桶位 2 的最大比率 */
+  SCHEDULE_RELAXED_BUCKET2_UPPER_RATIO: 2.4,
+  /** relaxed 模式：桶位 1 的最大比率 */
+  SCHEDULE_RELAXED_BUCKET1_MAX_RATIO: 4,
+
+  // ── Wait window fit score factors ──
+  /** ignore-wait 中性分数因子 */
+  SCHEDULE_WAIT_FIT_IGNORE_FACTOR: 0.5,
+  /** 无预计时长时 relaxed 模式分数因子 */
+  SCHEDULE_WAIT_FIT_NULL_RELAXED_FACTOR: 0.45,
+  /** 无预计时长时 strict 模式分数因子 */
+  SCHEDULE_WAIT_FIT_NULL_STRICT_FACTOR: 0.35,
+  /** relaxed 紧密匹配比率范围 [lower, upper] → 得分因子 */
+  SCHEDULE_WAIT_FIT_RELAXED_TIGHT_LOWER: 0.7,
+  SCHEDULE_WAIT_FIT_RELAXED_TIGHT_UPPER: 1.5,
+  SCHEDULE_WAIT_FIT_RELAXED_TIGHT_FACTOR: 0.85,
+  /** relaxed 中等匹配比率范围 */
+  SCHEDULE_WAIT_FIT_RELAXED_MED_LOWER: 0.35,
+  SCHEDULE_WAIT_FIT_RELAXED_MED_UPPER: 2.25,
+  SCHEDULE_WAIT_FIT_RELAXED_MED_FACTOR: 0.55,
+  /** relaxed 宽松匹配比率范围 */
+  SCHEDULE_WAIT_FIT_RELAXED_WIDE_LOWER: 0.15,
+  SCHEDULE_WAIT_FIT_RELAXED_WIDE_UPPER: 4,
+  SCHEDULE_WAIT_FIT_RELAXED_WIDE_FACTOR: 0.25,
+  /** relaxed 最低分数因子 */
+  SCHEDULE_WAIT_FIT_RELAXED_MIN_FACTOR: 0.1,
+  /** strict 紧密匹配比率范围 */
+  SCHEDULE_WAIT_FIT_STRICT_TIGHT_LOWER: 0.85,
+  SCHEDULE_WAIT_FIT_STRICT_TIGHT_UPPER: 1.15,
+  /** strict 中等匹配比率范围 → 得分因子 */
+  SCHEDULE_WAIT_FIT_STRICT_MED_LOWER: 0.6,
+  SCHEDULE_WAIT_FIT_STRICT_MED_UPPER: 1.35,
+  SCHEDULE_WAIT_FIT_STRICT_MED_FACTOR: 0.65,
+  /** strict 宽松匹配比率范围 → 得分因子 */
+  SCHEDULE_WAIT_FIT_STRICT_WIDE_LOWER: 0.35,
+  SCHEDULE_WAIT_FIT_STRICT_WIDE_UPPER: 1.65,
+  SCHEDULE_WAIT_FIT_STRICT_WIDE_FACTOR: 0.35,
+
+  // ── Interlude scoring weights ──
+  /** 穿插任务默认分（无预计时长） */
+  INTERLUDE_DEFAULT_SCORE: 5,
+  /** 穿插任务超时惩罚分 */
+  INTERLUDE_OVERRUN_PENALTY_SCORE: 2,
+  /** 穿插任务时间匹配分 */
+  INTERLUDE_TIME_FIT_SCORE: 25,
+  /** 穿插任务时间弱匹配分 */
+  INTERLUDE_TIME_WEAK_FIT_SCORE: 10,
+  /** 穿插任务超时判定乘数 */
+  INTERLUDE_OVERRUN_MULTIPLIER: 1.5,
+  /** 穿插任务时间匹配最低比率 */
+  INTERLUDE_TIME_FIT_MIN_RATIO: 0.2,
+  /** 低负荷加分 */
+  INTERLUDE_LOW_LOAD_SCORE: 20,
+  /** 等待子任务加分 */
+  INTERLUDE_WAIT_BONUS_SCORE: 15,
+  /** combo-select 区域分 */
+  INTERLUDE_COMBO_ZONE_SCORE: 10,
+  /** backup 区域分 */
+  INTERLUDE_BACKUP_ZONE_SCORE: 5,
+  /** 穿插任务最大选取数 */
+  INTERLUDE_MAX_COUNT: 3,
+
+  // ── Recommendation group limits ──
+  /** 三维推荐每组最大候选数 */
+  RECOMMENDATION_GROUP_MAX: 2,
+  /** oversized fallback 每组最大候选数 */
+  RECOMMENDATION_OVERSIZED_GROUP_MAX: 1,
+  /** command 栈最大数量 */
+  RECOMMENDATION_COMMAND_STACK_MAX: 3,
+  /** relaxed 模式剩余窗口上界乘数 */
+  RECOMMENDATION_RELAXED_UPPER_BOUND_MULTIPLIER: 4,
+  /** 默认主任务等待分钟数（未填写时回退） */
+  DEFAULT_MAIN_WAIT_MINUTES: 60,
+
+  // ── Fragment defense thresholds (minutes) ──
+  FRAGMENT_DEFENSE_LEVEL2_THRESHOLD_MIN: 15,
+  FRAGMENT_DEFENSE_LEVEL3_THRESHOLD_MIN: 25,
+
+  // ── evaluateTimeRemaining thresholds ──
+  /** tight-blank 判定比率 */
+  TIME_REMAINING_TIGHT_BLANK_RATIO: 0.75,
+  /** time-match 下界因子 (0.75 × 0.75) */
+  TIME_REMAINING_MATCH_LOWER_FACTOR: 0.5625,
+  /** time-match 上界乘数 */
+  TIME_REMAINING_MATCH_UPPER_MULTIPLIER: 1.5,
+
+  // ── Service-level timing constants ──
+  /** 高亮清除延迟（毫秒）- dock-completion-flow */
+  HIGHLIGHT_CLEAR_DELAY_MS: 2000,
+  /** 碎片倒计时 tick 间隔（毫秒）- dock-fragment-rest */
+  FRAGMENT_COUNTDOWN_TICK_MS: 1000,
+  /** 休息提醒累计 tick 间隔（毫秒）- dock-fragment-rest */
+  REST_REMINDER_TICK_MS: 10_000,
+  /** 云端拉取防抖（毫秒）- dock-cloud-sync */
+  CLOUD_PULL_DEBOUNCE_MS: 250,
+  /** 云端拉取最小间隔（毫秒）- dock-cloud-sync */
+  CLOUD_PULL_MIN_INTERVAL_MS: 5000,
+  /** 云端拉取最大重试次数 */
+  CLOUD_PULL_MAX_RETRIES: 5,
+  /** 帮助提示自动消失（毫秒）- dock-help-feedback */
+  HELP_NUDGE_AUTO_DISMISS_MS: 4200,
+  /** Dock 操作反馈自动消失（毫秒）- dock-help-feedback */
+  DOCK_FEEDBACK_AUTO_DISMISS_MS: 2400,
+
+  // ── Flip transition fallback dimensions ──
+  /** 翻转过渡虚拟矩形宽度 */
+  FLIP_FALLBACK_WIDTH: 192,
+  /** 翻转过渡虚拟矩形高度 */
+  FLIP_FALLBACK_HEIGHT: 88,
+  /** 翻转过渡虚拟矩形底部偏移 */
+  FLIP_FALLBACK_BOTTOM_OFFSET: 44,
 
   // Misc
   REMINDER_BADGE_THRESHOLD: 2,

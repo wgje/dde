@@ -51,7 +51,9 @@ describe('FocusHudWindowService', () => {
     restReminderActive: signal(false),
     cumulativeHighLoadMs: signal(0),
     cumulativeLowLoadMs: signal(0),
-    dismissRestReminder: vi.fn(),
+    fragmentRest: {
+      dismissRestReminder: vi.fn(),
+    },
     tick: signal(0),
   };
 
@@ -87,6 +89,7 @@ describe('FocusHudWindowService', () => {
   it('should mount and unmount the PiP HUD component', async () => {
     let pageHideHandler: ((event: PageTransitionEvent) => void) | null = null;
     const pipDocument = document.implementation.createHTMLDocument('pip');
+    const requestWindow = vi.fn().mockResolvedValue(undefined);
     const closeSpy = vi.fn(() => {
       pipWindow.closed = true;
       pageHideHandler?.({} as PageTransitionEvent);
@@ -107,7 +110,7 @@ describe('FocusHudWindowService', () => {
     Object.defineProperty(window, 'documentPictureInPicture', {
       configurable: true,
       value: {
-        requestWindow: vi.fn().mockResolvedValue(pipWindow),
+        requestWindow: requestWindow.mockResolvedValue(pipWindow),
       },
     });
 
@@ -116,7 +119,13 @@ describe('FocusHudWindowService', () => {
     await service.open();
 
     expect(service.isActive()).toBe(true);
+    expect(requestWindow).toHaveBeenCalledWith({
+      width: 392,
+      height: 500,
+      preferInitialWindowPlacement: true,
+    });
     expect(pipDocument.body.querySelector('[data-testid="dock-v3-status-machine-pip"]')).toBeTruthy();
+    expect(pipDocument.body.style.overflow).toBe('auto');
 
     await service.close();
 

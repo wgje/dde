@@ -3,16 +3,19 @@
  * 消除 parking-dock / dock-console-stack / dock-radar-zone 中的重复实现。
  */
 
+const MINUTES_PER_DAY = 1440;
+const MINUTES_PER_HOUR = 60;
+
 /** 将分钟数格式化为人可读的短字符串：`12m` / `2h30m` / `1d4h` */
 export function formatDockMinutes(minutes: number): string {
-  if (minutes >= 1440) {
-    const d = Math.floor(minutes / 1440);
-    const remainH = Math.floor((minutes % 1440) / 60);
+  if (minutes >= MINUTES_PER_DAY) {
+    const d = Math.floor(minutes / MINUTES_PER_DAY);
+    const remainH = Math.floor((minutes % MINUTES_PER_DAY) / MINUTES_PER_HOUR);
     return remainH > 0 ? `${d}d${remainH}h` : `${d}d`;
   }
-  if (minutes >= 60) {
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
+  if (minutes >= MINUTES_PER_HOUR) {
+    const h = Math.floor(minutes / MINUTES_PER_HOUR);
+    const m = minutes % MINUTES_PER_HOUR;
     return m > 0 ? `${h}h${m}m` : `${h}h`;
   }
   return `${minutes}m`;

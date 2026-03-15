@@ -7,6 +7,76 @@
 
 import { DockEntry, DockLane, RecommendationGroupType } from '../../../../models/parking-dock';
 
+// ─── Layout algorithm constants ────────────────────────────────
+
+/** 中心排斥椭圆参数 */
+const CENTER_Y = -36;
+const ELLIPSE_RX_COMBO = 220;
+const ELLIPSE_RX_BACKUP = 210;
+const ELLIPSE_RY_COMBO = 170;
+const ELLIPSE_RY_BACKUP = 162;
+
+/** Y 轴夹紧因子（防止布局越过底部边界） */
+const MAX_Y_FACTOR_COMBO = 0.1;
+const MAX_Y_FACTOR_BACKUP = 0.04;
+
+/** 碰撞检测半尺寸 */
+const ITEM_HALF_WIDTH_COMBO = 120;
+const ITEM_HALF_WIDTH_BACKUP = 104;
+const ITEM_HALF_HEIGHT_COMBO = 24;
+const ITEM_HALF_HEIGHT_BACKUP = 18;
+
+/** 推挤力度系数 */
+const SPACING_PUSH_SCALE = 0.62;
+
+/** 碰撞回避迭代参数 */
+const CENTER_AVOID_MAX_PASSES = 4;
+const SPACING_MAX_PASSES = 5;
+const CONVERGENCE_THRESHOLD = 0.5;
+const OVERLAP_PUSH_PADDING = 8;
+
+/** 最小距离衰减参数 */
+const MIN_DIST_BASE_COMBO = 100;
+const MIN_DIST_BASE_BACKUP = 92;
+const MIN_DIST_FLOOR_COMBO = 56;
+const MIN_DIST_FLOOR_BACKUP = 48;
+const MIN_DIST_SHRINK_COMBO = 4.4;
+const MIN_DIST_SHRINK_BACKUP = 3.6;
+
+/** 扇区锚点因子 */
+const SECTOR_ANCHOR_X = 0.86;
+const SECTOR_ANCHOR_Y = 0.58;
+const SECTOR_ANCHOR_TOP_Y = 0.98;
+
+/** 布局间距因子 */
+const HORIZONTAL_GAP_TOP = 0.23;
+const HORIZONTAL_GAP_SIDE = 0.21;
+const VERTICAL_GAP_MIN = 48;
+const VERTICAL_GAP_FACTOR_TOP = 0.17;
+const VERTICAL_GAP_FACTOR_SIDE = 0.2;
+const COLUMN_THRESHOLD = 4;
+
+/** 备选区环参数 */
+const RING_SCALE_X_INNER = 0.9;
+const RING_SCALE_X_OUTER = 1.08;
+const RING_SCALE_Y_INNER = 0.88;
+const RING_SCALE_Y_OUTER = 1.04;
+const RING_ARC_START = Math.PI * 0.08;
+const RING_ARC_END = Math.PI * 0.92;
+const BACKUP_BOUND_EXTRA_X = 1.12;
+const BACKUP_BOUND_EXTRA_Y = 1.1;
+
+/** 抖动范围 */
+const JITTER_X_TOP = 12;
+const JITTER_X_SIDE = 14;
+const JITTER_Y = 10;
+const BACKUP_JITTER_X = 6;
+const BACKUP_JITTER_Y = 4;
+
+/** 回退坐标因子 */
+const COMBO_FALLBACK_Y_FACTOR = 0.68;
+const BACKUP_FALLBACK_Y_FACTOR = 0.82;
+
 // ─── Types ─────────────────────────────────────────────────────
 
 export interface RadarLayoutItem {
@@ -65,7 +135,7 @@ export function clampPoint(
   boundY: number,
   lane: DockLane,
 ): { x: number; y: number } {
-  const maxYFactor = lane === 'combo-select' ? 0.1 : 0.04;
+  const maxYFactor = lane === 'combo-select' ? MAX_Y_FACTOR_COMBO : MAX_Y_FACTOR_BACKUP;
   const minY = -boundY;
   const maxY = -(boundY * maxYFactor);
   return {
@@ -84,9 +154,9 @@ export function avoidCenterOcclusion(
   padding: number,
 ): { x: number; y: number } {
   const centerX = 0;
-  const centerY = -36;
-  const ellipseRx = lane === 'combo-select' ? 220 : 210;
-  const ellipseRy = lane === 'combo-select' ? 170 : 162;
+  const centerY = CENTER_Y;
+  const ellipseRx = lane === 'combo-select' ? ELLIPSE_RX_COMBO : ELLIPSE_RX_BACKUP;
+  const ellipseRy = lane === 'combo-select' ? ELLIPSE_RY_COMBO : ELLIPSE_RY_BACKUP;
   const dx = point.x - centerX;
   const dy = point.y - centerY;
   const norm = (dx * dx) / (ellipseRx * ellipseRx) + (dy * dy) / (ellipseRy * ellipseRy);
@@ -124,8 +194,8 @@ export function avoidOverlayOcclusions(
     return clampPoint(point, boundX, boundY, lane);
   }
 
-  const itemHalfWidth = lane === 'combo-select' ? 120 : 104;
-  const itemHalfHeight = lane === 'combo-select' ? 24 : 18;
+  const itemHalfWidth = lane === 'combo-select' ? ITEM_HALF_WIDTH_COMBO : ITEM_HALF_WIDTH_BACKUP;
+  const itemHalfHeight = lane === 'combo-select' ? ITEM_HALF_HEIGHT_COMBO : ITEM_HALF_HEIGHT_BACKUP;
   let current = point;
 
   avoidRects.forEach((rect, index) => {
@@ -146,7 +216,7 @@ export function avoidOverlayOcclusions(
           ? Math.sign(dx)
           : (rand(hashCode(`${seedKey}:overlay-x:${pass}:${index}`)) > 0.5 ? 1 : -1);
       current = clampPoint(
-        { x: current.x + (directionX * (overlapX + 8)), y: current.y },
+        { x: current.x + (directionX * (overlapX + OVERLAP_PUSH_PADDING)), y: current.y },
         boundX,
         boundY,
         lane,
@@ -156,7 +226,7 @@ export function avoidOverlayOcclusions(
 
     const directionY = dy !== 0 ? Math.sign(dy) : -1;
     current = clampPoint(
-      { x: current.x, y: current.y + (directionY * (overlapY + 8)) },
+      { x: current.x, y: current.y + (directionY * (overlapY + OVERLAP_PUSH_PADDING)) },
       boundX,
       boundY,
       lane,
@@ -176,11 +246,11 @@ export function avoidOcclusions(
   avoidRects: readonly RadarAvoidRect[],
 ): { x: number; y: number } {
   let current = point;
-  for (let pass = 0; pass < 4; pass += 1) {
+  for (let pass = 0; pass < CENTER_AVOID_MAX_PASSES; pass += 1) {
     const before = current;
     current = avoidCenterOcclusion(current, lane, boundX, boundY, occlusionSafePadding);
     current = avoidOverlayOcclusions(current, lane, boundX, boundY, seedKey, pass, avoidRects);
-    if (Math.abs(current.x - before.x) < 0.5 && Math.abs(current.y - before.y) < 0.5) {
+    if (Math.abs(current.x - before.x) < CONVERGENCE_THRESHOLD && Math.abs(current.y - before.y) < CONVERGENCE_THRESHOLD) {
       break;
     }
   }
@@ -199,7 +269,7 @@ export function resolveSpacingConflicts(
   avoidRects: readonly RadarAvoidRect[],
 ): { x: number; y: number } {
   let current = clampPoint(point, boundX, boundY, lane);
-  for (let pass = 0; pass < 5; pass += 1) {
+  for (let pass = 0; pass < SPACING_MAX_PASSES; pass += 1) {
     let moved = false;
     for (const existing of placed) {
       const dx = current.x - existing.x;
@@ -214,7 +284,7 @@ export function resolveSpacingConflicts(
         ux = Math.cos(angle);
         uy = Math.sin(angle);
       }
-      const push = (minDistance - normalizedDistance) * 0.62;
+      const push = (minDistance - normalizedDistance) * SPACING_PUSH_SCALE;
       current = clampPoint(
         {
           x: current.x + (ux * push),
@@ -234,9 +304,9 @@ export function resolveSpacingConflicts(
 // ─── Sector / arc helpers ──────────────────────────────────────
 
 export function computeMinDistance(count: number, lane: DockLane): number {
-  const base = lane === 'combo-select' ? 100 : 92;
-  const floor = lane === 'combo-select' ? 56 : 48;
-  const shrink = Math.max(0, count - 1) * (lane === 'combo-select' ? 4.4 : 3.6);
+  const base = lane === 'combo-select' ? MIN_DIST_BASE_COMBO : MIN_DIST_BASE_BACKUP;
+  const floor = lane === 'combo-select' ? MIN_DIST_FLOOR_COMBO : MIN_DIST_FLOOR_BACKUP;
+  const shrink = Math.max(0, count - 1) * (lane === 'combo-select' ? MIN_DIST_SHRINK_COMBO : MIN_DIST_SHRINK_BACKUP);
   return Math.max(floor, base - shrink);
 }
 
@@ -249,8 +319,8 @@ export function computeArcAngle(index: number, count: number, start: number, end
 export function computeSectorJitter(taskId: string, sector: ComboSector): { x: number; y: number } {
   const seed = hashCode(`${taskId}:${sector}`);
   return {
-    x: (rand(seed + 19) - 0.5) * (sector === 'top' ? 12 : 14),
-    y: (rand(seed + 47) - 0.5) * 10,
+    x: (rand(seed + 19) - 0.5) * (sector === 'top' ? JITTER_X_TOP : JITTER_X_SIDE),
+    y: (rand(seed + 47) - 0.5) * JITTER_Y,
   };
 }
 
@@ -301,16 +371,16 @@ export function layoutComboEntries(
   const comboSpreadY = radiusY * config.comboSpreadYFactor;
   const sectors = buildComboSectorBuckets(entries, groupByTaskId, config.comboSectorSequence);
   const anchors: Record<ComboSector, { x: number; y: number }> = {
-    left: { x: -comboSpreadX * 0.86, y: -comboSpreadY * 0.58 },
-    top: { x: 0, y: -comboSpreadY * 0.98 },
-    right: { x: comboSpreadX * 0.86, y: -comboSpreadY * 0.58 },
+    left: { x: -comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
+    top: { x: 0, y: -comboSpreadY * SECTOR_ANCHOR_TOP_Y },
+    right: { x: comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
   };
 
   for (const sector of config.comboSectorSequence) {
     const bucket = sectors.get(sector) ?? [];
-    const columnCount = bucket.length >= 4 ? 2 : 1;
-    const horizontalGap = comboSpreadX * (sector === 'top' ? 0.23 : 0.21);
-    const verticalGap = Math.max(48, comboSpreadY * (sector === 'top' ? 0.17 : 0.2));
+    const columnCount = bucket.length >= COLUMN_THRESHOLD ? 2 : 1;
+    const horizontalGap = comboSpreadX * (sector === 'top' ? HORIZONTAL_GAP_TOP : HORIZONTAL_GAP_SIDE);
+    const verticalGap = Math.max(VERTICAL_GAP_MIN, comboSpreadY * (sector === 'top' ? VERTICAL_GAP_FACTOR_TOP : VERTICAL_GAP_FACTOR_SIDE));
 
     bucket.forEach((entry, index) => {
       const row = Math.floor(index / columnCount);
@@ -339,7 +409,7 @@ export function layoutComboEntries(
 
   return entries.map(entry => ({
     entry,
-    ...(pointByTaskId.get(entry.taskId) ?? { x: 0, y: -comboSpreadY * 0.68 }),
+    ...(pointByTaskId.get(entry.taskId) ?? { x: 0, y: -comboSpreadY * COMBO_FALLBACK_Y_FACTOR }),
   }));
 }
 
@@ -361,23 +431,23 @@ export function layoutBackupEntries(
   });
 
   rings.forEach((ringEntries, ringIndex) => {
-    const ringScaleX = ringIndex === 0 ? 0.9 : 1.08;
-    const ringScaleY = ringIndex === 0 ? 0.88 : 1.04;
-    const ringStart = Math.PI * 0.08;
-    const ringEnd = Math.PI * 0.92;
+    const ringScaleX = ringIndex === 0 ? RING_SCALE_X_INNER : RING_SCALE_X_OUTER;
+    const ringScaleY = ringIndex === 0 ? RING_SCALE_Y_INNER : RING_SCALE_Y_OUTER;
+    const ringStart = RING_ARC_START;
+    const ringEnd = RING_ARC_END;
     ringEntries.forEach((entry, index) => {
       const angle = computeArcAngle(index, ringEntries.length, ringStart, ringEnd);
       const jitterSeed = hashCode(`${entry.taskId}:backup:${ringIndex}`);
       const point = {
-        x: Math.cos(angle) * backupSpreadX * ringScaleX + ((rand(jitterSeed + 17) - 0.5) * 6),
-        y: -Math.sin(angle) * backupSpreadY * ringScaleY + ((rand(jitterSeed + 41) - 0.5) * 4),
+        x: Math.cos(angle) * backupSpreadX * ringScaleX + ((rand(jitterSeed + 17) - 0.5) * BACKUP_JITTER_X),
+        y: -Math.sin(angle) * backupSpreadY * ringScaleY + ((rand(jitterSeed + 41) - 0.5) * BACKUP_JITTER_Y),
       };
       const adjusted = resolveSpacingConflicts(
         point,
         placed,
         minDist,
-        backupSpreadX * 1.12,
-        backupSpreadY * 1.1,
+        backupSpreadX * BACKUP_BOUND_EXTRA_X,
+        backupSpreadY * BACKUP_BOUND_EXTRA_Y,
         'backup',
         entry.taskId,
         config.occlusionSafePadding,
@@ -390,7 +460,7 @@ export function layoutBackupEntries(
 
   return entries.map(entry => ({
     entry,
-    ...(pointByTaskId.get(entry.taskId) ?? { x: 0, y: -backupSpreadY * 0.82 }),
+    ...(pointByTaskId.get(entry.taskId) ?? { x: 0, y: -backupSpreadY * BACKUP_FALLBACK_Y_FACTOR }),
   }));
 }
 

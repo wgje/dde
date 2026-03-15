@@ -134,6 +134,24 @@ export interface Database {
         Insert: BackupEncryptionKeyInsert;
         Update: BackupEncryptionKeyUpdate;
       };
+      /** 专注会话快照表 - Focus Console v3 */
+      focus_sessions: {
+        Row: FocusSessionRow;
+        Insert: FocusSessionInsert;
+        Update: FocusSessionUpdate;
+      };
+      /** 日常任务表 - Focus Console v3 */
+      routine_tasks: {
+        Row: RoutineTaskRow;
+        Insert: RoutineTaskInsert;
+        Update: RoutineTaskUpdate;
+      };
+      /** 日常任务完成记录表 - Focus Console v3 */
+      routine_completions: {
+        Row: RoutineCompletionRow;
+        Insert: RoutineCompletionInsert;
+        Update: RoutineCompletionUpdate;
+      };
     };
     Views: {
       /** 活跃任务视图（排除软删除） */
@@ -1079,4 +1097,95 @@ export interface BackupEncryptionKeyUpdate {
   deprecated_at?: string | null;
   retired_at?: string | null;
   notes?: string | null;
+}
+
+// ============================================
+// 专注会话快照表 (focus_sessions) - Focus Console v3
+// ============================================
+
+/** 专注会话行数据 */
+export interface FocusSessionRow {
+  id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  session_state: Json;
+  updated_at: string;
+}
+
+/** 专注会话插入数据 */
+export interface FocusSessionInsert {
+  id: string;
+  user_id: string;
+  started_at: string;
+  ended_at?: string | null;
+  session_state: Json;
+  updated_at?: string;
+}
+
+/** 专注会话更新数据 */
+export interface FocusSessionUpdate {
+  ended_at?: string | null;
+  session_state?: Json;
+  started_at?: string;
+}
+
+// ============================================
+// 日常任务表 (routine_tasks) - Focus Console v3
+// ============================================
+
+/** 日常任务行数据 */
+export interface RoutineTaskRow {
+  id: string;
+  user_id: string;
+  title: string;
+  max_times_per_day: number;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 日常任务插入数据 */
+export interface RoutineTaskInsert {
+  id: string;
+  user_id: string;
+  title: string;
+  max_times_per_day?: number;
+  is_enabled?: boolean;
+}
+
+/** 日常任务更新数据 */
+export interface RoutineTaskUpdate {
+  title?: string;
+  max_times_per_day?: number;
+  is_enabled?: boolean;
+}
+
+// ============================================
+// 日常任务完成记录表 (routine_completions) - Focus Console v3
+// ============================================
+
+/** 日常任务完成记录行数据 */
+export interface RoutineCompletionRow {
+  id: string;
+  routine_id: string;
+  user_id: string;
+  date_key: string;
+  count: number;
+  updated_at: string;
+}
+
+/** 日常任务完成记录插入数据 */
+export interface RoutineCompletionInsert {
+  id: string;
+  routine_id: string;
+  user_id: string;
+  date_key: string;
+  count?: number;
+}
+
+/** 日常任务完成记录更新数据 */
+export interface RoutineCompletionUpdate {
+  count?: number;
+  date_key?: string;
 }

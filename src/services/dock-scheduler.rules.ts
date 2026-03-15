@@ -193,13 +193,13 @@ function computeTimeMatchBucket(
 
   if (waitFitMode === 'relaxed') {
     const ratio = expectedMinutes / remainingMinutes;
-    if (ratio >= 0.65 && ratio <= 1.6) {
+    if (ratio >= PARKING_CONFIG.SCHEDULE_RELAXED_BUCKET3_LOWER_RATIO && ratio <= PARKING_CONFIG.SCHEDULE_RELAXED_BUCKET3_UPPER_RATIO) {
       return 3;
     }
-    if (ratio >= 0.3 && ratio <= 2.4) {
+    if (ratio >= PARKING_CONFIG.SCHEDULE_RELAXED_BUCKET2_LOWER_RATIO && ratio <= PARKING_CONFIG.SCHEDULE_RELAXED_BUCKET2_UPPER_RATIO) {
       return 2;
     }
-    if (ratio <= 4) {
+    if (ratio <= PARKING_CONFIG.SCHEDULE_RELAXED_BUCKET1_MAX_RATIO) {
       return 1;
     }
     return 0;
@@ -274,36 +274,37 @@ function computeWaitWindowFitScore(
 ): number {
   // GAP-3: ignore-wait 模式下忽略等待时间匹配，返回中性分数
   if (waitFitMode === 'ignore-wait') {
-    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.5);
+    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_IGNORE_FACTOR);
   }
   if (remainingMinutes <= 0) return 0;
   if (expectedMinutes == null || expectedMinutes <= 0) {
-    return Math.floor(
-      PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * (waitFitMode === 'relaxed' ? 0.45 : 0.35),
-    );
+    const factor = waitFitMode === 'relaxed'
+      ? PARKING_CONFIG.SCHEDULE_WAIT_FIT_NULL_RELAXED_FACTOR
+      : PARKING_CONFIG.SCHEDULE_WAIT_FIT_NULL_STRICT_FACTOR;
+    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * factor);
   }
   if (waitFitMode === 'relaxed') {
     const ratio = expectedMinutes / remainingMinutes;
-    if (ratio >= 0.7 && ratio <= 1.5) {
-      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.85);
+    if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_TIGHT_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_TIGHT_UPPER) {
+      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_TIGHT_FACTOR);
     }
-    if (ratio >= 0.35 && ratio <= 2.25) {
-      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.55);
+    if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_MED_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_MED_UPPER) {
+      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_MED_FACTOR);
     }
-    if (ratio >= 0.15 && ratio <= 4) {
-      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.25);
+    if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_WIDE_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_WIDE_UPPER) {
+      return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_WIDE_FACTOR);
     }
-    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.1);
+    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_RELAXED_MIN_FACTOR);
   }
   const ratio = expectedMinutes / remainingMinutes;
-  if (ratio >= 0.85 && ratio <= 1.15) {
+  if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_TIGHT_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_TIGHT_UPPER) {
     return PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT;
   }
-  if (ratio >= 0.6 && ratio <= 1.35) {
-    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.65);
+  if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_MED_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_MED_UPPER) {
+    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_MED_FACTOR);
   }
-  if (ratio >= 0.35 && ratio <= 1.65) {
-    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * 0.35);
+  if (ratio >= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_WIDE_LOWER && ratio <= PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_WIDE_UPPER) {
+    return Math.floor(PARKING_CONFIG.SCHEDULE_WAIT_WINDOW_FIT_WEIGHT * PARKING_CONFIG.SCHEDULE_WAIT_FIT_STRICT_WIDE_FACTOR);
   }
   return 0;
 }
@@ -341,7 +342,7 @@ export function computeThreeDimensionalRecommendation(
   const safeRemainingWaitMin = Math.max(0, remainingWaitMin);
   const assigned = new Set<string>();
   const preferLongTask = safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES;
-  const relaxedUpperBoundMinutes = Math.max(safeRemainingWaitMin, 1) * 4;
+  const relaxedUpperBoundMinutes = Math.max(safeRemainingWaitMin, 1) * PARKING_CONFIG.RECOMMENDATION_RELAXED_UPPER_BOUND_MULTIPLIER;
   const compareByWindowFit = (a: FocusTaskSlot, b: FocusTaskSlot): number => {
     const aExec = effectiveExecMin(a);
     const bExec = effectiveExecMin(b);
@@ -370,7 +371,7 @@ export function computeThreeDimensionalRecommendation(
         !assigned.has(task.slotId),
     )
     .sort(compareByWindowFit)
-    .slice(0, 2);
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
   homologousAdvancement.forEach(task => assigned.add(task.slotId));
 
   // 认知降低组：仅在主任务为高负荷时推荐低负荷任务（GAP-3 修复）
@@ -388,7 +389,7 @@ export function computeThreeDimensionalRecommendation(
           if (aSameProject !== bSameProject) return bSameProject - aSameProject;
           return compareByWindowFit(a, b);
         })
-        .slice(0, 2)
+        .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX)
     : [];
   cognitiveDowngrade.forEach(task => assigned.add(task.slotId));
 
@@ -404,7 +405,7 @@ export function computeThreeDimensionalRecommendation(
         (b.waitMinutes ?? 0) - (a.waitMinutes ?? 0)
         || compareByWindowFit(a, b),
     )
-    .slice(0, 2);
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
 
   const allEmpty =
     homologousAdvancement.length === 0 &&
@@ -443,19 +444,19 @@ function computeOversizedFallback(
   const sameProject = pendingTasks
     .filter(task => task.sourceProjectId != null && task.sourceProjectId === mainTask.sourceProjectId)
     .sort((a, b) => (a.estimatedMinutes ?? Number.POSITIVE_INFINITY) - (b.estimatedMinutes ?? Number.POSITIVE_INFINITY))
-    .slice(0, 1);
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_OVERSIZED_GROUP_MAX);
   for (const t of sameProject) usedIds.add(t.slotId);
 
   const lowLoad = pendingTasks
     .filter(task => task.cognitiveLoad === 'low' && !usedIds.has(task.slotId))
     .sort((a, b) => (a.estimatedMinutes ?? Number.POSITIVE_INFINITY) - (b.estimatedMinutes ?? Number.POSITIVE_INFINITY))
-    .slice(0, 1);
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_OVERSIZED_GROUP_MAX);
   for (const t of lowLoad) usedIds.add(t.slotId);
 
   const hasWait = pendingTasks
     .filter(task => (task.waitMinutes ?? 0) > 0 && !usedIds.has(task.slotId))
     .sort((a, b) => effectiveExecMin(a) - effectiveExecMin(b))
-    .slice(0, 1);
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_OVERSIZED_GROUP_MAX);
 
   return [
     { type: 'homologous-advancement', candidates: sameProject, isOversized: true },
@@ -472,15 +473,15 @@ export function effectiveExecMin(task: FocusTaskSlot): number {
 // 穿插任务评分（用于空窗期）
 export function computeInterludeScore(task: FocusTaskSlot, remainingWaitMs: number): number {
   const remainingMin = remainingWaitMs / 60_000;
-  if (!task.estimatedMinutes) return 5;
+  if (!task.estimatedMinutes) return PARKING_CONFIG.INTERLUDE_DEFAULT_SCORE;
 
   const exec = effectiveExecMin(task);
-  if (exec > remainingMin * 1.5) return 2;
+  if (exec > remainingMin * PARKING_CONFIG.INTERLUDE_OVERRUN_MULTIPLIER) return PARKING_CONFIG.INTERLUDE_OVERRUN_PENALTY_SCORE;
 
-  const timeFitScore = exec > remainingMin * 0.2 ? 25 : 10;
-  const loadScore = task.cognitiveLoad === 'low' ? 20 : 0;
-  const waitBonusScore = task.waitMinutes ? 15 : 0;
-  const zoneScore = task.zone === 'combo-select' ? 10 : 5;
+  const timeFitScore = exec > remainingMin * PARKING_CONFIG.INTERLUDE_TIME_FIT_MIN_RATIO ? PARKING_CONFIG.INTERLUDE_TIME_FIT_SCORE : PARKING_CONFIG.INTERLUDE_TIME_WEAK_FIT_SCORE;
+  const loadScore = task.cognitiveLoad === 'low' ? PARKING_CONFIG.INTERLUDE_LOW_LOAD_SCORE : 0;
+  const waitBonusScore = task.waitMinutes ? PARKING_CONFIG.INTERLUDE_WAIT_BONUS_SCORE : 0;
+  const zoneScore = task.zone === 'combo-select' ? PARKING_CONFIG.INTERLUDE_COMBO_ZONE_SCORE : PARKING_CONFIG.INTERLUDE_BACKUP_ZONE_SCORE;
   return timeFitScore + loadScore + waitBonusScore + zoneScore;
 }
 
@@ -494,7 +495,7 @@ export function selectInterludeTasks(
     .map(task => ({ task, score: computeInterludeScore(task, remainingWaitMs) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3)
+    .slice(0, PARKING_CONFIG.INTERLUDE_MAX_COUNT)
     .map(({ task }) => task);
 }
 
@@ -536,12 +537,12 @@ export function assignZonesOnFocusStart(
   }
 
   const rest = tasks.filter(task => task.slotId !== mainTaskSlotId);
-  const mainWaitMin = main.estimatedMinutes ?? 60;
+  const mainWaitMin = main.estimatedMinutes ?? PARKING_CONFIG.DEFAULT_MAIN_WAIT_MINUTES;
 
   const recommendation = computeThreeDimensionalRecommendation(main, rest, mainWaitMin);
   const comboSelectIds = new Set(recommendation.flatMap(group => group.candidates.map(task => task.slotId)));
 
-  const commandStack = rest.filter(task => !comboSelectIds.has(task.slotId)).slice(0, 3);
+  const commandStack = rest.filter(task => !comboSelectIds.has(task.slotId)).slice(0, PARKING_CONFIG.RECOMMENDATION_COMMAND_STACK_MAX);
   const comboTasks = rest.filter(task => comboSelectIds.has(task.slotId));
   const commandStackIds = new Set(commandStack.map(task => task.slotId));
   const backupTasks = rest.filter(
@@ -561,8 +562,8 @@ export function determineFragmentDefenseLevel(
 ): 1 | 2 | 3 | 4 {
   if (hasBurnout) return 2;
   if (shortestWaitMinutes <= PARKING_CONFIG.FRAGMENT_PASSIVE_THRESHOLD_MINUTES) return 1;
-  if (shortestWaitMinutes <= 15) return 2;
-  if (shortestWaitMinutes <= 25) return 3;
+  if (shortestWaitMinutes <= PARKING_CONFIG.FRAGMENT_DEFENSE_LEVEL2_THRESHOLD_MIN) return 2;
+  if (shortestWaitMinutes <= PARKING_CONFIG.FRAGMENT_DEFENSE_LEVEL3_THRESHOLD_MIN) return 3;
   return 4;
 }
 
@@ -586,16 +587,16 @@ export function evaluateTimeRemaining(
   if (candidateEffectiveExecMin == null) return 'time-match';
 
   // tight-blank：候选执行时长 **严格大于** 75% 剩余窗口
-  if (candidateEffectiveExecMin > remainingMin * 0.75) {
+  if (candidateEffectiveExecMin > remainingMin * PARKING_CONFIG.TIME_REMAINING_TIGHT_BLANK_RATIO) {
     return 'tight-blank';
   }
 
   // time-match：候选在 [56.25%, 75%] 区间且不超过 150% 剩余窗口
   // 注意：上界使用 <= 0.75，与 tight-blank 的 > 0.75 互斥
-  const lowerBound = remainingMin * 0.5625; // 0.75 * 0.75
+  const lowerBound = remainingMin * PARKING_CONFIG.TIME_REMAINING_MATCH_LOWER_FACTOR;
   if (
     candidateEffectiveExecMin >= lowerBound &&
-    candidateEffectiveExecMin <= remainingMin * 1.5
+    candidateEffectiveExecMin <= remainingMin * PARKING_CONFIG.TIME_REMAINING_MATCH_UPPER_MULTIPLIER
   ) {
     return 'time-match';
   }

@@ -630,7 +630,7 @@ export class DockCompletionFlowService {
     this.ctx.highlightClearTimer.current = setTimeout(() => {
       if (this.ctx.pendingDecision()) return;
       this.ctx.highlightedIds.set(new Set());
-    }, 2000);
+    }, PARKING_CONFIG.HIGHLIGHT_CLEAR_DELAY_MS);
     return true;
   }
 

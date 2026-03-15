@@ -51,8 +51,22 @@ CREATE TABLE IF NOT EXISTS routine_completions (
   count           INT NOT NULL DEFAULT 1
 );
 
-CREATE INDEX IF NOT EXISTS idx_routine_completions_user_routine
-  ON routine_completions (user_id, routine_id, completed_date);
+-- 索引：如果 completed_date 存在则创建索引，否则跳过（UUID 迁移后列名为 date_key）
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'routine_completions' AND column_name = 'completed_date'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_routine_completions_user_routine
+      ON routine_completions (user_id, routine_id, completed_date);
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'routine_completions' AND column_name = 'date_key'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_routine_completions_user_routine_dk
+      ON routine_completions (user_id, routine_id, date_key);
+  END IF;
+END $$;
 
 -- ============================================
 -- updated_at 自动刷新触发器（H-21 修复）

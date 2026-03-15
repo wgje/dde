@@ -1,10 +1,24 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 3.9.0
--- 最后验证: 2026-02-15
+-- 版本: 5.0.0
+-- 最后验证: 2026-03-15
 --
 -- 更新日志：
+--   5.0.0 (2026-03-15): 全量安全加固 + Focus Console 汇总：
+--                       - FORCE RLS 覆盖全部 21 张表（含备份表）
+--                       - anon 角色零写入（仅 app_config SELECT）
+--                       - 管理/维护 RPC 函数仅限 service_role
+--                       - batch_upsert_tasks 升级支持 parking_meta/expected_minutes/cognitive_load/wait_minutes
+--                       - 数据安全约束：TEXT 长度、数值范围、JSONB 大小限制
+--                       - RLS 策略拆分为独立 CRUD（routine_tasks/routine_completions）
+--                       - 补充缺失策略（transcription_usage INSERT/UPDATE/DELETE, circuit_breaker_logs INSERT）
+--   4.0.0 (2026-03-15): 全量对齐迁移：
+--                       - tasks 表新增 parking_meta, expected_minutes, cognitive_load, wait_minutes 列及约束
+--                       - user_preferences 表新增 dock_snapshot 列
+--                       - black_box_entries 表新增 focus_meta 列、来源约束、共享仓索引、FORCE RLS
+--                       - 新增 focus_sessions / routine_tasks / routine_completions 表（UUID PK）
+--                       - 所有新表配置 RLS（(SELECT auth.uid()) 缓存优化）、FORCE RLS、触发器、索引、GRANT
 --   3.9.0 (2026-02-15): 集成 Resume 水位 RPC（get_project_sync_watermark / get_user_projects_watermark /
 --                       list_project_heads_since / get_accessible_project_probe / get_black_box_sync_watermark /
 --                       get_resume_recovery_probe）及配套索引
@@ -218,9 +232,20 @@ CREATE TABLE IF NOT EXISTS public.tasks (
   due_date TIMESTAMP WITH TIME ZONE,
   tags JSONB DEFAULT '[]'::jsonb,
   attachments JSONB DEFAULT '[]'::jsonb,
+  -- 【2026-02-22 新增】State Overlap 停泊元数据
+  parking_meta JSONB DEFAULT NULL,
+  -- 【2026-02-26 新增】Dock/Focus 规划属性
+  expected_minutes INTEGER DEFAULT NULL,
+  cognitive_load TEXT DEFAULT 'low',
+  wait_minutes INTEGER DEFAULT NULL,
   deleted_at TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  -- 约束
+  CONSTRAINT tasks_cognitive_load_check CHECK (cognitive_load IS NULL OR cognitive_load IN ('high', 'low')),
+  CONSTRAINT tasks_expected_minutes_check CHECK (expected_minutes IS NULL OR expected_minutes > 0),
+  CONSTRAINT tasks_wait_minutes_check CHECK (wait_minutes IS NULL OR wait_minutes > 0),
+  CONSTRAINT tasks_wait_within_expected_check CHECK (expected_minutes IS NULL OR wait_minutes IS NULL OR wait_minutes <= expected_minutes)
 );
 
 DROP TRIGGER IF EXISTS update_tasks_updated_at ON public.tasks;
@@ -234,6 +259,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON public.tasks(parent_id);
 -- 优化索引：活跃任务的项目+时间戳部分复合索引（覆盖 95% 查询场景）
 CREATE INDEX IF NOT EXISTS idx_tasks_project_active ON public.tasks(project_id, updated_at DESC)
   WHERE deleted_at IS NULL;
+-- 停泊任务跨项目查询索引
+CREATE INDEX IF NOT EXISTS idx_tasks_parking_meta
+  ON public.tasks ((parking_meta IS NOT NULL))
+  WHERE parking_meta IS NOT NULL;
+COMMENT ON COLUMN public.tasks.parking_meta IS
+  'State Overlap 停泊元数据（JSONB）。结构：{ state, parkedAt, lastVisitedAt, contextSnapshot, reminder, pinned }。NULL 表示非停泊任务。';
 -- 注：以下索引已删除（未使用或被复合索引替代）：
 -- - idx_tasks_stage: 被 idx_tasks_project_active 替代
 -- - idx_tasks_deleted_at: 软删除查询较少
@@ -302,6 +333,8 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
   local_backup_enabled BOOLEAN DEFAULT false,
   local_backup_interval_ms INTEGER DEFAULT 3600000,
   focus_preferences JSONB DEFAULT '{"gateEnabled":true,"spotlightEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::jsonb,
+  -- 【2026-02-25 新增】停泊坞快照（跨设备同步）
+  dock_snapshot JSONB DEFAULT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(user_id)
@@ -331,6 +364,9 @@ CREATE TABLE IF NOT EXISTS public.black_box_entries (
   -- 内容
   content TEXT NOT NULL,
   
+  -- 【2026-03-04 新增】专注控制台就地创建元数据
+  focus_meta JSONB DEFAULT NULL,
+  
   -- 时间字段
   date DATE NOT NULL DEFAULT CURRENT_DATE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -359,10 +395,34 @@ COMMENT ON COLUMN public.black_box_entries.is_completed IS '是否已完成，�
 COMMENT ON COLUMN public.black_box_entries.is_archived IS '是否已归档，不显示在主列表';
 COMMENT ON COLUMN public.black_box_entries.snooze_until IS '跳过至该日期，在此之前不会在大门中出现';
 COMMENT ON COLUMN public.black_box_entries.snooze_count IS '已跳过次数';
+COMMENT ON COLUMN public.black_box_entries.project_id IS
+  '所属项目 ID；NULL 表示共享黑匣子仓（跨项目可见）';
+
+-- focus_meta 来源约束
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'black_box_entries_focus_meta_source_check'
+      AND conrelid = 'public.black_box_entries'::regclass
+  ) THEN
+    ALTER TABLE public.black_box_entries
+      ADD CONSTRAINT black_box_entries_focus_meta_source_check
+      CHECK (
+        focus_meta IS NULL
+        OR NOT (focus_meta ? 'source')
+        OR focus_meta->>'source' = 'focus-console-inline'
+      );
+  END IF;
+END $$;
 
 -- 索引（仅保留增量同步必需的索引）
 -- 注意：idx_black_box_user_date, idx_black_box_project, idx_black_box_pending 经验证未使用，已移除
 CREATE INDEX IF NOT EXISTS idx_black_box_updated_at ON public.black_box_entries(updated_at);
+-- 共享仓增量同步索引
+CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_shared_updated
+  ON public.black_box_entries (user_id, updated_at DESC)
+  WHERE project_id IS NULL AND deleted_at IS NULL;
 
 -- updated_at 自动更新触发器
 DROP TRIGGER IF EXISTS update_black_box_entries_updated_at ON public.black_box_entries;
@@ -372,6 +432,7 @@ CREATE TRIGGER update_black_box_entries_updated_at
 
 -- RLS 策略（使用优化的 helper 函数）
 ALTER TABLE public.black_box_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.black_box_entries FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "black_box_select_policy" ON public.black_box_entries;
 CREATE POLICY "black_box_select_policy" ON public.black_box_entries 
@@ -426,6 +487,179 @@ CREATE POLICY "transcription_usage_select_policy" ON public.transcription_usage
   FOR SELECT USING ((select auth.uid()) = user_id);
 
 -- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
+
+-- ============================================
+-- 5.3 专注会话快照表 (focus_sessions) - Focus Console v3
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.focus_sessions (
+  id              UUID PRIMARY KEY,                -- 客户端 crypto.randomUUID()
+  user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  started_at      TIMESTAMPTZ NOT NULL,
+  ended_at        TIMESTAMPTZ,
+  session_state   JSONB NOT NULL,                  -- FocusSessionState 序列化
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_focus_sessions_user_id
+  ON public.focus_sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_focus_sessions_user_updated_at
+  ON public.focus_sessions (user_id, updated_at DESC);
+
+DROP TRIGGER IF EXISTS trg_focus_sessions_updated_at ON public.focus_sessions;
+CREATE TRIGGER trg_focus_sessions_updated_at
+  BEFORE UPDATE ON public.focus_sessions
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ALTER TABLE public.focus_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.focus_sessions FORCE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  CREATE POLICY "focus_sessions_select"
+    ON focus_sessions FOR SELECT
+    USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "focus_sessions_insert"
+    ON focus_sessions FOR INSERT
+    WITH CHECK ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "focus_sessions_update"
+    ON focus_sessions FOR UPDATE
+    USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "focus_sessions_delete"
+    ON focus_sessions FOR DELETE
+    USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- anon 不允许访问用户数据表
+GRANT ALL ON TABLE public.focus_sessions TO authenticated;
+GRANT ALL ON TABLE public.focus_sessions TO service_role;
+
+-- ============================================
+-- 5.4 日常任务表 (routine_tasks) - Focus Console v3
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.routine_tasks (
+  id                UUID PRIMARY KEY,              -- 客户端 crypto.randomUUID()
+  user_id           UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  title             TEXT NOT NULL,
+  max_times_per_day INT NOT NULL DEFAULT 1,
+  is_enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_routine_tasks_user_id
+  ON public.routine_tasks (user_id);
+CREATE INDEX IF NOT EXISTS idx_routine_tasks_user_updated
+  ON public.routine_tasks (user_id, updated_at DESC);
+
+DROP TRIGGER IF EXISTS trg_routine_tasks_updated_at ON public.routine_tasks;
+CREATE TRIGGER trg_routine_tasks_updated_at
+  BEFORE UPDATE ON public.routine_tasks
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ALTER TABLE public.routine_tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_tasks FORCE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_tasks_select"
+    ON routine_tasks FOR SELECT
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_tasks_insert"
+    ON routine_tasks FOR INSERT
+    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_tasks_update"
+    ON routine_tasks FOR UPDATE
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_tasks_delete"
+    ON routine_tasks FOR DELETE
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- anon 不允许访问用户数据表
+GRANT ALL ON TABLE public.routine_tasks TO authenticated;
+GRANT ALL ON TABLE public.routine_tasks TO service_role;
+
+-- ============================================
+-- 5.5 日常任务完成记录表 (routine_completions) - Focus Console v3
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS public.routine_completions (
+  id              UUID PRIMARY KEY,                -- 客户端 crypto.randomUUID()
+  routine_id      UUID NOT NULL REFERENCES public.routine_tasks(id) ON DELETE CASCADE,
+  user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  date_key        DATE NOT NULL,                   -- 完成日期
+  count           INT NOT NULL DEFAULT 1,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_routine_completions_user_routine_date_key
+  ON public.routine_completions (user_id, routine_id, date_key);
+
+DROP TRIGGER IF EXISTS trg_routine_completions_updated_at ON public.routine_completions;
+CREATE TRIGGER trg_routine_completions_updated_at
+  BEFORE UPDATE ON public.routine_completions
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ALTER TABLE public.routine_completions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_completions FORCE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_completions_select"
+    ON routine_completions FOR SELECT
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_completions_insert"
+    ON routine_completions FOR INSERT
+    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_completions_update"
+    ON routine_completions FOR UPDATE
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE POLICY "routine_completions_delete"
+    ON routine_completions FOR DELETE
+    TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- anon 不允许访问用户数据表
+GRANT ALL ON TABLE public.routine_completions TO authenticated;
+GRANT ALL ON TABLE public.routine_completions TO service_role;
 
 -- ============================================
 -- 6. 清理日志表 (cleanup_logs)
@@ -2289,14 +2523,18 @@ COMMENT ON TABLE public.circuit_breaker_logs IS
 -- ============================================================
 -- [MIGRATION] 20260101000002_batch_upsert_tasks_attachments.sql
 -- ============================================================
--- batch_upsert_tasks 函数：支持批量 upsert 任务，包含 attachments 字段
+-- batch_upsert_tasks 函数：支持批量 upsert 任务，包含 attachments + Focus Console 规划字段
 -- 用于批量操作的事务保护（≥20 个任务）
 -- 
+-- v6.0.0 修正：新增 parking_meta, expected_minutes, cognitive_load, wait_minutes 支持
+--              新增安全校验：TEXT 长度限制、数值范围约束
 -- v5.2.3 修正：移除不存在的 owner_id 列引用，通过 project.owner_id 进行权限校验
 -- 安全特性：
 -- 1. SECURITY DEFINER + auth.uid() 权限校验
 -- 2. 只能操作自己的项目和任务（通过 projects.owner_id 或 project_members 校验）
 -- 3. 事务保证原子性
+-- 4. TEXT 长度限制防 DoS / 数据溢出
+-- 5. 数值范围约束防溢出
 
 CREATE OR REPLACE FUNCTION public.batch_upsert_tasks(
   p_tasks jsonb[],
@@ -2311,41 +2549,70 @@ DECLARE
   v_count integer := 0;
   v_task jsonb;
   v_user_id uuid;
+  v_title text;
+  v_content text;
+  v_cognitive text;
+  v_expected int;
+  v_wait int;
 BEGIN
-  -- 权限校验：获取当前用户 ID
+  -- 权限校验
   v_user_id := auth.uid();
   IF v_user_id IS NULL THEN
     RAISE EXCEPTION 'Unauthorized: not authenticated';
   END IF;
-  
-  -- 权限校验：验证用户是项目所有者或成员
+
+  -- 验证用户是项目所有者或成员
   IF NOT EXISTS (
     SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id 
+    WHERE p.id = p_project_id
       AND (
         p.owner_id = v_user_id
         OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
+          SELECT 1 FROM public.project_members pm
           WHERE pm.project_id = p.id AND pm.user_id = v_user_id
         )
       )
   ) THEN
     RAISE EXCEPTION 'Unauthorized: not project owner or member (project_id: %, user_id: %)', p_project_id, v_user_id;
   END IF;
-  
-  -- 事务内执行，任何失败自动回滚
+
   FOREACH v_task IN ARRAY p_tasks
   LOOP
+    -- 安全校验：TEXT 长度限制（防 DoS / 数据溢出）
+    v_title := v_task->>'title';
+    v_content := v_task->>'content';
+    IF v_title IS NOT NULL AND length(v_title) > 10000 THEN
+      RAISE EXCEPTION 'Title too long (max 10000 chars) for task %', v_task->>'id';
+    END IF;
+    IF v_content IS NOT NULL AND length(v_content) > 1000000 THEN
+      RAISE EXCEPTION 'Content too long (max 1000000 chars) for task %', v_task->>'id';
+    END IF;
+
+    -- 安全校验：数值范围
+    v_expected := (v_task->>'expectedMinutes')::integer;
+    v_wait := (v_task->>'waitMinutes')::integer;
+    v_cognitive := v_task->>'cognitiveLoad';
+
+    IF v_expected IS NOT NULL AND (v_expected <= 0 OR v_expected > 14400) THEN
+      RAISE EXCEPTION 'expected_minutes out of range (1-14400) for task %', v_task->>'id';
+    END IF;
+    IF v_wait IS NOT NULL AND (v_wait <= 0 OR v_wait > 14400) THEN
+      RAISE EXCEPTION 'wait_minutes out of range (1-14400) for task %', v_task->>'id';
+    END IF;
+    IF v_cognitive IS NOT NULL AND v_cognitive NOT IN ('low', 'high') THEN
+      RAISE EXCEPTION 'cognitive_load must be low or high for task %', v_task->>'id';
+    END IF;
+
     INSERT INTO public.tasks (
-      id, project_id, title, content, stage, parent_id, 
+      id, project_id, title, content, stage, parent_id,
       "order", rank, status, x, y, short_id, deleted_at,
-      attachments
+      attachments, expected_minutes, cognitive_load, wait_minutes, parking_meta
     )
     VALUES (
       (v_task->>'id')::uuid,
       p_project_id,
-      v_task->>'title',
-      v_task->>'content',
+      v_title,
+      v_content,
       (v_task->>'stage')::integer,
       (v_task->>'parentId')::uuid,
       COALESCE((v_task->>'order')::integer, 0),
@@ -2355,7 +2622,11 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      COALESCE(v_task->'attachments', '[]'::jsonb)
+      COALESCE(v_task->'attachments', '[]'::jsonb),
+      v_expected,
+      COALESCE(v_cognitive, 'low'),
+      v_wait,
+      v_task->'parkingMeta'
     )
     ON CONFLICT (id) DO UPDATE SET
       title = EXCLUDED.title,
@@ -2370,11 +2641,15 @@ BEGIN
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
       attachments = EXCLUDED.attachments,
+      expected_minutes = EXCLUDED.expected_minutes,
+      cognitive_load = EXCLUDED.cognitive_load,
+      wait_minutes = EXCLUDED.wait_minutes,
+      parking_meta = EXCLUDED.parking_meta,
       updated_at = NOW();
-    
+
     v_count := v_count + 1;
   END LOOP;
-  
+
   RETURN v_count;
 EXCEPTION WHEN OTHERS THEN
   RAISE;
@@ -2384,7 +2659,7 @@ $$;
 -- 授权
 GRANT EXECUTE ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) TO authenticated;
 
-COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Batch upsert tasks with transaction guarantee. Includes attachments field support (v5.2.3 - fixed owner_id reference).';
+COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Batch upsert tasks with transaction guarantee. Supports attachments + Focus Console planning fields (v6.0.0).';
 -- ============================================================
 -- [MIGRATION] 20260101000003_optimistic_lock_strict_mode.sql
 -- ============================================================
@@ -3564,12 +3839,14 @@ GRANT EXECUTE ON FUNCTION public.is_task_tombstoned(uuid) TO authenticated;
 REVOKE EXECUTE ON FUNCTION public.is_connection_tombstoned(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.is_connection_tombstoned(uuid) TO authenticated;
 
--- 迁移工具（保守：仅 authenticated / service_role）
+-- 迁移工具（仅限 service_role，不应暴露给普通用户）
 REVOKE EXECUTE ON FUNCTION public.migrate_project_data_to_v2(uuid) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.migrate_project_data_to_v2(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.migrate_project_data_to_v2(uuid) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.migrate_project_data_to_v2(uuid) TO service_role;
 
 REVOKE EXECUTE ON FUNCTION public.migrate_all_projects_to_v2() FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.migrate_all_projects_to_v2() TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.migrate_all_projects_to_v2() FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.migrate_all_projects_to_v2() TO service_role;
 
 -- 触发器辅助函数（不应作为 RPC 暴露）
 REVOKE EXECUTE ON FUNCTION public.trigger_set_updated_at() FROM PUBLIC, anon;
@@ -3743,4 +4020,158 @@ REVOKE EXECUTE ON FUNCTION public.cleanup_old_logs() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_deleted_attachments(integer) FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_expired_scan_records() FROM PUBLIC, anon;
 
+-- 维护函数仅 service_role 可调用
+GRANT EXECUTE ON FUNCTION public.cleanup_old_logs() TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_deleted_attachments(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_expired_scan_records() TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() TO service_role;
+
 COMMENT ON FUNCTION public.get_server_time() IS '获取服务端当前时间，用于客户端时钟偏移检测';
+
+-- ============================================================
+-- 全量安全加固 (v6.0.0)
+-- ============================================================
+
+-- FORCE RLS 全量覆盖（确保 service_role 也受策略约束）
+ALTER TABLE public.tasks FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.projects FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.connections FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.user_preferences FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.task_tombstones FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.connection_tombstones FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.project_members FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.app_config FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.attachment_scans FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.circuit_breaker_logs FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.cleanup_logs FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.purge_rate_limits FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.quarantined_files FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transcription_usage FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.backup_metadata FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.backup_restore_history FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.backup_encryption_keys FORCE ROW LEVEL SECURITY;
+
+-- anon 角色全量收紧（用户数据零访问）
+REVOKE ALL ON TABLE public.tasks FROM anon;
+REVOKE ALL ON TABLE public.projects FROM anon;
+REVOKE ALL ON TABLE public.connections FROM anon;
+REVOKE ALL ON TABLE public.user_preferences FROM anon;
+REVOKE ALL ON TABLE public.black_box_entries FROM anon;
+REVOKE ALL ON TABLE public.focus_sessions FROM anon;
+REVOKE ALL ON TABLE public.routine_tasks FROM anon;
+REVOKE ALL ON TABLE public.routine_completions FROM anon;
+REVOKE ALL ON TABLE public.transcription_usage FROM anon;
+REVOKE ALL ON TABLE public.task_tombstones FROM anon;
+REVOKE ALL ON TABLE public.connection_tombstones FROM anon;
+REVOKE ALL ON TABLE public.project_members FROM anon;
+REVOKE ALL ON TABLE public.circuit_breaker_logs FROM anon;
+REVOKE ALL ON TABLE public.cleanup_logs FROM anon;
+REVOKE ALL ON TABLE public.purge_rate_limits FROM anon;
+REVOKE ALL ON TABLE public.quarantined_files FROM anon;
+REVOKE ALL ON TABLE public.attachment_scans FROM anon;
+REVOKE ALL ON TABLE public.backup_metadata FROM anon;
+REVOKE ALL ON TABLE public.backup_restore_history FROM anon;
+REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon;
+-- app_config：仅保留 anon 只读
+REVOKE ALL ON TABLE public.app_config FROM anon;
+GRANT SELECT ON TABLE public.app_config TO anon;
+-- 新表不自动授权 anon
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM anon;
+
+-- 数据安全约束（防 DoS / 溢出 / 注入）
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_title_length_check' AND conrelid='public.tasks'::regclass)
+  THEN ALTER TABLE public.tasks ADD CONSTRAINT tasks_title_length_check CHECK (title IS NULL OR length(title) <= 10000);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_content_length_check' AND conrelid='public.tasks'::regclass)
+  THEN ALTER TABLE public.tasks ADD CONSTRAINT tasks_content_length_check CHECK (content IS NULL OR length(content) <= 1000000);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_parking_meta_size_check' AND conrelid='public.tasks'::regclass)
+  THEN ALTER TABLE public.tasks ADD CONSTRAINT tasks_parking_meta_size_check CHECK (parking_meta IS NULL OR pg_column_size(parking_meta) <= 524288);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='routine_tasks_title_length_check' AND conrelid='public.routine_tasks'::regclass)
+  THEN ALTER TABLE public.routine_tasks ADD CONSTRAINT routine_tasks_title_length_check CHECK (length(title) <= 1000);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='routine_tasks_max_times_check' AND conrelid='public.routine_tasks'::regclass)
+  THEN ALTER TABLE public.routine_tasks ADD CONSTRAINT routine_tasks_max_times_check CHECK (max_times_per_day > 0 AND max_times_per_day <= 100);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='routine_completions_count_check' AND conrelid='public.routine_completions'::regclass)
+  THEN ALTER TABLE public.routine_completions ADD CONSTRAINT routine_completions_count_check CHECK (count > 0 AND count <= 1000);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='focus_sessions_state_size_check' AND conrelid='public.focus_sessions'::regclass)
+  THEN ALTER TABLE public.focus_sessions ADD CONSTRAINT focus_sessions_state_size_check CHECK (pg_column_size(session_state) <= 1048576);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='user_preferences_dock_snapshot_size_check' AND conrelid='public.user_preferences'::regclass)
+  THEN ALTER TABLE public.user_preferences ADD CONSTRAINT user_preferences_dock_snapshot_size_check CHECK (dock_snapshot IS NULL OR pg_column_size(dock_snapshot) <= 1048576);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='user_preferences_focus_pref_size_check' AND conrelid='public.user_preferences'::regclass)
+  THEN ALTER TABLE public.user_preferences ADD CONSTRAINT user_preferences_focus_pref_size_check CHECK (focus_preferences IS NULL OR pg_column_size(focus_preferences) <= 65536);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='user_preferences_color_mode_check' AND conrelid='public.user_preferences'::regclass)
+  THEN ALTER TABLE public.user_preferences ADD CONSTRAINT user_preferences_color_mode_check CHECK (color_mode IS NULL OR color_mode IN ('light', 'dark', 'system'));
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='user_preferences_backup_interval_check' AND conrelid='public.user_preferences'::regclass)
+  THEN ALTER TABLE public.user_preferences ADD CONSTRAINT user_preferences_backup_interval_check CHECK (local_backup_interval_ms IS NULL OR (local_backup_interval_ms >= 300000 AND local_backup_interval_ms <= 604800000));
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='black_box_entries_focus_meta_size_check' AND conrelid='public.black_box_entries'::regclass)
+  THEN ALTER TABLE public.black_box_entries ADD CONSTRAINT black_box_entries_focus_meta_size_check CHECK (focus_meta IS NULL OR pg_column_size(focus_meta) <= 262144);
+  END IF;
+END $$;
+
+-- 补充缺失的 RLS 策略
+DO $$ BEGIN
+  CREATE POLICY "transcription_usage_insert_policy" ON public.transcription_usage FOR INSERT TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY "transcription_usage_update_policy" ON public.transcription_usage FOR UPDATE TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY "transcription_usage_delete_policy" ON public.transcription_usage FOR DELETE TO authenticated USING ((SELECT auth.uid()) = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY "circuit_breaker_logs_insert_own" ON public.circuit_breaker_logs FOR INSERT TO authenticated WITH CHECK (user_id = (SELECT auth.uid()));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE POLICY "cleanup_logs_authenticated_select" ON public.cleanup_logs FOR SELECT TO authenticated USING (true);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+COMMENT ON SCHEMA public IS
+  '全量安全加固完成: FORCE RLS 全覆盖, anon 零写入, RPC 分级授权, JSONB/TEXT/数值溢出防护, batch_upsert 同步新字段';
+
+-- ============================================================
+-- 初始化完成
+-- ============================================================

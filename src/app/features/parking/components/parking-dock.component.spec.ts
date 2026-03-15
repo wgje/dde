@@ -15,6 +15,11 @@ import { ProjectStore, TaskStore } from '../../../core/state/stores';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { UiStateService } from '../../../../services/ui-state.service';
 
+import {
+  DockFocusTransitionState,
+  DockPendingDecision,
+} from '../../../../models/parking-dock';
+
 describe('ParkingDockComponent v4', () => {
   let fixture: ComponentFixture<ParkingDockComponent>;
   let component: ParkingDockComponent;
@@ -23,9 +28,9 @@ describe('ParkingDockComponent v4', () => {
   const dockedEntries = signal<any[]>([]);
   const focusMode = signal(false);
   const focusScrimOn = signal(true);
-  const focusTransition = signal<any>(null);
+  const focusTransition = signal<DockFocusTransitionState | null>(null);
   const dockExpanded = signal(true);
-  const pendingDecision = signal<any>(null);
+  const pendingDecision = signal<DockPendingDecision | null>(null);
   const pendingDecisionEntries = signal<any[]>([]);
   const statusMachineEntries = signal<any[]>([]);
   const muteWaitTone = signal(false);

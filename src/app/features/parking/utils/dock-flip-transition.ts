@@ -81,11 +81,11 @@ export function getDockSourceRect(el?: HTMLElement | null): DockFlipRect | null 
     return toFlipRect(target.getBoundingClientRect());
   }
   // 回退：停泊坞不可见时使用屏幕底部居中的虚拟矩形
-  const width = 192;
-  const height = 88;
+  const width = PARKING_CONFIG.FLIP_FALLBACK_WIDTH;
+  const height = PARKING_CONFIG.FLIP_FALLBACK_HEIGHT;
   return {
     left: Math.max(0, Math.round((window.innerWidth - width) / 2)),
-    top: Math.max(0, Math.round(window.innerHeight - height - 44)),
+    top: Math.max(0, Math.round(window.innerHeight - height - PARKING_CONFIG.FLIP_FALLBACK_BOTTOM_OFFSET)),
     width,
     height,
   };

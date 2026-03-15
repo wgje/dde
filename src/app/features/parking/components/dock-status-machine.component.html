@@ -1,0 +1,291 @@
+@if (hudMode() === 'full') {
+  <div
+    class="glass-card status-machine-card px-3.5 py-3 rounded-[22px] flex flex-col min-w-[236px] max-w-[316px]"
+    [class.expired-border-glow]="hasExpiredTask() && enableStatusExtraGlow() && !isGlowDegraded()"
+    [class.expired-border-glow-degraded]="hasExpiredTask() && enableStatusExtraGlow() && isGlowDegraded()"
+    [class.rest-reminder-glow]="restReminderActive() && enableRestReminderGlow()"
+    [attr.data-performance-tier]="performanceTier()"
+    data-testid="dock-v3-status-machine">
+
+    <div class="status-topline">
+      <div class="status-header">
+        <div class="status-heading-row">
+          <div class="status-title font-mono">状态机 Status</div>
+          @if (allEntries().length > 0) {
+            <div class="status-count-badge">
+              {{ allEntries().length }}
+            </div>
+          }
+        </div>
+
+        @if (summaryItems().length > 0) {
+          <div class="status-summary-rail" aria-label="状态机概览">
+            @for (item of summaryItems(); track item.id) {
+              <div class="status-summary-item" [attr.data-tone]="item.tone">
+                <span class="status-summary-dot" [attr.data-tone]="item.tone"></span>
+                <span class="status-summary-label">{{ item.label }}</span>
+                <span class="status-summary-count">{{ item.count }}</span>
+              </div>
+            }
+          </div>
+        }
+
+        @if (blankPeriodActive() || isBurnoutActive() || restReminderActive()) {
+          <div class="status-badges">
+            @if (blankPeriodActive()) {
+              <div class="status-badge" data-tone="blank">留白期</div>
+            }
+            @if (isBurnoutActive()) {
+              <div class="status-badge" data-tone="burnout">倦怠</div>
+            }
+            @if (restReminderActive()) {
+              <button
+                type="button"
+                class="status-badge status-badge-action"
+                data-tone="rest"
+                (click)="dismissRestReminder()"
+                data-testid="dock-v3-rest-reminder-badge">
+                {{ restReminderLabel() }}
+                <span aria-hidden="true">✕</span>
+              </button>
+            }
+          </div>
+        }
+      </div>
+
+      <div class="status-actions">
+        @if (showPipToggleState()) {
+          <button
+            type="button"
+            class="hud-action-btn status-icon-btn"
+            [class.status-icon-btn-active]="pipToggleActiveState()"
+            (click)="requestPipToggle()"
+            [attr.aria-label]="pipToggleLabel()"
+            [attr.aria-pressed]="pipToggleActiveState()"
+            [attr.title]="pipToggleLabel()"
+            style="min-height: 44px; min-width: 44px;"
+            data-testid="dock-v3-status-pip-toggle">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="4.75" y="6.75" width="14.5" height="10.5" rx="2.5" stroke="currentColor" stroke-width="1.6"></rect>
+              <path d="M19.25 10L21 8.75V15.25L19.25 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <span class="sr-only">{{ pipToggleLabel() }}</span>
+          </button>
+        }
+
+        <button
+          type="button"
+          class="hud-action-btn status-icon-btn"
+          [class.status-icon-btn-muted]="muted()"
+          (click)="toggleMute()"
+          [attr.aria-label]="muteButtonLabel()"
+          [attr.aria-pressed]="muted()"
+          [attr.title]="muteButtonLabel()"
+          style="min-height: 44px; min-width: 44px;"
+          data-testid="dock-v3-status-mute">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M5.5 10.25H8.75L13 6.75V17.25L8.75 13.75H5.5V10.25Z"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linejoin="round">
+            </path>
+            @if (muted()) {
+              <path d="M15.25 8.75L19.25 12.75" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+              <path d="M19.25 8.75L15.25 12.75" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+            } @else {
+              <path
+                d="M16.25 9.25C17.15 9.95 17.75 11 17.75 12C17.75 13 17.15 14.05 16.25 14.75"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round">
+              </path>
+              <path
+                d="M18.5 7.25C20.1 8.55 21 10.2 21 12C21 13.8 20.1 15.45 18.5 16.75"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round">
+              </path>
+            }
+          </svg>
+          <span class="sr-only">{{ muteButtonLabel() }}</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="status-list">
+      @for (row of visibleRows(); track row.trackId) {
+        @switch (row.kind) {
+          @case ('focus') {
+            <div class="status-row flex items-center gap-3" data-state="focus">
+              <div
+                class="w-3 h-3 rounded-full bg-indigo-500 shrink-0"
+                [class.focus-dot-pulse]="enableStatusExtraGlow()">
+              </div>
+              <div class="status-row-content">
+                <div class="status-row-copy">
+                  <span class="status-row-title font-medium text-slate-50">{{ row.entry.title }}</span>
+                  <div class="status-row-meta">
+                    <span class="status-pill" data-tone="focus">当前主线</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          }
+
+          @case ('wait') {
+            <div
+              class="status-row clickable flex items-center gap-3"
+              data-state="wait"
+              [class.status-row-alert]="isExpired(row.entry)"
+              (click)="onSuspendedClick(row.entry)"
+              (keydown.enter)="onSuspendedClick(row.entry)"
+              (keydown.space)="$event.preventDefault(); onSuspendedClick(row.entry)"
+              tabindex="0"
+              role="button"
+              data-testid="dock-v3-status-entry-suspended"
+              [attr.data-task-id]="row.entry.taskId">
+              <div class="relative w-10 h-10 shrink-0 rounded-full flex items-center justify-center">
+                <svg class="w-10 h-10 -rotate-90 absolute inset-0" viewBox="0 0 24 24">
+                  <circle
+                    class="ring-track"
+                    cx="12"
+                    cy="12"
+                    [attr.r]="ringRadius"
+                    [attr.stroke-width]="ringStrokeWidth">
+                  </circle>
+                  @if (isExpired(row.entry)) {
+                    <circle
+                      class="ring-progress-expired"
+                      [class.ring-expired-glow]="enableStatusExtraGlow()"
+                      cx="12"
+                      cy="12"
+                      [attr.r]="ringRadius"
+                      [attr.stroke]="ringExpiredStroke"
+                      [attr.stroke-width]="ringStrokeWidth"
+                      [attr.stroke-dasharray]="circumference"
+                      stroke-dashoffset="0">
+                    </circle>
+                  } @else {
+                    <circle
+                      class="ring-progress"
+                      cx="12"
+                      cy="12"
+                      [attr.r]="ringRadius"
+                      [attr.stroke]="ringWaitStroke"
+                      [attr.stroke-width]="ringStrokeWidth"
+                      [attr.stroke-dasharray]="circumference"
+                      [attr.stroke-dashoffset]="getRingOffset(row.entry)">
+                    </circle>
+                  }
+                </svg>
+              </div>
+
+              <div class="status-row-content">
+                <div class="status-row-copy">
+                  <span
+                    class="status-row-title font-medium"
+                    [class.text-slate-100]="isExpired(row.entry)"
+                    [class.text-slate-200]="!isExpired(row.entry)">
+                    {{ row.entry.title }}
+                  </span>
+                  <div class="status-row-meta">
+                    <span class="status-pill" [attr.data-tone]="isExpired(row.entry) ? 'expired' : 'wait'">
+                      {{ row.entry.label }}
+                    </span>
+                    <span class="status-note" [class.text-amber-300]="isExpired(row.entry)">
+                      {{ getWaitDisplay(row.entry) }}
+                    </span>
+                    @if (isExpired(row.entry) && suspendedEntries().length > 1) {
+                      <span class="status-pill" data-tone="switch">可切换</span>
+                    }
+                  </div>
+                </div>
+              </div>
+            </div>
+          }
+
+          @case ('stalled') {
+            <div
+              class="status-row clickable flex items-center gap-3"
+              data-state="stalled"
+              (click)="onStalledClick(row.entry)"
+              (keydown.enter)="onStalledClick(row.entry)"
+              (keydown.space)="$event.preventDefault(); onStalledClick(row.entry)"
+              tabindex="0"
+              role="button"
+              data-testid="dock-v3-status-entry-stalled"
+              [attr.data-task-id]="row.entry.taskId">
+              <div class="w-3 h-3 rounded-full border border-slate-500 bg-slate-700/40 shrink-0"></div>
+              <div class="status-row-content">
+                <div class="status-row-copy">
+                  <span class="status-row-title text-slate-300">{{ row.entry.title }}</span>
+                  <div class="status-row-meta">
+                    <span class="status-pill" data-tone="stalled">停滞中</span>
+                    <span class="status-note">点击恢复</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          }
+
+          @case ('idle') {
+            <div class="status-row flex items-center gap-3" data-state="idle">
+              <div class="w-3 h-3 rounded-full border-2 border-slate-600 shrink-0"></div>
+              <div class="status-row-content">
+                <div class="status-row-copy">
+                  <span class="status-row-title text-slate-500">{{ row.entry.title }}</span>
+                  <div class="status-row-meta">
+                    <span class="status-pill">待启动</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          }
+        }
+      }
+
+      @if (allEntries().length === 0) {
+        <div class="status-empty">
+          <div class="status-empty-icon"></div>
+          <span>暂无任务</span>
+        </div>
+      }
+    </div>
+  </div>
+}
+@else {
+  <div class="glass-card px-3 py-2 rounded-full flex items-center gap-2" data-testid="dock-v3-status-machine-minimal">
+    <span class="text-[10px] text-slate-300 font-mono">专注 {{ focusingEntries().length }}</span>
+    <span class="text-[10px] text-amber-300 font-mono">等待 {{ suspendedEntries().length }}</span>
+    @if (stalledEntries().length > 0) {
+      <span class="text-[10px] text-slate-300 font-mono">停滞 {{ stalledEntries().length }}</span>
+    }
+    @if (blankPeriodActive() || fragmentDefenseLevel() >= 2) {
+      <span class="text-[9px] text-yellow-300 bg-yellow-500/15 rounded-full px-1.5 py-0.5">留白期</span>
+    }
+    @if (isBurnoutActive()) {
+      <span class="text-[9px] text-orange-300 bg-orange-500/15 rounded-full px-1.5 py-0.5">倦怠</span>
+    }
+    @if (restReminderActive()) {
+      <button
+        type="button"
+        class="text-[9px] text-emerald-300 bg-emerald-500/15 rounded-full px-1.5 py-0.5 cursor-pointer"
+        (click)="dismissRestReminder()">
+        {{ restReminderLabel() }}
+      </button>
+    }
+    @if (showPipToggleState()) {
+      <button
+        type="button"
+        class="status-minimal-action"
+        [attr.data-active]="pipToggleActiveState() ? 'true' : 'false'"
+        (click)="requestPipToggle()"
+        [attr.aria-label]="pipToggleLabel()"
+        [attr.title]="pipToggleLabel()"
+        data-testid="dock-v3-status-pip-toggle-minimal">
+        {{ pipToggleActiveState() ? '已弹出' : '弹出' }}
+      </button>
+    }
+  </div>
+}

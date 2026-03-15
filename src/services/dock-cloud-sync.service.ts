@@ -6,6 +6,7 @@
  * from business state logic.
  */
 import { Injectable, inject } from '@angular/core';
+import { PARKING_CONFIG } from '../config/parking.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import {
@@ -24,10 +25,11 @@ import {
 import { LoggerService } from './logger.service';
 import { withTimeout } from '../utils/timeout';
 import { TimerHandle } from '../utils/timer-handle';
+import { supabaseErrorToError } from '../utils/supabase-error';
 
 const CLOUD_PUSH_DEBOUNCE_MS = SYNC_CONFIG.DEBOUNCE_DELAY;
-const CLOUD_PULL_DEBOUNCE_MS = 250;
-const CLOUD_PULL_MIN_INTERVAL_MS = 5000;
+const CLOUD_PULL_DEBOUNCE_MS = PARKING_CONFIG.CLOUD_PULL_DEBOUNCE_MS;
+const CLOUD_PULL_MIN_INTERVAL_MS = PARKING_CONFIG.CLOUD_PULL_MIN_INTERVAL_MS;
 
 /**
  * Callbacks provided by DockEngineService for engine state mutations
@@ -178,11 +180,12 @@ export class DockCloudSyncService {
       cb.scheduleLocalPersist(remote, userId);
       await this.hydrateRoutineSlots(userId);
       this.cloudPullRetryCount = 0; // reset on success
-    } catch (error) {
+    } catch (rawError) {
+      const error = supabaseErrorToError(rawError);
       this.logger.warn('Failed to pull focus session from cloud', error);
       this.cloudPullRetryCount += 1;
-      if (this.cloudPullRetryCount > 5) {
-        this.logger.warn('pullCloudSnapshot: max retries (5) reached, giving up');
+      if (this.cloudPullRetryCount > PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES) {
+        this.logger.warn(`pullCloudSnapshot: max retries (${PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES}) reached, giving up`);
         this.cloudPullRetryCount = 0;
         return;
       }
@@ -237,7 +240,8 @@ export class DockCloudSyncService {
         }
         return next;
       });
-    } catch (error) {
+    } catch (rawError) {
+      const error = supabaseErrorToError(rawError);
       this.logger.warn('hydrateRoutineSlots failed', error);
     }
   }

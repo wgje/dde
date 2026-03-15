@@ -35,7 +35,9 @@ describe('DockStatusMachinePipComponent', () => {
     cumulativeLowLoadMs,
     switchToTask: vi.fn(),
     toggleMuteWaitTone: vi.fn(() => muted.update(value => !value)),
-    dismissRestReminder: vi.fn(),
+    fragmentRest: {
+      dismissRestReminder: vi.fn(),
+    },
   };
 
   beforeEach(async () => {
@@ -136,7 +138,7 @@ describe('DockStatusMachinePipComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-focus-card"]')).toBeNull();
   });
 
-  it('should limit secondary alerts to two rows and expose overflow count', () => {
+  it('should render all secondary alerts directly without folding when four tasks are present', () => {
     statusEntries.set([
       {
         taskId: 'A',
@@ -181,9 +183,11 @@ describe('DockStatusMachinePipComponent', () => {
     ]);
     fixture.detectChanges();
 
-    expect(component.secondaryAlerts()).toHaveLength(2);
-    expect(component.hiddenAlertCount()).toBe(1);
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('+1 项折叠');
+    expect(component.secondaryAlerts()).toHaveLength(3);
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Expired C');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Stalled D');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Waiting E');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).not.toContain('折叠');
   });
 
   it('primary alert action should switch task for wait-finished items', () => {
@@ -235,5 +239,18 @@ describe('DockStatusMachinePipComponent', () => {
 
     expect(mockEngine.switchToTask).toHaveBeenCalledWith('B');
     expect(returnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rest reminder action should dismiss in place without returning', () => {
+    const returnSpy = vi.fn();
+    component.returnRequested.subscribe(returnSpy);
+    restReminderActive.set(true);
+    cumulativeHighLoadMs.set(45 * 60 * 1000);
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-action-rest-reminder"]')?.click();
+
+    expect(mockEngine.fragmentRest.dismissRestReminder).toHaveBeenCalledTimes(1);
+    expect(returnSpy).not.toHaveBeenCalled();
   });
 });

@@ -15,9 +15,9 @@
 
         @if (!strictSampleMode && engine.pendingDecision() && pendingDecisionEntries().length > 0) {
           <div
-            class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl
+            class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl pointer-events-auto
                    px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
-            style="top: 40px; pointer-events: auto;"
+            style="top: 40px;"
             data-testid="dock-v3-pending-decision">
             <div class="flex items-center gap-2 mb-2.5">
               <div class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></div>
@@ -82,8 +82,7 @@
 
         @if (!strictSampleMode && blankPeriodActive()) {
           <div
-            class="blank-period-card blank-period-enter absolute left-1/2 top-10 -translate-x-1/2 z-30 w-[min(92vw,420px)] rounded-[28px] px-5 py-4"
-            style="pointer-events: auto;"
+            class="blank-period-card blank-period-enter absolute left-1/2 top-10 -translate-x-1/2 z-30 w-[min(92vw,420px)] rounded-[28px] px-5 py-4 pointer-events-auto"
             data-testid="dock-v3-blank-period-card">
             <div class="flex items-start gap-3">
               <div class="blank-period-icon shrink-0 mt-0.5"></div>
@@ -124,12 +123,11 @@
 
       <button
         type="button"
-        class="fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform"
+        class="fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform pointer-events-auto"
         [ngClass]="canCreateBackupTask()
           ? 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-900/45 border-indigo-300/40 hover:scale-105 active:scale-95'
           : 'bg-slate-800/90 text-slate-500 border-slate-600/50 shadow-none cursor-not-allowed'"
         [disabled]="!canCreateBackupTask()"
-        style="pointer-events: auto;"
         (click)="createBackupTaskFromFab()"
         aria-label="创建备选任务"
         data-testid="dock-v3-backup-fab">
@@ -159,9 +157,8 @@
 
     @if (engine.focusMode()) {
       <div
-        class="fixed z-[66]"
+        class="fixed z-[66] pointer-events-auto"
         [ngStyle]="hudContainerStyle()"
-        style="pointer-events: auto;"
         data-testid="dock-v3-status-machine-container">
         <div
           class="status-machine-shell"
@@ -178,8 +175,7 @@
 
       @if (showHelpOverlay()) {
         <div
-          class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4"
-          style="pointer-events: auto;"
+          class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4 pointer-events-auto"
           role="dialog"
           aria-modal="true"
           aria-label="专注操作帮助"
@@ -223,8 +219,7 @@
 
       <!-- GAP-2: 碎片时间进入倒计时选择 -->
       @if (engine.fragmentEntryCountdown() !== null) {
-        <div class="fixed inset-0 z-[48] flex items-center justify-center"
-             style="pointer-events: auto;">
+        <div class="fixed inset-0 z-[48] flex items-center justify-center pointer-events-auto">
           <div class="fragment-countdown-card rounded-2xl border border-emerald-500/30 bg-slate-900/95 px-6 py-5 text-center shadow-2xl max-w-[320px]">
             <div class="text-emerald-400 text-[11px] font-semibold tracking-widest mb-2 uppercase">碎片时间</div>
             <div class="text-slate-100 text-sm mb-3">
@@ -256,8 +251,7 @@
       <!-- 碎片阶段日常任务浮层 -->
       @if (engine.isFragmentPhase()) {
         <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2
-                    -translate-x-1/2 -translate-y-1/2 z-40"
-             style="pointer-events: auto;">
+                    -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-auto">
            @defer (when engine.isFragmentPhase()) {
              <app-dock-daily-slot></app-dock-daily-slot>
            }
@@ -271,8 +265,7 @@
 
       @if (showExitConfirm()) {
         <div
-          class="fixed inset-0 z-[72] bg-black/45 flex items-center justify-center"
-          style="pointer-events: auto;"
+          class="fixed inset-0 z-[72] bg-black/45 flex items-center justify-center pointer-events-auto"
           role="dialog"
           aria-modal="true"
           aria-label="退出专注模式确认"

@@ -153,7 +153,7 @@ export class DockFragmentRestService {
         return;
       }
       this.fragmentEntryCountdown.set(current - 1);
-    }, 1000);
+    }, PARKING_CONFIG.FRAGMENT_COUNTDOWN_TICK_MS);
   }
 
   /** 用户在倒计时内主动选择进入碎片时间 */
@@ -206,7 +206,7 @@ export class DockFragmentRestService {
     if (!focusMode) return;
     if (focusingLoad === null) return;
 
-    const TICK_MS = 10_000; // 与 tick interval 一致
+    const TICK_MS = PARKING_CONFIG.REST_REMINDER_TICK_MS;
 
     if (focusingLoad === 'high') {
       const next = this.cumulativeHighLoadMs() + TICK_MS;

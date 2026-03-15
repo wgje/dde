@@ -72,8 +72,8 @@ export class FocusHudWindowService {
 
     try {
       const pipWindow = await controller.requestWindow({
-        width: PARKING_CONFIG.HUD_FULL_MAX_WIDTH_PX + 36,
-        height: PARKING_CONFIG.HUD_FULL_MAX_HEIGHT_PX + 92,
+        width: PARKING_CONFIG.STATUS_MACHINE_PIP_DEFAULT_WIDTH_PX,
+        height: PARKING_CONFIG.STATUS_MACHINE_PIP_DEFAULT_HEIGHT_PX,
         preferInitialWindowPlacement: true,
       });
       this.mountToWindow(pipWindow);
@@ -160,6 +160,7 @@ export class FocusHudWindowService {
 
   private prepareDocumentShell(targetDocument: Document): void {
     targetDocument.body.innerHTML = '';
+    targetDocument.documentElement.style.height = '100%';
     targetDocument.body.style.margin = '0';
     targetDocument.body.style.minHeight = '100vh';
     targetDocument.body.style.background =
@@ -167,7 +168,7 @@ export class FocusHudWindowService {
     targetDocument.body.style.color = 'rgba(241, 245, 249, 0.96)';
     targetDocument.body.style.fontFamily =
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    targetDocument.body.style.overflow = 'hidden';
+    targetDocument.body.style.overflow = 'auto';
   }
 
   private copyStyleSheets(targetDocument: Document): void {

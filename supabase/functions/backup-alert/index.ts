@@ -350,14 +350,15 @@ function createHealthReportAlert(stats: {
 // ===========================================
 
 Deno.serve(async (req: Request) => {
-  // CORS 预检
+  // CORS 预检（内部服务函数，仅允许 service_role 调用）
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
       headers: {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': req.headers.get('origin') || '',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Vary': 'Origin',
       },
     });
   }

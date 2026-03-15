@@ -144,22 +144,11 @@ DROP POLICY IF EXISTS "tasks owner insert" ON public.tasks;
 DROP POLICY IF EXISTS "tasks owner update" ON public.tasks;
 DROP POLICY IF EXISTS "tasks owner delete" ON public.tasks;
 
--- 创建优化后的策略
-CREATE POLICY "tasks_select_optimized" ON public.tasks
-FOR SELECT
-USING (public.user_is_project_owner(project_id));
-
-CREATE POLICY "tasks_insert_optimized" ON public.tasks
-FOR INSERT
-WITH CHECK (public.user_is_project_owner(project_id));
-
-CREATE POLICY "tasks_update_optimized" ON public.tasks
-FOR UPDATE
-USING (public.user_is_project_owner(project_id));
-
-CREATE POLICY "tasks_delete_optimized" ON public.tasks
-FOR DELETE
-USING (public.user_is_project_owner(project_id));
+-- 创建优化后的策略（幂等包装）
+DO $$ BEGIN CREATE POLICY "tasks_select_optimized" ON public.tasks FOR SELECT USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "tasks_insert_optimized" ON public.tasks FOR INSERT WITH CHECK (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "tasks_update_optimized" ON public.tasks FOR UPDATE USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "tasks_delete_optimized" ON public.tasks FOR DELETE USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================
 -- 第 5 部分：优化 connections 表 RLS 策略
@@ -171,22 +160,11 @@ DROP POLICY IF EXISTS "connections owner insert" ON public.connections;
 DROP POLICY IF EXISTS "connections owner update" ON public.connections;
 DROP POLICY IF EXISTS "connections owner delete" ON public.connections;
 
--- 创建优化后的策略
-CREATE POLICY "connections_select_optimized" ON public.connections
-FOR SELECT
-USING (public.user_is_project_owner(project_id));
-
-CREATE POLICY "connections_insert_optimized" ON public.connections
-FOR INSERT
-WITH CHECK (public.user_is_project_owner(project_id));
-
-CREATE POLICY "connections_update_optimized" ON public.connections
-FOR UPDATE
-USING (public.user_is_project_owner(project_id));
-
-CREATE POLICY "connections_delete_optimized" ON public.connections
-FOR DELETE
-USING (public.user_is_project_owner(project_id));
+-- 创建优化后的策略（幂等包装）
+DO $$ BEGIN CREATE POLICY "connections_select_optimized" ON public.connections FOR SELECT USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "connections_insert_optimized" ON public.connections FOR INSERT WITH CHECK (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "connections_update_optimized" ON public.connections FOR UPDATE USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "connections_delete_optimized" ON public.connections FOR DELETE USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================
 -- 第 6 部分：优化 task_tombstones 表 RLS 策略
@@ -196,14 +174,9 @@ USING (public.user_is_project_owner(project_id));
 DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
 DROP POLICY IF EXISTS "task_tombstones_insert_owner" ON public.task_tombstones;
 
--- 创建优化后的策略
-CREATE POLICY "task_tombstones_select_optimized" ON public.task_tombstones
-FOR SELECT TO authenticated
-USING (public.user_is_project_owner(project_id));
-
-CREATE POLICY "task_tombstones_insert_optimized" ON public.task_tombstones
-FOR INSERT TO authenticated
-WITH CHECK (public.user_is_project_owner(project_id));
+-- 创建优化后的策略（幂等包装）
+DO $$ BEGIN CREATE POLICY "task_tombstones_select_optimized" ON public.task_tombstones FOR SELECT TO authenticated USING (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "task_tombstones_insert_optimized" ON public.task_tombstones FOR INSERT TO authenticated WITH CHECK (public.user_is_project_owner(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================
 -- 第 7 部分：优化 connection_tombstones 表 RLS 策略
@@ -213,14 +186,9 @@ WITH CHECK (public.user_is_project_owner(project_id));
 DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;
 DROP POLICY IF EXISTS "connection_tombstones_insert" ON public.connection_tombstones;
 
--- 创建优化后的策略
-CREATE POLICY "connection_tombstones_select_optimized" ON public.connection_tombstones
-FOR SELECT TO authenticated
-USING (public.user_has_project_access(project_id));
-
-CREATE POLICY "connection_tombstones_insert_optimized" ON public.connection_tombstones
-FOR INSERT TO authenticated
-WITH CHECK (public.user_has_project_access(project_id));
+-- 创建优化后的策略（幂等包装）
+DO $$ BEGIN CREATE POLICY "connection_tombstones_select_optimized" ON public.connection_tombstones FOR SELECT TO authenticated USING (public.user_has_project_access(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "connection_tombstones_insert_optimized" ON public.connection_tombstones FOR INSERT TO authenticated WITH CHECK (public.user_has_project_access(project_id)); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================
 -- 第 8 部分：优化 black_box_entries 表 RLS 策略
@@ -232,25 +200,11 @@ DROP POLICY IF EXISTS "black_box_insert_policy" ON public.black_box_entries;
 DROP POLICY IF EXISTS "black_box_update_policy" ON public.black_box_entries;
 DROP POLICY IF EXISTS "black_box_delete_policy" ON public.black_box_entries;
 
--- 创建优化后的策略（使用函数缓存）
-CREATE POLICY "black_box_select_optimized" ON public.black_box_entries
-FOR SELECT
-USING (
-  user_id = public.current_user_id() 
-  OR project_id IN (SELECT public.user_accessible_project_ids())
-);
-
-CREATE POLICY "black_box_insert_optimized" ON public.black_box_entries
-FOR INSERT
-WITH CHECK (user_id = public.current_user_id());
-
-CREATE POLICY "black_box_update_optimized" ON public.black_box_entries
-FOR UPDATE
-USING (user_id = public.current_user_id());
-
-CREATE POLICY "black_box_delete_optimized" ON public.black_box_entries
-FOR DELETE
-USING (user_id = public.current_user_id());
+-- 创建优化后的策略（使用函数缓存，幂等包装）
+DO $$ BEGIN CREATE POLICY "black_box_select_optimized" ON public.black_box_entries FOR SELECT USING (user_id = public.current_user_id() OR project_id IN (SELECT public.user_accessible_project_ids())); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "black_box_insert_optimized" ON public.black_box_entries FOR INSERT WITH CHECK (user_id = public.current_user_id()); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "black_box_update_optimized" ON public.black_box_entries FOR UPDATE USING (user_id = public.current_user_id()); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE POLICY "black_box_delete_optimized" ON public.black_box_entries FOR DELETE USING (user_id = public.current_user_id()); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================
 -- 第 9 部分：创建复合索引以加速常见查询模式

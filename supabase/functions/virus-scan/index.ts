@@ -68,9 +68,14 @@ let currentCorsHeaders: Record<string, string> = {};
  * 根据请求来源返回 CORS 头
  * 只有白名单中的来源才会被允许
  */
+/** Vercel 预览域名项目级前缀（受控模式） */
+const VERCEL_PREVIEW_PREFIX = 'dde-';
+
 function getCorsHeaders(origin: string | null): Record<string, string> {
-  const isAllowed = origin && ALLOWED_ORIGINS.some(allowed => 
-    origin === allowed || origin.endsWith('.vercel.app')
+  const isAllowed = origin && (
+    ALLOWED_ORIGINS.includes(origin) ||
+    // 只允许项目级前缀的 Vercel 预览域名（防止任意 .vercel.app 子域访问）
+    (origin.endsWith('.vercel.app') && origin.includes(`://${VERCEL_PREVIEW_PREFIX}`))
   );
   
   return {

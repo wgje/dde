@@ -156,12 +156,11 @@
       transition:
         transform var(--pk-panel-enter) var(--pk-ease-enter),
         opacity var(--pk-panel-exit) var(--pk-ease-standard);
-      /* vp 缩放保护：停泊坞展开高度不超过视口 55%，防止覆盖主内容 */
-      max-height: calc(55dvh - env(safe-area-inset-bottom, 0px));
+      /* mobile-first：移动端默认高度不超 34dvh，宽度贴合视口 */
+      max-height: calc(34dvh - env(safe-area-inset-bottom, 0px));
       /* 允许 planner popover 向坞栏外侧展开，正文滚动仍由内部容器负责。 */
       overflow: visible;
-      /* 宽度限制：不超过 860px 且不超过内容区宽度（视口 - 侧边栏）再减去左右内边 32px */
-      max-width: min(860px, calc(100vw - var(--dock-sidebar-width, 0px) - 32px));
+      max-width: calc(100vw - 20px);
       /* will-change 已移除：CSS transition 声明足以触发浏览器合成层优化，
          常驻 will-change 白白占用 GPU 显存（尤其移动端） */
     }
@@ -287,8 +286,8 @@
        坞栏卡片 — 悬浮抬升 + 认知负荷侧边色条 · 清新系
        ══════════════════════════════════════════ */
     .dock-card {
-      /* 宽度随视口缩放：手机(≤375px)约144px，平板起固定192px */
-      width: clamp(9rem, calc(50vw - 3.5rem), 12rem);
+      /* mobile-first：移动端卡片宽度 */
+      width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
       transition:
         transform var(--pk-micro-hover) var(--pk-ease-micro),
         box-shadow var(--pk-micro-hover) var(--pk-ease-micro),
@@ -694,14 +693,15 @@
       transition: none !important;
     }
 
-    @media (max-width: 640px) {
+    @media (min-width: 641px) {
       .dock-bar {
-        max-width: calc(100vw - 20px);
-        max-height: calc(34dvh - env(safe-area-inset-bottom, 0px));
+        /* 桌面端：停泊坞展开高度不超过视口 55%，宽度 ≤ 860px */
+        max-width: min(860px, calc(100vw - var(--dock-sidebar-width, 0px) - 32px));
+        max-height: calc(55dvh - env(safe-area-inset-bottom, 0px));
       }
       .dock-card,
       .drop-zone {
-        width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
+        width: clamp(9rem, calc(50vw - 3.5rem), 12rem);
       }
     }
 

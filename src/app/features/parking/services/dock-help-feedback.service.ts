@@ -101,7 +101,7 @@ export class DockHelpFeedbackService implements OnDestroy {
     this.helpNudgeTimer = setTimeout(() => {
       this.showHelpNudge.set(false);
       this.helpNudgeTimer = null;
-    }, 4200);
+    }, PARKING_CONFIG.HELP_NUDGE_AUTO_DISMISS_MS);
   }
 
   // ── Dock action feedback ────────────────────────────────────
@@ -116,7 +116,7 @@ export class DockHelpFeedbackService implements OnDestroy {
     this.dockActionFeedbackTimer = setTimeout(() => {
       this.dockActionFeedback.set(null);
       this.dockActionFeedbackTimer = null;
-    }, 2400);
+    }, PARKING_CONFIG.DOCK_FEEDBACK_AUTO_DISMISS_MS);
   }
 
   // ── Restore hint ────────────────────────────────────────────

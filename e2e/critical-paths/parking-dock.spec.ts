@@ -216,6 +216,28 @@ async function createInlineTaskInFocus(page: Page, times = 1): Promise<void> {
   }
 }
 
+async function seedDockSnapshot(page: Page, snapshot: Record<string, unknown>): Promise<void> {
+  await page.evaluate(async (payload: Record<string, unknown>) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open('keyval-store');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve(req.result);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('keyval', 'readwrite');
+      const store = tx.objectStore('keyval');
+      store.put(payload, 'nanoflow.focus-session.v5.local-user');
+      store.put(payload, 'nanoflow.focus-session.v5.anonymous');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+
+    db.close();
+  }, snapshot);
+}
+
 async function createTextTask(page: Page, title: string) {
   await ensureTextReady(page);
   const createButton = page.locator('app-text-unassigned button').filter({ hasText: '新建' }).first();
@@ -533,6 +555,137 @@ test.describe('ParkingDock V3 critical paths', () => {
     await expect(page.locator('[data-testid="dock-v3-status-machine"]').first()).toContainText(/Secondary-B/, { timeout: 10000 });
   });
 
+  test('status hud should render all four visible states directly when four entries are present', async ({ page }) => {
+    await bootstrapLocalWorkspace(page);
+    await createAndActivateProject(page, `DockHudOverflow-${testHelpers.uniqueId()}`);
+    const nowIso = new Date().toISOString();
+    const waitStartedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+    await seedDockSnapshot(page, {
+      version: 7,
+      entries: [
+        {
+          taskId: 'hud-focus',
+          title: 'HUD Focus',
+          sourceProjectId: null,
+          status: 'focusing',
+          load: 'low',
+          expectedMinutes: 25,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: true,
+          dockedOrder: 0,
+          detail: '',
+          sourceKind: 'dock-created',
+          sourceBlackBoxEntryId: null,
+          inlineArchiveStatus: 'pending',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'hud-wait-a',
+          title: 'HUD Wait A',
+          sourceProjectId: null,
+          status: 'suspended_waiting',
+          load: 'low',
+          expectedMinutes: 15,
+          waitMinutes: 30,
+          waitStartedAt,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 1,
+          detail: '',
+          sourceKind: 'dock-created',
+          sourceBlackBoxEntryId: null,
+          inlineArchiveStatus: 'pending',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'hud-wait-b',
+          title: 'HUD Wait B',
+          sourceProjectId: null,
+          status: 'suspended_waiting',
+          load: 'high',
+          expectedMinutes: 20,
+          waitMinutes: 45,
+          waitStartedAt,
+          lane: 'backup',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 2,
+          detail: '',
+          sourceKind: 'dock-created',
+          sourceBlackBoxEntryId: null,
+          inlineArchiveStatus: 'pending',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'hud-stalled',
+          title: 'HUD Stalled',
+          sourceProjectId: null,
+          status: 'stalled',
+          load: 'low',
+          expectedMinutes: 10,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'backup',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 3,
+          detail: '',
+          sourceKind: 'dock-created',
+          sourceBlackBoxEntryId: null,
+          inlineArchiveStatus: 'pending',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'hud-focus',
+        comboSelectIds: ['hud-focus', 'hud-wait-a'],
+        backupIds: ['hud-wait-b', 'hud-stalled'],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      lastRuleDecision: null,
+      dailyResetDate: '2026-03-15',
+      savedAt: nowIso,
+    });
+
+    await page.reload();
+    await testHelpers.waitForAppReady(page);
+    const localModeBtn = page.locator('[data-testid="local-mode-btn"]').first();
+    if (await localModeBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
+      await localModeBtn.click({ force: true });
+    }
+    if (!(await page.locator('[data-testid="project-shell-main-content"]').first().isVisible({ timeout: 1500 }).catch(() => false))) {
+      await page.locator('[data-testid="project-item"]').first().click({ force: true });
+      await enterProjectWorkspace(page);
+    }
+
+    await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 10000 });
+    const statusHud = page.locator('[data-testid="dock-v3-status-machine"]').first();
+    await expect(statusHud).toContainText('HUD Focus', { timeout: 10000 });
+    await expect(statusHud).toContainText('HUD Wait A', { timeout: 10000 });
+    await expect(statusHud).toContainText('HUD Wait B', { timeout: 10000 });
+    await expect(statusHud).toContainText('HUD Stalled', { timeout: 10000 });
+    await expect(page.locator('[data-testid="dock-v3-status-overflow"]')).toHaveCount(0);
+  });
+
   test('repeated focus task switches should leave no ghost or stuck takeover phase', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
     await createAndActivateProject(page, `DockRepeat-${testHelpers.uniqueId()}`);
@@ -639,26 +792,23 @@ test.describe('ParkingDock V3 critical paths', () => {
       sourceBlackBoxEntryId?: string | null;
     } | null = null;
 
-    for (let i = 0; i < 20; i += 1) {
+    await expect.poll(async () => {
       const snapshot = await readDockSnapshotFromIdb(page);
       const entries = ((snapshot as { entries?: Array<{ sourceProjectId?: string | null; sourceBlackBoxEntryId?: string | null }> })?.entries ?? []);
       sharedEntry = entries.find(entry => typeof entry.sourceBlackBoxEntryId === 'string' && entry.sourceBlackBoxEntryId.length > 0) ?? null;
-      if (sharedEntry) break;
-      await page.waitForTimeout(500);
-    }
+      return sharedEntry;
+    }, { timeout: 10_000, intervals: [500] }).toBeTruthy();
 
-    expect(sharedEntry).toBeTruthy();
     expect(sharedEntry?.sourceProjectId ?? null).toBeNull();
 
     const blackBoxEntryId = sharedEntry?.sourceBlackBoxEntryId;
     expect(blackBoxEntryId).toBeTruthy();
 
     let blackBoxEntry: any | null = null;
-    for (let i = 0; i < 20; i += 1) {
+    await expect.poll(async () => {
       blackBoxEntry = await readBlackBoxEntryFromIdb(page, blackBoxEntryId as string);
-      if (blackBoxEntry) break;
-      await page.waitForTimeout(500);
-    }
+      return blackBoxEntry;
+    }, { timeout: 10_000, intervals: [500] }).toBeTruthy();
 
     expect(blackBoxEntry).toBeTruthy();
     expect((blackBoxEntry as { projectId?: string | null })?.projectId ?? null).toBeNull();

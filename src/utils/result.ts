@@ -63,6 +63,9 @@ export const ErrorCodes = {
   FOCUS_CONSOLE_SAVE_FAILED: 'FOCUS_CONSOLE_SAVE_FAILED',
   FOCUS_CONSOLE_ROUTINE_FAILED: 'FOCUS_CONSOLE_ROUTINE_FAILED',
   FOCUS_CONSOLE_INCREMENT_FAILED: 'FOCUS_CONSOLE_INCREMENT_FAILED',
+  // Dock 快照持久化错误码
+  DOCK_IDB_PERSIST_FAILED: 'DOCK_IDB_PERSIST_FAILED',
+  DOCK_IDB_RESTORE_FAILED: 'DOCK_IDB_RESTORE_FAILED',
 } as const;
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
@@ -123,6 +126,8 @@ export const ErrorMessages: Record<ErrorCode, string> = {
   [ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED]: '保存专注会话失败',
   [ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED]: '日常任务操作失败',
   [ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED]: '完成记录更新失败',
+  [ErrorCodes.DOCK_IDB_PERSIST_FAILED]: '停泊坞快照本地持久化失败',
+  [ErrorCodes.DOCK_IDB_RESTORE_FAILED]: '停泊坞快照本地恢复失败',
 };
 
 /**

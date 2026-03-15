@@ -187,7 +187,7 @@ describe('DockStatusMachineComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('留白期');
   });
 
-  it('should render the same four entries provided by the console-visible source', () => {
+  it('should render the same four entries provided by the console-visible source without overflow folding', () => {
     statusEntries.set([
       {
         taskId: 'A',
@@ -227,6 +227,14 @@ describe('DockStatusMachineComponent', () => {
 
     expect(component.allEntries()).toHaveLength(4);
     expect(fixture.nativeElement.textContent).toContain('4');
+    expect(fixture.nativeElement.textContent).toContain('Focus A');
+    expect(fixture.nativeElement.textContent).toContain('Waiting B');
+    expect(fixture.nativeElement.textContent).toContain('Stalled C');
+    expect(fixture.nativeElement.textContent).toContain('Queued D');
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="dock-v3-status-entry-suspended"]')).toHaveLength(1);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="dock-v3-status-entry-stalled"]')).toHaveLength(1);
+    expect(fixture.nativeElement.querySelectorAll('[data-state="idle"]')).toHaveLength(1);
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-overflow"]')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('第五项');
   });
 });

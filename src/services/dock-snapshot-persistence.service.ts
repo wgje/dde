@@ -5,6 +5,7 @@
  */
 import { Injectable, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { ErrorCodes } from '../utils/result';
 
 import {
   CognitiveLoad,
@@ -65,9 +66,7 @@ export class DockSnapshotPersistenceService {
         return;
       }
       const resolved = snapshotFn();
-      void set(this.localCacheKey(userId), resolved).catch(() => {
-        // Ignore IndexedDB failures.
-      });
+      void this.persistToIdb(this.localCacheKey(userId), resolved);
     };
     this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
   }
@@ -96,14 +95,36 @@ export class DockSnapshotPersistenceService {
         }
       }
       return null;
-    } catch {
-      // eslint-disable-next-line no-restricted-syntax -- IDB 读取失败时安全降级为空状态
+    } catch (err) {
+      this.logger.warn('IDB restore failed', {
+        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+        error: err,
+      });
+      // eslint-disable-next-line no-restricted-syntax -- IDB 读取失败时安全降级为空状态，已通过 logger 上报
       return null;
     }
   }
 
   cancelPendingPersist(): void {
     this.localPersistTimer.cancel();
+  }
+
+  /** IDB 写入（含 1 次重试），失败不阻塞业务流 */
+  private async persistToIdb(key: string, value: DockSnapshot): Promise<void> {
+    const maxRetries = 1;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await set(key, value);
+        return;
+      } catch (err) {
+        if (attempt < maxRetries) continue;
+        this.logger.warn('IDB persist failed after retry', {
+          code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
+          key,
+          error: err,
+        });
+      }
+    }
   }
 
   localCacheKey(userId: string | null): string {
