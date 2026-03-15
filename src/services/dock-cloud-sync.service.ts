@@ -152,8 +152,10 @@ export class DockCloudSyncService {
         this.cloudPullRetryCount = 0;
         return;
       }
-      // 拉取失败后延迟重试（指数退避），避免静默丢失云端数据（离线优先 RetryQueue 语义）
-      const backoffMs = SYNC_CONFIG.DEBOUNCE_DELAY * 2 * Math.pow(2, this.cloudPullRetryCount - 1);
+      // 拉取失败后延迟重试（指数退避 + 随机抖动），避免多客户端同时重试造成雷群效应
+      const baseMs = SYNC_CONFIG.DEBOUNCE_DELAY * 2 * Math.pow(2, this.cloudPullRetryCount - 1);
+      const jitterMs = Math.floor(Math.random() * SYNC_CONFIG.DEBOUNCE_DELAY);
+      const backoffMs = baseMs + jitterMs;
       if (this.cloudPullTimer) clearTimeout(this.cloudPullTimer);
       this.cloudPullTimer = setTimeout(() => {
         this.lastCloudPullAt = 0; // 允许下次立即拉取

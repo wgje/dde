@@ -15,7 +15,6 @@ import {
   DockSessionState,
   DockSourceSection,
   DockSnapshot,
-  DockTaskStatus,
   DockZoneSource,
   FragmentDefenseLevel,
   FragmentEventEntry,
@@ -54,6 +53,7 @@ import { DockInlineCreationService } from './dock-inline-creation.service';
 import { DockEntryFieldService } from './dock-entry-field.service';
 import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
+import { IntervalHandle, TimerHandle } from '../utils/timer-handle';
 import {
   buildConsoleVisibleOrderHint,
   buildOverflowMeta,
@@ -150,28 +150,29 @@ export class DockEngineService {
   readonly fragmentEntryCountdown = computed(() => this.fragmentRest.fragmentEntryCountdown());
 
   /**
-   * 持久化脏标记：聚合所有影响快照持久化的信号为一个递增版本号。
+   * 持久化脏标记：聚合所有影响快照持久化的信号。
    * effect 监听此单一 computed，避免多个信号同时变更时触发多次冗余持久化。
+   * 使用纯函数推导（无副作用），返回依赖信号的引用数组长度作为依赖追踪标记。
    */
-  private readonly persistenceVersion = computed(() => {
+  private readonly persistenceDeps = computed(() => {
     // 读取所有持久化相关信号以建立依赖关系
-    this.entries();
-    this.focusMode();
-    this.dockExpanded();
-    this.muteWaitTone();
-    this.focusScrimOn();
-    this.firstDragIntervened();
-    this.dailySlots();
-    this.suspendChainRootTaskId();
-    this.suspendRecommendationLocked();
-    this.pendingDecision();
-    this.lastRuleDecision();
-    this.dailyResetDate();
-    this.focusSessionContext();
-    // 返回递增版本号，确保 effect 在任意依赖变更时触发
-    return ++this._persistenceCounter;
-  });
-  private _persistenceCounter = 0;
+    const deps = [
+      this.entries(),
+      this.focusMode(),
+      this.dockExpanded(),
+      this.muteWaitTone(),
+      this.focusScrimOn(),
+      this.firstDragIntervened(),
+      this.dailySlots(),
+      this.suspendChainRootTaskId(),
+      this.suspendRecommendationLocked(),
+      this.pendingDecision(),
+      this.lastRuleDecision(),
+      this.dailyResetDate(),
+      this.focusSessionContext(),
+    ];
+    return deps;
+  }, { equal: () => false });
 
   private readonly firstDragIntervened = signal(false);
   private readonly firstMainSelectionWindow = signal<{ taskId: string; expiresAt: number } | null>(null);
@@ -180,22 +181,23 @@ export class DockEngineService {
   private readonly focusSessionContext = signal<{ id: string; startedAt: number } | null>(null);
   private readonly softLimitNoticeShown = signal(false);
 
-  private tickTimer: ReturnType<typeof setInterval> | null = null;
-  private localPersistTimer: ReturnType<typeof setTimeout> | null = null;
-  private firstMainSelectionTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly tickInterval = new IntervalHandle();
+  private readonly localPersist = new TimerHandle();
+  private readonly firstMainSelection = new TimerHandle();
   private switchMaintenanceIdleId: number | null = null;
-  private switchMaintenanceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly switchMaintenanceFallback = new TimerHandle();
   private switchMaintenanceToken = 0;
   private nonCriticalWorkHoldUntil = 0;
   /** 完成操作 FIFO 队列（策划案 §18.1：防止并发 completeTask 竞态） */
   private completionQueue: string[] = [];
   private isProcessingCompletion = false;
-  private completionDrainTimer: ReturnType<typeof setTimeout> | null = null;
-  private highlightClearTimer: ReturnType<typeof setTimeout> | null = null;
-  private audioStopTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly completionDrain = new TimerHandle();
+  private readonly highlightClearTimerRef: { current: ReturnType<typeof setTimeout> | null } = { current: null };
+  private readonly audioStop = new TimerHandle();
 
   private currentSnapshotUserId: string | null = null;
-  private isRestoringSnapshot = false;
+  /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
+  private readonly restoringSnapshot = signal(false);
   private waitEndNotifiedIds = new Set<string>();
   private visibilityListener: (() => void) | null = null;
 
@@ -350,8 +352,6 @@ export class DockEngineService {
   // ---------------------------------------------------------------------------
 
   private initSubServices(): void {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
     this.completionFlow.init({
       entries: this.entries,
       pendingDecision: this.pendingDecision,
@@ -365,7 +365,7 @@ export class DockEngineService {
       focusingEntry: this.focusingEntry,
       focusMode: this.focusMode,
       suspendChainRootTaskId: this.suspendChainRootTaskId,
-      highlightClearTimer: { get current() { return self.highlightClearTimer; }, set current(v) { self.highlightClearTimer = v; } },
+      highlightClearTimer: this.highlightClearTimerRef,
     });
 
     this.cloudSync.init({
@@ -432,7 +432,7 @@ export class DockEngineService {
 
   /** 10 秒一次 tick，配合 CSS transition 平滑过渡（避免 1s 频率导致动画卡顿） */
   private startTickTimer(): void {
-    this.tickTimer = setInterval(() => {
+    this.tickInterval.start(() => {
       this.tick.update(value => value + 1);
       this.checkWaitExpiry();
       this.checkPendingDecisionExpiry();
@@ -447,9 +447,9 @@ export class DockEngineService {
 
   private restoreInitialSnapshot(): void {
     this.currentSnapshotUserId = this.auth.currentUserId();
-    this.isRestoringSnapshot = true;
+    this.restoringSnapshot.set(true);
     void this.restoreLocalSnapshot(this.currentSnapshotUserId).finally(() => {
-      this.isRestoringSnapshot = false;
+      this.restoringSnapshot.set(false);
     });
   }
 
@@ -459,17 +459,17 @@ export class DockEngineService {
       const userId = this.auth.currentUserId();
       if (userId === this.currentSnapshotUserId) return;
       this.currentSnapshotUserId = userId;
-      this.isRestoringSnapshot = true;
+      this.restoringSnapshot.set(true);
       void this.restoreLocalSnapshot(userId).finally(() => {
-        this.isRestoringSnapshot = false;
+        this.restoringSnapshot.set(false);
       });
       if (userId) this.cloudSync.scheduleCloudPull(userId, true);
     });
 
-    // 状态变更时触发本地持久化和云端推送（通过 persistenceVersion 聚合信号，避免冗余触发）
+    // 状态变更时触发本地持久化和云端推送（通过 persistenceDeps 聚合信号，避免冗余触发）
     effect(() => {
-      this.persistenceVersion();
-      if (this.isRestoringSnapshot) return;
+      this.persistenceDeps();
+      if (this.restoringSnapshot()) return;
 
       this.scheduleLocalPersist(null, this.currentSnapshotUserId);
       if (this.currentSnapshotUserId) {
@@ -527,33 +527,18 @@ export class DockEngineService {
   private registerDestroyCleanup(): void {
     this.destroyRef.onDestroy(() => {
       // 合并所有清理逻辑到 DestroyRef（避免 ngOnDestroy + DestroyRef 双注册）
-      if (this.tickTimer) {
-        clearInterval(this.tickTimer);
-        this.tickTimer = null;
-      }
-      if (this.completionDrainTimer) {
-        clearTimeout(this.completionDrainTimer);
-        this.completionDrainTimer = null;
-      }
+      this.tickInterval.stop();
+      this.completionDrain.cancel();
       this.completionQueue.length = 0;
       this.isProcessingCompletion = false;
-      if (this.highlightClearTimer) {
-        clearTimeout(this.highlightClearTimer);
-        this.highlightClearTimer = null;
+      if (this.highlightClearTimerRef.current) {
+        clearTimeout(this.highlightClearTimerRef.current);
+        this.highlightClearTimerRef.current = null;
       }
-      if (this.audioStopTimer) {
-        clearTimeout(this.audioStopTimer);
-        this.audioStopTimer = null;
-      }
-      if (this.localPersistTimer) {
-        clearTimeout(this.localPersistTimer);
-        this.localPersistTimer = null;
-      }
+      this.audioStop.cancel();
+      this.localPersist.cancel();
       this.cloudSync.cancelTimers();
-      if (this.firstMainSelectionTimer) {
-        clearTimeout(this.firstMainSelectionTimer);
-        this.firstMainSelectionTimer = null;
-      }
+      this.firstMainSelection.cancel();
       this.fragmentRest.resetAll();
       this.cancelSwitchMaintenance();
       if (this.visibilityListener && typeof document !== 'undefined') {
@@ -738,20 +723,22 @@ export class DockEngineService {
     this.entries.update(prev =>
       prev.map(entry => {
         if (entry.taskId === taskId) {
-          return {
+          const updated: DockEntry = {
             ...entry,
-            status: 'focusing' as DockTaskStatus,
+            status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,
             systemSelected: false,
             recommendationLocked: false,
           };
+          return updated;
         }
         if (currentFocusId && entry.taskId === currentFocusId) {
-          return {
+          const updated: DockEntry = {
             ...entry,
-            status: 'stalled' as DockTaskStatus,
+            status: 'stalled',
           };
+          return updated;
         }
         return entry;
       }),
@@ -786,17 +773,17 @@ export class DockEngineService {
     // 安全检查：只淘汰仍在 console 中且非 focusing/主任务的卡片
     if (entry.status === 'focusing' || entry.isMain) return;
     this.entries.update(prev =>
-      prev.map(e =>
-        e.taskId === taskId
-          ? {
-              ...e,
-              status: 'pending_start' as DockTaskStatus,
-              lane: 'backup' as DockLane,
-              zoneSource: 'auto' as DockZoneSource,
-              relationReason: 'auto:evicted-from-console',
-            }
-          : e,
-      ),
+      prev.map(e => {
+        if (e.taskId !== taskId) return e;
+        const evicted: DockEntry = {
+          ...e,
+          status: 'pending_start',
+          lane: 'backup',
+          zoneSource: 'auto',
+          relationReason: 'auto:evicted-from-console',
+        };
+        return evicted;
+      }),
     );
     this.pendingRadarEviction.set(null);
     // 淘汰实际生效后触发雷达区返回入场动画
@@ -821,16 +808,17 @@ export class DockEngineService {
     this.entries.update(prev =>
       prev.map(entry => {
         if (entry.taskId === taskId) {
-          return {
+          const promoted: DockEntry = {
             ...entry,
             isMain: true,
-            status: 'focusing' as DockTaskStatus,
+            status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,
             systemSelected: false,
             recommendationLocked: false,
             manualMainSelected: true,
           };
+          return promoted;
         }
         if (entry.taskId === currentFocusId) {
           return {
@@ -1027,8 +1015,14 @@ export class DockEngineService {
     }
   }
 
+  private static readonly MAX_COMPLETION_QUEUE_DEPTH = 50;
+
   completeTask(taskId: string): void {
     // FIFO 队列序列化（策划案 §18.1）：防止快速连续完成导致竞态
+    if (this.completionQueue.length >= DockEngineService.MAX_COMPLETION_QUEUE_DEPTH) {
+      this.logger.warn('完成队列已满，丢弃新请求', { taskId, queueSize: this.completionQueue.length });
+      return;
+    }
     this.completionQueue.push(taskId);
     if (this.isProcessingCompletion) return;
     this.drainCompletionQueue();
@@ -1049,10 +1043,7 @@ export class DockEngineService {
     }
     // 300ms 间隔处理下一个，给动画和信号传播留余量
     if (this.completionQueue.length > 0) {
-      this.completionDrainTimer = setTimeout(() => {
-        this.completionDrainTimer = null;
-        this.drainCompletionQueue();
-      }, 300);
+      this.completionDrain.schedule(() => this.drainCompletionQueue(), 300);
     } else {
       this.isProcessingCompletion = false;
     }
@@ -1075,17 +1066,17 @@ export class DockEngineService {
     }
 
     this.entries.update(prev =>
-      prev.map(item =>
-        item.taskId === taskId
-          ? {
-              ...item,
-              status: 'completed' as DockTaskStatus,
-              isMain: false,
-              systemSelected: false,
-              recommendedScore: null,
-            }
-          : item,
-      ),
+      prev.map(item => {
+        if (item.taskId !== taskId) return item;
+        const completed: DockEntry = {
+          ...item,
+          status: 'completed',
+          isMain: false,
+          systemSelected: false,
+          recommendedScore: null,
+        };
+        return completed;
+      }),
     );
 
     const task = this.taskStore.getTask(taskId);
@@ -1115,18 +1106,18 @@ export class DockEngineService {
     const firstSuspendInChain = !this.suspendRecommendationLocked();
 
     this.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              status: 'suspended_waiting' as DockTaskStatus,
-              waitMinutes: normalizedWait,
-              waitStartedAt: new Date().toISOString(),
-              isMain: entry.isMain,
-              systemSelected: false,
-            }
-          : entry,
-      ),
+      prev.map(entry => {
+        if (entry.taskId !== taskId) return entry;
+        const suspended: DockEntry = {
+          ...entry,
+          status: 'suspended_waiting',
+          waitMinutes: normalizedWait,
+          waitStartedAt: new Date().toISOString(),
+          isMain: entry.isMain,
+          systemSelected: false,
+        };
+        return suspended;
+      }),
     );
     this.taskSync.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
 
@@ -1203,16 +1194,17 @@ export class DockEngineService {
       let next = prev.map(entry => {
         if (entry.taskId === taskId) {
           changed = true;
-          return {
+          const focused: DockEntry = {
             ...entry,
             isMain: entry.isMain,
-            status: 'focusing' as DockTaskStatus,
+            status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,
             systemSelected: false,
             recommendationLocked: false,
             manualMainSelected: entry.manualMainSelected,
           };
+          return focused;
         }
         if (currentFocusId && entry.taskId === currentFocusId) {
           const backgroundStatus = this.completionFlow.deriveBackgroundStatus(entry, target, currentFocus);
@@ -1484,7 +1476,7 @@ export class DockEngineService {
       normalized.session.mainTaskId,
     );
 
-    this.isRestoringSnapshot = true;
+    this.restoringSnapshot.set(true);
     this.entries.set(recoveredWithMain);
     this.consoleVisibleOrderHint.set([]);
     this.focusMode.set(normalized.focusMode);
@@ -1520,7 +1512,7 @@ export class DockEngineService {
     this.highLoadCounter.set(normalized.session.highLoadCounter ?? { count: 0, windowStartAt: 0 });
     this.burnoutTriggeredAt.set(normalized.session.burnoutTriggeredAt ?? null);
     this.rebalanceAutoZones();
-    this.isRestoringSnapshot = false;
+    this.restoringSnapshot.set(false);
     this.refreshSuspendRecommendationLock();
     // 恢复快照后立即检查过期等待（策划案：跨天恢复不等 10s tick）
     this.checkWaitExpiry();
@@ -1569,7 +1561,6 @@ export class DockEngineService {
     const execute = () => {
       if (token !== this.switchMaintenanceToken) return;
       this.switchMaintenanceIdleId = null;
-      this.switchMaintenanceFallbackTimer = null;
       this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
       this.refreshSuspendRecommendationLock();
     };
@@ -1578,7 +1569,7 @@ export class DockEngineService {
       if (token !== this.switchMaintenanceToken) return;
       const holdDelay = this.getNonCriticalHoldDelay();
       if (holdDelay > 0) {
-        this.switchMaintenanceFallbackTimer = setTimeout(schedule, holdDelay);
+        this.switchMaintenanceFallback.schedule(schedule, holdDelay);
         return;
       }
 
@@ -1592,7 +1583,7 @@ export class DockEngineService {
       if (typeof g.requestIdleCallback === 'function') {
         this.switchMaintenanceIdleId = g.requestIdleCallback(() => execute(), { timeout: 120 });
       } else {
-        this.switchMaintenanceFallbackTimer = setTimeout(execute, 0);
+        this.switchMaintenanceFallback.schedule(execute, 0);
       }
     };
 
@@ -1611,10 +1602,7 @@ export class DockEngineService {
     }
     this.switchMaintenanceIdleId = null;
 
-    if (this.switchMaintenanceFallbackTimer) {
-      clearTimeout(this.switchMaintenanceFallbackTimer);
-      this.switchMaintenanceFallbackTimer = null;
-    }
+    this.switchMaintenanceFallback.cancel();
   }
 
   private buildNormalizeContext(): SnapshotNormalizeContext {
@@ -1637,17 +1625,14 @@ export class DockEngineService {
     this.clearFirstMainSelectionWindow();
     const expiresAt = Date.now() + PARKING_CONFIG.FIRST_MAIN_OVERRIDE_WINDOW_MS;
     this.firstMainSelectionWindow.set({ taskId, expiresAt });
-    this.firstMainSelectionTimer = setTimeout(() => {
-      this.firstMainSelectionTimer = null;
-      this.firstMainSelectionWindow.set(null);
-    }, PARKING_CONFIG.FIRST_MAIN_OVERRIDE_WINDOW_MS);
+    this.firstMainSelection.schedule(
+      () => this.firstMainSelectionWindow.set(null),
+      PARKING_CONFIG.FIRST_MAIN_OVERRIDE_WINDOW_MS,
+    );
   }
 
   private clearFirstMainSelectionWindow(): void {
-    if (this.firstMainSelectionTimer) {
-      clearTimeout(this.firstMainSelectionTimer);
-      this.firstMainSelectionTimer = null;
-    }
+    this.firstMainSelection.cancel();
     this.firstMainSelectionWindow.set(null);
   }
 
@@ -1750,7 +1735,8 @@ export class DockEngineService {
           this.waitEndNotifiedIds.add(entry.taskId);
           shouldPlaySound = true;
         }
-        next[index] = { ...entry, status: 'wait_finished' as DockTaskStatus };
+        const finished: DockEntry = { ...entry, status: 'wait_finished' };
+        next[index] = finished;
       }
       return changed ? next : prev;
     });
@@ -1783,10 +1769,20 @@ export class DockEngineService {
     this.completionFlow.enterFragmentPhase('tight-blank 超时，自动进入留白期', pending.rootTaskId, pending.rootRemainingMinutes);
   }
 
+  // 复用单个 AudioContext 实例，避免浏览器限制和不必要的开销
+  private sharedAudioCtx: AudioContext | null = null;
+
+  private getAudioContext(): AudioContext {
+    if (!this.sharedAudioCtx || this.sharedAudioCtx.state === 'closed') {
+      this.sharedAudioCtx = new AudioContext();
+    }
+    return this.sharedAudioCtx;
+  }
+
   private playWaitEndSound(): void {
     if (this.muteWaitTone()) return;
     try {
-      const audio = new AudioContext();
+      const audio = this.getAudioContext();
       const oscillator = audio.createOscillator();
       const gain = audio.createGain();
       oscillator.connect(gain);
@@ -1794,11 +1790,10 @@ export class DockEngineService {
       oscillator.frequency.value = PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_TONE_HZ;
       gain.gain.value = 0.08;
       oscillator.start();
-      this.audioStopTimer = setTimeout(() => {
-        this.audioStopTimer = null;
-        oscillator.stop();
-        void audio.close();
-      }, PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_DURATION_MS + 20);
+      this.audioStop.schedule(
+        () => oscillator.stop(),
+        PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_DURATION_MS + 20,
+      );
     } catch {
       // Ignore audio failures.
     }
@@ -1810,11 +1805,6 @@ export class DockEngineService {
       userId,
       () => this.getNonCriticalHoldDelay(),
     );
-  }
-
-  /** 保留内部委托，供 spec 通过 (service as any).todayDateKey() 访问 */
-  private todayDateKey(now?: Date): string {
-    return this.dailySlotService.todayDateKey(now);
   }
 
   private async restoreLocalSnapshot(userId: string | null): Promise<void> {

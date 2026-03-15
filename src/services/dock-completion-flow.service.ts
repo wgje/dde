@@ -642,17 +642,18 @@ export class DockCompletionFlowService {
       const hasOtherMaster = prev.some(
         entry => entry.taskId !== taskId && entry.status !== 'completed' && entry.isMain,
       );
-      return prev.map(entry => {
+       return prev.map(entry => {
         if (entry.taskId === taskId) {
-          return {
+          const focused: DockEntry = {
             ...entry,
             isMain: entry.isMain || !hasOtherMaster,
-            status: 'focusing' as DockTaskStatus,
+            status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,
             systemSelected: false,
             recommendationLocked: false,
           };
+          return focused;
         }
         if (currentFocusId && entry.taskId === currentFocusId) {
           return {

@@ -13,6 +13,7 @@ import {
   DockEntry,
   DockPendingDecision,
   DockRuleDecision,
+  DockRuleDecisionType,
   DockSessionState,
   DockSnapshot,
   DockSourceSection,
@@ -140,12 +141,13 @@ export class DockSnapshotPersistenceService {
       if (!isLegacyManualCombo) return entry;
 
       changed = true;
-      return {
+      const migrated: DockEntry = {
         ...entry,
-        lane: 'backup' as DockLane,
+        lane: 'backup',
         relationScore: 20,
         relationReason: 'manual:default-backup',
       };
+      return migrated;
     });
 
     return changed ? next : entries;
@@ -357,10 +359,19 @@ export class DockSnapshotPersistenceService {
     };
   }
 
+  private static readonly VALID_DECISION_TYPES: ReadonlySet<DockRuleDecisionType> = new Set([
+    'first_suspend_recommendation',
+    'completion_followup',
+    'pending_decision',
+    'fragment_phase',
+    'idle_promote',
+  ]);
+
   normalizeRuleDecision(raw: unknown): DockRuleDecision | null {
     if (!raw || typeof raw !== 'object') return null;
     const source = raw as Partial<DockRuleDecision>;
     if (!source.type || typeof source.type !== 'string') return null;
+    if (!DockSnapshotPersistenceService.VALID_DECISION_TYPES.has(source.type as DockRuleDecisionType)) return null;
     const reason =
       typeof source.reason === 'string' && source.reason
         ? source.reason
@@ -369,7 +380,7 @@ export class DockSnapshotPersistenceService {
       ? source.recommendedTaskIds.filter((item): item is string => typeof item === 'string')
       : [];
     return {
-      type: source.type as DockRuleDecision['type'],
+      type: source.type as DockRuleDecisionType,
       reason,
       rootTaskId: typeof source.rootTaskId === 'string' ? source.rootTaskId : undefined,
       recommendedTaskIds,

@@ -32,6 +32,7 @@ import {
   DockSourceSection,
 } from '../../../models/parking-dock';
 import { readTaskDragPayload, hasTaskDragTypes } from '../../../utils/task-drag-payload';
+import { TimerHandle } from '../../../utils/timer-handle';
 import {
   buildFocusTransition,
   createFlipGhostState,
@@ -177,6 +178,9 @@ export class ParkingDockComponent implements OnDestroy {
   );
   readonly canUseInlineDockCreate = computed(
     () => this.canMutateDock() && !(this.engine.focusMode() && this.engine.focusScrimOn()),
+  );
+  readonly showInlineDockCreate = computed(
+    () => !this.engine.focusMode() || !this.engine.focusScrimOn(),
   );
   readonly canCreateBackupTask = computed(() => this.canMutateDock());
   readonly canUsePlannerQuickEdit = computed(() => this.canMutateDock());
@@ -363,19 +367,20 @@ export class ParkingDockComponent implements OnDestroy {
 
   private touchStartY = 0;
   private readonly plannerPanel = viewChild<ElementRef<HTMLElement>>('plannerPanel');
+  private readonly consoleStack = viewChild(DockConsoleStackComponent);
   private touchTaskId: string | null = null;
-  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
-  private flipTimer: ReturnType<typeof setTimeout> | null = null;
-  private dropRejectResetTimer: ReturnType<typeof setTimeout> | null = null;
-  private semicircleDragExpandTimer: ReturnType<typeof setTimeout> | null = null;
-  private semicircleAutoCollapseTimer: ReturnType<typeof setTimeout> | null = null;
-  private restoreHintTimer: ReturnType<typeof setTimeout> | null = null;
-  private helpNudgeTimer: ReturnType<typeof setTimeout> | null = null;
-  private dockActionFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly longPress = new TimerHandle();
+  private readonly flip = new TimerHandle();
+  private readonly dropRejectReset = new TimerHandle();
+  private readonly semicircleDragExpand = new TimerHandle();
+  private readonly semicircleAutoCollapse = new TimerHandle();
+  private readonly restoreHint = new TimerHandle();
+  private readonly helpNudge = new TimerHandle();
+  private readonly dockFeedback = new TimerHandle();
   private hudDragPointerId: number | null = null;
   private hudDragOffset: { x: number; y: number } | null = null;
   private draggingDockTaskId: string | null = null;
-  private recentlyDockedTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly recentlyDocked = new TimerHandle();
   private helpNudgeShownOnce = false;
 
   constructor() {
@@ -393,6 +398,12 @@ export class ParkingDockComponent implements OnDestroy {
       if (!this.plannerQuickEditTaskId()) return;
       if (this.plannerActiveEntry()) return;
       this.closePlannerQuickEdit(false);
+    });
+
+    effect(() => {
+      if (this.showInlineDockCreate()) return;
+      if (!this.showNewTaskForm()) return;
+      this.showNewTaskForm.set(false);
     });
   }
 
@@ -453,10 +464,8 @@ export class ParkingDockComponent implements OnDestroy {
       event.preventDefault();
       this.engine.setFocusScrim(false);
       this.showRestoreHint.set(true);
-      if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
-      this.restoreHintTimer = setTimeout(() => {
+      this.restoreHint.schedule(() => {
         this.showRestoreHint.set(false);
-        this.restoreHintTimer = null;
       }, PARKING_CONFIG.DOCK_EXIT_CONFIRM_RESTORE_HINT_MS);
       return;
     }
@@ -525,15 +534,15 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
-    if (this.flipTimer) clearTimeout(this.flipTimer);
-    if (this.dropRejectResetTimer) clearTimeout(this.dropRejectResetTimer);
-    if (this.semicircleDragExpandTimer) clearTimeout(this.semicircleDragExpandTimer);
-    if (this.semicircleAutoCollapseTimer) clearTimeout(this.semicircleAutoCollapseTimer);
-    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
-    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
-    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
-    if (this.recentlyDockedTimer) clearTimeout(this.recentlyDockedTimer);
+    this.longPress.cancel();
+    this.flip.cancel();
+    this.dropRejectReset.cancel();
+    this.semicircleDragExpand.cancel();
+    this.semicircleAutoCollapse.cancel();
+    this.restoreHint.cancel();
+    this.helpNudge.cancel();
+    this.dockFeedback.cancel();
+    this.recentlyDocked.cancel();
     this.persistHudPosition();
     this.transitionPerformanceTierLock.set(null);
     this.engine.endFocusTransition();
@@ -551,10 +560,7 @@ export class ParkingDockComponent implements OnDestroy {
     this.engine.setDockExpanded(next);
     if (next) {
       this.semicircleHoverExpanded.set(true);
-      if (this.semicircleAutoCollapseTimer) {
-        clearTimeout(this.semicircleAutoCollapseTimer);
-        this.semicircleAutoCollapseTimer = null;
-      }
+      this.semicircleAutoCollapse.cancel();
       return;
     }
     this.plannerQuickEditTaskId.set(null);
@@ -564,10 +570,7 @@ export class ParkingDockComponent implements OnDestroy {
   onSemicircleMouseEnter(): void {
     if (this.gateActive()) return;
     this.semicircleHoverExpanded.set(true);
-    if (this.semicircleAutoCollapseTimer) {
-      clearTimeout(this.semicircleAutoCollapseTimer);
-      this.semicircleAutoCollapseTimer = null;
-    }
+    this.semicircleAutoCollapse.cancel();
   }
 
   onSemicircleMouseLeave(): void {
@@ -801,12 +804,8 @@ export class ParkingDockComponent implements OnDestroy {
 
   private markRecentlyDocked(taskId: string): void {
     this.recentlyDockedTaskId.set(taskId);
-    if (this.recentlyDockedTimer) {
-      clearTimeout(this.recentlyDockedTimer);
-    }
-    this.recentlyDockedTimer = setTimeout(() => {
+    this.recentlyDocked.schedule(() => {
       this.recentlyDockedTaskId.set(null);
-      this.recentlyDockedTimer = null;
     }, 3000);
 
     this.plannerQuickEditTaskId.update(current => (current === taskId ? null : current));
@@ -846,8 +845,12 @@ export class ParkingDockComponent implements OnDestroy {
     if (this.isDockSelectionBlocked()) return;
     const entry = this.engine.orderedDockEntries().find(item => item.taskId === taskId) ?? null;
     if (!entry) return;
+    const currentFrontTaskId = this.engine.focusMode()
+      ? (this.engine.focusingEntry()?.taskId ?? null)
+      : (this.engine.orderedDockEntries().find(item => item.isMain)?.taskId ?? null);
 
-    if (!this.firstMainSelectionPending() && entry.isMain) {
+    // 前台判定要看当前 C 位，而不是是否主任务；主任务在专注中可能暂时退居后台。
+    if (!this.firstMainSelectionPending() && currentFrontTaskId === taskId) {
       if (this.dockSecondaryRailActive()) {
         this.showDockFeedback(`当前已在前台：${entry.title}`, 'info');
       }
@@ -912,8 +915,7 @@ export class ParkingDockComponent implements OnDestroy {
     if (!this.canReorderDockCards()) return;
     this.touchStartY = event.touches?.[0]?.clientY ?? 0;
     this.touchTaskId = taskId;
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
-    this.longPressTimer = setTimeout(() => {
+    this.longPress.schedule(() => {
       this.touchTaskId = taskId;
     }, 500);
   }
@@ -929,10 +931,7 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   onTouchEnd(): void {
-    if (this.longPressTimer) {
-      clearTimeout(this.longPressTimer);
-      this.longPressTimer = null;
-    }
+    this.longPress.cancel();
     this.touchTaskId = null;
   }
 
@@ -1083,10 +1082,8 @@ export class ParkingDockComponent implements OnDestroy {
 
   private showRestoreHintToast(): void {
     this.showRestoreHint.set(true);
-    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
-    this.restoreHintTimer = setTimeout(() => {
+    this.restoreHint.schedule(() => {
       this.showRestoreHint.set(false);
-      this.restoreHintTimer = null;
     }, PARKING_CONFIG.DOCK_EXIT_CONFIRM_RESTORE_HINT_MS);
   }
 
@@ -1094,19 +1091,15 @@ export class ParkingDockComponent implements OnDestroy {
     if (this.helpNudgeShownOnce) return;
     this.helpNudgeShownOnce = true;
     this.showHelpNudge.set(true);
-    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
-    this.helpNudgeTimer = setTimeout(() => {
+    this.helpNudge.schedule(() => {
       this.showHelpNudge.set(false);
-      this.helpNudgeTimer = null;
     }, 4200);
   }
 
   private showDockFeedback(message: string, tone: DockActionFeedback['tone']): void {
     this.dockActionFeedback.set({ message, tone });
-    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
-    this.dockActionFeedbackTimer = setTimeout(() => {
+    this.dockFeedback.schedule(() => {
       this.dockActionFeedback.set(null);
-      this.dockActionFeedbackTimer = null;
     }, 2400);
   }
 
@@ -1116,8 +1109,7 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   private hasVisibleWaitMenu(): boolean {
-    if (typeof document === 'undefined') return false;
-    return Boolean(document.querySelector('[data-testid="dock-v3-wait-menu"].visible'));
+    return this.consoleStack()?.waitPresetTaskId() != null;
   }
 
   /**
@@ -1132,42 +1124,30 @@ export class ParkingDockComponent implements OnDestroy {
   private triggerDropReject(): void {
     this.dropState.set('reject');
     this.scheduleSemicircleAutoCollapse();
-    if (this.dropRejectResetTimer) {
-      clearTimeout(this.dropRejectResetTimer);
-    }
-    this.dropRejectResetTimer = setTimeout(() => {
+    this.dropRejectReset.schedule(() => {
       this.dropState.set('idle');
-      this.dropRejectResetTimer = null;
     }, PARKING_CONFIG.DOCK_DROP_REJECT_RESET_MS);
   }
 
   private scheduleSemicircleDragExpand(): void {
     if (this.semicircleExpanded()) return;
-    if (this.semicircleDragExpandTimer) return;
-    this.semicircleDragExpandTimer = setTimeout(() => {
+    if (this.semicircleDragExpand.active) return;
+    this.semicircleDragExpand.schedule(() => {
       this.semicircleHoverExpanded.set(true);
       // 拖拽悬停触发展开坞栏面板，使 drop-zone 可触达
       this.engine.setDockExpanded(true);
-      this.semicircleDragExpandTimer = null;
       this.scheduleSemicircleAutoCollapse();
     }, PARKING_CONFIG.DOCK_SEMICIRCLE_DRAG_EXPAND_DELAY_MS);
   }
 
   private scheduleSemicircleAutoCollapse(): void {
-    if (this.semicircleDragExpandTimer) {
-      clearTimeout(this.semicircleDragExpandTimer);
-      this.semicircleDragExpandTimer = null;
-    }
-    if (this.semicircleAutoCollapseTimer) {
-      clearTimeout(this.semicircleAutoCollapseTimer);
-      this.semicircleAutoCollapseTimer = null;
-    }
+    this.semicircleDragExpand.cancel();
+    this.semicircleAutoCollapse.cancel();
     if (this.dockExpanded()) return;
-    this.semicircleAutoCollapseTimer = setTimeout(() => {
+    this.semicircleAutoCollapse.schedule(() => {
       if (!this.dockExpanded()) {
         this.semicircleHoverExpanded.set(false);
       }
-      this.semicircleAutoCollapseTimer = null;
     }, PARKING_CONFIG.DOCK_SEMICIRCLE_AUTO_COLLAPSE_MS);
   }
 
@@ -1211,13 +1191,11 @@ export class ParkingDockComponent implements OnDestroy {
       this.engine.toggleFocusMode();
     });
 
-    this.clearFlipTimer();
-    this.flipTimer = setTimeout(() => {
+    this.flip.schedule(() => {
       const current = this.engine.focusTransition();
       if (current?.phase === 'entering') {
         this.finalizeEnterFocusTransition(current);
       }
-      this.flipTimer = null;
     }, transition.durationMs!);
   }
 
@@ -1239,18 +1217,16 @@ export class ParkingDockComponent implements OnDestroy {
       this.engine.toggleFocusMode();
     });
 
-    this.clearFlipTimer();
-    this.flipTimer = setTimeout(() => {
+    this.flip.schedule(() => {
       const current = this.engine.focusTransition();
       if (current?.phase === 'exiting') {
         this.finalizeExitFocusTransition();
       }
-      this.flipTimer = null;
     }, transition.durationMs!);
   }
 
   private finalizeEnterFocusTransition(transition: DockFocusTransitionState): void {
-    this.clearFlipTimer();
+    this.flip.cancel();
     this.engine.beginFocusTransition({
       ...transition,
       phase: 'focused',
@@ -1260,7 +1236,7 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   private finalizeExitFocusTransition(): void {
-    this.clearFlipTimer();
+    this.flip.cancel();
     this.engine.endFocusTransition();
     this.clearFlipGhost();
     this.transitionPerformanceTierLock.set(null);
@@ -1274,12 +1250,6 @@ export class ParkingDockComponent implements OnDestroy {
     this.flipGhostActive.set(false);
     // 单帧 rAF：让幽灵元素先渲染到初始位置，下一帧激活 CSS transition
     requestAnimationFrame(() => this.flipGhostActive.set(true));
-  }
-
-  private clearFlipTimer(): void {
-    if (!this.flipTimer) return;
-    clearTimeout(this.flipTimer);
-    this.flipTimer = null;
   }
 
   private clearFlipGhost(): void {

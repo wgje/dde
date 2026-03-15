@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockEngineService } from './dock-engine.service';
+import { DockDailySlotService } from './dock-daily-slot.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { TaskStore, SimpleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
@@ -223,7 +224,7 @@ describe('DockEngineService', () => {
   });
 
   afterEach(() => {
-    service.ngOnDestroy();
+    TestBed.resetTestingModule();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
   });
@@ -1417,7 +1418,7 @@ describe('DockEngineService', () => {
   });
 
   it('holdNonCriticalWork should defer cloud push timer', () => {
-    (service as { isRestoringSnapshot: boolean }).isRestoringSnapshot = false;
+    (service as unknown as { restoringSnapshot: { set: (v: boolean) => void } }).restoringSnapshot.set(false);
     mockActionQueue.enqueue.mockClear();
 
     service.holdNonCriticalWork(2600);
@@ -2129,9 +2130,9 @@ describe('DockEngineService', () => {
   it('todayDateKey should honor routine reset hour preference', () => {
     mockFocusPreferenceService.update({ routineResetHourLocal: 5 });
 
-    // TODO(L-19): Consider exposing via protected method or test harness
-    expect((service as any).todayDateKey(new Date('2026-03-06T04:59:00'))).toBe('2026-03-05');
-    expect((service as any).todayDateKey(new Date('2026-03-06T05:00:00'))).toBe('2026-03-06');
+    const dailySlot = TestBed.inject(DockDailySlotService);
+    expect(dailySlot.todayDateKey(new Date('2026-03-06T04:59:00'))).toBe('2026-03-05');
+    expect(dailySlot.todayDateKey(new Date('2026-03-06T05:00:00'))).toBe('2026-03-06');
   });
 
   it('completeDailySlot should enqueue UUID-based routine completion mutation', () => {
