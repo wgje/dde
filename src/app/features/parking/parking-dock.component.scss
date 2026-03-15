@@ -73,12 +73,6 @@
       0% {
         transform: translate3d(-1.2%, -0.8%, 0) scale(var(--scene-base-scale, 1.03));
       }
-      33% {
-        transform: translate3d(0.4%, 0.5%, 0) scale(calc(var(--scene-base-scale, 1.03) + 0.008));
-      }
-      66% {
-        transform: translate3d(-0.3%, -0.3%, 0) scale(calc(var(--scene-base-scale, 1.03) + 0.004));
-      }
       100% {
         transform: translate3d(1.1%, -0.4%, 0) scale(var(--scene-base-scale, 1.03));
       }
@@ -88,17 +82,9 @@
         opacity: 0.84;
         transform: scale(var(--scene-bloom-scale, 1.05));
       }
-      25% {
-        opacity: 0.92;
-        transform: scale(calc(var(--scene-bloom-scale, 1.05) + 0.008));
-      }
       50% {
         opacity: 1;
         transform: scale(calc(var(--scene-bloom-scale, 1.05) + 0.014));
-      }
-      75% {
-        opacity: 0.94;
-        transform: scale(calc(var(--scene-bloom-scale, 1.05) + 0.006));
       }
     }
     @keyframes focusSceneGrainShift {
@@ -250,23 +236,23 @@
         0 -8px 24px rgba(0, 0, 0, 0.24),
         0 -1px 4px rgba(99, 102, 241, 0.08);
     }
-    .dock-semicircle:hover {
+    .dock-semicircle:hover,
+    .dock-semicircle.expanded,
+    .dock-semicircle.drag-active {
       opacity: 1;
       transform: translateX(-50%) translateY(0) scale(1, 1);
+    }
+    .dock-semicircle:hover {
       background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96));
       box-shadow:
         0 -12px 28px rgba(0, 0, 0, 0.3),
         0 -2px 10px rgba(99, 102, 241, 0.14);
     }
     .dock-semicircle.expanded {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0) scale(1, 1);
       background: linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.94));
     }
     /* 拖拽悬停反馈：任务块拖过半圆时提供明显的视觉提示 */
     .dock-semicircle.drag-active {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0) scale(1, 1);
       background: linear-gradient(180deg, rgba(99, 102, 241, 0.25), rgba(30, 41, 59, 0.95));
       box-shadow:
         0 -12px 30px rgba(0, 0, 0, 0.3),
@@ -451,7 +437,8 @@
       background: rgba(99, 102, 241, 0.06);
       color: rgba(165, 180, 252, 0.9);
     }
-    .drop-zone.active {
+    .drop-zone.active,
+    .drop-zone.alt-drag-hover {
       border-color: rgba(99, 102, 241, 0.6);
       background: rgba(99, 102, 241, 0.08);
       box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.06);
@@ -469,13 +456,6 @@
       background: rgba(239, 68, 68, 0.12);
       color: rgba(254, 202, 202, 0.95);
       animation: dropRejectShake var(--dock-drop-reject-shake-ms, 180ms) ease-in-out;
-    }
-    /* Alt+拖拽悬停反馈（从 GoJS 画布指针跟踪方式拖拽，不经过 HTML5 DnD） */
-    .drop-zone.alt-drag-hover {
-      border-color: rgba(99, 102, 241, 0.6);
-      background: rgba(99, 102, 241, 0.08);
-      box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.06);
-      transform: translateY(-1px);
     }
 
     /* ══════════════════════════════════════════
@@ -611,20 +591,6 @@
       transform: translateY(-2px);
     }
 
-    @keyframes blankPeriodRise {
-      0% {
-        opacity: 0;
-        transform: translateX(-50%) translateY(-8px) scale(0.985);
-      }
-      50% {
-        opacity: 0.65;
-        transform: translateX(-50%) translateY(-1px) scale(0.998);
-      }
-      100% {
-        opacity: 1;
-        transform: translateX(-50%) translateY(0) scale(1);
-      }
-    }
     @keyframes blankPeriodBreathe {
       0%, 100% {
         opacity: 0.92;
@@ -646,7 +612,7 @@
         inset 0 1px 0 rgba(255, 255, 255, 0.06);
     }
     .blank-period-enter {
-      animation: blankPeriodRise var(--pk-focus-enter) var(--pk-ease-enter);
+      animation: decisionSlideIn var(--pk-focus-enter) var(--pk-ease-enter);
     }
     .blank-period-icon {
       width: 40px;
@@ -669,23 +635,9 @@
       background: rgba(251, 191, 36, 0.08);
     }
 
-    @keyframes hudSettle {
-      0% {
-        opacity: 0;
-        transform: translateY(-6px) scale(0.985);
-      }
-      50% {
-        opacity: 0.6;
-        transform: translateY(-1px) scale(0.998);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
     .status-machine-shell {
       display: inline-flex;
-      animation: hudSettle var(--pk-hud-enter) var(--pk-ease-enter) var(--pk-focus-scene-entry-hud) both;
+      animation: slideDown var(--pk-hud-enter) var(--pk-ease-enter) var(--pk-focus-scene-entry-hud) both;
       transform-origin: top right;
     }
     .status-machine-shell-minimal {
@@ -727,10 +679,7 @@
       .dock-semicircle-enter,
       .pending-decision-enter,
       .decision-card,
-      .dock-v4-flip-ghost {
-        transition: none;
-        animation: none;
-      }
+      .dock-v4-flip-ghost,
       .drop-zone {
         transition: none;
         animation: none;
@@ -750,9 +699,7 @@
         max-width: calc(100vw - 20px);
         max-height: calc(34dvh - env(safe-area-inset-bottom, 0px));
       }
-      .dock-card {
-        width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
-      }
+      .dock-card,
       .drop-zone {
         width: clamp(9rem, calc(50vw - 1.25rem), 11.25rem);
       }

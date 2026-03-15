@@ -52,10 +52,7 @@ import { DockStatusMachineComponent } from './components/dock-status-machine.com
 import { DockDailySlotComponent } from './components/dock-daily-slot.component';
 import { DockZenModeComponent } from './components/dock-zen-mode.component';
 import { DockFocusSceneComponent, type DockFocusSceneMode } from './components/dock-focus-scene.component';
-import {
-  DockPlannerQuickEditComponent,
-  type DockPlannerQuickEditPresentation,
-} from './components/dock-planner-quick-edit.component';
+import { type DockPlannerQuickEditPresentation } from './components/dock-planner-quick-edit.component';
 import { formatDockMinutes, parseOptionalMinutes } from './utils/dock-format';
 
 type DockDropState = 'idle' | 'canDrop' | 'isOver' | 'reject';
@@ -106,7 +103,6 @@ const DOCK_CLOSE_TRANSIENT_SURFACES_EVENT = 'dock-close-transient-surfaces';
     DockDailySlotComponent,
     DockZenModeComponent,
     DockFocusSceneComponent,
-    DockPlannerQuickEditComponent,
   ],
   styleUrl: './parking-dock.component.scss',
   templateUrl: './parking-dock.component.html',
@@ -780,7 +776,7 @@ export class ParkingDockComponent implements OnDestroy {
   onZenExit(): void {
     if (!this.engine.focusMode()) return;
     if (this.focusLeader.isReadOnlyFollower()) return;
-    this.engine.dismissZenMode();
+    this.engine.fragmentRest.dismissZenMode();
   }
 
   createTask(): void {

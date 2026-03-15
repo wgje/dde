@@ -404,7 +404,7 @@ export class DockStatusMachinePipComponent {
         this.returnToMain();
         return;
       case 'rest-reminder':
-        this.engine.dismissRestReminder();
+        this.engine.fragmentRest.dismissRestReminder();
         return;
       default:
         this.returnToMain();

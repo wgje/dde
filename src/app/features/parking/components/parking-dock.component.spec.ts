@@ -76,7 +76,17 @@ describe('ParkingDockComponent v4', () => {
     restReminderActive: signal(false),
     cumulativeHighLoadMs: signal(0),
     cumulativeLowLoadMs: signal(0),
-    dismissRestReminder: vi.fn(),
+    fragmentRest: {
+      dismissRestReminder: vi.fn(),
+      acceptFragmentEntry: vi.fn(),
+      skipFragmentEntry: vi.fn(),
+      dismissZenMode: vi.fn(),
+    },
+    dailySlotService: {
+      completeDailySlot: vi.fn(),
+      removeDailySlot: vi.fn(),
+      addDailySlot: vi.fn(),
+    },
     comboSelectEntries: signal([]),
     backupEntries: signal([]),
     toggleFocusMode: vi.fn(() => focusMode.update(value => !value)),
@@ -89,10 +99,6 @@ describe('ParkingDockComponent v4', () => {
     choosePendingDecisionCandidate: vi.fn(),
     cancelPendingDecisionAutoPromote: vi.fn(),
     toggleMuteWaitTone: vi.fn(),
-    getWaitRemainingSeconds: vi.fn(() => null),
-    completeDailySlot: vi.fn(),
-    removeDailySlot: vi.fn(),
-    addDailySlot: vi.fn(),
     createInDock: vi.fn(() => 'dock-created'),
     completeTask: vi.fn(),
     suspendTask: vi.fn(),
@@ -114,9 +120,6 @@ describe('ParkingDockComponent v4', () => {
     setDetail: vi.fn(),
     acquireDockEditLock: vi.fn(() => editLock.set(true)),
     releaseDockEditLock: vi.fn(() => editLock.set(false)),
-    acceptFragmentEntry: vi.fn(),
-    skipFragmentEntry: vi.fn(),
-    dismissZenMode: vi.fn(),
   };
 
   const mockTaskStore = {
@@ -930,10 +933,10 @@ describe('ParkingDockComponent v4', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="fragment-countdown-number"]')?.textContent).toContain('8s');
 
     fixture.nativeElement.querySelector('[data-testid="fragment-countdown-skip"]')?.click();
-    expect(mockEngine.skipFragmentEntry).toHaveBeenCalledTimes(1);
+    expect(mockEngine.fragmentRest.skipFragmentEntry).toHaveBeenCalledTimes(1);
 
     fixture.nativeElement.querySelector('[data-testid="fragment-countdown-accept"]')?.click();
-    expect(mockEngine.acceptFragmentEntry).toHaveBeenCalledTimes(1);
+    expect(mockEngine.fragmentRest.acceptFragmentEntry).toHaveBeenCalledTimes(1);
   });
 
   it('createBackupTaskFromFab should add low-load backup task', () => {

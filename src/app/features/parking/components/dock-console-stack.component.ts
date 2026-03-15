@@ -381,7 +381,7 @@ export class DockConsoleStackComponent implements OnDestroy {
     return { width, height };
   });
 
-  readonly waitPresets = WAIT_PRESETS.filter(preset => preset.minutes > 0);
+  readonly waitPresets = WAIT_PRESETS.filter(preset => preset.minutes !== null && preset.minutes > 0);
   readonly waitPresetTaskId = signal<string | null>(null);
   readonly interactionLocked = signal(false);
   readonly renderCards = signal<ConsoleRenderCard[]>([]);

@@ -5,13 +5,17 @@
  */
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
+  CognitiveLoad,
   DockEntry,
+  DockSourceSection,
   DockTaskStatus,
   DockUiStatus,
+  DockZoneSource,
   FocusTaskSlot,
   StatusMachineEntry,
   StatusMachineLabel,
 } from '../models/parking-dock';
+import { type PlannerFieldSet, sanitizePlannerFields } from '../utils/planner-fields';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import { rankDockCandidates } from './dock-scheduler.rules';
 
@@ -284,4 +288,59 @@ export function sortDockEntriesForDisplay(
     if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
     return a.taskId.localeCompare(b.taskId);
   });
+}
+
+// ---------------------------------------------------------------------------
+//  buildDockEntry（纯函数，从 DockEngineService.dockTask 中提取）
+// ---------------------------------------------------------------------------
+
+export interface BuildDockEntryParams {
+  taskId: string;
+  title: string;
+  content: string | null;
+  sourceProjectId: string | null;
+  currentEntryCount: number;
+  lane: DockEntry['lane'];
+  zoneSource: DockZoneSource;
+  relationScore: number | null;
+  relationReason: string | null;
+  plannerFields: PlannerFieldSet;
+  inheritedLoad: CognitiveLoad;
+  muteWaitTone: boolean;
+  options?: {
+    sourceKind?: DockEntry['sourceKind'];
+    sourceSection?: DockSourceSection;
+    detail?: string;
+  };
+}
+
+/** 构建 DockEntry 对象——纯函数，不依赖服务实例 */
+export function buildDockEntry(params: BuildDockEntryParams): DockEntry {
+  return {
+    taskId: params.taskId,
+    title: params.title,
+    sourceProjectId: params.sourceProjectId,
+    status: 'pending_start',
+    load: params.plannerFields.cognitiveLoad ?? params.inheritedLoad,
+    expectedMinutes: params.plannerFields.expectedMinutes,
+    waitMinutes: params.plannerFields.waitMinutes,
+    waitStartedAt: null,
+    lane: params.lane,
+    zoneSource: params.zoneSource,
+    isMain: false,
+    dockedOrder: params.currentEntryCount,
+    detail: params.options?.detail ?? params.content ?? '',
+    sourceKind: params.options?.sourceKind ?? 'project-task',
+    sourceBlackBoxEntryId: null,
+    inlineArchiveStatus: undefined,
+    inlineArchivedTaskId: null,
+    systemSelected: false,
+    recommendedScore: null,
+    sourceSection: params.options?.sourceSection,
+    manualMainSelected: false,
+    recommendationLocked: false,
+    snoozeRingMuted: params.muteWaitTone,
+    relationScore: params.relationScore,
+    relationReason: params.relationReason,
+  };
 }

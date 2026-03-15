@@ -9,6 +9,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { getWaitRemainingSeconds } from '../../../../services/dock-engine.utils';
 
 /**
  * 碎片阶段日常任务槽 — 当停泊坞所有任务均挂起时显示。
@@ -211,7 +212,7 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
             @if (!slotDone) {
               <button
                 type="button"
-                (click)="engine.completeDailySlot(slot.id)"
+                (click)="engine.dailySlotService.completeDailySlot(slot.id)"
                 [attr.aria-label]="'完成日常任务: ' + slot.title"
                 class="px-3 py-1.5 text-xs rounded-lg bg-slate-700/60 hover:bg-emerald-600/40
                        text-slate-300 hover:text-emerald-200 transition-colors"
@@ -221,7 +222,7 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
             }
             <button
               type="button"
-              (click)="engine.removeDailySlot(slot.id)"
+              (click)="engine.dailySlotService.removeDailySlot(slot.id)"
               [attr.aria-label]="'移除日常任务: ' + slot.title"
               class="px-2 py-1.5 text-xs rounded-lg hover:bg-slate-700/60
                      text-slate-500 hover:text-slate-400 transition-colors"
@@ -313,7 +314,7 @@ export class DockDailySlotComponent {
     let minRemaining = Infinity;
     let label = '';
     for (const entry of suspended) {
-      const seconds = this.engine.getWaitRemainingSeconds(entry);
+      const seconds = getWaitRemainingSeconds(entry);
       if (seconds !== null && seconds < minRemaining) {
         minRemaining = seconds;
         label = entry.title;
@@ -351,7 +352,7 @@ export class DockDailySlotComponent {
   addSlot(): void {
     const title = this.newTitle.trim();
     if (!title) return;
-    this.engine.addDailySlot(title, this.newMaxCount || 1);
+    this.engine.dailySlotService.addDailySlot(title, this.newMaxCount || 1);
     this.newTitle = '';
     this.newMaxCount = 1;
     this.showAddForm.set(false);

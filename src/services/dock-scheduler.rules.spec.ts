@@ -461,7 +461,7 @@ describe('computeThreeDimensionalRecommendation', () => {
     });
     const groups = computeThreeDimensionalRecommendation(main, [big], 35);
     // 大任务回退模式：isOversized = true
-    expect(groups.some(g => (g as any).isOversized)).toBe(true);
+    expect(groups.some(g => g.isOversized)).toBe(true);
   });
   it('should reserve ignore-wait mode for extreme mismatches beyond relaxed bounds', () => {
     const main = makeSlot({

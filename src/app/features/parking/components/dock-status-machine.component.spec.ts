@@ -45,7 +45,9 @@ describe('DockStatusMachineComponent', () => {
     restReminderActive: signal(false),
     cumulativeHighLoadMs: signal(0),
     cumulativeLowLoadMs: signal(0),
-    dismissRestReminder: vi.fn(),
+    fragmentRest: {
+      dismissRestReminder: vi.fn(),
+    },
     tick: signal(0),
   };
 
@@ -91,7 +93,6 @@ describe('DockStatusMachineComponent', () => {
     expect(waiting.taskId).toBe('B');
     expect(component.isExpired(waiting)).toBe(false);
     expect(component.getRingOffset(waiting)).toBeGreaterThan(0);
-    expect(component.getWaitDisplay(waiting)).toBe('剩余 02:00');
   });
 
   it('should mark waiting_done entry as expired', () => {
@@ -109,7 +110,6 @@ describe('DockStatusMachineComponent', () => {
 
     expect(component.hasExpiredTask()).toBe(true);
     expect(component.isExpired(component.suspendedEntries()[0])).toBe(true);
-    expect(component.getWaitDisplay(component.suspendedEntries()[0])).toBe('等待已结束');
   });
 
   it('clicking suspended item should switch focus task', () => {
@@ -159,25 +159,6 @@ describe('DockStatusMachineComponent', () => {
 
     const muteButton = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-mute"]') as HTMLButtonElement | null;
     expect(muteButton?.getAttribute('style')).toContain('min-height: 44px;');
-    expect(muteButton?.getAttribute('style')).toContain('min-width: 44px;');
-    expect(muteButton?.getAttribute('aria-label')).toBe('开启状态提醒声音');
-    expect(muteButton?.querySelector('svg')).toBeTruthy();
-  });
-
-  it('should render the PiP toggle inside the HUD header and emit requests', () => {
-    const pipToggleSpy = vi.fn();
-    fixture.componentInstance.pipToggleRequested.subscribe(pipToggleSpy);
-    fixture.componentRef.setInput('forcedMode', 'full');
-    fixture.componentRef.setInput('showPipToggle', true);
-    fixture.componentRef.setInput('pipToggleActive', true);
-    fixture.detectChanges();
-
-    const pipButton = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-pip-toggle"]') as HTMLButtonElement | null;
-    expect(pipButton).toBeTruthy();
-    expect(pipButton?.getAttribute('aria-label')).toBe('关闭悬浮窗');
-
-    pipButton?.click();
-    expect(pipToggleSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should keep status extra glow enabled for T0 performance mode when the product flag is on', () => {

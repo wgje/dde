@@ -391,7 +391,8 @@ export interface DockOverflowMeta {
 
 export interface WaitPreset {
   label: string;
-  minutes: number;
+  /** 等待分钟数。null 表示「自定义」哨兵，UI 层应拦截并弹出输入框。 */
+  minutes: number | null;
 }
 
 /**
@@ -407,8 +408,8 @@ export const WAIT_PRESETS: WaitPreset[] = [
   { label: '2 小时', minutes: 120 },
   { label: '3 小时', minutes: 180 },
   { label: '1 天', minutes: 1440 },
-  /** 自定义：minutes = -1 为哨兵值，UI 层拦截后弹出自定义输入 */
-  { label: '自定义', minutes: -1 },
+  /** 自定义：minutes = null 表示哨兵值，UI 层拦截后弹出自定义输入 */
+  { label: '自定义', minutes: null },
 ];
 
 export interface StatusMachineEntry {

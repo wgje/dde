@@ -17,7 +17,6 @@ import {
   DockSnapshot,
   DockZoneSource,
   FragmentDefenseLevel,
-  FragmentEventEntry,
   FocusSessionState,
   HighLoadCounter,
   isStatusMachineEntryExpired,
@@ -54,8 +53,10 @@ import { DockEntryFieldService } from './dock-entry-field.service';
 import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
 import { IntervalHandle, TimerHandle } from '../utils/timer-handle';
+import { DockAudioPlayer } from './dock-audio.utils';
 import {
   buildConsoleVisibleOrderHint,
+  buildDockEntry,
   buildOverflowMeta,
   findConsoleEvictionCandidate,
   getWaitRemainingSeconds,
@@ -86,11 +87,13 @@ export class DockEngineService {
   private readonly focusHudWindow = inject(FocusHudWindowService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
   private readonly cloudSync = inject(DockCloudSyncService);
-  private readonly fragmentRest = inject(DockFragmentRestService);
+  /** 公开子服务——组件可直接调用碎片/休息相关 API，无需经过 engine 委托 */
+  readonly fragmentRest = inject(DockFragmentRestService);
   private readonly zoneService = inject(DockZoneService);
   private readonly completionFlow = inject(DockCompletionFlowService);
   private readonly inlineCreation = inject(DockInlineCreationService);
-  private readonly dailySlotService = inject(DockDailySlotService);
+  /** 公开子服务——组件可直接调用日常任务槽 API，无需经过 engine 委托 */
+  readonly dailySlotService = inject(DockDailySlotService);
   private readonly taskSync = inject(DockTaskSyncService);
   private readonly entryField = inject(DockEntryFieldService);
   private readonly destroyRef = inject(DestroyRef);
@@ -102,7 +105,9 @@ export class DockEngineService {
   readonly muteWaitTone = signal(false);
   readonly focusScrimOn = signal(true);
   readonly dailySlots = signal<DailySlotEntry[]>([]);
-  readonly highlightedIds = signal<Set<string>>(new Set(), { equal: () => false });
+  readonly highlightedIds = signal<Set<string>>(new Set(), {
+    equal: (a, b) => a.size === b.size && [...a].every(id => b.has(id)),
+  });
   readonly pendingDecision = signal<DockPendingDecision | null>(null);
   readonly lastRuleDecision = signal<DockRuleDecision | null>(null);
   readonly tick = signal(0);
@@ -201,7 +206,7 @@ export class DockEngineService {
   private isProcessingCompletion = false;
   private readonly completionDrain = new TimerHandle();
   private readonly highlightClearTimerRef: { current: ReturnType<typeof setTimeout> | null } = { current: null };
-  private readonly audioStop = new TimerHandle();
+  private readonly audioPlayer = new DockAudioPlayer();
 
   private currentSnapshotUserId: string | null = null;
   /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
@@ -605,7 +610,7 @@ export class DockEngineService {
         clearTimeout(this.highlightClearTimerRef.current);
         this.highlightClearTimerRef.current = null;
       }
-      this.audioStop.cancel();
+      this.audioPlayer.dispose();
       this.localPersist.cancel();
       this.cloudSync.cancelTimers();
       this.firstMainSelection.cancel();
@@ -614,11 +619,6 @@ export class DockEngineService {
       if (this.visibilityListener && typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', this.visibilityListener);
         this.visibilityListener = null;
-      }
-      // AudioContext 资源释放
-      if (this.sharedAudioCtx && this.sharedAudioCtx.state !== 'closed') {
-        void this.sharedAudioCtx.close();
-        this.sharedAudioCtx = null;
       }
     });
   }
@@ -655,40 +655,31 @@ export class DockEngineService {
           relationReason: lane === 'combo-select' ? 'manual:combo-select' : 'manual:backup',
         }
       : this.zoneService.inferAutoLaneForTask(task, sourceProjectId, taskId);
-    const normalizedLane = inferredRelation.lane;
     const inheritedLoad: CognitiveLoad = task.cognitive_load === 'high' ? 'high' : 'low';
     const plannerFields = sanitizePlannerFields({
       expectedMinutes: options?.expectedMinutes ?? task.expected_minutes,
       waitMinutes: options?.waitMinutes ?? task.wait_minutes,
       cognitiveLoad: options?.load ?? task.cognitive_load,
     });
-    const entry: DockEntry = {
+    const entry = buildDockEntry({
       taskId,
       title: task.title || 'Untitled task',
+      content: task.content ?? null,
       sourceProjectId,
-      status: 'pending_start',
-      load: plannerFields.cognitiveLoad ?? inheritedLoad,
-      expectedMinutes: plannerFields.expectedMinutes,
-      waitMinutes: plannerFields.waitMinutes,
-      waitStartedAt: null,
-      lane: normalizedLane,
+      currentEntryCount: this.entries().length,
+      lane: inferredRelation.lane,
       zoneSource,
-      isMain: false,
-      dockedOrder: this.entries().length,
-      detail: options?.detail ?? task.content ?? '',
-      sourceKind: options?.sourceKind ?? 'project-task',
-      sourceBlackBoxEntryId: null,
-      inlineArchiveStatus: undefined,
-      inlineArchivedTaskId: null,
-      systemSelected: false,
-      recommendedScore: null,
-      sourceSection: options?.sourceSection,
-      manualMainSelected: false,
-      recommendationLocked: false,
-      snoozeRingMuted: this.muteWaitTone(),
       relationScore: inferredRelation.relationScore,
       relationReason: inferredRelation.relationReason,
-    };
+      plannerFields,
+      inheritedLoad,
+      muteWaitTone: this.muteWaitTone(),
+      options: {
+        sourceKind: options?.sourceKind,
+        sourceSection: options?.sourceSection,
+        detail: options?.detail,
+      },
+    });
 
     if (plannerFields.adjusted) {
       this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
@@ -1394,48 +1385,8 @@ export class DockEngineService {
     this.refreshSuspendRecommendationLock();
   }
 
-  addDailySlot(title: string, maxDailyCount = 1): string {
-    return this.dailySlotService.addDailySlot(title, maxDailyCount);
-  }
-
-  setDailySlotEnabled(id: string, enabled: boolean): void {
-    this.dailySlotService.setDailySlotEnabled(id, enabled);
-  }
-
-  completeDailySlot(id: string): void {
-    this.dailySlotService.completeDailySlot(id);
-  }
-
-  skipDailySlot(id: string): void {
-    this.dailySlotService.skipDailySlot(id);
-  }
-
   dismissZenMode(): void {
     this.fragmentRest.dismissZenMode();
-  }
-
-  /**
-   * 碎片事件推荐（策划案 §7.8 Level 2）
-   * 按 physical-crossover > digital-janitor > micro-progress 优先级
-   * 从预置列表中随机选取一个推荐给用户
-   */
-  getFragmentEventRecommendation(): FragmentEventEntry | null {
-    return this.fragmentRest.getFragmentEventRecommendation();
-  }
-
-  /**
-   * 完成碎片事件（策划案 §7.8 Level 3→4）
-   * 完成后不连发，直接进入 Zen Mode
-   */
-  completeFragmentEvent(): void {
-    this.fragmentRest.completeFragmentEvent();
-  }
-
-  /**
-   * 跳过碎片事件 → 展示日常任务槽（策划案 §7.8 Step 3.5→Step 4）
-   */
-  skipFragmentEvent(): void {
-    this.fragmentRest.skipFragmentEvent();
   }
 
   /**
@@ -1451,18 +1402,6 @@ export class DockEngineService {
    */
   releaseDockEditLock(): void {
     this.editLock.set(false);
-  }
-
-  removeDailySlot(id: string): void {
-    this.dailySlotService.removeDailySlot(id);
-  }
-
-  getWaitRemainingSeconds(entry: DockEntry): number | null {
-    return getWaitRemainingSeconds(entry);
-  }
-
-  isWaitExpired(entry: DockEntry): boolean {
-    return isWaitExpired(entry);
   }
 
   exportSnapshot(): DockSnapshot {
@@ -1803,8 +1742,8 @@ export class DockEngineService {
       }
       return changed ? next : prev;
     });
-    if (shouldPlaySound) {
-      this.playWaitEndSound();
+    if (shouldPlaySound && !this.muteWaitTone()) {
+      this.audioPlayer.playWaitEndSound();
     }
     if (newlyExpiredTitles.length > 0 && this.shouldSendAttentionNotification()) {
       const body = newlyExpiredTitles.length === 1
@@ -1842,36 +1781,6 @@ export class DockEngineService {
     this.completionFlow.enterFragmentPhase('tight-blank 超时，自动进入留白期', pending.rootTaskId, pending.rootRemainingMinutes);
   }
 
-  // 复用单个 AudioContext 实例，避免浏览器限制和不必要的开销
-  private sharedAudioCtx: AudioContext | null = null;
-
-  private getAudioContext(): AudioContext {
-    if (!this.sharedAudioCtx || this.sharedAudioCtx.state === 'closed') {
-      this.sharedAudioCtx = new AudioContext();
-    }
-    return this.sharedAudioCtx;
-  }
-
-  private playWaitEndSound(): void {
-    if (this.muteWaitTone()) return;
-    try {
-      const audio = this.getAudioContext();
-      const oscillator = audio.createOscillator();
-      const gain = audio.createGain();
-      oscillator.connect(gain);
-      gain.connect(audio.destination);
-      oscillator.frequency.value = PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_TONE_HZ;
-      gain.gain.value = 0.08;
-      oscillator.start();
-      this.audioStop.schedule(
-        () => oscillator.stop(),
-        PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_DURATION_MS + 20,
-      );
-    } catch {
-      // Ignore audio failures.
-    }
-  }
-
   private shouldSendAttentionNotification(): boolean {
     if (typeof document === 'undefined') return !this.focusHudWindow.isActive();
     return document.visibilityState !== 'visible' && !this.focusHudWindow.isActive();
@@ -1895,42 +1804,6 @@ export class DockEngineService {
       return;
     }
     this.reset();
-  }
-
-  // ============================================
-  // GAP-1 & GAP-2: Delegated to DockFragmentRestService
-  // ============================================
-
-  /**
-   * 用户确认/关闭休息提醒（UI 调用）
-   * 重置提醒状态以允许下一轮累计触发
-   */
-  dismissRestReminder(): void {
-    this.fragmentRest.dismissRestReminder();
-  }
-
-  /**
-   * 开始碎片时间进入倒计时
-   * 在等待插入任务完成后、主任务仍有剩余等待时间时调用
-   */
-  startFragmentEntryCountdown(context?: {
-    reason?: string;
-    rootTaskId?: string;
-    remainingMinutes?: number;
-    preservePendingDecision?: boolean;
-    countdownSeconds?: number;
-  }): void {
-    this.fragmentRest.startFragmentEntryCountdown(context);
-  }
-
-  /** 用户在倒计时内主动选择进入碎片时间 */
-  acceptFragmentEntry(): void {
-    this.fragmentRest.acceptFragmentEntry();
-  }
-
-  /** 用户在倒计时内主动跳过碎片时间 */
-  skipFragmentEntry(): void {
-    this.fragmentRest.skipFragmentEntry();
   }
 
   /**

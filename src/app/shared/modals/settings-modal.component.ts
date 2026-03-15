@@ -1101,21 +1101,21 @@ export class SettingsModalComponent {
     const title = this.newRoutineTitle.trim();
     if (!title) return;
     const nextMax = Math.min(24, Math.max(1, Math.floor(Number(this.newRoutineMaxCount) || 1)));
-    this.dockEngine.addDailySlot(title, nextMax);
+    this.dockEngine.dailySlotService.addDailySlot(title, nextMax);
     this.newRoutineTitle = '';
     this.newRoutineMaxCount = 1;
   }
 
   completeRoutineSlot(id: string): void {
-    this.dockEngine.completeDailySlot(id);
+    this.dockEngine.dailySlotService.completeDailySlot(id);
   }
 
   toggleRoutineSlot(id: string, enabled: boolean): void {
-    this.dockEngine.setDailySlotEnabled(id, enabled);
+    this.dockEngine.dailySlotService.setDailySlotEnabled(id, enabled);
   }
 
   removeRoutineSlot(id: string): void {
-    this.dockEngine.removeDailySlot(id);
+    this.dockEngine.dailySlotService.removeDailySlot(id);
   }
   
   /**

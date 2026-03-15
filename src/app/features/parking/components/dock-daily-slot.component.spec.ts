@@ -18,8 +18,8 @@ describe('DockDailySlotComponent', () => {
     },
   ]);
   const suspendedEntries = signal<any[]>([
-    { taskId: 'A', title: '主任务 A' },
-    { taskId: 'B', title: '主任务 B' },
+    { taskId: 'A', title: '主任务 A', waitMinutes: 5, waitStartedAt: new Date().toISOString() },
+    { taskId: 'B', title: '主任务 B', waitMinutes: 10, waitStartedAt: new Date().toISOString() },
   ]);
 
   const availableFragmentDockTasks = signal<any[]>([]);
@@ -28,10 +28,11 @@ describe('DockDailySlotComponent', () => {
     availableDailySlots,
     suspendedEntries,
     availableFragmentDockTasks,
-    getWaitRemainingSeconds: vi.fn((entry: { taskId: string }) => (entry.taskId === 'A' ? 300 : 900)),
-    addDailySlot: vi.fn(),
-    completeDailySlot: vi.fn(),
-    removeDailySlot: vi.fn(),
+    dailySlotService: {
+      addDailySlot: vi.fn(),
+      completeDailySlot: vi.fn(),
+      removeDailySlot: vi.fn(),
+    },
     switchToTask: vi.fn(),
   };
 
@@ -47,8 +48,8 @@ describe('DockDailySlotComponent', () => {
       },
     ]);
     suspendedEntries.set([
-      { taskId: 'A', title: '主任务 A' },
-      { taskId: 'B', title: '主任务 B' },
+      { taskId: 'A', title: '主任务 A', waitMinutes: 5, waitStartedAt: new Date().toISOString() },
+      { taskId: 'B', title: '主任务 B', waitMinutes: 10, waitStartedAt: new Date().toISOString() },
     ]);
 
     await TestBed.configureTestingModule({
@@ -71,7 +72,7 @@ describe('DockDailySlotComponent', () => {
     component.newMaxCount = 2;
     component.addSlot();
 
-    expect(mockEngine.addDailySlot).toHaveBeenCalledWith('喝水', 2);
+    expect(mockEngine.dailySlotService.addDailySlot).toHaveBeenCalledWith('喝水', 2);
     expect(component.newTitle).toBe('');
     expect(component.newMaxCount).toBe(1);
     expect(component.showAddForm()).toBe(false);

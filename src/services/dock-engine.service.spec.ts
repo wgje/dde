@@ -17,6 +17,7 @@ import { ToastService } from './toast.service';
 import { FocusAttentionService } from './focus-attention.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import { Task } from '../models';
+import { DockSnapshot } from '../models/parking-dock';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 
@@ -752,7 +753,7 @@ describe('DockEngineService', () => {
 
     expect(service.fragmentEntryCountdown()).toBe(PARKING_CONFIG.FRAGMENT_ENTRY_COUNTDOWN_S);
     expect(service.pendingDecision()).toBeNull();
-    service.skipFragmentEntry();
+    service.fragmentRest.skipFragmentEntry();
     expect(service.fragmentEntryCountdown()).toBeNull();
     expect(service.activeFragmentEvent()).toBeNull();
   });
@@ -823,7 +824,7 @@ describe('DockEngineService', () => {
     });
 
     service.completeTask('B');
-    service.acceptFragmentEntry();
+    service.fragmentRest.acceptFragmentEntry();
 
     expect(service.fragmentEntryCountdown()).toBeNull();
     expect(service.fragmentDefenseLevel()).toBe(2);
@@ -848,7 +849,7 @@ describe('DockEngineService', () => {
     expect(service.restReminderActive()).toBe(true);
     expect(service.cumulativeHighLoadMs()).toBeGreaterThanOrEqual(PARKING_CONFIG.REST_REMINDER_HIGH_LOAD_THRESHOLD_MS);
 
-    service.dismissRestReminder();
+    service.fragmentRest.dismissRestReminder();
 
     expect(service.restReminderActive()).toBe(false);
     expect(service.cumulativeHighLoadMs()).toBe(0);
@@ -1002,7 +1003,7 @@ describe('DockEngineService', () => {
           sourceKind: 'project-task',
           systemSelected: false,
           recommendedScore: null,
-        } as unknown as any,
+        },
       ],
       focusMode: false,
       isDockExpanded: true,
@@ -1014,7 +1015,7 @@ describe('DockEngineService', () => {
         mainTaskId: 'legacy-1',
         strongZoneIds: ['legacy-1'],
         weakZoneIds: [],
-      } as unknown as any,
+      },
       firstDragDone: true,
       dailySlots: [],
       suspendChainRootTaskId: null,
@@ -1022,7 +1023,7 @@ describe('DockEngineService', () => {
       pendingDecision: null,
       dailyResetDate: '2026-02-25',
       savedAt: new Date().toISOString(),
-    } as unknown as any);
+    } as unknown as DockSnapshot);
 
     const entry = service.entries().find(item => item.taskId === 'legacy-1');
     expect(entry?.lane).toBe('combo-select');
@@ -2309,10 +2310,10 @@ describe('DockEngineService', () => {
   });
 
   it('completeDailySlot should enqueue UUID-based routine completion mutation', () => {
-    const slotId = service.addDailySlot('Daily Task', 1);
+    const slotId = service.dailySlotService.addDailySlot('Daily Task', 1);
     mockActionQueue.enqueue.mockClear();
 
-    service.completeDailySlot(slotId);
+    service.dailySlotService.completeDailySlot(slotId);
 
     expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
     const payload = mockActionQueue.enqueue.mock.calls[0][0];
