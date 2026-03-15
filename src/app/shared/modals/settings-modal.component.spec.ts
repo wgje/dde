@@ -1,0 +1,262 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { By } from '@angular/platform-browser';
+import { SettingsModalComponent } from './settings-modal.component';
+import { LoggerService } from '../../../services/logger.service';
+import { UserSessionService } from '../../../services/user-session.service';
+import { PreferenceService } from '../../../services/preference.service';
+import { ExportService } from '../../../services/export.service';
+import { ImportService } from '../../../services/import.service';
+import { AttachmentExportService } from '../../../services/attachment-export.service';
+import { AttachmentImportService } from '../../../services/attachment-import.service';
+import { LocalBackupService } from '../../../services/local-backup.service';
+import { ThemeService } from '../../../services/theme.service';
+import { DockEngineService } from '../../../services/dock-engine.service';
+import { FocusPreferenceService } from '../../../services/focus-preference.service';
+import { GateService } from '../../../services/gate.service';
+
+describe('SettingsModalComponent', () => {
+  let fixture: ComponentFixture<SettingsModalComponent>;
+  let component: SettingsModalComponent;
+
+  type MockFocusPreferences = {
+    gateEnabled: boolean;
+    spotlightEnabled: boolean;
+    blackBoxEnabled: boolean;
+    strataEnabled: boolean;
+    maxSnoozePerDay: number;
+    routineResetHourLocal: number;
+    restReminderHighLoadMinutes: number;
+    restReminderLowLoadMinutes: number;
+  };
+
+  const currentUserId = signal<string | null>('user-1');
+  const theme = signal<'default' | 'ocean' | 'forest' | 'sunset' | 'lavender'>('default');
+  const autoResolveConflicts = signal(true);
+  const colorMode = signal<'light' | 'dark' | 'system'>('system');
+  const dailySlots = signal([
+    {
+      id: 'slot-1',
+      title: '喝水',
+      maxDailyCount: 1,
+      todayCompletedCount: 0,
+      isEnabled: true,
+      createdAt: '2026-03-14T08:00:00.000Z',
+    },
+  ]);
+  const focusPreferences = signal<MockFocusPreferences>({
+    gateEnabled: true,
+    spotlightEnabled: true,
+    blackBoxEnabled: true,
+    strataEnabled: true,
+    maxSnoozePerDay: 3,
+    routineResetHourLocal: 0,
+    restReminderHighLoadMinutes: 90,
+    restReminderLowLoadMinutes: 30,
+  });
+
+  const mockLogger = {
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+  };
+
+  const mockPreferenceService = {
+    theme,
+    autoResolveConflicts,
+    setAutoResolveConflicts: vi.fn((enabled: boolean) => autoResolveConflicts.set(enabled)),
+  };
+
+  const mockThemeService = {
+    colorMode,
+    setColorMode: vi.fn((mode: 'light' | 'dark' | 'system') => colorMode.set(mode)),
+  };
+
+  const mockFocusPreferenceService = {
+    preferences: focusPreferences,
+    update: vi.fn((updates: Partial<MockFocusPreferences>) => {
+      focusPreferences.update(current => ({ ...current, ...updates }));
+    }),
+    setRestReminderHighLoadMinutes: vi.fn((minutes: number) => {
+      focusPreferences.update(current => ({ ...current, restReminderHighLoadMinutes: minutes }));
+    }),
+    setRestReminderLowLoadMinutes: vi.fn((minutes: number) => {
+      focusPreferences.update(current => ({ ...current, restReminderLowLoadMinutes: minutes }));
+    }),
+  };
+
+  const mockDockEngine = {
+    dailySlots,
+    addDailySlot: vi.fn(),
+    completeDailySlot: vi.fn(),
+    setDailySlotEnabled: vi.fn(),
+    removeDailySlot: vi.fn(),
+  };
+
+  const mockLocalBackupService = {
+    setProjectsProvider: vi.fn(),
+    isAvailable: signal(false),
+    isAuthorized: signal(false),
+    hasSavedHandle: signal(false),
+    directoryName: signal<string | null>(null),
+    autoBackupEnabled: signal(false),
+    autoBackupIntervalMs: signal(30 * 60 * 1000),
+    lastBackupTime: signal<string | null>(null),
+    isBackingUp: signal(false),
+    requestDirectoryAccess: vi.fn(),
+    revokeDirectoryAccess: vi.fn(),
+    resumePermission: vi.fn(),
+    performBackup: vi.fn(),
+    stopAutoBackup: vi.fn(),
+    startAutoBackup: vi.fn(),
+  };
+
+  const mockExportService = {
+    isExporting: signal(false),
+    exportAndDownload: vi.fn(),
+  };
+
+  const mockImportService = {
+    isImporting: signal(false),
+    validateFile: vi.fn(),
+    generatePreview: vi.fn(),
+    executeImport: vi.fn(),
+  };
+
+  const mockAttachmentExportService = {
+    isExporting: signal(false),
+    progress: signal({ percentage: 0, processedCount: 0, totalCount: 0 }),
+    exportAndDownload: vi.fn(),
+  };
+
+  const mockAttachmentImportService = {
+    isImporting: signal(false),
+    progress: signal({ percentage: 0, completedItems: 0, failedItems: 0, skippedItems: 0, totalItems: 0 }),
+    extractAttachmentsFromZip: vi.fn(),
+    importAttachments: vi.fn(),
+  };
+
+  const mockUserSession = {
+    currentUserId,
+  };
+
+  const mockGateService = {
+    devForceShowGate: vi.fn(),
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    currentUserId.set('user-1');
+    theme.set('default');
+    autoResolveConflicts.set(true);
+    colorMode.set('system');
+    dailySlots.set([
+      {
+        id: 'slot-1',
+        title: '喝水',
+        maxDailyCount: 1,
+        todayCompletedCount: 0,
+        isEnabled: true,
+        createdAt: '2026-03-14T08:00:00.000Z',
+      },
+    ]);
+    focusPreferences.set({
+      gateEnabled: true,
+      spotlightEnabled: true,
+      blackBoxEnabled: true,
+      strataEnabled: true,
+      maxSnoozePerDay: 3,
+      routineResetHourLocal: 0,
+      restReminderHighLoadMinutes: 90,
+      restReminderLowLoadMinutes: 30,
+    });
+
+    await TestBed.configureTestingModule({
+      imports: [SettingsModalComponent],
+      providers: [
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: UserSessionService, useValue: mockUserSession },
+        { provide: PreferenceService, useValue: mockPreferenceService },
+        { provide: ExportService, useValue: mockExportService },
+        { provide: ImportService, useValue: mockImportService },
+        { provide: AttachmentExportService, useValue: mockAttachmentExportService },
+        { provide: AttachmentImportService, useValue: mockAttachmentImportService },
+        { provide: LocalBackupService, useValue: mockLocalBackupService },
+        { provide: ThemeService, useValue: mockThemeService },
+        { provide: DockEngineService, useValue: mockDockEngine },
+        { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
+        { provide: GateService, useValue: mockGateService },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(SettingsModalComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  it('should remove the obsolete backup reminder setting from the UI', () => {
+    expect(fixture.nativeElement.textContent).not.toContain('定期备份提醒');
+  });
+
+  it('should emit themeChange when a theme tile is selected', () => {
+    const themeSpy = vi.fn();
+    component.themeChange.subscribe(themeSpy);
+
+    findButtonByText('海洋').click();
+
+    expect(themeSpy).toHaveBeenCalledWith('ocean');
+  });
+
+  it('should update color mode directly through ThemeService', () => {
+    findButtonByText('深色').click();
+
+    expect(mockThemeService.setColorMode).toHaveBeenCalledWith('dark');
+    expect(colorMode()).toBe('dark');
+  });
+
+  it('should expose a stable settings modal test id', () => {
+    expect(fixture.nativeElement.querySelector('[data-testid="settings-modal"]')).toBeTruthy();
+  });
+
+  it('should keep the black box toggle visible and functional', () => {
+    const toggle = fixture.debugElement.query(By.css('[data-testid="settings-blackbox-toggle"]'));
+
+    expect(fixture.nativeElement.textContent).toContain('黑匣子');
+    expect(toggle).toBeTruthy();
+
+    (toggle.nativeElement as HTMLButtonElement).click();
+
+    expect(mockFocusPreferenceService.update).toHaveBeenCalledWith({ blackBoxEnabled: false });
+  });
+
+  it('should toggle auto resolve conflicts via PreferenceService', () => {
+    component.toggleAutoResolve();
+
+    expect(mockPreferenceService.setAutoResolveConflicts).toHaveBeenCalledWith(false);
+    expect(autoResolveConflicts()).toBe(false);
+  });
+
+  it('should forward rest reminder changes to FocusPreferenceService', () => {
+    const highLoadSelect = fixture.debugElement.query(By.css('[data-testid="settings-rest-reminder-high"]')).nativeElement as HTMLSelectElement;
+    const lowLoadSelect = fixture.debugElement.query(By.css('[data-testid="settings-rest-reminder-low"]')).nativeElement as HTMLSelectElement;
+
+    highLoadSelect.value = '120';
+    highLoadSelect.dispatchEvent(new Event('change'));
+    lowLoadSelect.value = '15';
+    lowLoadSelect.dispatchEvent(new Event('change'));
+
+    expect(mockFocusPreferenceService.setRestReminderHighLoadMinutes).toHaveBeenCalledWith(120);
+    expect(mockFocusPreferenceService.setRestReminderLowLoadMinutes).toHaveBeenCalledWith(15);
+  });
+
+  function findButtonByText(text: string): HTMLButtonElement {
+    const buttons = Array.from(fixture.nativeElement.querySelectorAll('button')) as HTMLButtonElement[];
+    const button = buttons.find(candidate => candidate.textContent?.includes(text));
+    if (!button) {
+      throw new Error(`Button not found: ${text}`);
+    }
+    return button;
+  }
+});

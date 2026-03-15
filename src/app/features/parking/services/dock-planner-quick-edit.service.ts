@@ -10,6 +10,8 @@ import type { DockPlannerQuickEditPresentation } from '../components/dock-planne
  *
  * Provided at the component level (not root) so each dock instance
  * gets its own planner state.
+ *
+ * TODO(L-28): Wire up to ParkingDockComponent — currently defined but not injected anywhere.
  */
 @Injectable()
 export class DockPlannerQuickEditService implements OnDestroy {

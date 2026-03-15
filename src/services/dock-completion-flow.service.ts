@@ -28,6 +28,7 @@ import {
 } from './dock-scheduler.rules';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockZoneService } from './dock-zone.service';
+import { LoggerService } from './logger.service';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import {
   entryOrder,
@@ -65,21 +66,54 @@ export interface DockCompletionContext {
 export class DockCompletionFlowService {
   private readonly zoneService = inject(DockZoneService);
   private readonly fragmentRest = inject(DockFragmentRestService);
+  private readonly logger = inject(LoggerService);
 
   private _ctx: DockCompletionContext | null = null;
 
+  /**
+   * 获取上下文——必须在 DockEngineService 构造期间调用 init() 注入。
+   * 如未初始化则抛出明确错误，便于定位 DI 顺序问题。
+   */
   private get ctx(): DockCompletionContext {
     if (!this._ctx) {
-      throw new Error('DockCompletionFlowService.init() must be called before use');
+      throw new Error(
+        'DockCompletionFlowService.init() must be called before use. ' +
+        'Ensure DockEngineService is constructed before accessing this service.',
+      );
     }
     return this._ctx;
   }
 
+  /**
+   * 由 DockEngineService 在其构造函数中调用，注入共享信号引用。
+   * 此服务使用手动上下文注入而非 Angular DI，因为所需信号是 DockEngineService 的私有成员，
+   * 无法通过常规注入获取。这是有意的架构权衡：以运行时初始化检查换取信号封装性。
+   */
   init(ctx: DockCompletionContext): void {
     if (this._ctx) {
-      console.warn('[DockCompletionFlow] init() called again — overwriting previous context');
+      this.logger.category('DockCompletionFlow').warn('init() called again — overwriting previous context');
     }
     this._ctx = ctx;
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Private helpers — 减少 createRuleDecision + signal.set 的重复仪式
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 封装 lastRuleDecision 的更新：创建决策记录并写入信号。
+   * 所有需要更新 lastRuleDecision 的调用点应使用此方法，
+   * 以确保 createRuleDecision 参数格式一致且不遗漏。
+   */
+  private setLastDecision(params: {
+    type: Parameters<typeof createRuleDecision>[0]['type'];
+    reason: string;
+    rootTaskId?: string;
+    recommendedTaskIds?: string[];
+    remainingMinutes?: number;
+    ratio?: number | null;
+  }): void {
+    this.ctx.lastRuleDecision.set(createRuleDecision(params));
   }
 
   // ---------------------------------------------------------------------------
@@ -231,15 +265,13 @@ export class DockCompletionFlowService {
       chainRootTaskId, rootRemainingMinutes, [],
       'tight-blank: 留白窗口紧张，5s 后进入留白期', 5000,
     );
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'pending_decision',
-        reason: 'tight-blank: 留白窗口紧张，等待用户取消或确认',
-        rootTaskId: rootTaskId ?? undefined,
-        recommendedTaskIds: [],
-        remainingMinutes: rootRemainingMinutes,
-      }),
-    );
+    this.setLastDecision({
+      type: 'pending_decision',
+      reason: 'tight-blank: 留白窗口紧张，等待用户取消或确认',
+      rootTaskId: rootTaskId ?? undefined,
+      recommendedTaskIds: [],
+      remainingMinutes: rootRemainingMinutes,
+    });
   }
 
   /** mismatch-recompute 分支：时间偏差过大，展示重算候选并启动碎片过渡倒计时 */
@@ -259,20 +291,18 @@ export class DockCompletionFlowService {
           : 'mismatch-recompute: 规则引擎回退候选重算';
     this.setPendingDecision(chainRootTaskId, rootRemainingMinutes, candidateGroups, reason);
     this.ctx.highlightedIds.set(new Set(candidateGroups.flatMap(group => group.taskIds)));
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'pending_decision',
-        reason:
-          recommendation.mode === 'strict'
-            ? 'mismatch-recompute: 三组候选已重算，等待用户手动决策'
-            : recommendation.mode === 'relaxed'
-              ? 'mismatch-recompute: 已放宽时窗并重算候选，等待用户手动决策'
-              : 'mismatch-recompute: 回退候选已生成，等待用户手动决策',
-        rootTaskId: rootTaskId ?? undefined,
-        recommendedTaskIds: candidateGroups.flatMap(group => group.taskIds),
-        remainingMinutes: rootRemainingMinutes,
-      }),
-    );
+    this.setLastDecision({
+      type: 'pending_decision',
+      reason:
+        recommendation.mode === 'strict'
+          ? 'mismatch-recompute: 三组候选已重算，等待用户手动决策'
+          : recommendation.mode === 'relaxed'
+            ? 'mismatch-recompute: 已放宽时窗并重算候选，等待用户手动决策'
+            : 'mismatch-recompute: 回退候选已生成，等待用户手动决策',
+      rootTaskId: rootTaskId ?? undefined,
+      recommendedTaskIds: candidateGroups.flatMap(group => group.taskIds),
+      remainingMinutes: rootRemainingMinutes,
+    });
     this.startFragmentTransitionCountdown(rootTaskId, rootRemainingMinutes);
   }
 
@@ -296,20 +326,18 @@ export class DockCompletionFlowService {
           : '候选不足，已放宽时窗后保留最优下一步供用户手动选择',
     );
     this.ctx.highlightedIds.set(new Set([primaryCandidate.taskId]));
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'completion_followup',
-        reason:
-          branch === 'time-match'
-            ? 'time-match: 候选时长匹配，保持高亮等待用户切换'
-            : recommendation.mode === 'strict'
-              ? '候选不足，保留最优下一步'
-              : '候选不足，已放宽时窗后保留最优下一步',
-        rootTaskId: rootTaskId ?? undefined,
-        recommendedTaskIds: [primaryCandidate.taskId],
-        remainingMinutes: rootRemainingMinutes,
-      }),
-    );
+    this.setLastDecision({
+      type: 'completion_followup',
+      reason:
+        branch === 'time-match'
+          ? 'time-match: 候选时长匹配，保持高亮等待用户切换'
+          : recommendation.mode === 'strict'
+            ? '候选不足，保留最优下一步'
+            : '候选不足，已放宽时窗后保留最优下一步',
+      rootTaskId: rootTaskId ?? undefined,
+      recommendedTaskIds: [primaryCandidate.taskId],
+      remainingMinutes: rootRemainingMinutes,
+    });
     this.startFragmentTransitionCountdown(rootTaskId, rootRemainingMinutes);
   }
 
@@ -322,15 +350,13 @@ export class DockCompletionFlowService {
 
     this.ctx.pendingDecision.set(null);
     this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'completion_followup',
-        reason: '主任务等待结束，置顶高亮等待用户恢复',
-        rootTaskId: recoveredMain.taskId,
-        recommendedTaskIds: [recoveredMain.taskId],
-        remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
-      }),
-    );
+    this.setLastDecision({
+      type: 'completion_followup',
+      reason: '主任务等待结束，置顶高亮等待用户恢复',
+      rootTaskId: recoveredMain.taskId,
+      recommendedTaskIds: [recoveredMain.taskId],
+      remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
+    });
     return true;
   }
 
@@ -340,15 +366,13 @@ export class DockCompletionFlowService {
     this.promoteNext();
     const focused = this.ctx.focusingEntry();
     if (focused) {
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'completion_followup',
-          reason: '任务完成后按规则推进下一候选',
-          rootTaskId: rootTaskId ?? undefined,
-          recommendedTaskIds: [focused.taskId],
-          remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
-        }),
-      );
+      this.setLastDecision({
+        type: 'completion_followup',
+        reason: '任务完成后按规则推进下一候选',
+        rootTaskId: rootTaskId ?? undefined,
+        recommendedTaskIds: [focused.taskId],
+        remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
+      });
     }
   }
 
@@ -534,40 +558,49 @@ export class DockCompletionFlowService {
   }
 
   promoteNext(): void {
-    const stalled = this.ctx.entries()
+    const allEntries = this.ctx.entries();
+    if (this.tryPromoteStalled(allEntries)) return;
+    if (this.tryPromoteMainIdle(allEntries)) return;
+    if (this.tryPromoteRadarCandidate(allEntries)) return;
+    this.tryHighlightRecoveredMain(allEntries);
+  }
+
+  /** 优先恢复停滞任务 */
+  private tryPromoteStalled(allEntries: readonly DockEntry[]): boolean {
+    const stalled = allEntries
       .filter(entry => entry.status === 'stalled')
       .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
-    if (stalled) {
-      this.ctx.schedulerPhase.set('active');
-      this.promoteCandidate(stalled.taskId);
-      this.ctx.highlightedIds.set(new Set([stalled.taskId]));
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'idle_promote',
-          reason: '主任务完成后优先恢复停滞任务',
-          recommendedTaskIds: [stalled.taskId],
-        }),
-      );
-      return;
-    }
+    if (!stalled) return false;
+    this.ctx.schedulerPhase.set('active');
+    this.promoteCandidate(stalled.taskId);
+    this.ctx.highlightedIds.set(new Set([stalled.taskId]));
+    this.setLastDecision({
+      type: 'idle_promote',
+      reason: '主任务完成后优先恢复停滞任务',
+      recommendedTaskIds: [stalled.taskId],
+    });
+    return true;
+  }
 
-    const mainIdle = this.ctx.entries()
+  /** 主控链存在可运行任务时按入坞顺序推进 */
+  private tryPromoteMainIdle(allEntries: readonly DockEntry[]): boolean {
+    const mainIdle = allEntries
       .filter(entry => entry.isMain && isAutoPromotableStatus(entry.status))
       .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
-    if (mainIdle) {
-      this.ctx.schedulerPhase.set('active');
-      this.promoteCandidate(mainIdle.taskId);
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'idle_promote',
-          reason: '主控链存在可运行任务，按入坞顺序推进',
-          recommendedTaskIds: [mainIdle.taskId],
-        }),
-      );
-      return;
-    }
+    if (!mainIdle) return false;
+    this.ctx.schedulerPhase.set('active');
+    this.promoteCandidate(mainIdle.taskId);
+    this.setLastDecision({
+      type: 'idle_promote',
+      reason: '主控链存在可运行任务，按入坞顺序推进',
+      recommendedTaskIds: [mainIdle.taskId],
+    });
+    return true;
+  }
 
-    const radarCandidates = this.ctx.entries().filter(
+  /** 规则引擎从雷达区拉取最优候选进入主控台 */
+  private tryPromoteRadarCandidate(allEntries: readonly DockEntry[]): boolean {
+    const radarCandidates = allEntries.filter(
       entry => !entry.isMain && isAutoPromotableStatus(entry.status),
     );
     const focusReference = this.ctx.focusingEntry();
@@ -582,37 +615,38 @@ export class DockCompletionFlowService {
     const radarCandidate = rankedRadar.length > 0
       ? radarCandidates.find(entry => entry.taskId === rankedRadar[0].taskId) ?? null
       : null;
-    if (radarCandidate) {
-      this.ctx.schedulerPhase.set('active');
-      this.promoteCandidate(radarCandidate.taskId);
-      this.ctx.highlightedIds.set(new Set([radarCandidate.taskId]));
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'idle_promote',
-          reason: '规则引擎从雷达区拉取最优候选进入主控台',
-          recommendedTaskIds: [radarCandidate.taskId],
-        }),
-      );
-      this.ctx.highlightClearTimer.current = setTimeout(() => {
-        if (this.ctx.pendingDecision()) return;
-        this.ctx.highlightedIds.set(new Set());
-      }, 2000);
-      return;
+    if (!radarCandidate) return false;
+    this.ctx.schedulerPhase.set('active');
+    this.promoteCandidate(radarCandidate.taskId);
+    this.ctx.highlightedIds.set(new Set([radarCandidate.taskId]));
+    this.setLastDecision({
+      type: 'idle_promote',
+      reason: '规则引擎从雷达区拉取最优候选进入主控台',
+      recommendedTaskIds: [radarCandidate.taskId],
+    });
+    if (this.ctx.highlightClearTimer.current) {
+      clearTimeout(this.ctx.highlightClearTimer.current);
     }
+    this.ctx.highlightClearTimer.current = setTimeout(() => {
+      if (this.ctx.pendingDecision()) return;
+      this.ctx.highlightedIds.set(new Set());
+    }, 2000);
+    return true;
+  }
 
-    const recoveredMain = this.ctx.entries()
+  /** 等待结束任务已恢复时仅高亮等待用户手动切换 */
+  private tryHighlightRecoveredMain(allEntries: readonly DockEntry[]): void {
+    const recoveredMain = allEntries
       .filter(entry => entry.isMain && entry.status === 'wait_finished')
       .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (recoveredMain) {
       this.ctx.schedulerPhase.set('active');
       this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
-      this.ctx.lastRuleDecision.set(
-        createRuleDecision({
-          type: 'idle_promote',
-          reason: '等待结束任务已恢复，仅置顶高亮等待用户切换',
-          recommendedTaskIds: [recoveredMain.taskId],
-        }),
-      );
+      this.setLastDecision({
+        type: 'idle_promote',
+        reason: '等待结束任务已恢复，仅置顶高亮等待用户切换',
+        recommendedTaskIds: [recoveredMain.taskId],
+      });
     }
   }
 
@@ -620,22 +654,34 @@ export class DockCompletionFlowService {
     this.fragmentRest.stopFragmentEntryCountdown();
     this.fragmentRest.setFragmentDismissed(false);
     if (!this.ctx.focusMode()) {
-      this.ctx.entries.update(prev =>
-        prev.map(entry =>
-          entry.taskId === taskId
-            ? {
-                ...entry,
-                isMain: true,
-                status: 'pending_start',
-                systemSelected: false,
-                recommendationLocked: false,
-              }
-            : { ...entry, isMain: false },
-        ),
-      );
+      this.promoteCandidateNonFocus(taskId);
       return;
     }
+    this.promoteCandidateInFocus(taskId);
+    if (clearDecision) {
+      this.clearPendingDecisionIfMatched(taskId);
+    }
+  }
 
+  /** 非专注模式下候选推进：设为 main + pending_start */
+  private promoteCandidateNonFocus(taskId: string): void {
+    this.ctx.entries.update(prev =>
+      prev.map(entry =>
+        entry.taskId === taskId
+          ? {
+              ...entry,
+              isMain: true,
+              status: 'pending_start',
+              systemSelected: false,
+              recommendationLocked: false,
+            }
+          : { ...entry, isMain: false },
+      ),
+    );
+  }
+
+  /** 专注模式下候选推进：设为 focusing，原焦点降级 */
+  private promoteCandidateInFocus(taskId: string): void {
     const currentFocusId = this.ctx.focusingEntry()?.taskId ?? null;
     const targetEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
     this.ctx.entries.update(prev => {
@@ -644,7 +690,7 @@ export class DockCompletionFlowService {
       );
        return prev.map(entry => {
         if (entry.taskId === taskId) {
-          const focused: DockEntry = {
+          return {
             ...entry,
             isMain: entry.isMain || !hasOtherMaster,
             status: 'focusing',
@@ -653,7 +699,6 @@ export class DockCompletionFlowService {
             systemSelected: false,
             recommendationLocked: false,
           };
-          return focused;
         }
         if (currentFocusId && entry.taskId === currentFocusId) {
           return {
@@ -666,9 +711,6 @@ export class DockCompletionFlowService {
     });
     if (currentFocusId && currentFocusId !== taskId) {
       this.ctx.lastConsoleDemotedTaskId.set(currentFocusId);
-    }
-    if (clearDecision) {
-      this.clearPendingDecisionIfMatched(taskId);
     }
   }
 
@@ -712,22 +754,30 @@ export class DockCompletionFlowService {
       'relaxed',
     );
     const recommendationIds = recommendation.groups.flatMap(group => group.taskIds);
-    const candidateIds = recommendationIds;
-    if (candidateIds.length === 0) {
+    if (recommendationIds.length === 0) {
       this.ctx.pendingDecision.set(null);
       this.ctx.highlightedIds.set(new Set());
       return;
     }
 
     const scoreByTaskId = new Map(rankedFallback.map(item => [item.taskId, item.score]));
-    const pendingGroups = recommendation.groups.map(group => ({ type: group.type, taskIds: group.taskIds }));
+    this.applyRecommendationEntries(suspendedTaskId, recommendationIds, scoreByTaskId);
+    this.recordSuspendRecommendation(
+      suspendedTaskId, waitMinutes, recommendation, recommendationIds,
+    );
+  }
 
+  /** 推荐 entries 更新：标记挂起任务、候选任务、非候选任务 */
+  private applyRecommendationEntries(
+    suspendedTaskId: string,
+    recommendationIds: string[],
+    scoreByTaskId: Map<string, number>,
+  ): void {
     this.ctx.entries.update(prev =>
       prev.map(entry => {
         if (entry.taskId === suspendedTaskId) {
           return {
             ...entry,
-            // 被挂起的主任务保留原 isMain 状态（策划案 §2.8 G-38c）
             isMain: entry.isMain,
             status: 'suspended_waiting',
             systemSelected: false,
@@ -735,7 +785,7 @@ export class DockCompletionFlowService {
             recommendedScore: null,
           };
         }
-        if (candidateIds.includes(entry.taskId)) {
+        if (recommendationIds.includes(entry.taskId)) {
           return {
             ...entry,
             status: 'pending_start',
@@ -752,7 +802,16 @@ export class DockCompletionFlowService {
         };
       }),
     );
+  }
 
+  /** 记录首次挂起推荐的 pendingDecision 和 ruleDecision */
+  private recordSuspendRecommendation(
+    suspendedTaskId: string,
+    waitMinutes: number,
+    recommendation: { mode: string; groups: Array<{ type: RecommendationGroupType; taskIds: string[] }> },
+    recommendationIds: string[],
+  ): void {
+    const pendingGroups = recommendation.groups.map(group => ({ type: group.type, taskIds: group.taskIds }));
     this.setPendingDecision(
       suspendedTaskId,
       waitMinutes,
@@ -763,21 +822,18 @@ export class DockCompletionFlowService {
           ? '首次挂起触发放宽时窗推荐，等待用户手动决策'
           : '首次挂起触发回退推荐，等待用户手动决策',
     );
-    const highlighted = candidateIds;
-    this.ctx.highlightedIds.set(new Set(highlighted));
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'first_suspend_recommendation',
-        reason: recommendation.mode === 'strict'
-          ? '首次挂起触发三维推荐阵列'
-          : recommendation.mode === 'relaxed'
-            ? '首次挂起触发放宽时窗推荐'
-            : '首次挂起触发规则引擎回退推荐',
-        rootTaskId: suspendedTaskId,
-          recommendedTaskIds: highlighted,
-          remainingMinutes: waitMinutes,
-        }),
-    );
+    this.ctx.highlightedIds.set(new Set(recommendationIds));
+    this.setLastDecision({
+      type: 'first_suspend_recommendation',
+      reason: recommendation.mode === 'strict'
+        ? '首次挂起触发三维推荐阵列'
+        : recommendation.mode === 'relaxed'
+          ? '首次挂起触发放宽时窗推荐'
+          : '首次挂起触发规则引擎回退推荐',
+      rootTaskId: suspendedTaskId,
+      recommendedTaskIds: recommendationIds,
+      remainingMinutes: waitMinutes,
+    });
   }
 
   setPendingDecision(
@@ -824,15 +880,13 @@ export class DockCompletionFlowService {
     );
 
     this.ctx.highlightedIds.set(new Set(candidateIds));
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'pending_decision',
-        reason,
-        rootTaskId,
-        recommendedTaskIds: candidateIds,
-        remainingMinutes: rootRemainingMinutes,
-      }),
-    );
+    this.setLastDecision({
+      type: 'pending_decision',
+      reason,
+      rootTaskId,
+      recommendedTaskIds: candidateIds,
+      remainingMinutes: rootRemainingMinutes,
+    });
   }
 
   enterFragmentPhase(reason: string, rootTaskId?: string, remainingMinutes?: number): void {
@@ -841,19 +895,15 @@ export class DockCompletionFlowService {
     if (this.ctx.fragmentDefenseLevel() < 2) {
       this.ctx.fragmentDefenseLevel.set(2);
     }
-    // 碎片阶段进入时自动触发碎片事件推荐（策划案 §7.8 Step 3.5）
-    if (this.ctx.fragmentDefenseLevel() >= 2) {
-      this.fragmentRest.getFragmentEventRecommendation();
-    }
-    this.ctx.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'fragment_phase',
-        reason,
-        rootTaskId,
-        recommendedTaskIds: [],
-        remainingMinutes,
-      }),
-    );
+    // M-19 fix: fragmentDefenseLevel 始终 >= 2（上方已保证），直接触发
+    this.fragmentRest.getFragmentEventRecommendation();
+    this.setLastDecision({
+      type: 'fragment_phase',
+      reason,
+      rootTaskId,
+      recommendedTaskIds: [],
+      remainingMinutes,
+    });
   }
 
   clearSystemSelectionOnEntries(entries: DockEntry[]): DockEntry[] {

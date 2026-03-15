@@ -230,6 +230,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
                         (touchend)="onTouchEnd($event)"
                         (click)="taskClick.emit(task)"
                         class="draggable-item w-full min-w-0 px-3 py-2 bg-white dark:bg-stone-800 border border-stone-200 dark:border-stone-600 rounded-lg shadow-sm text-xs text-stone-700 dark:text-stone-300 hover:border-teal-400 dark:hover:border-teal-500 hover:shadow transition-all truncate flex items-center gap-1.5"
+                        [attr.data-testid]="'flow-palette-task-' + task.id"
                         [ngClass]="{ 'opacity-50': draggingId() === task.id }">
                         <span class="w-1.5 h-1.5 rounded-full bg-teal-400 shrink-0"></span>
                         <span class="truncate">{{ task.title || '无标题' }}</span>

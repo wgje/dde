@@ -32,16 +32,24 @@ export class DockDailySlotService {
   private _fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel> | null = null;
   private _isFragmentPhase: Signal<boolean> | null = null;
 
-  private assertInitialized(): asserts this is this & {
-    _dailySlots: WritableSignal<DailySlotEntry[]>;
-    _dailyResetDate: WritableSignal<string>;
-    _schedulerPhase: WritableSignal<DockSchedulerPhase>;
-    _fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
-    _isFragmentPhase: Signal<boolean>;
-  } {
-    if (!this._dailySlots) {
+  /** 返回已初始化的上下文，未初始化时抛异常 */
+  private ctx(): Required<{
+    dailySlots: WritableSignal<DailySlotEntry[]>;
+    dailyResetDate: WritableSignal<string>;
+    schedulerPhase: WritableSignal<DockSchedulerPhase>;
+    fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
+    isFragmentPhase: Signal<boolean>;
+  }> {
+    if (!this._dailySlots || !this._dailyResetDate || !this._schedulerPhase || !this._fragmentDefenseLevel || !this._isFragmentPhase) {
       throw new Error('DockDailySlotService.init() must be called before use');
     }
+    return {
+      dailySlots: this._dailySlots,
+      dailyResetDate: this._dailyResetDate,
+      schedulerPhase: this._schedulerPhase,
+      fragmentDefenseLevel: this._fragmentDefenseLevel,
+      isFragmentPhase: this._isFragmentPhase,
+    };
   }
 
   init(ctx: DockDailySlotContext): void {
@@ -71,7 +79,7 @@ export class DockDailySlotService {
   }
 
   addDailySlot(title: string, maxDailyCount = 1): string {
-    this.assertInitialized();
+    const c = this.ctx();
     const id = crypto.randomUUID();
     const slot: DailySlotEntry = {
       id,
@@ -81,7 +89,7 @@ export class DockDailySlotService {
       isEnabled: true,
       createdAt: new Date().toISOString(),
     };
-    this._dailySlots.update(prev => [...prev, slot]);
+    c.dailySlots.update(prev => [...prev, slot]);
     const userId = this.auth.currentUserId();
     if (userId) {
       this.cloudSync.enqueueRoutineTaskSync(userId, {
@@ -96,10 +104,10 @@ export class DockDailySlotService {
   }
 
   setDailySlotEnabled(id: string, enabled: boolean): void {
-    this.assertInitialized();
-    const target = this._dailySlots().find(slot => slot.id === id) ?? null;
+    const c = this.ctx();
+    const target = c.dailySlots().find(slot => slot.id === id) ?? null;
     if (!target || target.isEnabled === enabled) return;
-    this._dailySlots.update(prev =>
+    c.dailySlots.update(prev =>
       prev.map(slot => (slot.id === id ? { ...slot, isEnabled: enabled } : slot)),
     );
     const userId = this.auth.currentUserId();
@@ -115,10 +123,10 @@ export class DockDailySlotService {
   }
 
   completeDailySlot(id: string): void {
-    this.assertInitialized();
-    const target = this._dailySlots().find(slot => slot.id === id) ?? null;
+    const c = this.ctx();
+    const target = c.dailySlots().find(slot => slot.id === id) ?? null;
     if (!target) return;
-    this._dailySlots.update(prev =>
+    c.dailySlots.update(prev =>
       prev.map(slot =>
         slot.id === id
           ? { ...slot, todayCompletedCount: Math.min(slot.maxDailyCount, slot.todayCompletedCount + 1) }
@@ -135,15 +143,15 @@ export class DockDailySlotService {
       };
       this.cloudSync.enqueueRoutineCompletionSync(completion);
     }
-    if (this._isFragmentPhase() && this._fragmentDefenseLevel() >= 3) {
-      this._fragmentDefenseLevel.set(4);
-      this._schedulerPhase.set('paused');
+    if (c.isFragmentPhase() && c.fragmentDefenseLevel() >= 3) {
+      c.fragmentDefenseLevel.set(4);
+      c.schedulerPhase.set('paused');
     }
   }
 
   skipDailySlot(id: string): void {
-    this.assertInitialized();
-    this._dailySlots.update(prev =>
+    const c = this.ctx();
+    c.dailySlots.update(prev =>
       prev.map(slot =>
         slot.id === id
           ? { ...slot, todayCompletedCount: slot.maxDailyCount }
@@ -153,9 +161,9 @@ export class DockDailySlotService {
   }
 
   removeDailySlot(id: string): void {
-    this.assertInitialized();
-    const removed = this._dailySlots().find(slot => slot.id === id) ?? null;
-    this._dailySlots.update(prev => prev.filter(slot => slot.id !== id));
+    const c = this.ctx();
+    const removed = c.dailySlots().find(slot => slot.id === id) ?? null;
+    c.dailySlots.update(prev => prev.filter(slot => slot.id !== id));
     const userId = this.auth.currentUserId();
     if (userId && removed) {
       this.cloudSync.enqueueRoutineTaskSync(userId, {
@@ -169,10 +177,10 @@ export class DockDailySlotService {
   }
 
   resetDailySlotsIfNeeded(): void {
-    this.assertInitialized();
+    const c = this.ctx();
     const today = this.todayDateKey();
-    if (today === this._dailyResetDate()) return;
-    this._dailyResetDate.set(today);
-    this._dailySlots.update(prev => prev.map(slot => ({ ...slot, todayCompletedCount: 0 })));
+    if (today === c.dailyResetDate()) return;
+    c.dailyResetDate.set(today);
+    c.dailySlots.update(prev => prev.map(slot => ({ ...slot, todayCompletedCount: 0 })));
   }
 }

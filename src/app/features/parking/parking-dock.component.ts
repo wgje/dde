@@ -10,13 +10,14 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { NgClass, NgStyle } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DockEngineService } from '../../../services/dock-engine.service';
 import { DynamicModalService } from '../../../services/dynamic-modal.service';
 import { FocusDockLeaderService } from '../../../services/focus-dock-leader.service';
 import { GateService } from '../../../services/gate.service';
 import { PerformanceTierService, type FocusPerformanceTier } from '../../../services/performance-tier.service';
+import { FocusHudWindowService } from '../../../services/focus-hud-window.service';
 import { ToastService } from '../../../services/toast.service';
 import { ModalLoaderService } from '../../core/services/modal-loader.service';
 import { ProjectStore, TaskStore } from '../../core/state/stores';
@@ -55,6 +56,7 @@ import {
   DockPlannerQuickEditComponent,
   type DockPlannerQuickEditPresentation,
 } from './components/dock-planner-quick-edit.component';
+import { formatDockMinutes, parseOptionalMinutes } from './utils/dock-format';
 
 type DockDropState = 'idle' | 'canDrop' | 'isOver' | 'reject';
 
@@ -95,7 +97,8 @@ const DOCK_CLOSE_TRANSIENT_SURFACES_EVENT = 'dock-close-transient-surfaces';
     '[style.z-index]': 'focusHostZIndex()',
   },
   imports: [
-    CommonModule,
+    NgClass,
+    NgStyle,
     FormsModule,
     DockConsoleStackComponent,
     DockRadarZoneComponent,
@@ -116,6 +119,7 @@ export class ParkingDockComponent implements OnDestroy {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly dynamicModal = inject(DynamicModalService);
   private readonly performanceTierService = inject(PerformanceTierService);
+  readonly focusHudWindow = inject(FocusHudWindowService);
   private readonly projectStore = inject(ProjectStore);
   private readonly taskStore = inject(TaskStore);
   private readonly toast = inject(ToastService);
@@ -227,7 +231,10 @@ export class ParkingDockComponent implements OnDestroy {
   readonly hudSafeRightInsetPx = 12;
   readonly firstMainSelectionPending = computed(() => this.engine.firstMainSelectionPending());
   readonly hudMinimalMode = computed(
-    () => this.engine.focusMode() && !this.engine.focusScrimOn(),
+    () => this.engine.focusMode() && (!this.engine.focusScrimOn() || this.focusHudWindow.isActive()),
+  );
+  readonly canOpenPipHud = computed(
+    () => this.engine.focusMode() && !this.uiState.isMobile() && this.focusHudWindow.isSupported(),
   );
   readonly focusStageTransform = computed(() => {
     if (this.uiState.isMobile()) {
@@ -405,6 +412,12 @@ export class ParkingDockComponent implements OnDestroy {
       if (!this.showNewTaskForm()) return;
       this.showNewTaskForm.set(false);
     });
+
+    effect(() => {
+      if (this.engine.focusMode()) return;
+      if (!this.focusHudWindow.isActive()) return;
+      void this.focusHudWindow.close();
+    });
   }
 
   @HostListener('document:keydown', ['$event'])
@@ -546,6 +559,19 @@ export class ParkingDockComponent implements OnDestroy {
     this.persistHudPosition();
     this.transitionPerformanceTierLock.set(null);
     this.engine.endFocusTransition();
+    void this.focusHudWindow.close();
+  }
+
+  async togglePipHud(): Promise<void> {
+    if (!this.canOpenPipHud()) return;
+    if (this.focusHudWindow.isActive()) {
+      await this.focusHudWindow.close();
+      return;
+    }
+    const opened = await this.focusHudWindow.open();
+    if (!opened) {
+      this.toast.warning('打开悬浮窗失败', '当前环境未能创建悬浮窗，请先留在主窗口继续处理。');
+    }
   }
 
   toggleNewTaskForm(): void {
@@ -607,6 +633,7 @@ export class ParkingDockComponent implements OnDestroy {
   onHudPointerDown(event: PointerEvent): void {
     if (this.hudMinimalMode()) return;
     if (event.button !== 0) return;
+    if (this.shouldIgnoreHudPointerDown(event.target)) return;
     const container = (event.currentTarget as HTMLElement)
       .closest('[data-testid=\"dock-v3-status-machine-container\"]') as HTMLElement | null;
     const rect = container?.getBoundingClientRect();
@@ -623,6 +650,24 @@ export class ParkingDockComponent implements OnDestroy {
     };
     (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
     event.preventDefault();
+  }
+
+  private shouldIgnoreHudPointerDown(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    return target.closest(
+      [
+        'button',
+        'a',
+        'input',
+        'textarea',
+        'select',
+        'label',
+        'summary',
+        '[role="button"]',
+        '[contenteditable="true"]',
+        '[data-hud-drag-ignore]',
+      ].join(','),
+    ) !== null;
   }
 
   onBackdropClick(): void {
@@ -745,8 +790,8 @@ export class ParkingDockComponent implements OnDestroy {
     if (!title) return;
 
     const detail = this.newTaskDetail.trim();
-    const expectedMinutes = this.parseOptionalMinutes(this.newTaskExpectedMinutes);
-    const waitMinutes = this.parseOptionalMinutes(this.newTaskWaitMinutes);
+    const expectedMinutes = parseOptionalMinutes(this.newTaskExpectedMinutes);
+    const waitMinutes = parseOptionalMinutes(this.newTaskWaitMinutes);
     const createdId = this.engine.createInDock(title, this.newTaskLane, this.newTaskLoad, {
       expectedMinutes,
       waitMinutes,
@@ -914,7 +959,8 @@ export class ParkingDockComponent implements OnDestroy {
   onTouchStart(event: TouchEvent, taskId: string): void {
     if (!this.canReorderDockCards()) return;
     this.touchStartY = event.touches?.[0]?.clientY ?? 0;
-    this.touchTaskId = taskId;
+    // H-8 fix: 不立即设置 touchTaskId，等长按回调后才允许滑动手势
+    this.touchTaskId = null;
     this.longPress.schedule(() => {
       this.touchTaskId = taskId;
     }, 500);
@@ -1319,32 +1365,14 @@ export class ParkingDockComponent implements OnDestroy {
 
   private resolvePlannerTrigger(taskId: string): HTMLButtonElement | null {
     return this.hostElement.nativeElement.querySelector(
-      `[data-testid="dock-v3-planner-toggle"][data-planner-task-id="${taskId}"]`,
+      `[data-testid="dock-v3-planner-toggle"][data-planner-task-id="${CSS.escape(taskId)}"]`,
     ) as HTMLButtonElement | null;
   }
 
   formatTime(minutes: number): string {
-    if (minutes >= 1440) {
-      const d = Math.floor(minutes / 1440);
-      const remainH = Math.floor((minutes % 1440) / 60);
-      return remainH > 0 ? `${d}d${remainH}h` : `${d}d`;
-    }
-    if (minutes >= 60) {
-      const h = Math.floor(minutes / 60);
-      const m = minutes % 60;
-      return m > 0 ? `${h}h${m}m` : `${h}h`;
-    }
-    return `${minutes}m`;
+    return formatDockMinutes(minutes);
   }
 
-  private parseOptionalMinutes(raw: string | number | null | undefined): number | null {
-    if (raw === null || raw === undefined) return null;
-    const value = typeof raw === 'string' ? raw.trim() : String(raw).trim();
-    if (!value) return null;
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) return null;
-    return Math.floor(parsed);
-  }
 
   /** 待决策候选任务（computed 避免模板每次 CD 重复调用） */
   readonly pendingDecisionRemainingMinutes = computed(() => {

@@ -1,4 +1,4 @@
-import { Component, inject, output, input, signal, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
@@ -30,7 +30,7 @@ interface TaskAttachmentMetadata {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
-      <div class="bg-slate-50 dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5 dark:ring-stone-700" (click)="$event.stopPropagation()">
+      <div data-testid="settings-modal" class="bg-slate-50 dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5 dark:ring-stone-700" (click)="$event.stopPropagation()">
         <!-- 头部 -->
         <div class="px-4 py-3 border-b border-slate-200/60 dark:border-stone-700 flex items-center justify-between bg-white dark:bg-stone-800 sticky top-0 z-10">
           <h2 class="text-base font-bold text-slate-800 dark:text-stone-200">系统设置</h2>
@@ -297,23 +297,6 @@ interface TaskAttachmentMetadata {
                 </div>
               </div>
 
-              <!-- 导出提醒 -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div>
-                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">定期备份提醒</div>
-                  <div class="text-[10px] text-slate-400 dark:text-stone-500">每 7 天提醒一次</div>
-                </div>
-                <button 
-                  (click)="toggleExportReminder()"
-                  class="relative w-9 h-5 rounded-full transition-colors duration-200"
-                  [class.bg-blue-500]="exportReminderEnabled()"
-                  [class.bg-slate-200]="!exportReminderEnabled()">
-                  <span 
-                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
-                    [class.translate-x-4]="exportReminderEnabled()">
-                  </span>
-                </button>
-              </div>
             </div>
           </section>
           
@@ -369,6 +352,7 @@ interface TaskAttachmentMetadata {
                 <button 
                   type="button"
                   (click)="toggleBlackBoxEnabled()"
+                  data-testid="settings-blackbox-toggle"
                   class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
                   [class.bg-indigo-500]="focusPreferenceService.preferences().blackBoxEnabled"
                   [class.bg-slate-200]="!focusPreferenceService.preferences().blackBoxEnabled">
@@ -583,7 +567,7 @@ interface TaskAttachmentMetadata {
                     <div class="flex items-center justify-between px-1 gap-3">
                       <div>
                         <div class="text-[11px] font-semibold text-amber-800 dark:text-amber-300">自动定时备份</div>
-                        <div class="text-[10px] text-amber-600/80 dark:text-amber-400/80">间隔 {{ selectedBackupInterval() }}</div>
+                        <div class="text-[10px] text-amber-600/80 dark:text-amber-400/80">当前默认间隔 {{ selectedBackupInterval() }}</div>
                       </div>
                       <button 
                         (click)="toggleAutoBackup()"
@@ -672,12 +656,8 @@ export class SettingsModalComponent {
   readonly close = output<void>();
   readonly signOut = output<void>();
   readonly themeChange = output<ThemeType>();
-  readonly colorModeChange = output<ColorMode>();
   readonly openDashboard = output<void>();
   readonly importComplete = output<Project>();
-  
-  /** 导出提醒开关状态 */
-  exportReminderEnabled = signal(true);
   readonly routineSlots = computed(() =>
     [...this.dockEngine.dailySlots()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
   );
@@ -744,16 +724,11 @@ export class SettingsModalComponent {
   
   updateColorMode(mode: ColorMode) {
     this.themeService.setColorMode(mode);
-    this.colorModeChange.emit(mode);
   }
   
   toggleAutoResolve() {
     const current = this.preferenceService.autoResolveConflicts();
     this.preferenceService.setAutoResolveConflicts(!current);
-  }
-  
-  toggleExportReminder() {
-    this.exportReminderEnabled.update(v => !v);
   }
   
   /**
@@ -995,16 +970,6 @@ export class SettingsModalComponent {
   }
   
   /**
-   * 恢复本地备份权限
-   */
-  async handleResumePermission(): Promise<void> {
-    // 先设置项目提供者
-    this.localBackupService.setProjectsProvider(() => this.projects());
-    // 然后恢复权限
-    await this.localBackupService.resumePermission();
-  }
-  
-  /**
    * 取消本地备份授权
    */
   async handleRevokeLocalBackup(): Promise<void> {
@@ -1098,17 +1063,6 @@ export class SettingsModalComponent {
     this.focusPreferenceService.update({ strataEnabled: !current });
   }
   
-  /**
-   * 更新每日最大跳过次数
-   */
-  updateMaxSnooze(event: Event): void {
-    const select = event.target as HTMLSelectElement;
-    const value = parseInt(select.value, 10);
-    if (!isNaN(value) && value > 0) {
-      this.focusPreferenceService.update({ maxSnoozePerDay: value });
-    }
-  }
-
   updateRoutineResetHour(event: Event): void {
     const select = event.target as HTMLSelectElement;
     const value = Number.parseInt(select.value, 10);

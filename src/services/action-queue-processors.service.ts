@@ -168,7 +168,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.saveFocusSession(payload.record);
+        const result = await this.syncService.saveFocusSession(payload.record);
+        return result.ok;
       } catch (error) {
         this.logger.error('focus-session:create 异常', { error });
         return false;
@@ -182,7 +183,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.saveFocusSession(payload.record);
+        const result = await this.syncService.saveFocusSession(payload.record);
+        return result.ok;
       } catch (error) {
         this.logger.error('focus-session:update 异常', { error });
         return false;
@@ -197,7 +199,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        const result = await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        return result.ok;
       } catch (error) {
         this.logger.error('routine-task:create 异常', { error });
         return false;
@@ -212,7 +215,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        const result = await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        return result.ok;
       } catch (error) {
         this.logger.error('routine-task:update 异常', { error });
         return false;
@@ -226,7 +230,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.incrementRoutineCompletion(payload.completion);
+        const result = await this.syncService.incrementRoutineCompletion(payload.completion);
+        return result.ok;
       } catch (error) {
         this.logger.error('routine-completion:create 异常', { error });
         return false;
@@ -240,7 +245,8 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.incrementRoutineCompletion(payload.completion);
+        const result = await this.syncService.incrementRoutineCompletion(payload.completion);
+        return result.ok;
       } catch (error) {
         this.logger.error('routine-completion:update 异常', { error });
         return false;

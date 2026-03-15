@@ -11,7 +11,7 @@ import {
   signal,
 } from '@angular/core';
 import { DomSanitizer, SafeStyle } from '@angular/platform-browser';
-import { CommonModule } from '@angular/common';
+import { NgStyle } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import type { DockFocusTransitionPhase } from '../../../../models/parking-dock';
 import { PerformanceTierService, type FocusPerformanceTier } from '../../../../services/performance-tier.service';
@@ -42,7 +42,7 @@ interface DockFocusScenePreset {
   selector: 'app-dock-focus-scene',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [NgStyle],
   styles: [`
     :host {
       display: block;
@@ -341,6 +341,8 @@ interface DockFocusScenePreset {
         [class.active]="stageVisible()"
         [style.transform]="stageTransform$()"
         style="pointer-events: none;"
+        [attr.aria-hidden]="stageVisible() ? null : 'true'"
+        [attr.inert]="stageVisible() ? null : ''"
         [attr.data-performance-tier]="performanceTier$()"
         [attr.data-scene]="sceneMode$()"
         [attr.data-reduced-motion]="reducedMotion$() ? 'true' : 'false'"
@@ -350,7 +352,10 @@ interface DockFocusScenePreset {
         data-testid="dock-v3-focus-stage"
         (animationend)="onStageAnimationEnd($event)"
         (transitionend)="onStageTransitionEnd($event)">
-        <ng-content></ng-content>
+        @if (stageVisible()) {
+          <!-- scrim 关闭且无过渡时，彻底卸载投影内容，避免透明固定层继续吞点击。 -->
+          <ng-content></ng-content>
+        }
       </div>
     }
   `,

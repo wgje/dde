@@ -58,6 +58,11 @@ export const ErrorCodes = {
   FOCUS_ENTRY_NOT_FOUND: 'FOCUS_ENTRY_NOT_FOUND',
   FOCUS_SNOOZE_LIMIT_EXCEEDED: 'FOCUS_SNOOZE_LIMIT_EXCEEDED',
   FOCUS_SERVICE_UNAVAILABLE: 'FOCUS_SERVICE_UNAVAILABLE',
+  // Focus Console 同步错误码
+  FOCUS_CONSOLE_LOAD_FAILED: 'FOCUS_CONSOLE_LOAD_FAILED',
+  FOCUS_CONSOLE_SAVE_FAILED: 'FOCUS_CONSOLE_SAVE_FAILED',
+  FOCUS_CONSOLE_ROUTINE_FAILED: 'FOCUS_CONSOLE_ROUTINE_FAILED',
+  FOCUS_CONSOLE_INCREMENT_FAILED: 'FOCUS_CONSOLE_INCREMENT_FAILED',
 } as const;
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
@@ -114,6 +119,10 @@ export const ErrorMessages: Record<ErrorCode, string> = {
   [ErrorCodes.FOCUS_ENTRY_NOT_FOUND]: '条目不存在',
   [ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED]: '今日跳过次数已达上限',
   [ErrorCodes.FOCUS_SERVICE_UNAVAILABLE]: '转写服务暂不可用',
+  [ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED]: '加载专注会话失败',
+  [ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED]: '保存专注会话失败',
+  [ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED]: '日常任务操作失败',
+  [ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED]: '完成记录更新失败',
 };
 
 /**

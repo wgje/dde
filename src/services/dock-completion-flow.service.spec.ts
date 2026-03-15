@@ -5,6 +5,12 @@ import { DockCompletionFlowService, DockCompletionContext } from './dock-complet
 import { DockZoneService } from './dock-zone.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import {
+  isWaitingLike,
+  isRunnableStatus,
+  isAutoPromotableStatus,
+  isConsoleBackgroundStatus,
+} from './dock-engine.utils';
+import {
   DockEntry,
   DockPendingDecision,
   DockRuleDecision,
@@ -45,10 +51,6 @@ function makeEntry(overrides: Partial<DockEntry> & { taskId: string }): DockEntr
 
 const mockZoneService = {
   resolveSourceProjectId: vi.fn((entry: DockEntry) => entry.sourceProjectId),
-  entryOrder: vi.fn((entry: DockEntry) => {
-    if (Number.isFinite(entry.manualOrder)) return Number(entry.manualOrder);
-    return entry.dockedOrder;
-  }),
 };
 
 const mockFragmentRest = {
@@ -121,7 +123,7 @@ describe('DockCompletionFlowService', () => {
         ['stalled', false],
         ['completed', false],
       ] as [DockTaskStatus, boolean][])('isWaitingLike(%s) → %s', (status, expected) => {
-        expect(service.isWaitingLike(status)).toBe(expected);
+        expect(isWaitingLike(status)).toBe(expected);
       });
     });
 
@@ -134,7 +136,7 @@ describe('DockCompletionFlowService', () => {
         ['suspended_waiting', false],
         ['completed', false],
       ] as [DockTaskStatus, boolean][])('isRunnableStatus(%s) → %s', (status, expected) => {
-        expect(service.isRunnableStatus(status)).toBe(expected);
+        expect(isRunnableStatus(status)).toBe(expected);
       });
     });
 
@@ -147,7 +149,7 @@ describe('DockCompletionFlowService', () => {
         ['wait_finished', false],
         ['completed', false],
       ] as [DockTaskStatus, boolean][])('isAutoPromotableStatus(%s) → %s', (status, expected) => {
-        expect(service.isAutoPromotableStatus(status)).toBe(expected);
+        expect(isAutoPromotableStatus(status)).toBe(expected);
       });
     });
 
@@ -160,7 +162,7 @@ describe('DockCompletionFlowService', () => {
         ['focusing', false],
         ['completed', false],
       ] as [DockTaskStatus, boolean][])('isConsoleBackgroundStatus(%s) → %s', (status, expected) => {
-        expect(service.isConsoleBackgroundStatus(status)).toBe(expected);
+        expect(isConsoleBackgroundStatus(status)).toBe(expected);
       });
     });
   });

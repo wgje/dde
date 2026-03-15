@@ -1,6 +1,28 @@
+import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockFocusSceneComponent } from './dock-focus-scene.component';
+
+@Component({
+  standalone: true,
+  imports: [DockFocusSceneComponent],
+  template: `
+    <app-dock-focus-scene
+      [active]="active"
+      [scrimOn]="scrimOn">
+      <button
+        type="button"
+        style="pointer-events: auto;"
+        data-testid="projected-focus-control">
+        Focus Control
+      </button>
+    </app-dock-focus-scene>
+  `,
+})
+class DockFocusSceneHostComponent {
+  active = true;
+  scrimOn = false;
+}
 
 describe('DockFocusSceneComponent', () => {
   let fixture: ComponentFixture<DockFocusSceneComponent>;
@@ -8,14 +30,14 @@ describe('DockFocusSceneComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      imports: [DockFocusSceneComponent],
+      imports: [DockFocusSceneComponent, DockFocusSceneHostComponent],
     }).compileComponents();
 
     fixture = TestBed.createComponent(DockFocusSceneComponent);
     component = fixture.componentInstance;
   });
 
-  it('keeps stage mounted in transparent focus mode', () => {
+  it('keeps stage shell mounted in transparent focus mode', () => {
     fixture.componentRef.setInput('active', true);
     fixture.componentRef.setInput('scrimOn', false);
     fixture.detectChanges();
@@ -27,6 +49,23 @@ describe('DockFocusSceneComponent', () => {
     expect(stage.getAttribute('data-scrim')).toBe('off');
     expect(backdrop.classList.contains('active')).toBe(false);
     expect(component.focusStageStyle()['--stage-shell-opacity']).toBe('0.720');
+  });
+
+  it('should unmount projected controls when transparent focus mode is idle', () => {
+    const hostFixture = TestBed.createComponent(DockFocusSceneHostComponent);
+    hostFixture.detectChanges();
+
+    const stage = hostFixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]') as HTMLElement | null;
+
+    expect(stage).toBeTruthy();
+    expect(stage?.getAttribute('aria-hidden')).toBe('true');
+    expect(stage?.hasAttribute('inert')).toBe(true);
+    expect(hostFixture.nativeElement.querySelector('[data-testid="projected-focus-control"]')).toBeNull();
+
+    hostFixture.componentInstance.scrimOn = true;
+    hostFixture.detectChanges();
+
+    expect(hostFixture.nativeElement.querySelector('[data-testid="projected-focus-control"]')).toBeTruthy();
   });
 
   it('keeps the full-screen stage transparent to pointer hits outside real controls', () => {

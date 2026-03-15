@@ -8,6 +8,7 @@ import { DynamicModalService } from '../../../../services/dynamic-modal.service'
 import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
 import { GateService } from '../../../../services/gate.service';
 import { PerformanceTierService } from '../../../../services/performance-tier.service';
+import { FocusHudWindowService } from '../../../../services/focus-hud-window.service';
 import { ToastService } from '../../../../services/toast.service';
 import { ModalLoaderService } from '../../../core/services/modal-loader.service';
 import { ProjectStore, TaskStore } from '../../../core/state/stores';
@@ -45,7 +46,7 @@ describe('ParkingDockComponent v4', () => {
     consoleEntries: computed(() => dockedEntries().filter(entry => entry.isMain && entry.status !== 'completed')),
     consoleVisibleEntries: computed(() => dockedEntries().filter(entry => entry.isMain && entry.status !== 'completed').slice(0, 4)),
     focusingEntry: computed(
-      () => dockedEntries().find(entry => entry.status === 'focusing' && entry.isMain) ?? null,
+      () => dockedEntries().find(entry => entry.status === 'focusing') ?? null,
     ),
     focusMode,
     focusScrimOn,
@@ -142,6 +143,13 @@ describe('ParkingDockComponent v4', () => {
     isActive: signal(false),
   };
 
+  const mockFocusHudWindow = {
+    isActive: signal(false),
+    isSupported: signal(true),
+    open: vi.fn().mockResolvedValue(true),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+
   const mockProjectStore = {
     projects: signal([] as any[]),
   };
@@ -157,6 +165,7 @@ describe('ParkingDockComponent v4', () => {
 
   const mockToast = {
     error: vi.fn(),
+    warning: vi.fn(),
   };
 
   beforeEach(async () => {
@@ -186,10 +195,16 @@ describe('ParkingDockComponent v4', () => {
     mockFocusLeader.tryTakeover.mockClear();
     mockPerformanceTier.tier.set('T0');
     mockGateService.isActive.set(false);
+    mockFocusHudWindow.isActive.set(false);
+    mockFocusHudWindow.isSupported.set(true);
+    mockFocusHudWindow.open.mockClear();
+    mockFocusHudWindow.open.mockResolvedValue(true);
+    mockFocusHudWindow.close.mockClear();
     mockModalLoader.loadSettingsModal.mockResolvedValue(ParkingDockComponent);
     mockDynamicModal.open.mockClear();
     mockDynamicModal.close.mockClear();
     mockToast.error.mockClear();
+    mockToast.warning.mockClear();
 
     await TestBed.configureTestingModule({
       imports: [ParkingDockComponent, DockPlannerQuickEditComponent],
@@ -202,6 +217,7 @@ describe('ParkingDockComponent v4', () => {
         { provide: ModalLoaderService, useValue: mockModalLoader },
         { provide: DynamicModalService, useValue: mockDynamicModal },
         { provide: PerformanceTierService, useValue: mockPerformanceTier },
+        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
         { provide: ToastService, useValue: mockToast },
       ],
     }).compileComponents();
@@ -290,6 +306,29 @@ describe('ParkingDockComponent v4', () => {
 
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-create-toggle"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-drop-zone"]')).toBeTruthy();
+  });
+
+  it('should hide inline create controls while focus scrim is enabled and restore them after scrim is closed', () => {
+    fixture.detectChanges();
+    component.toggleNewTaskForm();
+    fixture.detectChanges();
+
+    expect(component.showNewTaskForm()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-create-toggle"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.new-task-form')).toBeTruthy();
+
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    fixture.detectChanges();
+
+    expect(component.showNewTaskForm()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-create-toggle"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.new-task-form')).toBeNull();
+
+    focusScrimOn.set(false);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-create-toggle"]')).toBeTruthy();
   });
 
   it('clampHudPosition should allow HUD to reach any edge with only 12px margin', () => {
@@ -764,6 +803,38 @@ describe('ParkingDockComponent v4', () => {
     expect(mockEngine.setMainTask).toHaveBeenCalledWith('focus-target');
   });
 
+  it('clicking the dock main card should bring it back to C position when another task is in front', () => {
+    dockedEntries.set([
+      {
+        taskId: 'focus-main',
+        title: 'Focus Main',
+        status: 'stalled',
+        load: 'low',
+        lane: 'backup',
+        expectedMinutes: 25,
+        waitMinutes: null,
+        isMain: true,
+      },
+      {
+        taskId: 'focus-secondary',
+        title: 'Focus Secondary',
+        status: 'focusing',
+        load: 'low',
+        lane: 'combo-select',
+        expectedMinutes: 15,
+        waitMinutes: null,
+        isMain: false,
+      },
+    ]);
+    focusMode.set(true);
+    focusScrimOn.set(true);
+
+    component.onDockCardClick('focus-main');
+
+    expect(mockEngine.setMainTask).toHaveBeenCalledWith('focus-main');
+    expect(component.dockActionFeedback()?.message).toContain('已切换到前台');
+  });
+
   it('main dock cards should not show backup or combo lane labels', () => {
     dockedEntries.set([
       {
@@ -781,8 +852,10 @@ describe('ParkingDockComponent v4', () => {
 
     const card = fixture.nativeElement.querySelector('[data-testid="dock-v3-item"]') as HTMLElement | null;
     const text = card?.textContent ?? '';
+    const mainLabelMatches = text.match(/主任务/g) ?? [];
 
     expect(text).toContain('主任务');
+    expect(mainLabelMatches).toHaveLength(1);
     expect(text).not.toContain('副任务');
     expect(text).not.toContain('组合选择');
   });
@@ -994,6 +1067,100 @@ describe('ParkingDockComponent v4', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-container"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-minimal"]')).toBeTruthy();
+  });
+
+  it('active PiP HUD should collapse the in-page HUD to minimal mode even with scrim on', () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isActive.set(true);
+    statusMachineEntries.set([
+      {
+        taskId: 'A',
+        title: 'Focus A',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    fixture.detectChanges();
+
+    expect(component.hudMinimalMode()).toBe(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-minimal"]')).toBeTruthy();
+  });
+
+  it('PiP HUD toggle should open the PiP window on desktop focus mode', async () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isSupported.set(true);
+    fixture.detectChanges();
+
+    await component.togglePipHud();
+
+    expect(mockFocusHudWindow.open).toHaveBeenCalledTimes(1);
+    expect(mockFocusHudWindow.close).not.toHaveBeenCalled();
+  });
+
+  it('PiP HUD toggle should close the PiP window when it is already active', async () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isSupported.set(true);
+    mockFocusHudWindow.isActive.set(true);
+    fixture.detectChanges();
+
+    await component.togglePipHud();
+
+    expect(mockFocusHudWindow.close).toHaveBeenCalledTimes(1);
+    expect(mockFocusHudWindow.open).not.toHaveBeenCalled();
+  });
+
+  it('PiP HUD open failure should warn the user instead of failing silently', async () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isSupported.set(true);
+    mockFocusHudWindow.open.mockResolvedValue(false);
+    fixture.detectChanges();
+
+    await component.togglePipHud();
+
+    expect(mockToast.warning).toHaveBeenCalledWith(
+      '打开悬浮窗失败',
+      '当前环境未能创建悬浮窗，请先留在主窗口继续处理。',
+    );
+  });
+
+  it('HUD drag handler should ignore header action buttons so the PiP toggle remains clickable', () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isSupported.set(true);
+    fixture.detectChanges();
+
+    const shell = fixture.nativeElement.querySelector('.status-machine-shell') as HTMLElement | null;
+    const pipButton = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-pip-toggle"]') as HTMLButtonElement | null;
+    const preventDefault = vi.fn();
+
+    component.onHudPointerDown({
+      button: 0,
+      clientX: 48,
+      clientY: 48,
+      currentTarget: shell,
+      target: pipButton,
+      pointerId: 1,
+      preventDefault,
+    } as unknown as PointerEvent);
+
+    expect(component.hudDragging()).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('should render the PiP toggle inside the status HUD header instead of an external floating button', () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    mockFocusHudWindow.isSupported.set(true);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-pip-toggle"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-pip-toggle"]')).toBeNull();
   });
 
 

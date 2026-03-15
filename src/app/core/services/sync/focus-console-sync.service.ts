@@ -10,6 +10,13 @@ import {
 } from '../../../../models/parking-dock';
 import { nowISO } from '../../../../utils/date';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
+import {
+  type Result,
+  type OperationError,
+  success,
+  failure,
+  ErrorCodes,
+} from '../../../../utils/result';
 
 /** 最小化运行时校验：DockSnapshot 至少含合法 version */
 function isDockSnapshotLike(value: unknown): value is DockSnapshot {
@@ -36,14 +43,6 @@ interface RoutineTaskRow {
   updated_at: string;
 }
 
-interface RoutineCompletionRow {
-  id: string;
-  user_id: string;
-  routine_id: string;
-  date_key: string;
-  count: number;
-}
-
 @Injectable({
   providedIn: 'root',
 })
@@ -52,11 +51,8 @@ export class FocusConsoleSyncService {
   private readonly logger = inject(LoggerService).category('FocusConsoleSync');
 
   /**
-   * 【M-02】`this.supabase.client()` is synchronous and may throw if called
-   * before the Supabase client is fully initialised (e.g. during early
-   * bootstrap). The try/catch below gracefully degrades to null so callers
-   * treat it as "offline". If call sites are ever invoked before Angular DI
-   * finishes, consider switching to `clientAsync()` (which awaits readiness).
+   * Supabase client 安全获取：未就绪或未配置时返回 null，
+   * 调用方以 SYNC_OFFLINE 错误处理。
    */
   private getSupabaseClient(): SupabaseClient | null {
     if (!this.supabase.isConfigured) return null;
@@ -68,16 +64,16 @@ export class FocusConsoleSyncService {
   }
 
   /**
-   * 【M-01 LWW gap】This method unconditionally returns the remote snapshot
-   * without comparing `updated_at` against the local in-memory/IDB state.
-   * If the local state is newer (e.g. user made changes while offline), the
-   * caller will overwrite it with a stale remote snapshot. A future iteration
-   * should compare `row.updated_at` with the local DockSnapshot timestamp and
-   * only return the remote data when it is strictly newer (LWW merge).
+   * 加载远端专注会话快照。
+   * 【HR-2 LWW 修复】当提供 localUpdatedAt 时，仅在远端更新时间严格晚于本地时返回，
+   * 否则返回 null 表示本地数据更新（Last-Write-Wins）。
    */
-  async loadFocusSession(userId: string): Promise<DockSnapshot | null> {
+  async loadFocusSession(
+    userId: string,
+    localUpdatedAt?: string,
+  ): Promise<Result<DockSnapshot | null, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return null;
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
       const { data, error } = await client
@@ -88,28 +84,32 @@ export class FocusConsoleSyncService {
         .limit(1)
         .maybeSingle();
       if (error) throw supabaseErrorToError(error);
-      if (!data) return null;
+      if (!data) return success(null);
 
       const row = data as FocusSessionRow;
+
+      // LWW：本地更新时间 >= 远端时，跳过远端数据（本地赢）
+      if (localUpdatedAt && row.updated_at <= localUpdatedAt) {
+        return success(null);
+      }
+
       const state = row.session_state;
-      if (!isDockSnapshotLike(state)) return null;
-      return state;
+      if (!isDockSnapshotLike(state)) return success(null);
+      return success(state);
     } catch (error) {
       this.logger.warn('loadFocusSession failed', error);
-      return null;
+      return failure(ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED, '加载专注会话失败');
     }
   }
 
   /**
-   * 【H-05 Offline-first limitation】This method writes directly to Supabase
-   * without local IDB persistence. When offline, the data is lost (return false).
-   * Callers already handle false returns gracefully, but a future iteration should
-   * add IDB persistence + RetryQueue support (like BlackBoxSyncService does) so
-   * that focus session snapshots survive offline/crash scenarios.
+   * 保存专注会话快照到远端。
+   * 【H-05 说明】当前直接写 Supabase，离线时返回 SYNC_OFFLINE 错误。
+   * 调用方（DockCloudSyncService）负责将失败操作入队到 RetryQueue。
    */
-  async saveFocusSession(record: FocusSessionRecord): Promise<boolean> {
+  async saveFocusSession(record: FocusSessionRecord): Promise<Result<void, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return false;
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
       const payload: FocusSessionRow = {
@@ -121,20 +121,35 @@ export class FocusConsoleSyncService {
         updated_at: record.updatedAt || nowISO(),
       };
 
+      // C-4 fix: 写入前检查远端版本，避免过期重试覆盖更新数据
+      const { data: existing } = await client
+        .from('focus_sessions')
+        .select('session_state')
+        .eq('id', record.id)
+        .maybeSingle();
+      if (existing?.session_state) {
+        const remoteSavedAt = (existing.session_state as Record<string, unknown>)?.savedAt;
+        const localSavedAt = (record.snapshot as unknown as Record<string, unknown>)?.savedAt;
+        if (typeof remoteSavedAt === 'number' && typeof localSavedAt === 'number' && remoteSavedAt > localSavedAt) {
+          this.logger.info('saveFocusSession skipped: remote is newer', { remoteSavedAt, localSavedAt });
+          return success(undefined);
+        }
+      }
+
       const { error } = await client
         .from('focus_sessions')
         .upsert(payload, { onConflict: 'id' });
       if (error) throw supabaseErrorToError(error);
-      return true;
+      return success(undefined);
     } catch (error) {
       this.logger.warn('saveFocusSession failed', error);
-      return false;
+      return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '保存专注会话失败');
     }
   }
 
-  async listRoutineTasks(userId: string): Promise<RoutineTask[]> {
+  async listRoutineTasks(userId: string): Promise<Result<RoutineTask[], OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return [];
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
       const { data, error } = await client
@@ -145,28 +160,27 @@ export class FocusConsoleSyncService {
       if (error) throw supabaseErrorToError(error);
 
       const rows = Array.isArray(data) ? (data as RoutineTaskRow[]) : [];
-      return rows.map(row => ({
+      return success(rows.map(row => ({
         routineId: row.id,
         title: row.title,
-        triggerCondition: 'any-blank-period',
+        triggerCondition: 'any-blank-period' as const,
         maxTimesPerDay: row.max_times_per_day,
         isEnabled: row.is_enabled,
-      }));
+        updatedAt: row.updated_at,
+      })));
     } catch (error) {
       this.logger.warn('listRoutineTasks failed', error);
-      return [];
+      return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '获取日常任务失败');
     }
   }
 
   /**
-   * 【H-06 Offline-first limitation】This method writes directly to Supabase
-   * without local IDB persistence. When offline, the mutation is lost (return false).
-   * A future iteration should add IDB persistence + RetryQueue support
-   * (like BlackBoxSyncService does) to ensure routine task edits survive offline.
+   * 保存日常任务到远端。
+   * 离线时返回 SYNC_OFFLINE，调用方负责 RetryQueue。
    */
-  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<boolean> {
+  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<Result<void, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return false;
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
       const payload: RoutineTaskRow = {
@@ -182,31 +196,29 @@ export class FocusConsoleSyncService {
         .from('routine_tasks')
         .upsert(payload, { onConflict: 'id' });
       if (error) throw supabaseErrorToError(error);
-      return true;
+      return success(undefined);
     } catch (error) {
       this.logger.warn('upsertRoutineTask failed', error);
-      return false;
+      return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '更新日常任务失败');
     }
   }
 
   /**
-   * 【H-06 Offline-first limitation】Same as saveFocusSession / upsertRoutineTask —
-   * no local IDB persistence. Offline increments are lost. Future iteration should
-   * queue mutations locally and replay via RetryQueue on reconnect.
-   *
-   * 【H-07 Race condition】The previous SELECT-then-UPDATE pattern was not atomic.
-   * Two concurrent calls could read the same count and both write count+1 instead
-   * of count+2. Ideally this should use a Supabase RPC with `UPDATE ... SET count
-   * = count + 1` for a true atomic increment. As an interim fix we use optimistic
-   * concurrency: the UPDATE filters on the expected `count` value so a stale read
-   * will match zero rows, which we detect and log as a conflict.
+   * 递增日常任务完成计数。
+   * 【HR-3 修复】冲突时自动重试一次（读取最新 count 后再更新），
+   * 避免静默丢弃增量。
+   * TODO(NF-ROUTINE-RPC): 替换为 Supabase RPC `increment_routine_completion`
+   * 实现真正的原子 `UPDATE ... SET count = count + 1`。
    */
-  async incrementRoutineCompletion(mutation: RoutineCompletionMutation): Promise<boolean> {
+  async incrementRoutineCompletion(
+    mutation: RoutineCompletionMutation,
+    _retryAttempt = 0,
+  ): Promise<Result<void, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return false;
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
-      // Step 1: Attempt optimistic insert (first completion for this routine+date)
+      // Step 1: 尝试插入（首次完成）
       const { error: insertError } = await client
         .from('routine_completions')
         .insert({
@@ -217,20 +229,15 @@ export class FocusConsoleSyncService {
           count: 1,
         });
 
-      // Insert succeeded — first completion for this day
-      if (!insertError) return true;
+      if (!insertError) return success(undefined);
 
-      // If the error is NOT a unique-violation (23505), it's a real failure
+      // 非唯一约束冲突(23505)则为真正错误
       const pgCode = (insertError as unknown as Record<string, unknown>).code;
       if (pgCode !== '23505') {
         throw supabaseErrorToError(insertError);
       }
 
-      // Step 2: Row already exists — read current count, then update with
-      // optimistic concurrency guard (filter on expected count).
-      // TODO(H-07): Replace with Supabase RPC `increment_routine_completion`
-      // that performs `UPDATE ... SET count = count + 1 ... RETURNING count`
-      // for a truly atomic server-side increment.
+      // Step 2: 已存在 — 读取当前 count 并乐观更新
       const { data, error } = await client
         .from('routine_completions')
         .select('id,count')
@@ -241,17 +248,16 @@ export class FocusConsoleSyncService {
       if (error) throw supabaseErrorToError(error);
 
       if (!data) {
-        // Should not happen after a 23505 conflict, but guard defensively
         this.logger.warn('incrementRoutineCompletion: row disappeared after conflict');
-        return false;
+        return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录意外消失');
       }
 
-      const existingCount = typeof data === 'object' && data !== null ? Number((data as Record<string, unknown>).count ?? 0) : 0;
-      const existingId = typeof data === 'object' && data !== null ? String((data as Record<string, unknown>).id ?? '') : '';
+      const record = data as Record<string, unknown>;
+      const existingCount = Number(record.count ?? 0);
+      const existingId = String(record.id ?? '');
       const nextCount = Math.max(1, existingCount + 1);
 
-      // Optimistic concurrency: filter on the expected count so a concurrent
-      // increment by another client will cause this update to match 0 rows.
+      // 乐观并发：filter on expected count 检测并发修改
       const { data: updateResult, error: updateError } = await client
         .from('routine_completions')
         .update({ count: nextCount })
@@ -262,23 +268,25 @@ export class FocusConsoleSyncService {
       if (updateError) throw supabaseErrorToError(updateError);
 
       if (!updateResult || updateResult.length === 0) {
-        this.logger.warn(
-          'incrementRoutineCompletion: concurrent modification detected — ' +
-          'update matched 0 rows. The increment may have been applied by another client.'
-        );
-        // Return true to avoid retry-loops; the count will converge on next sync.
+        // M-15: 冲突时重试最多 3 次（原仅 1 次，高并发场景下不足）
+        if (_retryAttempt < 3) {
+          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${_retryAttempt + 1}/3`);
+          return this.incrementRoutineCompletion(mutation, _retryAttempt + 1);
+        }
+        this.logger.warn('incrementRoutineCompletion: conflict persists after retry');
+        return failure(ErrorCodes.SYNC_CONFLICT, '并发修改冲突');
       }
 
-      return true;
+      return success(undefined);
     } catch (error) {
       this.logger.warn('incrementRoutineCompletion failed', error);
-      return false;
+      return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
     }
   }
 
-  async importLegacyDockSnapshot(userId: string): Promise<DockSnapshot | null> {
+  async importLegacyDockSnapshot(userId: string): Promise<Result<DockSnapshot | null, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return null;
+    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
     try {
       const { data, error } = await client
@@ -290,11 +298,11 @@ export class FocusConsoleSyncService {
       const raw = typeof data === 'object' && data !== null
         ? (data as Record<string, unknown>).dock_snapshot
         : undefined;
-      if (!isDockSnapshotLike(raw)) return null;
-      return raw;
+      if (!isDockSnapshotLike(raw)) return success(null);
+      return success(raw);
     } catch (error) {
       this.logger.warn('importLegacyDockSnapshot failed', error);
-      return null;
+      return failure(ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED, '导入旧版快照失败');
     }
   }
 }

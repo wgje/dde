@@ -9,7 +9,7 @@ import {
   output,
   signal,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { NgStyle } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { PerformanceTierService } from '../../../../services/performance-tier.service';
@@ -18,7 +18,7 @@ import { PerformanceTierService } from '../../../../services/performance-tier.se
   selector: 'app-dock-zen-mode',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [NgStyle],
   styles: [`
     :host {
       display: block;

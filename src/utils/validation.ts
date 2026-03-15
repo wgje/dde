@@ -8,6 +8,20 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{
 const MAX_ATTACHMENT_SIZE = ATTACHMENT_CONFIG.MAX_FILE_SIZE;
 const MAX_ATTACHMENTS_PER_TASK = ATTACHMENT_CONFIG.MAX_ATTACHMENTS_PER_TASK;
 
+/** M-2: 模块级 URL 清洗函数，用于所有 URL 类型字段 */
+const URL_ALLOWED_PROTOCOLS = ['https:', 'http:', 'blob:'];
+function sanitizeUrlValue(value: unknown): string {
+  const url = String(value || '');
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    if (!URL_ALLOWED_PROTOCOLS.includes(parsed.protocol)) return '';
+  } catch {
+    if (!/^https?:\/\/|^blob:[a-z]+:|^\/(?!\/)|^storage\//.test(url)) return '';
+  }
+  return url;
+}
+
 const ALLOWED_MIME_TYPES: Record<AttachmentType, string[]> = {
   image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'],
   document: [
@@ -320,18 +334,7 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
   const type = validTypes.includes(raw.type as AttachmentType) ? (raw.type as AttachmentType) : 'file';
 
   const allowedProtocols = ['https:', 'http:', 'blob:'];
-  const sanitizeUrl = (value: unknown): string => {
-    const url = String(value || '');
-    if (!url) return '';
-    try {
-      const parsed = new URL(url);
-      if (!allowedProtocols.includes(parsed.protocol)) return '';
-    } catch {
-      // catch 分支：URL 不可解析时，使用允许列表阻止危险协议
-      if (!/^https?:\/\/|^blob:|^\/|^storage\//.test(url)) return '';
-    }
-    return url;
-  };
+  const sanitizeUrl = (value: unknown): string => sanitizeUrlValue(value);
 
   return {
     id: String(raw.id || crypto.randomUUID()),
@@ -433,10 +436,88 @@ function sanitizeParkingMeta(value: unknown): import('../models/parking').TaskPa
     state: raw.state,
     parkedAt: typeof raw.parkedAt === 'string' ? raw.parkedAt : null,
     lastVisitedAt: typeof raw.lastVisitedAt === 'string' ? raw.lastVisitedAt : null,
-    contextSnapshot: (raw.contextSnapshot && typeof raw.contextSnapshot === 'object') ? raw.contextSnapshot as import('../models/parking').TaskParkingMeta['contextSnapshot'] : null,
-    reminder: (raw.reminder && typeof raw.reminder === 'object') ? raw.reminder as import('../models/parking').TaskParkingMeta['reminder'] : null,
+    // H-9 fix: 结构校验嵌套对象，防止空对象通过后导致下游 NaN/崩溃
+    contextSnapshot: sanitizeContextSnapshot(raw.contextSnapshot),
+    reminder: sanitizeReminder(raw.reminder),
     pinned: typeof raw.pinned === 'boolean' ? raw.pinned : false,
   };
+}
+
+/** H-9: 校验 contextSnapshot 嵌套字段 */
+function sanitizeContextSnapshot(value: unknown): import('../models/parking').TaskParkingMeta['contextSnapshot'] {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.savedAt !== 'string' && typeof raw.savedAt !== 'number') return null;
+
+  // cursorPosition 需要是 { line, column } 结构或 null
+  let cursorPosition: { line: number; column: number } | null = null;
+  if (raw.cursorPosition && typeof raw.cursorPosition === 'object') {
+    const cp = raw.cursorPosition as Record<string, unknown>;
+    if (typeof cp.line === 'number' && typeof cp.column === 'number') {
+      cursorPosition = { line: cp.line, column: cp.column };
+    }
+  }
+
+  // scrollAnchor 需要是对象而非字符串
+  let scrollAnchor: import('../models/parking').ParkingScrollAnchor | null = null;
+  if (raw.scrollAnchor && typeof raw.scrollAnchor === 'object') {
+    const sa = raw.scrollAnchor as Record<string, unknown>;
+    if (typeof sa.scrollPercent === 'number') {
+      scrollAnchor = {
+        anchorType: sa.anchorType === 'heading' || sa.anchorType === 'line' ? sa.anchorType : 'line',
+        anchorIndex: typeof sa.anchorIndex === 'number' ? sa.anchorIndex : 0,
+        scrollPercent: sa.scrollPercent,
+        ...(typeof sa.anchorOffset === 'number' ? { anchorOffset: sa.anchorOffset } : {}),
+      };
+    }
+  }
+
+  // structuralAnchor 需要是对象
+  let structuralAnchor: import('../models/parking').ParkingStructuralAnchor | null = null;
+  if (raw.structuralAnchor && typeof raw.structuralAnchor === 'object') {
+    const sta = raw.structuralAnchor as Record<string, unknown>;
+    const validTypes = ['heading', 'gojs-node', 'line', 'fallback'] as const;
+    const saType = validTypes.includes(sta.type as typeof validTypes[number]) ? sta.type as typeof validTypes[number] : 'fallback';
+    structuralAnchor = {
+      type: saType,
+      label: typeof sta.label === 'string' ? sta.label : '',
+      ...(typeof sta.line === 'number' ? { line: sta.line } : {}),
+    };
+  }
+
+  // flowViewport 需要是对象
+  let flowViewport: import('../models/parking').ParkingFlowViewport | null = null;
+  if (raw.flowViewport && typeof raw.flowViewport === 'object') {
+    const fv = raw.flowViewport as Record<string, unknown>;
+    if (typeof fv.scale === 'number') {
+      flowViewport = {
+        scale: fv.scale,
+        selectedNodeId: typeof fv.selectedNodeId === 'string' ? fv.selectedNodeId : null,
+      };
+    }
+  }
+
+  return {
+    savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : String(raw.savedAt),
+    contentHash: typeof raw.contentHash === 'string' ? raw.contentHash : '',
+    viewMode: raw.viewMode === 'flow' || raw.viewMode === 'text' ? raw.viewMode : 'text',
+    cursorPosition,
+    scrollAnchor,
+    structuralAnchor,
+    flowViewport,
+  };
+}
+
+/** H-9: 校验 reminder 嵌套字段 */
+function sanitizeReminder(value: unknown): import('../models/parking').TaskParkingMeta['reminder'] {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.reminderAt !== 'string') return null;
+  return {
+    reminderAt: raw.reminderAt,
+    snoozeCount: typeof raw.snoozeCount === 'number' ? raw.snoozeCount : 0,
+    maxSnoozeCount: typeof raw.maxSnoozeCount === 'number' ? raw.maxSnoozeCount : 3,
+  } as import('../models/parking').TaskParkingMeta['reminder'];
 }
 
 export function sanitizeProject(rawProject: unknown): Project {
@@ -496,9 +577,9 @@ export function sanitizeProject(rawProject: unknown): Project {
     updatedAt: typeof project.updatedAt === 'string' ? project.updatedAt : nowISO(),
     version: typeof project.version === 'number' ? project.version : 0,
     viewState,
-    flowchartUrl: typeof project.flowchartUrl === 'string' ? project.flowchartUrl : undefined,
+    flowchartUrl: typeof project.flowchartUrl === 'string' ? sanitizeUrlValue(project.flowchartUrl) : undefined,
     flowchartThumbnailUrl:
-      typeof project.flowchartThumbnailUrl === 'string' ? project.flowchartThumbnailUrl : undefined,
+      typeof project.flowchartThumbnailUrl === 'string' ? sanitizeUrlValue(project.flowchartThumbnailUrl) : undefined,
   };
 }
 

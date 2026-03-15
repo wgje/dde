@@ -66,21 +66,24 @@ describe('FocusConsoleSyncService', () => {
     const select = vi.fn(() => ({ eq }));
     mockClient.from.mockReturnValue({ select });
 
-    const snapshot = await service.loadFocusSession('user-1');
+    const result = await service.loadFocusSession('user-1');
 
+    expect(result.ok).toBe(true);
     expect(order).toHaveBeenCalledWith('updated_at', { ascending: false });
     expect(limit).toHaveBeenCalledWith(1);
-    expect((snapshot as { entries?: Array<{ sourceProjectId: string | null }> } | null)?.entries?.[0]?.sourceProjectId)
-      .toBeNull();
+    if (result.ok) {
+      expect((result.value as { entries?: Array<{ sourceProjectId: string | null }> } | null)?.entries?.[0]?.sourceProjectId)
+        .toBeNull();
+    }
   });
 
-  it('saveFocusSession should return false on failure so queue can retry', async () => {
+  it('saveFocusSession should return failure Result on error so queue can retry', async () => {
     const upsert = vi.fn().mockResolvedValue({
       error: { message: 'temporary failure' },
     });
     mockClient.from.mockReturnValue({ upsert });
 
-    const ok = await service.saveFocusSession({
+    const result = await service.saveFocusSession({
       id: 'session-1',
       userId: 'user-1',
       startedAt: '2026-03-03T00:00:00.000Z',
@@ -110,15 +113,15 @@ describe('FocusConsoleSyncService', () => {
       },
     });
 
-    expect(ok).toBe(false);
+    expect(result.ok).toBe(false);
   });
 
-  it('loadFocusSession should return null when Supabase is not configured', async () => {
+  it('loadFocusSession should return failure when Supabase is not configured', async () => {
     mockSupabaseClientService.isConfigured = false;
 
-    const snapshot = await service.loadFocusSession('user-1');
+    const result = await service.loadFocusSession('user-1');
 
-    expect(snapshot).toBeNull();
+    expect(result.ok).toBe(false);
     expect(mockSupabaseClientService.client).not.toHaveBeenCalled();
     mockSupabaseClientService.isConfigured = true;
   });
@@ -143,14 +146,14 @@ describe('FocusConsoleSyncService', () => {
       return {};
     });
 
-    const ok = await service.incrementRoutineCompletion({
+    const result = await service.incrementRoutineCompletion({
       completionId: 'comp-1',
       userId: 'user-1',
       routineId: 'routine-1',
       dateKey: '2026-03-03',
     });
 
-    expect(ok).toBe(true);
+    expect(result.ok).toBe(true);
     expect(insert).toHaveBeenCalledWith(
       expect.objectContaining({
         date_key: '2026-03-03',
@@ -158,4 +161,3 @@ describe('FocusConsoleSyncService', () => {
     );
   });
 });
-

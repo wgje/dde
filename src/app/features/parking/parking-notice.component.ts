@@ -16,7 +16,6 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { GateService } from '../../../services/gate.service';
 import { ParkingService } from '../../../services/parking.service';
 import { SimpleReminderService } from '../../../services/simple-reminder.service';
@@ -34,7 +33,7 @@ type DismissReason = 'action' | 'interactive' | 'fallback';
   selector: 'app-parking-notice',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [],
   styles: [`
     :host {
       display: block;

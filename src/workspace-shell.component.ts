@@ -991,6 +991,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       clearTimeout(this.searchDebounceTimer);
       this.searchDebounceTimer = null;
     }
+    // M-12 fix: 清理窗口 resize 防抖定时器
+    if (this.resizeDebounceTimer) {
+      clearTimeout(this.resizeDebounceTimer);
+      this.resizeDebounceTimer = null;
+    }
   }
 
   private schedulePwaPromptInitialization(): void {

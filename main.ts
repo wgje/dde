@@ -49,7 +49,7 @@ const logError = (msg: string, err?: any) => {
 // 在浏览器空闲时执行任务，避免阻塞首屏渲染
 const scheduleIdleTask = (task: () => void) => {
   if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-    (window as any).requestIdleCallback(() => task());
+    (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(() => task());
   } else {
     setTimeout(task, 0);
   }
@@ -125,7 +125,7 @@ async function checkAndClearCacheIfNeeded(): Promise<boolean> {
 
 // ========== 强制清理缓存工具函数（暴露到全局供紧急使用）==========
 function registerForceClearCacheTool(): void {
-  (window as any).__NANOFLOW_FORCE_CLEAR_CACHE__ = async function() {
+  (window as Window & { __NANOFLOW_FORCE_CLEAR_CACHE__?: () => Promise<void> }).__NANOFLOW_FORCE_CLEAR_CACHE__ = async function() {
     log('🧹 用户触发强制清理缓存...');
     localStorage.setItem(FORCE_CLEAR_KEY, 'true');
     
@@ -159,7 +159,7 @@ log('当前 URL: ' + window.location.href);
 log('User Agent: ' + navigator.userAgent.substring(0, 80) + '...');
 
 // 检查 Zone.js 是否已加载
-const zoneLoaded = typeof (window as any).Zone !== 'undefined';
+const zoneLoaded = typeof (window as Window & { Zone?: unknown }).Zone !== 'undefined';
 log('Zone.js: ' + (zoneLoaded ? '✅已加载' : '❌未加载'));
 
 if (!zoneLoaded) {
@@ -282,7 +282,7 @@ async function startApplication() {
     log('✅ Angular 启动成功! 耗时: ' + elapsed + 'ms');
     
     // 标记应用就绪
-    (window as any).__NANOFLOW_READY__ = true;
+    (window as Window & { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
     
     // 隐藏初始加载器
     const loader = document.getElementById('initial-loader');
@@ -346,10 +346,18 @@ async function runPostBootstrapMaintenance(): Promise<void> {
 // SW 生命周期由 Angular provideServiceWorker() + ngsw-config.json 统一管理
 // 版本升级时的缓存清理仍保留在 checkAndClearCacheIfNeeded() 中
 
+// ========== XSS 安全：HTML 转义 ==========
+function escapeHtml(str: string): string {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 // ========== 显示启动错误界面 ==========
-function showStartupError(title: string, description: string, err: any) {
+function showStartupError(title: string, _description: string, err: unknown) {
   // 详细错误分析
-  const errStr = String(err?.message || err);
+  const errObj = err as Record<string, unknown> | null | undefined;
+  const errStr = String(errObj?.message || err);
   let diagnosis = '未知错误';
   let suggestion = '请尝试清除浏览器缓存并刷新';
   
@@ -375,19 +383,26 @@ function showStartupError(title: string, description: string, err: any) {
   
   log('📋 诊断: ' + diagnosis);
   log('💡 建议: ' + suggestion);
+
+  // 所有动态内容必须 escapeHtml 转义，防止 XSS（SEC-1 修复）
+  const safeTitle = escapeHtml(title);
+  const safeBuildId = escapeHtml(BUILD_ID);
+  const safeDiagnosis = escapeHtml(diagnosis);
+  const safeSuggestion = escapeHtml(suggestion);
+  const safeError = escapeHtml(String(errObj?.stack || errObj?.message || err));
   
   // 显示用户可见的错误界面
   const errorDiv = document.createElement('div');
   errorDiv.style.cssText = 'position:fixed;inset:0;background:#fff;color:#333;padding:2rem;font-family:"LXGW WenKai Screen", sans-serif;z-index:99998;overflow:auto;';
   errorDiv.innerHTML = `
     <div style="max-width:600px;margin:0 auto;">
-      <h1 style="color:#dc2626;margin-bottom:1rem;font-size:1.5rem;">${title}</h1>
-      <p style="margin-bottom:0.5rem;color:#666;">Build: ${BUILD_ID}</p>
-      <p style="margin-bottom:1rem;color:#666;">诊断: ${diagnosis}</p>
+      <h1 style="color:#dc2626;margin-bottom:1rem;font-size:1.5rem;">${safeTitle}</h1>
+      <p style="margin-bottom:0.5rem;color:#666;">Build: ${safeBuildId}</p>
+      <p style="margin-bottom:1rem;color:#666;">诊断: ${safeDiagnosis}</p>
       <div style="background:#fef2f2;border:1px solid #fecaca;padding:1rem;border-radius:8px;margin-bottom:1rem;">
-        <p style="font-size:0.9rem;color:#991b1b;margin:0;">💡 ${suggestion}</p>
+        <p style="font-size:0.9rem;color:#991b1b;margin:0;">💡 ${safeSuggestion}</p>
       </div>
-      <pre style="background:#f5f5f5;padding:1rem;overflow:auto;font-size:11px;max-height:200px;margin-bottom:1rem;white-space:pre-wrap;word-break:break-all;border-radius:8px;">${err?.stack || err?.message || err}</pre>
+      <pre style="background:#f5f5f5;padding:1rem;overflow:auto;font-size:11px;max-height:200px;margin-bottom:1rem;white-space:pre-wrap;word-break:break-all;border-radius:8px;">${safeError}</pre>
       <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
         <button onclick="location.reload()" style="padding:0.75rem 1.5rem;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:1rem;">刷新页面</button>
         <button onclick="window.__NANOFLOW_FORCE_CLEAR_CACHE__()" style="padding:0.75rem 1.5rem;background:#dc2626;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:1rem;">清除缓存并刷新</button>

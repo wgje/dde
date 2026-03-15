@@ -114,7 +114,8 @@ async function triggerFocusToggle(page: Page): Promise<void> {
 async function waitForFocusTransitionStable(page: Page): Promise<void> {
   const mainContent = page.locator('[data-testid="project-shell-main-content"]').first();
   if (!(await mainContent.count())) {
-    await page.waitForTimeout(700);
+    // 等待主内容容器出现（回退：元素尚未渲染）
+    await expect(mainContent).toBeAttached({ timeout: 3000 }).catch(() => {});
     return;
   }
 
@@ -184,7 +185,7 @@ async function createDockTaskByForm(page: Page, title: string): Promise<void> {
   await expect(toggle).toBeVisible({ timeout: 10000 });
   await toggle.evaluate((el: HTMLElement) => el.click());
 
-  const form = panel.locator('.new-task-form').first();
+  const form = panel.locator('[data-testid="dock-v3-new-task-form"]').first();
   await expect(form).toBeVisible({ timeout: 5000 });
 
   await form.locator('input').first().fill(title);
@@ -236,7 +237,7 @@ async function createFlowPaletteTask(page: Page, title: string): Promise<string>
   await ensureFlowReady(page);
   await page.locator('[data-testid="flow-palette-tab-unassigned"]').first().click({ force: true });
 
-  await expect(page.locator(`.draggable-item:has-text("${title}")`).first()).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('[data-testid^="flow-palette-task-"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 10000 });
   return title;
 }
 
@@ -292,7 +293,10 @@ async function confirmFocusedTaskCompletion(page: Page): Promise<void> {
   const completeBtn = page.locator('[data-testid="dock-v3-complete-btn"]').first();
   await expect(completeBtn).toBeVisible({ timeout: 10000 });
   await completeBtn.evaluate((el: HTMLElement) => el.click());
-  await page.waitForTimeout(900);
+  // H-11 fix: 等待完成按钮消失或 console card 更新，替代盲等 900ms
+  await expect(completeBtn).toBeHidden({ timeout: 10000 }).catch(() => {
+    // 按钮可能仍可见（下一个任务的完成按钮），容忍超时
+  });
 }
 
 async function readDockSnapshotFromIdb(page: Page): Promise<any | null> {
@@ -421,7 +425,7 @@ test.describe('ParkingDock V3 critical paths', () => {
 
     const flowTaskTitle = await createFlowPaletteTask(page, `FlowDrag-${testHelpers.uniqueId()}`);
     await ensureDockPanelVisible(page);
-    await dragTaskToDock(page, `.draggable-item:has-text("${flowTaskTitle}")`);
+    await dragTaskToDock(page, '[data-testid^="flow-palette-task-"]:has-text("' + flowTaskTitle + '")');
 
     await expect(page.locator('[data-testid="dock-v3-item"]').filter({ hasText: flowTaskTitle }).first()).toBeVisible({ timeout: 10000 });
   });
@@ -589,8 +593,8 @@ test.describe('ParkingDock V3 critical paths', () => {
     await expect(page.locator('[data-testid="dock-v3-item"]').first()).toBeVisible({ timeout: 10000 });
 
     await context.setOffline(false);
-    await page.waitForTimeout(3500);
-    await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 10000 });
+    // 等待同步防抖完成后 focus-stage 重新可见，替代盲等 3.5s
+    await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 15000 });
   });
 
   test('exit confirm should support keep/clear/save three branches without archive prompt', async ({ page }) => {
@@ -666,10 +670,9 @@ test.describe('ParkingDock V3 critical paths', () => {
     await createAndActivateProject(page, `DockStatus-${testHelpers.uniqueId()}`);
 
     const chain = await prepareWaitChain(page, `Status-${testHelpers.uniqueId()}`);
-    // TODO: Replace hardcoded wait with page.clock.fastForward() for deterministic timer expiry
-    await page.waitForTimeout(16000);
+    // H-10 fix: 等待可观测 UI 状态（suspended entry 出现），而非硬编码 16s
     const suspendedEntry = page.locator('[data-testid="dock-v3-status-entry-suspended"]').filter({ hasText: chain.mainTitle }).first();
-    await expect(suspendedEntry).toBeVisible({ timeout: 10000 });
+    await expect(suspendedEntry).toBeVisible({ timeout: 320_000 });
     await suspendedEntry.evaluate((el: HTMLElement) => el.click());
 
     const stalledEntry = page.locator('[data-testid="dock-v3-status-entry-stalled"]').filter({ hasText: chain.subTitle }).first();
@@ -681,9 +684,10 @@ test.describe('ParkingDock V3 critical paths', () => {
     await createAndActivateProject(page, `DockRestore-${testHelpers.uniqueId()}`);
 
     const chain = await prepareWaitChain(page, `Restore-${testHelpers.uniqueId()}`);
-    // TODO: Replace hardcoded wait with page.clock.fastForward() for deterministic timer expiry
-    await page.waitForTimeout(16000);
-    await page.locator('[data-testid="dock-v3-status-entry-suspended"]').filter({ hasText: chain.mainTitle }).first().evaluate((el: HTMLElement) => el.click());
+    // H-10 fix: 等待可观测 UI 状态而非硬编码 16s
+    const suspendedForRestore = page.locator('[data-testid="dock-v3-status-entry-suspended"]').filter({ hasText: chain.mainTitle }).first();
+    await expect(suspendedForRestore).toBeVisible({ timeout: 320_000 });
+    await suspendedForRestore.evaluate((el: HTMLElement) => el.click());
     await expect(page.locator('[data-testid="dock-v3-status-entry-stalled"]').filter({ hasText: chain.subTitle }).first()).toBeVisible({ timeout: 10000 });
 
     await confirmFocusedTaskCompletion(page);
@@ -696,7 +700,7 @@ test.describe('ParkingDock V3 critical paths', () => {
 
     const taskTitle = await createFlowPaletteTask(page, `SyncViews-${testHelpers.uniqueId()}`);
     await ensureDockPanelVisible(page);
-    await dragTaskToDock(page, `.draggable-item:has-text("${taskTitle}")`);
+    await dragTaskToDock(page, '[data-testid^="flow-palette-task-"]:has-text("' + taskTitle + '")');
     await enterFocusMode(page);
 
     await confirmFocusedTaskCompletion(page);
@@ -712,7 +716,7 @@ test.describe('ParkingDock V3 critical paths', () => {
 
     await ensureFlowReady(page);
     await page.locator('[data-testid="flow-palette-tab-unassigned"]').first().click({ force: true });
-    await page.locator(`.draggable-item:has-text("${taskTitle}")`).first().click({ force: true });
+    await page.locator('[data-testid^="flow-palette-task-"]').filter({ hasText: taskTitle }).first().click({ force: true });
     await expect(page.locator('[data-testid="flow-task-status-badge"]').first()).toContainText('完成', { timeout: 10000 });
   });
 
@@ -735,7 +739,7 @@ test.describe('ParkingDock V3 critical paths', () => {
     const createToggle = panel.locator('[data-testid="dock-v3-create-toggle"]').first();
     await expect(createToggle).toBeVisible({ timeout: 10000 });
     await createToggle.click({ force: true });
-    await expect(panel.locator('.new-task-form').first()).toBeHidden({ timeout: 2000 });
+    await expect(panel.locator('[data-testid="dock-v3-new-task-form"]').first()).toBeHidden({ timeout: 2000 });
 
     await triggerFocusToggle(page);
     await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeHidden({ timeout: 2000 });
@@ -766,7 +770,7 @@ test.describe('ParkingDock V3 critical paths', () => {
     await bootstrapLocalWorkspace(page);
     await createAndActivateProject(page, `DockMobile-${testHelpers.uniqueId()}`);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForTimeout(300);
+    await expect(page.locator('[data-testid="dock-v3-semicircle"]').first()).toBeVisible({ timeout: 5000 });
 
     const viewport = page.viewportSize();
     const semiCircle = page.locator('[data-testid="dock-v3-semicircle"]').first();
@@ -805,7 +809,7 @@ test.describe('ParkingDock V3 critical paths', () => {
     await expect(page.locator('[data-testid="dock-v3-help-overlay"]')).toBeHidden({ timeout: 5000 });
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForTimeout(300);
+    await expect(page.locator('[data-testid="dock-v3-console-card"]').first()).toBeVisible({ timeout: 5000 });
 
     const mobileTargets = await measureDockTargets(page);
     expect(mobileTargets.waitButton?.height ?? 0).toBeGreaterThanOrEqual(44);

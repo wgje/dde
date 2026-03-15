@@ -52,6 +52,7 @@ import {
   classifySupabaseClientFailure
 } from '../../../utils/supabase-error';
 import { PermanentFailureError, isPermanentFailureError } from '../../../utils/permanent-failure-error';
+import { type Result, type OperationError } from '../../../utils/result';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config/sync.config';
 import { APP_LIFECYCLE_CONFIG } from '../../../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
@@ -906,27 +907,27 @@ export class SimpleSyncService {
     return this.userPrefsSync.saveUserPreferences(userId, preferences);
   }
 
-  async loadFocusSession(userId: string): Promise<DockSnapshot | null> {
-    return this.focusConsoleSync.loadFocusSession(userId);
+  async loadFocusSession(userId: string, localUpdatedAt?: string): Promise<Result<DockSnapshot | null, OperationError>> {
+    return this.focusConsoleSync.loadFocusSession(userId, localUpdatedAt);
   }
 
-  async saveFocusSession(record: FocusSessionRecord): Promise<boolean> {
+  async saveFocusSession(record: FocusSessionRecord): Promise<Result<void, OperationError>> {
     return this.focusConsoleSync.saveFocusSession(record);
   }
 
-  async listRoutineTasks(userId: string): Promise<RoutineTask[]> {
+  async listRoutineTasks(userId: string): Promise<Result<RoutineTask[], OperationError>> {
     return this.focusConsoleSync.listRoutineTasks(userId);
   }
 
-  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<boolean> {
+  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<Result<void, OperationError>> {
     return this.focusConsoleSync.upsertRoutineTask(userId, task);
   }
 
-  async incrementRoutineCompletion(mutation: RoutineCompletionMutation): Promise<boolean> {
+  async incrementRoutineCompletion(mutation: RoutineCompletionMutation): Promise<Result<void, OperationError>> {
     return this.focusConsoleSync.incrementRoutineCompletion(mutation);
   }
 
-  async importLegacyDockSnapshot(userId: string): Promise<DockSnapshot | null> {
+  async importLegacyDockSnapshot(userId: string): Promise<Result<DockSnapshot | null, OperationError>> {
     return this.focusConsoleSync.importLegacyDockSnapshot(userId);
   }
   

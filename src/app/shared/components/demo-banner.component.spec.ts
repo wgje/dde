@@ -39,4 +39,11 @@ describe('DemoBannerComponent', () => {
 
     expect(component.showBanner()).toBe(true);
   });
+
+  it('暗色样式应只依赖 data-color-mode，不再回退到 .dark 类', () => {
+    const styles = ((DemoBannerComponent as unknown as { ɵcmp?: { styles?: string[] } }).ɵcmp?.styles ?? []).join(' ');
+
+    expect(styles).toContain('[data-color-mode="dark"]');
+    expect(styles).not.toContain('.dark .demo-banner');
+  });
 });

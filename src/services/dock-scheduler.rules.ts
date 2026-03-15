@@ -35,7 +35,6 @@ export interface DockCandidateScore {
   expectedMinutes: number | null;
   priority: {
     lowLoadWithWait: number;
-    sameProject: number;
     lowLoad: number;
     comboSelectLane: number;
     relationStrength: number;
@@ -123,10 +122,6 @@ function scoreDockCandidate(
 ): DockCandidateScore {
   const waitFitMode = context.waitFitMode ?? 'strict';
   const lowLoadWithWait = candidate.load === 'low' && (candidate.waitMinutes ?? 0) > 0 ? 1 : 0;
-  const sameProject = computeSameProjectPriority(
-    candidate.sourceProjectId ?? null,
-    context.rootProjectId ?? null,
-  );
   const lowLoad = candidate.load === 'low' ? 1 : 0;
   const comboSelectLane = candidate.lane === 'combo-select' ? 1 : 0;
   const relationStrength = resolveRelationStrength(candidate);
@@ -143,10 +138,10 @@ function scoreDockCandidate(
   const orderWeight = -candidate.dockedOrder;
 
   let score = 0;
+  // lowLoadWithWait 累计：低负荷 + 等待双重奖励（设计意图是低负荷等待任务获得额外优先级）
   if (lowLoadWithWait) {
     score += PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT + PARKING_CONFIG.SCHEDULE_WAIT_CHILD_WEIGHT;
   }
-  // GAP-2: 同项目为最低优先级，不贡献分数；树距离通过 relationStrength 主导
   score += lowLoad ? PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT : PARKING_CONFIG.SCHEDULE_HIGH_LOAD_WEIGHT;
   score += comboSelectLane ? PARKING_CONFIG.SCHEDULE_STRONG_ZONE_WEIGHT : PARKING_CONFIG.SCHEDULE_WEAK_ZONE_WEIGHT;
   score += relationStrength;
@@ -172,7 +167,6 @@ function scoreDockCandidate(
     score,
     priority: {
       lowLoadWithWait,
-      sameProject,
       lowLoad,
       comboSelectLane,
       relationStrength,
@@ -443,18 +437,23 @@ function computeOversizedFallback(
   mainTask: FocusTaskSlot,
   pendingTasks: FocusTaskSlot[],
 ): RecommendationGroup[] {
+  // L-6 fix: 跨组去重，避免同一任务出现在多个推荐组中
+  const usedIds = new Set<string>();
+
   const sameProject = pendingTasks
     .filter(task => task.sourceProjectId != null && task.sourceProjectId === mainTask.sourceProjectId)
     .sort((a, b) => (a.estimatedMinutes ?? Number.POSITIVE_INFINITY) - (b.estimatedMinutes ?? Number.POSITIVE_INFINITY))
     .slice(0, 1);
+  for (const t of sameProject) usedIds.add(t.slotId);
 
   const lowLoad = pendingTasks
-    .filter(task => task.cognitiveLoad === 'low')
+    .filter(task => task.cognitiveLoad === 'low' && !usedIds.has(task.slotId))
     .sort((a, b) => (a.estimatedMinutes ?? Number.POSITIVE_INFINITY) - (b.estimatedMinutes ?? Number.POSITIVE_INFINITY))
     .slice(0, 1);
+  for (const t of lowLoad) usedIds.add(t.slotId);
 
   const hasWait = pendingTasks
-    .filter(task => (task.waitMinutes ?? 0) > 0)
+    .filter(task => (task.waitMinutes ?? 0) > 0 && !usedIds.has(task.slotId))
     .sort((a, b) => effectiveExecMin(a) - effectiveExecMin(b))
     .slice(0, 1);
 
@@ -567,6 +566,15 @@ export function determineFragmentDefenseLevel(
   return 4;
 }
 
+/**
+ * 判断候选任务预计时长与主任务剩余等待窗口的匹配度。
+ *
+ * 分支边界定义（互斥、无重叠）：
+ *   blank-period:       remainingMin ≤ TIGHT_THRESHOLD
+ *   tight-blank:        exec > 75% remaining（候选过大，留白紧张）
+ *   time-match:         56.25% remaining ≤ exec ≤ 75% remaining 且 exec ≤ 150% remaining
+ *   mismatch-recompute: 其他所有情况（候选时长偏差过大，需重算）
+ */
 export function evaluateTimeRemaining(
   remainingMin: number,
   candidateEffectiveExecMin: number | null,
@@ -577,12 +585,16 @@ export function evaluateTimeRemaining(
 
   if (candidateEffectiveExecMin == null) return 'time-match';
 
+  // tight-blank：候选执行时长 **严格大于** 75% 剩余窗口
   if (candidateEffectiveExecMin > remainingMin * 0.75) {
     return 'tight-blank';
   }
 
+  // time-match：候选在 [56.25%, 75%] 区间且不超过 150% 剩余窗口
+  // 注意：上界使用 <= 0.75，与 tight-blank 的 > 0.75 互斥
+  const lowerBound = remainingMin * 0.5625; // 0.75 * 0.75
   if (
-    candidateEffectiveExecMin >= remainingMin * 0.75 * 0.75 &&
+    candidateEffectiveExecMin >= lowerBound &&
     candidateEffectiveExecMin <= remainingMin * 1.5
   ) {
     return 'time-match';

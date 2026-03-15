@@ -260,6 +260,8 @@ export interface RoutineTask {
   triggerCondition: 'any-blank-period';
   maxTimesPerDay: number;
   isEnabled: boolean;
+  /** LWW 同步必需字段 */
+  updatedAt?: string;
 }
 
 export interface FocusSessionRecord {
@@ -418,6 +420,16 @@ export interface StatusMachineEntry {
   waitTotalSeconds: number | null;
 }
 
+/**
+ * 状态机中的“等待已结束”在 UI 上需要统一判定：
+ * 既包含已显式切到 waiting_done 的条目，也包含倒计时已经归零、
+ * 但状态提升尚未在本轮 tick 中完成的 suspended_waiting 条目。
+ */
+export function isStatusMachineEntryExpired(entry: Pick<StatusMachineEntry, 'uiStatus' | 'waitRemainingSeconds'>): boolean {
+  return entry.uiStatus === 'waiting_done'
+    || (entry.waitRemainingSeconds !== null && entry.waitRemainingSeconds <= 0);
+}
+
 export interface DailySlotEntry {
   id: string;
   title: string;
@@ -520,12 +532,9 @@ export interface DockSnapshot {
 //  DockEntry 类型守卫（sourceKind 辨识）
 // ---------------------------------------------------------------------------
 
-/** 就地创建条目：携带 inline 专属字段 */
+/** 就地创建条目：携带 inline 专属字段（M-8: 仅窄化 sourceKind，其他字段保持原始可选性） */
 export function isInlineDockEntry(entry: DockEntry): entry is DockEntry & {
   sourceKind: 'dock-created';
-  sourceBlackBoxEntryId: string | null;
-  inlineArchiveStatus: 'pending' | 'archiving' | 'archived' | 'failed';
-  inlineArchivedTaskId: string | null;
 } {
   return entry.sourceKind === 'dock-created';
 }

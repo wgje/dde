@@ -2,11 +2,11 @@ import { DestroyRef, Injectable, computed, effect, inject, signal } from '@angul
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
+  CURRENT_DOCK_SNAPSHOT_VERSION,
   DailySlotEntry,
   DockLane,
   DockExitAction,
   DockSchedulerPhase,
-  DockUiStatus,
   DockEntry,
   DockFocusTransitionState,
   DockPendingDecision,
@@ -19,8 +19,8 @@ import {
   FragmentDefenseLevel,
   FragmentEventEntry,
   FocusSessionState,
-  FocusTaskSlot,
   HighLoadCounter,
+  isStatusMachineEntryExpired,
   StatusMachineEntry,
 } from '../models/parking-dock';
 import { SimpleSyncService, TaskStore } from '../core-bridge';
@@ -32,12 +32,12 @@ import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ToastService } from './toast.service';
+import { FocusAttentionService } from './focus-attention.service';
+import { FocusHudWindowService } from './focus-hud-window.service';
 import {
   checkBurnoutThreshold,
   computeThreeDimensionalRecommendation,
   createRuleDecision,
-  effectiveExecMin,
-  evaluateTimeRemaining,
   updateHighLoadCounter,
 } from './dock-scheduler.rules';
 import { sanitizePlannerFields } from '../utils/planner-fields';
@@ -63,7 +63,6 @@ import {
   isConsoleBackgroundStatus,
   isWaitExpired,
   isWaitingLike,
-  resolveOrderingWindowMinutes,
   sortDockEntriesForDisplay,
   toFocusTaskSlot,
   toStatusMachineEntry,
@@ -83,6 +82,8 @@ export class DockEngineService {
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly toast = inject(ToastService);
+  private readonly focusAttention = inject(FocusAttentionService);
+  private readonly focusHudWindow = inject(FocusHudWindowService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
   private readonly cloudSync = inject(DockCloudSyncService);
   private readonly fragmentRest = inject(DockFragmentRestService);
@@ -152,7 +153,14 @@ export class DockEngineService {
   /**
    * 持久化脏标记：聚合所有影响快照持久化的信号。
    * effect 监听此单一 computed，避免多个信号同时变更时触发多次冗余持久化。
-   * 使用纯函数推导（无副作用），返回依赖信号的引用数组长度作为依赖追踪标记。
+   * 使用纯函数推导（无副作用），返回依赖信号的引用数组作为依赖追踪标记。
+   *
+   * ⚠️ 维护契约：任何新增的需要参与持久化的 signal 必须加入此列表。
+   * 遗漏会导致该 signal 的变更无法触发本地/云端持久化，造成静默数据丢失。
+   * 当前依赖列表：entries, focusMode, dockExpanded, muteWaitTone, focusScrimOn,
+   *   firstDragIntervened, dailySlots, suspendChainRootTaskId,
+   *   suspendRecommendationLocked, pendingDecision, lastRuleDecision,
+   *   dailyResetDate, focusSessionContext
    */
   private readonly persistenceDeps = computed(() => {
     // 读取所有持久化相关信号以建立依赖关系
@@ -199,6 +207,8 @@ export class DockEngineService {
   /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
   private readonly restoringSnapshot = signal(false);
   private waitEndNotifiedIds = new Set<string>();
+  private blankPeriodNotified = false;
+  private fragmentCountdownNotified = false;
   private visibilityListener: (() => void) | null = null;
 
   readonly dockedEntries = computed(() => this.entries().filter(entry => entry.status !== 'completed'));
@@ -367,8 +377,25 @@ export class DockEngineService {
       suspendChainRootTaskId: this.suspendChainRootTaskId,
       highlightClearTimer: this.highlightClearTimerRef,
     });
+    this.cloudSync.init(this.buildCloudSyncContext());
+    this.fragmentRest.init(this.buildFragmentRestContext());
+    this.inlineCreation.init(this.buildInlineCreationContext());
+    this.dailySlotService.init({
+      dailySlots: this.dailySlots,
+      dailyResetDate: this.dailyResetDate,
+      schedulerPhase: this.schedulerPhase,
+      fragmentDefenseLevel: this.fragmentDefenseLevel,
+      isFragmentPhase: this.isFragmentPhase,
+    });
+    this.entryField.init({
+      entries: this.entries,
+      focusSessionContext: () => this.focusSessionContext(),
+      rebalanceAutoZones: () => this.rebalanceAutoZones(),
+    });
+  }
 
-    this.cloudSync.init({
+  private buildCloudSyncContext() {
+    return {
       exportSnapshot: () => this.exportSnapshot(),
       restoreSnapshot: (snapshot: DockSnapshot) => this.restoreSnapshot(snapshot),
       scheduleLocalPersist: (snapshot: DockSnapshot, userId: string) => this.scheduleLocalPersist(snapshot, userId),
@@ -377,10 +404,13 @@ export class DockEngineService {
       getFocusSessionContext: () => this.focusSessionContext(),
       setFocusSessionContext: (ctx: { id: string; startedAt: number }) => this.focusSessionContext.set(ctx),
       buildNormalizeContext: () => this.buildNormalizeContext(),
-    });
+      getCurrentSnapshotUserId: () => this.currentSnapshotUserId,
+    };
+  }
 
-    this.fragmentRest.init({
-      enterFragmentPhase: (reason, rootTaskId, remainingMinutes) =>
+  private buildFragmentRestContext() {
+    return {
+      enterFragmentPhase: (reason: string, rootTaskId?: string, remainingMinutes?: number) =>
         this.completionFlow.enterFragmentPhase(reason, rootTaskId, remainingMinutes),
       clearPendingDecisionState: () => {
         this.pendingDecision.set(null);
@@ -396,10 +426,12 @@ export class DockEngineService {
       focusingEntry: this.focusingEntry,
       lastRuleDecision: this.lastRuleDecision,
       isFragmentPhase: this.isFragmentPhase,
-      getWaitRemainingSeconds: (entry) => getWaitRemainingSeconds(entry),
-    });
+      getWaitRemainingSeconds: (entry: DockEntry) => getWaitRemainingSeconds(entry),
+    };
+  }
 
-    this.inlineCreation.init({
+  private buildInlineCreationContext() {
+    return {
       entries: this.entries,
       dockedCount: this.dockedCount,
       focusSessionContext: this.focusSessionContext,
@@ -413,21 +445,7 @@ export class DockEngineService {
       waitEndNotifiedIds: this.waitEndNotifiedIds,
       setMainTask: (taskId: string) => this.setMainTask(taskId),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
-    });
-
-    this.dailySlotService.init({
-      dailySlots: this.dailySlots,
-      dailyResetDate: this.dailyResetDate,
-      schedulerPhase: this.schedulerPhase,
-      fragmentDefenseLevel: this.fragmentDefenseLevel,
-      isFragmentPhase: this.isFragmentPhase,
-    });
-
-    this.entryField.init({
-      entries: this.entries,
-      focusSessionContext: () => this.focusSessionContext(),
-      rebalanceAutoZones: () => this.rebalanceAutoZones(),
-    });
+    };
   }
 
   /** 10 秒一次 tick，配合 CSS transition 平滑过渡（避免 1s 频率导致动画卡顿） */
@@ -454,6 +472,13 @@ export class DockEngineService {
   }
 
   private registerEffects(): void {
+    this.registerCoreEffects();
+    this.registerReconciliationEffects();
+    this.registerNotificationEffects();
+  }
+
+  /** 核心状态同步 effects：用户切换、持久化、软限制重置、每日重置 */
+  private registerCoreEffects(): void {
     // 用户切换时重新加载快照
     effect(() => {
       const userId = this.auth.currentUserId();
@@ -489,8 +514,10 @@ export class DockEngineService {
       this.focusPreferenceService.preferences().routineResetHourLocal;
       this.dailySlotService.resetDailySlotsIfNeeded();
     }, { allowSignalWrites: true });
+  }
 
-    // 外部完成的任务协调
+  /** 外部状态协调 effect：检测外部完成的任务并同步 */
+  private registerReconciliationEffects(): void {
     effect(() => {
       const taskMap = this.taskStore.tasksMap();
       if (!taskMap) return;
@@ -503,6 +530,49 @@ export class DockEngineService {
       if (externallyCompletedIds.length === 0) return;
       queueMicrotask(() => {
         this.reconcileExternallyCompletedTasks(externallyCompletedIds);
+      });
+    });
+  }
+
+  /** 通知类 effects：Badge 更新、留白期通知、碎片倒计时通知 */
+  private registerNotificationEffects(): void {
+    effect(() => {
+      const expiredCount = this.statusMachineEntries().filter(entry => isStatusMachineEntryExpired(entry)).length;
+      const pendingDecisionCount = this.pendingDecision() ? 1 : 0;
+      const fragmentCountdownCount = this.fragmentEntryCountdown() !== null ? 1 : 0;
+      this.focusAttention.updateBadge(expiredCount + pendingDecisionCount + fragmentCountdownCount);
+    });
+
+    effect(() => {
+      const blankPeriodActive =
+        this.fragmentEntryCountdown() === null
+        && this.pendingDecision() !== null
+        && this.pendingDecisionEntries().length === 0;
+      if (!blankPeriodActive) {
+        this.blankPeriodNotified = false;
+        return;
+      }
+      if (this.blankPeriodNotified || !this.shouldSendAttentionNotification()) return;
+      this.blankPeriodNotified = true;
+      void this.focusAttention.notify({
+        title: 'NanoFlow 专注提示',
+        body: '当前进入留白期，建议先保持空档，不再插入新任务。',
+        tag: 'nanoflow-focus-blank-period',
+      });
+    });
+
+    effect(() => {
+      const countdown = this.fragmentEntryCountdown();
+      if (countdown === null) {
+        this.fragmentCountdownNotified = false;
+        return;
+      }
+      if (this.fragmentCountdownNotified || !this.shouldSendAttentionNotification()) return;
+      this.fragmentCountdownNotified = true;
+      void this.focusAttention.notify({
+        title: 'NanoFlow 专注提示',
+        body: `检测到短暂空闲，碎片时间倒计时已开始（${countdown} 秒）。`,
+        tag: 'nanoflow-focus-fragment-countdown',
       });
     });
   }
@@ -544,6 +614,11 @@ export class DockEngineService {
       if (this.visibilityListener && typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', this.visibilityListener);
         this.visibilityListener = null;
+      }
+      // AudioContext 资源释放
+      if (this.sharedAudioCtx && this.sharedAudioCtx.state !== 'closed') {
+        void this.sharedAudioCtx.close();
+        this.sharedAudioCtx = null;
       }
     });
   }
@@ -716,14 +791,27 @@ export class DockEngineService {
       evictedTaskId = findConsoleEvictionCandidate(preVisible, currentFocusId);
     }
 
-    // Phase 1: 仅切换 focusing/stalled 状态，不立即淘汰。
-    // 淘汰延迟到 UI 动画窗口结束后由 flushRadarEviction() 执行，
-    // 避免 DOM 元素被 Angular @for 立即移除导致无退出过渡。
-    // visibleStackEntries 限制为 4 张，溢出的淘汰候选自然超出渲染范围。
+    this.applyRadarInsertEntries(taskId, currentFocusId);
+    this.consoleVisibleOrderHint.set(
+      buildConsoleVisibleOrderHint(preVisible, taskId, evictedTaskId),
+    );
+
+    // 设置协调信号：inserted 供 console-stack 触发 C 位入场动画，
+    // evictedTaskId 由动画结束后 flushRadarEviction() 执行。
+    this.lastRadarInsertedTaskId.set(taskId);
+    this.pendingRadarEviction.set(evictedTaskId);
+
+    this.completionFlow.clearPendingDecisionIfMatched(taskId);
+    this.scheduleSwitchMaintenance();
+    return evictedTaskId;
+  }
+
+  /** 雷达区插入时的 entries 状态更新：target → focusing，原焦点 → stalled */
+  private applyRadarInsertEntries(taskId: string, currentFocusId: string | null): void {
     this.entries.update(prev =>
       prev.map(entry => {
         if (entry.taskId === taskId) {
-          const updated: DockEntry = {
+          return {
             ...entry,
             status: 'focusing',
             waitMinutes: null,
@@ -731,14 +819,9 @@ export class DockEngineService {
             systemSelected: false,
             recommendationLocked: false,
           };
-          return updated;
         }
         if (currentFocusId && entry.taskId === currentFocusId) {
-          const updated: DockEntry = {
-            ...entry,
-            status: 'stalled',
-          };
-          return updated;
+          return { ...entry, status: 'stalled' };
         }
         return entry;
       }),
@@ -746,20 +829,6 @@ export class DockEngineService {
     if (currentFocusId && currentFocusId !== taskId) {
       this.lastConsoleDemotedTaskId.set(currentFocusId);
     }
-    this.consoleVisibleOrderHint.set(
-      buildConsoleVisibleOrderHint(preVisible, taskId, evictedTaskId),
-    );
-
-    // 设置协调信号：inserted 信号供 console-stack 触发 C 位入场动画。
-    // evictedTaskId 通过 pendingRadarEviction 暂存,
-    // 由 console-stack 动画结束后调用 flushRadarEviction() 执行淘汰，
-    // flushRadarEviction 完成后才设置 lastRadarEvictedTaskId 触发雷达区返回动画。
-    this.lastRadarInsertedTaskId.set(taskId);
-    this.pendingRadarEviction.set(evictedTaskId);
-
-    this.completionFlow.clearPendingDecisionIfMatched(taskId);
-    this.scheduleSwitchMaintenance();
-    return evictedTaskId;
   }
 
   /**
@@ -927,47 +996,49 @@ export class DockEngineService {
   toggleFocusMode(): void {
     const next = !this.focusMode();
     this.focusMode.set(next);
-
     if (next) {
-      // 进入专注模式时重置遮罩，确保完整专注 UI 可见
-      this.focusScrimOn.set(true);
-      this.focusSessionContext.set({
-        id: crypto.randomUUID(),
-        startedAt: Date.now(),
-      });
-      this.schedulerPhase.set('active');
-      const focused = this.focusingEntry();
-      if (!focused) {
-        const candidate = this.consoleEntries().find(entry => isAutoPromotableStatus(entry.status));
-        if (candidate) {
-          this.completionFlow.promoteCandidate(candidate.taskId);
-          this.lastRuleDecision.set(
-            createRuleDecision({
-              type: 'idle_promote',
-              reason: '进入专注模式后自动将首个可运行任务推入主控台',
-              recommendedTaskIds: [candidate.taskId],
-            }),
-          );
-        }
-      }
+      this.enterFocusMode();
+    } else {
+      this.exitFocusMode();
+    }
+  }
 
-      const initialTaskId =
-        this.focusingEntry()?.taskId ??
-        this.entries().find(entry => entry.isMain && entry.status !== 'completed')?.taskId ??
-        null;
-      if (initialTaskId) {
-        this.startFirstMainSelectionWindow(initialTaskId);
+  /** 进入专注模式：初始化会话、自动推入候选、启动首选窗口 */
+  private enterFocusMode(): void {
+    this.focusScrimOn.set(true);
+    this.focusSessionContext.set({
+      id: crypto.randomUUID(),
+      startedAt: Date.now(),
+    });
+    this.schedulerPhase.set('active');
+    const focused = this.focusingEntry();
+    if (!focused) {
+      const candidate = this.consoleEntries().find(entry => isAutoPromotableStatus(entry.status));
+      if (candidate) {
+        this.completionFlow.promoteCandidate(candidate.taskId);
+        this.lastRuleDecision.set(
+          createRuleDecision({
+            type: 'idle_promote',
+            reason: '进入专注模式后自动将首个可运行任务推入主控台',
+            recommendedTaskIds: [candidate.taskId],
+          }),
+        );
       }
-
-      // v3.0 进入专注模式时更新碎片阶段防御等级（§7.8）
-      this.fragmentRest.updateFragmentDefenseLevel();
-      return;
     }
 
-    this.clearFirstMainSelectionWindow();
+    const initialTaskId =
+      this.focusingEntry()?.taskId ??
+      this.entries().find(entry => entry.isMain && entry.status !== 'completed')?.taskId ??
+      null;
+    if (initialTaskId) {
+      this.startFirstMainSelectionWindow(initialTaskId);
+    }
+    this.fragmentRest.updateFragmentDefenseLevel();
+  }
 
-    // 退出专注模式：批量重置状态。使用 queueMicrotask 延迟非关键信号写入，
-    // 避免与 focusMode.set(false) 的 @if DOM 销毁在同一同步块竞争主线程。
+  /** 退出专注模式：批量重置状态，延迟非关键信号以避免 DOM 竞争 */
+  private exitFocusMode(): void {
+    this.clearFirstMainSelectionWindow();
     queueMicrotask(() => {
       this.suspendRecommendationLocked.set(false);
       this.suspendChainRootTaskId.set(null);
@@ -977,9 +1048,7 @@ export class DockEngineService {
       this.focusTransition.set(null);
       this.lastRecommendationGroups.set([]);
       this.schedulerPhase.set('active');
-      // GAP-1: 退出专注模式时重置休息提醒累计
       this.fragmentRest.resetRestState();
-      // GAP-2: 清除碎片倒计时
       this.fragmentRest.stopFragmentEntryCountdown();
       this.fragmentRest.setFragmentDismissed(false);
     });
@@ -1054,31 +1123,46 @@ export class DockEngineService {
     if (!entry) return;
     const wasMaster = entry.isMain;
 
-    // v3.0 倦怠检测：高负荷任务完成时更新计数器（§7.8 NG-16b）
-    if (entry.load === 'high') {
-      const now = Date.now();
-      const updated = updateHighLoadCounter(this.highLoadCounter(), now);
-      this.highLoadCounter.set(updated);
-      if (checkBurnoutThreshold(updated, now)) {
-        this.burnoutTriggeredAt.set(now);
-        this.logger.info('倦怠熔断触发：2h 内完成 ≥ 3 个高负荷任务');
-      }
-    }
+    this.trackBurnoutIfHighLoad(entry);
 
     this.entries.update(prev =>
       prev.map(item => {
         if (item.taskId !== taskId) return item;
-        const completed: DockEntry = {
+        return {
           ...item,
           status: 'completed',
           isMain: false,
           systemSelected: false,
           recommendedScore: null,
         };
-        return completed;
       }),
     );
 
+    this.syncTaskCompletion(taskId);
+    this.completionFlow.resolveAfterCompletion(taskId);
+    if (wasMaster) {
+      this.completionFlow.promoteFocusedTaskToMaster();
+    }
+    this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
+    this.rebalanceAutoZones();
+    this.refreshSuspendRecommendationLock();
+    this.waitEndNotifiedIds.delete(taskId);
+  }
+
+  /** 倦怠检测：高负荷任务完成时更新计数器（§7.8 NG-16b） */
+  private trackBurnoutIfHighLoad(entry: DockEntry): void {
+    if (entry.load !== 'high') return;
+    const now = Date.now();
+    const updated = updateHighLoadCounter(this.highLoadCounter(), now);
+    this.highLoadCounter.set(updated);
+    if (checkBurnoutThreshold(updated, now)) {
+      this.burnoutTriggeredAt.set(now);
+      this.logger.info('倦怠熔断触发：2h 内完成 ≥ 3 个高负荷任务');
+    }
+  }
+
+  /** 同步任务完成状态到项目数据层 */
+  private syncTaskCompletion(taskId: string): void {
     const task = this.taskStore.getTask(taskId);
     const projectId = this.taskSync.resolveTaskProjectId(taskId);
     if (task && projectId) {
@@ -1090,15 +1174,6 @@ export class DockEngineService {
         });
       }
     }
-
-    this.completionFlow.resolveAfterCompletion(taskId);
-    if (wasMaster) {
-      this.completionFlow.promoteFocusedTaskToMaster();
-    }
-    this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
-    this.rebalanceAutoZones();
-    this.refreshSuspendRecommendationLock();
-    this.waitEndNotifiedIds.delete(taskId);
   }
 
   suspendTask(taskId: string, waitMinutes: number): void {
@@ -1240,30 +1315,34 @@ export class DockEngineService {
     const candidateIds = this.completionFlow.pendingCandidateIds(pending);
     if (!candidateIds.includes(taskId)) return;
 
-    const selectedId = taskId;
-    const rejectedIds = candidateIds.filter(id => id !== selectedId);
-    this.completionFlow.promoteCandidate(selectedId, false);
+    const rejectedIds = candidateIds.filter(id => id !== taskId);
+    this.completionFlow.promoteCandidate(taskId, false);
     this.pendingDecision.set(null);
     this.highlightedIds.set(new Set());
 
+    this.clearCandidateSelectionFlags(taskId, rejectedIds);
+    this.lastRuleDecision.set(
+      createRuleDecision({
+        type: 'completion_followup',
+        reason: '异常时长分叉由用户手动决策',
+        rootTaskId: pending.rootTaskId,
+        recommendedTaskIds: [taskId],
+        remainingMinutes: pending.rootRemainingMinutes,
+      }),
+    );
+  }
+
+  /** 清除候选推荐标记：选中/拒绝/其余条目分别处理 */
+  private clearCandidateSelectionFlags(selectedId: string, rejectedIds: string[]): void {
     this.entries.update(prev =>
       prev.map(entry => {
-        if (entry.taskId === selectedId) {
+        if (entry.taskId === selectedId || rejectedIds.includes(entry.taskId)) {
           return {
             ...entry,
             isMain: entry.isMain,
             systemSelected: false,
             recommendationLocked: false,
-            manualMainSelected: entry.manualMainSelected,
-            recommendedScore: null,
-          };
-        }
-        if (rejectedIds.includes(entry.taskId)) {
-          return {
-            ...entry,
-            isMain: entry.isMain,
-            systemSelected: false,
-            recommendationLocked: false,
+            ...(entry.taskId === selectedId ? { manualMainSelected: entry.manualMainSelected } : {}),
             recommendedScore: null,
           };
         }
@@ -1273,15 +1352,6 @@ export class DockEngineService {
           recommendationLocked: false,
           recommendedScore: entry.systemSelected ? null : entry.recommendedScore,
         };
-      }),
-    );
-    this.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'completion_followup',
-        reason: '异常时长分叉由用户手动决策',
-        rootTaskId: pending.rootTaskId,
-        recommendedTaskIds: [selectedId],
-        remainingMinutes: pending.rootRemainingMinutes,
       }),
     );
   }
@@ -1398,7 +1468,7 @@ export class DockEngineService {
   exportSnapshot(): DockSnapshot {
     const session = this.buildSessionState();
     return {
-      version: 7,
+      version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries: this.entries(),
       focusMode: this.focusMode(),
       isDockExpanded: this.dockExpanded(),
@@ -1476,8 +1546,20 @@ export class DockEngineService {
       normalized.session.mainTaskId,
     );
 
+    // C-1 fix: try/finally 保护 restoringSnapshot 标志，防止异常导致永久卡住
     this.restoringSnapshot.set(true);
-    this.entries.set(recoveredWithMain);
+    try {
+      this.hydrateSignalsFromSnapshot(normalized, recoveredWithMain);
+    } finally {
+      this.restoringSnapshot.set(false);
+    }
+    this.refreshSuspendRecommendationLock();
+    this.checkWaitExpiry();
+  }
+
+  /** 从规范化快照恢复所有信号状态 */
+  private hydrateSignalsFromSnapshot(normalized: DockSnapshot, entries: DockEntry[]): void {
+    this.entries.set(entries);
     this.consoleVisibleOrderHint.set([]);
     this.focusMode.set(normalized.focusMode);
     this.dockExpanded.set(normalized.isDockExpanded);
@@ -1508,14 +1590,9 @@ export class DockEngineService {
     } else {
       this.focusSessionContext.set(null);
     }
-    // v3.0 恢复倦怠检测状态
     this.highLoadCounter.set(normalized.session.highLoadCounter ?? { count: 0, windowStartAt: 0 });
     this.burnoutTriggeredAt.set(normalized.session.burnoutTriggeredAt ?? null);
     this.rebalanceAutoZones();
-    this.restoringSnapshot.set(false);
-    this.refreshSuspendRecommendationLock();
-    // 恢复快照后立即检查过期等待（策划案：跨天恢复不等 10s tick）
-    this.checkWaitExpiry();
   }
 
   reset(): void {
@@ -1667,46 +1744,30 @@ export class DockEngineService {
     const comboSet = new Set(session.comboSelectIds);
     const backupSet = new Set(session.backupIds);
     const hasLaneHints = comboSet.size > 0 || backupSet.size > 0;
-    let hydrated = entries;
+
+    // M-9 fix: 提取 lane 分配逻辑为辅助函数，消除 6 层嵌套三元
+    const assignLane = (entry: DockEntry, markMain: boolean): DockEntry => {
+      if (entry.status === 'completed') return entry;
+      if (markMain && entry.taskId === session.mainTaskId) return { ...entry, isMain: true };
+      if (entry.isMain) return entry;
+      if (!hasLaneHints) return entry;
+      if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
+      if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
+      return entry;
+    };
 
     if (!session.mainTaskId) {
-      if (hasLaneHints) {
-        hydrated = entries.map(entry => {
-          if (entry.status === 'completed' || entry.isMain) return entry;
-          if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
-          if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
-          return entry;
-        });
-      }
+      const hydrated = entries.map(e => assignLane(e, false));
       return this.completionFlow.enforceSingleMainInvariant(hydrated, null);
     }
 
     const hasMain = entries.some(entry => entry.isMain && entry.status !== 'completed');
     if (hasMain || !entries.some(entry => entry.taskId === session.mainTaskId)) {
-      if (hasLaneHints) {
-        hydrated = entries.map(entry => {
-          if (entry.status === 'completed' || entry.isMain) return entry;
-          if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
-          if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
-          return entry;
-        });
-      }
+      const hydrated = entries.map(e => assignLane(e, false));
       return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
     }
 
-    hydrated = entries.map(entry =>
-      entry.status === 'completed'
-        ? entry
-        : entry.taskId === session.mainTaskId
-          ? { ...entry, isMain: true }
-          : hasLaneHints && !entry.isMain
-            ? comboSet.has(entry.taskId)
-              ? { ...entry, lane: 'combo-select' }
-              : backupSet.has(entry.taskId)
-                ? { ...entry, lane: 'backup' }
-                : entry
-            : entry,
-    );
+    const hydrated = entries.map(e => assignLane(e, true));
     return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
   }
 
@@ -1723,6 +1784,7 @@ export class DockEngineService {
 
   private checkWaitExpiry(): void {
     let shouldPlaySound = false;
+    const newlyExpiredTitles: string[] = [];
     this.entries.update(prev => {
       let changed = false;
       const next = [...prev];
@@ -1734,6 +1796,7 @@ export class DockEngineService {
         if (!this.waitEndNotifiedIds.has(entry.taskId)) {
           this.waitEndNotifiedIds.add(entry.taskId);
           shouldPlaySound = true;
+          newlyExpiredTitles.push(entry.title);
         }
         const finished: DockEntry = { ...entry, status: 'wait_finished' };
         next[index] = finished;
@@ -1742,6 +1805,16 @@ export class DockEngineService {
     });
     if (shouldPlaySound) {
       this.playWaitEndSound();
+    }
+    if (newlyExpiredTitles.length > 0 && this.shouldSendAttentionNotification()) {
+      const body = newlyExpiredTitles.length === 1
+        ? `${newlyExpiredTitles[0]} 的等待已结束，可以恢复处理。`
+        : `${newlyExpiredTitles.length} 个任务的等待已结束，可以回到主窗口处理。`;
+      void this.focusAttention.notify({
+        title: 'NanoFlow 专注提示',
+        body,
+        tag: 'nanoflow-focus-wait-finished',
+      });
     }
   }
 
@@ -1799,6 +1872,11 @@ export class DockEngineService {
     }
   }
 
+  private shouldSendAttentionNotification(): boolean {
+    if (typeof document === 'undefined') return !this.focusHudWindow.isActive();
+    return document.visibilityState !== 'visible' && !this.focusHudWindow.isActive();
+  }
+
   private scheduleLocalPersist(_snapshot: DockSnapshot | null, userId: string | null): void {
     this.snapshotPersistence.scheduleLocalPersist(
       () => this.exportSnapshot(),
@@ -1810,6 +1888,8 @@ export class DockEngineService {
   private async restoreLocalSnapshot(userId: string | null): Promise<void> {
     const ctx = this.buildNormalizeContext();
     const normalized = await this.snapshotPersistence.restoreLocalSnapshot(userId, ctx);
+    // C-2 fix: 丢弃过期的异步恢复（用户已切换到其他账户）
+    if (userId !== this.currentSnapshotUserId) return;
     if (normalized) {
       this.restoreSnapshot(normalized);
       return;

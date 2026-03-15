@@ -14,6 +14,8 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { BlackBoxService } from './black-box.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { FocusAttentionService } from './focus-attention.service';
+import { FocusHudWindowService } from './focus-hud-window.service';
 import { Task } from '../models';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
@@ -98,6 +100,16 @@ describe('DockEngineService', () => {
     info: vi.fn(),
     warning: vi.fn(),
     error: vi.fn(),
+  };
+
+  const mockFocusAttention = {
+    updateBadge: vi.fn(),
+    notify: vi.fn().mockResolvedValue(undefined),
+  };
+
+  const mockFocusHudWindow = {
+    isActive: signal(false),
+    isSupported: signal(true),
   };
 
   const mockTaskStore = {
@@ -201,6 +213,9 @@ describe('DockEngineService', () => {
     mockToast.info.mockClear();
     mockToast.warning.mockClear();
     mockToast.error.mockClear();
+    mockFocusAttention.updateBadge.mockClear();
+    mockFocusAttention.notify.mockClear();
+    mockFocusHudWindow.isActive.set(false);
     mockFocusPreferenceService.update.mockClear();
 
     TestBed.configureTestingModule({
@@ -217,6 +232,8 @@ describe('DockEngineService', () => {
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
+        { provide: FocusAttentionService, useValue: mockFocusAttention },
+        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
       ],
     });
 
@@ -1208,6 +1225,162 @@ describe('DockEngineService', () => {
 
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'A')?.status).toBe('wait_finished');
+  });
+
+  it('expired suspended_waiting entries should count toward the attention badge immediately', () => {
+    seedTask('A');
+    seedTask('B');
+    mockFocusAttention.updateBadge.mockClear();
+    const waitStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    service.restoreSnapshot({
+      version: 4,
+      entries: [
+        {
+          taskId: 'A',
+          title: 'A',
+          sourceProjectId: 'project-1',
+          status: 'suspended_waiting',
+          load: 'low',
+          expectedMinutes: 30,
+          waitMinutes: 5,
+          waitStartedAt,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: true,
+          dockedOrder: 0,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'B',
+          title: 'B',
+          sourceProjectId: 'project-1',
+          status: 'focusing',
+          load: 'high',
+          expectedMinutes: 25,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 1,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: [],
+        backupIds: [],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: 'A',
+      suspendRecommendationLocked: true,
+      pendingDecision: null,
+      dailyResetDate: '2026-02-25',
+      savedAt: new Date().toISOString(),
+    });
+    TestBed.flushEffects();
+
+    expect(mockFocusAttention.updateBadge).toHaveBeenLastCalledWith(1);
+  });
+
+  it('active PiP HUD should suppress wait-finished notifications while the main document is hidden', () => {
+    const originalVisibilityDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    });
+    mockFocusHudWindow.isActive.set(true);
+    seedTask('A');
+    seedTask('B');
+    const waitStartedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    try {
+      service.restoreSnapshot({
+        version: 4,
+        entries: [
+          {
+            taskId: 'A',
+            title: 'A',
+            sourceProjectId: 'project-1',
+            status: 'suspended_waiting',
+            load: 'low',
+            expectedMinutes: 30,
+            waitMinutes: 5,
+            waitStartedAt,
+            lane: 'combo-select',
+            zoneSource: 'manual',
+            isMain: true,
+            dockedOrder: 0,
+            detail: '',
+            sourceKind: 'project-task',
+            systemSelected: false,
+            recommendedScore: null,
+          },
+          {
+            taskId: 'B',
+            title: 'B',
+            sourceProjectId: 'project-1',
+            status: 'focusing',
+            load: 'high',
+            expectedMinutes: 25,
+            waitMinutes: null,
+            waitStartedAt: null,
+            lane: 'combo-select',
+            zoneSource: 'manual',
+            isMain: false,
+            dockedOrder: 1,
+            detail: '',
+            sourceKind: 'project-task',
+            systemSelected: false,
+            recommendedScore: null,
+          },
+        ],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: 'A',
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        firstDragDone: true,
+        dailySlots: [],
+        suspendChainRootTaskId: 'A',
+        suspendRecommendationLocked: true,
+        pendingDecision: null,
+        dailyResetDate: '2026-02-25',
+        savedAt: new Date().toISOString(),
+      });
+      mockFocusAttention.notify.mockClear();
+
+      vi.advanceTimersByTime(10_500);
+
+      expect(service.entries().find(entry => entry.taskId === 'A')?.status).toBe('wait_finished');
+      expect(mockFocusAttention.notify).not.toHaveBeenCalled();
+    } finally {
+      if (originalVisibilityDescriptor) {
+        Object.defineProperty(document, 'visibilityState', originalVisibilityDescriptor);
+      } else {
+        delete (document as Record<string, unknown>).visibilityState;
+      }
+    }
   });
 
   it('pending decision with candidates should stay manual even after timeout elapses', () => {

@@ -48,6 +48,8 @@ export class WorkspaceModalCoordinatorService {
 
   /** Pending conflict data kept while the conflict modal is open */
   private _pendingConflict: ConflictData | null = null;
+  // M-14: 防止并发冲突解决操作
+  private _isResolvingConflict = false;
   /** Conflict modal ref */
   private _conflictModalRef: ModalRef | null = null;
 
@@ -376,33 +378,51 @@ export class WorkspaceModalCoordinatorService {
   }
 
   async resolveConflictLocal(): Promise<void> {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'local');
+    if (this._isResolvingConflict) return;
+    this._isResolvingConflict = true;
+    try {
+      const data = this._pendingConflict;
+      if (data) {
+        await this.projectOps.resolveConflict(data.projectId, 'local');
+      }
+      this._conflictModalRef?.close({ choice: 'local' });
+      this._pendingConflict = null;
+      this._conflictModalRef = null;
+    } finally {
+      this._isResolvingConflict = false;
     }
-    this._conflictModalRef?.close({ choice: 'local' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
   }
 
   async resolveConflictRemote(): Promise<void> {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'remote');
+    if (this._isResolvingConflict) return;
+    this._isResolvingConflict = true;
+    try {
+      const data = this._pendingConflict;
+      if (data) {
+        await this.projectOps.resolveConflict(data.projectId, 'remote');
+      }
+      this._conflictModalRef?.close({ choice: 'remote' });
+      this._pendingConflict = null;
+      this._conflictModalRef = null;
+    } finally {
+      this._isResolvingConflict = false;
     }
-    this._conflictModalRef?.close({ choice: 'remote' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
   }
 
   async resolveConflictMerge(): Promise<void> {
-    const data = this._pendingConflict;
-    if (data) {
-      await this.projectOps.resolveConflict(data.projectId, 'merge');
+    if (this._isResolvingConflict) return;
+    this._isResolvingConflict = true;
+    try {
+      const data = this._pendingConflict;
+      if (data) {
+        await this.projectOps.resolveConflict(data.projectId, 'merge');
+      }
+      this._conflictModalRef?.close({ choice: 'merge' });
+      this._pendingConflict = null;
+      this._conflictModalRef = null;
+    } finally {
+      this._isResolvingConflict = false;
     }
-    this._conflictModalRef?.close({ choice: 'merge' });
-    this._pendingConflict = null;
-    this._conflictModalRef = null;
   }
 
   cancelConflictResolution(): void {

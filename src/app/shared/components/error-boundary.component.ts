@@ -145,8 +145,8 @@ import { LoggerService } from '../../../services/logger.service';
       justify-content: center;
       min-height: 200px;
       padding: 2rem;
-      background: var(--fallback-bg, #fef2f2);
-      border: 1px solid var(--fallback-border, #fecaca);
+      background: var(--fallback-bg, var(--theme-danger-bg, #fef2f2));
+      border: 1px solid var(--fallback-border, var(--theme-danger-border, #fecaca));
       border-radius: 0.5rem;
     }
     
@@ -169,7 +169,7 @@ import { LoggerService } from '../../../services/logger.service';
       display: flex;
       justify-content: center;
       margin-bottom: 1rem;
-      color: var(--error-icon-color, #ef4444);
+      color: var(--error-icon-color, var(--theme-danger-text, #ef4444));
     }
     
     .error-icon-fatal {
@@ -179,12 +179,12 @@ import { LoggerService } from '../../../services/logger.service';
     .error-title {
       font-size: 1.25rem;
       font-weight: 600;
-      color: var(--error-title-color, #991b1b);
+      color: var(--error-title-color, var(--theme-danger-text, #991b1b));
       margin-bottom: 0.5rem;
     }
     
     .error-message {
-      color: var(--error-message-color, #7f1d1d);
+      color: var(--error-message-color, var(--theme-text-secondary, #7f1d1d));
       margin-bottom: 1rem;
       line-height: 1.5;
     }
@@ -193,14 +193,14 @@ import { LoggerService } from '../../../services/logger.service';
       text-align: left;
       margin-bottom: 1rem;
       padding: 0.5rem;
-      background: rgba(0,0,0,0.05);
+      background: var(--theme-surface-subtle, rgba(0,0,0,0.05));
       border-radius: 0.25rem;
       font-size: 0.75rem;
     }
     
     .error-details summary {
       cursor: pointer;
-      color: var(--error-details-color, #6b7280);
+      color: var(--error-details-color, var(--theme-text-muted, #6b7280));
     }
     
     .error-details pre {
@@ -229,47 +229,39 @@ import { LoggerService } from '../../../services/logger.service';
     }
     
     .btn-retry {
-      background: var(--btn-retry-bg, #3b82f6);
-      color: white;
+      background: var(--btn-retry-bg, var(--theme-primary-solid, #3b82f6));
+      color: var(--btn-retry-color, var(--theme-primary-contrast, white));
       border: none;
     }
     
     .btn-retry:hover {
-      background: var(--btn-retry-hover, #2563eb);
+      background: var(--btn-retry-hover, var(--theme-primary-solid-hover, #2563eb));
     }
     
     .btn-refresh {
-      background: var(--btn-refresh-bg, #f3f4f6);
-      color: var(--btn-refresh-color, #374151);
-      border: 1px solid var(--btn-refresh-border, #d1d5db);
+      background: var(--btn-refresh-bg, var(--theme-surface-subtle, #f3f4f6));
+      color: var(--btn-refresh-color, var(--theme-text-primary, #374151));
+      border: 1px solid var(--btn-refresh-border, var(--theme-border-subtle, #d1d5db));
     }
     
     .btn-refresh:hover {
-      background: var(--btn-refresh-hover, #e5e7eb);
+      background: var(--btn-refresh-hover, var(--theme-surface-hover, #e5e7eb));
     }
     
     .btn-home {
       background: transparent;
-      color: var(--btn-home-color, #6b7280);
+      color: var(--btn-home-color, var(--theme-text-muted, #6b7280));
       border: none;
       text-decoration: underline;
     }
     
     .btn-home:hover {
-      color: var(--btn-home-hover, #374151);
+      color: var(--btn-home-hover, var(--theme-text-primary, #374151));
     }
     
     /* 暗色主题支持 */
-    :host-context([data-theme="dark"]) .error-boundary-fallback {
-      --fallback-bg: #1f1f1f;
-      --fallback-border: #3f3f3f;
-      --error-icon-color: #f87171;
-      --error-title-color: #fca5a5;
-      --error-message-color: #fecaca;
-      --btn-refresh-bg: #374151;
-      --btn-refresh-color: #e5e7eb;
-      --btn-refresh-border: #4b5563;
-      --btn-home-color: #9ca3af;
+    :host-context([data-color-mode="dark"]) .error-boundary-fallback {
+      --error-message-color: var(--theme-text-secondary, #e5e7eb);
     }
   `]
 })

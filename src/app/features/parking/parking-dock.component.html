@@ -104,10 +104,12 @@
           </div>
         }
 
-        <app-dock-radar-zone
-          class="absolute left-1/2 top-1/2 z-10 pointer-events-auto"
-          style="width: 0; height: 0;">
-        </app-dock-radar-zone>
+        @defer (when engine.focusMode()) {
+          <app-dock-radar-zone
+            class="absolute left-1/2 top-1/2 z-10 pointer-events-auto"
+            style="width: 0; height: 0;">
+          </app-dock-radar-zone>
+        }
       }
     </app-dock-focus-scene>
 
@@ -166,7 +168,10 @@
           [class.status-machine-shell-minimal]="hudMinimalMode()"
           (pointerdown)="onHudPointerDown($event)">
           <app-dock-status-machine
-            [forcedMode]="engine.focusScrimOn() ? 'full' : 'minimal'">
+            [forcedMode]="hudMinimalMode() ? 'minimal' : 'full'"
+            [showPipToggle]="canOpenPipHud()"
+            [pipToggleActive]="focusHudWindow.isActive()"
+            (pipToggleRequested)="togglePipHud()">
           </app-dock-status-machine>
         </div>
       </div>
@@ -253,7 +258,9 @@
         <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2
                     -translate-x-1/2 -translate-y-1/2 z-40"
              style="pointer-events: auto;">
-          <app-dock-daily-slot></app-dock-daily-slot>
+           @defer (when engine.isFragmentPhase()) {
+             <app-dock-daily-slot></app-dock-daily-slot>
+           }
         </div>
       }
 
@@ -435,18 +442,20 @@
             </h3>
           </div>
           <div class="flex items-center gap-2">
-            <button
-              type="button"
-              (click)="toggleNewTaskForm()"
-              [disabled]="!canUseInlineDockCreate()"
-              class="px-4 py-1.5 rounded-full text-xs font-semibold transition-colors"
-              [ngClass]="showNewTaskForm()
-                ? 'bg-indigo-500/90 text-white hover:bg-indigo-400'
-                : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'"
-              style="min-height: 44px;"
-              data-testid="dock-v3-create-toggle">
-              {{ showNewTaskForm() ? '收起新建' : '+ 新建' }}
-            </button>
+            @if (showInlineDockCreate()) {
+              <button
+                type="button"
+                (click)="toggleNewTaskForm()"
+                [disabled]="!canUseInlineDockCreate()"
+                class="px-4 py-1.5 rounded-full text-xs font-semibold transition-colors"
+                [ngClass]="showNewTaskForm()
+                  ? 'bg-indigo-500/90 text-white hover:bg-indigo-400'
+                  : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'"
+                style="min-height: 44px;"
+                data-testid="dock-v3-create-toggle">
+                {{ showNewTaskForm() ? '收起新建' : '+ 新建' }}
+              </button>
+            }
 
             <button
               type="button"
@@ -482,7 +491,7 @@
                 class="mx-2 flex flex-wrap items-stretch gap-2.5 text-[11px] text-slate-200"
                 data-testid="dock-v3-secondary-rail-banner">
                 @if (bannerPlannerTarget(); as bannerTarget) {
-                  <div class="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-amber-400/18 bg-amber-500/8 px-2.5 py-2">
+                  <div class="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-amber-500/10 bg-amber-500/[0.06] px-2.5 py-2">
                     <span class="shrink-0 text-[9px] font-semibold uppercase tracking-[0.16em] text-amber-200/80">补全</span>
                     <div class="min-w-0 flex flex-1 items-center gap-2">
                         @if (bannerPlannerMissingCount() > 0) {
@@ -508,7 +517,7 @@
                       type="button"
                       data-testid="dock-v3-planner-toggle"
                       [attr.data-planner-task-id]="bannerTarget.taskId"
-                      class="shrink-0 rounded-lg border border-amber-300/30 bg-amber-500/12 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition-colors hover:bg-amber-500/20"
+                      class="shrink-0 rounded-lg border border-amber-300/[0.18] bg-amber-500/12 px-2.5 py-1 text-[10px] font-semibold text-amber-100 transition-colors hover:bg-amber-500/[0.18]"
                       (click)="togglePlannerQuickEdit(bannerTarget.taskId)">
                       编辑
                     </button>
@@ -688,8 +697,8 @@
         <!-- 表单 + 卡片列表：当面板高度受限时可垂直滚动 -->
         <div class="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto hide-scrollbar">
         <!-- 新建任务表单 -->
-        @if (showAdvancedUi && showNewTaskForm()) {
-          <div class="new-task-form flex flex-col gap-2.5 px-2">
+        @if (showAdvancedUi && showInlineDockCreate() && showNewTaskForm()) {
+          <div class="new-task-form flex flex-col gap-2.5 px-2" data-testid="dock-v3-new-task-form">
             <div class="flex items-center gap-2">
               <input
                 type="text"
@@ -817,15 +826,6 @@
               </div>
               <!-- 标题 -->
               <div class="text-xs font-medium text-slate-200 line-clamp-2 mb-2">{{ entry.title }}</div>
-              <div class="mb-2 text-[10px] text-slate-400">
-                @if (entry.isMain) {
-                  主任务
-                } @else if (entry.lane === 'combo-select') {
-                  副任务
-                } @else {
-                  备选任务
-                }
-              </div>
               <!-- 底部状态 + 策划快编触发器（同一行，减少卡片留白） -->
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-1.5 min-w-0">

@@ -8,8 +8,8 @@ import {
   effect,
   inject,
   signal,
+  untracked,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { DockEntry, DockLane, CognitiveLoad, RecommendationGroupType } from '../../../../models/parking-dock';
@@ -24,6 +24,7 @@ import {
   hashCode,
   rand,
 } from '../utils/dock-radar-layout';
+import { formatDockMinutes } from '../utils/dock-format';
 
 interface RadarProjectMeta {
   name: string;
@@ -34,7 +35,7 @@ interface RadarProjectMeta {
   selector: 'app-dock-radar-zone',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, FormsModule],
+  imports: [FormsModule],
   styleUrl: './dock-radar-zone.component.scss',
   templateUrl: './dock-radar-zone.component.html',
 })
@@ -75,23 +76,25 @@ export class DockRadarZoneComponent implements OnDestroy {
   private readonly radarEvictEffect = effect(() => {
     const evictedId = this.engine.lastRadarEvictedTaskId();
     if (!evictedId) return;
-    this.radarReturningIds.update(prev => {
-      const next = new Set(prev);
-      next.add(evictedId);
-      return next;
-    });
-    this.engine.lastRadarEvictedTaskId.set(null);
-    // 入场动画结束后清除标记
-    this.clearRadarReturnTimer(evictedId);
-    const timer = setTimeout(() => {
-      this.radarReturnTimers.delete(evictedId);
+    untracked(() => {
       this.radarReturningIds.update(prev => {
         const next = new Set(prev);
-        next.delete(evictedId);
+        next.add(evictedId);
         return next;
       });
-    }, PARKING_CONFIG.MOTION.radar.returnMs + 80);
-    this.radarReturnTimers.set(evictedId, timer);
+      this.engine.lastRadarEvictedTaskId.set(null);
+      // 入场动画结束后清除标记
+      this.clearRadarReturnTimer(evictedId);
+      const timer = setTimeout(() => {
+        this.radarReturnTimers.delete(evictedId);
+        this.radarReturningIds.update(prev => {
+          const next = new Set(prev);
+          next.delete(evictedId);
+          return next;
+        });
+      }, PARKING_CONFIG.MOTION.radar.returnMs + PARKING_CONFIG.RADAR_RETURN_BUFFER_MS);
+      this.radarReturnTimers.set(evictedId, timer);
+    });
   });
 
   // 首次出现在当前雷达区的任务只播放一次 appear，索引变化不再重播。
@@ -104,19 +107,21 @@ export class DockRadarZoneComponent implements OnDestroy {
     const newTaskIds = visibleTaskIds.filter(taskId => !knownTaskIds.has(taskId));
     if (newTaskIds.length === 0) return;
 
-    this.knownTaskIds.update(prev => {
-      const next = new Set(prev);
-      newTaskIds.forEach(taskId => next.add(taskId));
-      return next;
-    });
-
-    newTaskIds.forEach(taskId => {
-      this.enteringTaskIds.update(prev => {
+    untracked(() => {
+      this.knownTaskIds.update(prev => {
         const next = new Set(prev);
-        next.add(taskId);
+        newTaskIds.forEach(taskId => next.add(taskId));
         return next;
       });
-      this.scheduleEnteringCleanup(taskId);
+
+      newTaskIds.forEach(taskId => {
+        this.enteringTaskIds.update(prev => {
+          const next = new Set(prev);
+          next.add(taskId);
+          return next;
+        });
+        this.scheduleEnteringCleanup(taskId);
+      });
     });
   });
   private readonly overlayAvoidEffect = effect(() => {
@@ -129,6 +134,8 @@ export class DockRadarZoneComponent implements OnDestroy {
 
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly hoverExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // M-11 fix: focus float 使用独立 timer map，避免与 hover 交叉取消
+  private readonly focusExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private touchActiveTaskId: string | null = null;
   private touchStartY = 0;
   private touchLongPressed = false;
@@ -216,6 +223,10 @@ export class DockRadarZoneComponent implements OnDestroy {
       clearTimeout(timer);
     }
     this.hoverExitTimers.clear();
+    for (const timer of this.focusExitTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.focusExitTimers.clear();
     for (const timer of this.enteringTimers.values()) {
       clearTimeout(timer);
     }
@@ -326,20 +337,20 @@ export class DockRadarZoneComponent implements OnDestroy {
     if (this.longPressTimer) clearTimeout(this.longPressTimer);
     this.longPressTimer = setTimeout(() => {
       this.touchLongPressed = true;
-    }, 420);
+    }, PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS);
   }
 
   onTouchMove(event: TouchEvent, taskId: string): void {
     if (!this.canInteract()) return;
     const deltaY = (event.touches?.[0]?.clientY ?? 0) - this.touchStartY;
-    if (this.groupSwitchEnabled() && !this.touchLongPressed && Math.abs(deltaY) > 40) {
+    if (this.groupSwitchEnabled() && !this.touchLongPressed && Math.abs(deltaY) > PARKING_CONFIG.RADAR_SWIPE_THRESHOLD_PX) {
       this.cycleGroup(deltaY > 0 ? 1 : -1);
       this.touchStartY = event.touches?.[0]?.clientY ?? 0;
       return;
     }
 
     if (!this.touchLongPressed || this.touchActiveTaskId !== taskId) return;
-    if (Math.abs(deltaY) < 28) return;
+    if (Math.abs(deltaY) < PARKING_CONFIG.RADAR_SWIPE_MIN_PX) return;
     this.engine.toggleLoad(taskId, deltaY > 0 ? 'down' : 'up');
     this.touchStartY = event.touches?.[0]?.clientY ?? 0;
   }
@@ -480,17 +491,13 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   formatTime(minutes: number): string {
-    if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d`;
-    if (minutes < 60) return `${minutes}m`;
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return m > 0 ? `${h}h${m}m` : `${h}h`;
+    return formatDockMinutes(minutes);
   }
 
   getAppearDelay(taskId: string, lane: DockLane): string {
     const seed = hashCode(`${taskId}:${lane}:appear`);
-    const minDelay = lane === 'combo-select' ? 24 : 72;
-    const spread = lane === 'combo-select' ? 132 : 168;
+    const minDelay = lane === 'combo-select' ? PARKING_CONFIG.RADAR_COMBO_MIN_DELAY_MS : PARKING_CONFIG.RADAR_BACKUP_MIN_DELAY_MS;
+    const spread = lane === 'combo-select' ? PARKING_CONFIG.RADAR_COMBO_DELAY_SPREAD_MS : PARKING_CONFIG.RADAR_BACKUP_DELAY_SPREAD_MS;
     return `${Math.round(minDelay + (rand(seed) * spread))}ms`;
   }
 
@@ -569,9 +576,9 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   private scheduleFocusFloatRemoval(taskId: string): void {
-    this.clearHoverExitTimer(taskId);
+    this.clearFocusExitTimer(taskId);
     const timer = setTimeout(() => {
-      this.hoverExitTimers.delete(taskId);
+      this.focusExitTimers.delete(taskId);
       this.focusFloatIds.update(prev => {
         if (!prev.has(taskId)) return prev;
         const next = new Set(prev);
@@ -579,7 +586,7 @@ export class DockRadarZoneComponent implements OnDestroy {
         return next;
       });
     }, this.hoverExitLingerMs);
-    this.hoverExitTimers.set(taskId, timer);
+    this.focusExitTimers.set(taskId, timer);
   }
 
   private clearHoverExitTimer(taskId: string): void {
@@ -587,6 +594,13 @@ export class DockRadarZoneComponent implements OnDestroy {
     if (!timer) return;
     clearTimeout(timer);
     this.hoverExitTimers.delete(taskId);
+  }
+
+  private clearFocusExitTimer(taskId: string): void {
+    const timer = this.focusExitTimers.get(taskId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.focusExitTimers.delete(taskId);
   }
 
   private scheduleEnteringCleanup(taskId: string): void {
@@ -599,7 +613,7 @@ export class DockRadarZoneComponent implements OnDestroy {
         next.delete(taskId);
         return next;
       });
-    }, PARKING_CONFIG.MOTION.radar.appearMs + 40);
+    }, PARKING_CONFIG.MOTION.radar.appearMs + PARKING_CONFIG.RADAR_APPEAR_BUFFER_MS);
     this.enteringTimers.set(taskId, timer);
   }
 

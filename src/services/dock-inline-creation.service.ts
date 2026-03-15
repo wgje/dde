@@ -53,13 +53,25 @@ export class DockInlineCreationService {
 
   private _ctx: DockInlineCreationContext | null = null;
 
+  /**
+   * 获取上下文——必须在 DockEngineService 构造期间调用 init() 注入。
+   * 如未初始化则抛出明确错误，便于定位 DI 顺序问题。
+   */
   private get ctx(): DockInlineCreationContext {
     if (!this._ctx) {
-      throw new Error('DockInlineCreationService.init() must be called before use');
+      throw new Error(
+        'DockInlineCreationService.init() must be called before use. ' +
+        'Ensure DockEngineService is constructed before accessing this service.',
+      );
     }
     return this._ctx;
   }
 
+  /**
+   * 由 DockEngineService 在其构造函数中调用，注入共享信号引用。
+   * 此服务使用手动上下文注入而非 Angular DI，因为所需信号是 DockEngineService 的私有成员，
+   * 无法通过常规注入获取。这是有意的架构权衡：以运行时初始化检查换取信号封装性。
+   */
   init(ctx: DockInlineCreationContext): void {
     if (this._ctx) {
       this.logger.warn('init() called again — overwriting previous context');

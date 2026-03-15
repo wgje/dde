@@ -19,6 +19,7 @@ import {
 import { determineFragmentDefenseLevel } from './dock-scheduler.rules';
 import { FocusPreferenceService } from './focus-preference.service';
 import { LoggerService } from './logger.service';
+import { IntervalHandle } from '../utils/timer-handle';
 
 /**
  * Callbacks and signal references provided by DockEngineService
@@ -73,7 +74,7 @@ export class DockFragmentRestService {
   // ─── Private State ────────────────────────────
 
   /** 碎片倒计时 interval timer */
-  private fragmentCountdownTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly fragmentCountdownInterval = new IntervalHandle();
   /** 碎片倒计时超时后是否用户已主动跳过 */
   private readonly fragmentEntryDismissed = signal(false);
   /** 倒计时上下文：进入碎片阶段时使用的原因/参数 */
@@ -85,16 +86,27 @@ export class DockFragmentRestService {
 
   private _callbacks: FragmentRestEngineCallbacks | null = null;
 
+  /** 碎片事件推荐轮询索引，确保推荐结果可预测（非随机） */
+  private fragmentEventRoundRobinIndex = 0;
+
+  /**
+   * 获取回调——必须在 DockEngineService 构造期间调用 init() 注入。
+   * 如未初始化则抛出明确错误，便于定位 DI 顺序问题。
+   */
   private get callbacks(): FragmentRestEngineCallbacks {
     if (!this._callbacks) {
-      throw new Error('DockFragmentRestService.init() must be called before use');
+      throw new Error(
+        'DockFragmentRestService.init() must be called before use. ' +
+        'Ensure DockEngineService is constructed before accessing this service.',
+      );
     }
     return this._callbacks;
   }
 
   /**
-   * Initialize with engine callbacks. Must be called once during
-   * DockEngineService construction.
+   * 由 DockEngineService 在其构造函数中调用，注入引擎回调和信号引用。
+   * 此服务使用手动上下文注入而非 Angular DI，因为所需回调引用的是 DockEngineService 的私有成员，
+   * 无法通过常规注入获取。这是有意的架构权衡：以运行时初始化检查换取信号封装性。
    */
   init(callbacks: FragmentRestEngineCallbacks): void {
     if (this._callbacks) {
@@ -120,7 +132,7 @@ export class DockFragmentRestService {
   }): void {
     this.stopFragmentEntryCountdown(false);
     if (!context?.preservePendingDecision) {
-      this._callbacks?.clearPendingDecisionState();
+      this.callbacks.clearPendingDecisionState();
     }
     this.fragmentEntryDismissed.set(false);
     this.fragmentCountdownContext = {
@@ -130,7 +142,7 @@ export class DockFragmentRestService {
     };
     const totalSeconds = context?.countdownSeconds ?? PARKING_CONFIG.FRAGMENT_ENTRY_COUNTDOWN_S;
     this.fragmentEntryCountdown.set(totalSeconds);
-    this.fragmentCountdownTimer = setInterval(() => {
+    this.fragmentCountdownInterval.start(() => {
       const current = this.fragmentEntryCountdown();
       if (current === null || current <= 1) {
         // 倒计时结束，自动进入碎片阶段
@@ -160,10 +172,7 @@ export class DockFragmentRestService {
   }
 
   stopFragmentEntryCountdown(clearContext: boolean = true): void {
-    if (this.fragmentCountdownTimer) {
-      clearInterval(this.fragmentCountdownTimer);
-      this.fragmentCountdownTimer = null;
-    }
+    this.fragmentCountdownInterval.stop();
     this.fragmentEntryCountdown.set(null);
     if (clearContext) {
       this.fragmentCountdownContext = null;
@@ -173,7 +182,7 @@ export class DockFragmentRestService {
   private enterFragmentPhaseFromCountdown(): void {
     const context = this.fragmentCountdownContext;
     this.fragmentCountdownContext = null;
-    this._callbacks?.enterFragmentPhase(
+    this.callbacks.enterFragmentPhase(
       context?.reason ?? '碎片时间倒计时结束/用户确认，进入碎片阶段',
       context?.rootTaskId,
       context?.remainingMinutes,
@@ -249,7 +258,7 @@ export class DockFragmentRestService {
   /**
    * 碎片事件推荐（策划案 §7.8 Level 2）
    * 按 physical-crossover > digital-janitor > micro-progress 优先级
-   * 从预置列表中随机选取一个推荐给用户
+   * 从预置列表中以 round-robin 方式选取，确保推荐结果可预测且分布均匀
    */
   getFragmentEventRecommendation(): FragmentEventEntry | null {
     const defenseLevel = this.callbacks.fragmentDefenseLevel();
@@ -265,8 +274,9 @@ export class DockFragmentRestService {
     for (const category of categoryOrder) {
       const candidates = PRESET_FRAGMENT_EVENTS.filter(e => e.category === category);
       if (candidates.length > 0) {
-        // 随机选一个，避免总是推同一条
-        const pick = candidates[Math.floor(Math.random() * candidates.length)];
+        // round-robin 轮询选取，避免随机导致的不可预测行为
+        const pick = candidates[this.fragmentEventRoundRobinIndex % candidates.length];
+        this.fragmentEventRoundRobinIndex++;
         this.activeFragmentEvent.set(pick);
         return pick;
       }
@@ -377,6 +387,8 @@ export class DockFragmentRestService {
     this.stopFragmentEntryCountdown();
     this.fragmentEntryDismissed.set(false);
     this.activeFragmentEvent.set(null);
+    // M-22 fix: 重置 round-robin 索引，避免跨会话状态泄漏
+    this.fragmentEventRoundRobinIndex = 0;
     this.resetRestState();
   }
 

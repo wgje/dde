@@ -21,6 +21,8 @@ export interface FocusHelpSection {
  *
  * Provided at the component level (not root) so each dock
  * instance gets its own help/feedback state.
+ *
+ * TODO(L-28): Wire up to ParkingDockComponent — currently defined but not injected anywhere.
  */
 @Injectable()
 export class DockHelpFeedbackService implements OnDestroy {

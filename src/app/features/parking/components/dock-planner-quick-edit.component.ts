@@ -1,4 +1,4 @@
-import { CommonModule } from '@angular/common';
+import { NgClass } from '@angular/common';
 import {
   ChangeDetectionStrategy,
   Component,
@@ -15,7 +15,7 @@ export type DockPlannerQuickEditPresentation = 'popover' | 'sheet';
 @Component({
   selector: 'app-dock-planner-quick-edit',
   standalone: true,
-  imports: [CommonModule],
+  imports: [NgClass],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: [`
     .planner-attention-glow {

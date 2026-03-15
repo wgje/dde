@@ -438,6 +438,9 @@ export class DockConsoleStackComponent implements OnDestroy {
     if (!insertedId || hasActiveMotion || insertedId === this.lastHandledRadarInsertId) return;
 
     untracked(() => {
+      // H-7 fix: 提前设置标记，防止动画中断后重复触发
+      this.lastHandledRadarInsertId = insertedId;
+      const pendingEviction = this.engine.pendingRadarEviction();
       const batch = buildRadarConsoleMotionBatch(
         this.snapshotStableEntries(),
         postEntries,
@@ -445,8 +448,7 @@ export class DockConsoleStackComponent implements OnDestroy {
         this.nextBatchKey('radar'),
       );
       this.applyMotionBatch(batch, () => {
-        this.lastHandledRadarInsertId = insertedId;
-        const pendingEviction = this.engine.pendingRadarEviction();
+        // H-7 fix: afterSettle 仅负责 eviction，标记已提前设置
         if (pendingEviction) {
           this.engine.flushRadarEviction(pendingEviction);
         }

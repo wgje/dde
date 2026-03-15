@@ -385,10 +385,11 @@ export class TextTaskEditorComponent implements OnDestroy {
           // 仅当内容输入框未聚焦时才同步内容
           if (!this.isContentFocused) {
             this.localContent.set(task.content || '');
+          }
+          // M-10 fix: 规划字段不受 content 焦点状态限制，始终同步
           this.localExpectedMinutes.set(task.expected_minutes == null ? '' : String(task.expected_minutes));
           this.localWaitMinutes.set(task.wait_minutes == null ? '' : String(task.wait_minutes));
           this.localCognitiveLoad.set(task.cognitive_load ?? '');
-          }
         }
       });
     } catch {

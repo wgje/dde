@@ -16,6 +16,49 @@ import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import { rankDockCandidates } from './dock-scheduler.rules';
 
 // ---------------------------------------------------------------------------
+//  Entry ordering（纯函数）
+// ---------------------------------------------------------------------------
+
+export function entryOrder(entry: DockEntry): number {
+  if (Number.isFinite(entry.manualOrder)) {
+    return Number(entry.manualOrder);
+  }
+  return entry.dockedOrder;
+}
+
+// ---------------------------------------------------------------------------
+//  DockEntry → FocusTaskSlot 映射（纯函数）
+// ---------------------------------------------------------------------------
+
+export function toFocusTaskSlot(
+  entry: DockEntry,
+  zone: 'command' | 'combo-select' | 'backup' = 'command',
+  idx = 0,
+): FocusTaskSlot {
+  return {
+    slotId: entry.taskId,
+    taskId: entry.taskId,
+    estimatedMinutes: entry.expectedMinutes,
+    waitMinutes: entry.waitMinutes,
+    cognitiveLoad: entry.load,
+    focusStatus: mapDockStatusToFocusStatus(entry.status),
+    zone,
+    zoneIndex: idx,
+    isMaster: entry.isMain,
+    waitStartedAt: entry.waitStartedAt ? new Date(entry.waitStartedAt).getTime() : null,
+    waitEndAt: entry.waitStartedAt && entry.waitMinutes
+      ? new Date(entry.waitStartedAt).getTime() + entry.waitMinutes * 60_000
+      : null,
+    sourceProjectId: entry.sourceProjectId ?? null,
+    sourceBlockType: entry.sourceKind === 'dock-created' ? 'text' : null,
+    draggedInAt: Date.now(),
+    isFirstBatch: entry.dockedOrder === 0,
+    inlineTitle: entry.title,
+    inlineDetail: entry.detail ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 //  Status helpers（纯函数）
 // ---------------------------------------------------------------------------
 
@@ -125,14 +168,6 @@ export function buildOverflowMeta(entries: DockEntry[]): { comboSelectOverflow: 
     comboSelectOverflow: Math.max(0, comboCount - PARKING_CONFIG.RADAR_COMBO_VISIBLE_LIMIT),
     backupOverflow: Math.max(0, backupCount - PARKING_CONFIG.RADAR_BACKUP_VISIBLE_LIMIT),
   };
-}
-
-export function nextManualOrder(entries: ReadonlyArray<DockEntry>): number {
-  const orders = entries
-    .map(entry => entry.manualOrder)
-    .filter((value): value is number => Number.isFinite(value));
-  if (orders.length === 0) return entries.length;
-  return Math.max(...orders) + 1;
 }
 
 export function resolveOrderingWindowMinutes(root: DockEntry | null): number {

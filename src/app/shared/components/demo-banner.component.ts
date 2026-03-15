@@ -69,8 +69,12 @@ import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
     }
 
     .demo-banner {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
+      background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--theme-primary) 78%, white 22%) 0%,
+        color-mix(in srgb, var(--theme-accent) 82%, #1f2937 18%) 100%
+      );
+      color: var(--theme-primary-contrast, white);
       padding: 0.625rem 1rem;
       pointer-events: auto;
       font-size: 0.875rem;
@@ -120,30 +124,30 @@ import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
     }
 
     .banner-btn.primary {
-      background: white;
-      color: #667eea;
+      background: var(--theme-surface-base, white);
+      color: var(--theme-primary-text, #667eea);
       border: none;
     }
 
     .banner-btn.primary:hover {
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--theme-surface-hover, rgba(255, 255, 255, 0.9));
       transform: translateY(-1px);
     }
 
     .banner-btn.secondary {
-      background: rgba(255, 255, 255, 0.15);
-      color: white;
-      border: 1px solid rgba(255, 255, 255, 0.3);
+      background: color-mix(in srgb, var(--theme-surface-base) 16%, transparent);
+      color: var(--theme-primary-contrast, white);
+      border: 1px solid color-mix(in srgb, var(--theme-surface-base) 28%, transparent);
     }
 
     .banner-btn.secondary:hover {
-      background: rgba(255, 255, 255, 0.25);
+      background: color-mix(in srgb, var(--theme-surface-base) 24%, transparent);
     }
 
     .banner-close {
       background: transparent;
       border: none;
-      color: rgba(255, 255, 255, 0.7);
+      color: color-mix(in srgb, var(--theme-primary-contrast, white) 72%, transparent);
       cursor: pointer;
       padding: 0.25rem 0.5rem;
       font-size: 1rem;
@@ -152,7 +156,7 @@ import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
     }
 
     .banner-close:hover {
-      color: white;
+      color: var(--theme-primary-contrast, white);
     }
 
     /* 移动端适配 */
@@ -182,9 +186,12 @@ import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
     }
 
     /* 深色模式适配 - 使用项目的 data-color-mode 属性 */
-    :host-context([data-color-mode="dark"]) .demo-banner,
-    .dark .demo-banner {
-      background: linear-gradient(135deg, #4c51bf 0%, #6b46c1 100%);
+    :host-context([data-color-mode="dark"]) .demo-banner {
+      background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--theme-primary) 74%, black 26%) 0%,
+        color-mix(in srgb, var(--theme-accent) 78%, black 22%) 100%
+      );
     }
   `]
 })

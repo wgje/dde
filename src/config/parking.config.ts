@@ -310,35 +310,60 @@ export const PARKING_CONFIG = {
   STATUS_RING_WAIT_STROKE: '#f59e0b',
   STATUS_RING_EXPIRED_STROKE: '#fbbf24',
 
-  // Scheduling — 调度评分权重与阈值
+  /**
+   * ── 调度评分权重体系文档 ──
+   *
+   * 候选任务评分公式：
+   *   finalScore = zoneScore + relationScore + loadScore + timeScore + projectScore + waitChildScore
+   *
+   * 各维度权重设计理念（详见 dock-scheduler.rules.ts 中 rankDockCandidates）：
+   *   1. zone（强/弱）：combo-select 区任务优先于 backup 区
+   *   2. relation（强/弱）：树距离越近越优先（基于 relationScore 归一化至 0~1 后乘以权重）
+   *   3. load（高/低）：倾向交替负荷以防认知疲劳
+   *   4. time（tight/normal/overrun）：候选时长与剩余窗口的匹配程度
+   *   5. waitChild：等待子任务中的候选获额外加分
+   *   6. projectSwitch：同项目惩罚（鼓励项目切换以保持新鲜感）
+   *
+   * 调参注意事项：
+   *   - STRONG_ZONE (35) > RELATION_STRONG (32) > TIME_TIGHT_MATCH (30)
+   *     表示区域匹配最重要，其次是树距离，最后是时间窗口
+   *   - 负值表示惩罚，正值表示奖励
+   *   - 修改任一权重后应运行 dock-scheduler.rules.spec.ts 验证排序结果
+   */
+
   /** 紧张窗口判定阈值（分钟）：剩余 ≤ 2min 视为紧张留白期 */
   SCHEDULE_TIGHT_THRESHOLD_MINUTES: 2,
-  /** combo-select 区候选强匹配权重 */
+  /** combo-select 区候选强匹配权重（最高优先级） */
   SCHEDULE_STRONG_ZONE_WEIGHT: 35,
   /** backup 区候选弱匹配权重 */
   SCHEDULE_WEAK_ZONE_WEIGHT: 20,
-  /** 树距离强关联权重（直接父子/兄弟） */
+  /** 树距离强关联权重（直接父子/兄弟，归一化后乘以此值） */
   SCHEDULE_RELATION_STRONG_WEIGHT: 32,
-  /** 树距离弱关联权重（远亲节点） */
+  /** 树距离弱关联权重（远亲节点，归一化后乘以此值） */
   SCHEDULE_RELATION_WEAK_WEIGHT: 12,
-  /** relationScore 归一化上限 */
+  /** relationScore 归一化上限（超过此值视为满分关联） */
   SCHEDULE_RELATION_SCORE_CAP: 100,
-  /** 低负荷候选权重 */
+  /** 低负荷候选权重（倾向调度低负荷任务以缓解认知压力） */
   SCHEDULE_LOW_LOAD_WEIGHT: 20,
-  /** 高负荷候选权重 */
+  /** 高负荷候选权重（高负荷任务得分较低，避免连续高负荷） */
   SCHEDULE_HIGH_LOAD_WEIGHT: 8,
-  /** 负荷切换奖励：高→低 */
+  /** 负荷切换奖励：高→低（鼓励高负荷任务后切换至低负荷） */
   SCHEDULE_LOAD_TRANSITION_LOW_BONUS: 10,
-  /** 负荷切换惩罚：高→高 */
+  /** 负荷切换惩罚：高→高（连续高负荷累加惩罚） */
   SCHEDULE_LOAD_TRANSITION_HIGH_PENALTY: -8,
   // GAP-2: 同项目为最低优先级，惩罚值从 -7 降为 -2，使树距离主导调度
   SCHEDULE_PROJECT_SWITCH_PENALTY: -2,
-  /** 时间窗口紧密匹配权重 */
+  /** 时间窗口紧密匹配权重（候选时长与剩余窗口高度匹配时最大奖励） */
   SCHEDULE_TIME_TIGHT_MATCH_WEIGHT: 30,
+  /** 时间窗口常规匹配权重（候选在合理范围内） */
   SCHEDULE_TIME_NORMAL_MATCH_WEIGHT: 20,
+  /** 时间窗口轻度超出权重（候选略超窗口但在容许范围内） */
   SCHEDULE_TIME_SMALL_OVERRUN_WEIGHT: 12,
+  /** 等待窗口匹配权重（候选时长适配主任务等待窗口） */
   SCHEDULE_WAIT_WINDOW_FIT_WEIGHT: 14,
+  /** 时间窗口严重不匹配惩罚（候选远超或远小于窗口） */
   SCHEDULE_TIME_MISMATCH_PENALTY: -10,
+  /** 等待子任务额外加分（正在等待中的子任务获得调度优先） */
   SCHEDULE_WAIT_CHILD_WEIGHT: 8,
   /** 容许超出窗口的分钟数 */
   SCHEDULE_OVER_RUN_ALLOWANCE_MINUTES: 10,
@@ -425,4 +450,24 @@ export const PARKING_CONFIG = {
   BEFORE_UNLOAD_PRIORITY: 5,
   SNAPSHOT_DRAFT_KEY: 'parking-snapshot-draft',
   DOCK_SNAPSHOT_STORAGE_KEY: 'nanoflow.dock-snapshot.v3',
+
+  // 雷达区布局微调
+  /** 返回动画结束后清除标记的额外缓冲（毫秒） */
+  RADAR_RETURN_BUFFER_MS: 80,
+  /** 首次出现动画结束后清除标记的额外缓冲（毫秒） */
+  RADAR_APPEAR_BUFFER_MS: 40,
+  /** 雷达区晋升延迟（毫秒） */
+  RADAR_PROMOTION_DELAY_MS: 420,
+  /** 雷达区上滑手势阈值（像素） */
+  RADAR_SWIPE_THRESHOLD_PX: 40,
+  /** 雷达区下滑手势最小阈值（像素） */
+  RADAR_SWIPE_MIN_PX: 28,
+  /** combo-select 出场最小延迟（毫秒） */
+  RADAR_COMBO_MIN_DELAY_MS: 24,
+  /** backup 出场最小延迟（毫秒） */
+  RADAR_BACKUP_MIN_DELAY_MS: 72,
+  /** combo-select 延迟范围（毫秒） */
+  RADAR_COMBO_DELAY_SPREAD_MS: 132,
+  /** backup 延迟范围（毫秒） */
+  RADAR_BACKUP_DELAY_SPREAD_MS: 168,
 } as const;

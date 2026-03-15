@@ -4,6 +4,7 @@ import { DockEntry, DockLane } from '../models/parking-dock';
 import { Task } from '../models';
 import { TaskStore } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
+import { entryOrder } from './dock-engine.utils';
 
 /**
  * 区域/调度推断服务：从 DockEngineService 拆分，负责 auto-lane 推断、
@@ -156,7 +157,7 @@ export class DockZoneService {
 
     const fallbackMain = activeEntries
       .filter(entry => entry.isMain && (!excludeTaskId || entry.taskId !== excludeTaskId))
-      .sort((a, b) => this.entryOrder(a) - this.entryOrder(b))[0];
+      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     return fallbackMain ?? null;
   }
 
@@ -231,27 +232,26 @@ export class DockZoneService {
     return adjacency;
   }
 
+  /** O(n) order-independent fingerprint using additive + XOR hash combination */
   buildAdjacencyFingerprint(tasks: Task[]): string {
-    const pairs: string[] = [];
+    let xor = 0;
+    let sum = 0;
     for (const t of tasks) {
-      pairs.push(`${t.id}:${t.parentId ?? ''}`);
+      let h = 0x811c9dc5; // FNV-1a offset basis
+      const key = `${t.id}:${t.parentId ?? ''}`;
+      for (let i = 0; i < key.length; i++) {
+        h ^= key.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      h >>>= 0;
+      xor ^= h;
+      sum = (sum + h) >>> 0;
     }
-    pairs.sort();
-    return pairs.join('|');
+    return `${tasks.length}:${xor}:${sum}`;
   }
 
   resolveSourceProjectId(entry: DockEntry): string | null {
     return entry.sourceProjectId ?? this.taskStore.getTaskProjectId(entry.taskId);
   }
 
-  // ---------------------------------------------------------------------------
-  //  Helpers
-  // ---------------------------------------------------------------------------
-
-  entryOrder(entry: DockEntry): number {
-    if (Number.isFinite(entry.manualOrder)) {
-      return Number(entry.manualOrder);
-    }
-    return entry.dockedOrder;
-  }
 }

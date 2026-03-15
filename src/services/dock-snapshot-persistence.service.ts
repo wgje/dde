@@ -8,6 +8,7 @@ import { PARKING_CONFIG } from '../config/parking.config';
 
 import {
   CognitiveLoad,
+  CURRENT_DOCK_SNAPSHOT_VERSION,
   DailySlotEntry,
   DockLane,
   DockEntry,
@@ -27,6 +28,7 @@ import {
 import { sanitizePlannerFields } from '../utils/planner-fields';
 import { LoggerService } from './logger.service';
 import { get, set } from 'idb-keyval';
+import { TimerHandle } from '../utils/timer-handle';
 
 const LOCAL_IDB_KEY_PREFIX = 'nanoflow.focus-session.v5';
 // 持久化防抖 500ms（原 120ms 太激进，动画期间信号频繁变化导致
@@ -45,7 +47,7 @@ export interface SnapshotNormalizeContext {
 })
 export class DockSnapshotPersistenceService {
   private readonly logger = inject(LoggerService).category('DockSnapshotPersistence');
-  private localPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly localPersistTimer = new TimerHandle();
 
   // ─── Local IDB Persistence ───────────────────
 
@@ -54,20 +56,20 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     getNonCriticalHoldDelay: () => number,
   ): void {
-    if (this.localPersistTimer) clearTimeout(this.localPersistTimer);
+    // M-3 fix: 持久化最大延迟上限，防止动画持续 hold 导致无限延迟
+    const deadline = Date.now() + 10_000;
     const runPersist = () => {
       const holdDelay = getNonCriticalHoldDelay();
-      if (holdDelay > 0) {
-        this.localPersistTimer = setTimeout(runPersist, holdDelay);
+      if (holdDelay > 0 && Date.now() < deadline) {
+        this.localPersistTimer.schedule(runPersist, holdDelay);
         return;
       }
-      this.localPersistTimer = null;
       const resolved = snapshotFn();
       void set(this.localCacheKey(userId), resolved).catch(() => {
         // Ignore IndexedDB failures.
       });
     };
-    this.localPersistTimer = setTimeout(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
+    this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
   }
 
   async restoreLocalSnapshot(
@@ -81,10 +83,16 @@ export class DockSnapshotPersistenceService {
 
       // Legacy one-time local import path (localStorage v2/v3/v4).
       if (typeof localStorage !== 'undefined') {
-        const legacyRaw = localStorage.getItem(this.legacyLocalStorageKey(userId));
+        const legacyKey = this.legacyLocalStorageKey(userId);
+        const legacyRaw = localStorage.getItem(legacyKey);
         if (legacyRaw) {
           const parsed = JSON.parse(legacyRaw) as DockSnapshot;
-          return this.normalizeSnapshot(parsed, ctx);
+          const result = this.normalizeSnapshot(parsed, ctx);
+          // M-4 fix: 迁移成功后移除旧数据，防止 IDB 清除后 stale 数据复活
+          if (result) {
+            localStorage.removeItem(legacyKey);
+          }
+          return result;
         }
       }
       return null;
@@ -95,10 +103,7 @@ export class DockSnapshotPersistenceService {
   }
 
   cancelPendingPersist(): void {
-    if (this.localPersistTimer) {
-      clearTimeout(this.localPersistTimer);
-      this.localPersistTimer = null;
-    }
+    this.localPersistTimer.cancel();
   }
 
   localCacheKey(userId: string | null): string {
@@ -155,6 +160,29 @@ export class DockSnapshotPersistenceService {
 
   // ─── Normalize Functions ───────────────────
 
+  /**
+   * 快照反序列化与版本归一化。
+   * 将 v2~v7 的原始快照统一转换为当前版本（v7）格式。
+   *
+   * 版本迁移路径：
+   *   v2 → 初始版本，包含基础 entries 和 focusMode
+   *   v3 → 新增 dailySlots 数组
+   *   v4 → 新增 session.focusScrimOn / firstDragIntervened
+   *   v5 → 新增 session.highLoadCounter / burnoutTriggeredAt
+   *   v6 → 新增 session.focusSessionId / focusSessionStartedAt；弃用 focusSessionState
+   *   v7 → 当前版本；新增 dailyResetDate / suspendRecommendationLocked
+   *
+   * 所有版本共用同一归一化代码路径，因为：
+   *   1. 每个字段都有独立的 fallback 默认值（在 normalizeEntry/normalizeSessionState 中处理）
+   *   2. 老版本快照中缺失的字段会自动填充默认值
+   *   3. 无需逐版本递增迁移——直接从任意旧版本映射到 v7
+   *
+   * 当新增 v8 时的维护步骤：
+   *   1. 将 8 加入 SUPPORTED_VERSIONS
+   *   2. 在 normalizeEntry/normalizeSessionState 中为新字段添加 fallback
+   *   3. 更新 exportSnapshot 输出 version: 8
+   *   4. 更新此文档块
+   */
   normalizeSnapshot(raw: unknown, ctx: SnapshotNormalizeContext): DockSnapshot | null {
     if (!raw || typeof raw !== 'object') return null;
     const source = raw as Omit<Partial<DockSnapshot>, 'version'> & { version?: unknown };
@@ -168,36 +196,11 @@ export class DockSnapshotPersistenceService {
     const dailySlots = Array.isArray(source.dailySlots)
       ? source.dailySlots.map(slot => this.normalizeDailySlot(slot)).filter((slot): slot is DailySlotEntry => !!slot)
       : [];
-    const legacyFirstDragDone = Boolean(source.firstDragDone);
-    const fallbackFocusMode = Boolean(source.focusMode);
-    const normalizedSession = this.normalizeSessionState(source.session, entries, fallbackFocusMode, legacyFirstDragDone, ctx);
-    const legacyFocusState =
-      source.focusSessionState && typeof source.focusSessionState === 'object'
-        ? fromLegacySessionState(source.focusSessionState as LegacyFocusSessionState, {
-            sessionId: normalizedSession.focusSessionId ?? crypto.randomUUID(),
-            sessionStartedAt: normalizedSession.focusSessionStartedAt ?? Date.now(),
-            isFocusOverlayOn: normalizedSession.focusScrimOn,
-            highLoadCounter: normalizedSession.highLoadCounter ?? { count: 0, windowStartAt: 0 },
-            burnoutTriggeredAt: normalizedSession.burnoutTriggeredAt ?? null,
-          })
-        : null;
-    const session: DockSessionState = {
-      ...normalizedSession,
-      focusScrimOn: legacyFocusState?.isFocusOverlayOn ?? normalizedSession.focusScrimOn,
-      firstDragIntervened:
-        legacyFocusState?.hasFirstBatchSelected ??
-        normalizedSession.firstDragIntervened,
-      highLoadCounter: legacyFocusState?.highLoadCounter ?? normalizedSession.highLoadCounter,
-      burnoutTriggeredAt: legacyFocusState?.burnoutTriggeredAt ?? normalizedSession.burnoutTriggeredAt,
-      focusSessionId: normalizedSession.focusSessionId ?? legacyFocusState?.sessionId,
-      focusSessionStartedAt:
-        normalizedSession.focusSessionStartedAt ??
-        legacyFocusState?.sessionStartedAt,
-    };
+    const session = this.mergeSessionWithLegacy(source, entries, ctx);
     const focusMode = source.focusMode === undefined ? session.focusBlurOn : Boolean(source.focusMode);
 
     return {
-      version: 7,
+      version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries,
       focusMode,
       isDockExpanded: source.isDockExpanded === undefined ? true : Boolean(source.isDockExpanded),
@@ -220,59 +223,73 @@ export class DockSnapshotPersistenceService {
     };
   }
 
+  /** 合并 normalizedSession 与 legacyFocusSessionState（v2-v5 兼容） */
+  private mergeSessionWithLegacy(
+    source: Omit<Partial<DockSnapshot>, 'version'> & { version?: unknown },
+    entries: DockEntry[],
+    ctx: SnapshotNormalizeContext,
+  ): DockSessionState {
+    const legacyFirstDragDone = Boolean(source.firstDragDone);
+    const fallbackFocusMode = Boolean(source.focusMode);
+    const normalizedSession = this.normalizeSessionState(source.session, entries, fallbackFocusMode, legacyFirstDragDone, ctx);
+    const legacyFocusState =
+      source.focusSessionState && typeof source.focusSessionState === 'object'
+        ? fromLegacySessionState(source.focusSessionState as LegacyFocusSessionState, {
+            sessionId: normalizedSession.focusSessionId ?? crypto.randomUUID(),
+            sessionStartedAt: normalizedSession.focusSessionStartedAt ?? Date.now(),
+            isFocusOverlayOn: normalizedSession.focusScrimOn,
+            highLoadCounter: normalizedSession.highLoadCounter ?? { count: 0, windowStartAt: 0 },
+            burnoutTriggeredAt: normalizedSession.burnoutTriggeredAt ?? null,
+          })
+        : null;
+    return {
+      ...normalizedSession,
+      focusScrimOn: legacyFocusState?.isFocusOverlayOn ?? normalizedSession.focusScrimOn,
+      firstDragIntervened:
+        legacyFocusState?.hasFirstBatchSelected ??
+        normalizedSession.firstDragIntervened,
+      highLoadCounter: legacyFocusState?.highLoadCounter ?? normalizedSession.highLoadCounter,
+      burnoutTriggeredAt: legacyFocusState?.burnoutTriggeredAt ?? normalizedSession.burnoutTriggeredAt,
+      focusSessionId: normalizedSession.focusSessionId ?? legacyFocusState?.sessionId,
+      focusSessionStartedAt:
+        normalizedSession.focusSessionStartedAt ??
+        legacyFocusState?.sessionStartedAt,
+    };
+  }
+
   normalizeEntry(raw: unknown, ctx: SnapshotNormalizeContext): DockEntry | null {
     if (!raw || typeof raw !== 'object') return null;
     const source = raw as Partial<DockEntry>;
     if (!source.taskId || typeof source.taskId !== 'string') return null;
 
-    const status = normalizeStatus(source.status);
-    const rawLane = (source as { lane?: unknown; zone?: unknown }).lane ?? (source as { zone?: unknown }).zone;
-    const lane: DockLane =
-      rawLane === 'combo-select' || rawLane === 'strong'
-        ? 'combo-select'
-        : 'backup';
-    const zoneSource: DockZoneSource = source.zoneSource === 'manual' ? 'manual' : 'auto';
-    const load: CognitiveLoad = source.load === 'high' ? 'high' : 'low';
+    const enumFields = this.normalizeEntryEnumFields(source);
     const plannerFields = sanitizePlannerFields({
       expectedMinutes: source.expectedMinutes,
       waitMinutes: source.waitMinutes,
-      cognitiveLoad: load,
+      cognitiveLoad: enumFields.load,
     });
-    const sourceKind: DockEntry['sourceKind'] =
-      source.sourceKind === 'dock-created'
-        ? 'dock-created'
-        : 'project-task';
-    const normalizedInlineArchiveStatus: DockEntry['inlineArchiveStatus'] =
-      source.inlineArchiveStatus === 'archiving' ||
-      source.inlineArchiveStatus === 'archived' ||
-      source.inlineArchiveStatus === 'failed' ||
-      source.inlineArchiveStatus === 'pending'
-        ? source.inlineArchiveStatus
-        : sourceKind === 'dock-created'
-          ? 'pending'
-          : undefined;
 
     return {
       taskId: source.taskId,
       title: typeof source.title === 'string' ? source.title : 'Untitled task',
       sourceProjectId: typeof source.sourceProjectId === 'string' ? source.sourceProjectId : null,
-      status,
-      load: plannerFields.cognitiveLoad ?? load,
+      status: enumFields.status,
+      load: plannerFields.cognitiveLoad ?? enumFields.load,
       expectedMinutes: plannerFields.expectedMinutes,
       waitMinutes: plannerFields.waitMinutes,
       waitStartedAt: typeof source.waitStartedAt === 'string' ? source.waitStartedAt : null,
-      lane,
-      zoneSource,
+      lane: enumFields.lane,
+      zoneSource: enumFields.zoneSource,
       isMain: Boolean(source.isMain),
       dockedOrder: Number.isFinite(source.dockedOrder) ? Number(source.dockedOrder) : 0,
       manualOrder: normalizeNullableNumber(source.manualOrder) ?? undefined,
       detail: typeof source.detail === 'string' ? source.detail : '',
-      sourceKind,
+      sourceKind: enumFields.sourceKind,
       sourceBlackBoxEntryId:
         typeof source.sourceBlackBoxEntryId === 'string' && source.sourceBlackBoxEntryId
           ? source.sourceBlackBoxEntryId
           : null,
-      inlineArchiveStatus: normalizedInlineArchiveStatus,
+      inlineArchiveStatus: enumFields.inlineArchiveStatus,
       inlineArchivedTaskId:
         typeof source.inlineArchivedTaskId === 'string' && source.inlineArchivedTaskId
           ? source.inlineArchivedTaskId
@@ -289,6 +306,39 @@ export class DockSnapshotPersistenceService {
           ? source.relationReason
           : null,
     };
+  }
+
+  /** 枚举类字段归一化：status、lane、load、sourceKind、inlineArchiveStatus */
+  private normalizeEntryEnumFields(source: Partial<DockEntry>): {
+    status: DockEntry['status'];
+    lane: DockLane;
+    zoneSource: DockZoneSource;
+    load: CognitiveLoad;
+    sourceKind: DockEntry['sourceKind'];
+    inlineArchiveStatus: DockEntry['inlineArchiveStatus'];
+  } {
+    const status = normalizeStatus(source.status);
+    const rawLane = (source as { lane?: unknown; zone?: unknown }).lane ?? (source as { zone?: unknown }).zone;
+    const lane: DockLane =
+      rawLane === 'combo-select' || rawLane === 'strong'
+        ? 'combo-select'
+        : 'backup';
+    const zoneSource: DockZoneSource = source.zoneSource === 'manual' ? 'manual' : 'auto';
+    const load: CognitiveLoad = source.load === 'high' ? 'high' : 'low';
+    const sourceKind: DockEntry['sourceKind'] =
+      source.sourceKind === 'dock-created'
+        ? 'dock-created'
+        : 'project-task';
+    const inlineArchiveStatus: DockEntry['inlineArchiveStatus'] =
+      source.inlineArchiveStatus === 'archiving' ||
+      source.inlineArchiveStatus === 'archived' ||
+      source.inlineArchiveStatus === 'failed' ||
+      source.inlineArchiveStatus === 'pending'
+        ? source.inlineArchiveStatus
+        : sourceKind === 'dock-created'
+          ? 'pending'
+          : undefined;
+    return { status, lane, zoneSource, load, sourceKind, inlineArchiveStatus };
   }
 
   normalizeDailySlot(raw: unknown): DailySlotEntry | null {
@@ -312,6 +362,28 @@ export class DockSnapshotPersistenceService {
     const source = raw as Partial<DockPendingDecision> & { candidateTaskIds?: unknown };
     if (!source.rootTaskId || typeof source.rootTaskId !== 'string') return null;
 
+    const candidateGroups = this.normalizeCandidateGroups(source);
+    if (candidateGroups.length === 0 && !(typeof source.reason === 'string' && source.reason.includes('tight-blank'))) {
+      return null;
+    }
+
+    return {
+      rootTaskId: source.rootTaskId,
+      rootRemainingMinutes: Number.isFinite(source.rootRemainingMinutes) ? Number(source.rootRemainingMinutes) : 0,
+      candidateGroups,
+      reason: typeof source.reason === 'string' && source.reason ? source.reason : '候选任务时长匹配异常',
+      expiresAt: typeof source.expiresAt === 'string' ? source.expiresAt : undefined,
+      autoPromoteAfterMs: Number.isFinite(source.autoPromoteAfterMs)
+        ? Number(source.autoPromoteAfterMs)
+        : undefined,
+      createdAt: typeof source.createdAt === 'string' ? source.createdAt : new Date().toISOString(),
+    };
+  }
+
+  /** 候选组归一化：支持新 candidateGroups 格式和 legacy candidateTaskIds */
+  private normalizeCandidateGroups(
+    source: Partial<DockPendingDecision> & { candidateTaskIds?: unknown },
+  ): Array<{ type: RecommendationGroupType; taskIds: string[] }> {
     const normalizedGroups = Array.isArray(source.candidateGroups)
       ? source.candidateGroups
         .map(group => {
@@ -333,30 +405,14 @@ export class DockSnapshotPersistenceService {
         .filter((group): group is { type: RecommendationGroupType; taskIds: string[] } => !!group)
       : [];
 
+    if (normalizedGroups.length > 0) return normalizedGroups;
+
     const legacyCandidates = Array.isArray(source.candidateTaskIds)
       ? source.candidateTaskIds.filter((item): item is string => typeof item === 'string' && item.length > 0)
       : [];
-    const candidateGroups = normalizedGroups.length > 0
-      ? normalizedGroups
-      : legacyCandidates.length > 0
-        ? [{ type: 'homologous-advancement' as RecommendationGroupType, taskIds: legacyCandidates }]
-        : [];
-
-    if (candidateGroups.length === 0 && !(typeof source.reason === 'string' && source.reason.includes('tight-blank'))) {
-      return null;
-    }
-
-    return {
-      rootTaskId: source.rootTaskId,
-      rootRemainingMinutes: Number.isFinite(source.rootRemainingMinutes) ? Number(source.rootRemainingMinutes) : 0,
-      candidateGroups,
-      reason: typeof source.reason === 'string' && source.reason ? source.reason : '候选任务时长匹配异常',
-      expiresAt: typeof source.expiresAt === 'string' ? source.expiresAt : undefined,
-      autoPromoteAfterMs: Number.isFinite(source.autoPromoteAfterMs)
-        ? Number(source.autoPromoteAfterMs)
-        : undefined,
-      createdAt: typeof source.createdAt === 'string' ? source.createdAt : new Date().toISOString(),
-    };
+    return legacyCandidates.length > 0
+      ? [{ type: 'homologous-advancement' as RecommendationGroupType, taskIds: legacyCandidates }]
+      : [];
   }
 
   private static readonly VALID_DECISION_TYPES: ReadonlySet<DockRuleDecisionType> = new Set([
@@ -397,61 +453,10 @@ export class DockSnapshotPersistenceService {
     legacyFirstDragDone: boolean,
     ctx: SnapshotNormalizeContext,
   ): DockSessionState {
-    const source = raw && typeof raw === 'object'
-      ? (raw as Partial<DockSessionState> & {
-          strongZoneIds?: string[];
-          weakZoneIds?: string[];
-          hasFirstBatchSelected?: boolean;
-        })
-      : null;
-
-    const fallbackMainTaskId =
-      entries.find(entry => entry.status === 'focusing')?.taskId ??
-      entries.find(entry => entry.isMain && entry.status !== 'completed')?.taskId ??
-      null;
-    const fallbackComboSelectIds = entries
-      .filter(entry => entry.status !== 'completed' && !entry.isMain && entry.lane === 'combo-select')
-      .map(entry => entry.taskId);
-    const fallbackBackupIds = entries
-      .filter(entry => entry.status !== 'completed' && !entry.isMain && entry.lane === 'backup')
-      .map(entry => entry.taskId);
-
-    const toIdList = (value: unknown): string[] =>
-      Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-    const comboIds = toIdList(source?.comboSelectIds);
-    const backupIds = toIdList(source?.backupIds);
-    const legacyStrongIds = toIdList(source?.strongZoneIds);
-    const legacyWeakIds = toIdList(source?.weakZoneIds);
-    const resolvedComboIds = comboIds.length > 0 ? comboIds : legacyStrongIds;
-    const resolvedBackupIds = backupIds.length > 0 ? backupIds : legacyWeakIds;
-    const normalizedHighLoadCounter = normalizeHighLoadCounter(source?.highLoadCounter);
-    const normalizedBurnoutAt =
-      source?.burnoutTriggeredAt == null
-        ? null
-        : Number.isFinite(source.burnoutTriggeredAt)
-          ? Number(source.burnoutTriggeredAt)
-          : null;
-    const normalizedSessionId =
-      typeof source?.focusSessionId === 'string' && source.focusSessionId
-        ? source.focusSessionId
-        : undefined;
-    const normalizedSessionStartedAt =
-      Number.isFinite(source?.focusSessionStartedAt)
-        ? Number(source?.focusSessionStartedAt)
-        : undefined;
-    const normalizedOverflowMeta =
-      source?.overflowMeta && typeof source.overflowMeta === 'object'
-        ? {
-            comboSelectOverflow: Math.max(
-              0,
-              Number((source.overflowMeta as { comboSelectOverflow?: unknown }).comboSelectOverflow ?? 0) || 0,
-            ),
-            backupOverflow: Math.max(
-              0,
-              Number((source.overflowMeta as { backupOverflow?: unknown }).backupOverflow ?? 0) || 0,
-            ),
-          }
-        : ctx.buildOverflowMeta(entries.filter(entry => entry.status !== 'completed'));
+    const source = parseSessionSource(raw);
+    const fallbacks = buildSessionFallbacks(entries);
+    const idLists = resolveSessionIdLists(source, fallbacks);
+    const fields = normalizeSessionFields(source, entries, ctx);
 
     return {
       firstDragIntervened:
@@ -464,16 +469,83 @@ export class DockSnapshotPersistenceService {
       mainTaskId:
         typeof source?.mainTaskId === 'string' && source.mainTaskId
           ? source.mainTaskId
-          : fallbackMainTaskId,
-      comboSelectIds: resolvedComboIds.length > 0 ? resolvedComboIds : fallbackComboSelectIds,
-      backupIds: resolvedBackupIds.length > 0 ? resolvedBackupIds : fallbackBackupIds,
-      highLoadCounter: normalizedHighLoadCounter,
-      burnoutTriggeredAt: normalizedBurnoutAt,
-      focusSessionId: normalizedSessionId,
-      focusSessionStartedAt: normalizedSessionStartedAt,
-      overflowMeta: normalizedOverflowMeta,
+          : fallbacks.mainTaskId,
+      comboSelectIds: idLists.comboSelectIds,
+      backupIds: idLists.backupIds,
+      ...fields,
     };
   }
+}
+
+// ─── normalizeSessionState 拆分辅助函数 ───
+
+type SessionSource = Partial<DockSessionState> & {
+  strongZoneIds?: string[];
+  weakZoneIds?: string[];
+  hasFirstBatchSelected?: boolean;
+} | null;
+
+function parseSessionSource(raw: unknown): SessionSource {
+  return raw && typeof raw === 'object'
+    ? (raw as NonNullable<SessionSource>)
+    : null;
+}
+
+function buildSessionFallbacks(entries: DockEntry[]): {
+  mainTaskId: string | null;
+  comboSelectIds: string[];
+  backupIds: string[];
+} {
+  const mainTaskId =
+    entries.find(e => e.status === 'focusing')?.taskId ??
+    entries.find(e => e.isMain && e.status !== 'completed')?.taskId ??
+    null;
+  const active = entries.filter(e => e.status !== 'completed' && !e.isMain);
+  return {
+    mainTaskId,
+    comboSelectIds: active.filter(e => e.lane === 'combo-select').map(e => e.taskId),
+    backupIds: active.filter(e => e.lane === 'backup').map(e => e.taskId),
+  };
+}
+
+function toIdList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+function resolveSessionIdLists(
+  source: SessionSource,
+  fallbacks: ReturnType<typeof buildSessionFallbacks>,
+): { comboSelectIds: string[]; backupIds: string[] } {
+  const combo = toIdList(source?.comboSelectIds);
+  const backup = toIdList(source?.backupIds);
+  const legacyCombo = toIdList(source?.strongZoneIds);
+  const legacyBackup = toIdList(source?.weakZoneIds);
+  const resolved = combo.length > 0 ? combo : legacyCombo;
+  const resolvedBackup = backup.length > 0 ? backup : legacyBackup;
+  return {
+    comboSelectIds: resolved.length > 0 ? resolved : fallbacks.comboSelectIds,
+    backupIds: resolvedBackup.length > 0 ? resolvedBackup : fallbacks.backupIds,
+  };
+}
+
+function normalizeSessionFields(
+  source: SessionSource,
+  entries: DockEntry[],
+  ctx: SnapshotNormalizeContext,
+): Pick<DockSessionState, 'highLoadCounter' | 'burnoutTriggeredAt' | 'focusSessionId' | 'focusSessionStartedAt' | 'overflowMeta'> {
+  const burnoutAt = source?.burnoutTriggeredAt;
+  return {
+    highLoadCounter: normalizeHighLoadCounter(source?.highLoadCounter),
+    burnoutTriggeredAt: burnoutAt == null ? null : Number.isFinite(burnoutAt) ? Number(burnoutAt) : null,
+    focusSessionId: typeof source?.focusSessionId === 'string' && source.focusSessionId ? source.focusSessionId : undefined,
+    focusSessionStartedAt: Number.isFinite(source?.focusSessionStartedAt) ? Number(source?.focusSessionStartedAt) : undefined,
+    overflowMeta: source?.overflowMeta && typeof source.overflowMeta === 'object'
+      ? {
+          comboSelectOverflow: Math.max(0, Number((source.overflowMeta as { comboSelectOverflow?: unknown }).comboSelectOverflow ?? 0) || 0),
+          backupOverflow: Math.max(0, Number((source.overflowMeta as { backupOverflow?: unknown }).backupOverflow ?? 0) || 0),
+        }
+      : ctx.buildOverflowMeta(entries.filter(e => e.status !== 'completed')),
+  };
 }
 
 // ─── Standalone normalize helpers (re-exported for DockEngine backward compat) ───

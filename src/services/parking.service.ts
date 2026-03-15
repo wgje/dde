@@ -63,6 +63,9 @@ export class ParkingService implements OnDestroy {
   /** 通知队列（Gate 激活时暂存） */
   private readonly _pendingNotices = signal<ParkingNotice[]>([]);
 
+  /** H-6: Gate 激活时延迟的驱逐通知 */
+  private readonly _deferredEvictionNotices: ParkingNotice[] = [];
+
   /** 对外只读的通知队列 */
   readonly pendingNotices = this._pendingNotices.asReadonly();
 
@@ -79,6 +82,8 @@ export class ParkingService implements OnDestroy {
   private parkedDeltaTimer: ReturnType<typeof setInterval> | null = null;
   /** 启动延迟执行 timer */
   private startupEvictionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** M-13: initEviction 递归 ready-check 定时器 */
+  private evictionReadyCheckTimer: ReturnType<typeof setTimeout> | null = null;
   /** 在线事件监听器 */
   private onlineListener: (() => void) | null = null;
   private visibilityChangeHandler: (() => void) | null = null;
@@ -158,6 +163,10 @@ export class ParkingService implements OnDestroy {
     if (this.startupEvictionTimer) {
       clearTimeout(this.startupEvictionTimer);
       this.startupEvictionTimer = null;
+    }
+    if (this.evictionReadyCheckTimer) {
+      clearTimeout(this.evictionReadyCheckTimer);
+      this.evictionReadyCheckTimer = null;
     }
     if (this.onlineListener) {
       window.removeEventListener('online', this.onlineListener);
@@ -373,27 +382,35 @@ export class ParkingService implements OnDestroy {
   }
 
   private async doInitParkedLightweightSync(): Promise<void> {
+    try {
+      // 1) 先读缓存（冷启动快速可见）
+      const cached = await this.projectDataService.loadParkedTasksCache();
+      this.parkedCursor = cached.cursor;
+      for (const entry of cached.entries) {
+        this.applyRemoteParkedEntry(entry.task, entry.projectId);
+      }
 
-    // 1) 先读缓存（冷启动快速可见）
-    const cached = await this.projectDataService.loadParkedTasksCache();
-    this.parkedCursor = cached.cursor;
-    for (const entry of cached.entries) {
-      this.applyRemoteParkedEntry(entry.task, entry.projectId);
+      // 2) Pull one incremental delta in background.
+      await this.syncParkedDelta();
+
+      // 3) 启动恢复时：优先使用 IDB 已恢复快照，降级读取草稿并清理草稿键
+      this.restoreSnapshotDraftFromLocalStorage();
+
+      // 4) Start periodic incremental refresh.
+      this.parkedDeltaTimer = setInterval(() => {
+        void this.syncParkedDelta();
+      }, ParkingService.EVICTION_CHECK_INTERVAL_MS);
+    } catch (error: unknown) {
+      // H-5 fix: 初始化失败时清除缓存的 Promise，允许后续重试
+      this.parkedLightweightInitPromise = null;
+      this.logger.warn('ParkingService', 'doInitParkedLightweightSync failed, will allow retry', error);
     }
-
-    // 2) Pull one incremental delta in background.
-    await this.syncParkedDelta();
-
-    // 3) 启动恢复时：优先使用 IDB 已恢复快照，降级读取草稿并清理草稿键
-    this.restoreSnapshotDraftFromLocalStorage();
-
-    // 4) Start periodic incremental refresh.
-    this.parkedDeltaTimer = setInterval(() => {
-      void this.syncParkedDelta();
-    }, ParkingService.EVICTION_CHECK_INTERVAL_MS);
   }
 
   private async syncParkedDelta(): Promise<void> {
+    // M-24 fix: 离线时跳过增量拉取，避免不必要的网络错误
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
     const knownParkedTaskIds = Array.from(this.taskStore.parkedTaskIds());
     const delta = await this.projectDataService.pullParkedTasksDelta(this.parkedCursor, knownParkedTaskIds);
 
@@ -428,6 +445,10 @@ export class ParkingService implements OnDestroy {
 
   private applyRemoteParkedEntry(task: Task, projectId: string): void {
     const local = this.taskStore.getTask(task.id);
+    // C-3 fix: LWW 检查 — 本地版本更新时跳过远端覆盖
+    if (local && local.updatedAt && task.updatedAt && local.updatedAt > task.updatedAt) {
+      return;
+    }
     const nextTask = local
       ? {
         ...local,
@@ -463,9 +484,10 @@ export class ParkingService implements OnDestroy {
       readyChecks += 1;
       const tierReady = this.startupOrchestrator.isTierReady('p1');
       if (tierReady || readyChecks >= maxReadyChecks) {
+        this.evictionReadyCheckTimer = null;
         this.armFirstInteractionForEviction();
       } else {
-        setTimeout(checkReady, 500);
+        this.evictionReadyCheckTimer = setTimeout(checkReady, 500);
       }
     };
     checkReady();
@@ -644,14 +666,22 @@ export class ParkingService implements OnDestroy {
   }
 
   /**
-   * Gate 激活时通知只排队；关闭后由组件消费展示
+   * Gate 激活时驱逐通知延迟入队；关闭后由组件消费展示
    */
   showNotice(notice: ParkingNotice): void {
+    // H-6 fix: Gate 激活时驱逐通知延迟到 Gate 关闭后再展示
     if (notice.type === 'eviction' && this.gateService.isActive()) {
-      this._pendingNotices.update(list => [...list, notice]);
+      this._deferredEvictionNotices.push(notice);
       return;
     }
     this._pendingNotices.update(list => [...list, notice]);
+  }
+
+  /** H-6: Gate 关闭后刷出延迟的驱逐通知 */
+  flushDeferredNotices(): void {
+    if (this._deferredEvictionNotices.length === 0) return;
+    const batch = this._deferredEvictionNotices.splice(0);
+    this._pendingNotices.update(list => [...list, ...batch]);
   }
 
   // ─── 停泊任务被软删除联动（A5.1.5）───
@@ -711,7 +741,7 @@ export class ParkingService implements OnDestroy {
 
     const separator = '\n---\n';
     const noteBlock = `> 备注（停泊时）: ${noteContent}`;
-    const updatedContent = task.content + separator + noteBlock;
+    const updatedContent = (task.content ?? '') + separator + noteBlock;
 
     // Resolve project id for target task.
     const projectId = this.findProjectId(taskId);

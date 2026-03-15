@@ -174,26 +174,29 @@ export class LoggerService {
    * 敏感字段列表
    * 这些字段在日志中会被替换为 [REDACTED]
    */
+  // M-1 fix: 所有条目统一小写，因为查询时使用 key.toLowerCase() 匹配
   private static readonly SENSITIVE_FIELDS = new Set([
     'password',
     'token',
-    'accessToken',
+    'accesstoken',
     'access_token',
-    'refreshToken',
+    'refreshtoken',
     'refresh_token',
     'secret',
-    'apiKey',
-    'api_key',
     'apikey',
+    'api_key',
     'authorization',
     'auth',
-    'secretKey',
-    'encryptionKey',
-    'signingKey',
+    'secretkey',
+    'secret_key',
+    'encryptionkey',
+    'encryption_key',
+    'signingkey',
+    'signing_key',
     'credential',
     'credentials',
     'private',
-    'privateKey',
+    'privatekey',
     'private_key',
   ]);
   
