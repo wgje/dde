@@ -1,9 +1,10 @@
-import { ChangeDetectionStrategy, Component, computed, inject, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, HostListener, computed, inject, output, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { isStatusMachineEntryExpired, type StatusMachineEntry } from '../../../../models/parking-dock';
 
 type PipAlertTone = 'danger' | 'warning' | 'info' | 'calm';
+type PipLayoutMode = 'regular' | 'compact' | 'micro';
 type PipAlertKind =
   | 'wait-finished'
   | 'fragment-countdown'
@@ -29,11 +30,21 @@ interface PipAlert {
   tone: PipAlertTone;
 }
 
-interface PipToolbarChip {
+interface PipSummaryToken {
   id: string;
   label: string;
   tone: PipAlertTone;
-  value: string;
+  value?: string;
+}
+
+interface PipTaskRow {
+  alert: PipAlert | null;
+  badge: string;
+  headline: string;
+  id: string;
+  meta: string;
+  tone: PipAlertTone;
+  type: 'focus-context' | 'alert';
 }
 
 @Component({
@@ -48,10 +59,27 @@ export class DockStatusMachinePipComponent {
 
   readonly returnRequested = output<void>();
   readonly closeRequested = output<void>();
+  private readonly viewportSize = signal(this.readViewportSize());
 
   readonly allEntries = computed(() => this.engine.statusMachineEntries());
   readonly currentFocusEntry = computed(() => this.engine.focusingEntry());
   readonly muted = computed(() => this.engine.muteWaitTone());
+  readonly layoutMode = computed<PipLayoutMode>(() => {
+    const viewport = this.viewportSize();
+    if (viewport.width <= 288 || viewport.height <= 320) {
+      return 'micro';
+    }
+    if (viewport.width <= 320 || viewport.height <= 360) {
+      return 'compact';
+    }
+    return 'regular';
+  });
+  readonly toolbarMode = computed<'full' | 'buttons-only'>(() =>
+    this.layoutMode() === 'micro' ? 'buttons-only' : 'full',
+  );
+  readonly primaryCardLayout = computed<'inline' | 'stack'>(() =>
+    this.layoutMode() === 'micro' ? 'stack' : 'inline',
+  );
   readonly blankPeriodActive = computed(
     () =>
       this.engine.fragmentEntryCountdown() === null
@@ -69,24 +97,42 @@ export class DockStatusMachinePipComponent {
   readonly stalledEntries = computed(() =>
     this.allEntries().filter(entry => entry.uiStatus === 'stalled'),
   );
-  readonly toolbarChips = computed<PipToolbarChip[]>(() => {
-    const chips: PipToolbarChip[] = [];
-    if (this.currentFocusEntry()) {
-      chips.push({ id: 'focus', label: '主线', tone: 'info', value: '进行中' });
-    }
+  readonly summaryTokens = computed<PipSummaryToken[]>(() => {
+    const tokens: PipSummaryToken[] = [];
+
     if (this.expiredEntries().length > 0) {
-      chips.push({ id: 'expired', label: '到时', tone: 'danger', value: `${this.expiredEntries().length}` });
-    }
-    if (this.waitingEntries().length > 0) {
-      chips.push({ id: 'waiting', label: '等待', tone: 'warning', value: `${this.waitingEntries().length}` });
+      tokens.push({ id: 'expired', label: '到时', tone: 'danger', value: `${this.expiredEntries().length}` });
     }
     if (this.stalledEntries().length > 0) {
-      chips.push({ id: 'stalled', label: '停滞', tone: 'calm', value: `${this.stalledEntries().length}` });
+      tokens.push({ id: 'stalled', label: '停滞', tone: 'warning', value: `${this.stalledEntries().length}` });
     }
-    if (chips.length === 0) {
-      chips.push({ id: 'stable', label: '状态', tone: 'calm', value: '稳定' });
+    if (this.waitingEntries().length > 0) {
+      tokens.push({ id: 'waiting', label: '等待', tone: 'warning', value: `${this.waitingEntries().length}` });
     }
-    return chips;
+    if (this.currentFocusEntry()) {
+      tokens.push({ id: 'focus', label: '主线', tone: 'info', value: '进行中' });
+    }
+
+    if (tokens.length === 0) {
+      tokens.push({ id: 'stable', label: '稳定', tone: 'calm' });
+    }
+
+    return tokens;
+  });
+  readonly visibleSummaryTokens = computed<PipSummaryToken[]>(() => {
+    const tokens = this.summaryTokens();
+    if (this.layoutMode() !== 'micro' || tokens.length <= 2) {
+      return tokens;
+    }
+
+    return [
+      ...tokens.slice(0, 2),
+      {
+        id: 'overflow',
+        label: `+${tokens.length - 2}`,
+        tone: 'calm',
+      },
+    ];
   });
   readonly primaryAlert = computed<PipAlert>(() => {
     const expired = this.expiredEntries()[0];
@@ -237,15 +283,52 @@ export class DockStatusMachinePipComponent {
 
     return alerts;
   });
+  readonly taskRows = computed<PipTaskRow[]>(() => {
+    const rows: PipTaskRow[] = [];
+    const focusEntry = this.currentFocusEntry();
+
+    if (focusEntry && this.primaryAlert().kind !== 'focus') {
+      rows.push({
+        id: `focus-context-${focusEntry.taskId}`,
+        type: 'focus-context',
+        alert: null,
+        badge: '当前主线',
+        headline: focusEntry.title,
+        meta: this.currentFocusMeta(),
+        tone: 'info',
+      });
+    }
+
+    for (const alert of this.secondaryAlerts()) {
+      rows.push({
+        id: alert.id,
+        type: 'alert',
+        alert,
+        badge: alert.badge,
+        headline: alert.headline,
+        meta: alert.meta,
+        tone: alert.tone,
+      });
+    }
+
+    return rows;
+  });
   readonly muteButtonLabel = computed(() =>
     this.muted() ? '关闭静音提醒' : '开启状态提醒声音',
   );
-  readonly showFocusCard = computed(
-    () => this.currentFocusEntry() !== null && this.primaryAlert().kind !== 'focus',
-  );
+
+  @HostListener('window:resize')
+  onViewportResize(): void {
+    this.viewportSize.set(this.readViewportSize());
+  }
 
   handlePrimaryAction(): void {
     this.handleAlertAction(this.primaryAlert());
+  }
+
+  handleTaskRowAction(row: PipTaskRow): void {
+    if (!row.alert) return;
+    this.handleAlertAction(row.alert);
   }
 
   handleAlertAction(alert: PipAlert): void {
@@ -324,6 +407,19 @@ export class DockStatusMachinePipComponent {
     }
   }
 
+  summaryTokenClasses(tone: PipAlertTone): string {
+    switch (tone) {
+      case 'danger':
+        return 'text-rose-300';
+      case 'warning':
+        return 'text-amber-300';
+      case 'info':
+        return 'text-indigo-300';
+      default:
+        return 'text-slate-300';
+    }
+  }
+
   currentFocusMeta(): string {
     const entry = this.currentFocusEntry();
     if (!entry) return '主线进行中';
@@ -367,5 +463,16 @@ export class DockStatusMachinePipComponent {
     const minutes = Math.floor(safeSeconds / 60);
     const seconds = safeSeconds % 60;
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+
+  private readViewportSize(): { width: number; height: number } {
+    if (typeof window === 'undefined') {
+      return { width: 360, height: 420 };
+    }
+
+    return {
+      width: window.innerWidth > 0 ? window.innerWidth : 360,
+      height: window.innerHeight > 0 ? window.innerHeight : 420,
+    };
   }
 }

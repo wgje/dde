@@ -63,11 +63,17 @@ export class DockEntryFieldService {
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {
     const nextLoad: CognitiveLoad = direction === 'up' ? 'high' : 'low';
-    const exists = this.ctx.entries().some(entry => entry.taskId === taskId);
+    // M-2 fix: 将存在性检查与状态更新合并为原子操作，
+    // 消除 check-then-act 窗口内被其他 microtask 移除条目的竞态。
+    let matched = false;
     this.ctx.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, load: nextLoad } : entry)),
+      prev.map(entry => {
+        if (entry.taskId !== taskId) return entry;
+        matched = true;
+        return entry.load === nextLoad ? entry : { ...entry, load: nextLoad };
+      }),
     );
-    if (exists) {
+    if (matched) {
       this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
     }
   }

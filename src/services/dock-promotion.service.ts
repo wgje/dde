@@ -7,9 +7,7 @@
 import { Injectable, Signal, WritableSignal, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
-  CognitiveLoad,
   DockEntry,
-  DockLane,
   DockPendingDecision,
   DockRuleDecision,
   DockSchedulerPhase,
@@ -23,11 +21,11 @@ import {
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockZoneService } from './dock-zone.service';
 import { LoggerService } from './logger.service';
-import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import {
   entryOrder,
   isAutoPromotableStatus,
   isRunnableStatus,
+  toSchedulerCandidate,
 } from './dock-engine.utils';
 import { TimerHandle } from '../utils/timer-handle';
 
@@ -102,31 +100,11 @@ export class DockPromotionService {
   }
 
   // ---------------------------------------------------------------------------
-  //  Conversion helper
+  //  Conversion helper (M-1: 委托至 dock-engine.utils.toSchedulerCandidate)
   // ---------------------------------------------------------------------------
 
-  toSchedulerCandidate(entry: DockEntry): {
-    taskId: string;
-    lane: DockLane;
-    load: CognitiveLoad;
-    expectedMinutes: number | null;
-    waitMinutes: number | null;
-    dockedOrder: number;
-    manualOrder: number | null;
-    relationScore: number | null;
-    sourceProjectId: string | null;
-  } {
-    return {
-      taskId: entry.taskId,
-      lane: entry.lane,
-      load: entry.load,
-      expectedMinutes: entry.expectedMinutes,
-      waitMinutes: entry.waitMinutes,
-      dockedOrder: entry.dockedOrder,
-      manualOrder: normalizeNullableNumber(entry.manualOrder),
-      relationScore: normalizeNullableNumber(entry.relationScore),
-      sourceProjectId: entry.sourceProjectId ?? this.zoneService.resolveSourceProjectId(entry),
-    };
+  toSchedulerCandidate(entry: DockEntry) {
+    return toSchedulerCandidate(entry, this.zoneService.resolveSourceProjectId(entry));
   }
 
   // ---------------------------------------------------------------------------

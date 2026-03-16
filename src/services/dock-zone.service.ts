@@ -23,7 +23,11 @@ export class DockZoneService {
     projectId: string;
     fingerprint: string;
     adjacency: Map<string, string[]>;
+    createdAt: number;
   } | null = null;
+
+  /** M-4: 缓存 TTL（5 分钟），防止长期持有过时邻接表 */
+  private static readonly ADJACENCY_CACHE_TTL_MS = 5 * 60 * 1000;
 
   /**
    * 清除邻接表缓存。
@@ -222,10 +226,12 @@ export class DockZoneService {
 
   getOrBuildAdjacency(projectId: string, tasks: Task[]): Map<string, string[]> {
     const fingerprint = this.buildAdjacencyFingerprint(tasks);
+    const now = Date.now();
     if (
       this.adjacencyCache &&
       this.adjacencyCache.projectId === projectId &&
-      this.adjacencyCache.fingerprint === fingerprint
+      this.adjacencyCache.fingerprint === fingerprint &&
+      now - this.adjacencyCache.createdAt < DockZoneService.ADJACENCY_CACHE_TTL_MS
     ) {
       return this.adjacencyCache.adjacency;
     }
@@ -240,7 +246,7 @@ export class DockZoneService {
       }
     }
 
-    this.adjacencyCache = { projectId, fingerprint, adjacency };
+    this.adjacencyCache = { projectId, fingerprint, adjacency, createdAt: now };
     return adjacency;
   }
 

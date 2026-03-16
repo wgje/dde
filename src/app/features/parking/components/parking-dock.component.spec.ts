@@ -15,7 +15,7 @@ import { ProjectStore, TaskStore } from '../../../core/state/stores';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { UiStateService } from '../../../../services/ui-state.service';
 
-import { Project } from '../../../../models';
+import { clampHudPosition } from '../utils/dock-hud-position';
 
 import {
   DockEntry,
@@ -311,7 +311,7 @@ describe('ParkingDockComponent v4', () => {
     component.onBackdropClick();
     fixture.detectChanges();
 
-    expect(component.showHelpOverlay()).toBe(false);
+    expect(component.helpFeedback.showHelpOverlay()).toBe(false);
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-help-overlay"]')).toBeNull();
   });
 
@@ -349,18 +349,13 @@ describe('ParkingDockComponent v4', () => {
     const size = { width: 290, height: 220 };
     const minMargin = 12;
 
-    // TODO(L-19): Consider exposing via protected method or test harness
     // 右下角 — 不再有 FAB 避让带
-    const bottomRight = (component as unknown as {
-      clampHudPosition: (position: { x: number; y: number }, size: { width: number; height: number }) => { x: number; y: number };
-    }).clampHudPosition({ x: window.innerWidth, y: window.innerHeight }, size);
+    const bottomRight = clampHudPosition({ x: window.innerWidth, y: window.innerHeight }, size);
     expect(bottomRight.x).toBe(window.innerWidth - size.width - minMargin);
     expect(bottomRight.y).toBe(window.innerHeight - size.height - minMargin);
 
     // 右上角 — 按钮已内嵌，无避让
-    const topRight = (component as unknown as {
-      clampHudPosition: (position: { x: number; y: number }, size: { width: number; height: number }) => { x: number; y: number };
-    }).clampHudPosition({ x: window.innerWidth, y: 0 }, size);
+    const topRight = clampHudPosition({ x: window.innerWidth, y: 0 }, size);
     expect(topRight.x).toBe(window.innerWidth - size.width - minMargin);
     expect(topRight.y).toBe(minMargin);
   });
@@ -379,7 +374,7 @@ describe('ParkingDockComponent v4', () => {
     } as unknown as DragEvent);
 
     expect(mockEngine.dockTaskFromExternalDrag).toHaveBeenCalledWith('task-1', 'flow');
-    expect(component.dropState()).toBe('idle');
+    expect(component.dragDrop.dropState()).toBe('idle');
   });
 
   it('onDrop should fallback to text/plain and use default backup entrypoint', () => {
@@ -441,11 +436,11 @@ describe('ParkingDockComponent v4', () => {
       dataTransfer: { getData } as unknown as DataTransfer,
     } as unknown as DragEvent);
 
-    expect(component.dropState()).toBe('reject');
+    expect(component.dragDrop.dropState()).toBe('reject');
     expect(mockEngine.dockTaskFromExternalDrag).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(240);
-    expect(component.dropState()).toBe('idle');
+    expect(component.dragDrop.dropState()).toBe('idle');
   });
 
   it('drop with incomplete planner fields should keep planner as an explicit opt-in action', () => {
@@ -468,7 +463,7 @@ describe('ParkingDockComponent v4', () => {
     } as unknown as DragEvent);
 
     expect(component.isPlannerQuickEditOpen('task-missing-fields')).toBe(false);
-    expect(component.recentlyDockedTaskId()).toBe('task-missing-fields');
+    expect(component.planner.recentlyDockedTaskId()).toBe('task-missing-fields');
   });
 
   it('planner quick edit should forward explicit planner changes to the engine', () => {
@@ -585,13 +580,13 @@ describe('ParkingDockComponent v4', () => {
       '[data-testid="dock-v3-secondary-rail-banner"] [data-testid="dock-v3-planner-toggle"]',
     ) as HTMLButtonElement | null;
 
-    expect(component.bannerPlannerTarget()?.taskId).toBe('focus-current');
+    expect(component.planner.bannerTarget()?.taskId).toBe('focus-current');
     expect(fixture.nativeElement.textContent).toContain('Current Focus');
 
     bannerToggle?.click();
     fixture.detectChanges();
 
-    expect(component.plannerActiveEntry()?.taskId).toBe('focus-current');
+    expect(component.planner.activeEntry()?.taskId).toBe('focus-current');
   });
 
   it('desktop planner quick edit should close on outside pointer down', () => {
@@ -640,15 +635,15 @@ describe('ParkingDockComponent v4', () => {
     component.onFocusSessionToggle();
     fixture.detectChanges();
 
-    expect(component.performanceTier()).toBe('T0');
+    expect(component.focusTransitionService.performanceTier()).toBe('T0');
 
     mockPerformanceTier.tier.set('T2');
     fixture.detectChanges();
-    expect(component.performanceTier()).toBe('T0');
+    expect(component.focusTransitionService.performanceTier()).toBe('T0');
 
     component.onFocusTransitionSettled('entering');
     fixture.detectChanges();
-    expect(component.performanceTier()).toBe('T2');
+    expect(component.focusTransitionService.performanceTier()).toBe('T2');
   });
 
   it('onFocusSessionToggle should require confirmation before exit transition', async () => {
@@ -704,7 +699,7 @@ describe('ParkingDockComponent v4', () => {
     component.onKeydown(new KeyboardEvent('keydown', { key: 'h', altKey: true }));
     fixture.detectChanges();
 
-    expect(component.showHelpOverlay()).toBe(true);
+    expect(component.helpFeedback.showHelpOverlay()).toBe(true);
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-help-overlay"]')).toBeTruthy();
   });
 
@@ -739,7 +734,7 @@ describe('ParkingDockComponent v4', () => {
     fixture.detectChanges();
 
     expect(mockEngine.setMainTask).toHaveBeenCalledWith('focus-next');
-    expect(component.dockActionFeedback()?.message).toContain('已切换到前台');
+    expect(component.helpFeedback.dockActionFeedback()?.message).toContain('已切换到前台');
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-dock-feedback"]')).toBeTruthy();
   });
 
@@ -846,7 +841,7 @@ describe('ParkingDockComponent v4', () => {
     component.onDockCardClick('focus-main');
 
     expect(mockEngine.setMainTask).toHaveBeenCalledWith('focus-main');
-    expect(component.dockActionFeedback()?.message).toContain('已切换到前台');
+    expect(component.helpFeedback.dockActionFeedback()?.message).toContain('已切换到前台');
   });
 
   it('main dock cards should not show backup or combo lane labels', () => {
@@ -1006,7 +1001,7 @@ describe('ParkingDockComponent v4', () => {
     uiState.isMobile.set(true);
     fixture.detectChanges();
 
-    expect(component.plannerPresentation()).toBe('sheet');
+    expect(component.planner.presentation()).toBe('sheet');
     expect(component.dockSemicircleBottomInset()).toBe(component.dockBottomInset);
   });
 

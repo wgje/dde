@@ -94,6 +94,12 @@ export class DockEngineService {
   /** C-2: 生命周期管理（effects、tick、维护调度）提取至专属服务 */
   private readonly lifecycle = inject(DockEngineLifecycleService);
 
+  /**
+   * 持久化信号预期总数（与 persistenceDeps 内数组长度一对一对应）。
+   * 新增/删除持久化信号时，必须同步更新此值，否则 dev 断言会在首次 effect 运行时报错。
+   */
+  private static readonly EXPECTED_PERSISTED_SIGNAL_COUNT = 16;
+
   readonly entries = signal<DockEntry[]>([]);
   readonly focusMode = signal(false);
   readonly focusTransition = signal<DockFocusTransitionState | null>(null);
@@ -158,10 +164,18 @@ export class DockEngineService {
    *
    * ⚠️ 维护契约：任何新增的需要参与持久化的 signal 必须加入此列表。
    * 遗漏会导致该 signal 的变更无法触发本地/云端持久化，造成静默数据丢失。
-   * 当前依赖列表：entries, focusMode, dockExpanded, muteWaitTone, focusScrimOn,
+   *
+   * 同步检查清单（三方必须覆盖相同信号集）：
+   *  1. persistenceDeps（此处）
+   *  2. exportSnapshot() + buildSessionState()
+   *  3. hydrateSignalsFromSnapshot()
+   *
+   * 当前持久化信号（16 个）：
+   *   entries, focusMode, dockExpanded, muteWaitTone, focusScrimOn,
    *   firstDragIntervened, dailySlots, suspendChainRootTaskId,
    *   suspendRecommendationLocked, pendingDecision, lastRuleDecision,
-   *   dailyResetDate, focusSessionContext
+   *   dailyResetDate, focusSessionContext,
+   *   highLoadCounter, burnoutTriggeredAt, schedulerPhase
    */
   private readonly persistenceDeps = computed(() => {
     // 读取所有持久化相关信号以建立依赖关系
@@ -180,7 +194,21 @@ export class DockEngineService {
       this.lastRuleDecision(),
       this.dailyResetDate(),
       this.focusSessionContext(),
+      // v3.0 倦怠检测 + 调度器阶段（§7.8）——缺失会导致这三个信号变更后不触发持久化
+      this.highLoadCounter(),
+      this.burnoutTriggeredAt(),
+      this.schedulerPhase(),
     ];
+    // dev 守卫：持久化信号数量漂移检测
+    if (typeof ngDevMode === 'undefined' || ngDevMode) {
+      if (deps.length !== DockEngineService.EXPECTED_PERSISTED_SIGNAL_COUNT) {
+        console.error(
+          `[DockEngine] persistenceDeps 信号数量不匹配：` +
+          `预期 ${DockEngineService.EXPECTED_PERSISTED_SIGNAL_COUNT}，实际 ${deps.length}。` +
+          `请同步更新 EXPECTED_PERSISTED_SIGNAL_COUNT、exportSnapshot 和 hydrateSignalsFromSnapshot。`,
+        );
+      }
+    }
     return deps;
   });
 
@@ -588,9 +616,15 @@ export class DockEngineService {
     return this.inlineCreation.createInDock(title, lane, load, options);
   }
 
+  /**
+   * 外部完成状态调和：一次性快照 entries，过滤后批量入队。
+   * 避免循环内反复读取 entries() 导致与异步 drainCompletionQueue 产生竞态。
+   */
   private reconcileExternallyCompletedTasks(taskIds: string[]): void {
+    const currentEntries = this.entries();
+    const entryMap = new Map(currentEntries.map(item => [item.taskId, item]));
     for (const taskId of taskIds) {
-      const entry = this.entries().find(item => item.taskId === taskId);
+      const entry = entryMap.get(taskId);
       const task = this.taskStore.getTask(taskId);
       if (!entry || entry.status === 'completed' || task?.status !== 'completed') continue;
       this.completeTask(taskId);
@@ -812,17 +846,22 @@ export class DockEngineService {
         orderByTaskId.set(entry.taskId, index);
       });
 
+      // completed entries 保留原样但 dockedOrder 推到尾部，避免与 active 序号冲突
+      const completedBaseOrder = reordered.length;
+      let completedOffset = 0;
       let changed = false;
       const next = prev.map(entry => {
         const nextOrder = orderByTaskId.get(entry.taskId);
-        if (nextOrder === undefined) return entry;
-        if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
+        if (nextOrder !== undefined) {
+          if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
+          changed = true;
+          return { ...entry, dockedOrder: nextOrder, manualOrder: nextOrder };
+        }
+        // completed 或非活跃 entry：序号推到活跃 entries 之后
+        const tailOrder = completedBaseOrder + completedOffset++;
+        if (entry.dockedOrder === tailOrder) return entry;
         changed = true;
-        return {
-          ...entry,
-          dockedOrder: nextOrder,
-          manualOrder: nextOrder,
-        };
+        return { ...entry, dockedOrder: tailOrder };
       });
       return changed ? next : prev;
     });
@@ -901,22 +940,24 @@ export class DockEngineService {
     this.fragmentRest.updateFragmentDefenseLevel();
   }
 
-  /** 退出专注模式：批量重置状态，延迟非关键信号以避免 DOM 竞争 */
+  /**
+   * 退出专注模式：同步批量重置所有专注相关状态信号。
+   * 所有重置必须在同一同步帧内完成，避免 focusMode=false 与其他信号
+   * 之间出现不一致窗口（effects 在下一个 microtask 才能感知变更）。
+   */
   private exitFocusMode(): void {
     this.clearFirstMainSelectionWindow();
-    queueMicrotask(() => {
-      this.suspendRecommendationLocked.set(false);
-      this.suspendChainRootTaskId.set(null);
-      this.pendingDecision.set(null);
-      this.lastRuleDecision.set(null);
-      this.highlightedIds.set(new Set());
-      this.focusTransition.set(null);
-      this.lastRecommendationGroups.set([]);
-      this.schedulerPhase.set('active');
-      this.fragmentRest.resetRestState();
-      this.fragmentRest.stopFragmentEntryCountdown();
-      this.fragmentRest.setFragmentDismissed(false);
-    });
+    this.suspendRecommendationLocked.set(false);
+    this.suspendChainRootTaskId.set(null);
+    this.pendingDecision.set(null);
+    this.lastRuleDecision.set(null);
+    this.highlightedIds.set(new Set());
+    this.focusTransition.set(null);
+    this.lastRecommendationGroups.set([]);
+    this.schedulerPhase.set('active');
+    this.fragmentRest.resetRestState();
+    this.fragmentRest.stopFragmentEntryCountdown();
+    this.fragmentRest.setFragmentDismissed(false);
   }
 
   toggleFocusScrim(): void {

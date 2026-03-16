@@ -173,7 +173,11 @@ export class FocusHudWindowService {
 
   private copyStyleSheets(targetDocument: Document): void {
     if (typeof document === 'undefined') return;
+    // H-5 fix: 仅复制同源样式表。跨域（如浏览器扩展注入的）样式表
+    // 读取 cssRules 会抛 SecurityError，且不属于应用样式，直接跳过。
+    const origin = document.location.origin;
     for (const styleSheet of Array.from(document.styleSheets)) {
+      if (styleSheet.href && !styleSheet.href.startsWith(origin)) continue;
       try {
         const cssText = Array.from(styleSheet.cssRules).map(rule => rule.cssText).join('\n');
         if (!cssText) continue;

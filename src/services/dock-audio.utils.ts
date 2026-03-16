@@ -22,6 +22,11 @@ export class DockAudioPlayer {
   playWaitEndSound(): void {
     try {
       const ctx = this.getOrCreateContext();
+      // L-1 fix: 浏览器自动播放策略可能将 AudioContext 挂起，
+      // 需要在用户手势触发链中 resume() 才能实际产生声音。
+      if (ctx.state === 'suspended') {
+        void ctx.resume();
+      }
       const oscillator = ctx.createOscillator();
       const gain = ctx.createGain();
       oscillator.connect(gain);

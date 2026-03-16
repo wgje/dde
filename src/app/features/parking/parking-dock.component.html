@@ -2,7 +2,7 @@
       [active]="engine.focusMode()"
       [scrimOn]="engine.focusScrimOn()"
       [sceneMode]="focusSceneMode()"
-      [performanceTier]="performanceTier()"
+      [performanceTier]="focusTransitionService.performanceTier()"
       [reducedMotion]="reducedMotion()"
       [transitionPhase]="engine.focusTransition()?.phase ?? null"
       [stageTransform]="focusStageTransform()"
@@ -115,7 +115,7 @@
     </app-dock-focus-scene>
 
     @if (engine.focusMode()) {
-      @if (showHelpNudge() && !showHelpOverlay()) {
+      @if (helpFeedback.showHelpNudge() && !helpFeedback.showHelpOverlay()) {
         <div
           class="fixed left-1/2 top-6 z-[66] -translate-x-1/2 rounded-full border border-indigo-400/30 bg-slate-900/88 px-4 py-2 text-[11px] text-slate-100 shadow-lg backdrop-blur-sm"
           data-testid="dock-v3-help-nudge">
@@ -137,10 +137,10 @@
       </button>
     }
 
-    @if (flipGhost(); as ghost) {
+    @if (focusTransitionService.flipGhost(); as ghost) {
       <div
         class="dock-v4-flip-ghost"
-        [class.active]="flipGhostActive()"
+        [class.active]="focusTransitionService.flipGhostActive()"
         [style.left.px]="ghost.from.left"
         [style.top.px]="ghost.from.top"
         [style.width.px]="ghost.from.width"
@@ -175,7 +175,7 @@
         </div>
       </div>
 
-      @if (showHelpOverlay()) {
+      @if (helpFeedback.showHelpOverlay()) {
         <div
           class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4 pointer-events-auto"
           role="dialog"
@@ -204,7 +204,7 @@
               </button>
             </div>
             <div class="grid gap-3 md:grid-cols-3">
-              @for (section of focusHelpSections; track section.title) {
+              @for (section of helpFeedback.focusHelpSections; track section.title) {
                 <section class="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-4">
                   <div class="text-[11px] font-semibold text-slate-100">{{ section.title }}</div>
                   <div class="mt-1 text-[11px] text-slate-400">{{ section.subtitle }}</div>
@@ -353,7 +353,7 @@
         </div>
       }
 
-      @if (showRestoreHint()) {
+      @if (helpFeedback.showRestoreHint()) {
         <div
           class="fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
           aria-live="polite"
@@ -362,7 +362,7 @@
         </div>
       }
 
-      @if (dockActionFeedback(); as feedback) {
+      @if (helpFeedback.dockActionFeedback(); as feedback) {
         <div
           class="fixed left-1/2 z-[71] -translate-x-1/2 rounded-full border px-4 py-2 text-[11px] shadow-lg backdrop-blur-sm"
           [ngClass]="feedback.tone === 'success'
@@ -380,7 +380,7 @@
     <div
       class="dock-semicircle dock-semicircle-enter"
       [class.expanded]="semicircleExpanded()"
-      [class.drag-active]="dropState() !== 'idle' && dropState() !== 'reject'"
+      [class.drag-active]="dragDrop.dropState() !== 'idle' && dragDrop.dropState() !== 'reject'"
       [style.left]="dockCenterLeft()"
       [style.bottom]="dockSemicircleBottomInset()"
       [style.--dock-semicircle-scale-x]="semicircleExpanded() ? '1' : '0.5'"
@@ -432,14 +432,14 @@
       [style.bottom]="dockBottomInset"
       [style.--dock-focus-dim-opacity]="PARKING_CONFIG.DOCK_FOCUS_DIM_OPACITY"
       [style.--dock-focus-dim-translate-y]="PARKING_CONFIG.DOCK_FOCUS_DIM_TRANSLATE_Y_PX + 'px'"
-      [class.focus-collapsed]="!dockExpanded() && dropState() === 'idle'"
+      [class.focus-collapsed]="!dockExpanded() && dragDrop.dropState() === 'idle'"
       [class.focus-expanded]="dockExpanded() && !dockSecondaryRailActive()"
       [class.focus-secondary]="dockExpanded() && dockSecondaryRailActive()"
-      [class.drag-peek]="!dockExpanded() && dropState() !== 'idle'"
-      [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+      [class.drag-peek]="!dockExpanded() && dragDrop.dropState() !== 'idle'"
+      [class.drag-receiving]="dragDrop.dropState() !== 'idle' && dragDrop.dropState() !== 'reject'"
       data-testid="dock-v3-panel">
       <div class="glass-card dock-shell rounded-2xl p-4 flex flex-col gap-4 border border-slate-700/30 shadow-2xl max-h-full overflow-visible"
-           [class.drag-receiving]="dropState() !== 'idle' && dropState() !== 'reject'"
+           [class.drag-receiving]="dragDrop.dropState() !== 'idle' && dragDrop.dropState() !== 'reject'"
            data-testid="dock-v3-shell">
 
         <!-- 顶部标题栏 -->
@@ -498,19 +498,19 @@
           </div>
         </div>
 
-        @if (bannerPlannerTarget() || plannerActiveEntry()) {
+        @if (planner.bannerTarget() || planner.activeEntry()) {
           <div class="relative z-[3] flex-shrink-0">
-            @if (bannerPlannerTarget()) {
+            @if (planner.bannerTarget()) {
               <div
                 class="mx-2 flex flex-wrap items-stretch gap-2.5 text-[11px] text-slate-200"
                 data-testid="dock-v3-secondary-rail-banner">
-                @if (bannerPlannerTarget(); as bannerTarget) {
+                @if (planner.bannerTarget(); as bannerTarget) {
                   <div class="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-amber-500/10 bg-amber-500/[0.06] px-2.5 py-2">
                     <span class="shrink-0 text-[9px] font-semibold uppercase tracking-[0.16em] text-amber-200/80">补全</span>
                     <div class="min-w-0 flex flex-1 items-center gap-2">
-                        @if (bannerPlannerMissingCount() > 0) {
+                        @if (planner.bannerMissingCount() > 0) {
                           <span class="shrink-0 rounded-full bg-amber-500/14 px-1.5 py-0.5 text-[9px] font-semibold text-amber-100">
-                            {{ bannerPlannerMissingCount() }} 项
+                            {{ planner.bannerMissingCount() }} 项
                           </span>
                         } @else {
                           <span class="shrink-0 rounded-full bg-emerald-500/14 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-100">
@@ -539,14 +539,14 @@
                 }
               </div>
             }
-            @if (plannerActiveEntry(); as plannerEntry) {
+            @if (planner.activeEntry(); as plannerEntry) {
               <div
                 #plannerPanel
-                [ngClass]="plannerPanelClasses()"
-                [attr.data-presentation]="plannerPresentation()"
+                [ngClass]="planner.panelClasses()"
+                [attr.data-presentation]="planner.presentation()"
                 tabindex="-1"
-                [attr.role]="plannerPresentation() === 'sheet' ? 'dialog' : 'region'"
-                [attr.aria-modal]="plannerPresentation() === 'sheet' ? 'true' : null"
+                [attr.role]="planner.presentation() === 'sheet' ? 'dialog' : 'region'"
+                [attr.aria-modal]="planner.presentation() === 'sheet' ? 'true' : null"
                 aria-label="补全任务属性"
                 data-testid="dock-v3-planner-panel"
                 (click)="$event.stopPropagation()"
@@ -560,9 +560,9 @@
                       <span class="rounded-full border border-slate-700/70 bg-slate-900/80 px-1.5 py-0.5 text-[9px] text-slate-300">
                         {{ plannerEntry.isMain ? '主任务' : (plannerEntry.lane === 'combo-select' ? '副任务' : '备选任务') }}
                       </span>
-                      @if (plannerMissingFieldCount() > 0) {
+                      @if (planner.missingFieldCount() > 0) {
                         <span class="rounded-full border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-200">
-                          {{ plannerMissingFieldCount() }} 项待补
+                          {{ planner.missingFieldCount() }} 项待补
                         </span>
                       } @else {
                         <span class="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-200">
@@ -612,7 +612,7 @@
                       </span>
                     </div>
                     <div class="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
-                      @for (preset of plannerExpectedPresets; track preset) {
+                      @for (preset of planner.expectedPresets; track preset) {
                         <button
                           type="button"
                           class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
@@ -684,7 +684,7 @@
                           data-testid="dock-v3-planner-wait-none">
                           无
                         </button>
-                        @for (preset of plannerWaitPresets; track preset) {
+                        @for (preset of planner.waitPresets; track preset) {
                           <button
                             type="button"
                             class="rounded-xl border px-2 py-2 text-[10px] font-medium transition-colors"
@@ -792,12 +792,12 @@
               [class.secondary-card]="dockSecondaryRailActive()"
               [class.secondary-active]="dockSecondaryRailActive() && entry.isMain"
               [class.planner-open]="isPlannerQuickEditOpen(entry.taskId)"
-              [class.ring-1]="recentlyDockedTaskId() === entry.taskId"
-              [class.shadow-lg]="recentlyDockedTaskId() === entry.taskId"
+              [class.ring-1]="planner.recentlyDockedTaskId() === entry.taskId"
+              [class.shadow-lg]="planner.recentlyDockedTaskId() === entry.taskId"
               [ngClass]="entry.isMain
-                ? (recentlyDockedTaskId() === entry.taskId ? 'ring-amber-400/40' : '')
+                ? (planner.recentlyDockedTaskId() === entry.taskId ? 'ring-amber-400/40' : '')
                 : 'bg-slate-800/40 border-slate-600/30 hover:bg-slate-800/60'
-                  + (recentlyDockedTaskId() === entry.taskId ? ' ring-amber-400/40' : '')"
+                  + (planner.recentlyDockedTaskId() === entry.taskId ? ' ring-amber-400/40' : '')"
               (wheel)="onCardWheel($event, entry.taskId)"
               (click)="onDockCardClick(entry.taskId)"
               (touchstart)="onTouchStart($event, entry.taskId)"
@@ -878,9 +878,9 @@
           <div
             class="drop-zone flex-shrink-0 w-48 rounded-xl border-2 border-dashed border-slate-600/40
                    bg-slate-800/10 flex flex-col items-center justify-center text-slate-500 text-xs gap-2.5"
-            [class.can-drop]="dropState() === 'canDrop'"
-            [class.active]="dropState() === 'isOver'"
-            [class.reject]="dropState() === 'reject'"
+            [class.can-drop]="dragDrop.dropState() === 'canDrop'"
+            [class.active]="dragDrop.dropState() === 'isOver'"
+            [class.reject]="dragDrop.dropState() === 'reject'"
             [class.opacity-50]="!canAcceptExternalDrop()"
             [style.--dock-drop-reject-shake-ms]="PARKING_CONFIG.DOCK_DROP_REJECT_SHAKE_MS + 'ms'"
             (dragover)="onDropZoneDragOver($event)"
@@ -895,7 +895,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
             </svg>
             <span class="text-[10px]">
-              @if (dropState() === 'reject') {
+              @if (dragDrop.dropState() === 'reject') {
                 无法放入
               } @else {
                 拖入任务块

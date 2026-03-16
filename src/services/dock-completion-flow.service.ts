@@ -9,7 +9,6 @@ import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
   DockEntry,
-  DockLane,
   DockPendingDecision,
   DockRuleDecision,
   DockSchedulerPhase,
@@ -38,12 +37,12 @@ import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockPromotionService } from './dock-promotion.service';
 import { DockZoneService } from './dock-zone.service';
 import { LoggerService } from './logger.service';
-import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import {
   entryOrder,
   getWaitRemainingSeconds,
   isAutoPromotableStatus,
   toFocusTaskSlot,
+  toSchedulerCandidate,
 } from './dock-engine.utils';
 import { TimerHandle } from '../utils/timer-handle';
 
@@ -136,31 +135,11 @@ export class DockCompletionFlowService {
   }
 
   // ---------------------------------------------------------------------------
-  //  Conversion helpers
+  //  Conversion helpers (M-1: 委托至 dock-engine.utils.toSchedulerCandidate)
   // ---------------------------------------------------------------------------
 
-  toSchedulerCandidate(entry: DockEntry): {
-    taskId: string;
-    lane: DockLane;
-    load: CognitiveLoad;
-    expectedMinutes: number | null;
-    waitMinutes: number | null;
-    dockedOrder: number;
-    manualOrder: number | null;
-    relationScore: number | null;
-    sourceProjectId: string | null;
-  } {
-    return {
-      taskId: entry.taskId,
-      lane: entry.lane,
-      load: entry.load,
-      expectedMinutes: entry.expectedMinutes,
-      waitMinutes: entry.waitMinutes,
-      dockedOrder: entry.dockedOrder,
-      manualOrder: normalizeNullableNumber(entry.manualOrder),
-      relationScore: normalizeNullableNumber(entry.relationScore),
-      sourceProjectId: entry.sourceProjectId ?? this.zoneService.resolveSourceProjectId(entry),
-    };
+  toSchedulerCandidate(entry: DockEntry) {
+    return toSchedulerCandidate(entry, this.zoneService.resolveSourceProjectId(entry));
   }
 
   toFocusTaskSlot(entry: DockEntry, zone: 'command' | 'combo-select' | 'backup' = 'command', idx = 0): FocusTaskSlot {

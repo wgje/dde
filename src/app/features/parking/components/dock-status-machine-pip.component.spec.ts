@@ -108,7 +108,8 @@ describe('DockStatusMachinePipComponent', () => {
 
     expect(component.primaryAlert().kind).toBe('wait-finished');
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-headline"]')?.textContent).toContain('Wait Done');
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-focus-card"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-focus-inline-row"]')?.textContent).toContain('Current Focus');
+    expect(component.taskRows()[0]?.type).toBe('focus-context');
   });
 
   it('should treat zero-second suspended waiting entries as wait-finished alerts', () => {
@@ -141,10 +142,15 @@ describe('DockStatusMachinePipComponent', () => {
 
     expect(component.primaryAlert().kind).toBe('focus');
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-headline"]')?.textContent).toContain('Current Focus');
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-focus-card"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-focus-inline-row"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-task-list"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-toolbar"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('header')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('Status PiP');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-summary"]')?.getAttribute('data-summary-mode')).toBe('regular');
   });
 
-  it('should render all secondary alerts directly without folding when four tasks are present', () => {
+  it('should render current focus and all secondary alerts in one task list without folding', () => {
     statusEntries.set([
       {
         taskId: 'A',
@@ -190,10 +196,16 @@ describe('DockStatusMachinePipComponent', () => {
     fixture.detectChanges();
 
     expect(component.secondaryAlerts()).toHaveLength(3);
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Expired C');
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Stalled D');
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).toContain('Waiting E');
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-secondary-list"]')?.textContent).not.toContain('折叠');
+    expect(component.taskRows()).toHaveLength(4);
+    expect(component.taskRows()[0]?.type).toBe('focus-context');
+
+    const taskList = fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-task-list"]') as HTMLElement | null;
+    expect(taskList?.textContent).toContain('Current Focus');
+    expect(taskList?.textContent).toContain('Expired C');
+    expect(taskList?.textContent).toContain('Stalled D');
+    expect(taskList?.textContent).toContain('Waiting E');
+    expect(taskList?.textContent).not.toContain('折叠');
+    expect(taskList?.textContent).not.toContain('更多');
   });
 
   it('primary alert action should switch task for wait-finished items', () => {
@@ -258,5 +270,161 @@ describe('DockStatusMachinePipComponent', () => {
 
     expect(mockEngine.fragmentRest.dismissRestReminder).toHaveBeenCalledTimes(1);
     expect(returnSpy).not.toHaveBeenCalled();
+  });
+
+  it('should collapse summary tokens into a single-line overflow summary in micro layout', () => {
+    const original = { width: window.innerWidth, height: window.innerHeight };
+    statusEntries.set([
+      {
+        taskId: 'A',
+        title: 'Current Focus',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+      {
+        taskId: 'B',
+        title: 'Expired B',
+        uiStatus: 'waiting_done',
+        label: '等待结束',
+        waitRemainingSeconds: 0,
+        waitTotalSeconds: 300,
+      },
+      {
+        taskId: 'C',
+        title: 'Stalled C',
+        uiStatus: 'stalled',
+        label: '停滞中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+      {
+        taskId: 'D',
+        title: 'Waiting D',
+        uiStatus: 'suspended_waiting',
+        label: '挂起等待',
+        waitRemainingSeconds: 180,
+        waitTotalSeconds: 300,
+      },
+    ]);
+    fixture.detectChanges();
+
+    try {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 280 });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 300 });
+      component.onViewportResize();
+      fixture.detectChanges();
+
+      expect(component.layoutMode()).toBe('micro');
+      expect(component.summaryTokens().map(token => token.id)).toEqual(['expired', 'stalled', 'waiting', 'focus']);
+      expect(component.visibleSummaryTokens().map(token => token.label)).toEqual(['到时', '停滞', '+2']);
+
+      const summary = fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-summary"]') as HTMLElement | null;
+      expect(summary).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-toolbar"]')?.getAttribute('data-toolbar-mode')).toBe('buttons-only');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original.width });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: original.height });
+      component.onViewportResize();
+      fixture.detectChanges();
+    }
+  });
+
+  it('secondary task rows should preserve click behavior inside the compact task list', () => {
+    const returnSpy = vi.fn();
+    component.returnRequested.subscribe(returnSpy);
+    statusEntries.set([
+      {
+        taskId: 'A',
+        title: 'Current Focus',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+      {
+        taskId: 'B',
+        title: 'Stalled B',
+        uiStatus: 'stalled',
+        label: '停滞中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-task-row-stalled"]')?.click();
+
+    expect(mockEngine.switchToTask).toHaveBeenCalledWith('B');
+    expect(returnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('should switch to micro layouts at 280x300 while keeping toolbar actions clickable', () => {
+    const original = { width: window.innerWidth, height: window.innerHeight };
+    const returnSpy = vi.fn();
+    const closeSpy = vi.fn();
+    component.returnRequested.subscribe(returnSpy);
+    component.closeRequested.subscribe(closeSpy);
+    statusEntries.set([
+      {
+        taskId: 'A',
+        title: 'Current Focus',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+      {
+        taskId: 'B',
+        title: 'Expired B',
+        uiStatus: 'waiting_done',
+        label: '等待结束',
+        waitRemainingSeconds: 0,
+        waitTotalSeconds: 300,
+      },
+      {
+        taskId: 'C',
+        title: 'Stalled C',
+        uiStatus: 'stalled',
+        label: '停滞中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    fixture.detectChanges();
+
+    try {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 280 });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 300 });
+      component.onViewportResize();
+      fixture.detectChanges();
+
+      expect(component.layoutMode()).toBe('micro');
+      expect(component.primaryCardLayout()).toBe('stack');
+      expect(component.toolbarMode()).toBe('buttons-only');
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-task-list"]')?.textContent).toContain('Current Focus');
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-task-list"]')?.textContent).toContain('Stalled C');
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-toolbar"]')?.getAttribute('data-toolbar-mode')).toBe('buttons-only');
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-toolbar-buttons"]')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-toolbar-buttons"]')?.children.length).toBe(4);
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-pip"]')?.getAttribute('data-layout-mode')).toBe('micro');
+      expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-action-wait-finished"]')?.closest('section')?.getAttribute('data-primary-layout')).toBe('stack');
+
+      fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-return"]')?.click();
+      fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-mute"]')?.click();
+      fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-close"]')?.click();
+      fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-exit-focus"]')?.click();
+
+      expect(returnSpy).toHaveBeenCalledTimes(1);
+      expect(mockEngine.toggleMuteWaitTone).toHaveBeenCalledTimes(1);
+      expect(mockEngine.toggleFocusMode).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original.width });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: original.height });
+      component.onViewportResize();
+      fixture.detectChanges();
+    }
   });
 });

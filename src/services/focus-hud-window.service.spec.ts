@@ -89,6 +89,10 @@ describe('FocusHudWindowService', () => {
   it('should mount and unmount the PiP HUD component', async () => {
     let pageHideHandler: ((event: PageTransitionEvent) => void) | null = null;
     const pipDocument = document.implementation.createHTMLDocument('pip');
+    Object.defineProperty(pipDocument, 'defaultView', {
+      configurable: true,
+      value: window,
+    });
     const requestWindow = vi.fn().mockResolvedValue(undefined);
     const closeSpy = vi.fn(() => {
       pipWindow.closed = true;
@@ -120,8 +124,8 @@ describe('FocusHudWindowService', () => {
 
     expect(service.isActive()).toBe(true);
     expect(requestWindow).toHaveBeenCalledWith({
-      width: 392,
-      height: 500,
+      width: 360,
+      height: 420,
       preferInitialWindowPlacement: true,
     });
     expect(pipDocument.body.querySelector('[data-testid="dock-v3-status-machine-pip"]')).toBeTruthy();

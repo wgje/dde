@@ -68,7 +68,8 @@ export class DockSnapshotPersistenceService {
         return;
       }
       const resolved = snapshotFn();
-      const cloned = typeof structuredClone === 'function' ? structuredClone(resolved) : JSON.parse(JSON.stringify(resolved));
+      // structuredClone 深拷贝快照，避免后续异步 IDB 写入时引用被外部修改
+      const cloned = structuredClone(resolved);
       // 串行化写入：前一次未完成时，本次写入排队等待
       const key = this.localCacheKey(userId);
       this.persistChain = this.persistChain.then(() => this.persistToIdb(key, cloned));
@@ -303,7 +304,12 @@ export class DockSnapshotPersistenceService {
   normalizeEntry(raw: unknown, ctx: SnapshotNormalizeContext): DockEntry | null {
     if (!raw || typeof raw !== 'object') return null;
     const source = raw as Partial<DockEntry>;
-    if (!source.taskId || typeof source.taskId !== 'string') return null;
+    // H-3 fix: 验证 taskId 为非空字符串。对不符合 UUID 格式的 taskId 记录警告
+    // 但不拒绝（测试环境使用短 ID），仅拒绝空值和非字符串类型。
+    if (!source.taskId || typeof source.taskId !== 'string' || !source.taskId.trim()) return null;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(source.taskId)) {
+      this.logger.warn('normalizeEntry: taskId is not a valid UUID', { taskId: source.taskId });
+    }
 
     const enumFields = this.normalizeEntryEnumFields(source);
     const plannerFields = sanitizePlannerFields({

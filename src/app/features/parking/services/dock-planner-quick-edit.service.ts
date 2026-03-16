@@ -10,8 +10,6 @@ import type { DockPlannerQuickEditPresentation } from '../components/dock-planne
  *
  * Provided at the component level (not root) so each dock instance
  * gets its own planner state.
- *
- * TODO(L-28): Wire up to ParkingDockComponent — currently defined but not injected anywhere.
  */
 @Injectable()
 export class DockPlannerQuickEditService implements OnDestroy {
@@ -51,16 +49,26 @@ export class DockPlannerQuickEditService implements OnDestroy {
     if (!entry) return 0;
     let count = 0;
     if (entry.expectedMinutes === null) count += 1;
-    // waitMinutes is optional and does not count as missing
     return count;
   });
 
-  /** First dock entry that is missing required attributes (for the banner) */
+  /**
+   * 专注模式背景操作轨激活时为 true（用于 bannerTarget 跟随前台任务）
+   */
+  private readonly dockSecondaryRailActive = computed(
+    () => this.engine.focusMode() && this.engine.focusScrimOn(),
+  );
+
+  /**
+   * 第一个存在必填属性缺失的停泊坞条目（不含 waitMinutes）。
+   * 专注模式背景操作轨里，banner 始终跟随当前前台任务，避免"打开编辑"指向旧任务。
+   */
   readonly bannerTarget = computed(() => {
-    // Don't show the banner when a planner panel is already open
     if (this.activeEntry()) return null;
+    // 专注 + scrim 时跟随前台 focusing entry
+    const focusEntry = this.dockSecondaryRailActive() ? this.engine.focusingEntry() : null;
+    if (focusEntry) return focusEntry;
     const entries = this.engine.orderedDockEntries();
-    // Prefer the main task
     const main = entries.find(e => e.isMain && e.expectedMinutes === null);
     if (main) return main;
     return entries.find(e => e.expectedMinutes === null) ?? null;
@@ -75,9 +83,26 @@ export class DockPlannerQuickEditService implements OnDestroy {
     return count;
   });
 
-  /** CSS class string for the inline planner panel */
+  /** CSS class string for the planner panel（响应式：popover 绝对定位 / sheet 内嵌） */
   readonly panelClasses = computed(() => {
-    return 'mx-2 rounded-2xl border border-slate-600/55 bg-slate-950/97 p-3.5 shadow-[0_8px_32px_rgba(2,6,23,0.4)] backdrop-blur-md overflow-hidden animate-[plannerSlideOpen_200ms_ease-out]';
+    const baseClasses = [
+      'pointer-events-auto',
+      'overflow-y-auto',
+      'hide-scrollbar',
+      'rounded-2xl',
+      'border',
+      'border-slate-700/75',
+      'bg-slate-950/97',
+      'p-3.5',
+      'shadow-[0_18px_56px_rgba(2,6,23,0.46)]',
+      'backdrop-blur-md',
+      'animate-[plannerSlideOpen_220ms_ease-out]',
+      'origin-top',
+    ].join(' ');
+    if (this.presentation() === 'popover') {
+      return `${baseClasses} absolute bottom-full right-2 z-20 mb-2 w-[min(calc(100%-1rem),26rem)] max-h-[min(340px,calc(100dvh-180px))]`;
+    }
+    return `${baseClasses} mx-2 mt-2 max-h-[min(46dvh,320px)]`;
   });
 
   // ── Timers ──────────────────────────────────────────────────
@@ -89,10 +114,6 @@ export class DockPlannerQuickEditService implements OnDestroy {
     return this.plannerQuickEditTaskId() === taskId;
   }
 
-  /**
-   * Toggle the planner panel for a given task.
-   * The caller must verify `canUsePlannerQuickEdit()` before calling.
-   */
   togglePlannerQuickEdit(taskId: string): void {
     if (this.plannerQuickEditTaskId() === taskId) {
       this.closePlannerQuickEdit();
@@ -102,47 +123,26 @@ export class DockPlannerQuickEditService implements OnDestroy {
     this.engine.setDockExpanded(true);
   }
 
-  /**
-   * Close the planner panel.
-   * Returns the task ID that was open (or null) so the caller can
-   * restore focus to the trigger button if desired.
-   */
   closePlannerQuickEdit(): string | null {
     const taskId = this.plannerQuickEditTaskId();
     this.plannerQuickEditTaskId.set(null);
     return taskId;
   }
 
-  /**
-   * Set cognitive load for a dock entry via the planner panel.
-   * The caller must verify `canUsePlannerQuickEdit()` before calling.
-   */
   setPlannerQuickEditLoad(taskId: string, nextLoad: CognitiveLoad): void {
     const entry = this.engine.orderedDockEntries().find(item => item.taskId === taskId) ?? null;
     if (!entry || entry.load === nextLoad) return;
     this.engine.toggleLoad(taskId, nextLoad === 'high' ? 'up' : 'down');
   }
 
-  /**
-   * Set expected-time for a dock entry via the planner panel.
-   * The caller must verify `canUsePlannerQuickEdit()` before calling.
-   */
   setPlannerQuickEditExpected(taskId: string, minutes: number | null): void {
     this.engine.setExpectedTime(taskId, minutes);
   }
 
-  /**
-   * Set wait-window for a dock entry via the planner panel.
-   * The caller must verify `canUsePlannerQuickEdit()` before calling.
-   */
   setPlannerQuickEditWait(taskId: string, minutes: number | null): void {
     this.engine.setWaitTime(taskId, minutes);
   }
 
-  /**
-   * Mark a task as recently docked (highlight ring for 3 seconds).
-   * Also dismisses the planner panel if it was open for this task.
-   */
   markRecentlyDocked(taskId: string): void {
     this.recentlyDockedTaskId.set(taskId);
     if (this.recentlyDockedTimer) {
@@ -152,14 +152,9 @@ export class DockPlannerQuickEditService implements OnDestroy {
       this.recentlyDockedTaskId.set(null);
       this.recentlyDockedTimer = null;
     }, 3000);
-
     this.plannerQuickEditTaskId.update(current => (current === taskId ? null : current));
   }
 
-  /**
-   * Called by the component's effect when the active entry disappears
-   * (task removed from dock while planner was open).
-   */
   closeIfEntryGone(): void {
     if (!this.plannerQuickEditTaskId()) return;
     if (this.activeEntry()) return;
