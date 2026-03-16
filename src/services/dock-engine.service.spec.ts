@@ -2339,4 +2339,33 @@ describe('DockEngineService', () => {
     service.endFocusTransition();
     expect(service.focusTransition()).toBeNull();
   });
+
+  // =========================================================================
+  //  Init-chain integration — all sub-services respond after construction
+  // =========================================================================
+
+  describe('sub-service init chain', () => {
+    it('should allow completionFlow operations after engine construction', () => {
+      // completionFlow is initialized during DockEngineService constructor via initSubServices.
+      // If init() wasn't called, these would throw "must be called before use".
+      seedTask('T1');
+      service.dockTask('T1');
+      // completionFlow's enforceSingleMainInvariant is called during dockTask flow
+      expect(service.entries().length).toBe(1);
+    });
+
+    it('should allow entryField operations after engine construction', () => {
+      seedTask('T1');
+      service.dockTask('T1');
+      // entryField.toggleLoad would throw if init() wasn't called
+      service.toggleLoad('T1', 'up');
+      expect(service.entries().find(e => e.taskId === 'T1')?.load).toBe('high');
+    });
+
+    it('should allow inlineCreation after engine construction', () => {
+      const taskId = service.createInDock('Inline test', 'combo-select', 'low');
+      expect(taskId).not.toBeNull();
+      expect(service.entries().some(e => e.taskId === taskId)).toBe(true);
+    });
+  });
 });

@@ -209,7 +209,7 @@ export class DockEngineService {
   private completionQueue: string[] = [];
   private isProcessingCompletion = false;
   private readonly completionDrain = new TimerHandle();
-  private readonly highlightClearTimerRef: { current: ReturnType<typeof setTimeout> | null } = { current: null };
+  private readonly highlightClearTimer = new TimerHandle();
   private readonly audioPlayer = new DockAudioPlayer();
 
   private currentSnapshotUserId: string | null = null;
@@ -384,7 +384,7 @@ export class DockEngineService {
       focusingEntry: this.focusingEntry,
       focusMode: this.focusMode,
       suspendChainRootTaskId: this.suspendChainRootTaskId,
-      highlightClearTimer: this.highlightClearTimerRef,
+      highlightClearTimer: this.highlightClearTimer,
     });
     this.cloudSync.init(this.buildCloudSyncContext());
     this.fragmentRest.init(this.buildFragmentRestContext());
@@ -610,10 +610,7 @@ export class DockEngineService {
       this.completionDrain.cancel();
       this.completionQueue.length = 0;
       this.isProcessingCompletion = false;
-      if (this.highlightClearTimerRef.current) {
-        clearTimeout(this.highlightClearTimerRef.current);
-        this.highlightClearTimerRef.current = null;
-      }
+      this.highlightClearTimer.cancel();
       this.audioPlayer.dispose();
       this.localPersist.cancel();
       this.cloudSync.cancelTimers();
@@ -917,6 +914,7 @@ export class DockEngineService {
     this.pendingRadarEviction.set(null);
     this.lastConsoleDemotedTaskId.set(null);
     this.consoleVisibleOrderHint.set([]);
+    this.zoneService.clearAdjacencyCache();
   }
 
   reorderDockEntries(sourceTaskId: string, targetTaskId: string): void {
@@ -1558,6 +1556,7 @@ export class DockEngineService {
     this.schedulerPhase.set('active');
     this.waitEndNotifiedIds.clear();
     this.lastConsoleDemotedTaskId.set(null);
+    this.zoneService.clearAdjacencyCache();
   }
 
   /**

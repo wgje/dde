@@ -63,10 +63,13 @@ export class DockEntryFieldService {
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {
     const nextLoad: CognitiveLoad = direction === 'up' ? 'high' : 'low';
+    const exists = this.ctx.entries().some(entry => entry.taskId === taskId);
     this.ctx.entries.update(prev =>
       prev.map(entry => (entry.taskId === taskId ? { ...entry, load: nextLoad } : entry)),
     );
-    this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
+    if (exists) {
+      this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
+    }
   }
 
   setExpectedTime(taskId: string, minutes: number | null): void {

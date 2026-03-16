@@ -25,6 +25,14 @@ export class DockZoneService {
     adjacency: Map<string, string[]>;
   } | null = null;
 
+  /**
+   * 清除邻接表缓存。
+   * 应在项目切换/删除时调用，防止长会话中缓存无限增长。
+   */
+  clearAdjacencyCache(): void {
+    this.adjacencyCache = null;
+  }
+
   // ---------------------------------------------------------------------------
   //  Public API
   // ---------------------------------------------------------------------------

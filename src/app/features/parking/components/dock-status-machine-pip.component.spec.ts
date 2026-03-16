@@ -3,6 +3,12 @@ import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockStatusMachinePipComponent } from './dock-status-machine-pip.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import {
+  StatusMachineEntry,
+  DockEntry,
+  DockPendingDecision,
+  DockPendingDecisionEntry,
+} from '../../../../models/parking-dock';
 
 describe('DockStatusMachinePipComponent', () => {
   let fixture: ComponentFixture<DockStatusMachinePipComponent>;
@@ -10,10 +16,10 @@ describe('DockStatusMachinePipComponent', () => {
 
   const focusMode = signal(true);
   const muted = signal(false);
-  const statusEntries = signal<any[]>([]);
-  const focusingEntry = signal<any | null>(null);
-  const pendingDecision = signal<any>(null);
-  const pendingDecisionEntries = signal<any[]>([]);
+  const statusEntries = signal<StatusMachineEntry[]>([]);
+  const focusingEntry = signal<DockEntry | null>(null);
+  const pendingDecision = signal<DockPendingDecision | null>(null);
+  const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
   const fragmentEntryCountdown = signal<number | null>(null);
   const isBurnoutActive = signal(false);
   const restReminderActive = signal(false);

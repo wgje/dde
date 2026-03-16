@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockCompletionFlowService, DockCompletionContext } from './dock-completion-flow.service';
 import { DockZoneService } from './dock-zone.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
+import { TimerHandle } from '../utils/timer-handle';
 import {
   isWaitingLike,
   isRunnableStatus,
@@ -84,7 +85,7 @@ function buildContext(initial: {
     focusingEntry: signal<DockEntry | null>(initial.focusingEntry ?? null),
     focusMode: signal(initial.focusMode ?? false),
     suspendChainRootTaskId: signal<string | null>(initial.suspendChainRootTaskId ?? null),
-    highlightClearTimer: { current: null },
+    highlightClearTimer: new TimerHandle(),
   };
 }
 

@@ -41,7 +41,7 @@ const log = (msg: string, _color = '#0f0') => {
   const elapsed = Date.now() - START_TIME;
   console.log(`[NanoFlow +${elapsed}ms] ${msg}`);
 };
-const logError = (msg: string, err?: any) => {
+const logError = (msg: string, err?: unknown) => {
   const elapsed = Date.now() - START_TIME;
   console.error(`[NanoFlow +${elapsed}ms] ❌ ${msg}`, err || '');
 };
@@ -193,7 +193,12 @@ window.addEventListener('unhandledrejection', (event) => {
   // Supabase Auth 在多标签页/多实例场景会用 Navigator LockManager 做互斥。
   // 当锁被其他实例占用时会出现立即失败的 rejection；这通常不影响登录态本身，
   // 但 Zone.js + 浏览器默认行为会把它打印成“未处理错误”，造成噪音。
-  const reasonText = String((event as any)?.reason?.message ?? (event as any)?.reason ?? '');
+  const reason: unknown = (event as PromiseRejectionEvent).reason;
+  const reasonText = String(
+    (reason != null && typeof reason === 'object' && 'message' in reason ? (reason as { message: string }).message : null)
+    ?? reason
+    ?? '',
+  );
   const isSupabaseAuthLockContention =
     /Navigator LockManager lock/i.test(reasonText) ||
     /Acquiring an exclusive Navigator LockManager lock/i.test(reasonText) ||
@@ -321,7 +326,7 @@ async function startApplication() {
     scheduleIdleTask(() => {
       void runPostBootstrapMaintenance();
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     clearTimeout(startupTimeout);
     logError('❌ 启动失败', err);
     showStartupError('启动失败', '应用无法正常启动', err);

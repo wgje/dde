@@ -29,6 +29,7 @@ import {
   isAutoPromotableStatus,
   isRunnableStatus,
 } from './dock-engine.utils';
+import { TimerHandle } from '../utils/timer-handle';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -43,7 +44,7 @@ export interface DockPromotionContext {
   lastConsoleDemotedTaskId: WritableSignal<string | null>;
   focusingEntry: Signal<DockEntry | null>;
   focusMode: Signal<boolean>;
-  highlightClearTimer: { current: ReturnType<typeof setTimeout> | null };
+  highlightClearTimer: TimerHandle;
 }
 
 @Injectable({
@@ -200,10 +201,7 @@ export class DockPromotionService {
       reason: '规则引擎从雷达区拉取最优候选进入主控台',
       recommendedTaskIds: [radarCandidate.taskId],
     });
-    if (this.ctx.highlightClearTimer.current) {
-      clearTimeout(this.ctx.highlightClearTimer.current);
-    }
-    this.ctx.highlightClearTimer.current = setTimeout(() => {
+    this.ctx.highlightClearTimer.schedule(() => {
       if (this.ctx.pendingDecision()) return;
       this.ctx.highlightedIds.set(new Set());
     }, PARKING_CONFIG.HIGHLIGHT_CLEAR_DELAY_MS);

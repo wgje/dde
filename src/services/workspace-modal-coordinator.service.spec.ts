@@ -12,6 +12,7 @@ import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
 import { Router } from '@angular/router';
+import { type ConflictData } from './modal.service';
 
 // ── Fake component for modal loading ─────────────────────────
 class FakeComponent {}
@@ -194,9 +195,9 @@ describe('WorkspaceModalCoordinatorService', () => {
 
   it('should resolve conflict and close modal', async () => {
     // Set up pending conflict
-    service.setPendingConflict({ projectId: 'p-1' } as any);
+    service.setPendingConflict({ projectId: 'p-1' } as ConflictData);
     // Open conflict modal to set the ref
-    await service.openConflictModal({ projectId: 'p-1' } as any);
+    await service.openConflictModal({ projectId: 'p-1' } as ConflictData);
 
     await service.resolveConflictLocal();
 
@@ -207,7 +208,7 @@ describe('WorkspaceModalCoordinatorService', () => {
   // ── cancelConflictResolution ───────────────────────────────
 
   it('should close modal and show info toast', async () => {
-    await service.openConflictModal({ projectId: 'p-1' } as any);
+    await service.openConflictModal({ projectId: 'p-1' } as ConflictData);
 
     service.cancelConflictResolution();
 

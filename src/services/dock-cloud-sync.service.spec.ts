@@ -348,4 +348,18 @@ describe('DockCloudSyncService', () => {
       );
     });
   });
+
+  // =========================================================================
+  //  Error paths — rejection / failure scenarios
+  // =========================================================================
+
+  describe('error paths', () => {
+    it('should not throw when cancelTimers is called before any push/pull', () => {
+      expect(() => service.cancelTimers()).not.toThrow();
+    });
+
+    it('should not throw when scheduleCloudPush receives null snapshot', () => {
+      expect(() => service.scheduleCloudPush('user-1', null)).not.toThrow();
+    });
+  });
 });

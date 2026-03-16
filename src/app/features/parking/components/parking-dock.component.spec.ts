@@ -15,9 +15,15 @@ import { ProjectStore, TaskStore } from '../../../core/state/stores';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { UiStateService } from '../../../../services/ui-state.service';
 
+import { Project } from '../../../../models';
+
 import {
-  DockFocusTransitionState,
+  DockEntry,
   DockPendingDecision,
+  DockPendingDecisionEntry,
+  StatusMachineEntry,
+  DailySlotEntry,
+  DockFocusTransitionState,
 } from '../../../../models/parking-dock';
 
 describe('ParkingDockComponent v4', () => {
@@ -25,17 +31,17 @@ describe('ParkingDockComponent v4', () => {
   let component: ParkingDockComponent;
   let uiState: UiStateService;
 
-  const dockedEntries = signal<any[]>([]);
+  const dockedEntries = signal<DockEntry[]>([]);
   const focusMode = signal(false);
   const focusScrimOn = signal(true);
   const focusTransition = signal<DockFocusTransitionState | null>(null);
   const dockExpanded = signal(true);
   const pendingDecision = signal<DockPendingDecision | null>(null);
-  const pendingDecisionEntries = signal<any[]>([]);
-  const statusMachineEntries = signal<any[]>([]);
+  const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
+  const statusMachineEntries = signal<StatusMachineEntry[]>([]);
   const muteWaitTone = signal(false);
-  const suspendedEntries = signal<any[]>([]);
-  const availableDailySlots = signal<any[]>([]);
+  const suspendedEntries = signal<DockEntry[]>([]);
+  const availableDailySlots = signal<DailySlotEntry[]>([]);
   const highlightedIds = signal<Set<string>>(new Set());
   const firstMainSelectionPending = signal<{ taskId: string; expiresAt: number } | null>(null);
   const fragmentEntryCountdown = signal<number | null>(null);
@@ -159,7 +165,7 @@ describe('ParkingDockComponent v4', () => {
   };
 
   const mockProjectStore = {
-    projects: signal([] as any[]),
+    projects: signal<Project[]>([]),
   };
 
   const mockModalLoader = {

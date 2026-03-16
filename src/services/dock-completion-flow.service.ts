@@ -45,6 +45,7 @@ import {
   isAutoPromotableStatus,
   toFocusTaskSlot,
 } from './dock-engine.utils';
+import { TimerHandle } from '../utils/timer-handle';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -63,7 +64,7 @@ export interface DockCompletionContext {
   focusingEntry: Signal<DockEntry | null>;
   focusMode: Signal<boolean>;
   suspendChainRootTaskId: Signal<string | null>;
-  highlightClearTimer: { current: ReturnType<typeof setTimeout> | null };
+  highlightClearTimer: TimerHandle;
 }
 
 @Injectable({

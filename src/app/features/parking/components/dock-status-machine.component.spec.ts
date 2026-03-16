@@ -3,12 +3,17 @@ import { signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockStatusMachineComponent } from './dock-status-machine.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import {
+  StatusMachineEntry,
+  DockPendingDecision,
+  DockPendingDecisionEntry,
+} from '../../../../models/parking-dock';
 
 describe('DockStatusMachineComponent', () => {
   let fixture: ComponentFixture<DockStatusMachineComponent>;
   let component: DockStatusMachineComponent;
 
-  const statusEntries = signal<any[]>([
+  const statusEntries = signal<StatusMachineEntry[]>([
     {
       taskId: 'A',
       title: 'Focus A',
@@ -27,8 +32,8 @@ describe('DockStatusMachineComponent', () => {
     },
   ]);
   const muted = signal(false);
-  const pendingDecision = signal<any>(null);
-  const pendingDecisionEntries = signal<any[]>([]);
+  const pendingDecision = signal<DockPendingDecision | null>(null);
+  const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
   const fragmentEntryCountdown = signal<number | null>(null);
 
   const mockEngine = {

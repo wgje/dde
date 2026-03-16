@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ActionQueueService } from './action-queue.service';
+import { QueuedAction } from './action-queue.types';
 import { SimpleSyncService } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
@@ -42,9 +43,9 @@ const mockAuthService = { currentUserId: vi.fn(() => 'test-user') };
 // ── Helpers ──────────────────────────────────────────────────
 
 /** Retrieve the handler registered for a given action type */
-function getProcessor(type: string): (action: any) => Promise<boolean> {
+function getProcessor(type: string): (action: QueuedAction) => Promise<boolean> {
   const call = mockActionQueueService.registerProcessor.mock.calls.find(
-    (c: any[]) => c[0] === type,
+    (c: [string, (action: QueuedAction) => Promise<boolean>]) => c[0] === type,
   );
   if (!call) throw new Error(`No processor registered for "${type}"`);
   return call[1];

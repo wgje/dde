@@ -122,16 +122,14 @@ describe('DockEntryFieldService', () => {
       });
     });
 
-    it('should no-op entries for missing taskId', () => {
+    it('should no-op entries and skip sync for missing taskId', () => {
       const before = entries();
       service.toggleLoad('non-existent', 'up');
 
       // Entries remain unchanged (same content)
       expect(entries()).toEqual(before);
-      // Sync is still called (service doesn't guard against missing entries)
-      expect(mockTaskSync.syncTaskPlannerFields).toHaveBeenCalledWith('non-existent', {
-        cognitive_load: 'high',
-      });
+      // Sync is NOT called because entry doesn't exist (guard added)
+      expect(mockTaskSync.syncTaskPlannerFields).not.toHaveBeenCalled();
     });
   });
 
@@ -218,6 +216,22 @@ describe('DockEntryFieldService', () => {
       expect(updated.lane).toBe('backup');
       expect(updated.zoneSource).toBe('auto');
       expect(rebalanceAutoZones).toHaveBeenCalledOnce();
+    });
+  });
+
+  // =========================================================================
+  //  6. Error paths — init guard
+  // =========================================================================
+
+  describe('init guard', () => {
+    it('should throw if accessed before init()', () => {
+      // Create a second instance via TestBed that hasn't had init() called
+      const freshService = TestBed.inject(DockEntryFieldService);
+      // Reset its internal context to simulate un-initialized state
+      (freshService as unknown as { _ctx: unknown })._ctx = null;
+      expect(() => freshService.toggleLoad('task-1', 'up')).toThrow(
+        /init\(\) must be called before use/,
+      );
     });
   });
 });

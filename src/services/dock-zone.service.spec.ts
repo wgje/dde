@@ -226,4 +226,60 @@ describe('DockZoneService', () => {
       expect(result.lane).toBe('backup' as DockLane);
     });
   });
+
+  // =========================================================================
+  //  clearAdjacencyCache — 缓存清除
+  // =========================================================================
+
+  describe('clearAdjacencyCache', () => {
+    it('should invalidate the cache so next computeTreeDistance rebuilds adjacency', () => {
+      const tasks = [
+        makeTask('t1', { parentId: null }),
+        makeTask('t2', { parentId: 't1' }),
+      ];
+      mockTaskStore.getTasksByProject.mockReturnValue(tasks);
+
+      // Warm the cache
+      const d1 = service.computeTreeDistance('proj-1', 't1', 't2');
+      expect(d1).toBe(1);
+
+      // After clearing, the cache should be rebuilt on next call (no stale data)
+      service.clearAdjacencyCache();
+
+      // Change task structure
+      const newTasks = [
+        makeTask('t1', { parentId: null }),
+        makeTask('t2', { parentId: null }),
+        makeTask('t3', { parentId: 't1' }),
+      ];
+      mockTaskStore.getTasksByProject.mockReturnValue(newTasks);
+
+      const d2 = service.computeTreeDistance('proj-1', 't1', 't2');
+      // t1 and t2 no longer share parent-child; they're disconnected
+      expect(d2).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  //  Error paths — defensive behavior
+  // =========================================================================
+
+  describe('error paths', () => {
+    it('should return null for computeTreeDistance with empty projectId', () => {
+      expect(service.computeTreeDistance('', 't1', 't2')).toBeNull();
+    });
+
+    it('should return 0 for computeTreeDistance with same taskId', () => {
+      expect(service.computeTreeDistance('proj-1', 't1', 't1')).toBe(0);
+    });
+
+    it('should return null when tasks list is empty', () => {
+      mockTaskStore.getTasksByProject.mockReturnValue([]);
+      expect(service.computeTreeDistance('proj-1', 't1', 't2')).toBeNull();
+    });
+
+    it('should return false for hasDirectConnection with empty projectId', () => {
+      expect(service.hasDirectConnection('', 't1', 't2')).toBe(false);
+    });
+  });
 });
