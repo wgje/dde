@@ -2,6 +2,8 @@
 // 专注模式配置常量
 // ============================================
 
+import { SYNC_CONFIG } from './sync.config';
+
 /**
  * 专注模式配置
  */
@@ -76,8 +78,8 @@ export const FOCUS_CONFIG = {
   
   // 同步配置（与主架构对齐）
   SYNC: {
-    /** 防抖延迟（与 SYNC_CONFIG.DEBOUNCE_DELAY 一致） */
-    DEBOUNCE_DELAY: 3000,
+    /** 防抖延迟 — 引用 SYNC_CONFIG.DEBOUNCE_DELAY 作为唯一真实来源 */
+    DEBOUNCE_DELAY: SYNC_CONFIG.DEBOUNCE_DELAY,
     /** IndexedDB 存储键前缀 */
     IDB_PREFIX: 'focus_',
     /** IndexedDB 数据库名称 */

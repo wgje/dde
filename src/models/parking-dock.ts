@@ -2,6 +2,17 @@
 // Dock v3 domain model
 // ============================================
 
+/**
+ * 停泊坞任务状态（权威领域模型 — snake_case 命名）
+ *
+ * 这是所有状态的唯一真实来源（Single Source of Truth）。
+ * 其他状态类型通过映射函数派生：
+ *   - DockUiStatus    ← mapDockStatusToUiStatus()   (snake_case，UI 展示)
+ *   - FocusTaskStatus ← mapDockStatusToFocusStatus() (kebab-case，Focus Console API)
+ *
+ * @see mapDockStatusToUiStatus   — dock-engine.utils.ts
+ * @see mapDockStatusToFocusStatus — dock-engine.utils.ts
+ */
 export type DockTaskStatus =
   | 'pending_start'
   | 'focusing'
@@ -300,6 +311,18 @@ export type DockZoneSource = 'auto' | 'manual';
 export type DockSourceSection = 'text' | 'flow' | 'dock-create';
 /** Status machine display labels — intentionally Chinese strings for the Chinese-locale UI. */
 export type StatusMachineLabel = '待启动' | '专注中' | '挂起等待' | '等待结束' | '停滞中';
+/**
+ * 停泊坞 UI 展示状态（snake_case 命名，与 DockTaskStatus 同约定）
+ *
+ * 由 mapDockStatusToUiStatus() 从 DockTaskStatus 映射而来：
+ *   DockTaskStatus       → DockUiStatus
+ *   'pending_start'      → 'queued'        (重命名：UI 更友好)
+ *   'focusing'           → 'focusing'
+ *   'suspended_waiting'  → 'suspended_waiting'
+ *   'wait_finished'      → 'waiting_done'  (重命名：UI 更友好)
+ *   'stalled'            → 'stalled'
+ *   'completed'          → (无对应 — 已完成任务不展示)
+ */
 export type DockUiStatus = 'queued' | 'focusing' | 'suspended_waiting' | 'waiting_done' | 'stalled';
 export type DockRuleDecisionType =
   | 'first_suspend_recommendation'

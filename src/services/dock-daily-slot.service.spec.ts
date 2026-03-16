@@ -32,19 +32,14 @@ const mockCloudSyncService = {
   enqueueRoutineCompletionSync: vi.fn(),
 };
 
-const mockLoggerCategory = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-};
-
+// LoggerService：测试不关注日志输出，提供最小无操作实现
+const noopLoggerCategory = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
+  category: () => noopLoggerCategory,
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
 };
 
 // ---------------------------------------------------------------------------

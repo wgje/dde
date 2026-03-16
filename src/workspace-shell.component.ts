@@ -14,7 +14,6 @@ import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ModalService, type DeleteProjectData, type LoginData } from './services/modal.service';
 import { WorkspaceModalCoordinatorService } from './services/workspace-modal-coordinator.service';
-import { DynamicModalService } from './services/dynamic-modal.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { SimpleSyncService } from './app/core/services/simple-sync.service';
@@ -23,7 +22,6 @@ import { ParkingService } from './services/parking.service';
 import { BlackBoxService } from './services/black-box.service';
 import { FocusPreferenceService } from './services/focus-preference.service';
 import { BeforeUnloadManagerService } from './services/before-unload-manager.service';
-import { ModalLoaderService } from './app/core/services/modal-loader.service';
 import { BeforeUnloadGuardService } from './services/guards';
 import { AppAuthCoordinatorService } from './app/core/services/app-auth-coordinator.service';
 import { AppProjectCoordinatorService } from './app/core/services/app-project-coordinator.service';
@@ -168,8 +166,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly actionQueue = inject(ActionQueueService);
   private readonly errorHandler = inject(GlobalErrorHandler);
   private readonly modal = inject(ModalService);
-  private readonly modalLoader = inject(ModalLoaderService);
-  private readonly dynamicModal = inject(DynamicModalService);
   readonly modalCoord = inject(WorkspaceModalCoordinatorService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   readonly supabaseClient = inject(SupabaseClientService);
@@ -724,7 +720,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     }
     
     // 🚀 空闲时预加载常用模态框（消除首次点击延迟）
-    this.modalLoader.preloadCommonModals();
+    this.modalCoord.preloadCommonModals();
     
     // 🛡️ 数据保护：延迟初始化存储配额监控和 IndexedDB 健康检查
     setTimeout(() => {

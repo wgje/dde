@@ -51,15 +51,9 @@ const mockBlackBox = {
   archive: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1' } }),
 };
 
-const mockCategoryLogger = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-};
-
+// LoggerService：测试不关注日志输出，提供最小无操作实现
 const mockLogger = {
-  category: vi.fn().mockReturnValue(mockCategoryLogger),
+  category: () => ({ debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }),
 };
 
 const mockToast = {

@@ -24,6 +24,12 @@ import { ProjectStore, TaskStore } from '../../core/state/stores';
 import { UiStateService } from '../../../services/ui-state.service';
 import { PARKING_CONFIG } from '../../../config/parking.config';
 import {
+  DOCK_TOAST,
+  DOCK_HELP_SECTIONS,
+  DOCK_GROUP_LABELS,
+  DOCK_DEFAULT_TASK_TITLE,
+} from '../../../config/dock-i18n.config';
+import {
   CognitiveLoad,
   DockExitAction,
   DockLane,
@@ -75,12 +81,6 @@ type FocusExitFlowStep = 'primary' | 'destructive';
 interface DockActionFeedback {
   message: string;
   tone: 'info' | 'success';
-}
-
-interface FocusHelpSection {
-  title: string;
-  subtitle: string;
-  items: string[];
 }
 
 const DOCK_REORDER_MIME = 'application/x-nanoflow-dock-reorder';
@@ -338,35 +338,7 @@ export class ParkingDockComponent implements OnDestroy {
   readonly dockSemicircleBottomInset = computed(() =>
     this.uiState.isMobile() ? this.dockBottomInset : 'env(safe-area-inset-bottom)',
   );
-  readonly focusHelpSections: FocusHelpSection[] = [
-    {
-      title: '点击',
-      subtitle: '把主要动作显式摆到眼前',
-      items: [
-        '点击背景卡片可切到前台，系统会给出“已切换到前台”的即时反馈。',
-        '补全属性按钮会打开属性面板，关闭后仍留在当前专注上下文。',
-        '右上角关闭按钮会先进入退出确认，而不是直接把你踢出专注。',
-      ],
-    },
-    {
-      title: '键盘',
-      subtitle: '保留快捷方式，但不让它们承担主路径',
-      items: [
-        'Alt + H 打开这份帮助。',
-        'Alt + Shift + F 切换背景虚化；Alt + Shift + D 展开或收起停泊坞。',
-        'Esc 只关闭当前层级：先关属性面板/帮助层，再处理虚化或退出确认。',
-      ],
-    },
-    {
-      title: '触控',
-      subtitle: '移动端不需要记忆隐藏手势也能完成主要操作',
-      items: [
-        '完成、等待、负荷切换都有明确按钮，优先用按钮而不是手势。',
-        '上滑完成仍可用，但现在属于专家快捷方式。',
-        'Planner 在手机上会以底部面板展开，便于单手补全属性。',
-      ],
-    },
-  ];
+  readonly focusHelpSections = DOCK_HELP_SECTIONS;
 
   private touchStartY = 0;
   private readonly plannerPanel = viewChild<ElementRef<HTMLElement>>('plannerPanel');
@@ -574,7 +546,7 @@ export class ParkingDockComponent implements OnDestroy {
     }
     const opened = await this.focusHudWindow.open();
     if (!opened) {
-      this.toast.warning('打开悬浮窗失败', '当前环境未能创建悬浮窗，请先留在主窗口继续处理。');
+      this.toast.warning(DOCK_TOAST.PIP_OPEN_FAIL_TITLE, DOCK_TOAST.PIP_OPEN_FAIL_BODY);
     }
   }
 
@@ -774,9 +746,7 @@ export class ParkingDockComponent implements OnDestroy {
     const nextScrimOn = !this.engine.focusScrimOn();
     this.engine.toggleFocusScrim();
     this.showDockFeedback(
-      nextScrimOn
-        ? '背景虚化已开启，底部停泊坞进入背景操作轨。'
-        : '背景虚化已关闭，底部停泊坞保持可操作。',
+      nextScrimOn ? DOCK_TOAST.SCRIM_ON : DOCK_TOAST.SCRIM_OFF,
       'info',
     );
   }
@@ -862,13 +832,13 @@ export class ParkingDockComponent implements OnDestroy {
 
   createBackupTaskFromFab(): void {
     if (!this.canCreateBackupTask()) return;
-    const createdId = this.engine.createInDock('新备选任务', 'backup', 'low');
+    const createdId = this.engine.createInDock(DOCK_DEFAULT_TASK_TITLE, 'backup', 'low');
     if (!createdId) return;
     this.engine.setDockExpanded(true);
     this.semicircleHoverExpanded.set(true);
     this.markRecentlyDocked(createdId);
     if (this.engine.focusMode()) {
-      this.showDockFeedback('已添加备选任务，可在背景操作轨里随时切到前台。', 'success');
+      this.showDockFeedback(DOCK_TOAST.BACKUP_CREATED_BODY, 'success');
     }
   }
 
@@ -886,7 +856,7 @@ export class ParkingDockComponent implements OnDestroy {
         },
       });
     } catch {
-      this.toast.error('设置面板加载失败', '请稍后重试。');
+      this.toast.error(DOCK_TOAST.SETTINGS_LOAD_FAIL_TITLE, DOCK_TOAST.SETTINGS_LOAD_FAIL_BODY);
     }
   }
 
@@ -1398,8 +1368,6 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   groupLabel(group: DockPendingDecisionEntry['group']): string {
-    if (group === 'homologous-advancement') return '同源推进';
-    if (group === 'cognitive-downgrade') return '认知降级';
-    return '异步并发';
+    return DOCK_GROUP_LABELS[group as keyof typeof DOCK_GROUP_LABELS] ?? DOCK_GROUP_LABELS.fallback;
   }
 }

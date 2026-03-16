@@ -1,5 +1,6 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { DOCK_TOAST } from '../config/dock-i18n.config';
 import {
   CognitiveLoad,
   CURRENT_DOCK_SNAPSHOT_VERSION,
@@ -549,7 +550,7 @@ export class DockEngineService {
     });
 
     if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
+      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(plannerFields.expectedMinutes ?? 0));
     }
 
     this.entries.update(prev => [...prev, entry]);

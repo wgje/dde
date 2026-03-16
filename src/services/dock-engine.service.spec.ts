@@ -88,13 +88,9 @@ describe('DockEngineService', () => {
     })),
   };
 
+  // LoggerService：测试不关注日志输出，提供最小无操作实现
   const mockLogger = {
-    category: vi.fn(() => ({
-      warn: vi.fn(),
-      error: vi.fn(),
-      info: vi.fn(),
-      debug: vi.fn(),
-    })),
+    category: () => ({ warn: () => {}, error: () => {}, info: () => {}, debug: () => {} }),
   };
 
   const mockToast = {

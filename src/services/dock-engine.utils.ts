@@ -4,6 +4,7 @@
  * 所有函数均为无状态、不依赖 Angular 服务的纯函数。
  */
 import { PARKING_CONFIG } from '../config/parking.config';
+import { DOCK_STATUS_LABELS } from '../config/dock-i18n.config';
 import {
   CognitiveLoad,
   DockEntry,
@@ -110,6 +111,12 @@ export function isWaitExpired(entry: DockEntry): boolean {
 
 // ---------------------------------------------------------------------------
 //  Status mapping helpers
+//
+//  三套状态类型使用不同命名约定（历史原因）：
+//    DockTaskStatus    — snake_case (权威来源)
+//    DockUiStatus      — snake_case (UI 展示)
+//    FocusTaskStatus   — kebab-case (Focus Console API，v3.0 引入)
+//  修改映射时需同步更新 parking-dock.ts 中的 JSDoc 映射表。
 // ---------------------------------------------------------------------------
 
 export function mapDockStatusToUiStatus(status: DockTaskStatus): DockUiStatus {
@@ -139,19 +146,19 @@ export function toStatusMachineEntry(entry: DockEntry): StatusMachineEntry {
 
   switch (uiStatus) {
     case 'focusing':
-      label = '专注中';
+      label = DOCK_STATUS_LABELS.focusing;
       break;
     case 'waiting_done':
-      label = '等待结束';
+      label = DOCK_STATUS_LABELS.waiting_done;
       break;
     case 'suspended_waiting':
-      label = '挂起等待';
+      label = DOCK_STATUS_LABELS.suspended_waiting;
       break;
     case 'stalled':
-      label = '停滞中';
+      label = DOCK_STATUS_LABELS.stalled;
       break;
     default:
-      label = '待启动';
+      label = DOCK_STATUS_LABELS.queued;
       break;
   }
 

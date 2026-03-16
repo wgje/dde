@@ -67,6 +67,11 @@ export class WorkspaceModalCoordinatorService {
 
   // ── Helpers ────────────────────────────────────────────────────────
 
+  /** 预加载常用模态框组件（委托 ModalLoaderService） */
+  preloadCommonModals(): void {
+    this.modalLoader.preloadCommonModals();
+  }
+
   isModalLoading(type: string): boolean {
     return this.modalLoading()[type] ?? false;
   }

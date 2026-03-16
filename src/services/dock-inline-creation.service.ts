@@ -6,6 +6,7 @@
  */
 import { Injectable, Signal, WritableSignal, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { DOCK_TOAST } from '../config/dock-i18n.config';
 import {
   CognitiveLoad,
   DockEntry,
@@ -152,7 +153,7 @@ export class DockInlineCreationService {
       relationReason: lane === 'combo-select' ? 'manual:create-combo-select' : 'manual:create-backup',
     };
     if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
+      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(plannerFields.expectedMinutes ?? 0));
     }
     this.ctx.entries.update(prev => [...prev, entry]);
     if (!this.ctx.firstDragIntervened()) {
@@ -172,15 +173,15 @@ export class DockInlineCreationService {
     const hardLimit = PARKING_CONFIG.DOCK_CONSOLE_HARD_LIMIT;
     if (count >= hardLimit) {
       this.toast.warning(
-        '停泊坞已满',
-        `最多可保留 ${hardLimit} 个任务，请先移除部分任务后再添加「${entryTitle}」。`,
+        DOCK_TOAST.DOCK_FULL_TITLE,
+        DOCK_TOAST.dockFullBody(hardLimit, entryTitle),
       );
       return false;
     }
     if (count + 1 >= softLimit && !this.ctx.softLimitNoticeShown()) {
       this.toast.info(
-        '停泊坞接近上限',
-        `建议将入坞任务控制在 ${softLimit} 个以内，以保持专注控制台清晰。`,
+        DOCK_TOAST.DOCK_NEAR_LIMIT_TITLE,
+        DOCK_TOAST.dockNearLimitBody(softLimit),
       );
       this.ctx.softLimitNoticeShown.set(true);
     }

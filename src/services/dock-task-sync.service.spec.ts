@@ -77,16 +77,9 @@ function createMockDockEntry(overrides: Partial<DockEntry> = {}): DockEntry {
 
 // ── Mocks ──
 
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
+// LoggerService：测试不关注日志输出，提供最小无操作实现
+const noopLoggerCategory = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+const mockLoggerService = { category: () => noopLoggerCategory };
 
 const mockTaskStore = {
   getTaskProjectId: vi.fn<(taskId: string) => string | null>().mockReturnValue(null),
