@@ -111,6 +111,23 @@ export class DockSnapshotPersistenceService {
 
   /** IDB 写入（含 1 次重试），失败不阻塞业务流 */
   private async persistToIdb(key: string, value: DockSnapshot): Promise<void> {
+    // 配额预检：移动端 Safari 等环境 IDB 配额有限，静默降级避免数据丢失
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      try {
+        const { usage, quota } = await navigator.storage.estimate();
+        if (usage != null && quota != null && quota - usage < 1024 * 1024) {
+          this.logger.warn('IDB storage near quota limit, skipping persist', {
+            code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
+            usage,
+            quota,
+            key,
+          });
+          return;
+        }
+      } catch {
+        // estimate() 不可用时静默跳过检查，继续尝试写入
+      }
+    }
     const maxRetries = 1;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -170,7 +187,7 @@ export class DockSnapshotPersistenceService {
       const migrated: DockEntry = {
         ...entry,
         lane: 'backup',
-        relationScore: 20,
+        relationScore: PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
         relationReason: 'manual:default-backup',
       };
       return migrated;

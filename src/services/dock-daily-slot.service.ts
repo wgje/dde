@@ -52,6 +52,13 @@ export class DockDailySlotService {
     };
   }
 
+  /**
+   * 手动注入上下文信号。
+   *
+   * **启动顺序依赖**：必须在 `DockEngineService.initSubServices()` 中调用，
+   * 早于任何依赖日程/留白状态的操作。上下文中的 WritableSignal 由 Engine 私有持有，
+   * 无法通过 Angular DI 注入，因此采用显式 init() 传递。
+   */
   init(ctx: DockDailySlotContext): void {
     if (this._dailySlots) {
       this.logger.warn('init() called again — overwriting previous context');

@@ -50,6 +50,7 @@ import { DockDailySlotService } from './dock-daily-slot.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockInlineCreationService } from './dock-inline-creation.service';
 import { DockEntryFieldService } from './dock-entry-field.service';
+import { DockPromotionService } from './dock-promotion.service';
 import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
 import { IntervalHandle, TimerHandle } from '../utils/timer-handle';
@@ -64,6 +65,8 @@ import {
   isConsoleBackgroundStatus,
   isWaitExpired,
   isWaitingLike,
+  patchAllEntries,
+  patchEntryByTaskId,
   sortDockEntriesForDisplay,
   toFocusTaskSlot,
   toStatusMachineEntry,
@@ -91,6 +94,7 @@ export class DockEngineService {
   readonly fragmentRest = inject(DockFragmentRestService);
   private readonly zoneService = inject(DockZoneService);
   private readonly completionFlow = inject(DockCompletionFlowService);
+  private readonly promotionService = inject(DockPromotionService);
   private readonly inlineCreation = inject(DockInlineCreationService);
   /** 公开子服务——组件可直接调用日常任务槽 API，无需经过 engine 委托 */
   readonly dailySlotService = inject(DockDailySlotService);
@@ -212,8 +216,8 @@ export class DockEngineService {
   /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
   private readonly restoringSnapshot = signal(false);
   private waitEndNotifiedIds = new Set<string>();
-  private blankPeriodNotified = false;
-  private fragmentCountdownNotified = false;
+  private readonly blankPeriodNotified = signal(false);
+  private readonly fragmentCountdownNotified = signal(false);
   private visibilityListener: (() => void) | null = null;
 
   readonly dockedEntries = computed(() => this.entries().filter(entry => entry.status !== 'completed'));
@@ -554,32 +558,32 @@ export class DockEngineService {
         && this.pendingDecision() !== null
         && this.pendingDecisionEntries().length === 0;
       if (!blankPeriodActive) {
-        this.blankPeriodNotified = false;
+        this.blankPeriodNotified.set(false);
         return;
       }
-      if (this.blankPeriodNotified || !this.shouldSendAttentionNotification()) return;
-      this.blankPeriodNotified = true;
+      if (this.blankPeriodNotified() || !this.shouldSendAttentionNotification()) return;
+      this.blankPeriodNotified.set(true);
       void this.focusAttention.notify({
         title: 'NanoFlow 专注提示',
         body: '当前进入留白期，建议先保持空档，不再插入新任务。',
         tag: 'nanoflow-focus-blank-period',
       });
-    });
+    }, { allowSignalWrites: true });
 
     effect(() => {
       const countdown = this.fragmentEntryCountdown();
       if (countdown === null) {
-        this.fragmentCountdownNotified = false;
+        this.fragmentCountdownNotified.set(false);
         return;
       }
-      if (this.fragmentCountdownNotified || !this.shouldSendAttentionNotification()) return;
-      this.fragmentCountdownNotified = true;
+      if (this.fragmentCountdownNotified() || !this.shouldSendAttentionNotification()) return;
+      this.fragmentCountdownNotified.set(true);
       void this.focusAttention.notify({
         title: 'NanoFlow 专注提示',
         body: `检测到短暂空闲，碎片时间倒计时已开始（${countdown} 秒）。`,
         tag: 'nanoflow-focus-fragment-countdown',
       });
-    });
+    }, { allowSignalWrites: true });
   }
 
   private registerVisibilityListener(): void {
@@ -651,7 +655,7 @@ export class DockEngineService {
     const inferredRelation = lane
       ? {
           lane,
-          relationScore: lane === 'combo-select' ? 100 : 20,
+          relationScore: lane === 'combo-select' ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
           relationReason: lane === 'combo-select' ? 'manual:combo-select' : 'manual:backup',
         }
       : this.zoneService.inferAutoLaneForTask(task, sourceProjectId, taskId);
@@ -750,7 +754,7 @@ export class DockEngineService {
           : { ...entry, isMain: false },
       ),
     );
-    this.completionFlow.clearPendingDecisionIfMatched(taskId);
+    this.promotionService.clearPendingDecisionIfMatched(taskId);
     this.rebalanceAutoZones();
   }
 
@@ -792,7 +796,7 @@ export class DockEngineService {
     this.lastRadarInsertedTaskId.set(taskId);
     this.pendingRadarEviction.set(evictedTaskId);
 
-    this.completionFlow.clearPendingDecisionIfMatched(taskId);
+    this.promotionService.clearPendingDecisionIfMatched(taskId);
     this.scheduleSwitchMaintenance();
     return evictedTaskId;
   }
@@ -833,16 +837,11 @@ export class DockEngineService {
     // 安全检查：只淘汰仍在 console 中且非 focusing/主任务的卡片
     if (entry.status === 'focusing' || entry.isMain) return;
     this.entries.update(prev =>
-      prev.map(e => {
-        if (e.taskId !== taskId) return e;
-        const evicted: DockEntry = {
-          ...e,
-          status: 'pending_start',
-          lane: 'backup',
-          zoneSource: 'auto',
-          relationReason: 'auto:evicted-from-console',
-        };
-        return evicted;
+      patchEntryByTaskId(prev, taskId, {
+        status: 'pending_start',
+        lane: 'backup',
+        zoneSource: 'auto',
+        relationReason: 'auto:evicted-from-console',
       }),
     );
     this.pendingRadarEviction.set(null);
@@ -961,7 +960,7 @@ export class DockEngineService {
   toggleMuteWaitTone(): void {
     const next = !this.muteWaitTone();
     this.muteWaitTone.set(next);
-    this.entries.update(prev => prev.map(entry => ({ ...entry, snoozeRingMuted: next })));
+    this.entries.update(prev => patchAllEntries(prev, { snoozeRingMuted: next }));
   }
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {
@@ -1006,7 +1005,7 @@ export class DockEngineService {
     if (!focused) {
       const candidate = this.consoleEntries().find(entry => isAutoPromotableStatus(entry.status));
       if (candidate) {
-        this.completionFlow.promoteCandidate(candidate.taskId);
+        this.promotionService.promoteCandidate(candidate.taskId);
         this.lastRuleDecision.set(
           createRuleDecision({
             type: 'idle_promote',
@@ -1117,22 +1116,18 @@ export class DockEngineService {
     this.trackBurnoutIfHighLoad(entry);
 
     this.entries.update(prev =>
-      prev.map(item => {
-        if (item.taskId !== taskId) return item;
-        return {
-          ...item,
-          status: 'completed',
-          isMain: false,
-          systemSelected: false,
-          recommendedScore: null,
-        };
+      patchEntryByTaskId(prev, taskId, {
+        status: 'completed',
+        isMain: false,
+        systemSelected: false,
+        recommendedScore: null,
       }),
     );
 
     this.syncTaskCompletion(taskId);
     this.completionFlow.resolveAfterCompletion(taskId);
     if (wasMaster) {
-      this.completionFlow.promoteFocusedTaskToMaster();
+      this.promotionService.promoteFocusedTaskToMaster();
     }
     this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
     this.rebalanceAutoZones();
@@ -1204,7 +1199,7 @@ export class DockEngineService {
       return;
     }
 
-    this.completionFlow.promoteNext();
+    this.promotionService.promoteNext();
   }
 
   switchToTask(taskId: string): void {
@@ -1307,7 +1302,7 @@ export class DockEngineService {
     if (!candidateIds.includes(taskId)) return;
 
     const rejectedIds = candidateIds.filter(id => id !== taskId);
-    this.completionFlow.promoteCandidate(taskId, false);
+    this.promotionService.promoteCandidate(taskId, false);
     this.pendingDecision.set(null);
     this.highlightedIds.set(new Set());
 
@@ -1373,7 +1368,7 @@ export class DockEngineService {
     const removed = this.entries().find(entry => entry.taskId === taskId) ?? null;
     this.entries.update(prev => prev.filter(entry => entry.taskId !== taskId));
     if (removed?.isMain) {
-      this.completionFlow.promoteFocusedTaskToMaster();
+      this.promotionService.promoteFocusedTaskToMaster();
     }
     this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
     this.rebalanceAutoZones();
@@ -1770,11 +1765,7 @@ export class DockEngineService {
     this.pendingDecision.set(null);
     this.highlightedIds.set(new Set());
     this.entries.update(prev =>
-      prev.map(entry => ({
-        ...entry,
-        systemSelected: false,
-        recommendationLocked: false,
-      })),
+      patchAllEntries(prev, { systemSelected: false, recommendationLocked: false }),
     );
 
     // pendingCandidateIds is guaranteed empty here (early-returned above otherwise)

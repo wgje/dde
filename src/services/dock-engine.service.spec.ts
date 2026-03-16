@@ -1560,7 +1560,7 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(updateSpy).toHaveBeenCalledTimes(1);
 
-    vi.advanceTimersByTime(220);
+    vi.advanceTimersByTime(PARKING_CONFIG.DOCK_ANIMATION_MS);
     expect(updateSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -1584,10 +1584,10 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(updateSpy).toHaveBeenCalledTimes(1);
 
-    vi.advanceTimersByTime(220);
+    vi.advanceTimersByTime(PARKING_CONFIG.DOCK_ANIMATION_MS);
     expect(updateSpy).toHaveBeenCalledTimes(1);
 
-    vi.advanceTimersByTime(220);
+    vi.advanceTimersByTime(PARKING_CONFIG.DOCK_ANIMATION_MS);
     expect(updateSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -1599,10 +1599,10 @@ describe('DockEngineService', () => {
     service.toggleFocusScrim();
     mockActionQueue.enqueue.mockClear();
 
-    vi.advanceTimersByTime(2500);
+    vi.advanceTimersByTime(PARKING_CONFIG.NOTICE_MIN_VISIBLE_MS);
     expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
 
-    vi.advanceTimersByTime(600);
+    vi.advanceTimersByTime(PARKING_CONFIG.FRAGMENT_SILENT_FADE_MS);
     expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
   });
 
@@ -1614,7 +1614,7 @@ describe('DockEngineService', () => {
     const first = service.exportSnapshot().focusSessionState;
     expect(first).toBeTruthy();
 
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(PARKING_CONFIG.DOCK_SEMICIRCLE_DRAG_EXPAND_DELAY_MS);
     service.toggleFocusScrim();
     const second = service.exportSnapshot().focusSessionState;
     expect(second).toBeTruthy();
@@ -1681,7 +1681,7 @@ describe('DockEngineService', () => {
     service.dockTask('B');
 
     service.toggleFocusMode();
-    vi.advanceTimersByTime(15_100);
+    vi.advanceTimersByTime(PARKING_CONFIG.NOTICE_FALLBACK_TIMEOUT_MS + 100);
     expect(service.firstMainSelectionPending()).toBeNull();
     service.overrideFirstMainTask('B');
     expect(service.entries().find(item => item.taskId === 'A')?.isMain).toBe(true);

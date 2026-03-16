@@ -28,5 +28,8 @@ export function parseOptionalMinutes(raw: string | number | null | undefined): n
   if (!value) return null;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return Math.floor(parsed);
+  const floored = Math.floor(parsed);
+  // 0.x 值通过 > 0 但 floor 后为 0，语义上无效
+  if (floored <= 0) return null;
+  return floored;
 }

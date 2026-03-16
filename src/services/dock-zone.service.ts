@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { FLOATING_TREE_CONFIG } from '../config/layout.config';
+import { PARKING_CONFIG } from '../config/parking.config';
 import { DockEntry, DockLane } from '../models/parking-dock';
 import { Task } from '../models';
 import { TaskStore } from '../core-bridge';
@@ -48,7 +49,7 @@ export class DockZoneService {
     if (!referenceTask || !sourceProjectId || !referenceProjectId || sourceProjectId !== referenceProjectId) {
       return {
         lane: 'backup',
-        relationScore: 10,
+        relationScore: PARKING_CONFIG.ZONE_SCORE_CROSS_PROJECT_DEFAULT,
         relationReason: 'auto:cross-project-default-backup',
       };
     }
@@ -57,17 +58,17 @@ export class DockZoneService {
     const reasons: string[] = [];
 
     if (task.parentId === referenceTask.id || referenceTask.parentId === task.id) {
-      score += 70;
+      score += PARKING_CONFIG.ZONE_SCORE_PARENT_CHILD;
       reasons.push('parent-child');
     }
 
     if (task.parentId && referenceTask.parentId && task.parentId === referenceTask.parentId) {
-      score += 25;
+      score += PARKING_CONFIG.ZONE_SCORE_SHARED_PARENT;
       reasons.push('shared-parent');
     }
 
     if (this.hasDirectConnection(sourceProjectId, task.id, referenceTask.id)) {
-      score += 60;
+      score += PARKING_CONFIG.ZONE_SCORE_DIRECT_CONNECTION;
       reasons.push('direct-connection');
     }
 
@@ -75,22 +76,25 @@ export class DockZoneService {
     const treeDistance = this.computeTreeDistance(sourceProjectId, task.id, referenceTask.id);
     if (treeDistance !== null && treeDistance >= 2) {
       // 距离 2 → 40分，距离 3 → 30分，距离 4 → 20分，距离 5+ → 10分
-      const distanceScore = Math.max(10, 50 - treeDistance * 10);
+      const distanceScore = Math.max(
+        PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_FLOOR,
+        PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_BASE - treeDistance * PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_STEP,
+      );
       score += distanceScore;
       reasons.push(`tree-distance:${treeDistance}`);
     }
 
     if (task.stage !== null && referenceTask.stage !== null && task.stage === referenceTask.stage) {
-      score += 12;
+      score += PARKING_CONFIG.ZONE_SCORE_SAME_STAGE;
       reasons.push('same-stage');
       if (Math.abs((task.order ?? 0) - (referenceTask.order ?? 0)) <= 1) {
-        score += 15;
+        score += PARKING_CONFIG.ZONE_SCORE_ADJACENT_ORDER;
         reasons.push('adjacent-order');
       }
     }
 
     const normalizedScore = Math.max(0, Math.min(100, score));
-    const lane: DockLane = normalizedScore >= 50 ? 'combo-select' : 'backup';
+    const lane: DockLane = normalizedScore >= PARKING_CONFIG.ZONE_COMBO_THRESHOLD ? 'combo-select' : 'backup';
     return {
       lane,
       relationScore: normalizedScore,

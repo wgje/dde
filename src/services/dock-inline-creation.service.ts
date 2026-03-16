@@ -148,7 +148,7 @@ export class DockInlineCreationService {
       manualMainSelected: false,
       recommendationLocked: false,
       snoozeRingMuted: this.ctx.muteWaitTone(),
-      relationScore: lane === 'combo-select' ? 100 : 20,
+      relationScore: lane === 'combo-select' ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
       relationReason: lane === 'combo-select' ? 'manual:create-combo-select' : 'manual:create-backup',
     };
     if (plannerFields.adjusted) {

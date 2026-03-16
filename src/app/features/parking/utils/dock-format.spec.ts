@@ -139,8 +139,7 @@ describe('parseOptionalMinutes', () => {
   });
 
   it('should handle 0.5 by flooring to 0 which is <= 0, returning null', () => {
-    // parsed = 0.5 > 0 → floor(0.5) = 0
-    // But the check is parsed > 0, which 0.5 passes, so floor(0.5) = 0
-    expect(parseOptionalMinutes(0.5)).toBe(0);
+    // parsed = 0.5 > 0 → floor(0.5) = 0 → 0 无效 → null
+    expect(parseOptionalMinutes(0.5)).toBeNull();
   });
 });

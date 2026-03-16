@@ -12,7 +12,7 @@ import { ToastService } from './services/toast.service';
 import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
-import { ModalService, type DeleteProjectData, type ConflictData, type LoginData } from './services/modal.service';
+import { ModalService, type DeleteProjectData, type LoginData } from './services/modal.service';
 import { WorkspaceModalCoordinatorService } from './services/workspace-modal-coordinator.service';
 import { DynamicModalService } from './services/dynamic-modal.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';

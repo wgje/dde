@@ -9,18 +9,18 @@ import { DockEntry, DockLane, RecommendationGroupType } from '../../../../models
 
 // ─── Layout algorithm constants ────────────────────────────────
 
-/** 中心排斥椭圆参数 */
+/** 中心排斥椭圆参数（单位: px，基于 600×600 雷达视口） */
 const CENTER_Y = -36;
 const ELLIPSE_RX_COMBO = 220;
 const ELLIPSE_RX_BACKUP = 210;
 const ELLIPSE_RY_COMBO = 170;
 const ELLIPSE_RY_BACKUP = 162;
 
-/** Y 轴夹紧因子（防止布局越过底部边界） */
+/** Y 轴夹紧因子（比例系数，防止布局越过底部边界） */
 const MAX_Y_FACTOR_COMBO = 0.1;
 const MAX_Y_FACTOR_BACKUP = 0.04;
 
-/** 碰撞检测半尺寸 */
+/** 碰撞检测半尺寸（单位: px） */
 const ITEM_HALF_WIDTH_COMBO = 120;
 const ITEM_HALF_WIDTH_BACKUP = 104;
 const ITEM_HALF_HEIGHT_COMBO = 24;
@@ -43,7 +43,7 @@ const MIN_DIST_FLOOR_BACKUP = 48;
 const MIN_DIST_SHRINK_COMBO = 4.4;
 const MIN_DIST_SHRINK_BACKUP = 3.6;
 
-/** 扇区锚点因子 */
+/** 扇区锚点因子（0~1 比例系数，控制任务卡片散布在雷达扇区中的基准位置） */
 const SECTOR_ANCHOR_X = 0.86;
 const SECTOR_ANCHOR_Y = 0.58;
 const SECTOR_ANCHOR_TOP_Y = 0.98;

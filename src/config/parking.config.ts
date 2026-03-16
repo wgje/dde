@@ -311,6 +311,30 @@ export const PARKING_CONFIG = {
   STATUS_RING_WAIT_STROKE: '#f59e0b',
   STATUS_RING_EXPIRED_STROKE: '#fbbf24',
 
+  // ── Zone inference: 自动 lane 推断评分权重 ──
+  // 用于 DockZoneService.inferZone() 中基于任务间关系计算 relationScore
+  /** 父子关系（parent-child）加分 */
+  ZONE_SCORE_PARENT_CHILD: 70,
+  /** 共享父节点（shared-parent / sibling）加分 */
+  ZONE_SCORE_SHARED_PARENT: 25,
+  /** 直接连线（direct-connection）加分 */
+  ZONE_SCORE_DIRECT_CONNECTION: 60,
+  /** 同阶段（same-stage）加分 */
+  ZONE_SCORE_SAME_STAGE: 12,
+  /** 相邻排序（adjacent-order）加分 */
+  ZONE_SCORE_ADJACENT_ORDER: 15,
+  /** 树距离评分基数（distanceScore = max(FLOOR, BASE - distance × STEP)） */
+  ZONE_SCORE_TREE_DISTANCE_BASE: 50,
+  ZONE_SCORE_TREE_DISTANCE_STEP: 10,
+  ZONE_SCORE_TREE_DISTANCE_FLOOR: 10,
+  /** 跨项目默认 relationScore */
+  ZONE_SCORE_CROSS_PROJECT_DEFAULT: 10,
+  /** combo-select / backup 分界阈值：≥ 此值归入 combo-select */
+  ZONE_COMBO_THRESHOLD: 50,
+  /** 手动创建任务的默认 relationScore：combo-select 与 backup */
+  ZONE_MANUAL_COMBO_SCORE: 100,
+  ZONE_MANUAL_BACKUP_SCORE: 20,
+
   /**
    * ── 调度评分权重体系文档 ──
    *

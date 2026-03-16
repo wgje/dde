@@ -26,17 +26,23 @@ import {
   evaluateTimeRemaining,
   rankDockCandidates,
 } from './dock-scheduler.rules';
+import {
+  clearSuspendRecommendationFlags,
+  clearSystemSelectionFlags,
+  deriveBackgroundStatus as deriveBackgroundStatusPure,
+  enforceSingleMainInvariant as enforceSingleMainInvariantPure,
+  pendingCandidateIds as pendingCandidateIdsPure,
+  sortConsoleEntriesForDisplay as sortConsoleForDisplayPure,
+} from './dock-completion.utils';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
+import { DockPromotionService } from './dock-promotion.service';
 import { DockZoneService } from './dock-zone.service';
 import { LoggerService } from './logger.service';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import {
   entryOrder,
   getWaitRemainingSeconds,
-  hasActiveWaitTimer,
   isAutoPromotableStatus,
-  isRunnableStatus,
-  isWaitingLike,
   toFocusTaskSlot,
 } from './dock-engine.utils';
 
@@ -66,6 +72,7 @@ export interface DockCompletionContext {
 export class DockCompletionFlowService {
   private readonly zoneService = inject(DockZoneService);
   private readonly fragmentRest = inject(DockFragmentRestService);
+  private readonly promotionService = inject(DockPromotionService);
   private readonly logger = inject(LoggerService);
 
   private _ctx: DockCompletionContext | null = null;
@@ -94,6 +101,17 @@ export class DockCompletionFlowService {
       this.logger.category('DockCompletionFlow').warn('init() called again — overwriting previous context');
     }
     this._ctx = ctx;
+    this.promotionService.init({
+      entries: ctx.entries,
+      pendingDecision: ctx.pendingDecision,
+      highlightedIds: ctx.highlightedIds,
+      schedulerPhase: ctx.schedulerPhase,
+      lastRuleDecision: ctx.lastRuleDecision,
+      lastConsoleDemotedTaskId: ctx.lastConsoleDemotedTaskId,
+      focusingEntry: ctx.focusingEntry,
+      focusMode: ctx.focusMode,
+      highlightClearTimer: ctx.highlightClearTimer,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -157,22 +175,7 @@ export class DockCompletionFlowService {
     nextTarget: DockEntry | null = null,
     currentFocus: DockEntry | null = null,
   ): DockTaskStatus {
-    if (hasActiveWaitTimer(entry)) {
-      return 'suspended_waiting';
-    }
-    if (entry.waitStartedAt && entry.waitMinutes) {
-      return 'wait_finished';
-    }
-    if (currentFocus && !currentFocus.isMain && nextTarget?.isMain) {
-      return 'stalled';
-    }
-    if (entry.status === 'stalled') {
-      return 'stalled';
-    }
-    if (entry.status === 'focusing') {
-      return 'stalled';
-    }
-    return 'pending_start';
+    return deriveBackgroundStatusPure(entry, nextTarget, currentFocus);
   }
 
   // ---------------------------------------------------------------------------
@@ -558,181 +561,15 @@ export class DockCompletionFlowService {
   }
 
   promoteNext(): void {
-    const allEntries = this.ctx.entries();
-    if (this.tryPromoteStalled(allEntries)) return;
-    if (this.tryPromoteMainIdle(allEntries)) return;
-    if (this.tryPromoteRadarCandidate(allEntries)) return;
-    this.tryHighlightRecoveredMain(allEntries);
-  }
-
-  /** 优先恢复停滞任务 */
-  private tryPromoteStalled(allEntries: readonly DockEntry[]): boolean {
-    const stalled = allEntries
-      .filter(entry => entry.status === 'stalled')
-      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
-    if (!stalled) return false;
-    this.ctx.schedulerPhase.set('active');
-    this.promoteCandidate(stalled.taskId);
-    this.ctx.highlightedIds.set(new Set([stalled.taskId]));
-    this.setLastDecision({
-      type: 'idle_promote',
-      reason: '主任务完成后优先恢复停滞任务',
-      recommendedTaskIds: [stalled.taskId],
-    });
-    return true;
-  }
-
-  /** 主控链存在可运行任务时按入坞顺序推进 */
-  private tryPromoteMainIdle(allEntries: readonly DockEntry[]): boolean {
-    const mainIdle = allEntries
-      .filter(entry => entry.isMain && isAutoPromotableStatus(entry.status))
-      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
-    if (!mainIdle) return false;
-    this.ctx.schedulerPhase.set('active');
-    this.promoteCandidate(mainIdle.taskId);
-    this.setLastDecision({
-      type: 'idle_promote',
-      reason: '主控链存在可运行任务，按入坞顺序推进',
-      recommendedTaskIds: [mainIdle.taskId],
-    });
-    return true;
-  }
-
-  /** 规则引擎从雷达区拉取最优候选进入主控台 */
-  private tryPromoteRadarCandidate(allEntries: readonly DockEntry[]): boolean {
-    const radarCandidates = allEntries.filter(
-      entry => !entry.isMain && isAutoPromotableStatus(entry.status),
-    );
-    const focusReference = this.ctx.focusingEntry();
-    const rankedRadar = rankDockCandidates(
-      radarCandidates.map(entry => this.toSchedulerCandidate(entry)),
-      PARKING_CONFIG.SCHEDULE_OVER_RUN_ALLOWANCE_MINUTES,
-      {
-        rootLoad: focusReference?.load ?? null,
-        rootProjectId: focusReference ? this.zoneService.resolveSourceProjectId(focusReference) : null,
-      },
-    );
-    const radarCandidate = rankedRadar.length > 0
-      ? radarCandidates.find(entry => entry.taskId === rankedRadar[0].taskId) ?? null
-      : null;
-    if (!radarCandidate) return false;
-    this.ctx.schedulerPhase.set('active');
-    this.promoteCandidate(radarCandidate.taskId);
-    this.ctx.highlightedIds.set(new Set([radarCandidate.taskId]));
-    this.setLastDecision({
-      type: 'idle_promote',
-      reason: '规则引擎从雷达区拉取最优候选进入主控台',
-      recommendedTaskIds: [radarCandidate.taskId],
-    });
-    if (this.ctx.highlightClearTimer.current) {
-      clearTimeout(this.ctx.highlightClearTimer.current);
-    }
-    this.ctx.highlightClearTimer.current = setTimeout(() => {
-      if (this.ctx.pendingDecision()) return;
-      this.ctx.highlightedIds.set(new Set());
-    }, PARKING_CONFIG.HIGHLIGHT_CLEAR_DELAY_MS);
-    return true;
-  }
-
-  /** 等待结束任务已恢复时仅高亮等待用户手动切换 */
-  private tryHighlightRecoveredMain(allEntries: readonly DockEntry[]): void {
-    const recoveredMain = allEntries
-      .filter(entry => entry.isMain && entry.status === 'wait_finished')
-      .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
-    if (recoveredMain) {
-      this.ctx.schedulerPhase.set('active');
-      this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
-      this.setLastDecision({
-        type: 'idle_promote',
-        reason: '等待结束任务已恢复，仅置顶高亮等待用户切换',
-        recommendedTaskIds: [recoveredMain.taskId],
-      });
-    }
+    this.promotionService.promoteNext();
   }
 
   promoteCandidate(taskId: string, clearDecision: boolean = true): void {
-    this.fragmentRest.stopFragmentEntryCountdown();
-    this.fragmentRest.setFragmentDismissed(false);
-    if (!this.ctx.focusMode()) {
-      this.promoteCandidateNonFocus(taskId);
-      return;
-    }
-    this.promoteCandidateInFocus(taskId);
-    if (clearDecision) {
-      this.clearPendingDecisionIfMatched(taskId);
-    }
-  }
-
-  /** 非专注模式下候选推进：设为 main + pending_start */
-  private promoteCandidateNonFocus(taskId: string): void {
-    this.ctx.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              isMain: true,
-              status: 'pending_start',
-              systemSelected: false,
-              recommendationLocked: false,
-            }
-          : { ...entry, isMain: false },
-      ),
-    );
-  }
-
-  /** 专注模式下候选推进：设为 focusing，原焦点降级 */
-  private promoteCandidateInFocus(taskId: string): void {
-    const currentFocusId = this.ctx.focusingEntry()?.taskId ?? null;
-    const targetEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
-    this.ctx.entries.update(prev => {
-      const hasOtherMaster = prev.some(
-        entry => entry.taskId !== taskId && entry.status !== 'completed' && entry.isMain,
-      );
-       return prev.map(entry => {
-        if (entry.taskId === taskId) {
-          return {
-            ...entry,
-            isMain: entry.isMain || !hasOtherMaster,
-            status: 'focusing',
-            waitMinutes: null,
-            waitStartedAt: null,
-            systemSelected: false,
-            recommendationLocked: false,
-          };
-        }
-        if (currentFocusId && entry.taskId === currentFocusId) {
-          return {
-            ...entry,
-            status: this.deriveBackgroundStatus(entry, targetEntry, entry),
-          };
-        }
-        return entry;
-      });
-    });
-    if (currentFocusId && currentFocusId !== taskId) {
-      this.ctx.lastConsoleDemotedTaskId.set(currentFocusId);
-    }
+    this.promotionService.promoteCandidate(taskId, clearDecision);
   }
 
   promoteFocusedTaskToMaster(): void {
-    this.ctx.entries.update(prev => {
-      const active = prev.filter(entry => entry.status !== 'completed');
-      if (active.length === 0) return prev;
-      const hasMaster = active.some(entry => entry.isMain);
-      if (hasMaster) return prev;
-
-      const nextMaster =
-        active.find(entry => entry.status === 'focusing') ??
-        active.find(entry => isRunnableStatus(entry.status)) ??
-        active[0];
-      if (!nextMaster) return prev;
-
-      return prev.map(entry =>
-        entry.taskId === nextMaster.taskId
-          ? { ...entry, isMain: true }
-          : entry,
-      );
-    });
+    this.promotionService.promoteFocusedTaskToMaster();
   }
 
   scheduleFirstSuspendRecommendation(suspendedTaskId: string, waitMinutes: number): void {
@@ -907,155 +744,34 @@ export class DockCompletionFlowService {
   }
 
   clearSystemSelectionOnEntries(entries: DockEntry[]): DockEntry[] {
-    // 策划案 §2.8 G-38c：清除系统推荐时，同时修正被错误标记 isMain 的候选任务
-    // isMain 应始终仅属于唯一主任务，系统推荐的候选不应持有 isMain
-    const realMainId = entries.find(
-      e => e.isMain && !e.systemSelected && e.status !== 'completed',
-    )?.taskId ?? null;
-    let changed = false;
-    const next = entries.map(entry => {
-      const wasSystemSelected = entry.systemSelected || entry.recommendationLocked;
-      // 修正：系统推荐的候选如果被错误标记了 isMain，在清除时一并还原
-      const hasStaleMain = entry.isMain && entry.systemSelected && entry.taskId !== realMainId;
-      if (!wasSystemSelected && !hasStaleMain) return entry;
-      changed = true;
-      return {
-        ...entry,
-        isMain: hasStaleMain ? false : entry.isMain,
-        systemSelected: false,
-        recommendationLocked: false,
-      };
-    });
-    return this.enforceSingleMainInvariant(changed ? next : entries, realMainId);
+    return clearSystemSelectionFlags(entries);
   }
 
   clearSuspendRecommendationStateOnEntries(entries: DockEntry[]): DockEntry[] {
-    // 策划案 §2.8 G-38c：清除挂起推荐状态时，同步修正被错误标记 isMain 的候选
-    const realMainId = entries.find(
-      e => e.isMain && !e.systemSelected && e.status !== 'completed',
-    )?.taskId ?? null;
-    let changed = false;
-    const next = entries.map(entry => {
-      const hasStaleMain = entry.isMain && entry.systemSelected && entry.taskId !== realMainId;
-      if (!entry.systemSelected && !entry.recommendationLocked && entry.recommendedScore === null && !hasStaleMain) {
-        return entry;
-      }
-      changed = true;
-      return {
-        ...entry,
-        isMain: hasStaleMain ? false : entry.isMain,
-        systemSelected: false,
-        recommendationLocked: false,
-        recommendedScore: null,
-      };
-    });
-    return this.enforceSingleMainInvariant(changed ? next : entries, realMainId);
+    return clearSuspendRecommendationFlags(entries);
   }
 
   clearPendingDecisionIfMatched(taskId: string): void {
-    const pending = this.ctx.pendingDecision();
-    if (!pending || !this.pendingCandidateIds(pending).includes(taskId)) return;
-    this.ctx.pendingDecision.set(null);
-    this.ctx.highlightedIds.set(new Set());
-    this.ctx.entries.update(prev => this.clearSystemSelectionOnEntries(prev));
+    this.promotionService.clearPendingDecisionIfMatched(taskId);
   }
 
   enforceSingleMainInvariant(
     entries: DockEntry[],
     preferredTaskId: string | null = null,
   ): DockEntry[] {
-    if (entries.length === 0) return entries;
-
-    const activeEntries = entries.filter(entry => entry.status !== 'completed');
-    if (activeEntries.length === 0) {
-      let changed = false;
-      const cleared = entries.map(entry => {
-        if (!entry.isMain) return entry;
-        changed = true;
-        return { ...entry, isMain: false };
-      });
-      return changed ? cleared : entries;
-    }
-
-    const ordered = [...activeEntries].sort((a, b) => entryOrder(a) - entryOrder(b));
-    const preferredMain = preferredTaskId
-      ? activeEntries.find(entry => entry.taskId === preferredTaskId) ?? null
-      : null;
-    const existingMain = ordered.find(entry => entry.isMain) ?? null;
-    const focusingEntry = activeEntries.find(entry => entry.status === 'focusing') ?? null;
-    const fallbackEntry = ordered[0] ?? null;
-    const targetMainTaskId =
-      preferredMain?.taskId ??
-      existingMain?.taskId ??
-      focusingEntry?.taskId ??
-      fallbackEntry?.taskId ??
-      null;
-
-    let changed = false;
-    const next = entries.map(entry => {
-      const normalizedIsMain =
-        entry.status !== 'completed' &&
-        targetMainTaskId !== null &&
-        entry.taskId === targetMainTaskId;
-      if (entry.isMain === normalizedIsMain) return entry;
-      changed = true;
-      return {
-        ...entry,
-        isMain: normalizedIsMain,
-      };
-    });
-    return changed ? next : entries;
+    return enforceSingleMainInvariantPure(entries, preferredTaskId);
   }
 
   pendingCandidateIds(pending: DockPendingDecision): string[] {
-    return pending.candidateGroups.flatMap(group => group.taskIds);
+    return pendingCandidateIdsPure(pending);
   }
 
   sortConsoleEntriesForDisplay(entries: DockEntry[]): DockEntry[] {
-    if (entries.length <= 1) return entries;
-    const demotedTaskId = this.ctx.lastConsoleDemotedTaskId();
-    const hintIndex = new Map(
-      this.ctx.consoleVisibleOrderHint().map((taskId, index) => [taskId, index] as const),
+    return sortConsoleForDisplayPure(
+      entries,
+      this.ctx.lastConsoleDemotedTaskId(),
+      this.ctx.consoleVisibleOrderHint(),
     );
-    return [...entries].sort((a, b) => {
-      // 1️⃣ C 位：focusing 永远排最前
-      if (a.status === 'focusing') return -1;
-      if (b.status === 'focusing') return 1;
-
-      // 2️⃣ 最近一次交互命中的四卡顺序优先，保证"选中项前置，其余存活项顺延"
-      const aHintIndex = hintIndex.get(a.taskId);
-      const bHintIndex = hintIndex.get(b.taskId);
-      if (aHintIndex !== undefined || bHintIndex !== undefined) {
-        if (aHintIndex !== undefined && bHintIndex !== undefined && aHintIndex !== bHintIndex) {
-          return aHintIndex - bHintIndex;
-        }
-        if (aHintIndex !== undefined && bHintIndex === undefined) return -1;
-        if (bHintIndex !== undefined && aHintIndex === undefined) return 1;
-      }
-
-      // 3️⃣ 刚离开 C 位的 stalled 卡固定第二（fallback）
-      if (demotedTaskId) {
-        const aDemoted = a.taskId === demotedTaskId && a.status === 'stalled';
-        const bDemoted = b.taskId === demotedTaskId && b.status === 'stalled';
-        if (aDemoted && !bDemoted) return -1;
-        if (bDemoted && !aDemoted) return 1;
-      }
-
-      // 4️⃣ stalled 在 waiting 之前
-      const aStalled = a.status === 'stalled';
-      const bStalled = b.status === 'stalled';
-      if (aStalled && !bStalled) return -1;
-      if (bStalled && !aStalled) return 1;
-
-      const aSuspended = isWaitingLike(a.status);
-      const bSuspended = isWaitingLike(b.status);
-      if (aSuspended && !bSuspended) return 1;
-      if (bSuspended && !aSuspended) return -1;
-
-      // 5️⃣ 同状态按入坞序稳定排列
-      if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
-      return a.taskId.localeCompare(b.taskId);
-    });
   }
 
 }

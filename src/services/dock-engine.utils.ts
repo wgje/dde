@@ -15,7 +15,7 @@ import {
   StatusMachineEntry,
   StatusMachineLabel,
 } from '../models/parking-dock';
-import { type PlannerFieldSet, sanitizePlannerFields } from '../utils/planner-fields';
+import { type PlannerFieldSet } from '../utils/planner-fields';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import { rankDockCandidates } from './dock-scheduler.rules';
 
@@ -343,4 +343,25 @@ export function buildDockEntry(params: BuildDockEntryParams): DockEntry {
     relationScore: params.relationScore,
     relationReason: params.relationReason,
   };
+}
+
+// ---------------------------------------------------------------------------
+//  Entry patch helpers（信号更新简化）
+// ---------------------------------------------------------------------------
+
+/** 按 taskId 局部更新单条 DockEntry，未命中则原样返回。 */
+export function patchEntryByTaskId(
+  entries: readonly DockEntry[],
+  taskId: string,
+  patch: Partial<DockEntry>,
+): DockEntry[] {
+  return entries.map(e => (e.taskId === taskId ? { ...e, ...patch } : e));
+}
+
+/** 对所有条目应用相同的局部更新。 */
+export function patchAllEntries(
+  entries: readonly DockEntry[],
+  patch: Partial<DockEntry>,
+): DockEntry[] {
+  return entries.map(e => ({ ...e, ...patch }));
 }

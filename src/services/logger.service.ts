@@ -49,10 +49,10 @@ export class LoggerService {
   
   /**
    * CategoryLogger 缓存
-   * TODO: categoryLoggers Map 会随着不同 category 调用持续增长且永不收缩。
-   * 对于当前项目规模（类别数有限）影响可忽略，但超长会话或动态类别场景下
-   * 应考虑 LRU 淘汰或定期清理。
+   * 上限 MAX_CATEGORY_LOGGERS，超出后淘汰最早创建的条目。
+   * 当前项目约 140 个静态类别，256 足够覆盖并留有余量。
    */
+  private static readonly MAX_CATEGORY_LOGGERS = 256;
   private categoryLoggers = new Map<string, CategoryLogger>();
   
   constructor() {
@@ -306,6 +306,11 @@ export class LoggerService {
   category(category: string): CategoryLogger {
     let logger = this.categoryLoggers.get(category);
     if (!logger) {
+      // 简易 FIFO 淘汰：超出上限时移除最早插入的条目
+      if (this.categoryLoggers.size >= LoggerService.MAX_CATEGORY_LOGGERS) {
+        const oldest = this.categoryLoggers.keys().next().value;
+        if (oldest !== undefined) this.categoryLoggers.delete(oldest);
+      }
       logger = new CategoryLogger(this, category);
       this.categoryLoggers.set(category, logger);
     }
