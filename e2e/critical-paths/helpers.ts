@@ -3,7 +3,7 @@
  * 
  * 从 critical-paths.spec.ts 抽取的共享代码
  */
-import { expect, Page } from '@playwright/test';
+import { expect, Locator, Page } from '@playwright/test';
 import {
   ensureAuthenticated as ensureSharedAuthenticated,
   ensureLoginModalVisible,
@@ -37,6 +37,10 @@ export interface TestHelpers {
   trackProjectId(id: string): void;
   getKeyboardModifier(): 'Meta' | 'Control';
   waitForTaskCard(page: Page, title: string, options?: { timeout?: number }): Promise<void>;
+  /** 安全可见性检查，替代 .isVisible({ timeout }).catch(() => false) */
+  isElementVisible(locator: Locator, timeout?: number): Promise<boolean>;
+  /** 条件点击：元素可见则点击并返回 true，不可见返回 false */
+  clickIfVisible(locator: Locator, options?: { timeout?: number; force?: boolean }): Promise<boolean>;
 }
 
 // ============================================================================
@@ -99,7 +103,7 @@ export const testHelpers: TestHelpers = {
    */
   async ensureEditorReady(page: Page, options?: { requireCloud?: boolean }): Promise<void> {
     const addTaskBtn = page.locator('[data-testid="add-task-btn"]');
-    if (await addTaskBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
+    if (await testHelpers.isElementVisible(addTaskBtn, 1200)) {
       return;
     }
 
@@ -190,5 +194,26 @@ export const testHelpers: TestHelpers = {
     const timeout = options?.timeout ?? 5000;
     await expect(page.locator(`[data-testid="task-card"]:has-text("${title}")`))
       .toBeVisible({ timeout });
-  }
+  },
+
+  /** 安全可见性检查，替代 .isVisible({ timeout }).catch(() => false) 模式 */
+  async isElementVisible(locator: Locator, timeout = 2000): Promise<boolean> {
+    try {
+      await locator.waitFor({ state: 'visible', timeout });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  /** 条件点击：元素可见则点击并返回 true，超时不可见返回 false */
+  async clickIfVisible(locator: Locator, options?: { timeout?: number; force?: boolean }): Promise<boolean> {
+    try {
+      await locator.waitFor({ state: 'visible', timeout: options?.timeout ?? 2000 });
+      await locator.click({ force: options?.force ?? false });
+      return true;
+    } catch {
+      return false;
+    }
+  },
 };

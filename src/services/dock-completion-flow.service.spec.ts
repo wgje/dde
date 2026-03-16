@@ -685,4 +685,110 @@ describe('DockCompletionFlowService', () => {
       expect(result).toBeNull();
     });
   });
+
+  // =========================================================================
+  //  8. Race conditions & edge cases
+  // =========================================================================
+
+  describe('race conditions', () => {
+    it('double-trigger of resolveAfterCompletion should not corrupt entries', () => {
+      const ctx = buildContext({
+        entries: [
+          makeEntry({ taskId: 'A', status: 'completed' }),
+          makeEntry({ taskId: 'B', status: 'pending_start', dockedOrder: 1 }),
+          makeEntry({ taskId: 'C', status: 'pending_start', dockedOrder: 2 }),
+        ],
+        suspendChainRootTaskId: null,
+        focusMode: false,
+      });
+      service.init(ctx);
+
+      // 连续触发两次完成决策
+      service.resolveAfterCompletion('A');
+      service.resolveAfterCompletion('A');
+
+      // 结果只应有一个 main 任务
+      const mainEntries = ctx.entries().filter(e => e.isMain);
+      expect(mainEntries.length).toBe(1);
+    });
+
+    it('resolveAfterCompletion for a non-existent taskId should not throw', () => {
+      const ctx = buildContext({
+        entries: [
+          makeEntry({ taskId: 'A', status: 'focusing' }),
+        ],
+        focusMode: true,
+      });
+      service.init(ctx);
+
+      // 传入不存在的 taskId 不应抛异常
+      expect(() => service.resolveAfterCompletion('non-existent')).not.toThrow();
+    });
+
+    it('promoteCandidate with invalid taskId should not corrupt entries', () => {
+      const ctx = buildContext({
+        entries: [
+          makeEntry({ taskId: 'A', isMain: true, status: 'focusing' }),
+        ],
+        focusMode: true,
+      });
+      service.init(ctx);
+
+      service.promoteCandidate('non-existent');
+
+      // A 仍是 main 且状态不变
+      const a = ctx.entries().find(e => e.taskId === 'A');
+      expect(a?.isMain).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  //  9. Error path: sub-service failures
+  // =========================================================================
+
+  describe('error paths', () => {
+    it('propagates fragmentRest.startFragmentEntryCountdown errors (no internal try/catch)', () => {
+      vi.useFakeTimers();
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      mockFragmentRest.startFragmentEntryCountdown.mockImplementationOnce(() => {
+        throw new Error('fragment service unavailable');
+      });
+
+      const rootEntry = makeEntry({
+        taskId: 'root-err',
+        isMain: true,
+        status: 'suspended_waiting',
+        waitStartedAt: new Date(now).toISOString(),
+        waitMinutes: 30,
+      });
+
+      const ctx = buildContext({
+        entries: [
+          makeEntry({ taskId: 'done-err', status: 'completed' }),
+          rootEntry,
+        ],
+        suspendChainRootTaskId: 'root-err',
+        focusMode: true,
+      });
+      service.init(ctx);
+
+      // 当前实现不捕获 fragment 服务异常——错误会向上传播
+      expect(() => service.resolveAfterCompletion('done-err')).toThrow('fragment service unavailable');
+
+      vi.useRealTimers();
+    });
+
+    it('propagates zoneService.resolveSourceProjectId errors (no internal try/catch)', () => {
+      mockZoneService.resolveSourceProjectId.mockImplementationOnce(() => {
+        throw new Error('zone service unavailable');
+      });
+
+      const entry = makeEntry({ taskId: 'zone-err', sourceProjectId: null });
+
+      // 当前实现不捕获 zone 服务异常——错误会向上传播
+      expect(() => service.toSchedulerCandidate(entry)).toThrow('zone service unavailable');
+    });
+  });
 });

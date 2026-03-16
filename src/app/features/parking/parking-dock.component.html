@@ -28,6 +28,7 @@
                 type="button"
                 class="text-[9px] px-2 py-1 rounded border border-slate-600/70 text-slate-300 hover:bg-slate-700/50"
                 (click)="cancelPendingAutoPromote()"
+                aria-label="收起推荐"
                 data-testid="dock-v3-pending-cancel">
                 收起推荐
               </button>
@@ -49,6 +50,7 @@
                       ? 'border-indigo-400/40 bg-indigo-500/8 hover:bg-indigo-500/15'
                       : 'border-emerald-400/40 bg-emerald-500/8 hover:bg-emerald-500/15')"
                   (click)="choosePendingCandidate(entry.taskId)"
+                  [attr.aria-label]="'选择候选任务：' + entry.title"
                   [attr.data-testid]="'dock-v3-pending-choice-' + i">
                   <div class="text-[10px] font-mono mb-1.5 font-semibold"
                     [class.text-amber-300]="i % 3 === 0"
@@ -196,6 +198,7 @@
                 type="button"
                 class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl border border-slate-600/70 bg-slate-800/80 px-3 py-2 text-[11px] text-slate-200 hover:bg-slate-700"
                 (click)="closeHelpOverlay()"
+                aria-label="关闭帮助"
                 data-testid="dock-v3-help-close">
                 关闭
               </button>
@@ -219,7 +222,10 @@
 
       <!-- GAP-2: 碎片时间进入倒计时选择 -->
       @if (engine.fragmentEntryCountdown() !== null) {
-        <div class="fixed inset-0 z-[48] flex items-center justify-center pointer-events-auto">
+        <div class="fixed inset-0 z-[48] flex items-center justify-center pointer-events-auto"
+          role="dialog"
+          aria-modal="true"
+          aria-label="碎片时间倒计时">
           <div class="fragment-countdown-card rounded-2xl border border-emerald-500/30 bg-slate-900/95 px-6 py-5 text-center shadow-2xl max-w-[320px]">
             <div class="text-emerald-400 text-[11px] font-semibold tracking-widest mb-2 uppercase">碎片时间</div>
             <div class="text-slate-100 text-sm mb-3">
@@ -233,6 +239,7 @@
                 type="button"
                 class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
                 (click)="engine.fragmentRest.acceptFragmentEntry()"
+                aria-label="立即进入碎片任务"
                 data-testid="fragment-countdown-accept">
                 立即进入
               </button>
@@ -240,6 +247,7 @@
                 type="button"
                 class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs transition-colors"
                 (click)="engine.fragmentRest.skipFragmentEntry()"
+                aria-label="跳过碎片任务"
                 data-testid="fragment-countdown-skip">
                 跳过
               </button>
@@ -297,6 +305,7 @@
                   type="button"
                   class="min-h-[44px] rounded-xl border border-slate-600/70 bg-slate-800/85 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
                   aria-keyshortcuts="Escape"
+                  aria-label="继续专注"
                   (click)="confirmExitFocus('cancel')"
                   data-testid="dock-v3-exit-cancel">
                   继续专注
@@ -305,6 +314,7 @@
                   type="button"
                   class="min-h-[44px] rounded-xl bg-slate-700 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-600"
                   aria-keyshortcuts="Alt+K"
+                  aria-label="仅关闭背景虚化"
                   (click)="confirmExitFocus('keep-focus-hide-scrim')"
                   data-testid="dock-v3-exit-keep">
                   仅关闭背景虚化
@@ -313,6 +323,7 @@
                   type="button"
                   class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
                   aria-keyshortcuts="Enter"
+                  aria-label="结束专注"
                   (click)="confirmExitFocus('request-end-focus')"
                   data-testid="dock-v3-exit-request-end">
                   结束专注…
@@ -323,6 +334,7 @@
                 <button
                   type="button"
                   class="min-h-[44px] rounded-xl bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+                  aria-label="结束专注并保留停泊坞"
                   (click)="confirmExitFocus('save-exit')"
                   data-testid="dock-v3-exit-save">
                   结束专注并保留停泊坞
@@ -330,6 +342,7 @@
                 <button
                   type="button"
                   class="min-h-[44px] rounded-xl bg-rose-700/80 px-3 py-2 text-xs font-medium text-white hover:bg-rose-600"
+                  aria-label="结束专注并清空停泊坞"
                   (click)="confirmExitFocus('clear-exit')"
                   data-testid="dock-v3-exit-clear">
                   结束专注并清空停泊坞
@@ -343,6 +356,7 @@
       @if (showRestoreHint()) {
         <div
           class="fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
+          aria-live="polite"
           data-testid="dock-v3-exit-restore-hint">
           已保留专注会话，可随时重新开启虚化。
         </div>
@@ -355,6 +369,7 @@
             ? 'border-emerald-400/25 bg-slate-900/88 text-emerald-100'
             : 'border-indigo-400/25 bg-slate-900/88 text-slate-100'"
           [style.bottom]="'calc(' + dockBottomInset + ' + 148px)'"
+          aria-live="polite"
           data-testid="dock-v3-dock-feedback">
           {{ feedback.message }}
         </div>
@@ -403,6 +418,7 @@
       <div
         class="fixed left-1/2 -translate-x-1/2 z-[45] px-3 py-2 rounded-full border border-indigo-400/30 bg-slate-900/90 text-[11px] text-slate-100 shadow-lg"
         [style.bottom]="'calc(' + dockBottomInset + ' + 132px)'"
+        aria-live="polite"
         data-testid="dock-v3-first-main-hint">
         初始主任务已选定，15 秒内可点击其他任务改选。
       </div>
@@ -445,6 +461,8 @@
                   ? 'bg-indigo-500/90 text-white hover:bg-indigo-400'
                   : 'bg-slate-800/80 text-slate-200 hover:bg-slate-700'"
                 style="min-height: 44px;"
+                [attr.aria-label]="showNewTaskForm() ? '收起新建任务表单' : '新建停泊任务'"
+                [attr.aria-expanded]="showNewTaskForm()"
                 data-testid="dock-v3-create-toggle">
                 {{ showNewTaskForm() ? '收起新建' : '+ 新建' }}
               </button>
@@ -455,6 +473,7 @@
               (click)="toggleHelpOverlay()"
               class="px-4 py-1.5 rounded-full text-xs font-semibold text-slate-200 bg-slate-800/80 hover:bg-slate-700 transition-colors"
               style="min-height: 44px;"
+              aria-label="操作帮助"
               data-testid="dock-v3-help-trigger-inline">
               操作帮助
             </button>
@@ -471,6 +490,8 @@
                 ? '0 0 20px rgba(99,102,241,0.35), 0 0 6px rgba(139,92,246,0.4)'
                 : 'none'"
               style="min-height: 44px;"
+              [attr.aria-label]="!engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '关闭背景虚化' : '开启背景虚化')"
+              [attr.aria-pressed]="engine.focusMode() && engine.focusScrimOn()"
               data-testid="dock-v3-focus-toggle">
               {{ !engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '背景虚化开启' : '背景虚化关闭') }}
             </button>
@@ -759,6 +780,8 @@
 
         <!-- 任务卡片列表 -->
         <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x"
+             role="group"
+             aria-label="停泊坞任务列表"
              (dragover)="onDockRailDragOver($event)"
              (dragleave)="onDockRailDragLeave()"
              (drop)="onDrop($event)">

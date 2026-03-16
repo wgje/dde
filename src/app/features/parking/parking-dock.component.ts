@@ -967,7 +967,7 @@ export class ParkingDockComponent implements OnDestroy {
     this.touchTaskId = null;
     this.longPress.schedule(() => {
       this.touchTaskId = taskId;
-    }, 500);
+    }, PARKING_CONFIG.DOCK_LONG_PRESS_DELAY_MS);
   }
 
   onTouchMove(event: TouchEvent, _taskId?: string): void {
@@ -1143,14 +1143,14 @@ export class ParkingDockComponent implements OnDestroy {
     this.showHelpNudge.set(true);
     this.helpNudge.schedule(() => {
       this.showHelpNudge.set(false);
-    }, 4200);
+    }, PARKING_CONFIG.DOCK_HELP_NUDGE_DURATION_MS);
   }
 
   private showDockFeedback(message: string, tone: DockActionFeedback['tone']): void {
     this.dockActionFeedback.set({ message, tone });
     this.dockFeedback.schedule(() => {
       this.dockActionFeedback.set(null);
-    }, 2400);
+    }, PARKING_CONFIG.DOCK_FEEDBACK_TOAST_DURATION_MS);
   }
 
   private dispatchCloseTransientSurfaceEvent(): void {

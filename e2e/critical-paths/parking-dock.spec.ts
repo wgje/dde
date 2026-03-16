@@ -6,7 +6,7 @@ async function bootstrapLocalWorkspace(page: Page): Promise<void> {
   await testHelpers.waitForAppReady(page);
 
   const localModeBtn = page.locator('[data-testid="local-mode-btn"]').first();
-  if (await localModeBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+  if (await testHelpers.isElementVisible(localModeBtn, 2000)) {
     await localModeBtn.click();
   }
 
@@ -15,7 +15,7 @@ async function bootstrapLocalWorkspace(page: Page): Promise<void> {
 
 async function enterProjectWorkspace(page: Page): Promise<void> {
   const enterButton = page.getByRole('button', { name: /enter/i }).first();
-  if (await enterButton.isVisible({ timeout: 1500 }).catch(() => false)) {
+  if (await testHelpers.isElementVisible(enterButton, 1500)) {
     await enterButton.click({ force: true });
   }
 
@@ -41,28 +41,26 @@ async function createAndActivateProject(page: Page, projectName: string): Promis
 
 async function ensureTextReady(page: Page): Promise<void> {
   const textTab = page.locator('[data-testid="text-view-tab"]').first();
-  if (await textTab.isVisible({ timeout: 1200 }).catch(() => false)) {
-    await textTab.click({ force: true });
-  }
+  await testHelpers.clickIfVisible(textTab, { timeout: 1200, force: true });
 }
 
 async function ensureFlowReady(page: Page): Promise<void> {
-  const flowTab = page.locator('[data-testid="flow-view-tab"]').first();
-  if (await flowTab.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await flowTab.click({ force: true });
-  }
+  await testHelpers.clickIfVisible(
+    page.locator('[data-testid="flow-view-tab"]').first(),
+    { timeout: 3000, force: true },
+  );
 
-  const loadFlowButton = page.getByRole('button', { name: /流程图|加载/i }).first();
-  if (await loadFlowButton.isVisible({ timeout: 1500 }).catch(() => false)) {
-    await loadFlowButton.click({ force: true });
-  }
+  await testHelpers.clickIfVisible(
+    page.getByRole('button', { name: /流程图|加载/i }).first(),
+    { timeout: 1500, force: true },
+  );
 
   await expect(page.locator('[data-testid="flow-diagram"]').first()).toBeVisible({ timeout: 15000 });
 }
 
 async function ensureDockPanelVisible(page: Page): Promise<void> {
   const panel = page.locator('[data-testid="dock-v3-panel"]').first();
-  if (await panel.isVisible({ timeout: 800 }).catch(() => false)) {
+  if (await testHelpers.isElementVisible(panel, 800)) {
     return;
   }
 
@@ -93,7 +91,7 @@ async function clickVisibleFocusToggle(page: Page): Promise<boolean> {
 
   for (const selector of selectors) {
     const toggle = page.locator(selector).first();
-    if (await toggle.isVisible({ timeout: 1200 }).catch(() => false)) {
+    if (await testHelpers.isElementVisible(toggle, 1200)) {
       await toggle.click({ force: true });
       return true;
     }
@@ -135,7 +133,7 @@ async function enterFocusMode(page: Page): Promise<void> {
 
 async function openExitConfirm(page: Page): Promise<void> {
   const confirm = page.locator('[data-testid="dock-v3-exit-confirm"]').first();
-  if (await confirm.isVisible({ timeout: 800 }).catch(() => false)) {
+  if (await testHelpers.isElementVisible(confirm, 800)) {
     return;
   }
 
@@ -203,11 +201,11 @@ async function createDockTaskByForm(page: Page, title: string): Promise<void> {
 
 async function createInlineTaskInFocus(page: Page, times = 1): Promise<void> {
   const fab = page.locator('[data-testid="dock-v3-backup-fab"]').first();
-  if (!(await fab.isVisible({ timeout: 1500 }).catch(() => false))) {
-    const scrimToggle = page.locator('[data-testid="dock-v3-focus-toggle"]').first();
-    if (await scrimToggle.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await scrimToggle.click({ force: true });
-    }
+  if (!(await testHelpers.isElementVisible(fab, 1500))) {
+    await testHelpers.clickIfVisible(
+      page.locator('[data-testid="dock-v3-focus-toggle"]').first(),
+      { timeout: 1500, force: true },
+    );
   }
 
   await expect(fab).toBeVisible({ timeout: 10000 });
@@ -501,18 +499,18 @@ test.describe('ParkingDock V3 critical paths', () => {
     await enterFocusMode(page);
 
     const waitTrigger = page.locator('[data-testid="dock-v3-wait-trigger"]').first();
-    if (await waitTrigger.isVisible({ timeout: 2000 }).catch(() => false)) {
+    if (await testHelpers.isElementVisible(waitTrigger, 2000)) {
       await waitTrigger.click({ force: true });
-      const waitPreset = page.locator('[data-testid="dock-v3-wait-preset"]').filter({ hasText: '30 分钟' }).first();
-      if (await waitPreset.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await waitPreset.click({ force: true });
-      }
+      await testHelpers.clickIfVisible(
+        page.locator('[data-testid="dock-v3-wait-preset"]').filter({ hasText: '30 分钟' }).first(),
+        { timeout: 1500, force: true },
+      );
     }
 
-    const completeBtn = page.locator('[data-testid="dock-v3-complete-btn"]').first();
-    if (await completeBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await completeBtn.click({ force: true });
-    }
+    await testHelpers.clickIfVisible(
+      page.locator('[data-testid="dock-v3-complete-btn"]').first(),
+      { timeout: 2000, force: true },
+    );
 
     await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 10000 });
   });
@@ -668,11 +666,11 @@ test.describe('ParkingDock V3 critical paths', () => {
 
     await page.reload();
     await testHelpers.waitForAppReady(page);
-    const localModeBtn = page.locator('[data-testid="local-mode-btn"]').first();
-    if (await localModeBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
-      await localModeBtn.click({ force: true });
-    }
-    if (!(await page.locator('[data-testid="project-shell-main-content"]').first().isVisible({ timeout: 1500 }).catch(() => false))) {
+    await testHelpers.clickIfVisible(
+      page.locator('[data-testid="local-mode-btn"]').first(),
+      { timeout: 1200, force: true },
+    );
+    if (!(await testHelpers.isElementVisible(page.locator('[data-testid="project-shell-main-content"]').first(), 1500))) {
       await page.locator('[data-testid="project-item"]').first().click({ force: true });
       await enterProjectWorkspace(page);
     }
@@ -764,7 +762,7 @@ test.describe('ParkingDock V3 critical paths', () => {
     await expect(backdrop).not.toHaveClass(/active/, { timeout: 10000 });
 
     const scrimToggle = page.locator('[data-testid="dock-v3-focus-toggle"]').first();
-    if (await scrimToggle.isVisible({ timeout: 1500 }).catch(() => false)) {
+    if (await testHelpers.isElementVisible(scrimToggle, 1500)) {
       await scrimToggle.evaluate((el: HTMLElement) => el.click());
       await expect(backdrop).toHaveClass(/active/, { timeout: 10000 });
     }
