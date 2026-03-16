@@ -178,7 +178,7 @@ async function handleHealthCheck(): Promise<Response> {
   } catch (error) {
     return jsonResponse({
       status: 'unhealthy',
-      error: String(error),
+      error: 'Health check failed',
       timestamp: new Date().toISOString(),
     }, 503);
   }
@@ -231,7 +231,7 @@ async function handleScan(body: ScanRequest): Promise<Response> {
     return jsonResponse({
       fileId,
       status: SCAN_STATUS.FAILED,
-      error: String(error),
+      error: 'File scan could not be completed',
       scannedAt: new Date().toISOString(),
       scanner: 'clamav',
     });
@@ -303,8 +303,8 @@ async function handleHashVerification(body: ScanRequest): Promise<Response> {
     const valid = data.file_hash === expectedHash;
     
     if (!valid) {
-      // 记录可能的篡改尝试
-      console.warn('Hash mismatch detected:', { fileId, expected: expectedHash, actual: data.file_hash });
+      // 记录可能的篡改尝试（脱敏处理）
+      console.warn('Hash mismatch detected:', { fileId, hashMatch: false });
     }
 
     return jsonResponse({ valid });

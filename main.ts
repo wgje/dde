@@ -123,9 +123,13 @@ async function checkAndClearCacheIfNeeded(): Promise<boolean> {
   }
 }
 
-// ========== 强制清理缓存工具函数（暴露到全局供紧急使用）==========
+// ========== 强制清理缓存工具函数（仅在错误页面按钮中使用，防止外部脚本滥用）==========
+let _forceClearInvoked = false;
 function registerForceClearCacheTool(): void {
   (window as Window & { __NANOFLOW_FORCE_CLEAR_CACHE__?: () => Promise<void> }).__NANOFLOW_FORCE_CLEAR_CACHE__ = async function() {
+    // 限流：防止重复调用导致刷新循环
+    if (_forceClearInvoked) return;
+    _forceClearInvoked = true;
     log('🧹 用户触发强制清理缓存...');
     localStorage.setItem(FORCE_CLEAR_KEY, 'true');
     

@@ -129,8 +129,7 @@ async function sendSlackAlert(
       });
       
       if (!response.ok) {
-        const text = await response.text();
-        return { success: false, error: `Slack API error: ${response.status} - ${text}` };
+        return { success: false, error: `Slack notification delivery failed (HTTP ${response.status})` };
       }
       
       return { success: true };
@@ -217,8 +216,7 @@ async function sendEmailAlert(
       });
       
       if (!response.ok) {
-        const data = await response.json();
-        return { success: false, error: `Resend API error: ${response.status} - ${JSON.stringify(data)}` };
+        return { success: false, error: `Email delivery failed (HTTP ${response.status})` };
       }
       
       return { success: true };
@@ -350,12 +348,21 @@ function createHealthReportAlert(stats: {
 // ===========================================
 
 Deno.serve(async (req: Request) => {
-  // CORS 预检（内部服务函数，仅允许 service_role 调用）
+  // CORS 预检（内部服务函数，仅允许白名单来源）
+  const ALLOWED_ORIGINS = [
+    'https://dde-eight.vercel.app',
+    'https://nanoflow.app',
+  ];
+  const requestOrigin = req.headers.get('origin') || '';
+  const corsOrigin = ALLOWED_ORIGINS.includes(requestOrigin)
+    ? requestOrigin
+    : ALLOWED_ORIGINS[0];
+
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
       headers: {
-        'Access-Control-Allow-Origin': req.headers.get('origin') || '',
+        'Access-Control-Allow-Origin': corsOrigin,
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Vary': 'Origin',
@@ -526,7 +533,7 @@ Deno.serve(async (req: Request) => {
   } catch (error) {
     console.error('Alert function error:', error);
     return new Response(JSON.stringify({ 
-      error: error instanceof Error ? error.message : 'Unknown error' 
+      error: 'Internal alert processing error' 
     }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },

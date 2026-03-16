@@ -61,6 +61,9 @@ export class DockCloudSyncService implements OnDestroy {
   private readonly cloudPullTimer = new TimerHandle();
   private cloudPullRetryCount = 0;
   private lastCloudPullAt = 0;
+  /** 断路器：连续不可恢复错误（如 401/403）时停止重试 */
+  private circuitBreakerOpen = false;
+  private circuitBreakerResetTimer = new TimerHandle();
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
 
@@ -88,7 +91,12 @@ export class DockCloudSyncService implements OnDestroy {
 
   scheduleCloudPush(userId: string, snapshot: DockSnapshot | null): void {
     const cb = this.callbacks;
-    if (!cb) return;
+    if (!cb) {
+      // H-4 fix: 未初始化时记录警告而非静默吞掉，防止 init 顺序变更后
+      // 云同步静默失效而无任何可观测信号。
+      this.logger.warn('scheduleCloudPush called before init() — skipping', { userId });
+      return;
+    }
 
     const runPush = () => {
       const holdDelay = cb.getNonCriticalHoldDelay();
@@ -115,7 +123,16 @@ export class DockCloudSyncService implements OnDestroy {
 
   private async pullCloudSnapshot(userId: string): Promise<void> {
     const cb = this.callbacks;
-    if (!cb) return;
+    if (!cb) {
+      this.logger.warn('pullCloudSnapshot called before init() — skipping', { userId });
+      return;
+    }
+
+    // 断路器开启时跳过拉取
+    if (this.circuitBreakerOpen) {
+      this.logger.warn('pullCloudSnapshot: circuit breaker open — skipping');
+      return;
+    }
 
     this.lastCloudPullAt = Date.now();
     const ctx = cb.buildNormalizeContext();
@@ -180,9 +197,18 @@ export class DockCloudSyncService implements OnDestroy {
       cb.scheduleLocalPersist(remote, userId);
       await this.hydrateRoutineSlots(userId);
       this.cloudPullRetryCount = 0; // reset on success
+      this.resetCircuitBreaker();
     } catch (rawError) {
       const error = supabaseErrorToError(rawError);
       this.logger.warn('Failed to pull focus session from cloud', error);
+
+      // 对不可恢复错误（认证/权限）开启断路器，避免无限重试风暴
+      const statusCode = (rawError as { status?: number })?.status;
+      if (statusCode === 401 || statusCode === 403) {
+        this.openCircuitBreaker();
+        return;
+      }
+
       this.cloudPullRetryCount += 1;
       if (this.cloudPullRetryCount > PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES) {
         this.logger.warn(`pullCloudSnapshot: max retries (${PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES}) reached, giving up`);
@@ -327,5 +353,24 @@ export class DockCloudSyncService implements OnDestroy {
   cancelTimers(): void {
     this.cloudPushTimer.cancel();
     this.cloudPullTimer.cancel();
+    this.circuitBreakerResetTimer.cancel();
+  }
+
+  /** 断路器：不可恢复错误时停止重试，30 秒后自动半开 */
+  private openCircuitBreaker(): void {
+    this.circuitBreakerOpen = true;
+    this.cloudPullRetryCount = 0;
+    this.logger.warn('Circuit breaker opened — halting cloud pull retries for 30s');
+    this.circuitBreakerResetTimer.schedule(() => {
+      this.circuitBreakerOpen = false;
+      this.logger.info('Circuit breaker half-open — next pull attempt allowed');
+    }, 30_000);
+  }
+
+  private resetCircuitBreaker(): void {
+    if (this.circuitBreakerOpen) {
+      this.circuitBreakerOpen = false;
+      this.circuitBreakerResetTimer.cancel();
+    }
   }
 }

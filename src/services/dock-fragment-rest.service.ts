@@ -140,7 +140,7 @@ export class DockFragmentRestService {
       rootTaskId: context?.rootTaskId,
       remainingMinutes: context?.remainingMinutes,
     };
-    const totalSeconds = context?.countdownSeconds ?? PARKING_CONFIG.FRAGMENT_ENTRY_COUNTDOWN_S;
+    const totalSeconds = Math.max(1, context?.countdownSeconds ?? PARKING_CONFIG.FRAGMENT_ENTRY_COUNTDOWN_S);
     this.fragmentEntryCountdown.set(totalSeconds);
     this.fragmentCountdownInterval.start(() => {
       const current = this.fragmentEntryCountdown();

@@ -7,6 +7,7 @@ import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
   DockEntry,
+  DockLane,
   DockSourceSection,
   DockTaskStatus,
   DockUiStatus,
@@ -38,6 +39,7 @@ export function toFocusTaskSlot(
   entry: DockEntry,
   zone: 'command' | 'combo-select' | 'backup' = 'command',
   idx = 0,
+  now = Date.now(),
 ): FocusTaskSlot {
   return {
     slotId: entry.taskId,
@@ -55,7 +57,7 @@ export function toFocusTaskSlot(
       : null,
     sourceProjectId: entry.sourceProjectId ?? null,
     sourceBlockType: entry.sourceKind === 'dock-created' ? 'text' : null,
-    draggedInAt: Date.now(),
+    draggedInAt: now,
     isFirstBatch: entry.dockedOrder === 0,
     inlineTitle: entry.title,
     inlineDetail: entry.detail ?? null,
@@ -360,10 +362,57 @@ export function patchEntryByTaskId(
   return entries.map(e => (e.taskId === taskId ? { ...e, ...patch } : e));
 }
 
-/** 对所有条目应用相同的局部更新。 */
+/** 对所有条目应用相同的局部更新。仅当 patch 实际改变了值时才创建新引用。 */
 export function patchAllEntries(
   entries: readonly DockEntry[],
   patch: Partial<DockEntry>,
 ): DockEntry[] {
-  return entries.map(e => ({ ...e, ...patch }));
+  const patchKeys = Object.keys(patch) as (keyof DockEntry)[];
+  let changed = false;
+  const next = entries.map(e => {
+    const needsPatch = patchKeys.some(key => e[key] !== patch[key]);
+    if (!needsPatch) return e;
+    changed = true;
+    return { ...e, ...patch };
+  });
+  return changed ? next : entries as unknown as DockEntry[];
+}
+
+// ---------------------------------------------------------------------------
+//  SchedulerCandidate 转换（M-1 修复：消除 DockCompletionFlowService / DockPromotionService 的重复实现）
+// ---------------------------------------------------------------------------
+
+/** 调度器候选人数据对象 */
+export interface SchedulerCandidate {
+  taskId: string;
+  lane: DockLane;
+  load: CognitiveLoad;
+  expectedMinutes: number | null;
+  waitMinutes: number | null;
+  dockedOrder: number;
+  manualOrder: number | null;
+  relationScore: number | null;
+  sourceProjectId: string | null;
+}
+
+/**
+ * 将 DockEntry 转换为调度器候选人纯数据对象。
+ * @param fallbackProjectId 当 entry.sourceProjectId 为空时使用的回退值
+ *   （通常来自 DockZoneService.resolveSourceProjectId）。
+ */
+export function toSchedulerCandidate(
+  entry: DockEntry,
+  fallbackProjectId: string | null,
+): SchedulerCandidate {
+  return {
+    taskId: entry.taskId,
+    lane: entry.lane,
+    load: entry.load,
+    expectedMinutes: entry.expectedMinutes,
+    waitMinutes: entry.waitMinutes,
+    dockedOrder: entry.dockedOrder,
+    manualOrder: normalizeNullableNumber(entry.manualOrder),
+    relationScore: normalizeNullableNumber(entry.relationScore),
+    sourceProjectId: entry.sourceProjectId ?? fallbackProjectId,
+  };
 }

@@ -21,8 +21,9 @@ function sanitizeUrlValue(value: unknown): string {
     const parsed = new URL(url);
     if (!URL_ALLOWED_PROTOCOLS.includes(parsed.protocol)) return '';
   } catch {
-    // 非标准 URL（相对路径等）：只放行安全前缀
+    // 非标准 URL（相对路径等）：只放行安全前缀，阻止路径穿越
     if (!/^https?:\/\/|^blob:https?:|^\/(?!\/)|^storage\//.test(url)) return '';
+    if (url.includes('..')) return '';
   }
   return url;
 }
