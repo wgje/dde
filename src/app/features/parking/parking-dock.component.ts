@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   ElementRef,
   HostListener,
   OnDestroy,
@@ -385,13 +386,17 @@ export class ParkingDockComponent implements OnDestroy {
   private draggingDockTaskId: string | null = null;
   private readonly recentlyDocked = new TimerHandle();
   private helpNudgeShownOnce = false;
+  /** 用于 requestAnimationFrame 清理的追踪 ID 列表 */
+  private readonly pendingRafs: number[] = [];
+  /** planner 面板自动聚焦定时器 */
+  private readonly plannerAutoFocus = new TimerHandle();
 
   constructor() {
     effect(() => {
       const activeEntry = this.plannerActiveEntry();
       if (!activeEntry) return;
 
-      setTimeout(() => {
+      this.plannerAutoFocus.schedule(() => {
         this.focusPlannerPanel();
         this.scrollPlannerPanelIntoView();
       }, 0);
@@ -552,6 +557,10 @@ export class ParkingDockComponent implements OnDestroy {
     this.helpNudge.cancel();
     this.dockFeedback.cancel();
     this.recentlyDocked.cancel();
+    this.plannerAutoFocus.cancel();
+    // 清理所有未完成的 requestAnimationFrame
+    for (const id of this.pendingRafs) cancelAnimationFrame(id);
+    this.pendingRafs.length = 0;
     this.persistHudPosition();
     this.transitionPerformanceTierLock.set(null);
     this.engine.endFocusTransition();
@@ -1229,9 +1238,9 @@ export class ParkingDockComponent implements OnDestroy {
     this.engine.beginFocusTransition(transition);
     this.startFlipGhost(transition);
 
-    requestAnimationFrame(() => {
+    this.pendingRafs.push(requestAnimationFrame(() => {
       this.engine.toggleFocusMode();
-    });
+    }));
 
     this.flip.schedule(() => {
       const current = this.engine.focusTransition();
@@ -1255,9 +1264,9 @@ export class ParkingDockComponent implements OnDestroy {
     this.engine.beginFocusTransition(transition);
     this.startFlipGhost(transition);
 
-    requestAnimationFrame(() => {
+    this.pendingRafs.push(requestAnimationFrame(() => {
       this.engine.toggleFocusMode();
-    });
+    }));
 
     this.flip.schedule(() => {
       const current = this.engine.focusTransition();

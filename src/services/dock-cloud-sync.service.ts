@@ -5,7 +5,7 @@
  * Extracted from DockEngineService to decouple network/cloud operations
  * from business state logic.
  */
-import { Injectable, inject } from '@angular/core';
+import { Injectable, OnDestroy, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
@@ -51,7 +51,7 @@ export interface CloudSyncEngineCallbacks {
 @Injectable({
   providedIn: 'root',
 })
-export class DockCloudSyncService {
+export class DockCloudSyncService implements OnDestroy {
   private readonly syncService = inject(SimpleSyncService);
   private readonly actionQueue = inject(ActionQueueService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
@@ -319,6 +319,10 @@ export class DockCloudSyncService {
   }
 
   // ─── Cleanup ──────────────────────────────────
+
+  ngOnDestroy(): void {
+    this.cancelTimers();
+  }
 
   cancelTimers(): void {
     this.cloudPushTimer.cancel();

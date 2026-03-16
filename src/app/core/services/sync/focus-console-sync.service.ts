@@ -17,6 +17,7 @@ import {
   failure,
   ErrorCodes,
 } from '../../../../utils/result';
+import { PARKING_CONFIG } from '../../../../config/parking.config';
 
 /** 最小化运行时校验：DockSnapshot 至少含合法 version */
 function isDockSnapshotLike(value: unknown): value is DockSnapshot {
@@ -88,8 +89,9 @@ export class FocusConsoleSyncService {
 
       const row = data as FocusSessionRow;
 
-      // LWW：本地更新时间 >= 远端时，跳过远端数据（本地赢）
-      if (localUpdatedAt && row.updated_at <= localUpdatedAt) {
+      // LWW：本地更新时间 > 远端时，跳过远端数据（本地赢）
+      // 相同时间戳时优先使用远端数据确保 LWW 一致性
+      if (localUpdatedAt && row.updated_at < localUpdatedAt) {
         return success(null);
       }
 
@@ -268,9 +270,9 @@ export class FocusConsoleSyncService {
       if (updateError) throw supabaseErrorToError(updateError);
 
       if (!updateResult || updateResult.length === 0) {
-        // M-15: 冲突时重试最多 3 次（原仅 1 次，高并发场景下不足）
-        if (_retryAttempt < 3) {
-          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${_retryAttempt + 1}/3`);
+        // M-15: 冲突时重试最多 CLOUD_PULL_MAX_RETRIES 次
+        if (_retryAttempt < PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES) {
+          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${_retryAttempt + 1}/${PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES}`);
           return this.incrementRoutineCompletion(mutation, _retryAttempt + 1);
         }
         this.logger.warn('incrementRoutineCompletion: conflict persists after retry');

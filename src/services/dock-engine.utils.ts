@@ -88,7 +88,9 @@ export function isConsoleBackgroundStatus(status: DockTaskStatus): boolean {
 
 export function getWaitRemainingSeconds(entry: DockEntry): number | null {
   if (!entry.waitStartedAt || !entry.waitMinutes) return null;
-  const elapsed = Date.now() - new Date(entry.waitStartedAt).getTime();
+  const startTime = new Date(entry.waitStartedAt).getTime();
+  if (Number.isNaN(startTime)) return null;
+  const elapsed = Date.now() - startTime;
   const total = entry.waitMinutes * 60_000;
   return Math.max(0, Math.ceil((total - elapsed) / 1000));
 }

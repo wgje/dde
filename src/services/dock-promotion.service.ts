@@ -282,7 +282,7 @@ export class DockPromotionService {
         if (currentFocusId && entry.taskId === currentFocusId) {
           return {
             ...entry,
-            status: deriveBackgroundStatus(entry, targetEntry, entry),
+            status: deriveBackgroundStatus(entry, targetEntry, this.ctx.focusingEntry()),
           };
         }
         return entry;

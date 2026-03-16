@@ -10,14 +10,19 @@ const MAX_ATTACHMENTS_PER_TASK = ATTACHMENT_CONFIG.MAX_ATTACHMENTS_PER_TASK;
 
 /** M-2: 模块级 URL 清洗函数，用于所有 URL 类型字段 */
 const URL_ALLOWED_PROTOCOLS = ['https:', 'http:', 'blob:'];
+/** 危险协议黑名单：阻止 XSS 注入向量 */
+const URL_DANGEROUS_PROTOCOLS = /^(javascript|data|vbscript):/i;
 function sanitizeUrlValue(value: unknown): string {
   const url = String(value || '');
   if (!url) return '';
+  // 先行拦截危险协议（XSS 防护）
+  if (URL_DANGEROUS_PROTOCOLS.test(url.trim())) return '';
   try {
     const parsed = new URL(url);
     if (!URL_ALLOWED_PROTOCOLS.includes(parsed.protocol)) return '';
   } catch {
-    if (!/^https?:\/\/|^blob:[a-z]+:|^\/(?!\/)|^storage\//.test(url)) return '';
+    // 非标准 URL（相对路径等）：只放行安全前缀
+    if (!/^https?:\/\/|^blob:https?:|^\/(?!\/)|^storage\//.test(url)) return '';
   }
   return url;
 }
@@ -333,7 +338,7 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
   const validTypes: AttachmentType[] = ['image', 'document', 'link', 'file'];
   const type = validTypes.includes(raw.type as AttachmentType) ? (raw.type as AttachmentType) : 'file';
 
-  const allowedProtocols = ['https:', 'http:', 'blob:'];
+  const _allowedProtocols = ['https:', 'http:', 'blob:'];
   const sanitizeUrl = (value: unknown): string => sanitizeUrlValue(value);
 
   return {

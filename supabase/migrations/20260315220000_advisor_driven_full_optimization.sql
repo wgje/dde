@@ -140,6 +140,8 @@ CREATE INDEX IF NOT EXISTS idx_connections_deleted_cleanup
 -- ============================================================================
 -- Circuit breaker 频繁触发说明 CLI 并发连接过多
 -- 为 authenticated 角色设置合理的 statement_timeout 防止长查询占用连接
+-- 回滚命令: ALTER ROLE authenticated SET statement_timeout = DEFAULT;
+-- 注意：此设置影响所有 authenticated 用户，长查询可通过连接级 SET LOCAL statement_timeout 覆盖
 
 ALTER ROLE authenticated SET statement_timeout = '30s';
 

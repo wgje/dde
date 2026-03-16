@@ -84,6 +84,9 @@ export class ThemeService {
     this.applyThemeToDOM(theme);
     localStorage.setItem(CACHE_CONFIG.THEME_CACHE_KEY, theme);
     
+    // 更新 PWA theme-color（读取主题实际背景色）
+    this.updateThemeColorMeta();
+    
     // 防抖同步到云端
     this.debouncedSyncPreferences();
   }
@@ -219,10 +222,16 @@ export class ThemeService {
   
   /**
    * 更新 PWA theme-color meta 标签
+   * 优先读取当前主题的 CSS 变量 --theme-bg，回退到硬编码默认值
    */
   private updateThemeColorMeta() {
-    const isDark = this.effectiveColorMode() === 'dark';
-    const color = isDark ? '#1a1a1a' : '#f5f5f4';
+    let color: string;
+    if (typeof document !== 'undefined') {
+      const bg = getComputedStyle(document.documentElement).getPropertyValue('--theme-bg').trim();
+      color = bg || (this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#f5f5f4');
+    } else {
+      color = this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#f5f5f4';
+    }
     
     // 更新 meta 标签
     this.meta.updateTag({ name: 'theme-color', content: color });

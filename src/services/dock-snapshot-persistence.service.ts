@@ -49,6 +49,8 @@ export interface SnapshotNormalizeContext {
 export class DockSnapshotPersistenceService {
   private readonly logger = inject(LoggerService).category('DockSnapshotPersistence');
   private readonly localPersistTimer = new TimerHandle();
+  /** 序列化 IDB 写入：上一次写入完成后才启动下一次 */
+  private persistChain: Promise<void> = Promise.resolve();
 
   // ─── Local IDB Persistence ───────────────────
 
@@ -66,7 +68,10 @@ export class DockSnapshotPersistenceService {
         return;
       }
       const resolved = snapshotFn();
-      void this.persistToIdb(this.localCacheKey(userId), resolved);
+      const cloned = typeof structuredClone === 'function' ? structuredClone(resolved) : JSON.parse(JSON.stringify(resolved));
+      // 串行化写入：前一次未完成时，本次写入排队等待
+      const key = this.localCacheKey(userId);
+      this.persistChain = this.persistChain.then(() => this.persistToIdb(key, cloned));
     };
     this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
   }

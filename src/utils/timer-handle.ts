@@ -11,10 +11,11 @@ export class TimerHandle {
 
   schedule(fn: () => void, delay: number): void {
     this.cancel();
+    const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : 0;
     this.id = setTimeout(() => {
       this.id = null;
       fn();
-    }, delay);
+    }, safeDelay);
   }
 
   cancel(): void {
@@ -37,7 +38,8 @@ export class IntervalHandle {
 
   start(fn: () => void, interval: number): void {
     this.stop();
-    this.id = setInterval(fn, interval);
+    const safeInterval = Number.isFinite(interval) && interval > 0 ? interval : 1;
+    this.id = setInterval(fn, safeInterval);
   }
 
   stop(): void {

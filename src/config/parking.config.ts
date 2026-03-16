@@ -617,4 +617,10 @@ export const PARKING_CONFIG = {
   RADAR_COMBO_DELAY_SPREAD_MS: 132,
   /** backup 延迟范围（毫秒） */
   RADAR_BACKUP_DELAY_SPREAD_MS: 168,
+
+  // ── Engine internals ──
+  /** 完成队列逐项处理间隔（毫秒），给动画和信号传播留余量 */
+  COMPLETION_DRAIN_INTERVAL_MS: 300,
+  /** requestIdleCallback 超时回退（毫秒）— switchMaintenance */
+  MAINTENANCE_IDLE_TIMEOUT_MS: 120,
 } as const;

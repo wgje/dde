@@ -616,7 +616,6 @@ export class DockCompletionFlowService {
         if (entry.taskId === suspendedTaskId) {
           return {
             ...entry,
-            isMain: entry.isMain,
             status: 'suspended_waiting',
             systemSelected: false,
             recommendationLocked: false,

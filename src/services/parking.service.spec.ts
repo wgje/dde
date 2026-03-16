@@ -459,7 +459,9 @@ describe('ParkingService', () => {
 
       (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
 
-      // 通知应在队列中
+      // Gate 激活时 eviction 通知被延迟到 _deferredEvictionNotices 中
+      // 需要 flush 后才进入 pendingNotices
+      (service as unknown as { flushDeferredNotices: () => void }).flushDeferredNotices();
       expect(service.pendingNotices().length).toBe(1);
     });
   });

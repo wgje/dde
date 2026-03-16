@@ -241,12 +241,13 @@ export interface ZoneAssignment {
 }
 
 /**
- * StatusHUD 位置偏好（策划案 §5.5）
+ * StatusHUD 预设位置偏好（策划案 §5.5）
+ * 注意：与 dock-hud-position.ts 中的 HudPosition { x, y } 坐标类型不同
  */
-export type HudPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+export type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
 
 export interface FocusHudPreference {
-  position: HudPosition;
+  position: HudPresetPosition;
   opacity: number;
   minimized: boolean;
 }
@@ -281,7 +282,7 @@ export interface RoutineCompletionMutation {
 }
 
 /** 预置碎片事件列表（策划案 §7.8 Level 2-a） */
-export const PRESET_FRAGMENT_EVENTS: FragmentEventEntry[] = [
+export const PRESET_FRAGMENT_EVENTS = [
   { id: 'frag-01', category: 'physical-crossover', title: '站起来倒杯水', suggestedMinutes: 3, isPreset: true },
   { id: 'frag-02', category: 'physical-crossover', title: '做几组伸展运动', suggestedMinutes: 5, isPreset: true },
   { id: 'frag-03', category: 'physical-crossover', title: '去洗手间洗把脸', suggestedMinutes: 3, isPreset: true },
@@ -294,7 +295,7 @@ export const PRESET_FRAGMENT_EVENTS: FragmentEventEntry[] = [
   { id: 'frag-09', category: 'micro-progress', title: '快速复查上一个任务的笔记', suggestedMinutes: 3, isPreset: true },
   { id: 'frag-10', category: 'micro-progress', title: '为下一步列一个简短的行动清单', suggestedMinutes: 4, isPreset: true },
   { id: 'frag-11', category: 'micro-progress', title: '浏览待办清单标记优先级', suggestedMinutes: 3, isPreset: true },
-];
+] as const satisfies readonly FragmentEventEntry[];
 export type DockZoneSource = 'auto' | 'manual';
 export type DockSourceSection = 'text' | 'flow' | 'dock-create';
 /** Status machine display labels — intentionally Chinese strings for the Chinese-locale UI. */

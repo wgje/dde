@@ -559,10 +559,10 @@ DO $$ BEGIN
     TO authenticated WITH CHECK (user_id = (SELECT auth.uid()));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- 7.6 cleanup_logs: authenticated 只读
+-- 7.6 cleanup_logs: authenticated 只读（仅限本用户记录）
 DO $$ BEGIN
   CREATE POLICY "cleanup_logs_authenticated_select" ON public.cleanup_logs FOR SELECT
-    TO authenticated USING (true);
+    TO authenticated USING (user_id = (SELECT auth.uid()));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================================

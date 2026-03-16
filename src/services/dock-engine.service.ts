@@ -1098,9 +1098,9 @@ export class DockEngineService {
       // 防止 executeCompleteTask 异常导致队列永久卡死
       this.logger.error('executeCompleteTask 抛出异常，跳过该任务继续处理队列', { taskId, error });
     }
-    // 300ms 间隔处理下一个，给动画和信号传播留余量
+    // 配置化间隔处理下一个，给动画和信号传播留余量
     if (this.completionQueue.length > 0) {
-      this.completionDrain.schedule(() => this.drainCompletionQueue(), 300);
+      this.completionDrain.schedule(() => this.drainCompletionQueue(), PARKING_CONFIG.COMPLETION_DRAIN_INTERVAL_MS);
     } else {
       this.isProcessingCompletion = false;
     }
@@ -1591,7 +1591,7 @@ export class DockEngineService {
       };
 
       if (typeof g.requestIdleCallback === 'function') {
-        this.switchMaintenanceIdleId = g.requestIdleCallback(() => execute(), { timeout: 120 });
+        this.switchMaintenanceIdleId = g.requestIdleCallback(() => execute(), { timeout: PARKING_CONFIG.MAINTENANCE_IDLE_TIMEOUT_MS });
       } else {
         this.switchMaintenanceFallback.schedule(execute, 0);
       }
