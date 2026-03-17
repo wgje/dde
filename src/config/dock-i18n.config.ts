@@ -23,6 +23,7 @@ export const DOCK_STATUS_LABELS = {
 export const DOCK_GROUP_LABELS = {
   'homologous-advancement': '同源推进',
   'cognitive-downgrade': '认知降级',
+  'asynchronous-boot': '异步并发',
   fallback: '异步并发',
 } as const;
 

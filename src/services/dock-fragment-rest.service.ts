@@ -111,6 +111,8 @@ export class DockFragmentRestService {
   init(callbacks: FragmentRestEngineCallbacks): void {
     if (this._callbacks) {
       this.logger.warn('init() called again — overwriting previous callbacks');
+      // 重新初始化前清理旧的定时器，防止旧 interval 引用泄漏
+      this.resetAll();
     }
     this._callbacks = callbacks;
   }

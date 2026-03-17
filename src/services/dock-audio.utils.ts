@@ -35,7 +35,7 @@ export class DockAudioPlayer {
       gain.gain.value = 0.08;
       oscillator.start();
       this.stopTimer.schedule(
-        () => oscillator.stop(),
+        () => { try { oscillator.stop(); } catch { /* oscillator already stopped or context closed */ } },
         PARKING_CONFIG.STATUS_MACHINE_NOTIFICATION_DURATION_MS + 20,
       );
     } catch {

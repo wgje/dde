@@ -71,8 +71,13 @@ export class DockSnapshotPersistenceService {
       // structuredClone 深拷贝快照，避免后续异步 IDB 写入时引用被外部修改
       const cloned = structuredClone(resolved);
       // 串行化写入：前一次未完成时，本次写入排队等待
+      // 链上附加 .catch 防止单次 IDB 写入失败导致整条链断裂（后续所有持久化静默丢失）
       const key = this.localCacheKey(userId);
-      this.persistChain = this.persistChain.then(() => this.persistToIdb(key, cloned));
+      this.persistChain = this.persistChain.then(
+        () => this.persistToIdb(key, cloned),
+      ).catch(err => {
+        this.logger.error('persistChain: IDB write failed, chain recovered', err);
+      });
     };
     this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
   }

@@ -759,8 +759,7 @@ export class FlowDiagramService {
         this.diagram.removeDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
         this.viewportBoundsHandler = null;
       }
-      // 【P1-10 修复】先 clear() 清除数据和事件监听，再断开 DOM
-      // 顺序：clear → removeDiagramListener → div = null
+      // 顺序：先移除监听器 → clear 清除数据 → div = null 断开 DOM
       this.diagram.clear();
       this.diagram.div = null;
       this.diagram = null;

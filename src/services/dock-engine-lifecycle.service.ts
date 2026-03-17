@@ -299,6 +299,7 @@ export class DockEngineLifecycleService {
       this.cloudSync.cancelTimers();
       this.fragmentRest.resetAll();
       this.cancelSwitchMaintenance();
+      this.snapshotPersistence.cancelPendingPersist();
       if (this.visibilityListener && typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', this.visibilityListener);
         this.visibilityListener = null;

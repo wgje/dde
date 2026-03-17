@@ -400,6 +400,7 @@ export class DockEngineService {
     this.lifecycle.registerDestroyCleanup(() => {
       // engine 侧额外清理
       this.taskFlow.destroy();
+      this.entryCrud.destroy();
       this.highlightClearTimer.cancel();
       this.localPersist.cancel();
       this.firstMainSelection.cancel();

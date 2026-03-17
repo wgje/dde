@@ -20,7 +20,8 @@ export class PerformanceTierService implements OnDestroy {
   private activeConsumers = 0;
 
   ngOnDestroy(): void {
-    this.stopMeasuring();
+    this.activeConsumers = 0;
+    this.pauseRaf();
   }
 
   /** 消费方调用以启动 FPS 采样（引用计数，多次调用安全） */

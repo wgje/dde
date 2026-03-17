@@ -61,6 +61,10 @@ export class FlowSelectionService {
       this.selectionChangedHandler = null;
     }
     
+    // 取消残留的 rAF，防止旧 diagram 上下文的回调在新 diagram 上执行
+    this.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
+    this.pendingRetryRafIds = [];
+    
     this.diagram = diagram;
     this.selectedTaskIds.set(new Set());
     

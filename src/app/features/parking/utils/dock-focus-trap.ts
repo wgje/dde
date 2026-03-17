@@ -3,6 +3,8 @@
  * 从 ParkingDockComponent 提取为纯函数以减少组件行数。
  */
 export function trapDialogFocus(event: KeyboardEvent, selector: string): void {
+  // 仅处理 Tab 键，其他按键不拦截
+  if (event.key !== 'Tab') return;
   if (typeof document === 'undefined') return;
   const container = document.querySelector<HTMLElement>(selector);
   if (!container) return;

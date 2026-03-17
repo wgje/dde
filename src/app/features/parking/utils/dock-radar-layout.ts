@@ -174,6 +174,10 @@ export function avoidCenterOcclusion(
   const stretchedX = ux * targetScale;
   const stretchedY = uy * targetScale;
   const pushLen = Math.hypot(stretchedX, stretchedY);
+  // pushLen 为零时说明目标在椭圆中心，直接使用 clamped 原始点避免 NaN
+  if (pushLen === 0) {
+    return clampPoint(point, boundX, boundY, lane);
+  }
   const pushed = {
     x: centerX + stretchedX + ((stretchedX / pushLen) * padding),
     y: centerY + stretchedY + ((stretchedY / pushLen) * padding),

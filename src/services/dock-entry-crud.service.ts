@@ -119,6 +119,13 @@ export class DockEntryCrudService {
     this._ctx = ctx;
   }
 
+  /**
+   * 清理资源——在 DockEngineService 析构时调用
+   */
+  destroy(): void {
+    this.radarEvictionTimeout.cancel();
+  }
+
   // ---------------------------------------------------------------------------
   //  Entry CRUD Operations
   // ---------------------------------------------------------------------------

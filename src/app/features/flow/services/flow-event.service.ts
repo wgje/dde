@@ -216,6 +216,9 @@ export class FlowEventService {
     // 【修复 L-39】补充清理 onDeleteKeyPressed 和 onSelectionChanged
     flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
     flowTemplateEventHandlers.onSelectionChanged = undefined;
+    // 补充清理端口悬停处理器，防止模板全局对象泄漏
+    flowTemplateEventHandlers.onPortMouseEnter = undefined;
+    flowTemplateEventHandlers.onPortMouseLeave = undefined;
   }
 
   /**

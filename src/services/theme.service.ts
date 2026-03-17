@@ -1,4 +1,4 @@
-import { Injectable, signal, inject, effect, computed, PLATFORM_ID } from '@angular/core';
+import { Injectable, signal, inject, effect, computed, PLATFORM_ID, DestroyRef } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 import { Meta } from '@angular/platform-browser';
 import { ThemeType, ColorMode } from '../models';
@@ -35,6 +35,7 @@ export class ThemeService {
   private readonly logger = this.loggerService.category('Theme');
   private meta = inject(Meta);
   private platformId = inject(PLATFORM_ID);
+  private readonly destroyRef = inject(DestroyRef);
   
   /** 当前色调主题 */
   readonly theme = signal<ThemeType>('default');
@@ -72,6 +73,12 @@ export class ThemeService {
       this.setupSystemPreferenceListener();
       this.setupEffects();
     }
+    this.destroyRef.onDestroy(() => {
+      if (this.saveDebounceTimer) {
+        clearTimeout(this.saveDebounceTimer);
+        this.saveDebounceTimer = null;
+      }
+    });
   }
   
   // ========== 公共方法 ==========

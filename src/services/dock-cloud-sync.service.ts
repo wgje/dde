@@ -105,6 +105,8 @@ export class DockCloudSyncService implements OnDestroy {
         return;
       }
       const resolved = snapshot ?? cb.exportSnapshot();
+      // 保证本地持久化先于云端推送，维护 offline-first 不变式
+      cb.scheduleLocalPersist(resolved, userId);
       this.enqueueFocusSessionSync(userId, resolved);
     };
     this.cloudPushTimer.schedule(runPush, CLOUD_PUSH_DEBOUNCE_MS);
@@ -186,6 +188,8 @@ export class DockCloudSyncService implements OnDestroy {
         await this.hydrateRoutineSlots(userId);
         return;
       }
+      // H-3 补充: isSnapshotNewer 也需验证用户一致性，防止跨用户数据覆盖
+      if (!this.isCurrentUser(userId)) return;
       if (!this.snapshotPersistence.isSnapshotNewer(remote, local)) {
         await this.hydrateRoutineSlots(userId);
         return;
