@@ -6,10 +6,7 @@ const { TextDecoder } = require('node:util');
 const projectRoot = process.cwd();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
-const excludedPaths = new Set([
-  'docs/archive/focus-console-design.corrupted-20260228-154326.before-recover-20260228-161303.md',
-  'docs/archive/focus-console-design.corrupted-20260228-154326.md',
-]);
+const excludedPaths = new Set([]);
 const excludedPathPatterns = [
   /^docs\/archive\/.+\.corrupted-[^/]+\.md$/u,
 ];

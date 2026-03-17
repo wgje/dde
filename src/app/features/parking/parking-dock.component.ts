@@ -143,29 +143,19 @@ export class ParkingDockComponent implements OnDestroy {
   readonly hudDragging = signal(false);
   readonly showExitConfirm = signal(false);
   readonly exitFlowStep = signal<FocusExitFlowStep>('primary');
-  readonly takeoverBannerVisible = computed(
-    () => this.engine.focusMode() && this.focusLeader.isReadOnlyFollower(),
-  );
+  readonly takeoverBannerVisible = computed(() => this.engine.focusMode() && this.focusLeader.isReadOnlyFollower());
   readonly gateActive = computed(() => this.gateService.isActive());
-  readonly canMutateDock = computed(
-    () => !this.gateActive() && !this.focusLeader.isReadOnlyFollower(),
-  );
+  readonly canMutateDock = computed(() => !this.gateActive() && !this.focusLeader.isReadOnlyFollower());
   readonly canUseInlineDockCreate = computed(
     () => this.canMutateDock() && !(this.engine.focusMode() && this.engine.focusScrimOn()),
   );
-  readonly showInlineDockCreate = computed(
-    () => !this.engine.focusMode() || !this.engine.focusScrimOn(),
-  );
+  readonly showInlineDockCreate = computed(() => !this.engine.focusMode() || !this.engine.focusScrimOn());
   readonly canCreateBackupTask = computed(() => this.canMutateDock());
   readonly canUsePlannerQuickEdit = computed(() => this.canMutateDock());
   readonly canReorderDockCards = computed(() => this.dragDrop.canReorderDockCards());
   readonly canAcceptExternalDrop = computed(() => this.dragDrop.canAcceptExternalDrop());
-  readonly canToggleScrim = computed(
-    () => this.engine.focusMode() && this.canMutateDock(),
-  );
-  readonly dockSecondaryRailActive = computed(
-    () => this.engine.focusMode() && this.engine.focusScrimOn(),
-  );
+  readonly canToggleScrim = computed(() => this.engine.focusMode() && this.canMutateDock());
+  readonly dockSecondaryRailActive = computed(() => this.engine.focusMode() && this.engine.focusScrimOn());
   readonly focusMotionProfile = PARKING_CONFIG.FOCUS_MOTION_PROFILE;
   readonly motion = PARKING_CONFIG.MOTION;
   readonly reducedMotion = signal(this.focusTransitionService.prefersReducedMotion());
@@ -332,7 +322,7 @@ export class ParkingDockComponent implements OnDestroy {
     }
     if (this.engine.pendingDecision()) {
       event.preventDefault();
-      this.cancelPendingAutoPromote();
+      this.engine.cancelPendingDecisionAutoPromote();
       return;
     }
     if (this.engine.focusMode() && this.engine.focusScrimOn()) {
@@ -358,16 +348,8 @@ export class ParkingDockComponent implements OnDestroy {
     }
     if (event.altKey && !event.shiftKey && key === 'h') {
       event.preventDefault();
-      this.toggleHelpOverlay();
+      this.helpFeedback.toggleHelpOverlay();
     }
-  }
-
-  toggleHelpOverlay(): void {
-    this.helpFeedback.toggleHelpOverlay();
-  }
-
-  closeHelpOverlay(): void {
-    this.helpFeedback.closeHelpOverlay();
   }
 
   @HostListener('window:dock-focus-session-toggle')
@@ -559,8 +541,7 @@ export class ParkingDockComponent implements OnDestroy {
 
   confirmExitFocus(action: FocusExitConfirmAction): void {
     if (action === 'cancel') {
-      this.showExitConfirm.set(false);
-      this.exitFlowStep.set('primary');
+      this.resetExitFlow();
       return;
     }
 
@@ -579,16 +560,14 @@ export class ParkingDockComponent implements OnDestroy {
     if (action === 'keep-focus-hide-scrim') {
       this.engine.markExitAction('keep_focus_hide_scrim');
       this.engine.setFocusScrim(false);
-      this.showExitConfirm.set(false);
-      this.exitFlowStep.set('primary');
+      this.resetExitFlow();
       this.helpFeedback.showRestoreHintToast();
       return;
     }
 
     const exitAction: DockExitAction = action === 'clear-exit' ? 'clear_exit' : 'save_exit';
     this.engine.markExitAction(exitAction);
-    this.showExitConfirm.set(false);
-    this.exitFlowStep.set('primary');
+    this.resetExitFlow();
     if (exitAction === 'clear_exit') {
       this.engine.clearDockForExit();
     }
@@ -638,16 +617,12 @@ export class ParkingDockComponent implements OnDestroy {
     });
     if (!createdId) return;
 
-    this.markRecentlyDocked(createdId);
+    this.planner.markRecentlyDocked(createdId);
     this.newTaskTitle = '';
     this.newTaskExpectedMinutes = '';
     this.newTaskWaitMinutes = '';
     this.newTaskDetail = '';
     this.showNewTaskForm.set(false);
-  }
-
-  isPlannerQuickEditOpen(taskId: string): boolean {
-    return this.planner.isPlannerQuickEditOpen(taskId);
   }
 
   togglePlannerQuickEdit(taskId: string): void {
@@ -662,24 +637,11 @@ export class ParkingDockComponent implements OnDestroy {
   closePlannerQuickEdit(restoreFocus = true): void {
     const taskId = this.planner.closePlannerQuickEdit();
     if (restoreFocus && taskId) {
-      this.restorePlannerTriggerFocus(taskId);
+      const trigger = this.hostElement.nativeElement.querySelector(
+        `[data-testid="dock-v3-planner-toggle"][data-planner-task-id="${CSS.escape(taskId)}"]`,
+      ) as HTMLButtonElement | null;
+      trigger?.focus();
     }
-  }
-
-  setPlannerQuickEditLoad(taskId: string, nextLoad: CognitiveLoad): void {
-    this.planner.setPlannerQuickEditLoad(taskId, nextLoad);
-  }
-
-  setPlannerQuickEditExpected(taskId: string, minutes: number | null): void {
-    this.planner.setPlannerQuickEditExpected(taskId, minutes);
-  }
-
-  setPlannerQuickEditWait(taskId: string, minutes: number | null): void {
-    this.planner.setPlannerQuickEditWait(taskId, minutes);
-  }
-
-  private markRecentlyDocked(taskId: string): void {
-    this.planner.markRecentlyDocked(taskId);
   }
 
   createBackupTaskFromFab(): void {
@@ -688,7 +650,7 @@ export class ParkingDockComponent implements OnDestroy {
     if (!createdId) return;
     this.engine.setDockExpanded(true);
     this.dragDrop.semicircleHoverExpanded.set(true);
-    this.markRecentlyDocked(createdId);
+    this.planner.markRecentlyDocked(createdId);
     if (this.engine.focusMode()) {
       this.helpFeedback.showDockFeedback(DOCK_TOAST.BACKUP_CREATED_BODY, 'success');
     }
@@ -741,64 +703,17 @@ export class ParkingDockComponent implements OnDestroy {
     }
   }
 
-  onDockCardDragStart(event: DragEvent, taskId: string): void {
-    this.dragDrop.onDockCardDragStart(event, taskId);
-  }
-
-  onDockCardDragOver(event: DragEvent, targetTaskId: string): void {
-    this.dragDrop.onDockCardDragOver(event, targetTaskId);
-  }
-
-  onDockCardDrop(event: DragEvent, targetTaskId: string): void {
-    this.dragDrop.onDockCardDrop(event, targetTaskId);
-  }
-
-  onDockCardDragEnd(): void {
-    this.dragDrop.onDockCardDragEnd();
-  }
-
-  onCardWheel(event: WheelEvent, taskId: string): void {
-    this.dragDrop.onCardWheel(event, taskId);
-  }
-
-  onTouchStart(event: TouchEvent, taskId: string): void {
-    this.dragDrop.onTouchStart(event, taskId);
-  }
-
-  onTouchMove(event: TouchEvent, _taskId?: string): void {
-    this.dragDrop.onTouchMove(event, _taskId);
-  }
-
-  onTouchEnd(): void {
-    this.dragDrop.onTouchEnd();
-  }
-
-  onDockRailDragOver(event: DragEvent): void {
-    this.dragDrop.onDockRailDragOver(event);
-  }
-
-  onDockRailDragLeave(): void {
-    this.dragDrop.onDockRailDragLeave();
-  }
-
-  onDropZoneDragOver(event: DragEvent): void {
-    this.dragDrop.onDropZoneDragOver(event);
-  }
-
-  onDropZoneDragLeave(): void {
-    this.dragDrop.onDropZoneDragLeave();
-  }
-
   onDrop(event: DragEvent): void {
-    this.dragDrop.onDrop(event, (taskId) => this.markRecentlyDocked(taskId));
-  }
-
-  isEditingBlocked(): boolean {
-    return !this.canUseInlineDockCreate();
+    this.dragDrop.onDrop(event, (taskId) => this.planner.markRecentlyDocked(taskId));
   }
 
   private isDockSelectionBlocked(): boolean {
     return this.gateActive() || this.focusLeader.isReadOnlyFollower();
+  }
+
+  private resetExitFlow(): void {
+    this.showExitConfirm.set(false);
+    this.exitFlowStep.set('primary');
   }
 
   private closeTransientSurface(): boolean {
@@ -813,7 +728,7 @@ export class ParkingDockComponent implements OnDestroy {
     }
 
     if (this.helpFeedback.showHelpOverlay()) {
-      this.closeHelpOverlay();
+      this.helpFeedback.closeHelpOverlay();
       return true;
     }
 
@@ -860,40 +775,15 @@ export class ParkingDockComponent implements OnDestroy {
     this.plannerPanel()?.nativeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  private restorePlannerTriggerFocus(taskId: string): void {
-    const trigger = this.resolvePlannerTrigger(taskId);
-    trigger?.focus();
-  }
-
-  private resolvePlannerTrigger(taskId: string): HTMLButtonElement | null {
-    return this.hostElement.nativeElement.querySelector(
-      `[data-testid="dock-v3-planner-toggle"][data-planner-task-id="${CSS.escape(taskId)}"]`,
-    ) as HTMLButtonElement | null;
-  }
-
   formatTime(minutes: number): string {
     return formatDockMinutes(minutes);
   }
-
 
   /** 待决策候选任务（computed 避免模板每次 CD 重复调用） */
   readonly pendingDecisionRemainingMinutes = computed(() => {
     const remaining = this.engine.pendingDecision()?.rootRemainingMinutes ?? 0;
     return remaining > 0 ? Math.ceil(remaining) : 0;
   });
-
-  /** 待决策候选条目，最多取 2 个（computed 避免模板重复调用） */
-  readonly pendingDecisionEntries = computed(() =>
-    this.engine.pendingDecisionEntries(),
-  );
-
-  choosePendingCandidate(taskId: string): void {
-    this.engine.choosePendingDecisionCandidate(taskId);
-  }
-
-  cancelPendingAutoPromote(): void {
-    this.engine.cancelPendingDecisionAutoPromote();
-  }
 
   groupLabel(group: DockPendingDecisionEntry['group']): string {
     return DOCK_GROUP_LABELS[group as keyof typeof DOCK_GROUP_LABELS] ?? DOCK_GROUP_LABELS.fallback;

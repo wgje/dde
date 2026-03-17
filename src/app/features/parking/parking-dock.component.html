@@ -13,7 +13,7 @@
         <!-- 中央卡片堆 -->
         <app-dock-console-stack class="relative z-20 pointer-events-auto"></app-dock-console-stack>
 
-        @if (!strictSampleMode && engine.pendingDecision() && pendingDecisionEntries().length > 0) {
+        @if (!strictSampleMode && engine.pendingDecision() && engine.pendingDecisionEntries().length > 0) {
           <div
             class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl pointer-events-auto
                    px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
@@ -27,7 +27,7 @@
               <button
                 type="button"
                 class="text-[9px] px-2 py-1 rounded border border-slate-600/70 text-slate-300 hover:bg-slate-700/50"
-                (click)="cancelPendingAutoPromote()"
+                (click)="engine.cancelPendingDecisionAutoPromote()"
                 aria-label="收起推荐"
                 data-testid="dock-v3-pending-cancel">
                 收起推荐
@@ -40,7 +40,7 @@
               </span>
             </div>
             <div class="grid grid-cols-3 gap-2.5">
-              @for (entry of pendingDecisionEntries(); track entry.taskId; let i = $index) {
+              @for (entry of engine.pendingDecisionEntries(); track entry.taskId; let i = $index) {
                 <button
                   type="button"
                   class="decision-card rounded-xl border px-3.5 py-2.5 text-left transition-colors transition-transform transition-shadow"
@@ -49,7 +49,7 @@
                     : (i % 3 === 1
                       ? 'border-indigo-400/40 bg-indigo-500/8 hover:bg-indigo-500/15'
                       : 'border-emerald-400/40 bg-emerald-500/8 hover:bg-emerald-500/15')"
-                  (click)="choosePendingCandidate(entry.taskId)"
+                  (click)="engine.choosePendingDecisionCandidate(entry.taskId)"
                   [attr.aria-label]="'选择候选任务：' + entry.title"
                   [attr.data-testid]="'dock-v3-pending-choice-' + i">
                   <div class="text-[10px] font-mono mb-1.5 font-semibold"
@@ -181,7 +181,7 @@
           role="dialog"
           aria-modal="true"
           aria-label="专注操作帮助"
-          (click)="closeHelpOverlay()"
+          (click)="helpFeedback.closeHelpOverlay()"
           data-testid="dock-v3-help-overlay">
           <div
             class="w-[min(92vw,860px)] rounded-[28px] border border-slate-600/70 bg-slate-900/96 p-5 text-slate-100 shadow-2xl backdrop-blur-md"
@@ -197,7 +197,7 @@
               <button
                 type="button"
                 class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl border border-slate-600/70 bg-slate-800/80 px-3 py-2 text-[11px] text-slate-200 hover:bg-slate-700"
-                (click)="closeHelpOverlay()"
+                (click)="helpFeedback.closeHelpOverlay()"
                 aria-label="关闭帮助"
                 data-testid="dock-v3-help-close">
                 关闭
@@ -470,7 +470,7 @@
 
             <button
               type="button"
-              (click)="toggleHelpOverlay()"
+              (click)="helpFeedback.toggleHelpOverlay()"
               class="px-4 py-1.5 rounded-full text-xs font-semibold text-slate-200 bg-slate-800/80 hover:bg-slate-700 transition-colors"
               style="min-height: 44px;"
               aria-label="操作帮助"
@@ -619,7 +619,7 @@
                           [ngClass]="plannerEntry.expectedMinutes === preset
                             ? 'border-indigo-400/45 bg-indigo-500/15 text-indigo-200'
                             : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-                          (click)="setPlannerQuickEditExpected(plannerEntry.taskId, preset)"
+                          (click)="planner.setPlannerQuickEditExpected(plannerEntry.taskId, preset)"
                           style="min-height: 36px;"
                           data-testid="dock-v3-planner-expected">
                           {{ formatTime(preset) }}
@@ -643,7 +643,7 @@
                           [ngClass]="plannerEntry.load === 'low'
                             ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
                             : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-                          (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'low')"
+                          (click)="planner.setPlannerQuickEditLoad(plannerEntry.taskId, 'low')"
                           style="min-height: 34px;"
                           data-testid="dock-v3-planner-load-low">
                           低负荷
@@ -654,7 +654,7 @@
                           [ngClass]="plannerEntry.load === 'high'
                             ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200'
                             : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-                          (click)="setPlannerQuickEditLoad(plannerEntry.taskId, 'high')"
+                          (click)="planner.setPlannerQuickEditLoad(plannerEntry.taskId, 'high')"
                           style="min-height: 34px;"
                           data-testid="dock-v3-planner-load-high">
                           高负荷
@@ -679,7 +679,7 @@
                           [ngClass]="plannerEntry.waitMinutes === null
                             ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
                             : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-                          (click)="setPlannerQuickEditWait(plannerEntry.taskId, null)"
+                          (click)="planner.setPlannerQuickEditWait(plannerEntry.taskId, null)"
                           style="min-height: 36px;"
                           data-testid="dock-v3-planner-wait-none">
                           无
@@ -691,7 +691,7 @@
                             [ngClass]="plannerEntry.waitMinutes === preset
                               ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
                               : 'border-slate-700/60 bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-                            (click)="setPlannerQuickEditWait(plannerEntry.taskId, preset)"
+                            (click)="planner.setPlannerQuickEditWait(plannerEntry.taskId, preset)"
                             style="min-height: 36px;"
                             data-testid="dock-v3-planner-wait">
                             {{ formatTime(preset) }}
@@ -782,8 +782,8 @@
         <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x"
              role="group"
              aria-label="停泊坞任务列表"
-             (dragover)="onDockRailDragOver($event)"
-             (dragleave)="onDockRailDragLeave()"
+             (dragover)="dragDrop.onDockRailDragOver($event)"
+             (dragleave)="dragDrop.onDockRailDragLeave()"
              (drop)="onDrop($event)">
           @for (entry of engine.orderedDockEntries(); track entry.taskId) {
             <div
@@ -791,22 +791,22 @@
               [class.main-card]="entry.isMain"
               [class.secondary-card]="dockSecondaryRailActive()"
               [class.secondary-active]="dockSecondaryRailActive() && entry.isMain"
-              [class.planner-open]="isPlannerQuickEditOpen(entry.taskId)"
+              [class.planner-open]="planner.isPlannerQuickEditOpen(entry.taskId)"
               [class.ring-1]="planner.recentlyDockedTaskId() === entry.taskId"
               [class.shadow-lg]="planner.recentlyDockedTaskId() === entry.taskId"
               [ngClass]="entry.isMain
                 ? (planner.recentlyDockedTaskId() === entry.taskId ? 'ring-amber-400/40' : '')
                 : 'bg-slate-800/40 border-slate-600/30 hover:bg-slate-800/60'
                   + (planner.recentlyDockedTaskId() === entry.taskId ? ' ring-amber-400/40' : '')"
-              (wheel)="onCardWheel($event, entry.taskId)"
+              (wheel)="dragDrop.onCardWheel($event, entry.taskId)"
               (click)="onDockCardClick(entry.taskId)"
-              (touchstart)="onTouchStart($event, entry.taskId)"
-              (touchmove)="onTouchMove($event, entry.taskId)"
-              (touchend)="onTouchEnd()"
-              (dragstart)="onDockCardDragStart($event, entry.taskId)"
-              (dragover)="onDockCardDragOver($event, entry.taskId)"
-              (drop)="onDockCardDrop($event, entry.taskId)"
-              (dragend)="onDockCardDragEnd()"
+              (touchstart)="dragDrop.onTouchStart($event, entry.taskId)"
+              (touchmove)="dragDrop.onTouchMove($event, entry.taskId)"
+              (touchend)="dragDrop.onTouchEnd()"
+              (dragstart)="dragDrop.onDockCardDragStart($event, entry.taskId)"
+              (dragover)="dragDrop.onDockCardDragOver($event, entry.taskId)"
+              (drop)="dragDrop.onDockCardDrop($event, entry.taskId)"
+              (dragend)="dragDrop.onDockCardDragEnd()"
               [attr.draggable]="canReorderDockCards() ? 'true' : null"
               tabindex="0"
               role="button"
@@ -883,8 +883,8 @@
             [class.reject]="dragDrop.dropState() === 'reject'"
             [class.opacity-50]="!canAcceptExternalDrop()"
             [style.--dock-drop-reject-shake-ms]="PARKING_CONFIG.DOCK_DROP_REJECT_SHAKE_MS + 'ms'"
-            (dragover)="onDropZoneDragOver($event)"
-            (dragleave)="onDropZoneDragLeave()"
+            (dragover)="dragDrop.onDropZoneDragOver($event)"
+            (dragleave)="dragDrop.onDropZoneDragLeave()"
             (drop)="onDrop($event)"
             style="min-height: 80px;"
             role="region"

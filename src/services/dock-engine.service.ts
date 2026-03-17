@@ -1,9 +1,8 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+﻿import { Injectable, computed, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DOCK_TOAST } from '../config/dock-i18n.config';
 import {
   CognitiveLoad,
-  CURRENT_DOCK_SNAPSHOT_VERSION,
   DailySlotEntry,
   DockLane,
   DockExitAction,
@@ -13,12 +12,10 @@ import {
   DockPendingDecision,
   DockPendingDecisionEntry,
   DockRuleDecision,
-  DockSessionState,
   DockSourceSection,
   DockSnapshot,
   DockZoneSource,
   FragmentDefenseLevel,
-  FocusSessionState,
   HighLoadCounter,
   StatusMachineEntry,
 } from '../models/parking-dock';
@@ -31,14 +28,12 @@ import { ToastService } from './toast.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import {
   checkBurnoutThreshold,
-  computeThreeDimensionalRecommendation,
   createRuleDecision,
   updateHighLoadCounter,
 } from './dock-scheduler.rules';
 import { sanitizePlannerFields } from '../utils/planner-fields';
 import {
   DockSnapshotPersistenceService,
-  type SnapshotNormalizeContext,
 } from './dock-snapshot-persistence.service';
 import { DockCloudSyncService } from './dock-cloud-sync.service';
 import { DockCompletionFlowService } from './dock-completion-flow.service';
@@ -50,11 +45,13 @@ import { DockPromotionService } from './dock-promotion.service';
 import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
 import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
+import { DockSnapshotManagerService } from './dock-snapshot-manager.service';
+import { DockEntryCrudService } from './dock-entry-crud.service';
+import { DockTaskFlowService } from './dock-task-flow.service';
 import { TimerHandle } from '../utils/timer-handle';
 import {
   buildConsoleVisibleOrderHint,
   buildDockEntry,
-  buildOverflowMeta,
   findConsoleEvictionCandidate,
   getWaitRemainingSeconds,
   isAutoPromotableStatus,
@@ -63,7 +60,6 @@ import {
   patchAllEntries,
   patchEntryByTaskId,
   sortDockEntriesForDisplay,
-  toFocusTaskSlot,
   toStatusMachineEntry,
 } from './dock-engine.utils';
 
@@ -93,6 +89,12 @@ export class DockEngineService {
   private readonly entryField = inject(DockEntryFieldService);
   /** C-2: 生命周期管理（effects、tick、维护调度）提取至专属服务 */
   private readonly lifecycle = inject(DockEngineLifecycleService);
+  /** 快照/会话管理服务，负责快照导出恢复、会话状态构建等 */
+  private readonly snapshotManager = inject(DockSnapshotManagerService);
+  /** 条目 CRUD 操作服务，负责任务入坞、主任务设置、雷达区操作等 */
+  private readonly entryCrud = inject(DockEntryCrudService);
+  /** 任务流程操作服务，负责专注模式、完成流程、挂起切换、决策处理等 */
+  private readonly taskFlow = inject(DockTaskFlowService);
 
   /**
    * 持久化信号预期总数（与 persistenceDeps 内数组长度一对一对应）。
@@ -158,25 +160,7 @@ export class DockEngineService {
   readonly fragmentEntryCountdown = computed(() => this.fragmentRest.fragmentEntryCountdown());
 
   /**
-   * 持久化脏标记：聚合所有影响快照持久化的信号。
-   * effect 监听此单一 computed，避免多个信号同时变更时触发多次冗余持久化。
-   * 使用纯函数推导（无副作用），返回依赖信号的引用数组作为依赖追踪标记。
-   *
-   * ⚠️ 维护契约：任何新增的需要参与持久化的 signal 必须加入此列表。
-   * 遗漏会导致该 signal 的变更无法触发本地/云端持久化，造成静默数据丢失。
-   *
-   * 同步检查清单（三方必须覆盖相同信号集）：
-   *  1. persistenceDeps（此处）
-   *  2. exportSnapshot() + buildSessionState()
-   *  3. hydrateSignalsFromSnapshot()
-   *
-   * 当前持久化信号（16 个）：
-   *   entries, focusMode, dockExpanded, muteWaitTone, focusScrimOn,
-   *   firstDragIntervened, dailySlots, suspendChainRootTaskId,
-   *   suspendRecommendationLocked, pendingDecision, lastRuleDecision,
-   *   dailyResetDate, focusSessionContext,
-   *   highLoadCounter, burnoutTriggeredAt, schedulerPhase
-   */
+  /** 持久化脏标记：聚合所有影响快照持久化的信号，避免多次冗余持久化。 */
   private readonly persistenceDeps = computed(() => {
     // 读取所有持久化相关信号以建立依赖关系
     // 返回新数组使 Object.is 检测到变更，无需自定义 equal
@@ -221,12 +205,6 @@ export class DockEngineService {
 
   private readonly localPersist = new TimerHandle();
   private readonly firstMainSelection = new TimerHandle();
-  /** 安全超时：如果动画未触发 flushRadarEviction，强制清除 pendingRadarEviction */
-  private readonly radarEvictionTimeout = new TimerHandle();
-  /** 完成操作 FIFO 队列（策划案 §18.1：防止并发 completeTask 竞态） */
-  private completionQueue: string[] = [];
-  private isProcessingCompletion = false;
-  private readonly completionDrain = new TimerHandle();
   private readonly highlightClearTimer = new TimerHandle();
 
   private currentSnapshotUserId: string | null = null;
@@ -410,7 +388,7 @@ export class DockEngineService {
       restoreSnapshot: (snapshot) => this.restoreSnapshot(snapshot),
       reset: () => this.reset(),
       reconcileExternallyCompletedTasks: (taskIds) => this.reconcileExternallyCompletedTasks(taskIds),
-      buildNormalizeContext: () => this.buildNormalizeContext(),
+      buildNormalizeContext: () => this.snapshotManager.buildNormalizeContext(),
       getNonCriticalHoldDelay: () => this.lifecycle.getNonCriticalHoldDelay(),
       scheduleLocalPersist: (snapshot, userId) => this.scheduleLocalPersist(snapshot, userId),
     });
@@ -421,17 +399,43 @@ export class DockEngineService {
     this.lifecycle.triggerInitialCloudPull();
     this.lifecycle.registerDestroyCleanup(() => {
       // engine 侧额外清理
-      this.completionDrain.cancel();
-      this.completionQueue.length = 0;
-      this.isProcessingCompletion = false;
+      this.taskFlow.destroy();
       this.highlightClearTimer.cancel();
       this.localPersist.cancel();
       this.firstMainSelection.cancel();
-      this.radarEvictionTimeout.cancel();
     });
   }
 
   private initSubServices(): void {
+    this.snapshotManager.init({
+      entries: this.entries,
+      focusMode: this.focusMode,
+      dockExpanded: this.dockExpanded,
+      muteWaitTone: this.muteWaitTone,
+      focusScrimOn: this.focusScrimOn,
+      firstDragIntervened: this.firstDragIntervened,
+      dailySlots: this.dailySlots,
+      suspendChainRootTaskId: this.suspendChainRootTaskId,
+      suspendRecommendationLocked: this.suspendRecommendationLocked,
+      pendingDecision: this.pendingDecision,
+      lastRuleDecision: this.lastRuleDecision,
+      dailyResetDate: this.dailyResetDate,
+      focusSessionContext: this.focusSessionContext,
+      highLoadCounter: this.highLoadCounter,
+      burnoutTriggeredAt: this.burnoutTriggeredAt,
+      schedulerPhase: this.schedulerPhase,
+      lastRecommendationGroups: this.lastRecommendationGroups,
+      lastExitAction: this.lastExitAction,
+      focusTransition: this.focusTransition,
+      highlightedIds: this.highlightedIds,
+      editLock: this.editLock,
+      fragmentDefenseLevel: this.fragmentDefenseLevel,
+      lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
+      consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      waitEndNotifiedIds: this.waitEndNotifiedIds,
+      clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
+      rebalanceAutoZones: () => this.rebalanceAutoZones(),
+    });
     this.completionFlow.init({
       entries: this.entries,
       pendingDecision: this.pendingDecision,
@@ -462,6 +466,58 @@ export class DockEngineService {
       focusSessionContext: () => this.focusSessionContext(),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
+    this.entryCrud.init({
+      entries: this.entries,
+      focusMode: this.focusMode,
+      muteWaitTone: this.muteWaitTone,
+      dockExpanded: this.dockExpanded,
+      focusScrimOn: this.focusScrimOn,
+      firstDragIntervened: this.firstDragIntervened,
+      pendingDecision: this.pendingDecision,
+      highlightedIds: this.highlightedIds,
+      suspendRecommendationLocked: this.suspendRecommendationLocked,
+      suspendChainRootTaskId: this.suspendChainRootTaskId,
+      lastRadarInsertedTaskId: this.lastRadarInsertedTaskId,
+      lastRadarEvictedTaskId: this.lastRadarEvictedTaskId,
+      pendingRadarEviction: this.pendingRadarEviction,
+      lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
+      consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      firstMainSelectionWindow: this.firstMainSelectionWindow,
+      waitEndNotifiedIds: this.waitEndNotifiedIds,
+      focusingEntry: this.focusingEntry,
+      consoleEntries: this.consoleEntries,
+      consoleVisibleEntries: this.consoleVisibleEntries,
+      switchToTask: (taskId: string) => this.taskFlow.switchToTask(taskId),
+      completeTask: (taskId: string) => this.taskFlow.completeTask(taskId),
+      rebalanceAutoZones: () => this.rebalanceAutoZones(),
+      clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
+      startFirstMainSelectionWindow: (taskId: string) => this.startFirstMainSelectionWindow(taskId),
+    });
+    this.taskFlow.init({
+      entries: this.entries,
+      focusMode: this.focusMode,
+      focusScrimOn: this.focusScrimOn,
+      schedulerPhase: this.schedulerPhase,
+      focusSessionContext: this.focusSessionContext,
+      lastRuleDecision: this.lastRuleDecision,
+      lastRecommendationGroups: this.lastRecommendationGroups,
+      focusTransition: this.focusTransition,
+      pendingDecision: this.pendingDecision,
+      highlightedIds: this.highlightedIds,
+      suspendRecommendationLocked: this.suspendRecommendationLocked,
+      suspendChainRootTaskId: this.suspendChainRootTaskId,
+      highLoadCounter: this.highLoadCounter,
+      burnoutTriggeredAt: this.burnoutTriggeredAt,
+      lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
+      consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      waitEndNotifiedIds: this.waitEndNotifiedIds,
+      focusingEntry: this.focusingEntry,
+      consoleEntries: this.consoleEntries,
+      consoleVisibleEntries: this.consoleVisibleEntries,
+      rebalanceAutoZones: () => this.rebalanceAutoZones(),
+      clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
+      startFirstMainSelectionWindow: (taskId: string) => this.startFirstMainSelectionWindow(taskId),
+    });
   }
 
   private buildCloudSyncContext() {
@@ -473,7 +529,7 @@ export class DockEngineService {
       getNonCriticalHoldDelay: () => this.lifecycle.getNonCriticalHoldDelay(),
       getFocusSessionContext: () => this.focusSessionContext(),
       setFocusSessionContext: (ctx: { id: string; startedAt: number }) => this.focusSessionContext.set(ctx),
-      buildNormalizeContext: () => this.buildNormalizeContext(),
+      buildNormalizeContext: () => this.snapshotManager.buildNormalizeContext(),
       getCurrentSnapshotUserId: () => this.currentSnapshotUserId,
     };
   }
@@ -518,7 +574,6 @@ export class DockEngineService {
     };
   }
 
-
   // Public API
   dockTask(
     taskId: string,
@@ -533,78 +588,11 @@ export class DockEngineService {
       zoneSource?: DockZoneSource;
     },
   ): boolean {
-    if (this.entries().some(entry => entry.taskId === taskId)) return false;
-
-    const task = this.taskStore.getTask(taskId);
-    if (!task || task.status !== 'active') {
-      this.logger.warn(`Task ${taskId} is missing or not active; reject docking.`);
-      return false;
-    }
-    if (!this.inlineCreation.ensureDockCapacity(task.title || 'Untitled task')) return false;
-
-    const sourceProjectId = this.taskSync.resolveTaskProjectId(taskId);
-    const zoneSource: DockZoneSource = options?.zoneSource ?? (lane ? 'manual' : 'auto');
-    const inferredRelation = lane
-      ? {
-          lane,
-          relationScore: lane === 'combo-select' ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
-          relationReason: lane === 'combo-select' ? 'manual:combo-select' : 'manual:backup',
-        }
-      : this.zoneService.inferAutoLaneForTask(task, sourceProjectId, taskId);
-    const inheritedLoad: CognitiveLoad = task.cognitive_load === 'high' ? 'high' : 'low';
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: options?.expectedMinutes ?? task.expected_minutes,
-      waitMinutes: options?.waitMinutes ?? task.wait_minutes,
-      cognitiveLoad: options?.load ?? task.cognitive_load,
-    });
-    const entry = buildDockEntry({
-      taskId,
-      title: task.title || 'Untitled task',
-      content: task.content ?? null,
-      sourceProjectId,
-      currentEntryCount: this.entries().length,
-      lane: inferredRelation.lane,
-      zoneSource,
-      relationScore: inferredRelation.relationScore,
-      relationReason: inferredRelation.relationReason,
-      plannerFields,
-      inheritedLoad,
-      muteWaitTone: this.muteWaitTone(),
-      options: {
-        sourceKind: options?.sourceKind,
-        sourceSection: options?.sourceSection,
-        detail: options?.detail,
-      },
-    });
-
-    if (plannerFields.adjusted) {
-      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(plannerFields.expectedMinutes ?? 0));
-    }
-
-    this.entries.update(prev => [...prev, entry]);
-    this.rebalanceAutoZones();
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: entry.expectedMinutes,
-      cognitive_load: entry.load,
-      wait_minutes: entry.waitMinutes,
-    });
-
-    if (!this.firstDragIntervened()) {
-      this.setMainTask(taskId);
-      this.firstDragIntervened.set(true);
-    }
-    return true;
+    return this.entryCrud.dockTask(taskId, lane, options);
   }
 
-  /**
-   * 统一外部拖拽入坞策略：
-   * 文本/流程图拖拽默认进入备选区（backup），并视为手动分区。
-   */
   dockTaskFromExternalDrag(taskId: string, sourceSection?: Extract<DockSourceSection, 'text' | 'flow'>): boolean {
-    return this.dockTask(taskId, 'backup', {
-      sourceSection,
-      zoneSource: 'manual',
-    });
+    return this.entryCrud.dockTaskFromExternalDrag(taskId, sourceSection);
   }
 
   createInDock(
@@ -616,19 +604,8 @@ export class DockEngineService {
     return this.inlineCreation.createInDock(title, lane, load, options);
   }
 
-  /**
-   * 外部完成状态调和：一次性快照 entries，过滤后批量入队。
-   * 避免循环内反复读取 entries() 导致与异步 drainCompletionQueue 产生竞态。
-   */
   private reconcileExternallyCompletedTasks(taskIds: string[]): void {
-    const currentEntries = this.entries();
-    const entryMap = new Map(currentEntries.map(item => [item.taskId, item]));
-    for (const taskId of taskIds) {
-      const entry = entryMap.get(taskId);
-      const task = this.taskStore.getTask(taskId);
-      if (!entry || entry.status === 'completed' || task?.status !== 'completed') continue;
-      this.completeTask(taskId);
-    }
+    this.entryCrud.reconcileExternallyCompletedTasks(taskIds);
   }
 
   getInlineArchiveCandidates(): DockEntry[] {
@@ -640,171 +617,19 @@ export class DockEngineService {
   }
 
   setMainTask(taskId: string): void {
-    if (this.focusMode()) {
-      this.switchToTask(taskId);
-      return;
-    }
-
-    this.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? { ...entry, isMain: true, systemSelected: false, manualMainSelected: true }
-          : { ...entry, isMain: false },
-      ),
-    );
-    this.promotionService.clearPendingDecisionIfMatched(taskId);
-    this.rebalanceAutoZones();
+    this.entryCrud.setMainTask(taskId);
   }
 
-  /**
-   * 从雷达区（备选/组合选择）点选任务插入到主控台 C 位。
-   * 不改变主任务标记（isMain），仅切换 focusing 状态。
-   * 超出 CONSOLE_STACK_VISIBLE_MAX 的末尾卡片回到备选区。
-   * 主任务不可被淘汰——如果溢出位是主任务，则淘汰其前一张非主任务卡片。
-   *
-   * @returns 被淘汰回备选区的 taskId，null 表示无淘汰
-   */
   insertToConsoleFromRadar(taskId: string): string | null {
-    this.fragmentRest.stopFragmentEntryCountdown();
-    this.fragmentRest.setFragmentDismissed(false);
-
-    const target = this.entries().find(e => e.taskId === taskId && e.status !== 'completed');
-    if (!target) return null;
-
-    const currentFocusId = this.focusingEntry()?.taskId ?? null;
-    const preVisible = this.consoleVisibleEntries();
-    let evictedTaskId: string | null = null;
-
-    // 点击背景任务时，以“切换前可见 4 卡”决定淘汰对象。
-    // 这样可以保证：
-    // 1. 旧 C 位稳定后推到第二张
-    // 2. 主任务永不被退回备选区
-    // 3. 动画窗口内不会临时出现第 5 张卡
-    if (preVisible.length >= PARKING_CONFIG.CONSOLE_STACK_VISIBLE_MAX) {
-      evictedTaskId = findConsoleEvictionCandidate(preVisible, currentFocusId);
-    }
-
-    this.applyRadarInsertEntries(taskId, currentFocusId);
-    this.consoleVisibleOrderHint.set(
-      buildConsoleVisibleOrderHint(preVisible, taskId, evictedTaskId),
-    );
-
-    // 设置协调信号：inserted 供 console-stack 触发 C 位入场动画，
-    // evictedTaskId 由动画结束后 flushRadarEviction() 执行。
-    this.lastRadarInsertedTaskId.set(taskId);
-    this.pendingRadarEviction.set(evictedTaskId);
-
-    // 安全超时：如果动画未在窗口期内调用 flushRadarEviction，强制清除
-    if (evictedTaskId) {
-      this.radarEvictionTimeout.schedule(() => {
-        if (this.pendingRadarEviction() === evictedTaskId) {
-          this.flushRadarEviction(evictedTaskId);
-        }
-      }, PARKING_CONFIG.DOCK_ANIMATION_MS * 3);
-    }
-
-    this.promotionService.clearPendingDecisionIfMatched(taskId);
-    this.lifecycle.scheduleSwitchMaintenance();
-    return evictedTaskId;
+    return this.entryCrud.insertToConsoleFromRadar(taskId);
   }
 
-  /** 雷达区插入时的 entries 状态更新：target → focusing，原焦点 → stalled */
-  private applyRadarInsertEntries(taskId: string, currentFocusId: string | null): void {
-    this.entries.update(prev =>
-      prev.map(entry => {
-        if (entry.taskId === taskId) {
-          return {
-            ...entry,
-            status: 'focusing',
-            waitMinutes: null,
-            waitStartedAt: null,
-            systemSelected: false,
-            recommendationLocked: false,
-          };
-        }
-        if (currentFocusId && entry.taskId === currentFocusId) {
-          return { ...entry, status: 'stalled' };
-        }
-        return entry;
-      }),
-    );
-    if (currentFocusId && currentFocusId !== taskId) {
-      this.lastConsoleDemotedTaskId.set(currentFocusId);
-    }
-  }
-
-  /**
-   * Phase 2: 将指定任务从主控台淘汰回备选区。
-   * 由 console-stack 组件在动画窗口结束时调用，确保 DOM 退出过渡已完成。
-   * 完成后设置 lastRadarEvictedTaskId 信号，触发雷达区返回入场动画。
-   */
   flushRadarEviction(taskId: string): void {
-    this.radarEvictionTimeout.cancel();
-    const entry = this.entries().find(e => e.taskId === taskId);
-    if (!entry) return;
-    // 安全检查：只淘汰仍在 console 中且非 focusing/主任务的卡片
-    if (entry.status === 'focusing' || entry.isMain) return;
-    this.entries.update(prev =>
-      patchEntryByTaskId(prev, taskId, {
-        status: 'pending_start',
-        lane: 'backup',
-        zoneSource: 'auto',
-        relationReason: 'auto:evicted-from-console',
-      }),
-    );
-    this.pendingRadarEviction.set(null);
-    // 淘汰实际生效后触发雷达区返回入场动画
-    this.lastRadarEvictedTaskId.set(taskId);
+    this.entryCrud.flushRadarEviction(taskId);
   }
 
   overrideFirstMainTask(taskId: string): void {
-    const pending = this.firstMainSelectionWindow();
-    if (!pending) {
-      this.setMainTask(taskId);
-      return;
-    }
-    const exists = this.entries().some(entry => entry.taskId === taskId && entry.status !== 'completed');
-    if (!exists) return;
-    if (!this.focusMode()) {
-      this.setMainTask(taskId);
-      this.clearFirstMainSelectionWindow();
-      return;
-    }
-
-    const currentFocusId = this.focusingEntry()?.taskId ?? null;
-    this.entries.update(prev =>
-      prev.map(entry => {
-        if (entry.taskId === taskId) {
-          const promoted: DockEntry = {
-            ...entry,
-            isMain: true,
-            status: 'focusing',
-            waitMinutes: null,
-            waitStartedAt: null,
-            systemSelected: false,
-            recommendationLocked: false,
-            manualMainSelected: true,
-          };
-          return promoted;
-        }
-        if (entry.taskId === currentFocusId) {
-          return {
-            ...entry,
-            isMain: false,
-            status: this.completionFlow.deriveBackgroundStatus(entry),
-            systemSelected: false,
-            recommendationLocked: false,
-          };
-        }
-        return entry.isMain
-          ? { ...entry, isMain: false }
-          : entry;
-      }),
-    );
-    if (currentFocusId && currentFocusId !== taskId) {
-      this.lastConsoleDemotedTaskId.set(currentFocusId);
-    }
-    this.clearFirstMainSelectionWindow();
+    this.entryCrud.overrideFirstMainTask(taskId);
   }
 
   markExitAction(action: DockExitAction): void {
@@ -812,69 +637,22 @@ export class DockEngineService {
   }
 
   clearDockForExit(): void {
-    this.entries.set([]);
+    this.entryCrud.clearDockForExit();
     this.dailySlots.set([]);
-    this.pendingDecision.set(null);
     this.lastRuleDecision.set(null);
-    this.highlightedIds.set(new Set());
-    this.suspendRecommendationLocked.set(false);
-    this.suspendChainRootTaskId.set(null);
-    this.waitEndNotifiedIds.clear();
-    this.firstDragIntervened.set(false);
-    this.clearFirstMainSelectionWindow();
-    this.pendingRadarEviction.set(null);
-    this.lastConsoleDemotedTaskId.set(null);
-    this.consoleVisibleOrderHint.set([]);
     this.zoneService.clearAdjacencyCache();
   }
 
   reorderDockEntries(sourceTaskId: string, targetTaskId: string): void {
-    if (!sourceTaskId || !targetTaskId || sourceTaskId === targetTaskId) return;
-
-    this.entries.update(prev => {
-      const activeEntries = prev.filter(entry => entry.status !== 'completed');
-      const sourceIndex = activeEntries.findIndex(entry => entry.taskId === sourceTaskId);
-      const targetIndex = activeEntries.findIndex(entry => entry.taskId === targetTaskId);
-      if (sourceIndex < 0 || targetIndex < 0) return prev;
-
-      const reordered = [...activeEntries];
-      const [moved] = reordered.splice(sourceIndex, 1);
-      reordered.splice(targetIndex, 0, moved);
-
-      const orderByTaskId = new Map<string, number>();
-      reordered.forEach((entry, index) => {
-        orderByTaskId.set(entry.taskId, index);
-      });
-
-      // completed entries 保留原样但 dockedOrder 推到尾部，避免与 active 序号冲突
-      const completedBaseOrder = reordered.length;
-      let completedOffset = 0;
-      let changed = false;
-      const next = prev.map(entry => {
-        const nextOrder = orderByTaskId.get(entry.taskId);
-        if (nextOrder !== undefined) {
-          if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
-          changed = true;
-          return { ...entry, dockedOrder: nextOrder, manualOrder: nextOrder };
-        }
-        // completed 或非活跃 entry：序号推到活跃 entries 之后
-        const tailOrder = completedBaseOrder + completedOffset++;
-        if (entry.dockedOrder === tailOrder) return entry;
-        changed = true;
-        return { ...entry, dockedOrder: tailOrder };
-      });
-      return changed ? next : prev;
-    });
+    this.entryCrud.reorderDockEntries(sourceTaskId, targetTaskId);
   }
 
   setDockExpanded(expanded: boolean): void {
-    this.dockExpanded.set(expanded);
+    this.entryCrud.setDockExpanded(expanded);
   }
 
   toggleMuteWaitTone(): void {
-    const next = !this.muteWaitTone();
-    this.muteWaitTone.set(next);
-    this.entries.update(prev => patchAllEntries(prev, { snoozeRingMuted: next }));
+    this.entryCrud.toggleMuteWaitTone();
   }
 
   toggleLoad(taskId: string, direction: 'up' | 'down'): void {
@@ -898,66 +676,7 @@ export class DockEngineService {
   }
 
   toggleFocusMode(): void {
-    const next = !this.focusMode();
-    this.focusMode.set(next);
-    if (next) {
-      this.enterFocusMode();
-    } else {
-      this.exitFocusMode();
-    }
-  }
-
-  /** 进入专注模式：初始化会话、自动推入候选、启动首选窗口 */
-  private enterFocusMode(): void {
-    this.focusScrimOn.set(true);
-    this.focusSessionContext.set({
-      id: crypto.randomUUID(),
-      startedAt: Date.now(),
-    });
-    this.schedulerPhase.set('active');
-    const focused = this.focusingEntry();
-    if (!focused) {
-      const candidate = this.consoleEntries().find(entry => isAutoPromotableStatus(entry.status));
-      if (candidate) {
-        this.promotionService.promoteCandidate(candidate.taskId);
-        this.lastRuleDecision.set(
-          createRuleDecision({
-            type: 'idle_promote',
-            reason: '进入专注模式后自动将首个可运行任务推入主控台',
-            recommendedTaskIds: [candidate.taskId],
-          }),
-        );
-      }
-    }
-
-    const initialTaskId =
-      this.focusingEntry()?.taskId ??
-      this.entries().find(entry => entry.isMain && entry.status !== 'completed')?.taskId ??
-      null;
-    if (initialTaskId) {
-      this.startFirstMainSelectionWindow(initialTaskId);
-    }
-    this.fragmentRest.updateFragmentDefenseLevel();
-  }
-
-  /**
-   * 退出专注模式：同步批量重置所有专注相关状态信号。
-   * 所有重置必须在同一同步帧内完成，避免 focusMode=false 与其他信号
-   * 之间出现不一致窗口（effects 在下一个 microtask 才能感知变更）。
-   */
-  private exitFocusMode(): void {
-    this.clearFirstMainSelectionWindow();
-    this.suspendRecommendationLocked.set(false);
-    this.suspendChainRootTaskId.set(null);
-    this.pendingDecision.set(null);
-    this.lastRuleDecision.set(null);
-    this.highlightedIds.set(new Set());
-    this.focusTransition.set(null);
-    this.lastRecommendationGroups.set([]);
-    this.schedulerPhase.set('active');
-    this.fragmentRest.resetRestState();
-    this.fragmentRest.stopFragmentEntryCountdown();
-    this.fragmentRest.setFragmentDismissed(false);
+    this.taskFlow.toggleFocusMode();
   }
 
   toggleFocusScrim(): void {
@@ -976,522 +695,63 @@ export class DockEngineService {
     this.focusTransition.set(null);
   }
 
-  /**
-   * Temporarily defer non-critical work (maintenance / persistence / cloud push)
-   * so animation-critical frames can run without main-thread contention.
-   */
   holdNonCriticalWork(durationMs: number): void {
     this.lifecycle.holdNonCriticalWork(durationMs);
   }
 
-  private static readonly MAX_COMPLETION_QUEUE_DEPTH = 50;
-
   completeTask(taskId: string): void {
-    // FIFO 队列序列化（策划案 §18.1）：防止快速连续完成导致竞态
-    if (this.completionQueue.length >= DockEngineService.MAX_COMPLETION_QUEUE_DEPTH) {
-      this.logger.warn('完成队列已满，丢弃新请求', { taskId, queueSize: this.completionQueue.length });
-      return;
-    }
-    this.completionQueue.push(taskId);
-    if (this.isProcessingCompletion) return;
-    this.drainCompletionQueue();
-  }
-
-  private drainCompletionQueue(): void {
-    if (this.completionQueue.length === 0) {
-      this.isProcessingCompletion = false;
-      return;
-    }
-    this.isProcessingCompletion = true;
-    const taskId = this.completionQueue.shift()!;
-    try {
-      this.executeCompleteTask(taskId);
-    } catch (error) {
-      // 防止 executeCompleteTask 异常导致队列永久卡死
-      this.logger.error('executeCompleteTask 抛出异常，跳过该任务继续处理队列', { taskId, error });
-    }
-    // C-3 fix: 始终通过异步调度处理下一个任务——即使队列在 executeCompleteTask
-    // 执行期间被同步追加了新条目，也确保当前调用栈先退出，让信号传播完成后
-    // 再处理下一个，避免 re-entrancy 导致的状态竞态。
-    if (this.completionQueue.length > 0) {
-      this.completionDrain.schedule(() => this.drainCompletionQueue(), PARKING_CONFIG.COMPLETION_DRAIN_INTERVAL_MS);
-    } else {
-      // 延迟重置标志：如果 executeCompleteTask 的 effect 在同一 microtask 内
-      // 触发了 completeTask，此时 isProcessingCompletion 仍为 true，新任务会
-      // 正确入队而非启动第二个 drain 循环。queueMicrotask 在所有同步 effect
-      // 处理完成后才执行，保证最终一致。
-      queueMicrotask(() => {
-        if (this.completionQueue.length > 0) {
-          this.drainCompletionQueue();
-        } else {
-          this.isProcessingCompletion = false;
-        }
-      });
-    }
-  }
-
-  private executeCompleteTask(taskId: string): void {
-    const entry = this.entries().find(item => item.taskId === taskId);
-    if (!entry) return;
-    const wasMaster = entry.isMain;
-
-    this.trackBurnoutIfHighLoad(entry);
-
-    this.entries.update(prev =>
-      patchEntryByTaskId(prev, taskId, {
-        status: 'completed',
-        isMain: false,
-        systemSelected: false,
-        recommendedScore: null,
-      }),
-    );
-
-    this.syncTaskCompletion(taskId);
-    this.completionFlow.resolveAfterCompletion(taskId);
-    if (wasMaster) {
-      this.promotionService.promoteFocusedTaskToMaster();
-    }
-    this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
-    this.rebalanceAutoZones();
-    this.lifecycle.refreshSuspendRecommendationLock();
-    this.waitEndNotifiedIds.delete(taskId);
-  }
-
-  /** 倦怠检测：高负荷任务完成时更新计数器（§7.8 NG-16b） */
-  private trackBurnoutIfHighLoad(entry: DockEntry): void {
-    if (entry.load !== 'high') return;
-    const now = Date.now();
-    const updated = updateHighLoadCounter(this.highLoadCounter(), now);
-    this.highLoadCounter.set(updated);
-    if (checkBurnoutThreshold(updated, now)) {
-      this.burnoutTriggeredAt.set(now);
-      this.logger.info('倦怠熔断触发：2h 内完成 ≥ 3 个高负荷任务');
-    }
-  }
-
-  /** 同步任务完成状态到项目数据层 */
-  private syncTaskCompletion(taskId: string): void {
-    const task = this.taskStore.getTask(taskId);
-    const projectId = this.taskSync.resolveTaskProjectId(taskId);
-    if (task && projectId) {
-      if (this.projectState.activeProjectId() === projectId) {
-        this.taskOps.updateTaskStatus(taskId, 'completed');
-      } else {
-        this.taskSync.applyCrossProjectTaskPatch(taskId, projectId, {
-          status: 'completed',
-        });
-      }
-    }
+    this.taskFlow.completeTask(taskId);
   }
 
   suspendTask(taskId: string, waitMinutes: number): void {
-    const normalizedWait = Math.max(1, Math.floor(waitMinutes));
-    const firstSuspendInChain = !this.suspendRecommendationLocked();
-
-    this.entries.update(prev =>
-      prev.map(entry => {
-        if (entry.taskId !== taskId) return entry;
-        const suspended: DockEntry = {
-          ...entry,
-          status: 'suspended_waiting',
-          waitMinutes: normalizedWait,
-          waitStartedAt: new Date().toISOString(),
-          isMain: entry.isMain,
-          systemSelected: false,
-        };
-        return suspended;
-      }),
-    );
-    this.taskSync.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
-
-    // 多层挂起嵌套检测（策划案 §7.9）：≥3 层同时挂起 → 直接进入碎片阶段
-    const suspendNestingDepth = this.entries().filter(
-      e => e.status === 'suspended_waiting' || e.status === 'wait_finished',
-    ).length;
-    if (suspendNestingDepth >= 3) {
-      this.logger.info(`挂起嵌套深度 ${suspendNestingDepth} ≥ 3，自动进入碎片阶段`);
-      this.completionFlow.enterFragmentPhase('挂起嵌套 ≥ 3 层，自动进入碎片阶段', taskId, normalizedWait);
-      return;
-    }
-
-    if (firstSuspendInChain) {
-      this.suspendChainRootTaskId.set(taskId);
-      this.suspendRecommendationLocked.set(true);
-      this.completionFlow.scheduleFirstSuspendRecommendation(taskId, normalizedWait);
-      return;
-    }
-
-    this.promotionService.promoteNext();
+    this.taskFlow.suspendTask(taskId, waitMinutes);
   }
 
   switchToTask(taskId: string): void {
-    this.fragmentRest.stopFragmentEntryCountdown();
-    this.fragmentRest.setFragmentDismissed(false);
-    const target = this.entries().find(entry => entry.taskId === taskId && entry.status !== 'completed');
-    if (!target) return;
-
-    const preVisible = this.consoleVisibleEntries();
-    const currentFocusId = this.focusingEntry()?.taskId ?? null;
-    const currentFocus = currentFocusId
-      ? this.entries().find(entry => entry.taskId === currentFocusId) ?? null
-      : null;
-    const pending = this.pendingDecision();
-    const shouldClearPending = !!pending && this.completionFlow.pendingCandidateIds(pending).includes(taskId);
-
-    const result = this.applySwitchEntries(taskId, currentFocusId, currentFocus, target, shouldClearPending);
-    if (!result.committed) return;
-
-    if (currentFocusId && currentFocusId !== taskId) {
-      this.lastConsoleDemotedTaskId.set(currentFocusId);
-    }
-    this.consoleVisibleOrderHint.set(buildConsoleVisibleOrderHint(preVisible, taskId));
-    this.lifecycle.scheduleSwitchMaintenance();
-
-    if (result.unlockSuspendChain) {
-      this.suspendRecommendationLocked.set(false);
-      this.suspendChainRootTaskId.set(null);
-      this.pendingDecision.set(null);
-      this.highlightedIds.set(new Set());
-      return;
-    }
-
-    if (shouldClearPending) {
-      this.pendingDecision.set(null);
-      this.highlightedIds.set(new Set());
-    }
-  }
-
-  /** 切换任务 entries 更新逻辑（从 switchToTask 提取，降低方法体积） */
-  private applySwitchEntries(
-    taskId: string,
-    currentFocusId: string | null,
-    currentFocus: DockEntry | null,
-    target: DockEntry,
-    shouldClearPending: boolean,
-  ): { committed: boolean; unlockSuspendChain: boolean } {
-    let unlockSuspendChain = false;
-    let committed = false;
-
-    this.entries.update(prev => {
-      let changed = false;
-      let next = prev.map(entry => {
-        if (entry.taskId === taskId) {
-          changed = true;
-          const focused: DockEntry = {
-            ...entry,
-            isMain: entry.isMain,
-            status: 'focusing',
-            waitMinutes: null,
-            waitStartedAt: null,
-            systemSelected: false,
-            recommendationLocked: false,
-            manualMainSelected: entry.manualMainSelected,
-          };
-          return focused;
-        }
-        if (currentFocusId && entry.taskId === currentFocusId) {
-          const backgroundStatus = this.completionFlow.deriveBackgroundStatus(entry, target, currentFocus);
-          if (entry.status === backgroundStatus) return entry;
-          changed = true;
-          return { ...entry, status: backgroundStatus };
-        }
-        return entry;
-      });
-
-      if (shouldClearPending) {
-        const cleared = this.completionFlow.clearSystemSelectionOnEntries(next);
-        if (cleared !== next) { next = cleared; changed = true; }
-      }
-
-      const hasSuspended = next.some(entry => isWaitingLike(entry.status));
-      if (!hasSuspended) {
-        unlockSuspendChain = true;
-        const unlocked = this.completionFlow.clearSuspendRecommendationStateOnEntries(next);
-        if (unlocked !== next) { next = unlocked; changed = true; }
-      }
-
-      committed = changed;
-      return changed ? next : prev;
-    });
-
-    return { committed, unlockSuspendChain: unlockSuspendChain };
+    this.taskFlow.switchToTask(taskId);
   }
 
   choosePendingDecisionCandidate(taskId: string): void {
-    const pending = this.pendingDecision();
-    if (!pending) return;
-    const candidateIds = this.completionFlow.pendingCandidateIds(pending);
-    if (!candidateIds.includes(taskId)) return;
-
-    const rejectedIds = candidateIds.filter(id => id !== taskId);
-    this.promotionService.promoteCandidate(taskId, false);
-    this.pendingDecision.set(null);
-    this.highlightedIds.set(new Set());
-
-    this.clearCandidateSelectionFlags(taskId, rejectedIds);
-    this.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'completion_followup',
-        reason: '异常时长分叉由用户手动决策',
-        rootTaskId: pending.rootTaskId,
-        recommendedTaskIds: [taskId],
-        remainingMinutes: pending.rootRemainingMinutes,
-      }),
-    );
-  }
-
-  /** 清除候选推荐标记：选中/拒绝/其余条目分别处理 */
-  private clearCandidateSelectionFlags(selectedId: string, rejectedIds: string[]): void {
-    this.entries.update(prev =>
-      prev.map(entry => {
-        if (entry.taskId === selectedId || rejectedIds.includes(entry.taskId)) {
-          return {
-            ...entry,
-            isMain: entry.isMain,
-            systemSelected: false,
-            recommendationLocked: false,
-            ...(entry.taskId === selectedId ? { manualMainSelected: entry.manualMainSelected } : {}),
-            recommendedScore: null,
-          };
-        }
-        return {
-          ...entry,
-          systemSelected: false,
-          recommendationLocked: false,
-          recommendedScore: entry.systemSelected ? null : entry.recommendedScore,
-        };
-      }),
-    );
+    this.taskFlow.choosePendingDecisionCandidate(taskId);
   }
 
   cancelPendingDecisionAutoPromote(): void {
-    const pending = this.pendingDecision();
-    if (!pending) return;
-    this.pendingDecision.set(null);
-    this.highlightedIds.set(new Set());
-    this.entries.update(prev => this.completionFlow.clearSystemSelectionOnEntries(prev));
-    this.lastRuleDecision.set(
-      createRuleDecision({
-        type: 'completion_followup',
-        reason: '用户收起推荐提示，保持当前状态',
-        rootTaskId: pending.rootTaskId,
-        recommendedTaskIds: [],
-        remainingMinutes: pending.rootRemainingMinutes,
-      }),
-    );
+    this.taskFlow.cancelPendingDecisionAutoPromote();
   }
 
   removeFromDock(taskId: string): void {
-    // 从完成队列中移除该任务，防止 removeFromDock 后 drainCompletionQueue 操作已移除的幽灵条目
-    const queueIdx = this.completionQueue.indexOf(taskId);
-    if (queueIdx !== -1) {
-      this.completionQueue.splice(queueIdx, 1);
-    }
-    const removed = this.entries().find(entry => entry.taskId === taskId) ?? null;
-    this.entries.update(prev => prev.filter(entry => entry.taskId !== taskId));
-    if (removed?.isMain) {
-      this.promotionService.promoteFocusedTaskToMaster();
-    }
-    this.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
-    this.rebalanceAutoZones();
-    this.waitEndNotifiedIds.delete(taskId);
-    if (this.entries().length === 0) {
-      this.pendingDecision.set(null);
-      this.highlightedIds.set(new Set());
-    }
-    this.lifecycle.refreshSuspendRecommendationLock();
+    this.taskFlow.removeFromDock(taskId);
   }
 
   dismissZenMode(): void {
     this.fragmentRest.dismissZenMode();
   }
 
-  /**
-   * 获取编辑锁（C 位卡片输入框获焦时调用）
-   * 持有锁期间抑制 pendingDecision 超时分支
-   */
   acquireDockEditLock(): void {
     this.editLock.set(true);
   }
 
-  /**
-   * 释放编辑锁（C 位卡片输入框失焦时调用）
-   */
   releaseDockEditLock(): void {
     this.editLock.set(false);
   }
 
   exportSnapshot(): DockSnapshot {
-    const session = this.buildSessionState();
-    return {
-      version: CURRENT_DOCK_SNAPSHOT_VERSION,
-      entries: this.entries(),
-      focusMode: this.focusMode(),
-      isDockExpanded: this.dockExpanded(),
-      muteWaitTone: this.muteWaitTone(),
-      session,
-      firstDragDone: this.firstDragIntervened(),
-      dailySlots: this.dailySlots(),
-      suspendChainRootTaskId: this.suspendChainRootTaskId(),
-      suspendRecommendationLocked: this.suspendRecommendationLocked(),
-      pendingDecision: this.pendingDecision(),
-      lastRuleDecision: this.lastRuleDecision(),
-      dailyResetDate: this.dailyResetDate(),
-      savedAt: new Date().toISOString(),
-      // v3.0 专注模式会话状态（§2.5）
-      focusSessionState: this.focusMode() ? this.buildFocusSessionState() : null,
-    };
-  }
-
-  /**
-   * 构建 FocusSessionState（策划案 §2.5）
-   * 将当前 entries signal 映射为 FocusTaskSlot 格式
-   */
-  private buildFocusSessionState(): FocusSessionState {
-    const context = this.ensureFocusSessionContext();
-    const activeEntries = this.entries().filter(e => e.status !== 'completed');
-
-    const commandTasks = activeEntries
-      .filter(e => e.isMain)
-      .map((e, i) => toFocusTaskSlot(e, 'command', i));
-    const comboSelectTasks = activeEntries
-      .filter(e => !e.isMain && e.lane === 'combo-select')
-      .map((e, i) => toFocusTaskSlot(e, 'combo-select', i));
-    const backupTasks = activeEntries
-      .filter(e => !e.isMain && e.lane === 'backup')
-      .map((e, i) => toFocusTaskSlot(e, 'backup', i));
-
-    return {
-      schemaVersion: 2,
-      sessionId: context.id,
-      sessionStartedAt: context.startedAt,
-      isActive: true,
-      isFocusOverlayOn: this.focusScrimOn(),
-      commandCenterTasks: commandTasks,
-      comboSelectTasks,
-      backupTasks,
-      hasFirstBatchSelected: this.firstDragIntervened(),
-      routineSlotsShownToday: [],
-      highLoadCounter: this.highLoadCounter(),
-      burnoutTriggeredAt: this.burnoutTriggeredAt(),
-    };
-  }
-
-  private ensureFocusSessionContext(seed?: { id?: string | null; startedAt?: number | null }): { id: string; startedAt: number } {
-    const current = this.focusSessionContext();
-    if (current) return current;
-
-    const next = {
-      id: typeof seed?.id === 'string' && seed.id ? seed.id : crypto.randomUUID(),
-      startedAt:
-        Number.isFinite(seed?.startedAt)
-          ? Number(seed?.startedAt)
-          : Date.now(),
-    };
-    this.focusSessionContext.set(next);
-    return next;
+    return this.snapshotManager.exportSnapshot();
   }
 
   restoreSnapshot(snapshot: DockSnapshot): void {
-    const normalized = this.snapshotPersistence.normalizeSnapshot(snapshot, this.buildNormalizeContext());
-    if (!normalized) return;
-    const hydratedEntries = this.applySessionToEntries(normalized.entries, normalized.session);
-    const recoveredEntries = this.snapshotPersistence.recoverLegacyExternalDragDefaultBackup(hydratedEntries);
-    const recoveredWithMain = this.completionFlow.enforceSingleMainInvariant(
-      recoveredEntries,
-      normalized.session.mainTaskId,
-    );
-
     // C-1 fix: try/finally 保护 restoringSnapshot 标志，防止异常导致永久卡住
     this.restoringSnapshot.set(true);
     try {
-      this.hydrateSignalsFromSnapshot(normalized, recoveredWithMain);
+      this.snapshotManager.restoreSnapshot(snapshot);
     } finally {
       this.restoringSnapshot.set(false);
     }
-    this.lifecycle.refreshSuspendRecommendationLock();
-    this.lifecycle.checkWaitExpiry();
-  }
-
-  /** 从规范化快照恢复所有信号状态 */
-  private hydrateSignalsFromSnapshot(normalized: DockSnapshot, entries: DockEntry[]): void {
-    this.entries.set(entries);
-    this.consoleVisibleOrderHint.set([]);
-    this.focusMode.set(normalized.focusMode);
-    this.dockExpanded.set(normalized.isDockExpanded);
-    this.muteWaitTone.set(normalized.muteWaitTone);
-    this.focusScrimOn.set(normalized.session.focusScrimOn);
-    this.firstDragIntervened.set(normalized.session.firstDragIntervened);
-    this.dailySlots.set(normalized.dailySlots);
-    this.suspendChainRootTaskId.set(normalized.suspendChainRootTaskId);
-    this.suspendRecommendationLocked.set(normalized.suspendRecommendationLocked);
-    this.pendingDecision.set(normalized.pendingDecision);
-    this.lastRuleDecision.set(normalized.lastRuleDecision ?? null);
-    this.lastExitAction.set(null);
-    this.focusTransition.set(null);
-    this.clearFirstMainSelectionWindow();
-    this.dailyResetDate.set(normalized.dailyResetDate);
-    this.schedulerPhase.set(normalized.session.schedulerPhase ?? 'active');
-    if (
-      typeof normalized.session.focusSessionId === 'string' &&
-      normalized.session.focusSessionId &&
-      Number.isFinite(normalized.session.focusSessionStartedAt)
-    ) {
-      this.focusSessionContext.set({
-        id: normalized.session.focusSessionId,
-        startedAt: Number(normalized.session.focusSessionStartedAt),
-      });
-    } else if (normalized.focusMode) {
-      this.ensureFocusSessionContext();
-    } else {
-      this.focusSessionContext.set(null);
-    }
-    this.highLoadCounter.set(normalized.session.highLoadCounter ?? { count: 0, windowStartAt: 0 });
-    this.burnoutTriggeredAt.set(normalized.session.burnoutTriggeredAt ?? null);
-    this.rebalanceAutoZones();
   }
 
   reset(): void {
-    this.entries.set([]);
-    this.consoleVisibleOrderHint.set([]);
-    this.focusMode.set(false);
-    this.dockExpanded.set(true);
-    this.muteWaitTone.set(false);
-    this.focusScrimOn.set(true);
-    this.firstDragIntervened.set(false);
-    this.dailySlots.set([]);
-    this.suspendChainRootTaskId.set(null);
-    this.suspendRecommendationLocked.set(false);
-    this.pendingDecision.set(null);
-    this.lastRuleDecision.set(null);
-    this.lastExitAction.set(null);
-    this.focusTransition.set(null);
-    this.clearFirstMainSelectionWindow();
-    this.focusSessionContext.set(null);
-    this.highlightedIds.set(new Set());
-    this.dailyResetDate.set(this.dailySlotService.todayDateKey());
-    // v3.0 重置倦怠检测状态
-    this.highLoadCounter.set({ count: 0, windowStartAt: 0 });
-    this.burnoutTriggeredAt.set(null);
-    this.fragmentDefenseLevel.set(1);
-    this.lastRecommendationGroups.set([]);
-    this.fragmentRest.resetAll();
-    this.editLock.set(false);
-    this.schedulerPhase.set('active');
-    this.waitEndNotifiedIds.clear();
-    this.lastConsoleDemotedTaskId.set(null);
-    this.zoneService.clearAdjacencyCache();
+    this.snapshotManager.reset();
   }
-
-
-  private buildNormalizeContext(): SnapshotNormalizeContext {
-    return {
-      muteWaitTone: this.muteWaitTone(),
-      todayDateKey: this.dailySlotService.todayDateKey(),
-      buildOverflowMeta: (entries) => buildOverflowMeta(entries),
-    };
-  }
-
 
   private rebalanceAutoZones(): void {
     this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
@@ -1520,80 +780,7 @@ export class DockEngineService {
     this.firstMainSelectionWindow.set(null);
   }
 
-  private buildSessionState(entries: DockEntry[] = this.entries()): DockSessionState {
-    const activeEntries = entries.filter(entry => entry.status !== 'completed');
-    const mainCandidate =
-      activeEntries.find(entry => entry.status === 'focusing') ??
-      activeEntries.find(entry => entry.isMain) ??
-      null;
-    return {
-      firstDragIntervened: this.firstDragIntervened(),
-      focusBlurOn: this.focusMode(),
-      focusScrimOn: this.focusScrimOn(),
-      focusSessionId: this.focusSessionContext()?.id,
-      focusSessionStartedAt: this.focusSessionContext()?.startedAt,
-      mainTaskId: mainCandidate?.taskId ?? null,
-      comboSelectIds: activeEntries
-        .filter(entry => !entry.isMain && entry.lane === 'combo-select')
-        .map(entry => entry.taskId),
-      backupIds: activeEntries
-        .filter(entry => !entry.isMain && entry.lane === 'backup')
-        .map(entry => entry.taskId),
-      highLoadCounter: this.highLoadCounter(),
-      burnoutTriggeredAt: this.burnoutTriggeredAt(),
-      hasFirstBatchSelected: this.firstDragIntervened(),
-      schedulerPhase: this.schedulerPhase(),
-      overflowMeta: buildOverflowMeta(activeEntries),
-    };
-  }
-
-  private applySessionToEntries(entries: DockEntry[], session: DockSessionState): DockEntry[] {
-    const comboSet = new Set(session.comboSelectIds);
-    const backupSet = new Set(session.backupIds);
-    const hasLaneHints = comboSet.size > 0 || backupSet.size > 0;
-
-    // M-9 fix: 提取 lane 分配逻辑为辅助函数，消除 6 层嵌套三元
-    const assignLane = (entry: DockEntry, markMain: boolean): DockEntry => {
-      if (entry.status === 'completed') return entry;
-      if (markMain && entry.taskId === session.mainTaskId) return { ...entry, isMain: true };
-      if (entry.isMain) return entry;
-      if (!hasLaneHints) return entry;
-      if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
-      if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
-      return entry;
-    };
-
-    if (!session.mainTaskId) {
-      const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, null);
-    }
-
-    const hasMain = entries.some(entry => entry.isMain && entry.status !== 'completed');
-    if (hasMain || !entries.some(entry => entry.taskId === session.mainTaskId)) {
-      const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
-    }
-
-    const hydrated = entries.map(e => assignLane(e, true));
-    return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
-  }
-
-
-  /**
-   * v3.0 使用三维推荐阵列增强挂起推荐（策划案 §4.2.4）
-   * 在首次挂起时触发，替代原始单分数排序
-   */
   computeRecommendationForSuspended(suspendedTaskId: string, waitMinutes: number): void {
-    const suspendedEntry = this.entries().find(e => e.taskId === suspendedTaskId);
-    if (!suspendedEntry) return;
-
-    const mainSlot = this.completionFlow.toFocusTaskSlot(suspendedEntry, 'command', 0);
-    const pendingEntries = this.entries().filter(
-      e => isAutoPromotableStatus(e.status) && e.taskId !== suspendedTaskId,
-    );
-    const pendingSlots = pendingEntries.map((e, i) => this.completionFlow.toFocusTaskSlot(e, 'combo-select', i));
-
-    const groups = computeThreeDimensionalRecommendation(mainSlot, pendingSlots, waitMinutes);
-    this.lastRecommendationGroups.set(groups);
+    this.snapshotManager.computeRecommendationForSuspended(suspendedTaskId, waitMinutes);
   }
 }
