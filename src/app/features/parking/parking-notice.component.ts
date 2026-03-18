@@ -71,7 +71,7 @@ type DismissReason = 'action' | 'interactive' | 'fallback';
     }
   `],
   template: `
-    @if (currentNotice(); as notice) {
+    @if (renderNotice(); as notice) {
       <div class="notice-container rounded-xl shadow-2xl border px-4 py-3 flex flex-col gap-2"
            data-testid="parking-notice"
            [class.notice-enter]="!isExiting()"
@@ -207,6 +207,8 @@ export class ParkingNoticeComponent implements OnDestroy {
   });
 
   readonly isExiting = signal(false);
+  readonly dismissingNotice = signal<ParkingNotice | null>(null);
+  readonly renderNotice = computed<ParkingNotice | null>(() => this.currentNotice() ?? this.dismissingNotice());
   readonly showSnoozeGuidance = computed(() => {
     const notice = this.currentNotice();
     if (!notice || notice.type !== 'reminder') return false;
@@ -219,7 +221,6 @@ export class ParkingNoticeComponent implements OnDestroy {
   private dismissTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeStartTime = 0;
   private lastNoticeId: string | null = null;
-  private dismissingNotice: ParkingNotice | null = null;
 
   private clickHandler: ((e: MouseEvent) => void) | null = null;
   private scrollStartY: number | null = null;
@@ -331,7 +332,7 @@ export class ParkingNoticeComponent implements OnDestroy {
     this.mobileExpanded.set(false);
     this.evictionExpanded.set(false);
     this.dismissedEvictionTokenIds.set(new Set());
-    this.dismissingNotice = null;
+    this.dismissingNotice.set(null);
     this.phase = 'idle';
     this.noticeStartTime = 0;
 
@@ -359,17 +360,18 @@ export class ParkingNoticeComponent implements OnDestroy {
     if (this.phase === 'idle' || this.isExiting()) return;
     const notice = this.currentNotice();
     if (!notice) return;
-    this.dismissingNotice = notice;
+    this.dismissingNotice.set(notice);
 
     this.isExiting.set(true);
     this.clearAllTimers();
     this.removeExternalListeners();
 
     this.dismissTimer = setTimeout(() => {
-      if (this.dismissingNotice) {
-        this.consumeNoticeByType(this.dismissingNotice, reason);
+      const dismissingNotice = this.dismissingNotice();
+      if (dismissingNotice) {
+        this.consumeNoticeByType(dismissingNotice, reason);
       }
-      this.dismissingNotice = null;
+      this.dismissingNotice.set(null);
       this.phase = 'idle';
       this.noticeStartTime = 0;
       this.isExiting.set(false);

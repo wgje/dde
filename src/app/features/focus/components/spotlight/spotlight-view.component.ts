@@ -95,7 +95,7 @@ import { SpotlightCardComponent } from './spotlight-card.component';
   `,
   styles: [`
     .spotlight-view {
-      animation: spotlight-enter 0.3s ease-out;
+      animation: spotlight-enter var(--pk-overlay-enter) var(--pk-ease-enter);
     }
     
     @keyframes spotlight-enter {
@@ -108,7 +108,7 @@ import { SpotlightCardComponent } from './spotlight-card.component';
     }
     
     .animate-emerge {
-      animation: emerge 0.4s ease-out;
+      animation: emerge var(--pk-panel-enter) var(--pk-ease-enter);
     }
     
     @keyframes emerge {

@@ -421,7 +421,7 @@ export interface WaitPreset {
 
 /**
  * 等待时间预设列表（中文 UI）。
- * minutes > 0 为实际等待分钟数；minutes = -1 是哨兵值，
+ * minutes > 0 为实际等待分钟数；minutes === null 是哨兵值，
  * UI 层应拦截该值并弹出自定义输入，而非直接传入计时逻辑。
  */
 export const WAIT_PRESETS: WaitPreset[] = [

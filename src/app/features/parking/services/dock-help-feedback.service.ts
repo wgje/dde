@@ -1,5 +1,6 @@
 import { Injectable, OnDestroy, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
+import { TimerHandle } from '../../../../utils/timer-handle';
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -64,9 +65,9 @@ export class DockHelpFeedbackService implements OnDestroy {
   ];
 
   // ── Timers & Flags ──────────────────────────────────────────
-  private helpNudgeTimer: ReturnType<typeof setTimeout> | null = null;
-  private dockActionFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
-  private restoreHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly helpNudgeTimer = new TimerHandle();
+  private readonly dockActionFeedbackTimer = new TimerHandle();
+  private readonly restoreHintTimer = new TimerHandle();
   private helpNudgeShownOnce = false;
 
   // ── Help overlay methods ────────────────────────────────────
@@ -95,10 +96,8 @@ export class DockHelpFeedbackService implements OnDestroy {
     if (this.helpNudgeShownOnce) return;
     this.helpNudgeShownOnce = true;
     this.showHelpNudge.set(true);
-    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
-    this.helpNudgeTimer = setTimeout(() => {
+    this.helpNudgeTimer.schedule(() => {
       this.showHelpNudge.set(false);
-      this.helpNudgeTimer = null;
     }, PARKING_CONFIG.HELP_NUDGE_AUTO_DISMISS_MS);
   }
 
@@ -110,10 +109,8 @@ export class DockHelpFeedbackService implements OnDestroy {
    */
   showDockFeedback(message: string, tone: DockActionFeedback['tone']): void {
     this.dockActionFeedback.set({ message, tone });
-    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
-    this.dockActionFeedbackTimer = setTimeout(() => {
+    this.dockActionFeedbackTimer.schedule(() => {
       this.dockActionFeedback.set(null);
-      this.dockActionFeedbackTimer = null;
     }, PARKING_CONFIG.DOCK_FEEDBACK_AUTO_DISMISS_MS);
   }
 
@@ -125,18 +122,16 @@ export class DockHelpFeedbackService implements OnDestroy {
    */
   showRestoreHintToast(): void {
     this.showRestoreHint.set(true);
-    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
-    this.restoreHintTimer = setTimeout(() => {
+    this.restoreHintTimer.schedule(() => {
       this.showRestoreHint.set(false);
-      this.restoreHintTimer = null;
     }, PARKING_CONFIG.DOCK_EXIT_CONFIRM_RESTORE_HINT_MS);
   }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
   ngOnDestroy(): void {
-    if (this.helpNudgeTimer) clearTimeout(this.helpNudgeTimer);
-    if (this.dockActionFeedbackTimer) clearTimeout(this.dockActionFeedbackTimer);
-    if (this.restoreHintTimer) clearTimeout(this.restoreHintTimer);
+    this.helpNudgeTimer.cancel();
+    this.dockActionFeedbackTimer.cancel();
+    this.restoreHintTimer.cancel();
   }
 }

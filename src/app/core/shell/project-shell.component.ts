@@ -36,8 +36,16 @@ import { ParkingNoticeComponent } from '../../features/parking/parking-notice.co
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
 import { PARKING_CONFIG } from '../../../config/parking.config';
-import { DockFocusTransitionPhase } from '../../../models/parking-dock';
 import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
+import {
+  type DockFocusChromePhase,
+} from '../../../utils/dock-focus-phase';
+import {
+  resolveProjectShellTakeoverFilter,
+  resolveProjectShellTakeoverOpacity,
+  resolveProjectShellTakeoverTransform,
+  resolveProjectShellTakeoverVisibility,
+} from './project-shell-focus-motion';
 
 interface NetworkInformationLike {
   effectiveType?: '4g' | '3g' | '2g' | 'slow-2g';
@@ -89,9 +97,13 @@ interface NetworkInformationLike {
     }
     .dock-main-content {
       transition:
-        opacity var(--pk-shell-exit) var(--pk-ease-standard),
+        opacity var(--pk-shell-enter) var(--pk-ease-standard),
         transform var(--pk-shell-enter) var(--pk-ease-enter),
-        filter var(--pk-shell-enter) var(--pk-ease-standard);
+        filter var(--pk-shell-enter) var(--pk-ease-standard),
+        visibility 0ms linear var(--pk-shell-enter);
+      transform-origin: center center;
+      backface-visibility: hidden;
+      contain: paint;
       will-change: opacity, transform, filter;
     }
   `],
@@ -105,10 +117,11 @@ interface NetworkInformationLike {
           data-testid="project-shell-main-content"
           [attr.data-dock-takeover-phase]="dockTakeoverPhase()"
           [class.pointer-events-none]="dockTakeoverMainNonInteractive()"
-          [class.invisible]="dockTakeoverMainHidden()"
           [style.opacity]="dockTakeoverMainOpacity()"
           [style.transform]="dockTakeoverMainTransform()"
-          [style.filter]="dockTakeoverMainFilter()">
+          [style.filter]="dockTakeoverMainFilter()"
+          [style.visibility]="dockTakeoverMainVisibility()"
+          [attr.aria-hidden]="dockTakeoverMainHidden() ? 'true' : null">
         <!-- Text Column - 允许滑动手势切换 -->
         <div class="flex flex-col min-h-0 overflow-hidden"
              [class.transition-all]="!uiState.isResizing() || collapseAnimating()"
@@ -388,18 +401,15 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   private readonly dockEngine = inject(DockEngineService);
-  readonly dockTakeoverPhase = computed<DockFocusTransitionPhase>(() => {
-    const transition = this.dockEngine.focusTransition();
-    if (transition?.phase === 'entering') return 'entering';
-    if (transition?.phase === 'exiting') return 'exiting';
-    if (this.dockEngine.focusMode() && this.dockEngine.focusScrimOn()) return 'focused';
-    return 'idle';
-  });
+  readonly dockTakeoverPhase = computed<DockFocusChromePhase>(() => this.resolveDockTakeoverPhase());
   readonly dockTakeoverMainHidden = computed(
     () =>
       PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT === 'hide'
       && (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'focused'),
   );
+  readonly dockTakeoverMainVisibility = computed<'visible' | 'hidden'>(() => {
+    return this.resolveDockTakeoverMainVisibility();
+  });
   readonly dockTakeoverMainDimmed = computed(
     () =>
       PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT === 'dim'
@@ -410,33 +420,13 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     () => this.dockTakeoverPhase() !== 'idle',
   );
   readonly dockTakeoverMainOpacity = computed(() => {
-    if (this.dockTakeoverMainHidden()) return 0;
-    if (this.dockTakeoverMainDimmed()) {
-      return this.dockTakeoverPhase() === 'focused' ? 0.46 : 0.68;
-    }
-    if (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'exiting') {
-      return 0.8;
-    }
-    return 1;
+    return this.resolveDockTakeoverMainOpacity();
   });
   readonly dockTakeoverMainFilter = computed(() => {
-    if (this.dockTakeoverMainDimmed()) {
-      return this.dockTakeoverPhase() === 'focused' ? 'blur(6px)' : 'blur(3px)';
-    }
-    if (this.dockTakeoverMainHidden()) return 'blur(8px)';
-    return 'none';
+    return this.resolveDockTakeoverMainFilter();
   });
   readonly dockTakeoverMainTransform = computed(() => {
-    if (this.dockTakeoverMainHidden()) return 'translateY(-12px) scale(0.985)';
-    if (this.dockTakeoverMainDimmed()) {
-      return this.dockTakeoverPhase() === 'focused'
-        ? 'translateY(-6px) scale(0.996)'
-        : 'translateY(-4px) scale(0.997)';
-    }
-    if (this.dockTakeoverPhase() === 'entering' || this.dockTakeoverPhase() === 'exiting') {
-      return 'translateY(-3px) scale(0.998)';
-    }
-    return 'translateY(0) scale(1)';
+    return this.resolveDockTakeoverMainTransform();
   });
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
@@ -513,6 +503,34 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     ).subscribe(() => {
       this.handleRouteChange();
     });
+  }
+
+  private resolveDockTakeoverPhase(): DockFocusChromePhase {
+    return this.dockEngine.focusChromePhase();
+  }
+
+  private resolveDockTakeoverMainVisibility(): 'visible' | 'hidden' {
+    return resolveProjectShellTakeoverVisibility(this.resolveDockTakeoverVisualState());
+  }
+
+  private resolveDockTakeoverMainOpacity(): number {
+    return resolveProjectShellTakeoverOpacity(this.resolveDockTakeoverVisualState());
+  }
+
+  private resolveDockTakeoverMainFilter(): string {
+    return resolveProjectShellTakeoverFilter(this.resolveDockTakeoverVisualState());
+  }
+
+  private resolveDockTakeoverMainTransform(): string {
+    return resolveProjectShellTakeoverTransform(this.resolveDockTakeoverVisualState());
+  }
+
+  private resolveDockTakeoverVisualState() {
+    return {
+      phase: this.dockTakeoverPhase(),
+      hiddenMode: this.dockTakeoverMainHidden(),
+      scrimOn: this.dockEngine.focusScrimOn(),
+    };
   }
 
   /**

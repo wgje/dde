@@ -204,7 +204,9 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                       'opacity-40 scale-98 border border-retro-teal border-dashed bg-retro-teal/10': draggingTaskId() === task.id
                     }">
                     <span class="text-retro-dark dark:text-stone-300">{{task.title || '未命名任务'}}
-                      <span *ngIf="task.content" class="ml-1 text-[10px] text-stone-400">· 内容</span>
+                      @if (task.content) {
+                      <span class="ml-1 text-[10px] text-stone-400">· 内容</span>
+                      }
                     </span>
                   </div>
                 }

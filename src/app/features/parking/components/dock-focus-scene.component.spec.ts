@@ -9,7 +9,8 @@ import { DockFocusSceneComponent } from './dock-focus-scene.component';
   template: `
     <app-dock-focus-scene
       [active]="active"
-      [scrimOn]="scrimOn">
+      [scrimOn]="scrimOn"
+      [transitionPhase]="transitionPhase">
       <button
         type="button"
         style="pointer-events: auto;"
@@ -22,6 +23,7 @@ import { DockFocusSceneComponent } from './dock-focus-scene.component';
 class DockFocusSceneHostComponent {
   active = true;
   scrimOn = false;
+  transitionPhase: 'entering' | 'focused' | 'exiting' | null = null;
 }
 
 describe('DockFocusSceneComponent', () => {
@@ -49,6 +51,21 @@ describe('DockFocusSceneComponent', () => {
     expect(stage.getAttribute('data-scrim')).toBe('off');
     expect(backdrop.classList.contains('active')).toBe(false);
     expect(component.focusStageStyle()['--stage-shell-opacity']).toBe('0.720');
+  });
+
+  it('applies steady stage positioning on the inner shell so enter/exit animation does not overwrite it', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.componentRef.setInput('scrimOn', true);
+    fixture.componentRef.setInput('transitionPhase', 'entering');
+    fixture.componentRef.setInput('stageTransform', 'translateY(96px)');
+    fixture.detectChanges();
+
+    const stage = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]') as HTMLElement | null;
+    const stageShell = fixture.nativeElement.querySelector('.console-stage-shell') as HTMLElement | null;
+
+    expect(stage).toBeTruthy();
+    expect(stage?.style.transform).toBe('');
+    expect(stageShell?.style.transform).toBe('translateY(96px)');
   });
 
   it('should unmount projected controls when transparent focus mode is idle', () => {
@@ -140,6 +157,20 @@ describe('DockFocusSceneComponent', () => {
     component.onStageAnimationEnd({ animationName: 'focusStageEnter' } as AnimationEvent);
 
     expect(settled).toHaveBeenCalledWith('entering');
+  });
+
+  it('keeps projected controls mounted during exit transition even after active state turns false', () => {
+    const hostFixture = TestBed.createComponent(DockFocusSceneHostComponent);
+    hostFixture.componentInstance.active = false;
+    hostFixture.componentInstance.scrimOn = false;
+    hostFixture.componentInstance.transitionPhase = 'exiting';
+    hostFixture.detectChanges();
+
+    const stage = hostFixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]') as HTMLElement | null;
+
+    expect(stage).toBeTruthy();
+    expect(stage?.getAttribute('data-transition')).toBe('exiting');
+    expect(hostFixture.nativeElement.querySelector('[data-testid="projected-focus-control"]')).toBeTruthy();
   });
 
   it('short-circuits transitionSettled in T2 profile without waiting for animation', async () => {

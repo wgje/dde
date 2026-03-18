@@ -3,8 +3,8 @@ import {
   Component,
   computed,
   effect,
-  inject,
   Input,
+  inject,
   OnDestroy,
   OnInit,
   output,
@@ -107,8 +107,8 @@ interface DockFocusScenePreset {
       pointer-events: none;
       opacity: 0;
       transition:
-        opacity var(--pk-overlay-enter) var(--pk-ease-standard),
-        background-color var(--pk-overlay-enter) var(--pk-ease-standard);
+        opacity var(--pk-shell-enter) var(--pk-ease-standard),
+        background-color var(--pk-shell-enter) var(--pk-ease-standard);
     }
 
     .focus-backdrop.active {
@@ -119,16 +119,30 @@ interface DockFocusScenePreset {
     .console-stage {
       pointer-events: none;
       opacity: 0;
-      transition:
-        opacity var(--pk-shell-exit) var(--pk-ease-standard),
-        transform var(--pk-shell-enter) var(--pk-ease-enter);
+      backface-visibility: hidden;
+      transition: opacity var(--pk-shell-exit) var(--pk-ease-standard);
+      will-change: opacity, transform;
     }
 
     .console-stage.active {
       opacity: var(--stage-shell-opacity, 1);
     }
 
-    .console-stage::before {
+    .console-stage-shell {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      transform: translateY(0);
+      transform-origin: center center;
+      backface-visibility: hidden;
+      transition: transform var(--pk-shell-enter) var(--pk-ease-enter);
+      will-change: transform;
+    }
+
+    .console-stage-shell::before {
       content: '';
       position: absolute;
       top: 50%;
@@ -154,7 +168,7 @@ interface DockFocusScenePreset {
       animation-delay: var(--scene-ambient-delay, 340ms);
     }
 
-    .console-stage::after {
+    .console-stage-shell::after {
       content: '';
       position: absolute;
       top: 50%;
@@ -267,7 +281,7 @@ interface DockFocusScenePreset {
     }
 
     .focus-scene[data-performance-tier='T1'] .focus-scene-aurora,
-    .console-stage[data-performance-tier='T1']::before {
+    .console-stage-shell[data-performance-tier='T1']::before {
       animation: none;
     }
 
@@ -277,8 +291,8 @@ interface DockFocusScenePreset {
     .focus-scene[data-reduced-motion='true'] .focus-base-mesh,
     .focus-scene[data-reduced-motion='true'] .focus-scene-aurora,
     .focus-scene[data-reduced-motion='true'] .focus-scene-grain,
-    .console-stage[data-performance-tier='T2']::before,
-    .console-stage[data-reduced-motion='true']::before {
+    .console-stage-shell[data-performance-tier='T2']::before,
+    .console-stage-shell[data-reduced-motion='true']::before {
       animation: none !important;
       transform: none;
     }
@@ -300,7 +314,8 @@ interface DockFocusScenePreset {
       .focus-base-mesh,
       .focus-backdrop,
       .console-stage,
-      .console-stage::before {
+      .console-stage-shell,
+      .console-stage-shell::before {
         transition: none;
         animation: none;
       }
@@ -339,7 +354,6 @@ interface DockFocusScenePreset {
       <div
         class="fixed inset-0 z-30 flex items-center justify-center console-stage"
         [class.active]="stageVisible()"
-        [style.transform]="stageTransform$()"
         style="pointer-events: none;"
         [attr.aria-hidden]="stageVisible() ? null : 'true'"
         [attr.inert]="stageVisible() ? null : ''"
@@ -352,10 +366,19 @@ interface DockFocusScenePreset {
         data-testid="dock-v3-focus-stage"
         (animationend)="onStageAnimationEnd($event)"
         (transitionend)="onStageTransitionEnd($event)">
-        @if (stageVisible()) {
-          <!-- scrim 关闭且无过渡时，彻底卸载投影内容，避免透明固定层继续吞点击。 -->
-          <ng-content></ng-content>
-        }
+        <div
+          class="console-stage-shell"
+          [style.transform]="stageTransform$()"
+          [attr.data-performance-tier]="performanceTier$()"
+          [attr.data-scene]="sceneMode$()"
+          [attr.data-reduced-motion]="reducedMotion$() ? 'true' : 'false'"
+          [attr.data-scrim]="scrimOn$() ? 'on' : 'off'"
+          [attr.data-transition]="transitionPhase$() ?? 'steady'">
+          @if (stageVisible()) {
+            <!-- scrim 关闭且无过渡时，彻底卸载投影内容，避免透明固定层继续吞点击。 -->
+            <ng-content></ng-content>
+          }
+        </div>
       </div>
     }
   `,
@@ -364,37 +387,63 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
   private readonly sanitizer = inject(DomSanitizer);
   private readonly performanceTierService = inject(PerformanceTierService);
 
-  private readonly _active = signal(false);
-  @Input() set active(v: boolean) { this._active.set(v); }
-  readonly active$ = this._active.asReadonly();
+  private readonly activeState = signal(false);
+  private readonly scrimOnState = signal(false);
+  private readonly sceneModeState = signal<DockFocusSceneMode>('steady');
+  private readonly performanceTierState = signal<FocusPerformanceTier>('T0');
+  private readonly reducedMotionState = signal(false);
+  private readonly transitionPhaseState = signal<DockFocusTransitionPhase | null>(null);
+  private readonly stageTransformState = signal('translateY(0)');
+  private readonly backgroundImageUrlState = signal('');
 
-  private readonly _scrimOn = signal(false);
-  @Input() set scrimOn(v: boolean) { this._scrimOn.set(v); }
-  readonly scrimOn$ = this._scrimOn.asReadonly();
+  readonly active$ = this.activeState;
+  readonly scrimOn$ = this.scrimOnState;
+  readonly sceneMode$ = this.sceneModeState;
+  readonly performanceTier$ = this.performanceTierState;
+  readonly reducedMotion$ = this.reducedMotionState;
+  readonly transitionPhase$ = this.transitionPhaseState;
+  readonly stageTransform$ = this.stageTransformState;
+  readonly backgroundImageUrl$ = this.backgroundImageUrlState;
 
-  private readonly _sceneMode = signal<DockFocusSceneMode>('steady');
-  @Input() set sceneMode(v: DockFocusSceneMode) { this._sceneMode.set(v); }
-  readonly sceneMode$ = this._sceneMode.asReadonly();
+  @Input({ alias: 'active' })
+  set active(value: boolean) {
+    this.activeState.set(Boolean(value));
+  }
 
-  private readonly _performanceTier = signal<FocusPerformanceTier>('T0');
-  @Input() set performanceTier(v: FocusPerformanceTier) { this._performanceTier.set(v); }
-  readonly performanceTier$ = this._performanceTier.asReadonly();
+  @Input({ alias: 'scrimOn' })
+  set scrimOn(value: boolean) {
+    this.scrimOnState.set(Boolean(value));
+  }
 
-  private readonly _reducedMotion = signal(false);
-  @Input() set reducedMotion(v: boolean) { this._reducedMotion.set(v); }
-  readonly reducedMotion$ = this._reducedMotion.asReadonly();
+  @Input({ alias: 'sceneMode' })
+  set sceneMode(value: DockFocusSceneMode) {
+    this.sceneModeState.set(value ?? 'steady');
+  }
 
-  private readonly _transitionPhase = signal<DockFocusTransitionPhase | null>(null);
-  @Input() set transitionPhase(v: DockFocusTransitionPhase | null) { this._transitionPhase.set(v); }
-  readonly transitionPhase$ = this._transitionPhase.asReadonly();
+  @Input({ alias: 'performanceTier' })
+  set performanceTier(value: FocusPerformanceTier) {
+    this.performanceTierState.set(value ?? 'T0');
+  }
 
-  private readonly _stageTransform = signal('translateY(0)');
-  @Input() set stageTransform(v: string) { this._stageTransform.set(v); }
-  readonly stageTransform$ = this._stageTransform.asReadonly();
+  @Input({ alias: 'reducedMotion' })
+  set reducedMotion(value: boolean) {
+    this.reducedMotionState.set(Boolean(value));
+  }
 
-  private readonly _backgroundImageUrl = signal('');
-  @Input() set backgroundImageUrl(v: string) { this._backgroundImageUrl.set(v); }
-  readonly backgroundImageUrl$ = this._backgroundImageUrl.asReadonly();
+  @Input({ alias: 'transitionPhase' })
+  set transitionPhase(value: DockFocusTransitionPhase | null) {
+    this.transitionPhaseState.set(value ?? null);
+  }
+
+  @Input({ alias: 'stageTransform' })
+  set stageTransform(value: string) {
+    this.stageTransformState.set(value || 'translateY(0)');
+  }
+
+  @Input({ alias: 'backgroundImageUrl' })
+  set backgroundImageUrl(value: string) {
+    this.backgroundImageUrlState.set(value || '');
+  }
 
   readonly backdropClick = output<void>();
   readonly transitionSettled = output<DockFocusTransitionPhase>();

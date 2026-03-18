@@ -55,6 +55,7 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
 })
 export class FocusModeComponent implements OnInit, OnDestroy {
   private static focusAnimationStyleLoaded = false;
+  private static focusAnimationStyleLoadPromise: Promise<void> | null = null;
 
   private readonly gateService = inject(GateService);
   private readonly blackBoxSyncService = inject(BlackBoxSyncService);
@@ -100,17 +101,36 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   }
 
   private ensureFocusAnimationStyleLoaded(): void {
-    if (FocusModeComponent.focusAnimationStyleLoaded) return;
-    FocusModeComponent.focusAnimationStyleLoaded = true;
-
-    void import('./focus.animations.css').catch((error: unknown) => {
-      FocusModeComponent.focusAnimationStyleLoaded = false;
+    void FocusModeComponent.preloadAssets().catch((error: unknown) => {
       this.logger.warn(
         'FocusMode',
         'focus 动画样式按需加载失败，降级继续',
         error instanceof Error ? error.message : String(error)
       );
     });
+  }
+
+  static preloadAssets(): Promise<void> {
+    if (FocusModeComponent.focusAnimationStyleLoaded) {
+      return Promise.resolve();
+    }
+    if (FocusModeComponent.focusAnimationStyleLoadPromise) {
+      return FocusModeComponent.focusAnimationStyleLoadPromise;
+    }
+
+    FocusModeComponent.focusAnimationStyleLoadPromise = import('./focus.animations.css')
+      .then(() => {
+        FocusModeComponent.focusAnimationStyleLoaded = true;
+      })
+      .catch((error: unknown) => {
+        FocusModeComponent.focusAnimationStyleLoaded = false;
+        throw error;
+      })
+      .finally(() => {
+        FocusModeComponent.focusAnimationStyleLoadPromise = null;
+      });
+
+    return FocusModeComponent.focusAnimationStyleLoadPromise;
   }
 
   ngOnDestroy(): void {

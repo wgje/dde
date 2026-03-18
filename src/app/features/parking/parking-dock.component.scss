@@ -23,7 +23,7 @@
       pointer-events: none;
       opacity: 0;
       overflow: hidden;
-      transition: opacity 0.58s cubic-bezier(0.25, 0.06, 0.20, 1.0);
+      transition: opacity var(--pk-shell-enter) var(--pk-ease-standard);
     }
     .focus-scene.active {
       opacity: 1;
@@ -114,8 +114,8 @@
     .focus-backdrop {
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.52s cubic-bezier(0.25, 0.06, 0.20, 1.0),
-                  background-color 0.52s cubic-bezier(0.25, 0.06, 0.20, 1.0);
+      transition: opacity var(--pk-shell-enter) var(--pk-ease-standard),
+                  background-color var(--pk-shell-enter) var(--pk-ease-standard);
     }
     .focus-backdrop.active {
       opacity: 1;
@@ -153,9 +153,11 @@
        ══════════════════════════════════════════ */
     .dock-bar {
       pointer-events: auto;
+      backface-visibility: hidden;
       transition:
         transform var(--pk-panel-enter) var(--pk-ease-enter),
-        opacity var(--pk-panel-exit) var(--pk-ease-standard);
+        opacity var(--pk-panel-exit) var(--pk-ease-standard),
+        left var(--pk-shell-enter) var(--pk-ease-standard);
       /* mobile-first：移动端默认高度不超 34dvh，宽度贴合视口 */
       max-height: calc(34dvh - env(safe-area-inset-bottom, 0px));
       /* 允许 planner popover 向坞栏外侧展开，正文滚动仍由内部容器负责。 */
@@ -226,11 +228,13 @@
       justify-content: center;
       gap: 4px;
       opacity: 0.32;
+      backface-visibility: hidden;
       transition:
         transform var(--pk-panel-enter) var(--pk-ease-enter),
         opacity var(--pk-panel-exit) var(--pk-ease-standard),
         background-color var(--pk-panel-exit) var(--pk-ease-standard),
-        box-shadow var(--pk-panel-exit) var(--pk-ease-standard);
+        box-shadow var(--pk-panel-exit) var(--pk-ease-standard),
+        left var(--pk-shell-enter) var(--pk-ease-standard);
       box-shadow:
         0 -8px 24px rgba(0, 0, 0, 0.24),
         0 -1px 4px rgba(99, 102, 241, 0.08);
@@ -634,14 +638,62 @@
       background: rgba(251, 191, 36, 0.08);
     }
 
+    .focus-floating-ui {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      transform-origin: center top;
+      backface-visibility: hidden;
+    }
+
+    /* 入场动画：entering 和 focused 阶段都触发，因为 @if 条件渲染可能在 focused 阶段才挂载元素 */
+    .focus-floating-ui:not(.focus-floating-ui-hud)[data-focus-phase='entering'],
+    .focus-floating-ui:not(.focus-floating-ui-hud)[data-focus-phase='focused'] {
+      animation: focusFloatingIn var(--pk-hud-enter) var(--pk-ease-enter) both;
+    }
+
+    .focus-floating-ui[data-focus-phase='exiting'] {
+      animation: focusFloatingOut var(--pk-focus-exit) var(--pk-ease-exit) both;
+    }
+
+    @keyframes focusFloatingIn {
+      0% {
+        opacity: 0;
+        transform: translateY(10px) scale(0.985);
+      }
+      55% {
+        opacity: 0.72;
+        transform: translateY(2px) scale(0.997);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @keyframes focusFloatingOut {
+      0% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+      100% {
+        opacity: 0;
+        transform: translateY(10px) scale(0.985);
+      }
+    }
+
     .status-machine-shell {
       display: inline-flex;
       animation: slideDown var(--pk-hud-enter) var(--pk-ease-enter) var(--pk-focus-scene-entry-hud) both;
       transform-origin: top right;
+      backface-visibility: hidden;
     }
     .status-machine-shell-minimal {
       transform-origin: top center;
       animation-delay: 0ms;
+    }
+
+    .focus-floating-ui-hud[data-focus-phase='exiting'] .status-machine-shell {
+      animation: focusFloatingOut var(--pk-focus-exit) var(--pk-ease-exit) both;
     }
 
     /* ══════════════════════════════════════════
@@ -665,6 +717,40 @@
       100% { opacity: 1; transform: translateY(0) scale(1); }
     }
 
+    .focus-exit-confirm-overlay {
+      animation: exitConfirmOverlayIn var(--pk-overlay-enter) var(--pk-ease-enter) both;
+    }
+
+    .focus-exit-confirm-card {
+      animation: exitConfirmCardIn var(--pk-panel-enter) var(--pk-ease-enter) both;
+      transform-origin: center top;
+      backface-visibility: hidden;
+    }
+
+    @keyframes exitConfirmOverlayIn {
+      0% {
+        opacity: 0;
+      }
+      100% {
+        opacity: 1;
+      }
+    }
+
+    @keyframes exitConfirmCardIn {
+      0% {
+        opacity: 0;
+        transform: translateY(12px) scale(0.985);
+      }
+      55% {
+        opacity: 0.7;
+        transform: translateY(4px) scale(0.995);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .focus-scene,
       .focus-bg-image,
@@ -674,10 +760,13 @@
       .dock-card,
       .new-task-form,
       .fragment-overlay-enter,
+      .focus-floating-ui,
       .dock-semicircle,
       .dock-semicircle-enter,
       .pending-decision-enter,
       .decision-card,
+      .focus-exit-confirm-overlay,
+      .focus-exit-confirm-card,
       .dock-v4-flip-ghost,
       .drop-zone {
         transition: none;

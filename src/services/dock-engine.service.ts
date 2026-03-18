@@ -1,6 +1,5 @@
 ﻿import { Injectable, computed, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
-import { DOCK_TOAST } from '../config/dock-i18n.config';
 import {
   CognitiveLoad,
   DailySlotEntry,
@@ -27,12 +26,6 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ToastService } from './toast.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import {
-  checkBurnoutThreshold,
-  createRuleDecision,
-  updateHighLoadCounter,
-} from './dock-scheduler.rules';
-import { sanitizePlannerFields } from '../utils/planner-fields';
-import {
   DockSnapshotPersistenceService,
 } from './dock-snapshot-persistence.service';
 import { DockCloudSyncService } from './dock-cloud-sync.service';
@@ -50,15 +43,13 @@ import { DockEntryCrudService } from './dock-entry-crud.service';
 import { DockTaskFlowService } from './dock-task-flow.service';
 import { TimerHandle } from '../utils/timer-handle';
 import {
-  buildConsoleVisibleOrderHint,
-  buildDockEntry,
-  findConsoleEvictionCandidate,
+  resolveDockFocusChromePhase,
+  type DockFocusChromePhase,
+} from '../utils/dock-focus-phase';
+import {
   getWaitRemainingSeconds,
-  isAutoPromotableStatus,
   isConsoleBackgroundStatus,
   isWaitingLike,
-  patchAllEntries,
-  patchEntryByTaskId,
   sortDockEntriesForDisplay,
   toStatusMachineEntry,
 } from './dock-engine.utils';
@@ -105,6 +96,7 @@ export class DockEngineService {
   readonly entries = signal<DockEntry[]>([]);
   readonly focusMode = signal(false);
   readonly focusTransition = signal<DockFocusTransitionState | null>(null);
+  private readonly focusChromeRestoring = signal(false);
   readonly dockExpanded = signal(true);
   readonly muteWaitTone = signal(false);
   readonly focusScrimOn = signal(true);
@@ -159,7 +151,6 @@ export class DockEngineService {
   /** 碎片进入倒计时剩余秒数（null=不在倒计时状态） */
   readonly fragmentEntryCountdown = computed(() => this.fragmentRest.fragmentEntryCountdown());
 
-  /**
   /** 持久化脏标记：聚合所有影响快照持久化的信号，避免多次冗余持久化。 */
   private readonly persistenceDeps = computed(() => {
     // 读取所有持久化相关信号以建立依赖关系
@@ -186,8 +177,8 @@ export class DockEngineService {
     // dev 守卫：持久化信号数量漂移检测
     if (typeof ngDevMode === 'undefined' || ngDevMode) {
       if (deps.length !== DockEngineService.EXPECTED_PERSISTED_SIGNAL_COUNT) {
-        console.error(
-          `[DockEngine] persistenceDeps 信号数量不匹配：` +
+        this.logger.error(
+          `persistenceDeps 信号数量不匹配：` +
           `预期 ${DockEngineService.EXPECTED_PERSISTED_SIGNAL_COUNT}，实际 ${deps.length}。` +
           `请同步更新 EXPECTED_PERSISTED_SIGNAL_COUNT、exportSnapshot 和 hydrateSignalsFromSnapshot。`,
         );
@@ -206,6 +197,7 @@ export class DockEngineService {
   private readonly localPersist = new TimerHandle();
   private readonly firstMainSelection = new TimerHandle();
   private readonly highlightClearTimer = new TimerHandle();
+  private readonly focusChromeRestoreTimer = new TimerHandle();
 
   private currentSnapshotUserId: string | null = null;
   /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
@@ -239,6 +231,14 @@ export class DockEngineService {
     const phase = this.focusTransition()?.phase ?? null;
     return phase === 'entering' || phase === 'exiting';
   });
+  readonly focusChromePhase = computed<DockFocusChromePhase>(() =>
+    resolveDockFocusChromePhase(
+      this.focusMode(),
+      this.focusTransition(),
+      this.focusScrimOn(),
+      this.focusChromeRestoring(),
+    ),
+  );
   readonly consoleEntries = computed(() =>
     this.entries().filter(
       entry =>
@@ -291,6 +291,13 @@ export class DockEngineService {
   );
   // v3.0 倦怠状态（策划案 §7.8 NG-16b）
   readonly isBurnoutActive = computed(() => this.burnoutTriggeredAt() !== null);
+  /** 空白等待期：倒计时结束但无可选推荐条目 */
+  readonly blankPeriodActive = computed(
+    () =>
+      this.fragmentEntryCountdown() === null
+      && this.pendingDecision() !== null
+      && this.pendingDecisionEntries().length === 0,
+  );
   readonly isFragmentPhase = computed(() => {
     const docked = this.dockedEntries();
     return (
@@ -404,6 +411,7 @@ export class DockEngineService {
       this.highlightClearTimer.cancel();
       this.localPersist.cancel();
       this.firstMainSelection.cancel();
+      this.focusChromeRestoreTimer.cancel();
     });
   }
 
@@ -639,6 +647,9 @@ export class DockEngineService {
 
   clearDockForExit(): void {
     this.entryCrud.clearDockForExit();
+  }
+
+  finalizeClearDockForExit(): void {
     this.dailySlots.set([]);
     this.lastRuleDecision.set(null);
     this.zoneService.clearAdjacencyCache();
@@ -677,6 +688,7 @@ export class DockEngineService {
   }
 
   toggleFocusMode(): void {
+    this.clearFocusChromeRestore();
     this.taskFlow.toggleFocusMode();
   }
 
@@ -689,11 +701,30 @@ export class DockEngineService {
   }
 
   beginFocusTransition(state: DockFocusTransitionState): void {
+    this.clearFocusChromeRestore();
     this.focusTransition.set(state);
   }
 
   endFocusTransition(): void {
     this.focusTransition.set(null);
+  }
+
+  beginFocusChromeRestore(durationMs: number = PARKING_CONFIG.DOCK_ANIMATION_MS): void {
+    this.focusChromeRestoreTimer.cancel();
+    if (durationMs <= 0) {
+      this.focusChromeRestoring.set(false);
+      return;
+    }
+
+    this.focusChromeRestoring.set(true);
+    this.focusChromeRestoreTimer.schedule(() => {
+      this.focusChromeRestoring.set(false);
+    }, durationMs);
+  }
+
+  clearFocusChromeRestore(): void {
+    this.focusChromeRestoreTimer.cancel();
+    this.focusChromeRestoring.set(false);
   }
 
   holdNonCriticalWork(durationMs: number): void {

@@ -119,28 +119,44 @@
   </app-workspace-overlays>
 
   <app-workspace-shell-core>
-    <div data-testid="app-container" class="flex flex-1 w-full min-h-0 overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
+    <div data-testid="app-container" class="relative flex flex-1 w-full min-h-0 overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
   
   <!-- Toast 通知容器 -->
   <app-toast-container data-testid="toast-container"></app-toast-container>
   
   <!-- Left Sidebar: Project List -->
   <app-workspace-sidebar>
-    <aside data-testid="project-selector" class="border-r flex flex-col shrink-0 shadow-[4px_0_24px_rgba(0,0,0,0.02)] z-10 overflow-hidden" [class.transition-all]="!isResizingAny" [class.duration-75]="!isResizingAny" style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
+    @if (mobileSidebarBackdropVisible()) {
+      <div
+        data-testid="project-selector-backdrop"
+        class="fixed inset-0 z-30 bg-slate-950/12 backdrop-blur-[1px]"
+        (click)="isSidebarOpen.set(false)"
+        aria-hidden="true">
+      </div>
+    }
+    <aside data-testid="project-selector" class="border-r flex flex-col shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-hidden" [class.shrink-0]="!isMobile()" [class.transition-all]="!isMobile() && !isResizingAny" [class.duration-75]="!isMobile() && !isResizingAny" [class.fixed]="isMobile()" [class.inset-y-0]="isMobile()" [class.left-0]="isMobile()" [class.z-40]="isMobile()" [class.z-10]="!isMobile()" style="background-color: var(--theme-sidebar-bg); border-color: var(--theme-border);"
+           [attr.data-mobile-overlay]="isMobile() ? 'true' : null"
            [style.opacity]="workspaceSidebarOpacity()"
            [style.transform]="workspaceSidebarTransform()"
-           [style.pointer-events]="focusWorkspaceTakeoverActive() ? 'none' : 'auto'"
-           [style.transition]="workspaceSidebarTransition"
+           [style.pointer-events]="workspaceSidebarPointerEvents()"
+           [style.transition]="workspaceSidebarTransition()"
            [style.width.px]="workspaceSidebarWidthPx()"
-           [class.w-0]="!isSidebarOpen()"
+           [style.max-width]="isMobile() ? 'calc(100vw - 24px)' : null"
+           [class.w-0]="!isMobile() && !isSidebarOpen()"
            (touchstart)="onSidebarTouchStart($event)"
            (touchmove)="onSidebarTouchMove($event)"
            (touchend)="onSidebarTouchEnd($event)"
            role="navigation"
+           [attr.aria-hidden]="isMobile() && !isSidebarOpen() ? 'true' : null"
            aria-label="项目导航">
-    
-    <!-- ====== 顶部固定区（Header + 搜索） ====== -->
-    <div class="shrink-0">
+      <div
+        class="flex h-full min-h-0 flex-col overflow-hidden"
+        [style.opacity]="workspaceSidebarContentOpacity()"
+        [style.transform]="workspaceSidebarContentTransform()"
+        [style.transition]="workspaceSidebarContentTransition()">
+     
+      <!-- ====== 顶部固定区（Header + 搜索） ====== -->
+      <div class="shrink-0">
       <!-- Sidebar Header -->
       <div class="flex justify-between items-center px-5 pt-5 pb-3"
            [ngClass]="{'px-3 pt-3 pb-2': isMobile()}">
@@ -193,8 +209,8 @@
       </div>
     </div>
 
-    <!-- ====== 可滚动项目列表区 ====== -->
-    <div class="flex-1 overflow-y-auto min-h-0 px-3 pb-2" [ngClass]="{'px-2': isMobile()}">
+      <!-- ====== 可滚动项目列表区 ====== -->
+      <div class="flex-1 overflow-y-auto min-h-0 px-3 pb-2" [ngClass]="{'px-2': isMobile()}">
       
       <!-- 搜索结果（任务） -->
       @if (unifiedSearchQuery() && searchResults().length > 0) {
@@ -378,8 +394,8 @@
       </div>
     </div>
     
-    <!-- ====== 底部固定区（工具 + 状态 + 操作） ====== -->
-    <div class="shrink-0 border-t border-stone-200/50 dark:border-stone-700/40">
+      <!-- ====== 底部固定区（工具 + 状态 + 操作） ====== -->
+      <div class="shrink-0 border-t border-stone-200/50 dark:border-stone-700/40">
       
       <!-- 会话过期警告 — 最高优先级，始终置顶 -->
       @if (sessionExpired()) {
@@ -522,7 +538,8 @@
           </button>
         </div>
       </div>
-    </div>
+      </div>
+      </div>
     </aside>
   </app-workspace-sidebar>
 
@@ -538,7 +555,7 @@
   }
 
   <!-- Main Content - 使用 router-outlet 渲染子路由组件 -->
-  <main class="flex-1 flex relative responsive-stack overflow-hidden min-h-0" style="background-color: var(--theme-bg);"
+  <main class="flex-1 flex relative responsive-stack overflow-hidden min-h-0 min-w-0" style="background-color: var(--theme-bg);"
         role="main"
         aria-label="任务管理区域"
         (touchstart)="onMainTouchStart($event)"

@@ -6,6 +6,8 @@
 // 当前阶段为"字符串外部化"第一步，非完整 i18n 方案。
 // ============================================
 
+import type { RecommendationGroupType } from '../models/parking-dock';
+
 /**
  * 状态机展示标签 — DockUiStatus → 中文
  */
@@ -19,13 +21,16 @@ export const DOCK_STATUS_LABELS = {
 
 /**
  * 组合选择区域三维分组标签
+ * TYPE-GROUP fix: 用 Record 约束所有合法键，移除 fallback 键
  */
-export const DOCK_GROUP_LABELS = {
+export const DOCK_GROUP_LABELS: Record<RecommendationGroupType, string> = {
   'homologous-advancement': '同源推进',
   'cognitive-downgrade': '认知降级',
   'asynchronous-boot': '异步并发',
-  fallback: '异步并发',
 } as const;
+
+/** 组分组标签兜底值 */
+export const DOCK_GROUP_FALLBACK_LABEL = '异步并发';
 
 /**
  * Toast / 通知消息 — 按服务分组

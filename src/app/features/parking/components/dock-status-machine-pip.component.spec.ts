@@ -36,6 +36,12 @@ describe('DockStatusMachinePipComponent', () => {
     pendingDecisionEntries,
     fragmentEntryCountdown,
     isBurnoutActive,
+    blankPeriodActive: computed(
+      () =>
+        fragmentEntryCountdown() === null
+        && pendingDecision() !== null
+        && pendingDecisionEntries().length === 0,
+    ),
     restReminderActive,
     cumulativeHighLoadMs,
     cumulativeLowLoadMs,

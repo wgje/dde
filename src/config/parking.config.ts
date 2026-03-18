@@ -4,6 +4,15 @@
 
 import type { FragmentEventCategory } from '../models/parking-dock';
 
+/** 时间常量（毫秒），用于停泊任务衰老检测 */
+const HOURS_MS = 60 * 60 * 1000;
+const STALE_THRESHOLD_HOURS = 72;
+const STALE_WARNING_HOURS = 64;
+const SNOOZE_QUICK_MIN = 5;
+const SNOOZE_NORMAL_MIN = 30;
+const SNOOZE_TWO_HOURS = 2;
+const SNOOZE_TOMORROW_HOURS = 24;
+
 export const PARKING_CONFIG = {
   MOTION: {
     easing: {
@@ -33,10 +42,10 @@ export const PARKING_CONFIG = {
     focus: {
       enterMs: 340,
       exitMs: 280,
-      stageDelayMs: 40,
-      radarDelayMs: 90,
-      hudDelayMs: 120,
-      ambientDelayMs: 140,
+      stageDelayMs: 16,
+      radarDelayMs: 48,
+      hudDelayMs: 72,
+      ambientDelayMs: 56,
     },
     card: {
       clickExitMs: 140,
@@ -176,8 +185,8 @@ export const PARKING_CONFIG = {
   },
 
   // Core
-  PARKED_TASK_STALE_THRESHOLD: 72 * 60 * 60 * 1000,
-  PARKED_TASK_STALE_WARNING: 64 * 60 * 60 * 1000,
+  PARKED_TASK_STALE_THRESHOLD: STALE_THRESHOLD_HOURS * HOURS_MS,
+  PARKED_TASK_STALE_WARNING: STALE_WARNING_HOURS * HOURS_MS,
   PARKED_TASK_SOFT_LIMIT: 10,
 
   NOTICE_MIN_VISIBLE_MS: 2500,
@@ -188,10 +197,10 @@ export const PARKING_CONFIG = {
   EDIT_LINE_FLASH_DURATION: 1000,
 
   SNOOZE_PRESETS: {
-    QUICK: 5 * 60 * 1000,
-    NORMAL: 30 * 60 * 1000,
-    TWO_HOURS_LATER: 2 * 60 * 60 * 1000,
-    TOMORROW_SAME_TIME: 24 * 60 * 60 * 1000,
+    QUICK: SNOOZE_QUICK_MIN * 60 * 1000,
+    NORMAL: SNOOZE_NORMAL_MIN * 60 * 1000,
+    TWO_HOURS_LATER: SNOOZE_TWO_HOURS * HOURS_MS,
+    TOMORROW_SAME_TIME: SNOOZE_TOMORROW_HOURS * HOURS_MS,
   },
 
   MAX_SNOOZE_COUNT: 5,
@@ -259,10 +268,10 @@ export const PARKING_CONFIG = {
   FOCUS_SCENE_TRANSPARENT_STAGE_ALPHA: 0.72,
   FOCUS_SCENE_TRANSPARENT_VIGNETTE_ALPHA: 0.24,
   FOCUS_SCENE_ENTRY_BG_MS: 0,
-  FOCUS_SCENE_ENTRY_STAGE_MS: 40,
-  FOCUS_SCENE_ENTRY_RADAR_MS: 90,
-  FOCUS_SCENE_ENTRY_ENV_MS: 140,
-  FOCUS_SCENE_ENTRY_HUD_MS: 120,
+  FOCUS_SCENE_ENTRY_STAGE_MS: 16,
+  FOCUS_SCENE_ENTRY_RADAR_MS: 48,
+  FOCUS_SCENE_ENTRY_ENV_MS: 80,
+  FOCUS_SCENE_ENTRY_HUD_MS: 72,
   FOCUS_BLANK_PERIOD_BREATHE_DURATION_S: 5.4,
   FOCUS_BLANK_PERIOD_DRIFT_DURATION_S: 9.2,
 
@@ -455,6 +464,7 @@ export const PARKING_CONFIG = {
   // Minimal HUD pill defaults for transparent focus mode.
   HUD_MINIMAL_PILL_OPACITY: 0.6,
   HUD_MINIMAL_TOP_PX: 16,
+  HUD_MINIMAL_MOBILE_TOP_PX: 44,
   HUD_MINIMAL_WIDTH_PX: 200,
   HUD_FULL_MAX_WIDTH_PX: 290,
   HUD_FULL_MAX_HEIGHT_PX: 220,
@@ -635,4 +645,12 @@ export const PARKING_CONFIG = {
   COMPLETION_DRAIN_INTERVAL_MS: 300,
   /** requestIdleCallback 超时回退（毫秒）— switchMaintenance */
   MAINTENANCE_IDLE_TIMEOUT_MS: 120,
+
+  // ── Normalization safety bounds ──
+  /** 断路器自动半开重置延迟（毫秒）— dock-cloud-sync */
+  CLOUD_CIRCUIT_BREAKER_RESET_MS: 30_000,
+  /** normalizeEntry 标题最大长度 */
+  MAX_ENTRY_TITLE_LENGTH: 500,
+  /** normalizeEntry 详情最大长度 */
+  MAX_ENTRY_DETAIL_LENGTH: 10_000,
 } as const;

@@ -142,7 +142,7 @@ import { LoggerService } from '../../../../../services/logger.service';
     }
     
     .animate-fade-in {
-      animation: fade-in 0.2s ease-out;
+      animation: fade-in var(--pk-panel-enter) var(--pk-ease-enter);
     }
     
     @keyframes fade-in {

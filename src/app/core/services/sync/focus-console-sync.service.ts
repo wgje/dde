@@ -89,10 +89,14 @@ export class FocusConsoleSyncService {
 
       const row = data as FocusSessionRow;
 
+      // H-LWW fix: 用 epoch ms 比较时间戳，避免 ISO 字符串格式差异
       // LWW：本地更新时间 > 远端时，跳过远端数据（本地赢）
-      // 相同时间戳时优先使用远端数据确保 LWW 一致性
-      if (localUpdatedAt && row.updated_at < localUpdatedAt) {
-        return success(null);
+      if (localUpdatedAt && row.updated_at) {
+        const remoteMs = new Date(row.updated_at).getTime();
+        const localMs = new Date(localUpdatedAt).getTime();
+        if (Number.isFinite(remoteMs) && Number.isFinite(localMs) && remoteMs < localMs) {
+          return success(null);
+        }
       }
 
       const state = row.session_state;
@@ -207,83 +211,87 @@ export class FocusConsoleSyncService {
 
   /**
    * 递增日常任务完成计数。
-   * 【HR-3 修复】冲突时自动重试一次（读取最新 count 后再更新），
+   * 【HR-3 修复】冲突时自动重试（读取最新 count 后再更新），
    * 避免静默丢弃增量。
+   * DATA-C3 fix: 改为迭代循环，遵守禁递归规则。
    * TODO(NF-ROUTINE-RPC): 替换为 Supabase RPC `increment_routine_completion`
    * 实现真正的原子 `UPDATE ... SET count = count + 1`。
    */
   async incrementRoutineCompletion(
     mutation: RoutineCompletionMutation,
-    _retryAttempt = 0,
   ): Promise<Result<void, OperationError>> {
     const client = this.getSupabaseClient();
     if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
-    try {
-      // Step 1: 尝试插入（首次完成）
-      const { error: insertError } = await client
-        .from('routine_completions')
-        .insert({
-          id: mutation.completionId,
-          routine_id: mutation.routineId,
-          user_id: mutation.userId,
-          date_key: mutation.dateKey,
-          count: 1,
-        });
+    const maxRetries = PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES;
 
-      if (!insertError) return success(undefined);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        // Step 1: 尝试插入（首次完成）
+        const { error: insertError } = await client
+          .from('routine_completions')
+          .insert({
+            id: mutation.completionId,
+            routine_id: mutation.routineId,
+            user_id: mutation.userId,
+            date_key: mutation.dateKey,
+            count: 1,
+          });
 
-      // 非唯一约束冲突(23505)则为真正错误
-      const pgCode = (insertError as unknown as Record<string, unknown>).code;
-      if (pgCode !== '23505') {
-        throw supabaseErrorToError(insertError);
-      }
+        if (!insertError) return success(undefined);
 
-      // Step 2: 已存在 — 读取当前 count 并乐观更新
-      const { data, error } = await client
-        .from('routine_completions')
-        .select('id,count')
-        .eq('user_id', mutation.userId)
-        .eq('routine_id', mutation.routineId)
-        .eq('date_key', mutation.dateKey)
-        .maybeSingle();
-      if (error) throw supabaseErrorToError(error);
-
-      if (!data) {
-        this.logger.warn('incrementRoutineCompletion: row disappeared after conflict');
-        return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录意外消失');
-      }
-
-      const record = data as Record<string, unknown>;
-      const existingCount = Number(record.count ?? 0);
-      const existingId = String(record.id ?? '');
-      const nextCount = Math.max(1, existingCount + 1);
-
-      // 乐观并发：filter on expected count 检测并发修改
-      const { data: updateResult, error: updateError } = await client
-        .from('routine_completions')
-        .update({ count: nextCount })
-        .eq('id', existingId)
-        .eq('user_id', mutation.userId)
-        .eq('count', existingCount)
-        .select('id');
-      if (updateError) throw supabaseErrorToError(updateError);
-
-      if (!updateResult || updateResult.length === 0) {
-        // M-15: 冲突时重试最多 CLOUD_PULL_MAX_RETRIES 次
-        if (_retryAttempt < PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES) {
-          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${_retryAttempt + 1}/${PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES}`);
-          return this.incrementRoutineCompletion(mutation, _retryAttempt + 1);
+        // 非唯一约束冲突(23505)则为真正错误
+        const pgCode = (insertError as unknown as Record<string, unknown>).code;
+        if (pgCode !== '23505') {
+          throw supabaseErrorToError(insertError);
         }
-        this.logger.warn('incrementRoutineCompletion: conflict persists after retry');
-        return failure(ErrorCodes.SYNC_CONFLICT, '并发修改冲突');
-      }
 
-      return success(undefined);
-    } catch (error) {
-      this.logger.warn('incrementRoutineCompletion failed', error);
-      return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
+        // Step 2: 已存在 — 读取当前 count 并乐观更新
+        const { data, error } = await client
+          .from('routine_completions')
+          .select('id,count')
+          .eq('user_id', mutation.userId)
+          .eq('routine_id', mutation.routineId)
+          .eq('date_key', mutation.dateKey)
+          .maybeSingle();
+        if (error) throw supabaseErrorToError(error);
+
+        if (!data) {
+          this.logger.warn('incrementRoutineCompletion: row disappeared after conflict');
+          return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录意外消失');
+        }
+
+        const record = data as Record<string, unknown>;
+        const existingCount = Number(record.count ?? 0);
+        const existingId = String(record.id ?? '');
+        const nextCount = Math.max(1, existingCount + 1);
+
+        // 乐观并发：filter on expected count 检测并发修改
+        const { data: updateResult, error: updateError } = await client
+          .from('routine_completions')
+          .update({ count: nextCount })
+          .eq('id', existingId)
+          .eq('user_id', mutation.userId)
+          .eq('count', existingCount)
+          .select('id');
+        if (updateError) throw supabaseErrorToError(updateError);
+
+        if (updateResult && updateResult.length > 0) {
+          return success(undefined);
+        }
+
+        // 并发冲突，继续下一次迭代重试
+        if (attempt < maxRetries) {
+          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${attempt + 1}/${maxRetries}`);
+        }
+      } catch (error) {
+        this.logger.warn('incrementRoutineCompletion failed', error);
+        return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
+      }
     }
+
+    this.logger.warn('incrementRoutineCompletion: conflict persists after retry');
+    return failure(ErrorCodes.SYNC_CONFLICT, '并发修改冲突');
   }
 
   async importLegacyDockSnapshot(userId: string): Promise<Result<DockSnapshot | null, OperationError>> {

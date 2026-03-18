@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   HostListener,
+  Input,
   OnDestroy,
   computed,
   effect,
@@ -9,7 +10,7 @@ import {
   signal,
   untracked,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { NgClass, NgStyle } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { WAIT_PRESETS, type DockEntry } from '../../../../models/parking-dock';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -30,6 +31,7 @@ import {
   type ConsoleCardPoseKey,
   type ConsoleRenderCard,
 } from '../utils/dock-console-motion';
+import { formatDockMinutes } from '../utils/dock-format';
 
 const consoleMotion = PARKING_CONFIG.MOTION.console;
 
@@ -45,7 +47,7 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
   selector: 'app-dock-console-stack',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [NgClass, NgStyle],
   styles: [`
     :host {
       display: block;
@@ -386,6 +388,12 @@ export class DockConsoleStackComponent implements OnDestroy {
   readonly interactionLocked = signal(false);
   readonly renderCards = signal<ConsoleRenderCard[]>([]);
   readonly motionStateMap = signal<Record<string, ConsoleCardMotionState>>({});
+  private readonly overrideEntriesState = signal<DockEntry[] | null>(null);
+
+  @Input({ alias: 'overrideEntries' })
+  set overrideEntries(value: DockEntry[] | null) {
+    this.overrideEntriesState.set(value ? value.map((entry) => ({ ...entry })) : null);
+  }
 
   private touchStartY = 0;
   private swipeActive = false;
@@ -417,7 +425,7 @@ export class DockConsoleStackComponent implements OnDestroy {
     this.closeWaitPresets();
   }
 
-  readonly stackEntries = computed(() => this.engine.consoleVisibleEntries());
+  readonly stackEntries = computed(() => this.overrideEntriesState() ?? this.engine.consoleVisibleEntries());
   readonly visibleStackEntries = this.stackEntries;
 
   private readonly stableRenderSyncEffect = effect(() => {
@@ -432,6 +440,7 @@ export class DockConsoleStackComponent implements OnDestroy {
   });
 
   private readonly radarInsertEffect = effect(() => {
+    if (this.overrideEntriesState()) return;
     const insertedId = this.engine.lastRadarInsertedTaskId();
     const postEntries = this.stackEntries();
     const hasActiveMotion = Object.keys(this.motionStateMap()).length > 0;
@@ -643,15 +652,9 @@ export class DockConsoleStackComponent implements OnDestroy {
     return this.waitPresetTaskId() === taskId;
   }
 
+  /** ARCH-H1 fix: 委托给共享工具函数，保持全局显示一致 */
   formatTime(minutes: number): string {
-    if (minutes >= 1440) {
-      const days = Math.floor(minutes / 1440);
-      return `${days}天`;
-    }
-    if (minutes < 60) return `${minutes}m`;
-    const hours = Math.floor(minutes / 60);
-    const remain = minutes % 60;
-    return remain > 0 ? `${hours}h${remain}m` : `${hours}h`;
+    return formatDockMinutes(minutes);
   }
 
   private snapshotStableEntries(): DockEntry[] {

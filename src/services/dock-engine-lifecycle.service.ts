@@ -98,7 +98,18 @@ export class DockEngineLifecycleService {
   private readonly taskStore = inject(TaskStore);
   private readonly destroyRef = inject(DestroyRef);
 
-  private ctx!: DockEngineLifecycleContext;
+  private _ctx: DockEngineLifecycleContext | null = null;
+
+  /** ARCH-C3 fix: 安全 getter 模式，与其他子服务一致 */
+  private get ctx(): DockEngineLifecycleContext {
+    if (!this._ctx) {
+      throw new Error(
+        'DockEngineLifecycleService.init() must be called before use. ' +
+        'Ensure DockEngineService is constructed before accessing this service.',
+      );
+    }
+    return this._ctx;
+  }
 
   // 生命周期内部状态
   private readonly tickInterval = new IntervalHandle();
@@ -114,7 +125,7 @@ export class DockEngineLifecycleService {
   // ---------------------------------------------------------------------------
 
   init(ctx: DockEngineLifecycleContext): void {
-    this.ctx = ctx;
+    this._ctx = ctx;
   }
 
   // ---------------------------------------------------------------------------
@@ -162,7 +173,7 @@ export class DockEngineLifecycleService {
 
   /** 核心状态同步 effects：用户切换、持久化、软限制重置、每日重置 */
   private registerCoreEffects(): void {
-    // 用户切换时重新加载快照
+    // DATA-C2 fix: cloud pull 必须在 local restore 完成后调度，避免竞态覆盖
     effect(() => {
       const userId = this.auth.currentUserId();
       if (userId === this.ctx.getCurrentSnapshotUserId()) return;
@@ -170,8 +181,8 @@ export class DockEngineLifecycleService {
       this.ctx.restoringSnapshot.set(true);
       void this.restoreLocalSnapshot(userId).finally(() => {
         this.ctx.restoringSnapshot.set(false);
+        if (userId) this.cloudSync.scheduleCloudPull(userId, true);
       });
-      if (userId) this.cloudSync.scheduleCloudPull(userId, true);
     });
 
     // 状态变更时触发本地持久化和云端推送（通过 persistenceDeps 聚合信号，避免冗余触发）
@@ -315,6 +326,8 @@ export class DockEngineLifecycleService {
   scheduleSwitchMaintenance(): void {
     this.cancelSwitchMaintenance();
     const token = ++this.switchMaintenanceToken;
+    // ARCH-C1 fix: 添加 deadline，防止无限重调度
+    const deadline = Date.now() + 30_000;
 
     const execute = () => {
       if (token !== this.switchMaintenanceToken) return;
@@ -326,7 +339,7 @@ export class DockEngineLifecycleService {
     const schedule = () => {
       if (token !== this.switchMaintenanceToken) return;
       const holdDelay = this.ctx.getNonCriticalHoldDelay();
-      if (holdDelay > 0) {
+      if (holdDelay > 0 && Date.now() < deadline) {
         this.switchMaintenanceFallback.schedule(schedule, holdDelay);
         return;
       }
@@ -388,6 +401,11 @@ export class DockEngineLifecycleService {
   checkWaitExpiry(): void {
     let shouldPlaySound = false;
     const newlyExpiredTitles: string[] = [];
+    // MEM-H1 fix: 清理不再存于 entries 中的过期通知 ID
+    const currentIds = new Set(this.ctx.entries().map(e => e.taskId));
+    for (const id of this.ctx.waitEndNotifiedIds) {
+      if (!currentIds.has(id)) this.ctx.waitEndNotifiedIds.delete(id);
+    }
     this.ctx.entries.update(prev => {
       let changed = false;
       const next = [...prev];

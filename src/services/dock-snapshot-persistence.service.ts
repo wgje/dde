@@ -325,19 +325,21 @@ export class DockSnapshotPersistenceService {
 
     return {
       taskId: source.taskId,
-      title: typeof source.title === 'string' ? source.title : 'Untitled task',
+      title: typeof source.title === 'string' ? source.title.slice(0, PARKING_CONFIG.MAX_ENTRY_TITLE_LENGTH) : 'Untitled task',
       sourceProjectId: typeof source.sourceProjectId === 'string' ? source.sourceProjectId : null,
       status: enumFields.status,
       load: plannerFields.cognitiveLoad ?? enumFields.load,
       expectedMinutes: plannerFields.expectedMinutes,
       waitMinutes: plannerFields.waitMinutes,
-      waitStartedAt: typeof source.waitStartedAt === 'string' ? source.waitStartedAt : null,
+      waitStartedAt: typeof source.waitStartedAt === 'string' && !isNaN(Date.parse(source.waitStartedAt))
+        ? source.waitStartedAt
+        : null,
       lane: enumFields.lane,
       zoneSource: enumFields.zoneSource,
       isMain: Boolean(source.isMain),
       dockedOrder: Number.isFinite(source.dockedOrder) ? Number(source.dockedOrder) : 0,
       manualOrder: normalizeNullableNumber(source.manualOrder) ?? undefined,
-      detail: typeof source.detail === 'string' ? source.detail : '',
+      detail: typeof source.detail === 'string' ? source.detail.slice(0, PARKING_CONFIG.MAX_ENTRY_DETAIL_LENGTH) : '',
       sourceKind: enumFields.sourceKind,
       sourceBlackBoxEntryId:
         typeof source.sourceBlackBoxEntryId === 'string' && source.sourceBlackBoxEntryId

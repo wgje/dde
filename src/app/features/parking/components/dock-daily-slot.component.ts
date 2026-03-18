@@ -5,7 +5,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { NgClass } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -26,7 +26,7 @@ import { getWaitRemainingSeconds } from '../../../../services/dock-engine.utils'
   selector: 'app-dock-daily-slot',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, FormsModule],
+  imports: [NgClass, FormsModule],
   styles: [`
     :host {
       display: block;
@@ -212,7 +212,7 @@ import { getWaitRemainingSeconds } from '../../../../services/dock-engine.utils'
             @if (!slotDone) {
               <button
                 type="button"
-                (click)="engine.dailySlotService.completeDailySlot(slot.id)"
+                (click)="completeDailySlot(slot.id)"
                 [attr.aria-label]="'完成日常任务: ' + slot.title"
                 class="px-3 py-1.5 text-xs rounded-lg bg-slate-700/60 hover:bg-emerald-600/40
                        text-slate-300 hover:text-emerald-200 transition-colors"
@@ -222,7 +222,7 @@ import { getWaitRemainingSeconds } from '../../../../services/dock-engine.utils'
             }
             <button
               type="button"
-              (click)="engine.dailySlotService.removeDailySlot(slot.id)"
+              (click)="removeDailySlot(slot.id)"
               [attr.aria-label]="'移除日常任务: ' + slot.title"
               class="px-2 py-1.5 text-xs rounded-lg hover:bg-slate-700/60
                      text-slate-500 hover:text-slate-400 transition-colors"
@@ -356,6 +356,14 @@ export class DockDailySlotComponent {
     this.newTitle = '';
     this.newMaxCount = 1;
     this.showAddForm.set(false);
+  }
+
+  completeDailySlot(slotId: string): void {
+    this.engine.dailySlotService.completeDailySlot(slotId);
+  }
+
+  removeDailySlot(slotId: string): void {
+    this.engine.dailySlotService.removeDailySlot(slotId);
   }
 
   /**

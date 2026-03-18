@@ -174,6 +174,20 @@ describe('ParkingNoticeComponent', () => {
       expect(mockParkingService.startWork).toHaveBeenCalledWith('task-r');
     });
 
+    it('动作触发后应保留 renderNotice 直到退场动画结束', () => {
+      const notice = createReminderNotice();
+      activeReminder.set(notice);
+      fixture.detectChanges();
+
+      component.handleAction(notice, 'ignore');
+
+      expect(component.renderNotice()?.id).toBe('reminder-1');
+      expect(component.isExiting()).toBe(true);
+
+      vi.advanceTimersByTime(320);
+      expect(component.renderNotice()).toBeNull();
+    });
+
     it('snooze-5m 应调用 reminderService.snooze5m', () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);

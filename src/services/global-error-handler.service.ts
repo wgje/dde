@@ -590,12 +590,14 @@ export class GlobalErrorHandler implements ErrorHandler {
     }
     
     // 在 Angular zone 内导航到错误页面
+    // 【安全】仅传递用户安全消息，避免原始错误信息（含堆栈/内部细节）泄露到 UI
+    const safeMessage = this.getUserMessage(message);
     this.zone.run(() => {
       void this.router.navigate(['/error'], { 
         skipLocationChange: true,
         state: { 
-          errorMessage: message,
-          userMessage: this.getUserMessage(message)
+          errorMessage: safeMessage,
+          userMessage: safeMessage
         }
       });
     });

@@ -160,7 +160,7 @@ import { GateActionsComponent } from './gate-actions.component';
       border-radius: 9999px;
       background: linear-gradient(90deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.15) 100%);
       box-shadow: 0 0 12px rgba(255, 255, 255, 0.15);
-      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
+      transition: all var(--pk-panel-enter) var(--pk-ease-enter);
     }
 
     .rubble-chip.cleared {
@@ -236,7 +236,7 @@ import { GateActionsComponent } from './gate-actions.component';
       text-align: center;
       color: rgba(255, 255, 255, 0.95);
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 24px 48px -12px rgba(0, 0, 0, 0.8);
-      animation: completion-pop 400ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      animation: completion-pop var(--pk-panel-enter) var(--pk-ease-enter);
     }
 
     .completion-mark {
@@ -279,7 +279,7 @@ import { GateActionsComponent } from './gate-actions.component';
     }
 
     .shake-y {
-      animation: gate-shake-y 210ms cubic-bezier(0.16, 1, 0.3, 1);
+      animation: gate-shake-y var(--pk-micro-pulse) var(--pk-ease-enter);
     }
 
     @keyframes gate-shake-y {

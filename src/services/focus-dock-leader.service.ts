@@ -1,6 +1,7 @@
 import { Injectable, OnDestroy, computed, inject, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { IntervalHandle } from '../utils/timer-handle';
 
 interface FocusDockLease {
   tabId: string;
@@ -25,7 +26,7 @@ export class FocusDockLeaderService implements OnDestroy {
   private readonly leaseExpiresAt = signal(0);
   private readonly leaderState = signal(false);
   private channel: BroadcastChannel | null = null;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly heartbeatTimer = new IntervalHandle();
   private storageListener: ((event: StorageEvent) => void) | null = null;
 
   readonly isLeader = computed(() => this.leaderState());
@@ -65,10 +66,7 @@ export class FocusDockLeaderService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+    this.heartbeatTimer.stop();
     if (this.channel) {
       this.channel.close();
       this.channel = null;
@@ -91,8 +89,8 @@ export class FocusDockLeaderService implements OnDestroy {
   }
 
   private startHeartbeat(): void {
-    if (this.heartbeatTimer) return;
-    this.heartbeatTimer = setInterval(() => {
+    if (this.heartbeatTimer.active) return;
+    this.heartbeatTimer.start(() => {
       this.nowTick.set(Date.now());
       this.refreshLeaseState();
       if (this.isLeader()) {

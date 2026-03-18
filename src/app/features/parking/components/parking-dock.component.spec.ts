@@ -14,6 +14,7 @@ import { ModalLoaderService } from '../../../core/services/modal-loader.service'
 import { ProjectStore, TaskStore } from '../../../core/state/stores';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { UiStateService } from '../../../../services/ui-state.service';
+import { resolveDockFocusChromePhase } from '../../../../utils/dock-focus-phase';
 
 import { clampHudPosition } from '../utils/dock-hud-position';
 
@@ -35,6 +36,7 @@ describe('ParkingDockComponent v4', () => {
   const focusMode = signal(false);
   const focusScrimOn = signal(true);
   const focusTransition = signal<DockFocusTransitionState | null>(null);
+  const focusChromeRestoring = signal(false);
   const dockExpanded = signal(true);
   const pendingDecision = signal<DockPendingDecision | null>(null);
   const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
@@ -47,6 +49,7 @@ describe('ParkingDockComponent v4', () => {
   const fragmentEntryCountdown = signal<number | null>(null);
   const lastRadarInsertedTaskId = signal<string | null>(null);
   const lastRadarEvictedTaskId = signal<string | null>(null);
+  const lastExitAction = signal<'save_exit' | 'clear_exit' | 'keep_focus_hide_scrim' | null>(null);
   const editLock = signal(false);
   const tick = signal(0);
 
@@ -62,6 +65,14 @@ describe('ParkingDockComponent v4', () => {
     focusMode,
     focusScrimOn,
     focusTransition,
+    focusChromePhase: computed(() =>
+      resolveDockFocusChromePhase(
+        focusMode(),
+        focusTransition(),
+        focusScrimOn(),
+        focusChromeRestoring(),
+      ),
+    ),
     dockExpanded,
     pendingDecision,
     pendingDecisionEntries,
@@ -72,6 +83,7 @@ describe('ParkingDockComponent v4', () => {
     highlightedIds,
     firstMainSelectionPending,
     fragmentEntryCountdown,
+    lastExitAction,
     lastRadarInsertedTaskId,
     lastRadarEvictedTaskId,
     pendingRadarEviction: signal<string | null>(null),
@@ -80,6 +92,12 @@ describe('ParkingDockComponent v4', () => {
     tick,
     isFragmentPhase: signal(false),
     isBurnoutActive: signal(false),
+    blankPeriodActive: computed(
+      () =>
+        fragmentEntryCountdown() === null
+        && pendingDecision() !== null
+        && pendingDecisionEntries().length === 0,
+    ),
     fragmentDefenseLevel: signal(1 as 1 | 2 | 3 | 4),
     burnoutTriggeredAt: signal<number | null>(null),
     lastRecommendationGroups: signal([]),
@@ -105,6 +123,11 @@ describe('ParkingDockComponent v4', () => {
     setFocusScrim: vi.fn((on: boolean) => focusScrimOn.set(on)),
     beginFocusTransition: vi.fn((state: unknown) => focusTransition.set(state)),
     endFocusTransition: vi.fn(() => focusTransition.set(null)),
+    beginFocusChromeRestore: vi.fn((durationMs: number = PARKING_CONFIG.DOCK_ANIMATION_MS) => {
+      focusChromeRestoring.set(true);
+      setTimeout(() => focusChromeRestoring.set(false), durationMs);
+    }),
+    clearFocusChromeRestore: vi.fn(() => focusChromeRestoring.set(false)),
     holdNonCriticalWork: vi.fn(),
     setDockExpanded: vi.fn((expanded: boolean) => dockExpanded.set(expanded)),
     choosePendingDecisionCandidate: vi.fn(),
@@ -120,8 +143,14 @@ describe('ParkingDockComponent v4', () => {
     removeFromDock: vi.fn(),
     setMainTask: vi.fn(),
     overrideFirstMainTask: vi.fn(),
-    markExitAction: vi.fn(),
-    clearDockForExit: vi.fn(),
+    markExitAction: vi.fn((action: 'save_exit' | 'clear_exit' | 'keep_focus_hide_scrim') => {
+      lastExitAction.set(action);
+    }),
+    clearDockForExit: vi.fn(() => {
+      dockedEntries.set([]);
+      statusMachineEntries.set([]);
+    }),
+    finalizeClearDockForExit: vi.fn(),
     getInlineArchiveCandidates: vi.fn(() => []),
     archiveInlineEntriesToActiveProject: vi.fn(() => ({ converted: 0, failed: 0 })),
     reorderDockEntries: vi.fn(),
@@ -189,6 +218,7 @@ describe('ParkingDockComponent v4', () => {
     focusMode.set(false);
     focusScrimOn.set(true);
     focusTransition.set(null);
+    focusChromeRestoring.set(false);
     dockExpanded.set(true);
     pendingDecision.set(null);
     pendingDecisionEntries.set([]);
@@ -201,6 +231,7 @@ describe('ParkingDockComponent v4', () => {
     fragmentEntryCountdown.set(null);
     lastRadarInsertedTaskId.set(null);
     lastRadarEvictedTaskId.set(null);
+    lastExitAction.set(null);
     editLock.set(false);
     tick.set(0);
     mockFocusLeader.isLeader.set(true);
@@ -209,6 +240,12 @@ describe('ParkingDockComponent v4', () => {
     mockFocusLeader.tryTakeover.mockClear();
     mockPerformanceTier.tier.set('T0');
     mockGateService.isActive.set(false);
+    mockEngine.isFragmentPhase.set(false);
+    mockEngine.isBurnoutActive.set(false);
+    mockEngine.fragmentDefenseLevel.set(1);
+    mockEngine.restReminderActive.set(false);
+    mockEngine.cumulativeHighLoadMs.set(0);
+    mockEngine.cumulativeLowLoadMs.set(0);
     mockFocusHudWindow.isActive.set(false);
     mockFocusHudWindow.isSupported.set(true);
     mockFocusHudWindow.open.mockClear();
@@ -239,6 +276,7 @@ describe('ParkingDockComponent v4', () => {
     fixture = TestBed.createComponent(ParkingDockComponent);
     component = fixture.componentInstance;
     uiState = TestBed.inject(UiStateService);
+    uiState.isMobile.set(false);
     fixture.detectChanges();
   });
 
@@ -667,21 +705,65 @@ describe('ParkingDockComponent v4', () => {
 
     await vi.advanceTimersByTimeAsync(20);
     fixture.detectChanges();
-    expect(mockEngine.toggleFocusMode).toHaveBeenCalledTimes(1);
-    expect(focusMode()).toBe(false);
+    expect(mockEngine.toggleFocusMode).not.toHaveBeenCalled();
+    expect(focusMode()).toBe(true);
 
     await vi.advanceTimersByTimeAsync(PARKING_CONFIG.MOTION.focus.exitMs + 20);
+    fixture.detectChanges();
+    expect(mockEngine.toggleFocusMode).toHaveBeenCalledTimes(1);
+    expect(focusMode()).toBe(false);
+    expect(mockEngine.beginFocusChromeRestore).toHaveBeenCalled();
+    expect(mockEngine.endFocusTransition).not.toHaveBeenCalled();
+    expect(focusTransition()?.phase).toBe('exiting');
+
+    await vi.advanceTimersByTimeAsync(Math.min(PARKING_CONFIG.MOTION.focus.exitMs, 200) + 20);
     fixture.detectChanges();
     expect(mockEngine.endFocusTransition).toHaveBeenCalled();
     expect(focusTransition()).toBeNull();
   });
 
-  it('confirmExitFocus clear-exit should clear dock immediately before exit transition', () => {
+  it('confirmExitFocus clear-exit should keep exit visuals alive after live dock data is cleared', () => {
     focusMode.set(true);
+    dockedEntries.set([
+      {
+        taskId: 'focus-main',
+        title: 'Focus Main',
+        status: 'focusing',
+        load: 'low',
+        lane: 'backup',
+        expectedMinutes: 25,
+        waitMinutes: null,
+        isMain: true,
+      },
+    ]);
+    statusMachineEntries.set([
+      {
+        taskId: 'focus-main',
+        title: 'Focus Main',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    focusTransition.set({
+      phase: 'exiting',
+      direction: 'exit',
+      fromRect: { left: 10, top: 10, width: 100, height: 100 },
+      toRect: { left: 10, top: 500, width: 100, height: 100 },
+      durationMs: PARKING_CONFIG.MOTION.focus.exitMs,
+      startedAt: new Date().toISOString(),
+    });
+    fixture.detectChanges();
 
     component.confirmExitFocus('clear-exit');
+    fixture.detectChanges();
     expect(mockEngine.markExitAction).toHaveBeenCalledWith('clear_exit');
     expect(mockEngine.clearDockForExit).toHaveBeenCalledTimes(1);
+    expect(dockedEntries()).toHaveLength(0);
+    expect(statusMachineEntries()).toHaveLength(0);
+    expect(component.exitConsoleEntries()?.[0]?.taskId).toBe('focus-main');
+    expect(component.exitStatusMachineEntries()?.[0]?.taskId).toBe('focus-main');
   });
 
   it('keep-focus-hide-scrim should not trigger archive conversion', () => {
@@ -886,6 +968,18 @@ describe('ParkingDockComponent v4', () => {
     expect(style.width).toBe('200px');
   });
 
+  it('mobile hud minimal mode should sit lower in the top-center area for better visual balance', () => {
+    uiState.isMobile.set(true);
+    focusMode.set(true);
+    focusScrimOn.set(false);
+
+    const style = component.hudContainerStyle();
+
+    expect(style.top).toBe(`calc(env(safe-area-inset-top) + ${PARKING_CONFIG.HUD_MINIMAL_MOBILE_TOP_PX}px)`);
+    expect(style.left).toBe('50%');
+    expect(style.width).toBe('200px');
+  });
+
   it('full HUD should default to upper-right with 12px margin', () => {
     focusMode.set(true);
     focusScrimOn.set(true);
@@ -910,7 +1004,7 @@ describe('ParkingDockComponent v4', () => {
     expect(component.focusHostZIndex()).toBeNull();
   });
 
-  it('sidebar offset should collapse to viewport center during focus takeover', () => {
+  it('sidebar offset should stay anchored to the content area during focus takeover and save-exit recovery', () => {
     uiState.isMobile.set(false);
     uiState.sidebarOpen.set(true);
     uiState.sidebarWidth.set(320);
@@ -921,14 +1015,15 @@ describe('ParkingDockComponent v4', () => {
     focusScrimOn.set(true);
     fixture.detectChanges();
 
-    expect(component.sidebarEffectiveWidth()).toBe(0);
-    expect(component.dockCenterLeft()).toBe('50%');
+    expect(component.sidebarEffectiveWidth()).toBe(320);
+    expect(component.dockCenterLeft()).toBe('calc(50% + 160px)');
 
     focusMode.set(false);
-    focusTransition.set({ phase: 'entering' });
+    focusTransition.set({ phase: 'exiting' });
     fixture.detectChanges();
 
-    expect(component.sidebarEffectiveWidth()).toBe(0);
+    expect(component.sidebarEffectiveWidth()).toBe(320);
+    expect(component.dockCenterLeft()).toBe('calc(50% + 160px)');
   });
 
   it('should render fragment countdown overlay and wire accept/skip actions', () => {
@@ -1076,6 +1171,98 @@ describe('ParkingDockComponent v4', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-container"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-minimal"]')).toBeTruthy();
+  });
+
+  it('entering focus should delay floating HUD and backup FAB until transition service releases them', () => {
+    focusMode.set(true);
+    focusScrimOn.set(true);
+    focusTransition.set({
+      phase: 'entering',
+      direction: 'enter',
+      fromRect: { left: 10, top: 500, width: 120, height: 72 },
+      toRect: { left: 200, top: 180, width: 320, height: 220 },
+      durationMs: PARKING_CONFIG.MOTION.focus.enterMs,
+      startedAt: new Date().toISOString(),
+    });
+    statusMachineEntries.set([
+      {
+        taskId: 'A',
+        title: 'Focus A',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    (component.focusTransitionService as unknown as {
+      floatingUiVisible: { set: (value: boolean) => void };
+    }).floatingUiVisible.set(false);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-backup-fab"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-container"]')).toBeNull();
+
+    (component.focusTransitionService as unknown as {
+      floatingUiVisible: { set: (value: boolean) => void };
+    }).floatingUiVisible.set(true);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-backup-fab"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-container"]')).toBeTruthy();
+  });
+
+  it('mobile minimal HUD should enable pass-through styling for drawer gestures', () => {
+    uiState.isMobile.set(true);
+    focusMode.set(true);
+    focusScrimOn.set(false);
+    statusMachineEntries.set([
+      {
+        taskId: 'A',
+        title: 'Focus A',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    fixture.detectChanges();
+
+    const container = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-container"]') as HTMLElement | null;
+    const minimal = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-machine-minimal"]') as HTMLElement | null;
+
+    expect(component.hudMinimalPassThrough()).toBe(true);
+    expect(container?.classList.contains('pointer-events-none')).toBe(true);
+    expect(container?.getAttribute('data-pass-through')).toBe('true');
+    expect(minimal?.getAttribute('data-pass-through')).toBe('true');
+  });
+
+  it('mobile minimal HUD should keep explicit action buttons clickable in pass-through mode', () => {
+    uiState.isMobile.set(true);
+    focusMode.set(true);
+    focusScrimOn.set(false);
+    mockEngine.restReminderActive.set(true);
+    mockEngine.cumulativeHighLoadMs.set(25 * 60 * 1000);
+    statusMachineEntries.set([
+      {
+        taskId: 'A',
+        title: 'Focus A',
+        uiStatus: 'focusing',
+        label: '专注中',
+        waitRemainingSeconds: null,
+        waitTotalSeconds: null,
+      },
+    ]);
+    fixture.detectChanges();
+
+    const button = fixture.nativeElement.querySelector(
+      '[data-testid="dock-v3-status-machine-minimal"] [data-status-interactive="true"]',
+    ) as HTMLButtonElement | null;
+
+    expect(button).toBeTruthy();
+
+    button?.click();
+
+    expect(mockEngine.fragmentRest.dismissRestReminder).toHaveBeenCalledTimes(1);
   });
 
   it('active PiP HUD should collapse the in-page HUD to minimal mode even with scrim on', () => {

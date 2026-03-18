@@ -4,6 +4,7 @@
 
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { PARKING_CONFIG } from '../config/parking.config';
+import type { Task } from './core-types';
 
 /**
  * 黑匣子条目状态
@@ -161,7 +162,7 @@ export interface StrataItem {
   /** 完成时间 */
   completedAt: string;
   /** 原始数据源（可选，用于详情展示） */
-  source?: BlackBoxEntry | Record<string, unknown> | object;
+  source?: BlackBoxEntry | Task | Record<string, unknown>;
 }
 
 /**

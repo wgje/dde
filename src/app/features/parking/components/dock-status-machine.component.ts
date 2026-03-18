@@ -10,7 +10,6 @@ import {
   signal,
   untracked,
 } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { PerformanceTierService } from '../../../../services/performance-tier.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
@@ -36,37 +35,50 @@ type StatusPrimaryRow =
   selector: 'app-dock-status-machine',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [],
   styleUrl: './dock-status-machine.component.scss',
   templateUrl: './dock-status-machine.component.html',
 })
 export class DockStatusMachineComponent implements OnDestroy {
   private readonly engine = inject(DockEngineService);
   private readonly performanceTierService = inject(PerformanceTierService);
-  private readonly forcedModeInput = signal<'full' | 'minimal' | null>(null);
-  readonly showPipToggleState = signal(false);
-  readonly pipToggleActiveState = signal(false);
+  private readonly forcedModeState = signal<'full' | 'minimal' | null>(null);
+  private readonly passThroughStateInput = signal(false);
+  private readonly showPipToggleStateInput = signal(false);
+  private readonly pipToggleActiveStateInput = signal(false);
+  private readonly overrideEntriesState = signal<StatusMachineEntry[] | null>(null);
+  protected readonly forcedModeInput = this.forcedModeState;
+  protected readonly passThroughInput = this.passThroughStateInput;
+  readonly passThroughState = computed(() => this.passThroughInput());
+  readonly showPipToggleState = this.showPipToggleStateInput;
+  readonly pipToggleActiveState = this.pipToggleActiveStateInput;
   private mqlRef: MediaQueryList | null = null;
   private mqlHandler: ((e: MediaQueryListEvent) => void) | null = null;
   readonly pipToggleRequested = output<void>();
 
-  @Input()
+  @Input({ alias: 'forcedMode' })
   set forcedMode(value: 'full' | 'minimal' | null) {
-    this.forcedModeInput.set(value ?? null);
+    this.forcedModeState.set(value ?? null);
   }
 
-  get forcedMode(): 'full' | 'minimal' | null {
-    return this.forcedModeInput();
+  @Input({ alias: 'passThrough' })
+  set passThrough(value: boolean) {
+    this.passThroughStateInput.set(Boolean(value));
   }
 
-  @Input()
+  @Input({ alias: 'showPipToggle' })
   set showPipToggle(value: boolean) {
-    this.showPipToggleState.set(Boolean(value));
+    this.showPipToggleStateInput.set(Boolean(value));
   }
 
-  @Input()
+  @Input({ alias: 'pipToggleActive' })
   set pipToggleActive(value: boolean) {
-    this.pipToggleActiveState.set(Boolean(value));
+    this.pipToggleActiveStateInput.set(Boolean(value));
+  }
+
+  @Input({ alias: 'overrideEntries' })
+  set overrideEntries(value: StatusMachineEntry[] | null) {
+    this.overrideEntriesState.set(value ? value.map((entry) => ({ ...entry })) : null);
   }
 
   // GAP-B: 等待结束光晕 3 分钟后自动降级为静态微光，避免持续催促影响副任务心流
@@ -133,7 +145,7 @@ export class DockStatusMachineComponent implements OnDestroy {
   readonly ringExpiredStroke = PARKING_CONFIG.STATUS_RING_EXPIRED_STROKE;
   readonly circumference = 2 * Math.PI * PARKING_CONFIG.STATUS_RING_RADIUS;
 
-  readonly allEntries = computed(() => this.engine.statusMachineEntries());
+  readonly allEntries = computed(() => this.overrideEntriesState() ?? this.engine.statusMachineEntries());
   readonly muted = computed(() => this.engine.muteWaitTone());
   readonly isBurnoutActive = computed(() => this.engine.isBurnoutActive());
   readonly restReminderActive = computed(() => this.engine.restReminderActive());
@@ -146,12 +158,7 @@ export class DockStatusMachineComponent implements OnDestroy {
     const totalMin = Math.round(Math.max(highMs, lowMs) / 60_000);
     return `已专注 ${totalMin} 分钟，休息一下`;
   });
-  readonly blankPeriodActive = computed(
-    () =>
-      this.engine.fragmentEntryCountdown() === null
-      && this.engine.pendingDecision() !== null
-      && this.engine.pendingDecisionEntries().length === 0,
-  );
+  readonly blankPeriodActive = computed(() => this.engine.blankPeriodActive());
 
   readonly hudMode = computed<'full' | 'minimal'>(() => {
     const forced = this.forcedModeInput();

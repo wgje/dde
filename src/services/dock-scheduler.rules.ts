@@ -326,11 +326,6 @@ function computeProjectSwitchPenalty(candidateProjectId: string | null, rootProj
   return PARKING_CONFIG.SCHEDULE_PROJECT_SWITCH_PENALTY;
 }
 
-function computeSameProjectPriority(candidateProjectId: string | null, rootProjectId: string | null): number {
-  if (!candidateProjectId || !rootProjectId) return 0;
-  return candidateProjectId === rootProjectId ? 1 : 0;
-}
-
 // 三维推荐：同源推进 / 认知降低 / 异步并发
 export function computeThreeDimensionalRecommendation(
   mainTask: FocusTaskSlot,
@@ -338,18 +333,15 @@ export function computeThreeDimensionalRecommendation(
   remainingWaitMin: number,
   waitFitMode: DockWaitFitMode = 'strict',
 ): RecommendationGroup[] {
-  // 防御负值：等待时间不可能为负
   const safeRemainingWaitMin = Math.max(0, remainingWaitMin);
   const assigned = new Set<string>();
   const preferLongTask = safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES;
   const relaxedUpperBoundMinutes = Math.max(safeRemainingWaitMin, 1) * PARKING_CONFIG.RECOMMENDATION_RELAXED_UPPER_BOUND_MULTIPLIER;
   const compareByWindowFit = (a: FocusTaskSlot, b: FocusTaskSlot): number => {
-    const aExec = effectiveExecMin(a);
-    const bExec = effectiveExecMin(b);
-    const aDiff = Math.abs(aExec - safeRemainingWaitMin);
-    const bDiff = Math.abs(bExec - safeRemainingWaitMin);
+    const aDiff = Math.abs(effectiveExecMin(a) - safeRemainingWaitMin);
+    const bDiff = Math.abs(effectiveExecMin(b) - safeRemainingWaitMin);
     if (aDiff !== bDiff) return aDiff - bDiff;
-    return preferLongTask ? bExec - aExec : aExec - bExec;
+    return preferLongTask ? effectiveExecMin(b) - effectiveExecMin(a) : effectiveExecMin(a) - effectiveExecMin(b);
   };
   const allowEstimatedWindow = (task: FocusTaskSlot): boolean =>
     waitFitMode === 'ignore-wait'
@@ -362,50 +354,15 @@ export function computeThreeDimensionalRecommendation(
         ? effectiveExecMin(task) <= relaxedUpperBoundMinutes
         : effectiveExecMin(task) <= safeRemainingWaitMin);
 
-  const homologousAdvancement = pendingTasks
-    .filter(
-      task =>
-        task.sourceProjectId != null &&
-        task.sourceProjectId === mainTask.sourceProjectId &&
-        allowEstimatedWindow(task) &&
-        !assigned.has(task.slotId),
-    )
-    .sort(compareByWindowFit)
-    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
-  homologousAdvancement.forEach(task => assigned.add(task.slotId));
-
-  // 认知降低组：仅在主任务为高负荷时推荐低负荷任务（GAP-3 修复）
-  const cognitiveDowngrade = mainTask.cognitiveLoad === 'high'
-    ? pendingTasks
-        .filter(
-          task =>
-            task.cognitiveLoad === 'low' &&
-            allowEstimatedWindow(task) &&
-            !assigned.has(task.slotId),
-        )
-        .sort((a, b) => {
-          const aSameProject = a.sourceProjectId === mainTask.sourceProjectId ? 1 : 0;
-          const bSameProject = b.sourceProjectId === mainTask.sourceProjectId ? 1 : 0;
-          if (aSameProject !== bSameProject) return bSameProject - aSameProject;
-          return compareByWindowFit(a, b);
-        })
-        .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX)
-    : [];
-  cognitiveDowngrade.forEach(task => assigned.add(task.slotId));
-
-  const asynchronousBoot = pendingTasks
-    .filter(
-      task =>
-        (task.waitMinutes ?? 0) > 0 &&
-        allowExecWindow(task) &&
-        !assigned.has(task.slotId),
-    )
-    .sort(
-      (a, b) =>
-        (b.waitMinutes ?? 0) - (a.waitMinutes ?? 0)
-        || compareByWindowFit(a, b),
-    )
-    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
+  const homologousAdvancement = buildHomologousGroup(
+    mainTask, pendingTasks, assigned, allowEstimatedWindow, compareByWindowFit,
+  );
+  const cognitiveDowngrade = buildCognitiveDowngradeGroup(
+    mainTask, pendingTasks, assigned, allowEstimatedWindow, compareByWindowFit,
+  );
+  const asynchronousBoot = buildAsynchronousBootGroup(
+    pendingTasks, assigned, allowExecWindow, compareByWindowFit,
+  );
 
   const allEmpty =
     homologousAdvancement.length === 0 &&
@@ -432,6 +389,77 @@ export function computeThreeDimensionalRecommendation(
     { type: 'cognitive-downgrade', candidates: cognitiveDowngrade },
     { type: 'asynchronous-boot', candidates: asynchronousBoot },
   ];
+}
+
+/** 同源推进组：与主任务同项目且时间窗匹配 */
+function buildHomologousGroup(
+  mainTask: FocusTaskSlot,
+  pendingTasks: FocusTaskSlot[],
+  assigned: Set<string>,
+  allowEstimatedWindow: (t: FocusTaskSlot) => boolean,
+  compareByWindowFit: (a: FocusTaskSlot, b: FocusTaskSlot) => number,
+): FocusTaskSlot[] {
+  const group = pendingTasks
+    .filter(
+      task =>
+        task.sourceProjectId != null &&
+        task.sourceProjectId === mainTask.sourceProjectId &&
+        allowEstimatedWindow(task) &&
+        !assigned.has(task.slotId),
+    )
+    .sort(compareByWindowFit)
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
+  group.forEach(task => assigned.add(task.slotId));
+  return group;
+}
+
+/** 认知降级组：仅在主任务为高负荷时推荐低负荷任务 */
+function buildCognitiveDowngradeGroup(
+  mainTask: FocusTaskSlot,
+  pendingTasks: FocusTaskSlot[],
+  assigned: Set<string>,
+  allowEstimatedWindow: (t: FocusTaskSlot) => boolean,
+  compareByWindowFit: (a: FocusTaskSlot, b: FocusTaskSlot) => number,
+): FocusTaskSlot[] {
+  if (mainTask.cognitiveLoad !== 'high') return [];
+  const group = pendingTasks
+    .filter(
+      task =>
+        task.cognitiveLoad === 'low' &&
+        allowEstimatedWindow(task) &&
+        !assigned.has(task.slotId),
+    )
+    .sort((a, b) => {
+      const aSameProject = a.sourceProjectId === mainTask.sourceProjectId ? 1 : 0;
+      const bSameProject = b.sourceProjectId === mainTask.sourceProjectId ? 1 : 0;
+      if (aSameProject !== bSameProject) return bSameProject - aSameProject;
+      return compareByWindowFit(a, b);
+    })
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
+  group.forEach(task => assigned.add(task.slotId));
+  return group;
+}
+
+/** 异步引导组：含等待时间且执行时间匹配的任务 */
+function buildAsynchronousBootGroup(
+  pendingTasks: FocusTaskSlot[],
+  assigned: Set<string>,
+  allowExecWindow: (t: FocusTaskSlot) => boolean,
+  compareByWindowFit: (a: FocusTaskSlot, b: FocusTaskSlot) => number,
+): FocusTaskSlot[] {
+  return pendingTasks
+    .filter(
+      task =>
+        (task.waitMinutes ?? 0) > 0 &&
+        allowExecWindow(task) &&
+        !assigned.has(task.slotId),
+    )
+    .sort(
+      (a, b) =>
+        (b.waitMinutes ?? 0) - (a.waitMinutes ?? 0)
+        || compareByWindowFit(a, b),
+    )
+    .slice(0, PARKING_CONFIG.RECOMMENDATION_GROUP_MAX);
 }
 
 function computeOversizedFallback(

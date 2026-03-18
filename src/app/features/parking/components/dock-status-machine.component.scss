@@ -43,6 +43,16 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
+.glass-card[data-pass-through='true'],
+.glass-card[data-pass-through='true'] * {
+  pointer-events: none;
+}
+
+.glass-card[data-pass-through='true'] [data-status-interactive='true'],
+.glass-card[data-pass-through='true'] [data-status-interactive='true'] * {
+  pointer-events: auto;
+}
+
 .status-machine-card {
   gap: 12px;
   padding: 12px 14px;

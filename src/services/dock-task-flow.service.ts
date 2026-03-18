@@ -186,7 +186,12 @@ export class DockTaskFlowService {
     this.ctx.pendingDecision.set(null);
     this.ctx.lastRuleDecision.set(null);
     this.ctx.highlightedIds.set(new Set());
-    this.ctx.focusTransition.set(null);
+    // 过渡中的 exiting 状态需要保留到动画协调器收尾，
+    // 否则退出计时器会丢失 phase，导致 flip ghost 无法清理。
+    // 仅在非过渡场景下清掉已落稳的 focused 标记，兼容直接退出路径（如 PiP 关闭）。
+    if (this.ctx.focusTransition()?.phase === 'focused') {
+      this.ctx.focusTransition.set(null);
+    }
     this.ctx.lastRecommendationGroups.set([]);
     this.ctx.schedulerPhase.set('active');
     this.fragmentRest.resetRestState();

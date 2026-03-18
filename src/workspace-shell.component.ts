@@ -53,6 +53,10 @@ import { StartupTierOrchestratorService } from './services/startup-tier-orchestr
 import { TaskStore } from './services/stores';
 import { DockEngineService } from './services/dock-engine.service';
 import { reloadViaForceClearCache } from './utils/force-clear-cache';
+import {
+  resolveDockFocusChromeLayoutLocked,
+  type DockFocusChromePhase,
+} from './utils/dock-focus-phase';
 
 function readTextInputValue(event: Event | string): string {
   if (typeof event === 'string') return event;
@@ -197,6 +201,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
 
   private spotlightTriggerLoadPromise: Promise<Type<unknown> | null> | null = null;
   private blackBoxRecorderLoadPromise: Promise<Type<unknown> | null> | null = null;
+  private focusModePreloadPromise: Promise<void> | null = null;
+  private focusModePreloadScheduled = false;
 
   /**
    * 核心数据是否已加载完毕
@@ -233,31 +239,94 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
    * 让右侧 ProjectShell 的统一 focus content effect 成为唯一背景层。
    */
   readonly focusWorkspaceTakeoverActive = computed(() => this.resolveFocusWorkspaceTakeoverActive());
+  readonly focusWorkspaceTakeoverPhase = computed(() => this.resolveFocusWorkspaceTakeoverPhase());
   readonly workspaceSidebarWidthPx = computed(() => this.resolveWorkspaceSidebarWidth());
-  readonly workspaceSidebarOpacity = computed(
-    () => this.focusWorkspaceTakeoverActive() ? '0' : '1',
+  readonly mobileSidebarBackdropVisible = computed(
+    () => this.uiState.isMobile() && this.uiState.sidebarOpen() && !this.focusWorkspaceTakeoverActive(),
   );
-  readonly workspaceSidebarTransform = computed(
-    () => this.focusWorkspaceTakeoverActive()
-      ? 'translateX(-12px) scale(0.985)'
-      : 'translateX(0) scale(1)',
-  );
-  readonly workspaceSidebarTransition =
-    'width 220ms cubic-bezier(0.22, 1, 0.36, 1),'
-    + ' opacity 180ms cubic-bezier(0.2, 0.8, 0.2, 1),'
-    + ' transform 220ms cubic-bezier(0.22, 1, 0.36, 1)';
+  readonly workspaceSidebarOpacity = computed(() => {
+    const phase = this.focusWorkspaceTakeoverPhase();
+    return phase === 'entering' || phase === 'focused' || phase === 'exiting' ? '0' : '1';
+  });
+  readonly workspaceSidebarTransform = computed(() => this.resolveWorkspaceSidebarTransform());
+  readonly workspaceSidebarPointerEvents = computed(() => this.resolveWorkspaceSidebarPointerEvents());
+  readonly workspaceSidebarTransition = computed(() => this.resolveWorkspaceSidebarTransition());
+  readonly workspaceSidebarContentOpacity = computed(() => this.resolveWorkspaceSidebarContentOpacity());
+  readonly workspaceSidebarContentTransform = computed(() => this.resolveWorkspaceSidebarContentTransform());
+  readonly workspaceSidebarContentTransition = computed(() => this.resolveWorkspaceSidebarContentTransition());
 
   private resolveFocusWorkspaceTakeoverActive(): boolean {
-    const transition = this.dockEngine.focusTransition();
-    return this.focusBlurActive()
-      || transition?.phase === 'entering'
-      || transition?.phase === 'exiting';
+    return this.resolveFocusWorkspaceTakeoverPhase() !== 'idle';
+  }
+
+  private resolveFocusWorkspaceTakeoverPhase(): DockFocusChromePhase {
+    return this.dockEngine.focusChromePhase();
   }
 
   private resolveWorkspaceSidebarWidth(): number {
-    if (this.resolveFocusWorkspaceTakeoverActive()) return 0;
+    if (this.uiState.isMobile()) return 240;
     if (!this.uiState.sidebarOpen()) return 0;
-    return this.uiState.isMobile() ? 240 : this.uiState.sidebarWidth();
+    return this.uiState.sidebarWidth();
+  }
+
+  private resolveWorkspaceSidebarTransform(): string {
+    const isMobile = this.uiState.isMobile();
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
+    if (resolveDockFocusChromeLayoutLocked(phase)) {
+      return isMobile ? 'translateX(calc(-100% - 12px))' : 'translateX(-12px) scale(0.985)';
+    }
+    if (isMobile) {
+      return this.uiState.sidebarOpen() ? 'translateX(0)' : 'translateX(calc(-100% - 12px))';
+    }
+    return 'translateX(0) scale(1)';
+  }
+
+  private resolveWorkspaceSidebarPointerEvents(): 'none' | 'auto' {
+    if (this.resolveFocusWorkspaceTakeoverPhase() !== 'idle') return 'none';
+    if (this.uiState.isMobile() && !this.uiState.sidebarOpen()) return 'none';
+    return 'auto';
+  }
+
+  private resolveWorkspaceSidebarTransition(): string {
+    if (this.uiState.isMobile()) {
+      return 'opacity var(--pk-overlay-enter) var(--pk-ease-standard),'
+        + ' transform var(--pk-shell-restore) var(--pk-ease-enter)';
+    }
+    return 'width var(--pk-shell-restore) var(--pk-ease-enter),'
+      + ' opacity var(--pk-overlay-enter) var(--pk-ease-standard),'
+      + ' transform var(--pk-shell-restore) var(--pk-ease-enter)';
+  }
+
+  private resolveWorkspaceSidebarContentOpacity(): string {
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
+    return phase === 'entering' || phase === 'focused' || phase === 'exiting' ? '0' : '1';
+  }
+
+  private resolveWorkspaceSidebarContentTransform(): string {
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
+    if (phase === 'entering' || phase === 'focused' || phase === 'exiting') {
+      return this.uiState.isMobile() ? 'translateX(-10px)' : 'translateX(-12px)';
+    }
+    if (phase === 'restoring') {
+      return this.uiState.isMobile() ? 'translateX(-4px)' : 'translateX(-6px)';
+    }
+    return 'translateX(0)';
+  }
+
+  private resolveWorkspaceSidebarContentTransition(): string {
+    if (this.uiState.isMobile()) {
+      return 'opacity var(--pk-overlay-enter) var(--pk-ease-enter),'
+        + ' transform var(--pk-shell-enter) var(--pk-ease-enter)';
+    }
+
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
+    if (phase === 'restoring') {
+      return 'opacity var(--pk-overlay-enter) var(--pk-ease-enter) 120ms,'
+        + ' transform var(--pk-shell-enter) var(--pk-ease-enter)';
+    }
+
+    return 'opacity var(--pk-overlay-exit) var(--pk-ease-standard),'
+      + ' transform var(--pk-shell-exit) var(--pk-ease-exit)';
   }
 
   /** FocusMode 用户明确交互信号（点击/按键后激活） */
@@ -427,6 +496,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
 
   private preloadSidebarTools(reason: 'startup' | 'p1' | 'intent'): void {
     void this.loadSpotlightTriggerComponent();
+    void this.preloadFocusModeAssets(reason);
 
     if (this.focusPrefs.isBlackBoxEnabled()) {
       void this.loadBlackBoxRecorderComponent();
@@ -494,6 +564,51 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       });
 
     return this.blackBoxRecorderLoadPromise;
+  }
+
+  private preloadFocusModeAssets(reason: 'startup' | 'p1' | 'intent'): Promise<void> {
+    if (this.focusModePreloadPromise) return this.focusModePreloadPromise;
+
+    this.focusModePreloadPromise = import('./app/features/focus/focus-mode.component')
+      .then(async (module) => {
+        const focusModeComponent = module.FocusModeComponent;
+        if (typeof focusModeComponent?.preloadAssets === 'function') {
+          await focusModeComponent.preloadAssets();
+        }
+        this.sentryLazyLoader.addBreadcrumb({
+          category: 'startup',
+          message: 'focus-mode.preload',
+          level: 'info',
+          data: { reason },
+        });
+      })
+      .catch((error: unknown) => {
+        this.logger.warn('FocusMode 懒预热失败', error);
+      })
+      .finally(() => {
+        this.focusModePreloadPromise = null;
+      });
+
+    return this.focusModePreloadPromise;
+  }
+
+  private scheduleFocusModePreload(reason: 'startup' | 'p1'): void {
+    if (this.focusModePreloadScheduled) return;
+    this.focusModePreloadScheduled = true;
+
+    const runPreload = () => {
+      void this.preloadFocusModeAssets(reason);
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      const requestIdle = (window as Window & {
+        requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      }).requestIdleCallback;
+      requestIdle(() => runPreload(), { timeout: 1800 });
+      return;
+    }
+
+    setTimeout(runPreload, 1200);
   }
 
   // 模态框开关状态 - 保留删除项目用（其余已迁移到命令式渲染）
@@ -705,6 +820,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     this.schedulePwaPromptInitialization();
     this.startupFontScheduler.initialize();
     this.startupTier.initialize();
+    this.scheduleFocusModePreload('startup');
     if (!FEATURE_FLAGS.SIDEBAR_TOOLS_DYNAMIC_LOAD_V1) {
       this.preloadSidebarTools('startup');
     }
@@ -766,6 +882,17 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
    * 会抛出 NG0203: inject() must be called from an injection context
    */
   private setupSignalEffects(): void {
+    this.setupModalEffects();
+    this.setupDataProtectionEffect();
+    this.setupFocusProbeEffect();
+    this.setupStartupTierEffects();
+    this.setupRemoteCallbackEffect();
+    this.setupSubscriptionEffect();
+    this.setupSyncPulseEffect();
+  }
+
+  /** 模态框请求信号监听（可恢复错误 / 登录 / 迁移） */
+  private setupModalEffects(): void {
     // 监听可恢复错误信号，命令式打开错误恢复模态框
     effect(() => {
       const error = this.errorHandler.recoverableError();
@@ -786,11 +913,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     effect(() => {
       const loginRequested = this.modal.isOpen('login');
       if (loginRequested) {
-        // 保存 returnUrl（closeByType 会清除 ModalService 数据）
         const loginData = this.modal.getData('login') as LoginData | undefined;
         this.modalCoord.loginReturnUrl = loginData?.returnUrl ?? null;
-        this.modal.closeByType('login'); // 清除旧状态
-        // 防止重复打开（当前登录模态框已在显示中）
+        this.modal.closeByType('login');
         if (!this.modalCoord.loginModalRef) {
           void this.openLoginModal();
         }
@@ -805,8 +930,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
         void this.openMigrationModal();
       }
     });
-    
-    // 📦 数据保护：导出提醒（7 天未导出时 Toast 提示）
+  }
+
+  /** 📦 数据保护：导出提醒（7 天未导出时 Toast 提示） */
+  private setupDataProtectionEffect(): void {
     effect(() => {
       const needsReminder = this.exportService.needsExportReminder();
       const userId = this.userSession.currentUserId();
@@ -818,8 +945,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
         );
       }
     });
+  }
 
-    // Focus 启动探针：登录后尽早执行本地 gate 检查（无网络请求）
+  /** Focus 启动探针：登录后尽早执行本地 gate 检查 */
+  private setupFocusProbeEffect(): void {
     effect(() => {
       if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) return;
 
@@ -835,7 +964,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       this.focusProbeInitializedForUser = userId;
       this.focusStartupProbe.initialize();
     });
+  }
 
+  /** 分层启动补水：auth → p1 warmup → p2 sync */
+  private setupStartupTierEffects(): void {
     effect(() => {
       if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) return;
       if (!this.currentUserId()) return;
@@ -864,7 +996,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       this.syncHydrationDone = true;
       this.syncCoordinator.initialize();
     });
+  }
 
+  /** 远程变更回调初始化 */
+  private setupRemoteCallbackEffect(): void {
     effect(() => {
       if (!FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) return;
 
@@ -902,7 +1037,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
         this.remoteCallbacksInitializing = false;
       });
     });
+  }
 
+  /** 项目订阅管理 */
+  private setupSubscriptionEffect(): void {
     effect(() => {
       if (!FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) return;
 
@@ -935,7 +1073,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
       this.subscribedProjectId = projectId;
       void this.simpleSync.subscribeToProject(projectId, userId);
     });
+  }
 
+  /** 同步心跳管理 */
+  private setupSyncPulseEffect(): void {
     effect(() => {
       if (!FEATURE_FLAGS.EVENT_DRIVEN_SYNC_PULSE_V1) {
         this.destroySyncPulse();
@@ -962,6 +1103,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     
     // 确保待处理的撤销操作被保存
     this.undoService.flushPendingAction();
+    
+    // 释放模态框协调器的回调引用，避免持有过期组件引用
+    this.modalCoord.clearCallbacks();
     
     // 移除全局事件监听器
     window.removeEventListener('toggle-sidebar', this.handleToggleSidebar);

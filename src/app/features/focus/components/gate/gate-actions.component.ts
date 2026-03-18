@@ -203,7 +203,7 @@ import { LoggerService } from '../../../../../services/logger.service';
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
       color: rgba(255, 255, 255, 0.95);
-      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
+      transition: all var(--pk-panel-enter) var(--pk-ease-enter);
       font-size: 0.95rem;
       font-weight: 400;
       letter-spacing: 0.06em;
@@ -269,7 +269,7 @@ import { LoggerService } from '../../../../../services/logger.service';
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
       color: rgba(255, 255, 255, 0.95);
-      transition: all 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
+      transition: all var(--pk-panel-enter) var(--pk-ease-enter);
       z-index: 4;
       touch-action: none;
       user-select: none;
@@ -376,7 +376,7 @@ import { LoggerService } from '../../../../../services/logger.service';
       padding: 1.25rem;
       z-index: 91;
       color: rgba(255, 255, 255, 0.95);
-      animation: panel-up 400ms cubic-bezier(0.175, 0.885, 0.32, 1.1);
+      animation: panel-up var(--pk-panel-enter) var(--pk-ease-enter);
     }
 
     @keyframes panel-up {
@@ -410,7 +410,7 @@ import { LoggerService } from '../../../../../services/logger.service';
       color: rgba(255, 255, 255, 0.5);
       font-size: 0.8rem;
       cursor: pointer;
-      transition: color 200ms ease;
+      transition: color var(--pk-panel-exit) var(--pk-ease-standard);
     }
 
     .panel-close:hover {
@@ -440,7 +440,9 @@ import { LoggerService } from '../../../../../services/logger.service';
       box-sizing: border-box;
       font-family: inherit;
       box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
-      transition: border-color 200ms ease, box-shadow 200ms ease;
+      transition:
+        border-color var(--pk-panel-exit) var(--pk-ease-standard),
+        box-shadow var(--pk-panel-exit) var(--pk-ease-standard);
     }
 
     .transcription-input:focus,

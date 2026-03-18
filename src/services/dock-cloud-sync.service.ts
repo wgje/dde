@@ -141,8 +141,8 @@ export class DockCloudSyncService implements OnDestroy {
     try {
       // H-1 fix: 传递本地快照的 savedAt 用于服务端 LWW 短路优化
       const local = cb.exportSnapshot();
-      const localSavedAt = typeof local?.savedAt === 'number'
-        ? new Date(local.savedAt).toISOString()
+      const localSavedAt = typeof local?.savedAt === 'string' && local.savedAt
+        ? local.savedAt
         : undefined;
 
       const loadResult = await withTimeout(
@@ -198,6 +198,8 @@ export class DockCloudSyncService implements OnDestroy {
       // H-3 fix: 恢复前最终检查用户是否仍然一致
       if (!this.isCurrentUser(userId)) return;
       cb.restoreSnapshot(remote);
+      // C-4 fix: 恢复远端快照后取消待执行的云推送，防止旧数据覆盖刚拉取的新快照
+      this.cloudPushTimer.cancel();
       cb.scheduleLocalPersist(remote, userId);
       await this.hydrateRoutineSlots(userId);
       this.cloudPullRetryCount = 0; // reset on success
@@ -241,6 +243,8 @@ export class DockCloudSyncService implements OnDestroy {
         this.syncService.listRoutineTasks(userId),
         { timeout: TIMEOUT_CONFIG.QUICK, timeoutMessage: 'listRoutineTasks 超时' },
       );
+      // DATA-C5 fix: async 边界后检查用户是否仍为当前用户，防止跨用户数据污染
+      if (!this.isCurrentUser(userId)) return;
       const routineTasks = listResult.ok ? listResult.value : [];
       if (routineTasks.length === 0) return;
       cb.updateDailySlots(prev => {
@@ -284,7 +288,16 @@ export class DockCloudSyncService implements OnDestroy {
   ): FocusSessionRecord {
     const cb = this.callbacks;
     if (!cb) {
-      throw new Error('DockCloudSyncService not initialized');
+      this.logger.error('buildFocusSessionRecord called before init() — returning fallback record');
+      const now = new Date().toISOString();
+      return {
+        id: crypto.randomUUID(),
+        userId,
+        startedAt: now,
+        endedAt: null,
+        snapshot,
+        updatedAt: now,
+      };
     }
 
     const currentContext = cb.getFocusSessionContext();
@@ -368,7 +381,7 @@ export class DockCloudSyncService implements OnDestroy {
     this.circuitBreakerResetTimer.schedule(() => {
       this.circuitBreakerOpen = false;
       this.logger.info('Circuit breaker half-open — next pull attempt allowed');
-    }, 30_000);
+    }, PARKING_CONFIG.CLOUD_CIRCUIT_BREAKER_RESET_MS);
   }
 
   private resetCircuitBreaker(): void {

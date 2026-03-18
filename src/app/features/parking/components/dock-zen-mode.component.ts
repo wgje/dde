@@ -1,13 +1,16 @@
 import {
+  AfterViewChecked,
   ChangeDetectionStrategy,
   Component,
   computed,
-  inject,
+  ElementRef,
   Input,
+  inject,
   OnDestroy,
   OnInit,
   output,
   signal,
+  viewChild,
 } from '@angular/core';
 import { NgStyle } from '@angular/common';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
@@ -152,8 +155,9 @@ import { PerformanceTierService } from '../../../../services/performance-tier.se
   `],
   template: `
     @if (isActive$()) {
-      <!-- TODO: Add cdkTrapFocus from @angular/cdk/a11y when CDK is installed to provide proper focus trapping -->
+      <!-- 全屏模态，单一焦点元素 + tabindex + Escape 退出构成简易焦点陷阱 -->
       <div
+        #zenOverlay
         class="zen-overlay"
         [ngStyle]="overlayStyle()"
         [attr.data-performance-tier]="performanceTier()"
@@ -179,14 +183,20 @@ import { PerformanceTierService } from '../../../../services/performance-tier.se
     }
   `,
 })
-export class DockZenModeComponent implements OnInit, OnDestroy {
+export class DockZenModeComponent implements OnInit, OnDestroy, AfterViewChecked {
   private readonly engine = inject(DockEngineService);
   private readonly performanceTierService = inject(PerformanceTierService);
+  private readonly zenOverlay = viewChild<ElementRef<HTMLDivElement>>('zenOverlay');
+  private focusApplied = false;
 
-  private readonly _isActive = signal(false);
-  @Input() set isActive(v: boolean) { this._isActive.set(v); }
-  readonly isActive$ = this._isActive.asReadonly();
+  private readonly isActiveState = signal(false);
+  readonly isActive$ = this.isActiveState;
   readonly exit = output<void>();
+
+  @Input({ alias: 'isActive' })
+  set isActive(value: boolean) {
+    this.isActiveState.set(Boolean(value));
+  }
 
   readonly pulseSize = PARKING_CONFIG.ZEN_MODE_PULSE_SIZE_PX;
   readonly blurPx = PARKING_CONFIG.ZEN_MODE_BLUR_PX;
@@ -197,6 +207,16 @@ export class DockZenModeComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.performanceTierService.startMeasuring();
+  }
+
+  ngAfterViewChecked(): void {
+    const el = this.zenOverlay()?.nativeElement;
+    if (el && !this.focusApplied) {
+      el.focus();
+      this.focusApplied = true;
+    } else if (!el) {
+      this.focusApplied = false;
+    }
   }
 
   ngOnDestroy(): void {

@@ -237,7 +237,10 @@ export class MobileDrawerGestureService {
       this.bottomPanelHeight.set(newHeight);
     }
     
-    event.preventDefault();
+    // 滚动已接管时 touchmove 可能变为不可取消，先守卫避免浏览器 Intervention 警告。
+    if (event.cancelable) {
+      event.preventDefault();
+    }
     return true;
   }
   

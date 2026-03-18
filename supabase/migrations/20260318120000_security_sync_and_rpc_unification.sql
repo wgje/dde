@@ -1,0 +1,4 @@
+-- no-op placeholder
+-- 该迁移原始内容已通过 MCP 落地到远端版本：
+--   20260318073718_security_sync_and_rpc_unification.sql
+-- 保留本文件仅为避免历史分支引用该序号时发生冲突。

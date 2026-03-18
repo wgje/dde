@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone } from '@angular/core';
+import { Injectable, inject, signal, NgZone, DestroyRef, OnDestroy } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -52,7 +52,7 @@ export interface DropResultCallback {
 @Injectable({
   providedIn: 'root'
 })
-export class FlowDragDropService {
+export class FlowDragDropService implements OnDestroy {
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly layoutService = inject(FlowLayoutService);
@@ -60,7 +60,13 @@ export class FlowDragDropService {
   private readonly logger = this.loggerService.category('FlowDragDrop');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
+  private readonly destroyRef = inject(DestroyRef);
   
+  constructor() {
+    // 服务销毁时确保清除残留的全局指针事件监听
+    this.destroyRef.onDestroy(() => this.ngOnDestroy());
+  }
+
   // ========== 状态 ==========
   
   /** 拖放目标是否激活（高亮待分配区域） */
@@ -712,5 +718,9 @@ export class FlowDragDropService {
       hint.textContent = suffix;
       container.appendChild(hint);
     }
+  }
+
+  ngOnDestroy(): void {
+    this.endAltDragToDock();
   }
 }

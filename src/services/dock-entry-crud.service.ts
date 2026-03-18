@@ -30,7 +30,6 @@ import {
   buildConsoleVisibleOrderHint, 
   buildDockEntry, 
   findConsoleEvictionCandidate, 
-  isConsoleBackgroundStatus, 
   patchAllEntries, 
   patchEntryByTaskId 
 } from './dock-engine.utils';
@@ -387,7 +386,6 @@ export class DockEntryCrudService {
 
   clearDockForExit(): void {
     this.ctx.entries.set([]);
-    this.ctx.pendingDecision.set(null);
     this.ctx.highlightedIds.set(new Set());
     this.ctx.suspendRecommendationLocked.set(false);
     this.ctx.suspendChainRootTaskId.set(null);

@@ -1,23 +1,31 @@
     <app-dock-focus-scene
-      [active]="engine.focusMode()"
+      [active]="focusSessionMounted()"
       [scrimOn]="engine.focusScrimOn()"
       [sceneMode]="focusSceneMode()"
       [performanceTier]="focusTransitionService.performanceTier()"
       [reducedMotion]="reducedMotion()"
-      [transitionPhase]="engine.focusTransition()?.phase ?? null"
+      [transitionPhase]="focusSceneTransitionPhase()"
       [stageTransform]="focusStageTransform()"
       [backgroundImageUrl]="focusBackgroundUrl"
       (backdropClick)="onBackdropClick()"
       (transitionSettled)="onFocusTransitionSettled($event)">
-      @if (engine.focusMode()) {
+      @if (focusSessionMounted()) {
         <!-- 中央卡片堆 -->
-        <app-dock-console-stack class="relative z-20 pointer-events-auto"></app-dock-console-stack>
+        <app-dock-console-stack
+          class="relative z-20"
+          [overrideEntries]="exitConsoleEntries()"
+          [class.pointer-events-auto]="focusSessionInteractive()"
+          [class.pointer-events-none]="!focusSessionInteractive()"
+          [attr.data-focus-phase]="focusSessionPhase()">
+        </app-dock-console-stack>
 
         @if (!strictSampleMode && engine.pendingDecision() && engine.pendingDecisionEntries().length > 0) {
           <div
             class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl pointer-events-auto
                    px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
             style="top: 40px;"
+            [class.pointer-events-none]="!focusSessionInteractive()"
+            [attr.data-focus-phase]="focusSessionPhase()"
             data-testid="dock-v3-pending-decision">
             <div class="flex items-center gap-2 mb-2.5">
               <div class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></div>
@@ -85,6 +93,8 @@
         @if (!strictSampleMode && blankPeriodActive()) {
           <div
             class="blank-period-card blank-period-enter absolute left-1/2 top-10 -translate-x-1/2 z-30 w-[min(92vw,420px)] rounded-[28px] px-5 py-4 pointer-events-auto"
+            [class.pointer-events-none]="!focusSessionInteractive()"
+            [attr.data-focus-phase]="focusSessionPhase()"
             data-testid="dock-v3-blank-period-card">
             <div class="flex items-start gap-3">
               <div class="blank-period-icon shrink-0 mt-0.5"></div>
@@ -105,19 +115,22 @@
           </div>
         }
 
-        @defer (when engine.focusMode()) {
-          <app-dock-radar-zone
-            class="absolute left-1/2 top-1/2 z-10 pointer-events-auto"
-            style="width: 0; height: 0;">
-          </app-dock-radar-zone>
-        }
+        <div
+          class="absolute left-1/2 top-1/2 z-10"
+          [class.pointer-events-auto]="focusSessionInteractive()"
+          [class.pointer-events-none]="!focusSessionInteractive()"
+          [attr.data-focus-phase]="focusSessionPhase()"
+          style="width: 0; height: 0;">
+          <app-dock-radar-zone></app-dock-radar-zone>
+        </div>
       }
     </app-dock-focus-scene>
 
-    @if (engine.focusMode()) {
+    @if (focusFloatingUiMounted()) {
       @if (helpFeedback.showHelpNudge() && !helpFeedback.showHelpOverlay()) {
         <div
-          class="fixed left-1/2 top-6 z-[66] -translate-x-1/2 rounded-full border border-indigo-400/30 bg-slate-900/88 px-4 py-2 text-[11px] text-slate-100 shadow-lg backdrop-blur-sm"
+          class="focus-floating-ui fixed left-1/2 top-6 z-[66] -translate-x-1/2 rounded-full border border-indigo-400/30 bg-slate-900/88 px-4 py-2 text-[11px] text-slate-100 shadow-lg backdrop-blur-sm"
+          [attr.data-focus-phase]="focusSessionPhase()"
           data-testid="dock-v3-help-nudge">
           按 <span class="font-mono text-indigo-300">Alt + H</span> 或状态机问号按钮查看专注操作帮助
         </div>
@@ -125,11 +138,13 @@
 
       <button
         type="button"
-        class="fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform pointer-events-auto"
+        class="focus-floating-ui fixed z-[67] right-6 bottom-12 w-12 h-12 rounded-full border flex items-center justify-center text-3xl font-light pb-1 transition-transform pointer-events-auto"
         [ngClass]="canCreateBackupTask()
           ? 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-900/45 border-indigo-300/40 hover:scale-105 active:scale-95'
           : 'bg-slate-800/90 text-slate-500 border-slate-600/50 shadow-none cursor-not-allowed'"
         [disabled]="!canCreateBackupTask()"
+        [style.pointer-events]="focusSessionInteractive() ? 'auto' : 'none'"
+        [attr.data-focus-phase]="focusSessionPhase()"
         (click)="createBackupTaskFromFab()"
         aria-label="创建备选任务"
         data-testid="dock-v3-backup-fab">
@@ -157,10 +172,14 @@
       </div>
     }
 
-    @if (engine.focusMode()) {
+    @if (focusFloatingUiMounted()) {
       <div
-        class="fixed z-[66] pointer-events-auto"
+        class="focus-floating-ui focus-floating-ui-hud fixed z-[66]"
+        [class.pointer-events-auto]="focusSessionInteractive() && !hudMinimalPassThrough()"
+        [class.pointer-events-none]="!focusSessionInteractive() || hudMinimalPassThrough()"
         [ngStyle]="hudContainerStyle()"
+        [attr.data-pass-through]="hudMinimalPassThrough() ? 'true' : null"
+        [attr.data-focus-phase]="focusSessionPhase()"
         data-testid="dock-v3-status-machine-container">
         <div
           class="status-machine-shell"
@@ -168,6 +187,8 @@
           (pointerdown)="onHudPointerDown($event)">
           <app-dock-status-machine
             [forcedMode]="hudMinimalMode() ? 'minimal' : 'full'"
+            [passThrough]="hudMinimalPassThrough()"
+            [overrideEntries]="exitStatusMachineEntries()"
             [showPipToggle]="canOpenPipHud()"
             [pipToggleActive]="focusHudWindow.isActive()"
             (pipToggleRequested)="togglePipHud()">
@@ -177,7 +198,9 @@
 
       @if (helpFeedback.showHelpOverlay()) {
         <div
-          class="fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4 pointer-events-auto"
+          class="focus-floating-ui fixed inset-0 z-[71] flex items-center justify-center bg-slate-950/45 px-4 pointer-events-auto"
+          [style.pointer-events]="focusSessionInteractive() ? 'auto' : 'none'"
+          [attr.data-focus-phase]="focusSessionPhase()"
           role="dialog"
           aria-modal="true"
           aria-label="专注操作帮助"
@@ -222,7 +245,9 @@
 
       <!-- GAP-2: 碎片时间进入倒计时选择 -->
       @if (engine.fragmentEntryCountdown() !== null) {
-        <div class="fixed inset-0 z-[48] flex items-center justify-center pointer-events-auto"
+        <div class="focus-floating-ui fixed inset-0 z-[48] flex items-center justify-center pointer-events-auto"
+          [style.pointer-events]="focusSessionInteractive() ? 'auto' : 'none'"
+          [attr.data-focus-phase]="focusSessionPhase()"
           role="dialog"
           aria-modal="true"
           aria-label="碎片时间倒计时">
@@ -259,10 +284,10 @@
       <!-- 碎片阶段日常任务浮层 -->
       @if (engine.isFragmentPhase()) {
         <div class="fragment-overlay fragment-overlay-enter fixed top-1/2 left-1/2
-                    -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-auto">
-           @defer (when engine.isFragmentPhase()) {
-             <app-dock-daily-slot></app-dock-daily-slot>
-           }
+                    -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-auto"
+          [style.pointer-events]="focusSessionInteractive() ? 'auto' : 'none'"
+          [attr.data-focus-phase]="focusSessionPhase()">
+           <app-dock-daily-slot></app-dock-daily-slot>
         </div>
       }
 
@@ -273,12 +298,12 @@
 
       @if (showExitConfirm()) {
         <div
-          class="fixed inset-0 z-[72] bg-black/45 flex items-center justify-center pointer-events-auto"
+          class="focus-exit-confirm-overlay fixed inset-0 z-[72] bg-black/45 flex items-center justify-center pointer-events-auto"
           role="dialog"
           aria-modal="true"
           aria-label="退出专注模式确认"
           data-testid="dock-v3-exit-confirm">
-          <div class="w-[min(92vw,500px)] rounded-2xl border border-slate-600/70 bg-slate-900/95 p-4 text-slate-100 shadow-2xl">
+          <div class="focus-exit-confirm-card w-[min(92vw,500px)] rounded-2xl border border-slate-600/70 bg-slate-900/95 p-4 text-slate-100 shadow-2xl">
             <div class="mb-3 flex items-center justify-between gap-3">
               <div>
                 <h4 class="text-sm font-semibold">退出专注模式</h4>
@@ -355,7 +380,8 @@
 
       @if (helpFeedback.showRestoreHint()) {
         <div
-          class="fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
+          class="focus-floating-ui fixed bottom-28 left-1/2 -translate-x-1/2 z-[71] px-3 py-1.5 rounded-full bg-slate-900/85 border border-slate-700/80 text-[11px] text-slate-200"
+          [attr.data-focus-phase]="focusSessionPhase()"
           aria-live="polite"
           data-testid="dock-v3-exit-restore-hint">
           已保留专注会话，可随时重新开启虚化。
@@ -364,11 +390,12 @@
 
       @if (helpFeedback.dockActionFeedback(); as feedback) {
         <div
-          class="fixed left-1/2 z-[71] -translate-x-1/2 rounded-full border px-4 py-2 text-[11px] shadow-lg backdrop-blur-sm"
+          class="focus-floating-ui fixed left-1/2 z-[71] -translate-x-1/2 rounded-full border px-4 py-2 text-[11px] shadow-lg backdrop-blur-sm"
           [ngClass]="feedback.tone === 'success'
             ? 'border-emerald-400/25 bg-slate-900/88 text-emerald-100'
             : 'border-indigo-400/25 bg-slate-900/88 text-slate-100'"
           [style.bottom]="'calc(' + dockBottomInset + ' + 148px)'"
+          [attr.data-focus-phase]="focusSessionPhase()"
           aria-live="polite"
           data-testid="dock-v3-dock-feedback">
           {{ feedback.message }}
@@ -483,17 +510,17 @@
               (click)="onScrimToggle()"
               [disabled]="!canToggleScrim()"
               class="px-4 py-1.5 rounded-full text-xs font-bold transition-colors"
-              [ngClass]="engine.focusMode() && engine.focusScrimOn()
+              [ngClass]="focusSessionMounted() && engine.focusScrimOn()
                 ? 'bg-gradient-to-r from-indigo-500 to-violet-500 text-white'
                 : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'"
-              [style.box-shadow]="engine.focusMode() && engine.focusScrimOn()
+              [style.box-shadow]="focusSessionMounted() && engine.focusScrimOn()
                 ? '0 0 20px rgba(99,102,241,0.35), 0 0 6px rgba(139,92,246,0.4)'
                 : 'none'"
               style="min-height: 44px;"
-              [attr.aria-label]="!engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '关闭背景虚化' : '开启背景虚化')"
-              [attr.aria-pressed]="engine.focusMode() && engine.focusScrimOn()"
+              [attr.aria-label]="!focusSessionMounted() ? '进入专注后可用' : (engine.focusScrimOn() ? '关闭背景虚化' : '开启背景虚化')"
+              [attr.aria-pressed]="focusSessionMounted() && engine.focusScrimOn()"
               data-testid="dock-v3-focus-toggle">
-              {{ !engine.focusMode() ? '进入专注后可用' : (engine.focusScrimOn() ? '背景虚化开启' : '背景虚化关闭') }}
+              {{ !focusSessionMounted() ? '进入专注后可用' : (engine.focusScrimOn() ? '背景虚化开启' : '背景虚化关闭') }}
             </button>
           </div>
         </div>

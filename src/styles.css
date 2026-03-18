@@ -49,6 +49,7 @@ body {
   --pk-ease-micro: cubic-bezier(0.18, 0.75, 0.28, 1);
   --pk-shell-enter: 320ms;
   --pk-shell-exit: 260ms;
+  --pk-shell-restore: 320ms;
   --pk-overlay-enter: 280ms;
   --pk-overlay-exit: 220ms;
   --pk-panel-enter: 220ms;
@@ -63,7 +64,7 @@ body {
   --pk-notice-enter: 200ms;
   --pk-notice-exit: 160ms;
   --pk-status-ring-pulse: 320ms;
-  --pk-focus-scene-entry-hud: 120ms;
+  --pk-focus-scene-entry-hud: 72ms;
   --pk-radar-hover: 140ms;
   --pk-radar-appear: 220ms;
   --pk-radar-return: 180ms;

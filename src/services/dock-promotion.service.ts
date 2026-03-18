@@ -167,9 +167,13 @@ export class DockPromotionService {
         rootProjectId: focusReference ? this.zoneService.resolveSourceProjectId(focusReference) : null,
       },
     );
-    const radarCandidate = rankedRadar.length > 0
-      ? radarCandidates.find(entry => entry.taskId === rankedRadar[0].taskId) ?? null
-      : null;
+    // 逐优先级遍历候选，防止排名期间条目被移除导致静默丢失
+    let radarCandidate: DockEntry | null = null;
+    for (const ranked of rankedRadar) {
+      const found = radarCandidates.find(entry => entry.taskId === ranked.taskId);
+      if (found) { radarCandidate = found; break; }
+      this.logger.warn('DockPromotion', '排名候选已不在条目列表中，尝试下一个', { taskId: ranked.taskId });
+    }
     if (!radarCandidate) return false;
     this.ctx.schedulerPhase.set('active');
     this.promoteCandidate(radarCandidate.taskId);

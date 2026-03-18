@@ -921,6 +921,44 @@ describe('DockEngineService', () => {
     expect(service.focusMode()).toBe(false);
   });
 
+  it('toggleFocusMode should preserve an exiting transition until the coordinator settles it', () => {
+    service.toggleFocusMode();
+    expect(service.focusMode()).toBe(true);
+
+    service.beginFocusTransition({
+      phase: 'exiting',
+      direction: 'exit',
+      fromRect: { left: 12, top: 24, width: 180, height: 96 },
+      toRect: { left: 18, top: 640, width: 220, height: 108 },
+      durationMs: 280,
+      startedAt: new Date().toISOString(),
+    });
+
+    service.toggleFocusMode();
+
+    expect(service.focusMode()).toBe(false);
+    expect(service.focusTransition()?.phase).toBe('exiting');
+  });
+
+  it('toggleFocusMode should clear a settled focused transition on direct exit', () => {
+    service.toggleFocusMode();
+    expect(service.focusMode()).toBe(true);
+
+    service.beginFocusTransition({
+      phase: 'focused',
+      direction: 'enter',
+      fromRect: { left: 12, top: 640, width: 180, height: 96 },
+      toRect: { left: 18, top: 24, width: 220, height: 108 },
+      durationMs: 340,
+      startedAt: new Date().toISOString(),
+    });
+
+    service.toggleFocusMode();
+
+    expect(service.focusMode()).toBe(false);
+    expect(service.focusTransition()).toBeNull();
+  });
+
   it('restoreSnapshot should restore dock expanded and mute preference', () => {
     service.restoreSnapshot({
       version: 4,
@@ -2200,14 +2238,22 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
   });
-  it('clearDockForExit should clear entries and reset exit-sensitive state', () => {
+  it('clearDockForExit should clear entries but keep exit chrome alive until final cleanup', () => {
     seedTask('A');
     service.dockTask('A');
     service.markExitAction('clear_exit');
+    service.pendingDecision.set({ reason: 'still visible during exit' });
+    service.lastRuleDecision.set({
+      type: 'idle_promote',
+      reason: 'rule',
+      recommendedTaskIds: ['A'],
+      createdAt: new Date().toISOString(),
+    });
     service.clearDockForExit();
 
     expect(service.entries()).toHaveLength(0);
-    expect(service.pendingDecision()).toBeNull();
+    expect(service.pendingDecision()).toEqual({ reason: 'still visible during exit' });
+    service.finalizeClearDockForExit();
     expect(service.lastRuleDecision()).toBeNull();
   });
 
@@ -2334,6 +2380,16 @@ describe('DockEngineService', () => {
     expect(service.focusTransition()?.phase).toBe('entering');
     service.endFocusTransition();
     expect(service.focusTransition()).toBeNull();
+  });
+
+  it('focus chrome restore should expose restoring phase until timer settles', () => {
+    expect(service.focusChromePhase()).toBe('idle');
+
+    service.beginFocusChromeRestore(200);
+    expect(service.focusChromePhase()).toBe('restoring');
+
+    vi.advanceTimersByTime(220);
+    expect(service.focusChromePhase()).toBe('idle');
   });
 
   // =========================================================================

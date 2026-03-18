@@ -158,9 +158,7 @@ export function unwrap<T>(result: Result<T, OperationError>): T {
   if (result.ok) {
     return result.value;
   }
-  // TypeScript 在这里知道 result 是 { ok: false; error: OperationError }
-  const failedResult = result as { ok: false; error: OperationError };
-  throw new Error(failedResult.error.message);
+  throw new Error(result.error.message);
 }
 
 /**

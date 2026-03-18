@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, HostListener, computed, inject, output, signal } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { NgClass } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { isStatusMachineEntryExpired, type StatusMachineEntry } from '../../../../models/parking-dock';
 
@@ -50,7 +50,7 @@ interface PipTaskRow {
 @Component({
   selector: 'app-dock-status-machine-pip',
   standalone: true,
-  imports: [CommonModule],
+  imports: [NgClass],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './dock-status-machine-pip.component.html',
 })
@@ -80,12 +80,7 @@ export class DockStatusMachinePipComponent {
   readonly primaryCardLayout = computed<'inline' | 'stack'>(() =>
     this.layoutMode() === 'micro' ? 'stack' : 'inline',
   );
-  readonly blankPeriodActive = computed(
-    () =>
-      this.engine.fragmentEntryCountdown() === null
-      && this.engine.pendingDecision() !== null
-      && this.engine.pendingDecisionEntries().length === 0,
-  );
+  readonly blankPeriodActive = computed(() => this.engine.blankPeriodActive());
   readonly expiredEntries = computed(() =>
     this.allEntries().filter(entry => isStatusMachineEntryExpired(entry)),
   );

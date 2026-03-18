@@ -4,7 +4,7 @@
  * 负责：任务完成后推荐、候选排序、待决策管理、碎片阶段进入、
  * 主控台排序、主任务一致性修复等纯调度流逻辑。
  */
-import { Injectable, Signal, WritableSignal, inject } from '@angular/core';
+import { Injectable, Signal, WritableSignal, inject, DestroyRef } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
@@ -74,6 +74,12 @@ export class DockCompletionFlowService {
   private readonly fragmentRest = inject(DockFragmentRestService);
   private readonly promotionService = inject(DockPromotionService);
   private readonly logger = inject(LoggerService);
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** 推荐候选人数上限 */
+  private static readonly RECOMMENDATION_CANDIDATE_LIMIT = 3;
+  /** 自动推进最小间隔（防止过快触发） */
+  private static readonly MIN_AUTO_PROMOTE_MS = 1_000;
 
   private _ctx: DockCompletionContext | null = null;
 
@@ -514,7 +520,7 @@ export class DockCompletionFlowService {
       // GAP-3: 完全忽略等待时间匹配，仅按其他属性排序
       'ignore-wait',
     );
-    const candidateIds = ranked.slice(0, 3).map(item => item.taskId);
+    const candidateIds = ranked.slice(0, DockCompletionFlowService.RECOMMENDATION_CANDIDATE_LIMIT).map(item => item.taskId);
     if (candidateIds.length === 0) return [];
     return [{ type: 'homologous-advancement', taskIds: candidateIds }];
   }
@@ -663,7 +669,7 @@ export class DockCompletionFlowService {
     const now = nowDate.toISOString();
     const expiresAtMs =
       typeof autoPromoteAfterMs === 'number'
-        ? Math.max(1_000, autoPromoteAfterMs)
+        ? Math.max(DockCompletionFlowService.MIN_AUTO_PROMOTE_MS, autoPromoteAfterMs)
         : null;
     const candidateIds = candidateGroups.flatMap(group => group.taskIds);
     this.ctx.pendingDecision.set({

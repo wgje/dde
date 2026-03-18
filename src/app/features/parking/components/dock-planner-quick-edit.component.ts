@@ -48,10 +48,9 @@ export type DockPlannerQuickEditPresentation = 'popover' | 'sheet';
 export class DockPlannerQuickEditComponent {
   private readonly openState = signal(false);
   private readonly attentionState = signal(false);
-  // TODO: pendingOpen has no timeout — if the parent never responds with an
-  // openInput binding update, this flag stays true indefinitely. Consider
-  // adding a short timeout (e.g. 500ms) to auto-reset as a safety net.
+  // pendingOpen 安全网：500ms 超时自动重置，防止父组件未响应时状态卡住
   private readonly pendingOpen = signal(false);
+  private pendingOpenTimerId: ReturnType<typeof setTimeout> | null = null;
   private readonly expectedMinutesState = signal<number | null>(null);
   private readonly waitMinutesState = signal<number | null>(null);
   private readonly disabledState = signal(false);
@@ -124,6 +123,12 @@ export class DockPlannerQuickEditComponent {
     if (this.disabled()) return;
     if (!this.open()) {
       this.pendingOpen.set(true);
+      // 安全网：500ms 内若父组件未响应 open 变化，自动重置 pendingOpen
+      if (this.pendingOpenTimerId !== null) clearTimeout(this.pendingOpenTimerId);
+      this.pendingOpenTimerId = setTimeout(() => {
+        this.pendingOpenTimerId = null;
+        this.pendingOpen.set(false);
+      }, 500);
     }
     this.toggleRequested.emit();
   }

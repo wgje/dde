@@ -254,9 +254,8 @@ export class DockZoneService {
   buildAdjacencyFingerprint(tasks: Task[]): string {
     let xor = 0;
     let sum = 0;
-    // 使用排序保证输入顺序无关性
-    const sorted = [...tasks].sort((a, b) => a.id.localeCompare(b.id));
-    for (const t of sorted) {
+    // XOR 和 SUM 运算天然顺序无关，无需排序
+    for (const t of tasks) {
       let h = 0x811c9dc5; // FNV-1a offset basis
       const key = `${t.id}:${t.parentId ?? ''}`;
       for (let i = 0; i < key.length; i++) {

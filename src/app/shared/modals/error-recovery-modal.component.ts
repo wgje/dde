@@ -1,5 +1,4 @@
 import { Component, Input, Output, EventEmitter, ChangeDetectionStrategy, OnInit, OnDestroy } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
 /**
@@ -40,7 +39,7 @@ export interface ErrorRecoveryResult {
 @Component({
   selector: 'app-error-recovery-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" 
@@ -54,18 +53,24 @@ export interface ErrorRecoveryResult {
           <!-- 图标 -->
           <div class="mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-4"
                [class]="iconBgClass">
-            <svg *ngIf="type === 'error'" class="w-6 h-6 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            @if (type === 'error') {
+            <svg class="w-6 h-6 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
                     d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
-            <svg *ngIf="type === 'warning'" class="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            }
+            @if (type === 'warning') {
+            <svg class="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
                     d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <svg *ngIf="type === 'info'" class="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            }
+            @if (type === 'info') {
+            <svg class="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
                     d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
+            }
           </div>
           
           <!-- 标题 -->
@@ -79,26 +84,30 @@ export interface ErrorRecoveryResult {
           </p>
           
           <!-- 详细信息（可选） -->
-          <details *ngIf="details" class="mt-3">
+          @if (details) {
+          <details class="mt-3">
             <summary class="text-xs text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-200">
               查看详细信息
             </summary>
             <pre class="mt-2 p-2 bg-gray-100 dark:bg-gray-700 rounded text-xs text-gray-600 dark:text-gray-300 overflow-auto max-h-32">{{ details }}</pre>
           </details>
+          }
         </div>
         
         <!-- 选项按钮 -->
         <div class="p-4 pt-0 space-y-2">
-          <button *ngFor="let option of options"
-                  (click)="selectOption(option)"
+          @for (option of options; track option.id) {
+          <button (click)="selectOption(option)"
                   class="w-full py-3 px-4 rounded-xl font-medium transition-colors flex items-center justify-center gap-2"
                   [class]="getButtonClass(option.style)">
             <span>{{ option.label }}</span>
           </button>
+          }
         </div>
         
         <!-- 记住选择（可选） -->
-        <div *ngIf="allowRememberChoice" class="px-6 pb-4">
+        @if (allowRememberChoice) {
+        <div class="px-6 pb-4">
           <label class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer">
             <input type="checkbox" 
                    [(ngModel)]="rememberChoice"
@@ -106,14 +115,15 @@ export interface ErrorRecoveryResult {
             <span>记住此选择</span>
           </label>
         </div>
+        }
         
-        <!-- 倒计时自动选择（可选） -->
-        <div *ngIf="autoSelectIn !== null && autoSelectIn > 0" 
-             class="px-6 pb-4 text-center">
+        @if (autoSelectIn !== null && autoSelectIn > 0) {
+        <div class="px-6 pb-4 text-center">
           <p class="text-xs text-gray-500 dark:text-gray-400">
             将在 {{ autoSelectIn }} 秒后自动选择 "{{ defaultOption?.label }}"
           </p>
         </div>
+        }
       </div>
     </div>
   `,

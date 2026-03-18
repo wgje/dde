@@ -120,7 +120,9 @@ async function waitForFocusTransitionStable(page: Page): Promise<void> {
   await expect
     .poll(async () => {
       const phase = await mainContent.getAttribute('data-dock-takeover-phase');
-      return phase === 'entering' || phase === 'exiting' ? 'transitioning' : 'stable';
+      return phase === 'entering' || phase === 'exiting' || phase === 'restoring'
+        ? 'transitioning'
+        : 'stable';
     }, { timeout: 10000, intervals: [200, 300, 500] })
     .toBe('stable');
 }
@@ -138,10 +140,13 @@ async function openExitConfirm(page: Page): Promise<void> {
   }
 
   await waitForFocusTransitionStable(page);
-  
-  // 使用键盘快捷键 'l' 触发退出
-  await page.keyboard.press('l');
-  
+
+  await triggerFocusToggle(page);
+  if (await testHelpers.isElementVisible(confirm, 1200)) {
+    return;
+  }
+
+  await page.keyboard.press('Alt+Shift+L');
   await expect(confirm).toBeVisible({ timeout: 5000 });
 }
 
@@ -149,6 +154,7 @@ async function saveAndExitFocus(page: Page): Promise<void> {
   await openDestructiveExitChoices(page);
   await page.locator('[data-testid="dock-v3-exit-save"]').click({ force: true });
   await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeHidden({ timeout: 10000 });
+  await waitForFocusTransitionStable(page);
 }
 
 async function openDestructiveExitChoices(page: Page): Promise<void> {
@@ -776,6 +782,30 @@ test.describe('ParkingDock V3 critical paths', () => {
     await enterFocusMode(page);
     await saveAndExitFocus(page);
     await expect(page.locator('[data-testid="dock-v3-item"]')).toHaveCount(1, { timeout: 10000 });
+  });
+
+  test('save-exit should keep sidebar restore in a dedicated restoring phase before returning interactive', async ({ page }) => {
+    await bootstrapLocalWorkspace(page);
+    await createAndActivateProject(page, `DockRestorePhase-${testHelpers.uniqueId()}`);
+
+    await createDockTaskByForm(page, `Restore-${testHelpers.uniqueId()}`);
+    await enterFocusMode(page);
+
+    await openDestructiveExitChoices(page);
+    await page.locator('[data-testid="dock-v3-exit-save"]').click({ force: true });
+
+    const mainContent = page.locator('[data-testid="project-shell-main-content"]').first();
+    const projectSelector = page.locator('[data-testid="project-selector"]').first();
+
+    await expect(mainContent).toHaveAttribute('data-dock-takeover-phase', 'restoring', { timeout: 10000 });
+    await expect
+      .poll(async () => projectSelector.evaluate((el) => window.getComputedStyle(el).pointerEvents))
+      .toBe('none');
+
+    await waitForFocusTransitionStable(page);
+    await expect
+      .poll(async () => projectSelector.evaluate((el) => window.getComputedStyle(el).pointerEvents))
+      .toBe('auto');
   });
 
   test('shared black-box entries should persist sourceBlackBoxEntryId and focus_meta in local stores', async ({ page }) => {

@@ -51,18 +51,21 @@ interface ScanResult {
 /**
  * 允许的来源白名单
  * 安全修复：限制 CORS 来源，防止任意网站调用 API
+ * SEC-M6: 生产环境通过环境变量配置，避免 localhost 残留
  */
-const ALLOWED_ORIGINS = [
-  'https://dde-eight.vercel.app',
-  'https://nanoflow.app',
-  'http://localhost:4200',      // 开发环境
-  'http://localhost:5173',      // Vite 开发服务器
-];
+const ALLOWED_ORIGINS: string[] = (() => {
+  const envOrigins = Deno.env.get('ALLOWED_ORIGINS');
+  if (envOrigins) return envOrigins.split(',').map(o => o.trim()).filter(Boolean);
+  return [
+    'https://dde-eight.vercel.app',
+    'https://nanoflow.app',
+    'http://localhost:4200',      // 开发环境
+    'http://localhost:5173',      // Vite 开发服务器
+  ];
+})();
 
-/**
- * 当前请求的 CORS 头（在请求处理开始时设置）
- */
-let currentCorsHeaders: Record<string, string> = {};
+/** 文件大小限制：10MB base64 编码后约 13.7MB */
+const MAX_FILE_BASE64_LENGTH = 10 * 1024 * 1024 * 1.37;
 
 /**
  * 根据请求来源返回 CORS 头
@@ -72,11 +75,18 @@ let currentCorsHeaders: Record<string, string> = {};
 const VERCEL_PREVIEW_PREFIX = 'dde-';
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
-  const isAllowed = origin && (
-    ALLOWED_ORIGINS.includes(origin) ||
-    // 只允许项目级前缀的 Vercel 预览域名（防止任意 .vercel.app 子域访问）
-    (origin.endsWith('.vercel.app') && origin.includes(`://${VERCEL_PREVIEW_PREFIX}`))
-  );
+  let isAllowed = false;
+  if (origin) {
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      isAllowed = true;
+    } else {
+      // SEC-M5: 用 URL 解析锚定 hostname，防止 evil-dde-xxx.vercel.app 绕过
+      try {
+        const url = new URL(origin);
+        isAllowed = url.hostname.startsWith(VERCEL_PREVIEW_PREFIX) && url.hostname.endsWith('.vercel.app');
+      } catch { /* 非法 origin 忽略 */ }
+    }
+  }
   
   return {
     'Access-Control-Allow-Origin': isAllowed ? origin! : ALLOWED_ORIGINS[0],
@@ -110,13 +120,13 @@ async function verifyAuth(req: Request): Promise<{ userId: string } | null> {
 // ==================== 主函数 ====================
 
 serve(async (req: Request) => {
-  // 获取请求来源，用于 CORS 响应
+  // SEC-H1 fix: 使用局部变量避免并发请求间 CORS 头竞态
   const origin = req.headers.get('Origin');
-  currentCorsHeaders = getCorsHeaders(origin);
+  const corsHeaders = getCorsHeaders(origin);
 
   // 处理 CORS 预检请求
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: currentCorsHeaders });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
@@ -126,37 +136,37 @@ serve(async (req: Request) => {
 
     // health 检查不需要认证（用于监控）
     if (action === 'health') {
-      return handleHealthCheck();
+      return handleHealthCheck(corsHeaders);
     }
 
     // 其他操作需要认证
     const auth = await verifyAuth(req);
     if (!auth) {
       console.warn('🛡️ [VirusScan] Unauthorized request for action:', action);
-      return jsonResponse({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }, 401);
+      return jsonResponse({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }, corsHeaders, 401);
     }
 
     console.log('🛡️ [VirusScan] Authenticated user:', auth.userId.slice(0, 8) + '...', 'action:', action);
 
     switch (action) {
       case 'scan':
-        return handleScan(body);
+        return handleScan(body, auth.userId, corsHeaders);
       
       case 'status':
-        return handleStatusCheck(body);
+        return handleStatusCheck(body, auth.userId, corsHeaders);
       
       case 'verify-hash':
-        return handleHashVerification(body);
+        return handleHashVerification(body, auth.userId, corsHeaders);
       
       case 'rescan':
-        return handleRescan(body);
+        return handleRescan(body, auth.userId, corsHeaders);
       
       default:
-        return jsonResponse({ error: `Unknown action: ${action}` }, 400);
+        return jsonResponse({ error: `Unknown action: ${action}` }, corsHeaders, 400);
     }
   } catch (error) {
     console.error('Error processing request:', error);
-    return jsonResponse({ error: 'Internal server error' }, 500);
+    return jsonResponse({ error: 'Internal server error' }, corsHeaders, 500);
   }
 });
 
@@ -165,7 +175,7 @@ serve(async (req: Request) => {
 /**
  * 健康检查
  */
-async function handleHealthCheck(): Promise<Response> {
+async function handleHealthCheck(corsHeaders: Record<string, string>): Promise<Response> {
   try {
     // 检查 ClamAV 是否可用
     const clamAvHealth = await checkClamAvHealth();
@@ -174,24 +184,29 @@ async function handleHealthCheck(): Promise<Response> {
       status: clamAvHealth ? 'healthy' : 'degraded',
       clamav: clamAvHealth,
       timestamp: new Date().toISOString(),
-    });
+    }, corsHeaders);
   } catch (error) {
     return jsonResponse({
       status: 'unhealthy',
       error: 'Health check failed',
       timestamp: new Date().toISOString(),
-    }, 503);
+    }, corsHeaders, 503);
   }
 }
 
 /**
  * 执行文件扫描
  */
-async function handleScan(body: ScanRequest): Promise<Response> {
+async function handleScan(body: ScanRequest, _userId: string, corsHeaders: Record<string, string>): Promise<Response> {
   const { file, filename, hash, mimeType } = body;
   
   if (!file || !filename) {
-    return jsonResponse({ error: 'Missing required fields: file, filename' }, 400);
+    return jsonResponse({ error: 'Missing required fields: file, filename' }, corsHeaders, 400);
+  }
+
+  // SEC-M2: 文件大小限制，防止 DoS
+  if (file.length > MAX_FILE_BASE64_LENGTH) {
+    return jsonResponse({ error: 'File too large (max 10MB)' }, corsHeaders, 413);
   }
 
   const fileId = crypto.randomUUID();
@@ -206,9 +221,14 @@ async function handleScan(body: ScanRequest): Promise<Response> {
     // 记录扫描结果
     await saveScanResult(fileId, hash || '', scanResult);
     
+    // SEC-C1 fix: ClamAV 失败时返回 FAILED 状态，不假装为 CLEAN
+    const effectiveStatus = scanResult.status === SCAN_STATUS.FAILED
+      ? SCAN_STATUS.FAILED
+      : (scanResult.infected ? SCAN_STATUS.THREAT_DETECTED : SCAN_STATUS.CLEAN);
+
     const result: ScanResult = {
       fileId,
-      status: scanResult.infected ? SCAN_STATUS.THREAT_DETECTED : SCAN_STATUS.CLEAN,
+      status: effectiveStatus,
       threatName: scanResult.virusName,
       threatDescription: scanResult.description,
       scannedAt: new Date().toISOString(),
@@ -217,7 +237,7 @@ async function handleScan(body: ScanRequest): Promise<Response> {
       signatureVersion: scanResult.signatureVersion,
     };
 
-    return jsonResponse(result);
+    return jsonResponse(result, corsHeaders);
   } catch (error) {
     console.error('Scan error:', error);
     
@@ -234,31 +254,33 @@ async function handleScan(body: ScanRequest): Promise<Response> {
       error: 'File scan could not be completed',
       scannedAt: new Date().toISOString(),
       scanner: 'clamav',
-    });
+    }, corsHeaders);
   }
 }
 
 /**
  * 检查扫描状态
  */
-async function handleStatusCheck(body: ScanRequest): Promise<Response> {
+async function handleStatusCheck(body: ScanRequest, userId: string, corsHeaders: Record<string, string>): Promise<Response> {
   const { fileId } = body;
   
   if (!fileId) {
-    return jsonResponse({ error: 'Missing required field: fileId' }, 400);
+    return jsonResponse({ error: 'Missing required field: fileId' }, corsHeaders, 400);
   }
 
   try {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     
+    // SEC-C2 fix: 添加 user_id 过滤，防止 IDOR 越权访问
     const { data, error } = await supabase
       .from('attachment_scans')
       .select('*')
       .eq('file_id', fileId)
+      .eq('user_id', userId)
       .single();
 
     if (error || !data) {
-      return jsonResponse({ error: 'Scan record not found' }, 404);
+      return jsonResponse({ error: 'Scan record not found' }, corsHeaders, 404);
     }
 
     return jsonResponse({
@@ -270,34 +292,36 @@ async function handleStatusCheck(body: ScanRequest): Promise<Response> {
       scanner: data.scanner,
       engineVersion: data.engine_version,
       signatureVersion: data.signature_version,
-    });
+    }, corsHeaders);
   } catch (error) {
     console.error('Status check error:', error);
-    return jsonResponse({ error: 'Failed to check status' }, 500);
+    return jsonResponse({ error: 'Failed to check status' }, corsHeaders, 500);
   }
 }
 
 /**
  * 验证文件哈希
  */
-async function handleHashVerification(body: ScanRequest): Promise<Response> {
+async function handleHashVerification(body: ScanRequest, userId: string, corsHeaders: Record<string, string>): Promise<Response> {
   const { fileId, expectedHash } = body;
   
   if (!fileId || !expectedHash) {
-    return jsonResponse({ error: 'Missing required fields: fileId, expectedHash' }, 400);
+    return jsonResponse({ error: 'Missing required fields: fileId, expectedHash' }, corsHeaders, 400);
   }
 
   try {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     
+    // SEC-C2 fix: 添加 user_id 过滤
     const { data, error } = await supabase
       .from('attachment_scans')
       .select('file_hash')
       .eq('file_id', fileId)
+      .eq('user_id', userId)
       .single();
 
     if (error || !data) {
-      return jsonResponse({ valid: false, error: 'File not found' });
+      return jsonResponse({ valid: false, error: 'File not found' }, corsHeaders);
     }
 
     const valid = data.file_hash === expectedHash;
@@ -307,31 +331,44 @@ async function handleHashVerification(body: ScanRequest): Promise<Response> {
       console.warn('Hash mismatch detected:', { fileId, hashMatch: false });
     }
 
-    return jsonResponse({ valid });
+    return jsonResponse({ valid }, corsHeaders);
   } catch (error) {
     console.error('Hash verification error:', error);
-    return jsonResponse({ valid: false, error: 'Verification failed' });
+    return jsonResponse({ valid: false, error: 'Verification failed' }, corsHeaders);
   }
 }
 
 /**
  * 触发重新扫描
  */
-async function handleRescan(body: ScanRequest): Promise<Response> {
+async function handleRescan(body: ScanRequest, userId: string, corsHeaders: Record<string, string>): Promise<Response> {
   const { fileId } = body;
   
   if (!fileId) {
-    return jsonResponse({ error: 'Missing required field: fileId' }, 400);
+    return jsonResponse({ error: 'Missing required field: fileId' }, corsHeaders, 400);
   }
 
   try {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     
+    // SEC-C2 fix: 添加 user_id 过滤，仅允许操作自己的文件
+    const { data: existing } = await supabase
+      .from('attachment_scans')
+      .select('file_id')
+      .eq('file_id', fileId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (!existing) {
+      return jsonResponse({ error: 'Scan record not found' }, corsHeaders, 404);
+    }
+
     // 更新状态为 scanning
     await supabase
       .from('attachment_scans')
       .update({ status: SCAN_STATUS.SCANNING })
-      .eq('file_id', fileId);
+      .eq('file_id', fileId)
+      .eq('user_id', userId);
 
     // TODO: 从 Storage 获取文件并重新扫描
     // 这里应该触发一个后台任务
@@ -340,10 +377,10 @@ async function handleRescan(body: ScanRequest): Promise<Response> {
       fileId,
       status: SCAN_STATUS.SCANNING,
       message: 'Rescan queued',
-    });
+    }, corsHeaders);
   } catch (error) {
     console.error('Rescan error:', error);
-    return jsonResponse({ error: 'Failed to queue rescan' }, 500);
+    return jsonResponse({ error: 'Failed to queue rescan' }, corsHeaders, 500);
   }
 }
 
@@ -449,12 +486,13 @@ async function saveScanResult(
 
 /**
  * 返回 JSON 响应
+ * SEC-H1 fix: corsHeaders 作为参数传入，避免全局可变状态竞态
  */
-function jsonResponse(data: unknown, status = 200): Response {
+function jsonResponse(data: unknown, corsHeaders: Record<string, string>, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
-      ...currentCorsHeaders,
+      ...corsHeaders,
       'Content-Type': 'application/json',
     },
   });

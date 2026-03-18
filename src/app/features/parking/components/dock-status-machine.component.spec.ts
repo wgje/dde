@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockStatusMachineComponent } from './dock-status-machine.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -45,6 +45,12 @@ describe('DockStatusMachineComponent', () => {
     switchToTask: vi.fn(),
     toggleMuteWaitTone: vi.fn(() => muted.update(value => !value)),
     isBurnoutActive: signal(false),
+    blankPeriodActive: computed(
+      () =>
+        fragmentEntryCountdown() === null
+        && pendingDecision() !== null
+        && pendingDecisionEntries().length === 0,
+    ),
     fragmentDefenseLevel: signal(1 as 1 | 2),
     burnoutTriggeredAt: signal<number | null>(null),
     restReminderActive: signal(false),

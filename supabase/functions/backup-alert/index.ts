@@ -61,6 +61,16 @@ interface AlertResult {
 // 配置
 // ===========================================
 
+/** SEC-H5: HTML 转义，防止邮件模板注入 */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 const ALERT_CONFIG = {
   /** 告警颜色映射（Slack） */
   SEVERITY_COLORS: {
@@ -173,16 +183,16 @@ async function sendEmailAlert(
       <body>
         <div class="container">
           <div class="header">
-            <h2 style="margin: 0;">${emoji} ${payload.title}</h2>
+            <h2 style="margin: 0;">${escapeHtml(emoji)} ${escapeHtml(payload.title)}</h2>
           </div>
           <div class="content">
-            <p>${payload.message}</p>
+            <p>${escapeHtml(payload.message)}</p>
             ${payload.data ? `
               <table class="data-table">
                 ${Object.entries(payload.data).map(([key, value]) => `
                   <tr>
-                    <td>${key}</td>
-                    <td>${String(value)}</td>
+                    <td>${escapeHtml(key)}</td>
+                    <td>${escapeHtml(String(value))}</td>
                   </tr>
                 `).join('')}
               </table>
@@ -378,10 +388,22 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // 验证授权（仅允许服务端调用）
+    // SEC-H2 fix: 验证 Bearer token，不仅检查格式
     const authHeader = req.headers.get('Authorization');
     if (!authHeader?.startsWith('Bearer ')) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const authClient = createClient(supabaseUrl, supabaseKey);
+    const { data: { user }, error: authError } = await authClient.auth.getUser(token);
+    if (authError || !user) {
+      return new Response(JSON.stringify({ error: 'Invalid or expired token' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
       });

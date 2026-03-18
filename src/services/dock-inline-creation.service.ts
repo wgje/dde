@@ -279,20 +279,21 @@ export class DockInlineCreationService {
             ? {
                 ...item,
                 sourceBlackBoxEntryId: blackBoxEntryId,
-                inlineArchiveStatus: 'pending',
+                inlineArchiveStatus: 'archiving',
               }
             : item,
         ),
       );
+    } else {
+      // blackBoxEntryId 已存在，仅切换状态
+      this.ctx.entries.update(prev =>
+        prev.map(item =>
+          item.taskId === entry.taskId
+            ? { ...item, inlineArchiveStatus: 'archiving' }
+            : item,
+        ),
+      );
     }
-
-    this.ctx.entries.update(prev =>
-      prev.map(item =>
-        item.taskId === entry.taskId
-          ? { ...item, inlineArchiveStatus: 'archiving' }
-          : item,
-      ),
-    );
 
     const createResult = this.taskOps.addTask(entry.title, entry.detail ?? '', null, null, false);
     if (!createResult.ok) {

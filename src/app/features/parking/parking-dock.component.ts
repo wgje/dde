@@ -25,6 +25,7 @@ import { PARKING_CONFIG } from '../../../config/parking.config';
 import {
   DOCK_TOAST,
   DOCK_GROUP_LABELS,
+  DOCK_GROUP_FALLBACK_LABEL,
   DOCK_DEFAULT_TASK_TITLE,
 } from '../../../config/dock-i18n.config';
 import {
@@ -33,6 +34,8 @@ import {
   DockLane,
   DockFocusTransitionPhase,
   DockPendingDecisionEntry,
+  StatusMachineEntry,
+  type RecommendationGroupType,
 } from '../../../models/parking-dock';
 import { hasTaskDragTypes } from '../../../utils/task-drag-payload';
 import { TimerHandle } from '../../../utils/timer-handle';
@@ -55,6 +58,10 @@ import { DockDragDropService } from './services/dock-drag-drop.service';
 import { DockFocusTransitionService } from './services/dock-focus-transition.service';
 import { trapDialogFocus } from './utils/dock-focus-trap';
 import { formatDockMinutes, parseOptionalMinutes } from './utils/dock-format';
+import {
+  resolveDockFocusUiPhase,
+  type DockFocusUiPhase,
+} from '../../../utils/dock-focus-phase';
 
 type FocusExitConfirmAction =
   | 'save-exit'
@@ -111,14 +118,6 @@ export class ParkingDockComponent implements OnDestroy {
   /** 停泊坞和半圆入口的水平中心点：桌面端有侧边栏时向右偏移半个侧边栏宽度 */
   readonly sidebarEffectiveWidth = computed(() => {
     if (this.uiState.isMobile() || !this.uiState.sidebarOpen()) return 0;
-    const transition = this.engine.focusTransition();
-    if (
-      (this.engine.focusMode() && this.engine.focusScrimOn())
-      || transition?.phase === 'entering'
-      || transition?.phase === 'exiting'
-    ) {
-      return 0;
-    }
     return this.uiState.sidebarWidth();
   });
   readonly dockCenterLeft = computed(() => {
@@ -133,6 +132,29 @@ export class ParkingDockComponent implements OnDestroy {
     }
     return null;
   });
+  readonly focusSessionPhase = computed<DockFocusUiPhase>(() =>
+    resolveDockFocusUiPhase(this.engine.focusMode(), this.engine.focusTransition()),
+  );
+  readonly focusSessionMounted = computed(() => this.focusSessionPhase() !== 'idle');
+  readonly focusSessionInteractive = computed(() => this.focusSessionPhase() === 'focused');
+  readonly focusSceneTransitionPhase = computed<DockFocusTransitionPhase | null>(() => {
+    const phase = this.focusSessionPhase();
+    return phase === 'idle' ? null : phase;
+  });
+  readonly focusFloatingUiMounted = computed(
+    () => this.focusSessionPhase() === 'focused' || this.focusTransitionService.floatingUiVisible(),
+  );
+  readonly exitVisualSnapshot = computed(() => this.focusTransitionService.exitVisualSnapshot());
+  readonly exitConsoleEntries = computed(() =>
+    this.focusSessionPhase() === 'exiting'
+      ? (this.exitVisualSnapshot()?.consoleEntries ?? null)
+      : null,
+  );
+  readonly exitStatusMachineEntries = computed<StatusMachineEntry[] | null>(() =>
+    this.focusSessionPhase() === 'exiting'
+      ? (this.exitVisualSnapshot()?.statusMachineEntries ?? null)
+      : null,
+  );
   readonly dockExpanded = computed(() => this.engine.dockExpanded());
   readonly semicircleExpanded = computed(() => this.dockExpanded() || this.dragDrop.semicircleHoverExpanded());
   readonly hudSize = signal<{ width: number; height: number }>({
@@ -143,32 +165,35 @@ export class ParkingDockComponent implements OnDestroy {
   readonly hudDragging = signal(false);
   readonly showExitConfirm = signal(false);
   readonly exitFlowStep = signal<FocusExitFlowStep>('primary');
-  readonly takeoverBannerVisible = computed(() => this.engine.focusMode() && this.focusLeader.isReadOnlyFollower());
+  readonly takeoverBannerVisible = computed(
+    () => this.focusSessionMounted() && this.focusLeader.isReadOnlyFollower(),
+  );
   readonly gateActive = computed(() => this.gateService.isActive());
   readonly canMutateDock = computed(() => !this.gateActive() && !this.focusLeader.isReadOnlyFollower());
   readonly canUseInlineDockCreate = computed(
-    () => this.canMutateDock() && !(this.engine.focusMode() && this.engine.focusScrimOn()),
+    () => this.canMutateDock() && !(this.focusSessionMounted() && this.engine.focusScrimOn()),
   );
-  readonly showInlineDockCreate = computed(() => !this.engine.focusMode() || !this.engine.focusScrimOn());
+  readonly showInlineDockCreate = computed(
+    () => !this.focusSessionMounted() || !this.engine.focusScrimOn(),
+  );
   readonly canCreateBackupTask = computed(() => this.canMutateDock());
   readonly canUsePlannerQuickEdit = computed(() => this.canMutateDock());
   readonly canReorderDockCards = computed(() => this.dragDrop.canReorderDockCards());
   readonly canAcceptExternalDrop = computed(() => this.dragDrop.canAcceptExternalDrop());
-  readonly canToggleScrim = computed(() => this.engine.focusMode() && this.canMutateDock());
-  readonly dockSecondaryRailActive = computed(() => this.engine.focusMode() && this.engine.focusScrimOn());
+  readonly canToggleScrim = computed(
+    () => this.focusSessionInteractive() && this.canMutateDock(),
+  );
+  readonly dockSecondaryRailActive = computed(
+    () => this.focusSessionMounted() && this.engine.focusScrimOn(),
+  );
   readonly focusMotionProfile = PARKING_CONFIG.FOCUS_MOTION_PROFILE;
   readonly motion = PARKING_CONFIG.MOTION;
   readonly reducedMotion = signal(this.focusTransitionService.prefersReducedMotion());
   readonly strictSampleMode = PARKING_CONFIG.DOCK_V3_STRICT_SAMPLE_UI;
   readonly showAdvancedUi = PARKING_CONFIG.DOCK_V3_SHOW_ADVANCED_UI;
-  readonly blankPeriodActive = computed(
-    () =>
-      this.engine.fragmentEntryCountdown() === null
-      && this.engine.pendingDecision() !== null
-      && this.engine.pendingDecisionEntries().length === 0,
-  );
+  readonly blankPeriodActive = computed(() => this.engine.blankPeriodActive());
   readonly focusSceneMode = computed<DockFocusSceneMode>(() => {
-    if (this.engine.focusMode() && this.engine.fragmentDefenseLevel() >= 4) {
+    if (this.focusSessionMounted() && this.engine.fragmentDefenseLevel() >= 4) {
       return 'zen';
     }
     if (this.engine.isBurnoutActive()) {
@@ -183,16 +208,17 @@ export class ParkingDockComponent implements OnDestroy {
     return 'steady';
   });
   readonly showZenMode = computed(
-    () => this.engine.focusMode() && this.engine.fragmentDefenseLevel() >= 4,
+    () => this.focusSessionMounted() && this.engine.fragmentDefenseLevel() >= 4,
   );
-  /** @deprecated 右侧避让带已移除，保留字段避免序列化断裂 */
-  readonly hudSafeRightInsetPx = 12;
   readonly firstMainSelectionPending = computed(() => this.engine.firstMainSelectionPending());
   readonly hudMinimalMode = computed(
-    () => this.engine.focusMode() && (!this.engine.focusScrimOn() || this.focusHudWindow.isActive()),
+    () => this.focusSessionPhase() === 'focused' && (!this.engine.focusScrimOn() || this.focusHudWindow.isActive()),
+  );
+  readonly hudMinimalPassThrough = computed(
+    () => this.uiState.isMobile() && this.hudMinimalMode(),
   );
   readonly canOpenPipHud = computed(
-    () => this.engine.focusMode() && !this.uiState.isMobile() && this.focusHudWindow.isSupported(),
+    () => this.focusSessionPhase() === 'focused' && !this.uiState.isMobile() && this.focusHudWindow.isSupported(),
   );
   readonly focusStageTransform = computed(() => {
     if (this.uiState.isMobile()) {
@@ -202,8 +228,11 @@ export class ParkingDockComponent implements OnDestroy {
   });
   readonly hudContainerStyle = computed<Record<string, string>>(() => {
     if (this.hudMinimalMode()) {
+      const minimalTop = this.uiState.isMobile()
+        ? `calc(env(safe-area-inset-top) + ${PARKING_CONFIG.HUD_MINIMAL_MOBILE_TOP_PX}px)`
+        : `${PARKING_CONFIG.HUD_MINIMAL_TOP_PX}px`;
       return {
-        top: `${PARKING_CONFIG.HUD_MINIMAL_TOP_PX}px`,
+        top: minimalTop,
         left: '50%',
         right: 'auto',
         transform: 'translateX(-50%)',
@@ -243,6 +272,8 @@ export class ParkingDockComponent implements OnDestroy {
   private hudDragOffset: { x: number; y: number } | null = null;
   /** planner 面板自动聚焦定时器 */
   private readonly plannerAutoFocus = new TimerHandle();
+  /** 退出确认对话框主按钮自动聚焦 */
+  private readonly exitFocusTimer = new TimerHandle();
 
   constructor() {
     effect(() => {
@@ -383,6 +414,7 @@ export class ParkingDockComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.plannerAutoFocus.cancel();
+    this.exitFocusTimer.cancel();
     persistHudPositionUtil(this.hudPosition());
     this.focusTransitionService.transitionPerformanceTierLock.set(null);
     this.engine.endFocusTransition();
@@ -523,13 +555,12 @@ export class ParkingDockComponent implements OnDestroy {
       return;
     }
 
-    // 进入专注模式前，先将停泊坞面板收起下沉，避免坞栏与专注虚化遮罩叠加
-    if (this.engine.dockExpanded()) {
-      this.engine.setDockExpanded(false);
-      this.dragDrop.scheduleSemicircleAutoCollapse();
-    }
-
     if (this.focusTransitionService.prefersReducedMotion()) {
+      if (this.engine.dockExpanded()) {
+        this.engine.setDockExpanded(false);
+        this.dragDrop.scheduleSemicircleAutoCollapse();
+      }
+      this.focusTransitionService.clearExitVisualSnapshot();
       this.engine.endFocusTransition();
       this.engine.toggleFocusMode();
       this.helpFeedback.showFocusHelpNudgeOnce();
@@ -537,6 +568,11 @@ export class ParkingDockComponent implements OnDestroy {
     }
     this.helpFeedback.showFocusHelpNudgeOnce();
     this.focusTransitionService.runEnterFocusTransition();
+    // 先捕获 enter 几何，再让停泊坞下沉，避免源卡片首帧抖动。
+    if (this.engine.dockExpanded()) {
+      this.engine.setDockExpanded(false);
+      this.dragDrop.scheduleSemicircleAutoCollapse();
+    }
   }
 
   confirmExitFocus(action: FocusExitConfirmAction): void {
@@ -569,9 +605,16 @@ export class ParkingDockComponent implements OnDestroy {
     this.engine.markExitAction(exitAction);
     this.resetExitFlow();
     if (exitAction === 'clear_exit') {
+      this.captureExitVisualSnapshot();
       this.engine.clearDockForExit();
+    } else {
+      this.focusTransitionService.clearExitVisualSnapshot();
     }
     if (this.focusTransitionService.prefersReducedMotion()) {
+      if (exitAction === 'clear_exit') {
+        this.engine.finalizeClearDockForExit();
+      }
+      this.focusTransitionService.clearExitVisualSnapshot();
       this.engine.endFocusTransition();
       this.engine.toggleFocusMode();
       return;
@@ -642,6 +685,26 @@ export class ParkingDockComponent implements OnDestroy {
       ) as HTMLButtonElement | null;
       trigger?.focus();
     }
+  }
+
+  isPlannerQuickEditOpen(taskId: string): boolean {
+    return this.planner.isPlannerQuickEditOpen(taskId);
+  }
+
+  setPlannerQuickEditExpected(taskId: string, minutes: number | null): void {
+    this.planner.setPlannerQuickEditExpected(taskId, minutes);
+  }
+
+  setPlannerQuickEditWait(taskId: string, minutes: number | null): void {
+    this.planner.setPlannerQuickEditWait(taskId, minutes);
+  }
+
+  setPlannerQuickEditLoad(taskId: string, nextLoad: CognitiveLoad): void {
+    this.planner.setPlannerQuickEditLoad(taskId, nextLoad);
+  }
+
+  toggleHelpOverlay(): void {
+    this.helpFeedback.toggleHelpOverlay();
   }
 
   createBackupTaskFromFab(): void {
@@ -756,7 +819,7 @@ export class ParkingDockComponent implements OnDestroy {
 
   private focusExitConfirmPrimaryAction(): void {
     if (typeof document === 'undefined') return;
-    setTimeout(() => {
+    this.exitFocusTimer.schedule(() => {
       const selector = this.exitFlowStep() === 'destructive'
         ? '[data-testid="dock-v3-exit-save"]'
         : '[data-testid="dock-v3-exit-cancel"]';
@@ -786,6 +849,13 @@ export class ParkingDockComponent implements OnDestroy {
   });
 
   groupLabel(group: DockPendingDecisionEntry['group']): string {
-    return DOCK_GROUP_LABELS[group as keyof typeof DOCK_GROUP_LABELS] ?? DOCK_GROUP_LABELS.fallback;
+    return DOCK_GROUP_LABELS[group as RecommendationGroupType] ?? DOCK_GROUP_FALLBACK_LABEL;
+  }
+
+  private captureExitVisualSnapshot(): void {
+    this.focusTransitionService.captureExitVisualSnapshot({
+      consoleEntries: this.engine.consoleVisibleEntries().map((entry) => ({ ...entry })),
+      statusMachineEntries: this.engine.statusMachineEntries().map((entry) => ({ ...entry })),
+    });
   }
 }

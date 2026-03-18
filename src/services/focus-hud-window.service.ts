@@ -159,7 +159,7 @@ export class FocusHudWindowService {
   }
 
   private prepareDocumentShell(targetDocument: Document): void {
-    targetDocument.body.innerHTML = '';
+    targetDocument.body.replaceChildren();
     targetDocument.documentElement.style.height = '100%';
     targetDocument.body.style.margin = '0';
     targetDocument.body.style.minHeight = '100vh';

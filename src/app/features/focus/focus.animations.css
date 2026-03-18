@@ -125,7 +125,7 @@
 }
 
 .gate-overlay {
-  animation: gate-enter 0.28s ease-out forwards;
+  animation: gate-enter var(--pk-overlay-enter) var(--pk-ease-enter) forwards;
 }
 
 .stone-door.entering {
@@ -230,11 +230,11 @@
 }
 
 .blackbox-entry {
-  animation: blackbox-entry-in 0.3s ease-out forwards;
+  animation: blackbox-entry-in var(--pk-panel-enter) var(--pk-ease-enter) forwards;
 }
 
 .blackbox-entry.deleting {
-  animation: blackbox-entry-delete 0.3s ease-out forwards;
+  animation: blackbox-entry-delete var(--pk-panel-exit) var(--pk-ease-exit) forwards;
 }
 
 /* ============================================================
@@ -317,15 +317,15 @@
 }
 
 .spotlight-view {
-  animation: spotlight-enter 0.4s ease-out forwards;
+  animation: spotlight-enter var(--pk-overlay-enter) var(--pk-ease-enter) forwards;
 }
 
 .spotlight-view.leaving {
-  animation: spotlight-leave 0.3s ease-out forwards;
+  animation: spotlight-leave var(--pk-overlay-exit) var(--pk-ease-exit) forwards;
 }
 
 .spotlight-card {
-  animation: spotlight-card-focus 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation: spotlight-card-focus var(--pk-panel-enter) var(--pk-ease-enter) forwards;
 }
 
 .spotlight-card.active {
@@ -409,11 +409,11 @@
 }
 
 .strata-panel.expanded {
-  animation: strata-expand 0.3s ease-out forwards;
+  animation: strata-expand var(--pk-panel-enter) var(--pk-ease-enter) forwards;
 }
 
 .strata-panel.collapsed {
-  animation: strata-collapse 0.3s ease-out forwards;
+  animation: strata-collapse var(--pk-panel-exit) var(--pk-ease-exit) forwards;
 }
 
 /* 基础 .strata-layer 不定义动画，避免与状态动画冲突 */
@@ -424,7 +424,7 @@
 
 /* 初始入场动画 - 只在首次渲染时使用 */
 .strata-layer.entering {
-  animation: strata-sink 0.3s ease-out forwards;
+  animation: strata-sink var(--pk-panel-enter) var(--pk-ease-enter) forwards;
 }
 
 /* 使用 transition 处理 hover 效果，避免鼠标移出时抖动 */
