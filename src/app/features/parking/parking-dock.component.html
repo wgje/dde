@@ -11,13 +11,15 @@
       (transitionSettled)="onFocusTransitionSettled($event)">
       @if (focusSessionMounted()) {
         <!-- 中央卡片堆 -->
-        <app-dock-console-stack
-          class="relative z-20"
-          [overrideEntries]="exitConsoleEntries()"
-          [class.pointer-events-auto]="focusSessionInteractive()"
-          [class.pointer-events-none]="!focusSessionInteractive()"
-          [attr.data-focus-phase]="focusSessionPhase()">
-        </app-dock-console-stack>
+        @if (focusConsoleStageMounted()) {
+          <app-dock-console-stack
+            class="relative z-20"
+            [overrideEntries]="exitConsoleEntries()"
+            [class.pointer-events-auto]="focusSessionInteractive()"
+            [class.pointer-events-none]="!focusSessionInteractive()"
+            [attr.data-focus-phase]="focusSessionPhase()">
+          </app-dock-console-stack>
+        }
 
         @if (!strictSampleMode && engine.pendingDecision() && engine.pendingDecisionEntries().length > 0) {
           <div

@@ -244,10 +244,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   readonly mobileSidebarBackdropVisible = computed(
     () => this.uiState.isMobile() && this.uiState.sidebarOpen() && !this.focusWorkspaceTakeoverActive(),
   );
-  readonly workspaceSidebarOpacity = computed(() => {
-    const phase = this.focusWorkspaceTakeoverPhase();
-    return phase === 'entering' || phase === 'focused' || phase === 'exiting' ? '0' : '1';
-  });
+  readonly workspaceSidebarOpacity = computed(() => this.resolveWorkspaceSidebarOpacity());
   readonly workspaceSidebarTransform = computed(() => this.resolveWorkspaceSidebarTransform());
   readonly workspaceSidebarPointerEvents = computed(() => this.resolveWorkspaceSidebarPointerEvents());
   readonly workspaceSidebarTransition = computed(() => this.resolveWorkspaceSidebarTransition());
@@ -269,11 +266,24 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     return this.uiState.sidebarWidth();
   }
 
+  private resolveWorkspaceSidebarOpacity(): string {
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
+    if (phase === 'entering' || phase === 'focused') return '0';
+    if (phase === 'exiting') return this.uiState.isMobile() ? '0' : '1';
+    return '1';
+  }
+
   private resolveWorkspaceSidebarTransform(): string {
     const isMobile = this.uiState.isMobile();
     const phase = this.resolveFocusWorkspaceTakeoverPhase();
     if (resolveDockFocusChromeLayoutLocked(phase)) {
-      return isMobile ? 'translateX(calc(-100% - 12px))' : 'translateX(-12px) scale(0.985)';
+      if (phase === 'restoring') {
+        return isMobile ? 'translateX(calc(-100% - 12px))' : 'translateX(0) scale(1)';
+      }
+      if (phase === 'exiting') {
+        return isMobile ? 'translateX(calc(-100% - 12px))' : 'translateX(0) scale(1)';
+      }
+      return isMobile ? 'translateX(calc(-100% - 12px))' : 'translateX(-8px) scale(0.992)';
     }
     if (isMobile) {
       return this.uiState.sidebarOpen() ? 'translateX(0)' : 'translateX(calc(-100% - 12px))';
@@ -288,45 +298,67 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   }
 
   private resolveWorkspaceSidebarTransition(): string {
+    const phase = this.resolveFocusWorkspaceTakeoverPhase();
     if (this.uiState.isMobile()) {
-      return 'opacity var(--pk-overlay-enter) var(--pk-ease-standard),'
-        + ' transform var(--pk-shell-restore) var(--pk-ease-enter)';
+      // 移动端：使用完整的 smooth-restore 时长
+      return 'opacity var(--pk-shell-smooth-restore) var(--pk-ease-standard),'
+        + ' transform var(--pk-shell-smooth-restore) var(--pk-ease-restore)';
     }
-    return 'width var(--pk-shell-restore) var(--pk-ease-enter),'
-      + ' opacity var(--pk-overlay-enter) var(--pk-ease-standard),'
-      + ' transform var(--pk-shell-restore) var(--pk-ease-enter)';
+    if (phase === 'restoring') {
+      // 恢复阶段：宽度先恢复（使用 snappy 曲线防止弹出感），opacity/transform 跟随
+      // 宽度用稍短时长+ snappy 曲线，避免「慢慢打开」的疲惫感
+      return 'width var(--pk-shell-smooth-restore) var(--pk-ease-restore-snappy),'
+        + ' opacity var(--pk-shell-smooth-restore) var(--pk-ease-restore),'
+        + ' transform var(--pk-shell-smooth-restore) var(--pk-ease-restore)';
+    }
+    if (phase === 'exiting') {
+      // 退出阶段：快速收起（入场时长但用 standard 曲线，感觉更利落）
+      return 'width var(--pk-shell-enter) var(--pk-ease-standard),'
+        + ' opacity var(--pk-shell-enter) var(--pk-ease-standard),'
+        + ' transform var(--pk-shell-enter) var(--pk-ease-standard)';
+    }
+    // entering / focused / idle：入场时快速隐藏侧边栏，exit 时用 overlay-exit 给予短促退场感
+    return 'width var(--pk-shell-enter) var(--pk-ease-standard),'
+      + ' opacity var(--pk-overlay-exit) var(--pk-ease-exit),'
+      + ' transform var(--pk-shell-enter) var(--pk-ease-enter)';
   }
 
   private resolveWorkspaceSidebarContentOpacity(): string {
     const phase = this.resolveFocusWorkspaceTakeoverPhase();
-    return phase === 'entering' || phase === 'focused' || phase === 'exiting' ? '0' : '1';
+    if (phase === 'entering' || phase === 'focused') return '0';
+    if (phase === 'exiting') return this.uiState.isMobile() ? '0' : '1';
+    return '1';
   }
 
   private resolveWorkspaceSidebarContentTransform(): string {
     const phase = this.resolveFocusWorkspaceTakeoverPhase();
-    if (phase === 'entering' || phase === 'focused' || phase === 'exiting') {
-      return this.uiState.isMobile() ? 'translateX(-10px)' : 'translateX(-12px)';
+    if (phase === 'entering' || phase === 'focused') {
+      return this.uiState.isMobile() ? 'translateX(-8px)' : 'translateX(-8px)';
+    }
+    if (phase === 'exiting') {
+      return this.uiState.isMobile() ? 'translateX(-4px)' : 'translateX(0)';
     }
     if (phase === 'restoring') {
-      return this.uiState.isMobile() ? 'translateX(-4px)' : 'translateX(-6px)';
+      return 'translateX(0)';
     }
     return 'translateX(0)';
   }
 
   private resolveWorkspaceSidebarContentTransition(): string {
     if (this.uiState.isMobile()) {
-      return 'opacity var(--pk-overlay-enter) var(--pk-ease-enter),'
-        + ' transform var(--pk-shell-enter) var(--pk-ease-enter)';
+      return 'opacity var(--pk-shell-smooth-restore) var(--pk-ease-restore),'
+        + ' transform var(--pk-shell-smooth-restore) var(--pk-ease-restore)';
     }
 
     const phase = this.resolveFocusWorkspaceTakeoverPhase();
     if (phase === 'restoring') {
-      return 'opacity var(--pk-overlay-enter) var(--pk-ease-enter) 120ms,'
-        + ' transform var(--pk-shell-enter) var(--pk-ease-enter)';
+      // content 延迟 120ms 显示：让侧边栏宽度先展开，再显示文字内容，避免文字在窄宽度下挤压
+      return 'opacity var(--pk-shell-smooth-restore) var(--pk-ease-restore) 120ms,'
+        + ' transform var(--pk-shell-smooth-restore) var(--pk-ease-restore)';
     }
 
     return 'opacity var(--pk-overlay-exit) var(--pk-ease-standard),'
-      + ' transform var(--pk-shell-exit) var(--pk-ease-exit)';
+      + ' transform var(--pk-shell-exit) var(--pk-ease-standard)';
   }
 
   /** FocusMode 用户明确交互信号（点击/按键后激活） */

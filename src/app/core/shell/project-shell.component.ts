@@ -43,6 +43,7 @@ import {
 import {
   resolveProjectShellTakeoverFilter,
   resolveProjectShellTakeoverOpacity,
+  resolveProjectShellTakeoverTransition,
   resolveProjectShellTakeoverTransform,
   resolveProjectShellTakeoverVisibility,
 } from './project-shell-focus-motion';
@@ -95,15 +96,25 @@ interface NetworkInformationLike {
       transition: opacity 0ms ease-out 0ms;
       pointer-events: none;
     }
+    /*
+     * dock-main-content 动效改进：
+     * 1. 移除永久 will-change：常态下不需要 GPU 层，避免过渡前 composite 层污染
+     * 2. 改用 data-dock-takeover-phase 属性动态激活 will-change，仅在过渡期间启用 GPU
+     * 3. visibility 由 0ms 立即响应，去掉 delay — 原先 delay=var(--pk-shell-enter) 导致
+     *    opacity 开始渐变但 visibility 仍为 hidden，造成入场帧闪烁
+     * 4. opacity/filter 分层错开：opacity 比 filter 快 40ms，视觉上内容先现后虚化，
+     *    符合"先感知内容、再加深专注氛围"的认知节奏
+     */
     .dock-main-content {
-      transition:
-        opacity var(--pk-shell-enter) var(--pk-ease-standard),
-        transform var(--pk-shell-enter) var(--pk-ease-enter),
-        filter var(--pk-shell-enter) var(--pk-ease-standard),
-        visibility 0ms linear var(--pk-shell-enter);
       transform-origin: center center;
       backface-visibility: hidden;
       contain: paint;
+    }
+    /* 仅在专注模式接管期间激活 GPU 合成层，避免常态多余层占用 */
+    .dock-main-content[data-dock-takeover-phase="entering"],
+    .dock-main-content[data-dock-takeover-phase="focused"],
+    .dock-main-content[data-dock-takeover-phase="exiting"],
+    .dock-main-content[data-dock-takeover-phase="restoring"] {
       will-change: opacity, transform, filter;
     }
   `],
@@ -120,6 +131,7 @@ interface NetworkInformationLike {
           [style.opacity]="dockTakeoverMainOpacity()"
           [style.transform]="dockTakeoverMainTransform()"
           [style.filter]="dockTakeoverMainFilter()"
+          [style.transition]="dockTakeoverMainTransition()"
           [style.visibility]="dockTakeoverMainVisibility()"
           [attr.aria-hidden]="dockTakeoverMainHidden() ? 'true' : null">
         <!-- Text Column - 允许滑动手势切换 -->
@@ -428,6 +440,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   readonly dockTakeoverMainTransform = computed(() => {
     return this.resolveDockTakeoverMainTransform();
   });
+  readonly dockTakeoverMainTransition = computed(() => {
+    return this.resolveDockTakeoverMainTransition();
+  });
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private toast = inject(ToastService);
@@ -523,6 +538,10 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
 
   private resolveDockTakeoverMainTransform(): string {
     return resolveProjectShellTakeoverTransform(this.resolveDockTakeoverVisualState());
+  }
+
+  private resolveDockTakeoverMainTransition(): string {
+    return resolveProjectShellTakeoverTransition(this.dockTakeoverPhase());
   }
 
   private resolveDockTakeoverVisualState() {

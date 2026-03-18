@@ -182,7 +182,39 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       (WorkspaceShellComponent.prototype as unknown as {
         resolveWorkspaceSidebarContentTransition: (this: WorkspaceShellComponent) => string;
       }).resolveWorkspaceSidebarContentTransition.call(restoringContext),
-    ).toContain('120ms');
+    ).toContain('var(--pk-shell-smooth-restore)');
+  });
+
+  it('桌面端退出专注时项目栏应直接回到完整视觉态，而不是先缩成 ghost 再恢复', () => {
+    const exitingContext = {
+      resolveFocusWorkspaceTakeoverPhase: () => 'exiting',
+      uiState: {
+        isMobile: () => false,
+        sidebarOpen: () => true,
+        sidebarWidth: () => 320,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarOpacity: (this: WorkspaceShellComponent) => string;
+      }).resolveWorkspaceSidebarOpacity.call(exitingContext),
+    ).toBe('1');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarTransform: (this: WorkspaceShellComponent) => string;
+      }).resolveWorkspaceSidebarTransform.call(exitingContext),
+    ).toBe('translateX(0) scale(1)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarContentOpacity: (this: WorkspaceShellComponent) => string;
+      }).resolveWorkspaceSidebarContentOpacity.call(exitingContext),
+    ).toBe('1');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        resolveWorkspaceSidebarContentTransform: (this: WorkspaceShellComponent) => string;
+      }).resolveWorkspaceSidebarContentTransform.call(exitingContext),
+    ).toBe('translateX(0)');
   });
 
   it('移动端侧栏应改为 overlay transform 开合，而不是依赖主布局挤压', () => {
@@ -264,4 +296,5 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       }).resolveWorkspaceSidebarPointerEvents.call(restoringContext),
     ).toBe('none');
   });
+
 });

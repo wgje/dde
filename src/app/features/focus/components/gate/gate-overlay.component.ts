@@ -108,6 +108,11 @@ import { GateActionsComponent } from './gate-actions.component';
       -webkit-backdrop-filter: blur(24px);
       overflow: hidden;
       transform: translateY(0);
+      /* 合成层提示：避免 backdrop-filter 导致入场首帧出现白屏/闪烁；
+         will-change 在动画后由浏览器自动回收（animation 完成后无 will-change 更新） */
+      will-change: opacity, transform;
+      /* 限制重绘范围，减少 backdrop-filter 对周围元素的影响 */
+      contain: layout style;
     }
 
     .gate-header,

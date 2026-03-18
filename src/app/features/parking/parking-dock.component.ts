@@ -141,6 +141,9 @@ export class ParkingDockComponent implements OnDestroy {
     const phase = this.focusSessionPhase();
     return phase === 'idle' ? null : phase;
   });
+  readonly focusConsoleStageMounted = computed(
+    () => this.focusSessionMounted() && this.focusSessionPhase() !== 'exiting',
+  );
   readonly focusFloatingUiMounted = computed(
     () => this.focusSessionPhase() === 'focused' || this.focusTransitionService.floatingUiVisible(),
   );
@@ -596,6 +599,7 @@ export class ParkingDockComponent implements OnDestroy {
     if (action === 'keep-focus-hide-scrim') {
       this.engine.markExitAction('keep_focus_hide_scrim');
       this.engine.setFocusScrim(false);
+      this.engine.beginFocusChromeRestore(this.motion.shell.enterMs);
       this.resetExitFlow();
       this.helpFeedback.showRestoreHintToast();
       return;

@@ -54,6 +54,9 @@ interface DockFocusScenePreset {
       overflow: hidden;
       transition: opacity var(--pk-shell-enter) var(--pk-ease-standard);
     }
+    .focus-scene[data-scrim-dismiss='fast'] {
+      transition: none;
+    }
 
     .focus-scene.active {
       opacity: 1;
@@ -110,6 +113,9 @@ interface DockFocusScenePreset {
         opacity var(--pk-shell-enter) var(--pk-ease-standard),
         background-color var(--pk-shell-enter) var(--pk-ease-standard);
     }
+    .focus-backdrop[data-scrim-dismiss='fast'] {
+      transition: none;
+    }
 
     .focus-backdrop.active {
       opacity: 1;
@@ -122,6 +128,9 @@ interface DockFocusScenePreset {
       backface-visibility: hidden;
       transition: opacity var(--pk-shell-exit) var(--pk-ease-standard);
       will-change: opacity, transform;
+    }
+    .console-stage[data-scrim-dismiss='fast'] {
+      transition: none;
     }
 
     .console-stage.active {
@@ -140,6 +149,9 @@ interface DockFocusScenePreset {
       backface-visibility: hidden;
       transition: transform var(--pk-shell-enter) var(--pk-ease-enter);
       will-change: transform;
+    }
+    .console-stage-shell[data-scrim-dismiss='fast'] {
+      transition: none;
     }
 
     .console-stage-shell::before {
@@ -263,11 +275,11 @@ interface DockFocusScenePreset {
       }
       50% {
         opacity: calc(var(--stage-shell-opacity, 1) * 0.4);
-        transform: translateY(var(--stage-exit-mid-y, 4px)) scale(0.995);
+        transform: translateY(var(--stage-exit-mid-y, 4px)) scale(var(--stage-exit-mid-scale, 0.995));
       }
       100% {
         opacity: 0;
-        transform: translateY(var(--stage-exit-end-y, 8px)) scale(0.99);
+        transform: translateY(var(--stage-exit-end-y, 8px)) scale(var(--stage-exit-end-scale, 0.99));
       }
     }
 
@@ -330,6 +342,7 @@ interface DockFocusScenePreset {
         [attr.data-performance-tier]="performanceTier$()"
         [attr.data-reduced-motion]="reducedMotion$() ? 'true' : 'false'"
         [attr.data-scrim]="scrimOn$() ? 'on' : 'off'"
+        [attr.data-scrim-dismiss]="scrimDismissMode()"
         [attr.data-transition]="transitionPhase$() ?? 'steady'"
         [ngStyle]="focusSceneStyle()"
         data-testid="dock-v3-focus-scene">
@@ -347,6 +360,7 @@ interface DockFocusScenePreset {
         [class.active]="backdropVisible()"
         [style.background-color]="backdropVisible() ? focusBackdropColor() : 'rgba(0,0,0,0)'"
         [style.pointer-events]="backdropVisible() ? 'auto' : 'none'"
+        [attr.data-scrim-dismiss]="scrimDismissMode()"
         data-testid="dock-v3-focus-backdrop"
         (click)="backdropClick.emit()">
       </div>
@@ -361,6 +375,7 @@ interface DockFocusScenePreset {
         [attr.data-scene]="sceneMode$()"
         [attr.data-reduced-motion]="reducedMotion$() ? 'true' : 'false'"
         [attr.data-scrim]="scrimOn$() ? 'on' : 'off'"
+        [attr.data-scrim-dismiss]="scrimDismissMode()"
         [attr.data-transition]="transitionPhase$() ?? 'steady'"
         [ngStyle]="focusStageStyle()"
         data-testid="dock-v3-focus-stage"
@@ -373,6 +388,7 @@ interface DockFocusScenePreset {
           [attr.data-scene]="sceneMode$()"
           [attr.data-reduced-motion]="reducedMotion$() ? 'true' : 'false'"
           [attr.data-scrim]="scrimOn$() ? 'on' : 'off'"
+          [attr.data-scrim-dismiss]="scrimDismissMode()"
           [attr.data-transition]="transitionPhase$() ?? 'steady'">
           @if (stageVisible()) {
             <!-- scrim 关闭且无过渡时，彻底卸载投影内容，避免透明固定层继续吞点击。 -->
@@ -585,12 +601,16 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
   readonly sceneMounted = computed(() =>
     this.active$() || this.transitionPhase$() !== null,
   );
+  readonly scrimDismissMode = computed<'fast' | 'normal'>(() =>
+    this.active$() && !this.scrimOn$() && this.transitionPhase$() === null ? 'fast' : 'normal',
+  );
 
   readonly sceneVisible = computed(() =>
-    // 虚化关闭时隐藏场景背景，避免背景图残留在主内容上
+    // 虚化关闭时，退出专注也不能重新点亮整屏 ambient scene，
+    // 否则会在“结束专注并清空停泊坞”点击瞬间闪回一层带模糊 aurora 的背景。
     (this.active$() && this.scrimOn$())
     || this.transitionPhase$() === 'entering'
-    || this.transitionPhase$() === 'exiting',
+    || (this.transitionPhase$() === 'exiting' && this.scrimOn$()),
   );
 
   readonly backdropVisible = computed(() =>
@@ -646,12 +666,13 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
     const preset = this.presets[this.sceneMode$()];
     const tier = this.performanceTier$();
     const reduced = this.reducedMotion$();
+    const exiting = this.transitionPhase$() === 'exiting';
     const scrimFactor = this.scrimOn$() ? 1 : PARKING_CONFIG.FOCUS_SCENE_TRANSPARENT_STAGE_ALPHA;
     const haloFactor = (tier === 'T2' ? 0.4 : tier === 'T1' ? 0.72 : 1) * scrimFactor;
     const enterShiftPx = PARKING_CONFIG.MOTION.distance.focusShiftPx + 4;
     const enterMidShiftPx = Math.max(2, Math.round(PARKING_CONFIG.MOTION.distance.focusShiftPx / 3));
-    const exitMidShiftPx = Math.max(4, Math.round(PARKING_CONFIG.MOTION.distance.focusExitShiftPx / 2));
-    const exitShiftPx = PARKING_CONFIG.MOTION.distance.focusExitShiftPx;
+    const exitMidShiftPx = exiting ? 0 : Math.max(4, Math.round(PARKING_CONFIG.MOTION.distance.focusExitShiftPx / 2));
+    const exitShiftPx = exiting ? 0 : PARKING_CONFIG.MOTION.distance.focusExitShiftPx;
 
     return {
       '--stage-primary-rgb': preset.primaryRgb,
@@ -669,6 +690,8 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
       '--stage-enter-mid-y': `${enterMidShiftPx}px`,
       '--stage-exit-mid-y': `${exitMidShiftPx}px`,
       '--stage-exit-end-y': `${exitShiftPx}px`,
+      '--stage-exit-mid-scale': exiting ? '1' : '0.995',
+      '--stage-exit-end-scale': exiting ? '1' : '0.99',
       '--scene-ambient-delay': `${PARKING_CONFIG.MOTION.focus.ambientDelayMs}ms`,
       '--scene-entry-stage-delay': `${PARKING_CONFIG.FOCUS_SCENE_ENTRY_STAGE_MS}ms`,
       '--scene-entry-radar-delay': `${PARKING_CONFIG.FOCUS_SCENE_ENTRY_RADAR_MS}ms`,

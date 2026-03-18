@@ -88,10 +88,16 @@ export function clampHudPosition(
 ): HudPosition {
   if (typeof window === 'undefined') return position;
   const minMargin = 12;
-  const maxX = Math.max(minMargin, window.innerWidth - size.width - minMargin);
-  const maxY = Math.max(minMargin, window.innerHeight - size.height - minMargin);
+  const vWidth = window.innerWidth || 1024;
+  const vHeight = window.innerHeight || 768;
+  const maxX = Math.max(minMargin, vWidth - size.width - minMargin);
+  const maxY = Math.max(minMargin, vHeight - size.height - minMargin);
+
+  const rawX = typeof position.x === 'number' && !isNaN(position.x) ? position.x : maxX;
+  const rawY = typeof position.y === 'number' && !isNaN(position.y) ? position.y : minMargin;
+
   return {
-    x: Math.min(maxX, Math.max(minMargin, Math.round(position.x))),
-    y: Math.min(maxY, Math.max(minMargin, Math.round(position.y))),
+    x: Math.min(maxX, Math.max(minMargin, Math.round(rawX))),
+    y: Math.min(maxY, Math.max(minMargin, Math.round(rawY))),
   };
 }

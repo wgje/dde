@@ -43,19 +43,41 @@ body {
 /* ========== 主题变量 ========== */
 :root {
   /* ========== Parking/Dock 动效令牌 (同步自 PARKING_CONFIG) ========== */
+
+  /* --- 核心曲线 --- */
+  /* 入场：大动作柔和收束，避免生硬回弹 */
   --pk-ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 标准：通用结构切换，父子层级速度统一 */
   --pk-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* 退出：稳定短促收尾 */
   --pk-ease-exit: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 微动画：悬停/按压 */
   --pk-ease-micro: cubic-bezier(0.18, 0.75, 0.28, 1);
+  /* 恢复：退出专注后 chrome 还原，弹性收束感 */
+  --pk-ease-restore: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 宽度恢复专用：比 restore 更柔和，避免侧边栏宽度弹出感 */
+  --pk-ease-restore-snappy: cubic-bezier(0.25, 1, 0.5, 1);
+
+  /* --- 壳层时长 --- */
   --pk-shell-enter: 320ms;
   --pk-shell-exit: 260ms;
-  --pk-shell-restore: 320ms;
+  --pk-shell-restore: 400ms;
+  /* 【关键修复】smooth-restore：专注退出后侧边栏/主内容平滑还原，之前未定义导致降级为0ms */
+  --pk-shell-smooth-restore: 480ms;
+
+  /* --- 覆盖层时长 --- */
   --pk-overlay-enter: 280ms;
   --pk-overlay-exit: 220ms;
+
+  /* --- 面板时长 --- */
   --pk-panel-enter: 220ms;
   --pk-panel-exit: 180ms;
+
+  /* --- 专注模式时长 --- */
   --pk-focus-enter: 340ms;
   --pk-focus-exit: 280ms;
+
+  /* --- 微动画时长 --- */
   --pk-card-reorder: 180ms;
   --pk-micro-hover: 140ms;
   --pk-micro-glow: 160ms;
@@ -65,11 +87,15 @@ body {
   --pk-notice-exit: 160ms;
   --pk-status-ring-pulse: 320ms;
   --pk-focus-scene-entry-hud: 72ms;
+
+  /* --- 雷达时长 --- */
   --pk-radar-hover: 140ms;
   --pk-radar-appear: 220ms;
   --pk-radar-return: 180ms;
   --pk-radar-promote: 180ms;
   --pk-radar-highlight-pulse: 320ms;
+
+  /* --- 距离常量 --- */
   --pk-dist-panel-lift: 12px;
   --pk-dist-panel-peek: 6px;
   --pk-dist-semicircle-lift: 8px;

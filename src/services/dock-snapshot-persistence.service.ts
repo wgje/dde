@@ -51,6 +51,11 @@ export class DockSnapshotPersistenceService {
   private readonly localPersistTimer = new TimerHandle();
   /** 序列化 IDB 写入：上一次写入完成后才启动下一次 */
   private persistChain: Promise<void> = Promise.resolve();
+  /** 待执行的本地持久化任务，用于卸载前同步写入影子快照 */
+  private pendingLocalPersist: {
+    snapshotFn: () => DockSnapshot;
+    userId: string | null;
+  } | null = null;
 
   // ─── Local IDB Persistence ───────────────────
 
@@ -59,6 +64,7 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     getNonCriticalHoldDelay: () => number,
   ): void {
+    this.pendingLocalPersist = { snapshotFn, userId };
     // M-3 fix: 持久化最大延迟上限，防止动画持续 hold 导致无限延迟
     const deadline = Date.now() + 10_000;
     const runPersist = () => {
@@ -68,6 +74,7 @@ export class DockSnapshotPersistenceService {
         return;
       }
       const resolved = snapshotFn();
+      this.pendingLocalPersist = null;
       // structuredClone 深拷贝快照，避免后续异步 IDB 写入时引用被外部修改
       const cloned = structuredClone(resolved);
       // 串行化写入：前一次未完成时，本次写入排队等待
@@ -86,38 +93,72 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     ctx: SnapshotNormalizeContext,
   ): Promise<DockSnapshot | null> {
+    let normalizedIdbSnapshot: DockSnapshot | null = null;
+    let normalizedLegacySnapshot: DockSnapshot | null = null;
+    const legacyKey = this.legacyLocalStorageKey(userId);
+
     try {
       const raw = await get(this.localCacheKey(userId));
-      const normalized = this.normalizeSnapshot(raw, ctx);
-      if (normalized) return normalized;
-
-      // Legacy one-time local import path (localStorage v2/v3/v4).
-      if (typeof localStorage !== 'undefined') {
-        const legacyKey = this.legacyLocalStorageKey(userId);
-        const legacyRaw = localStorage.getItem(legacyKey);
-        if (legacyRaw) {
-          const parsed = JSON.parse(legacyRaw) as DockSnapshot;
-          const result = this.normalizeSnapshot(parsed, ctx);
-          // M-4 fix: 迁移成功后移除旧数据，防止 IDB 清除后 stale 数据复活
-          if (result) {
-            localStorage.removeItem(legacyKey);
-          }
-          return result;
-        }
-      }
-      return null;
+      normalizedIdbSnapshot = this.normalizeSnapshot(raw, ctx);
     } catch (err) {
       this.logger.warn('IDB restore failed', {
         code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
         error: err,
       });
-      // eslint-disable-next-line no-restricted-syntax -- IDB 读取失败时安全降级为空状态，已通过 logger 上报
-      return null;
     }
+
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const legacyRaw = localStorage.getItem(legacyKey);
+        if (legacyRaw) {
+          const parsed = JSON.parse(legacyRaw) as DockSnapshot;
+          normalizedLegacySnapshot = this.normalizeSnapshot(parsed, ctx);
+        }
+      } catch (err) {
+        this.logger.warn('Legacy localStorage restore failed', {
+          code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+          error: err,
+        });
+      }
+    }
+
+    if (normalizedIdbSnapshot && normalizedLegacySnapshot) {
+      const preferLegacy = this.isSnapshotNewer(normalizedLegacySnapshot, normalizedIdbSnapshot);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(legacyKey);
+      }
+      return preferLegacy ? normalizedLegacySnapshot : normalizedIdbSnapshot;
+    }
+
+    if (normalizedLegacySnapshot) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(legacyKey);
+      }
+      return normalizedLegacySnapshot;
+    }
+
+    return normalizedIdbSnapshot;
   }
 
   cancelPendingPersist(): void {
+    if (this.pendingLocalPersist) {
+      const { snapshotFn, userId } = this.pendingLocalPersist;
+      this.pendingLocalPersist = null;
+      this.persistShadowToLocalStorage(snapshotFn(), userId);
+    }
     this.localPersistTimer.cancel();
+  }
+
+  private persistShadowToLocalStorage(snapshot: DockSnapshot, userId: string | null): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(this.legacyLocalStorageKey(userId), JSON.stringify(snapshot));
+    } catch (err) {
+      this.logger.warn('Legacy localStorage shadow persist failed', {
+        code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
+        error: err,
+      });
+    }
   }
 
   /** IDB 写入（含 1 次重试），失败不阻塞业务流 */

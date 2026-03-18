@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveProjectShellTakeoverFilter,
   resolveProjectShellTakeoverOpacity,
+  resolveProjectShellTakeoverTransition,
   resolveProjectShellTakeoverTransform,
   resolveProjectShellTakeoverVisibility,
 } from './project-shell-focus-motion';
@@ -14,7 +15,7 @@ describe('project-shell focus motion', () => {
         hiddenMode: false,
         scrimOn: true,
       }),
-    ).toBe(0.9);
+    ).toBe(0.96);
     expect(
       resolveProjectShellTakeoverOpacity({
         phase: 'restoring',
@@ -31,7 +32,7 @@ describe('project-shell focus motion', () => {
         hiddenMode: false,
         scrimOn: true,
       }),
-    ).toBe('blur(1px)');
+    ).toBe('none');
     expect(
       resolveProjectShellTakeoverFilter({
         phase: 'restoring',
@@ -46,7 +47,7 @@ describe('project-shell focus motion', () => {
         hiddenMode: false,
         scrimOn: true,
       }),
-    ).toBe('translateY(-1px) scale(0.999)');
+    ).toBe('translateY(0) scale(1)');
     expect(
       resolveProjectShellTakeoverTransform({
         phase: 'restoring',
@@ -75,5 +76,12 @@ describe('project-shell focus motion', () => {
         hiddenMode: true,
       }),
     ).toBe('hidden');
+  });
+
+  it('clears blur transition immediately in idle phase so scrim-off does not linger visually', () => {
+    expect(resolveProjectShellTakeoverTransition('idle')).toContain('filter 0ms');
+    expect(resolveProjectShellTakeoverTransition('entering')).toContain(
+      'filter calc(var(--pk-shell-enter) + 40ms)',
+    );
   });
 });

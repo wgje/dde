@@ -1,4 +1,4 @@
-﻿import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
@@ -816,3 +816,4 @@ export class DockEngineService {
     this.snapshotManager.computeRecommendationForSuspended(suspendedTaskId, waitMinutes);
   }
 }
+

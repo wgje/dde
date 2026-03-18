@@ -650,7 +650,19 @@ describe('ParkingDockComponent v4', () => {
     expect(component.isPlannerQuickEditOpen('task-planner-outside')).toBe(false);
   });
 
-  it('onFocusSessionToggle should start enter transition with flip ghost', async () => {
+  it('onFocusSessionToggle should start enter transition with flip ghost when dock entries exist', async () => {
+    dockedEntries.set([
+      {
+        taskId: 'focus-source',
+        title: 'Focus Source',
+        status: 'pending_start',
+        load: 'low',
+        lane: 'backup',
+        expectedMinutes: 25,
+        waitMinutes: null,
+        isMain: true,
+      },
+    ]);
     component.onFocusSessionToggle();
     fixture.detectChanges();
 
@@ -662,6 +674,21 @@ describe('ParkingDockComponent v4', () => {
     fixture.detectChanges();
     expect(mockEngine.toggleFocusMode).toHaveBeenCalledTimes(1);
     expect(focusMode()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(PARKING_CONFIG.MOTION.focus.enterMs + 20);
+    fixture.detectChanges();
+    expect(focusTransition()?.phase).toBe('focused');
+  });
+
+  it('onFocusSessionToggle should skip the flip ghost when the dock is empty', async () => {
+    dockedEntries.set([]);
+
+    component.onFocusSessionToggle();
+    fixture.detectChanges();
+
+    expect(mockEngine.beginFocusTransition).toHaveBeenCalled();
+    expect(focusTransition()?.phase).toBe('entering');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v4-flip-ghost"]')).toBeNull();
 
     await vi.advanceTimersByTimeAsync(PARKING_CONFIG.MOTION.focus.enterMs + 20);
     fixture.detectChanges();
@@ -684,8 +711,20 @@ describe('ParkingDockComponent v4', () => {
     expect(component.focusTransitionService.performanceTier()).toBe('T2');
   });
 
-  it('onFocusSessionToggle should require confirmation before exit transition', async () => {
+  it('onFocusSessionToggle should require confirmation before handing off to the exit transition', async () => {
     focusMode.set(true);
+    dockedEntries.set([
+      {
+        taskId: 'focus-main',
+        title: 'Focus Main',
+        status: 'focusing',
+        load: 'low',
+        lane: 'backup',
+        expectedMinutes: 25,
+        waitMinutes: null,
+        isMain: true,
+      },
+    ]);
     fixture.detectChanges();
 
     component.onFocusSessionToggle();
@@ -702,6 +741,8 @@ describe('ParkingDockComponent v4', () => {
     fixture.detectChanges();
     expect(mockEngine.beginFocusTransition).toHaveBeenCalled();
     expect(focusTransition()?.phase).toBe('exiting');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v4-flip-ghost"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-console-card"]')).toBeNull();
 
     await vi.advanceTimersByTimeAsync(20);
     fixture.detectChanges();
@@ -715,11 +756,6 @@ describe('ParkingDockComponent v4', () => {
     expect(mockEngine.beginFocusChromeRestore).toHaveBeenCalled();
     expect(mockEngine.endFocusTransition).not.toHaveBeenCalled();
     expect(focusTransition()?.phase).toBe('exiting');
-
-    await vi.advanceTimersByTimeAsync(Math.min(PARKING_CONFIG.MOTION.focus.exitMs, 200) + 20);
-    fixture.detectChanges();
-    expect(mockEngine.endFocusTransition).toHaveBeenCalled();
-    expect(focusTransition()).toBeNull();
   });
 
   it('confirmExitFocus clear-exit should keep exit visuals alive after live dock data is cleared', () => {
@@ -772,6 +808,8 @@ describe('ParkingDockComponent v4', () => {
     component.confirmExitFocus('keep-focus-hide-scrim');
 
     expect(mockEngine.archiveInlineEntriesToActiveProject).not.toHaveBeenCalled();
+    expect(mockEngine.setFocusScrim).toHaveBeenCalledWith(false);
+    expect(mockEngine.beginFocusChromeRestore).toHaveBeenCalledWith(PARKING_CONFIG.MOTION.shell.enterMs);
   });
   it('Alt+H should render the help overlay when focus mode is active', () => {
     focusMode.set(true);

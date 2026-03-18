@@ -5,6 +5,7 @@ import { GateService } from '../../../services/gate.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { LoggerService } from '../../../services/logger.service';
 import { gateState, resetFocusState } from '../../../state/focus-stores';
+import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
 
 describe('FocusModeComponent', () => {
@@ -12,6 +13,7 @@ describe('FocusModeComponent', () => {
     await Promise.resolve();
     await Promise.resolve();
   };
+  const originalFocusStartupThrottledCheck = FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1;
 
   const destroyCallbacks: Array<() => void> = [];
   const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
@@ -24,11 +26,15 @@ describe('FocusModeComponent', () => {
     vi.useFakeTimers();
     resetFocusState();
     destroyCallbacks.length = 0;
+    (FEATURE_FLAGS as { FOCUS_STARTUP_THROTTLED_CHECK_V1: boolean }).FOCUS_STARTUP_THROTTLED_CHECK_V1 =
+      originalFocusStartupThrottledCheck;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     resetFocusState();
+    (FEATURE_FLAGS as { FOCUS_STARTUP_THROTTLED_CHECK_V1: boolean }).FOCUS_STARTUP_THROTTLED_CHECK_V1 =
+      originalFocusStartupThrottledCheck;
   });
 
   function createComponent() {
@@ -64,46 +70,38 @@ describe('FocusModeComponent', () => {
     return { component, loadFromLocal, pullChanges, checkGate };
   }
 
-  it('启动时先做本地检查，远端 pull 延迟 FOCUS_REMOTE_STARTUP_DELAY_MS 后触发', async () => {
+  it('默认 throttled 路径下应保持被动，由启动探针负责 gate 检查与黑匣子拉取', async () => {
     const { component, loadFromLocal, pullChanges, checkGate } = createComponent();
 
     component.ngOnInit();
     await flushPromises();
 
-    // 本地加载立即执行
-    expect(loadFromLocal).toHaveBeenCalledTimes(1);
-    // 仅本地检查 gate（1 次），远端 pull 尚未触发
-    expect(checkGate).toHaveBeenCalledTimes(1);
+    expect(loadFromLocal).not.toHaveBeenCalled();
+    expect(checkGate).not.toHaveBeenCalled();
     expect(pullChanges).not.toHaveBeenCalled();
 
-    // 推进到延迟时间后，远端 pull 才触发
     vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS);
     await flushPromises();
 
-    expect(pullChanges).toHaveBeenCalledTimes(1);
-    expect(pullChanges).toHaveBeenCalledWith({ reason: 'startup' });
-    // 本地检查 + 远端拉取后重新检查 = 2 次
-    expect(checkGate).toHaveBeenCalledTimes(2);
+    expect(loadFromLocal).not.toHaveBeenCalled();
+    expect(checkGate).not.toHaveBeenCalled();
+    expect(pullChanges).not.toHaveBeenCalled();
 
     component.ngOnDestroy();
   });
 
-  it('组件销毁时应清理远端拉取定时器', async () => {
-    const { component, pullChanges } = createComponent();
+  it('默认 throttled 路径下即使销毁后推进远端窗口，也不应补触发 gate 或拉取', async () => {
+    const { component, loadFromLocal, pullChanges, checkGate } = createComponent();
 
     component.ngOnInit();
     await flushPromises();
-
-    // pullChanges 尚未触发
-    expect(pullChanges).not.toHaveBeenCalled();
-
-    // 销毁组件取消待执行的远端拉取
     component.ngOnDestroy();
 
-    // 推进时间后，pullChanges 不应被调用
     vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS + 1000);
     await flushPromises();
 
+    expect(loadFromLocal).not.toHaveBeenCalled();
+    expect(checkGate).not.toHaveBeenCalled();
     expect(pullChanges).not.toHaveBeenCalled();
   });
 });

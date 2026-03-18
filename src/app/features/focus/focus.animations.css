@@ -125,7 +125,8 @@
 }
 
 .gate-overlay {
-  animation: gate-enter var(--pk-overlay-enter) var(--pk-ease-enter) forwards;
+  /* both = backwards（元素挂载即应用 from{opacity:0} 防止首帧闪烁）+ forwards（保持结束状态） */
+  animation: gate-enter var(--pk-overlay-enter) var(--pk-ease-enter) both;
 }
 
 .stone-door.entering {

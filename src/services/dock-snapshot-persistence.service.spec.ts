@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { describe, beforeEach, afterEach, it, expect, vi } from 'vitest';
+import { get, set } from 'idb-keyval';
 import {
   DockSnapshotPersistenceService,
   normalizeNullableNumber,
@@ -7,6 +8,11 @@ import {
 } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
 import type { DockEntry, DockSnapshot } from '../models/parking-dock';
+
+vi.mock('idb-keyval', () => ({
+  get: vi.fn(),
+  set: vi.fn(),
+}));
 
 // ─── Mocks ──────────────────────────────────
 
@@ -84,9 +90,14 @@ function makeMinimalSnapshot(overrides?: Record<string, unknown>): Record<string
 
 describe('DockSnapshotPersistenceService', () => {
   let service: DockSnapshotPersistenceService;
+  const mockGet = vi.mocked(get);
+  const mockSet = vi.mocked(set);
 
   beforeEach(() => {
     vi.useFakeTimers();
+    mockGet.mockReset();
+    mockSet.mockReset();
+    localStorage.clear();
 
     TestBed.configureTestingModule({
       providers: [
@@ -100,6 +111,7 @@ describe('DockSnapshotPersistenceService', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    localStorage.clear();
   });
 
   // ─── localCacheKey / legacyLocalStorageKey ───
@@ -477,6 +489,50 @@ describe('DockSnapshotPersistenceService', () => {
     });
   });
 
+  describe('restoreLocalSnapshot', () => {
+    const ctx = makeNormalizeContext();
+
+    it('should prefer a newer legacy snapshot over an older persisted IDB snapshot', async () => {
+      mockGet.mockResolvedValue(
+        makeMinimalSnapshot({
+          focusMode: true,
+          session: {
+            firstDragIntervened: false,
+            focusBlurOn: true,
+            focusScrimOn: true,
+            mainTaskId: null,
+            comboSelectIds: [],
+            backupIds: [],
+          },
+          savedAt: '2025-01-15T10:00:00.000Z',
+        }),
+      );
+      localStorage.setItem(
+        service.legacyLocalStorageKey('user-1'),
+        JSON.stringify(
+          makeMinimalSnapshot({
+            focusMode: false,
+            session: {
+              firstDragIntervened: false,
+              focusBlurOn: false,
+              focusScrimOn: false,
+              mainTaskId: null,
+              comboSelectIds: [],
+              backupIds: [],
+            },
+            savedAt: '2025-01-15T10:05:00.000Z',
+          }),
+        ),
+      );
+
+      const restored = await service.restoreLocalSnapshot('user-1', ctx);
+
+      expect(restored?.focusMode).toBe(false);
+      expect(restored?.session.focusScrimOn).toBe(false);
+      expect(localStorage.getItem(service.legacyLocalStorageKey('user-1'))).toBeNull();
+    });
+  });
+
   // ─── normalizePendingDecision ─────────────────
 
   describe('normalizePendingDecision', () => {
@@ -623,9 +679,22 @@ describe('DockSnapshotPersistenceService', () => {
       expect(() => service.cancelPendingPersist()).not.toThrow();
     });
 
-    it('should cancel a scheduled persist', () => {
+    it('should shadow a scheduled snapshot to localStorage before canceling the debounced IDB write', () => {
       // Schedule a persist, then cancel it
-      const snapshotFn = vi.fn(() => makeMinimalSnapshot() as unknown as DockSnapshot);
+      const snapshotFn = vi.fn(() =>
+        makeMinimalSnapshot({
+          focusMode: false,
+          session: {
+            firstDragIntervened: false,
+            focusBlurOn: false,
+            focusScrimOn: false,
+            mainTaskId: null,
+            comboSelectIds: [],
+            backupIds: [],
+          },
+          savedAt: '2025-01-15T11:00:00.000Z',
+        }) as unknown as DockSnapshot,
+      );
       service.scheduleLocalPersist(snapshotFn, 'user-1', () => 0);
 
       // Cancel before the debounce fires
@@ -634,8 +703,14 @@ describe('DockSnapshotPersistenceService', () => {
       // Advance past debounce interval
       vi.advanceTimersByTime(1000);
 
-      // snapshotFn should never have been called since we cancelled
-      expect(snapshotFn).not.toHaveBeenCalled();
+      expect(snapshotFn).toHaveBeenCalledTimes(1);
+      expect(mockSet).not.toHaveBeenCalled();
+      expect(
+        JSON.parse(localStorage.getItem(service.legacyLocalStorageKey('user-1')) ?? '{}'),
+      ).toMatchObject({
+        focusMode: false,
+        savedAt: '2025-01-15T11:00:00.000Z',
+      });
     });
 
     it('should be idempotent', () => {

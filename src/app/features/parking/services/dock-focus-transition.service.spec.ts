@@ -14,9 +14,11 @@ describe('DockFocusTransitionService', () => {
   const focusMode = signal(false);
   const focusTransition = signal<DockFocusTransitionState | null>(null);
   const lastExitAction = signal<'save_exit' | 'clear_exit' | 'keep_focus_hide_scrim' | null>('save_exit');
+  const dockedCount = signal(0);
 
   const mockEngine = {
     dockExpanded: signal(false),
+    dockedCount,
     focusMode,
     focusTransition,
     lastExitAction,
@@ -39,6 +41,7 @@ describe('DockFocusTransitionService', () => {
     focusMode.set(false);
     focusTransition.set(null);
     lastExitAction.set('save_exit');
+    dockedCount.set(0);
     rafQueue = [];
 
     vi.stubGlobal('requestAnimationFrame', ((callback: FrameRequestCallback) => {
@@ -64,6 +67,7 @@ describe('DockFocusTransitionService', () => {
   });
 
   it('delays floating UI visibility until the HUD delay elapses on focus enter', () => {
+    dockedCount.set(1);
     service.runEnterFocusTransition();
 
     expect(service.floatingUiVisible()).toBe(false);
@@ -77,21 +81,13 @@ describe('DockFocusTransitionService', () => {
     expect(service.floatingUiVisible()).toBe(true);
   });
 
-  it('keeps floating UI visible until the exit transition fully clears', () => {
-    service.runEnterFocusTransition();
-    rafQueue.splice(0).forEach((callback) => callback(0));
-    vi.advanceTimersByTime(PARKING_CONFIG.MOTION.focus.hudDelayMs);
-    expect(service.floatingUiVisible()).toBe(true);
+  it('does not create a flip ghost during exit even when dock data exists', () => {
+    dockedCount.set(1);
+    focusMode.set(true);
 
     service.runExitFocusTransition();
 
-    vi.advanceTimersByTime(PARKING_CONFIG.MOTION.focus.exitMs);
-    expect(service.floatingUiVisible()).toBe(true);
-
-    vi.advanceTimersByTime(Math.min(PARKING_CONFIG.MOTION.focus.exitMs, 200) - 1);
-    expect(service.floatingUiVisible()).toBe(true);
-
-    vi.advanceTimersByTime(1);
-    expect(service.floatingUiVisible()).toBe(false);
+    expect(focusTransition()?.phase).toBe('exiting');
+    expect(service.flipGhost()).toBeNull();
   });
 });

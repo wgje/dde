@@ -89,14 +89,19 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     // [DEV] 开发强制模式下跳过 loadFromLocal + checkGate，防止覆盖模拟数据
     if (this.gateService.devForceActive()) {
       this.logger.debug('FocusMode', '[DEV] 开发强制模式，跳过初始化检查');
-      // 监听页面可见性仍然启用，但不做初始化拉取
-    } else if (FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
-      void this.initializeLocalGateCheck();
-    } else {
-      this.scheduleLegacyInitialGateCheck();
+      return;
     }
 
-    // 监听页面可见性变化：待机一段时间后回来重新检查大门
+    if (FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
+      // 默认路径下，启动探针负责 gate 判断，全局同步链路负责黑匣子拉取。
+      // FocusModeComponent 只负责渲染 gate / spotlight，避免在专注模式关闭时
+      // 因重复 gate probe 或 resume recheck 出现突发 blur。
+      this.logger.debug('FocusMode', 'throttled 路径下保持被动，启动探针接管 gate 检查');
+      return;
+    }
+
+    this.scheduleLegacyInitialGateCheck();
+    // 旧兜底路径仍保留恢复时 gate 检查，便于紧急回滚
     this.setupVisibilityListener();
   }
 

@@ -3374,14 +3374,7 @@ CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated
 CREATE INDEX IF NOT EXISTS idx_project_members_user_project
   ON public.project_members (user_id, project_id);
 
--- 缺失 FK 索引（避免 FK 无索引全表扫描）
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id
-  ON public.backup_metadata (base_backup_id)
-  WHERE base_backup_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id
-  ON public.backup_restore_history (pre_restore_snapshot_id)
-  WHERE pre_restore_snapshot_id IS NOT NULL;
+-- 说明：backup_* 表在后文创建，相关 FK 索引在建表后统一创建，避免一次性初始化时出现“索引先于表创建”的顺序错误。
 
 -- 注：以下冗余索引已移除（极少作为查询条件或被复合索引替代）：
 -- - idx_connection_tombstones_deleted_by
@@ -3952,8 +3945,14 @@ COMMENT ON TABLE public.backup_metadata IS '备份元数据表，记录所有备
 -- DROP INDEX IF EXISTS idx_backup_metadata_user_status;
 -- DROP INDEX IF EXISTS idx_backup_metadata_expires;
 
--- 【添加】9 个全遭缺失的 FK 索引（2026-03-18 v6.3.0: Advisor 全量解决）
--- 發铿：語偶跳過了 backup_metadata.base_backup_id的索引建立
+-- 备份域 FK 约束索引（Advisor 对齐，建表后创建）
+-- backup_metadata.user_id -> auth.users(id)
+CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_id
+  ON public.backup_metadata(user_id);
+COMMENT ON INDEX idx_backup_metadata_user_id IS
+  'FK enforcement: user_id references auth.users(id). ON DELETE SET NULL.';
+
+-- backup_metadata.base_backup_id -> backup_metadata(id)
 CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
   ON public.backup_metadata(base_backup_id);
 COMMENT ON INDEX idx_backup_metadata_base_backup_id IS 
@@ -3989,7 +3988,13 @@ CREATE TRIGGER trg_backup_restore_history_updated_at
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- 【添加】2 个关键 FK 索引（2026-03-18 v6.3.0: Advisor 全量解决）
--- pre_restore_snapshot_id + user_id
+-- backup_restore_history.backup_id -> backup_metadata(id)
+CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_id
+  ON public.backup_restore_history(backup_id);
+COMMENT ON INDEX idx_backup_restore_history_backup_id IS
+  'FK enforcement: backup_id references backup_metadata(id). ON DELETE CASCADE.';
+
+-- backup_restore_history.pre_restore_snapshot_id + user_id
 CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id 
   ON public.backup_restore_history(pre_restore_snapshot_id);
 COMMENT ON INDEX idx_backup_restore_history_pre_restore_snapshot_id IS 
@@ -4001,31 +4006,6 @@ COMMENT ON INDEX idx_backup_restore_history_user_id IS
   'FK enforcement: user_id references auth.users(id). ON DELETE CASCADE.';
 
 ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY;
-
--- 【添加】2 个关键 FK 索引（2026-03-18 MCP v6.2.0）
--- 虽然应用当前使用软删除，但以下 2 个 FK 索引对保留原因：
---   1. 未来维护脚本（如备份清理）可能执行物理删除，此时索引决定性能
---   2. 数据完整性：这两个 FK 的删除规则关系数据库运维的稳定性
-
--- 【PART 1】backup_metadata FK 索引
--- base_backup_id 自引用（ON DELETE SET NULL）
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
-  ON public.backup_metadata(base_backup_id);
-COMMENT ON INDEX idx_backup_metadata_base_backup_id IS 
-  'FK enforcement: base_backup_id references backup_metadata(id). ON DELETE SET NULL.';
-
--- 【PART 2】backup_restore_history FK 索引（3 个关键 FK）
--- pre_restore_snapshot_id FK
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id 
-  ON public.backup_restore_history(pre_restore_snapshot_id);
-COMMENT ON INDEX idx_backup_restore_history_pre_restore_snapshot_id IS 
-  'FK enforcement: pre_restore_snapshot_id references backup_metadata(id). ON DELETE SET NULL.';
-
--- user_id FK
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id 
-  ON public.backup_restore_history(user_id);
-COMMENT ON INDEX idx_backup_restore_history_user_id IS 
-  'FK enforcement: user_id references auth.users(id). ON DELETE CASCADE.';
 
 -- 备份加密密钥表
 CREATE TABLE IF NOT EXISTS public.backup_encryption_keys (

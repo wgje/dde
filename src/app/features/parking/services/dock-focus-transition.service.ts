@@ -76,7 +76,11 @@ export class DockFocusTransitionService implements OnDestroy {
     this.transitionPerformanceTierLock.set(this.performanceTierService.tier());
     this.engine.holdNonCriticalWork(transition.durationMs! + 120);
     this.engine.beginFocusTransition(transition);
-    this.startFlipGhost(transition);
+    if (this.shouldRenderFlipGhost('enter')) {
+      this.startFlipGhost(transition);
+    } else {
+      this.clearFlipGhost();
+    }
     this.floatingUiDelay.schedule(() => {
       this.floatingUiVisible.set(true);
     }, this.motion.focus.hudDelayMs);
@@ -112,7 +116,11 @@ export class DockFocusTransitionService implements OnDestroy {
     this.transitionPerformanceTierLock.set(this.performanceTierService.tier());
     this.engine.holdNonCriticalWork(transition.durationMs! + 120);
     this.engine.beginFocusTransition(transition);
-    this.startFlipGhost(transition);
+    if (this.shouldRenderFlipGhost('exit')) {
+      this.startFlipGhost(transition);
+    } else {
+      this.clearFlipGhost();
+    }
 
     this.flip.schedule(() => {
       const current = this.engine.focusTransition();
@@ -143,15 +151,20 @@ export class DockFocusTransitionService implements OnDestroy {
     if (this.engine.focusMode()) {
       this.engine.toggleFocusMode();
     }
-    // 使用 shell.enterMs 作为 chrome restore 时长，确保 CSS transition 可以在 restoring 阶段内完成
-    const restoreDuration = this.motion.shell.enterMs;
+    // 使用 CSS 令牌 --pk-shell-smooth-restore 对应的时长 (480ms)，确保 restoring 阶段在 CSS transition 完成后才结束。
+    // 原先用 shell.enterMs (320ms)，少于 CSS transition 时长，导致 restoring 阶段在 48.6% 完成时被强行结束，
+    // 形成了项目栏「举起一半就弹回」的突变感。
+    // 注意：需要加上 40ms 安全戚，避免定时器与 CSS 动画生命周期竞争。
+    const cssRestoreMs = 480; // 对应 --pk-shell-smooth-restore
+    const restoreDuration = cssRestoreMs + 40;
     this.engine.beginFocusChromeRestore(restoreDuration);
-    // 延迟清除 focusTransition，让浮动 UI 的退出动画在 focusSessionMounted=true 期间播放完毕。
-    // 如果立即清除，@if(focusSessionMounted()) 包裹的元素会被瞬间卸载，退出动画被截断。
+    // 延迟卸载浮动 UI：必须大于最长的退出动画，并且留有充足内容。
+    // hud.enterMs (200ms) 用于 HUD 退出， focus.exitMs (280ms) 用于主场景退出。
+    const exitUnmountDelay = Math.max(this.motion.focus.exitMs, this.motion.hud.enterMs) + 80;
     this.exitUnmount.schedule(() => {
       this.floatingUiVisible.set(false);
       this.engine.endFocusTransition();
-    }, Math.min(this.motion.focus.exitMs, 200));
+    }, exitUnmountDelay);
     this.clearFlipGhost();
     this.clearExitVisualSnapshot();
     this.transitionPerformanceTierLock.set(null);
@@ -196,6 +209,14 @@ export class DockFocusTransitionService implements OnDestroy {
   private clearFlipGhost(): void {
     this.flipGhost.set(null);
     this.flipGhostActive.set(false);
+  }
+
+  private shouldRenderFlipGhost(direction: 'enter' | 'exit'): boolean {
+    if (direction === 'exit') return false;
+    const dockedCount = (this.engine as DockEngineService & {
+      dockedCount?: () => number;
+    }).dockedCount;
+    return typeof dockedCount !== 'function' || dockedCount() > 0;
   }
 
   // ── Lifecycle ──

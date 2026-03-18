@@ -44,11 +44,15 @@ describe('DockFocusSceneComponent', () => {
     fixture.componentRef.setInput('scrimOn', false);
     fixture.detectChanges();
 
+    const scene = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-scene"]');
     const stage = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]');
     const backdrop = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-backdrop"]');
 
+    expect(scene.getAttribute('data-scrim-dismiss')).toBe('fast');
     expect(stage).toBeTruthy();
     expect(stage.getAttribute('data-scrim')).toBe('off');
+    expect(stage.getAttribute('data-scrim-dismiss')).toBe('fast');
+    expect(backdrop.getAttribute('data-scrim-dismiss')).toBe('fast');
     expect(backdrop.classList.contains('active')).toBe(false);
     expect(component.focusStageStyle()['--stage-shell-opacity']).toBe('0.720');
   });
@@ -173,6 +177,20 @@ describe('DockFocusSceneComponent', () => {
     expect(hostFixture.nativeElement.querySelector('[data-testid="projected-focus-control"]')).toBeTruthy();
   });
 
+  it('keeps the ambient scene hidden while exiting transparent focus mode', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.componentRef.setInput('scrimOn', false);
+    fixture.componentRef.setInput('transitionPhase', 'exiting');
+    fixture.detectChanges();
+
+    const scene = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-scene"]') as HTMLElement | null;
+    const stage = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-stage"]') as HTMLElement | null;
+
+    expect(scene).toBeTruthy();
+    expect(scene?.classList.contains('active')).toBe(false);
+    expect(stage?.classList.contains('active')).toBe(true);
+  });
+
   it('short-circuits transitionSettled in T2 profile without waiting for animation', async () => {
     const settled = vi.fn();
     component.transitionSettled.subscribe(settled);
@@ -184,5 +202,17 @@ describe('DockFocusSceneComponent', () => {
     await Promise.resolve();
 
     expect(settled).toHaveBeenCalledWith('exiting');
+  });
+
+  it('uses a pure fade for exit stage tokens instead of shrinking downward', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.componentRef.setInput('scrimOn', true);
+    fixture.componentRef.setInput('transitionPhase', 'exiting');
+    fixture.detectChanges();
+
+    expect(component.focusStageStyle()['--stage-exit-mid-y']).toBe('0px');
+    expect(component.focusStageStyle()['--stage-exit-end-y']).toBe('0px');
+    expect(component.focusStageStyle()['--stage-exit-mid-scale']).toBe('1');
+    expect(component.focusStageStyle()['--stage-exit-end-scale']).toBe('1');
   });
 });
