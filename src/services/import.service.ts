@@ -71,8 +71,8 @@ export interface ImportOptions {
   conflictStrategy: ImportConflictStrategy;
   /** 是否跳过校验和验证 */
   skipChecksumValidation?: boolean;
-  /** 是否生成新的 ID（默认 true，符合 Hard Rule: ID 必须客户端 UUID）
-   * 设为 false 保留原始 ID 仅限高级场景，存在冲突/碰撞风险 */
+  /** 是否生成新的 ID。
+   * 默认保留导出文件中的客户端 UUID，仅在显式要求或 rename 导入时重生 ID。 */
   generateNewIds?: boolean;
 }
 
@@ -430,7 +430,8 @@ export class ImportService {
     options: ImportOptions,
     onProjectImported?: (project: Project) => Promise<void>
   ): Promise<ImportProjectResult> {
-    const { conflictStrategy, generateNewIds = true } = options;
+    const { conflictStrategy } = options;
+    let generateNewIds = options.generateNewIds ?? false;
     
     // 标记是否为覆盖操作
     let isOverwrite = false;
@@ -456,10 +457,10 @@ export class ImportService {
           return this.mergeProject(exportProject, existingProject, onProjectImported);
         
         case 'rename':
-          // 重命名：生成新 ID，视为新项目导入
+          // 重命名：必须重生整棵项目树 ID，避免与现有实体冲突
+          generateNewIds = true;
           exportProject = {
             ...exportProject,
-            id: crypto.randomUUID(),
             name: `${exportProject.name} (导入)`,
           };
           // rename 后不再视为覆盖，而是新项目
@@ -552,15 +553,15 @@ export class ImportService {
   /**
    * 转换导出项目为 Project
    * 【P2-44 修复】对导入数据执行 sanitizeProject 消毒
-   * 
-   * Hard Rule: ID 必须客户端 UUID。默认强制生成新 ID，
-   * 保留旧 ID 仅作为显式高级选项（generateNewIds=false），存在冲突/碰撞风险。
+   *
+   * Hard Rule: ID 必须客户端 UUID。导出文件中的实体 ID 本身就是客户端 UUID，
+   * 因此默认保留原始 ID；仅在显式要求或 rename 导入时重生整棵项目树 ID。
    */
-  private convertToProject(exportProject: ExportProject, generateNewIds: boolean = true): Project {
+  private convertToProject(exportProject: ExportProject, generateNewIds: boolean = false): Project {
     const projectId = generateNewIds ? crypto.randomUUID() : exportProject.id;
     
-    if (!generateNewIds) {
-      this.logger.warn('使用原始 ID 导入，可能导致 ID 冲突', { projectId: exportProject.id });
+    if (generateNewIds) {
+      this.logger.info('导入时重生项目树 ID', { projectId: exportProject.id });
     }
     
     // 构建 ID 映射（用于更新引用）

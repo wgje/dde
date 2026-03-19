@@ -46,7 +46,6 @@ import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability
 import { ExportService } from './services/export.service';
 import { AppLifecycleOrchestratorService } from './services/app-lifecycle-orchestrator.service';
 import { PwaInstallPromptService } from './services/pwa-install-prompt.service';
-import { StartupFontSchedulerService } from './services/startup-font-scheduler.service';
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
@@ -180,7 +179,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   /** 数据保护服务 */
   private readonly exportService = inject(ExportService);
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
-  private readonly startupFontScheduler = inject(StartupFontSchedulerService);
   private readonly focusStartupProbe = inject(FocusStartupProbeService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
@@ -202,6 +200,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private spotlightTriggerLoadPromise: Promise<Type<unknown> | null> | null = null;
   private blackBoxRecorderLoadPromise: Promise<Type<unknown> | null> | null = null;
   private focusModePreloadPromise: Promise<void> | null = null;
+  private startupFontSchedulerInitPromise: Promise<void> | null = null;
   private focusModePreloadScheduled = false;
 
   /**
@@ -719,7 +718,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     //   - Must be first: resume/recovery listeners must be active before
     //     any async startup work begins.
     // Step 2 (ngOnInit): StartupTierOrchestratorService.initialize()
-    // Step 3 (ngOnInit): StartupFontSchedulerService.initialize()
+    // Step 3 (ngOnInit): lazy StartupFontSchedulerService.initialize()
     // Step 4 (signal effect): FocusStartupProbeService.initialize()
     //   - Fires reactively after coreDataLoaded() && authenticated.
     // Step 5 (signal effect): EventDrivenSyncPulseService.initialize()
@@ -850,7 +849,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     // ⚡ 性能优化：延迟会话检查到浏览器空闲时段
     this.authCoord.scheduleSessionBootstrap();
     this.schedulePwaPromptInitialization();
-    this.startupFontScheduler.initialize();
+    this.scheduleStartupFontInitialization();
     this.startupTier.initialize();
     this.scheduleFocusModePreload('startup');
     if (!FEATURE_FLAGS.SIDEBAR_TOOLS_DYNAMIC_LOAD_V1) {
@@ -1220,6 +1219,21 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     }
 
     init();
+  }
+
+  private scheduleStartupFontInitialization(): void {
+    if (this.startupFontSchedulerInitPromise) {
+      return;
+    }
+
+    this.startupFontSchedulerInitPromise = import('./services/startup-font-scheduler.service')
+      .then(({ StartupFontSchedulerService }) => {
+        this.injector.get(StartupFontSchedulerService).initialize();
+      })
+      .catch((error: unknown) => {
+        this.startupFontSchedulerInitPromise = null;
+        this.logger.warn('延迟初始化字体调度器失败', error);
+      });
   }
 
   private async getRemoteChangeHandlerLazy(): Promise<RemoteChangeHandlerLike | null> {

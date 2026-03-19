@@ -1,12 +1,10 @@
 import { TestBed } from '@angular/core/testing';
 import { describe, beforeEach, afterEach, it, expect, vi } from 'vitest';
-import { get, set } from 'idb-keyval';
-import {
-  DockSnapshotPersistenceService,
-  normalizeNullableNumber,
-  type SnapshotNormalizeContext,
-} from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
+import type {
+  DockSnapshotPersistenceService as DockSnapshotPersistenceServiceType,
+  SnapshotNormalizeContext,
+} from './dock-snapshot-persistence.service';
 import type { DockEntry, DockSnapshot } from '../models/parking-dock';
 
 vi.mock('idb-keyval', () => ({
@@ -86,31 +84,41 @@ function makeMinimalSnapshot(overrides?: Record<string, unknown>): Record<string
   };
 }
 
+async function callNormalizeNullableNumber(value: unknown): Promise<number | null> {
+  const { normalizeNullableNumber } = await import('./dock-snapshot-persistence.service');
+  return normalizeNullableNumber(value);
+}
+
 // ─── Test Suite ─────────────────────────────
 
 describe('DockSnapshotPersistenceService', () => {
-  let service: DockSnapshotPersistenceService;
-  const mockGet = vi.mocked(get);
-  const mockSet = vi.mocked(set);
+  let service: DockSnapshotPersistenceServiceType;
+  let serviceClass: typeof import('./dock-snapshot-persistence.service').DockSnapshotPersistenceService;
+  let mockGet: ReturnType<typeof vi.fn>;
+  let mockSet: ReturnType<typeof vi.fn>;
 
-  beforeEach(() => {
-    vi.useFakeTimers();
+  beforeEach(async () => {
+    vi.resetModules();
+    const idbKeyval = await import('idb-keyval');
+    const dockSnapshotModule = await import('./dock-snapshot-persistence.service');
+    serviceClass = dockSnapshotModule.DockSnapshotPersistenceService;
+    mockGet = vi.mocked(idbKeyval.get);
+    mockSet = vi.mocked(idbKeyval.set);
     mockGet.mockReset();
     mockSet.mockReset();
     localStorage.clear();
 
     TestBed.configureTestingModule({
       providers: [
-        DockSnapshotPersistenceService,
+        serviceClass,
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
 
-    service = TestBed.inject(DockSnapshotPersistenceService);
+    service = TestBed.inject(serviceClass);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     localStorage.clear();
   });
 
@@ -675,6 +683,14 @@ describe('DockSnapshotPersistenceService', () => {
   // ─── cancelPendingPersist ─────────────────────
 
   describe('cancelPendingPersist', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('should not throw when called without pending persist', () => {
       expect(() => service.cancelPendingPersist()).not.toThrow();
     });
@@ -724,51 +740,51 @@ describe('DockSnapshotPersistenceService', () => {
 // ─── Standalone normalizeNullableNumber ─────
 
 describe('normalizeNullableNumber', () => {
-  it('should return null for null', () => {
-    expect(normalizeNullableNumber(null)).toBeNull();
+  it('should return null for null', async () => {
+    await expect(callNormalizeNullableNumber(null)).resolves.toBeNull();
   });
 
-  it('should return null for undefined', () => {
-    expect(normalizeNullableNumber(undefined)).toBeNull();
+  it('should return null for undefined', async () => {
+    await expect(callNormalizeNullableNumber(undefined)).resolves.toBeNull();
   });
 
-  it('should return null for empty string', () => {
-    expect(normalizeNullableNumber('')).toBeNull();
+  it('should return null for empty string', async () => {
+    await expect(callNormalizeNullableNumber('')).resolves.toBeNull();
   });
 
-  it('should return null for NaN', () => {
-    expect(normalizeNullableNumber(NaN)).toBeNull();
+  it('should return null for NaN', async () => {
+    await expect(callNormalizeNullableNumber(NaN)).resolves.toBeNull();
   });
 
-  it('should return null for Infinity', () => {
-    expect(normalizeNullableNumber(Infinity)).toBeNull();
+  it('should return null for Infinity', async () => {
+    await expect(callNormalizeNullableNumber(Infinity)).resolves.toBeNull();
   });
 
-  it('should return null for -Infinity', () => {
-    expect(normalizeNullableNumber(-Infinity)).toBeNull();
+  it('should return null for -Infinity', async () => {
+    await expect(callNormalizeNullableNumber(-Infinity)).resolves.toBeNull();
   });
 
-  it('should return null for non-numeric string', () => {
-    expect(normalizeNullableNumber('abc')).toBeNull();
+  it('should return null for non-numeric string', async () => {
+    await expect(callNormalizeNullableNumber('abc')).resolves.toBeNull();
   });
 
-  it('should return number for numeric value', () => {
-    expect(normalizeNullableNumber(42)).toBe(42);
+  it('should return number for numeric value', async () => {
+    await expect(callNormalizeNullableNumber(42)).resolves.toBe(42);
   });
 
-  it('should return number for zero', () => {
-    expect(normalizeNullableNumber(0)).toBe(0);
+  it('should return number for zero', async () => {
+    await expect(callNormalizeNullableNumber(0)).resolves.toBe(0);
   });
 
-  it('should return number for negative value', () => {
-    expect(normalizeNullableNumber(-10)).toBe(-10);
+  it('should return number for negative value', async () => {
+    await expect(callNormalizeNullableNumber(-10)).resolves.toBe(-10);
   });
 
-  it('should parse numeric string to number', () => {
-    expect(normalizeNullableNumber('123')).toBe(123);
+  it('should parse numeric string to number', async () => {
+    await expect(callNormalizeNullableNumber('123')).resolves.toBe(123);
   });
 
-  it('should parse float string to number', () => {
-    expect(normalizeNullableNumber('3.14')).toBe(3.14);
+  it('should parse float string to number', async () => {
+    await expect(callNormalizeNullableNumber('3.14')).resolves.toBe(3.14);
   });
 });

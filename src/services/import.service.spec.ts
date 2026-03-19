@@ -356,6 +356,26 @@ describe('ImportService', () => {
       expect(result.skippedCount).toBe(0);
       expect(onProjectImported).toHaveBeenCalledTimes(1);
     });
+
+    it('默认应保留原始项目与任务 ID', async () => {
+      const data = createValidExportData();
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+
+      await service.executeImport(
+        data,
+        [],
+        { conflictStrategy: 'skip' },
+        onProjectImported
+      );
+
+      const importedProject = onProjectImported.mock.calls[0][0] as Project;
+      expect(importedProject.id).toBe('proj-1');
+      expect(importedProject.tasks[0].id).toBe('task-1');
+      expect(importedProject.tasks[1].parentId).toBe('task-1');
+      expect(importedProject.connections[0].id).toBe('conn-1');
+      expect(importedProject.connections[0].source).toBe('task-1');
+      expect(importedProject.connections[0].target).toBe('task-2');
+    });
     
     it('使用 skip 策略时应跳过已存在的项目', async () => {
       const data = createValidExportData();
@@ -431,6 +451,8 @@ describe('ImportService', () => {
       const importedProject = onProjectImported.mock.calls[0][0] as Project;
       expect(importedProject.id).not.toBe(existingProject.id);
       expect(importedProject.name).toContain('(导入)');
+      expect(importedProject.tasks[0].id).not.toBe('task-1');
+      expect(importedProject.connections[0].id).not.toBe('conn-1');
     });
     
     it('generateNewIds 选项应生成全新的 ID', async () => {
