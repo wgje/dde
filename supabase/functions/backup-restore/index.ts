@@ -26,6 +26,7 @@ import {
   verifyChecksum,
   base64ToUint8Array,
 } from "../_shared/backup-utils.ts";
+import { prepareRestoreRows } from "../_shared/backup-restore-schema.ts";
 
 // ===========================================
 // 配置
@@ -322,24 +323,15 @@ async function executeRestore(
     console.log("Downloading backup data...");
     const backupData = await downloadAndParseBackup(supabase, meta);
     
-    // 3. 过滤数据（如果是特定项目恢复）
-    let projectsToRestore = backupData.projects;
-    let tasksToRestore = backupData.tasks;
-    let connectionsToRestore = backupData.connections;
-    
-    if (scope === 'project' && options?.projectId) {
-      projectsToRestore = backupData.projects.filter(p => p.id === options.projectId);
-      const projectId = options.projectId;
-      tasksToRestore = backupData.tasks.filter(t => t.projectId === projectId);
-      connectionsToRestore = backupData.connections.filter(c => c.projectId === projectId);
-    } else {
-      // 全量恢复时，仅恢复属于该用户的数据
-      projectsToRestore = backupData.projects.filter(p => p.userId === userId);
-      const userProjectIds = new Set(projectsToRestore.map(p => p.id));
-      tasksToRestore = backupData.tasks.filter(t => userProjectIds.has(t.projectId));
-      connectionsToRestore = backupData.connections.filter(c => userProjectIds.has(c.projectId));
-    }
-    
+    const preparedRows = prepareRestoreRows(backupData, userId, {
+      scope,
+      projectId: options?.projectId,
+    });
+
+    const projectsToRestore = preparedRows.projects;
+    const tasksToRestore = preparedRows.tasks;
+    const connectionsToRestore = preparedRows.connections;
+
     console.log(`Restoring: ${projectsToRestore.length} projects, ${tasksToRestore.length} tasks, ${connectionsToRestore.length} connections`);
     
     // 4. 执行恢复（使用事务）
@@ -361,14 +353,7 @@ async function executeRestore(
       const batch = projectsToRestore.slice(i, i + BATCH_SIZE);
       const { error } = await supabase
         .from("projects")
-        .upsert(batch.map(p => ({
-          id: p.id,
-          user_id: userId, // 使用当前用户 ID
-          name: p.name,
-          description: p.description,
-          created_at: p.createdAt,
-          updated_at: p.updatedAt,
-        })));
+        .upsert(batch);
       
       if (error) {
         throw new Error(`Failed to restore projects: ${error.message}`);
@@ -380,25 +365,7 @@ async function executeRestore(
       const batch = tasksToRestore.slice(i, i + BATCH_SIZE);
       const { error } = await supabase
         .from("tasks")
-        .upsert(batch.map(t => ({
-          id: t.id,
-          project_id: t.projectId,
-          title: t.title,
-          content: t.content,
-          parent_id: t.parentId,
-          stage: t.stage,
-          order: t.order,
-          rank: t.rank,
-          status: t.status,
-          x: t.x,
-          y: t.y,
-          display_id: t.displayId,
-          short_id: t.shortId,
-          attachments: t.attachments,
-          created_at: t.createdAt,
-          updated_at: t.updatedAt,
-          deleted_at: t.deletedAt,
-        })));
+        .upsert(batch);
       
       if (error) {
         throw new Error(`Failed to restore tasks: ${error.message}`);
@@ -410,17 +377,7 @@ async function executeRestore(
       const batch = connectionsToRestore.slice(i, i + BATCH_SIZE);
       const { error } = await supabase
         .from("connections")
-        .upsert(batch.map(c => ({
-          id: c.id,
-          project_id: c.projectId,
-          source: c.source,
-          target: c.target,
-          title: c.title,
-          description: c.description,
-          created_at: c.createdAt,
-          updated_at: c.updatedAt,
-          deleted_at: c.deletedAt,
-        })));
+        .upsert(batch);
       
       if (error) {
         throw new Error(`Failed to restore connections: ${error.message}`);
@@ -530,35 +487,39 @@ async function createPreRestoreSnapshot(
   supabase: SupabaseClient,
   userId: string
 ): Promise<string> {
-  
-  // 触发一次用户级全量备份作为快照
-  // 这里简化处理，实际应该内联执行而不是调用 Edge Function
-  
-  const { data, error } = await supabase
-    .from("backup_metadata")
-    .insert({
-      type: "full",
-      path: `snapshots/pre-restore/${userId}/${Date.now()}.json.gz`,
-      user_id: userId,
-      status: "pending",
-      backup_started_at: new Date().toISOString(),
-      checksum: "",
-      compressed: true,
-      encrypted: false,
-      retention_tier: "daily",
-    })
-    .select()
-    .single();
-  
-  if (error) {
-    console.error("Failed to create pre-restore snapshot:", error);
-    throw new Error("Failed to create pre-restore snapshot");
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const supabaseKey = Deno.env.get("NF_BACKUP_INTERNAL_JWT") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error("Pre-restore snapshot requires Supabase function credentials");
   }
-  
-  // TODO: 实际导出用户数据并上传
-  // 这里简化为仅创建记录，实际实现需要完整的导出逻辑
-  
-  return data.id;
+
+  const response = await fetch(`${supabaseUrl}/functions/v1/backup-full`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${supabaseKey}`,
+    },
+    body: JSON.stringify({ userId }),
+  });
+
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`Failed to create pre-restore snapshot: ${raw}`);
+  }
+
+  let payload: { success?: boolean; backupId?: string; error?: string } | null = null;
+  try {
+    payload = JSON.parse(raw) as { success?: boolean; backupId?: string; error?: string };
+  } catch {
+    throw new Error("Failed to parse pre-restore snapshot response");
+  }
+
+  if (!payload?.success || !payload.backupId) {
+    throw new Error(payload?.error || "Pre-restore snapshot did not return a backupId");
+  }
+
+  return payload.backupId;
 }
 
 async function deleteUserData(
@@ -570,7 +531,7 @@ async function deleteUserData(
   const { data: projects } = await supabase
     .from("projects")
     .select("id")
-    .eq("user_id", userId);
+    .eq("owner_id", userId);
   
   if (!projects || projects.length === 0) {
     return;
@@ -581,7 +542,7 @@ async function deleteUserData(
   // 按顺序删除：连接 → 任务 → 项目
   await supabase.from("connections").delete().in("project_id", projectIds);
   await supabase.from("tasks").delete().in("project_id", projectIds);
-  await supabase.from("projects").delete().eq("user_id", userId);
+  await supabase.from("projects").delete().eq("owner_id", userId);
 }
 
 function jsonResponse(data: unknown, status: number): Response {

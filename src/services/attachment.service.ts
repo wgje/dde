@@ -1,10 +1,9 @@
 import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { Attachment, AttachmentType } from '../models';
-import { ATTACHMENT_CONFIG, VIRUS_SCAN_CONFIG } from '../config';
+import { ATTACHMENT_CONFIG } from '../config';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FileTypeValidatorService, FILE_TYPE_VALIDATION_CONFIG } from './file-type-validator.service';
-import { VirusScanService } from './virus-scan.service';
 import { LoggerService } from './logger.service';
 
 /**
@@ -55,7 +54,6 @@ export class AttachmentService {
   private supabase = inject(SupabaseClientService);
   private destroyRef = inject(DestroyRef);
   private fileTypeValidator = inject(FileTypeValidatorService);
-  private virusScan = inject(VirusScanService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Attachment');
 
@@ -259,14 +257,6 @@ export class AttachmentService {
       const typeValidation = await this.fileTypeValidator.validateFile(file);
       if (!typeValidation.valid) {
         return { success: false, error: typeValidation.error || '文件类型验证失败' };
-      }
-    }
-
-    // v5.12: 病毒扫描（上传前扫描）
-    if (VIRUS_SCAN_CONFIG.UPLOAD_SCAN.ENABLED) {
-      const scanResult = await this.virusScan.scanBeforeUpload(file, file.name);
-      if (!scanResult.success) {
-        return { success: false, error: scanResult.error || '文件安全检查失败' };
       }
     }
 

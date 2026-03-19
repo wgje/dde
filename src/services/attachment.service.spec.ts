@@ -34,6 +34,24 @@ describe('AttachmentService', () => {
     service = injector.get(AttachmentService);
   });
 
+  describe('service construction', () => {
+    it('can be created without VirusScanService because upload flow no longer depends on scan RPCs', async () => {
+      const { FileTypeValidatorService } = await import('./file-type-validator.service');
+
+      const injector = Injector.create({
+        providers: [
+          { provide: AttachmentService, useClass: AttachmentService },
+          { provide: SupabaseClientService, useValue: { client: null, getClient: vi.fn(() => null) } },
+          { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
+          { provide: FileTypeValidatorService, useValue: { validateFile: vi.fn().mockResolvedValue({ valid: true }) } },
+          { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
+        ],
+      });
+
+      expect(() => injector.get(AttachmentService)).not.toThrow();
+    });
+  });
+
   describe('markAsDeleted / isDeleted / restoreDeleted', () => {
     it('标记删除并检测', () => {
       const att: Attachment = {

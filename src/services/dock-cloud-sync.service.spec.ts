@@ -284,6 +284,17 @@ describe('DockCloudSyncService', () => {
       // Only the last scheduled timer fires
       expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(1);
     });
+
+    it('should not fallback to legacy dock snapshot import when no remote focus session exists', async () => {
+      service.init(makeCallbacks());
+      mockSyncService.loadFocusSession.mockResolvedValueOnce({ ok: true, value: null });
+      mockSyncService.listRoutineTasks.mockResolvedValueOnce({ ok: true, value: [] });
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mockSyncService.importLegacyDockSnapshot).not.toHaveBeenCalled();
+    });
   });
 
   // ─── enqueue helpers ────────────────────────

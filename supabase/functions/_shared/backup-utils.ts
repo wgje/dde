@@ -57,8 +57,6 @@ export interface BackupData {
   userPreferences?: BackupUserPreferences[];
   /** 黑匣子条目 - 专注模式数据（v1.1.0+） */
   blackBoxEntries?: BackupBlackBoxEntry[];
-  /** 项目成员关系（v1.1.0+） */
-  projectMembers?: BackupProjectMember[];
 }
 
 export interface BackupProject {
@@ -145,17 +143,6 @@ export interface BackupBlackBoxEntry {
   snoozeUntil?: string | null;
   snoozeCount?: number;
   deletedAt?: string | null;
-}
-
-/** 项目成员备份 */
-export interface BackupProjectMember {
-  id: string;
-  projectId: string;
-  userId: string;
-  role?: string;
-  invitedBy?: string | null;
-  invitedAt?: string;
-  acceptedAt?: string | null;
 }
 
 /** 健康校验结果 */

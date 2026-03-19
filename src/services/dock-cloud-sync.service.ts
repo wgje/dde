@@ -161,23 +161,6 @@ export class DockCloudSyncService implements OnDestroy {
       // H-3 fix: 异步点后检查用户是否已切换
       if (!this.isCurrentUser(userId)) return;
 
-      // One-time cloud migration path from legacy user_preferences.dock_snapshot.
-      if (!remoteRaw) {
-        const legacyResult = await withTimeout(
-          this.syncService.importLegacyDockSnapshot(userId),
-          { timeout: TIMEOUT_CONFIG.STANDARD, timeoutMessage: 'importLegacyDockSnapshot 超时' },
-        );
-        if (!legacyResult.ok) {
-          this.logger.warn('importLegacyDockSnapshot returned error', legacyResult.error);
-        }
-        const legacyRaw = legacyResult.ok ? legacyResult.value : null;
-        if (!this.isCurrentUser(userId)) return; // H-3: 再次检查
-        const legacy = this.snapshotPersistence.normalizeSnapshot(legacyRaw, ctx);
-        if (legacy) {
-          this.enqueueFocusSessionSync(userId, legacy);
-          remoteRaw = legacy;
-        }
-      }
       if (!remoteRaw) {
         await this.hydrateRoutineSlots(userId);
         return;

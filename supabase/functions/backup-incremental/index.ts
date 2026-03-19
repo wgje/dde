@@ -28,11 +28,10 @@ import {
   BackupConnection,
   BackupUserPreferences,
   BackupBlackBoxEntry,
-  BackupProjectMember,
   validateBackup,
-  encryptData,
   calculateChecksum,
   compressData,
+  encryptData,
   generateBackupPath,
   calculateExpiresAt,
   uint8ArrayToBase64,
@@ -78,37 +77,24 @@ interface BackupResult {
   error?: string;
 }
 
-// ===========================================
-// 告警辅助函数
-// ===========================================
+async function resolveBackupUserId(
+  supabase: SupabaseClient,
+  requestedUserId?: string
+): Promise<string | undefined> {
+  if (requestedUserId) return requestedUserId;
 
-async function sendBackupFailedAlert(
-  supabaseUrl: string,
-  supabaseKey: string,
-  error: string,
-  details?: Record<string, unknown>
-): Promise<void> {
-  try {
-    const response = await fetch(`${supabaseUrl}/functions/v1/backup-alert`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${supabaseKey}`,
-      },
-      body: JSON.stringify({
-        action: 'backup_failed',
-        backupType: 'incremental',
-        error,
-        details,
-      }),
-    });
-    
-    if (!response.ok) {
-      console.warn('Failed to send backup alert:', await response.text());
-    }
-  } catch (alertError) {
-    console.warn('Failed to send backup alert:', alertError);
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("value")
+    .eq("key", "backup.user_id")
+    .maybeSingle();
+
+  if (error || !data) {
+    return undefined;
   }
+
+  const raw = (data as { value?: unknown }).value;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
 }
 
 // ===========================================
@@ -152,18 +138,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     
   } catch (error) {
     console.error("Incremental backup failed:", error);
-    
-    // 发送告警
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (supabaseUrl && supabaseKey) {
-      await sendBackupFailedAlert(
-        supabaseUrl,
-        supabaseKey,
-        error instanceof Error ? error.message : "Unknown error"
-      );
-    }
-    
+
     return jsonResponse({ 
       success: false, 
       error: error instanceof Error ? error.message : "Unknown error" 
@@ -180,11 +155,12 @@ async function executeIncrementalBackup(
   options: IncrementalBackupRequest,
   startTime: number
 ): Promise<BackupResult> {
-  
+  const effectiveUserId = await resolveBackupUserId(supabase, options.userId);
+
   console.log("Starting incremental backup...", { options });
   
   // 1. 确定增量起始时间
-  const incrementalSince = options.since || await getLastBackupTime(supabase);
+  const incrementalSince = options.since || await getLastBackupTime(supabase, effectiveUserId);
   
   if (!incrementalSince) {
     // 没有历史备份，应该执行全量备份
@@ -198,7 +174,7 @@ async function executeIncrementalBackup(
   console.log(`Incremental since: ${incrementalSince}`);
   
   // 2. 检查是否有变更
-  const changeCount = await countChanges(supabase, incrementalSince, options.userId);
+  const changeCount = await countChanges(supabase, incrementalSince, effectiveUserId);
   
   if (changeCount.total === 0 && MIN_CHANGES_FOR_BACKUP > 0) {
     console.log("No changes since last backup, skipping");
@@ -216,14 +192,14 @@ async function executeIncrementalBackup(
   const { expiresAt, retentionTier } = calculateExpiresAt("incremental");
   
   // 获取最新的全量备份 ID 作为 base
-  const baseBackupId = await getLatestFullBackupId(supabase);
+  const baseBackupId = await getLatestFullBackupId(supabase, effectiveUserId);
   
   const { data: backupMeta, error: metaError } = await supabase
     .from("backup_metadata")
     .insert({
       type: "incremental",
       path: backupPath,
-      user_id: options.userId || null,
+      user_id: effectiveUserId || null,
       status: "in_progress",
       backup_started_at: new Date().toISOString(),
       expires_at: expiresAt.toISOString(),
@@ -247,7 +223,8 @@ async function executeIncrementalBackup(
   try {
     // 4. 导出增量数据
     console.log("Exporting incremental data...");
-    const backupData = await exportIncrementalData(supabase, incrementalSince, options.userId);
+    const backupData = await exportIncrementalData(supabase, incrementalSince, effectiveUserId);
+    const backupOwnerId = effectiveUserId || deriveSingleOwnerId(backupData.projects);
     
     // 5. 健康校验（增量备份使用简化校验）
     console.log("Validating backup...");
@@ -314,6 +291,7 @@ async function executeIncrementalBackup(
       .from("backup_metadata")
       .update({
         status: "completed",
+        user_id: backupOwnerId,
         project_count: backupData.projects.length,
         task_count: backupData.tasks.length,
         connection_count: backupData.connections.length,
@@ -528,33 +506,7 @@ async function exportIncrementalData(
     }
   }
   
-  // 导出更新的项目成员
-  const projectMembers: BackupProjectMember[] = [];
-  {
-    let offset = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .from("project_members")
-        .select("*")
-        .range(offset, offset + BATCH_SIZE - 1)
-        .order("id");
-      
-      if (error) {
-        console.warn(`Failed to export project_members: ${error.message}`);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      
-      const filtered = projectIds
-        ? data.filter((r: Record<string, unknown>) => projectIds!.has(r.project_id as string))
-        : data;
-      projectMembers.push(...filtered.map(mapProjectMember));
-      offset += data.length;
-      if (data.length < BATCH_SIZE) break;
-    }
-  }
-  
-  console.log(`Exported incremental extras: ${userPreferences.length} prefs, ${blackBoxEntries.length} black_box, ${projectMembers.length} members`);
+  console.log(`Exported incremental extras: ${userPreferences.length} prefs, ${blackBoxEntries.length} black_box`);
   
   return {
     version: BACKUP_CONFIG.VERSION,
@@ -565,7 +517,6 @@ async function exportIncrementalData(
     connections,
     userPreferences,
     blackBoxEntries,
-    projectMembers,
   };
 }
 
@@ -573,25 +524,38 @@ async function exportIncrementalData(
 // 辅助函数
 // ===========================================
 
-async function getLastBackupTime(supabase: SupabaseClient): Promise<string | null> {
-  // 优先查找最近的增量备份，否则使用全量备份时间
-  const { data } = await supabase
+async function getLastBackupTime(
+  supabase: SupabaseClient,
+  userId?: string
+): Promise<string | null> {
+  let query = supabase
     .from("backup_metadata")
     .select("backup_completed_at")
-    .eq("status", "completed")
+    .eq("status", "completed");
+
+  query = userId ? query.eq("user_id", userId) : query.is("user_id", null);
+
+  const { data } = await query
     .order("backup_completed_at", { ascending: false })
     .limit(1)
     .single();
-  
+
   return data?.backup_completed_at || null;
 }
 
-async function getLatestFullBackupId(supabase: SupabaseClient): Promise<string | null> {
-  const { data } = await supabase
+async function getLatestFullBackupId(
+  supabase: SupabaseClient,
+  userId?: string
+): Promise<string | null> {
+  let query = supabase
     .from("backup_metadata")
     .select("id")
     .eq("type", "full")
-    .eq("status", "completed")
+    .eq("status", "completed");
+
+  query = userId ? query.eq("user_id", userId) : query.is("user_id", null);
+
+  const { data } = await query
     .order("backup_completed_at", { ascending: false })
     .limit(1)
     .single();
@@ -770,16 +734,9 @@ function mapBlackBoxEntry(row: Record<string, unknown>): BackupBlackBoxEntry {
   };
 }
 
-function mapProjectMember(row: Record<string, unknown>): BackupProjectMember {
-  return {
-    id: row.id as string,
-    projectId: row.project_id as string,
-    userId: row.user_id as string,
-    role: row.role as string | undefined,
-    invitedBy: row.invited_by as string | null | undefined,
-    invitedAt: row.invited_at as string | undefined,
-    acceptedAt: row.accepted_at as string | null | undefined,
-  };
+function deriveSingleOwnerId(projects: BackupProject[]): string | null {
+  const ownerIds = Array.from(new Set(projects.map(project => project.userId).filter(Boolean)));
+  return ownerIds.length === 1 ? ownerIds[0] : null;
 }
 
 function jsonResponse(data: unknown, status: number): Response {

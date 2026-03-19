@@ -293,26 +293,4 @@ export class FocusConsoleSyncService {
     this.logger.warn('incrementRoutineCompletion: conflict persists after retry');
     return failure(ErrorCodes.SYNC_CONFLICT, '并发修改冲突');
   }
-
-  async importLegacyDockSnapshot(userId: string): Promise<Result<DockSnapshot | null, OperationError>> {
-    const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
-
-    try {
-      const { data, error } = await client
-        .from('user_preferences')
-        .select('dock_snapshot')
-        .eq('user_id', userId)
-        .maybeSingle();
-      if (error) throw supabaseErrorToError(error);
-      const raw = typeof data === 'object' && data !== null
-        ? (data as Record<string, unknown>).dock_snapshot
-        : undefined;
-      if (!isDockSnapshotLike(raw)) return success(null);
-      return success(raw);
-    } catch (error) {
-      this.logger.warn('importLegacyDockSnapshot failed', error);
-      return failure(ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED, '导入旧版快照失败');
-    }
-  }
 }

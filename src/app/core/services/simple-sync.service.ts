@@ -927,10 +927,6 @@ export class SimpleSyncService {
     return this.focusConsoleSync.incrementRoutineCompletion(mutation);
   }
 
-  async importLegacyDockSnapshot(userId: string): Promise<Result<DockSnapshot | null, OperationError>> {
-    return this.focusConsoleSync.importLegacyDockSnapshot(userId);
-  }
-  
   // ==================== Delta Sync ====================
   
   async checkForDrift(projectId: string): Promise<{ tasks: Task[]; connections: Connection[] }> {

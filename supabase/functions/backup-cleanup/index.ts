@@ -22,7 +22,6 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { BACKUP_CONFIG } from "../_shared/backup-utils.ts";
 
 // ===========================================
 // 配置
@@ -30,6 +29,13 @@ import { BACKUP_CONFIG } from "../_shared/backup-utils.ts";
 
 const BATCH_SIZE = 50; // 每批删除的文件数
 const MAX_DELETIONS_PER_RUN = 500; // 每次运行最多删除的文件数
+const BACKUP_RETENTION = {
+  HOURLY_MAX_AGE_HOURS: 24,
+  DAILY_MAX_AGE_DAYS: 7,
+  DAILY_SAMPLE_HOURS: [0, 6, 12, 18],
+  WEEKLY_MAX_AGE_DAYS: 30,
+  MONTHLY_MAX_AGE_DAYS: 90,
+} as const;
 
 interface CleanupRequest {
   /** 测试模式（不实际删除） */
@@ -241,7 +247,7 @@ function selectBackupsToDelete(
   const sampledKeep: BackupRecord[] = [];
   
   const nowMs = now.getTime();
-  const config = BACKUP_CONFIG.RETENTION;
+  const config = BACKUP_RETENTION;
   
   // 时间边界
   const hourlyBoundary = nowMs - config.HOURLY_MAX_AGE_HOURS * 60 * 60 * 1000;

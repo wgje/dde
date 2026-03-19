@@ -1,3 +1,8 @@
+-- Deprecated in favor of:
+--   supabase/migrations/20260319120000_personal_backend_slimdown.sql
+-- This script documents the legacy rollout and should not be used to
+-- configure production backup schedules for the personal single-user setup.
+--
 -- NanoFlow 备份系统定时任务配置
 -- 版本: 1.1.0
 -- 日期: 2026-02-10

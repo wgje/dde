@@ -23,17 +23,15 @@ import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-
 import {
   BACKUP_CONFIG,
   BackupData,
-  BackupMetadata,
   BackupProject,
   BackupTask,
   BackupConnection,
   BackupUserPreferences,
   BackupBlackBoxEntry,
-  BackupProjectMember,
   validateBackup,
-  encryptData,
   calculateChecksum,
   compressData,
+  encryptData,
   generateBackupPath,
   calculateExpiresAt,
   uint8ArrayToBase64,
@@ -74,37 +72,24 @@ interface BackupResult {
   error?: string;
 }
 
-// ===========================================
-// 告警辅助函数
-// ===========================================
+async function resolveBackupUserId(
+  supabase: SupabaseClient,
+  requestedUserId?: string
+): Promise<string | undefined> {
+  if (requestedUserId) return requestedUserId;
 
-async function sendBackupFailedAlert(
-  supabaseUrl: string,
-  supabaseKey: string,
-  error: string,
-  details?: Record<string, unknown>
-): Promise<void> {
-  try {
-    const response = await fetch(`${supabaseUrl}/functions/v1/backup-alert`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${supabaseKey}`,
-      },
-      body: JSON.stringify({
-        action: 'backup_failed',
-        backupType: 'full',
-        error,
-        details,
-      }),
-    });
-    
-    if (!response.ok) {
-      console.warn('Failed to send backup alert:', await response.text());
-    }
-  } catch (alertError) {
-    console.warn('Failed to send backup alert:', alertError);
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("value")
+    .eq("key", "backup.user_id")
+    .maybeSingle();
+
+  if (error || !data) {
+    return undefined;
   }
+
+  const raw = (data as { value?: unknown }).value;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
 }
 
 // ===========================================
@@ -154,18 +139,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     
   } catch (error) {
     console.error("Backup failed:", error);
-    
-    // 发送告警
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (supabaseUrl && supabaseKey) {
-      await sendBackupFailedAlert(
-        supabaseUrl,
-        supabaseKey,
-        error instanceof Error ? error.message : "Unknown error"
-      );
-    }
-    
+
     return jsonResponse({ 
       success: false, 
       error: error instanceof Error ? error.message : "Unknown error" 
@@ -182,7 +156,8 @@ async function executeFullBackup(
   options: BackupJobRequest,
   startTime: number
 ): Promise<BackupResult> {
-  
+  const effectiveUserId = await resolveBackupUserId(supabase, options.userId);
+
   console.log("Starting full backup...", { options });
   
   // 1. 创建备份元数据记录（状态：in_progress）
@@ -194,7 +169,7 @@ async function executeFullBackup(
     .insert({
       type: "full",
       path: backupPath,
-      user_id: options.userId || null,
+      user_id: effectiveUserId || null,
       status: "in_progress",
       backup_started_at: new Date().toISOString(),
       expires_at: expiresAt.toISOString(),
@@ -216,11 +191,12 @@ async function executeFullBackup(
   try {
     // 2. 导出数据
     console.log("Exporting data...");
-    const backupData = await exportAllData(supabase, options.userId);
+    const backupData = await exportAllData(supabase, effectiveUserId);
+    const backupOwnerId = effectiveUserId || deriveSingleOwnerId(backupData.projects);
     
     // 3. 健康校验
     console.log("Validating backup...");
-    const previousMeta = await getPreviousBackupMeta(supabase);
+    const previousMeta = await getPreviousBackupMeta(supabase, backupOwnerId ?? undefined);
     const validation = validateBackup(backupData, previousMeta);
     
     if (!validation.ok) {
@@ -293,6 +269,7 @@ async function executeFullBackup(
       .from("backup_metadata")
       .update({
         status: "completed",
+        user_id: backupOwnerId,
         project_count: validation.projectCount,
         task_count: validation.taskCount,
         connection_count: validation.connectionCount,
@@ -514,33 +491,6 @@ async function exportAllData(
   }
   console.log(`Exported ${blackBoxEntries.length} black_box_entries`);
   
-  // 导出项目成员关系
-  const projectMembers: BackupProjectMember[] = [];
-  {
-    let offset = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .from("project_members")
-        .select("*")
-        .range(offset, offset + BATCH_SIZE - 1)
-        .order("id");
-      
-      if (error) {
-        console.warn(`Failed to export project_members: ${error.message}`);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      
-      const filtered = userId
-        ? data.filter((r: Record<string, unknown>) => projectIds.has(r.project_id as string))
-        : data;
-      projectMembers.push(...filtered.map(mapProjectMember));
-      offset += data.length;
-      if (data.length < BATCH_SIZE) break;
-    }
-  }
-  console.log(`Exported ${projectMembers.length} project_members`);
-  
   return {
     version: BACKUP_CONFIG.VERSION,
     type: "full",
@@ -550,7 +500,6 @@ async function exportAllData(
     connections,
     userPreferences,
     blackBoxEntries,
-    projectMembers,
   };
 }
 
@@ -639,16 +588,9 @@ function mapBlackBoxEntry(row: Record<string, unknown>): BackupBlackBoxEntry {
   };
 }
 
-function mapProjectMember(row: Record<string, unknown>): BackupProjectMember {
-  return {
-    id: row.id as string,
-    projectId: row.project_id as string,
-    userId: row.user_id as string,
-    role: row.role as string | undefined,
-    invitedBy: row.invited_by as string | null | undefined,
-    invitedAt: row.invited_at as string | undefined,
-    acceptedAt: row.accepted_at as string | null | undefined,
-  };
+function deriveSingleOwnerId(projects: BackupProject[]): string | null {
+  const ownerIds = Array.from(new Set(projects.map(project => project.userId).filter(Boolean)));
+  return ownerIds.length === 1 ? ownerIds[0] : null;
 }
 
 // ===========================================
@@ -656,13 +598,18 @@ function mapProjectMember(row: Record<string, unknown>): BackupProjectMember {
 // ===========================================
 
 async function getPreviousBackupMeta(
-  supabase: SupabaseClient
+  supabase: SupabaseClient,
+  userId?: string
 ): Promise<{ taskCount: number } | null> {
-  const { data, error } = await supabase
+  let query = supabase
     .from("backup_metadata")
     .select("task_count")
     .eq("type", "full")
-    .eq("status", "completed")
+    .eq("status", "completed");
+
+  query = userId ? query.eq("user_id", userId) : query.is("user_id", null);
+
+  const { data, error } = await query
     .order("backup_completed_at", { ascending: false })
     .limit(1)
     .single();

@@ -38,53 +38,214 @@ export type Database = {
         }
         Relationships: []
       }
-      attachment_scans: {
+      backup_encryption_keys: {
         Row: {
-          created_at: string | null
-          engine_version: string | null
-          error_message: string | null
-          file_hash: string | null
-          file_id: string
+          algorithm: string
+          created_at: string
+          deprecated_at: string | null
           id: string
-          scanned_at: string | null
-          scanner: string
-          signature_version: string | null
+          notes: string | null
+          retired_at: string | null
           status: string
-          threat_description: string | null
-          threat_name: string | null
-          updated_at: string | null
         }
         Insert: {
-          created_at?: string | null
-          engine_version?: string | null
-          error_message?: string | null
-          file_hash?: string | null
-          file_id: string
-          id?: string
-          scanned_at?: string | null
-          scanner?: string
-          signature_version?: string | null
+          algorithm?: string
+          created_at?: string
+          deprecated_at?: string | null
+          id: string
+          notes?: string | null
+          retired_at?: string | null
           status?: string
-          threat_description?: string | null
-          threat_name?: string | null
-          updated_at?: string | null
         }
         Update: {
-          created_at?: string | null
-          engine_version?: string | null
-          error_message?: string | null
-          file_hash?: string | null
-          file_id?: string
+          algorithm?: string
+          created_at?: string
+          deprecated_at?: string | null
           id?: string
-          scanned_at?: string | null
-          scanner?: string
-          signature_version?: string | null
+          notes?: string | null
+          retired_at?: string | null
           status?: string
-          threat_description?: string | null
-          threat_name?: string | null
-          updated_at?: string | null
         }
         Relationships: []
+      }
+      backup_metadata: {
+        Row: {
+          attachment_count: number
+          backup_completed_at: string | null
+          backup_started_at: string
+          base_backup_id: string | null
+          black_box_entry_count: number
+          checksum: string
+          checksum_algorithm: string
+          compressed: boolean
+          connection_count: number
+          created_at: string
+          encrypted: boolean
+          encryption_algorithm: string | null
+          encryption_key_id: string | null
+          error_message: string | null
+          expires_at: string | null
+          id: string
+          incremental_since: string | null
+          path: string
+          project_count: number
+          project_member_count: number
+          retention_tier: string | null
+          size_bytes: number
+          status: string
+          task_count: number
+          type: string
+          updated_at: string
+          user_id: string | null
+          user_preferences_count: number
+          validation_passed: boolean
+          validation_warnings: Json | null
+        }
+        Insert: {
+          attachment_count?: number
+          backup_completed_at?: string | null
+          backup_started_at?: string
+          base_backup_id?: string | null
+          black_box_entry_count?: number
+          checksum: string
+          checksum_algorithm?: string
+          compressed?: boolean
+          connection_count?: number
+          created_at?: string
+          encrypted?: boolean
+          encryption_algorithm?: string | null
+          encryption_key_id?: string | null
+          error_message?: string | null
+          expires_at?: string | null
+          id?: string
+          incremental_since?: string | null
+          path: string
+          project_count?: number
+          project_member_count?: number
+          retention_tier?: string | null
+          size_bytes?: number
+          status?: string
+          task_count?: number
+          type: string
+          updated_at?: string
+          user_id?: string | null
+          user_preferences_count?: number
+          validation_passed?: boolean
+          validation_warnings?: Json | null
+        }
+        Update: {
+          attachment_count?: number
+          backup_completed_at?: string | null
+          backup_started_at?: string
+          base_backup_id?: string | null
+          black_box_entry_count?: number
+          checksum?: string
+          checksum_algorithm?: string
+          compressed?: boolean
+          connection_count?: number
+          created_at?: string
+          encrypted?: boolean
+          encryption_algorithm?: string | null
+          encryption_key_id?: string | null
+          error_message?: string | null
+          expires_at?: string | null
+          id?: string
+          incremental_since?: string | null
+          path?: string
+          project_count?: number
+          project_member_count?: number
+          retention_tier?: string | null
+          size_bytes?: number
+          status?: string
+          task_count?: number
+          type?: string
+          updated_at?: string
+          user_id?: string | null
+          user_preferences_count?: number
+          validation_passed?: boolean
+          validation_warnings?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "backup_metadata_base_backup_id_fkey"
+            columns: ["base_backup_id"]
+            isOneToOne: false
+            referencedRelation: "backup_metadata"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      backup_restore_history: {
+        Row: {
+          backup_id: string
+          completed_at: string | null
+          connections_restored: number
+          created_at: string
+          error_message: string | null
+          id: string
+          mode: string
+          pre_restore_snapshot_id: string | null
+          project_id: string | null
+          projects_restored: number
+          scope: string
+          started_at: string
+          status: string
+          tasks_restored: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          backup_id: string
+          completed_at?: string | null
+          connections_restored?: number
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          mode: string
+          pre_restore_snapshot_id?: string | null
+          project_id?: string | null
+          projects_restored?: number
+          scope: string
+          started_at?: string
+          status?: string
+          tasks_restored?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          backup_id?: string
+          completed_at?: string | null
+          connections_restored?: number
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          mode?: string
+          pre_restore_snapshot_id?: string | null
+          project_id?: string | null
+          projects_restored?: number
+          scope?: string
+          started_at?: string
+          status?: string
+          tasks_restored?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "backup_restore_history_backup_id_fkey"
+            columns: ["backup_id"]
+            isOneToOne: false
+            referencedRelation: "backup_metadata"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "backup_restore_history_pre_restore_snapshot_id_fkey"
+            columns: ["pre_restore_snapshot_id"]
+            isOneToOne: false
+            referencedRelation: "backup_metadata"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       black_box_entries: {
         Row: {
@@ -92,12 +253,13 @@ export type Database = {
           created_at: string | null
           date: string
           deleted_at: string | null
+          focus_meta: Json | null
           id: string
-          is_archived: boolean | null
-          is_completed: boolean | null
-          is_read: boolean | null
+          is_archived: boolean
+          is_completed: boolean
+          is_read: boolean
           project_id: string | null
-          snooze_count: number | null
+          snooze_count: number
           snooze_until: string | null
           updated_at: string | null
           user_id: string | null
@@ -107,12 +269,13 @@ export type Database = {
           created_at?: string | null
           date?: string
           deleted_at?: string | null
+          focus_meta?: Json | null
           id: string
-          is_archived?: boolean | null
-          is_completed?: boolean | null
-          is_read?: boolean | null
+          is_archived?: boolean
+          is_completed?: boolean
+          is_read?: boolean
           project_id?: string | null
-          snooze_count?: number | null
+          snooze_count?: number
           snooze_until?: string | null
           updated_at?: string | null
           user_id?: string | null
@@ -122,12 +285,13 @@ export type Database = {
           created_at?: string | null
           date?: string
           deleted_at?: string | null
+          focus_meta?: Json | null
           id?: string
-          is_archived?: boolean | null
-          is_completed?: boolean | null
-          is_read?: boolean | null
+          is_archived?: boolean
+          is_completed?: boolean
+          is_read?: boolean
           project_id?: string | null
-          snooze_count?: number | null
+          snooze_count?: number
           snooze_until?: string | null
           updated_at?: string | null
           user_id?: string | null
@@ -294,43 +458,32 @@ export type Database = {
           },
         ]
       }
-      project_members: {
+      focus_sessions: {
         Row: {
-          accepted_at: string | null
+          ended_at: string | null
           id: string
-          invited_at: string | null
-          invited_by: string | null
-          project_id: string
-          role: string | null
+          session_state: Json
+          started_at: string
+          updated_at: string
           user_id: string
         }
         Insert: {
-          accepted_at?: string | null
-          id?: string
-          invited_at?: string | null
-          invited_by?: string | null
-          project_id: string
-          role?: string | null
+          ended_at?: string | null
+          id: string
+          session_state: Json
+          started_at: string
+          updated_at?: string
           user_id: string
         }
         Update: {
-          accepted_at?: string | null
+          ended_at?: string | null
           id?: string
-          invited_at?: string | null
-          invited_by?: string | null
-          project_id?: string
-          role?: string | null
+          session_state?: Json
+          started_at?: string
+          updated_at?: string
           user_id?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "project_members_project_id_fkey"
-            columns: ["project_id"]
-            isOneToOne: false
-            referencedRelation: "projects"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       projects: {
         Row: {
@@ -386,45 +539,68 @@ export type Database = {
         }
         Relationships: []
       }
-      quarantined_files: {
+      routine_completions: {
         Row: {
-          expires_at: string | null
+          count: number
+          date_key: string
           id: string
-          notes: string | null
-          original_file_id: string
-          quarantined_at: string | null
-          quarantined_by: string | null
-          restored: boolean | null
-          restored_at: string | null
-          storage_path: string
-          threat_description: string | null
-          threat_name: string
+          routine_id: string
+          updated_at: string
+          user_id: string
         }
         Insert: {
-          expires_at?: string | null
-          id?: string
-          notes?: string | null
-          original_file_id: string
-          quarantined_at?: string | null
-          quarantined_by?: string | null
-          restored?: boolean | null
-          restored_at?: string | null
-          storage_path: string
-          threat_description?: string | null
-          threat_name: string
+          count?: number
+          date_key: string
+          id: string
+          routine_id: string
+          updated_at?: string
+          user_id: string
         }
         Update: {
-          expires_at?: string | null
+          count?: number
+          date_key?: string
           id?: string
-          notes?: string | null
-          original_file_id?: string
-          quarantined_at?: string | null
-          quarantined_by?: string | null
-          restored?: boolean | null
-          restored_at?: string | null
-          storage_path?: string
-          threat_description?: string | null
-          threat_name?: string
+          routine_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "routine_completions_routine_id_fkey"
+            columns: ["routine_id"]
+            isOneToOne: false
+            referencedRelation: "routine_tasks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      routine_tasks: {
+        Row: {
+          created_at: string
+          id: string
+          is_enabled: boolean
+          max_times_per_day: number
+          title: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id: string
+          is_enabled?: boolean
+          max_times_per_day?: number
+          title: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_enabled?: boolean
+          max_times_per_day?: number
+          title?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -469,6 +645,7 @@ export type Database = {
           id: string
           order: number | null
           parent_id: string | null
+          parking_meta: Json | null
           priority: string | null
           project_id: string
           rank: number | null
@@ -493,6 +670,7 @@ export type Database = {
           id?: string
           order?: number | null
           parent_id?: string | null
+          parking_meta?: Json | null
           priority?: string | null
           project_id: string
           rank?: number | null
@@ -517,6 +695,7 @@ export type Database = {
           id?: string
           order?: number | null
           parent_id?: string | null
+          parking_meta?: Json | null
           priority?: string | null
           project_id?: string
           rank?: number | null
@@ -583,7 +762,6 @@ export type Database = {
           auto_resolve_conflicts: boolean | null
           color_mode: string | null
           created_at: string | null
-          dock_snapshot: Json | null
           floating_window_pref: string | null
           focus_preferences: Json | null
           id: string
@@ -598,7 +776,6 @@ export type Database = {
           auto_resolve_conflicts?: boolean | null
           color_mode?: string | null
           created_at?: string | null
-          dock_snapshot?: Json | null
           floating_window_pref?: string | null
           focus_preferences?: Json | null
           id?: string
@@ -613,7 +790,6 @@ export type Database = {
           auto_resolve_conflicts?: boolean | null
           color_mode?: string | null
           created_at?: string | null
-          dock_snapshot?: Json | null
           floating_window_pref?: string | null
           focus_preferences?: Json | null
           id?: string
@@ -703,12 +879,10 @@ export type Database = {
       active_tasks: {
         Row: {
           attachments: Json | null
-          cognitive_load: string | null
           content: string | null
           created_at: string | null
           deleted_at: string | null
           due_date: string | null
-          expected_minutes: number | null
           id: string | null
           order: number | null
           parent_id: string | null
@@ -721,18 +895,15 @@ export type Database = {
           tags: Json | null
           title: string | null
           updated_at: string | null
-          wait_minutes: number | null
           x: number | null
           y: number | null
         }
         Insert: {
           attachments?: Json | null
-          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
-          expected_minutes?: number | null
           id?: string | null
           order?: number | null
           parent_id?: string | null
@@ -745,18 +916,15 @@ export type Database = {
           tags?: Json | null
           title?: string | null
           updated_at?: string | null
-          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }
         Update: {
           attachments?: Json | null
-          cognitive_load?: string | null
           content?: string | null
           created_at?: string | null
           deleted_at?: string | null
           due_date?: string | null
-          expected_minutes?: number | null
           id?: string | null
           order?: number | null
           parent_id?: string | null
@@ -769,7 +937,6 @@ export type Database = {
           tags?: Json | null
           title?: string | null
           updated_at?: string | null
-          wait_minutes?: number | null
           x?: number | null
           y?: number | null
         }
@@ -803,8 +970,20 @@ export type Database = {
         Args: { p_attachment: Json; p_task_id: string }
         Returns: boolean
       }
+      apply_backup_schedules: {
+        Args: never
+        Returns: {
+          job_name: string
+          schedule: string
+          status: string
+        }[]
+      }
       batch_upsert_tasks: {
         Args: { p_project_id: string; p_tasks: Json[] }
+        Returns: number
+      }
+      cleanup_cron_job_run_details: {
+        Args: { p_max_age?: string }
         Returns: number
       }
       cleanup_deleted_attachments: {
@@ -814,62 +993,134 @@ export type Database = {
           storage_paths: string[]
         }[]
       }
+      cleanup_expired_backups: {
+        Args: never
+        Returns: {
+          expired_count: number
+          paths_to_delete: string[]
+        }[]
+      }
       cleanup_expired_scan_records: { Args: never; Returns: number }
       cleanup_old_deleted_connections: { Args: never; Returns: number }
       cleanup_old_deleted_tasks: { Args: never; Returns: number }
       cleanup_old_logs: { Args: never; Returns: number }
+      cleanup_personal_retention_artifacts: { Args: never; Returns: Json }
       current_user_id: { Args: never; Returns: string }
-      get_dashboard_stats: { Args: never; Returns: Json }
-      get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
-      get_project_sync_watermark: {
-        Args: { p_project_id: string }
-        Returns: string | null
-      }
       get_accessible_project_probe: {
         Args: { p_project_id: string }
         Returns: {
-          project_id: string
           accessible: boolean
-          watermark: string | null
+          project_id: string
+          watermark: string
         }[]
+      }
+      get_all_projects_data: {
+        Args: { p_since_timestamp?: string }
+        Returns: Json
+      }
+      get_backup_schedule: {
+        Args: { p_default: string; p_key: string }
+        Returns: string
+      }
+      get_backup_stats: {
+        Args: never
+        Returns: {
+          completed_backups: number
+          failed_backups: number
+          latest_full_backup: string
+          latest_incremental_backup: string
+          total_backups: number
+          total_size_bytes: number
+        }[]
+      }
+      get_black_box_sync_watermark: { Args: never; Returns: string }
+      get_dashboard_stats: { Args: never; Returns: Json }
+      get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
+      get_latest_completed_backup: {
+        Args: { backup_type?: string }
+        Returns: {
+          attachment_count: number
+          backup_completed_at: string | null
+          backup_started_at: string
+          base_backup_id: string | null
+          black_box_entry_count: number
+          checksum: string
+          checksum_algorithm: string
+          compressed: boolean
+          connection_count: number
+          created_at: string
+          encrypted: boolean
+          encryption_algorithm: string | null
+          encryption_key_id: string | null
+          error_message: string | null
+          expires_at: string | null
+          id: string
+          incremental_since: string | null
+          path: string
+          project_count: number
+          project_member_count: number
+          retention_tier: string | null
+          size_bytes: number
+          status: string
+          task_count: number
+          type: string
+          updated_at: string
+          user_id: string | null
+          user_preferences_count: number
+          validation_passed: boolean
+          validation_warnings: Json | null
+        }
+        SetofOptions: {
+          from: "*"
+          to: "backup_metadata"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      get_project_sync_watermark: {
+        Args: { p_project_id: string }
+        Returns: string
+      }
+      get_projects_list: {
+        Args: { p_limit?: number; p_offset?: number }
+        Returns: Json
       }
       get_resume_recovery_probe: {
-        Args: { p_project_id?: string | null }
+        Args: { p_project_id?: string }
         Returns: {
-          active_project_id: string | null
           active_accessible: boolean
-          active_watermark: string | null
-          projects_watermark: string | null
-          blackbox_watermark: string | null
-          server_now: string | null
+          active_project_id: string
+          active_watermark: string
+          blackbox_watermark: string
+          projects_watermark: string
+          server_now: string
         }[]
-      }
-      get_black_box_sync_watermark: {
-        Args: never
-        Returns: string | null
-      }
-      get_user_projects_watermark: {
-        Args: never
-        Returns: string | null
       }
       get_server_time: { Args: never; Returns: string }
       get_user_projects_meta: {
         Args: { p_since_timestamp?: string }
         Returns: Json
       }
-      list_project_heads_since: {
-        Args: { p_since?: string | null }
-        Returns: {
-          project_id: string
-          updated_at: string
-          version: number
-        }[]
+      get_user_projects_watermark: { Args: never; Returns: string }
+      get_vault_secret: { Args: { p_name: string }; Returns: string }
+      invoke_internal_edge_function: {
+        Args: { p_body?: Json; p_slug: string }
+        Returns: number
       }
       is_connection_tombstoned: {
         Args: { p_connection_id: string }
         Returns: boolean
       }
       is_task_tombstoned: { Args: { p_task_id: string }; Returns: boolean }
+      list_project_heads_since: {
+        Args: { p_since?: string }
+        Returns: {
+          project_id: string
+          updated_at: string
+          version: number
+        }[]
+      }
+      mark_expired_backups: { Args: never; Returns: number }
       migrate_all_projects_to_v2: {
         Args: never
         Returns: {
@@ -911,6 +1162,10 @@ export type Database = {
         Args: { p_project_id: string; p_task_ids: string[] }
         Returns: number
       }
+      update_backup_schedule: {
+        Args: { p_config_key: string; p_cron_expression: string }
+        Returns: string
+      }
       user_accessible_project_ids: { Args: never; Returns: string[] }
       user_has_project_access: {
         Args: { p_project_id: string }
@@ -929,511 +1184,6 @@ export type Database = {
         purged_count: number | null
         attachment_paths: string[] | null
       }
-    }
-  }
-  storage: {
-    Tables: {
-      buckets: {
-        Row: {
-          allowed_mime_types: string[] | null
-          avif_autodetection: boolean | null
-          created_at: string | null
-          file_size_limit: number | null
-          id: string
-          name: string
-          owner: string | null
-          owner_id: string | null
-          public: boolean | null
-          type: Database["storage"]["Enums"]["buckettype"]
-          updated_at: string | null
-        }
-        Insert: {
-          allowed_mime_types?: string[] | null
-          avif_autodetection?: boolean | null
-          created_at?: string | null
-          file_size_limit?: number | null
-          id: string
-          name: string
-          owner?: string | null
-          owner_id?: string | null
-          public?: boolean | null
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string | null
-        }
-        Update: {
-          allowed_mime_types?: string[] | null
-          avif_autodetection?: boolean | null
-          created_at?: string | null
-          file_size_limit?: number | null
-          id?: string
-          name?: string
-          owner?: string | null
-          owner_id?: string | null
-          public?: boolean | null
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string | null
-        }
-        Relationships: []
-      }
-      buckets_analytics: {
-        Row: {
-          created_at: string
-          deleted_at: string | null
-          format: string
-          id: string
-          name: string
-          type: Database["storage"]["Enums"]["buckettype"]
-          updated_at: string
-        }
-        Insert: {
-          created_at?: string
-          deleted_at?: string | null
-          format?: string
-          id?: string
-          name: string
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string
-        }
-        Update: {
-          created_at?: string
-          deleted_at?: string | null
-          format?: string
-          id?: string
-          name?: string
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string
-        }
-        Relationships: []
-      }
-      buckets_vectors: {
-        Row: {
-          created_at: string
-          id: string
-          type: Database["storage"]["Enums"]["buckettype"]
-          updated_at: string
-        }
-        Insert: {
-          created_at?: string
-          id: string
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string
-        }
-        Update: {
-          created_at?: string
-          id?: string
-          type?: Database["storage"]["Enums"]["buckettype"]
-          updated_at?: string
-        }
-        Relationships: []
-      }
-      migrations: {
-        Row: {
-          executed_at: string | null
-          hash: string
-          id: number
-          name: string
-        }
-        Insert: {
-          executed_at?: string | null
-          hash: string
-          id: number
-          name: string
-        }
-        Update: {
-          executed_at?: string | null
-          hash?: string
-          id?: number
-          name?: string
-        }
-        Relationships: []
-      }
-      objects: {
-        Row: {
-          bucket_id: string | null
-          created_at: string | null
-          id: string
-          last_accessed_at: string | null
-          level: number | null
-          metadata: Json | null
-          name: string | null
-          owner: string | null
-          owner_id: string | null
-          path_tokens: string[] | null
-          updated_at: string | null
-          user_metadata: Json | null
-          version: string | null
-        }
-        Insert: {
-          bucket_id?: string | null
-          created_at?: string | null
-          id?: string
-          last_accessed_at?: string | null
-          level?: number | null
-          metadata?: Json | null
-          name?: string | null
-          owner?: string | null
-          owner_id?: string | null
-          path_tokens?: string[] | null
-          updated_at?: string | null
-          user_metadata?: Json | null
-          version?: string | null
-        }
-        Update: {
-          bucket_id?: string | null
-          created_at?: string | null
-          id?: string
-          last_accessed_at?: string | null
-          level?: number | null
-          metadata?: Json | null
-          name?: string | null
-          owner?: string | null
-          owner_id?: string | null
-          path_tokens?: string[] | null
-          updated_at?: string | null
-          user_metadata?: Json | null
-          version?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "objects_bucketId_fkey"
-            columns: ["bucket_id"]
-            isOneToOne: false
-            referencedRelation: "buckets"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      prefixes: {
-        Row: {
-          bucket_id: string
-          created_at: string | null
-          level: number
-          name: string
-          updated_at: string | null
-        }
-        Insert: {
-          bucket_id: string
-          created_at?: string | null
-          level?: number
-          name: string
-          updated_at?: string | null
-        }
-        Update: {
-          bucket_id?: string
-          created_at?: string | null
-          level?: number
-          name?: string
-          updated_at?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "prefixes_bucketId_fkey"
-            columns: ["bucket_id"]
-            isOneToOne: false
-            referencedRelation: "buckets"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      s3_multipart_uploads: {
-        Row: {
-          bucket_id: string
-          created_at: string
-          id: string
-          in_progress_size: number
-          key: string
-          owner_id: string | null
-          upload_signature: string
-          user_metadata: Json | null
-          version: string
-        }
-        Insert: {
-          bucket_id: string
-          created_at?: string
-          id: string
-          in_progress_size?: number
-          key: string
-          owner_id?: string | null
-          upload_signature: string
-          user_metadata?: Json | null
-          version: string
-        }
-        Update: {
-          bucket_id?: string
-          created_at?: string
-          id?: string
-          in_progress_size?: number
-          key?: string
-          owner_id?: string | null
-          upload_signature?: string
-          user_metadata?: Json | null
-          version?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "s3_multipart_uploads_bucket_id_fkey"
-            columns: ["bucket_id"]
-            isOneToOne: false
-            referencedRelation: "buckets"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      s3_multipart_uploads_parts: {
-        Row: {
-          bucket_id: string
-          created_at: string
-          etag: string
-          id: string
-          key: string
-          owner_id: string | null
-          part_number: number
-          size: number
-          upload_id: string
-          version: string
-        }
-        Insert: {
-          bucket_id: string
-          created_at?: string
-          etag: string
-          id?: string
-          key: string
-          owner_id?: string | null
-          part_number: number
-          size?: number
-          upload_id: string
-          version: string
-        }
-        Update: {
-          bucket_id?: string
-          created_at?: string
-          etag?: string
-          id?: string
-          key?: string
-          owner_id?: string | null
-          part_number?: number
-          size?: number
-          upload_id?: string
-          version?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "s3_multipart_uploads_parts_bucket_id_fkey"
-            columns: ["bucket_id"]
-            isOneToOne: false
-            referencedRelation: "buckets"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "s3_multipart_uploads_parts_upload_id_fkey"
-            columns: ["upload_id"]
-            isOneToOne: false
-            referencedRelation: "s3_multipart_uploads"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      vector_indexes: {
-        Row: {
-          bucket_id: string
-          created_at: string
-          data_type: string
-          dimension: number
-          distance_metric: string
-          id: string
-          metadata_configuration: Json | null
-          name: string
-          updated_at: string
-        }
-        Insert: {
-          bucket_id: string
-          created_at?: string
-          data_type: string
-          dimension: number
-          distance_metric: string
-          id?: string
-          metadata_configuration?: Json | null
-          name: string
-          updated_at?: string
-        }
-        Update: {
-          bucket_id?: string
-          created_at?: string
-          data_type?: string
-          dimension?: number
-          distance_metric?: string
-          id?: string
-          metadata_configuration?: Json | null
-          name?: string
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "vector_indexes_bucket_id_fkey"
-            columns: ["bucket_id"]
-            isOneToOne: false
-            referencedRelation: "buckets_vectors"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-    }
-    Views: {
-      [_ in never]: never
-    }
-    Functions: {
-      add_prefixes: {
-        Args: { _bucket_id: string; _name: string }
-        Returns: undefined
-      }
-      can_insert_object: {
-        Args: { bucketid: string; metadata: Json; name: string; owner: string }
-        Returns: undefined
-      }
-      delete_leaf_prefixes: {
-        Args: { bucket_ids: string[]; names: string[] }
-        Returns: undefined
-      }
-      delete_prefix: {
-        Args: { _bucket_id: string; _name: string }
-        Returns: boolean
-      }
-      extension: { Args: { name: string }; Returns: string }
-      filename: { Args: { name: string }; Returns: string }
-      foldername: { Args: { name: string }; Returns: string[] }
-      get_level: { Args: { name: string }; Returns: number }
-      get_prefix: { Args: { name: string }; Returns: string }
-      get_prefixes: { Args: { name: string }; Returns: string[] }
-      get_size_by_bucket: {
-        Args: never
-        Returns: {
-          bucket_id: string
-          size: number
-        }[]
-      }
-      list_multipart_uploads_with_delimiter: {
-        Args: {
-          bucket_id: string
-          delimiter_param: string
-          max_keys?: number
-          next_key_token?: string
-          next_upload_token?: string
-          prefix_param: string
-        }
-        Returns: {
-          created_at: string
-          id: string
-          key: string
-        }[]
-      }
-      list_objects_with_delimiter: {
-        Args: {
-          bucket_id: string
-          delimiter_param: string
-          max_keys?: number
-          next_token?: string
-          prefix_param: string
-          start_after?: string
-        }
-        Returns: {
-          id: string
-          metadata: Json
-          name: string
-          updated_at: string
-        }[]
-      }
-      lock_top_prefixes: {
-        Args: { bucket_ids: string[]; names: string[] }
-        Returns: undefined
-      }
-      operation: { Args: never; Returns: string }
-      search: {
-        Args: {
-          bucketname: string
-          levels?: number
-          limits?: number
-          offsets?: number
-          prefix: string
-          search?: string
-          sortcolumn?: string
-          sortorder?: string
-        }
-        Returns: {
-          created_at: string
-          id: string
-          last_accessed_at: string
-          metadata: Json
-          name: string
-          updated_at: string
-        }[]
-      }
-      search_legacy_v1: {
-        Args: {
-          bucketname: string
-          levels?: number
-          limits?: number
-          offsets?: number
-          prefix: string
-          search?: string
-          sortcolumn?: string
-          sortorder?: string
-        }
-        Returns: {
-          created_at: string
-          id: string
-          last_accessed_at: string
-          metadata: Json
-          name: string
-          updated_at: string
-        }[]
-      }
-      search_v1_optimised: {
-        Args: {
-          bucketname: string
-          levels?: number
-          limits?: number
-          offsets?: number
-          prefix: string
-          search?: string
-          sortcolumn?: string
-          sortorder?: string
-        }
-        Returns: {
-          created_at: string
-          id: string
-          last_accessed_at: string
-          metadata: Json
-          name: string
-          updated_at: string
-        }[]
-      }
-      search_v2: {
-        Args: {
-          bucket_name: string
-          levels?: number
-          limits?: number
-          prefix: string
-          sort_column?: string
-          sort_column_after?: string
-          sort_order?: string
-          start_after?: string
-        }
-        Returns: {
-          created_at: string
-          id: string
-          key: string
-          last_accessed_at: string
-          metadata: Json
-          name: string
-          updated_at: string
-        }[]
-      }
-    }
-    Enums: {
-      buckettype: "STANDARD" | "ANALYTICS" | "VECTOR"
-    }
-    CompositeTypes: {
-      [_ in never]: never
     }
   }
 }
@@ -1558,10 +1308,5 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {},
-  },
-  storage: {
-    Enums: {
-      buckettype: ["STANDARD", "ANALYTICS", "VECTOR"],
-    },
   },
 } as const
