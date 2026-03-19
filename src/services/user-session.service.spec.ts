@@ -324,6 +324,17 @@ describe('UserSessionService', () => {
       expect(localStorage.getItem('nanoflow.preference.user-123.layout')).toBeNull();
       expect(localStorage.getItem('nanoflow.preference.user-999.theme')).toBe('forest');
     });
+
+    it('应清理 focus_mode IndexedDB 缓存', async () => {
+      const clearIndexedDBSpy = vi.spyOn(
+        service as unknown as { clearIndexedDB: (dbName: string) => Promise<void> },
+        'clearIndexedDB'
+      );
+
+      await service.clearAllLocalData();
+
+      expect(clearIndexedDBSpy).toHaveBeenCalledWith('focus_mode');
+    });
   });
 
   describe('DestroyRef cleanup', () => {

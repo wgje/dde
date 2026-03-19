@@ -19,6 +19,7 @@ import { GateService } from './gate.service';
 import { ContextRestoreService } from './context-restore.service';
 import { ProjectDataService } from '../core-bridge';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { AuthService } from './auth.service';
 
 describe('ParkingService', () => {
   let service: ParkingService;
@@ -125,6 +126,12 @@ describe('ParkingService', () => {
     restore: vi.fn(),
   };
 
+  const currentUserIdSignal = signal<string | null>(null);
+
+  const mockAuthService = {
+    currentUserId: currentUserIdSignal,
+  };
+
   const mockProjectDataService = {
     loadParkedTasksCache: vi.fn(async () => ({ entries: [], cursor: null })),
     pullParkedTasksDelta: vi.fn(async () => ({ entries: [], removedTaskIds: [], nextCursor: null })),
@@ -139,6 +146,8 @@ describe('ParkingService', () => {
     parkedTasksSignal.set([]);
     parkedTaskIdsSignal.set(new Set());
     mockGateService.isActive.set(false);
+    currentUserIdSignal.set(null);
+    localStorage.removeItem('nanoflow-local-mode');
     vi.clearAllMocks();
 
     TestBed.configureTestingModule({
@@ -154,6 +163,7 @@ describe('ParkingService', () => {
         { provide: GateService, useValue: mockGateService },
         { provide: ContextRestoreService, useValue: mockContextRestoreService },
         { provide: ProjectDataService, useValue: mockProjectDataService },
+        { provide: AuthService, useValue: mockAuthService },
       ],
     });
 
@@ -400,6 +410,23 @@ describe('ParkingService', () => {
       expect(taskMap.get('offline-1')?.parkingMeta).toBeTruthy();
       expect(service.pendingNotices().length).toBe(0);
       onlineSpy.mockRestore();
+    });
+  });
+
+  describe('停泊轻量同步鉴权保护', () => {
+    it('访客态初始化时不应触发停泊任务云端拉取', async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
+    });
+
+    it('登录后手动增量同步应恢复云端拉取', async () => {
+      currentUserIdSignal.set('user-1');
+
+      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
+
+      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
     });
   });
 

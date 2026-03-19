@@ -12,6 +12,7 @@ import { SupabaseClientService } from './supabase-client.service';
 import { Project, Task, Connection } from '../models';
 import { CACHE_CONFIG, SYNC_CONFIG } from '../config/sync.config';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { FOCUS_CONFIG } from '../config/focus.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
@@ -257,6 +258,7 @@ export class UserSessionService {
     // 4. 清理 IndexedDB
     await this.clearIndexedDB('nanoflow-db');
     await this.clearIndexedDB('nanoflow-queue-backup');
+    await this.clearIndexedDB(FOCUS_CONFIG.SYNC.IDB_NAME);
     
     // 5. 【P3-12 修复】清理 Supabase auth token
     try {

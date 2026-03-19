@@ -29,6 +29,8 @@ import { BeforeUnloadManagerService } from './before-unload-manager.service';
 import { StartupTierOrchestratorService } from './startup-tier-orchestrator.service';
 import { GateService } from './gate.service';
 import { ContextRestoreService } from './context-restore.service';
+import { AuthService } from './auth.service';
+import { isLocalModeEnabled } from './guards/auth.guard';
 import { spotlightMode } from '../state/focus-stores';
 import { ProjectDataService } from '../core-bridge';
 
@@ -55,6 +57,7 @@ export class ParkingService implements OnDestroy {
   private readonly gateService = inject(GateService);
   private readonly contextRestoreService = inject(ContextRestoreService);
   private readonly projectDataService = inject(ProjectDataService);
+  private readonly authService = inject(AuthService);
 
   // ─── 内部状态 ───
   /** 衰老清理 token Map（仅内存，不持久化） */
@@ -410,6 +413,7 @@ export class ParkingService implements OnDestroy {
   private async syncParkedDelta(): Promise<void> {
     // M-24 fix: 离线时跳过增量拉取，避免不必要的网络错误
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    if (!this.authService.currentUserId() || isLocalModeEnabled()) return;
 
     const knownParkedTaskIds = Array.from(this.taskStore.parkedTaskIds());
     const delta = await this.projectDataService.pullParkedTasksDelta(this.parkedCursor, knownParkedTaskIds);

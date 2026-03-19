@@ -9,7 +9,7 @@ import { LoggerService } from '../../../services/logger.service';
 import { OptimisticStateService } from '../../../services/optimistic-state.service';
 import { UndoService } from '../../../services/undo.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
-import { getErrorMessage, isFailure, humanizeErrorMessage } from '../../../utils/result';
+import { getErrorMessage, isFailure, humanizeErrorMessage, type OperationError } from '../../../utils/result';
 import { AUTH_CONFIG } from '../../../config/auth.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { AttachmentService } from '../../../services/attachment.service';
@@ -140,6 +140,11 @@ export class AppAuthCoordinatorService {
     }
   }
 
+  private getAuthFailureMessage(error: OperationError): string {
+    const message = error.message?.trim();
+    return message || getErrorMessage(error);
+  }
+
   private async bootstrapSession(): Promise<void> {
     if (this.bootstrapInFlight) {
       this.logger.debug('[Bootstrap] 已在执行中，跳过重复调用');
@@ -244,7 +249,7 @@ export class AppAuthCoordinatorService {
     try {
       const result = await this.auth.signIn(this.authEmail(), this.authPassword());
       if (isFailure(result)) {
-        throw new Error(getErrorMessage(result.error));
+        throw new Error(this.getAuthFailureMessage(result.error));
       }
       disableLocalMode();
       this.sessionEmail.set(this.auth.sessionEmail());
@@ -306,7 +311,7 @@ export class AppAuthCoordinatorService {
     try {
       const result = await this.auth.signUp(this.authEmail(), this.authPassword());
       if (isFailure(result)) {
-        throw new Error(getErrorMessage(result.error));
+        throw new Error(this.getAuthFailureMessage(result.error));
       }
       if (result.value.needsConfirmation) {
         this.authError.set('注册成功！请查收邮件并点击验证链接完成注册。');
@@ -347,7 +352,7 @@ export class AppAuthCoordinatorService {
     try {
       const result = await this.auth.resetPassword(this.authEmail());
       if (isFailure(result)) {
-        throw new Error(getErrorMessage(result.error));
+        throw new Error(this.getAuthFailureMessage(result.error));
       }
       this.resetPasswordSent.set(true);
     } catch (e: unknown) {
