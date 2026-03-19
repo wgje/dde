@@ -41,21 +41,48 @@ async function isVisible(
   return page.locator(selector).isVisible({ timeout: timeoutMs }).catch(() => false);
 }
 
+async function tryOpenLoginModal(page: Page, selector: string): Promise<void> {
+  const trigger = page.locator(selector);
+  const isVisibleTrigger = await trigger.isVisible({ timeout: 1000 }).catch(() => false);
+  if (!isVisibleTrigger) {
+    return;
+  }
+
+  const isEnabledTrigger = await trigger.isEnabled().catch(() => false);
+  if (!isEnabledTrigger) {
+    return;
+  }
+
+  try {
+    await trigger.click({ timeout: 2000 });
+  } catch {
+    // 登录模态框可能正由 Guard 自动拉起，此时忽略触发器点击失败。
+  }
+}
+
 export async function ensureLoginModalVisible(
   page: Page,
   modalTimeoutMs = DEFAULT_OPTIONS.modalTimeoutMs
 ): Promise<void> {
-  if (await isVisible(page, '[data-testid="login-modal"]', 800)) {
+  const loginModal = page.locator('[data-testid="login-modal"]');
+  if (await loginModal.isVisible({ timeout: 800 }).catch(() => false)) {
     return;
   }
 
-  if (await isVisible(page, '[data-testid="login-btn"]', 2000)) {
-    await page.click('[data-testid="login-btn"]');
-  } else if (await isVisible(page, 'button:has-text("登录账号")', 2000)) {
-    await page.click('button:has-text("登录账号")');
+  const guardOpenedModal = await loginModal
+    .waitFor({ state: 'visible', timeout: 1500 })
+    .then(() => true)
+    .catch(() => false);
+  if (guardOpenedModal) {
+    return;
   }
 
-  await page.locator('[data-testid="login-modal"]').waitFor({
+  await tryOpenLoginModal(page, '[data-testid="login-btn"]');
+  if (!(await loginModal.isVisible({ timeout: 300 }).catch(() => false))) {
+    await tryOpenLoginModal(page, 'button:has-text("登录账号")');
+  }
+
+  await loginModal.waitFor({
     state: 'visible',
     timeout: modalTimeoutMs,
   });

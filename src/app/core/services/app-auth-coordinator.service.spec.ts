@@ -281,6 +281,21 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
 
     expect(routerMock.navigateByUrl).not.toHaveBeenCalled();
   });
+
+  it('should preserve the auth service login error message', async () => {
+    const { service, authMock } = setup();
+    authMock.signIn.mockResolvedValue({
+      ok: false,
+      error: { code: 'SYNC_AUTH_EXPIRED', message: '用户名或密码错误' },
+    });
+
+    service.authEmail.set('wrong@example.com');
+    service.authPassword.set('bad-password');
+
+    await service.handleLogin();
+
+    expect(service.authError()).toBe('用户名或密码错误');
+  });
 });
 
 describe('handleSignup timeout protection', () => {
@@ -382,5 +397,41 @@ describe('handleSignup timeout protection', () => {
 
     expect(authMock.signUp).not.toHaveBeenCalled();
     expect(service.authError()).toBe('密码长度至少8位');
+  });
+
+  it('should preserve the auth service signup error message', async () => {
+    const { service, authMock } = setup();
+    authMock.signUp.mockResolvedValue({
+      ok: false,
+      error: { code: 'UNKNOWN', message: '该邮箱已被注册' },
+    });
+
+    service.authEmail.set('existing@example.com');
+    service.authPassword.set('password123');
+    service.authConfirmPassword.set('password123');
+
+    await service.handleSignup();
+
+    expect(service.authError()).toBe('该邮箱已被注册');
+  });
+});
+
+describe('handleResetPassword error propagation', () => {
+  beforeEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('should preserve the auth service reset password error message', async () => {
+    const { service, authMock } = setup();
+    authMock.resetPassword.mockResolvedValue({
+      ok: false,
+      error: { code: 'UNKNOWN', message: '邮箱格式不正确或未验证' },
+    });
+
+    service.authEmail.set('invalid-email');
+
+    await service.handleResetPassword();
+
+    expect(service.authError()).toBe('邮箱格式不正确或未验证');
   });
 });
