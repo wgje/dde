@@ -17,7 +17,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
   template: `
     <article 
       [attr.data-stage-number]="stage().stageNumber"
-      class="text-stage-card flex flex-col bg-retro-cream/70 dark:bg-stone-800/70 backdrop-blur border border-retro-muted/20 dark:border-stone-700/50 rounded-xl shadow-sm overflow-visible transition-all flex-shrink-0"
+      class="text-stage-card flex flex-col min-w-0 bg-retro-cream/70 dark:bg-stone-800/70 backdrop-blur border border-retro-muted/20 dark:border-stone-700/50 rounded-xl shadow-sm overflow-visible transition-all flex-shrink-0"
       [ngClass]="{
         'rounded-2xl': !isMobile(), 
         'w-full': isMobile(),

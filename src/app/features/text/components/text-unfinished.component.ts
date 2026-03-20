@@ -16,7 +16,7 @@ import { UnfinishedItem } from './text-view.types';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section 
-      class="flex-none mt-2 px-2 pb-1 rounded-xl bg-retro-rust/10 dark:bg-retro-rust/5 border border-retro-rust/30 dark:border-retro-rust/20 transition-all"
+      class="flex-none min-w-0 mt-2 px-2 pb-1 rounded-xl bg-retro-rust/10 dark:bg-retro-rust/5 border border-retro-rust/30 dark:border-retro-rust/20 transition-all"
       [ngClass]="{'mx-4 mt-4': !isMobile(), 'mx-2': isMobile()}">
       
       <header 

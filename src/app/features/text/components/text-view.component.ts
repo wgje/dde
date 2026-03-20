@@ -37,7 +37,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
   providers: [TextViewTaskOpsService],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div #scrollContainer class="flex flex-col h-full theme-bg overflow-y-auto overflow-x-hidden text-view-scroll-container"
+    <div #scrollContainer class="flex flex-col h-full min-w-0 theme-bg overflow-y-auto overflow-x-hidden text-view-scroll-container"
          (click)="ops.onContainerClick($event)"
          (touchmove)="onGlobalTouchMove($event)"
          (touchend)="onGlobalTouchEnd($event)"

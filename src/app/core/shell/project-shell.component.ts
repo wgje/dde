@@ -135,7 +135,8 @@ interface NetworkInformationLike {
           [style.visibility]="dockTakeoverMainVisibility()"
           [attr.aria-hidden]="dockTakeoverMainHidden() ? 'true' : null">
         <!-- Text Column - 允许滑动手势切换 -->
-        <div class="flex flex-col min-h-0 overflow-hidden"
+        <!-- min-w-0 确保文本栏可被正确压缩 -->
+        <div class="flex flex-col min-h-0 min-w-0 overflow-hidden"
              [class.transition-all]="!uiState.isResizing() || collapseAnimating()"
              [class.duration-300]="!uiState.isResizing() || collapseAnimating()"
              [class.ease-in-out]="!uiState.isResizing() || collapseAnimating()" 
@@ -157,7 +158,8 @@ interface NetworkInformationLike {
              (touchend)="onTextViewTouchEnd($event)">
           
           <!-- 内容包装：折叠时立即隐藏内容，避免窄宽度下内容崩坏 -->
-          <div class="text-col-inner flex flex-col flex-1 min-h-0"
+          <!-- min-w-0 关键：允许 flex 容器在父容器压缩时正确收缩，防止内容撑宽导致布局崩坏 -->
+          <div class="text-col-inner flex flex-col flex-1 min-h-0 min-w-0"
                [class.text-col-inner--hidden]="!uiState.isMobile() && uiState.isTextColumnCollapsed()">
           <!-- Header for Text Column -->
           <div class="shrink-0 z-10"
@@ -310,14 +312,14 @@ interface NetworkInformationLike {
 
         <!-- 文本栏折叠时：一条细分界线 + 居中小箭头按钮 -->
         @if (!uiState.isMobile() && uiState.isTextColumnCollapsed()) {
-          <div class="w-px flex-shrink-0 relative z-20 group"
+          <div class="w-px flex-shrink-0 relative z-50 group"
                style="background-color: var(--theme-border);">
-            <!-- 居中非实心箭头按钮 -->
+            <!-- 居中非实心箭头按钮，z-50 确保按钮浮于 flow-palette(z-40) 之上 -->
             <button (click)="expandTextColumnToMin()"
                     class="absolute top-1/3 -translate-y-1/2 -right-3 w-6 h-8 flex items-center justify-center rounded-r-md
                            bg-white dark:bg-stone-800 border border-l-0 border-stone-200 dark:border-stone-700
                            hover:bg-stone-50 dark:hover:bg-stone-700 hover:border-stone-300 dark:hover:border-stone-600
-                           shadow-sm cursor-pointer transition-colors z-30"
+                           shadow-sm cursor-pointer transition-colors"
                     aria-label="展开文本栏"
                     title="展开文本栏">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-stone-400 dark:text-stone-500 group-hover:text-stone-600 dark:group-hover:text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

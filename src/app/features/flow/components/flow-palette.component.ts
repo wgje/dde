@@ -86,13 +86,30 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
       from { transform: translateY(100%); opacity: 0; }
       to { transform: translateY(0); opacity: 1; }
     }
+
+    /* Resize 边界线 */
+    .resize-handle {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      cursor: col-resize;
+      z-index: 10;
+      transition: background-color 0.15s ease;
+    }
+    .resize-handle:hover,
+    .resize-handle.resizing {
+      @apply bg-indigo-400/50;
+    }
   `],
   template: `
     <div
       class="sidebar-container"
-      [style.width]="isOpen() ? expandedWidth : '0px'"
+      [style.width]="isOpen() ? sidebarWidth() + 'px' : '0px'"
       [class.w-0]="!isOpen()"
-      [class.opacity-0]="!isOpen()">
+      [class.opacity-0]="!isOpen()"
+      [class.transition-none]="isResizing()">>
 
       <!-- 侧边栏内容 -->
       <div class="flex-1 flex flex-col w-full h-full min-w-[320px]">
@@ -289,6 +306,14 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
         </div>
 
       </div>
+
+      <!-- Resize handle：可拖拽调整宽度的边界线 -->
+      <div 
+        class="resize-handle"
+        [class.resizing]="isResizing()"
+        (mousedown)="onResizeStart($event)"
+        (touchstart)="onResizeTouchStart($event)">
+      </div>
     </div>
     
     <!-- 折叠切换按钮 (悬浮在侧边栏边缘) -->
@@ -363,7 +388,18 @@ export class FlowPaletteComponent implements OnDestroy {
   // 与 FlowToolbar 保持一致，但侧边栏默认展开
   readonly isOpenChange = output<boolean>();
 
-  readonly expandedWidth = '360px'; // 固定宽度，不再使用 clamp 的弹性宽度，保持一致性
+  /** 侧边栏宽度限制：最小 280px，最大 600px */
+  private readonly MIN_WIDTH = 280;
+  private readonly MAX_WIDTH = 600;
+  private readonly DEFAULT_WIDTH = 360;
+
+  /** 可调整的侧边栏宽度 */
+  readonly sidebarWidth = signal(this.DEFAULT_WIDTH);
+  /** 是否正在拖拽调整宽度 */
+  readonly isResizing = signal(false);
+
+  /** 保留兼容（暂不移除），实际使用 sidebarWidth() */
+  readonly expandedWidth = '360px';
 
   readonly livingTasks = computed(() => this.projectState.tasks().filter(task => !task.deletedAt));
   readonly totalTaskCount = computed(() => this.livingTasks().length);
@@ -478,7 +514,22 @@ export class FlowPaletteComponent implements OnDestroy {
 
   private sectionFocusTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Resize 状态：起始宽度和起始鼠标位置 */
+  private resizeState = {
+    startWidth: 0,
+    startX: 0,
+  };
+
+  /** 绑定的 resize 事件处理器，用于移除监听 */
+  private boundResizeMove = this.onResizeMove.bind(this);
+  private boundResizeEnd = this.onResizeEnd.bind(this);
+  private boundResizeTouchMove = this.onResizeTouchMove.bind(this);
+  private boundResizeTouchEnd = this.onResizeTouchEnd.bind(this);
+
   ngOnDestroy() {
+    // 清理 resize 监听
+    this.cleanupResizeListeners();
+
     if (this.touchState.longPressTimer) {
       clearTimeout(this.touchState.longPressTimer);
       this.touchState.longPressTimer = null;
@@ -493,6 +544,75 @@ export class FlowPaletteComponent implements OnDestroy {
       clearTimeout(this.sectionFocusTimer);
       this.sectionFocusTimer = null;
     }
+  }
+
+  // ============ Resize 宽度调整逻辑 ============
+
+  /** 鼠标按下开始 resize */
+  onResizeStart(event: MouseEvent) {
+    event.preventDefault();
+    this.resizeState.startWidth = this.sidebarWidth();
+    this.resizeState.startX = event.clientX;
+    this.isResizing.set(true);
+
+    document.addEventListener('mousemove', this.boundResizeMove);
+    document.addEventListener('mouseup', this.boundResizeEnd);
+  }
+
+  /** 鼠标移动中调整宽度 */
+  private onResizeMove(event: MouseEvent) {
+    if (!this.isResizing()) return;
+    const delta = event.clientX - this.resizeState.startX;
+    const newWidth = Math.max(this.MIN_WIDTH, Math.min(this.MAX_WIDTH, this.resizeState.startWidth + delta));
+    this.sidebarWidth.set(newWidth);
+  }
+
+  /** 鼠标释放结束 resize */
+  private onResizeEnd() {
+    this.isResizing.set(false);
+    document.removeEventListener('mousemove', this.boundResizeMove);
+    document.removeEventListener('mouseup', this.boundResizeEnd);
+  }
+
+  /** 触摸开始 resize */
+  onResizeTouchStart(event: TouchEvent) {
+    if (event.touches.length !== 1) return;
+    event.preventDefault();
+    const touch = event.touches[0];
+    this.resizeState.startWidth = this.sidebarWidth();
+    this.resizeState.startX = touch.clientX;
+    this.isResizing.set(true);
+
+    document.addEventListener('touchmove', this.boundResizeTouchMove, { passive: false });
+    document.addEventListener('touchend', this.boundResizeTouchEnd);
+    document.addEventListener('touchcancel', this.boundResizeTouchEnd);
+  }
+
+  /** 触摸移动中调整宽度 */
+  private onResizeTouchMove(event: TouchEvent) {
+    if (!this.isResizing() || event.touches.length !== 1) return;
+    event.preventDefault();
+    const touch = event.touches[0];
+    const delta = touch.clientX - this.resizeState.startX;
+    const newWidth = Math.max(this.MIN_WIDTH, Math.min(this.MAX_WIDTH, this.resizeState.startWidth + delta));
+    this.sidebarWidth.set(newWidth);
+  }
+
+  /** 触摸结束 resize */
+  private onResizeTouchEnd() {
+    this.isResizing.set(false);
+    document.removeEventListener('touchmove', this.boundResizeTouchMove);
+    document.removeEventListener('touchend', this.boundResizeTouchEnd);
+    document.removeEventListener('touchcancel', this.boundResizeTouchEnd);
+  }
+
+  /** 清理 resize 监听器 */
+  private cleanupResizeListeners() {
+    document.removeEventListener('mousemove', this.boundResizeMove);
+    document.removeEventListener('mouseup', this.boundResizeEnd);
+    document.removeEventListener('touchmove', this.boundResizeTouchMove);
+    document.removeEventListener('touchend', this.boundResizeTouchEnd);
+    document.removeEventListener('touchcancel', this.boundResizeTouchEnd);
   }
 
   // 拖动事件

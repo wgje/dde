@@ -23,7 +23,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section 
-      class="flex-none transition-all duration-300 overflow-hidden"
+      class="flex-none min-w-0 transition-all duration-300 overflow-hidden"
       [ngClass]="{'mx-4 mt-2 mb-4 max-h-[1000px]': !isMobile() && uiState.isTextSidebarVisible(), 'mx-2 mt-1 mb-2 max-h-[1000px]': isMobile() && uiState.isTextSidebarVisible(), 'max-h-0 opacity-0 m-0 p-0 border-none pointer-events-none': !uiState.isTextSidebarVisible()}">
       
       <div class="px-2 pb-1 rounded-xl bg-retro-teal/10 dark:bg-retro-teal/5 border border-retro-teal/30 dark:border-retro-teal/20">

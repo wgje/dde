@@ -795,12 +795,21 @@ export class RetryQueueService {
 
     this.isProcessingQueue = true;
     this.lastProcessTime = Date.now();
-
-    try {
-      this.operationHandler.onProcessingStateChange(true, this.queue.length);
-    } catch (error) {
-      this.logger.warn('onProcessingStateChange(true) 回调失败，继续处理队列', error);
-    }
+    
+    // 【2026-03-20 优化】延迟设置 isSyncing 状态
+    // 只有当实际发起网络请求时才设置 isSyncing = true，避免空转检查导致 UI 频繁闪烁
+    let hasNotifiedSyncStart = false;
+    
+    const notifySyncStartOnce = () => {
+      if (!hasNotifiedSyncStart && this.operationHandler) {
+        hasNotifiedSyncStart = true;
+        try {
+          this.operationHandler.onProcessingStateChange(true, this.queue.length);
+        } catch (error) {
+          this.logger.warn('onProcessingStateChange(true) 回调失败', error);
+        }
+      }
+    };
 
     try {
       const sortedItems = [...this.queue].sort((a, b) => {
@@ -848,6 +857,9 @@ export class RetryQueueService {
           processedIds.add(item.id);
           continue;
         }
+
+        // 【2026-03-20 优化】首次实际处理项目时才通知 UI 进入同步状态
+        notifySyncStartOnce();
 
         let success = false;
         try {
@@ -936,10 +948,14 @@ export class RetryQueueService {
       };
     } finally {
       this.isProcessingQueue = false;
-      try {
-        this.operationHandler.onProcessingStateChange(false, this.queue.length);
-      } catch (error) {
-        this.logger.warn('onProcessingStateChange(false) 回调失败', error);
+      // 【2026-03-20 优化】只有在实际通知了同步开始时才通知同步结束
+      // 避免未发起任何网络请求的空转也触发状态切换
+      if (hasNotifiedSyncStart) {
+        try {
+          this.operationHandler.onProcessingStateChange(false, this.queue.length);
+        } catch (error) {
+          this.logger.warn('onProcessingStateChange(false) 回调失败', error);
+        }
       }
     }
   }
