@@ -1,10 +1,16 @@
 -- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 6.2.0
--- 最后验证: 2026-03-18（MCP 最终优化）
+-- 版本: 6.3.0
+-- 最后验证: 2026-03-20（个人版后端瘦身 + 备份重建）
 --
 -- 更新日志：
+--   6.3.0 (2026-03-20): 个人版后端收口：
+--                       - project_members / attachment_scans / quarantined_files 最终移除
+--                       - user_preferences.dock_snapshot 最终移除
+--                       - owner-only project access 函数与 projects 策略重写
+--                       - 备份调度改为 Vault + pg_net helper
+--                       - 新增 backup.user_id 配置、cron 日志清理、个人数据保留清理
 --   6.2.0 (2026-03-18): MCP Supabase Advisor 最终优化 + 架构修正：
 --                       【根本发现】应用 100% 使用软删除（UPDATE deleted_at），而不是物理 DELETE
 --                              → FK 索引对应的级联删除约束检查永未执行
@@ -3404,24 +3410,16 @@ BEGIN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 单用户 owner-only 模型（project_members 已移除）
   IF NOT EXISTS (
     SELECT 1
     FROM public.projects p
     WHERE p.id = p_project_id
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1
-          FROM public.project_members pm
-          WHERE pm.project_id = p_project_id
-            AND pm.user_id = v_user_id
-        )
-      )
+      AND p.owner_id = v_user_id
   ) THEN
-    RAISE EXCEPTION 'Access denied to project %', p_project_id;
+    RETURN NULL;
   END IF;
 
-  -- 注：tasks/connections 表无 user_id 列，访问权限通过 project_id -> projects.owner_id 关联保障
   SELECT GREATEST(
     COALESCE((SELECT p.updated_at FROM public.projects p WHERE p.id = p_project_id), '-infinity'::timestamptz),
     COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p_project_id), '-infinity'::timestamptz),
@@ -3443,7 +3441,7 @@ REVOKE ALL ON FUNCTION public.get_project_sync_watermark(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_project_sync_watermark(UUID) TO authenticated;
 
 COMMENT ON FUNCTION public.get_project_sync_watermark IS
-  '返回单项目聚合同步水位（project/tasks/connections/tombstones 最大时间戳）';
+  '返回单项目聚合同步水位（owner-only，project_members 已移除）';
 
 -- ============================================
 -- get_user_projects_watermark：用户项目域全局水位（性能优化版）
@@ -3465,47 +3463,19 @@ BEGIN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
-  WITH accessible_projects AS (
-    SELECT p.id
-    FROM public.projects p
-    WHERE p.owner_id = v_user_id
-    UNION
-    SELECT pm.project_id
-    FROM public.project_members pm
-    WHERE pm.user_id = v_user_id
-  ),
-  domain_max AS (
-    SELECT MAX(p.updated_at) AS ts
-    FROM public.projects p
-    JOIN accessible_projects ap ON ap.id = p.id
-
-    UNION ALL
-
-    SELECT MAX(t.updated_at) AS ts
-    FROM public.tasks t
-    JOIN accessible_projects ap ON ap.id = t.project_id
-
-    UNION ALL
-
-    SELECT MAX(c.updated_at) AS ts
-    FROM public.connections c
-    JOIN accessible_projects ap ON ap.id = c.project_id
-
-    UNION ALL
-
-    SELECT MAX(tt.deleted_at) AS ts
-    FROM public.task_tombstones tt
-    JOIN accessible_projects ap ON ap.id = tt.project_id
-
-    UNION ALL
-
-    SELECT MAX(ct.deleted_at) AS ts
-    FROM public.connection_tombstones ct
-    JOIN accessible_projects ap ON ap.id = ct.project_id
+  -- 单用户 owner-only 模型（project_members 已移除）
+  SELECT GREATEST(
+    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz)
   )
-  SELECT MAX(dm.ts)
-  INTO v_watermark
-  FROM domain_max dm;
+  INTO v_watermark;
+
+  IF v_watermark = '-infinity'::timestamptz THEN
+    RETURN NULL;
+  END IF;
 
   RETURN v_watermark;
 END;
@@ -3515,7 +3485,7 @@ REVOKE ALL ON FUNCTION public.get_user_projects_watermark() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_user_projects_watermark() TO authenticated;
 
 COMMENT ON FUNCTION public.get_user_projects_watermark IS
-  '返回当前用户可访问项目域聚合最大时间戳（优化版聚合路径）';
+  '返回当前用户项目域聚合最大时间戳（owner-only，project_members 已移除）';
 
 -- ============================================
 -- list_project_heads_since：变更项目头信息（性能优化版）
@@ -3542,76 +3512,21 @@ BEGIN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 单用户 owner-only 模型（project_members 已移除）
   RETURN QUERY
-  WITH accessible_projects AS (
-    SELECT p.id
-    FROM public.projects p
-    WHERE p.owner_id = v_user_id
-    UNION
-    SELECT pm.project_id
-    FROM public.project_members pm
-    WHERE pm.user_id = v_user_id
-  ),
-  project_heads AS (
+  WITH project_changes AS (
     SELECT
       p.id AS project_id,
-      p.updated_at AS project_updated_at,
+      GREATEST(
+        COALESCE(p.updated_at, '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p.id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id = p.id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id = p.id), '-infinity'::timestamptz),
+        COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id = p.id), '-infinity'::timestamptz)
+      ) AS updated_at,
       COALESCE(p.version, 1)::INTEGER AS version
     FROM public.projects p
-    JOIN accessible_projects ap ON ap.id = p.id
-  ),
-  task_changes AS (
-    SELECT
-      t.project_id,
-      MAX(t.updated_at) AS updated_at
-    FROM public.tasks t
-    JOIN accessible_projects ap ON ap.id = t.project_id
-    WHERE p_since IS NULL OR t.updated_at > p_since
-    GROUP BY t.project_id
-  ),
-  connection_changes AS (
-    SELECT
-      c.project_id,
-      MAX(c.updated_at) AS updated_at
-    FROM public.connections c
-    JOIN accessible_projects ap ON ap.id = c.project_id
-    WHERE p_since IS NULL OR c.updated_at > p_since
-    GROUP BY c.project_id
-  ),
-  task_tombstone_changes AS (
-    SELECT
-      tt.project_id,
-      MAX(tt.deleted_at) AS deleted_at
-    FROM public.task_tombstones tt
-    JOIN accessible_projects ap ON ap.id = tt.project_id
-    WHERE p_since IS NULL OR tt.deleted_at > p_since
-    GROUP BY tt.project_id
-  ),
-  connection_tombstone_changes AS (
-    SELECT
-      ct.project_id,
-      MAX(ct.deleted_at) AS deleted_at
-    FROM public.connection_tombstones ct
-    JOIN accessible_projects ap ON ap.id = ct.project_id
-    WHERE p_since IS NULL OR ct.deleted_at > p_since
-    GROUP BY ct.project_id
-  ),
-  project_changes AS (
-    SELECT
-      ph.project_id,
-      GREATEST(
-        COALESCE(ph.project_updated_at, '-infinity'::timestamptz),
-        COALESCE(tc.updated_at, '-infinity'::timestamptz),
-        COALESCE(cc.updated_at, '-infinity'::timestamptz),
-        COALESCE(ttc.deleted_at, '-infinity'::timestamptz),
-        COALESCE(ctc.deleted_at, '-infinity'::timestamptz)
-      ) AS updated_at,
-      ph.version
-    FROM project_heads ph
-    LEFT JOIN task_changes tc ON tc.project_id = ph.project_id
-    LEFT JOIN connection_changes cc ON cc.project_id = ph.project_id
-    LEFT JOIN task_tombstone_changes ttc ON ttc.project_id = ph.project_id
-    LEFT JOIN connection_tombstone_changes ctc ON ctc.project_id = ph.project_id
+    WHERE p.owner_id = v_user_id
   )
   SELECT
     pc.project_id,
@@ -3627,7 +3542,7 @@ REVOKE ALL ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) TO authenticated;
 
 COMMENT ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) IS
-  '返回当前用户在给定水位后变更的项目头信息（聚合 JOIN 优化版）';
+  '返回当前用户在给定水位后变更的项目头信息（owner-only，project_members 已移除）';
 
 -- ============================================
 -- get_accessible_project_probe：项目可访问探测 + 水位
@@ -3655,19 +3570,12 @@ BEGIN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 单用户 owner-only 模型（project_members 已移除）
   SELECT EXISTS (
     SELECT 1
     FROM public.projects p
     WHERE p.id = p_project_id
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1
-          FROM public.project_members pm
-          WHERE pm.project_id = p_project_id
-            AND pm.user_id = v_user_id
-        )
-      )
+      AND p.owner_id = v_user_id
   )
   INTO v_accessible;
 
@@ -3699,7 +3607,7 @@ REVOKE ALL ON FUNCTION public.get_accessible_project_probe(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_accessible_project_probe(UUID) TO authenticated;
 
 COMMENT ON FUNCTION public.get_accessible_project_probe IS
-  '返回当前项目可访问性与项目域聚合水位（project/tasks/connections/tombstones）';
+  '返回当前项目可访问性与项目域聚合水位（owner-only，project_members 已移除）';
 
 -- ============================================
 -- get_black_box_sync_watermark：黑匣子域同步水位
@@ -3767,20 +3675,13 @@ BEGIN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 单用户 owner-only 模型（project_members 已移除）
   IF p_project_id IS NOT NULL THEN
     SELECT EXISTS (
       SELECT 1
       FROM public.projects p
       WHERE p.id = p_project_id
-        AND (
-          p.owner_id = v_user_id
-          OR EXISTS (
-            SELECT 1
-            FROM public.project_members pm
-            WHERE pm.project_id = p_project_id
-              AND pm.user_id = v_user_id
-          )
-        )
+        AND p.owner_id = v_user_id
     )
     INTO v_active_accessible;
 
@@ -3800,21 +3701,12 @@ BEGIN
     END IF;
   END IF;
 
-  WITH accessible_projects AS (
-    SELECT p.id
-    FROM public.projects p
-    WHERE p.owner_id = v_user_id
-    UNION
-    SELECT pm.project_id
-    FROM public.project_members pm
-    WHERE pm.user_id = v_user_id
-  )
   SELECT GREATEST(
-    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id IN (SELECT id FROM accessible_projects)), '-infinity'::timestamptz)
+    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz)
   )
   INTO v_projects_watermark;
 
@@ -3842,7 +3734,7 @@ REVOKE ALL ON FUNCTION public.get_resume_recovery_probe(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_resume_recovery_probe(UUID) TO authenticated;
 
 COMMENT ON FUNCTION public.get_resume_recovery_probe IS
-  '恢复链路聚合探测：active project 可访问性 + active/project/blackbox 水位 + server_now';
+  '恢复链路聚合探测（owner-only，project_members 已移除）';
 
 -- ============================================================
 -- 权限收口：SECURITY DEFINER RPC 禁止 PUBLIC / anon
@@ -4280,6 +4172,364 @@ ALTER ROLE authenticated SET statement_timeout = '30s';
 
 COMMENT ON SCHEMA public IS
   '全量优化 v6.0.0: FORCE RLS 全覆盖, 冗余索引清理, 备份索引整合, autovacuum 调优, statement_timeout 30s';
+
+-- ============================================================
+-- Personal Backend Slim-Down Overlay (v6.3.0)
+-- 使一次性初始化后的最终状态与 2026-03-19 主库迁移保持一致。
+-- ============================================================
+
+CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+
+DELETE FROM public.app_config
+WHERE key IN (
+  'backup.schedule.attachments_cleanup',
+  'backup.schedule.health_report'
+);
+
+INSERT INTO public.app_config (key, value, description)
+VALUES
+  ('backup.schedule.full', to_jsonb('10 19 * * *'::text), 'Full backup cron (UTC). Asia/Shanghai: daily 03:10.'),
+  ('backup.schedule.incremental', to_jsonb('10 1,7,13 * * *'::text), 'Incremental backup cron (UTC). Asia/Shanghai: 09:10 / 15:10 / 21:10.'),
+  ('backup.schedule.cleanup', to_jsonb('10 20 * * *'::text), 'Backup cleanup cron (UTC). Asia/Shanghai: daily 04:10.'),
+  ('backup.user_id', 'null'::jsonb, 'Optional owner UUID for scheduled single-user backups.')
+ON CONFLICT (key) DO UPDATE SET
+  value = EXCLUDED.value,
+  description = EXCLUDED.description,
+  updated_at = now();
+
+CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
+RETURNS SETOF uuid
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = 'pg_catalog', 'public'
+AS $$
+  SELECT id
+  FROM public.projects
+  WHERE owner_id = public.current_user_id()
+$$;
+
+CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = p_project_id
+      AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+DROP POLICY IF EXISTS "owner select" ON public.projects;
+CREATE POLICY "owner select" ON public.projects
+FOR SELECT
+USING ((SELECT auth.uid() AS uid) = owner_id);
+
+DROP POLICY IF EXISTS "owner update" ON public.projects;
+CREATE POLICY "owner update" ON public.projects
+FOR UPDATE
+USING ((SELECT auth.uid() AS uid) = owner_id);
+
+CREATE OR REPLACE FUNCTION public.get_vault_secret(p_name text)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'vault'
+AS $$
+  SELECT decrypted_secret
+  FROM vault.decrypted_secrets
+  WHERE name = p_name
+  ORDER BY updated_at DESC
+  LIMIT 1
+$$;
+
+REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM anon;
+REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM authenticated;
+
+CREATE OR REPLACE FUNCTION public.invoke_internal_edge_function(
+  p_slug text,
+  p_body jsonb DEFAULT '{}'::jsonb
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'public', 'vault'
+AS $$
+DECLARE
+  v_base_url text;
+  v_service_role_key text;
+  v_backup_user_id text;
+  v_request_id bigint;
+BEGIN
+  IF p_slug NOT IN ('backup-full', 'backup-incremental', 'backup-cleanup') THEN
+    RAISE EXCEPTION 'Unsupported internal Edge Function slug: %', p_slug;
+  END IF;
+
+  v_base_url := public.get_vault_secret('backup_supabase_url');
+  v_service_role_key := public.get_vault_secret('backup_service_role_key');
+
+  IF v_base_url IS NULL OR v_service_role_key IS NULL THEN
+    RAISE EXCEPTION 'Missing Vault secret(s) backup_supabase_url / backup_service_role_key';
+  END IF;
+
+  IF p_slug IN ('backup-full', 'backup-incremental') THEN
+    SELECT value #>> '{}' INTO v_backup_user_id
+    FROM public.app_config
+    WHERE key = 'backup.user_id';
+
+    IF coalesce(trim(v_backup_user_id), '') <> '' THEN
+      p_body := coalesce(p_body, '{}'::jsonb) || jsonb_build_object('userId', v_backup_user_id);
+    END IF;
+  END IF;
+
+  SELECT net.http_post(
+    url := rtrim(v_base_url, '/') || '/functions/v1/' || p_slug,
+    headers := jsonb_build_object(
+      'Authorization', 'Bearer ' || v_service_role_key,
+      'Content-Type', 'application/json'
+    ),
+    body := coalesce(p_body, '{}'::jsonb)
+  )
+  INTO v_request_id;
+
+  RETURN v_request_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM anon;
+REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM authenticated;
+
+CREATE OR REPLACE FUNCTION public.apply_backup_schedules()
+RETURNS TABLE(job_name text, schedule text, status text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'public', 'cron'
+AS $$
+DECLARE
+  v_full_schedule text;
+  v_incremental_schedule text;
+  v_cleanup_schedule text;
+  v_job record;
+BEGIN
+  v_full_schedule := public.get_backup_schedule('backup.schedule.full', '10 19 * * *');
+  v_incremental_schedule := public.get_backup_schedule('backup.schedule.incremental', '10 1,7,13 * * *');
+  v_cleanup_schedule := public.get_backup_schedule('backup.schedule.cleanup', '10 20 * * *');
+
+  FOR v_job IN
+    SELECT jobid
+    FROM cron.job
+    WHERE jobname IN (
+      'nanoflow-backup-full',
+      'nanoflow-backup-incremental',
+      'nanoflow-backup-cleanup',
+      'nanoflow-cleanup-attachments',
+      'nanoflow-backup-health-report'
+    )
+  LOOP
+    PERFORM cron.unschedule(v_job.jobid);
+  END LOOP;
+
+  PERFORM cron.schedule(
+    'nanoflow-backup-full',
+    v_full_schedule,
+    $cmd$SELECT public.invoke_internal_edge_function('backup-full', '{}'::jsonb);$cmd$
+  );
+
+  PERFORM cron.schedule(
+    'nanoflow-backup-incremental',
+    v_incremental_schedule,
+    $cmd$SELECT public.invoke_internal_edge_function('backup-incremental', '{}'::jsonb);$cmd$
+  );
+
+  PERFORM cron.schedule(
+    'nanoflow-backup-cleanup',
+    v_cleanup_schedule,
+    $cmd$SELECT public.invoke_internal_edge_function('backup-cleanup', '{}'::jsonb);$cmd$
+  );
+
+  RETURN QUERY
+  SELECT
+    j.jobname::text,
+    j.schedule::text,
+    CASE WHEN j.active THEN 'active' ELSE 'paused' END::text
+  FROM cron.job j
+  WHERE j.jobname IN (
+    'nanoflow-backup-full',
+    'nanoflow-backup-incremental',
+    'nanoflow-backup-cleanup'
+  )
+  ORDER BY j.jobname;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.update_backup_schedule(p_config_key text, p_cron_expression text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'public'
+AS $$
+DECLARE
+  v_valid_keys text[] := ARRAY[
+    'backup.schedule.full',
+    'backup.schedule.incremental',
+    'backup.schedule.cleanup'
+  ];
+BEGIN
+  IF NOT (p_config_key = ANY(v_valid_keys)) THEN
+    RAISE EXCEPTION 'Invalid backup schedule key: %', p_config_key;
+  END IF;
+
+  IF array_length(string_to_array(trim(p_cron_expression), ' '), 1) != 5 THEN
+    RAISE EXCEPTION 'Invalid cron expression: %', p_cron_expression;
+  END IF;
+
+  INSERT INTO public.app_config (key, value, description)
+  VALUES (p_config_key, to_jsonb(p_cron_expression), 'Backup schedule configuration')
+  ON CONFLICT (key) DO UPDATE SET
+    value = to_jsonb(p_cron_expression),
+    updated_at = now();
+
+  PERFORM public.apply_backup_schedules();
+
+  RETURN format('Updated %s to "%s"', p_config_key, p_cron_expression);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.cleanup_cron_job_run_details(
+  p_max_age interval DEFAULT interval '7 days'
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'cron'
+AS $$
+DECLARE
+  v_deleted_count integer := 0;
+BEGIN
+  WITH deleted AS (
+    DELETE FROM cron.job_run_details
+    WHERE end_time < now() - p_max_age
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_deleted_count FROM deleted;
+
+  RETURN v_deleted_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.cleanup_personal_retention_artifacts()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'public'
+AS $$
+DECLARE
+  v_focus_sessions_deleted integer := 0;
+  v_transcription_usage_deleted integer := 0;
+  v_task_tombstones_deleted integer := 0;
+  v_connection_tombstones_deleted integer := 0;
+BEGIN
+  WITH deleted AS (
+    DELETE FROM public.focus_sessions
+    WHERE ended_at IS NOT NULL
+      AND updated_at < now() - interval '30 days'
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_focus_sessions_deleted FROM deleted;
+
+  WITH deleted AS (
+    DELETE FROM public.transcription_usage
+    WHERE created_at < now() - interval '90 days'
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_transcription_usage_deleted FROM deleted;
+
+  WITH deleted AS (
+    DELETE FROM public.task_tombstones
+    WHERE deleted_at < now() - interval '30 days'
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_task_tombstones_deleted FROM deleted;
+
+  WITH deleted AS (
+    DELETE FROM public.connection_tombstones
+    WHERE deleted_at < now() - interval '30 days'
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_connection_tombstones_deleted FROM deleted;
+
+  IF (v_focus_sessions_deleted + v_transcription_usage_deleted + v_task_tombstones_deleted + v_connection_tombstones_deleted) > 0 THEN
+    INSERT INTO public.cleanup_logs (type, details)
+    VALUES (
+      'personal_retention_cleanup',
+      jsonb_build_object(
+        'focus_sessions_deleted', v_focus_sessions_deleted,
+        'transcription_usage_deleted', v_transcription_usage_deleted,
+        'task_tombstones_deleted', v_task_tombstones_deleted,
+        'connection_tombstones_deleted', v_connection_tombstones_deleted,
+        'cleanup_time', now()
+      )
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'focus_sessions_deleted', v_focus_sessions_deleted,
+    'transcription_usage_deleted', v_transcription_usage_deleted,
+    'task_tombstones_deleted', v_task_tombstones_deleted,
+    'connection_tombstones_deleted', v_connection_tombstones_deleted
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM anon;
+REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_personal_retention_artifacts() TO service_role;
+
+DELETE FROM cron.job_run_details;
+SELECT public.apply_backup_schedules();
+
+DO $$
+DECLARE
+  v_job record;
+BEGIN
+  FOR v_job IN
+    SELECT jobid
+    FROM cron.job
+    WHERE jobname IN ('nanoflow-personal-retention', 'nanoflow-cron-log-retention')
+  LOOP
+    PERFORM cron.unschedule(v_job.jobid);
+  END LOOP;
+
+  PERFORM cron.schedule(
+    'nanoflow-personal-retention',
+    '40 20 * * *',
+    $cmd$SELECT public.cleanup_personal_retention_artifacts();$cmd$
+  );
+
+  PERFORM cron.schedule(
+    'nanoflow-cron-log-retention',
+    '55 20 * * *',
+    $cmd$SELECT public.cleanup_cron_job_run_details(interval '7 days');$cmd$
+  );
+END $$;
+
+ALTER TABLE public.user_preferences
+DROP CONSTRAINT IF EXISTS user_preferences_dock_snapshot_size_check;
+
+DROP TABLE IF EXISTS public.project_members CASCADE;
+DROP TABLE IF EXISTS public.attachment_scans CASCADE;
+DROP TABLE IF EXISTS public.quarantined_files CASCADE;
+
+ALTER TABLE public.user_preferences
+DROP COLUMN IF EXISTS dock_snapshot;
 
 -- ============================================================
 -- 初始化完成

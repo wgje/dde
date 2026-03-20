@@ -12,6 +12,8 @@
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
+
 /** IndexedDB 数据库配置 */
 export const DB_CONFIG = {
   name: 'nanoflow-store-cache',
@@ -38,28 +40,31 @@ export class IndexedDBService {
   
   /**
    * 初始化 IndexedDB
+   * 
+   * 【修复 VersionError】使用 openIndexedDBAdaptive 避免版本降级错误：
+   * - 先无版本打开，获取当前数据库实际版本
+   * - 仅当需要升级或补建 store 时才指定新版本
+   * - 避免 PWA 缓存旧代码导致的 "requested version < existing version" 错误
    */
   async initDatabase(): Promise<IDBDatabase> {
     if (this.db) return this.db;
     
     if (!this.dbInitPromise) {
-      this.dbInitPromise = new Promise<IDBDatabase>((resolve, reject) => {
+      this.dbInitPromise = (async () => {
         if (typeof indexedDB === 'undefined') {
-          reject(new Error('IndexedDB 不可用'));
-          return;
+          throw new Error('IndexedDB 不可用');
         }
         
-        const request = indexedDB.open(DB_CONFIG.name, DB_CONFIG.version);
-        
-        request.onerror = () => {
-          this.logger.error('IndexedDB 打开失败', request.error);
-          // 【P1-01 修复】失败后清除 promise，允许重试
-          this.dbInitPromise = null;
-          reject(request.error);
-        };
-        
-        request.onsuccess = () => {
-          this.db = request.result;
+        try {
+          const db = await openIndexedDBAdaptive({
+            dbName: DB_CONFIG.name,
+            targetVersion: DB_CONFIG.version,
+            requiredStores: Object.values(DB_CONFIG.stores),
+            ensureStores: this.ensureStores.bind(this),
+          });
+          
+          this.db = db;
+          
           // 【P3-01 修复】处理其他标签页触发数据库版本升级
           this.db.onversionchange = () => {
             this.logger.warn('检测到数据库版本变更，关闭当前连接');
@@ -67,46 +72,46 @@ export class IndexedDBService {
             this.db = null;
             this.dbInitPromise = null;
           };
-          this.logger.debug('IndexedDB 初始化成功');
-          resolve(request.result);
-        };
-        
-        request.onupgradeneeded = (event) => {
-          const db = (event.target as IDBOpenDBRequest).result;
-          const oldVersion = event.oldVersion;
           
-          if (!db.objectStoreNames.contains(DB_CONFIG.stores.projects)) {
-            db.createObjectStore(DB_CONFIG.stores.projects, { keyPath: 'id' });
-          }
-          if (!db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
-            const taskStore = db.createObjectStore(DB_CONFIG.stores.tasks, { keyPath: 'id' });
-            taskStore.createIndex('projectId', 'projectId', { unique: false });
-            // 【P3-05】复合索引：支持按 projectId + updatedAt 范围查询增量任务
-            taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
-          }
-          if (!db.objectStoreNames.contains(DB_CONFIG.stores.connections)) {
-            const connStore = db.createObjectStore(DB_CONFIG.stores.connections, { keyPath: 'id' });
-            connStore.createIndex('projectId', 'projectId', { unique: false });
-          }
-          if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
-            db.createObjectStore(DB_CONFIG.stores.meta, { keyPath: 'key' });
-          }
-          
-          // 版本 1 → 2 升级：为已有的 tasks store 补建复合索引
-          if (oldVersion < 2) {
-            const tx = (event.target as IDBOpenDBRequest).transaction;
-            if (tx && db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
-              const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
-              if (!taskStore.indexNames.contains('projectId_updatedAt')) {
-                taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
-              }
-            }
-          }
-        };
-      });
+          this.logger.debug('IndexedDB 初始化成功', { version: db.version });
+          return db;
+        } catch (error) {
+          this.logger.error('IndexedDB 打开失败', error);
+          // 【P1-01 修复】失败后清除 promise，允许重试
+          this.dbInitPromise = null;
+          throw error;
+        }
+      })();
     }
     
     return this.dbInitPromise;
+  }
+  
+  /**
+   * 确保所有必需的 object stores 存在
+   * 在 onupgradeneeded 事件中调用
+   */
+  private ensureStores(db: IDBDatabase): void {
+    if (!db.objectStoreNames.contains(DB_CONFIG.stores.projects)) {
+      db.createObjectStore(DB_CONFIG.stores.projects, { keyPath: 'id' });
+    }
+    if (!db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
+      const taskStore = db.createObjectStore(DB_CONFIG.stores.tasks, { keyPath: 'id' });
+      taskStore.createIndex('projectId', 'projectId', { unique: false });
+      // 【P3-05】复合索引：支持按 projectId + updatedAt 范围查询增量任务
+      taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
+    } else {
+      // 数据库已存在 tasks store，检查是否需要补建索引
+      // 注意：只有在 onupgradeneeded 事务中才能修改索引
+      // openIndexedDBAdaptive 会在检测到 missing stores 时触发 version bump
+    }
+    if (!db.objectStoreNames.contains(DB_CONFIG.stores.connections)) {
+      const connStore = db.createObjectStore(DB_CONFIG.stores.connections, { keyPath: 'id' });
+      connStore.createIndex('projectId', 'projectId', { unique: false });
+    }
+    if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
+      db.createObjectStore(DB_CONFIG.stores.meta, { keyPath: 'key' });
+    }
   }
   
   /**
