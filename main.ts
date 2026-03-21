@@ -17,6 +17,9 @@ import { provideServiceWorker } from '@angular/service-worker';
 // - 初始化前的错误会被队列缓存，初始化后自动发送
 // - 详见 src/services/sentry-lazy-loader.service.ts
 
+// 简化日志 - 仅在显式 verbose 时输出，避免启动期控制台噪音
+const VERBOSE_LOGS = isDevMode() && localStorage.getItem('nanoflow.verbose') === 'true';
+
 // ============= BUILD ID =============
 // 使用入口 chunk URL 作为构建指纹，确保 outputHashing 变化能触发版本偏移恢复。
 const BUILD_ID = (() => {
@@ -27,15 +30,12 @@ const BUILD_ID = (() => {
     return `${VERSION.full}:runtime-unknown`;
   }
 })();
-if (isDevMode()) {
+if (VERBOSE_LOGS) {
   console.log('%c [NanoFlow] Main.ts Loaded: ' + BUILD_ID, 'background: #222; color: #bada55; font-size: 20px');
 }
 const START_TIME = Date.now();
 const VERSION_STORAGE_KEY = 'nanoflow.app-version';
 const FORCE_CLEAR_KEY = 'nanoflow.force-clear-cache';
-
-// 简化日志 - 仅开发模式输出，生产模式静默
-const VERBOSE_LOGS = isDevMode() && localStorage.getItem('nanoflow.verbose') === 'true';
 const log = (msg: string, _color = '#0f0') => {
   if (!VERBOSE_LOGS) return;
   const elapsed = Date.now() - START_TIME;
@@ -258,7 +258,11 @@ async function startApplication() {
         // Sentry 将在浏览器空闲时通过 requestIdleCallback 初始化
         {
           provide: APP_INITIALIZER,
-          useFactory: (sentryLoader: { triggerLazyInit: () => void }) => () => {
+          useFactory: (sentryLoader: { isConfigured: () => boolean; triggerLazyInit: () => void }) => () => {
+            if (!sentryLoader.isConfigured()) {
+              return Promise.resolve();
+            }
+
             // 使用 queueMicrotask 确保不阻塞当前任务
             queueMicrotask(() => sentryLoader.triggerLazyInit());
             return Promise.resolve();

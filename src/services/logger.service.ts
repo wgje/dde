@@ -1,5 +1,4 @@
 import { Injectable } from '@angular/core';
-import { environment } from '../environments/environment';
 
 /**
  * 日志级别
@@ -56,8 +55,69 @@ export class LoggerService {
   private categoryLoggers = new Map<string, CategoryLogger>();
   
   constructor() {
-    // 生产环境只显示警告和错误
-    this.level = environment.production ? LogLevel.WARN : LogLevel.DEBUG;
+    this.level = this.resolveInitialLevel();
+  }
+
+  /**
+   * 默认控制台策略：默认安静，显式开启才输出 info/debug。
+   * 这样可避免开发态启动期被大量初始化日志淹没。
+   */
+  private resolveInitialLevel(): LogLevel {
+    const explicitLevel = this.readExplicitLogLevel();
+    if (explicitLevel !== null) {
+      return explicitLevel;
+    }
+
+    if (this.isVerboseConsoleEnabled()) {
+      return LogLevel.DEBUG;
+    }
+
+    return LogLevel.WARN;
+  }
+
+  /**
+   * 支持 localStorage 覆盖日志级别：
+   * nanoflow.logLevel=debug|info|warn|error|none
+   */
+  private readExplicitLogLevel(): LogLevel | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    let rawLevel: string | null = null;
+    try {
+      rawLevel = window.localStorage.getItem('nanoflow.logLevel')?.trim().toLowerCase() ?? null;
+    } catch {
+      rawLevel = null;
+    }
+
+    switch (rawLevel) {
+      case 'debug':
+        return LogLevel.DEBUG;
+      case 'info':
+        return LogLevel.INFO;
+      case 'warn':
+      case 'warning':
+        return LogLevel.WARN;
+      case 'error':
+        return LogLevel.ERROR;
+      case 'none':
+        return LogLevel.NONE;
+      default:
+        return null;
+    }
+  }
+
+  private isVerboseConsoleEnabled(): boolean {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    try {
+      return window.localStorage.getItem('nanoflow.verbose') === 'true';
+    } catch {
+      return false;
+    }
   }
   
   /**

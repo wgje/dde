@@ -13,6 +13,7 @@
  */
 
 import { Injectable, inject, DestroyRef } from '@angular/core';
+import type { Json } from '../types/supabase';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { SYNC_CONFIG } from '../config/sync.config';
@@ -501,7 +502,7 @@ export class BlackBoxSyncService {
           project_id: entry.projectId,
           user_id: entry.userId,
           content: entry.content,
-          focus_meta: (entry.focusMeta ?? null) as unknown as Record<string, unknown> | null,
+          focus_meta: (entry.focusMeta ?? null) as Json | null,
           date: entry.date,
           created_at: entry.createdAt,
           updated_at: entry.updatedAt,

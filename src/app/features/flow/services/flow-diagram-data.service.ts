@@ -246,7 +246,7 @@ export class FlowDiagramDataService {
         const taskFingerprint = this.computeTaskFingerprint(activeTasks);
         const dockFingerprint = this.computeDockFingerprint();
         const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
-        const connSig = activeConns.map(c => `${c.source}->${c.target}`).sort().join('|');
+        const connSig = this.computeConnectionSignature(activeConns);
         
         if (taskFingerprint === this.lastTaskFingerprint 
             && connSig === this.lastConnectionSignatureForData
@@ -309,7 +309,7 @@ export class FlowDiagramDataService {
       // 【2026-02-25 性能优化】更新指纹缓存，下次无变化时可快速跳过
       this.lastTaskFingerprint = this.computeTaskFingerprint(activeTasks);
       const activeConnsForCache = project.connections?.filter(c => !c.deletedAt) ?? [];
-      this.lastConnectionSignatureForData = activeConnsForCache.map(c => `${c.source}->${c.target}`).sort().join('|');
+      this.lastConnectionSignatureForData = this.computeConnectionSignature(activeConnsForCache);
       this.lastSearchQuery = searchQuery;
       this.lastDockFingerprint = this.computeDockFingerprint();
 
@@ -527,5 +527,20 @@ export class FlowDiagramDataService {
     const dockedIds = Array.from(this.dockEngine.dockedTaskIds()).sort();
     const focusedTaskId = this.dockEngine.focusingEntry()?.taskId ?? '';
     return `${focusedTaskId}|${dockedIds.join(',')}`;
+  }
+
+  private computeConnectionSignature(
+    connections: Array<{
+      source: string;
+      target: string;
+      title?: string;
+      description?: string;
+      updatedAt?: string;
+    }>
+  ): string {
+    return connections
+      .map(c => `${c.source}->${c.target}|${c.title ?? ''}|${c.description ?? ''}|${c.updatedAt ?? ''}`)
+      .sort()
+      .join('|');
   }
 }

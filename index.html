@@ -81,8 +81,9 @@
   </style>
   
   <!-- 增强字体样式改由 StartupFontSchedulerService 在应用启动后动态注入 -->
-  <!-- 策略：用户首次交互优先，无交互则延迟兜底 -->
-  <noscript><link rel="stylesheet" href="/fonts/lxgw-wenkai-screen.css"></noscript>
+  <!-- 注意：不在 index.html 里直接挂样式表，避免 Angular application builder
+       在 Windows 下将 /fonts/... 误判为磁盘绝对路径并产生构建告警。
+       无脚本场景下应用本身不可运行，因此这里不再保留额外字体样式链接。 -->
   
   <!-- ========== 防闪屏脚本 (Anti-FOUC) ========== -->
   <!-- 必须是同步阻塞脚本，在 Angular 启动前确定颜色模式 -->
@@ -755,8 +756,6 @@
         if (elapsed < 25000) {
           setTimeout(checkReady, 100);
         } else {
-          console.error('[DEBUG v15] ❌ 加载超时');
-          // console.log('[DEBUG v15] 调试日志:', window.__DEBUG_LOG__);
           // 超时 - 显示带缓存清理按钮的提示
           var loader = document.getElementById('initial-loader');
           if (loader) {

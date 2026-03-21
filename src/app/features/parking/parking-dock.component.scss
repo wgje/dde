@@ -17,113 +17,6 @@
     }
 
     /* ══════════════════════════════════════════
-       专注模式背景场景 — 多层氛围 + 状态驱动
-       ══════════════════════════════════════════ */
-    .focus-scene {
-      pointer-events: none;
-      opacity: 0;
-      overflow: hidden;
-      transition: opacity var(--pk-shell-enter) var(--pk-ease-standard);
-    }
-    .focus-scene.active {
-      opacity: 1;
-    }
-    .focus-scene-layer {
-      position: absolute;
-      inset: -8%;
-      pointer-events: none;
-    }
-    .focus-bg-image {
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-      opacity: var(--scene-base-opacity, 0.78);
-      transform: translate3d(0, 0, 0) scale(var(--scene-base-scale, 1.03));
-      filter:
-        saturate(var(--scene-base-saturation, 1.08))
-        brightness(var(--scene-base-brightness, 0.92));
-      animation: focusSceneDrift var(--scene-drift-duration, 24s) ease-in-out infinite alternate;
-    }
-    .focus-scene-aurora {
-      background:
-        radial-gradient(circle at 18% 24%, rgba(var(--scene-primary-rgb, 99 102 241), calc(var(--scene-aurora-opacity, 0.18) * 0.95)) 0%, transparent 34%),
-        radial-gradient(circle at 76% 30%, rgba(var(--scene-secondary-rgb, 52 211 153), calc(var(--scene-aurora-opacity, 0.18) * 0.82)) 0%, transparent 38%),
-        radial-gradient(circle at 54% 78%, rgba(var(--scene-tertiary-rgb, 245 158 11), calc(var(--scene-aurora-opacity, 0.18) * 0.68)) 0%, transparent 44%);
-      mix-blend-mode: screen;
-      opacity: 0.92;
-      filter: blur(var(--scene-aurora-blur, 54px));
-      transform: scale(var(--scene-bloom-scale, 1.05));
-      animation: focusSceneBloom var(--scene-pulse-duration, 10s) ease-in-out infinite;
-    }
-    .focus-scene-vignette {
-      background:
-        radial-gradient(ellipse 88% 68% at 50% 42%, rgba(4, 6, 12, 0) 0%, rgba(4, 6, 12, var(--scene-vignette-opacity, 0.52)) 100%),
-        linear-gradient(180deg, rgba(6, 8, 14, 0.06) 0%, rgba(6, 8, 14, 0.24) 100%);
-    }
-    .focus-scene-grain {
-      opacity: var(--scene-grain-opacity, 0.04);
-      background-image:
-        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 3px),
-        repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px);
-      background-size: 180px 180px, 220px 220px;
-      mix-blend-mode: soft-light;
-      animation: focusSceneGrainShift 16s linear infinite;
-    }
-    @keyframes focusSceneDrift {
-      0% {
-        transform: translate3d(-1.2%, -0.8%, 0) scale(var(--scene-base-scale, 1.03));
-      }
-      100% {
-        transform: translate3d(1.1%, -0.4%, 0) scale(var(--scene-base-scale, 1.03));
-      }
-    }
-    @keyframes focusSceneBloom {
-      0%, 100% {
-        opacity: 0.84;
-        transform: scale(var(--scene-bloom-scale, 1.05));
-      }
-      50% {
-        opacity: 1;
-        transform: scale(calc(var(--scene-bloom-scale, 1.05) + 0.014));
-      }
-    }
-    @keyframes focusSceneGrainShift {
-      from { transform: translate3d(0, 0, 0); }
-      to { transform: translate3d(-2%, -1.5%, 0); }
-    }
-    .focus-scene[data-performance-tier='T1'] .focus-bg-image {
-      animation-duration: calc(var(--scene-drift-duration, 24s) * 1.2);
-    }
-    .focus-scene[data-performance-tier='T1'] .focus-scene-grain {
-      opacity: calc(var(--scene-grain-opacity, 0.04) * 0.5);
-      animation: none;
-    }
-    .focus-scene[data-performance-tier='T2'] .focus-bg-image,
-    .focus-scene[data-performance-tier='T2'] .focus-scene-aurora,
-    .focus-scene[data-performance-tier='T2'] .focus-scene-grain,
-    .focus-scene[data-reduced-motion='true'] .focus-bg-image,
-    .focus-scene[data-reduced-motion='true'] .focus-scene-aurora,
-    .focus-scene[data-reduced-motion='true'] .focus-scene-grain {
-      animation: none !important;
-      transform: none;
-    }
-
-    /* ══════════════════════════════════════════
-       专注模式遮罩 — 毛玻璃 + 暗色叠加
-       ══════════════════════════════════════════ */
-    .focus-backdrop {
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity var(--pk-shell-enter) var(--pk-ease-standard),
-                  background-color var(--pk-shell-enter) var(--pk-ease-standard);
-    }
-    .focus-backdrop.active {
-      opacity: 1;
-      pointer-events: auto;
-      will-change: opacity;
-    }
-
-    /* ══════════════════════════════════════════
        玻璃拟态基础 — 清新自然系
        ══════════════════════════════════════════ */
     .glass-card {
@@ -462,75 +355,6 @@
     }
 
     /* ══════════════════════════════════════════
-       主控台舞台 — 状态驱动的椭圆氛围场
-       （纵向位置随停泊坞展开/收起平滑过渡，
-         与 dock-bar 的 0.55s 动画同步）
-       ══════════════════════════════════════════ */
-    .console-stage {
-      pointer-events: auto;
-      --stage-primary-rgb: 99 102 241;
-      --stage-secondary-rgb: 52 211 153;
-      --stage-halo-opacity: 0.08;
-      --stage-secondary-opacity: 0.04;
-      --stage-ring-opacity: 0.08;
-      --stage-blur: 26px;
-      --stage-halo-width: 640px;
-      --stage-halo-height: 420px;
-      --stage-pulse-duration: 9s;
-    }
-
-    /* 同心椭圆主控台光晕背景 — 多层柔和辉光 */
-    .console-stage::before {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: var(--stage-halo-width);
-      height: var(--stage-halo-height);
-      transform: translate(-50%, -50%);
-      background:
-        radial-gradient(
-          ellipse 55% 40% at center,
-          rgba(var(--stage-primary-rgb), var(--stage-halo-opacity)) 0%,
-          rgba(var(--stage-primary-rgb), calc(var(--stage-halo-opacity) * 0.45)) 42%,
-          transparent 70%
-        ),
-        radial-gradient(
-          ellipse 80% 60% at center,
-          rgba(var(--stage-secondary-rgb), var(--stage-secondary-opacity)) 0%,
-          transparent 65%
-        );
-      border-radius: 50%;
-      pointer-events: none;
-      z-index: -1;
-      filter: blur(var(--stage-blur));
-      animation: stageHaloPulse var(--stage-pulse-duration) ease-in-out infinite;
-    }
-    .console-stage::after {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: calc(var(--stage-halo-width) * 0.75);
-      height: calc(var(--stage-halo-height) * 0.76);
-      transform: translate(-50%, calc(-50% - 20px));
-      border: 1px solid rgba(var(--stage-primary-rgb), var(--stage-ring-opacity));
-      border-radius: 50%;
-      pointer-events: none;
-      z-index: -1;
-    }
-    @keyframes stageHaloPulse {
-      0%, 100% {
-        opacity: 0.86;
-        transform: translate(-50%, -50%) scale(0.997);
-      }
-      50% {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(1.005);
-      }
-    }
-
-    /* ══════════════════════════════════════════
        FLIP 幽灵卡片（进入/退出专注映射过渡）
        ══════════════════════════════════════════ */
     .dock-v4-flip-ghost {
@@ -752,11 +576,7 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .focus-scene,
-      .focus-bg-image,
-      .focus-backdrop,
       .dock-bar,
-      .console-stage,
       .dock-card,
       .new-task-form,
       .fragment-overlay-enter,
@@ -774,14 +594,6 @@
       }
     }
 
-    .console-stage[data-performance-tier='T1'] {
-      transition-duration: 0.35s;
-    }
-
-    .console-stage[data-performance-tier='T2'] {
-      transition: none !important;
-    }
-
     @media (min-width: 641px) {
       .dock-bar {
         /* 桌面端：停泊坞展开高度不超过视口 55%，宽度 ≤ 860px */
@@ -792,16 +604,4 @@
       .drop-zone {
         width: clamp(9rem, calc(50vw - 3.5rem), 12rem);
       }
-    }
-
-    .console-stage[data-performance-tier='T2']::before,
-    .console-stage[data-performance-tier='T2']::after,
-    .console-stage[data-reduced-motion='true']::before,
-    .console-stage[data-reduced-motion='true']::after {
-      animation: none !important;
-    }
-
-    .console-stage[data-performance-tier='T2'] .pending-decision-enter,
-    .console-stage[data-performance-tier='T2'] .fragment-overlay-enter {
-      animation: none !important;
     }

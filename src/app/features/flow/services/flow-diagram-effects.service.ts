@@ -100,7 +100,9 @@ export class FlowDiagramEffectsService {
       // 构建有效连接的签名（过滤掉 deletedAt，只统计活跃连接）
       const activeConnections = project?.connections?.filter((c: { deletedAt?: string | null }) => !c.deletedAt) ?? [];
       const connectionSignature = activeConnections
-        .map((c: { source: string; target: string }) => `${c.source}->${c.target}`)
+        .map((c: { source: string; target: string; title?: string; description?: string; updatedAt?: string }) =>
+          `${c.source}->${c.target}|${c.title ?? ''}|${c.description ?? ''}|${c.updatedAt ?? ''}`
+        )
         .sort()
         .join('|');
       // 只在签名实际变化时才触发更新

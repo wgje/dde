@@ -3,12 +3,15 @@ import { ProjectStateService } from '../../../../services/project-state.service'
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
+import { UiStateService } from '../../../../services/ui-state.service';
 import { FlowLinkRelinkService } from './flow-link-relink.service';
 import { Task } from '../../../../models';
 import { 
   LinkTypeDialogData, 
-  ConnectionEditorData, 
+  ConnectionEditorData,
+  ConnectionEditorMode,
   LinkDeleteHint,
+  LinkActionMenu,
   PanelPosition,
   DragState,
   createInitialDragState
@@ -19,6 +22,11 @@ import { UI_CONFIG } from '../../../../config';
  * 连接类型
  */
 export type LinkType = 'parent-child' | 'cross-tree';
+
+interface OpenConnectionEditorOptions {
+  isCrossTree: boolean;
+  mode: ConnectionEditorMode;
+}
 
 /**
  * FlowLinkService - 连接线管理服务
@@ -43,6 +51,7 @@ export class FlowLinkService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowLink');
   private readonly toast = inject(ToastService);
+  private readonly uiState = inject(UiStateService);
   private readonly relinkService = inject(FlowLinkRelinkService);
   private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
@@ -75,6 +84,8 @@ export class FlowLinkService {
   
   /** 拖动状态 */
   private connEditorDragState: DragState = createInitialDragState();
+  /** 忽略背景关闭的保护窗口，避免同一次点击把刚打开/刚切回预览的关联块立刻关掉 */
+  private connectionEditorIgnoreCloseUntil = 0;
   
   /** 流程图容器边界（用于限制关联块编辑器拖动范围） */
   private diagramBounds: { left: number; top: number; right: number; bottom: number } | null = null;
@@ -86,6 +97,14 @@ export class FlowLinkService {
   
   /** 删除提示定时器 */
   private linkDeleteHintTimer: ReturnType<typeof setTimeout> | null = null;
+  
+  // ========== 移动端连接线操作菜单 ==========
+  
+  /** 移动端连接线操作菜单数据 */
+  readonly linkActionMenu = signal<LinkActionMenu | null>(null);
+  
+  /** 操作菜单定时器 */
+  private linkActionMenuTimer: ReturnType<typeof setTimeout> | null = null;
   
   // ========== 销毁标志 ==========
   private isDestroyed = false;
@@ -336,6 +355,8 @@ export class FlowLinkService {
   
   /**
    * 打开联系块编辑器
+   * 移动端：优先显示在点击位置上方，空间不足时回退到下方
+   * 桌面端：在点击位置附近显示
    */
   openConnectionEditor(
     sourceId: string,
@@ -343,46 +364,136 @@ export class FlowLinkService {
     description: string,
     x: number,
     y: number,
-    title?: string
+    title: string = '',
+    options: OpenConnectionEditorOptions = {
+      isCrossTree: true,
+      mode: 'preview',
+    }
   ): void {
-    this.logger.debug('openConnectionEditor 被调用', { sourceId, targetId, title, description, x, y });
+    this.logger.debug('openConnectionEditor 被调用', {
+      sourceId,
+      targetId,
+      title,
+      description,
+      x,
+      y,
+      isMobile: this.uiState.isMobile(),
+      options
+    });
+
+    const currentEditor = this.connectionEditorData();
+    const isSameConnection =
+      currentEditor &&
+      currentEditor.sourceId === sourceId &&
+      currentEditor.targetId === targetId &&
+      currentEditor.isCrossTree === options.isCrossTree;
+
+    if (isSameConnection) {
+      if (
+        this.uiState.isMobile() &&
+        currentEditor.isCrossTree &&
+        currentEditor.mode === 'preview' &&
+        options.mode === 'preview'
+      ) {
+        this.logger.debug('移动端同一跨树关联二次点击，切换到编辑态');
+        this.armConnectionEditorBackgroundCloseGuard();
+        this.connectionEditorData.set({
+          ...currentEditor,
+          mode: 'edit',
+        });
+        return;
+      }
+
+      if (currentEditor.mode === 'edit' && options.mode === 'preview') {
+        this.logger.debug('同一关联块已在编辑态，保持当前会话');
+        return;
+      }
+
+      if (currentEditor.mode !== options.mode) {
+        this.logger.debug('同一关联块切换模式', { from: currentEditor.mode, to: options.mode });
+        this.armConnectionEditorBackgroundCloseGuard();
+        this.connectionEditorData.set({
+          ...currentEditor,
+          mode: options.mode,
+        });
+      }
+      return;
+    }
     
     // 编辑器尺寸
-    const editorWidth = 176;  // w-44 = 11rem = 176px
-    const editorHeight = 140; // 估算高度
-    const padding = 8;
+    const editorWidth = 208;  // w-52 = 13rem = 208px
+    const editorHeight = 180; // 估算高度
+    const padding = 12;
     
-    // 将编辑器居中对齐到点击位置，并向上偏移使其显示在关联块正上方
-    let adjustedX = x - editorWidth / 2;
-    let adjustedY = y - editorHeight - 10; // 向上偏移，留 10px 间距
+    const viewport = typeof window !== 'undefined' ? window.visualViewport : null;
+    const viewportWidth = viewport?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1000);
+    const viewportHeight = viewport?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 800);
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const gap = 10;
     
-    // 获取流程图容器边界，限制编辑器在流程图区域内
-    const diagramDiv = document.querySelector('[data-testid="flow-diagram"]');
-    if (diagramDiv) {
-      const rect = diagramDiv.getBoundingClientRect();
-      const minX = rect.left + padding;
-      const minY = rect.top + padding;
-      const maxX = rect.right - editorWidth - padding;
-      const maxY = rect.bottom - editorHeight - padding;
-      
-      adjustedX = Math.max(minX, Math.min(maxX, adjustedX));
+    let adjustedX: number;
+    let adjustedY: number;
+    
+    if (this.uiState.isMobile()) {
+      const minX = viewportLeft + padding;
+      const maxX = viewportLeft + viewportWidth - editorWidth - padding;
+      const minY = viewportTop + padding;
+      const maxY = viewportTop + viewportHeight - editorHeight - padding;
+      const preferredAboveY = y - editorHeight - gap;
+      const fallbackBelowY = y + gap;
+
+      adjustedX = Math.max(minX, Math.min(maxX, x - editorWidth / 2));
+      adjustedY = preferredAboveY >= minY
+        ? preferredAboveY
+        : fallbackBelowY;
       adjustedY = Math.max(minY, Math.min(maxY, adjustedY));
+
+      this.logger.debug('移动端：锚定定位', {
+        adjustedX,
+        adjustedY,
+        tapX: x,
+        tapY: y,
+        viewportWidth,
+        viewportHeight,
+      });
     } else {
-      // 兜底：保持在视口内
-      adjustedX = Math.max(10, adjustedX);
-      adjustedY = Math.max(10, adjustedY);
+      // 【桌面端】在点击位置附近显示
+      // 将编辑器居中对齐到点击位置，并向上偏移使其显示在关联块正上方
+      adjustedX = x - editorWidth / 2;
+      adjustedY = y - editorHeight - gap; // 向上偏移，留 10px 间距
+      
+      // 获取流程图容器边界，限制编辑器在流程图区域内
+      const diagramDiv = document.querySelector('[data-testid="flow-diagram"]');
+      if (diagramDiv) {
+        const rect = diagramDiv.getBoundingClientRect();
+        const minX = rect.left + padding;
+        const minY = rect.top + padding;
+        const maxX = rect.right - editorWidth - padding;
+        const maxY = rect.bottom - editorHeight - padding;
+        
+        adjustedX = Math.max(minX, Math.min(maxX, adjustedX));
+        adjustedY = Math.max(minY, Math.min(maxY, adjustedY));
+      } else {
+        // 兜底：保持在视口内
+        adjustedX = Math.max(padding, Math.min(adjustedX, viewportWidth - editorWidth - padding));
+        adjustedY = Math.max(padding, Math.min(adjustedY, viewportHeight - editorHeight - padding));
+      }
     }
     
     const editorData = {
       sourceId,
       targetId,
-      title: title || '',
+      title,
       description,
+      isCrossTree: options.isCrossTree,
+      mode: options.mode,
       x: adjustedX,
       y: adjustedY
     };
     this.logger.debug('设置 connectionEditorData', editorData);
-    
+
+    this.armConnectionEditorBackgroundCloseGuard();
     this.connectionEditorData.set(editorData);
     this.connectionEditorPos.set({ x: adjustedX, y: adjustedY });
     
@@ -404,16 +515,34 @@ export class FlowLinkService {
     this.logger.debug('closeConnectionEditor 被调用');
     this.connectionEditorData.set(null);
   }
+
+  setConnectionEditorMode(mode: ConnectionEditorMode): void {
+    const data = this.connectionEditorData();
+    if (!data || data.mode === mode) {
+      return;
+    }
+
+    this.armConnectionEditorBackgroundCloseGuard();
+    this.connectionEditorData.set({
+      ...data,
+      mode,
+    });
+  }
+
+  shouldIgnoreConnectionEditorBackgroundClose(): boolean {
+    return Date.now() < this.connectionEditorIgnoreCloseUntil;
+  }
   
   /**
    * 保存联系块内容（标题和描述）
    * @param title 标题（外显内容）
    * @param description 描述（悬停显示）
    */
-  saveConnectionContent(title: string, description: string): void {
+  saveConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
+    this.taskOps.connectionAdapter.updateConnectionContent(sourceId, targetId, title, description);
+
     const data = this.connectionEditorData();
-    if (data) {
-      this.taskOps.connectionAdapter.updateConnectionContent(data.sourceId, data.targetId, title, description);
+    if (data && data.sourceId === sourceId && data.targetId === targetId) {
       // 更新本地数据，保持编辑器状态同步
       this.connectionEditorData.set({
         ...data,
@@ -434,9 +563,15 @@ export class FlowLinkService {
       return false;
     }
     
-    this.logger.info('删除跨树连接', { sourceId: data.sourceId, targetId: data.targetId });
-    // 删除跨树连接
-    this.taskOps.connectionAdapter.removeConnection(data.sourceId, data.targetId);
+    if (data.isCrossTree) {
+      this.logger.info('删除跨树连接', { sourceId: data.sourceId, targetId: data.targetId });
+      this.taskOps.connectionAdapter.removeConnection(data.sourceId, data.targetId);
+    } else {
+      // 父子连接：解除父子关系
+      this.logger.info('解除父子关系', { parentId: data.sourceId, childId: data.targetId });
+      this.taskOps.detachTask(data.targetId);
+    }
+    
     // 关闭编辑器
     this.closeConnectionEditor();
     return true;
@@ -610,6 +745,137 @@ export class FlowLinkService {
     this.linkDeleteHint.set(null);
   }
   
+  // ========== 移动端操作菜单方法 ==========
+  
+  /**
+   * 显示连接线操作菜单（移动端）
+   * 长按连接线时调用，提供编辑和删除两个选项
+   * @param linkData GoJS 连接线数据对象
+   * @param x 显示位置 X
+   * @param y 显示位置 Y
+   */
+  showLinkActionMenu(linkData: go.ObjectData, x: number, y: number): void {
+    this.logger.debug('showLinkActionMenu', { linkData, x, y });
+    
+    // 先关闭可能存在的删除提示
+    this.linkDeleteHint.set(null);
+    if (this.linkDeleteHintTimer) {
+      clearTimeout(this.linkDeleteHintTimer);
+      this.linkDeleteHintTimer = null;
+    }
+    
+    this.linkActionMenu.set({
+      link: { data: linkData },
+      x,
+      y,
+      isCrossTree: !!linkData?.isCrossTree
+    });
+    
+    // 5秒后自动隐藏（比删除提示更长，给用户更多思考时间）
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+    }
+    
+    const currentLinkData = linkData;
+    this.linkActionMenuTimer = setTimeout(() => {
+      if (this.isDestroyed) return;
+      const currentMenu = this.linkActionMenu();
+      if (currentMenu?.link?.data === currentLinkData) {
+        this.linkActionMenu.set(null);
+      }
+      this.linkActionMenuTimer = null;
+    }, 5000);
+  }
+  
+  /**
+   * 从操作菜单打开编辑器
+   */
+  openEditorFromActionMenu(): void {
+    const menu = this.linkActionMenu();
+    if (!menu?.link?.data) {
+      this.logger.warn('openEditorFromActionMenu: 没有操作菜单数据');
+      return;
+    }
+    
+    const linkData = menu.link.data;
+    const fromId = linkData.from as string;
+    const toId = linkData.to as string;
+    const title = (linkData.title as string) || '';
+    const description = (linkData.description as string) || '';
+    
+    // 关闭菜单并打开编辑器
+    this.linkActionMenu.set(null);
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+      this.linkActionMenuTimer = null;
+    }
+    
+    this.openConnectionEditor(fromId, toId, description, menu.x, menu.y, title, {
+      isCrossTree: true,
+      mode: 'edit',
+    });
+  }
+  
+  /**
+   * 从操作菜单查看父子关系（打开编辑器的只读模式）
+   */
+  viewFromActionMenu(): void {
+    const menu = this.linkActionMenu();
+    if (!menu?.link?.data) {
+      this.logger.warn('viewFromActionMenu: 没有操作菜单数据');
+      return;
+    }
+    
+    const linkData = menu.link.data;
+    const fromId = linkData.from as string;
+    const toId = linkData.to as string;
+    
+    // 关闭菜单并打开编辑器（父子关系会显示只读信息）
+    this.linkActionMenu.set(null);
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+      this.linkActionMenuTimer = null;
+    }
+    
+    this.openConnectionEditor(fromId, toId, '', menu.x, menu.y, '', {
+      isCrossTree: false,
+      mode: 'preview',
+    });
+  }
+  
+  /**
+   * 从操作菜单删除连接
+   */
+  deleteFromActionMenu(): { fromKey: string; toKey: string; isCrossTree: boolean } | null {
+    const menu = this.linkActionMenu();
+    this.logger.info('deleteFromActionMenu 被调用', { menu });
+    
+    if (!menu?.link) {
+      this.logger.warn('deleteFromActionMenu: 没有操作菜单数据');
+      return null;
+    }
+    
+    const result = this.deleteLinkInternal(menu.link);
+    this.logger.info('从操作菜单删除连接完成', result);
+    this.linkActionMenu.set(null);
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+      this.linkActionMenuTimer = null;
+    }
+    return result;
+  }
+  
+  /**
+   * 取消操作菜单
+   */
+  cancelActionMenu(): void {
+    this.linkActionMenu.set(null);
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+      this.linkActionMenuTimer = null;
+    }
+  }
+  
   /**
    * 从右键菜单删除连接
    */
@@ -660,6 +926,11 @@ export class FlowLinkService {
       this.linkDeleteHintTimer = null;
     }
     
+    if (this.linkActionMenuTimer) {
+      clearTimeout(this.linkActionMenuTimer);
+      this.linkActionMenuTimer = null;
+    }
+    
     document.removeEventListener('mousemove', this.onDragConnEditor);
     document.removeEventListener('mouseup', this.stopDragConnEditor);
     document.removeEventListener('touchmove', this.onDragConnEditor);
@@ -699,5 +970,9 @@ export class FlowLinkService {
     }
     
     return { fromKey, toKey, isCrossTree };
+  }
+
+  private armConnectionEditorBackgroundCloseGuard(durationMs: number = 300): void {
+    this.connectionEditorIgnoreCloseUntil = Date.now() + durationMs;
   }
 }

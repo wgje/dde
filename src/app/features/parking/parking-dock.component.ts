@@ -125,6 +125,11 @@ export class ParkingDockComponent implements OnDestroy {
     return offset === 0 ? '50%' : `calc(50% + ${offset / 2}px)`;
   });
 
+  /** 移动端流程图视图时隐藏半圆按钮，避免遮挡底部功能按键 */
+  readonly hideSemicircleOnMobileFlow = computed(
+    () => this.uiState.isMobile() && this.uiState.activeView() === 'flow',
+  );
+
   readonly showNewTaskForm = signal(false);
   readonly focusHostZIndex = computed<string | null>(() => {
     if (this.engine.focusMode() || this.engine.focusTransition() !== null || this.focusTransitionService.flipGhost() !== null) {

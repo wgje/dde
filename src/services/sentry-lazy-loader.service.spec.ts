@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 
@@ -38,10 +38,19 @@ const createSentryMock = (scope: ScopeMock) => ({
 
 describe('SentryLazyLoaderService', () => {
   let service: SentryLazyLoaderService;
+  const originalDsn = environment.SENTRY_DSN;
 
   beforeEach(() => {
+    localStorage.clear();
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = 'https://dsn.example.invalid/1';
     service = new SentryLazyLoaderService();
     vi.spyOn(service, 'triggerLazyInit').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
   });
 
   it('captureMessage 在未初始化时应缓存为 message 事件', () => {
@@ -93,8 +102,7 @@ describe('SentryLazyLoaderService', () => {
 });
 
 describe('SentryLazyLoaderService triggerLazyInit', () => {
-  it('缺少 DSN 时仅提示一次', () => {
-    const originalDsn = environment.SENTRY_DSN;
+  it('缺少 DSN 时默认静默，不向控制台输出噪音', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
@@ -104,8 +112,30 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
     service.triggerLazyInit();
     service.triggerLazyInit();
 
-    expect(warnSpy.mock.calls.length + infoSpy.mock.calls.length).toBe(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(infoSpy).not.toHaveBeenCalled();
+  });
 
-    (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
+  it('缺少 DSN 时不再缓存待发送事件', () => {
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
+    const disabledService = new SentryLazyLoaderService();
+
+    disabledService.captureMessage('should be dropped');
+    disabledService.captureException(new Error('should also be dropped'));
+
+    expect((disabledService as MutableService).pendingEvents).toHaveLength(0);
+  });
+
+  it('verbose 模式下缺少 DSN 仅输出一次诊断信息', () => {
+    localStorage.setItem('nanoflow.verbose', 'true');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
+    const service = new SentryLazyLoaderService();
+
+    service.triggerLazyInit();
+    service.triggerLazyInit();
+
+    expect(infoSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -207,14 +207,15 @@ export class FlowLinkTemplateService {
         relinkableTo: true,
         reshapable: true,
         resegmentable: false,
-        // 事件代理：桌面端连接线点击
-        click: isMobile
-          ? () => { /* 移动端空处理器 */ }
-          : ((e: go.InputEvent, link: go.GraphObject) => {
-              if (e.handled) return;
-              e.handled = true;
-              flowTemplateEventHandlers.onLinkClick?.(link as go.Link);
-            }) as GojsClickHandler,
+        // 【修复】移动端不设置 click，事件由 ObjectSingleClicked 处理
+        // 桌面端通过 click 事件处理
+        ...(isMobile ? {} : {
+          click: ((e: go.InputEvent, link: go.GraphObject) => {
+            if (e.handled) return;
+            e.handled = true;
+            flowTemplateEventHandlers.onLinkClick?.(link as go.Link);
+          }) as GojsClickHandler
+        }),
         contextMenu: $(go.Adornment, "Vertical",
           $("ContextMenuButton",
             $(go.TextBlock, "删除连接", { margin: 5 }),
@@ -251,13 +252,15 @@ export class FlowLinkTemplateService {
         relinkableTo: true,
         reshapable: true,
         resegmentable: false,
-        click: isMobile
-          ? () => { /* 移动端空处理器 */ }
-          : ((e: go.InputEvent, link: go.GraphObject) => {
-              if (e.handled) return;
-              e.handled = true;
-              flowTemplateEventHandlers.onLinkClick?.(link as go.Link);
-            }) as GojsClickHandler,
+        // 【修复】移动端不设置 click，让点击事件能传递到关联块标签
+        // 桌面端通过 click 事件处理
+        ...(isMobile ? {} : {
+          click: ((e: go.InputEvent, link: go.GraphObject) => {
+            if (e.handled) return;
+            e.handled = true;
+            flowTemplateEventHandlers.onLinkClick?.(link as go.Link);
+          }) as GojsClickHandler
+        }),
         contextMenu: $(go.Adornment, "Vertical",
           $("ContextMenuButton",
             $(go.TextBlock, "删除连接", { margin: 5 }),
@@ -612,7 +615,6 @@ export class FlowLinkTemplateService {
       segmentIndex: NaN,
       segmentFraction: 0.5,
       cursor: "pointer",
-      isActionable: true,
       background: "transparent",
     };
     
@@ -624,16 +626,39 @@ export class FlowLinkTemplateService {
     return $(go.Panel, "Auto",
       {
         ...panelConfig,
-        // 事件代理：点击时通过全局事件总线发送信号
-        click: (e: go.InputEvent, obj: go.GraphObject) => {
-          const link = obj?.part as go.Link | undefined;
-          if (!link?.data?.isCrossTree) return;
-          e.handled = true;
-          // 获取视图坐标用于定位编辑器
-          const viewX = e.viewPoint?.x ?? 0;
-          const viewY = e.viewPoint?.y ?? 0;
-          flowTemplateEventHandlers.onCrossTreeLabelClick?.(link, viewX, viewY);
-        }
+        // 桌面端保留标签点击直达编辑；移动端交由 ObjectSingleClicked 统一处理
+        ...(isMobile ? {} : {
+          click: (e: go.InputEvent, obj: go.GraphObject) => {
+            const link = obj?.part as go.Link | undefined;
+            if (!link?.data?.isCrossTree) return;
+            e.handled = true;
+
+            const diagram = e.diagram;
+            let viewX = 0;
+            let viewY = 0;
+
+            if (diagram && link) {
+              // 使用连接线的中点作为参考（关联块标签通常在中点附近）
+              const midPoint = link.midPoint;
+              if (midPoint && isFinite(midPoint.x) && isFinite(midPoint.y)) {
+                // 转换为视图坐标
+                const viewPoint = diagram.transformDocToView(midPoint);
+                viewX = viewPoint.x;
+                viewY = viewPoint.y;
+              } else {
+                // 降级：使用点击位置
+                viewX = e.viewPoint?.x ?? 0;
+                viewY = e.viewPoint?.y ?? 0;
+              }
+            } else {
+              // 降级：使用点击位置
+              viewX = e.viewPoint?.x ?? 0;
+              viewY = e.viewPoint?.y ?? 0;
+            }
+
+            flowTemplateEventHandlers.onCrossTreeLabelClick?.(link, viewX, viewY);
+          }
+        })
       },
       // 【2026-02-25 性能优化】不再需要 visible 绑定——此 panel 仅在 crossTree 模板中使用
       // new go.Binding("visible", "isCrossTree"), // 已由模板分类取代
@@ -642,15 +667,14 @@ export class FlowLinkTemplateService {
         stroke: "#8b5cf6",
         strokeWidth: 1,
         parameter1: 4,
-        cursor: "pointer",
-        isActionable: true
+        ...(isMobile ? { minSize: new go.Size(44, 24) } : {}),
+        cursor: "pointer"
       }),
       $(go.Panel, "Horizontal",
-        { margin: isMobile ? 4 : 3, defaultAlignment: go.Spot.Center, cursor: "pointer", isActionable: true },
+        { margin: isMobile ? 6 : 3, defaultAlignment: go.Spot.Center, cursor: "pointer" },
         $(go.TextBlock, "🔗", { 
           font: `${isMobile ? '10px' : '8px'} "LXGW WenKai Screen", sans-serif`, 
-          cursor: "pointer", 
-          isActionable: true 
+          cursor: "pointer"
         }),
         $(go.TextBlock, {
           font: `500 ${isMobile ? '10px' : '8px'} "LXGW WenKai Screen", sans-serif`,
@@ -658,8 +682,7 @@ export class FlowLinkTemplateService {
           maxSize: new go.Size(isMobile ? 100 : 120, 14),
           overflow: go.TextBlock.OverflowEllipsis,
           margin: new go.Margin(0, 0, 0, 2),
-          cursor: "pointer",
-          isActionable: true
+          cursor: "pointer"
         },
         // 优先显示 title，若无则显示截断的 description
         new go.Binding("text", "", (data: go.ObjectData) => {

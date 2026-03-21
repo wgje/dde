@@ -202,13 +202,13 @@ export class DockEngineLifecycleService {
       if (this.ctx.dockedCount() < PARKING_CONFIG.DOCK_CONSOLE_SOFT_LIMIT && this.ctx.softLimitNoticeShown()) {
         this.ctx.softLimitNoticeShown.set(false);
       }
-    }, { allowSignalWrites: true });
+    });
 
     // 每日重置时间偏好变更
     effect(() => {
       this.focusPreferenceService.preferences().routineResetHourLocal;
       this.dailySlotService.resetDailySlotsIfNeeded();
-    }, { allowSignalWrites: true });
+    });
   }
 
   /** 外部状态协调 effect：检测外部完成的任务并同步 */
@@ -254,7 +254,7 @@ export class DockEngineLifecycleService {
         body: DOCK_NOTIFICATION.TIGHT_BLANK_BODY,
         tag: 'nanoflow-focus-blank-period',
       });
-    }, { allowSignalWrites: true });
+    });
 
     effect(() => {
       const countdown = this.ctx.fragmentEntryCountdown();
@@ -269,7 +269,7 @@ export class DockEngineLifecycleService {
         body: DOCK_NOTIFICATION.fragmentCountdownBody(countdown),
         tag: 'nanoflow-focus-fragment-countdown',
       });
-    }, { allowSignalWrites: true });
+    });
   }
 
   // ---------------------------------------------------------------------------

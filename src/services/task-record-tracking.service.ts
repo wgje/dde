@@ -319,9 +319,10 @@ export class TaskRecordTrackingService {
       if (!beforeConn) {
         this.changeTracker.trackConnectionCreate(projectId, conn);
       } else {
+        const titleChanged = beforeConn.title !== conn.title;
         const deletedAtChanged = beforeConn.deletedAt !== conn.deletedAt;
         const descriptionChanged = beforeConn.description !== conn.description;
-        if (deletedAtChanged || descriptionChanged) {
+        if (titleChanged || deletedAtChanged || descriptionChanged) {
           this.changeTracker.trackConnectionUpdate(projectId, conn);
         }
       }

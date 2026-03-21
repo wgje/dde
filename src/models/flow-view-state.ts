@@ -25,6 +25,8 @@ export interface LinkTypeDialogData {
 /**
  * 联系块编辑器数据
  */
+export type ConnectionEditorMode = 'preview' | 'edit';
+
 export interface ConnectionEditorData {
   sourceId: string;
   targetId: string;
@@ -32,6 +34,10 @@ export interface ConnectionEditorData {
   title: string;
   /** 联系块详细描述 */
   description: string;
+  /** 当前打开的是跨树关联还是父子关系 */
+  isCrossTree: boolean;
+  /** 当前浮层模式：预览或编辑 */
+  mode: ConnectionEditorMode;
   x: number;
   y: number;
 }
@@ -56,6 +62,18 @@ export interface LinkDeleteHint {
   x: number;
   y: number;
   /** 是否跨树连接（用于 UI 文案区分） */
+  isCrossTree: boolean;
+}
+
+/**
+ * 移动端连接线操作菜单数据
+ * 长按连接线时显示，提供编辑和删除两个操作
+ */
+export interface LinkActionMenu {
+  link: LinkDataRef; // 连接线数据引用
+  x: number;
+  y: number;
+  /** 是否跨树连接（用于 UI 文案和功能区分） */
   isCrossTree: boolean;
 }
 
@@ -137,6 +155,8 @@ export interface FlowViewState {
   // ========== 移动端提示 ==========
   /** 连接线删除提示（移动端） */
   linkDeleteHint: LinkDeleteHint | null;
+  /** 移动端连接线操作菜单（长按显示） */
+  linkActionMenu: LinkActionMenu | null;
   
   // ========== 错误状态 ==========
   /** 流程图初始化错误信息 */

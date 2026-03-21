@@ -82,21 +82,33 @@ export class FlowEventRegistrationService {
         isDoubleClick
       });
       
-      // 移动端：单击打开编辑器（仅跨树连接），双击/长按显示删除提示
+      // 移动端：单击打开编辑器（预览模式），长按/双击显示操作菜单
       if (this.uiState.isMobile()) {
         if (isDoubleClick) {
-          this.logger.debug('移动端长按/双击：显示删除提示');
-          this.link.showLinkDeleteHint(linkData, x, y);
-        } else if (linkData?.isCrossTree) {
-          this.logger.debug('移动端单击：打开跨树连接编辑器');
-          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
+          // 长按/双击：显示操作菜单（编辑 + 删除）
+          this.logger.debug('移动端长按/双击：显示操作菜单', { isCrossTree: linkData?.isCrossTree });
+          this.link.showLinkActionMenu(linkData, x, y);
+        } else {
+          // 单击：打开编辑器，先进入预览模式
+          // 用户在预览模式下点击预览区域才会进入编辑模式
+          this.logger.debug('移动端单击：打开连接编辑器（预览模式）', { 
+            isCrossTree: linkData?.isCrossTree,
+            from: linkData.from,
+            to: linkData.to
+          });
+          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '', {
+            isCrossTree: !!linkData?.isCrossTree,
+            mode: 'preview',  // 移动端单击先进入预览模式，再次点击预览区域或同一关联块才进入编辑模式
+          });
         }
-        // 普通父子连接单击不做处理
       } else {
         // 桌面端：跨树连接线打开编辑器，普通连接线不处理（由右键菜单处理）
         if (linkData?.isCrossTree) {
           this.logger.debug('桌面端：打开跨树连接编辑器', { from: linkData.from, to: linkData.to });
-          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '');
+          this.link.openConnectionEditor(linkData.from, linkData.to, linkData.description || '', x, y, linkData.title || '', {
+            isCrossTree: true,
+            mode: 'preview',
+          });
         }
       }
     });
@@ -223,10 +235,31 @@ export class FlowEventRegistrationService {
    */
   registerBackgroundClickHandler(isPaletteOpen: WritableSignal<boolean>): void {
     this.eventService.onBackgroundClick(() => {
-      this.logger.debug('backgroundClick 触发，关闭编辑器和删除提示');
-      this.link.closeConnectionEditor();
-      // 移动端：同时关闭删除提示
+      this.logger.debug('backgroundClick 触发，关闭编辑器和菜单');
+      const currentEditor = this.link.connectionEditorData();
+
+      // 移动端编辑模式下点击背景：先保存并切换到预览模式，而不是关闭编辑器
+      // 这样用户可以继续查看内容，再次点击背景才会关闭
+      if (
+        currentEditor &&
+        this.uiState.isMobile() &&
+        currentEditor.mode === 'edit' &&
+        !this.link.shouldIgnoreConnectionEditorBackgroundClose()
+      ) {
+        this.link.setConnectionEditorMode('preview');
+      } else if (
+        !currentEditor ||
+        !this.uiState.isMobile() ||
+        (currentEditor.mode === 'preview' && !this.link.shouldIgnoreConnectionEditorBackgroundClose())
+      ) {
+        // 非移动端、无编辑器、或预览模式下点击背景：直接关闭
+        this.link.closeConnectionEditor();
+      }
+      // 其他情况（如保护窗口期内）：不做任何操作
+
+      // 移动端：同时关闭操作菜单和删除提示
       if (this.uiState.isMobile()) {
+        this.link.cancelActionMenu();
         this.link.cancelLinkDelete();
         // 移动端：点击流程图画布时收缩左侧调色板（黑匣子栏）
         if (isPaletteOpen()) {

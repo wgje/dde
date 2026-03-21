@@ -1,17 +1,27 @@
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { LoggerService, LogLevel } from './logger.service';
+import { environment } from '../environments/environment';
 
 describe('LoggerService', () => {
   let service: LoggerService;
+  const originalProduction = environment.production;
 
   beforeEach(() => {
+    localStorage.clear();
+    (environment as { production: boolean }).production = originalProduction;
     const injector = Injector.create({
       providers: [
         { provide: LoggerService, useClass: LoggerService },
       ],
     });
     service = injector.get(LoggerService);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+    (environment as { production: boolean }).production = originalProduction;
   });
 
   describe('setLevel / 日志过滤', () => {
@@ -21,6 +31,45 @@ describe('LoggerService', () => {
       service.debug('test', 'should not appear');
       // DEBUG < WARN, so it should be filtered
       spy.mockRestore();
+    });
+
+    it('开发环境默认抑制 info/debug 启动噪音', () => {
+      (environment as { production: boolean }).production = false;
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      const injector = Injector.create({
+        providers: [
+          { provide: LoggerService, useClass: LoggerService },
+        ],
+      });
+      const quietLogger = injector.get(LoggerService);
+
+      quietLogger.info('boot', 'info should stay silent by default');
+      quietLogger.debug('boot', 'debug should stay silent by default');
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(debugSpy).not.toHaveBeenCalled();
+    });
+
+    it('nanoflow.verbose=true 时恢复开发态详细日志', () => {
+      (environment as { production: boolean }).production = false;
+      localStorage.setItem('nanoflow.verbose', 'true');
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+      const injector = Injector.create({
+        providers: [
+          { provide: LoggerService, useClass: LoggerService },
+        ],
+      });
+      const verboseLogger = injector.get(LoggerService);
+
+      verboseLogger.info('boot', 'info should appear when verbose is enabled');
+      verboseLogger.debug('boot', 'debug should appear when verbose is enabled');
+
+      expect(infoSpy).toHaveBeenCalledOnce();
+      expect(debugSpy).toHaveBeenCalledOnce();
     });
   });
 

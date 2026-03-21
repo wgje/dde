@@ -145,13 +145,13 @@ const hasDevAutoLogin = devAutoLoginEmail && devAutoLoginPassword;
 // 如果没有配置 Supabase 环境变量，使用占位符（应用将以离线模式运行）
 const useOfflineMode = !supabaseUrl || !supabaseAnonKey;
 if (useOfflineMode) {
-  console.warn('⚠️ 未找到 Supabase 环境变量，将生成离线模式配置文件。');
-  console.warn('   如需云端同步功能，请在 .env.local 中设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY');
+  console.log('ℹ️ 未找到 Supabase 环境变量，将生成离线模式配置文件。');
+  console.log('   如需云端同步功能，请在 .env.local 中设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY');
 }
 
 if (!gojsLicenseKey) {
-  console.warn('⚠️ 未找到 GoJS License Key，流程图将显示水印。');
-  console.warn('   如需移除水印，请在 .env.local 中设置 NG_APP_GOJS_LICENSE_KEY');
+  console.log('ℹ️ 未找到 GoJS License Key，流程图将显示水印。');
+  console.log('   如需移除水印，请在 .env.local 中设置 NG_APP_GOJS_LICENSE_KEY');
 }
 
 if (hasDevAutoLogin) {

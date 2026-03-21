@@ -1,4 +1,4 @@
-import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy } from '@angular/core';
+import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy, viewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
@@ -43,6 +43,8 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           (input)="onTitleInput(titleInput.value)"
           (focus)="onInputFocus('title')"
           (blur)="onInputBlur('title')"
+          (compositionstart)="onCompositionStart('title')"
+          (compositionend)="onCompositionEnd('title', titleInput.value)"
           (mousedown)="isSelecting = true"
           (mouseup)="isSelecting = false"
           spellcheck="false"
@@ -88,6 +90,8 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               (input)="onContentInput(contentInput.value)"
               (focus)="onInputFocus('content')"
               (blur)="onInputBlur('content')"
+              (compositionstart)="onCompositionStart('content')"
+              (compositionend)="onCompositionEnd('content', contentInput.value)"
               (mousedown)="isSelecting = true"
               (mouseup)="isSelecting = false"
               spellcheck="false"
@@ -348,6 +352,12 @@ export class TextTaskEditorComponent implements OnDestroy {
   readonly showAttachmentList = signal(false);
   readonly isUploading = signal(false);
 
+  // ========== DOM 引用 ==========
+  /** 标题输入框引用 */
+  private readonly titleInputRef = viewChild<ElementRef<HTMLInputElement>>('titleInput');
+  /** 内容输入框引用 */
+  private readonly contentInputRef = viewChild<ElementRef<HTMLTextAreaElement>>('contentInput');
+
   // ========== Split-Brain 本地状态==========
   /** 本地标题（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localTitle = signal('');
@@ -360,6 +370,11 @@ export class TextTaskEditorComponent implements OnDestroy {
   private isTitleFocused = false;
   /** 内容输入框是否聚焦 */
   private isContentFocused = false;
+  /** IME 输入状态追踪 */
+  private readonly composingState: Record<'title' | 'content', boolean> = {
+    title: false,
+    content: false,
+  };
   /** 解锁延迟定时器*/
   private unlockTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
@@ -407,11 +422,39 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    // 【关键】组件销毁前，确保当前编辑的内容被保存
+    // 这是修复手机端点击关联块编辑后无法自动保存的核心逻辑
+    this.persistCurrentEdits();
+
     // 清理所有未完成的解锁定时器
     for (const timer of this.unlockTimers.values()) {
       clearTimeout(timer);
     }
     this.unlockTimers.clear();
+  }
+
+  /**
+   * 从 DOM 同步最新值并持久化
+   * 确保 IME 输入和快速关闭场景下数据不丢失
+   */
+  private persistCurrentEdits(): void {
+    const task = this.task?.();
+    if (!task) return;
+
+    // 从 DOM 直接读取最新值（绕过 Angular 数据绑定的延迟）
+    const titleEl = this.titleInputRef()?.nativeElement;
+    const contentEl = this.contentInputRef()?.nativeElement;
+
+    const currentTitle = titleEl?.value ?? this.localTitle();
+    const currentContent = contentEl?.value ?? this.localContent();
+
+    // 与当前 Store 中的任务比较，只有真正有变化才保存
+    if (currentTitle !== task.title) {
+      this.taskOpsAdapter.updateTaskTitle(task.id, currentTitle);
+    }
+    if (currentContent !== task.content) {
+      this.taskOpsAdapter.updateTaskContent(task.id, currentContent);
+    }
   }
 
   // ========== Split-Brain 锁定辅助方法 ==========
@@ -526,8 +569,10 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   /**
-   * 输入框失焦处理（Split-Brain 模式核心）   * 1. 提交本地内容到 Store
-   * 2. 延迟 5 秒后解锁字段（等待同步完成，防止回声覆盖）   * 3. 延迟后重新启用 Store->Local 同步
+   * 输入框失焦处理（Split-Brain 模式核心）
+   * 1. 从 DOM 读取最新值（确保 IME 输入的最终值）
+   * 2. 提交本地内容到 Store
+   * 3. 延迟后解锁字段（等待同步完成，防止回声覆盖）
    */
   onInputBlur(field: 'title' | 'content' | 'todo') {
     // 延迟清除选择标记
@@ -536,8 +581,13 @@ export class TextTaskEditorComponent implements OnDestroy {
     }, 100);
 
     if (field === 'title') {
+      // 从 DOM 读取最新值（确保 IME 输入完成后的最终值）
+      const titleEl = this.titleInputRef()?.nativeElement;
+      const currentTitle = titleEl?.value ?? this.localTitle();
+      this.localTitle.set(currentTitle);
+
       // 提交本地内容到 Store
-      this.taskOpsAdapter.updateTaskTitle(this.task().id, this.localTitle());
+      this.taskOpsAdapter.updateTaskTitle(this.task().id, currentTitle);
 
       const timer = setTimeout(() => {
         this.isTitleFocused = false;
@@ -546,7 +596,12 @@ export class TextTaskEditorComponent implements OnDestroy {
       }, 10000);
       this.unlockTimers.set('title', timer);
     } else if (field === 'content') {
-      this.taskOpsAdapter.updateTaskContent(this.task().id, this.localContent());
+      // 从 DOM 读取最新值
+      const contentEl = this.contentInputRef()?.nativeElement;
+      const currentContent = contentEl?.value ?? this.localContent();
+      this.localContent.set(currentContent);
+
+      this.taskOpsAdapter.updateTaskContent(this.task().id, currentContent);
 
       const timer = setTimeout(() => {
         this.isContentFocused = false;
@@ -573,6 +628,38 @@ export class TextTaskEditorComponent implements OnDestroy {
   onContentInput(value: string) {
     this.localContent.set(value);
     this.taskOpsAdapter.updateTaskContent(this.task().id, value);
+  }
+
+  // ========== IME Composition 处理 ==========
+
+  /**
+   * IME 输入开始（如中文拼音输入）
+   * 标记正在进行 composition，避免中间态被提交
+   */
+  onCompositionStart(field: 'title' | 'content'): void {
+    this.composingState[field] = true;
+  }
+
+  /**
+   * IME 输入完成
+   * 立即同步最终值到本地状态并提交到 Store
+   */
+  onCompositionEnd(field: 'title' | 'content', value: string): void {
+    this.composingState[field] = false;
+    if (field === 'title') {
+      this.localTitle.set(value);
+      this.taskOpsAdapter.updateTaskTitle(this.task().id, value);
+    } else if (field === 'content') {
+      this.localContent.set(value);
+      this.taskOpsAdapter.updateTaskContent(this.task().id, value);
+    }
+  }
+
+  /**
+   * 检查是否有任何字段正在 IME 输入中
+   */
+  private isComposing(): boolean {
+    return this.composingState.title || this.composingState.content;
   }
 
   onExpectedMinutesChange(value: string): void {

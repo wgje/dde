@@ -30,9 +30,11 @@ export type { ConnectionEditorData, ConnectionTasks } from './flow-connection-ed
 
 export { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
 
+export { FlowLinkActionMenuComponent } from './flow-link-action-menu.component';
+
 // 级联分配对话框
 export { FlowCascadeAssignDialogComponent } from './flow-cascade-assign-dialog.component';
 export type { CascadeAssignDialogData } from './flow-cascade-assign-dialog.component';
 
 // 类型导出
-export type { LinkDeleteHint } from '../../../../models/flow-view-state';
+export type { LinkDeleteHint, LinkActionMenu } from '../../../../models/flow-view-state';

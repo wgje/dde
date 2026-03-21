@@ -405,43 +405,45 @@
       }
     }
 
-    <!-- ═══ 半圆形停泊坞入口（始终可见） ═══ -->
-    <div
-      class="dock-semicircle dock-semicircle-enter"
-      [class.expanded]="semicircleExpanded()"
-      [class.drag-active]="dragDrop.dropState() !== 'idle' && dragDrop.dropState() !== 'reject'"
-      [style.left]="dockCenterLeft()"
-      [style.bottom]="dockSemicircleBottomInset()"
-      [style.--dock-semicircle-scale-x]="semicircleExpanded() ? '1' : '0.5'"
-      [style.--dock-semicircle-scale-y]="semicircleExpanded() ? '1' : '0.77'"
-      (click)="toggleDockExpanded()"
-      (mouseenter)="onSemicircleMouseEnter()"
-      (mouseleave)="onSemicircleMouseLeave()"
-      (dragover)="onSemicircleDragOver($event)"
-      (dragleave)="onSemicircleDragLeave()"
-      (drop)="onDrop($event)"
-      data-testid="dock-v3-semicircle"
-      [attr.aria-label]="dockExpanded() ? '收起停泊坞' : '展开停泊坞'"
-      [attr.aria-expanded]="dockExpanded()"
-      [attr.aria-disabled]="gateActive() ? 'true' : null"
-      [style.--dock-semicircle-lift]="dockExpanded() ? '0px' : (PARKING_CONFIG.MOTION.distance.semicircleLiftPx + 'px')"
-      role="button"
-      tabindex="0"
-      (keydown.enter)="toggleDockExpanded()"
-      (keydown.space)="$event.preventDefault(); toggleDockExpanded()">
-      @if (engine.dockedCount() > 0) {
-        <span class="count-badge">{{ engine.dockedCount() }}</span>
-      }
-      @if (dockExpanded()) {
-        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-        </svg>
-      } @else {
-        <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
-        </svg>
-      }
-    </div>
+    <!-- ═══ 半圆形停泊坞入口（移动端流程图视图时隐藏，避免遮挡底部功能按键） ═══ -->
+    @if (!hideSemicircleOnMobileFlow()) {
+      <div
+        class="dock-semicircle dock-semicircle-enter"
+        [class.expanded]="semicircleExpanded()"
+        [class.drag-active]="dragDrop.dropState() !== 'idle' && dragDrop.dropState() !== 'reject'"
+        [style.left]="dockCenterLeft()"
+        [style.bottom]="dockSemicircleBottomInset()"
+        [style.--dock-semicircle-scale-x]="semicircleExpanded() ? '1' : '0.5'"
+        [style.--dock-semicircle-scale-y]="semicircleExpanded() ? '1' : '0.77'"
+        (click)="toggleDockExpanded()"
+        (mouseenter)="onSemicircleMouseEnter()"
+        (mouseleave)="onSemicircleMouseLeave()"
+        (dragover)="onSemicircleDragOver($event)"
+        (dragleave)="onSemicircleDragLeave()"
+        (drop)="onDrop($event)"
+        data-testid="dock-v3-semicircle"
+        [attr.aria-label]="dockExpanded() ? '收起停泊坞' : '展开停泊坞'"
+        [attr.aria-expanded]="dockExpanded()"
+        [attr.aria-disabled]="gateActive() ? 'true' : null"
+        [style.--dock-semicircle-lift]="dockExpanded() ? '0px' : (PARKING_CONFIG.MOTION.distance.semicircleLiftPx + 'px')"
+        role="button"
+        tabindex="0"
+        (keydown.enter)="toggleDockExpanded()"
+        (keydown.space)="$event.preventDefault(); toggleDockExpanded()">
+        @if (engine.dockedCount() > 0) {
+          <span class="count-badge">{{ engine.dockedCount() }}</span>
+        }
+        @if (dockExpanded()) {
+          <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+          </svg>
+        } @else {
+          <svg class="w-3.5 h-3.5 text-stone-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
+          </svg>
+        }
+      </div>
+    }
 
     @if (firstMainSelectionPending()) {
       <div

@@ -36,8 +36,9 @@ import { FlowPaletteComponent } from './flow-palette.component';
 import { FlowTaskDetailComponent } from './flow-task-detail.component';
 import { FlowDeleteConfirmComponent } from './flow-delete-confirm.component';
 import { FlowLinkTypeDialogComponent } from './flow-link-type-dialog.component';
-import { FlowConnectionEditorComponent } from './flow-connection-editor.component';
+import { FlowConnectionEditorComponent, ConnectionEditorSavePayload } from './flow-connection-editor.component';
 import { FlowLinkDeleteHintComponent } from './flow-link-delete-hint.component';
+import { FlowLinkActionMenuComponent } from './flow-link-action-menu.component';
 import { FlowCascadeAssignDialogComponent } from './flow-cascade-assign-dialog.component';
 import { FlowBatchDeleteDialogComponent } from './flow-batch-delete-dialog.component';
 import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
@@ -62,6 +63,7 @@ import * as go from 'gojs';
     FlowLinkTypeDialogComponent,
     FlowConnectionEditorComponent,
     FlowLinkDeleteHintComponent,
+    FlowLinkActionMenuComponent,
     FlowCascadeAssignDialogComponent,
     FlowBatchDeleteDialogComponent,
     MobileDrawerContainerComponent,
@@ -629,8 +631,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   /** 保存联系块的标题和描述 */
-  saveConnectionDescription(data: { title: string; description: string }): void {
-    this.link.saveConnectionContent(data.title, data.description);
+  saveConnectionDescription(data: ConnectionEditorSavePayload): void {
+    this.link.saveConnectionContent(data.sourceId, data.targetId, data.title, data.description);
     this.refreshDiagram();
   }
   
@@ -647,6 +649,30 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.logger.debug('confirmLinkDelete 被调用');
     const result = this.link.confirmLinkDelete();
     this.logger.debug('删除连接线结果:', result);
+    if (result) {
+      this.refreshDiagram();
+    }
+  }
+  
+  // ========== 移动端连接线操作菜单处理 ==========
+  
+  /** 从操作菜单编辑连接 */
+  handleLinkActionEdit(): void {
+    this.logger.debug('handleLinkActionEdit 被调用');
+    this.link.openEditorFromActionMenu();
+  }
+  
+  /** 从操作菜单查看父子关系 */
+  handleLinkActionView(): void {
+    this.logger.debug('handleLinkActionView 被调用');
+    this.link.viewFromActionMenu();
+  }
+  
+  /** 从操作菜单删除连接 */
+  handleLinkActionDelete(): void {
+    this.logger.debug('handleLinkActionDelete 被调用');
+    const result = this.link.deleteFromActionMenu();
+    this.logger.debug('从操作菜单删除连接结果:', result);
     if (result) {
       this.refreshDiagram();
     }

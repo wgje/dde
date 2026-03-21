@@ -333,20 +333,43 @@ export class FlowEventService {
     // 视口变化（用于保存视图状态，由 FlowDiagramService 处理）
     // 这里不处理，保留给 FlowDiagramService
     
-    // 移动端特殊处理
+    // 移动端特殊处理：通过 ObjectSingleClicked/ObjectDoubleClicked 事件处理连接线和关联块标签的点击
     if (isMobile) {
       this.addTrackedListener('ObjectSingleClicked', (e: go.DiagramEvent) => {
-        const part = e.subject.part;
+        const subject = e.subject;
+        const part = subject?.part;
+        
+        this.logger.debug('移动端 ObjectSingleClicked', { 
+          subjectType: subject?.constructor?.name,
+          partType: part?.constructor?.name,
+          isLink: part instanceof go.Link,
+          hasData: !!part?.data
+        });
+        
+        // 检查是否点击了连接线或连接线上的元素（如关联块标签）
         if (part instanceof go.Link && part.data) {
-          const { x, y } = this.getLinkClickPosition(part);
+          // 获取实际点击位置（优先使用 lastInput 的视图坐标）
+          const { x, y } = this.getClickPositionFromEvent(part);
+          this.logger.debug('移动端连接线/关联块单击', { x, y, linkData: part.data });
           this.emitLinkClick(part.data, x, y, false);
         }
       });
       
       this.addTrackedListener('ObjectDoubleClicked', (e: go.DiagramEvent) => {
-        const part = e.subject.part;
+        const subject = e.subject;
+        const part = subject?.part;
+        
+        this.logger.debug('移动端 ObjectDoubleClicked', { 
+          subjectType: subject?.constructor?.name,
+          partType: part?.constructor?.name,
+          isLink: part instanceof go.Link
+        });
+        
+        // 检查是否点击了连接线或连接线上的元素（如关联块标签）
         if (part instanceof go.Link && part.data) {
-          const { x, y } = this.getLinkClickPosition(part);
+          // 获取实际点击位置
+          const { x, y } = this.getClickPositionFromEvent(part);
+          this.logger.debug('移动端连接线/关联块双击', { x, y, linkData: part.data });
           this.emitLinkClick(part.data, x, y, true);
         }
       });
@@ -508,6 +531,30 @@ export class FlowEventService {
   
   /**
    * 获取连接线点击位置（屏幕坐标）
+   * 优先使用实际点击位置（lastInput），回退到连接线中点
+   */
+  private getClickPositionFromEvent(link: go.Link): { x: number; y: number } {
+    if (!this.diagram || !this.diagramDiv) {
+      return { x: 0, y: 0 };
+    }
+    
+    const rect = this.diagramDiv.getBoundingClientRect();
+    
+    // 优先使用 lastInput 的视图坐标（实际点击位置）
+    const lastInput = this.diagram.lastInput;
+    if (lastInput && lastInput.viewPoint) {
+      return {
+        x: rect.left + lastInput.viewPoint.x,
+        y: rect.top + lastInput.viewPoint.y
+      };
+    }
+    
+    // 回退到连接线中点
+    return this.getLinkClickPosition(link);
+  }
+  
+  /**
+   * 获取连接线中点位置（屏幕坐标）
    */
   private getLinkClickPosition(link: go.Link): { x: number; y: number } {
     if (!this.diagram || !this.diagramDiv) {

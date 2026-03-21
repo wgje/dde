@@ -22,7 +22,7 @@ import { OptimisticStateService } from './optimistic-state.service';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
-import type { Project, Task } from '../models';
+import type { Connection, Project, Task } from '../models';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -69,6 +69,17 @@ function createProject(overrides: Partial<Project> = {}): Project {
     tasks: [createTask()],
     connections: [],
     version: 1,
+    ...overrides,
+  };
+}
+
+function createConnection(overrides: Partial<Connection> = {}): Connection {
+  return {
+    id: 'conn-1',
+    source: 'task-1',
+    target: 'task-2',
+    title: '旧标题',
+    description: '旧描述',
     ...overrides,
   };
 }
@@ -330,6 +341,29 @@ describe('TaskRecordTrackingService', () => {
     it('should set lastUpdateType to content', () => {
       service.recordAndUpdateDebounced((p) => p);
       expect(service.lastUpdateType).toBe('content');
+    });
+
+    it('should track connection update when only title changes', () => {
+      const project = createProject({
+        connections: [createConnection()],
+      });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      service.recordAndUpdateDebounced((p) => ({
+        ...p,
+        connections: p.connections.map(conn => ({
+          ...conn,
+          title: '新标题',
+        })),
+      }));
+
+      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({ title: '新标题', description: '旧描述' })
+      );
     });
   });
 

@@ -78,6 +78,9 @@ type PendingSentryEvent = PendingExceptionEvent | PendingMessageEvent;
  */
 @Injectable({ providedIn: 'root' })
 export class SentryLazyLoaderService {
+  private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
+  private readonly isConfiguredFlag = this.sentryDsn.length > 0;
+
   /** Sentry 模块实例（懒加载后可用） */
   private sentryModule = signal<SentryModule | null>(null);
   
@@ -97,6 +100,10 @@ export class SentryLazyLoaderService {
   private initPromise: Promise<void> | null = null;
   private hasLoggedMissingDsn = false;
 
+  isConfigured(): boolean {
+    return this.isConfiguredFlag;
+  }
+
   /**
    * 触发 Sentry 懒加载初始化
    * 使用 requestIdleCallback 确保不阻塞主线程
@@ -110,13 +117,12 @@ export class SentryLazyLoaderService {
       return;
     }
     
-    // 开发环境跳过 Sentry 初始化（除非有 DSN）
-    if (!environment.SENTRY_DSN) {
+    if (!this.isConfigured()) {
       if (this.hasLoggedMissingDsn) {
         return;
       }
       this.hasLoggedMissingDsn = true;
-      console.warn('[SentryLazyLoader] 无 SENTRY_DSN，跳过初始化');
+      this.logDiagnostic('[SentryLazyLoader] 无 SENTRY_DSN，Sentry 已禁用');
       return;
     }
 
@@ -151,7 +157,7 @@ export class SentryLazyLoaderService {
       
       // 使用与 main.ts 相同的配置（但不阻塞首屏）
       Sentry.init({
-        dsn: environment.SENTRY_DSN,
+        dsn: this.sentryDsn,
         integrations: [
           // 仅保留轻量级性能追踪
           Sentry.browserTracingIntegration(),
@@ -196,8 +202,7 @@ export class SentryLazyLoaderService {
       // 发送队列中的待处理事件
       this.flushPendingEvents();
 
-      // eslint-disable-next-line no-console -- 故意使用 console.log：Sentry 尚未就绪前 logger 不可用，且 warn/error 会在 breadcrumbs 中产生误导噪音
-      console.log('[SentryLazyLoader] Sentry 初始化完成');
+      this.logDiagnostic('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
       console.error('[SentryLazyLoader] Sentry 初始化失败:', error);
     } finally {
@@ -215,6 +220,10 @@ export class SentryLazyLoaderService {
    * @param context 额外上下文信息
    */
   captureException(error: unknown, context?: Record<string, unknown>): void {
+    if (!this.isConfigured()) {
+      return;
+    }
+
     const sentry = this.sentryModule();
     
     if (sentry) {
@@ -334,8 +343,7 @@ export class SentryLazyLoaderService {
       return;
     }
     
-    // eslint-disable-next-line no-console -- 故意使用 console.log：避免在 Sentry breadcrumbs 中产生 warning 级别噪音（Sentry Issue #91206571）
-    console.log(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
+    this.logDiagnostic(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
     const now = Date.now();
 
@@ -433,6 +441,10 @@ export class SentryLazyLoaderService {
     message: string,
     options?: CaptureMessageOptions
   ): void {
+    if (!this.isConfigured()) {
+      return;
+    }
+
     const sentry = this.sentryModule();
     if (sentry) {
       this.sendMessageToSentry(sentry, message, options);
@@ -454,6 +466,27 @@ export class SentryLazyLoaderService {
     const sentry = this.sentryModule();
     if (sentry) {
       sentry.withScope(callback);
+    }
+  }
+
+  private logDiagnostic(message: string): void {
+    if (!this.isVerboseConsoleEnabled()) {
+      return;
+    }
+
+    // eslint-disable-next-line no-console -- 仅在显式 verbose 时输出诊断信息，避免误判为 warning/error
+    console.info(message);
+  }
+
+  private isVerboseConsoleEnabled(): boolean {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    try {
+      return window.localStorage.getItem('nanoflow.verbose') === 'true';
+    } catch {
+      return false;
     }
   }
 }

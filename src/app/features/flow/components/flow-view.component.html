@@ -384,34 +384,6 @@
     (confirm)="confirmBatchDelete()">
   </app-flow-batch-delete-dialog>
   
-  <!-- 移动端连接线删除提示 -->
-  @if (uiState.isMobile()) {
-    <app-flow-link-delete-hint
-      [hint]="link.linkDeleteHint()"
-      (confirm)="confirmLinkDelete()"
-      (cancel)="link.cancelLinkDelete()">
-    </app-flow-link-delete-hint>
-  }
-  
-  <!-- 联系块内联编辑器 -->
-  <app-flow-connection-editor
-    [data]="link.connectionEditorData()"
-    [position]="link.connectionEditorPos()"
-    [connectionTasks]="link.getConnectionTasks()"
-    (close)="link.closeConnectionEditor()"
-    (save)="saveConnectionDescription($event)"
-    (delete)="deleteConnection()"
-    (dragStart)="link.startDragConnEditor($event)">
-  </app-flow-connection-editor>
-  
-  <!-- 连接类型选择对话框 -->
-  <app-flow-link-type-dialog
-    [data]="link.linkTypeDialog()"
-    (cancel)="link.cancelLinkCreate()"
-    (parentChildLink)="confirmParentChildLink()"
-    (crossTreeLink)="confirmCrossTreeLink()">
-  </app-flow-link-type-dialog>
-  
   <!-- 级联分配确认对话框 -->
   <app-flow-cascade-assign-dialog
     [data]="cascadeAssign.dialogData()"
@@ -422,3 +394,40 @@
   <!-- 移动端右侧滑出项目面板 (桌面端不显示) -->
 </div>
 }
+
+<!-- 共享连接浮层（移动端与桌面端共用） -->
+@if (uiState.isMobile()) {
+  <app-flow-link-delete-hint
+    [hint]="link.linkDeleteHint()"
+    (confirm)="confirmLinkDelete()"
+    (cancel)="link.cancelLinkDelete()">
+  </app-flow-link-delete-hint>
+}
+
+@if (uiState.isMobile()) {
+  <app-flow-link-action-menu
+    [menu]="link.linkActionMenu()"
+    (edit)="handleLinkActionEdit()"
+    (view)="handleLinkActionView()"
+    (deleteLink)="handleLinkActionDelete()"
+    (cancel)="link.cancelActionMenu()">
+  </app-flow-link-action-menu>
+}
+
+<app-flow-connection-editor
+  [data]="link.connectionEditorData()"
+  [position]="link.connectionEditorPos()"
+  [connectionTasks]="link.getConnectionTasks()"
+  (close)="link.closeConnectionEditor()"
+  (save)="saveConnectionDescription($event)"
+  (modeChange)="link.setConnectionEditorMode($event)"
+  (delete)="deleteConnection()"
+  (dragStart)="link.startDragConnEditor($event)">
+</app-flow-connection-editor>
+
+<app-flow-link-type-dialog
+  [data]="link.linkTypeDialog()"
+  (cancel)="link.cancelLinkCreate()"
+  (parentChildLink)="confirmParentChildLink()"
+  (crossTreeLink)="confirmCrossTreeLink()">
+</app-flow-link-type-dialog>
