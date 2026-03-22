@@ -28,7 +28,11 @@ import {
   BackupConnection,
   BackupUserPreferences,
   BackupBlackBoxEntry,
-  validateBackup,
+  BackupFocusSession,
+  BackupTranscriptionUsage,
+  BackupRoutineTask,
+  BackupRoutineCompletion,
+  buildTableCounts,
   calculateChecksum,
   compressData,
   encryptData,
@@ -209,6 +213,7 @@ async function executeIncrementalBackup(
       encrypted: !options.skipEncryption,
       base_backup_id: baseBackupId,
       incremental_since: incrementalSince,
+      payload_version: BACKUP_CONFIG.VERSION,
     })
     .select()
     .single();
@@ -295,6 +300,8 @@ async function executeIncrementalBackup(
         project_count: backupData.projects.length,
         task_count: backupData.tasks.length,
         connection_count: backupData.connections.length,
+        user_preferences_count: backupData.tableCounts.userPreferences,
+        black_box_entry_count: backupData.tableCounts.blackBoxEntries,
         size_bytes: finalSize,
         checksum,
         checksum_algorithm: BACKUP_CONFIG.INTEGRITY.CHECKSUM_ALGORITHM,
@@ -303,6 +310,9 @@ async function executeIncrementalBackup(
         encryption_key_id: encryptionKeyId,
         validation_passed: validation.ok,
         validation_warnings: validation.warnings,
+        payload_version: backupData.payloadVersion,
+        table_counts: backupData.tableCounts,
+        coverage: backupData.coverage,
         backup_completed_at: new Date().toISOString(),
       })
       .eq("id", backupId);
@@ -355,6 +365,10 @@ async function exportIncrementalData(
   const projects: BackupProject[] = [];
   const tasks: BackupTask[] = [];
   const connections: BackupConnection[] = [];
+  const focusSessions: BackupFocusSession[] = [];
+  const transcriptionUsage: BackupTranscriptionUsage[] = [];
+  const routineTasks: BackupRoutineTask[] = [];
+  const routineCompletions: BackupRoutineCompletion[] = [];
   
   // 导出更新的项目
   let projectOffset = 0;
@@ -508,15 +522,164 @@ async function exportIncrementalData(
   
   console.log(`Exported incremental extras: ${userPreferences.length} prefs, ${blackBoxEntries.length} black_box`);
   
-  return {
+  // 导出更新的专注会话
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("focus_sessions")
+        .select("*")
+        .gt("updated_at", since)
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.warn(`Failed to export focus_sessions: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+
+      focusSessions.push(...data.map(mapFocusSession));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+
+  // 导出更新的转写用量（仅 created_at）
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("transcription_usage")
+        .select("*")
+        .gt("created_at", since)
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.warn(`Failed to export transcription_usage: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+
+      transcriptionUsage.push(...data.map(mapTranscriptionUsage));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+
+  // 导出更新的日常任务
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("routine_tasks")
+        .select("*")
+        .gt("updated_at", since)
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.warn(`Failed to export routine_tasks: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+
+      routineTasks.push(...data.map(mapRoutineTask));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+
+  // 导出更新的日常完成记录
+  {
+    let offset = 0;
+    while (true) {
+      let query = supabase
+        .from("routine_completions")
+        .select("*")
+        .gt("updated_at", since)
+        .range(offset, offset + BATCH_SIZE - 1)
+        .order("id");
+
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.warn(`Failed to export routine_completions: ${error.message}`);
+        break;
+      }
+      if (!data || data.length === 0) break;
+
+      routineCompletions.push(...data.map(mapRoutineCompletion));
+      offset += data.length;
+      if (data.length < BATCH_SIZE) break;
+    }
+  }
+
+  const coverage = {
+    includesProjectData: true,
+    includesCloudUserState: true,
+    includesLocalState: false,
+  };
+
+  const payloadBase: BackupData = {
     version: BACKUP_CONFIG.VERSION,
+    payloadVersion: BACKUP_CONFIG.VERSION,
     type: "incremental",
     createdAt: new Date().toISOString(),
+    checksum: "",
+    tableCounts: {
+      projects: 0,
+      tasks: 0,
+      connections: 0,
+      userPreferences: 0,
+      blackBoxEntries: 0,
+      focusSessions: 0,
+      transcriptionUsage: 0,
+      routineTasks: 0,
+      routineCompletions: 0,
+    },
+    coverage,
     projects,
     tasks,
     connections,
     userPreferences,
     blackBoxEntries,
+    focusSessions,
+    transcriptionUsage,
+    routineTasks,
+    routineCompletions,
+  };
+
+  const tableCounts = buildTableCounts(payloadBase);
+  const checksum = await calculateChecksum(JSON.stringify({
+    ...payloadBase,
+    tableCounts,
+    checksum: "",
+  }));
+
+  return {
+    ...payloadBase,
+    tableCounts,
+    checksum,
   };
 }
 
@@ -567,7 +730,7 @@ async function countChanges(
   supabase: SupabaseClient,
   since: string,
   userId?: string
-): Promise<{ total: number; projects: number; tasks: number; connections: number }> {
+): Promise<{ total: number; projects: number; tasks: number; connections: number; extras: number }> {
   
   // 统计项目变更
   let projectQuery = supabase
@@ -592,12 +755,50 @@ async function countChanges(
     .from("connections")
     .select("id", { count: "exact", head: true })
     .gt("updated_at", since);
+
+  const { count: userPreferencesCount } = await supabase
+    .from("user_preferences")
+    .select("id", { count: "exact", head: true })
+    .gt("updated_at", since);
+
+  const { count: blackBoxCount } = await supabase
+    .from("black_box_entries")
+    .select("id", { count: "exact", head: true })
+    .gt("updated_at", since);
+
+  const { count: focusSessionCount } = await supabase
+    .from("focus_sessions")
+    .select("id", { count: "exact", head: true })
+    .gt("updated_at", since);
+
+  const { count: transcriptionUsageCount } = await supabase
+    .from("transcription_usage")
+    .select("id", { count: "exact", head: true })
+    .gt("created_at", since);
+
+  const { count: routineTaskCount } = await supabase
+    .from("routine_tasks")
+    .select("id", { count: "exact", head: true })
+    .gt("updated_at", since);
+
+  const { count: routineCompletionCount } = await supabase
+    .from("routine_completions")
+    .select("id", { count: "exact", head: true })
+    .gt("updated_at", since);
+
+  const extras = (userPreferencesCount || 0)
+    + (blackBoxCount || 0)
+    + (focusSessionCount || 0)
+    + (transcriptionUsageCount || 0)
+    + (routineTaskCount || 0)
+    + (routineCompletionCount || 0);
   
   return {
-    total: (projectCount || 0) + (taskCount || 0) + (connectionCount || 0),
+    total: (projectCount || 0) + (taskCount || 0) + (connectionCount || 0) + extras,
     projects: projectCount || 0,
     tasks: taskCount || 0,
     connections: connectionCount || 0,
+    extras,
   };
 }
 
@@ -613,7 +814,13 @@ function validateIncrementalBackup(data: BackupData): {
   const hasRequiredStructure = 
     Array.isArray(data.projects) &&
     Array.isArray(data.tasks) &&
-    Array.isArray(data.connections);
+    Array.isArray(data.connections) &&
+    Array.isArray(data.userPreferences) &&
+    Array.isArray(data.blackBoxEntries) &&
+    Array.isArray(data.focusSessions) &&
+    Array.isArray(data.transcriptionUsage) &&
+    Array.isArray(data.routineTasks) &&
+    Array.isArray(data.routineCompletions);
   
   if (!hasRequiredStructure) {
     errors.push("Invalid backup structure");
@@ -711,6 +918,11 @@ function mapUserPreferences(row: Record<string, unknown>): BackupUserPreferences
     theme: row.theme as string | undefined,
     layoutDirection: row.layout_direction as string | undefined,
     floatingWindowPref: row.floating_window_pref as string | undefined,
+    colorMode: row.color_mode as string | undefined,
+    autoResolveConflicts: row.auto_resolve_conflicts as boolean | undefined,
+    localBackupEnabled: row.local_backup_enabled as boolean | undefined,
+    localBackupIntervalMs: row.local_backup_interval_ms as number | undefined,
+    focusPreferences: row.focus_preferences as unknown,
     createdAt: row.created_at as string | undefined,
     updatedAt: row.updated_at as string | undefined,
   };
@@ -731,6 +943,51 @@ function mapBlackBoxEntry(row: Record<string, unknown>): BackupBlackBoxEntry {
     snoozeUntil: row.snooze_until as string | null | undefined,
     snoozeCount: row.snooze_count as number | undefined,
     deletedAt: row.deleted_at as string | null | undefined,
+    focusMeta: row.focus_meta as unknown,
+  };
+}
+
+function mapFocusSession(row: Record<string, unknown>): BackupFocusSession {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    startedAt: row.started_at as string,
+    endedAt: row.ended_at as string | null | undefined,
+    sessionState: row.session_state as unknown,
+    updatedAt: row.updated_at as string | undefined,
+  };
+}
+
+function mapTranscriptionUsage(row: Record<string, unknown>): BackupTranscriptionUsage {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    date: row.date as string,
+    audioSeconds: row.audio_seconds as number,
+    createdAt: row.created_at as string | undefined,
+  };
+}
+
+function mapRoutineTask(row: Record<string, unknown>): BackupRoutineTask {
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    title: row.title as string,
+    maxTimesPerDay: row.max_times_per_day as number,
+    isEnabled: row.is_enabled as boolean,
+    createdAt: row.created_at as string | undefined,
+    updatedAt: row.updated_at as string | undefined,
+  };
+}
+
+function mapRoutineCompletion(row: Record<string, unknown>): BackupRoutineCompletion {
+  return {
+    id: row.id as string,
+    routineId: row.routine_id as string,
+    userId: row.user_id as string,
+    dateKey: row.date_key as string,
+    count: row.count as number,
+    updatedAt: row.updated_at as string | undefined,
   };
 }
 

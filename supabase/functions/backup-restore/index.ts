@@ -42,6 +42,7 @@ interface RecoveryRequest {
     mode?: 'replace' | 'merge';
     scope?: 'all' | 'project';
     projectId?: string;
+    preset?: 'project_only' | 'project_plus_user_state';
     createSnapshot?: boolean;
   };
   userId: string; // 必须传入，用于权限校验
@@ -79,6 +80,15 @@ interface RecoveryPreview {
   taskCount: number;
   connectionCount: number;
   projects: Array<{ id: string; name: string }>;
+  extras: {
+    userPreferences: number;
+    blackBoxEntries: number;
+    focusSessions: number;
+    transcriptionUsage: number;
+    routineTasks: number;
+    routineCompletions: number;
+  };
+  coverage?: BackupData['coverage'];
 }
 
 interface RestoreResult {
@@ -87,6 +97,7 @@ interface RestoreResult {
   projectsRestored: number;
   tasksRestored: number;
   connectionsRestored: number;
+  extraTableCounts?: Record<string, number>;
   preRestoreSnapshotId?: string;
   durationMs: number;
   error?: string;
@@ -251,6 +262,15 @@ async function previewRecovery(
     taskCount: backupData.tasks.length,
     connectionCount: backupData.connections.length,
     projects: backupData.projects.map(p => ({ id: p.id, name: p.name })),
+    extras: {
+      userPreferences: backupData.userPreferences?.length ?? 0,
+      blackBoxEntries: backupData.blackBoxEntries?.length ?? 0,
+      focusSessions: backupData.focusSessions?.length ?? 0,
+      transcriptionUsage: backupData.transcriptionUsage?.length ?? 0,
+      routineTasks: backupData.routineTasks?.length ?? 0,
+      routineCompletions: backupData.routineCompletions?.length ?? 0,
+    },
+    coverage: backupData.coverage,
   };
 }
 
@@ -268,6 +288,7 @@ async function executeRestore(
   
   const mode = options?.mode || 'replace';
   const scope = options?.scope || 'all';
+  const preset = options?.preset || 'project_only';
   const createSnapshot = options?.createSnapshot ?? true;
   
   // 获取备份元数据
@@ -326,21 +347,29 @@ async function executeRestore(
     const preparedRows = prepareRestoreRows(backupData, userId, {
       scope,
       projectId: options?.projectId,
+      preset,
     });
 
     const projectsToRestore = preparedRows.projects;
     const tasksToRestore = preparedRows.tasks;
     const connectionsToRestore = preparedRows.connections;
+    const userPreferencesToRestore = preparedRows.userPreferences;
+    const blackBoxEntriesToRestore = preparedRows.blackBoxEntries;
+    const focusSessionsToRestore = preparedRows.focusSessions;
+    const transcriptionUsageToRestore = preparedRows.transcriptionUsage;
+    const routineTasksToRestore = preparedRows.routineTasks;
+    const routineCompletionsToRestore = preparedRows.routineCompletions;
 
-    console.log(`Restoring: ${projectsToRestore.length} projects, ${tasksToRestore.length} tasks, ${connectionsToRestore.length} connections`);
+    console.log(
+      `Restoring: ${projectsToRestore.length} projects, ${tasksToRestore.length} tasks, ${connectionsToRestore.length} connections, `
+      + `${blackBoxEntriesToRestore.length} black_box_entries`,
+    );
     
     // 4. 执行恢复（使用事务）
     if (mode === 'replace') {
       // 替换模式：先删除现有数据
       if (scope === 'project' && options?.projectId) {
-        await supabase.from("connections").delete().eq("project_id", options.projectId);
-        await supabase.from("tasks").delete().eq("project_id", options.projectId);
-        await supabase.from("projects").delete().eq("id", options.projectId);
+        await deleteProjectScopedData(supabase, userId, options.projectId, preset);
       } else {
         // 删除用户的所有数据
         await deleteUserData(supabase, userId);
@@ -383,6 +412,42 @@ async function executeRestore(
         throw new Error(`Failed to restore connections: ${error.message}`);
       }
     }
+
+    for (let i = 0; i < userPreferencesToRestore.length; i += BATCH_SIZE) {
+      const batch = userPreferencesToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("user_preferences").upsert(batch);
+      if (error) throw new Error(`Failed to restore user_preferences: ${error.message}`);
+    }
+
+    for (let i = 0; i < blackBoxEntriesToRestore.length; i += BATCH_SIZE) {
+      const batch = blackBoxEntriesToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("black_box_entries").upsert(batch);
+      if (error) throw new Error(`Failed to restore black_box_entries: ${error.message}`);
+    }
+
+    for (let i = 0; i < focusSessionsToRestore.length; i += BATCH_SIZE) {
+      const batch = focusSessionsToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("focus_sessions").upsert(batch);
+      if (error) throw new Error(`Failed to restore focus_sessions: ${error.message}`);
+    }
+
+    for (let i = 0; i < transcriptionUsageToRestore.length; i += BATCH_SIZE) {
+      const batch = transcriptionUsageToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("transcription_usage").upsert(batch);
+      if (error) throw new Error(`Failed to restore transcription_usage: ${error.message}`);
+    }
+
+    for (let i = 0; i < routineTasksToRestore.length; i += BATCH_SIZE) {
+      const batch = routineTasksToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("routine_tasks").upsert(batch);
+      if (error) throw new Error(`Failed to restore routine_tasks: ${error.message}`);
+    }
+
+    for (let i = 0; i < routineCompletionsToRestore.length; i += BATCH_SIZE) {
+      const batch = routineCompletionsToRestore.slice(i, i + BATCH_SIZE);
+      const { error } = await supabase.from("routine_completions").upsert(batch);
+      if (error) throw new Error(`Failed to restore routine_completions: ${error.message}`);
+    }
     
     // 6. 更新恢复记录
     const durationMs = Date.now() - startTime;
@@ -403,6 +468,10 @@ async function executeRestore(
       projectsRestored: projectsToRestore.length,
       tasksRestored: tasksToRestore.length,
       connectionsRestored: connectionsToRestore.length,
+      userPreferencesRestored: userPreferencesToRestore.length,
+      blackBoxEntriesRestored: blackBoxEntriesToRestore.length,
+      focusSessionsRestored: focusSessionsToRestore.length,
+      transcriptionUsageRestored: transcriptionUsageToRestore.length,
       durationMs,
     });
     
@@ -412,6 +481,14 @@ async function executeRestore(
       projectsRestored: projectsToRestore.length,
       tasksRestored: tasksToRestore.length,
       connectionsRestored: connectionsToRestore.length,
+      extraTableCounts: {
+        userPreferences: userPreferencesToRestore.length,
+        blackBoxEntries: blackBoxEntriesToRestore.length,
+        focusSessions: focusSessionsToRestore.length,
+        transcriptionUsage: transcriptionUsageToRestore.length,
+        routineTasks: routineTasksToRestore.length,
+        routineCompletions: routineCompletionsToRestore.length,
+      },
       preRestoreSnapshotId,
       durationMs,
     };
@@ -526,7 +603,6 @@ async function deleteUserData(
   supabase: SupabaseClient,
   userId: string
 ): Promise<void> {
-  
   // 获取用户的所有项目 ID
   const { data: projects } = await supabase
     .from("projects")
@@ -539,10 +615,38 @@ async function deleteUserData(
   
   const projectIds = projects.map((p: { id: string }) => p.id);
   
+  await supabase.from("black_box_entries").delete().eq("user_id", userId);
+  await supabase.from("transcription_usage").delete().eq("user_id", userId);
+  await supabase.from("focus_sessions").delete().eq("user_id", userId);
+  await supabase.from("routine_completions").delete().eq("user_id", userId);
+  await supabase.from("routine_tasks").delete().eq("user_id", userId);
+  await supabase.from("user_preferences").delete().eq("user_id", userId);
+
   // 按顺序删除：连接 → 任务 → 项目
   await supabase.from("connections").delete().in("project_id", projectIds);
   await supabase.from("tasks").delete().in("project_id", projectIds);
   await supabase.from("projects").delete().eq("owner_id", userId);
+}
+
+async function deleteProjectScopedData(
+  supabase: SupabaseClient,
+  userId: string,
+  projectId: string,
+  preset: 'project_only' | 'project_plus_user_state',
+): Promise<void> {
+  await supabase.from("black_box_entries").delete().eq("project_id", projectId);
+  await supabase.from("connections").delete().eq("project_id", projectId);
+  await supabase.from("tasks").delete().eq("project_id", projectId);
+  await supabase.from("projects").delete().eq("id", projectId);
+
+  if (preset === 'project_plus_user_state') {
+    await supabase.from("black_box_entries").delete().is("project_id", null).eq("user_id", userId);
+    await supabase.from("transcription_usage").delete().eq("user_id", userId);
+    await supabase.from("focus_sessions").delete().eq("user_id", userId);
+    await supabase.from("routine_completions").delete().eq("user_id", userId);
+    await supabase.from("routine_tasks").delete().eq("user_id", userId);
+    await supabase.from("user_preferences").delete().eq("user_id", userId);
+  }
 }
 
 function jsonResponse(data: unknown, status: number): Response {

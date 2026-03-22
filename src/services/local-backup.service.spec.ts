@@ -7,9 +7,14 @@ import { ExportService } from './export.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { DisasterBackupService } from './disaster-backup.service';
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+};
+
+const disasterBackupServiceMock = {
+  buildLocalBlob: vi.fn(),
 };
 
 describe('LocalBackupService', () => {
@@ -25,9 +30,11 @@ describe('LocalBackupService', () => {
         { provide: UiStateService, useValue: { isMobile: vi.fn(() => false) } },
         { provide: PreferenceService, useValue: { get: vi.fn(), set: vi.fn() } },
         { provide: SentryLazyLoaderService, useValue: { captureException: vi.fn() } },
+        { provide: DisasterBackupService, useValue: disasterBackupServiceMock },
       ],
     });
     service = injector.get(LocalBackupService);
+    disasterBackupServiceMock.buildLocalBlob.mockReset();
   });
 
   describe('初始状态', () => {
@@ -103,6 +110,42 @@ describe('LocalBackupService', () => {
         id: 'p1', name: 'Test', tasks: [], connections: [],
       }]);
       expect(result.success).toBe(false);
+    });
+
+    it('授权目录后应通过 DisasterBackupService 生成灾备文件', async () => {
+      const writes: Blob[] = [];
+      const writable = {
+        write: vi.fn(async (blob: Blob) => { writes.push(blob); }),
+        close: vi.fn(async () => undefined),
+      };
+      const fileHandle = {
+        createWritable: vi.fn(async () => writable),
+        getFile: vi.fn(),
+      };
+
+      (service as unknown as { directoryHandle: unknown }).directoryHandle = {
+        name: 'backups',
+        getFileHandle: vi.fn(async () => fileHandle),
+        removeEntry: vi.fn(async () => undefined),
+      };
+      (service as unknown as { checkAndRestorePermission: () => Promise<boolean> }).checkAndRestorePermission = vi.fn(async () => true);
+      service.setAutoBackupInterval(900000);
+
+      disasterBackupServiceMock.buildLocalBlob.mockResolvedValue({
+        payload: { payloadVersion: '2.0.0' },
+        blob: new Blob(['{"payloadVersion":"2.0.0"}'], { type: 'application/json' }),
+      });
+
+      const result = await service.performBackup([{
+        id: 'p1', name: 'Test', tasks: [], connections: [],
+      }]);
+
+      expect(result.success).toBe(true);
+      expect(disasterBackupServiceMock.buildLocalBlob).toHaveBeenCalledWith(
+        [{ id: 'p1', name: 'Test', tasks: [], connections: [] }],
+        { autoBackupEnabled: false, autoBackupIntervalMs: 900000 },
+      );
+      expect(writes).toHaveLength(1);
     });
   });
 });
