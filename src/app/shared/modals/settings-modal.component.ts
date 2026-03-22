@@ -4,7 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
 import { PreferenceService } from '../../../services/preference.service';
-import { ExportService } from '../../../services/export.service';
+import { ExportService, type ExportData } from '../../../services/export.service';
 import { ImportService, ImportOptions } from '../../../services/import.service';
 import { AttachmentExportService } from '../../../services/attachment-export.service';
 import { AttachmentImportService, type AttachmentImportItem } from '../../../services/attachment-import.service';
@@ -600,18 +600,110 @@ interface TaskAttachmentMetadata {
                     </button>
                     
                     <!-- 从本地备份恢复 -->
-                    <button 
-                      (click)="handleRestoreFromLocalBackup()"
-                      [disabled]="isRestoringFromBackup()"
-                      class="w-full py-1.5 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded-lg text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-all flex items-center justify-center gap-2 shadow-sm">
-                      @if (isRestoringFromBackup()) {
-                        <div class="w-2.5 h-2.5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
-                        <span>恢复中...</span>
-                      } @else {
+                    @if (restoreStep() === 'idle') {
+                      <button 
+                        (click)="handleRestoreFromLocalBackup()"
+                        class="w-full py-1.5 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded-lg text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-all flex items-center justify-center gap-2 shadow-sm">
                         <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                         <span>从备份恢复</span>
-                      }
-                    </button>
+                      </button>
+                    }
+
+                    <!-- 恢复流程面板 -->
+                    @if (restoreStep() !== 'idle') {
+                      <div class="bg-amber-50/80 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-2.5 space-y-2">
+                        <div class="flex items-center justify-between">
+                          <span class="text-[10px] font-bold text-amber-800 dark:text-amber-300">从备份恢复</span>
+                          @if (restoreStep() !== 'restoring') {
+                            <button (click)="cancelRestore()" class="text-[9px] text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-200 font-medium">取消</button>
+                          }
+                        </div>
+
+                        <!-- 加载中 -->
+                        @if (restoreStep() === 'loading' || restoreStep() === 'restoring') {
+                          <div class="flex items-center justify-center gap-2 py-3">
+                            <div class="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                            <span class="text-[10px] text-amber-700 dark:text-amber-300">
+                              {{ restoreStep() === 'loading' ? '读取备份文件...' : '恢复中，请勿关闭...' }}
+                            </span>
+                          </div>
+                        }
+
+                        <!-- 文件列表 -->
+                        @if (restoreStep() === 'list') {
+                          @if (restoreBackupFiles().length === 0) {
+                            <div class="text-[10px] text-amber-600/80 dark:text-amber-400/80 text-center py-2">备份目录中没有找到备份文件</div>
+                          } @else {
+                            <div class="max-h-[160px] overflow-y-auto space-y-1 custom-scrollbar">
+                              @for (file of restoreBackupFiles().slice(0, 10); track file.name; let i = $index) {
+                                <button
+                                  (click)="selectRestoreFile(i)"
+                                  class="w-full text-left px-2 py-1.5 rounded text-[10px] transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                                  [ngClass]="restoreSelectedIndex() === i ? 'bg-amber-200 dark:bg-amber-800' : ''">
+                                  <div class="font-medium text-amber-900 dark:text-amber-200">
+                                    {{ formatBackupDate(file.timestamp) }}
+                                  </div>
+                                  <div class="text-[9px] text-amber-600/80 dark:text-amber-400/70">
+                                    {{ formatBackupSize(file.size) }}
+                                  </div>
+                                </button>
+                              }
+                            </div>
+                            <button
+                              (click)="loadRestorePreview()"
+                              [disabled]="restoreSelectedIndex() < 0"
+                              class="w-full py-1 rounded text-[10px] font-bold transition-colors"
+                              [ngClass]="restoreSelectedIndex() >= 0 ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-amber-200 text-amber-400 cursor-not-allowed'">
+                              选择此备份
+                            </button>
+                          }
+                        }
+
+                        <!-- 预览确认 -->
+                        @if (restoreStep() === 'preview') {
+                          @if (restorePreview(); as preview) {
+                            <div class="space-y-1.5">
+                              <div class="text-[10px] text-amber-800 dark:text-amber-300">即将恢复：</div>
+                              <div class="grid grid-cols-3 gap-1">
+                                <div class="bg-white/60 dark:bg-stone-700/60 rounded px-2 py-1 text-center">
+                                  <div class="text-[12px] font-bold text-amber-900 dark:text-amber-200">{{ preview.projects }}</div>
+                                  <div class="text-[8px] text-amber-600 dark:text-amber-400">项目</div>
+                                </div>
+                                <div class="bg-white/60 dark:bg-stone-700/60 rounded px-2 py-1 text-center">
+                                  <div class="text-[12px] font-bold text-amber-900 dark:text-amber-200">{{ preview.tasks }}</div>
+                                  <div class="text-[8px] text-amber-600 dark:text-amber-400">任务</div>
+                                </div>
+                                <div class="bg-white/60 dark:bg-stone-700/60 rounded px-2 py-1 text-center">
+                                  <div class="text-[12px] font-bold text-amber-900 dark:text-amber-200">{{ preview.connections }}</div>
+                                  <div class="text-[8px] text-amber-600 dark:text-amber-400">连接</div>
+                                </div>
+                              </div>
+                              <div class="text-[9px] text-amber-600/80 dark:text-amber-400/70">⚠️ 以合并方式导入，不会删除现有数据</div>
+                              <div class="flex gap-2">
+                                <button (click)="restoreStep.set('list')" class="flex-1 py-1 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30">返回</button>
+                                <button (click)="confirmRestore()" class="flex-1 py-1 bg-amber-500 text-white rounded text-[10px] font-bold hover:bg-amber-600">确认恢复</button>
+                              </div>
+                            </div>
+                          }
+                        }
+
+                        <!-- 完成 -->
+                        @if (restoreStep() === 'done') {
+                          <div class="text-center py-2 space-y-1.5">
+                            <div class="text-green-600 dark:text-green-400 text-[10px] font-bold">✓ {{ restoreResultMsg() }}</div>
+                            <button (click)="cancelRestore()" class="text-[10px] text-amber-600 hover:text-amber-800 dark:text-amber-400 font-medium">关闭</button>
+                          </div>
+                        }
+
+                        <!-- 错误 -->
+                        @if (restoreStep() === 'error') {
+                          <div class="text-center py-2 space-y-1.5">
+                            <div class="text-red-600 dark:text-red-400 text-[10px]">{{ restoreError() }}</div>
+                            <button (click)="cancelRestore()" class="text-[10px] text-amber-600 hover:text-amber-800 dark:text-amber-400 font-medium">关闭</button>
+                          </div>
+                        }
+                      </div>
+                    }
                   </div>
                 }
               </div>
@@ -729,6 +821,14 @@ export class SettingsModalComponent {
   
   /** 是否正在从备份恢复 */
   readonly isRestoringFromBackup = signal(false);
+  
+  /** 恢复流程状态 */
+  readonly restoreStep = signal<'idle' | 'list' | 'loading' | 'preview' | 'restoring' | 'done' | 'error'>('idle');
+  readonly restoreBackupFiles = signal<{ name: string; timestamp: number; size: number }[]>([]);
+  readonly restoreSelectedIndex = signal<number>(-1);
+  readonly restorePreview = signal<{ projects: number; tasks: number; connections: number } | null>(null);
+  readonly restoreError = signal<string>('');
+  readonly restoreResultMsg = signal<string>('');
   
   /** 文件输入引用 - 使用 viewChild signal 引用模板中的 #fileInput */
   private readonly fileInputRef = viewChild<ElementRef<HTMLInputElement>>('fileInput');
@@ -1015,82 +1115,125 @@ export class SettingsModalComponent {
   }
   
   /**
-   * 从本地备份恢复
-   * 列出备份目录中的文件，让用户选择后通过 ImportService 导入
+   * 从本地备份恢复 — 打开文件列表面板
    */
   async handleRestoreFromLocalBackup(): Promise<void> {
-    this.isRestoringFromBackup.set(true);
+    this.restoreStep.set('loading');
+    this.restoreSelectedIndex.set(-1);
+    this.restorePreview.set(null);
+    this.restoreError.set('');
+    this.restoreResultMsg.set('');
     try {
       const files = await this.localBackupService.listBackupFiles();
-      if (files.length === 0) {
-        alert('备份目录中没有找到备份文件');
-        return;
-      }
-      
-      // 构建选择列表
-      const options = files.slice(0, 10).map((f, i) => {
-        const date = new Date(f.timestamp);
-        const sizeKB = Math.round(f.size / 1024);
-        return `${i + 1}. ${date.toLocaleString('zh-CN')} (${sizeKB} KB)`;
-      });
-      
-      const choice = prompt(
-        `请选择要恢复的备份文件（输入序号）：\n\n${options.join('\n')}\n\n⚠️ 恢复将以合并方式导入，不会删除现有数据`,
-      );
-      
-      if (!choice) return;
-      
-      const index = parseInt(choice, 10) - 1;
-      if (isNaN(index) || index < 0 || index >= files.length) {
-        alert('无效的选择');
-        return;
-      }
-      
-      const selectedFile = files[index];
-      const file = await this.localBackupService.readBackupFile(selectedFile.name);
+      this.restoreBackupFiles.set(files);
+      this.restoreStep.set('list');
+    } catch (error: unknown) {
+      this.logger.error('列出备份文件失败', error instanceof Error ? error.message : String(error));
+      this.restoreError.set('读取备份目录失败');
+      this.restoreStep.set('error');
+    }
+  }
+
+  /** 选择备份文件 */
+  selectRestoreFile(index: number): void {
+    this.restoreSelectedIndex.set(index);
+  }
+
+  /** 格式化备份文件日期 */
+  formatBackupDate(timestamp: number): string {
+    return new Date(timestamp).toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    });
+  }
+
+  /** 格式化备份文件大小 */
+  formatBackupSize(size: number): string {
+    return size >= 1048576
+      ? `${(size / 1048576).toFixed(1)} MB`
+      : `${Math.round(size / 1024)} KB`;
+  }
+
+  /** 加载所选备份的预览信息 */
+  async loadRestorePreview(): Promise<void> {
+    const idx = this.restoreSelectedIndex();
+    const files = this.restoreBackupFiles();
+    if (idx < 0 || idx >= files.length) return;
+
+    this.restoreStep.set('loading');
+    try {
+      const file = await this.localBackupService.readBackupFile(files[idx].name);
       if (!file) {
-        alert('无法读取备份文件');
+        this.restoreError.set('无法读取备份文件');
+        this.restoreStep.set('error');
         return;
       }
-      
-      // 使用 ImportService 验证和导入
+
       const validation = await this.importService.validateFile(file);
       if (!validation.valid || !validation.data) {
-        alert(`备份文件验证失败：${validation.error ?? '未知错误'}`);
+        this.restoreError.set(`验证失败：${validation.error ?? '未知错误'}`);
+        this.restoreStep.set('error');
         return;
       }
-      
+
+      // 缓存验证数据
+      this._pendingRestoreData = validation.data;
+
       const existingProjects = this.projects();
       const preview = await this.importService.generatePreview(validation.data, existingProjects);
-      
-      const totalProjects = preview.projects.length;
-      const totalTasks = preview.projects.reduce((s, p) => s + p.taskCount, 0);
-      const totalConnections = preview.projects.reduce((s, p) => s + p.connectionCount, 0);
-      
-      const confirmMsg = `即将恢复备份：\n- ${totalProjects} 个项目\n- ${totalTasks} 个任务\n- ${totalConnections} 个连接\n\n确认恢复？`;
-      if (!confirm(confirmMsg)) return;
-      
+      this.restorePreview.set({
+        projects: preview.projects.length,
+        tasks: preview.projects.reduce((s, p) => s + p.taskCount, 0),
+        connections: preview.projects.reduce((s, p) => s + p.connectionCount, 0),
+      });
+      this.restoreStep.set('preview');
+    } catch (error: unknown) {
+      this.logger.error('读取备份预览失败', error instanceof Error ? error.message : String(error));
+      this.restoreError.set('读取备份文件失败');
+      this.restoreStep.set('error');
+    }
+  }
+
+  /** 确认恢复 */
+  async confirmRestore(): Promise<void> {
+    if (!this._pendingRestoreData) return;
+    this.restoreStep.set('restoring');
+    this.isRestoringFromBackup.set(true);
+    try {
+      const existingProjects = this.projects();
       const result = await this.importService.executeImport(
-        validation.data,
+        this._pendingRestoreData,
         existingProjects,
         { conflictStrategy: 'merge' },
         async (project: Project) => {
           this.importComplete.emit(project);
         },
       );
-      
+
       if (result.success) {
-        alert(`恢复成功！已导入 ${result.importedCount} 个项目`);
+        this.restoreResultMsg.set(`恢复成功！已导入 ${result.importedCount} 个项目`);
+        this.restoreStep.set('done');
       } else {
-        alert(`恢复失败：${result.error ?? '未知错误'}`);
+        this.restoreError.set(`恢复失败：${result.error ?? '未知错误'}`);
+        this.restoreStep.set('error');
       }
     } catch (error: unknown) {
       this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
-      alert('恢复过程中发生错误');
+      this.restoreError.set('恢复过程中发生错误');
+      this.restoreStep.set('error');
     } finally {
       this.isRestoringFromBackup.set(false);
+      this._pendingRestoreData = null;
     }
   }
+
+  /** 取消/关闭恢复面板 */
+  cancelRestore(): void {
+    this.restoreStep.set('idle');
+    this._pendingRestoreData = null;
+  }
+
+  /** 缓存待恢复的验证数据 */
+  private _pendingRestoreData: ExportData | null = null;
   
   /**
    * 切换自动备份

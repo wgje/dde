@@ -245,19 +245,22 @@ export class ImportService {
       };
     }
     
-    // 5. 验证数据结构
+    // 5. 验证数据结构（BackupData 格式会被自动转换为 ExportData）
     const structureValidation = this.validateDataStructure(data);
     if (!structureValidation.valid) {
       return structureValidation;
     }
     
+    // 使用转换后的数据（BackupData 会被 validateDataStructure 转为 ExportData）
+    const validatedData = structureValidation.data ?? data;
+    
     // 6. 验证版本兼容性
-    const versionValidation = this.validateVersion(data.metadata.version);
+    const versionValidation = this.validateVersion(validatedData.metadata.version);
     if (!versionValidation.valid) {
       return versionValidation;
     }
     
-    return { valid: true, data };
+    return { valid: true, data: validatedData };
   }
   
   /**
