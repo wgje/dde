@@ -656,6 +656,18 @@ export class RetryQueueService {
   /** 设置操作处理器（由 SimpleSyncService 调用） */
   setOperationHandler(handler: RetryOperationHandler): void {
     this.operationHandler = handler;
+    
+    // 【Bug Fix 2026-03-22】设置处理器后，同步已加载的队列长度到 SyncState
+    // 原因：loadFromStorage 在构造函数中异步执行，可能在 handler 设置前完成，
+    // 导致 SyncState.pendingCount 与 RetryQueue.length 不一致，UI 在同步中/待同步间闪烁
+    if (this.queue.length > 0) {
+      try {
+        handler.onProcessingStateChange(false, this.queue.length);
+        this.logger.debug('setOperationHandler: 同步队列长度到 SyncState', { queueLength: this.queue.length });
+      } catch (error) {
+        this.logger.warn('setOperationHandler: 同步队列长度失败', error);
+      }
+    }
   }
   
   // ==================== 熔断器 ====================
@@ -1041,6 +1053,7 @@ export class RetryQueueService {
         this.queue = items;
         this.logger.info('从 IndexedDB 加载队列', { count: items.length });
         this.checkCapacityWarning();
+        this.syncPendingCountToState();
         return;
       }
     }
@@ -1048,6 +1061,22 @@ export class RetryQueueService {
     // 降级到 localStorage
     this.loadFromLocalStorage();
     this.checkCapacityWarning();
+    this.syncPendingCountToState();
+  }
+  
+  /**
+   * 【Bug Fix 2026-03-22】同步队列长度到 SyncState
+   * 解决 loadFromStorage 和 setOperationHandler 时序不确定导致的状态不一致
+   */
+  private syncPendingCountToState(): void {
+    if (this.queue.length > 0 && this.operationHandler) {
+      try {
+        this.operationHandler.onProcessingStateChange(false, this.queue.length);
+        this.logger.debug('loadFromStorage: 同步队列长度到 SyncState', { queueLength: this.queue.length });
+      } catch (error) {
+        this.logger.warn('loadFromStorage: 同步队列长度失败', error);
+      }
+    }
   }
   
   /**
