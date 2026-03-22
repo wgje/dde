@@ -10,6 +10,7 @@ import { RetryQueueService } from '../../core/services/sync/retry-queue.service'
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { SYNC_CONFIG } from '../../../config/sync.config';
+import type { QueuedAction } from '../../../services/action-queue.types';
 
 /**
  * 同步状态组件
@@ -407,6 +408,10 @@ import { SYNC_CONFIG } from '../../../config/sync.config';
   `
 })
 export class SyncStatusComponent {
+  private static readonly BACKGROUND_PENDING_ENTITY_TYPES = new Set<QueuedAction['entityType']>([
+    'focus-session',
+  ]);
+
   private actionQueue = inject(ActionQueueService);
   private syncService = inject(SimpleSyncService);
   private authService = inject(AuthService);
@@ -442,7 +447,13 @@ export class SyncStatusComponent {
   isResyncing = signal(false);
   
   // 从服务获取状态
-  readonly actionQueuePendingCount = this.actionQueue.queueSize;
+  /**
+   * 用户可感知的待同步数量。
+   * `focus-session` 由停泊坞后台自动快照推送周期性产生，不应把状态条抖成“1 待同步”。
+   */
+  readonly actionQueuePendingCount = computed(() =>
+    this.actionQueue.pendingActions().filter(action => this.isUserVisiblePendingAction(action)).length
+  );
   readonly retryQueuePendingCount = computed(() => this.syncService.syncState().pendingCount);
   readonly rawPendingCount = computed(() =>
     this.actionQueuePendingCount() + this.retryQueuePendingCount()
@@ -510,6 +521,10 @@ export class SyncStatusComponent {
       clearTimeout(this.pendingClearTimer);
       this.pendingClearTimer = null;
     }
+  }
+
+  private isUserVisiblePendingAction(action: QueuedAction): boolean {
+    return !SyncStatusComponent.BACKGROUND_PENDING_ENTITY_TYPES.has(action.entityType);
   }
 
   /**
