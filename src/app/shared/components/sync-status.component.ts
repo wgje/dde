@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, input, ChangeDetectionStrategy, output } from '@angular/core';
+import { Component, inject, signal, computed, input, ChangeDetectionStrategy, output, effect, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
@@ -416,6 +416,11 @@ export class SyncStatusComponent {
   private retryQueue = inject(RetryQueueService);
   private toastService = inject(ToastService);
   private readonly logger = inject(LoggerService);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly RETRY_PENDING_SHOW_DELAY_MS = 1200;
+  private readonly PENDING_CLEAR_DELAY_MS = 1500;
+  private pendingShowTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingClearTimer: ReturnType<typeof setTimeout> | null = null;
   
   // 输入属性 - 是否使用紧凑模式
   compact = input(false);
@@ -437,12 +442,75 @@ export class SyncStatusComponent {
   isResyncing = signal(false);
   
   // 从服务获取状态
-  readonly pendingCount = computed(() =>
-    this.actionQueue.queueSize() + this.syncService.syncState().pendingCount
+  readonly actionQueuePendingCount = this.actionQueue.queueSize;
+  readonly retryQueuePendingCount = computed(() => this.syncService.syncState().pendingCount);
+  readonly rawPendingCount = computed(() =>
+    this.actionQueuePendingCount() + this.retryQueuePendingCount()
   );
+  readonly pendingCount = signal(0);
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
   readonly queueFrozen = this.actionQueue.queueFrozen;
+
+  constructor() {
+    effect(() => {
+      const actionPending = this.actionQueuePendingCount();
+      const retryPending = this.retryQueuePendingCount();
+      const current = this.pendingCount();
+      const next = actionPending + retryPending;
+
+      if (next === current) {
+        return;
+      }
+
+      // 用户本地操作产生的待同步应立即反馈，避免交互延迟感。
+      if (actionPending > 0) {
+        this.clearPendingTimers();
+        this.pendingCount.set(next);
+        return;
+      }
+
+      // 后台重试队列的短促 0/1 波动会导致状态文案来回跳，做轻量防抖。
+      if (next > current) {
+        if (this.pendingShowTimer) {
+          clearTimeout(this.pendingShowTimer);
+        }
+        this.pendingShowTimer = setTimeout(() => {
+          this.pendingShowTimer = null;
+          const latestActionPending = this.actionQueuePendingCount();
+          const latestRetryPending = this.retryQueuePendingCount();
+          if (latestActionPending === 0 && latestRetryPending > 0) {
+            this.pendingCount.set(latestActionPending + latestRetryPending);
+          }
+        }, this.RETRY_PENDING_SHOW_DELAY_MS);
+        return;
+      }
+
+      if (this.pendingClearTimer) {
+        clearTimeout(this.pendingClearTimer);
+      }
+      this.pendingClearTimer = setTimeout(() => {
+        this.pendingClearTimer = null;
+        const latest = this.rawPendingCount();
+        if (latest === 0) {
+          this.pendingCount.set(0);
+        }
+      }, this.PENDING_CLEAR_DELAY_MS);
+    });
+
+    this.destroyRef.onDestroy(() => this.clearPendingTimers());
+  }
+
+  private clearPendingTimers(): void {
+    if (this.pendingShowTimer) {
+      clearTimeout(this.pendingShowTimer);
+      this.pendingShowTimer = null;
+    }
+    if (this.pendingClearTimer) {
+      clearTimeout(this.pendingClearTimer);
+      this.pendingClearTimer = null;
+    }
+  }
 
   /**
    * 队列是否正在处理（原型方法）

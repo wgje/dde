@@ -75,6 +75,8 @@ export class ProjectDataService {
   private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
   /** 避免本地离线模式重复打印“未配置”告警 */
   private hasLoggedSupabaseMissingConfig = false;
+  /** 会话级熔断：当批量 RPC 不存在时，后续直接走顺序加载 */
+  private batchRpcUnavailable = false;
 
   private isSupabaseOfflineMode(): boolean {
     const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
@@ -86,6 +88,26 @@ export class ProjectDataService {
       }
     }
     return Boolean(maybeSignal);
+  }
+
+  private isBatchRpcMissingError(error: {
+    code?: string;
+    message?: string;
+    details?: string;
+    hint?: string;
+  }): boolean {
+    const normalized = [error.message, error.details, error.hint]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join(' ')
+      .toLowerCase();
+
+    return (
+      error.code === '42883' ||
+      error.code === 'PGRST202' ||
+      normalized.includes('does not exist') ||
+      normalized.includes('could not find the function') ||
+      normalized.includes('schema cache')
+    );
   }
   
   /**
@@ -130,6 +152,11 @@ export class ProjectDataService {
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
+    if (this.batchRpcUnavailable) {
+      this.logger.debug('批量 RPC 已熔断，直接走顺序加载', { projectId });
+      return this.loadFullProject(projectId);
+    }
+
     try {
       this.logger.debug('使用 RPC 批量加载项目', { projectId });
       
@@ -138,6 +165,29 @@ export class ProjectDataService {
       });
 
       if (error) {
+        const isBatchRpcMissing = this.isBatchRpcMissingError(error);
+        if (isBatchRpcMissing) {
+          this.batchRpcUnavailable = true;
+          this.logger.warn('批量 RPC 不可用，切换到顺序加载并启用会话熔断', {
+            projectId,
+            errorCode: error.code,
+            error: error.message,
+          });
+          this.sentryLazyLoader.captureMessage('RPC get_full_project_data unavailable, fallback enabled', {
+            level: 'warning',
+            tags: {
+              operation: 'loadFullProjectOptimized',
+              classification: 'rpc_missing',
+            },
+            extra: {
+              projectId,
+              errorCode: error.code ?? 'unknown',
+              errorMessage: error.message ?? '',
+            }
+          });
+          return this.loadFullProject(projectId);
+        }
+
         // 【性能优化 2026-02-14】区分 Access Denied 与其他错误
         // Access Denied（P0001）说明 projectId 无效或无权限，无需 fallback
         const isAccessDenied = error.code === 'P0001' || error.message?.includes('Access denied');

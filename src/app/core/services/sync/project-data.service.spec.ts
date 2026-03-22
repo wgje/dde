@@ -211,4 +211,189 @@ describe('ProjectDataService', () => {
     expect(logger.warn).not.toHaveBeenCalled();
     expect(syncState.setSyncError).not.toHaveBeenCalled();
   });
+
+  it('RPC 函数不存在时应回退并熔断后续 RPC 调用', async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: null,
+        error: {
+          code: '42883',
+          message: 'function public.get_full_project_data(uuid) does not exist',
+        },
+      })
+      .mockResolvedValue({
+        data: {
+          id: 'proj-1',
+          owner_id: 'user-1',
+          title: 'Project 1',
+          created_at: '2026-03-22T00:00:00.000Z',
+          updated_at: '2026-03-22T00:00:00.000Z',
+        },
+        error: null,
+      });
+
+    const maybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'proj-1',
+        owner_id: 'user-1',
+        title: 'Project 1',
+        created_at: '2026-03-22T00:00:00.000Z',
+        updated_at: '2026-03-22T00:00:00.000Z',
+      },
+      error: null,
+    });
+    const select = vi.fn().mockReturnValue({
+      eq: vi.fn().mockReturnValue({ maybeSingle }),
+    });
+
+    const from = vi.fn((table: string) => {
+      if (table === 'projects') {
+        return { select };
+      }
+      return {
+        select: vi.fn().mockReturnValue({
+          eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      };
+    });
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: true,
+            clientAsync: vi.fn(async () => ({ rpc, from })),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(async (_key: string, work: () => Promise<unknown>) => work()),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+
+    const first = await service.loadFullProjectOptimized('proj-1');
+    const second = await service.loadFullProjectOptimized('proj-1');
+
+    expect(first?.id).toBe('proj-1');
+    expect(second?.id).toBe('proj-1');
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(from).toHaveBeenCalledWith('projects');
+  });
+
+  it('PGRST202 schema cache miss 时应识别为 RPC 缺失并回退', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: {
+        code: 'PGRST202',
+        message: 'Could not find the function public.get_full_project_data(p_project_id) in the schema cache',
+      },
+    });
+
+    const from = vi.fn((table: string) => ({
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue(
+          table === 'projects'
+            ? { maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }
+            : Promise.resolve({ data: [], error: null })
+        ),
+      }),
+    }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: true,
+            clientAsync: vi.fn(async () => ({ rpc, from })),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(async (_key: string, work: () => Promise<unknown>) => work()),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const result = await service.loadFullProjectOptimized('proj-missing-rpc');
+
+    expect(result).toBeNull();
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
 });
