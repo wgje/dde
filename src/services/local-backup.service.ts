@@ -25,9 +25,10 @@ import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
 import { get, set, del } from 'idb-keyval';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
-import { ExportService } from './export.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
+import { DisasterBackupService } from './disaster-backup.service';
+import type { Project } from '../models';
 import {
   LOCAL_BACKUP_CONFIG,
   LocalBackupResult,
@@ -54,7 +55,7 @@ export class LocalBackupService implements OnDestroy {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly logger = inject(LoggerService).category('LocalBackup');
   private readonly toast = inject(ToastService);
-  private readonly exportService = inject(ExportService);
+  private readonly disasterBackupService = inject(DisasterBackupService);
   private readonly uiState = inject(UiStateService);
   private readonly preferenceService = inject(PreferenceService);
   
@@ -331,12 +332,10 @@ export class LocalBackupService implements OnDestroy {
     try {
       this.logger.info('开始本地备份...', { projectCount: projects.length });
       
-      // 使用 ExportService 生成导出数据
-      const exportResult = await this.exportService.exportAllProjects(projects as never[]);
-      
-      if (!exportResult.success || !exportResult.blob) {
-        return { success: false, error: exportResult.error || '导出数据失败' };
-      }
+      const { blob } = await this.disasterBackupService.buildLocalBlob(projects as Project[], {
+        autoBackupEnabled: this._autoBackupEnabled(),
+        autoBackupIntervalMs: this._autoBackupIntervalMs(),
+      });
       
       // 生成文件名
       const timestamp = this.formatTimestamp();
@@ -345,12 +344,12 @@ export class LocalBackupService implements OnDestroy {
       // 写入文件
       const fileHandle = await this.directoryHandle.getFileHandle(filename, { create: true });
       const writable = await fileHandle.createWritable();
-      await writable.write(exportResult.blob);
+      await writable.write(blob);
       await writable.close();
       
       // 验证写入（可选）
       if (LOCAL_BACKUP_CONFIG.VALIDATION.VERIFY_WRITE) {
-        const verified = await this.verifyBackupFile(fileHandle, exportResult.blob.size);
+        const verified = await this.verifyBackupFile(fileHandle, blob.size);
         if (!verified) {
           this.logger.warn('备份文件验证失败，但文件已写入');
         }
@@ -364,12 +363,12 @@ export class LocalBackupService implements OnDestroy {
       this._lastBackupTime.set(backupTime);
       this.savePersistedState();
       
-      this.logger.info('本地备份完成', { filename, size: exportResult.blob.size });
+      this.logger.info('本地备份完成', { filename, size: blob.size });
       
       return {
         success: true,
         filename,
-        size: exportResult.blob.size,
+        size: blob.size,
         timestamp: backupTime,
         pathHint: `${this._directoryName()}/${filename}`,
       };
@@ -440,6 +439,69 @@ export class LocalBackupService implements OnDestroy {
       
     } catch (error) {
       this.logger.warn('清理旧备份时出错', error);
+    }
+  }
+  
+  // ============================================
+  // 备份浏览与恢复
+  // ============================================
+  
+  /**
+   * 列出备份目录中的所有备份文件
+   * @returns 按时间倒序排列的备份文件列表
+   */
+  async listBackupFiles(): Promise<{ name: string; timestamp: number; size: number }[]> {
+    if (!this.directoryHandle) {
+      return [];
+    }
+    
+    const hasPermission = await this.checkAndRestorePermission();
+    if (!hasPermission) {
+      return [];
+    }
+    
+    try {
+      const files: { name: string; timestamp: number; size: number }[] = [];
+      
+      for await (const entry of this.directoryHandle.values()) {
+        if (entry.kind === 'file' && entry.name.startsWith(LOCAL_BACKUP_CONFIG.FILENAME_PREFIX)) {
+          const timestamp = this.parseTimestampFromFilename(entry.name);
+          if (timestamp) {
+            const fileHandle = await this.directoryHandle.getFileHandle(entry.name);
+            const file = await fileHandle.getFile();
+            files.push({ name: entry.name, timestamp, size: file.size });
+          }
+        }
+      }
+      
+      files.sort((a, b) => b.timestamp - a.timestamp);
+      return files;
+    } catch (error) {
+      this.logger.error('列出备份文件失败', error);
+      return [];
+    }
+  }
+  
+  /**
+   * 从备份目录读取指定备份文件为 File 对象
+   * 返回的 File 可以直接传入 ImportService.validateFile() 进行导入
+   */
+  async readBackupFile(filename: string): Promise<File | null> {
+    if (!this.directoryHandle) {
+      return null;
+    }
+    
+    const hasPermission = await this.checkAndRestorePermission();
+    if (!hasPermission) {
+      return null;
+    }
+    
+    try {
+      const fileHandle = await this.directoryHandle.getFileHandle(filename);
+      return await fileHandle.getFile();
+    } catch (error) {
+      this.logger.error('读取备份文件失败', { filename, error });
+      return null;
     }
   }
   

@@ -34,6 +34,9 @@ export interface BackupMetadata {
   encryptionKeyId?: string;
   validationPassed: boolean;
   validationWarnings: string[];
+  payloadVersion?: string;
+  tableCounts?: BackupTableCounts;
+  coverage?: BackupCoverage;
   backupStartedAt: string;
   backupCompletedAt?: string;
   baseBackupId?: string;
@@ -47,16 +50,43 @@ export interface BackupMetadata {
 /** 备份数据结构 */
 export interface BackupData {
   version: string;
+  payloadVersion: string;
   type: BackupType;
   createdAt: string;
+  checksum?: string;
+  tableCounts: BackupTableCounts;
+  coverage: BackupCoverage;
   projects: BackupProject[];
   tasks: BackupTask[];
   connections: BackupConnection[];
   attachments?: BackupAttachmentMeta[];
   /** 用户偏好设置（v1.1.0+） */
-  userPreferences?: BackupUserPreferences[];
+  userPreferences: BackupUserPreferences[];
   /** 黑匣子条目 - 专注模式数据（v1.1.0+） */
-  blackBoxEntries?: BackupBlackBoxEntry[];
+  blackBoxEntries: BackupBlackBoxEntry[];
+  focusSessions: BackupFocusSession[];
+  transcriptionUsage: BackupTranscriptionUsage[];
+  routineTasks: BackupRoutineTask[];
+  routineCompletions: BackupRoutineCompletion[];
+  localState?: BackupLocalState;
+}
+
+export interface BackupTableCounts {
+  projects: number;
+  tasks: number;
+  connections: number;
+  userPreferences: number;
+  blackBoxEntries: number;
+  focusSessions: number;
+  transcriptionUsage: number;
+  routineTasks: number;
+  routineCompletions: number;
+}
+
+export interface BackupCoverage {
+  includesProjectData: boolean;
+  includesCloudUserState: boolean;
+  includesLocalState: boolean;
 }
 
 export interface BackupProject {
@@ -124,6 +154,11 @@ export interface BackupUserPreferences {
   theme?: string;
   layoutDirection?: string;
   floatingWindowPref?: string;
+  colorMode?: string;
+  autoResolveConflicts?: boolean;
+  localBackupEnabled?: boolean;
+  localBackupIntervalMs?: number;
+  focusPreferences?: unknown;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -143,6 +178,59 @@ export interface BackupBlackBoxEntry {
   snoozeUntil?: string | null;
   snoozeCount?: number;
   deletedAt?: string | null;
+  focusMeta?: unknown;
+}
+
+export interface BackupFocusSession {
+  id: string;
+  userId: string;
+  startedAt: string;
+  endedAt?: string | null;
+  sessionState: unknown;
+  updatedAt?: string;
+}
+
+export interface BackupTranscriptionUsage {
+  id: string;
+  userId: string;
+  date: string;
+  audioSeconds: number;
+  createdAt?: string;
+}
+
+export interface BackupRoutineTask {
+  id: string;
+  userId: string;
+  title: string;
+  maxTimesPerDay: number;
+  isEnabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface BackupRoutineCompletion {
+  id: string;
+  routineId: string;
+  userId: string;
+  dateKey: string;
+  count: number;
+  updatedAt?: string;
+}
+
+export interface BackupLocalState {
+  offlineSnapshot?: {
+    localStorage?: string | null;
+    indexedDb?: string | null;
+  };
+  parkedTaskCache?: {
+    entries: unknown[];
+    syncMetadata: Record<string, unknown>;
+  };
+  retryQueue?: unknown[];
+  actionQueue?: unknown;
+  deadLetters?: unknown[];
+  taskTombstones?: unknown;
+  connectionTombstones?: unknown;
 }
 
 /** 健康校验结果 */
@@ -160,13 +248,27 @@ export interface BackupValidation {
   warnings: string[];
 }
 
+export function buildTableCounts(data: BackupData): BackupTableCounts {
+  return {
+    projects: data.projects?.length ?? 0,
+    tasks: data.tasks?.length ?? 0,
+    connections: data.connections?.length ?? 0,
+    userPreferences: data.userPreferences?.length ?? 0,
+    blackBoxEntries: data.blackBoxEntries?.length ?? 0,
+    focusSessions: data.focusSessions?.length ?? 0,
+    transcriptionUsage: data.transcriptionUsage?.length ?? 0,
+    routineTasks: data.routineTasks?.length ?? 0,
+    routineCompletions: data.routineCompletions?.length ?? 0,
+  };
+}
+
 // ===========================================
 // 配置常量
 // ===========================================
 
 export const BACKUP_CONFIG = {
   /** 备份版本 */
-  VERSION: '1.1.0',
+  VERSION: '2.0.0',
   
   /** 健康校验配置 */
   VALIDATION: {
@@ -432,7 +534,7 @@ export async function decompressData(data: Uint8Array): Promise<string> {
  */
 export function validateBackup(
   data: BackupData,
-  previousMeta?: { taskCount: number } | null
+  previousMeta?: { taskCount: number; tableCounts?: Partial<BackupTableCounts> } | null
 ): BackupValidation {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -441,7 +543,13 @@ export function validateBackup(
   const hasRequiredTables = 
     Array.isArray(data.projects) &&
     Array.isArray(data.tasks) &&
-    Array.isArray(data.connections);
+    Array.isArray(data.connections) &&
+    Array.isArray(data.userPreferences) &&
+    Array.isArray(data.blackBoxEntries) &&
+    Array.isArray(data.focusSessions) &&
+    Array.isArray(data.transcriptionUsage) &&
+    Array.isArray(data.routineTasks) &&
+    Array.isArray(data.routineCompletions);
   
   if (!hasRequiredTables) {
     errors.push('缺少必需的数据表 (projects, tasks, connections)');
@@ -461,34 +569,73 @@ export function validateBackup(
     warnings.push(`项目数 (${projectCount}) 低于最小值 (${BACKUP_CONFIG.VALIDATION.MIN_PROJECT_COUNT})`);
   }
   
-  // 4. 任务数变化检查
+  const countThresholds = {
+    tasks: BACKUP_CONFIG.VALIDATION.TASK_COUNT_CHANGE,
+    default: {
+      WARNING_RATIO: 0.1,
+      BLOCK_RATIO: 0.3,
+      ABSOLUTE_THRESHOLD: 1,
+      MIN_TASK_COUNT_FOR_RATIO: 1,
+    },
+  } as const;
+
+  const validateCountDrift = (
+    label: string,
+    previousCount: number,
+    currentCount: number,
+    thresholds: {
+      WARNING_RATIO: number;
+      BLOCK_RATIO: number;
+      ABSOLUTE_THRESHOLD: number;
+      MIN_TASK_COUNT_FOR_RATIO: number;
+    },
+  ): { inRange: boolean } => {
+    if (previousCount <= 0) {
+      return { inRange: true };
+    }
+
+    const change = Math.abs(currentCount - previousCount);
+    const ratio = change / previousCount;
+    const useAbsolute = previousCount < thresholds.MIN_TASK_COUNT_FOR_RATIO;
+
+    if (useAbsolute) {
+      if (change > thresholds.ABSOLUTE_THRESHOLD) {
+        if (ratio > thresholds.BLOCK_RATIO) {
+          errors.push(`${label} count changed beyond threshold: ${previousCount} → ${currentCount}`);
+          return { inRange: false };
+        }
+        warnings.push(`${label} count changed unexpectedly: ${previousCount} → ${currentCount} (${change})`);
+      }
+      return { inRange: true };
+    }
+
+    if (ratio > thresholds.BLOCK_RATIO && change >= thresholds.ABSOLUTE_THRESHOLD) {
+      errors.push(`${label} count changed beyond threshold: ${previousCount} → ${currentCount} (${(ratio * 100).toFixed(1)}%)`);
+      return { inRange: false };
+    }
+    if ((ratio > thresholds.WARNING_RATIO || change >= thresholds.ABSOLUTE_THRESHOLD) && change > 0) {
+      warnings.push(`${label} count changed unexpectedly: ${previousCount} → ${currentCount} (${(ratio * 100).toFixed(1)}%)`);
+    }
+    return { inRange: true };
+  };
+
+  // 4. 表级数量变化检查
   let taskCountInRange = true;
   if (previousMeta && previousMeta.taskCount > 0) {
-    const change = Math.abs(taskCount - previousMeta.taskCount);
-    const ratio = change / previousMeta.taskCount;
-    const config = BACKUP_CONFIG.VALIDATION.TASK_COUNT_CHANGE;
-    
-    // 使用相对值或绝对值（取较大者）
-    const useAbsolute = previousMeta.taskCount < config.MIN_TASK_COUNT_FOR_RATIO;
-    
-    if (useAbsolute) {
-      // 小项目使用绝对值
-      if (change > config.ABSOLUTE_THRESHOLD) {
-        if (ratio > config.BLOCK_RATIO) {
-          errors.push(`任务数变化过大: ${previousMeta.taskCount} → ${taskCount}`);
-          taskCountInRange = false;
-        } else {
-          warnings.push(`任务数变化异常: ${previousMeta.taskCount} → ${taskCount} (${change} 个)`);
-        }
-      }
-    } else {
-      // 大项目使用相对值
-      if (ratio > config.BLOCK_RATIO) {
-        errors.push(`任务数变化超过阈值: ${previousMeta.taskCount} → ${taskCount} (${(ratio * 100).toFixed(1)}%)`);
-        taskCountInRange = false;
-      } else if (ratio > config.WARNING_RATIO || change > config.ABSOLUTE_THRESHOLD) {
-        warnings.push(`任务数变化异常: ${previousMeta.taskCount} → ${taskCount} (${(ratio * 100).toFixed(1)}%)`);
-      }
+    taskCountInRange = validateCountDrift(
+      'tasks',
+      previousMeta.taskCount,
+      taskCount,
+      countThresholds.tasks,
+    ).inRange;
+  }
+
+  const previousTableCounts = previousMeta?.tableCounts ?? {};
+  for (const [label, currentCount] of Object.entries(buildTableCounts(data))) {
+    if (label === 'tasks') continue;
+    const previousCount = previousTableCounts[label as keyof BackupTableCounts];
+    if (typeof previousCount === 'number' && previousCount > 0) {
+      validateCountDrift(label, previousCount, currentCount, countThresholds.default);
     }
   }
   

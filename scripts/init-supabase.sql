@@ -1,48 +1,46 @@
--- ============================================================
+﻿-- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 6.3.0
--- 最后验证: 2026-03-20（个人版后端瘦身 + 备份重建）
+-- 版本: 7.0.0
+-- 最后验证: 2026-03-22（移除云端备份基础设施）
 --
 -- 更新日志：
+--   7.0.0 (2026-03-22): 移除云端备份基础设施：
+--                       - 删除 backup_metadata / backup_restore_history / backup_encryption_keys 表
+--                       - 删除备份相关 RLS 策略、索引、GRANT
+--                       - 删除备份辅助函数（get_latest_completed_backup / mark_expired_backups / cleanup_expired_backups）
+--                       - 删除 invoke_internal_edge_function / apply_backup_schedules / update_backup_schedule
+--                       - 删除 backup.* app_config 配置项
+--                       - 删除备份相关 cron 任务
+--                       - 保留本地备份相关字段（local_backup_enabled / local_backup_interval_ms）
 --   6.3.0 (2026-03-20): 个人版后端收口：
 --                       - project_members / attachment_scans / quarantined_files 最终移除
 --                       - user_preferences.dock_snapshot 最终移除
 --                       - owner-only project access 函数与 projects 策略重写
---                       - 备份调度改为 Vault + pg_net helper
---                       - 新增 backup.user_id 配置、cron 日志清理、个人数据保留清理
+--                       - cron 日志清理、个人数据保留清理
 --   6.2.0 (2026-03-18): MCP Supabase Advisor 最终优化 + 架构修正：
 --                       【根本发现】应用 100% 使用软删除（UPDATE deleted_at），而不是物理 DELETE
 --                              → FK 索引对应的级联删除约束检查永未执行
 --                              → 所有"FK enforcement"索引实际使用次数为 0
---                       - 【删除】11 个不必要的 FK 索引（0 查询验证）：
---                         * idx_backup_metadata_base_backup_id
---                         * idx_backup_restore_history_user_id
---                         * idx_backup_restore_history_snapshot_id
+--                       - 【删除】不必要的 FK 索引（0 查询验证）：
 --                         * idx_project_members_invited_by
 --                         * idx_task_tombstones_deleted_by
 --                         * idx_connection_tombstones_deleted_by
 --                         * idx_quarantined_files_quarantined_by
 --                         * idx_black_box_entries_project_id
 --                         * idx_routine_completions_routine_id
---                         + 2 个其他未使用索引
---                       - 【添加】2 个关键 FK 索引（未来维护操作防御）：
---                         * idx_backup_metadata_user_id (user_id FK, ON DELETE SET NULL)
---                         * idx_backup_restore_history_backup_id (backup_id FK, ON DELETE CASCADE)
+--                         + 其他未使用索引
 --                       - 【文档】添加架构说明：软删除策略与 FK 索引必要性关系
 --                       - 预期性能提升：写入 +2-8%（减少 FK 检查开销）
 --   6.0.0 (2026-03-15): 全量数据库优化：
 --                       - 清理 13 个确认冗余的未使用索引
---                       - 备份表索引整合（13 个单列索引 → 4 个复合索引）
---                       - backup_metadata/restore_history: FORCE RLS + CRUD 策略 + GRANT
---                       - backup_restore_history 补充 updated_at 列 + 触发器
 --                       - connections UNIQUE 约束改为部分唯一索引（仅活跃行）
 --                       - 5 核心表 autovacuum 阈值调优
 --                       - cleanup 函数部分索引补充（deleted_at）
 --                       - authenticated 角色 statement_timeout = 30s
 --                       - transcription_usage SELECT 策略统一命名
 --   5.0.0 (2026-03-15): 全量安全加固 + Focus Console 汇总：
---                       - FORCE RLS 覆盖全部 21 张表（含备份表）
+--                       - FORCE RLS 覆盖全部用户表
 --                       - anon 角色零写入（仅 app_config SELECT）
 --                       - 管理/维护 RPC 函数仅限 service_role
 --                       - batch_upsert_tasks 升级支持 parking_meta/expected_minutes/cognitive_load/wait_minutes
@@ -3379,9 +3377,6 @@ CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated
 
 CREATE INDEX IF NOT EXISTS idx_project_members_user_project
   ON public.project_members (user_id, project_id);
-
--- 说明：backup_* 表在后文创建，相关 FK 索引在建表后统一创建，避免一次性初始化时出现“索引先于表创建”的顺序错误。
-
 -- 注：以下冗余索引已移除（极少作为查询条件或被复合索引替代）：
 -- - idx_connection_tombstones_deleted_by
 -- - idx_project_members_invited_by
@@ -3788,225 +3783,6 @@ REVOKE EXECUTE ON FUNCTION public.trigger_set_updated_at() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon;
 
--- ============================================
--- 备份系统表（合并自 backup-setup.sql）
--- ============================================
-
--- 备份元数据表
-CREATE TABLE IF NOT EXISTS public.backup_metadata (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  type TEXT NOT NULL CHECK (type IN ('full', 'incremental')),
-  path TEXT NOT NULL UNIQUE,
-  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-  project_count INTEGER NOT NULL DEFAULT 0,
-  task_count INTEGER NOT NULL DEFAULT 0,
-  connection_count INTEGER NOT NULL DEFAULT 0,
-  attachment_count INTEGER NOT NULL DEFAULT 0,
-  user_preferences_count INTEGER NOT NULL DEFAULT 0,
-  black_box_entry_count INTEGER NOT NULL DEFAULT 0,
-  project_member_count INTEGER NOT NULL DEFAULT 0,
-  size_bytes BIGINT NOT NULL DEFAULT 0,
-  compressed BOOLEAN NOT NULL DEFAULT true,
-  encrypted BOOLEAN NOT NULL DEFAULT false,
-  checksum TEXT NOT NULL,
-  checksum_algorithm TEXT NOT NULL DEFAULT 'SHA-256',
-  encryption_algorithm TEXT,
-  encryption_key_id TEXT,
-  validation_passed BOOLEAN NOT NULL DEFAULT true,
-  validation_warnings JSONB DEFAULT '[]'::jsonb,
-  backup_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  backup_completed_at TIMESTAMPTZ,
-  base_backup_id UUID REFERENCES public.backup_metadata(id) ON DELETE SET NULL,
-  incremental_since TIMESTAMPTZ,
-  expires_at TIMESTAMPTZ,
-  retention_tier TEXT CHECK (retention_tier IN ('hourly', 'daily', 'weekly', 'monthly')),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'expired')),
-  error_message TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-COMMENT ON TABLE public.backup_metadata IS '备份元数据表，记录所有备份的信息';
-
--- ⚠️ LEGACY NOTE (2026-03-18 MCP Advisor audit): 
--- 以下备份表在应用 v0.x 中未被主动查询使用。
--- 原计划索引（idx_backup_metadata_status_type_completed 等）已验证为 0 次查询。
--- 迁移至查询驱动的索引策略：仅保留 FK 约束所需的索引。
-
--- 【移除】原计划的复合索引（验证 0 次使用，已删除以优化写性能）
--- DROP INDEX IF EXISTS idx_backup_metadata_status_type_completed;
--- DROP INDEX IF EXISTS idx_backup_metadata_user_status;
--- DROP INDEX IF EXISTS idx_backup_metadata_expires;
-
--- 备份域 FK 约束索引（Advisor 对齐，建表后创建）
--- backup_metadata.user_id -> auth.users(id)
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_id
-  ON public.backup_metadata(user_id);
-COMMENT ON INDEX idx_backup_metadata_user_id IS
-  'FK enforcement: user_id references auth.users(id). ON DELETE SET NULL.';
-
--- backup_metadata.base_backup_id -> backup_metadata(id)
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
-  ON public.backup_metadata(base_backup_id);
-COMMENT ON INDEX idx_backup_metadata_base_backup_id IS 
-  'FK enforcement: base_backup_id references backup_metadata(id). ON DELETE SET NULL.';
-
-ALTER TABLE public.backup_metadata ENABLE ROW LEVEL SECURITY;
-
--- 备份恢复历史表
-CREATE TABLE IF NOT EXISTS public.backup_restore_history (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  backup_id UUID NOT NULL REFERENCES public.backup_metadata(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  mode TEXT NOT NULL CHECK (mode IN ('replace', 'merge')),
-  scope TEXT NOT NULL CHECK (scope IN ('all', 'project')),
-  project_id UUID,
-  pre_restore_snapshot_id UUID REFERENCES public.backup_metadata(id) ON DELETE SET NULL,
-  projects_restored INTEGER NOT NULL DEFAULT 0,
-  tasks_restored INTEGER NOT NULL DEFAULT 0,
-  connections_restored INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'rolled_back')),
-  error_message TEXT,
-  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-COMMENT ON TABLE public.backup_restore_history IS '备份恢复历史，记录用户的恢复操作';
-
--- updated_at 自动更新触发器
-DROP TRIGGER IF EXISTS trg_backup_restore_history_updated_at ON public.backup_restore_history;
-CREATE TRIGGER trg_backup_restore_history_updated_at
-  BEFORE UPDATE ON public.backup_restore_history
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
--- 【添加】2 个关键 FK 索引（2026-03-18 v6.3.0: Advisor 全量解决）
--- backup_restore_history.backup_id -> backup_metadata(id)
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_id
-  ON public.backup_restore_history(backup_id);
-COMMENT ON INDEX idx_backup_restore_history_backup_id IS
-  'FK enforcement: backup_id references backup_metadata(id). ON DELETE CASCADE.';
-
--- backup_restore_history.pre_restore_snapshot_id + user_id
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id 
-  ON public.backup_restore_history(pre_restore_snapshot_id);
-COMMENT ON INDEX idx_backup_restore_history_pre_restore_snapshot_id IS 
-  'FK enforcement: pre_restore_snapshot_id references backup_metadata(id). ON DELETE SET NULL.';
-
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id 
-  ON public.backup_restore_history(user_id);
-COMMENT ON INDEX idx_backup_restore_history_user_id IS 
-  'FK enforcement: user_id references auth.users(id). ON DELETE CASCADE.';
-
-ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY;
-
--- 备份加密密钥表
-CREATE TABLE IF NOT EXISTS public.backup_encryption_keys (
-  id TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated', 'retired')),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deprecated_at TIMESTAMPTZ,
-  retired_at TIMESTAMPTZ,
-  algorithm TEXT NOT NULL DEFAULT 'AES-256-GCM',
-  notes TEXT
-);
-COMMENT ON TABLE public.backup_encryption_keys IS '备份加密密钥元数据，用于密钥轮换管理';
-
-ALTER TABLE public.backup_encryption_keys ENABLE ROW LEVEL SECURITY;
-
--- 备份表 RLS 策略
--- service_role 天然绕过 RLS，不需要 service_role_all 策略
--- 使用 (SELECT auth.uid()) 子查询避免 initplan 逐行重评估（性能优化）
-DO $$ BEGIN
-  -- backup_metadata: SELECT（用户查看自己的备份）
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_select' AND tablename = 'backup_metadata') THEN
-    CREATE POLICY backup_metadata_user_select ON public.backup_metadata
-      FOR SELECT TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_metadata: INSERT
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_insert' AND tablename = 'backup_metadata') THEN
-    CREATE POLICY backup_metadata_user_insert ON public.backup_metadata
-      FOR INSERT TO authenticated
-      WITH CHECK (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_metadata: UPDATE
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_update' AND tablename = 'backup_metadata') THEN
-    CREATE POLICY backup_metadata_user_update ON public.backup_metadata
-      FOR UPDATE TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_restore_history: SELECT
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_select' AND tablename = 'backup_restore_history') THEN
-    CREATE POLICY backup_restore_history_user_select ON public.backup_restore_history
-      FOR SELECT TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_restore_history: INSERT
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_insert' AND tablename = 'backup_restore_history') THEN
-    CREATE POLICY backup_restore_history_user_insert ON public.backup_restore_history
-      FOR INSERT TO authenticated
-      WITH CHECK (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_restore_history: UPDATE
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_update' AND tablename = 'backup_restore_history') THEN
-    CREATE POLICY backup_restore_history_user_update ON public.backup_restore_history
-      FOR UPDATE TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_metadata: DELETE
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_metadata_user_delete' AND tablename = 'backup_metadata') THEN
-    CREATE POLICY backup_metadata_user_delete ON public.backup_metadata
-      FOR DELETE TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_restore_history: DELETE
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'backup_restore_history_user_delete' AND tablename = 'backup_restore_history') THEN
-    CREATE POLICY backup_restore_history_user_delete ON public.backup_restore_history
-      FOR DELETE TO authenticated
-      USING (user_id = (SELECT auth.uid()));
-  END IF;
-  -- backup_encryption_keys: 无策略（仅 service_role 访问，天然绕过 RLS）
-END $$;
-
--- 备份表 GRANT
-GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_metadata TO authenticated;
-GRANT ALL ON TABLE public.backup_metadata TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_restore_history TO authenticated;
-GRANT ALL ON TABLE public.backup_restore_history TO service_role;
-REVOKE ALL ON TABLE public.backup_encryption_keys FROM authenticated;
-GRANT ALL ON TABLE public.backup_encryption_keys TO service_role;
-
--- 备份辅助函数
-CREATE OR REPLACE FUNCTION public.get_latest_completed_backup(backup_type TEXT DEFAULT 'full')
-RETURNS public.backup_metadata
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
-BEGIN
-  RETURN (SELECT * FROM public.backup_metadata WHERE type = backup_type AND status = 'completed' ORDER BY backup_completed_at DESC LIMIT 1);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.mark_expired_backups()
-RETURNS INTEGER
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
-DECLARE expired_count INTEGER;
-BEGIN
-  UPDATE public.backup_metadata SET status = 'expired' WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
-  GET DIAGNOSTICS expired_count = ROW_COUNT;
-  RETURN expired_count;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.cleanup_expired_backups()
-RETURNS TABLE (expired_count INTEGER, paths_to_delete TEXT[])
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = 'pg_catalog', 'public' AS $$
-DECLARE v_expired_count INTEGER; v_paths TEXT[];
-BEGIN
-  SELECT array_agg(path) INTO v_paths FROM public.backup_metadata WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
-  UPDATE public.backup_metadata SET status = 'expired' WHERE status = 'completed' AND expires_at IS NOT NULL AND expires_at < now();
-  GET DIAGNOSTICS v_expired_count = ROW_COUNT;
-  RETURN QUERY SELECT v_expired_count, COALESCE(v_paths, ARRAY[]::TEXT[]);
-END;
-$$;
 REVOKE EXECUTE ON FUNCTION public.cleanup_old_logs() FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_deleted_attachments(integer) FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.cleanup_expired_scan_records() FROM PUBLIC, anon;
@@ -4039,9 +3815,6 @@ ALTER TABLE public.cleanup_logs FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.purge_rate_limits FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.quarantined_files FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.transcription_usage FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_metadata FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_restore_history FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_encryption_keys FORCE ROW LEVEL SECURITY;
 
 -- anon 角色全量收紧（用户数据零访问）
 REVOKE ALL ON TABLE public.tasks FROM anon;
@@ -4061,9 +3834,6 @@ REVOKE ALL ON TABLE public.cleanup_logs FROM anon;
 REVOKE ALL ON TABLE public.purge_rate_limits FROM anon;
 REVOKE ALL ON TABLE public.quarantined_files FROM anon;
 REVOKE ALL ON TABLE public.attachment_scans FROM anon;
-REVOKE ALL ON TABLE public.backup_metadata FROM anon;
-REVOKE ALL ON TABLE public.backup_restore_history FROM anon;
-REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon;
 -- app_config：仅保留 anon 只读
 REVOKE ALL ON TABLE public.app_config FROM anon;
 GRANT SELECT ON TABLE public.app_config TO anon;
@@ -4178,25 +3948,6 @@ COMMENT ON SCHEMA public IS
 -- 使一次性初始化后的最终状态与 2026-03-19 主库迁移保持一致。
 -- ============================================================
 
-CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
-CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
-
-DELETE FROM public.app_config
-WHERE key IN (
-  'backup.schedule.attachments_cleanup',
-  'backup.schedule.health_report'
-);
-
-INSERT INTO public.app_config (key, value, description)
-VALUES
-  ('backup.schedule.full', to_jsonb('10 19 * * *'::text), 'Full backup cron (UTC). Asia/Shanghai: daily 03:10.'),
-  ('backup.schedule.incremental', to_jsonb('10 1,7,13 * * *'::text), 'Incremental backup cron (UTC). Asia/Shanghai: 09:10 / 15:10 / 21:10.'),
-  ('backup.schedule.cleanup', to_jsonb('10 20 * * *'::text), 'Backup cleanup cron (UTC). Asia/Shanghai: daily 04:10.'),
-  ('backup.user_id', 'null'::jsonb, 'Optional owner UUID for scheduled single-user backups.')
-ON CONFLICT (key) DO UPDATE SET
-  value = EXCLUDED.value,
-  description = EXCLUDED.description,
-  updated_at = now();
 
 CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
 RETURNS SETOF uuid
@@ -4235,172 +3986,6 @@ CREATE POLICY "owner update" ON public.projects
 FOR UPDATE
 USING ((SELECT auth.uid() AS uid) = owner_id);
 
-CREATE OR REPLACE FUNCTION public.get_vault_secret(p_name text)
-RETURNS text
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path = 'pg_catalog', 'vault'
-AS $$
-  SELECT decrypted_secret
-  FROM vault.decrypted_secrets
-  WHERE name = p_name
-  ORDER BY updated_at DESC
-  LIMIT 1
-$$;
-
-REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM anon;
-REVOKE ALL ON FUNCTION public.get_vault_secret(text) FROM authenticated;
-
-CREATE OR REPLACE FUNCTION public.invoke_internal_edge_function(
-  p_slug text,
-  p_body jsonb DEFAULT '{}'::jsonb
-)
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = 'pg_catalog', 'public', 'vault'
-AS $$
-DECLARE
-  v_base_url text;
-  v_service_role_key text;
-  v_backup_user_id text;
-  v_request_id bigint;
-BEGIN
-  IF p_slug NOT IN ('backup-full', 'backup-incremental', 'backup-cleanup') THEN
-    RAISE EXCEPTION 'Unsupported internal Edge Function slug: %', p_slug;
-  END IF;
-
-  v_base_url := public.get_vault_secret('backup_supabase_url');
-  v_service_role_key := public.get_vault_secret('backup_service_role_key');
-
-  IF v_base_url IS NULL OR v_service_role_key IS NULL THEN
-    RAISE EXCEPTION 'Missing Vault secret(s) backup_supabase_url / backup_service_role_key';
-  END IF;
-
-  IF p_slug IN ('backup-full', 'backup-incremental') THEN
-    SELECT value #>> '{}' INTO v_backup_user_id
-    FROM public.app_config
-    WHERE key = 'backup.user_id';
-
-    IF coalesce(trim(v_backup_user_id), '') <> '' THEN
-      p_body := coalesce(p_body, '{}'::jsonb) || jsonb_build_object('userId', v_backup_user_id);
-    END IF;
-  END IF;
-
-  SELECT net.http_post(
-    url := rtrim(v_base_url, '/') || '/functions/v1/' || p_slug,
-    headers := jsonb_build_object(
-      'Authorization', 'Bearer ' || v_service_role_key,
-      'Content-Type', 'application/json'
-    ),
-    body := coalesce(p_body, '{}'::jsonb)
-  )
-  INTO v_request_id;
-
-  RETURN v_request_id;
-END;
-$$;
-
-REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM anon;
-REVOKE ALL ON FUNCTION public.invoke_internal_edge_function(text, jsonb) FROM authenticated;
-
-CREATE OR REPLACE FUNCTION public.apply_backup_schedules()
-RETURNS TABLE(job_name text, schedule text, status text)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = 'pg_catalog', 'public', 'cron'
-AS $$
-DECLARE
-  v_full_schedule text;
-  v_incremental_schedule text;
-  v_cleanup_schedule text;
-  v_job record;
-BEGIN
-  v_full_schedule := public.get_backup_schedule('backup.schedule.full', '10 19 * * *');
-  v_incremental_schedule := public.get_backup_schedule('backup.schedule.incremental', '10 1,7,13 * * *');
-  v_cleanup_schedule := public.get_backup_schedule('backup.schedule.cleanup', '10 20 * * *');
-
-  FOR v_job IN
-    SELECT jobid
-    FROM cron.job
-    WHERE jobname IN (
-      'nanoflow-backup-full',
-      'nanoflow-backup-incremental',
-      'nanoflow-backup-cleanup',
-      'nanoflow-cleanup-attachments',
-      'nanoflow-backup-health-report'
-    )
-  LOOP
-    PERFORM cron.unschedule(v_job.jobid);
-  END LOOP;
-
-  PERFORM cron.schedule(
-    'nanoflow-backup-full',
-    v_full_schedule,
-    $cmd$SELECT public.invoke_internal_edge_function('backup-full', '{}'::jsonb);$cmd$
-  );
-
-  PERFORM cron.schedule(
-    'nanoflow-backup-incremental',
-    v_incremental_schedule,
-    $cmd$SELECT public.invoke_internal_edge_function('backup-incremental', '{}'::jsonb);$cmd$
-  );
-
-  PERFORM cron.schedule(
-    'nanoflow-backup-cleanup',
-    v_cleanup_schedule,
-    $cmd$SELECT public.invoke_internal_edge_function('backup-cleanup', '{}'::jsonb);$cmd$
-  );
-
-  RETURN QUERY
-  SELECT
-    j.jobname::text,
-    j.schedule::text,
-    CASE WHEN j.active THEN 'active' ELSE 'paused' END::text
-  FROM cron.job j
-  WHERE j.jobname IN (
-    'nanoflow-backup-full',
-    'nanoflow-backup-incremental',
-    'nanoflow-backup-cleanup'
-  )
-  ORDER BY j.jobname;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.update_backup_schedule(p_config_key text, p_cron_expression text)
-RETURNS text
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = 'pg_catalog', 'public'
-AS $$
-DECLARE
-  v_valid_keys text[] := ARRAY[
-    'backup.schedule.full',
-    'backup.schedule.incremental',
-    'backup.schedule.cleanup'
-  ];
-BEGIN
-  IF NOT (p_config_key = ANY(v_valid_keys)) THEN
-    RAISE EXCEPTION 'Invalid backup schedule key: %', p_config_key;
-  END IF;
-
-  IF array_length(string_to_array(trim(p_cron_expression), ' '), 1) != 5 THEN
-    RAISE EXCEPTION 'Invalid cron expression: %', p_cron_expression;
-  END IF;
-
-  INSERT INTO public.app_config (key, value, description)
-  VALUES (p_config_key, to_jsonb(p_cron_expression), 'Backup schedule configuration')
-  ON CONFLICT (key) DO UPDATE SET
-    value = to_jsonb(p_cron_expression),
-    updated_at = now();
-
-  PERFORM public.apply_backup_schedules();
-
-  RETURN format('Updated %s to "%s"', p_config_key, p_cron_expression);
-END;
-$$;
 
 CREATE OR REPLACE FUNCTION public.cleanup_cron_job_run_details(
   p_max_age interval DEFAULT interval '7 days'
@@ -4494,7 +4079,6 @@ REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM authen
 GRANT EXECUTE ON FUNCTION public.cleanup_personal_retention_artifacts() TO service_role;
 
 DELETE FROM cron.job_run_details;
-SELECT public.apply_backup_schedules();
 
 DO $$
 DECLARE

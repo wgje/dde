@@ -38,215 +38,6 @@ export type Database = {
         }
         Relationships: []
       }
-      backup_encryption_keys: {
-        Row: {
-          algorithm: string
-          created_at: string
-          deprecated_at: string | null
-          id: string
-          notes: string | null
-          retired_at: string | null
-          status: string
-        }
-        Insert: {
-          algorithm?: string
-          created_at?: string
-          deprecated_at?: string | null
-          id: string
-          notes?: string | null
-          retired_at?: string | null
-          status?: string
-        }
-        Update: {
-          algorithm?: string
-          created_at?: string
-          deprecated_at?: string | null
-          id?: string
-          notes?: string | null
-          retired_at?: string | null
-          status?: string
-        }
-        Relationships: []
-      }
-      backup_metadata: {
-        Row: {
-          attachment_count: number
-          backup_completed_at: string | null
-          backup_started_at: string
-          base_backup_id: string | null
-          black_box_entry_count: number
-          checksum: string
-          checksum_algorithm: string
-          compressed: boolean
-          connection_count: number
-          created_at: string
-          encrypted: boolean
-          encryption_algorithm: string | null
-          encryption_key_id: string | null
-          error_message: string | null
-          expires_at: string | null
-          id: string
-          incremental_since: string | null
-          path: string
-          project_count: number
-          project_member_count: number
-          retention_tier: string | null
-          size_bytes: number
-          status: string
-          task_count: number
-          type: string
-          updated_at: string
-          user_id: string | null
-          user_preferences_count: number
-          validation_passed: boolean
-          validation_warnings: Json | null
-        }
-        Insert: {
-          attachment_count?: number
-          backup_completed_at?: string | null
-          backup_started_at?: string
-          base_backup_id?: string | null
-          black_box_entry_count?: number
-          checksum: string
-          checksum_algorithm?: string
-          compressed?: boolean
-          connection_count?: number
-          created_at?: string
-          encrypted?: boolean
-          encryption_algorithm?: string | null
-          encryption_key_id?: string | null
-          error_message?: string | null
-          expires_at?: string | null
-          id?: string
-          incremental_since?: string | null
-          path: string
-          project_count?: number
-          project_member_count?: number
-          retention_tier?: string | null
-          size_bytes?: number
-          status?: string
-          task_count?: number
-          type: string
-          updated_at?: string
-          user_id?: string | null
-          user_preferences_count?: number
-          validation_passed?: boolean
-          validation_warnings?: Json | null
-        }
-        Update: {
-          attachment_count?: number
-          backup_completed_at?: string | null
-          backup_started_at?: string
-          base_backup_id?: string | null
-          black_box_entry_count?: number
-          checksum?: string
-          checksum_algorithm?: string
-          compressed?: boolean
-          connection_count?: number
-          created_at?: string
-          encrypted?: boolean
-          encryption_algorithm?: string | null
-          encryption_key_id?: string | null
-          error_message?: string | null
-          expires_at?: string | null
-          id?: string
-          incremental_since?: string | null
-          path?: string
-          project_count?: number
-          project_member_count?: number
-          retention_tier?: string | null
-          size_bytes?: number
-          status?: string
-          task_count?: number
-          type?: string
-          updated_at?: string
-          user_id?: string | null
-          user_preferences_count?: number
-          validation_passed?: boolean
-          validation_warnings?: Json | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "backup_metadata_base_backup_id_fkey"
-            columns: ["base_backup_id"]
-            isOneToOne: false
-            referencedRelation: "backup_metadata"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      backup_restore_history: {
-        Row: {
-          backup_id: string
-          completed_at: string | null
-          connections_restored: number
-          created_at: string
-          error_message: string | null
-          id: string
-          mode: string
-          pre_restore_snapshot_id: string | null
-          project_id: string | null
-          projects_restored: number
-          scope: string
-          started_at: string
-          status: string
-          tasks_restored: number
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          backup_id: string
-          completed_at?: string | null
-          connections_restored?: number
-          created_at?: string
-          error_message?: string | null
-          id?: string
-          mode: string
-          pre_restore_snapshot_id?: string | null
-          project_id?: string | null
-          projects_restored?: number
-          scope: string
-          started_at?: string
-          status?: string
-          tasks_restored?: number
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          backup_id?: string
-          completed_at?: string | null
-          connections_restored?: number
-          created_at?: string
-          error_message?: string | null
-          id?: string
-          mode?: string
-          pre_restore_snapshot_id?: string | null
-          project_id?: string | null
-          projects_restored?: number
-          scope?: string
-          started_at?: string
-          status?: string
-          tasks_restored?: number
-          updated_at?: string
-          user_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "backup_restore_history_backup_id_fkey"
-            columns: ["backup_id"]
-            isOneToOne: false
-            referencedRelation: "backup_metadata"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "backup_restore_history_pre_restore_snapshot_id_fkey"
-            columns: ["pre_restore_snapshot_id"]
-            isOneToOne: false
-            referencedRelation: "backup_metadata"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       black_box_entries: {
         Row: {
           content: string
@@ -970,14 +761,6 @@ export type Database = {
         Args: { p_attachment: Json; p_task_id: string }
         Returns: boolean
       }
-      apply_backup_schedules: {
-        Args: never
-        Returns: {
-          job_name: string
-          schedule: string
-          status: string
-        }[]
-      }
       batch_upsert_tasks: {
         Args: { p_project_id: string; p_tasks: Json[] }
         Returns: number
@@ -991,13 +774,6 @@ export type Database = {
         Returns: {
           deleted_count: number
           storage_paths: string[]
-        }[]
-      }
-      cleanup_expired_backups: {
-        Args: never
-        Returns: {
-          expired_count: number
-          paths_to_delete: string[]
         }[]
       }
       cleanup_expired_scan_records: { Args: never; Returns: number }
@@ -1018,65 +794,9 @@ export type Database = {
         Args: { p_since_timestamp?: string }
         Returns: Json
       }
-      get_backup_schedule: {
-        Args: { p_default: string; p_key: string }
-        Returns: string
-      }
-      get_backup_stats: {
-        Args: never
-        Returns: {
-          completed_backups: number
-          failed_backups: number
-          latest_full_backup: string
-          latest_incremental_backup: string
-          total_backups: number
-          total_size_bytes: number
-        }[]
-      }
       get_black_box_sync_watermark: { Args: never; Returns: string }
       get_dashboard_stats: { Args: never; Returns: Json }
       get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
-      get_latest_completed_backup: {
-        Args: { backup_type?: string }
-        Returns: {
-          attachment_count: number
-          backup_completed_at: string | null
-          backup_started_at: string
-          base_backup_id: string | null
-          black_box_entry_count: number
-          checksum: string
-          checksum_algorithm: string
-          compressed: boolean
-          connection_count: number
-          created_at: string
-          encrypted: boolean
-          encryption_algorithm: string | null
-          encryption_key_id: string | null
-          error_message: string | null
-          expires_at: string | null
-          id: string
-          incremental_since: string | null
-          path: string
-          project_count: number
-          project_member_count: number
-          retention_tier: string | null
-          size_bytes: number
-          status: string
-          task_count: number
-          type: string
-          updated_at: string
-          user_id: string | null
-          user_preferences_count: number
-          validation_passed: boolean
-          validation_warnings: Json | null
-        }
-        SetofOptions: {
-          from: "*"
-          to: "backup_metadata"
-          isOneToOne: true
-          isSetofReturn: false
-        }
-      }
       get_project_sync_watermark: {
         Args: { p_project_id: string }
         Returns: string
@@ -1103,10 +823,6 @@ export type Database = {
       }
       get_user_projects_watermark: { Args: never; Returns: string }
       get_vault_secret: { Args: { p_name: string }; Returns: string }
-      invoke_internal_edge_function: {
-        Args: { p_body?: Json; p_slug: string }
-        Returns: number
-      }
       is_connection_tombstoned: {
         Args: { p_connection_id: string }
         Returns: boolean
@@ -1120,7 +836,6 @@ export type Database = {
           version: number
         }[]
       }
-      mark_expired_backups: { Args: never; Returns: number }
       migrate_all_projects_to_v2: {
         Args: never
         Returns: {
@@ -1161,10 +876,6 @@ export type Database = {
       safe_delete_tasks: {
         Args: { p_project_id: string; p_task_ids: string[] }
         Returns: number
-      }
-      update_backup_schedule: {
-        Args: { p_config_key: string; p_cron_expression: string }
-        Returns: string
       }
       user_accessible_project_ids: { Args: never; Returns: string[] }
       user_has_project_access: {
@@ -1310,3 +1021,4 @@ export const Constants = {
     Enums: {},
   },
 } as const
+

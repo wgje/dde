@@ -1,4 +1,4 @@
-import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
@@ -598,6 +598,20 @@ interface TaskAttachmentMetadata {
                         <span>立即执行备份</span>
                       }
                     </button>
+                    
+                    <!-- 从本地备份恢复 -->
+                    <button 
+                      (click)="handleRestoreFromLocalBackup()"
+                      [disabled]="isRestoringFromBackup()"
+                      class="w-full py-1.5 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded-lg text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-all flex items-center justify-center gap-2 shadow-sm">
+                      @if (isRestoringFromBackup()) {
+                        <div class="w-2.5 h-2.5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                        <span>恢复中...</span>
+                      } @else {
+                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        <span>从备份恢复</span>
+                      }
+                    </button>
                   </div>
                 }
               </div>
@@ -712,6 +726,9 @@ export class SettingsModalComponent {
       minute: '2-digit',
     });
   });
+  
+  /** 是否正在从备份恢复 */
+  readonly isRestoringFromBackup = signal(false);
   
   /** 文件输入引用 - 使用 viewChild signal 引用模板中的 #fileInput */
   private readonly fileInputRef = viewChild<ElementRef<HTMLInputElement>>('fileInput');
@@ -994,6 +1011,84 @@ export class SettingsModalComponent {
       alert(`备份成功！\n文件：${result.filename}\n位置：${result.pathHint}`);
     } else {
       alert(`备份失败：${result.error}`);
+    }
+  }
+  
+  /**
+   * 从本地备份恢复
+   * 列出备份目录中的文件，让用户选择后通过 ImportService 导入
+   */
+  async handleRestoreFromLocalBackup(): Promise<void> {
+    this.isRestoringFromBackup.set(true);
+    try {
+      const files = await this.localBackupService.listBackupFiles();
+      if (files.length === 0) {
+        alert('备份目录中没有找到备份文件');
+        return;
+      }
+      
+      // 构建选择列表
+      const options = files.slice(0, 10).map((f, i) => {
+        const date = new Date(f.timestamp);
+        const sizeKB = Math.round(f.size / 1024);
+        return `${i + 1}. ${date.toLocaleString('zh-CN')} (${sizeKB} KB)`;
+      });
+      
+      const choice = prompt(
+        `请选择要恢复的备份文件（输入序号）：\n\n${options.join('\n')}\n\n⚠️ 恢复将以合并方式导入，不会删除现有数据`,
+      );
+      
+      if (!choice) return;
+      
+      const index = parseInt(choice, 10) - 1;
+      if (isNaN(index) || index < 0 || index >= files.length) {
+        alert('无效的选择');
+        return;
+      }
+      
+      const selectedFile = files[index];
+      const file = await this.localBackupService.readBackupFile(selectedFile.name);
+      if (!file) {
+        alert('无法读取备份文件');
+        return;
+      }
+      
+      // 使用 ImportService 验证和导入
+      const validation = await this.importService.validateFile(file);
+      if (!validation.valid || !validation.data) {
+        alert(`备份文件验证失败：${validation.error ?? '未知错误'}`);
+        return;
+      }
+      
+      const existingProjects = this.projects();
+      const preview = await this.importService.generatePreview(validation.data, existingProjects);
+      
+      const totalProjects = preview.projects.length;
+      const totalTasks = preview.projects.reduce((s, p) => s + p.taskCount, 0);
+      const totalConnections = preview.projects.reduce((s, p) => s + p.connectionCount, 0);
+      
+      const confirmMsg = `即将恢复备份：\n- ${totalProjects} 个项目\n- ${totalTasks} 个任务\n- ${totalConnections} 个连接\n\n确认恢复？`;
+      if (!confirm(confirmMsg)) return;
+      
+      const result = await this.importService.executeImport(
+        validation.data,
+        existingProjects,
+        { conflictStrategy: 'merge' },
+        async (project: Project) => {
+          this.importComplete.emit(project);
+        },
+      );
+      
+      if (result.success) {
+        alert(`恢复成功！已导入 ${result.importedCount} 个项目`);
+      } else {
+        alert(`恢复失败：${result.error ?? '未知错误'}`);
+      }
+    } catch (error: unknown) {
+      this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
+      alert('恢复过程中发生错误');
+    } finally {
+      this.isRestoringFromBackup.set(false);
     }
   }
   

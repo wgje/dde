@@ -23,8 +23,11 @@ import { sanitizeProject } from '../utils/validation';
 import { 
   ExportData, 
   ExportMetadata, 
-  ExportProject
+  ExportProject,
+  ExportTask,
+  ExportConnection,
 } from './export.service';
+import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 
 // ============================================
 // 导入配置
@@ -693,6 +696,7 @@ export class ImportService {
   
   /**
    * 验证数据结构
+   * 支持 ExportData 格式和 BackupData（本地备份）格式，后者自动转换
    */
   private validateDataStructure(data: unknown): FileValidationResult {
     if (!data || typeof data !== 'object') {
@@ -701,7 +705,17 @@ export class ImportService {
     
     const obj = data as Record<string, unknown>;
     
-    // 检查必需字段
+    // 检测是否为 BackupData 格式（本地备份文件）
+    // BackupData 有 payloadVersion + 扁平的 tasks/connections 数组，无 metadata 字段
+    if (this.isBackupDataFormat(obj)) {
+      const converted = this.convertBackupDataToExportData(obj as unknown as BackupData);
+      if (!converted) {
+        return { valid: false, error: '本地备份数据转换失败' };
+      }
+      return { valid: true, data: converted };
+    }
+    
+    // 标准 ExportData 格式验证
     if (!obj['metadata'] || typeof obj['metadata'] !== 'object') {
       return { valid: false, error: '缺少元数据' };
     }
@@ -728,6 +742,120 @@ export class ImportService {
     }
     
     return { valid: true, data: data as ExportData };
+  }
+  
+  /**
+   * 检测数据是否为 BackupData 格式（本地灾难备份 / 坚果云备份）
+   */
+  private isBackupDataFormat(obj: Record<string, unknown>): boolean {
+    return (
+      typeof obj['payloadVersion'] === 'string' &&
+      Array.isArray(obj['projects']) &&
+      Array.isArray(obj['tasks']) &&
+      Array.isArray(obj['connections']) &&
+      !obj['metadata']
+    );
+  }
+  
+  /**
+   * 将 BackupData（扁平结构）转换为 ExportData（嵌套结构）
+   * 本地备份和坚果云备份文件使用 BackupData 格式，导入需要 ExportData 格式
+   */
+  private convertBackupDataToExportData(backup: BackupData): ExportData | null {
+    try {
+      // 按 projectId 分组 tasks 和 connections
+      const tasksByProject = new Map<string, ExportTask[]>();
+      const connectionsByProject = new Map<string, ExportConnection[]>();
+      
+      for (const task of backup.tasks ?? []) {
+        const projectId = task.projectId;
+        if (!tasksByProject.has(projectId)) {
+          tasksByProject.set(projectId, []);
+        }
+        tasksByProject.get(projectId)!.push({
+          id: task.id,
+          title: task.title,
+          content: task.content ?? '',
+          stage: task.stage ?? null,
+          parentId: task.parentId ?? null,
+          order: task.order ?? 0,
+          rank: task.rank ?? 0,
+          status: task.status ?? 'active',
+          x: task.x ?? 0,
+          y: task.y ?? 0,
+          displayId: task.displayId ?? task.shortId ?? task.id.slice(0, 6),
+          shortId: task.shortId,
+          createdAt: task.createdAt,
+          updatedAt: task.updatedAt,
+          deletedAt: task.deletedAt,
+          attachments: task.attachments?.map(att => {
+            if (typeof att === 'object' && att !== null) {
+              const a = att as Record<string, unknown>;
+              return {
+                id: String(a['id'] ?? ''),
+                name: String(a['name'] ?? ''),
+                size: Number(a['size'] ?? 0),
+                mimeType: String(a['mimeType'] ?? a['mime_type'] ?? ''),
+                type: (a['type'] as 'image' | 'document' | 'link' | 'file') ?? 'file',
+              };
+            }
+            return { id: '', name: '', size: 0, mimeType: '' };
+          }),
+          tags: task.tags,
+          priority: task.priority as ExportTask['priority'],
+          dueDate: task.dueDate,
+        });
+      }
+      
+      for (const conn of backup.connections ?? []) {
+        const projectId = conn.projectId;
+        if (!connectionsByProject.has(projectId)) {
+          connectionsByProject.set(projectId, []);
+        }
+        connectionsByProject.get(projectId)!.push({
+          id: conn.id,
+          source: conn.source,
+          target: conn.target,
+          title: conn.title,
+          description: conn.description,
+          deletedAt: conn.deletedAt,
+        });
+      }
+      
+      // 构建 ExportProject 列表
+      const projects: ExportProject[] = (backup.projects ?? []).map(proj => ({
+        id: proj.id,
+        name: proj.name,
+        description: proj.description ?? '',
+        tasks: tasksByProject.get(proj.id) ?? [],
+        connections: connectionsByProject.get(proj.id) ?? [],
+        createdAt: proj.createdAt,
+        updatedAt: proj.updatedAt,
+        version: proj.version,
+      }));
+      
+      const totalTasks = (backup.tasks ?? []).length;
+      const totalConnections = (backup.connections ?? []).length;
+      const totalAttachments = (backup.tasks ?? []).reduce(
+        (sum, t) => sum + (t.attachments?.length ?? 0), 0
+      );
+      
+      const metadata: ExportMetadata = {
+        exportedAt: backup.createdAt ?? new Date().toISOString(),
+        version: backup.payloadVersion ?? backup.version ?? '1.0',
+        appVersion: 'backup-restore',
+        projectCount: projects.length,
+        taskCount: totalTasks,
+        connectionCount: totalConnections,
+        attachmentCount: totalAttachments,
+        checksum: backup.checksum ?? '',
+        exportType: 'full',
+      };
+      
+      return { metadata, projects };
+    } catch {
+      return null;
+    }
   }
   
   /**

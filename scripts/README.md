@@ -32,8 +32,8 @@
 | 文件 | 何时用 | 原因 |
 |------|--------|------|
 | `cleanup-cron-setup.sql` | 需要定时清理软删除数据时 | 依赖 pg_cron 扩展，非所有实例可用。init-supabase.sql 会自动尝试，失败时用此脚本重试 |
-| `backup-setup.sql` | 需要服务端备份功能时 | 创建备份元数据表和 Storage 桶，独立于核心业务 |
-| `backup-cron-setup.sql` | 需要定时自动备份时 | 依赖 pg_cron + pg_net + Edge Functions 已部署 |
+
+> 注：`backup-setup.sql` 和 `backup-cron-setup.sql` 已在 v7.0.0 中移除（云端备份功能已剔除）。
 
 ### 老用户迁移专用（新项目忽略）
 
