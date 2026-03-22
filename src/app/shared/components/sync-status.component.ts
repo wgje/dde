@@ -460,6 +460,16 @@ export class SyncStatusComponent {
       const next = actionPending + retryPending;
 
       if (next === current) {
+        // 当重试队列在 0/1 之间短促抖动后回到当前值时，及时清理历史计时器，
+        // 避免旧计时器在后续瞬时波动中误触发，造成「已保存/待同步」来回跳。
+        if (next > 0 && this.pendingClearTimer) {
+          clearTimeout(this.pendingClearTimer);
+          this.pendingClearTimer = null;
+        }
+        if (next === 0 && this.pendingShowTimer) {
+          clearTimeout(this.pendingShowTimer);
+          this.pendingShowTimer = null;
+        }
         return;
       }
 
@@ -472,6 +482,10 @@ export class SyncStatusComponent {
 
       // 后台重试队列的短促 0/1 波动会导致状态文案来回跳，做轻量防抖。
       if (next > current) {
+        if (this.pendingClearTimer) {
+          clearTimeout(this.pendingClearTimer);
+          this.pendingClearTimer = null;
+        }
         if (this.pendingShowTimer) {
           clearTimeout(this.pendingShowTimer);
         }
@@ -486,6 +500,10 @@ export class SyncStatusComponent {
         return;
       }
 
+      if (this.pendingShowTimer) {
+        clearTimeout(this.pendingShowTimer);
+        this.pendingShowTimer = null;
+      }
       if (this.pendingClearTimer) {
         clearTimeout(this.pendingClearTimer);
       }
