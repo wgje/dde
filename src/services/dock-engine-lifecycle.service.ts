@@ -288,11 +288,23 @@ export class DockEngineLifecycleService {
     }
   }
 
+  /**
+   * 延迟触发初始云端拉取，避免在启动热路径上与关键 API 请求竞争带宽。
+   * 使用 requestIdleCallback 推迟到浏览器空闲阶段，减少首屏阻塞。
+   */
   triggerInitialCloudPull(): void {
     const userId = this.ctx.getCurrentSnapshotUserId();
-    if (userId) {
+    if (!userId) return;
+    const scheduleIdle = (cb: () => void) => {
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(cb);
+      } else {
+        setTimeout(cb, 2000);
+      }
+    };
+    scheduleIdle(() => {
       this.cloudSync.scheduleCloudPull(userId, true);
-    }
+    });
   }
 
   // ---------------------------------------------------------------------------

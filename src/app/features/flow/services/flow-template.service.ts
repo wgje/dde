@@ -239,7 +239,10 @@ export class FlowTemplateService {
             return;
           }
 
-          // 普通点击：调用事件处理器（单选逻辑由事件服务处理）
+          // 普通点击：先同步更新 GoJS 选中态（移动端 ClickSelectingTool 可能未正确触发），再通知事件服务
+          e.diagram?.clearSelection();
+          (node as go.Node).isSelected = true;
+          e.diagram?.raiseDiagramEvent('ChangedSelection');
           flowTemplateEventHandlers.onNodeClick?.(node as go.Node);
         }) as GojsClickHandler,
         doubleClick: ((e: go.InputEvent, node: go.GraphObject) => {

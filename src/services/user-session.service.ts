@@ -435,6 +435,7 @@ export class UserSessionService {
       serverNow: string | null;
     } | null = null;
 
+    // 阶段 1: 聚合 RPC 探测（单次调用获取多个水位信息）
     if (FEATURE_FLAGS.RESUME_COMPOSITE_PROBE_RPC_V1) {
       try {
         resumeProbe = await this.syncCoordinator.core.getResumeRecoveryProbe(activeProjectId ?? undefined);
@@ -443,6 +444,8 @@ export class UserSessionService {
       }
     }
 
+    // 标记 access preflight 是否确认了当前项目可访问（用于后续并行优化）
+    let accessPreflightConfirmed = false;
     if (FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 && activeProjectId) {
       try {
         const probe = resumeProbe && resumeProbe.activeProjectId === activeProjectId
@@ -459,47 +462,108 @@ export class UserSessionService {
           activeProjectId = null;
         } else if (probe?.watermark) {
           this.syncCoordinator.core.setLastSyncTime(activeProjectId, probe.watermark);
+          accessPreflightConfirmed = true;
+        } else if (probe?.accessible) {
+          accessPreflightConfirmed = true;
         }
       } catch (error) {
         this.logger.warn('activeProject 可访问性探测失败，继续走常规路径', error);
       }
     }
 
+    // 阶段 2: 并行执行水位快路 + 黑匣子水位探测（原来是串行 await）
     let skipProjectSyncSlowPath = false;
+    const parallelTasks: Promise<void>[] = [];
+
     if (FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1) {
-      try {
-        const manifestResult = resumeProbe
-          ? await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync', {
-            prefetchedRemoteWatermark: resumeProbe.projectsWatermark,
-          })
-          : await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync');
-        if (manifestResult.skipped && manifestResult.watermark) {
-          this.logger.debug('命中项目清单水位快路，跳过后台项目同步', {
-            watermark: manifestResult.watermark
-          });
-          skipProjectSyncSlowPath = true;
+      parallelTasks.push((async () => {
+        try {
+          const manifestResult = resumeProbe
+            ? await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync', {
+              prefetchedRemoteWatermark: resumeProbe.projectsWatermark,
+            })
+            : await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync');
+          if (manifestResult.skipped && manifestResult.watermark) {
+            this.logger.debug('命中项目清单水位快路，跳过后台项目同步', {
+              watermark: manifestResult.watermark
+            });
+            skipProjectSyncSlowPath = true;
+          }
+        } catch (error) {
+          this.logger.warn('项目清单水位快路失败，降级为常规后台同步', error);
         }
-      } catch (error) {
-        this.logger.warn('项目清单水位快路失败，降级为常规后台同步', error);
-      }
+      })());
     }
 
     if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
-      try {
-        if (resumeProbe) {
-          await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync', {
-            prefetchedRemoteWatermark: resumeProbe.blackboxWatermark,
-          });
-        } else {
-          await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync');
+      parallelTasks.push((async () => {
+        try {
+          if (resumeProbe) {
+            await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync', {
+              prefetchedRemoteWatermark: resumeProbe.blackboxWatermark,
+            });
+          } else {
+            await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('session-background-sync');
+          }
+        } catch (error) {
+          this.logger.warn('黑匣子水位快路失败，降级为常规流程', error);
         }
-      } catch (error) {
-        this.logger.warn('黑匣子水位快路失败，降级为常规流程', error);
-      }
+      })());
     }
 
-    let accessibleProjectIds = new Set<string>();
-    if (!skipProjectSyncSlowPath) {
+    // 等待所有并行水位探测完成
+    await Promise.allSettled(parallelTasks);
+
+    // 【性能优化】项目列表元数据同步与当前项目 delta sync 并行执行
+    // - 如果 access preflight 已确认 activeProjectId 可访问，可安全并行
+    // - syncProjectListMetadata 仅更新项目列表壳数据，不影响当前项目内容
+    let currentProjectSynced = false;
+
+    if (skipProjectSyncSlowPath) {
+      // 水位快路命中，跳过项目列表同步，只做 delta sync
+      if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+        try {
+          const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
+          if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
+            this.logger.debug('Delta Sync 成功', deltaResult);
+            currentProjectSynced = true;
+          }
+        } catch (deltaSyncError) {
+          this.logger.warn('Delta Sync 失败', deltaSyncError);
+        }
+      }
+    } else if (accessPreflightConfirmed && activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+      // access preflight 已确认项目可访问，并行执行列表同步和 delta sync
+      const [metadataResult, deltaResult] = await Promise.allSettled([
+        this.syncProjectListMetadata(userId),
+        this.syncCoordinator.performDeltaSync(activeProjectId),
+      ]);
+
+      if (metadataResult.status === 'fulfilled') {
+        const accessibleProjectIds = metadataResult.value;
+        const currentActive = this.projectState.activeProjectId();
+        if (currentActive && !accessibleProjectIds.has(currentActive)) {
+          this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: currentActive });
+          this.projectState.setActiveProjectId(null);
+          this.toastService.info('当前项目不可访问，已自动切换');
+          activeProjectId = null;
+        }
+      } else {
+        this.logger.warn('项目列表元数据同步失败', metadataResult.reason);
+      }
+
+      if (deltaResult.status === 'fulfilled') {
+        const dr = deltaResult.value;
+        if (dr.taskChanges > 0 || dr.connectionChanges > 0) {
+          this.logger.debug('Delta Sync 成功', dr);
+          currentProjectSynced = true;
+        }
+      } else {
+        this.logger.warn('Delta Sync 失败', deltaResult.reason);
+      }
+    } else {
+      // 降级路径：串行执行
+      let accessibleProjectIds = new Set<string>();
       try {
         accessibleProjectIds = await this.syncProjectListMetadata(userId);
       } catch (e) {
@@ -518,20 +582,17 @@ export class UserSessionService {
         this.toastService.info('当前项目不可访问，已自动切换');
         activeProjectId = null;
       }
-    }
-    
-    // === 策略 1: 优先使用 Delta Sync（增量同步）===
-    // 【Delta Sync 优化】尝试增量同步 - @see docs/plan_save.md Phase 3
-    let currentProjectSynced = false;
-    if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
-      try {
-        const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
-        if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
-          this.logger.debug('Delta Sync 成功', deltaResult);
-          currentProjectSynced = true;
+
+      if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+        try {
+          const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
+          if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
+            this.logger.debug('Delta Sync 成功', deltaResult);
+            currentProjectSynced = true;
+          }
+        } catch (deltaSyncError) {
+          this.logger.warn('Delta Sync 失败', deltaSyncError);
         }
-      } catch (deltaSyncError) {
-        this.logger.warn('Delta Sync 失败，尝试全量同步当前项目', deltaSyncError);
       }
     }
     

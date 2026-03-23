@@ -314,6 +314,8 @@ export class FlowDiagramDataService {
       this.lastDockFingerprint = this.computeDockFingerprint();
 
       if (selectedKeys.size > 0) {
+        // 先清除选中再恢复，确保 selectionChanged 回调触发（数据合并后 binding 可能覆盖了选中态边框）
+        this.diagram.clearSelection();
         this.diagram.nodes.each((node: go.Node) => {
           if (selectedKeys.has(node.data?.key)) {
             node.isSelected = true;

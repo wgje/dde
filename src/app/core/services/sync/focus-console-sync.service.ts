@@ -51,6 +51,9 @@ export class FocusConsoleSyncService {
   private readonly supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('FocusConsoleSync');
 
+  /** 短时请求去重：同一 userId 的 inflight loadFocusSession 共享同一 Promise */
+  private loadInflight: Map<string, Promise<Result<DockSnapshot | null, OperationError>>> = new Map();
+
   /**
    * Supabase client 安全获取：未就绪或未配置时返回 null，
    * 调用方以 SYNC_OFFLINE 错误处理。
@@ -68,8 +71,29 @@ export class FocusConsoleSyncService {
    * 加载远端专注会话快照。
    * 【HR-2 LWW 修复】当提供 localUpdatedAt 时，仅在远端更新时间严格晚于本地时返回，
    * 否则返回 null 表示本地数据更新（Last-Write-Wins）。
+   * 【性能优化】同一 userId 的并发请求自动去重，避免重复网络调用。
    */
   async loadFocusSession(
+    userId: string,
+    localUpdatedAt?: string,
+  ): Promise<Result<DockSnapshot | null, OperationError>> {
+    // 请求去重：如果同一用户已有 inflight 请求则复用
+    const existing = this.loadInflight.get(userId);
+    if (existing) {
+      this.logger.debug('loadFocusSession: 复用已有 inflight 请求', { userId: userId.substring(0, 8) });
+      return existing;
+    }
+
+    const promise = this.doLoadFocusSession(userId, localUpdatedAt);
+    this.loadInflight.set(userId, promise);
+    try {
+      return await promise;
+    } finally {
+      this.loadInflight.delete(userId);
+    }
+  }
+
+  private async doLoadFocusSession(
     userId: string,
     localUpdatedAt?: string,
   ): Promise<Result<DockSnapshot | null, OperationError>> {

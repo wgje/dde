@@ -70,6 +70,8 @@ export class FlowSelectionService {
     
     // 注册新监听器
     if (diagram) {
+      // 重置销毁标志，允许新 diagram 上下文的 selectNodeWithRetry 正常工作
+      this.isDestroyed = false;
       this.initSelectionListener();
     }
   }
@@ -132,6 +134,8 @@ export class FlowSelectionService {
     
     const node = this.diagram.findNodeForKey(nodeKey);
     if (node) {
+      // 先清除再选中，确保移动端触摸场景下 selectionChanged 回调一定触发
+      this.diagram.clearSelection();
       this.diagram.select(node);
       
       // 如果节点不在视图中，滚动到节点位置
