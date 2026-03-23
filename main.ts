@@ -330,6 +330,24 @@ async function startApplication() {
       void initWebVitals();
     }
 
+    // ============= Vercel Speed Insights =============
+    // 【2026-03-23】集成 Vercel Speed Insights 以跟踪 Web Vitals 和性能指标
+    // 在浏览器空闲时初始化，避免阻塞应用启动
+    const initSpeedInsights = () => {
+      void import('@vercel/speed-insights')
+        .then((module) => {
+          module.injectSpeedInsights({
+            framework: 'angular',
+            debug: isDevMode(),
+          });
+          log('✅ Vercel Speed Insights 已初始化');
+        })
+        .catch((error) => {
+          logError('Vercel Speed Insights 初始化失败', error);
+        });
+    };
+    scheduleIdleTask(initSpeedInsights);
+
     // 启动后维护任务：版本检查/缓存清理/SW 注销
     scheduleIdleTask(() => {
       void runPostBootstrapMaintenance();
