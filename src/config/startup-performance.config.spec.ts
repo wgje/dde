@@ -67,7 +67,7 @@ describe('STARTUP_PERF_CONFIG', () => {
   it('should expose remaining build gate values', () => {
     expect(STARTUP_PERF_CONFIG.STARTUP_MAIN_MAX_KB).toBe(260);
     expect(STARTUP_PERF_CONFIG.STARTUP_INITIAL_FETCH_MAX).toBe(12);
-    expect(STARTUP_PERF_CONFIG.STARTUP_MODULEPRELOAD_MAX).toBe(0);
+    expect(STARTUP_PERF_CONFIG.STARTUP_MODULEPRELOAD_MAX).toBe(10);
     expect(STARTUP_PERF_CONFIG.INDEX_PRELOAD_FETCH_ENABLED).toBe(false);
   });
 });

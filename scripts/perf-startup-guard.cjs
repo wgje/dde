@@ -20,7 +20,7 @@ const INDEX_HTML_PATH = path.join(__dirname, '..', 'dist', 'browser', 'index.htm
 const PROJECT_ROOT = path.join(__dirname, '..');
 
 const STARTUP_MAIN_MAX_KB = Number(process.env.STARTUP_MAIN_MAX_KB || 260);
-const STARTUP_MODULEPRELOAD_MAX = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 0);
+const STARTUP_MODULEPRELOAD_MAX = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 10);
 const STARTUP_INITIAL_STATIC_JS_MAX_KB = Number(process.env.STARTUP_INITIAL_STATIC_JS_MAX_KB || 340);
 const STARTUP_WORKSPACE_CHUNK_MAX_KB = Number(process.env.STARTUP_WORKSPACE_CHUNK_MAX_KB || 125);
 const STARTUP_MAIN_STATIC_IMPORT_MAX = Number(process.env.STARTUP_MAIN_STATIC_IMPORT_MAX || 10);

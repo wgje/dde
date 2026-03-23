@@ -87,8 +87,8 @@ describe('Feature Flags 安全校验', () => {
     expect(FEATURE_FLAGS.ROOT_STARTUP_DEP_PRUNE_V1).toBe(true);
   });
 
-  it('STRICT_MODULEPRELOAD_V2 应默认启用', () => {
-    expect(FEATURE_FLAGS.STRICT_MODULEPRELOAD_V2).toBe(true);
+  it('STRICT_MODULEPRELOAD_V2 应默认关闭以允许关键路径 preload', () => {
+    expect(FEATURE_FLAGS.STRICT_MODULEPRELOAD_V2).toBe(false);
   });
 
   it('ROOT_FORMS_FREE_V1 应默认启用', () => {

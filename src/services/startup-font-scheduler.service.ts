@@ -223,8 +223,11 @@ export class StartupFontSchedulerService {
     link.rel = 'stylesheet';
     link.href = href;
     link.setAttribute('data-nanoflow-enhanced-font', 'true');
+    // 非阻塞加载：media="print" 让浏览器异步下载而不阻塞渲染
+    link.media = 'print';
 
     link.onload = () => {
+      link.media = 'all';
       this.loading = false;
       this.enhancedFontLoadedSignal.set(true);
       this.logger.debug('增强字体已加载', { trigger, href });
@@ -242,10 +245,11 @@ export class StartupFontSchedulerService {
   }
 
   /**
-   * 注入 CDN 补充字体样式表。
+   * 注入 CDN 补充字体样式表（非渲染阻塞）。
    * 自托管仅包含 14 个高频子集，CDN CSS 包含全部 97 个子集。
    * 浏览器根据 unicode-range 只下载页面实际用到的子集文件。
    * 插入顺序：CDN <link> 在本地 <link> 之后，确保本地子集优先匹配。
+   * 使用 media="print" → "all" 技巧避免阻塞渲染，字体异步加载。
    * CDN 加载失败不影响核心体验，仅少数低频字符回退为系统字体。
    */
   private injectCdnFallbackStylesheet(): void {
@@ -259,8 +263,11 @@ export class StartupFontSchedulerService {
     link.rel = 'stylesheet';
     link.href = this.cdnFontStylesheetUrl;
     link.setAttribute('data-nanoflow-cdn-font', 'true');
+    // 非阻塞加载：media="print" 让浏览器异步下载 CSS，加载完成后切换到 "all"
+    link.media = 'print';
 
     link.onload = () => {
+      link.media = 'all';
       this.logger.debug('CDN 补充字体样式已加载（覆盖额外 83 个子集）');
     };
 

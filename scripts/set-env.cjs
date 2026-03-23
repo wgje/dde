@@ -48,7 +48,7 @@ const tabSyncLocalRefreshV1 = parseBooleanEnv(
 );
 const strictModulepreloadV2 = parseBooleanEnv(
   process.env.NG_APP_STRICT_MODULEPRELOAD_V2 || localEnv.NG_APP_STRICT_MODULEPRELOAD_V2,
-  true
+  false
 );
 const rootStartupDepPruneV1 = parseBooleanEnv(
   process.env.NG_APP_ROOT_STARTUP_DEP_PRUNE_V1 || localEnv.NG_APP_ROOT_STARTUP_DEP_PRUNE_V1,

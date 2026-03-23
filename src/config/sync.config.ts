@@ -218,8 +218,8 @@ export const CIRCUIT_BREAKER_CONFIG = {
   RECOVERY_TIME: 30000,
   /** 半开状态允许的试探请求数 */
   HALF_OPEN_REQUESTS: 1,
-  /** 触发熔断的错误类型（服务端超时/网关错误） */
-  TRIGGER_ERROR_TYPES: ['NetworkTimeoutError', 'GatewayError', 'ServiceUnavailableError'] as readonly string[],
+  /** 触发熔断的错误类型（网络不可达/服务端超时/网关错误） */
+  TRIGGER_ERROR_TYPES: ['NetworkError', 'NetworkTimeoutError', 'GatewayError', 'ServiceUnavailableError', 'UnknownServerError'] as readonly string[],
 } as const;
 
 /**

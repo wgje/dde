@@ -699,6 +699,19 @@ export class RetryQueueService {
     } catch { /* ignore */ }
   }
   
+  /**
+   * 从 Error 对象推断错误类型（用于未携带 errorType 的异常）
+   */
+  private classifyErrorType(error: Error): string {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('failed to fetch') || msg.includes('network')) return 'NetworkError';
+    if (msg.includes('timeout') || msg.includes('timed out')) return 'NetworkTimeoutError';
+    if (msg.includes('504')) return 'GatewayError';
+    if (msg.includes('503')) return 'ServiceUnavailableError';
+    if (msg.includes('offline') || msg.includes('no connection')) return 'NetworkError';
+    return 'UnknownError';
+  }
+  
   checkCircuitBreaker(): boolean {
     if (this.circuitState === 'closed') return true;
     if (this.circuitState === 'open') {
@@ -786,6 +799,16 @@ export class RetryQueueService {
       ? options.maxDurationMs
       : Number.POSITIVE_INFINITY;
 
+    // 【2026-03-23 修复】网络不可用或熔断器打开时，跳过处理避免无效重试风暴
+    if (!this.operationHandler?.isOnline() || !this.checkCircuitBreaker()) {
+      return {
+        processed: 0,
+        remaining: this.queue.length,
+        durationMs: Date.now() - sliceStartedAt,
+        completed: true
+      };
+    }
+
     if (this.isProcessingQueue || this.queue.length === 0 || !this.operationHandler || this.operationHandler.isSessionExpired()) {
       // 【2026-02-15 修复】处理锁超时保护：如果上次处理已超过 120s 仍未释放锁，强制释放
       if (this.isProcessingQueue && this.lastProcessTime > 0 && (Date.now() - this.lastProcessTime > this.PROCESS_TIMEOUT)) {
@@ -794,7 +817,16 @@ export class RetryQueueService {
           elapsed: Date.now() - this.lastProcessTime
         });
         this.isProcessingQueue = false;
-        // 强制释放后重新递归调用（带保护的单次重试）
+        // 【2026-03-23 修复】释放锁后检查网络和熔断状态，避免离线时立即递归重试
+        if (!this.operationHandler?.isOnline() || !this.checkCircuitBreaker()) {
+          this.logger.info('锁释放后网络不可用或熔断器打开，跳过重试');
+          return {
+            processed: 0,
+            remaining: this.queue.length,
+            durationMs: Date.now() - sliceStartedAt,
+            completed: true
+          };
+        }
         return this.processQueueSlice(options);
       }
       return {
@@ -894,12 +926,22 @@ export class RetryQueueService {
             processedIds.add(item.id);
             continue;
           }
+          // 【2026-03-23 修复】网络类错误记录到熔断器，触发熔断保护避免重试风暴
+          const errorType = (e as { errorType?: string })?.errorType
+            || this.classifyErrorType(e as Error);
+          this.recordCircuitFailure(errorType);
           this.logger.error('重试失败', e);
+          // 熔断器已打开时，停止处理当前批次中剩余项
+          if (!this.checkCircuitBreaker()) {
+            this.logger.warn('熔断器触发，停止本轮队列处理');
+            break;
+          }
         }
 
         if (success) {
           successCount++;
           processedIds.add(item.id);
+          this.recordCircuitSuccess();
           continue;
         }
 

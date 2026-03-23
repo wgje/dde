@@ -132,8 +132,8 @@ export const FEATURE_FLAGS = {
   TAB_SYNC_LOCAL_REFRESH_V1: true,
   /** 根组件启动依赖瘦身（重服务按需懒加载） */
   ROOT_STARTUP_DEP_PRUNE_V1: true,
-  /** modulepreload 严格模式（默认移除静态 modulepreload） */
-  STRICT_MODULEPRELOAD_V2: true,
+  /** modulepreload 严格模式关闭，允许关键路径 chunk preload 消除串行瀑布 */
+  STRICT_MODULEPRELOAD_V2: false,
   /** Root 组件移除 FormsModule（改为原生 input 事件绑定） */
   ROOT_FORMS_FREE_V1: true,
   /** UserSession 附件服务按需懒加载 */
