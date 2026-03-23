@@ -216,6 +216,13 @@ window.addEventListener('unhandledrejection', (event) => {
   logError('未处理的 Promise 拒绝', event.reason);
 });
 
+// ========== 【性能优化 2026-03-23】Supabase SDK 预热 ==========
+// 在 Angular 启动前立即开始下载 Supabase JS SDK（~50KB 压缩）。
+// 原始流程：Angular bootstrap → Router → AuthGuard → AuthService.checkSession()
+//   → SupabaseClientService.clientAsync() → import('@supabase/supabase-js')
+// 优化后：SDK import 与 Angular bootstrap 并行，节省 ~200-500ms（4G 网络）。
+const supabaseSdkPrewarm = import('@supabase/supabase-js').catch(() => null);
+
 // ========== 应用启动函数 ==========
 async function startApplication() {
   log('🏗️ 准备启动 Angular...');
@@ -237,6 +244,7 @@ async function startApplication() {
       import('./src/app.routes'),
       import('./src/services/global-error-handler.service'),
       import('./src/services/sentry-lazy-loader.service'),
+      supabaseSdkPrewarm, // 并行预热 Supabase SDK
     ]);
     const AppComponent = appComponentModule.AppComponent;
     const routes = appRoutesModule.routes;
@@ -329,24 +337,6 @@ async function startApplication() {
     } else {
       void initWebVitals();
     }
-
-    // ============= Vercel Speed Insights =============
-    // 【2026-03-23】集成 Vercel Speed Insights 以跟踪 Web Vitals 和性能指标
-    // 在浏览器空闲时初始化，避免阻塞应用启动
-    const initSpeedInsights = () => {
-      void import('@vercel/speed-insights')
-        .then((module) => {
-          module.injectSpeedInsights({
-            framework: 'angular',
-            debug: isDevMode(),
-          });
-          log('✅ Vercel Speed Insights 已初始化');
-        })
-        .catch((error) => {
-          logError('Vercel Speed Insights 初始化失败', error);
-        });
-    };
-    scheduleIdleTask(initSpeedInsights);
 
     // 启动后维护任务：版本检查/缓存清理/SW 注销
     scheduleIdleTask(() => {

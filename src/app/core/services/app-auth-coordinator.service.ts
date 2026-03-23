@@ -104,13 +104,11 @@ export class AppAuthCoordinatorService {
       });
     };
 
-    // 关键：确保首帧先完成渲染，再进行会话检查
-    if (typeof window !== 'undefined' && 'requestAnimationFrame' in window) {
-      requestAnimationFrame(() => setTimeout(runBootstrap, 0));
-      return;
-    }
-
-    setTimeout(runBootstrap, 0);
+    // 【性能优化 2026-03-23】移除 requestAnimationFrame 延迟
+    // 原策略等待首帧渲染后再启动会话检查，增加 ~16-32ms 延迟。
+    // 改为 queueMicrotask：在当前事件循环末尾执行，不阻塞首帧但也不额外等待帧完成。
+    // 会话检查是纯异步网络操作，不会阻塞渲染。
+    queueMicrotask(runBootstrap);
   }
 
   /** 重试启动会话 */

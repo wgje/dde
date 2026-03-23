@@ -46,6 +46,9 @@ interface OpenConnectionEditorOptions {
   providedIn: 'root'
 })
 export class FlowLinkService {
+  private static readonly CONNECTION_EDITOR_WIDTH = 208;
+  private static readonly CONNECTION_EDITOR_HEIGHT = 180;
+
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly loggerService = inject(LoggerService);
@@ -421,29 +424,26 @@ export class FlowLinkService {
     }
     
     // 编辑器尺寸
-    const editorWidth = 208;  // w-52 = 13rem = 208px
-    const editorHeight = 180; // 估算高度
+    const editorWidth = FlowLinkService.CONNECTION_EDITOR_WIDTH;  // w-52 = 13rem = 208px
+    const editorHeight = FlowLinkService.CONNECTION_EDITOR_HEIGHT; // 估算高度
     const padding = 12;
-    
-    const viewport = typeof window !== 'undefined' ? window.visualViewport : null;
-    const viewportWidth = viewport?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1000);
-    const viewportHeight = viewport?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 800);
-    const viewportLeft = viewport?.offsetLeft ?? 0;
-    const viewportTop = viewport?.offsetTop ?? 0;
+    const coordinateRoot = this.getConnectionEditorCoordinateRootBounds();
     const gap = 10;
+    const anchorX = x - coordinateRoot.left;
+    const anchorY = y - coordinateRoot.top;
     
     let adjustedX: number;
     let adjustedY: number;
     
     if (this.uiState.isMobile()) {
-      const minX = viewportLeft + padding;
-      const maxX = viewportLeft + viewportWidth - editorWidth - padding;
-      const minY = viewportTop + padding;
-      const maxY = viewportTop + viewportHeight - editorHeight - padding;
-      const preferredAboveY = y - editorHeight - gap;
-      const fallbackBelowY = y + gap;
+      const minX = padding;
+      const maxX = coordinateRoot.width - editorWidth - padding;
+      const minY = padding;
+      const maxY = coordinateRoot.height - editorHeight - padding;
+      const preferredAboveY = anchorY - editorHeight - gap;
+      const fallbackBelowY = anchorY + gap;
 
-      adjustedX = Math.max(minX, Math.min(maxX, x - editorWidth / 2));
+      adjustedX = Math.max(minX, Math.min(maxX, anchorX - editorWidth / 2));
       adjustedY = preferredAboveY >= minY
         ? preferredAboveY
         : fallbackBelowY;
@@ -454,30 +454,31 @@ export class FlowLinkService {
         adjustedY,
         tapX: x,
         tapY: y,
-        viewportWidth,
-        viewportHeight,
+        rootLeft: coordinateRoot.left,
+        rootTop: coordinateRoot.top,
+        rootWidth: coordinateRoot.width,
+        rootHeight: coordinateRoot.height,
       });
     } else {
       // 【桌面端】在点击位置附近显示
       // 将编辑器居中对齐到点击位置，并向上偏移使其显示在关联块正上方
-      adjustedX = x - editorWidth / 2;
-      adjustedY = y - editorHeight - gap; // 向上偏移，留 10px 间距
+      adjustedX = anchorX - editorWidth / 2;
+      adjustedY = anchorY - editorHeight - gap; // 向上偏移，留 10px 间距
       
       // 获取流程图容器边界，限制编辑器在流程图区域内
-      const diagramDiv = document.querySelector('[data-testid="flow-diagram"]');
-      if (diagramDiv) {
-        const rect = diagramDiv.getBoundingClientRect();
-        const minX = rect.left + padding;
-        const minY = rect.top + padding;
-        const maxX = rect.right - editorWidth - padding;
-        const maxY = rect.bottom - editorHeight - padding;
+      this.updateDiagramBounds();
+      if (this.diagramBounds) {
+        const minX = this.diagramBounds.left + padding;
+        const minY = this.diagramBounds.top + padding;
+        const maxX = this.diagramBounds.right - editorWidth - padding;
+        const maxY = this.diagramBounds.bottom - editorHeight - padding;
         
         adjustedX = Math.max(minX, Math.min(maxX, adjustedX));
         adjustedY = Math.max(minY, Math.min(maxY, adjustedY));
       } else {
-        // 兜底：保持在视口内
-        adjustedX = Math.max(padding, Math.min(adjustedX, viewportWidth - editorWidth - padding));
-        adjustedY = Math.max(padding, Math.min(adjustedY, viewportHeight - editorHeight - padding));
+        // 兜底：保持在当前壳容器内
+        adjustedX = Math.max(padding, Math.min(adjustedX, coordinateRoot.width - editorWidth - padding));
+        adjustedY = Math.max(padding, Math.min(adjustedY, coordinateRoot.height - editorHeight - padding));
       }
     }
     
@@ -623,12 +624,13 @@ export class FlowLinkService {
   updateDiagramBounds(): void {
     const diagramDiv = document.querySelector('[data-testid="flow-diagram"]');
     if (diagramDiv) {
+      const coordinateRoot = this.getConnectionEditorCoordinateRootBounds();
       const rect = diagramDiv.getBoundingClientRect();
       this.diagramBounds = {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom
+        left: rect.left - coordinateRoot.left,
+        top: rect.top - coordinateRoot.top,
+        right: rect.right - coordinateRoot.left,
+        bottom: rect.bottom - coordinateRoot.top
       };
     } else {
       this.diagramBounds = null;
@@ -648,8 +650,8 @@ export class FlowLinkService {
     const deltaY = clientY - this.connEditorDragState.startY;
     
     // 编辑器尺寸（用于边界计算）
-    const editorWidth = 176;  // w-44 = 11rem = 176px
-    const editorHeight = 140; // 估算高度
+    const editorWidth = FlowLinkService.CONNECTION_EDITOR_WIDTH;
+    const editorHeight = FlowLinkService.CONNECTION_EDITOR_HEIGHT;
     const padding = 8;        // 边缘内边距
     
     let newX = this.connEditorDragState.offsetX + deltaX;
@@ -970,6 +972,33 @@ export class FlowLinkService {
     }
     
     return { fromKey, toKey, isCrossTree };
+  }
+
+  /**
+   * 获取 connection editor 实际使用的坐标根容器。
+   * 在桌面端，project shell 主内容带有 transform/contain，fixed 浮层必须使用该容器坐标系。
+   */
+  private getConnectionEditorCoordinateRootBounds(): { left: number; top: number; width: number; height: number } {
+    const rootEl = document.querySelector('[data-testid="project-shell-main-content"]');
+    if (rootEl) {
+      const rect = rootEl.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+        };
+      }
+    }
+
+    const viewport = typeof window !== 'undefined' ? window.visualViewport : null;
+    return {
+      left: viewport?.offsetLeft ?? 0,
+      top: viewport?.offsetTop ?? 0,
+      width: viewport?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1000),
+      height: viewport?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 800),
+    };
   }
 
   private armConnectionEditorBackgroundCloseGuard(durationMs: number = 300): void {

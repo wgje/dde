@@ -29,7 +29,7 @@
     },
     {
       "name": "local-fonts",
-      "installMode": "lazy",
+      "installMode": "prefetch",
       "updateMode": "lazy",
       "resources": {
         "files": [

@@ -5,6 +5,7 @@
   "installCommand": "npm install",
   "outputDirectory": "dist/browser",
   "framework": null,
+  "ignoreCommand": "bash scripts/vercel-ignore-step.sh",
   "rewrites": [
     {
       "source": "/:path((?!.*\\.[a-zA-Z0-9]+$).*)",
@@ -38,9 +39,28 @@
       ]
     },
     {
-      "source": "/(.*\\.(?:css|ico|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot|json|webmanifest))",
+      "source": "/(.*\\.(?:css|ico|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot))",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/ngsw-worker.js",
+      "headers": [
+        { "key": "Content-Type", "value": "application/javascript" },
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
+    },
+    {
+      "source": "/ngsw.json",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
+    },
+    {
+      "source": "/manifest.webmanifest",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
     },
     {

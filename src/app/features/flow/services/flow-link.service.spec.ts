@@ -14,6 +14,9 @@ describe('FlowLinkService', () => {
   let service: FlowLinkService;
   let originalInnerWidth: number;
   let originalInnerHeight: number;
+  let uiStateMock: { isMobile: ReturnType<typeof signal<boolean>> };
+  let shellRootEl: HTMLDivElement | null = null;
+  let diagramEl: HTMLDivElement | null = null;
   let mockTaskOps: {
     connectionAdapter: {
       removeConnection: ReturnType<typeof vi.fn>;
@@ -29,6 +32,9 @@ describe('FlowLinkService', () => {
     vi.useFakeTimers();
     originalInnerWidth = window.innerWidth;
     originalInnerHeight = window.innerHeight;
+    uiStateMock = {
+      isMobile: signal(true),
+    };
 
     mockTaskOps = {
       connectionAdapter: {
@@ -74,9 +80,7 @@ describe('FlowLinkService', () => {
         },
         {
           provide: UiStateService,
-          useValue: {
-            isMobile: signal(true),
-          },
+          useValue: uiStateMock,
         },
         { provide: FlowLinkRelinkService, useValue: {} },
       ],
@@ -87,11 +91,30 @@ describe('FlowLinkService', () => {
 
   afterEach(() => {
     service.dispose();
+    shellRootEl?.remove();
+    shellRootEl = null;
+    diagramEl?.remove();
+    diagramEl = null;
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
   });
+
+  function mountFlowBounds(
+    rootRect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom' | 'width' | 'height'>,
+    diagramRect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom' | 'width' | 'height'>
+  ): void {
+    shellRootEl = document.createElement('div');
+    shellRootEl.setAttribute('data-testid', 'project-shell-main-content');
+    vi.spyOn(shellRootEl, 'getBoundingClientRect').mockReturnValue(rootRect as DOMRect);
+    document.body.appendChild(shellRootEl);
+
+    diagramEl = document.createElement('div');
+    diagramEl.setAttribute('data-testid', 'flow-diagram');
+    vi.spyOn(diagramEl, 'getBoundingClientRect').mockReturnValue(diagramRect as DOMRect);
+    document.body.appendChild(diagramEl);
+  }
 
   it('移动端首次打开跨树关联时应以预览态锚定在点击点附近', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
@@ -109,6 +132,44 @@ describe('FlowLinkService', () => {
       isCrossTree: true,
       mode: 'preview',
     });
+  });
+
+  it('桌面端打开跨树关联时应换算到流程图所在壳容器坐标系，并显示在关联块上方', () => {
+    uiStateMock.isMobile.set(false);
+    mountFlowBounds(
+      { left: 200, top: 100, right: 1400, bottom: 900, width: 1200, height: 800 },
+      { left: 520, top: 220, right: 1220, bottom: 860, width: 700, height: 640 }
+    );
+
+    service.openConnectionEditor('source-task', 'target-task', '跨树描述', 700, 400, '依赖', {
+      isCrossTree: true,
+      mode: 'preview',
+    } as any);
+
+    expect(service.connectionEditorPos()).toEqual({ x: 396, y: 132 });
+    expect(service.connectionEditorData()).toMatchObject({
+      x: 396,
+      y: 132,
+      isCrossTree: true,
+      mode: 'preview',
+    });
+  });
+
+  it('桌面端拖动跨树关联块时应允许在整个流程图区域内移动，而不是被视口坐标错误截断', () => {
+    uiStateMock.isMobile.set(false);
+    mountFlowBounds(
+      { left: 200, top: 100, right: 1400, bottom: 900, width: 1200, height: 800 },
+      { left: 520, top: 220, right: 1220, bottom: 860, width: 700, height: 640 }
+    );
+
+    service.connectionEditorPos.set({ x: 420, y: 180 });
+
+    service.startDragConnEditor(new MouseEvent('mousedown', { clientX: 760, clientY: 420 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 120, clientY: 420 }));
+
+    expect(service.connectionEditorPos()).toEqual({ x: 328, y: 180 });
+
+    document.dispatchEvent(new MouseEvent('mouseup'));
   });
 
   it('移动端上方空间不足时应回退到点击点下方', () => {

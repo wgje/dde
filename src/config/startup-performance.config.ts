@@ -120,16 +120,23 @@ export const STARTUP_PERF_CONFIG = {
 
   /**
    * 分层启动：P1 交互层预热延迟
+   * 【性能优化 2026-03-23】从 500ms 降至 150ms
+   * 交互层（UndoService warmup 等）无需等待 500ms，首帧渲染后即可安全预热。
    */
-  P1_INTERACTION_HYDRATE_DELAY_MS: 500,
+  P1_INTERACTION_HYDRATE_DELAY_MS: 150,
 
   /**
    * 分层启动：P2 同步层预热延迟
+   * 【性能优化 2026-03-23】从 2000ms 降至 800ms
+   * 同步层初始化（SyncCoordinator）无需固定等待 2s。
+   * auth ready + coreDataLoaded 作为 signal 前置条件已足够保护启动时序，
+   * 800ms 兜底仅防止极端场景下与首屏渲染竞争资源。
    */
-  P2_SYNC_HYDRATE_DELAY_MS: 2000,
+  P2_SYNC_HYDRATE_DELAY_MS: 800,
 
   /**
    * 分层启动：P2 触发前最短可见时长
+   * 【性能优化 2026-03-23】从 1200ms 降至 500ms
    */
-  P2_SYNC_MIN_VISIBLE_MS: 1200,
+  P2_SYNC_MIN_VISIBLE_MS: 500,
 } as const;

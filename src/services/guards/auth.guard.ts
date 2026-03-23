@@ -237,15 +237,35 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
     userId: authState.userId
   });
   
-  // 无论 isCheckingSession 当前是 true 还是 false，
-  // 只要 sessionInitialized 为 false 就说明首次检查尚未完成，必须等待
+  // 【性能优化 2026-03-23】冷启动非阻塞快速路径
+  // Guard 最终总是 return true（壳层负责登录兜底 UI），因此不必阻塞等待。
+  // 策略：先检查本地缓存 → 有缓存即放行 → 无缓存时仅触发会话检查（后台执行），立即放行。
+  // 节省 PWA 冷启动 ~1-2s（原等待上限 SESSION_CHECK_TIMEOUT = 2000ms）。
   if (!initialized) {
-    logger.debug('会话初始化未完成，等待 bootstrap 完成');
-    await waitForSessionCheck(authService, GUARD_CONFIG.SESSION_CHECK_TIMEOUT);
+    // 先检查本地缓存的认证状态（离线快路径）
+    const localAuth = checkLocalAuthCache();
+    if (localAuth.userId || authState.userId) {
+      // 有本地缓存或已有 userId，直接放行，后台继续完成会话初始化
+      logger.debug('冷启动快速路径：本地缓存/userId 已存在，立即放行', {
+        localAuth: !!localAuth.userId, userId: authState.userId
+      });
+      if (localAuth.userId) {
+        saveAuthCache(localAuth.userId);
+      }
+      // 非阻塞触发会话检查（不 await），确保后台完成 token 刷新
+      void (authService as unknown as { checkSession?: () => Promise<unknown> })
+        .checkSession?.()?.catch(() => {});
+      logger.debug(`⚡ 守卫检查完成（快速路径）`, { elapsed: performance.now() - perfStart });
+      return true;
+    }
+
+    // 无本地缓存：短时等待（最多 500ms），给首次网络会话检查一个机会
+    logger.debug('会话初始化未完成，短时等待');
+    await waitForSessionCheck(authService, Math.min(GUARD_CONFIG.SESSION_CHECK_TIMEOUT, 500));
     if (!authService.sessionInitialized()) {
       const stillCheckingSession = authService.authState().isCheckingSession;
       const payload = {
-        timeout: GUARD_CONFIG.SESSION_CHECK_TIMEOUT,
+        timeout: 500,
         targetUrl: state.url,
         stillCheckingSession
       };
