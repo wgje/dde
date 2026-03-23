@@ -25,6 +25,12 @@ interface TombstoneCache {
   timestamp: number;
 }
 
+/** batch_get_tombstones RPC 返回结构 */
+interface BatchTombstoneResult {
+  task_tombstones: { project_id: string; task_id: string }[];
+  connection_tombstones: { project_id: string; connection_id: string }[];
+}
+
 /**
  * 墓碑管理服务
  * 
@@ -282,6 +288,91 @@ export class TombstoneService {
    */
   updateConnectionTombstoneCache(projectId: string, ids: Set<string>): void {
     this.connectionTombstoneCache.set(projectId, { ids, timestamp: Date.now() });
+  }
+
+  // ==================== 批量 Tombstone 预热（免费层优化）====================
+
+  /**
+   * 批量预热所有项目的 task + connection tombstone 缓存
+   *
+   * 通过 RPC `batch_get_tombstones` 一次查询替代 N×2 次独立查询。
+   * 成功后将结果写入 tombstoneCache / connectionTombstoneCache，
+   * 后续 getTombstonesWithCache / getConnectionTombstoneCache 在 TTL 内直接命中。
+   *
+   * @returns true 表示预热成功，false 表示 RPC 不可用或出错
+   */
+  async batchPreloadTombstones(
+    projectIds: string[],
+    client: SupabaseClient
+  ): Promise<boolean> {
+    if (projectIds.length === 0) return true;
+
+    // 过滤掉缓存仍有效的项目，只加载需要刷新的
+    const now = Date.now();
+    const staleIds = projectIds.filter(pid => {
+      const tc = this.tombstoneCache.get(pid);
+      const cc = this.connectionTombstoneCache.get(pid);
+      const tcFresh = tc && (now - tc.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL;
+      const ccFresh = cc && (now - cc.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL;
+      return !tcFresh || !ccFresh;
+    });
+
+    if (staleIds.length === 0) {
+      this.logger.debug('批量 tombstone 预热：全部缓存有效，跳过', { count: projectIds.length });
+      return true;
+    }
+
+    try {
+      const { data, error } = await this.throttle.execute(
+        'batch-tombstones',
+        async () => client.rpc('batch_get_tombstones', { p_project_ids: staleIds }),
+        { deduplicate: true, timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT }
+      );
+
+      if (error) {
+        this.logger.warn('批量 tombstone RPC 失败', { error: (error as Error).message ?? error });
+        return false;
+      }
+
+      if (!data) {
+        this.logger.debug('批量 tombstone RPC 返回空');
+        return false;
+      }
+
+      // 解析结果并填充缓存
+      const taskRows = (data as BatchTombstoneResult).task_tombstones ?? [];
+      const connRows = (data as BatchTombstoneResult).connection_tombstones ?? [];
+
+      // 按 project_id 分组
+      const taskMap = new Map<string, Set<string>>();
+      const connMap = new Map<string, Set<string>>();
+
+      for (const row of taskRows) {
+        if (!taskMap.has(row.project_id)) taskMap.set(row.project_id, new Set());
+        taskMap.get(row.project_id)!.add(row.task_id);
+      }
+      for (const row of connRows) {
+        if (!connMap.has(row.project_id)) connMap.set(row.project_id, new Set());
+        connMap.get(row.project_id)!.add(row.connection_id);
+      }
+
+      // 写入缓存（包括查询结果为空的项目，避免后续重复查询）
+      const ts = Date.now();
+      for (const pid of staleIds) {
+        this.tombstoneCache.set(pid, { ids: taskMap.get(pid) ?? new Set(), timestamp: ts });
+        this.connectionTombstoneCache.set(pid, { ids: connMap.get(pid) ?? new Set(), timestamp: ts });
+      }
+
+      this.logger.info('批量 tombstone 预热完成', {
+        projectCount: staleIds.length,
+        taskTombstones: taskRows.length,
+        connectionTombstones: connRows.length,
+      });
+      return true;
+    } catch (e) {
+      this.logger.warn('批量 tombstone 预热异常', e);
+      return false;
+    }
   }
 
   /**

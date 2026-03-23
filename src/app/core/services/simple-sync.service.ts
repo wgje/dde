@@ -683,6 +683,13 @@ export class SimpleSyncService {
   async getConnectionTombstoneIds(projectId: string): Promise<Set<string>> {
     return this.connectionSyncOps.getConnectionTombstoneIds(projectId);
   }
+
+  /** 批量预热所有项目的 tombstone 缓存（单次 RPC 替代 N 次查询） */
+  async batchPreloadTombstones(projectIds: string[]): Promise<boolean> {
+    const client = await this.getSupabaseClient();
+    if (!client) return false;
+    return this.tombstoneService.batchPreloadTombstones(projectIds, client);
+  }
   
   // ==================== 项目同步 ====================
   

@@ -29,6 +29,7 @@ import { PermanentFailureError } from '../../../../utils/permanent-failure-error
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { TombstoneService } from './tombstone.service';
 
 @Injectable({
   providedIn: 'root'
@@ -44,6 +45,7 @@ export class ConnectionSyncOperationsService {
   private readonly sessionManager = inject(SessionManagerService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
+  private readonly tombstoneService = inject(TombstoneService);
   
   /**
    * 安全添加到重试队列（含会话和数据有效性检查）
@@ -462,8 +464,15 @@ export class ConnectionSyncOperationsService {
   
   /**
    * 获取项目的所有 connection tombstone ID
+   * 【免费层优化】优先使用 TombstoneService 缓存，避免每次独立查询
    */
   async getConnectionTombstoneIds(projectId: string): Promise<Set<string>> {
+    // 优先走缓存（由 batchPreloadTombstones 或之前查询写入）
+    const cached = this.tombstoneService.getConnectionTombstoneCache(projectId);
+    if (cached) {
+      return cached;
+    }
+
     const tombstoneIds = new Set<string>();
     
     const client = this.getSupabaseClient();
@@ -486,6 +495,9 @@ export class ConnectionSyncOperationsService {
       for (const t of (data || [])) {
         tombstoneIds.add(t.connection_id);
       }
+
+      // 写入缓存，后续在 TTL 内直接命中
+      this.tombstoneService.updateConnectionTombstoneCache(projectId, tombstoneIds);
       
       if (tombstoneIds.size > 0) {
         this.logger.debug('getConnectionTombstoneIds: 获取完成', {

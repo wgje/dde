@@ -284,6 +284,15 @@ export class SyncCoordinatorService {
     
     // 智能合并每个项目
     const mergedProjects: Project[] = [];
+
+    // 批量预热 tombstone 缓存：1 次 RPC 替代 N 次查询
+    const projectIdsNeedingTombstones = remoteProjects
+      .filter(rp => localProjectMap.has(rp.id))
+      .map(rp => rp.id);
+    if (projectIdsNeedingTombstones.length > 0) {
+      await this.core.batchPreloadTombstones(projectIdsNeedingTombstones);
+    }
+
     for (const remoteProject of remoteProjects) {
       const localProject = localProjectMap.get(remoteProject.id);
       if (!localProject) {
