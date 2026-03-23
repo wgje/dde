@@ -1,10 +1,18 @@
 ﻿-- ============================================================
 -- NanoFlow Supabase 完整初始化脚本（统一导入）
 -- ============================================================
--- 版本: 7.0.0
--- 最后验证: 2026-03-22（移除云端备份基础设施）
+-- 版本: 7.1.0
+-- 最后验证: 2026-03-23（免费层深度优化）
 --
 -- 更新日志：
+--   7.1.0 (2026-03-23): 免费层深度优化：
+--                       - 删除 10 个确认未使用/冗余索引（节省 ~208 KB + 写入放大）
+--                       - 删除索引清单：idx_task_tombstones_deleted_by, idx_connection_tombstones_deleted_by,
+--                         idx_black_box_entries_project_id, idx_routine_completions_routine_id,
+--                         idx_tasks_project_load, idx_connections_deleted_at, idx_projects_owner_id,
+--                         idx_tasks_project_id, idx_tasks_project_active, idx_connections_project_active
+--                       - 应用层配合优化：轮询间隔 5min→10min, 活跃轮询 60s→120s,
+--                         Tombstone TTL 5min→30min, focus_sessions 脏检查
 --   7.0.0 (2026-03-22): 移除云端备份基础设施：
 --                       - 删除 backup_metadata / backup_restore_history / backup_encryption_keys 表
 --                       - 删除备份相关 RLS 策略、索引、GRANT
@@ -221,10 +229,11 @@ CREATE TRIGGER update_projects_updated_at
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
-CREATE INDEX IF NOT EXISTS idx_projects_owner_id ON public.projects(owner_id);
 -- 复合索引用于增量同步查询
 CREATE INDEX IF NOT EXISTS idx_projects_owner_id_updated ON public.projects(owner_id, updated_at DESC);
--- 注：idx_projects_updated_at 已删除（未使用，被复合索引替代）
+-- 注：以下索引已删除（未使用或被复合索引替代）：
+-- - idx_projects_owner_id: 被 idx_projects_owner_id_updated 完全覆盖
+-- - idx_projects_updated_at: 被复合索引替代
 
 -- ============================================
 -- 2. 项目成员表 (project_members)
@@ -293,11 +302,7 @@ CREATE TRIGGER update_tasks_updated_at
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
-CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON public.tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON public.tasks(parent_id);
--- 优化索引：活跃任务的项目+时间戳部分复合索引（覆盖 95% 查询场景）
-CREATE INDEX IF NOT EXISTS idx_tasks_project_active ON public.tasks(project_id, updated_at DESC)
-  WHERE deleted_at IS NULL;
 -- 停泊任务跨项目查询索引
 CREATE INDEX IF NOT EXISTS idx_tasks_parking_meta
   ON public.tasks ((parking_meta IS NOT NULL))
@@ -305,7 +310,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parking_meta
 COMMENT ON COLUMN public.tasks.parking_meta IS
   'State Overlap 停泊元数据（JSONB）。结构：{ state, parkedAt, lastVisitedAt, contextSnapshot, reminder, pinned }。NULL 表示非停泊任务。';
 -- 注：以下索引已删除（未使用或被复合索引替代）：
--- - idx_tasks_stage: 被 idx_tasks_project_active 替代
+-- - idx_tasks_project_id: 被 idx_tasks_project_updated + project_order 替代
+-- - idx_tasks_project_active: 被 idx_tasks_project_updated 替代（仅 3 次使用）
+-- - idx_tasks_project_load: 80KB 覆盖索引，仅 1 次使用
+-- - idx_tasks_stage: 早期删除
 -- - idx_tasks_deleted_at: 软删除查询较少
 -- - idx_tasks_updated_at: 被复合索引替代
 -- - idx_tasks_short_id: 几乎无使用
@@ -349,14 +357,12 @@ CREATE TRIGGER update_connections_updated_at
 
 ALTER TABLE public.connections ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_connections_target_id ON public.connections(target_id);
--- 优化索引：活跃连接的项目+时间戳部分复合索引
-CREATE INDEX IF NOT EXISTS idx_connections_project_active ON public.connections(project_id, updated_at DESC)
-  WHERE deleted_at IS NULL;
 -- 增量同步索引
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated ON public.connections(project_id, updated_at DESC);
 -- 注：以下索引已删除（未使用或被复合索引替代）：
+-- - idx_connections_project_active: 被 idx_connections_project_updated 替代（仅 4 次使用）
+-- - idx_connections_deleted_at: 被 idx_connections_project_updated 替代
 -- - idx_connections_source_id: source_id 查询走 project_id 复合索引
--- - idx_connections_deleted_at: 被 idx_connections_project_active 替代
 -- - idx_connections_deleted_at_cleanup: 清理操作较少
 -- - idx_connections_updated_at: 被 idx_connections_project_updated 替代
 
@@ -470,10 +476,7 @@ END $$;
 -- 索引（仅保留增量同步必需的索引）
 -- 注意：idx_black_box_user_date, idx_black_box_project, idx_black_box_pending 经验证未使用，已移除
 CREATE INDEX IF NOT EXISTS idx_black_box_updated_at ON public.black_box_entries(updated_at);
--- 【添加】project_id FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
-CREATE INDEX IF NOT EXISTS idx_black_box_entries_project_id ON public.black_box_entries(project_id);
-COMMENT ON INDEX idx_black_box_entries_project_id IS 
-  'FK enforcement: project_id references projects(id). ON DELETE CASCADE.';
+-- 注：idx_black_box_entries_project_id 已删除（FK enforcement，应用查询全走 user_id + updated_at，71 天内 0 次使用）
 
 -- updated_at 自动更新触发器
 DROP TRIGGER IF EXISTS update_black_box_entries_updated_at ON public.black_box_entries;
@@ -671,11 +674,7 @@ CREATE TABLE IF NOT EXISTS public.routine_completions (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_routine_completions_user_routine_date_key
   ON public.routine_completions (user_id, routine_id, date_key);
 
--- 【添加】routine_id FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
-CREATE INDEX IF NOT EXISTS idx_routine_completions_routine_id 
-  ON public.routine_completions(routine_id);
-COMMENT ON INDEX idx_routine_completions_routine_id IS 
-  'FK enforcement: routine_id references routine_tasks(id). ON DELETE CASCADE.';
+-- 注：idx_routine_completions_routine_id 已删除（routine 功能尚未上线，0 次使用）
 
 DROP TRIGGER IF EXISTS trg_routine_completions_updated_at ON public.routine_completions;
 CREATE TRIGGER trg_routine_completions_updated_at
@@ -746,10 +745,7 @@ CREATE TABLE IF NOT EXISTS public.task_tombstones (
 
 ALTER TABLE public.task_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id ON public.task_tombstones(project_id);
--- 【添加】deleted_by FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
-CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by ON public.task_tombstones(deleted_by);
-COMMENT ON INDEX idx_task_tombstones_deleted_by IS 
-  'FK enforcement: deleted_by references auth.users(id). ON DELETE SET NULL.';
+-- 注：idx_task_tombstones_deleted_by 已删除（FK enforcement，应用使用软删除，级联从未触发）
 
 -- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "task_tombstones_select_owner" ON public.task_tombstones;
@@ -777,10 +773,7 @@ CREATE TABLE IF NOT EXISTS public.connection_tombstones (
 ALTER TABLE public.connection_tombstones ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_id ON public.connection_tombstones(project_id);
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_at ON public.connection_tombstones(deleted_at);
--- 【添加】deleted_by FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
-CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by ON public.connection_tombstones(deleted_by);
-COMMENT ON INDEX idx_connection_tombstones_deleted_by IS 
-  'FK enforcement: deleted_by references auth.users(id). ON DELETE SET NULL.';
+-- 注：idx_connection_tombstones_deleted_by 已删除（同 idx_task_tombstones_deleted_by）
 
 -- RLS 策略（使用优化的 helper 函数）
 DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;

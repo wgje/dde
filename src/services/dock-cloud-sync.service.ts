@@ -64,6 +64,8 @@ export class DockCloudSyncService implements OnDestroy {
   /** 断路器：连续不可恢复错误（如 401/403）时停止重试 */
   private circuitBreakerOpen = false;
   private circuitBreakerResetTimer = new TimerHandle();
+  /** 免费层优化：上次入队的快照指纹，用于跳过无变化的 focus_sessions 写入 */
+  private lastEnqueuedSnapshotFingerprint = '';
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
 
@@ -314,6 +316,13 @@ export class DockCloudSyncService implements OnDestroy {
   // ─── Action Queue Enqueue Helpers ─────────────
 
   enqueueFocusSessionSync(userId: string, snapshot: DockSnapshot): void {
+    // 免费层优化：生成快照指纹，跳过无变化的写入（日均节省 ~100 次 focus_sessions UPDATE）
+    const fingerprint = this.computeSnapshotFingerprint(snapshot);
+    if (fingerprint === this.lastEnqueuedSnapshotFingerprint) {
+      return;
+    }
+    this.lastEnqueuedSnapshotFingerprint = fingerprint;
+
     const record = this.buildFocusSessionRecord(userId, snapshot);
     this.actionQueue.enqueue({
       type: 'update',
@@ -321,6 +330,18 @@ export class DockCloudSyncService implements OnDestroy {
       entityId: record.id,
       payload: { record },
       priority: 'critical',
+    });
+  }
+
+  /** 计算快照业务指纹（忽略 savedAt 等时间戳，仅关注业务状态变化） */
+  private computeSnapshotFingerprint(snapshot: DockSnapshot): string {
+    return JSON.stringify({
+      fm: snapshot.focusMode,
+      mt: snapshot.session?.mainTaskId ?? null,
+      cs: snapshot.session?.comboSelectIds?.length ?? 0,
+      ec: snapshot.entries?.length ?? 0,
+      ver: snapshot.version ?? 0,
+      fs: snapshot.focusSessionState?.sessionId ?? null,
     });
   }
 
