@@ -231,6 +231,14 @@ try {
     console.warn('⚠️ index.html 中未找到预加载脚本的 Supabase 配置占位符，跳过注入');
   }
 
+  // 【2026-03-23】会话预热脚本也需要注入 Supabase 配置
+  const prewarmUrlPattern = /var SUPABASE_URL = '[^']*';/;
+  const prewarmKeyPattern = /var SUPABASE_ANON_KEY = '[^']*';/;
+  if (prewarmUrlPattern.test(indexHtml) && prewarmKeyPattern.test(indexHtml)) {
+    indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = '${finalUrl}';`);
+    indexHtml = indexHtml.replace(prewarmKeyPattern, `var SUPABASE_ANON_KEY = '${finalKey}';`);
+  }
+
   const disablePreloadPattern = /DISABLE_INDEX_DATA_PRELOAD_V1:\s*(true|false),/;
   const fontExtremePattern = /FONT_EXTREME_FIRSTPAINT_V1:\s*(true|false),/;
   const flowStateAwareRestorePattern = /FLOW_STATE_AWARE_RESTORE_V2:\s*(true|false),/;

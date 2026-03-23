@@ -73,6 +73,17 @@ interface Window {
   showOpenFilePicker?(options?: OpenFilePickerOptions): Promise<FileSystemFileHandle[]>;
   showSaveFilePicker?(options?: SaveFilePickerOptions): Promise<FileSystemFileHandle>;
   __NANOFLOW_BOOT_FLAGS__?: NanoFlowBootFlags;
+  __NANOFLOW_SESSION_PREWARM__?: {
+    status: 'idle' | 'pending' | 'refreshed' | 'failed';
+    session?: {
+      access_token: string;
+      refresh_token: string;
+      expires_in: number;
+      expires_at: number;
+      token_type: string;
+      user: unknown;
+    };
+  };
 }
 
 interface NanoFlowBootFlags {
