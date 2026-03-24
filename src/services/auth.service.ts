@@ -128,6 +128,88 @@ export class AuthService {
     }
   }
   
+  /**
+   * 【性能优化 2026-03-24】本地会话快速路径
+   * 
+   * 优化策略：
+   * 1. 优先读取 index.html 预热脚本的刷新结果（window.__NANOFLOW_SESSION_PREWARM__）
+   * 2. 其次读取 localStorage 中 Supabase 缓存的会话 token
+   * 3. 只要 token 未过期（>60s 缓冲），直接使用本地数据，跳过网络调用
+   * 4. 后台异步触发 SDK getSession() 确保 token 最终刷新
+   * 
+   * 预期收益：冷启动节省 1-3s（跳过 getSession 网络往返）
+   */
+  private tryLocalSessionFastPath(): { userId: string; email: string | null } | null {
+    try {
+      // 阶段 1：检查 index.html 预热脚本是否已拿到新鲜 session
+      const prewarm = (window as Window & { __NANOFLOW_SESSION_PREWARM__?: {
+        status: string;
+        session?: { access_token: string; expires_at: number; user?: { id: string; email?: string | null } | null };
+      } }).__NANOFLOW_SESSION_PREWARM__;
+
+      if (prewarm?.status === 'refreshed' && prewarm.session) {
+        const { session } = prewarm;
+        // 预热拿到的 session 包含 user 字段（从 /auth/v1/token 返回）
+        if (session.user?.id) {
+          this.logger.debug('[FastPath] 使用 index.html 预热 session', {
+            userId: session.user.id.substring(0, 8) + '...',
+            expiresAt: session.expires_at
+          });
+          return { userId: session.user.id, email: session.user.email ?? null };
+        }
+        // 预热成功但没有 user 字段 → 回退到 localStorage 解析
+      }
+
+      // 阶段 2：从 localStorage 读取 Supabase 缓存的 auth token
+      const storageKey = this.supabase.getStorageKey();
+      if (!storageKey) return null;
+
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return null;
+
+      const authData: unknown = JSON.parse(raw);
+      if (!authData || typeof authData !== 'object') return null;
+
+      const record = authData as Record<string, unknown>;
+
+      // Supabase JS SDK v2 存储格式：{ access_token, refresh_token, expires_at, user }
+      const accessToken = record['access_token'];
+      if (typeof accessToken !== 'string' || !accessToken) return null;
+
+      // 过期时间检查（秒级时间戳），保留 60s 缓冲避免边界竞争
+      let expiresAt = record['expires_at'];
+      if (typeof expiresAt === 'number') {
+        // 兼容毫秒和秒级时间戳
+        if (expiresAt > 1e12) expiresAt = Math.floor(expiresAt / 1000);
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (expiresAt <= nowSec + 60) {
+          this.logger.debug('[FastPath] 本地 token 即将过期，回退到网络检查');
+          return null;
+        }
+      }
+
+      // 提取 user 信息
+      const user = record['user'];
+      if (user && typeof user === 'object') {
+        const userRecord = user as Record<string, unknown>;
+        const userId = userRecord['id'];
+        if (typeof userId === 'string' && userId) {
+          const email = typeof userRecord['email'] === 'string' ? userRecord['email'] : null;
+          this.logger.debug('[FastPath] 使用 localStorage 缓存 session', {
+            userId: userId.substring(0, 8) + '...',
+            expiresAt
+          });
+          return { userId, email };
+        }
+      }
+
+      return null;
+    } catch (e) {
+      this.logger.debug('[FastPath] 本地会话读取失败，回退到网络检查', e);
+      return null;
+    }
+  }
+
   private async doCheckSession(): Promise<{ userId: string | null; email: string | null }> {
     this.logger.debug('========== checkSession 开始 ==========');
     
@@ -140,15 +222,32 @@ export class AuthService {
     
     this.authState.update(s => ({ ...s, isCheckingSession: true }));
     
-    // 超时保护：10秒后自动放弃
-    const SESSION_TIMEOUT = 10000;
+    // 【性能优化 2026-03-24】先尝试本地快速路径，避免网络往返
+    const localSession = this.tryLocalSessionFastPath();
+    if (localSession) {
+      this.logger.debug('[FastPath] 本地会话命中，跳过网络 getSession()');
+      this.currentUserId.set(localSession.userId);
+      this.sessionEmail.set(localSession.email);
+      this.authState.update(s => ({
+        ...s,
+        userId: localSession.userId,
+        email: localSession.email,
+        error: null
+      }));
+
+      // 后台异步刷新 SDK session 状态，确保 token 最终同步
+      this.scheduleBackgroundSessionRefresh();
+
+      return localSession;
+    }
+    
+    // 网络回退路径：超时保护 5 秒（原 10 秒，移动端体验优化）
+    const SESSION_TIMEOUT = 5000;
     
     try {
       this.logger.debug('正在调用 supabase.getSession()...');
       const callStartTime = Date.now();
       
-      // 【P2-08 修复】移除无效的 AbortController（signal 未传递给 getSession），
-      // 仅使用 Promise.race 实现超时保护
       let sessionResult: { data: { session: { user?: { id: string; email?: string | null } } | null } | null; error: { message: string; status?: number; name?: string } | null };
       
       try {
@@ -172,7 +271,6 @@ export class AuthService {
           status: error.status,
           name: error.name
         });
-        // 不抛出异常，而是在 catch 块中统一处理
         throw supabaseErrorToError(error);
       }
       
@@ -235,6 +333,35 @@ export class AuthService {
       this.authState.update(s => ({ ...s, isCheckingSession: false }));
       this.sessionInitialized.set(true);
     }
+  }
+
+  /**
+   * 后台异步刷新 SDK session，确保 Supabase 客户端状态与本地缓存同步。
+   * 不阻塞 UI，不影响用户操作。
+   */
+  private scheduleBackgroundSessionRefresh(): void {
+    const scheduleTask = (task: () => void) => {
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        (window as Window & { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
+          .requestIdleCallback(() => task(), { timeout: 3000 });
+      } else {
+        setTimeout(task, 500);
+      }
+    };
+
+    scheduleTask(() => {
+      void this.supabase.getSession()
+        .then(result => {
+          if (result.error) {
+            this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误', result.error);
+          } else {
+            this.logger.debug('[BackgroundRefresh] SDK session 已同步');
+          }
+        })
+        .catch(e => {
+          this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（不影响已加载数据）', e);
+        });
+    });
   }
 
   /**

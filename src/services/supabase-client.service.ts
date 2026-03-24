@@ -110,6 +110,19 @@ export class SupabaseClientService {
     return this.canInitialize;
   }
 
+  /**
+   * 返回 Supabase auth token 在 localStorage 中的存储键名。
+   * 供本地会话快速路径读取（避免重复硬编码 key 格式）。
+   */
+  getStorageKey(): string | null {
+    if (!this.canInitialize || !this.supabaseUrl) return null;
+    try {
+      return `sb-${new URL(this.supabaseUrl).hostname.split('.')[0]}-auth-token`;
+    } catch {
+      return null;
+    }
+  }
+
   async clientAsync(): Promise<SupabaseClient<Database> | null> {
     if (!this.canInitialize) return null;
     if (this.supabase) return this.supabase;
