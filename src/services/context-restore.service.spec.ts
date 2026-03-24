@@ -116,7 +116,7 @@ describe('ContextRestoreService', () => {
   // ─── P-03: saveSnapshot ───
 
   describe('P-03: saveSnapshot', () => {
-    it('应为停泊任务保存快照到 parkingMeta', () => {
+    it('应为停泊任务保存快照到 parkingMeta', async () => {
       const task = createTask({
         id: 'task-1',
         parkingMeta: {
@@ -130,7 +130,7 @@ describe('ContextRestoreService', () => {
       });
       mockTaskStore.getTask.mockReturnValue(task);
 
-      service.saveSnapshot('task-1');
+      await service.saveSnapshot('task-1');
 
       expect(mockTaskStore.setTask).toHaveBeenCalled();
       const updatedTask = mockTaskStore.setTask.mock.calls[0][0];
@@ -140,23 +140,23 @@ describe('ContextRestoreService', () => {
       expect(updatedTask.parkingMeta.contextSnapshot.viewMode).toBe('text');
     });
 
-    it('非停泊任务时静默忽略', () => {
+    it('非停泊任务时静默忽略', async () => {
       mockTaskStore.getTask.mockReturnValue(createTask({ parkingMeta: null }));
 
-      service.saveSnapshot('task-1');
+      await service.saveSnapshot('task-1');
 
       expect(mockTaskStore.setTask).not.toHaveBeenCalled();
     });
 
-    it('任务不存在时静默忽略', () => {
+    it('任务不存在时静默忽略', async () => {
       mockTaskStore.getTask.mockReturnValue(undefined);
 
-      service.saveSnapshot('nonexistent');
+      await service.saveSnapshot('nonexistent');
 
       expect(mockTaskStore.setTask).not.toHaveBeenCalled();
     });
 
-    it('保存快照应包含 contentHash', () => {
+    it('保存快照应包含 contentHash', async () => {
       const task = createTask({
         id: 'hash-test',
         content: '# 标题\n\n内容段落',
@@ -171,14 +171,14 @@ describe('ContextRestoreService', () => {
       });
       mockTaskStore.getTask.mockReturnValue(task);
 
-      service.saveSnapshot('hash-test');
+      await service.saveSnapshot('hash-test');
 
       const snapshot = mockTaskStore.setTask.mock.calls[0][0].parkingMeta.contextSnapshot;
       expect(snapshot.contentHash).toBeTruthy();
       expect(typeof snapshot.contentHash).toBe('string');
     });
 
-    it('Flow 视图时 viewMode 应为 flow', () => {
+    it('Flow 视图时 viewMode 应为 flow', async () => {
       mockUiState.activeView.set('flow');
       const task = createTask({
         id: 'flow-snap',
@@ -193,7 +193,7 @@ describe('ContextRestoreService', () => {
       });
       mockTaskStore.getTask.mockReturnValue(task);
 
-      service.saveSnapshot('flow-snap');
+      await service.saveSnapshot('flow-snap');
 
       const snapshot = mockTaskStore.setTask.mock.calls[0][0].parkingMeta.contextSnapshot;
       expect(snapshot.viewMode).toBe('flow');

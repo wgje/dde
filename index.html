@@ -160,232 +160,9 @@
     };
   </script>
 
-  <!-- ========== 性能优化：Supabase 会话预热 ========== -->
-  <!-- 【2026-03-23】PWA 冷启动关键优化 -->
-  <!-- 在 Angular 启动前立即刷新 Supabase auth token。 -->
-  <!-- 原始路径：JS 加载 → Angular bootstrap → Supabase SDK import → getSession → 网络刷新 -->
-  <!-- 优化后：HTML 解析阶段就发起 token refresh 请求，Angular 读取到的 token 已是新鲜的。 -->
-  <!-- 预计节省 1-2s（移动 4G 网络）。 -->
-  <script>
-    (function() {
-      // 存储结果供 Angular 消费
-      window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };
+  <!-- Supabase 预热 + 数据预加载 + 调试日志脚本已移至 <body> 骨架屏之后（P0-2 性能优化 2026-03-24） -->
+  <!-- 目的：让骨架屏 HTML 更快到达浏览器，减少 head 解析阻塞 -->
 
-      var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
-      // 由 scripts/set-env.cjs 注入实际值
-      var SUPABASE_URL = 'YOUR_SUPABASE_URL';
-      var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
-
-      // 仅在有真实配置时执行
-      if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
-      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
-
-      try {
-        var raw = localStorage.getItem(AUTH_KEY);
-        if (!raw) return;
-        var authData = JSON.parse(raw);
-        // Supabase JS SDK v2 存储格式
-        var refreshToken = null;
-        if (authData && authData.refresh_token) {
-          refreshToken = authData.refresh_token;
-        } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
-          refreshToken = authData.currentSession.refresh_token;
-        }
-        if (!refreshToken || typeof refreshToken !== 'string') return;
-
-        // 检查 access_token 是否快过期（10分钟内过期才刷新）
-        var expiresAt = null;
-        if (authData.expires_at) expiresAt = authData.expires_at;
-        else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
-
-        if (typeof expiresAt === 'number') {
-          // 秒级时间戳
-          if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
-          // 还有超过 10 分钟才过期，不需要刷新
-          if (expiresAt > Date.now() + 600000) return;
-        }
-        // 如果无法判断过期时间，为安全起见刷新
-
-        window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
-
-        // 直接调用 Supabase GoTrue API 刷新 token，不需要加载整个 SDK
-        fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ refresh_token: refreshToken })
-        }).then(function(resp) {
-          if (!resp.ok) {
-            window.__NANOFLOW_SESSION_PREWARM__.status = 'failed';
-            return;
-          }
-          return resp.json();
-        }).then(function(data) {
-          if (!data || !data.access_token) return;
-          // 写回 localStorage，Supabase SDK 读取时直接获得新鲜 token
-          var newSession = {
-            access_token: data.access_token,
-            refresh_token: data.refresh_token || refreshToken,
-            expires_in: data.expires_in,
-            expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-            token_type: data.token_type || 'bearer',
-            user: data.user || (authData && authData.user) || null
-          };
-          try {
-            localStorage.setItem(AUTH_KEY, JSON.stringify(newSession));
-          } catch (e) { /* 静默失败 */ }
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
-          window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
-        }).catch(function() {
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'failed';
-        });
-      } catch (e) { /* 静默失败，不影响正常启动流程 */ }
-    })();
-  </script>
-
-  <!-- ========== 性能优化：数据预加载 ========== -->
-  <!-- 仅在首帧后 + 空闲时 + 非弱网条件执行，避免与首屏关键资源竞争带宽 -->
-  <script>
-    (function() {
-      window.__PRELOADED_DATA__ = {
-        serverTime: null,
-        projects: null,
-        timestamp: Date.now()
-      };
-
-      // 与 FEATURE_FLAGS.DISABLE_INDEX_DATA_PRELOAD_V1 对齐：
-      // 默认禁用 index 首屏预加载 fetch，仅保留结构初始化。
-      var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
-      var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
-        ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1
-        : true;
-
-      window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
-      if (disableIndexPreload) return;
-
-      var nav = navigator || {};
-      var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
-      var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
-      var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
-      var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
-      var saveData = !!(connection && connection.saveData);
-
-      var isConstrainedNetwork = saveData ||
-        effectiveType === '2g' ||
-        effectiveType === 'slow-2g' ||
-        (downlink > 0 && downlink < 1.5) ||
-        rtt > 280;
-
-      if (isConstrainedNetwork) return;
-
-      var runWhenIdle = function(task) {
-        if (typeof requestIdleCallback === 'function') {
-          requestIdleCallback(function(deadline) {
-            if (deadline.didTimeout || deadline.timeRemaining() > 8) {
-              task();
-            } else {
-              setTimeout(task, 0);
-            }
-          }, { timeout: 2000 });
-          return;
-        }
-        setTimeout(task, 1200);
-      };
-
-      runWhenIdle(function() {
-        // 检查是否已登录（从当前 Supabase 项目的 auth token）
-        var authToken = null;
-        var tokenExpiresAt = null;
-        try {
-          var authKey = 'sb-fkhihclpghmmtbbywvoj-auth-token';
-          var rawAuth = localStorage.getItem(authKey);
-          if (rawAuth) {
-            var authData = JSON.parse(rawAuth);
-            var session = authData && (authData.currentSession || authData.session || authData);
-            if (session && typeof session.access_token === 'string') {
-              authToken = session.access_token;
-              if (typeof session.expires_at === 'number') {
-                tokenExpiresAt = session.expires_at;
-              } else if (typeof session.expires_at === 'string') {
-                var parsedExpiresAt = Date.parse(session.expires_at);
-                if (!isNaN(parsedExpiresAt)) {
-                  tokenExpiresAt = Math.floor(parsedExpiresAt / 1000);
-                }
-              } else if (typeof authData.expiresAt === 'number') {
-                tokenExpiresAt = authData.expiresAt;
-              } else if (typeof session.expires_in === 'number') {
-                tokenExpiresAt = Math.floor(Date.now() / 1000) + session.expires_in;
-              }
-            }
-          }
-        } catch (e) { /* 忽略错误 */ }
-
-        if (!authToken) return;
-        // 严格校验 token 过期状态，避免使用过期 token 触发 401
-        if (typeof tokenExpiresAt === 'number') {
-          if (tokenExpiresAt > 1000000000000) {
-            tokenExpiresAt = Math.floor(tokenExpiresAt / 1000);
-          }
-          // 令牌已过期或 5 分钟内即将过期时，跳过预加载
-          // 使用更大的缓冲区（300s 而非 30s），因为预加载器绕过了 SDK 的 refreshSession
-          if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
-        } else {
-          // 无法确定过期时间时，跳过预加载，让 SDK 正常流程处理
-          return;
-        }
-
-        // Supabase 配置（由 scripts/set-env.cjs 构建时注入，请勿手动修改）
-        var supabaseUrl = 'YOUR_SUPABASE_URL';
-        var supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
-
-        var headers = {
-          'apikey': supabaseAnonKey,
-          'Authorization': 'Bearer ' + authToken,
-          'Content-Type': 'application/json'
-        };
-        var baseUrl = supabaseUrl + '/rest/v1';
-
-        // 并行请求关键数据（不阻塞页面渲染）
-        // 401/403 等认证错误静默跳过，让 SDK 正常认证流程处理
-        fetch(baseUrl + '/rpc/get_server_time', {
-          method: 'POST',
-          headers: headers
-        }).then(function(r) {
-          if (!r.ok) return null; // 静默跳过任何非 200 响应
-          return r.json();
-        }).then(function(data) {
-          if (data && window.__PRELOADED_DATA__) {
-            window.__PRELOADED_DATA__.serverTime = data;
-          }
-        }).catch(function() {});
-
-        fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
-          headers: headers
-        }).then(function(r) {
-          if (!r.ok) return null; // 静默跳过任何非 200 响应
-          return r.json();
-        }).then(function(data) {
-          if (data && window.__PRELOADED_DATA__) {
-            window.__PRELOADED_DATA__.projects = data;
-          }
-        }).catch(function() {});
-      });
-    })();
-  </script>
-  
-  <!-- 早期调试脚本 - 在任何模块加载前执行 -->
-  <script>
-    // console.log('[DEBUG v15] HTML 开始解析');
-    window.__DEBUG_LOG__ = [];
-    window.__DEBUG_LOG__.push({t: Date.now(), m: 'HTML head 开始'});
-    window.onerror = function(msg, url, line, col, err) {
-      console.error('[DEBUG] 全局错误:', msg, url, line, col);
-      window.__DEBUG_LOG__.push({t: Date.now(), m: 'ERROR: ' + msg, url: url, line: line});
-      return false;
-    };
-  </script>
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
   <style>
@@ -619,119 +396,8 @@
       color: #9ca3af;
     }
 
-    /* Custom Scrollbar - 支持深色模式 */
-    ::-webkit-scrollbar {
-      width: 6px;
-      height: 6px;
-    }
-    ::-webkit-scrollbar-track {
-      background: transparent; 
-    }
-    ::-webkit-scrollbar-thumb {
-      background: #e2e8f0; 
-      border-radius: 9999px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: #cbd5e1; 
-    }
-    /* 深色模式滚动条 */
-    [data-color-mode="dark"] ::-webkit-scrollbar-thumb {
-      background: #4b5563;
-    }
-    [data-color-mode="dark"] ::-webkit-scrollbar-thumb:hover {
-      background: #6b7280;
-    }
-    
-    /* 让浏览器原生组件（复选框、滚动条等）自动适应颜色模式 */
-    :root {
-      color-scheme: light;
-    }
-    [data-color-mode="dark"] {
-      color-scheme: dark;
-    }
-
-    /* 移动端触摸交互优化 */
-    /* 禁止浏览器默认手势干扰流程图拖拽 */
-    .flow-canvas-container {
-      touch-action: none;
-    }
-    
-    /* 侧边栏可垂直滚动但禁止水平手势 */
-    .sidebar-touch-area {
-      touch-action: pan-y pinch-zoom;
-    }
-    
-    /* 主内容区域允许基本手势 */
-    .main-content-area {
-      touch-action: pan-x pan-y;
-    }
-    
-    /* 未分配任务拖拽区域 */
-    .unassigned-drag-area {
-      touch-action: none;
-    }
-
-    /* Fisheye Effect for Unassigned Tasks */
-    .fisheye-container {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 1rem;
-      overflow-x: auto;
-      height: 120px;
-    }
-    
-    .fisheye-item {
-      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-      flex-shrink: 0;
-      width: 60px;
-      height: 60px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.75rem;
-      overflow: hidden;
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 0.5rem;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-      cursor: pointer;
-    }
-
-    .fisheye-container:hover .fisheye-item {
-      opacity: 0.7;
-      transform: scale(0.9);
-    }
-
-    .fisheye-container .fisheye-item:hover {
-      opacity: 1;
-      transform: scale(1.8);
-      z-index: 10;
-      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-      border-color: #3b82f6;
-    }
-    
-    /* Task Card Expansion Animation */
-    .task-card {
-      transition: all 0.3s ease-out;
-    }
-    .task-card-expanded {
-      flex-grow: 1; /* Push others */
-      min-height: 300px;
-    }
-
-    /* Flowchart Grid */
-    .flow-bg {
-      background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
-      background-size: 20px 20px;
-    }
-    
-    /* 
-     * GoJS 授权提示：
-     * 如果使用 GoJS 试用版，会显示水印。
-     * 请购买正版授权或在代码中配置 License Key。
-     * 参考: https://gojs.net/latest/intro/license.html
-     */
+    /* 非首屏样式已迁移到 src/styles.css（P0 性能优化 2026-03-24） */
+    /* 包括：滚动条、color-scheme、触摸交互、fisheye、task-card、flow-bg */
   </style>
   <!-- 注意: importmap 已移除，Angular CLI 构建使用 npm 依赖 -->
   <!-- PWA manifest: Codespaces 代理会拦截 manifest 请求并重定向到 github.dev/pf-signin，
@@ -750,7 +416,7 @@
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 h-screen w-screen overflow-hidden">
   <script>
-    // console.log('[DEBUG v15] body 开始解析');
+    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
   </script>
   <!-- 初始加载指示器 - 增强版骨架屏（P1 优化 2026-01-26） -->
@@ -792,7 +458,147 @@
       <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#9ca3af;"></div>
     </div>
   </div>
-  
+
+  <!-- ========== 性能优化：预热脚本（P0-2 从 <head> 移至骨架屏之后 2026-03-24）========== -->
+  <!-- 目的：骨架屏 HTML 优先到达浏览器渲染，预热脚本在骨架屏绘制后执行 -->
+
+  <!-- 调试日志收集器 -->
+  <script>
+    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
+    window.__DEBUG_LOG__.push({t: Date.now(), m: '预热脚本开始'});
+  </script>
+
+  <!-- Supabase 会话预热：在骨架屏渲染后立即发起 token 刷新 -->
+  <script>
+    (function() {
+      window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };
+
+      var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
+      var SUPABASE_URL = 'YOUR_SUPABASE_URL';
+      var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+      if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
+      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
+
+      try {
+        var raw = localStorage.getItem(AUTH_KEY);
+        if (!raw) return;
+        var authData = JSON.parse(raw);
+        var refreshToken = null;
+        if (authData && authData.refresh_token) {
+          refreshToken = authData.refresh_token;
+        } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
+          refreshToken = authData.currentSession.refresh_token;
+        }
+        if (!refreshToken || typeof refreshToken !== 'string') return;
+
+        var expiresAt = null;
+        if (authData.expires_at) expiresAt = authData.expires_at;
+        else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
+
+        if (typeof expiresAt === 'number') {
+          if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
+          if (expiresAt > Date.now() + 600000) return;
+        }
+
+        window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
+
+        fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        }).then(function(resp) {
+          if (!resp.ok) { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; return; }
+          return resp.json();
+        }).then(function(data) {
+          if (!data || !data.access_token) return;
+          var newSession = {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token || refreshToken,
+            expires_in: data.expires_in,
+            expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+            token_type: data.token_type || 'bearer',
+            user: data.user || (authData && authData.user) || null
+          };
+          try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
+          window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
+          window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
+        }).catch(function() { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; });
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- 数据预加载（默认禁用，仅结构初始化） -->
+  <script>
+    (function() {
+      window.__PRELOADED_DATA__ = { serverTime: null, projects: null, timestamp: Date.now() };
+      var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
+      var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
+        ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 : true;
+      window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
+      if (disableIndexPreload) return;
+
+      var nav = navigator || {};
+      var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+      var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
+      var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
+      var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
+      var saveData = !!(connection && connection.saveData);
+      var isConstrainedNetwork = saveData || effectiveType === '2g' || effectiveType === 'slow-2g' ||
+        (downlink > 0 && downlink < 1.5) || rtt > 280;
+      if (isConstrainedNetwork) return;
+
+      var runWhenIdle = function(task) {
+        if (typeof requestIdleCallback === 'function') {
+          requestIdleCallback(function(deadline) {
+            if (deadline.didTimeout || deadline.timeRemaining() > 8) { task(); }
+            else { setTimeout(task, 0); }
+          }, { timeout: 2000 });
+          return;
+        }
+        setTimeout(task, 1200);
+      };
+
+      runWhenIdle(function() {
+        var authToken = null;
+        var tokenExpiresAt = null;
+        try {
+          var authKey = 'sb-fkhihclpghmmtbbywvoj-auth-token';
+          var rawAuth = localStorage.getItem(authKey);
+          if (rawAuth) {
+            var authData = JSON.parse(rawAuth);
+            var session = authData && (authData.currentSession || authData.session || authData);
+            if (session && typeof session.access_token === 'string') {
+              authToken = session.access_token;
+              if (typeof session.expires_at === 'number') { tokenExpiresAt = session.expires_at; }
+              else if (typeof session.expires_at === 'string') { var p = Date.parse(session.expires_at); if (!isNaN(p)) { tokenExpiresAt = Math.floor(p / 1000); } }
+              else if (typeof authData.expiresAt === 'number') { tokenExpiresAt = authData.expiresAt; }
+              else if (typeof session.expires_in === 'number') { tokenExpiresAt = Math.floor(Date.now() / 1000) + session.expires_in; }
+            }
+          }
+        } catch (e) {}
+        if (!authToken) return;
+        if (typeof tokenExpiresAt === 'number') {
+          if (tokenExpiresAt > 1000000000000) { tokenExpiresAt = Math.floor(tokenExpiresAt / 1000); }
+          if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
+        } else { return; }
+
+        var supabaseUrl = 'YOUR_SUPABASE_URL';
+        var supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+        var headers = { 'apikey': supabaseAnonKey, 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' };
+        var baseUrl = supabaseUrl + '/rest/v1';
+        fetch(baseUrl + '/rpc/get_server_time', { method: 'POST', headers: headers })
+          .then(function(r) { if (!r.ok) return null; return r.json(); })
+          .then(function(data) { if (data && window.__PRELOADED_DATA__) { window.__PRELOADED_DATA__.serverTime = data; } })
+          .catch(function() {});
+        fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', { headers: headers })
+          .then(function(r) { if (!r.ok) return null; return r.json(); })
+          .then(function(data) { if (data && window.__PRELOADED_DATA__) { window.__PRELOADED_DATA__.projects = data; } })
+          .catch(function() {});
+      });
+    })();
+  </script>
+
   <app-root></app-root>
   
     <noscript>

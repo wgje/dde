@@ -34,12 +34,14 @@ export class ContextRestoreService {
    * 保存当前任务的上下文快照
    * 在停泊或关闭页面前调用
    */
-  saveSnapshot(taskId: string): void {
+  async saveSnapshot(taskId: string): Promise<void> {
     const task = this.taskStore.getTask(taskId);
     if (!task) return;
 
     const viewMode = this.uiState.activeView() === 'flow' ? 'flow' : 'text';
     const contentHash = this.computeContentHash(task.content);
+
+    const flowViewport = viewMode === 'flow' ? await this.captureFlowViewport() : null;
 
     const snapshot: ParkingSnapshot = {
       savedAt: new Date().toISOString(),
@@ -48,7 +50,7 @@ export class ContextRestoreService {
       cursorPosition: viewMode === 'text' ? this.captureCursorPosition() : null,
       scrollAnchor: viewMode === 'text' ? this.captureScrollAnchor() : null,
       structuralAnchor: this.captureStructuralAnchor(task.content, viewMode),
-      flowViewport: viewMode === 'flow' ? this.captureFlowViewport() : null,
+      flowViewport,
     };
 
     // 将快照写入 parkingMeta
@@ -83,7 +85,7 @@ export class ContextRestoreService {
     const isCrossView = currentViewMode !== snapshot.viewMode;
 
     if (currentViewMode === 'flow') {
-      this.restoreFlowView(snapshot, isCrossView);
+      void this.restoreFlowView(snapshot, isCrossView);
     } else {
       this.restoreTextView(snapshot, task.content, hashMatches, isCrossView);
     }
@@ -166,19 +168,24 @@ export class ContextRestoreService {
 
   // ─── Flow 视图恢复（A5.2.5） ───
 
-  private restoreFlowView(snapshot: ParkingSnapshot, isCrossView: boolean): void {
+  /**
+   * 【性能优化 2026-03-24】改用 import() 替代 require()，打破 GoJS 静态依赖链。
+   * require() 会被 esbuild 静态分析并打包，导致 1.3MB GoJS 进入首屏 bundle。
+   * import() 是真正的动态导入，只在运行时按需加载。
+   */
+  private async restoreFlowView(snapshot: ParkingSnapshot, isCrossView: boolean): Promise<void> {
     if (isCrossView || !snapshot.flowViewport) {
       // 跨视图降级——仅尝试 structuralAnchor
       return;
     }
 
     try {
-      // 动态解析 FlowDiagramService（避免强依赖懒加载模块）
-      const { FlowDiagramService } = require('../app/features/flow/services/flow-diagram.service');
+      // 动态 import()：真正的代码分割，不会被 esbuild 静态打包
+      const { FlowDiagramService } = await import('../app/features/flow/services/flow-diagram.service');
       const flowService = this.injector.get(FlowDiagramService, null);
       if (!flowService) return;
 
-      const { FlowZoomService } = require('../app/features/flow/services/flow-zoom.service');
+      const { FlowZoomService } = await import('../app/features/flow/services/flow-zoom.service');
       const zoomService = this.injector.get(FlowZoomService, null);
 
       // 恢复缩放比例
@@ -294,14 +301,16 @@ export class ContextRestoreService {
     };
   }
 
-  private captureFlowViewport(): ParkingFlowViewport | null {
+  /**
+   * 【性能优化 2026-03-24】改用 import() 替代 require()，打破 GoJS 静态依赖链。
+   */
+  private async captureFlowViewport(): Promise<ParkingFlowViewport | null> {
     try {
-      const { FlowDiagramService } = require('../app/features/flow/services/flow-diagram.service');
+      const { FlowDiagramService } = await import('../app/features/flow/services/flow-diagram.service');
       const flowService = this.injector.get(FlowDiagramService, null);
       if (!flowService) return null;
       return flowService.getFlowParkingSnapshot() ?? null;
     } catch {
-      // eslint-disable-next-line no-restricted-syntax -- Flow 服务可能未加载，返回 null 是正常降级
       return null;
     }
   }

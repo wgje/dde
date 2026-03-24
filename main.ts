@@ -305,9 +305,12 @@ async function startApplication() {
     // 标记应用就绪
     (window as Window & { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
     
-    // 隐藏初始加载器
+    // 隐藏初始加载器（淡出过渡，避免突兀跳变）
     const loader = document.getElementById('initial-loader');
-    if (loader) loader.style.display = 'none';
+    if (loader) {
+      loader.classList.add('fade-out');
+      setTimeout(() => { loader.style.display = 'none'; }, 250);
+    }
     
     // 检查 Zone.js 是否正常工作 - 尝试触发变更检测
     try {

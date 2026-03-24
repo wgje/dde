@@ -121,10 +121,34 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly preferenceService = inject(PreferenceService);
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
-  private readonly searchService = inject(SearchService);
-  private readonly parkingService = inject(ParkingService);
   private readonly spotlightService = inject(SpotlightService);
-  private readonly blackBoxService = inject(BlackBoxService);
+
+  // ========== 延迟注入服务（P0-3 性能优化 2026-03-24）==========
+  // 以下服务不在首屏渲染路径上，改为按需获取以减少 DI 树展开耗时
+  private _searchService?: SearchService;
+  private get searchService(): SearchService {
+    return (this._searchService ??= this.injector.get(SearchService));
+  }
+  private _parkingService?: ParkingService;
+  private get parkingService(): ParkingService {
+    return (this._parkingService ??= this.injector.get(ParkingService));
+  }
+  private _blackBoxService?: BlackBoxService;
+  private get blackBoxService(): BlackBoxService {
+    return (this._blackBoxService ??= this.injector.get(BlackBoxService));
+  }
+  private _exportService?: ExportService;
+  private get exportService(): ExportService {
+    return (this._exportService ??= this.injector.get(ExportService));
+  }
+  private _focusStartupProbe?: FocusStartupProbeService;
+  private get focusStartupProbe(): FocusStartupProbeService {
+    return (this._focusStartupProbe ??= this.injector.get(FocusStartupProbeService));
+  }
+  private _simpleSync?: SimpleSyncService;
+  private get simpleSync(): SimpleSyncService {
+    return (this._simpleSync ??= this.injector.get(SimpleSyncService));
+  }
   readonly focusPrefs = inject(FocusPreferenceService);
   readonly pwaInstall = inject(PwaInstallPromptService);
 
@@ -172,14 +196,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   readonly modalCoord = inject(WorkspaceModalCoordinatorService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   readonly supabaseClient = inject(SupabaseClientService);
-  private readonly simpleSync = inject(SimpleSyncService);
   private readonly beforeUnloadManager = inject(BeforeUnloadManagerService);
   private readonly beforeUnloadGuard = inject(BeforeUnloadGuardService);
   
-  /** 数据保护服务 */
-  private readonly exportService = inject(ExportService);
+  /** 数据保护服务（延迟注入，见上方 getter） */
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
-  private readonly focusStartupProbe = inject(FocusStartupProbeService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
   

@@ -177,10 +177,10 @@ export class AuthService {
       if (typeof accessToken !== 'string' || !accessToken) return null;
 
       // 过期时间检查（秒级时间戳），保留 60s 缓冲避免边界竞争
-      let expiresAt = record['expires_at'];
-      if (typeof expiresAt === 'number') {
+      const rawExpiresAt = record['expires_at'];
+      if (typeof rawExpiresAt === 'number') {
         // 兼容毫秒和秒级时间戳
-        if (expiresAt > 1e12) expiresAt = Math.floor(expiresAt / 1000);
+        const expiresAt = rawExpiresAt > 1e12 ? Math.floor(rawExpiresAt / 1000) : rawExpiresAt;
         const nowSec = Math.floor(Date.now() / 1000);
         if (expiresAt <= nowSec + 60) {
           this.logger.debug('[FastPath] 本地 token 即将过期，回退到网络检查');
@@ -197,7 +197,7 @@ export class AuthService {
           const email = typeof userRecord['email'] === 'string' ? userRecord['email'] : null;
           this.logger.debug('[FastPath] 使用 localStorage 缓存 session', {
             userId: userId.substring(0, 8) + '...',
-            expiresAt
+            expiresAt: rawExpiresAt
           });
           return { userId, email };
         }

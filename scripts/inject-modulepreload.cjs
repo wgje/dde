@@ -37,6 +37,16 @@ const EXCLUDED_PATTERNS = [
   /\.map$/i,
 ];
 
+/**
+ * 【性能优化 2026-03-24】基于内容识别的排除列表。
+ * 哈希文件名无法按名称匹配（如 Supabase SDK 编译为 chunk-XXXXXXXX.js），
+ * 需要检查 chunk 内容中的特征字符串来排除。
+ */
+const EXCLUDED_CONTENT_MARKERS = [
+  'FunctionsError',          // Supabase Functions SDK (~172KB)
+  'supabase',                // Supabase 通用标记
+];
+
 function readBuiltHtml() {
   if (!fs.existsSync(INDEX_HTML)) {
     throw new Error(`index.html 不存在: ${INDEX_HTML}`);
@@ -97,7 +107,22 @@ function traceCriticalChunks(mainFile, maxDepth) {
         const filepath = path.join(DIST_DIR, file);
         if (fs.existsSync(filepath)) {
           const size = fs.statSync(filepath).size;
-          result.push({ file, depth, size });
+          // 【性能优化 2026-03-24】内容特征排除：
+          // 对大 chunk 做内容检测，排除 Supabase SDK 等非首屏依赖。
+          // modulepreload 会触发浏览器立即解析+编译，大型三方 SDK 应按需加载。
+          let contentExcluded = false;
+          if (size > 100 * 1024 && EXCLUDED_CONTENT_MARKERS.length > 0) {
+            const head = fs.readFileSync(filepath, 'utf8').slice(0, 2048);
+            contentExcluded = EXCLUDED_CONTENT_MARKERS.some((marker) =>
+              head.toLowerCase().includes(marker.toLowerCase()),
+            );
+            if (contentExcluded) {
+              console.log(`  [skip] ${file} (${Math.round(size / 1024)}KB) — 内容特征匹配，非首屏依赖`);
+            }
+          }
+          if (!contentExcluded) {
+            result.push({ file, depth, size });
+          }
         }
       }
     }
@@ -117,8 +142,11 @@ function traceCriticalChunks(mainFile, maxDepth) {
  * 评分依据：深度越浅越关键（权重高），体积适中的优先（太大的可能是非关键特性 chunk）。
  */
 function selectCriticalChunks(chunks, maxCount) {
-  // 过滤掉超大 chunk（>200KB 通常是独立特性如 GoJS/parking）
-  const candidates = chunks.filter((c) => c.size < 200 * 1024);
+  // 过滤掉超大 chunk（>150KB 通常是独立特性或三方 SDK）
+  // 【性能优化 2026-03-24】从 200KB 降至 150KB：
+  // Supabase JS SDK (~172KB) 被 modulepreload 后浏览器立即解析+编译，
+  // 导致中端手机额外 ~1s 的主线程阻塞。降低阈值确保 SDK 按需加载。
+  const candidates = chunks.filter((c) => c.size < 150 * 1024);
 
   // 按深度升序（浅的先）+ 同深度按体积降序（大的先，可能是共享依赖）
   candidates.sort((a, b) => {

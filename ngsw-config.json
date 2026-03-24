@@ -4,7 +4,7 @@
   "navigationPreload": true,
   "assetGroups": [
     {
-      "name": "app",
+      "name": "app-core",
       "installMode": "prefetch",
       "resources": {
         "files": [
@@ -13,7 +13,19 @@
           "/index.html",
           "/manifest.webmanifest",
           "/*.css",
-          "/*.js"
+          "/main*.js",
+          "/polyfills*.js"
+        ]
+      }
+    },
+    {
+      "name": "app-lazy",
+      "installMode": "lazy",
+      "updateMode": "lazy",
+      "resources": {
+        "files": [
+          "/chunk*.js",
+          "/worker*.js"
         ]
       }
     },
@@ -30,7 +42,7 @@
     },
     {
       "name": "local-fonts",
-      "installMode": "prefetch",
+      "installMode": "lazy",
       "updateMode": "lazy",
       "resources": {
         "files": [
@@ -60,7 +72,7 @@
       "cacheConfig": {
         "strategy": "freshness",
         "maxSize": 100,
-        "maxAge": "1m",
+        "maxAge": "1h",
         "timeout": "3s"
       }
     },

@@ -232,7 +232,7 @@ export class ParkingService implements OnDestroy {
 
     // 1) Snapshot current focused task then park it.
     if (currentFocused && currentFocused.id !== taskId) {
-      this.contextRestoreService.saveSnapshot(currentFocused.id);
+      void this.contextRestoreService.saveSnapshot(currentFocused.id);
 
       // 当前 focused → parked
       this.updateParkingMeta(currentFocused.id, {
@@ -345,7 +345,7 @@ export class ParkingService implements OnDestroy {
       };
 
     // 保存快照然后停泊
-    this.contextRestoreService.saveSnapshot(taskId);
+    void this.contextRestoreService.saveSnapshot(taskId);
     this.updateParkingMeta(taskId, meta);
 
     // 全局统一视觉反馈
@@ -904,7 +904,7 @@ export class ParkingService implements OnDestroy {
     const focused = this.focusedTask();
     if (focused) {
       // 触发 ContextRestoreService 保存完整快照
-      this.contextRestoreService.saveSnapshot(focused.id);
+      void this.contextRestoreService.saveSnapshot(focused.id);
     }
     await this.persistParkedTasksToIndexedDB();
   }
