@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone, DestroyRef, OnDestroy } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef, OnDestroy } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -59,7 +59,6 @@ export class FlowDragDropService implements OnDestroy {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDragDrop');
   private readonly toast = inject(ToastService);
-  private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
   
   constructor() {
@@ -641,21 +640,19 @@ export class FlowDragDropService implements OnDestroy {
     }
 
     if (isOverDock) {
-      this.zone.run(() => {
-        let dockedCount = 0;
-        for (const taskId of taskIds) {
-          const task = this.projectState.getTask(taskId);
-          if (!task) continue;
-          this.dockEngine.dockTaskFromExternalDrag(taskId, 'flow');
-          dockedCount++;
-        }
-        if (dockedCount > 0) {
-          const msg = dockedCount === 1
-            ? '任务已从流程图拖入停泊坞'
-            : `${dockedCount} 个任务已从流程图拖入停泊坞`;
-          this.toast.success('已加入停泊坞', msg);
-        }
-      });
+      let dockedCount = 0;
+      for (const taskId of taskIds) {
+        const task = this.projectState.getTask(taskId);
+        if (!task) continue;
+        this.dockEngine.dockTaskFromExternalDrag(taskId, 'flow');
+        dockedCount++;
+      }
+      if (dockedCount > 0) {
+        const msg = dockedCount === 1
+          ? '任务已从流程图拖入停泊坞'
+          : `${dockedCount} 个任务已从流程图拖入停泊坞`;
+        this.toast.success('已加入停泊坞', msg);
+      }
     }
 
     this.endAltDragToDock();

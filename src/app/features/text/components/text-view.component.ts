@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../../services/logger.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -124,7 +124,6 @@ export class TextViewComponent implements OnInit, OnDestroy {
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   readonly dragDropService = inject(TextViewDragDropService);
   readonly ops = inject(TextViewTaskOpsService);
-  private readonly ngZone = inject(NgZone);
   private readonly logger = inject(LoggerService).category('TextView');
   
   /** 全局触摸事件监听器的绑定引用 */
@@ -244,9 +243,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
     
     if (!event.isPrimary) return;
     
-    this.ngZone.run(() => {
-      this.onTouchEnd(event as unknown as TouchEvent);
-    });
+    this.onTouchEnd(event as unknown as TouchEvent);
   }
   
   /** 处理拖拽超时 - 当 touchend 丢失时自动完成拖拽 */
@@ -254,16 +251,14 @@ export class TextViewComponent implements OnInit, OnDestroy {
     const { task, targetStage, targetBeforeId } = event.detail;
     
     if (task && targetStage !== null) {
-      this.ngZone.run(() => {
-        const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId);
-        if (isFailure(result)) {
-          this.logger.error('[TouchDragTimeout] Move failed', { error: getErrorMessage(result.error) });
-        }
-        const touchEndResult = this.dragDropService.endTouchDrag();
-        const mouseExpandedStages = this.dragDropService.endDrag();
-        this.ops.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
-        this.ops.restoreAutoCollapsedSourceStage();
-      });
+      const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId);
+      if (isFailure(result)) {
+        this.logger.error('[TouchDragTimeout] Move failed', { error: getErrorMessage(result.error) });
+      }
+      const touchEndResult = this.dragDropService.endTouchDrag();
+      const mouseExpandedStages = this.dragDropService.endDrag();
+      this.ops.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
+      this.ops.restoreAutoCollapsedSourceStage();
     } else {
       const touchEndResult = this.dragDropService.endTouchDrag();
       const mouseExpandedStages = this.dragDropService.endDrag();
@@ -616,13 +611,13 @@ export class TextViewComponent implements OnInit, OnDestroy {
   private handleGlobalTouchEnd(event: TouchEvent) {
     if (this.dragDropService.isDOMUpdating) return;
     if (!this.dragDropService.touchDragTask) return;
-    this.ngZone.run(() => this.onTouchEnd(event));
+    this.onTouchEnd(event);
   }
   
   /** document 级别的全局 touchcancel 处理器 */
   private handleGlobalTouchCancel(event: TouchEvent) {
     if (this.dragDropService.isDOMUpdating) return;
     if (!this.dragDropService.draggingTaskId()) return;
-    this.ngZone.run(() => this.onTouchCancel(event));
+    this.onTouchCancel(event);
   }
 }

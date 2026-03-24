@@ -16,7 +16,7 @@
  * - 防止内存泄漏
  */
 
-import { Injectable, inject, NgZone } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -101,7 +101,6 @@ interface RegisteredListener {
 export class FlowEventService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowEvent');
-  private readonly zone = inject(NgZone);
   private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
   
@@ -188,14 +187,14 @@ export class FlowEventService {
     // Alt+拖拽节点到停泊坞 — 透传给 altDragCallback
     flowTemplateEventHandlers.onNodeAltDragStart = (taskId: string, clientX: number, clientY: number) => {
       if (this.altDragCallback) {
-        this.zone.run(() => this.altDragCallback!(taskId, clientX, clientY));
+        this.altDragCallback!(taskId, clientX, clientY);
       }
     };
 
     // 拖拽节点出画布边界 — 多选拖入停泊坞
     flowTemplateEventHandlers.onNodesDragOutOfBounds = (taskIds: string[], clientX: number, clientY: number) => {
       if (this.dragOutOfBoundsCallback) {
-        this.zone.run(() => this.dragOutOfBoundsCallback!(taskIds, clientX, clientY));
+        this.dragOutOfBoundsCallback!(taskIds, clientX, clientY);
       }
     };
     
@@ -579,25 +578,19 @@ export class FlowEventService {
   
   emitNodeClick(taskId: string, isDoubleClick: boolean): void {
     if (this.nodeClickCallback) {
-      this.zone.run(() => {
-        this.nodeClickCallback!(taskId, isDoubleClick);
-      });
+      this.nodeClickCallback!(taskId, isDoubleClick);
     }
   }
   
   emitLinkClick(linkData: GoJSLinkData, x: number, y: number, isDoubleClick?: boolean): void {
     if (this.linkClickCallback) {
-      this.zone.run(() => {
-        this.linkClickCallback!(linkData, x, y, isDoubleClick);
-      });
+      this.linkClickCallback!(linkData, x, y, isDoubleClick);
     }
   }
   
   emitLinkDelete(linkData: GoJSLinkData): void {
     if (this.linkDeleteCallback) {
-      this.zone.run(() => {
-        this.linkDeleteCallback!(linkData);
-      });
+      this.linkDeleteCallback!(linkData);
     }
   }
   
@@ -609,33 +602,25 @@ export class FlowEventService {
     gojsLink: go.Link
   ): void {
     if (this.linkRelinkCallback) {
-      this.zone.run(() => {
-        this.linkRelinkCallback!(linkType, relinkInfo, x, y, gojsLink);
-      });
+      this.linkRelinkCallback!(linkType, relinkInfo, x, y, gojsLink);
     }
   }
   
   emitLinkGesture(sourceId: string, targetId: string, x: number, y: number, link: go.Link): void {
     if (this.linkGestureCallback) {
-      this.zone.run(() => {
-        this.linkGestureCallback!(sourceId, targetId, x, y, link);
-      });
+      this.linkGestureCallback!(sourceId, targetId, x, y, link);
     }
   }
   
   emitSelectionMoved(movedNodes: Array<{ key: string; x: number; y: number; isUnassigned: boolean }>): void {
     if (this.selectionMovedCallback) {
-      this.zone.run(() => {
-        this.selectionMovedCallback!(movedNodes);
-      });
+      this.selectionMovedCallback!(movedNodes);
     }
   }
   
   emitBackgroundClick(): void {
     if (this.backgroundClickCallback) {
-      this.zone.run(() => {
-        this.backgroundClickCallback!();
-      });
+      this.backgroundClickCallback!();
     }
   }
   

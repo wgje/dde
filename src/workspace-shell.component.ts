@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, Injector } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
@@ -114,7 +114,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly logger = inject(LoggerService).category('App');
   private readonly injector = inject(Injector);
   private readonly uiState = inject(UiStateService);
-  private readonly ngZone = inject(NgZone);
+
   private readonly projectState = inject(ProjectStateService);
   private readonly taskStore = inject(TaskStore);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);

@@ -13,8 +13,7 @@
           "/index.html",
           "/manifest.webmanifest",
           "/*.css",
-          "/main*.js",
-          "/polyfills*.js"
+          "/main*.js"
         ]
       }
     },

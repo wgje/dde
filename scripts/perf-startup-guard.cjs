@@ -162,14 +162,11 @@ if (!fs.existsSync(INDEX_HTML_PATH)) {
 const stats = JSON.parse(fs.readFileSync(STATS_PATH, 'utf8'));
 const outputs = stats.outputs || {};
 const mainKey = Object.keys(outputs).find((key) => /^main-.*\.js$/.test(key));
+// 【Zoneless 迁移 2026-03-24】polyfills chunk 可能不存在（Zone.js 移除后无 polyfills）
 const polyfillsKey = Object.keys(outputs).find((key) => /^polyfills-.*\.js$/.test(key));
 
 if (!mainKey) {
   fail('未找到 main-*.js 输出');
-}
-
-if (!polyfillsKey) {
-  fail('未找到 polyfills-*.js 输出');
 }
 
 const mainOutput = outputs[mainKey];
@@ -187,7 +184,7 @@ const modulepreloadCount = (indexHtml.match(/rel="modulepreload"/g) || []).lengt
 const strictModulepreloadMatch = indexHtml.match(/STRICT_MODULEPRELOAD_V2:\s*(true|false)/);
 const strictModulepreload = strictModulepreloadMatch ? strictModulepreloadMatch[1] === 'true' : true;
 
-const staticClosure = collectStaticClosure(outputs, [mainKey, polyfillsKey]);
+const staticClosure = collectStaticClosure(outputs, [mainKey, polyfillsKey].filter(Boolean));
 const initialStaticBytes = [...staticClosure].reduce(
   (sum, key) => sum + Number(outputs[key]?.bytes || 0),
   0

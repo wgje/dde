@@ -5,7 +5,7 @@
  * 每日首次打开应用时，强制处理昨日遗留条目
  */
 
-import { Injectable, inject, signal, NgZone, effect, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, effect, DestroyRef } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, ErrorMessages } from '../utils/result';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -57,7 +57,6 @@ export type GateMotionState =
 export class GateService {
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly logger = inject(LoggerService);
-  private readonly ngZone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
 
   // 暴露状态给组件
@@ -168,10 +167,8 @@ export class GateService {
 
       this.blackBoxService.loadFromServer()
         .then(() => {
-          this.ngZone.run(() => {
-            if (gateState() !== 'reviewing') return;
-            this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'remote');
-          });
+          if (gateState() !== 'reviewing') return;
+          this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'remote');
         })
         .catch((error: unknown) => {
           this.logger.debug('Gate', 'Remote pull while gate reviewing failed', {
@@ -293,13 +290,11 @@ export class GateService {
 
     if (state !== 'idle') {
       this.animationTimeoutId = setTimeout(() => {
-        this.ngZone.run(() => {
-          if (this.cardAnimation() !== state) return;
+        if (this.cardAnimation() !== state) return;
 
-          this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
-          this.cardAnimation.set('idle');
-          onTimeout?.();
-        });
+        this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
+        this.cardAnimation.set('idle');
+        onTimeout?.();
       }, ANIMATION_TIMEOUT_MS);
     }
   }

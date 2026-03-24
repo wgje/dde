@@ -1,4 +1,4 @@
-import { Injectable, inject, ElementRef, NgZone, type EventEmitter, type Signal, type WritableSignal } from '@angular/core';
+import { Injectable, inject, ElementRef, type EventEmitter, type Signal, type WritableSignal } from '@angular/core';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -43,7 +43,6 @@ export class TextViewTaskOpsService {
   private readonly toast = inject(ToastService);
   private readonly dragDropService = inject(TextViewDragDropService);
   private readonly elementRef = inject(ElementRef);
-  private readonly ngZone = inject(NgZone);
   private readonly logger = inject(LoggerService).category('TextViewOps');
   private readonly parkingService = inject(ParkingService);
   private readonly dockEngine = inject(DockEngineService);
@@ -86,35 +85,31 @@ export class TextViewTaskOpsService {
   }
 
   scrollToElementById(selector: string): void {
-    this.ngZone.runOutsideAngular(() => {
-      requestAnimationFrame(() => {
-        const el = this.elementRef.nativeElement.querySelector(selector);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      });
+    requestAnimationFrame(() => {
+      const el = this.elementRef.nativeElement.querySelector(selector);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     });
   }
 
   scrollToTaskAndFocus(taskId: string, inputSelector?: string): void {
-    this.ngZone.runOutsideAngular(() => {
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
-            ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            if (inputSelector) {
-              const focusTimer = setTimeout(() => {
-                const input = el.querySelector(inputSelector) as HTMLInputElement;
-                input?.focus();
-                input?.select?.();
-                this.removeTimer(focusTimer);
-              }, 100);
-              this.pendingTimers.push(focusTimer);
-            }
+        const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
+          ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (inputSelector) {
+            const focusTimer = setTimeout(() => {
+              const input = el.querySelector(inputSelector) as HTMLInputElement;
+              input?.focus();
+              input?.select?.();
+              this.removeTimer(focusTimer);
+            }, 100);
+            this.pendingTimers.push(focusTimer);
           }
-        });
+        }
       });
     });
   }
@@ -189,16 +184,14 @@ export class TextViewTaskOpsService {
       if (unassignedRef) {
         await unassignedRef.setEditingTask(taskId, false);
       }
-      this.ngZone.runOutsideAngular(() => {
-        const timer = setTimeout(() => {
-          const el = this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-          this.removeTimer(timer);
-        }, 100);
-        this.pendingTimers.push(timer);
-      });
+      const timer = setTimeout(() => {
+        const el = this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        this.removeTimer(timer);
+      }, 100);
+      this.pendingTimers.push(timer);
     }
   }
 
@@ -237,21 +230,19 @@ export class TextViewTaskOpsService {
    * 任务展开后滚动到合适位置（仅手机端）
    */
   scrollToTaskAfterExpand(taskId: string): void {
-    this.ngZone.runOutsideAngular(() => {
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const timer = setTimeout(() => {
-            requestAnimationFrame(() => {
-              const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
-                ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
-              if (el) {
-                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }
-            });
-            this.removeTimer(timer);
-          }, 200);
-          this.pendingTimers.push(timer);
-        });
+        const timer = setTimeout(() => {
+          requestAnimationFrame(() => {
+            const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
+              ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          });
+          this.removeTimer(timer);
+        }, 200);
+        this.pendingTimers.push(timer);
       });
     });
   }

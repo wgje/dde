@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -56,7 +56,6 @@ export class FlowLinkService {
   private readonly toast = inject(ToastService);
   private readonly uiState = inject(UiStateService);
   private readonly relinkService = inject(FlowLinkRelinkService);
-  private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
   
   // ========== 连接模式状态 ==========
@@ -672,9 +671,7 @@ export class FlowLinkService {
       newY = Math.max(0, newY);
     }
     
-    this.zone.run(() => {
-      this.connectionEditorPos.set({ x: newX, y: newY });
-    });
+    this.connectionEditorPos.set({ x: newX, y: newY });
   };
   
   /**

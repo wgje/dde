@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone, effect, ElementRef } from '@angular/core';
+import { Injectable, inject, signal, effect, ElementRef } from '@angular/core';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
@@ -45,7 +45,6 @@ export class FlowDiagramService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDiagram');
   private readonly toast = inject(ToastService);
-  private readonly zone = inject(NgZone);
   private readonly themeService = inject(ThemeService);
   private readonly projectState = inject(ProjectStateService);
   
@@ -94,7 +93,7 @@ export class FlowDiagramService {
     
     // 只在 diagram 已初始化时重绘
     if (this.diagram && !this.isDestroyed && !this.isSuspended) {
-      this.zone.runOutsideAngular(() => {
+      {
         // 重新设置模板并更新绑定
         this.templateService.setupNodeTemplate(this.diagram!);
         this.linkTemplateService.setupLinkTemplate(this.diagram!);
@@ -110,7 +109,7 @@ export class FlowDiagramService {
         this.overviewService.updateTheme();
         
         this.logger.debug('主题变化触发 GoJS 重绘', { isDark, theme });
-      });
+      }
     }
   });
   
@@ -149,7 +148,7 @@ export class FlowDiagramService {
     
     // 【性能关键】在 Angular Zone 外部创建和配置 GoJS Diagram
     // 避免 GoJS 内部事件（鼠标移动、canvas 重绘、工具切换等）触发不必要的变更检测
-    return this.zone.runOutsideAngular(() => this._initializeOutsideZone(container));
+    return this._initializeOutsideZone(container);
   }
 
   /**
@@ -575,11 +574,9 @@ export class FlowDiagramService {
 
       // 【2026-02-25 性能优化】恢复时仅请求一次更新，不再全量 invalidateRoute
       // GoJS 在 requestUpdate() 时会自动重新路由需要更新的链接
-      this.zone.runOutsideAngular(() => {
-        requestAnimationFrame(() => {
-          if (!this.diagram || this.isDestroyed) return;
-          this.diagram.requestUpdate();
-        });
+      requestAnimationFrame(() => {
+        if (!this.diagram || this.isDestroyed) return;
+        this.diagram.requestUpdate();
       });
     } catch (error) {
       this.logger.error('恢复图表失败:', error);
@@ -659,11 +656,9 @@ export class FlowDiagramService {
   private redrawForFontChange(): void {
     if (!this.diagram || this.isDestroyed || this.isSuspended) return;
 
-    this.zone.runOutsideAngular(() => {
-      this.diagram!.updateAllTargetBindings();
-      this.diagram!.requestUpdate();
-      this.logger.debug('字体变化，GoJS Canvas 已重绘');
-    });
+    this.diagram!.updateAllTargetBindings();
+    this.diagram!.requestUpdate();
+    this.logger.debug('字体变化，GoJS Canvas 已重绘');
   }
 
   /**
@@ -699,7 +694,6 @@ export class FlowDiagramService {
     overviewDiv: ElementRef | undefined,
     isVisible: boolean,
     isCollapsed: boolean,
-    zone: NgZone,
     scheduleTimer: (cb: () => void, delay: number) => void,
     immediate = false
   ): void {
@@ -716,7 +710,7 @@ export class FlowDiagramService {
       }
       this.idleOverviewInitHandle = requestIdleCallback(() => {
         this.idleOverviewInitHandle = null;
-        zone.run(() => runInit());
+        runInit();
       }, { timeout: 3000 });
     } else {
       scheduleTimer(() => runInit(), 300);
