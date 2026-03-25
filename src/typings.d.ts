@@ -73,6 +73,9 @@ interface Window {
   showOpenFilePicker?(options?: OpenFilePickerOptions): Promise<FileSystemFileHandle[]>;
   showSaveFilePicker?(options?: SaveFilePickerOptions): Promise<FileSystemFileHandle>;
   __NANOFLOW_BOOT_FLAGS__?: NanoFlowBootFlags;
+  __NANOFLOW_READY__?: boolean;
+  __NANOFLOW_LAUNCH_SHELL_VISIBLE__?: boolean;
+  __NANOFLOW_BOOT_STAGE__?: 'booting' | 'launch-shell' | 'handoff' | 'ready';
   __NANOFLOW_SESSION_PREWARM__?: {
     status: 'idle' | 'pending' | 'refreshed' | 'failed';
     session?: {
@@ -158,4 +161,3 @@ declare module '*.css' {
   const content: Record<string, string>;
   export default content;
 }
-

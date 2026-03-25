@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, Injector } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, Injector, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
@@ -49,6 +49,8 @@ import { PwaInstallPromptService } from './services/pwa-install-prompt.service';
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
+import { BootStageService } from './services/boot-stage.service';
+import { LaunchSnapshotService } from './services/launch-snapshot.service';
 import { TaskStore } from './services/stores';
 import { DockEngineService } from './services/dock-engine.service';
 import { reloadViaForceClearCache } from './utils/force-clear-cache';
@@ -105,7 +107,7 @@ type StartupDiagnosticsLike = {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 
-export class WorkspaceShellComponent implements OnInit, OnDestroy {
+export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit {
   
   public throwTestError(): void {
     throw new Error("Sentry Test Error");
@@ -203,6 +205,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
+  readonly bootStage = inject(BootStageService);
+  private readonly launchSnapshot = inject(LaunchSnapshotService);
   
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
@@ -699,6 +703,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private eventDrivenSyncPulsePromise: Promise<EventDrivenSyncPulseLike | null> | null = null;
   private startupDiagnosticsPromise: Promise<StartupDiagnosticsLike[] | null> | null = null;
   private pwaPromptInitScheduled = false;
+  private workspaceHandoffSignaled = false;
 
   constructor() {
     // 启动流程：仅执行必要的同步初始化
@@ -863,10 +868,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
 
     // capture 阶段注册全局快捷键，避免被聚焦组件吞掉
     document.addEventListener('keydown', this.keyboardShortcutCaptureListener, { capture: true });
-    
-    // 标记应用已加载完成，用于隐藏初始加载指示器
-    (window as unknown as { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
-    
+
     // ⚡ 性能优化：延迟会话检查到浏览器空闲时段
     this.authCoord.scheduleSessionBootstrap();
     this.schedulePwaPromptInitialization();
@@ -897,6 +899,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
     
     // 🛡️ 安全校验：验证关键 Feature Flags 是否处于安全状态
     this.validateCriticalFeatureFlags();
+  }
+
+  ngAfterViewInit(): void {
+    this.signalWorkspaceHandoffReady();
   }
   
   /**
@@ -936,6 +942,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
   private setupSignalEffects(): void {
     this.setupModalEffects();
     this.setupDataProtectionEffect();
+    this.setupLaunchSnapshotEffect();
     this.setupFocusProbeEffect();
     this.setupStartupTierEffects();
     this.setupRemoteCallbackEffect();
@@ -997,6 +1004,41 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy {
         );
       }
     });
+  }
+
+  /** 启动快照：将最近项目摘要写入轻量快照，供下次冷启动直接显示。 */
+  private setupLaunchSnapshotEffect(): void {
+    effect(() => {
+      const snapshot = this.launchSnapshot.capture(this.projectState.projects(), {
+        activeProjectId: this.projectState.activeProjectId(),
+        lastActiveView: this.uiState.activeView(),
+        theme: this.preferenceService.theme(),
+        colorMode: this.readCurrentColorMode(),
+      });
+
+      this.launchSnapshot.schedulePersist(snapshot);
+    });
+  }
+
+  private readCurrentColorMode(): 'light' | 'dark' | 'system' {
+    if (typeof document === 'undefined') {
+      return 'system';
+    }
+
+    const mode = document.documentElement.getAttribute('data-color-mode');
+    if (mode === 'light' || mode === 'dark') {
+      return mode;
+    }
+    return 'system';
+  }
+
+  private signalWorkspaceHandoffReady(): void {
+    if (this.workspaceHandoffSignaled) {
+      return;
+    }
+
+    this.workspaceHandoffSignaled = true;
+    this.bootStage.markWorkspaceHandoffReady();
   }
 
   /** Focus 启动探针：登录后尽早执行本地 gate 检查 */

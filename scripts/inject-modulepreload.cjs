@@ -45,6 +45,8 @@ const EXCLUDED_PATTERNS = [
 const EXCLUDED_CONTENT_MARKERS = [
   'FunctionsError',          // Supabase Functions SDK (~172KB)
   'supabase',                // Supabase 通用标记
+  'WorkspaceShellComponent', // 启动壳优先：重型工作区路由块改为运行时预热
+  'ProjectShellComponent',   // 启动壳优先：项目壳层块不参与首波 modulepreload
 ];
 
 function readBuiltHtml() {
@@ -111,8 +113,8 @@ function traceCriticalChunks(mainFile, maxDepth) {
           // 对大 chunk 做内容检测，排除 Supabase SDK 等非首屏依赖。
           // modulepreload 会触发浏览器立即解析+编译，大型三方 SDK 应按需加载。
           let contentExcluded = false;
-          if (size > 100 * 1024 && EXCLUDED_CONTENT_MARKERS.length > 0) {
-            const head = fs.readFileSync(filepath, 'utf8').slice(0, 2048);
+          if (EXCLUDED_CONTENT_MARKERS.length > 0) {
+            const head = fs.readFileSync(filepath, 'utf8').slice(0, 65536);
             contentExcluded = EXCLUDED_CONTENT_MARKERS.some((marker) =>
               head.toLowerCase().includes(marker.toLowerCase()),
             );

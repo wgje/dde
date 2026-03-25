@@ -24,9 +24,7 @@
                 "output": "/"
               }
             ],
-            "styles": [
-              "src/styles.css"
-            ],
+            "styles": [],
             "define": {
               "import.meta.env.NG_APP_SUPABASE_URL": "process.env.NG_APP_SUPABASE_URL",
               "import.meta.env.NG_APP_SUPABASE_ANON_KEY": "process.env.NG_APP_SUPABASE_ANON_KEY"

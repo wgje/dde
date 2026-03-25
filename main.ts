@@ -299,19 +299,13 @@ async function startApplication() {
     
     const elapsed = Date.now() - START_TIME;
     log('✅ Angular 启动成功! 耗时: ' + elapsed + 'ms');
-    
-    // 标记应用就绪
-    (window as Window & { __NANOFLOW_READY__?: boolean }).__NANOFLOW_READY__ = true;
-    
-    // 隐藏初始加载器（淡出过渡，避免突兀跳变）
-    const loader = document.getElementById('initial-loader');
-    if (loader) {
-      loader.classList.add('fade-out');
-      setTimeout(() => { loader.style.display = 'none'; }, 250);
-    }
-    
+
+    window.dispatchEvent(new CustomEvent('nanoflow:bootstrap-complete', {
+      detail: { elapsed },
+    }));
+
     // 【Zoneless 迁移 2026-03-24】Zone.js 运行时检查已移除
-    log('🎉 应用完全就绪，Zoneless 模式运行中');
+    log('🎉 Angular bootstrap 完成，等待启动壳与工作区接管');
 
     const initWebVitals = () => {
       void import('./src/services/web-vitals.service')

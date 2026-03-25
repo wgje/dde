@@ -1,3 +1,11 @@
-<div class="h-full min-h-screen w-full flex flex-col overflow-hidden">
-  <router-outlet></router-outlet>
+<div class="app-root-shell">
+  <div class="app-root-shell__workspace">
+    <router-outlet></router-outlet>
+  </div>
+
+  @if (showLaunchShell()) {
+    <app-launch-shell
+      [snapshot]="launchSnapshot()"
+      [stage]="bootStage.currentStage()"></app-launch-shell>
+  }
 </div>

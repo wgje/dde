@@ -623,15 +623,19 @@
       };
       
       var checkReady = function() {
-        var appRoot = document.querySelector('app-root');
-        var hasContent = appRoot && appRoot.children.length > 0;
-        var isReady = window.__NANOFLOW_READY__ === true;
+        var launchShellVisible = window.__NANOFLOW_LAUNCH_SHELL_VISIBLE__ === true;
         var elapsed = Date.now() - startTime;
         
-        // 【优化】只要有内容就立即隐藏加载器，不等待完全就绪
-        if (isReady || hasContent) {
+        // 仅在启动壳真正可见后隐藏 loader，避免工作区尚未挂载时出现纯色空窗。
+        if (launchShellVisible) {
           var loader = document.getElementById('initial-loader');
-          if (loader) loader.style.display = 'none';
+          if (loader && !loader.classList.contains('fade-out')) {
+            loader.classList.add('fade-out');
+            setTimeout(function() {
+              loader.style.display = 'none';
+              window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
+            }, 250);
+          }
           return;
         }
         
@@ -643,9 +647,9 @@
           updateStatus('加载时间较长，可能是网络问题...');
         }
         
-        // 【优化】更频繁检查（100ms），更快响应
+        // 【优化】更频繁检查（50ms），尽快在启动壳可见后移除系统过渡层
         if (elapsed < 25000) {
-          setTimeout(checkReady, 100);
+          setTimeout(checkReady, 50);
         } else {
           // 超时 - 显示带缓存清理按钮的提示
           var loader = document.getElementById('initial-loader');

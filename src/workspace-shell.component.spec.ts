@@ -297,4 +297,21 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     ).toBe('none');
   });
 
+  it('signalWorkspaceHandoffReady 应只通知一次 boot stage handoff', () => {
+    const markWorkspaceHandoffReady = vi.fn();
+    const context = {
+      bootStage: { markWorkspaceHandoffReady },
+      workspaceHandoffSignaled: false,
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      signalWorkspaceHandoffReady: (this: WorkspaceShellComponent) => void;
+    }).signalWorkspaceHandoffReady.call(context);
+    (WorkspaceShellComponent.prototype as unknown as {
+      signalWorkspaceHandoffReady: (this: WorkspaceShellComponent) => void;
+    }).signalWorkspaceHandoffReady.call(context);
+
+    expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
+  });
+
 });
