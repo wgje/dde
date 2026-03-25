@@ -130,7 +130,10 @@
   <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
 
   <!-- PWA manifest: 必须保留在 <head> 中，Chrome 安装检测依赖 <head> 内的 <link rel="manifest">。
-       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。 -->
+       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。
+       已知限制：manifest.webmanifest 的 theme_color/background_color 不支持
+       prefers-color-scheme media query（Web 标准限制）。当前使用浅色 #f5f5f4，
+       深色模式设备的系统 splash 可能与应用内深色背景不一致。 -->
   <script>
     if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
       var link = document.createElement('link');
@@ -535,7 +538,11 @@
 
   <!-- ========== 内联快照渲染器 (P0 2026-03-25) ========== -->
   <!-- 在 Angular 引导之前从 localStorage 读取启动快照并立即渲染项目摘要，
-       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。 -->
+       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。
+       同源声明：本段 HTML/CSS（.lsh-* 前缀）是 LaunchShellComponent
+       （src/launch-shell.component.ts, .launch-shell__* 前缀）的纯 HTML 镜像。
+       二者的视觉语言、布局结构和数据格式必须保持一致。
+       若修改任一方，请同步更新另一方。 -->
   <script>
     (function() {
       try {

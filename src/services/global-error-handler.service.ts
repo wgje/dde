@@ -1,4 +1,4 @@
-import { ErrorHandler, Injectable, inject, signal } from '@angular/core';
+import { ErrorHandler, Injectable, inject, NgZone, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -76,6 +76,7 @@ export class GlobalErrorHandler implements ErrorHandler {
   private logger = this.loggerService.category('GlobalErrorHandler');
   private toast = inject(ToastService);
   private router = inject(Router);
+  private zone = inject(NgZone);
   
   /** Sentry 懒加载服务 - 用于异步错误上报 */
   private readonly sentryLoader = inject(SentryLazyLoaderService);
@@ -309,12 +310,14 @@ export class GlobalErrorHandler implements ErrorHandler {
     autoSelectIn?: number;
   }): Promise<string> {
     return new Promise((resolve) => {
-      this.recoverableError.set({
-        ...config,
-        resolve: (optionId: string) => {
-          this.recoverableError.set(null);
-          resolve(optionId);
-        }
+      this.zone.run(() => {
+        this.recoverableError.set({
+          ...config,
+          resolve: (optionId: string) => {
+            this.recoverableError.set(null);
+            resolve(optionId);
+          }
+        });
       });
     });
   }
@@ -545,7 +548,9 @@ export class GlobalErrorHandler implements ErrorHandler {
     const userMessage = this.getUserMessage(message);
     
     // 在 Angular zone 内显示 Toast
-    this.toast.error('出错了', userMessage);
+    this.zone.run(() => {
+      this.toast.error('出错了', userMessage);
+    });
   }
 
   /**
@@ -587,12 +592,14 @@ export class GlobalErrorHandler implements ErrorHandler {
     // 在 Angular zone 内导航到错误页面
     // 【安全】仅传递用户安全消息，避免原始错误信息（含堆栈/内部细节）泄露到 UI
     const safeMessage = this.getUserMessage(message);
-    void this.router.navigate(['/error'], { 
-      skipLocationChange: true,
-      state: { 
-        errorMessage: safeMessage,
-        userMessage: safeMessage
-      }
+    this.zone.run(() => {
+      void this.router.navigate(['/error'], {
+        skipLocationChange: true,
+        state: {
+          errorMessage: safeMessage,
+          userMessage: safeMessage
+        }
+      });
     });
   }
 }

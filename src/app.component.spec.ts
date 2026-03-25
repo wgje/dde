@@ -46,10 +46,14 @@ describe('AppComponent (Launch Shell)', () => {
   let workspaceStartupPreloaderMock: {
     workspaceStylesReady: ReturnType<typeof computed<boolean>>;
     start: ReturnType<typeof vi.fn>;
-    continueAfterLoaderHidden: ReturnType<typeof vi.fn>;
+    scheduleProjectShellPreload: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
+    // 确保 BOOT_SHELL_SPLIT_V1 开启以测试 launch shell 行为
+    (window as Window & { __NANOFLOW_BOOT_FLAGS__?: Record<string, unknown> }).__NANOFLOW_BOOT_FLAGS__ = {
+      BOOT_SHELL_SPLIT_V1: true,
+    };
     handoffReady = signal(false);
     appReady = signal(false);
     stylesReady = signal(false);
@@ -74,7 +78,7 @@ describe('AppComponent (Launch Shell)', () => {
     workspaceStartupPreloaderMock = {
       workspaceStylesReady: computed(() => stylesReady()),
       start: vi.fn(),
-      continueAfterLoaderHidden: vi.fn(),
+      scheduleProjectShellPreload: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -89,9 +93,6 @@ describe('AppComponent (Launch Shell)', () => {
 
   it('should render the launch shell before workspace handoff is ready', async () => {
     const fixture = TestBed.createComponent(AppComponent);
-
-    expect(workspaceStartupPreloaderMock.start).not.toHaveBeenCalled();
-
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -101,7 +102,7 @@ describe('AppComponent (Launch Shell)', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeTruthy();
   });
 
-  it('should continue project shell preload after loader hidden', async () => {
+  it('should trigger project shell preload after loader hidden', async () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
     await fixture.whenStable();
@@ -109,7 +110,8 @@ describe('AppComponent (Launch Shell)', () => {
 
     window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
 
-    expect(workspaceStartupPreloaderMock.continueAfterLoaderHidden).toHaveBeenCalledTimes(1);
+    expect(bootStageMock.noteLoaderHidden).toHaveBeenCalledTimes(1);
+    expect(workspaceStartupPreloaderMock.scheduleProjectShellPreload).toHaveBeenCalledTimes(1);
   });
 
   it('should hide launch shell when workspace handoff is ready', async () => {

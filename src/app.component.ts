@@ -16,6 +16,17 @@ import { LaunchSnapshotService, type LaunchSnapshot } from './services/launch-sn
 import { WorkspaceStartupPreloaderService } from './services/workspace-startup-preloader.service';
 
 /**
+ * 读取 index.html 注入的运行时 Boot Flag。
+ * 用于在 Angular 启动前由 index.html 设置的灰度开关。
+ */
+function readBootFlag(key: string, fallback: boolean): boolean {
+  if (typeof window === 'undefined') return fallback;
+  const flags = (window as Window & { __NANOFLOW_BOOT_FLAGS__?: Record<string, unknown> }).__NANOFLOW_BOOT_FLAGS__;
+  const value = flags?.[key];
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+/**
  * BootShell（轻量根组件）
  * 仅承载全局错误边界与路由出口，重型工作区逻辑下沉到 WorkspaceShell 路由组件。
  */
@@ -60,15 +71,22 @@ export class AppComponent {
   private readonly launchSnapshotService = inject(LaunchSnapshotService);
   private readonly workspaceStartupPreloader = inject(WorkspaceStartupPreloaderService);
 
-  readonly launchSnapshot = signal<LaunchSnapshot | null>(this.launchSnapshotService.read());
-  // styles.css 已恢复到 angular.json 静态构建，不再依赖动态加载信号
-  readonly showLaunchShell = computed(() => !this.bootStage.isWorkspaceHandoffReady());
+  /** BOOT_SHELL_SPLIT_V1 门控：关闭时跳过 launch shell，走传统启动路径 */
+  private readonly bootShellEnabled = readBootFlag('BOOT_SHELL_SPLIT_V1', true);
+
+  readonly launchSnapshot = signal<LaunchSnapshot | null>(
+    this.bootShellEnabled ? this.launchSnapshotService.read() : null,
+  );
+  readonly showLaunchShell = computed(() =>
+    this.bootShellEnabled && !this.bootStage.isWorkspaceHandoffReady(),
+  );
 
   constructor() {
+    // 第一阶段预热：仅拉取 workspace-shell chunk
+    this.workspaceStartupPreloader.start();
+
     afterNextRender(() => {
       this.bootStage.markLaunchShellVisible();
-      // 冷启动首帧只预热工作区壳，项目壳延后到 loader hidden 后。
-      this.workspaceStartupPreloader.start();
     });
 
     effect(() => {
@@ -83,7 +101,9 @@ export class AppComponent {
     if (typeof window !== 'undefined') {
       const loaderHiddenListener = () => {
         this.bootStage.noteLoaderHidden();
-        void this.workspaceStartupPreloader.continueAfterLoaderHidden();
+        // 第二阶段预热：initial-loader 淡出后再拉取 project-shell chunk，
+        // 避免与首屏渲染争抢主线程。
+        this.workspaceStartupPreloader.scheduleProjectShellPreload();
       };
       window.addEventListener('nanoflow:loader-hidden', loaderHiddenListener as EventListener);
       this.destroyRef.onDestroy(() => {
