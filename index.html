@@ -36,9 +36,9 @@
     form-action 'self';
   ">
   
-  <!-- PWA theme-color: 根据系统偏好预设，JS 可动态更新 -->
+  <!-- PWA theme-color: 使用深色默认值，匹配 manifest.webmanifest，减少 PWA 启动画面闪烁 -->
   <meta name="theme-color" content="#f5f5f4" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1a1a1a" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#111827" media="(prefers-color-scheme: dark)">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -179,6 +179,13 @@
     }
     #initial-loader.hidden {
       display: none;
+    }
+    
+    /* shimmer 骨架启用时撑满整个 loader */
+    #shimmer-skeleton.active {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
     }
     
     /* 渐进式入场动画 - 元素依次出现 */
@@ -375,6 +382,88 @@
 
     /* 非首屏样式已迁移到 src/styles.css（P0 性能优化 2026-03-24） */
     /* 包括：滚动条、color-scheme、触摸交互、fisheye、task-card、flow-bg */
+
+    /* ========== 内联快照壳 — Angular 启动前即时显示 (P0 2026-03-25) ========== */
+    /* 复用 LaunchShellComponent 视觉语言，在 Angular 引导期间展示缓存的项目摘要 */
+    @keyframes lsh-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.55; transform: scale(0.82); }
+    }
+    @keyframes lsh-shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    #snapshot-shell {
+      display: block;
+      position: absolute;
+      inset: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      background:
+        radial-gradient(circle at top left, rgba(79,70,229,0.16), transparent 34%),
+        radial-gradient(circle at bottom right, rgba(13,148,136,0.14), transparent 30%),
+        linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
+      color: #1c1917;
+    }
+    [data-color-mode="dark"] #snapshot-shell {
+      background:
+        radial-gradient(circle at top left, rgba(129,140,248,0.24), transparent 34%),
+        radial-gradient(circle at bottom right, rgba(52,211,153,0.14), transparent 30%),
+        linear-gradient(180deg, #111827 0%, #0f172a 100%);
+      color: #f5f5f4;
+    }
+
+    .lsh { display:flex; min-height:100%; padding:24px 18px; box-sizing:border-box; align-items:stretch; justify-content:center; }
+    .lsh-panel { width:min(100%,560px); display:flex; flex-direction:column; gap:18px; padding:20px; border-radius:24px;
+      background:rgba(255,255,255,0.86); border:1px solid rgba(231,229,228,0.92); box-shadow:0 20px 48px rgba(28,25,23,0.08); backdrop-filter:blur(14px); }
+    [data-color-mode="dark"] .lsh-panel { background:rgba(17,24,39,0.88); border-color:rgba(55,65,81,0.95); box-shadow:0 24px 56px rgba(0,0,0,0.3); }
+
+    .lsh-eyebrow { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:#57534e; letter-spacing:0.08em; text-transform:uppercase; }
+    [data-color-mode="dark"] .lsh-eyebrow { color:#d6d3d1; }
+    .lsh-dot { width:8px; height:8px; border-radius:999px; background:#4f46e5; box-shadow:0 0 0 8px rgba(79,70,229,0.08); }
+    .lsh-title { margin:0; font-size:28px; line-height:1.1; font-weight:700; }
+    .lsh-subtitle { margin:0; font-size:14px; line-height:1.6; color:#57534e; }
+    [data-color-mode="dark"] .lsh-subtitle { color:#d6d3d1; }
+
+    .lsh-status { display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px;
+      background:rgba(79,70,229,0.08); color:#4338ca; font-size:12px; font-weight:600; width:fit-content; }
+    [data-color-mode="dark"] .lsh-status { background:rgba(129,140,248,0.16); color:#c7d2fe; }
+    .lsh-pulse-dot { width:8px; height:8px; border-radius:999px; background:currentColor; animation:lsh-pulse 1.4s ease-in-out infinite; }
+
+    .lsh-grid { display:grid; grid-template-columns:1fr; gap:12px; }
+    .lsh-project { display:flex; flex-direction:column; gap:10px; padding:14px; border-radius:18px;
+      background:rgba(250,250,249,0.95); border:1px solid rgba(231,229,228,0.92); }
+    .lsh-project--active { border-color:rgba(79,70,229,0.28); background:rgba(238,242,255,0.85); }
+    [data-color-mode="dark"] .lsh-project { background:rgba(31,41,55,0.9); border-color:rgba(75,85,99,0.88); }
+    [data-color-mode="dark"] .lsh-project--active { background:rgba(49,46,129,0.32); border-color:rgba(129,140,248,0.44); }
+
+    .lsh-project-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+    .lsh-project-name { margin:0; font-size:16px; font-weight:700; }
+    .lsh-project-meta { font-size:12px; color:#78716c; white-space:nowrap; }
+    [data-color-mode="dark"] .lsh-project-meta { color:#a8a29e; }
+
+    .lsh-task-list { display:flex; flex-direction:column; gap:8px; }
+    .lsh-task { display:flex; align-items:center; gap:10px; font-size:13px; color:#292524; }
+    [data-color-mode="dark"] .lsh-task { color:#f5f5f4; }
+    .lsh-task-dot { width:8px; height:8px; border-radius:999px; background:#0d9488; flex-shrink:0; }
+    .lsh-task-dot--done { background:#a8a29e; }
+    .lsh-task-id { min-width:28px; font-variant-numeric:tabular-nums; color:#78716c; font-size:12px; }
+    [data-color-mode="dark"] .lsh-task-id { color:#a8a29e; }
+
+    .lsh-footer { font-size:12px; color:#78716c; display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:4px; }
+    [data-color-mode="dark"] .lsh-footer { color:#a8a29e; }
+
+    /* 无快照时的增强 shimmer 占位 */
+    .lsh-placeholder { height:18px; border-radius:999px;
+      background:linear-gradient(90deg,rgba(231,229,228,0.7),rgba(245,245,244,1),rgba(231,229,228,0.7));
+      background-size:240% 100%; animation:lsh-shimmer 1.6s linear infinite; }
+    [data-color-mode="dark"] .lsh-placeholder {
+      background:linear-gradient(90deg,rgba(55,65,81,0.85),rgba(75,85,99,1),rgba(55,65,81,0.85));
+      background-size:240% 100%; }
+    .lsh-placeholder--short { width:42%; }
+    .lsh-placeholder--medium { width:64%; }
   </style>
   <!-- PWA manifest 注入保留在 <head>（Chrome 安装检测必须） -->
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
@@ -385,45 +474,160 @@
     window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
   </script>
-  <!-- 初始加载指示器 - 增强版骨架屏（P1 优化 2026-01-26） -->
+  <!-- 初始加载指示器 — 快照感知型 (P0 2026-03-25) -->
+  <!-- 策略：如果 localStorage 里有上一次启动快照，则直接渲染项目摘要；
+       否则退回到 shimmer 骨架。Angular 启动后无缝切换到 LaunchShellComponent。 -->
   <div id="initial-loader">
-    <!-- 模拟真实 UI 布局的骨架屏 -->
-    <div class="skeleton-layout">
-      <!-- 顶部导航栏骨架 -->
-      <div class="skeleton-nav">
-        <div class="skeleton-shimmer" style="width:120px;height:28px;border-radius:6px;"></div>
-        <div class="skeleton-shimmer" style="width:200px;height:36px;border-radius:6px;margin-left:auto;"></div>
-        <div class="skeleton-shimmer" style="width:36px;height:36px;border-radius:50%;margin-left:1rem;"></div>
-      </div>
-      
-      <!-- 侧边栏骨架 -->
-      <div class="skeleton-sidebar">
-        <div class="skeleton-shimmer" style="width:100%;height:40px;border-radius:8px;margin-bottom:1rem;"></div>
-        <div class="skeleton-shimmer" style="width:85%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
-        <div class="skeleton-shimmer" style="width:65%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
-        <div class="skeleton-shimmer" style="width:75%;height:24px;border-radius:4px;margin-bottom:1.5rem;"></div>
-        <div class="skeleton-shimmer" style="width:50%;height:20px;border-radius:4px;margin-bottom:0.5rem;opacity:0.6;"></div>
-        <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;margin-bottom:0.5rem;"></div>
-        <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;"></div>
-      </div>
-      
-      <!-- 主内容区骨架 -->
-      <div class="skeleton-main">
-        <div class="skeleton-shimmer" style="width:250px;height:32px;border-radius:6px;margin-bottom:1.5rem;"></div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
-          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
-          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
-          <div class="skeleton-shimmer" style="height:180px;border-radius:12px;opacity:0.7;"></div>
+
+    <!-- ═══ 分支 A：快照壳（优先，由下方内联脚本激活）═══ -->
+    <div id="snapshot-shell">
+      <section class="lsh">
+        <div class="lsh-panel">
+          <div class="lsh-eyebrow"><span class="lsh-dot"></span><span>NanoFlow</span></div>
+          <div>
+            <h1 class="lsh-title">正在恢复你的工作区</h1>
+            <p class="lsh-subtitle">启动壳已先行显示，真实工作区会在后台完成接管。</p>
+          </div>
+          <div class="lsh-status"><span class="lsh-pulse-dot"></span><span>启动壳已就绪</span></div>
+          <div id="snapshot-projects" class="lsh-grid">
+            <!-- 由内联脚本填充；若无快照则显示占位 shimmer -->
+            <div class="lsh-placeholder lsh-placeholder--short"></div>
+            <div class="lsh-placeholder"></div>
+            <div class="lsh-placeholder lsh-placeholder--medium"></div>
+            <div class="lsh-placeholder"></div>
+          </div>
+          <div class="lsh-footer">
+            <span id="snapshot-view-label">视图：待恢复</span>
+            <span id="snapshot-saved-label">首次启动</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ 分支 B：传统 shimmer 骨架屏（当快照不可用时保留可见）═══ -->
+    <div id="shimmer-skeleton" style="display:none;">
+      <div class="skeleton-layout">
+        <div class="skeleton-nav">
+          <div class="skeleton-shimmer" style="width:120px;height:28px;border-radius:6px;"></div>
+          <div class="skeleton-shimmer" style="width:200px;height:36px;border-radius:6px;margin-left:auto;"></div>
+          <div class="skeleton-shimmer" style="width:36px;height:36px;border-radius:50%;margin-left:1rem;"></div>
+        </div>
+        <div class="skeleton-sidebar">
+          <div class="skeleton-shimmer" style="width:100%;height:40px;border-radius:8px;margin-bottom:1rem;"></div>
+          <div class="skeleton-shimmer" style="width:85%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
+          <div class="skeleton-shimmer" style="width:65%;height:24px;border-radius:4px;margin-bottom:0.75rem;"></div>
+          <div class="skeleton-shimmer" style="width:75%;height:24px;border-radius:4px;margin-bottom:1.5rem;"></div>
+          <div class="skeleton-shimmer" style="width:50%;height:20px;border-radius:4px;margin-bottom:0.5rem;opacity:0.6;"></div>
+          <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;margin-bottom:0.5rem;"></div>
+          <div class="skeleton-shimmer" style="width:90%;height:32px;border-radius:6px;"></div>
+        </div>
+        <div class="skeleton-main">
+          <div class="skeleton-shimmer" style="width:250px;height:32px;border-radius:6px;margin-bottom:1.5rem;"></div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
+            <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
+            <div class="skeleton-shimmer" style="height:180px;border-radius:12px;"></div>
+            <div class="skeleton-shimmer" style="height:180px;border-radius:12px;opacity:0.7;"></div>
+          </div>
         </div>
       </div>
-    </div>
-    
-    <!-- 加载状态提示 -->
-    <div class="skeleton-footer">
-      <div class="text">正在加载 NanoFlow...</div>
-      <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#9ca3af;"></div>
+      <div class="skeleton-footer">
+        <div class="text">正在加载 NanoFlow...</div>
+        <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#9ca3af;"></div>
+      </div>
     </div>
   </div>
+
+  <!-- ========== 内联快照渲染器 (P0 2026-03-25) ========== -->
+  <!-- 在 Angular 引导之前从 localStorage 读取启动快照并立即渲染项目摘要，
+       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。 -->
+  <script>
+    (function() {
+      try {
+        var raw = localStorage.getItem('nanoflow.launch-snapshot.v1');
+        if (!raw) return; /* 无快照：保留默认的 shimmer 占位即可，不切换到传统骨架 */
+        var snap = JSON.parse(raw);
+        if (!snap || snap.version !== 1 || !Array.isArray(snap.projects) || snap.projects.length === 0) return;
+
+        var container = document.getElementById('snapshot-projects');
+        if (!container) return;
+
+        /* 清空占位 shimmer */
+        container.innerHTML = '';
+
+        var max = Math.min(snap.projects.length, 4);
+        for (var i = 0; i < max; i++) {
+          var p = snap.projects[i];
+          if (!p || typeof p.name !== 'string') continue;
+
+          var card = document.createElement('article');
+          card.className = 'lsh-project' + (p.id === snap.activeProjectId ? ' lsh-project--active' : '');
+
+          var head = document.createElement('div');
+          head.className = 'lsh-project-head';
+
+          var nameEl = document.createElement('h2');
+          nameEl.className = 'lsh-project-name';
+          nameEl.textContent = p.name;
+          head.appendChild(nameEl);
+
+          var meta = document.createElement('span');
+          meta.className = 'lsh-project-meta';
+          meta.textContent = (p.openTaskCount || 0) + '/' + (p.taskCount || 0) + ' 待处理';
+          head.appendChild(meta);
+          card.appendChild(head);
+
+          /* 最近任务 */
+          if (Array.isArray(p.recentTasks) && p.recentTasks.length > 0) {
+            var taskList = document.createElement('div');
+            taskList.className = 'lsh-task-list';
+            for (var j = 0; j < Math.min(p.recentTasks.length, 3); j++) {
+              var t = p.recentTasks[j];
+              if (!t || typeof t.title !== 'string') continue;
+              var row = document.createElement('div');
+              row.className = 'lsh-task';
+
+              var dot = document.createElement('span');
+              dot.className = 'lsh-task-dot' + (t.status === 'completed' ? ' lsh-task-dot--done' : '');
+              row.appendChild(dot);
+
+              var tid = document.createElement('span');
+              tid.className = 'lsh-task-id';
+              tid.textContent = t.displayId || '';
+              row.appendChild(tid);
+
+              var ttl = document.createElement('span');
+              ttl.textContent = t.title;
+              row.appendChild(ttl);
+
+              taskList.appendChild(row);
+            }
+            card.appendChild(taskList);
+          }
+
+          container.appendChild(card);
+        }
+
+        /* 视图 / 时间标签 */
+        var viewEl = document.getElementById('snapshot-view-label');
+        if (viewEl) {
+          viewEl.textContent = '视图：' + (snap.lastActiveView === 'flow' ? '流程图' : snap.lastActiveView === 'text' ? '文本' : '待恢复');
+        }
+        var savedEl = document.getElementById('snapshot-saved-label');
+        if (savedEl && snap.savedAt) {
+          try {
+            var d = new Date(snap.savedAt);
+            savedEl.textContent = '最近快照：' + d.toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' });
+          } catch (e) { /* ignore */ }
+        }
+      } catch (e) {
+        /* localStorage / JSON 异常：退回到传统 shimmer 骨架 */
+        var shell = document.getElementById('snapshot-shell');
+        var shimmer = document.getElementById('shimmer-skeleton');
+        if (shell) shell.style.display = 'none';
+        if (shimmer) shimmer.className = 'active';
+      }
+    })();
+  </script>
 
   <!-- ========== 从 <head> 移出的阻塞脚本（P0-3 性能优化 2026-03-25）========== -->
   <!-- 目的：减少 <head> 阻塞脚本，让骨架屏 First Paint 更早触发 -->
@@ -610,65 +814,68 @@
   </noscript>
   
   <script>
-    // 简化加载检测 - Build v15
-    // console.log('[DEBUG v15] 检测脚本开始');
+    // 启动壳就绪检测 — 事件驱动 + 轮询双保险 (P0 2026-03-25)
     window.__DEBUG_LOG__.push({t: Date.now(), m: '检测脚本开始'});
     
     (function() {
       var startTime = Date.now();
-      var statusEl = document.getElementById('loader-status');
+      var dismissed = false;
       
-      var updateStatus = function(msg) {
-        if (statusEl) statusEl.textContent = msg;
-      };
+      function dismissLoader() {
+        if (dismissed) return;
+        dismissed = true;
+        var loader = document.getElementById('initial-loader');
+        if (loader && !loader.classList.contains('fade-out')) {
+          loader.classList.add('fade-out');
+          setTimeout(function() {
+            loader.style.display = 'none';
+            window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
+          }, 200);
+        }
+      }
+      
+      // 主路径：监听 BootStageService 发出的事件，0 延迟响应
+      window.addEventListener('nanoflow:boot-stage', function(e) {
+        var detail = e && e.detail;
+        if (detail && (detail.stage === 'launch-shell' || detail.stage === 'handoff' || detail.stage === 'ready')) {
+          dismissLoader();
+        }
+      });
+
+      // 兜底路径：轮询全局标记（防止事件漏收或时序问题）
+      var statusEl = document.getElementById('loader-status');
+      var updateStatus = function(msg) { if (statusEl) statusEl.textContent = msg; };
       
       var checkReady = function() {
-        var launchShellVisible = window.__NANOFLOW_LAUNCH_SHELL_VISIBLE__ === true;
-        var elapsed = Date.now() - startTime;
+        if (dismissed) return;
         
-        // 仅在启动壳真正可见后隐藏 loader，避免工作区尚未挂载时出现纯色空窗。
-        if (launchShellVisible) {
-          var loader = document.getElementById('initial-loader');
-          if (loader && !loader.classList.contains('fade-out')) {
-            loader.classList.add('fade-out');
-            setTimeout(function() {
-              loader.style.display = 'none';
-              window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
-            }, 250);
-          }
+        if (window.__NANOFLOW_LAUNCH_SHELL_VISIBLE__ === true) {
+          dismissLoader();
           return;
         }
         
-        // 更新加载状态提示 - 更早显示提示
-        if (elapsed > 3000) {
-          updateStatus('加载中，请稍候...');
-        }
-        if (elapsed > 6000) {
-          updateStatus('加载时间较长，可能是网络问题...');
-        }
+        var elapsed = Date.now() - startTime;
+        if (elapsed > 3000) updateStatus('加载中，请稍候...');
+        if (elapsed > 6000) updateStatus('加载时间较长，可能是网络问题...');
         
-        // 【优化】更频繁检查（50ms），尽快在启动壳可见后移除系统过渡层
         if (elapsed < 25000) {
-          setTimeout(checkReady, 50);
+          setTimeout(checkReady, 100);
         } else {
           // 超时 - 显示带缓存清理按钮的提示
           var loader = document.getElementById('initial-loader');
           if (loader) {
             loader.innerHTML = '<div style="text-align:center;padding:2rem;">' +
-              '<h2 style="color:#dc2626;">加载超时 (v15)</h2>' +
-              '<p style="color:#666;margin:1rem 0;">应用加载时间过长，可能是缓存问题</p>' +
-              '<p style="color:#999;font-size:12px;">Zoneless 模式</p>' +
+              '<h2 style="color:#dc2626;">加载超时</h2>' +
+              '<p style="color:#666;margin:1rem 0;">应用加载时间过长，可能是缓存问题导致。</p>' +
               '<div style="display:flex;gap:0.5rem;justify-content:center;margin-top:1rem;flex-wrap:wrap;">' +
               '<button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer;">刷新</button>' +
               '<button onclick="if(window.__NANOFLOW_FORCE_CLEAR_CACHE__)window.__NANOFLOW_FORCE_CLEAR_CACHE__();else{caches.keys().then(function(k){return Promise.all(k.map(function(n){return caches.delete(n)}))}).then(function(){location.reload()})}" style="padding:0.5rem 1rem;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;">清除缓存</button>' +
-              '</div>' +
-              '</div>';
+              '</div></div>';
           }
         }
       };
       
-      // 【优化】更早开始检测，50ms 后开始
-      setTimeout(checkReady, 50);
+      setTimeout(checkReady, 100);
     })();
   </script>
 </body>
