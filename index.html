@@ -126,42 +126,8 @@
     })();
   </script>
 
-  <!-- ========== 启动 Boot Flags（预加载阶段可读） ========== -->
-  <!-- 由 scripts/set-env.cjs 注入，支持灰度切换 -->
-  <script>
-    window.__NANOFLOW_BOOT_FLAGS__ = {
-      DISABLE_INDEX_DATA_PRELOAD_V1: true,
-      FONT_EXTREME_FIRSTPAINT_V1: true,
-      FLOW_STATE_AWARE_RESTORE_V2: true,
-      EVENT_DRIVEN_SYNC_PULSE_V1: true,
-      TAB_SYNC_LOCAL_REFRESH_V1: true,
-      STRICT_MODULEPRELOAD_V2: false,
-      ROOT_STARTUP_DEP_PRUNE_V1: true,
-      BOOT_SHELL_SPLIT_V1: true,
-      TIERED_STARTUP_HYDRATION_V1: true,
-      SUPABASE_DEFERRED_SDK_V1: true,
-      CONFIG_BARREL_PRUNE_V1: true,
-      SIDEBAR_TOOLS_DYNAMIC_LOAD_V1: true,
-      RESUME_INTERACTION_FIRST_V1: true,
-      RESUME_WATERMARK_RPC_V1: true,
-      RESUME_PULSE_DEDUP_V1: true,
-      ROUTE_GUARD_LAZY_IMPORT_V1: true,
-      WEB_VITALS_IDLE_BOOT_V2: true,
-      FONT_AGGRESSIVE_DEFER_V2: true,
-      SYNC_STATUS_DEFERRED_MOUNT_V1: true,
-      PWA_PROMPT_DEFER_V2: true,
-      RESUME_SESSION_SNAPSHOT_V1: true,
-      USER_PROJECTS_WATERMARK_RPC_V1: true,
-      RECOVERY_TICKET_DEDUP_V1: true,
-      BLACKBOX_WATERMARK_PROBE_V1: true,
-      WORKSPACE_SHELL_COMPOSITION_V3: true,
-      RESUME_COMPOSITE_PROBE_RPC_V1: true,
-      RESUME_METRICS_GATE_V1: true,
-    };
-  </script>
-
-  <!-- Supabase 预热 + 数据预加载 + 调试日志脚本已移至 <body> 骨架屏之后（P0-2 性能优化 2026-03-24） -->
-  <!-- 目的：让骨架屏 HTML 更快到达浏览器，减少 head 解析阻塞 -->
+  <!-- Boot Flags + 预热脚本已移至 <body> 骨架屏之后（P0-3 性能优化 2026-03-25） -->
+  <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
 
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
@@ -399,18 +365,7 @@
     /* 非首屏样式已迁移到 src/styles.css（P0 性能优化 2026-03-24） */
     /* 包括：滚动条、color-scheme、触摸交互、fisheye、task-card、flow-bg */
   </style>
-  <!-- 注意: importmap 已移除，Angular CLI 构建使用 npm 依赖 -->
-  <!-- PWA manifest: Codespaces 代理会拦截 manifest 请求并重定向到 github.dev/pf-signin，
-       其自身 CSP 不允许裸域 https://github.dev，导致 manifest 加载失败。
-       改用脚本动态注入，在 Codespaces 环境中跳过 manifest 加载。 -->
-  <script>
-    if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
-      var link = document.createElement('link');
-      link.rel = 'manifest';
-      link.href = 'manifest.webmanifest';
-      document.head.appendChild(link);
-    }
-  </script>
+  <!-- PWA manifest 动态注入已移至 <body>（P0-3 性能优化 2026-03-25） -->
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
@@ -458,6 +413,52 @@
       <div id="loader-status" style="margin-top:0.5rem;font-size:12px;color:#9ca3af;"></div>
     </div>
   </div>
+
+  <!-- ========== 从 <head> 移出的阻塞脚本（P0-3 性能优化 2026-03-25）========== -->
+  <!-- 目的：减少 <head> 阻塞脚本，让骨架屏 First Paint 更早触发 -->
+
+  <!-- Boot Flags：灰度开关（从 <head> 移至此处，仍在 main.js 之前执行） -->
+  <script>
+    window.__NANOFLOW_BOOT_FLAGS__ = {
+      DISABLE_INDEX_DATA_PRELOAD_V1: true,
+      FONT_EXTREME_FIRSTPAINT_V1: true,
+      FLOW_STATE_AWARE_RESTORE_V2: true,
+      EVENT_DRIVEN_SYNC_PULSE_V1: true,
+      TAB_SYNC_LOCAL_REFRESH_V1: true,
+      STRICT_MODULEPRELOAD_V2: false,
+      ROOT_STARTUP_DEP_PRUNE_V1: true,
+      BOOT_SHELL_SPLIT_V1: true,
+      TIERED_STARTUP_HYDRATION_V1: true,
+      SUPABASE_DEFERRED_SDK_V1: true,
+      CONFIG_BARREL_PRUNE_V1: true,
+      SIDEBAR_TOOLS_DYNAMIC_LOAD_V1: true,
+      RESUME_INTERACTION_FIRST_V1: true,
+      RESUME_WATERMARK_RPC_V1: true,
+      RESUME_PULSE_DEDUP_V1: true,
+      ROUTE_GUARD_LAZY_IMPORT_V1: true,
+      WEB_VITALS_IDLE_BOOT_V2: true,
+      FONT_AGGRESSIVE_DEFER_V2: true,
+      SYNC_STATUS_DEFERRED_MOUNT_V1: true,
+      PWA_PROMPT_DEFER_V2: true,
+      RESUME_SESSION_SNAPSHOT_V1: true,
+      USER_PROJECTS_WATERMARK_RPC_V1: true,
+      RECOVERY_TICKET_DEDUP_V1: true,
+      BLACKBOX_WATERMARK_PROBE_V1: true,
+      WORKSPACE_SHELL_COMPOSITION_V3: true,
+      RESUME_COMPOSITE_PROBE_RPC_V1: true,
+      RESUME_METRICS_GATE_V1: true,
+    };
+  </script>
+
+  <!-- PWA manifest 动态注入（从 <head> 移至此处，非渲染关键） -->
+  <script>
+    if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
+      var link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = 'manifest.webmanifest';
+      document.head.appendChild(link);
+    }
+  </script>
 
   <!-- ========== 性能优化：预热脚本（P0-2 从 <head> 移至骨架屏之后 2026-03-24）========== -->
   <!-- 目的：骨架屏 HTML 优先到达浏览器渲染，预热脚本在骨架屏绘制后执行 -->
