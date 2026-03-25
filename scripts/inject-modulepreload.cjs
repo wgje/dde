@@ -47,6 +47,7 @@ const EXCLUDED_CONTENT_MARKERS = [
   'supabase',                // Supabase 通用标记
   'WorkspaceShellComponent', // 启动壳优先：重型工作区路由块改为运行时预热
   'ProjectShellComponent',   // 启动壳优先：项目壳层块不参与首波 modulepreload
+  'FocusModeComponent',      // 专注模式是 @defer 懒加载，不需要首屏 preload
 ];
 
 function readBuiltHtml() {
@@ -159,14 +160,16 @@ function selectCriticalChunks(chunks, maxCount) {
   return candidates.slice(0, maxCount).map((c) => c.file);
 }
 
-function injectModulePreloads(html, modules) {
-  if (modules.length === 0) return html;
-  const links = modules
+function injectModulePreloads(html, modules, mainFile) {
+  if (modules.length === 0 && !mainFile) return html;
+  const allModules = mainFile ? [mainFile, ...modules] : modules;
+  const links = allModules
     .map((moduleName) => `<link rel="modulepreload" href="/${moduleName}">`)
     .join('\n  ');
 
   const snippet = `
   <!-- critical-path modulepreload (auto-generated, eliminates chunk waterfall) -->
+  <!-- 含 main entry + 关键 chunk，让浏览器在 HTML 解析初期即并行下载 -->
   ${links}
 `;
 
@@ -197,12 +200,16 @@ function main() {
 
   const allChunks = traceCriticalChunks(mainFile, 3);
   const selected = selectCriticalChunks(allChunks, MAX_CRITICAL_PRELOADS);
-  const nextHtml = injectModulePreloads(cleanedHtml, selected);
+  // 【P0 性能优化 2026-03-25】将 main entry 也加入 modulepreload，
+  // 让浏览器在解析 <head> 时即开始下载 main.js，而非等到解析到 <body> 末尾的 <script>。
+  // 对 43.5KB HTML 在手机上可节省 ~200-500ms。
+  const nextHtml = injectModulePreloads(cleanedHtml, selected, mainFile);
   fs.writeFileSync(INDEX_HTML, nextHtml);
 
   console.log(
-    `[inject-modulepreload] 关键路径模式：移除 ${removedCount} 条原始 preload，注入 ${selected.length} 条关键路径 preload`
+    `[inject-modulepreload] 关键路径模式：移除 ${removedCount} 条原始 preload，注入 ${selected.length + 1} 条关键路径 preload（含 main entry）`
   );
+  console.log(`  - ${mainFile} (${Math.round(fs.statSync(path.join(DIST_DIR, mainFile)).size / 1024)}KB) [entry]`);
   selected.forEach((f) => {
     const size = Math.round(fs.statSync(path.join(DIST_DIR, f)).size / 1024);
     console.log(`  - ${f} (${size}KB)`);

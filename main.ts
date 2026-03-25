@@ -2,20 +2,18 @@ import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, APP_INITIALIZER, provideExperimentalZonelessChangeDetection } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
-// ============= Sentry SDK 懒加载优化 =============
-// 【性能优化 2026-02-01】Sentry 懒加载以消除 320ms 首屏阻塞
-// 
-// 优化策略：
-// 1. 移除同步 Sentry.init()，改为 SentryLazyLoaderService 异步初始化
-// 2. 使用 requestIdleCallback 在浏览器空闲时加载
-// 3. 错误队列机制确保初始化前的错误不丢失
-// 
-// 预期收益：Render Delay -200~300ms，LCP 显著改善
-// ============= Sentry 懒加载（非阻塞初始化）=============
-// 【性能优化 2026-02-01】Sentry SDK 现由 SentryLazyLoaderService 管理
-// - 首屏渲染完成后通过 requestIdleCallback 异步初始化
-// - 初始化前的错误会被队列缓存，初始化后自动发送
-// - 详见 src/services/sentry-lazy-loader.service.ts
+// ============= 【P0 性能优化 2026-03-25】关键模块静态导入 =============
+// 原方案：main.ts 用 dynamic import() 延迟加载 4 个关键模块（AppComponent / routes /
+//   GlobalErrorHandler / SentryLazyLoaderService），以缩小 main.js 体积（8.7KB）。
+// 问题：dynamic import 的目标及其传递依赖没有 <link rel="modulepreload">，
+//   在手机 PWA 上形成多级串行下载瀑布，导致 FCP 延迟 3-4 秒。
+// 新方案：改为静态 import，构建器将自动为整棵依赖树生成 modulepreload 提示，
+//   浏览器从第一时间并行下载所有必需 chunk，消除瀑布流。
+// Supabase SDK 仍保持 dynamic import（~50KB，首屏不需要）。
+import { AppComponent } from './src/app.component';
+import { routes } from './src/app.routes';
+import { GlobalErrorHandler } from './src/services/global-error-handler.service';
+import { SentryLazyLoaderService } from './src/services/sentry-lazy-loader.service';
 
 // 简化日志 - 仅在显式 verbose 时输出，避免启动期控制台噪音
 const VERBOSE_LOGS = isDevMode() && localStorage.getItem('nanoflow.verbose') === 'true';
@@ -222,29 +220,16 @@ const supabaseSdkPrewarm = import('@supabase/supabase-js').catch(() => null);
 async function startApplication() {
   log('🏗️ 准备启动 Angular...');
   
-  // 3. 添加启动超时保护（15秒）
+  // 添加启动超时保护（15秒）
   const startupTimeout = setTimeout(() => {
     logError('Angular 启动超时！');
     showStartupError('启动超时', '应用启动时间过长，可能是缓存问题导致。', new Error('Startup timeout'));
   }, 15000);
   
   try {
-    const [
-      appComponentModule,
-      appRoutesModule,
-      globalErrorHandlerModule,
-      sentryLoaderModule
-    ] = await Promise.all([
-      import('./src/app.component'),
-      import('./src/app.routes'),
-      import('./src/services/global-error-handler.service'),
-      import('./src/services/sentry-lazy-loader.service'),
-      supabaseSdkPrewarm, // 并行预热 Supabase SDK
-    ]);
-    const AppComponent = appComponentModule.AppComponent;
-    const routes = appRoutesModule.routes;
-    const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
-    const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
+    // 【P0 性能优化 2026-03-25】关键模块已改为顶层静态 import，
+    // 此处仅需等待 Supabase SDK 预热（非阻塞，不影响 bootstrap 速度）。
+    // supabaseSdkPrewarm 在 import 语句后立即启动，与模块加载并行。
 
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
