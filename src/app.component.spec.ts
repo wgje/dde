@@ -94,16 +94,13 @@ describe('AppComponent (Launch Shell)', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeTruthy();
   });
 
-  it('should keep launch shell visible until both workspace handoff and styles are ready', async () => {
+  it('should hide launch shell when workspace handoff is ready', async () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
     await fixture.whenStable();
 
+    // styles.css 已恢复到静态构建，showLaunchShell 仅依赖 handoff
     handoffReady.set(true);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeTruthy();
-
-    stylesReady.set(true);
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();

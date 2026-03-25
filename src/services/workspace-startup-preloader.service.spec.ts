@@ -7,9 +7,8 @@ import {
 } from './workspace-startup-preloader.service';
 
 describe('WorkspaceStartupPreloaderService', () => {
-  it('should preload styles and route shells only once', async () => {
+  it('should preload route shells only once', async () => {
     const loader: WorkspaceStartupAssetLoader = {
-      loadWorkspaceStyles: vi.fn().mockResolvedValue(undefined),
       preloadWorkspaceShell: vi.fn().mockResolvedValue(undefined),
       preloadProjectShell: vi.fn().mockResolvedValue(undefined),
     };
@@ -23,13 +22,13 @@ describe('WorkspaceStartupPreloaderService', () => {
     const service = injector.get(WorkspaceStartupPreloaderService);
 
     service.start();
-    await Promise.all([service.preloadWorkspaceStyles(), service.preloadRouteShells()]);
+    await service.preloadRouteShells();
     service.start();
-    await Promise.all([service.preloadWorkspaceStyles(), service.preloadRouteShells()]);
+    await service.preloadRouteShells();
 
-    expect(loader.loadWorkspaceStyles).toHaveBeenCalledTimes(1);
     expect(loader.preloadWorkspaceShell).toHaveBeenCalledTimes(1);
     expect(loader.preloadProjectShell).toHaveBeenCalledTimes(1);
+    // styles.css 已恢复到静态构建，workspaceStylesReady 始终为 true
     expect(service.workspaceStylesReady()).toBe(true);
     expect(service.routeShellsReady()).toBe(true);
   });

@@ -1,7 +1,6 @@
 import { Inject, Injectable, InjectionToken, signal } from '@angular/core';
 
 export interface WorkspaceStartupAssetLoader {
-  loadWorkspaceStyles: () => Promise<unknown>;
   preloadWorkspaceShell: () => Promise<unknown>;
   preloadProjectShell: () => Promise<unknown>;
 }
@@ -11,7 +10,6 @@ export const WORKSPACE_STARTUP_ASSET_LOADER = new InjectionToken<WorkspaceStartu
   {
     providedIn: 'root',
     factory: () => ({
-      loadWorkspaceStyles: () => import('../styles.css'),
       preloadWorkspaceShell: () => import('../workspace-shell.component'),
       preloadProjectShell: () => import('../app/core/shell/project-shell.component'),
     }),
@@ -22,11 +20,11 @@ export const WORKSPACE_STARTUP_ASSET_LOADER = new InjectionToken<WorkspaceStartu
   providedIn: 'root',
 })
 export class WorkspaceStartupPreloaderService {
-  private stylesPromise: Promise<void> | null = null;
   private routeShellsPromise: Promise<void> | null = null;
   private started = false;
 
-  readonly workspaceStylesReady = signal(false);
+  /** @deprecated styles.css 已恢复到静态构建，此信号始终为 true。保留以兼容引用。 */
+  readonly workspaceStylesReady = signal(true);
   readonly routeShellsReady = signal(false);
 
   constructor(
@@ -40,31 +38,12 @@ export class WorkspaceStartupPreloaderService {
     }
 
     this.started = true;
-    void this.preloadWorkspaceStyles();
     void this.preloadRouteShells();
   }
 
+  /** @deprecated styles.css 已静态打包，无需预加载。保留以兼容调用方。 */
   preloadWorkspaceStyles(): Promise<void> {
-    if (this.workspaceStylesReady()) {
-      return Promise.resolve();
-    }
-
-    if (this.stylesPromise) {
-      return this.stylesPromise;
-    }
-
-    this.stylesPromise = this.assetLoader.loadWorkspaceStyles()
-      .then(() => {
-        this.workspaceStylesReady.set(true);
-      })
-      .catch(() => {
-        this.workspaceStylesReady.set(true);
-      })
-      .finally(() => {
-        this.stylesPromise = null;
-      });
-
-    return this.stylesPromise;
+    return Promise.resolve();
   }
 
   preloadRouteShells(): Promise<void> {

@@ -61,11 +61,11 @@ export class AppComponent {
   private readonly workspaceStartupPreloader = inject(WorkspaceStartupPreloaderService);
 
   readonly launchSnapshot = signal<LaunchSnapshot | null>(this.launchSnapshotService.read());
-  readonly showLaunchShell = computed(() =>
-    !this.bootStage.isWorkspaceHandoffReady() || !this.workspaceStartupPreloader.workspaceStylesReady()
-  );
+  // styles.css 已恢复到 angular.json 静态构建，不再依赖动态加载信号
+  readonly showLaunchShell = computed(() => !this.bootStage.isWorkspaceHandoffReady());
 
   constructor() {
+    // 预热路由壳组件，减少首次路由加载延迟
     this.workspaceStartupPreloader.start();
 
     afterNextRender(() => {
@@ -74,10 +74,9 @@ export class AppComponent {
 
     effect(() => {
       const workspaceReady = this.bootStage.isWorkspaceHandoffReady();
-      const stylesReady = this.workspaceStartupPreloader.workspaceStylesReady();
       const appReady = this.bootStage.isApplicationReady();
 
-      if (workspaceReady && stylesReady && !appReady) {
+      if (workspaceReady && !appReady) {
         this.bootStage.markApplicationReady();
       }
     });
