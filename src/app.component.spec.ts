@@ -38,6 +38,7 @@ describe('AppComponent (Launch Shell)', () => {
     isApplicationReady: ReturnType<typeof computed<boolean>>;
     markLaunchShellVisible: ReturnType<typeof vi.fn>;
     markApplicationReady: ReturnType<typeof vi.fn>;
+    noteLoaderHidden: ReturnType<typeof vi.fn>;
   };
   let launchSnapshotServiceMock: {
     read: ReturnType<typeof vi.fn>;
@@ -45,9 +46,14 @@ describe('AppComponent (Launch Shell)', () => {
   let workspaceStartupPreloaderMock: {
     workspaceStylesReady: ReturnType<typeof computed<boolean>>;
     start: ReturnType<typeof vi.fn>;
+    scheduleProjectShellPreload: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
+    // 确保 BOOT_SHELL_SPLIT_V1 开启以测试 launch shell 行为
+    (window as Window & { __NANOFLOW_BOOT_FLAGS__?: Record<string, unknown> }).__NANOFLOW_BOOT_FLAGS__ = {
+      BOOT_SHELL_SPLIT_V1: true,
+    };
     handoffReady = signal(false);
     appReady = signal(false);
     stylesReady = signal(false);
@@ -62,6 +68,7 @@ describe('AppComponent (Launch Shell)', () => {
       isApplicationReady: computed(() => appReady()),
       markLaunchShellVisible: vi.fn(),
       markApplicationReady: vi.fn(() => appReady.set(true)),
+      noteLoaderHidden: vi.fn(),
     };
 
     launchSnapshotServiceMock = {
@@ -71,6 +78,7 @@ describe('AppComponent (Launch Shell)', () => {
     workspaceStartupPreloaderMock = {
       workspaceStylesReady: computed(() => stylesReady()),
       start: vi.fn(),
+      scheduleProjectShellPreload: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -92,6 +100,18 @@ describe('AppComponent (Launch Shell)', () => {
     expect(workspaceStartupPreloaderMock.start).toHaveBeenCalledTimes(1);
     expect(launchSnapshotServiceMock.read).toHaveBeenCalledTimes(1);
     expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeTruthy();
+  });
+
+  it('should trigger project shell preload after loader hidden', async () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
+
+    expect(bootStageMock.noteLoaderHidden).toHaveBeenCalledTimes(1);
+    expect(workspaceStartupPreloaderMock.scheduleProjectShellPreload).toHaveBeenCalledTimes(1);
   });
 
   it('should hide launch shell when workspace handoff is ready', async () => {

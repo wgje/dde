@@ -130,7 +130,10 @@
   <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
 
   <!-- PWA manifest: 必须保留在 <head> 中，Chrome 安装检测依赖 <head> 内的 <link rel="manifest">。
-       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。 -->
+       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。
+       已知限制：manifest.webmanifest 的 theme_color/background_color 不支持
+       prefers-color-scheme media query（Web 标准限制）。当前使用浅色 #f5f5f4，
+       深色模式设备的系统 splash 可能与应用内深色背景不一致。 -->
   <script>
     if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
       var link = document.createElement('link');
@@ -470,10 +473,6 @@
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 h-screen w-screen overflow-hidden">
-  <script>
-    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
-    window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
-  </script>
   <!-- 初始加载指示器 — 快照感知型 (P0 2026-03-25) -->
   <!-- 策略：如果 localStorage 里有上一次启动快照，则直接渲染项目摘要；
        否则退回到 shimmer 骨架。Angular 启动后无缝切换到 LaunchShellComponent。 -->
@@ -539,7 +538,11 @@
 
   <!-- ========== 内联快照渲染器 (P0 2026-03-25) ========== -->
   <!-- 在 Angular 引导之前从 localStorage 读取启动快照并立即渲染项目摘要，
-       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。 -->
+       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。
+       同源声明：本段 HTML/CSS（.lsh-* 前缀）是 LaunchShellComponent
+       （src/launch-shell.component.ts, .launch-shell__* 前缀）的纯 HTML 镜像。
+       二者的视觉语言、布局结构和数据格式必须保持一致。
+       若修改任一方，请同步更新另一方。 -->
   <script>
     (function() {
       try {
@@ -667,104 +670,134 @@
 
   <!-- ========== 性能优化：预热脚本（P0-2 从 <head> 移至骨架屏之后 2026-03-24）========== -->
 
-  <!-- 调试日志收集器 -->
-  <script>
-    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
-    window.__DEBUG_LOG__.push({t: Date.now(), m: '预热脚本开始'});
-  </script>
-
-  <!-- Supabase 会话预热：在骨架屏渲染后立即发起 token 刷新 -->
+  <!-- 启动壳优先：会话预热与数据预加载延后到 launch-shell/boot 完成后再 idle 执行 -->
   <script>
     (function() {
-      window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };
+      window.__NANOFLOW_SESSION_PREWARM__ = window.__NANOFLOW_SESSION_PREWARM__ || { status: 'idle' };
+      window.__PRELOADED_DATA__ = window.__PRELOADED_DATA__ || { serverTime: null, projects: null, timestamp: Date.now() };
 
-      var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
-      var SUPABASE_URL = 'YOUR_SUPABASE_URL';
-      var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+      var hasScheduled = false;
+      var hasExecuted = false;
+      var fallbackTimer = null;
 
-      if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
-      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
-
-      try {
-        var raw = localStorage.getItem(AUTH_KEY);
-        if (!raw) return;
-        var authData = JSON.parse(raw);
-        var refreshToken = null;
-        if (authData && authData.refresh_token) {
-          refreshToken = authData.refresh_token;
-        } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
-          refreshToken = authData.currentSession.refresh_token;
+      var cleanup = function() {
+        window.removeEventListener('nanoflow:boot-stage', handleBootStage);
+        window.removeEventListener('nanoflow:bootstrap-complete', handleBootReady);
+        if (fallbackTimer !== null) {
+          clearTimeout(fallbackTimer);
+          fallbackTimer = null;
         }
-        if (!refreshToken || typeof refreshToken !== 'string') return;
+      };
 
-        var expiresAt = null;
-        if (authData.expires_at) expiresAt = authData.expires_at;
-        else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
+      var scheduleDeferredStartup = function() {
+        if (hasScheduled) return;
+        hasScheduled = true;
 
-        if (typeof expiresAt === 'number') {
-          if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
-          if (expiresAt > Date.now() + 600000) return;
-        }
+        var runDeferredStartup = function() {
+          if (hasExecuted) return;
+          hasExecuted = true;
+          startSessionPrewarm();
+          startDataPreload();
+        };
 
-        window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
-
-        fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-          method: 'POST',
-          headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh_token: refreshToken })
-        }).then(function(resp) {
-          if (!resp.ok) { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; return; }
-          return resp.json();
-        }).then(function(data) {
-          if (!data || !data.access_token) return;
-          var newSession = {
-            access_token: data.access_token,
-            refresh_token: data.refresh_token || refreshToken,
-            expires_in: data.expires_in,
-            expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-            token_type: data.token_type || 'bearer',
-            user: data.user || (authData && authData.user) || null
-          };
-          try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
-          window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
-        }).catch(function() { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; });
-      } catch (e) {}
-    })();
-  </script>
-
-  <!-- 数据预加载（默认禁用，仅结构初始化） -->
-  <script>
-    (function() {
-      window.__PRELOADED_DATA__ = { serverTime: null, projects: null, timestamp: Date.now() };
-      var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
-      var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
-        ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 : true;
-      window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
-      if (disableIndexPreload) return;
-
-      var nav = navigator || {};
-      var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
-      var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
-      var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
-      var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
-      var saveData = !!(connection && connection.saveData);
-      var isConstrainedNetwork = saveData || effectiveType === '2g' || effectiveType === 'slow-2g' ||
-        (downlink > 0 && downlink < 1.5) || rtt > 280;
-      if (isConstrainedNetwork) return;
-
-      var runWhenIdle = function(task) {
         if (typeof requestIdleCallback === 'function') {
-          requestIdleCallback(function(deadline) {
-            if (deadline.didTimeout || deadline.timeRemaining() > 8) { task(); }
-            else { setTimeout(task, 0); }
+          requestIdleCallback(function() {
+            runDeferredStartup();
           }, { timeout: 2000 });
           return;
         }
-        setTimeout(task, 1200);
+
+        setTimeout(runDeferredStartup, 250);
       };
 
-      runWhenIdle(function() {
+      var handleBootReady = function() {
+        cleanup();
+        scheduleDeferredStartup();
+      };
+
+      var handleBootStage = function(event) {
+        var detail = event && event.detail;
+        if (detail && (detail.stage === 'launch-shell' || detail.stage === 'handoff' || detail.stage === 'ready')) {
+          handleBootReady();
+        }
+      };
+
+      window.addEventListener('nanoflow:boot-stage', handleBootStage);
+      window.addEventListener('nanoflow:bootstrap-complete', handleBootReady, { once: true });
+      fallbackTimer = setTimeout(handleBootReady, 4000);
+
+      function startSessionPrewarm() {
+        var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
+        var SUPABASE_URL = 'YOUR_SUPABASE_URL';
+        var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+        if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
+        if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
+
+        try {
+          var raw = localStorage.getItem(AUTH_KEY);
+          if (!raw) return;
+          var authData = JSON.parse(raw);
+          var refreshToken = null;
+          if (authData && authData.refresh_token) {
+            refreshToken = authData.refresh_token;
+          } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
+            refreshToken = authData.currentSession.refresh_token;
+          }
+          if (!refreshToken || typeof refreshToken !== 'string') return;
+
+          var expiresAt = null;
+          if (authData.expires_at) expiresAt = authData.expires_at;
+          else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
+
+          if (typeof expiresAt === 'number') {
+            if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
+            if (expiresAt > Date.now() + 600000) return;
+          }
+
+          window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
+
+          fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+            method: 'POST',
+            headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: refreshToken })
+          }).then(function(resp) {
+            if (!resp.ok) { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; return; }
+            return resp.json();
+          }).then(function(data) {
+            if (!data || !data.access_token) return;
+            var newSession = {
+              access_token: data.access_token,
+              refresh_token: data.refresh_token || refreshToken,
+              expires_in: data.expires_in,
+              expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+              token_type: data.token_type || 'bearer',
+              user: data.user || (authData && authData.user) || null
+            };
+            try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
+            window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
+            window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
+          }).catch(function() { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; });
+        } catch (e) {}
+      }
+
+      function startDataPreload() {
+        var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
+        var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
+          ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 : true;
+        window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
+        if (disableIndexPreload) return;
+
+        var nav = navigator || {};
+        var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+        var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
+        var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
+        var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
+        var saveData = !!(connection && connection.saveData);
+        var isConstrainedNetwork = saveData || effectiveType === '2g' || effectiveType === 'slow-2g' ||
+          (downlink > 0 && downlink < 1.5) || rtt > 280;
+        if (isConstrainedNetwork) return;
+
         var authToken = null;
         var tokenExpiresAt = null;
         try {
@@ -788,6 +821,8 @@
           if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
         } else { return; }
 
+        window.__PRELOADED_DATA__.timestamp = Date.now();
+
         var supabaseUrl = 'YOUR_SUPABASE_URL';
         var supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
         var headers = { 'apikey': supabaseAnonKey, 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' };
@@ -800,7 +835,7 @@
           .then(function(r) { if (!r.ok) return null; return r.json(); })
           .then(function(data) { if (data && window.__PRELOADED_DATA__) { window.__PRELOADED_DATA__.projects = data; } })
           .catch(function() {});
-      });
+      }
     })();
   </script>
 
@@ -815,8 +850,6 @@
   
   <script>
     // 启动壳就绪检测 — 事件驱动 + 轮询双保险 (P0 2026-03-25)
-    window.__DEBUG_LOG__.push({t: Date.now(), m: '检测脚本开始'});
-    
     (function() {
       var startTime = Date.now();
       var dismissed = false;

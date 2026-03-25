@@ -1,5 +1,5 @@
 import { bootstrapApplication } from '@angular/platform-browser';
-import { isDevMode, ErrorHandler, VERSION, APP_INITIALIZER, provideExperimentalZonelessChangeDetection } from '@angular/core';
+import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
 // ============= Sentry SDK 懒加载优化 =============
@@ -162,8 +162,13 @@ log('Angular 版本: ' + VERSION.full);
 log('当前 URL: ' + window.location.href);
 log('User Agent: ' + navigator.userAgent.substring(0, 80) + '...');
 
-// 【Zoneless 迁移 2026-03-24】Zone.js 已移除，使用 provideZonelessChangeDetection
-log('Zoneless 模式: ✅ 已启用（Angular Signals 驱动变更检测）');
+// 检查 Zone.js 是否已加载
+const zoneLoaded = typeof (window as Window & { Zone?: unknown }).Zone !== 'undefined';
+log('Zone.js: ' + (zoneLoaded ? '✅已加载' : '❌未加载'));
+
+if (!zoneLoaded) {
+  logError('Zone.js 未加载！Angular 无法工作！');
+}
 
 // 检测浏览器能力
 const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -211,12 +216,57 @@ window.addEventListener('unhandledrejection', (event) => {
   logError('未处理的 Promise 拒绝', event.reason);
 });
 
-// ========== 【性能优化 2026-03-23】Supabase SDK 预热 ==========
-// 在 Angular 启动前立即开始下载 Supabase JS SDK（~50KB 压缩）。
-// 原始流程：Angular bootstrap → Router → AuthGuard → AuthService.checkSession()
-//   → SupabaseClientService.clientAsync() → import('@supabase/supabase-js')
-// 优化后：SDK import 与 Angular bootstrap 并行，节省 ~200-500ms（4G 网络）。
-const supabaseSdkPrewarm = import('@supabase/supabase-js').catch(() => null);
+// ========== Supabase SDK 预热（启动壳优先） ==========
+// 冷启动阶段优先让系统 splash 尽快交棒给应用自己的启动壳，
+// 因此不再在 Angular bootstrap 前争抢首波网络/主线程。
+let supabaseSdkPrewarmPromise: Promise<unknown> | null = null;
+let supabaseSdkPrewarmScheduled = false;
+
+const ensureSupabaseSdkPrewarm = () =>
+  (supabaseSdkPrewarmPromise ??= import('@supabase/supabase-js').catch(() => null));
+
+function scheduleSupabaseSdkPrewarmAfterShell(): void {
+  const deferredSdkEnabled = readBootFlag('SUPABASE_DEFERRED_SDK_V1', true);
+  if (!deferredSdkEnabled) {
+    void ensureSupabaseSdkPrewarm();
+    return;
+  }
+
+  if (supabaseSdkPrewarmScheduled || typeof window === 'undefined') {
+    return;
+  }
+
+  supabaseSdkPrewarmScheduled = true;
+  let fallbackTimer: number | null = null;
+
+  const kickoff = () => {
+    cleanup();
+    scheduleIdleTask(() => {
+      void ensureSupabaseSdkPrewarm();
+    });
+  };
+
+  const handleBootReady = () => kickoff();
+  const handleBootStage = (event: Event) => {
+    const detail = (event as CustomEvent<{ stage?: string }>).detail;
+    if (detail?.stage === 'launch-shell' || detail?.stage === 'handoff' || detail?.stage === 'ready') {
+      kickoff();
+    }
+  };
+
+  const cleanup = () => {
+    window.removeEventListener('nanoflow:boot-stage', handleBootStage as EventListener);
+    window.removeEventListener('nanoflow:bootstrap-complete', handleBootReady as EventListener);
+    if (fallbackTimer !== null) {
+      window.clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+  };
+
+  window.addEventListener('nanoflow:boot-stage', handleBootStage as EventListener);
+  window.addEventListener('nanoflow:bootstrap-complete', handleBootReady as EventListener, { once: true });
+  fallbackTimer = window.setTimeout(() => kickoff(), 4000);
+}
 
 // ========== 应用启动函数 ==========
 async function startApplication() {
@@ -239,7 +289,6 @@ async function startApplication() {
       import('./src/app.routes'),
       import('./src/services/global-error-handler.service'),
       import('./src/services/sentry-lazy-loader.service'),
-      supabaseSdkPrewarm, // 并行预热 Supabase SDK
     ]);
     const AppComponent = appComponentModule.AppComponent;
     const routes = appRoutesModule.routes;
@@ -284,10 +333,7 @@ async function startApplication() {
             paramsInheritanceStrategy: 'always'
           })
         ),
-        // 【Zoneless 迁移 2026-03-24】启用 Zoneless 变更检测
-        // 移除 Zone.js (~35KB polyfill)，Angular 仅在 Signal 变化时触发局部 CD
-        provideExperimentalZonelessChangeDetection(),
-        // Service Worker: Zoneless 下仍通过 PendingTasks 判断稳定性（30s 超时兜底）
+        // Service Worker: 启用以检测应用更新
         provideServiceWorker('ngsw-worker.js', {
           enabled: !isDevMode(),
           registrationStrategy: 'registerWhenStable:30000'
@@ -304,8 +350,15 @@ async function startApplication() {
       detail: { elapsed },
     }));
 
-    // 【Zoneless 迁移 2026-03-24】Zone.js 运行时检查已移除
-    log('🎉 Angular bootstrap 完成，等待启动壳与工作区接管');
+    // 检查 Zone.js 是否正常工作 - 尝试触发变更检测
+    try {
+      const zone = appRef.injector.get(NgZone);
+      zone.run(() => {
+        log('🎉 应用完全就绪，Zone.js 正常工作');
+      });
+    } catch (e) {
+      logError('Zone.js 运行时检查失败', e);
+    }
 
     const initWebVitals = () => {
       void import('./src/services/web-vitals.service')
@@ -370,8 +423,8 @@ function showStartupError(title: string, _description: string, err: unknown) {
   let suggestion = '请尝试清除浏览器缓存并刷新';
   
   if (errStr.includes('NG0908')) {
-    diagnosis = 'NG0908 冲突 - 变更检测初始化异常';
-    suggestion = '请清除缓存重试';
+    diagnosis = 'Zone.js 冲突 (NG0908) - 可能存在多个 Zone.js 实例';
+    suggestion = '请确保只有一个 Zone.js 加载';
   } else if (errStr.includes('inject') || errStr.includes('NullInjector')) {
     diagnosis = '依赖注入错误 - 某个服务无法注入';
     suggestion = '检查所有服务是否正确配置';
@@ -422,4 +475,5 @@ function showStartupError(title: string, _description: string, err: unknown) {
 }
 
 // 启动应用
+scheduleSupabaseSdkPrewarmAfterShell();
 startApplication();

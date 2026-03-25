@@ -23,6 +23,7 @@ type CaptureOptions = {
 export class LaunchSnapshotService {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingSnapshot: LaunchSnapshot | null = null;
+  private pendingCaptureArgs: { projects: Project[]; options: CaptureOptions } | null = null;
   private readonly pagehideListener = () => this.flushPendingPersist();
   private readonly visibilityChangeListener = () => {
     if (document.hidden) {
@@ -101,6 +102,26 @@ export class LaunchSnapshotService {
     }
 
     this.persistTimer = setTimeout(() => {
+      this.flushPendingPersist();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /**
+   * 延迟快照持久化：先缓存原始参数，防抖后才执行 capture + 写入。
+   * 避免在每次信号变化时都做 sort/slice/map（capture 开销）。
+   */
+  schedulePersistDeferred(projects: Project[], options: CaptureOptions): void {
+    this.pendingCaptureArgs = { projects, options };
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+    }
+
+    this.persistTimer = setTimeout(() => {
+      if (this.pendingCaptureArgs) {
+        const { projects: p, options: o } = this.pendingCaptureArgs;
+        this.pendingCaptureArgs = null;
+        this.pendingSnapshot = this.capture(p, o);
+      }
       this.flushPendingPersist();
     }, PERSIST_DEBOUNCE_MS);
   }
