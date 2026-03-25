@@ -10,6 +10,7 @@
     "ng": "node scripts/run-ng.cjs",
     "start": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs serve",
     "build": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build && node scripts/inject-modulepreload.cjs",
+    "build:stats": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build --stats-json && node scripts/inject-modulepreload.cjs",
     "build:clean": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build && node scripts/inject-modulepreload.cjs",
     "build:strict": "node scripts/validate-env.cjs --production && npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=2 NG_BUILD_PARALLEL_TS=1 NG_BUILD_TYPE_CHECK=1 node scripts/run-ng.cjs build && node scripts/inject-modulepreload.cjs",
     "build:strict:clean": "node scripts/validate-env.cjs --production && npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=2 NG_BUILD_PARALLEL_TS=1 NG_BUILD_TYPE_CHECK=1 node scripts/run-ng.cjs build && node scripts/inject-modulepreload.cjs",
@@ -59,7 +60,7 @@
     "quality:guard:encoding": "node scripts/contracts/check-encoding-corruption.cjs",
     "quality:guard:font-contract": "node scripts/check-font-subset-contract.cjs",
     "quality:guard:supabase-ready": "node scripts/check-supabase-ready-contract.cjs",
-    "perf:guard": "npm run build:dev -- --stats-json && node scripts/inject-modulepreload.cjs && npm run perf:guard:nojit && npm run perf:guard:startup && npm run quality:guard:font-contract && npm run quality:guard:supabase-ready",
+    "perf:guard": "npm run build:stats && npm run perf:guard:nojit && npm run perf:guard:startup && npm run quality:guard:font-contract && npm run quality:guard:supabase-ready",
     "test:baseline:update": "node scripts/update-test-duration-baseline.cjs --baseline=scripts/test-duration-baseline.json --quarantine=scripts/test-quarantine.json",
     "test:quarantine:update": "node scripts/update-test-quarantine.cjs --quarantine=scripts/test-quarantine.json"
   },

@@ -3,8 +3,28 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 const args = process.argv.slice(2);
-const ngPath = path.join(__dirname, '..', 'node_modules', '@angular', 'cli', 'bin', 'ng.js');
 const nodeMajor = Number(process.versions.node.split('.')[0]);
+
+function resolveDependencyPath(...segments) {
+  let currentDir = path.join(__dirname, '..');
+
+  while (true) {
+    const candidate = path.join(currentDir, 'node_modules', ...segments);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      break;
+    }
+    currentDir = parentDir;
+  }
+
+  return path.join(__dirname, '..', 'node_modules', ...segments);
+}
+
+const ngPath = resolveDependencyPath('@angular', 'cli', 'bin', 'ng.js');
 
 /**
  * 使用异步 spawn 启动子进程并正确转发信号
@@ -98,7 +118,7 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
  */
 function getEsbuildMajorMinor() {
   try {
-    const esbuildPkg = path.join(__dirname, '..', 'node_modules', 'esbuild', 'package.json');
+    const esbuildPkg = resolveDependencyPath('esbuild', 'package.json');
     const { version } = JSON.parse(fs.readFileSync(esbuildPkg, 'utf8'));
     const [, minor] = version.split('.').map(Number);
     return minor; // 只需要 minor 来判断 >= 0.23

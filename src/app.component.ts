@@ -65,11 +65,10 @@ export class AppComponent {
   readonly showLaunchShell = computed(() => !this.bootStage.isWorkspaceHandoffReady());
 
   constructor() {
-    // 预热路由壳组件，减少首次路由加载延迟
-    this.workspaceStartupPreloader.start();
-
     afterNextRender(() => {
       this.bootStage.markLaunchShellVisible();
+      // 冷启动首帧只预热工作区壳，项目壳延后到 loader hidden 后。
+      this.workspaceStartupPreloader.start();
     });
 
     effect(() => {
@@ -82,7 +81,10 @@ export class AppComponent {
     });
 
     if (typeof window !== 'undefined') {
-      const loaderHiddenListener = () => this.bootStage.noteLoaderHidden();
+      const loaderHiddenListener = () => {
+        this.bootStage.noteLoaderHidden();
+        void this.workspaceStartupPreloader.continueAfterLoaderHidden();
+      };
       window.addEventListener('nanoflow:loader-hidden', loaderHiddenListener as EventListener);
       this.destroyRef.onDestroy(() => {
         window.removeEventListener('nanoflow:loader-hidden', loaderHiddenListener as EventListener);

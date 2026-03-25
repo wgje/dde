@@ -7,7 +7,7 @@ import {
 } from './workspace-startup-preloader.service';
 
 describe('WorkspaceStartupPreloaderService', () => {
-  it('should preload route shells only once', async () => {
+  it('should preload workspace shell first and defer project shell until loader handoff', async () => {
     const loader: WorkspaceStartupAssetLoader = {
       preloadWorkspaceShell: vi.fn().mockResolvedValue(undefined),
       preloadProjectShell: vi.fn().mockResolvedValue(undefined),
@@ -22,9 +22,15 @@ describe('WorkspaceStartupPreloaderService', () => {
     const service = injector.get(WorkspaceStartupPreloaderService);
 
     service.start();
-    await service.preloadRouteShells();
+    await Promise.resolve();
     service.start();
-    await service.preloadRouteShells();
+
+    expect(loader.preloadWorkspaceShell).toHaveBeenCalledTimes(1);
+    expect(loader.preloadProjectShell).not.toHaveBeenCalled();
+    expect(service.routeShellsReady()).toBe(false);
+
+    await service.continueAfterLoaderHidden();
+    await service.continueAfterLoaderHidden();
 
     expect(loader.preloadWorkspaceShell).toHaveBeenCalledTimes(1);
     expect(loader.preloadProjectShell).toHaveBeenCalledTimes(1);

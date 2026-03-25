@@ -38,6 +38,7 @@ describe('AppComponent (Launch Shell)', () => {
     isApplicationReady: ReturnType<typeof computed<boolean>>;
     markLaunchShellVisible: ReturnType<typeof vi.fn>;
     markApplicationReady: ReturnType<typeof vi.fn>;
+    noteLoaderHidden: ReturnType<typeof vi.fn>;
   };
   let launchSnapshotServiceMock: {
     read: ReturnType<typeof vi.fn>;
@@ -45,6 +46,7 @@ describe('AppComponent (Launch Shell)', () => {
   let workspaceStartupPreloaderMock: {
     workspaceStylesReady: ReturnType<typeof computed<boolean>>;
     start: ReturnType<typeof vi.fn>;
+    continueAfterLoaderHidden: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -62,6 +64,7 @@ describe('AppComponent (Launch Shell)', () => {
       isApplicationReady: computed(() => appReady()),
       markLaunchShellVisible: vi.fn(),
       markApplicationReady: vi.fn(() => appReady.set(true)),
+      noteLoaderHidden: vi.fn(),
     };
 
     launchSnapshotServiceMock = {
@@ -71,6 +74,7 @@ describe('AppComponent (Launch Shell)', () => {
     workspaceStartupPreloaderMock = {
       workspaceStylesReady: computed(() => stylesReady()),
       start: vi.fn(),
+      continueAfterLoaderHidden: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -85,6 +89,9 @@ describe('AppComponent (Launch Shell)', () => {
 
   it('should render the launch shell before workspace handoff is ready', async () => {
     const fixture = TestBed.createComponent(AppComponent);
+
+    expect(workspaceStartupPreloaderMock.start).not.toHaveBeenCalled();
+
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -92,6 +99,17 @@ describe('AppComponent (Launch Shell)', () => {
     expect(workspaceStartupPreloaderMock.start).toHaveBeenCalledTimes(1);
     expect(launchSnapshotServiceMock.read).toHaveBeenCalledTimes(1);
     expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeTruthy();
+  });
+
+  it('should continue project shell preload after loader hidden', async () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
+
+    expect(workspaceStartupPreloaderMock.continueAfterLoaderHidden).toHaveBeenCalledTimes(1);
   });
 
   it('should hide launch shell when workspace handoff is ready', async () => {
