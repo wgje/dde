@@ -277,27 +277,9 @@ async function startApplication() {
   }, 15000);
   
   try {
-<<<<<<< HEAD
     // 【P0 性能优化 2026-03-25】关键模块已改为顶层静态 import，
     // 此处仅需等待 Supabase SDK 预热（非阻塞，不影响 bootstrap 速度）。
     // supabaseSdkPrewarm 在 import 语句后立即启动，与模块加载并行。
-=======
-    const [
-      appComponentModule,
-      appRoutesModule,
-      globalErrorHandlerModule,
-      sentryLoaderModule
-    ] = await Promise.all([
-      import('./src/app.component'),
-      import('./src/app.routes'),
-      import('./src/services/global-error-handler.service'),
-      import('./src/services/sentry-lazy-loader.service'),
-    ]);
-    const AppComponent = appComponentModule.AppComponent;
-    const routes = appRoutesModule.routes;
-    const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
-    const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
->>>>>>> eeecab17d7b7f9cc5051ff4f4c6460439520ba57
 
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
