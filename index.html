@@ -126,8 +126,19 @@
     })();
   </script>
 
-  <!-- Boot Flags + 预热脚本已移至 <body> 骨架屏之后（P0-3 性能优化 2026-03-25） -->
+  <!-- Boot Flags 已移至 <body> 骨架屏之后（P0-3 性能优化 2026-03-25） -->
   <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
+
+  <!-- PWA manifest: 必须保留在 <head> 中，Chrome 安装检测依赖 <head> 内的 <link rel="manifest">。
+       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。 -->
+  <script>
+    if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
+      var link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = 'manifest.webmanifest';
+      document.head.appendChild(link);
+    }
+  </script>
 
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
@@ -365,7 +376,7 @@
     /* 非首屏样式已迁移到 src/styles.css（P0 性能优化 2026-03-24） */
     /* 包括：滚动条、color-scheme、触摸交互、fisheye、task-card、flow-bg */
   </style>
-  <!-- PWA manifest 动态注入已移至 <body>（P0-3 性能优化 2026-03-25） -->
+  <!-- PWA manifest 注入保留在 <head>（Chrome 安装检测必须） -->
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
@@ -450,18 +461,7 @@
     };
   </script>
 
-  <!-- PWA manifest 动态注入（从 <head> 移至此处，非渲染关键） -->
-  <script>
-    if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
-      var link = document.createElement('link');
-      link.rel = 'manifest';
-      link.href = 'manifest.webmanifest';
-      document.head.appendChild(link);
-    }
-  </script>
-
   <!-- ========== 性能优化：预热脚本（P0-2 从 <head> 移至骨架屏之后 2026-03-24）========== -->
-  <!-- 目的：骨架屏 HTML 优先到达浏览器渲染，预热脚本在骨架屏绘制后执行 -->
 
   <!-- 调试日志收集器 -->
   <script>
