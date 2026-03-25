@@ -2,7 +2,7 @@
  * GlobalErrorHandler 服务测试
  * 使用 Injector 隔离模式，无需 TestBed
  */
-import { Injector, runInInjectionContext } from '@angular/core';
+import { Injector, NgZone, runInInjectionContext } from '@angular/core';
 import { GlobalErrorHandler, ErrorSeverity } from './global-error-handler.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -44,7 +44,8 @@ describe('GlobalErrorHandler', () => {
         { provide: LoggerService, useValue: loggerSpy },
         { provide: ToastService, useValue: toastSpy },
         { provide: Router, useValue: routerSpy },
-        { provide: SentryLazyLoaderService, useValue: sentryLoaderSpy }
+        { provide: SentryLazyLoaderService, useValue: sentryLoaderSpy },
+        { provide: NgZone, useValue: { run: (fn: () => void) => fn() } }
       ]
     });
 

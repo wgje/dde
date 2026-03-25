@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, Injector, AfterViewInit } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
@@ -116,6 +116,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly logger = inject(LoggerService).category('App');
   private readonly injector = inject(Injector);
   private readonly uiState = inject(UiStateService);
+  private readonly ngZone = inject(NgZone);
 
   private readonly projectState = inject(ProjectStateService);
   private readonly taskStore = inject(TaskStore);
@@ -126,7 +127,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly spotlightService = inject(SpotlightService);
 
   // ========== 延迟注入服务（P0-3 性能优化 2026-03-24）==========
-  // 以下服务不在首屏渲染路径上，改为按需获取以减少 DI 树展开耗时
+  // 以下服务不在首屏渲染路径上，改为按需获取以减少首次 DI 解析耗时。
+  // 权衡说明：
+  // - 优点：推迟非关键服务构造函数执行，减少 WorkspaceShell 初始化阻塞
+  // - 缺点：绕过 Angular 编译期 DI 检查，需靠测试覆盖保障正确性
+  // TODO: 长期方案是将这些服务的 UI 消费方改用 @defer 延迟渲染，
+  //       届时可恢复为标准 inject()。参见 Angular RFC: Deferred Views。
   private _searchService?: SearchService;
   private get searchService(): SearchService {
     return (this._searchService ??= this.injector.get(SearchService));
@@ -1008,15 +1014,21 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   /** 启动快照：将最近项目摘要写入轻量快照，供下次冷启动直接显示。 */
   private setupLaunchSnapshotEffect(): void {
+    // capture() 含 sort/slice/map，避免每次信号变化都执行。
+    // 仅将原始数据传递给 schedulePersist，在防抖回调内部做 capture。
     effect(() => {
-      const snapshot = this.launchSnapshot.capture(this.projectState.projects(), {
-        activeProjectId: this.projectState.activeProjectId(),
-        lastActiveView: this.uiState.activeView(),
-        theme: this.preferenceService.theme(),
-        colorMode: this.readCurrentColorMode(),
-      });
+      const projects = this.projectState.projects();
+      const activeProjectId = this.projectState.activeProjectId();
+      const lastActiveView = this.uiState.activeView();
+      const theme = this.preferenceService.theme();
+      const colorMode = this.readCurrentColorMode();
 
-      this.launchSnapshot.schedulePersist(snapshot);
+      this.launchSnapshot.schedulePersistDeferred(projects, {
+        activeProjectId,
+        lastActiveView,
+        theme,
+        colorMode,
+      });
     });
   }
 

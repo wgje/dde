@@ -1,8 +1,16 @@
-import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import type { LaunchSnapshot } from './services/launch-snapshot.service';
 import type { BootStage } from './services/boot-stage.service';
 
+/**
+ * 启动壳组件 — Angular 引导后、工作区接管前的过渡 UI。
+ *
+ * 同源声明：index.html 中的 `#snapshot-shell` 是本组件的纯 HTML 镜像，
+ * 用于 Angular 引导之前立即渲染 localStorage 快照（消除冷启动黑屏）。
+ * 二者的视觉语言（CSS class 前缀 `lsh-` / `launch-shell__`）、布局结构
+ * 和数据格式必须保持一致。若修改本组件，请同步更新 index.html #snapshot-shell。
+ */
 @Component({
   selector: 'app-launch-shell',
   standalone: true,
@@ -338,33 +346,28 @@ import type { BootStage } from './services/boot-stage.service';
   `,
 })
 export class LaunchShellComponent {
-  @Input() snapshot: LaunchSnapshot | null = null;
-  @Input() stage: BootStage = 'booting';
+  readonly snapshot = input<LaunchSnapshot | null>(null);
+  readonly stage = input<BootStage>('booting');
 
-  projects(): LaunchSnapshot['projects'] {
-    return this.snapshot?.projects ?? [];
-  }
+  readonly projects = computed(() => this.snapshot()?.projects ?? []);
+  readonly activeProjectId = computed(() => this.snapshot()?.activeProjectId ?? null);
 
-  activeProjectId(): string | null {
-    return this.snapshot?.activeProjectId ?? null;
-  }
-
-  stageLabel(): string {
-    const stage = this.stage;
-    if (stage === 'handoff') return '工作区准备接管';
-    if (stage === 'ready') return '工作区已就绪';
+  readonly stageLabel = computed(() => {
+    const s = this.stage();
+    if (s === 'handoff') return '工作区准备接管';
+    if (s === 'ready') return '工作区已就绪';
     return '启动壳已就绪';
-  }
+  });
 
-  lastActiveViewLabel(): string {
-    const view = this.snapshot?.lastActiveView;
+  readonly lastActiveViewLabel = computed(() => {
+    const view = this.snapshot()?.lastActiveView;
     if (view === 'flow') return '流程图';
     if (view === 'text') return '文本';
     return '待恢复';
-  }
+  });
 
-  savedAtLabel(): string {
-    const savedAt = this.snapshot?.savedAt;
+  readonly savedAtLabel = computed(() => {
+    const savedAt = this.snapshot()?.savedAt;
     if (!savedAt) return '首次启动';
 
     const date = new Date(savedAt);
@@ -376,5 +379,5 @@ export class LaunchShellComponent {
       hour: '2-digit',
       minute: '2-digit',
     });
-  }
+  });
 }

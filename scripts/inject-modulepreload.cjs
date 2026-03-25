@@ -5,56 +5,65 @@
  * - STRICT_MODULEPRELOAD_V2=true：移除所有静态 modulepreload
  * - STRICT_MODULEPRELOAD_V2=false（新默认）：
  *   1. 移除 Angular 自动生成的 initial chunk modulepreload
- *   2. 追踪从 main → 默认路由 (/projects) 的关键 chunk 链
- *   3. 注入关键路径 modulepreload（最多 MAX_CRITICAL_PRELOADS 条）
- *   这样浏览器可以并行下载整条链路，消除 10 级串行瀑布
+ *   2. 追踪从 main 开始的共享依赖链
+ *   3. 仅为小型共享 chunk 注入 modulepreload
+ *   4. 路由组件 chunk / 重型功能 chunk 一律不进入首屏 preload
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const DIST_DIR = path.join(__dirname, '..', 'dist', 'browser');
-const INDEX_HTML = path.join(DIST_DIR, 'index.html');
-/**
- * 关键路径 modulepreload 数量上限。
- * 过多会挤占带宽，过少则仍有瀑布；10 是经验值，覆盖 3-4 层 chunk 链。
- */
-const MAX_CRITICAL_PRELOADS = 10;
+const DEFAULT_DIST_DIR = path.join(__dirname, '..', 'dist', 'browser');
+const DEFAULT_INDEX_HTML = path.join(DEFAULT_DIST_DIR, 'index.html');
+const DEFAULT_MAX_CRITICAL_PRELOADS = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 6);
+const DEFAULT_MAX_TRACE_DEPTH = Number(process.env.STARTUP_MODULEPRELOAD_TRACE_DEPTH || 3);
+const MAX_PRELOAD_CHUNK_BYTES = Number(process.env.STARTUP_MAX_PRELOAD_CHUNK_BYTES || 96 * 1024);
 
-/**
- * 排除的 chunk 模式：这些是非关键路径，不应出现在首屏 preload 中
- */
 const EXCLUDED_PATTERNS = [
   /sentry/i,
+  /supabase/i,
   /gojs/i,
   /flow-view/i,
+  /text-view/i,
+  /workspace-shell/i,
+  /project-shell/i,
   /parking-dock/i,
   /settings-modal/i,
   /dashboard-modal/i,
   /focus-mode/i,
   /reset-password/i,
+  /error-page/i,
+  /not-found/i,
   /^ngsw-worker/i,
   /\.map$/i,
 ];
 
-/**
- * 【性能优化 2026-03-24】基于内容识别的排除列表。
- * 哈希文件名无法按名称匹配（如 Supabase SDK 编译为 chunk-XXXXXXXX.js），
- * 需要检查 chunk 内容中的特征字符串来排除。
- */
 const EXCLUDED_CONTENT_MARKERS = [
+<<<<<<< HEAD
   'FunctionsError',          // Supabase Functions SDK (~172KB)
   'supabase',                // Supabase 通用标记
   'WorkspaceShellComponent', // 启动壳优先：重型工作区路由块改为运行时预热
   'ProjectShellComponent',   // 启动壳优先：项目壳层块不参与首波 modulepreload
   'FocusModeComponent',      // 专注模式是 @defer 懒加载，不需要首屏 preload
+=======
+  'FunctionsError',
+  'supabase',
+  'WorkspaceShellComponent',
+  'ProjectShellComponent',
+  'TextViewComponent',
+  'FlowViewComponent',
+  'ParkingDockComponent',
+  'FocusModeComponent',
+  'GoJS',
+  'gojs',
+>>>>>>> eeecab17d7b7f9cc5051ff4f4c6460439520ba57
 ];
 
-function readBuiltHtml() {
-  if (!fs.existsSync(INDEX_HTML)) {
-    throw new Error(`index.html 不存在: ${INDEX_HTML}`);
+function readBuiltHtml(indexHtmlPath = DEFAULT_INDEX_HTML) {
+  if (!fs.existsSync(indexHtmlPath)) {
+    throw new Error(`index.html 不存在: ${indexHtmlPath}`);
   }
-  return fs.readFileSync(INDEX_HTML, 'utf-8');
+  return fs.readFileSync(indexHtmlPath, 'utf-8');
 }
 
 function parseStrictMode(html) {
@@ -72,132 +81,146 @@ function removeAllModulePreload(html) {
   };
 }
 
-/**
- * 从 JS 文件中提取动态 import() 的 chunk 文件名
- */
-function getChunkImports(filename) {
-  const filepath = path.join(DIST_DIR, filename);
+function getChunkImports(filename, distDir = DEFAULT_DIST_DIR) {
+  const filepath = path.join(distDir, filename);
   if (!fs.existsSync(filepath)) return [];
   const content = fs.readFileSync(filepath, 'utf8');
   const re = /import\(["']\.\/([^"']+)["']\)/g;
   const imports = [];
-  let m;
-  while ((m = re.exec(content)) !== null) {
-    imports.push(m[1]);
+  let match;
+
+  while ((match = re.exec(content)) !== null) {
+    imports.push(match[1]);
   }
+
   return imports;
 }
 
-/**
- * BFS 追踪从 main.js 开始的 chunk 依赖链。
- * 返回按发现顺序排列的 chunk 路径（排除 main/polyfills 自身）。
- * maxDepth 限制追踪深度，避免加载过多非关键 chunk。
- */
-function traceCriticalChunks(mainFile, maxDepth) {
+function isExcludedChunk(file, distDir = DEFAULT_DIST_DIR, options = {}) {
+  const {
+    excludedPatterns = EXCLUDED_PATTERNS,
+    excludedContentMarkers = EXCLUDED_CONTENT_MARKERS,
+    quiet = false,
+  } = options;
+
+  if (excludedPatterns.some((pattern) => pattern.test(file))) {
+    return true;
+  }
+
+  const filepath = path.join(distDir, file);
+  if (!fs.existsSync(filepath)) {
+    return true;
+  }
+
+  const head = fs.readFileSync(filepath, 'utf8').slice(0, 65536);
+  const contentExcluded = excludedContentMarkers.some((marker) =>
+    head.toLowerCase().includes(marker.toLowerCase()),
+  );
+  if (contentExcluded && !quiet) {
+    const size = Math.round(fs.statSync(filepath).size / 1024);
+    console.log(`  [skip] ${file} (${size}KB) — 内容特征匹配，非首屏依赖`);
+  }
+
+  return contentExcluded;
+}
+
+function traceCriticalChunks(mainFile, maxDepth, distDir = DEFAULT_DIST_DIR, options = {}) {
   const visited = new Set();
   const queue = [{ file: mainFile, depth: 0 }];
   const result = [];
 
   while (queue.length > 0) {
     const { file, depth } = queue.shift();
-    if (visited.has(file) || depth > maxDepth) continue;
+    if (!file || visited.has(file) || depth > maxDepth) continue;
     visited.add(file);
 
-    // 只收集非入口 chunk（main/polyfills 已经是 <script> 标签）
-    if (depth > 0) {
-      const isExcluded = EXCLUDED_PATTERNS.some((p) => p.test(file));
-      if (!isExcluded) {
-        const filepath = path.join(DIST_DIR, file);
-        if (fs.existsSync(filepath)) {
-          const size = fs.statSync(filepath).size;
-          // 【性能优化 2026-03-24】内容特征排除：
-          // 对大 chunk 做内容检测，排除 Supabase SDK 等非首屏依赖。
-          // modulepreload 会触发浏览器立即解析+编译，大型三方 SDK 应按需加载。
-          let contentExcluded = false;
-          if (EXCLUDED_CONTENT_MARKERS.length > 0) {
-            const head = fs.readFileSync(filepath, 'utf8').slice(0, 65536);
-            contentExcluded = EXCLUDED_CONTENT_MARKERS.some((marker) =>
-              head.toLowerCase().includes(marker.toLowerCase()),
-            );
-            if (contentExcluded) {
-              console.log(`  [skip] ${file} (${Math.round(size / 1024)}KB) — 内容特征匹配，非首屏依赖`);
-            }
-          }
-          if (!contentExcluded) {
-            result.push({ file, depth, size });
-          }
-        }
-      }
+    if (depth > 0 && !isExcludedChunk(file, distDir, options)) {
+      const filepath = path.join(distDir, file);
+      result.push({
+        file,
+        depth,
+        size: fs.statSync(filepath).size,
+      });
     }
 
-    const imports = getChunkImports(file);
-    for (const imp of imports) {
-      if (!visited.has(imp)) {
-        queue.push({ file: imp, depth: depth + 1 });
+    const imports = getChunkImports(file, distDir);
+    for (const importedFile of imports) {
+      if (!visited.has(importedFile)) {
+        queue.push({ file: importedFile, depth: depth + 1 });
       }
     }
   }
+
   return result;
 }
 
-/**
- * 对追踪到的 chunk 打分排序，选出最关键的 N 个。
- * 评分依据：深度越浅越关键（权重高），体积适中的优先（太大的可能是非关键特性 chunk）。
- */
-function selectCriticalChunks(chunks, maxCount) {
-  // 过滤掉超大 chunk（>150KB 通常是独立特性或三方 SDK）
-  // 【性能优化 2026-03-24】从 200KB 降至 150KB：
-  // Supabase JS SDK (~172KB) 被 modulepreload 后浏览器立即解析+编译，
-  // 导致中端手机额外 ~1s 的主线程阻塞。降低阈值确保 SDK 按需加载。
-  const candidates = chunks.filter((c) => c.size < 150 * 1024);
-
-  // 按深度升序（浅的先）+ 同深度按体积降序（大的先，可能是共享依赖）
-  candidates.sort((a, b) => {
-    if (a.depth !== b.depth) return a.depth - b.depth;
-    return b.size - a.size;
+function selectCriticalChunks(chunks, maxCount, maxChunkBytes = MAX_PRELOAD_CHUNK_BYTES) {
+  const candidates = chunks.filter((chunk) => chunk.size <= maxChunkBytes);
+  candidates.sort((left, right) => {
+    if (left.depth !== right.depth) return left.depth - right.depth;
+    return right.size - left.size;
   });
 
-  return candidates.slice(0, maxCount).map((c) => c.file);
+  return candidates.slice(0, maxCount).map((chunk) => chunk.file);
 }
 
+<<<<<<< HEAD
 function injectModulePreloads(html, modules, mainFile) {
   if (modules.length === 0 && !mainFile) return html;
   const allModules = mainFile ? [mainFile, ...modules] : modules;
   const links = allModules
+=======
+function injectModulePreloads(html, modules) {
+  if (modules.length === 0) return html;
+
+  const links = modules
+>>>>>>> eeecab17d7b7f9cc5051ff4f4c6460439520ba57
     .map((moduleName) => `<link rel="modulepreload" href="/${moduleName}">`)
     .join('\n  ');
 
   const snippet = `
+<<<<<<< HEAD
   <!-- critical-path modulepreload (auto-generated, eliminates chunk waterfall) -->
   <!-- 含 main entry + 关键 chunk，让浏览器在 HTML 解析初期即并行下载 -->
+=======
+  <!-- critical-path modulepreload (auto-generated, shared startup deps only) -->
+>>>>>>> eeecab17d7b7f9cc5051ff4f4c6460439520ba57
   ${links}
 `;
 
   return html.replace('</head>', `${snippet}</head>`);
 }
 
-function main() {
-  console.log('[inject-modulepreload] 开始规范化 modulepreload...');
+function findMainFile(distDir = DEFAULT_DIST_DIR) {
+  return fs.readdirSync(distDir).find((file) => /^main-.*\.js$/.test(file)) || null;
+}
 
-  const html = readBuiltHtml();
+function processModulePreload(options = {}) {
+  const {
+    distDir = DEFAULT_DIST_DIR,
+    indexHtmlPath = path.join(distDir, 'index.html'),
+    maxCriticalPreloads = DEFAULT_MAX_CRITICAL_PRELOADS,
+    maxTraceDepth = DEFAULT_MAX_TRACE_DEPTH,
+    maxChunkBytes = MAX_PRELOAD_CHUNK_BYTES,
+    quiet = false,
+  } = options;
+
+  const html = readBuiltHtml(indexHtmlPath);
   const strictMode = parseStrictMode(html);
   const { cleanedHtml, removedCount } = removeAllModulePreload(html);
 
   if (strictMode) {
-    fs.writeFileSync(INDEX_HTML, cleanedHtml);
-    console.log(`[inject-modulepreload] strict 模式：已移除 ${removedCount} 条 modulepreload`);
-    return;
+    fs.writeFileSync(indexHtmlPath, cleanedHtml);
+    return { strictMode, removedCount, selected: [] };
   }
 
-  // 追踪关键路径 chunk（从 main 开始，最多 3 层深度）
-  const files = fs.readdirSync(DIST_DIR).filter((f) => f.endsWith('.js'));
-  const mainFile = files.find((f) => /^main-/.test(f));
+  const mainFile = findMainFile(distDir);
   if (!mainFile) {
-    console.warn('[inject-modulepreload] 未找到 main-*.js，跳过关键路径追踪');
-    fs.writeFileSync(INDEX_HTML, cleanedHtml);
-    return;
+    fs.writeFileSync(indexHtmlPath, cleanedHtml);
+    return { strictMode, removedCount, selected: [] };
   }
 
+<<<<<<< HEAD
   const allChunks = traceCriticalChunks(mainFile, 3);
   const selected = selectCriticalChunks(allChunks, MAX_CRITICAL_PRELOADS);
   // 【P0 性能优化 2026-03-25】将 main entry 也加入 modulepreload，
@@ -213,7 +236,54 @@ function main() {
   selected.forEach((f) => {
     const size = Math.round(fs.statSync(path.join(DIST_DIR, f)).size / 1024);
     console.log(`  - ${f} (${size}KB)`);
+=======
+  const allChunks = traceCriticalChunks(mainFile, maxTraceDepth, distDir, { quiet });
+  const selected = selectCriticalChunks(allChunks, maxCriticalPreloads, maxChunkBytes);
+  const nextHtml = injectModulePreloads(cleanedHtml, selected);
+  fs.writeFileSync(indexHtmlPath, nextHtml);
+
+  return { strictMode, removedCount, selected };
+}
+
+function main() {
+  console.log('[inject-modulepreload] 开始规范化 modulepreload...');
+  const result = processModulePreload();
+
+  if (result.strictMode) {
+    console.log(`[inject-modulepreload] strict 模式：已移除 ${result.removedCount} 条 modulepreload`);
+    return;
+  }
+
+  console.log(
+    `[inject-modulepreload] 关键路径模式：移除 ${result.removedCount} 条原始 preload，注入 ${result.selected.length} 条关键路径 preload`
+  );
+  result.selected.forEach((file) => {
+    const size = Math.round(fs.statSync(path.join(DEFAULT_DIST_DIR, file)).size / 1024);
+    console.log(`  - ${file} (${size}KB)`);
+>>>>>>> eeecab17d7b7f9cc5051ff4f4c6460439520ba57
   });
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  DEFAULT_DIST_DIR,
+  DEFAULT_INDEX_HTML,
+  DEFAULT_MAX_CRITICAL_PRELOADS,
+  EXCLUDED_PATTERNS,
+  EXCLUDED_CONTENT_MARKERS,
+  MAX_PRELOAD_CHUNK_BYTES,
+  findMainFile,
+  getChunkImports,
+  injectModulePreloads,
+  isExcludedChunk,
+  main,
+  parseStrictMode,
+  processModulePreload,
+  readBuiltHtml,
+  removeAllModulePreload,
+  selectCriticalChunks,
+  traceCriticalChunks,
+};

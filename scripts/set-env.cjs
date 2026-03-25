@@ -232,10 +232,15 @@ try {
   }
 
   // 【2026-03-23】会话预热脚本也需要注入 Supabase 配置
-  const prewarmUrlPattern = /var SUPABASE_URL = '[^']*';/;
-  const prewarmKeyPattern = /var SUPABASE_ANON_KEY = '[^']*';/;
-  if (prewarmUrlPattern.test(indexHtml) && prewarmKeyPattern.test(indexHtml)) {
+  // 使用全局正则确保 index.html 中所有实例都被替换（预热脚本 + 数据预加载脚本）
+  const prewarmUrlPattern = /var SUPABASE_URL = '[^']*';/g;
+  const prewarmKeyPattern = /var SUPABASE_ANON_KEY = '[^']*';/g;
+  if (prewarmUrlPattern.test(indexHtml)) {
+    prewarmUrlPattern.lastIndex = 0;
     indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = '${finalUrl}';`);
+  }
+  if (prewarmKeyPattern.test(indexHtml)) {
+    prewarmKeyPattern.lastIndex = 0;
     indexHtml = indexHtml.replace(prewarmKeyPattern, `var SUPABASE_ANON_KEY = '${finalKey}';`);
   }
 
