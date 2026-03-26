@@ -250,9 +250,9 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
       logger.debug('冷启动快速路径：本地缓存/userId 已存在，立即放行', {
         localAuth: !!localAuth.userId, userId: authState.userId
       });
-      if (localAuth.userId) {
-        saveAuthCache(localAuth.userId);
-      }
+      // 【Bug 修复 2026-03-26】移除 saveAuthCache 调用：冷启动快速路径不应刷新 TTL。
+      // 原代码每次 guard 运行都重置过期时间，导致已失效账户的缓存永不过期。
+      // TTL 只在 doCheckSession/signIn 确认会话有效后才刷新（L295）。
       // 非阻塞触发会话检查（不 await），确保后台完成 token 刷新
       void (authService as unknown as { checkSession?: () => Promise<unknown> })
         .checkSession?.()?.catch(() => {});

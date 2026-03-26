@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, NgZone } from '@angular/core';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { FlowDiagramService } from './flow-diagram.service';
 import { FlowSelectionService } from './flow-selection.service';
@@ -17,6 +17,7 @@ export class FlowKeyboardService {
   private readonly selectionService = inject(FlowSelectionService);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly link = inject(FlowLinkService);
+  private readonly zone = inject(NgZone);
 
   /**
    * 处理图表快捷键
@@ -53,7 +54,9 @@ export class FlowKeyboardService {
     event.preventDefault();
     event.stopPropagation();
 
-    selectedKeys.forEach(id => this.taskOpsAdapter.detachTask(id));
+    this.zone.run(() => {
+      selectedKeys.forEach(id => this.taskOpsAdapter.detachTask(id));
+    });
 
     return 'handled';
   }
@@ -77,7 +80,9 @@ export class FlowKeyboardService {
     event.preventDefault();
     event.stopPropagation();
 
-    this.link.handleDeleteCrossTreeLinks(selectedLinks);
+    this.zone.run(() => {
+      this.link.handleDeleteCrossTreeLinks(selectedLinks);
+    });
 
     return 'handled';
   }

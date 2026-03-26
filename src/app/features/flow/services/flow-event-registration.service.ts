@@ -1,4 +1,4 @@
-import { Injectable, inject, WritableSignal } from '@angular/core';
+import { Injectable, inject, NgZone, WritableSignal } from '@angular/core';
 import { FlowEventService } from './flow-event.service';
 import { FlowLinkService } from './flow-link.service';
 import { FlowLinkRelinkService } from './flow-link-relink.service';
@@ -35,6 +35,7 @@ export class FlowEventRegistrationService {
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly uiState = inject(UiStateService);
   private readonly logger = inject(LoggerService).category('FlowEventReg');
+  private readonly zone = inject(NgZone);
 
   /**
    * 注册节点点击事件
@@ -273,7 +274,9 @@ export class FlowEventRegistrationService {
    */
   registerDeleteKeyHandler(handleDeleteKeyPressed: () => void): void {
     flowTemplateEventHandlers.onDeleteKeyPressed = () => {
-      handleDeleteKeyPressed();
+      this.zone.run(() => {
+        handleDeleteKeyPressed();
+      });
     };
   }
 

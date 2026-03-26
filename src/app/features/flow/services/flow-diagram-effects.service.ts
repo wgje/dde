@@ -1,4 +1,4 @@
-import { Injectable, inject, effect, untracked, Injector, Signal, EffectRef } from '@angular/core';
+import { Injectable, inject, effect, untracked, Injector, Signal, EffectRef, NgZone } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { PreferenceService } from '../../../../services/preference.service';
@@ -26,6 +26,7 @@ export class FlowDiagramEffectsService {
   private readonly diagram = inject(FlowDiagramService);
   private readonly flowCommand = inject(FlowCommandService);
   private readonly logger = inject(LoggerService);
+  private readonly zone = inject(NgZone);
 
   /** rAF 调度 ID（用于取消） */
   private pendingRafId: number | null = null;
@@ -43,13 +44,15 @@ export class FlowDiagramEffectsService {
     if (this.pendingRafId !== null) return;
     // 【2026-02-25 性能优化】在 NgZone 外部注册 rAF
     // 避免 GoJS diagram 更新操作触发 Angular 变更检测
-    this.pendingRafId = requestAnimationFrame(() => {
-      this.pendingRafId = null;
-      if (isDestroyed() || !this.diagram.isInitialized) return;
-      // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
-      const currentTasks = untracked(() => this.projectState.tasks());
-      this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
-      this.diagramUpdatePending = false;
+    this.zone.runOutsideAngular(() => {
+      this.pendingRafId = requestAnimationFrame(() => {
+        this.pendingRafId = null;
+        if (isDestroyed() || !this.diagram.isInitialized) return;
+        // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
+        const currentTasks = untracked(() => this.projectState.tasks());
+        this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
+        this.diagramUpdatePending = false;
+      });
     });
   }
 

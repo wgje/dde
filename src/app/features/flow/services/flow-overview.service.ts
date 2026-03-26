@@ -1,5 +1,5 @@
 /** FlowOverviewService - 小地图初始化/销毁、自动缩放、视口同步、指针交互 */
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, NgZone } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ThemeService } from '../../../../services/theme.service';
 import { FlowTemplateService } from './flow-template.service';
@@ -13,6 +13,7 @@ import * as go from 'gojs';
 export class FlowOverviewService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowOverview');
+  private readonly zone = inject(NgZone);
   private readonly themeService = inject(ThemeService);
   private readonly templateService = inject(FlowTemplateService);
   private readonly linkTemplateService = inject(FlowLinkTemplateService);
@@ -78,80 +79,82 @@ export class FlowOverviewService {
       return;
     }
     
-    try {
-      this.cleanupOverview();
-      
-      const containerWidth = container.clientWidth;
-      const containerHeight = container.clientHeight;
-      
-      if (containerWidth <= 0 || containerHeight <= 0) {
-        this.logger.warn('Overview 容器尺寸无效，延迟初始化');
-        return;
-      }
-      
-      this.overviewContainer = container;
-      
-      // 设置背景色和显示质量优化
-      container.style.backgroundColor = this.getOverviewBackgroundColor();
-      
-      // 优化渲染：强制浏览器使用更高对比度和锐利度的图像渲染算法
-      container.style.imageRendering = 'auto'; // 基础回退
-      if ('imageRendering' in container.style) {
-        // 尝试各种浏览器的锐化选项（非标准属性需类型断言）
-        const style = container.style as CSSStyleDeclaration & Record<string, string>;
-        style.imageRendering = '-webkit-optimize-contrast';
-        if (style.imageRendering !== '-webkit-optimize-contrast') {
-           style.imageRendering = 'crisp-edges';
+    this.zone.runOutsideAngular(() => {
+      try {
+        this.cleanupOverview();
+        
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+        
+        if (containerWidth <= 0 || containerHeight <= 0) {
+          this.logger.warn('Overview 容器尺寸无效，延迟初始化');
+          return;
         }
-      }
-      
-      // 提升抗锯齿效果（非标准 vendor-prefixed 属性）
-      const vendorStyle = container.style as CSSStyleDeclaration & Record<string, string>;
-      vendorStyle['webkitFontSmoothing'] = 'antialiased';
-      vendorStyle['mozOsxFontSmoothing'] = 'grayscale';
-      
-      // 创建 Overview 实例
-      this.overview = new go.Overview(container, {
-        observed: this.diagram,
-        contentAlignment: go.Spot.Center,
-        'animationManager.isEnabled': false,
-        // 强制使用高像素比渲染（至少为 2），大幅提升小地图的清晰度和视网膜屏幕支持
-        'computePixelRatio': () => Math.max(window.devicePixelRatio || 1, 2)
-      });
-      
-      // 设置模板
-      this.templateService.setupOverviewNodeTemplate(this.overview);
-      this.linkTemplateService.setupOverviewLinkTemplate(this.overview);
-      
-      this.overview.observed = this.diagram;
-      
-      // 设置视口框样式
-      this.templateService.setupOverviewBoxStyle(this.overview, isMobile);
-      
-      this.overview.scale = 0.15;
-      this.lastOverviewScale = 0.15;
+        
+        this.overviewContainer = container;
+        
+        // 设置背景色和显示质量优化
+        container.style.backgroundColor = this.getOverviewBackgroundColor();
+        
+        // 优化渲染：强制浏览器使用更高对比度和锐利度的图像渲染算法
+        container.style.imageRendering = 'auto'; // 基础回退
+        if ('imageRendering' in container.style) {
+          // 尝试各种浏览器的锐化选项（非标准属性需类型断言）
+          const style = container.style as CSSStyleDeclaration & Record<string, string>;
+          style.imageRendering = '-webkit-optimize-contrast';
+          if (style.imageRendering !== '-webkit-optimize-contrast') {
+             style.imageRendering = 'crisp-edges';
+          }
+        }
+        
+        // 提升抗锯齿效果（非标准 vendor-prefixed 属性）
+        const vendorStyle = container.style as CSSStyleDeclaration & Record<string, string>;
+        vendorStyle['webkitFontSmoothing'] = 'antialiased';
+        vendorStyle['mozOsxFontSmoothing'] = 'grayscale';
 
-      // 绑定指针监听
-      this.attachOverviewPointerListeners(container);
-      
-      // 设置自动缩放
-      this.setupOverviewAutoScale();
-      
-      // 设置 ResizeObserver
-      this.setupOverviewResizeObserver(container);
-      
-      // 强制刷新
-      if (this.diagram) {
-        this.diagram.requestUpdate();
+        // 创建 Overview 实例
+        this.overview = new go.Overview(container, {
+          observed: this.diagram,
+          contentAlignment: go.Spot.Center,
+          'animationManager.isEnabled': false,
+          // 强制使用高像素比渲染（至少为 2），大幅提升小地图的清晰度和视网膜屏幕支持
+          'computePixelRatio': () => Math.max(window.devicePixelRatio || 1, 2)
+        });
+
+        // 设置模板
+        this.templateService.setupOverviewNodeTemplate(this.overview);
+        this.linkTemplateService.setupOverviewLinkTemplate(this.overview);
+
+        this.overview.observed = this.diagram;
+
+        // 设置视口框样式
+        this.templateService.setupOverviewBoxStyle(this.overview, isMobile);
+
+        this.overview.scale = 0.15;
+        this.lastOverviewScale = 0.15;
+
+        // 绑定指针监听
+        this.attachOverviewPointerListeners(container);
+
+        // 设置自动缩放
+        this.setupOverviewAutoScale();
+
+        // 设置 ResizeObserver
+        this.setupOverviewResizeObserver(container);
+
+        // 强制刷新
+        if (this.diagram) {
+          this.diagram.requestUpdate();
+        }
+        if (this.overview) {
+          this.overview.requestUpdate();
+        }
+
+        this.logger.info(`Overview 初始化成功`);
+      } catch (error) {
+        this.logger.error('Overview 初始化失败:', error);
       }
-      if (this.overview) {
-        this.overview.requestUpdate();
-      }
-      
-      this.logger.info(`Overview 初始化成功`);
-    } catch (error) {
-      this.logger.error('Overview 初始化失败:', error);
-    }
+    });
   }
   
   /** 销毁小地图 */
@@ -781,18 +784,20 @@ export class FlowOverviewService {
       }
     };
 
-    container.addEventListener('pointerdown', onPointerDown, { passive: false, capture: true });
-    container.addEventListener('pointermove', onPointerMove, { passive: false, capture: true });
-    container.addEventListener('pointerup', onPointerUpLike, { passive: true, capture: true });
-    container.addEventListener('pointercancel', onPointerUpLike, { passive: true, capture: true });
-    container.addEventListener('lostpointercapture', onPointerUpLike, { passive: true, capture: true });
-    window.addEventListener('pointermove', onWindowPointerMove, { passive: false });
-    window.addEventListener('pointerup', onWindowPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onWindowPointerUp, { passive: true });
+    this.zone.runOutsideAngular(() => {
+      container.addEventListener('pointerdown', onPointerDown, { passive: false, capture: true });
+      container.addEventListener('pointermove', onPointerMove, { passive: false, capture: true });
+      container.addEventListener('pointerup', onPointerUpLike, { passive: true, capture: true });
+      container.addEventListener('pointercancel', onPointerUpLike, { passive: true, capture: true });
+      container.addEventListener('lostpointercapture', onPointerUpLike, { passive: true, capture: true });
+      window.addEventListener('pointermove', onWindowPointerMove, { passive: false });
+      window.addEventListener('pointerup', onWindowPointerUp, { passive: true });
+      window.addEventListener('pointercancel', onWindowPointerUp, { passive: true });
 
-    container.addEventListener('mousedown', onMouseDown, { passive: false, capture: true });
-    window.addEventListener('mousemove', onMouseMove, { passive: true });
-    window.addEventListener('mouseup', onMouseUp, { passive: true });
+      container.addEventListener('mousedown', onMouseDown, { passive: false, capture: true });
+      window.addEventListener('mousemove', onMouseMove, { passive: true });
+      window.addEventListener('mouseup', onMouseUp, { passive: true });
+    });
 
     this.overviewPointerCleanup = () => {
       container.style.touchAction = prevTouchAction;

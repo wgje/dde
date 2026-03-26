@@ -8,6 +8,7 @@ import { supabaseErrorToError } from '../utils/supabase-error';
 import { environment } from '../environments/environment';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { saveAuthCache } from './guards/auth.guard';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -451,6 +452,9 @@ export class AuthService {
       if (storageKey) {
         localStorage.removeItem(storageKey);
       }
+      // 【Bug 修复 2026-03-26】同步清除 guard 的独立 auth-cache，
+      // 否则下次冷启动 guard FastPath 仍会读到失效缓存并立即放行。
+      saveAuthCache(null);
     } catch {
       // localStorage 不可用时静默降级
     }

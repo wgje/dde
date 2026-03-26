@@ -54,7 +54,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
 
     /* 选项卡按钮 */
     .tab-btn {
-      @apply flex-1 py-2.5 text-xs font-medium text-stone-500 dark:text-stone-400 border-b-2 border-transparent transition-colors hover:text-stone-700 dark:hover:text-stone-300 bg-stone-50 dark:bg-stone-900;
+      @apply flex-1 py-2.5 text-xs font-medium text-stone-500 dark:text-stone-400 border-b-2 border-transparent transition-colors hover:text-stone-700 dark:hover:text-stone-300 bg-stone-50 dark:bg-stone-900 overflow-hidden whitespace-nowrap text-ellipsis;
     }
     .tab-btn.active {
       @apply text-indigo-600 dark:text-indigo-400 border-indigo-600 dark:border-indigo-400 bg-white dark:bg-stone-800;
@@ -62,7 +62,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
 
     /* 统计卡片 */
     .stat-card {
-      @apply flex flex-col p-3 rounded-lg bg-stone-50 dark:bg-stone-800/50 border border-stone-100 dark:border-stone-800 transition-all hover:bg-white dark:hover:bg-stone-800 hover:shadow-sm cursor-pointer hover:border-stone-200 dark:hover:border-stone-700;
+      @apply flex flex-col p-2 rounded-lg bg-stone-50 dark:bg-stone-800/50 border border-stone-100 dark:border-stone-800 transition-all hover:bg-white dark:hover:bg-stone-800 hover:shadow-sm cursor-pointer hover:border-stone-200 dark:hover:border-stone-700 overflow-hidden min-w-0;
     }
 
     /* 列表项 - 待办 */
@@ -112,7 +112,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
       [class.transition-none]="isResizing()">>
 
       <!-- 侧边栏内容 -->
-      <div class="flex-1 flex flex-col w-full h-full min-w-[320px]">
+      <div class="flex-1 flex flex-col w-full h-full min-w-0">
         
         <!-- 1. 项目头部 -->
         <div class="shrink-0 px-3 py-2 border-b border-stone-100 dark:border-stone-800 bg-white dark:bg-stone-900">
@@ -141,7 +141,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
         </div>
 
         <!-- 2. 仪表盘 (关键指标) -->
-        <div class="shrink-0 px-4 py-3 grid grid-cols-3 gap-2 border-b border-stone-100 dark:border-stone-800 bg-stone-50/30 dark:bg-stone-900/30">
+        <div class="shrink-0 px-3 py-3 grid grid-cols-3 gap-1.5 border-b border-stone-100 dark:border-stone-800 bg-stone-50/30 dark:bg-stone-900/30 overflow-hidden">
           <button (click)="focusDashboardSection('unfinished')" 
              class="stat-card"
              [class.ring-1]="focusedSection() === 'unfinished'"

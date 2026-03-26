@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, HostListener, output, ChangeDetectionStrategy, Injector, effect, EffectRef } from '@angular/core';
+import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, effect, EffectRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -86,6 +86,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService).category('FlowView');
+  private readonly zone = inject(NgZone);
   private readonly elementRef = inject(ElementRef);
   private readonly injector = inject(Injector);
   
@@ -372,7 +373,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     
     this.diagram.scheduleOverviewInit(
       this.overviewDiv(), this.isOverviewVisible(), this.isOverviewCollapsed(),
-      this.scheduleTimer.bind(this)
+      this.zone, this.scheduleTimer.bind(this)
     );
   }
   
@@ -388,7 +389,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.scheduleTimer(() => {
           this.diagram.scheduleOverviewInit(
             this.overviewDiv(), this.isOverviewVisible(), false,
-            this.scheduleTimer.bind(this), true
+            this.zone, this.scheduleTimer.bind(this), true
           );
         }, 100);
       });

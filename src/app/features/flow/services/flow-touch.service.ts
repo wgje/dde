@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject, signal, NgZone } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowDragDropService, InsertPositionInfo } from './flow-drag-drop.service';
 import { Task } from '../../../../models';
@@ -32,6 +32,7 @@ export interface TouchDropCallback {
 export class FlowTouchService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowTouch');
+  private readonly zone = inject(NgZone);
   private readonly dragDropService = inject(FlowDragDropService);
   
   // ========== 状态 ==========
@@ -166,7 +167,9 @@ export class FlowTouchService {
         // 查找插入位置
         const insertInfo = this.dragDropService.findInsertPosition(loc, diagram);
         
-        callback(task, insertInfo, loc);
+        this.zone.run(() => {
+          callback(task, insertInfo, loc);
+        });
       }
     }
     

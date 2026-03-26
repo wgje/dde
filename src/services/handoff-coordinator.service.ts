@@ -106,8 +106,19 @@ export class HandoffCoordinatorService {
     this.handoffScheduled = true;
     const trigger = () => this.bootStage.markWorkspaceHandoffReady();
 
+    // 【Bug 修复 2026-03-26】rAF 在隐藏标签页（包括 PWA 后台启动）中被浏览器节流/暂停，
+    // 导致 handoff 永不触发，用户卡在 launch-shell。
+    // 改为 rAF + setTimeout 双保险：谁先触发谁执行，另一个忽略。
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => trigger());
+      let fired = false;
+      const onceTrigger = () => {
+        if (!fired) {
+          fired = true;
+          trigger();
+        }
+      };
+      window.requestAnimationFrame(onceTrigger);
+      setTimeout(onceTrigger, 100);
       return;
     }
 

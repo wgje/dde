@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, ElementRef } from '@angular/core';
+import { Injectable, inject, NgZone, signal, ElementRef } from '@angular/core';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowDiagramService } from './flow-diagram.service';
@@ -16,6 +16,7 @@ import { FLOW_VIEW_CONFIG } from '../../../../config';
 export class FlowDiagramRetryService {
   private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService).category('FlowDiagramRetry');
+  private readonly zone = inject(NgZone);
   private readonly diagram = inject(FlowDiagramService);
 
   /** 是否正在重试加载图表 */
@@ -69,11 +70,11 @@ export class FlowDiagramRetryService {
     if (typeof requestIdleCallback !== 'undefined') {
       this.idleInitHandle = requestIdleCallback(() => {
         this.idleInitHandle = null;
-        startInit();
+        this.zone.run(() => startInit());
       }, { timeout: 5000 });
     } else {
       scheduleTimer(() => {
-        startInit();
+        this.zone.run(() => startInit());
       }, 1200);
     }
   }
@@ -119,29 +120,31 @@ export class FlowDiagramRetryService {
     const delay = FLOW_VIEW_CONFIG.DIAGRAM_RETRY_BASE_DELAY * Math.pow(2, this.retryCount - 1);
 
     scheduleTimer(() => {
-      const diagramDiv = getDiagramDiv();
+      this.zone.run(() => {
+        const diagramDiv = getDiagramDiv();
 
-      // 再次检查 DOM 是否准备好
-      if (!diagramDiv || !diagramDiv.nativeElement) {
-        this.logger.warn('[FlowDiagramRetry] 重试时 diagramDiv 仍未准备好，将再次重试');
+        // 再次检查 DOM 是否准备好
+        if (!diagramDiv || !diagramDiv.nativeElement) {
+          this.logger.warn('[FlowDiagramRetry] 重试时 diagramDiv 仍未准备好，将再次重试');
+          this.isRetrying.set(false);
+          // 如果 DOM 未准备好，递归重试
+          scheduleTimer(() => this.retryInitDiagram(getDiagramDiv, initDiagram, onInitialized, scheduleTimer), 500);
+          return;
+        }
+
+        // 防止上一次失败留下半初始化状态，重试前先清理旧实例
+        this.diagram.dispose();
+
+        initDiagram();
+        if (this.diagram.isInitialized) {
+          onInitialized(0);
+          // 成功后重置重试计数
+          this.retryCount = 0;
+          this.hasReachedRetryLimit.set(false);
+          this.toast.success('加载成功', '流程图已就绪');
+        }
         this.isRetrying.set(false);
-        // 如果 DOM 未准备好，递归重试
-        scheduleTimer(() => this.retryInitDiagram(getDiagramDiv, initDiagram, onInitialized, scheduleTimer), 500);
-        return;
-      }
-
-      // 防止上一次失败留下半初始化状态，重试前先清理旧实例
-      this.diagram.dispose();
-
-      initDiagram();
-      if (this.diagram.isInitialized) {
-        onInitialized(0);
-        // 成功后重置重试计数
-        this.retryCount = 0;
-        this.hasReachedRetryLimit.set(false);
-        this.toast.success('加载成功', '流程图已就绪');
-      }
-      this.isRetrying.set(false);
+      });
     }, delay);
   }
 
@@ -168,23 +171,25 @@ export class FlowDiagramRetryService {
     this.toast.info('重置中...', '正在完全重置流程图');
 
     scheduleTimer(() => {
-      const diagramDiv = getDiagramDiv();
+      this.zone.run(() => {
+        const diagramDiv = getDiagramDiv();
 
-      // 检查 DOM 是否准备好
-      if (!diagramDiv || !diagramDiv.nativeElement) {
-        this.logger.error('[FlowDiagramRetry] 重置时 diagramDiv 不可用');
-        this.toast.error('重置失败', '视图未准备好，请稍后重试');
-        return;
-      }
+        // 检查 DOM 是否准备好
+        if (!diagramDiv || !diagramDiv.nativeElement) {
+          this.logger.error('[FlowDiagramRetry] 重置时 diagramDiv 不可用');
+          this.toast.error('重置失败', '视图未准备好，请稍后重试');
+          return;
+        }
 
-      initDiagram();
-      if (this.diagram.isInitialized) {
-        onInitialized(0);
-        this.toast.success('重置成功', '流程图已就绪');
-      } else {
-        // 重置后仍然失败，显示错误但允许再次重试
-        this.toast.error('重置失败', '流程图初始化失败，请尝试刷新页面');
-      }
+        initDiagram();
+        if (this.diagram.isInitialized) {
+          onInitialized(0);
+          this.toast.success('重置成功', '流程图已就绪');
+        } else {
+          // 重置后仍然失败，显示错误但允许再次重试
+          this.toast.error('重置失败', '流程图初始化失败，请尝试刷新页面');
+        }
+      });
     }, 200);
   }
 
