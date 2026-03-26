@@ -272,8 +272,13 @@ export class AuthService {
         ...s,
         userId: localSession.userId,
         email: localSession.email,
-        error: null
+        error: null,
+        isCheckingSession: false,
       }));
+      // 【Bug 修复 2026-03-26】FastPath 必须完成与 finally 块相同的状态收尾，
+      // 否则 sessionInitialized 永远为 false → handoff 永远 pending → 界面空白。
+      this.sessionInitialized.set(true);
+      this.setProvisionalAuthState('ready');
 
       // 后台异步刷新 SDK session 状态，确保 token 最终同步
       this.scheduleBackgroundSessionRefresh();
@@ -379,6 +384,10 @@ export class AuthService {
   /**
    * 后台异步刷新 SDK session，确保 Supabase 客户端状态与本地缓存同步。
    * 不阻塞 UI，不影响用户操作。
+   *
+   * 【Bug 修复 2026-03-26】当后台刷新发现会话实际无效时（getSession 返回错误
+   * 或无 user），清除 currentUserId 等状态，触发 showLoginRequired 兜底。
+   * 否则用户看到"已登录"但所有 API 调用失败 → 永远无数据。
    */
   private scheduleBackgroundSessionRefresh(): void {
     const scheduleTask = (task: () => void) => {
@@ -394,15 +403,57 @@ export class AuthService {
       void this.supabase.getSession()
         .then(result => {
           if (result.error) {
-            this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误', result.error);
-          } else {
-            this.logger.debug('[BackgroundRefresh] SDK session 已同步');
+            this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误，清除本地会话', result.error);
+            this.handleBackgroundSessionInvalid();
+            return;
           }
+          const session = result.data?.session;
+          if (!session?.user) {
+            this.logger.warn('[BackgroundRefresh] SDK 返回空会话，本地缓存已失效');
+            this.handleBackgroundSessionInvalid();
+            return;
+          }
+          // 用 SDK 返回的最新 user 信息更新状态（可能 userId/email 有变化）
+          this.currentUserId.set(session.user.id);
+          this.sessionEmail.set(session.user.email ?? null);
+          this.authState.update(s => ({
+            ...s,
+            userId: session.user!.id,
+            email: session.user!.email ?? null,
+            error: null,
+          }));
+          this.logger.debug('[BackgroundRefresh] SDK session 已同步');
         })
         .catch(e => {
-          this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（不影响已加载数据）', e);
+          // 网络失败不清除状态 — 可能只是暂时离线，本地缓存仍有效
+          this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（网络问题，保留本地状态）', e);
         });
     });
+  }
+
+  /**
+   * 后台刷新发现会话确实无效时，清除 FastPath 乐观设置的状态。
+   * 这会让 showLoginRequired 生效，触发登录兜底 UI。
+   */
+  private handleBackgroundSessionInvalid(): void {
+    this.currentUserId.set(null);
+    this.sessionEmail.set(null);
+    this.authState.update(s => ({
+      ...s,
+      userId: null,
+      email: null,
+      error: null,
+      isCheckingSession: false,
+    }));
+    // 清除 localStorage 中已失效的 auth 缓存
+    try {
+      const storageKey = this.supabase.getStorageKey();
+      if (storageKey) {
+        localStorage.removeItem(storageKey);
+      }
+    } catch {
+      // localStorage 不可用时静默降级
+    }
   }
 
   /**

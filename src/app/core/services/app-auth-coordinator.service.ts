@@ -107,7 +107,10 @@ export class AppAuthCoordinatorService {
 
     if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && typeof window !== 'undefined') {
       const stage = window.__NANOFLOW_BOOT_STAGE__;
-      if (stage === 'handoff' || stage === 'ready') {
+      // 【Bug 修复 2026-03-26】扩展匹配条件：'launch-shell' 也立即放行。
+      // 原来只匹配 'handoff'|'ready'，但此时 stage 已是 'launch-shell'
+      // （AppComponent.afterNextRender 先执行），造成 bootstrap 总是等 2500ms 超时。
+      if (stage === 'launch-shell' || stage === 'handoff' || stage === 'ready') {
         queueMicrotask(runBootstrap);
         return;
       }
@@ -119,7 +122,8 @@ export class AppAuthCoordinatorService {
 
       const onBootStage = (event: Event) => {
         const detail = (event as CustomEvent<{ stage?: string }>).detail;
-        if (detail?.stage === 'handoff' || detail?.stage === 'ready') {
+        // 同步扩展：事件监听也匹配 'launch-shell'
+        if (detail?.stage === 'launch-shell' || detail?.stage === 'handoff' || detail?.stage === 'ready') {
           cleanup();
           runBootstrap();
         }
