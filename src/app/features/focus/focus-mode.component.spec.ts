@@ -1,4 +1,4 @@
-import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
+import { DestroyRef, Injector, NgZone, runInInjectionContext } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FocusModeComponent } from './focus-mode.component';
 import { GateService } from '../../../services/gate.service';
@@ -54,6 +54,12 @@ describe('FocusModeComponent', () => {
             info: vi.fn(),
             warn: vi.fn(),
             error: vi.fn(),
+          },
+        },
+        {
+          provide: NgZone,
+          useValue: {
+            run: (fn: () => unknown) => fn(),
           },
         },
         { provide: DestroyRef, useValue: mockDestroyRef },

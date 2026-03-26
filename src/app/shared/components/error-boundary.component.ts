@@ -7,7 +7,8 @@ import {
   OnDestroy,
   ChangeDetectorRef,
   ChangeDetectionStrategy,
-  HostBinding
+  HostBinding,
+  NgZone
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GlobalErrorHandler } from '../../../services/global-error-handler.service';
@@ -268,6 +269,7 @@ export class ErrorBoundaryComponent implements OnInit, OnDestroy {
   private errorHandler = inject(GlobalErrorHandler);
   private logger = inject(LoggerService).category('ErrorBoundary');
   private cdr = inject(ChangeDetectorRef);
+  private zone = inject(NgZone);
   
   /**
    * 显式禁用原生 HTML title 属性，防止悬浮时显示 tooltip

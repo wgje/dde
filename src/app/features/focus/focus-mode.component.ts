@@ -11,7 +11,8 @@ import {
   inject,
   OnInit,
   OnDestroy,
-  computed
+  computed,
+  NgZone
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateOverlayComponent } from './components/gate/gate-overlay.component';
@@ -59,6 +60,7 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private readonly gateService = inject(GateService);
   private readonly blackBoxSyncService = inject(BlackBoxSyncService);
   private readonly logger = inject(LoggerService);
+  private readonly ngZone = inject(NgZone);
 
   /** 页面隐藏时的时间戳，用于计算待机时长 */
   private hiddenAt: number | null = null;
@@ -159,13 +161,17 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
       const requestIdle = (window as Window & { requestIdleCallback: (cb: IdleRequestCallback, opts?: IdleRequestOptions) => number }).requestIdleCallback;
       requestIdle(() => {
-        void this.initializeAndCheckGateLegacy('startup');
+        this.ngZone.run(() => {
+          void this.initializeAndCheckGateLegacy('startup');
+        });
       }, { timeout: 4000 });
       return;
     }
 
     this.legacyInitialLoadTimer = setTimeout(() => {
-      void this.initializeAndCheckGateLegacy('startup');
+      this.ngZone.run(() => {
+        void this.initializeAndCheckGateLegacy('startup');
+      });
     }, 1200);
   }
 
@@ -192,7 +198,7 @@ export class FocusModeComponent implements OnInit, OnDestroy {
       this.blackBoxSyncService.pullChanges({ reason: 'startup' }).then(() => {
         // 【修复 P3-07】只有版本号匹配才更新 gate
         if (version === this.gateCheckVersion) {
-          this.checkGateOnStartup();
+          this.ngZone.run(() => this.checkGateOnStartup());
         }
       }).catch(pullError => {
         this.logger.warn('FocusMode', '后台拉取失败（throttled）',
@@ -218,7 +224,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
         if (idleDuration >= threshold) {
           this.logger.info('FocusMode', 
             `待机 ${Math.round(idleDuration / 1000)}s 后回来，重新检查大门`);
-          void this.handleResumeGateCheck();
+          // 在 NgZone 内执行，确保变更检测正确触发
+          this.ngZone.run(() => {
+            void this.handleResumeGateCheck();
+          });
         }
       }
     };
