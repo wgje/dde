@@ -3,7 +3,6 @@
 <!-- Build: 2025-12-04-v15-CACHE-FIX -->
 <html lang="en">
 <head>
-  <!-- LAUNCH_SHARED_HEAD_START -->
   <meta charset="utf-8">
   <title>NanoFlow</title>
   <base href="/">
@@ -131,10 +130,7 @@
   <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
 
   <!-- PWA manifest: 必须保留在 <head> 中，Chrome 安装检测依赖 <head> 内的 <link rel="manifest">。
-       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。
-       已知限制：manifest.webmanifest 的 theme_color/background_color 不支持
-       prefers-color-scheme media query（Web 标准限制）。当前使用浅色 #f5f5f4，
-       深色模式设备的系统 splash 可能与应用内深色背景不一致。 -->
+       Codespaces 代理会拦截 manifest 请求，因此在 *.github.dev 下跳过。 -->
   <script>
     if (!location.hostname.includes('github.dev') && !location.hostname.includes('app.github.dev')) {
       var link = document.createElement('link');
@@ -143,100 +139,6 @@
       document.head.appendChild(link);
     }
   </script>
-  <!-- LAUNCH_SHARED_HEAD_END -->
-
-  <!-- LAUNCH_SHARED_STYLES_START -->
-  <style>
-    :root {
-      --launch-shell-bg: #f5f5f4;
-    }
-    [data-color-mode="dark"] {
-      --launch-shell-bg: #0f172a;
-    }
-    #initial-loader {
-      position: fixed;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
-      background: var(--launch-shell-bg);
-      z-index: 99999;
-      font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-      transition: opacity 0.2s ease-out;
-    }
-    #initial-loader.fade-out {
-      opacity: 0;
-      pointer-events: none;
-    }
-    #initial-loader.hidden {
-      display: none;
-    }
-    @keyframes lsh-pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.55; transform: scale(0.82); }
-    }
-    @keyframes lsh-shimmer {
-      0% { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
-    }
-    #snapshot-shell {
-      display: block;
-      position: absolute;
-      inset: 0;
-      overflow-y: auto;
-      overflow-x: hidden;
-      -webkit-overflow-scrolling: touch;
-      background:
-        radial-gradient(circle at top left, rgba(79,70,229,0.16), transparent 34%),
-        radial-gradient(circle at bottom right, rgba(13,148,136,0.14), transparent 30%),
-        linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
-      color: #1c1917;
-    }
-    [data-color-mode="dark"] #snapshot-shell {
-      background:
-        radial-gradient(circle at top left, rgba(129,140,248,0.24), transparent 34%),
-        radial-gradient(circle at bottom right, rgba(52,211,153,0.14), transparent 30%),
-        linear-gradient(180deg, #111827 0%, #0f172a 100%);
-      color: #f5f5f4;
-    }
-    .lsh { display:flex; min-height:100%; padding:24px 18px; box-sizing:border-box; align-items:stretch; justify-content:center; }
-    .lsh-panel { width:min(100%,560px); display:flex; flex-direction:column; gap:18px; padding:20px; border-radius:24px;
-      background:rgba(255,255,255,0.86); border:1px solid rgba(231,229,228,0.92); box-shadow:0 20px 48px rgba(28,25,23,0.08); backdrop-filter:blur(14px); }
-    [data-color-mode="dark"] .lsh-panel { background:rgba(17,24,39,0.88); border-color:rgba(55,65,81,0.95); box-shadow:0 24px 56px rgba(0,0,0,0.3); }
-    .lsh-eyebrow { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:#57534e; letter-spacing:0.08em; text-transform:uppercase; }
-    .lsh-dot { width:8px; height:8px; border-radius:999px; background:#4f46e5; box-shadow:0 0 0 8px rgba(79,70,229,0.08); }
-    .lsh-title { margin:0; font-size:28px; line-height:1.1; font-weight:700; }
-    .lsh-subtitle { margin:0; font-size:14px; line-height:1.6; color:#57534e; }
-    .lsh-status { display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:rgba(79,70,229,0.08); color:#4338ca; font-size:12px; font-weight:600; width:fit-content; }
-    .lsh-pulse-dot { width:8px; height:8px; border-radius:999px; background:currentColor; animation:lsh-pulse 1.4s ease-in-out infinite; }
-    .lsh-grid { display:grid; grid-template-columns:1fr; gap:12px; }
-    .lsh-project { display:flex; flex-direction:column; gap:10px; padding:14px; border-radius:18px; background:rgba(250,250,249,0.95); border:1px solid rgba(231,229,228,0.92); }
-    .lsh-project--active { border-color:rgba(79,70,229,0.28); background:rgba(238,242,255,0.85); }
-    .lsh-project-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
-    .lsh-project-name { margin:0; font-size:16px; font-weight:700; }
-    .lsh-project-meta { font-size:12px; color:#78716c; white-space:nowrap; }
-    .lsh-project-desc { margin:0; font-size:13px; line-height:1.5; color:#57534e; }
-    .lsh-task-list { display:flex; flex-direction:column; gap:8px; }
-    .lsh-task { display:flex; align-items:center; gap:10px; font-size:13px; color:#292524; }
-    .lsh-task-id { min-width:28px; font-variant-numeric:tabular-nums; color:#78716c; font-size:12px; }
-    .lsh-task-dot { width:8px; height:8px; border-radius:999px; background:#0d9488; flex-shrink:0; }
-    .lsh-task-dot--done { background:#a8a29e; }
-    .lsh-footer { font-size:12px; color:#78716c; display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:4px; }
-    .lsh-placeholder { height:18px; border-radius:999px; background:linear-gradient(90deg,rgba(231,229,228,0.7),rgba(245,245,244,1),rgba(231,229,228,0.7)); background-size:240% 100%; animation:lsh-shimmer 1.6s linear infinite; }
-    .lsh-placeholder--short { width:42%; }
-    .lsh-placeholder--medium { width:64%; }
-    [data-color-mode="dark"] .lsh-eyebrow,
-    [data-color-mode="dark"] .lsh-subtitle,
-    [data-color-mode="dark"] .lsh-project-desc,
-    [data-color-mode="dark"] .lsh-project-meta,
-    [data-color-mode="dark"] .lsh-footer { color:#d6d3d1; }
-    [data-color-mode="dark"] .lsh-status { background:rgba(129,140,248,0.16); color:#c7d2fe; }
-    [data-color-mode="dark"] .lsh-project { background:rgba(31,41,55,0.9); border-color:rgba(75,85,99,0.88); }
-    [data-color-mode="dark"] .lsh-project--active { background:rgba(49,46,129,0.32); border-color:rgba(129,140,248,0.44); }
-    [data-color-mode="dark"] .lsh-task { color:#f5f5f4; }
-    [data-color-mode="dark"] .lsh-task-id { color:#a8a29e; }
-    [data-color-mode="dark"] .lsh-placeholder { background:linear-gradient(90deg,rgba(55,65,81,0.85),rgba(75,85,99,1),rgba(55,65,81,0.85)); background-size:240% 100%; }
-  </style>
-  <!-- LAUNCH_SHARED_STYLES_END -->
 
   <!-- Tailwind CDN removed in favor of local build -->
   <!-- GoJS is now imported via npm package -->
@@ -568,13 +470,16 @@
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 h-screen w-screen overflow-hidden">
+  <script>
+    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
+    window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
+  </script>
   <!-- 初始加载指示器 — 快照感知型 (P0 2026-03-25) -->
   <!-- 策略：如果 localStorage 里有上一次启动快照，则直接渲染项目摘要；
        否则退回到 shimmer 骨架。Angular 启动后无缝切换到 LaunchShellComponent。 -->
   <div id="initial-loader">
 
     <!-- ═══ 分支 A：快照壳（优先，由下方内联脚本激活）═══ -->
-    <!-- LAUNCH_SHARED_SHELL_START -->
     <div id="snapshot-shell">
       <section class="lsh">
         <div class="lsh-panel">
@@ -598,7 +503,6 @@
         </div>
       </section>
     </div>
-    <!-- LAUNCH_SHARED_SHELL_END -->
 
     <!-- ═══ 分支 B：传统 shimmer 骨架屏（当快照不可用时保留可见）═══ -->
     <div id="shimmer-skeleton" style="display:none;">
@@ -635,12 +539,7 @@
 
   <!-- ========== 内联快照渲染器 (P0 2026-03-25) ========== -->
   <!-- 在 Angular 引导之前从 localStorage 读取启动快照并立即渲染项目摘要，
-       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。
-       同源声明：本段 HTML/CSS（.lsh-* 前缀）是 LaunchShellComponent
-       （src/launch-shell.component.ts, .launch-shell__* 前缀）的纯 HTML 镜像。
-       二者的视觉语言、布局结构和数据格式必须保持一致。
-       若修改任一方，请同步更新另一方。 -->
-  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
+       消除 3-5 秒的「黑屏」感知。使用 textContent 避免 XSS。 -->
   <script>
     (function() {
       try {
@@ -721,23 +620,23 @@
           } catch (e) { /* ignore */ }
         }
       } catch (e) {
-        /* localStorage / JSON 异常：退回到传统 shimmer 骨架 */
+        /* localStorage / JSON 异常：退回到传统 shimmer 骨架（index.html）或保留占位（launch.html） */
         var shell = document.getElementById('snapshot-shell');
         var shimmer = document.getElementById('shimmer-skeleton');
         if (shimmer) {
+          /* index.html 路径：隐藏快照壳，显示完整 shimmer 骨架 */
           if (shell) shell.style.display = 'none';
           shimmer.className = 'active';
         }
+        /* launch.html 路径：无 shimmer 骨架，快照壳自带 placeholder 已经可见，无需额外操作 */
       }
     })();
   </script>
-  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
 
   <!-- ========== 从 <head> 移出的阻塞脚本（P0-3 性能优化 2026-03-25）========== -->
   <!-- 目的：减少 <head> 阻塞脚本，让骨架屏 First Paint 更早触发 -->
 
   <!-- Boot Flags：灰度开关（从 <head> 移至此处，仍在 main.js 之前执行） -->
-  <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
   <script>
     window.__NANOFLOW_BOOT_FLAGS__ = {
       DISABLE_INDEX_DATA_PRELOAD_V1: true,
@@ -769,138 +668,107 @@
       RESUME_METRICS_GATE_V1: true,
     };
   </script>
-  <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
 
   <!-- ========== 性能优化：预热脚本（P0-2 从 <head> 移至骨架屏之后 2026-03-24）========== -->
 
-  <!-- 启动壳优先：会话预热与数据预加载延后到 launch-shell/boot 完成后再 idle 执行 -->
+  <!-- 调试日志收集器 -->
+  <script>
+    window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
+    window.__DEBUG_LOG__.push({t: Date.now(), m: '预热脚本开始'});
+  </script>
+
+  <!-- Supabase 会话预热：在骨架屏渲染后立即发起 token 刷新 -->
   <script>
     (function() {
-      window.__NANOFLOW_SESSION_PREWARM__ = window.__NANOFLOW_SESSION_PREWARM__ || { status: 'idle' };
-      window.__PRELOADED_DATA__ = window.__PRELOADED_DATA__ || { serverTime: null, projects: null, timestamp: Date.now() };
+      window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };
 
-      var hasScheduled = false;
-      var hasExecuted = false;
-      var fallbackTimer = null;
+      var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
+      var SUPABASE_URL = 'YOUR_SUPABASE_URL';
+      var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 
-      var cleanup = function() {
-        window.removeEventListener('nanoflow:boot-stage', handleBootStage);
-        window.removeEventListener('nanoflow:bootstrap-complete', handleBootReady);
-        if (fallbackTimer !== null) {
-          clearTimeout(fallbackTimer);
-          fallbackTimer = null;
+      if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
+      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
+
+      try {
+        var raw = localStorage.getItem(AUTH_KEY);
+        if (!raw) return;
+        var authData = JSON.parse(raw);
+        var refreshToken = null;
+        if (authData && authData.refresh_token) {
+          refreshToken = authData.refresh_token;
+        } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
+          refreshToken = authData.currentSession.refresh_token;
         }
-      };
+        if (!refreshToken || typeof refreshToken !== 'string') return;
 
-      var scheduleDeferredStartup = function() {
-        if (hasScheduled) return;
-        hasScheduled = true;
+        var expiresAt = null;
+        if (authData.expires_at) expiresAt = authData.expires_at;
+        else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
 
-        var runDeferredStartup = function() {
-          if (hasExecuted) return;
-          hasExecuted = true;
-          startSessionPrewarm();
-          startDataPreload();
-        };
+        if (typeof expiresAt === 'number') {
+          if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
+          if (expiresAt > Date.now() + 600000) return;
+        }
 
+        window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
+
+        fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        }).then(function(resp) {
+          if (!resp.ok) { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; return; }
+          return resp.json();
+        }).then(function(data) {
+          if (!data || !data.access_token) return;
+          var newSession = {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token || refreshToken,
+            expires_in: data.expires_in,
+            expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+            token_type: data.token_type || 'bearer',
+            user: data.user || (authData && authData.user) || null
+          };
+          try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
+          window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
+          window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
+        }).catch(function() { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; });
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- 数据预加载（默认禁用，仅结构初始化） -->
+  <script>
+    (function() {
+      window.__PRELOADED_DATA__ = { serverTime: null, projects: null, timestamp: Date.now() };
+      var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
+      var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
+        ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 : true;
+      window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
+      if (disableIndexPreload) return;
+
+      var nav = navigator || {};
+      var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+      var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
+      var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
+      var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
+      var saveData = !!(connection && connection.saveData);
+      var isConstrainedNetwork = saveData || effectiveType === '2g' || effectiveType === 'slow-2g' ||
+        (downlink > 0 && downlink < 1.5) || rtt > 280;
+      if (isConstrainedNetwork) return;
+
+      var runWhenIdle = function(task) {
         if (typeof requestIdleCallback === 'function') {
-          requestIdleCallback(function() {
-            runDeferredStartup();
+          requestIdleCallback(function(deadline) {
+            if (deadline.didTimeout || deadline.timeRemaining() > 8) { task(); }
+            else { setTimeout(task, 0); }
           }, { timeout: 2000 });
           return;
         }
-
-        setTimeout(runDeferredStartup, 250);
+        setTimeout(task, 1200);
       };
 
-      var handleBootReady = function() {
-        cleanup();
-        scheduleDeferredStartup();
-      };
-
-      var handleBootStage = function(event) {
-        var detail = event && event.detail;
-        if (detail && (detail.stage === 'launch-shell' || detail.stage === 'handoff' || detail.stage === 'ready')) {
-          handleBootReady();
-        }
-      };
-
-      window.addEventListener('nanoflow:boot-stage', handleBootStage);
-      window.addEventListener('nanoflow:bootstrap-complete', handleBootReady, { once: true });
-      fallbackTimer = setTimeout(handleBootReady, 4000);
-
-      function startSessionPrewarm() {
-        var AUTH_KEY = 'sb-fkhihclpghmmtbbywvoj-auth-token';
-        var SUPABASE_URL = 'YOUR_SUPABASE_URL';
-        var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
-
-        if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
-        if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
-
-        try {
-          var raw = localStorage.getItem(AUTH_KEY);
-          if (!raw) return;
-          var authData = JSON.parse(raw);
-          var refreshToken = null;
-          if (authData && authData.refresh_token) {
-            refreshToken = authData.refresh_token;
-          } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
-            refreshToken = authData.currentSession.refresh_token;
-          }
-          if (!refreshToken || typeof refreshToken !== 'string') return;
-
-          var expiresAt = null;
-          if (authData.expires_at) expiresAt = authData.expires_at;
-          else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
-
-          if (typeof expiresAt === 'number') {
-            if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
-            if (expiresAt > Date.now() + 600000) return;
-          }
-
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
-
-          fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-            method: 'POST',
-            headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: refreshToken })
-          }).then(function(resp) {
-            if (!resp.ok) { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; return; }
-            return resp.json();
-          }).then(function(data) {
-            if (!data || !data.access_token) return;
-            var newSession = {
-              access_token: data.access_token,
-              refresh_token: data.refresh_token || refreshToken,
-              expires_in: data.expires_in,
-              expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-              token_type: data.token_type || 'bearer',
-              user: data.user || (authData && authData.user) || null
-            };
-            try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
-            window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
-            window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
-          }).catch(function() { window.__NANOFLOW_SESSION_PREWARM__.status = 'failed'; });
-        } catch (e) {}
-      }
-
-      function startDataPreload() {
-        var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
-        var disableIndexPreload = typeof runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 === 'boolean'
-          ? runtimeFlags.DISABLE_INDEX_DATA_PRELOAD_V1 : true;
-        window.__NANOFLOW_PRELOAD_DISABLED__ = disableIndexPreload;
-        if (disableIndexPreload) return;
-
-        var nav = navigator || {};
-        var connection = nav.connection || nav.mozConnection || nav.webkitConnection;
-        var effectiveType = connection && connection.effectiveType ? String(connection.effectiveType) : '';
-        var downlink = connection && typeof connection.downlink === 'number' ? connection.downlink : 0;
-        var rtt = connection && typeof connection.rtt === 'number' ? connection.rtt : 0;
-        var saveData = !!(connection && connection.saveData);
-        var isConstrainedNetwork = saveData || effectiveType === '2g' || effectiveType === 'slow-2g' ||
-          (downlink > 0 && downlink < 1.5) || rtt > 280;
-        if (isConstrainedNetwork) return;
-
+      runWhenIdle(function() {
         var authToken = null;
         var tokenExpiresAt = null;
         try {
@@ -924,8 +792,6 @@
           if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
         } else { return; }
 
-        window.__PRELOADED_DATA__.timestamp = Date.now();
-
         var supabaseUrl = 'YOUR_SUPABASE_URL';
         var supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
         var headers = { 'apikey': supabaseAnonKey, 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' };
@@ -938,7 +804,7 @@
           .then(function(r) { if (!r.ok) return null; return r.json(); })
           .then(function(data) { if (data && window.__PRELOADED_DATA__) { window.__PRELOADED_DATA__.projects = data; } })
           .catch(function() {});
-      }
+      });
     })();
   </script>
 
@@ -951,9 +817,10 @@
     </div>
   </noscript>
   
-  <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
   <script>
     // 启动壳就绪检测 — 事件驱动 + 轮询双保险 (P0 2026-03-25)
+    window.__DEBUG_LOG__.push({t: Date.now(), m: '检测脚本开始'});
+    
     (function() {
       var startTime = Date.now();
       var dismissed = false;
@@ -1015,6 +882,5 @@
       setTimeout(checkReady, 100);
     })();
   </script>
-  <!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
 </body>
 </html>

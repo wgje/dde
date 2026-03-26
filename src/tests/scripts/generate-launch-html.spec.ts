@@ -84,4 +84,79 @@ describe('generate-launch-html', () => {
     expect(launchHtml).toContain('main-ABC123.js');
     expect(launchHtml).not.toContain('__NANOFLOW_SESSION_PREWARM__');
   });
+
+  it('strips Tailwind utility classes from body tag', () => {
+    const { root, distDir } = createFixture();
+    // 覆盖 index.html 使 body 带 Tailwind class
+    writeFile(
+      path.join(distDir, 'index.html'),
+      `<!doctype html>
+<html>
+<head>
+  <!-- LAUNCH_SHARED_HEAD_START -->
+  <meta charset="utf-8">
+  <!-- LAUNCH_SHARED_HEAD_END -->
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-900 h-screen w-screen overflow-hidden">
+  <!-- LAUNCH_SHARED_SHELL_START -->
+  <div id="snapshot-shell"></div>
+  <!-- LAUNCH_SHARED_SHELL_END -->
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
+  <script>window.__FLAGS__ = {};</script>
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
+  <script>true;</script>
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
+  <script>true;</script>
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
+  <script src="polyfills-A.js" type="module"></script>
+  <script src="main-B.js" type="module"></script>
+</body>
+</html>`,
+    );
+
+    const { generateLaunchHtml } = require('../../../scripts/generate-launch-html.cjs');
+    generateLaunchHtml({ distDir, templatePath: path.join(root, 'public', 'launch.html') });
+    const launchHtml = fs.readFileSync(path.join(distDir, 'launch.html'), 'utf8');
+
+    expect(launchHtml).not.toContain('bg-slate-50');
+    expect(launchHtml).not.toContain('overflow-hidden');
+    expect(launchHtml).toContain('<body');
+  });
+
+  it('throws when no entry scripts found in index.html', () => {
+    const { root, distDir } = createFixture();
+    // 覆盖 index.html 移除 entry scripts
+    writeFile(
+      path.join(distDir, 'index.html'),
+      `<!doctype html>
+<html>
+<head>
+  <!-- LAUNCH_SHARED_HEAD_START -->
+  <meta charset="utf-8">
+  <!-- LAUNCH_SHARED_HEAD_END -->
+</head>
+<body>
+  <!-- LAUNCH_SHARED_SHELL_START -->
+  <div id="snapshot-shell"></div>
+  <!-- LAUNCH_SHARED_SHELL_END -->
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
+  <script>window.__FLAGS__ = {};</script>
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
+  <script>true;</script>
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
+  <script>true;</script>
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
+</body>
+</html>`,
+    );
+
+    const { generateLaunchHtml } = require('../../../scripts/generate-launch-html.cjs');
+    expect(() =>
+      generateLaunchHtml({ distDir, templatePath: path.join(root, 'public', 'launch.html') }),
+    ).toThrow('未在 index.html 中找到 main/polyfills 入口脚本');
+  });
 });

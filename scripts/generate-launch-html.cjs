@@ -31,7 +31,9 @@ function extractMarkedBlock(html, name, options = {}) {
 
 function extractBodyOpenTag(html) {
   const match = html.match(/<body\b[^>]*>/i);
-  return match ? match[0] : '<body>';
+  if (!match) return '<body>';
+  // 移除 Tailwind 工具类 — launch.html 不包含 Tailwind CSS 定义，保留无效 class 会产生样式不一致
+  return match[0].replace(/\bclass="[^"]*"/, '');
 }
 
 function extractEntryScripts(html) {
@@ -63,6 +65,10 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
   const loaderDismiss = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_LOADER_DISMISS');
   const bodyOpenTag = extractBodyOpenTag(indexHtml);
   const entryScripts = extractEntryScripts(indexHtml);
+
+  if (entryScripts.length === 0) {
+    throw new Error('未在 index.html 中找到 main/polyfills 入口脚本，launch.html 无法引导 Angular');
+  }
 
   return [
     '<!doctype html>',
