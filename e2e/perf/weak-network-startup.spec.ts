@@ -7,7 +7,7 @@ const PERF_GUARD = {
   MAX_BLACKBOX_PULLS_IN_10S: 1,
   MAX_RPC_400_COUNT: 0,
   LARGE_SCRIPT_CHUNK_MIN_BYTES: 600_000,
-  MAX_MODULEPRELOAD_LINKS: 0,
+  MAX_MODULEPRELOAD_LINKS: 8,
 } as const;
 
 test.describe('Weak Network Startup Guard', () => {
@@ -112,7 +112,7 @@ test.describe('Weak Network Startup Guard', () => {
 
     expect(
       modulepreloadLinks,
-      `strict 模式下 modulepreload 链接数量超限: ${modulepreloadLinks}`
+      `relaxed 模式下 modulepreload 链接数量超限: ${modulepreloadLinks}`
     ).toBeLessThanOrEqual(PERF_GUARD.MAX_MODULEPRELOAD_LINKS);
 
     await cdpSession.send('Network.emulateNetworkConditions', {

@@ -116,4 +116,58 @@ describe('LaunchSnapshotService', () => {
     expect(stored.activeProjectId).toBe('project-9');
     expect(stored.projects).toHaveLength(1);
   });
+
+  it('should materialize deferred captures before flushing on pagehide/visibility transitions', () => {
+    service.schedulePersistDeferred([createProject('project-2', 'Deferred', '2026-03-25T09:00:00.000Z')], {
+      activeProjectId: 'project-2',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'dark',
+    });
+
+    service.flushPendingPersist();
+
+    const stored = JSON.parse(localStorage.getItem('nanoflow.launch-snapshot.v1') ?? 'null') as LaunchSnapshot;
+    expect(stored.activeProjectId).toBe('project-2');
+    expect(stored.colorMode).toBe('dark');
+  });
+
+  it('should prefer v2 payloads over v1 when both snapshots exist', () => {
+    localStorage.setItem('nanoflow.launch-snapshot.v1', JSON.stringify({
+      version: 1,
+      savedAt: '2026-03-25T08:00:00.000Z',
+      activeProjectId: 'project-v1',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'light',
+      projects: [],
+    }));
+    localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+      version: 2,
+      savedAt: '2026-03-25T09:00:00.000Z',
+      activeProjectId: 'project-v2',
+      preferredView: 'flow',
+      resolvedLaunchView: 'text',
+      routeIntent: { kind: 'task', projectId: 'project-v2', taskId: 'task-9' },
+      mobileDegraded: true,
+      degradeReason: 'mobile-default-text',
+      theme: 'default',
+      colorMode: 'dark',
+      projects: [],
+      currentProject: null,
+    }));
+
+    const snapshot = service.read() as LaunchSnapshot & {
+      version: 2;
+      routeIntent: { kind: string; projectId: string | null; taskId?: string | null };
+      resolvedLaunchView: 'text' | 'flow';
+      mobileDegraded: boolean;
+    };
+
+    expect(snapshot.version).toBe(2);
+    expect(snapshot.activeProjectId).toBe('project-v2');
+    expect(snapshot.routeIntent.kind).toBe('task');
+    expect(snapshot.resolvedLaunchView).toBe('text');
+    expect(snapshot.mobileDegraded).toBe(true);
+  });
 });

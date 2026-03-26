@@ -182,6 +182,18 @@ export class SimpleSyncService {
     string,
     { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean }
   >();
+  private runtimeStarted = false;
+  private readonly handleOnline = () => {
+    this.logger.info('网络恢复');
+    this.state.update(s => ({ ...s, isOnline: true }));
+    if (this.retryQueueService.length > 0) {
+      this.retryQueueService.processQueue();
+    }
+  };
+  private readonly handleOffline = () => {
+    this.logger.info('网络断开');
+    this.state.update(s => ({ ...s, isOnline: false }));
+  };
   
   constructor() {
     // 订阅会话恢复事件
@@ -222,43 +234,50 @@ export class SimpleSyncService {
     this.blackBoxSync.setRetryQueueHandler((entry: BlackBoxEntry) => {
       this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId ?? undefined);
     });
-    
-    // 启动网络监听和重试循环
+
+    this.destroyRef.onDestroy(() => this.cleanup());
+  }
+
+  startRuntime(): void {
+    if (this.runtimeStarted) {
+      return;
+    }
+
+    this.runtimeStarted = true;
+    this.realtimePollingService.initializeRuntime();
     this.setupNetworkListeners();
     this.retryQueueService.startLoop(this.RETRY_INTERVAL);
-    
-    this.destroyRef.onDestroy(() => this.cleanup());
+  }
+
+  stopRuntime(): void {
+    if (!this.runtimeStarted) {
+      return;
+    }
+
+    this.runtimeStarted = false;
+    this.teardownNetworkListeners();
+    this.retryQueueService.stopLoop();
+    this.realtimePollingService.teardownRuntime();
   }
   
   // ==================== 网络与生命周期 ====================
   
   private setupNetworkListeners(): void {
     if (typeof window === 'undefined') return;
-    
-    const handleOnline = () => {
-      this.logger.info('网络恢复');
-      this.state.update(s => ({ ...s, isOnline: true }));
-      if (this.retryQueueService.length > 0) {
-        this.retryQueueService.processQueue();
-      }
-    };
-    
-    const handleOffline = () => {
-      this.logger.info('网络断开');
-      this.state.update(s => ({ ...s, isOnline: false }));
-    };
-    
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    
-    this.destroyRef.onDestroy(() => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    });
+
+    window.addEventListener('online', this.handleOnline);
+    window.addEventListener('offline', this.handleOffline);
+  }
+
+  private teardownNetworkListeners(): void {
+    if (typeof window === 'undefined') return;
+
+    window.removeEventListener('online', this.handleOnline);
+    window.removeEventListener('offline', this.handleOffline);
   }
   
   private cleanup(): void {
-    this.retryQueueService.stopLoop();
+    this.stopRuntime();
     this.realtimePollingService.unsubscribeFromProject();
   }
   

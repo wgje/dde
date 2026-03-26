@@ -63,7 +63,7 @@ describe('requireAuthGuard', () => {
     expect(show).not.toHaveBeenCalled();
   });
 
-  it('会话检查超时且无缓存时应允许壳层挂载并弹登录框', async () => {
+  it('AUTH_RUNTIME_GATE_V1 启用时，会话检查超时应直接放行而不弹登录框（由 handoff 兜底）', async () => {
     vi.useFakeTimers();
 
     const show = vi.fn();
@@ -89,10 +89,8 @@ describe('requireAuthGuard', () => {
     const result = await resultPromise;
 
     expect(result).toBe(true);
-    expect(show).toHaveBeenCalledWith('login', {
-      returnUrl: '/projects',
-      message: '请登录以访问此页面',
-    });
+    // AUTH_RUNTIME_GATE_V1 下，guard 放行但不主动弹登录框 — 登录提示由 handoff 协调器兜底
+    expect(show).not.toHaveBeenCalled();
   });
 
   it('已完成会话检查且未登录时应允许壳层挂载并弹登录框', async () => {

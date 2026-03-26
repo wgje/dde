@@ -81,13 +81,30 @@ export class RealtimePollingService {
   private onUserPreferencesChangeCallback: UserPreferencesChangeCallback | null = null;
   /** 任务级变更回调 */
   private onTaskChangeCallback: TaskChangeCallback | null = null;
+  private runtimeInitialized = false;
 
   constructor() {
-    this.setupUserActivityTracking();
-    
     this.destroyRef.onDestroy(() => {
       this.cleanup();
     });
+  }
+
+  initializeRuntime(): void {
+    if (this.runtimeInitialized) {
+      return;
+    }
+
+    this.runtimeInitialized = true;
+    this.setupUserActivityTracking();
+  }
+
+  teardownRuntime(): void {
+    if (!this.runtimeInitialized) {
+      return;
+    }
+
+    this.runtimeInitialized = false;
+    this.cleanup();
   }
 
   /**

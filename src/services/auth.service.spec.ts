@@ -27,9 +27,16 @@ describe('AuthService', () => {
     clientAsync: ReturnType<typeof vi.fn>;
     getSession: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
+    getStorageKey: ReturnType<typeof vi.fn>;
   };
   let authStateCallback: ((event: string, session: unknown) => void) | null = null;
   let mockUnsubscribe: ReturnType<typeof vi.fn>;
+
+  async function ensureRuntimeAuthReady(): Promise<void> {
+    await (service as AuthService & {
+      ensureRuntimeAuthReady: () => Promise<void>;
+    }).ensureRuntimeAuthReady();
+  }
   
   const mockLogger = {
     category: () => ({
@@ -76,6 +83,7 @@ describe('AuthService', () => {
         error: null
       }),
       signOut: vi.fn().mockResolvedValue(undefined),
+      getStorageKey: vi.fn().mockReturnValue('sb-test-auth-token'),
     };
     
     const mockEventBus = {
@@ -98,8 +106,6 @@ describe('AuthService', () => {
     });
     
     service = runInInjectionContext(injector, () => new AuthService());
-    await Promise.resolve();
-    await Promise.resolve();
   });
   
   afterEach(() => {
@@ -107,12 +113,22 @@ describe('AuthService', () => {
   });
   
   describe('onAuthStateChange 监听', () => {
-    it('应该注册认证状态变更监听器', () => {
-      expect(mockSupabaseClient.clientAsync).toHaveBeenCalled();
+    it('构造阶段不应初始化 Supabase client 或注册完整认证监听器', () => {
+      expect(mockSupabaseClient.clientAsync).not.toHaveBeenCalled();
+      expect(authStateCallback).toBeNull();
+    });
+
+    it('ensureRuntimeAuthReady 后才应该注册认证状态变更监听器，且只注册一次', async () => {
+      await ensureRuntimeAuthReady();
+      await ensureRuntimeAuthReady();
+
+      expect(mockSupabaseClient.clientAsync).toHaveBeenCalledTimes(1);
       expect(authStateCallback).toBeDefined();
     });
     
-    it('TOKEN_REFRESHED 事件应该清除过期标记', () => {
+    it('TOKEN_REFRESHED 事件应该清除过期标记', async () => {
+      await ensureRuntimeAuthReady();
+
       // 先设置过期状态
       (service as unknown as { sessionExpired: { set: (v: boolean) => void } }).sessionExpired.set(true);
       expect(service.sessionExpired()).toBe(true);
@@ -126,7 +142,9 @@ describe('AuthService', () => {
       expect(service.sessionExpired()).toBe(false);
     });
     
-    it('SIGNED_IN 事件应该更新用户信息', () => {
+    it('SIGNED_IN 事件应该更新用户信息', async () => {
+      await ensureRuntimeAuthReady();
+
       expect(service.currentUserId()).toBeNull();
       
       // 触发 SIGNED_IN 事件
@@ -137,10 +155,47 @@ describe('AuthService', () => {
       expect(service.currentUserId()).toBe('user-1');
       expect(service.sessionEmail()).toBe('test@example.com');
     });
+
+    it('storage 事件应桥接跨标签页登出状态', () => {
+      service.currentUserId.set('user-1');
+      service.sessionEmail.set('test@example.com');
+
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'sb-test-auth-token',
+        newValue: null,
+      }));
+
+      expect(service.currentUserId()).toBeNull();
+      expect(service.sessionEmail()).toBeNull();
+    });
+
+    it('auth runtime 就绪前应忽略 storage 登入事件，避免与 onAuthStateChange 竞态', () => {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'sb-test-auth-token',
+        newValue: JSON.stringify({ user: { id: 'cross-tab-user', email: 'cross@tab.com' } }),
+      }));
+
+      expect(service.currentUserId()).toBeNull();
+      expect(service.sessionEmail()).toBeNull();
+    });
+
+    it('auth runtime 就绪后应正常处理 storage 登入事件', async () => {
+      await ensureRuntimeAuthReady();
+
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'sb-test-auth-token',
+        newValue: JSON.stringify({ user: { id: 'cross-tab-user', email: 'cross@tab.com' } }),
+      }));
+
+      expect(service.currentUserId()).toBe('cross-tab-user');
+      expect(service.sessionEmail()).toBe('cross@tab.com');
+    });
   });
   
   describe('会话过期检测', () => {
-    it('非主动登出时应该触发会话过期处理', () => {
+    it('非主动登出时应该触发会话过期处理', async () => {
+      await ensureRuntimeAuthReady();
+
       // 先建立已登录状态（必须有 currentUserId 才会被视为会话过期）
       authStateCallback!('SIGNED_IN', {
         user: { id: 'user-1', email: 'test@example.com' }
@@ -162,6 +217,8 @@ describe('AuthService', () => {
     });
     
     it('主动登出时不应该触发会话过期提示', async () => {
+      await ensureRuntimeAuthReady();
+
       // 先登录
       authStateCallback!('SIGNED_IN', {
         user: { id: 'user-1', email: 'test@example.com' }
@@ -179,7 +236,9 @@ describe('AuthService', () => {
   });
   
   describe('reset', () => {
-    it('应该重置所有状态', () => {
+    it('应该重置所有状态', async () => {
+      await ensureRuntimeAuthReady();
+
       // 设置一些状态
       authStateCallback!('SIGNED_IN', {
         user: { id: 'user-1', email: 'test@example.com' }

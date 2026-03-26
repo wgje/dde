@@ -11,6 +11,9 @@
 // ============================================
 
 type RuntimeBootFlag =
+  | 'LAUNCH_CONTRACT_V2'
+  | 'AUTH_RUNTIME_GATE_V1'
+  | 'SNAPSHOT_HANDOFF_V2'
   | 'RESUME_INTERACTION_FIRST_V1'
   | 'RESUME_WATERMARK_RPC_V1'
   | 'RESUME_PULSE_DEDUP_V1'
@@ -134,6 +137,12 @@ export const FEATURE_FLAGS = {
   ROOT_STARTUP_DEP_PRUNE_V1: true,
   /** modulepreload 严格模式关闭，允许关键路径 chunk preload 消除串行瀑布 */
   STRICT_MODULEPRELOAD_V2: false,
+  /** 启动文档/缓存链路契约收口 */
+  LAUNCH_CONTRACT_V2: readRuntimeBooleanFlag('LAUNCH_CONTRACT_V2', true),
+  /** Auth runtime 延后到 handoff 后显式启动 */
+  AUTH_RUNTIME_GATE_V1: readRuntimeBooleanFlag('AUTH_RUNTIME_GATE_V1', true),
+  /** Snapshot v2 + handoff 协调器 */
+  SNAPSHOT_HANDOFF_V2: readRuntimeBooleanFlag('SNAPSHOT_HANDOFF_V2', true),
   /** Root 组件移除 FormsModule（改为原生 input 事件绑定） */
   ROOT_FORMS_FREE_V1: true,
   /** UserSession 附件服务按需懒加载 */

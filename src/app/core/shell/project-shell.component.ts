@@ -36,6 +36,8 @@ import { ParkingNoticeComponent } from '../../features/parking/parking-notice.co
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
 import { PARKING_CONFIG } from '../../../config/parking.config';
+import { HandoffCoordinatorService, shouldDegradeMobileStartupRoute } from '../../../services/handoff-coordinator.service';
+import { LaunchSnapshotService } from '../../../services/launch-snapshot.service';
 import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
 import {
   type DockFocusChromePhase,
@@ -454,9 +456,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly dynamicModal = inject(DynamicModalService);
   private readonly projectCoord = inject(AppProjectCoordinatorService);
+  private readonly handoffCoordinator = inject(HandoffCoordinatorService);
+  private readonly launchSnapshot = inject(LaunchSnapshotService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectShell');
   private readonly destroyRef = inject(DestroyRef);
+  private readonly startupLaunchSnapshot = this.launchSnapshot.read();
   
   // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
   // Shell 通过命令服务发布意图，FlowView 订阅并响应
@@ -496,6 +501,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   // Flow 智能恢复定时器
   private flowRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private flowIdlePreloadTimer: ReturnType<typeof setTimeout> | null = null;
+  private startupRouteDecisionResolved = false;
   private flowRestoreIdleCallbackId: number | null = null;
   private flowPreloadIdleCallbackId: number | null = null;
   private lastFlowRestoreProjectId: string | null = null;
@@ -579,6 +585,25 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     const projectId = snapshot.params['projectId'];
     const childSnapshot = snapshot.firstChild;
     const taskId = childSnapshot?.params['taskId'];
+    const currentUrl = this.router.url;
+    const handoffResult = this.handoffCoordinator.result();
+    const snapshotRouteIntent = this.startupLaunchSnapshot?.routeIntent;
+    const snapshotMatchesCurrentRoute =
+      snapshotRouteIntent?.projectId === projectId
+      && (
+        (snapshotRouteIntent.kind === 'task' && snapshotRouteIntent.taskId === taskId)
+        || (snapshotRouteIntent.kind === 'flow' && currentUrl.endsWith('/flow'))
+        || (snapshotRouteIntent.kind === 'text' && currentUrl.endsWith('/text'))
+        || snapshotRouteIntent.kind === 'project'
+      );
+    const degradeMobileStartupRoute =
+      FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2 &&
+      !this.startupRouteDecisionResolved &&
+      (
+        handoffResult.kind === 'degraded-to-text'
+        || (this.startupLaunchSnapshot?.mobileDegraded === true && snapshotMatchesCurrentRoute)
+        || shouldDegradeMobileStartupRoute(currentUrl, this.uiState.isMobile())
+      );
     
     // 处理项目切换
     if (projectId && projectId !== this.projectState.activeProjectId()) {
@@ -590,14 +615,33 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     }
     
     // 处理任务深链接定位
-    if (taskId) {
+    if (taskId && !degradeMobileStartupRoute) {
       this.handleTaskDeepLink(taskId);
     }
     
     // 根据 URL 确定视图模式
-    const currentUrl = this.router.url;
     const isFlowRoute = currentUrl.endsWith('/flow');
     const isTaskDeepLink = currentUrl.includes('/task/');
+
+    this.startupRouteDecisionResolved = true;
+
+    if (degradeMobileStartupRoute) {
+      this.cancelFlowStateAwareTimers();
+      this.setActiveView('text');
+      this.toast.info(
+        '已切换到文本视图',
+        this.startupLaunchSnapshot?.degradeReason === 'mobile-default-text'
+          ? '手机端启动默认进入文本视图，可稍后手动切换流程图'
+          : '启动阶段已回退到更稳定的文本视图'
+      );
+      if (handoffResult.kind === 'degraded-to-project' && !this.projectState.activeProjectId()) {
+        const fallbackProjectId = this.projectState.projects()[0]?.id ?? null;
+        if (fallbackProjectId) {
+          this.projectState.setActiveProjectId(fallbackProjectId);
+        }
+      }
+      return;
+    }
 
     if (isFlowRoute || isTaskDeepLink) {
       this.cancelFlowStateAwareTimers();

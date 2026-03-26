@@ -76,6 +76,7 @@ interface Window {
   __NANOFLOW_READY__?: boolean;
   __NANOFLOW_LAUNCH_SHELL_VISIBLE__?: boolean;
   __NANOFLOW_BOOT_STAGE__?: 'booting' | 'launch-shell' | 'handoff' | 'ready';
+  __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown;
   __NANOFLOW_SESSION_PREWARM__?: {
     status: 'idle' | 'pending' | 'refreshed' | 'failed';
     session?: {
@@ -90,6 +91,9 @@ interface Window {
 }
 
 interface NanoFlowBootFlags {
+  LAUNCH_CONTRACT_V2?: boolean;
+  AUTH_RUNTIME_GATE_V1?: boolean;
+  SNAPSHOT_HANDOFF_V2?: boolean;
   DISABLE_INDEX_DATA_PRELOAD_V1?: boolean;
   FONT_EXTREME_FIRSTPAINT_V1?: boolean;
   FLOW_STATE_AWARE_RESTORE_V2?: boolean;

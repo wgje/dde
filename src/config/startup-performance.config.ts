@@ -99,9 +99,9 @@ export const STARTUP_PERF_CONFIG = {
 
   /**
    * 允许的 modulepreload 数量（critical path chunks）
-   * 从 0 提升到 10：preload 关键路由 chunk 消除 10 级串行瀑布
+   * 当前 relaxed 策略实测产物为 8 条（main/polyfills + 6 个共享 chunk）
    */
-  STARTUP_MODULEPRELOAD_MAX: 10,
+  STARTUP_MODULEPRELOAD_MAX: 8,
 
   /**
    * 构建门禁：main/polyfills 递归静态依赖闭包体积上限（KB，raw）

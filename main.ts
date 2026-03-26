@@ -2,6 +2,7 @@ import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
+import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-registration-strategy';
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -329,7 +330,10 @@ async function startApplication() {
         // Service Worker: 启用以检测应用更新
         provideServiceWorker('ngsw-worker.js', {
           enabled: !isDevMode(),
-          registrationStrategy: 'registerWhenStable:30000'
+          registrationStrategy: createPostHandoffSwRegistrationStrategy({
+            delayMs: 250,
+            fallbackMs: 4_000,
+          })
         })
       ]
     });

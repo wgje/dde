@@ -14,7 +14,8 @@
           "/launch.html",
           "/manifest.webmanifest",
           "/*.css",
-          "/main*.js"
+          "/main*.js",
+          "/polyfills*.js"
         ]
       }
     },

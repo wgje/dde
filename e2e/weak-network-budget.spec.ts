@@ -35,8 +35,8 @@ const BUDGET = {
   MAX_PRE_FLOW_LARGE_CHUNK_COUNT: 0,
   /** 判定为重型 chunk 的最小体积 */
   LARGE_SCRIPT_CHUNK_MIN_BYTES: 600_000,
-  /** strict 模式下 modulepreload 链接上限 */
-  MAX_MODULEPRELOAD_LINKS: 0,
+  /** relaxed 模式下 modulepreload 链接上限 */
+  MAX_MODULEPRELOAD_LINKS: 8,
 } as const;
 
 test.describe('弱网性能预算门禁', () => {
@@ -219,7 +219,7 @@ test.describe('弱网性能预算门禁', () => {
 
     expect(
       modulepreloadLinks,
-      `strict 模式下 modulepreload 数量超限 (${modulepreloadLinks} > ${BUDGET.MAX_MODULEPRELOAD_LINKS})`
+      `relaxed 模式下 modulepreload 数量超限 (${modulepreloadLinks} > ${BUDGET.MAX_MODULEPRELOAD_LINKS})`
     ).toBeLessThanOrEqual(BUDGET.MAX_MODULEPRELOAD_LINKS);
 
     // 清理节流

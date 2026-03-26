@@ -34,8 +34,8 @@ import { WorkspaceSidebarComponent } from './app/core/shell/workspace-sidebar.co
 import { WorkspaceOverlaysComponent } from './app/core/shell/workspace-overlays.component';
 import type { StorageEscapeData } from './app/shared/modals';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
-import { filter } from 'rxjs/operators';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { filter, map, startWith } from 'rxjs/operators';
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { ThemeType, Project } from './models';
 import { UI_CONFIG } from './config/ui.config';
 import { FEATURE_FLAGS, validateCriticalFlags } from './config/feature-flags.config';
@@ -49,7 +49,9 @@ import { PwaInstallPromptService } from './services/pwa-install-prompt.service';
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
+import { AuthService } from './services/auth.service';
 import { BootStageService } from './services/boot-stage.service';
+import { HandoffCoordinatorService } from './services/handoff-coordinator.service';
 import { LaunchSnapshotService } from './services/launch-snapshot.service';
 import { TaskStore } from './services/stores';
 import { DockEngineService } from './services/dock-engine.service';
@@ -159,6 +161,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
   readonly focusPrefs = inject(FocusPreferenceService);
   readonly pwaInstall = inject(PwaInstallPromptService);
+  private readonly authService = inject(AuthService);
 
   /** 认证协调器 — 管理所有认证相关状态和操作 */
   readonly authCoord = inject(AppAuthCoordinatorService);
@@ -212,11 +215,23 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
   readonly bootStage = inject(BootStageService);
+  private readonly handoffCoordinator = inject(HandoffCoordinatorService);
   private readonly launchSnapshot = inject(LaunchSnapshotService);
+  private readonly startupLaunchSnapshot = this.launchSnapshot.read();
   
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+
+  /** 路由 URL 信号化 — 保证 effect 内可响应导航变化 */
+  private readonly routeUrl = toSignal(
+    this.router.events.pipe(
+      filter((event): event is NavigationEnd => event instanceof NavigationEnd),
+      map((event) => event.urlAfterRedirects),
+      startWith(this.router.url),
+    ),
+    { initialValue: this.router.url },
+  );
 
   /** 代理 UiStateService.sidebarOpen，所有 .set()/.update() 调用均作用于服务层信号 */
   get isSidebarOpen() { return this.uiState.sidebarOpen; }
@@ -676,7 +691,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   // 模态框开关状态 - 保留删除项目用（其余已迁移到命令式渲染）
   readonly showDeleteProjectModal = computed(() => this.modal.isOpen('deleteProject'));
   
-  readonly showLoginRequired = this.authCoord.showLoginRequired;
+  readonly showLoginRequired = computed(() =>
+    this.authCoord.showLoginRequired() && this.handoffCoordinator.result().kind === 'login-required'
+  );
   
   /** 删除项目目标 - 从 ModalService 获取 */
   readonly deleteProjectTarget = computed(() => {
@@ -892,7 +909,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) {
       // 旧策略兜底：未开启分层启动时维持原有初始化节奏
-      setTimeout(() => this.syncCoordinator.initialize(), 100);
+      setTimeout(() => {
+        this.syncCoordinator.initialize();
+        this.simpleSync.startRuntime();
+      }, 100);
     }
     
     // 🚀 空闲时预加载常用模态框（消除首次点击延迟）
@@ -949,6 +969,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupModalEffects();
     this.setupDataProtectionEffect();
     this.setupLaunchSnapshotEffect();
+    this.setupHandoffEffect();
     this.setupFocusProbeEffect();
     this.setupStartupTierEffects();
     this.setupRemoteCallbackEffect();
@@ -1022,10 +1043,18 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       const lastActiveView = this.uiState.activeView();
       const theme = this.preferenceService.theme();
       const colorMode = this.readCurrentColorMode();
+      const routeUrl = this.routeUrl();
+      const resolvedLaunchView = lastActiveView ?? 'text';
+      const mobileDegraded = this.uiState.isMobile() && (routeUrl.endsWith('/flow') || routeUrl.includes('/task/')) && resolvedLaunchView === 'text';
+      const degradeReason = mobileDegraded ? 'mobile-default-text' : null;
 
       this.launchSnapshot.schedulePersistDeferred(projects, {
         activeProjectId,
         lastActiveView,
+        routeUrl,
+        resolvedLaunchView,
+        mobileDegraded,
+        degradeReason,
         theme,
         colorMode,
       });
@@ -1050,7 +1079,43 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.workspaceHandoffSignaled = true;
-    this.bootStage.markWorkspaceHandoffReady();
+    if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
+      this.bootStage.markWorkspaceHandoffReady();
+      return;
+    }
+    this.handoffCoordinator.markLayoutStable();
+  }
+
+  private setupHandoffEffect(): void {
+    effect(() => {
+      if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
+        return;
+      }
+
+      const currentRouteUrl = this.routeUrl();
+      const projects = this.projectState.projects();
+      const activeProjectId = this.projectState.activeProjectId();
+      const result = this.handoffCoordinator.resolve({
+        routeUrl: currentRouteUrl,
+        isMobile: this.uiState.isMobile(),
+        hasProjects: projects.length > 0,
+        activeProjectId,
+        authConfigured: this.authService.isConfigured,
+        authRuntimeState: this.authService.runtimeState(),
+        isCheckingSession: this.authCoord.isCheckingSession(),
+        showLoginRequired: this.authCoord.showLoginRequired(),
+        bootstrapFailed: this.authCoord.bootstrapFailed(),
+        snapshot: this.startupLaunchSnapshot,
+      });
+
+      if (result.kind === 'degraded-to-project' && !activeProjectId && projects.length > 0) {
+        const snapshotProjectId = this.startupLaunchSnapshot?.currentProject?.id ?? null;
+        const fallbackProjectId = projects.some((project) => project.id === snapshotProjectId)
+          ? snapshotProjectId
+          : projects[0].id;
+        this.projectState.setActiveProjectId(fallbackProjectId);
+      }
+    });
   }
 
   /** Focus 启动探针：登录后尽早执行本地 gate 检查 */
@@ -1101,6 +1166,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
       this.syncHydrationDone = true;
       this.syncCoordinator.initialize();
+      this.simpleSync.startRuntime();
     });
   }
 

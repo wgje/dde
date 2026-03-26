@@ -4,6 +4,7 @@ import { AuthService } from '../auth.service';
 import { LoggerService } from '../logger.service';
 import { ModalService } from '../modal.service';
 import { AUTH_CONFIG, GUARD_CONFIG } from '../../config';
+import { FEATURE_FLAGS } from '../../config/feature-flags.config';
 import { guardLogger } from '../../utils/standalone-logger';
 
 /** 本地认证缓存 key */
@@ -259,6 +260,15 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
       return true;
     }
 
+    if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1) {
+      // 安全说明：Guard 放行不等于跳过认证 — 下游 showLoginRequired computed
+      // 在 handoff 完成后仍会显式检查认证状态并展示登录 UI
+      logger.debug('Auth runtime 已延后到 handoff 后，先允许壳层挂载', {
+        targetUrl: state.url,
+      });
+      return true;
+    }
+
     // 无本地缓存：短时等待（最多 500ms），给首次网络会话检查一个机会
     logger.debug('会话初始化未完成，短时等待');
     await waitForSessionCheck(authService, Math.min(GUARD_CONFIG.SESSION_CHECK_TIMEOUT, 500));
@@ -294,6 +304,12 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
   
   if (localAuth.userId) {
     logger.debug('使用本地缓存认证，允许离线访问');
+    return true;
+  }
+
+  if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && !authService.sessionInitialized()) {
+    // 安全说明：同上 — handoff 完成后 showLoginRequired 会兜底显示登录界面
+    logger.debug('Auth runtime 尚未完成，推迟登录提示到壳层 handoff 之后');
     return true;
   }
   

@@ -63,6 +63,7 @@ export class AppAuthCoordinatorService {
   /** 显示未登录提示界面 */
   readonly showLoginRequired = computed(() => {
     return this.auth.isConfigured &&
+      this.auth.runtimeState() !== 'pending' &&
       this.auth.sessionInitialized() &&  // 必须等首次会话检查完成，防止启动竞态误显示
       !this.userSession.currentUserId() &&
       !this.modal.isOpen('login') &&
@@ -103,6 +104,38 @@ export class AppAuthCoordinatorService {
         // 错误已在 bootstrapSession 内部处理
       });
     };
+
+    if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && typeof window !== 'undefined') {
+      const stage = window.__NANOFLOW_BOOT_STAGE__;
+      if (stage === 'handoff' || stage === 'ready') {
+        queueMicrotask(runBootstrap);
+        return;
+      }
+
+      let fallbackTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        cleanup();
+        runBootstrap();
+      }, 2500);
+
+      const onBootStage = (event: Event) => {
+        const detail = (event as CustomEvent<{ stage?: string }>).detail;
+        if (detail?.stage === 'handoff' || detail?.stage === 'ready') {
+          cleanup();
+          runBootstrap();
+        }
+      };
+
+      const cleanup = () => {
+        window.removeEventListener('nanoflow:boot-stage', onBootStage as EventListener);
+        if (fallbackTimer) {
+          clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+        }
+      };
+
+      window.addEventListener('nanoflow:boot-stage', onBootStage as EventListener, { once: true });
+      return;
+    }
 
     // 【性能优化 2026-03-23】移除 requestAnimationFrame 延迟
     // 原策略等待首帧渲染后再启动会话检查，增加 ~16-32ms 延迟。

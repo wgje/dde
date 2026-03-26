@@ -54,6 +54,8 @@ describe('SimpleSyncService', () => {
   let mockToast: any;
   let mockThrottle: any;
   let mockClient: any;
+  let windowAddEventListenerSpy: ReturnType<typeof vi.spyOn>;
+  let windowRemoveEventListenerSpy: ReturnType<typeof vi.spyOn>;
   
   // Sprint 9 子服务 Mock - 提升到 describe 级别以便测试用例访问
   let mockRealtimePolling: any;
@@ -150,6 +152,8 @@ describe('SimpleSyncService', () => {
   
   beforeEach(() => {
     disablePollutionGuard();
+    windowAddEventListenerSpy = vi.spyOn(window, 'addEventListener');
+    windowRemoveEventListenerSpy = vi.spyOn(window, 'removeEventListener');
     // 重置模拟客户端
     // 注意：pushTask 现在会先检查 task_tombstones，然后再 upsert
     mockClient = {
@@ -268,6 +272,8 @@ describe('SimpleSyncService', () => {
     // 使用可变状态追踪 Realtime 启用状态
     mockRealtimeEnabledState = false;
     mockRealtimePolling = {
+      initializeRuntime: vi.fn(),
+      teardownRuntime: vi.fn(),
       isRealtimeEnabled: vi.fn().mockImplementation(() => mockRealtimeEnabledState),
       setOnRemoteChange: vi.fn(),
       hasRemoteChangeCallback: vi.fn().mockReturnValue(true),
@@ -471,6 +477,8 @@ describe('SimpleSyncService', () => {
   afterEach(() => {
     // 清理定时器
     vi.clearAllTimers();
+    windowAddEventListenerSpy.mockRestore();
+    windowRemoveEventListenerSpy.mockRestore();
     enablePollutionGuard();
   });
   
@@ -489,6 +497,31 @@ describe('SimpleSyncService', () => {
       expect(service.isOnline()).toBe(true);
       expect(service.isSyncing()).toBe(false);
       expect(service.hasConflict()).toBe(false);
+    });
+
+    it('构造阶段不应启动 retry loop 或注册网络监听', () => {
+      expect(mockRetryQueueService.startLoop).not.toHaveBeenCalled();
+      expect(windowAddEventListenerSpy).not.toHaveBeenCalledWith('online', expect.any(Function));
+      expect(windowAddEventListenerSpy).not.toHaveBeenCalledWith('offline', expect.any(Function));
+    });
+
+    it('startRuntime/stopRuntime 应显式控制 loop 与网络监听', () => {
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+        stopRuntime: () => void;
+      };
+
+      runtimeService.startRuntime();
+      expect(mockRetryQueueService.startLoop).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.initializeRuntime).toHaveBeenCalledTimes(1);
+      expect(windowAddEventListenerSpy).toHaveBeenCalledWith('online', expect.any(Function));
+      expect(windowAddEventListenerSpy).toHaveBeenCalledWith('offline', expect.any(Function));
+
+      runtimeService.stopRuntime();
+      expect(mockRetryQueueService.stopLoop).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.teardownRuntime).toHaveBeenCalledTimes(1);
+      expect(windowRemoveEventListenerSpy).toHaveBeenCalledWith('online', expect.any(Function));
+      expect(windowRemoveEventListenerSpy).toHaveBeenCalledWith('offline', expect.any(Function));
     });
   });
   

@@ -62,9 +62,17 @@ export class AuthService {
    * 解决 Guard 与 bootstrap 间的竞态条件导致登录弹窗误弹出
    */
   readonly sessionInitialized = signal(false);
+  readonly runtimeState = signal<'idle' | 'pending' | 'ready' | 'failed'>('idle');
   
   /** 认证状态变更订阅的取消函数 */
   private authStateSubscription: { unsubscribe: () => void } | null = null;
+  private authRuntimeReady = false;
+  private runtimeAuthReadyPromise: Promise<void> | null = null;
+  private readonly storageKey = this.supabase.getStorageKey();
+  private readonly storageListener = (event: StorageEvent) => this.handleStorageEvent(event);
+  private setProvisionalAuthState(state: 'pending' | 'ready' | 'failed'): void {
+    this.runtimeState.set(state);
+  }
   
   /** Supabase 是否已配置 */
   get isConfigured(): boolean {
@@ -92,13 +100,45 @@ export class AuthService {
   readonly sessionEmail = signal<string | null>(null);
   
   constructor() {
-    // 初始化认证状态监听
-    void this.initAuthStateListener();
+    if (!this.supabase.isConfigured) {
+      this.runtimeState.set('ready');
+    }
+    this.initStorageBridge();
     
     // 组件销毁时清理订阅
     this.destroyRef.onDestroy(() => {
       this.authStateSubscription?.unsubscribe();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('storage', this.storageListener);
+      }
     });
+  }
+
+  async ensureRuntimeAuthReady(): Promise<void> {
+    if (!this.supabase.isConfigured || this.authRuntimeReady) {
+      this.setProvisionalAuthState('ready');
+      return;
+    }
+
+    if (this.runtimeAuthReadyPromise) {
+      return this.runtimeAuthReadyPromise;
+    }
+
+    this.setProvisionalAuthState('pending');
+    this.runtimeAuthReadyPromise = this.initAuthStateListener()
+      .then(() => {
+        this.authRuntimeReady = true;
+        this.setProvisionalAuthState('ready');
+      })
+      .catch((error) => {
+        this.setProvisionalAuthState('failed');
+        throw error;
+      })
+      .finally(() => {
+        this.runtimeAuthReadyPromise = null;
+      });
+
+    return this.runtimeAuthReadyPromise;
   }
 
   /**
@@ -245,6 +285,7 @@ export class AuthService {
     const SESSION_TIMEOUT = 5000;
     
     try {
+      await this.ensureRuntimeAuthReady();
       this.logger.debug('正在调用 supabase.getSession()...');
       const callStartTime = Date.now();
       
@@ -497,6 +538,7 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
+      await this.ensureRuntimeAuthReady();
       const client = await this.supabase.clientAsync();
       if (!client) {
         const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
@@ -565,6 +607,7 @@ export class AuthService {
     this.authState.update(s => ({ ...s, isLoading: true, error: null }));
     
     try {
+      await this.ensureRuntimeAuthReady();
       const client = await this.supabase.clientAsync();
       if (!client) {
         const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
@@ -643,12 +686,20 @@ export class AuthService {
    * 用于测试环境的 afterEach 或 HMR 重载
    */
   reset(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', this.storageListener);
+    }
     this.currentUserId.set(null);
     this.sessionEmail.set(null);
     this.sessionExpired.set(false);
     this.sessionInitialized.set(false);
     this.isManualSignOut = false;
     this.devAutoLoginAttempted = false;
+    this.authRuntimeReady = false;
+    this.authStateSubscription?.unsubscribe();
+    this.authStateSubscription = null;
+    this.runtimeAuthReadyPromise = null;
+    this.runtimeState.set(this.supabase.isConfigured ? 'idle' : 'ready');
     this.authState.set({
       isCheckingSession: false,
       isLoading: false,
@@ -672,6 +723,10 @@ export class AuthService {
   private async initAuthStateListener(): Promise<void> {
     if (!this.supabase.isConfigured) {
       this.logger.debug('Supabase 未配置，跳过认证状态监听');
+      return;
+    }
+
+    if (this.authStateSubscription) {
       return;
     }
     
@@ -706,6 +761,53 @@ export class AuthService {
     });
     
     this.authStateSubscription = data.subscription;
+  }
+
+  private initStorageBridge(): void {
+    if (typeof window === 'undefined' || !this.storageKey) {
+      return;
+    }
+
+    window.addEventListener('storage', this.storageListener);
+  }
+
+  private handleStorageEvent(event: StorageEvent): void {
+    if (!this.storageKey || event.key !== this.storageKey) {
+      return;
+    }
+
+    // 登出（token 被清除）在任何阶段都应立即响应
+    if (!event.newValue) {
+      this.currentUserId.set(null);
+      this.sessionEmail.set(null);
+      this.authState.update((state) => ({
+        ...state,
+        userId: null,
+        email: null,
+      }));
+      return;
+    }
+
+    // Auth runtime 未就绪时忽略登入事件，避免与 onAuthStateChange 竞态
+    if (!this.authRuntimeReady) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(event.newValue) as { user?: { id?: unknown; email?: unknown } };
+      const userId = typeof parsed.user?.id === 'string' ? parsed.user.id : null;
+      const email = typeof parsed.user?.email === 'string' ? parsed.user.email : null;
+
+      this.currentUserId.set(userId);
+      this.sessionEmail.set(email);
+      this.authState.update((state) => ({
+        ...state,
+        userId,
+        email,
+      }));
+    } catch (error) {
+      this.logger.debug('Storage bridge 解析 auth token 失败，已忽略', error);
+    }
   }
   
   /**
