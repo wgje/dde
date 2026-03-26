@@ -50,12 +50,14 @@ export function createPostHandoffSwRegistrationStrategy(
 
     function onBootStage(event: Event): void {
       const detail = (event as CustomEvent<{ stage?: string }>).detail;
-      if (detail?.stage === 'handoff' || detail?.stage === 'ready') {
+      // 【Bug 修复 2026-03-26】扩展匹配条件：'launch-shell' 也触发注册。
+      // 与 app-auth-coordinator 同理：ngOnInit 时 stage 已是 'launch-shell'。
+      if (detail?.stage === 'launch-shell' || detail?.stage === 'handoff' || detail?.stage === 'ready') {
         scheduleRegistration();
       }
     }
 
-    if (window.__NANOFLOW_BOOT_STAGE__ === 'handoff' || window.__NANOFLOW_BOOT_STAGE__ === 'ready') {
+    if (window.__NANOFLOW_BOOT_STAGE__ === 'launch-shell' || window.__NANOFLOW_BOOT_STAGE__ === 'handoff' || window.__NANOFLOW_BOOT_STAGE__ === 'ready') {
       scheduleRegistration();
     } else {
       window.addEventListener('nanoflow:boot-stage', onBootStage as EventListener);
