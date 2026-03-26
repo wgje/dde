@@ -15,6 +15,7 @@ const path = require('path');
 
 const DEFAULT_DIST_DIR = path.join(__dirname, '..', 'dist', 'browser');
 const DEFAULT_INDEX_HTML = path.join(DEFAULT_DIST_DIR, 'index.html');
+const DEFAULT_HTML_FILES = ['index.html', 'launch.html'];
 const DEFAULT_MAX_CRITICAL_PRELOADS = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 6);
 const DEFAULT_MAX_TRACE_DEPTH = Number(process.env.STARTUP_MODULEPRELOAD_TRACE_DEPTH || 3);
 const MAX_PRELOAD_CHUNK_BYTES = Number(process.env.STARTUP_MAX_PRELOAD_CHUNK_BYTES || 96 * 1024);
@@ -62,6 +63,10 @@ function parseStrictMode(html) {
   const match = html.match(/STRICT_MODULEPRELOAD_V2:\s*(true|false)/);
   if (!match) return true;
   return match[1] === 'true';
+}
+
+function resolveHtmlFiles(distDir = DEFAULT_DIST_DIR, htmlFiles = DEFAULT_HTML_FILES) {
+  return htmlFiles.filter((htmlFile) => fs.existsSync(path.join(distDir, htmlFile)));
 }
 
 function removeAllModulePreload(html) {
@@ -156,10 +161,36 @@ function selectCriticalChunks(chunks, maxCount, maxChunkBytes = MAX_PRELOAD_CHUN
   return candidates.slice(0, maxCount).map((chunk) => chunk.file);
 }
 
-function injectModulePreloads(html, modules) {
-  if (modules.length === 0) return html;
+function extractEntryModules(html, options = {}) {
+  const mainFile = options.mainFile || null;
+  const polyfillsFile = options.polyfillsFile || null;
+  const entryModules = [];
+  const scriptPattern = /<script\b[^>]*src=["']([^"']+)["'][^>]*type=["']module["'][^>]*><\/script>|<script\b[^>]*type=["']module["'][^>]*src=["']([^"']+)["'][^>]*><\/script>/gi;
+  let match;
 
-  const links = modules
+  while ((match = scriptPattern.exec(html)) !== null) {
+    const src = (match[1] || match[2] || '').replace(/^\//, '');
+    if (!src) continue;
+    if ((mainFile && src === mainFile) || (polyfillsFile && src === polyfillsFile)) {
+      entryModules.push(src);
+    }
+  }
+
+  if (polyfillsFile && !entryModules.includes(polyfillsFile)) {
+    entryModules.push(polyfillsFile);
+  }
+  if (mainFile && !entryModules.includes(mainFile)) {
+    entryModules.push(mainFile);
+  }
+
+  return entryModules;
+}
+
+function injectModulePreloads(html, modules, options = {}) {
+  const preloadModules = [...new Set([...(options.entryModules || []), ...modules])];
+  if (preloadModules.length === 0) return html;
+
+  const links = preloadModules
     .map((moduleName) => `<link rel="modulepreload" href="/${moduleName}">`)
     .join('\n  ');
 
@@ -175,37 +206,58 @@ function findMainFile(distDir = DEFAULT_DIST_DIR) {
   return fs.readdirSync(distDir).find((file) => /^main-.*\.js$/.test(file)) || null;
 }
 
+function findPolyfillsFile(distDir = DEFAULT_DIST_DIR) {
+  return fs.readdirSync(distDir).find((file) => /^polyfills-.*\.js$/.test(file)) || null;
+}
+
 function processModulePreload(options = {}) {
   const {
     distDir = DEFAULT_DIST_DIR,
     indexHtmlPath = path.join(distDir, 'index.html'),
+    htmlFiles = DEFAULT_HTML_FILES,
     maxCriticalPreloads = DEFAULT_MAX_CRITICAL_PRELOADS,
     maxTraceDepth = DEFAULT_MAX_TRACE_DEPTH,
     maxChunkBytes = MAX_PRELOAD_CHUNK_BYTES,
     quiet = false,
   } = options;
 
-  const html = readBuiltHtml(indexHtmlPath);
-  const strictMode = parseStrictMode(html);
-  const { cleanedHtml, removedCount } = removeAllModulePreload(html);
-
-  if (strictMode) {
-    fs.writeFileSync(indexHtmlPath, cleanedHtml);
-    return { strictMode, removedCount, selected: [] };
-  }
-
   const mainFile = findMainFile(distDir);
+  const polyfillsFile = findPolyfillsFile(distDir);
   if (!mainFile) {
+    const html = readBuiltHtml(indexHtmlPath);
+    const { cleanedHtml, removedCount } = removeAllModulePreload(html);
     fs.writeFileSync(indexHtmlPath, cleanedHtml);
-    return { strictMode, removedCount, selected: [] };
+    return { strictMode: parseStrictMode(html), removedCount, selected: [], processedHtmls: [] };
   }
 
   const allChunks = traceCriticalChunks(mainFile, maxTraceDepth, distDir, { quiet });
   const selected = selectCriticalChunks(allChunks, maxCriticalPreloads, maxChunkBytes);
-  const nextHtml = injectModulePreloads(cleanedHtml, selected);
-  fs.writeFileSync(indexHtmlPath, nextHtml);
+  const processedHtmls = [];
 
-  return { strictMode, removedCount, selected };
+  for (const htmlFile of resolveHtmlFiles(distDir, htmlFiles)) {
+    const htmlPath = path.join(distDir, htmlFile);
+    const html = readBuiltHtml(htmlPath);
+    const strictMode = parseStrictMode(html);
+    const { cleanedHtml, removedCount } = removeAllModulePreload(html);
+    const entryModules = extractEntryModules(cleanedHtml, { mainFile, polyfillsFile });
+
+    if (strictMode) {
+      fs.writeFileSync(htmlPath, cleanedHtml);
+      processedHtmls.push({ htmlFile, strictMode, removedCount, selected: [], entryModules });
+      continue;
+    }
+
+    const nextHtml = injectModulePreloads(cleanedHtml, selected, { entryModules });
+    fs.writeFileSync(htmlPath, nextHtml);
+    processedHtmls.push({ htmlFile, strictMode, removedCount, selected, entryModules });
+  }
+
+  return {
+    strictMode: false,
+    removedCount: processedHtmls[0]?.removedCount ?? 0,
+    selected,
+    processedHtmls,
+  };
 }
 
 function main() {
@@ -217,14 +269,16 @@ function main() {
     return;
   }
 
-  console.log(
-    `[inject-modulepreload] 关键路径模式：移除 ${result.removedCount} 条原始 preload，注入 ${result.selected.length} 条关键路径 preload`
-  );
-  result.selected.forEach((file) => {
-    const size = Math.round(fs.statSync(path.join(DEFAULT_DIST_DIR, file)).size / 1024);
-    console.log(`  - ${file} (${size}KB)`);
-
-  });
+  for (const html of result.processedHtmls || []) {
+    console.log(
+      `[inject-modulepreload] ${html.htmlFile}: 移除 ${html.removedCount} 条原始 preload，注入 ${html.entryModules.length + html.selected.length} 条 preload`
+    );
+    [...html.entryModules, ...html.selected].forEach((file) => {
+      const targetPath = path.join(DEFAULT_DIST_DIR, file);
+      const size = fs.existsSync(targetPath) ? Math.round(fs.statSync(targetPath).size / 1024) : 0;
+      console.log(`  - ${file} (${size}KB)`);
+    });
+  }
 }
 
 if (require.main === module) {
@@ -233,12 +287,15 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_DIST_DIR,
+  DEFAULT_HTML_FILES,
   DEFAULT_INDEX_HTML,
   DEFAULT_MAX_CRITICAL_PRELOADS,
   EXCLUDED_PATTERNS,
   EXCLUDED_CONTENT_MARKERS,
   MAX_PRELOAD_CHUNK_BYTES,
+  extractEntryModules,
   findMainFile,
+  findPolyfillsFile,
   getChunkImports,
   injectModulePreloads,
   isExcludedChunk,
@@ -247,6 +304,7 @@ module.exports = {
   processModulePreload,
   readBuiltHtml,
   removeAllModulePreload,
+  resolveHtmlFiles,
   selectCriticalChunks,
   traceCriticalChunks,
 };

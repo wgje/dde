@@ -14,6 +14,7 @@ const path = require('path');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const INDEX_HTML_PATH = path.join(PROJECT_ROOT, 'dist', 'browser', 'index.html');
+const LAUNCH_HTML_PATH = path.join(PROJECT_ROOT, 'dist', 'browser', 'launch.html');
 const STATS_CANDIDATES = [
   path.join(PROJECT_ROOT, 'dist', 'stats.json'),
   path.join(PROJECT_ROOT, 'dist', 'browser', 'stats.json'),
@@ -24,6 +25,7 @@ const STARTUP_MODULEPRELOAD_MAX = Number(process.env.STARTUP_MODULEPRELOAD_MAX |
 const STARTUP_INITIAL_STATIC_JS_MAX_KB = Number(process.env.STARTUP_INITIAL_STATIC_JS_MAX_KB || 340);
 const STARTUP_WORKSPACE_CHUNK_MAX_KB = Number(process.env.STARTUP_WORKSPACE_CHUNK_MAX_KB || 125);
 const STARTUP_MAIN_STATIC_IMPORT_MAX = Number(process.env.STARTUP_MAIN_STATIC_IMPORT_MAX || 10);
+const STARTUP_LAUNCH_DISCOVERY_MAX_BYTES = Number(process.env.STARTUP_LAUNCH_DISCOVERY_MAX_BYTES || 16384);
 const HOTPATH_CONFIG_BARREL_BAN_ENABLED = String(
   process.env.HOTPATH_CONFIG_BARREL_BAN_ENABLED ?? 'true'
 ).toLowerCase() !== 'false';
@@ -189,10 +191,14 @@ function findForbiddenModulepreloadFiles(options) {
     distDir,
     patterns = FORBIDDEN_MODULEPRELOAD_PATTERNS,
     markers = FORBIDDEN_MODULEPRELOAD_MARKERS,
+    ignoreFiles = [],
   } = options;
 
   const matches = [];
   for (const href of extractModulepreloadHrefs(indexHtml)) {
+    if (ignoreFiles.includes(href)) {
+      continue;
+    }
     if (patterns.some((pattern) => pattern.test(href))) {
       matches.push(href);
       continue;
@@ -212,10 +218,59 @@ function findForbiddenModulepreloadFiles(options) {
   return [...new Set(matches)];
 }
 
+function findEntryDiscoveryByteOffset(html, entryFile) {
+  if (!entryFile) return -1;
+  return html.indexOf(entryFile);
+}
+
+function evaluateShellPreloads(options) {
+  const {
+    shellName,
+    html,
+    distDir,
+    mainKey,
+    polyfillsKey,
+    launchDiscoveryMaxBytes = STARTUP_LAUNCH_DISCOVERY_MAX_BYTES,
+    checkDiscovery = false,
+  } = options;
+  const violations = [];
+  const hrefs = extractModulepreloadHrefs(html);
+
+  if (mainKey && !hrefs.includes(mainKey)) {
+    violations.push(`${shellName} 缺少 main 入口 modulepreload`);
+  }
+  if (polyfillsKey && !hrefs.includes(polyfillsKey)) {
+    violations.push(`${shellName} 缺少 polyfills 入口 modulepreload`);
+  }
+
+  const ignoredEntries = [mainKey, polyfillsKey].filter(Boolean);
+  const forbiddenModulepreloads = findForbiddenModulepreloadFiles({
+    indexHtml: html,
+    distDir,
+    ignoreFiles: ignoredEntries,
+  });
+  if (forbiddenModulepreloads.length > 0) {
+    violations.push(`${shellName} 含路由组件 chunk: ${forbiddenModulepreloads.join(', ')}`);
+  }
+
+  if (checkDiscovery && mainKey) {
+    const discoveryOffset = findEntryDiscoveryByteOffset(html, mainKey);
+    if (discoveryOffset === -1) {
+      violations.push(`${shellName} 未发现 main 入口脚本引用`);
+    } else if (discoveryOffset > launchDiscoveryMaxBytes) {
+      violations.push(`${shellName} main 发现位置超限: ${discoveryOffset}B > ${launchDiscoveryMaxBytes}B`);
+    }
+  }
+
+  return violations;
+}
+
 function evaluateStartupGuard(options = {}) {
   const projectRoot = options.projectRoot || PROJECT_ROOT;
   const statsPath = options.statsPath || findStatsPath(projectRoot);
   const indexHtmlPath = options.indexHtmlPath || INDEX_HTML_PATH;
+  const launchHtmlPath = options.launchHtmlPath || LAUNCH_HTML_PATH;
+  const launchHtmlMaxDiscoveryBytes = Number(options.launchHtmlMaxDiscoveryBytes || STARTUP_LAUNCH_DISCOVERY_MAX_BYTES);
   const distDir = options.distDir || path.dirname(indexHtmlPath);
 
   if (!fs.existsSync(statsPath)) {
@@ -247,7 +302,7 @@ function evaluateStartupGuard(options = {}) {
   const modulepreloadCount = extractModulepreloadHrefs(indexHtml).length;
   const strictModulepreloadMatch = indexHtml.match(/STRICT_MODULEPRELOAD_V2:\s*(true|false)/);
   const strictModulepreload = strictModulepreloadMatch ? strictModulepreloadMatch[1] === 'true' : true;
-  const forbiddenModulepreloads = findForbiddenModulepreloadFiles({ indexHtml, distDir });
+  const launchHtml = fs.existsSync(launchHtmlPath) ? fs.readFileSync(launchHtmlPath, 'utf8') : null;
 
   const staticClosure = collectStaticClosure(outputs, [mainKey, polyfillsKey].filter(Boolean));
   const initialStaticBytes = [...staticClosure].reduce(
@@ -291,9 +346,6 @@ function evaluateStartupGuard(options = {}) {
   if (modulepreloadCount > STARTUP_MODULEPRELOAD_MAX) {
     violations.push(`modulepreload 数量超限: ${modulepreloadCount} > ${STARTUP_MODULEPRELOAD_MAX}`);
   }
-  if (forbiddenModulepreloads.length > 0) {
-    violations.push(`modulepreload 含路由组件 chunk: ${forbiddenModulepreloads.join(', ')}`);
-  }
   if (hasCompilerInput) {
     violations.push(`检测到 @angular/compiler 进入 ${mainKey}`);
   }
@@ -310,6 +362,32 @@ function evaluateStartupGuard(options = {}) {
     violations.push(`hotpath 禁令：检测到 config barrel 导入 (${hit})`);
   }
 
+  violations.push(
+    ...evaluateShellPreloads({
+      shellName: 'index.html',
+      html: indexHtml,
+      distDir,
+      mainKey,
+      polyfillsKey,
+    }),
+  );
+
+  if (launchHtml) {
+    violations.push(
+      ...evaluateShellPreloads({
+        shellName: 'launch.html',
+        html: launchHtml,
+        distDir,
+        mainKey,
+        polyfillsKey,
+        launchDiscoveryMaxBytes: launchHtmlMaxDiscoveryBytes,
+        checkDiscovery: true,
+      }),
+    );
+  } else {
+    violations.push(`未找到构建后的 launch.html: ${launchHtmlPath}`);
+  }
+
   return {
     violations,
     warnings: hotpathConfigBarrelCheck.warnings,
@@ -322,6 +400,7 @@ function evaluateStartupGuard(options = {}) {
     workspaceChunkKB,
     modulepreloadCount,
     strictModulepreload,
+    launchHtmlPath,
   };
 }
 
@@ -379,6 +458,7 @@ module.exports = {
   FORBIDDEN_MODULEPRELOAD_PATTERNS,
   evaluateStartupGuard,
   extractModulepreloadHrefs,
+  findEntryDiscoveryByteOffset,
   findForbiddenModulepreloadFiles,
   findStatsPath,
   main,

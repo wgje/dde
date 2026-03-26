@@ -15,11 +15,21 @@
 # SPA 路由重写规则
 # 所有非静态文件请求重定向到 index.html（Angular 路由处理）
 [[redirects]]
+  from = "/launch.html"
+  to = "/launch.html"
+  status = 200
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
 
 # 安全头配置
+[[headers]]
+  for = "/launch.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
 [[headers]]
   for = "/*"
   [headers.values]

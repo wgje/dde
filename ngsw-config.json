@@ -11,6 +11,7 @@
           "/favicon.ico",
           "/index.csr.html",
           "/index.html",
+          "/launch.html",
           "/manifest.webmanifest",
           "/*.css",
           "/main*.js"

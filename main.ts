@@ -2,18 +2,13 @@ import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
-// ============= 【P0 性能优化 2026-03-25】关键模块静态导入 =============
-// 原方案：main.ts 用 dynamic import() 延迟加载 4 个关键模块（AppComponent / routes /
-//   GlobalErrorHandler / SentryLazyLoaderService），以缩小 main.js 体积（8.7KB）。
-// 问题：dynamic import 的目标及其传递依赖没有 <link rel="modulepreload">，
-//   在手机 PWA 上形成多级串行下载瀑布，导致 FCP 延迟 3-4 秒。
-// 新方案：改为静态 import，构建器将自动为整棵依赖树生成 modulepreload 提示，
-//   浏览器从第一时间并行下载所有必需 chunk，消除瀑布流。
+// ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
+// 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
+// 配套保障：
+// 1. build 后 inject-modulepreload.cjs 会为 main/polyfills 与关键启动 chunk 注入 head 级 preload
+// 2. 浏览器能并行下载入口与热路径共享依赖，避免旧版的运行时瀑布
+// 3. AppComponent / routes / GlobalErrorHandler / SentryLazyLoaderService 重新脱离 main 静态闭包
 // Supabase SDK 仍保持 dynamic import（~50KB，首屏不需要）。
-import { AppComponent } from './src/app.component';
-import { routes } from './src/app.routes';
-import { GlobalErrorHandler } from './src/services/global-error-handler.service';
-import { SentryLazyLoaderService } from './src/services/sentry-lazy-loader.service';
 
 // 简化日志 - 仅在显式 verbose 时输出，避免启动期控制台噪音
 const VERBOSE_LOGS = isDevMode() && localStorage.getItem('nanoflow.verbose') === 'true';
@@ -277,9 +272,21 @@ async function startApplication() {
   }, 15000);
   
   try {
-    // 【P0 性能优化 2026-03-25】关键模块已改为顶层静态 import，
-    // 此处仅需等待 Supabase SDK 预热（非阻塞，不影响 bootstrap 速度）。
-    // supabaseSdkPrewarm 在 import 语句后立即启动，与模块加载并行。
+    const [
+      appComponentModule,
+      appRoutesModule,
+      globalErrorHandlerModule,
+      sentryLoaderModule,
+    ] = await Promise.all([
+      import('./src/app.component'),
+      import('./src/app.routes'),
+      import('./src/services/global-error-handler.service'),
+      import('./src/services/sentry-lazy-loader.service'),
+    ]);
+    const AppComponent = appComponentModule.AppComponent;
+    const routes = appRoutesModule.routes;
+    const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
+    const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
 
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [

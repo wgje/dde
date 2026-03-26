@@ -28,6 +28,20 @@ function createDistFixture(): string {
   <link rel="modulepreload" href="/old-preload.js">
 </head>
 <body>
+  <script type="module" src="polyfills-XYZ999.js"></script>
+  <script type="module" src="main-ABC123.js"></script>
+</body>
+</html>`,
+  );
+  writeFile(
+    path.join(distDir, 'launch.html'),
+    `<!doctype html>
+<html>
+<head>
+  <script>window.__NANOFLOW_BOOT_FLAGS__ = { STRICT_MODULEPRELOAD_V2: false };</script>
+</head>
+<body>
+  <script type="module" src="polyfills-XYZ999.js"></script>
   <script type="module" src="main-ABC123.js"></script>
 </body>
 </html>`,
@@ -43,6 +57,7 @@ function createDistFixture(): string {
       '',
     ].join('\n'),
   );
+  writeFile(path.join(distDir, 'polyfills-XYZ999.js'), 'export const polyfills = true;');
   writeFile(path.join(distDir, 'chunk-shared.js'), 'export const SharedStartupDependency = true;');
   writeFile(path.join(distDir, 'chunk-text-view.js'), 'export const TextViewComponent = true;');
   writeFile(path.join(distDir, 'chunk-workspace.js'), 'export const WorkspaceShellComponent = true;');
@@ -61,17 +76,26 @@ describe('inject-modulepreload', () => {
     }
   });
 
-  it('omits route component chunks from injected critical preloads', () => {
+  it('injects entry preloads for both startup shells while omitting route component chunks', () => {
     const distDir = createDistFixture();
 
-    const result = processModulePreload({ distDir, maxCriticalPreloads: 10 });
-    const html = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
+    processModulePreload({ distDir, htmlFiles: ['index.html', 'launch.html'], maxCriticalPreloads: 10 });
+    const indexHtml = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
+    const launchHtml = fs.readFileSync(path.join(distDir, 'launch.html'), 'utf8');
 
-    expect(result.selected).toEqual(['chunk-shared.js']);
-    expect(html).toContain('/chunk-shared.js');
-    expect(html).not.toContain('/chunk-text-view.js');
-    expect(html).not.toContain('/chunk-workspace.js');
-    expect(html).not.toContain('/chunk-flow-view.js');
-    expect(html).not.toContain('/old-preload.js');
+    expect(indexHtml).toContain('/main-ABC123.js');
+    expect(indexHtml).toContain('/polyfills-XYZ999.js');
+    expect(indexHtml).toContain('/chunk-shared.js');
+    expect(indexHtml).not.toContain('/chunk-text-view.js');
+    expect(indexHtml).not.toContain('/chunk-workspace.js');
+    expect(indexHtml).not.toContain('/chunk-flow-view.js');
+    expect(indexHtml).not.toContain('/old-preload.js');
+
+    expect(launchHtml).toContain('/main-ABC123.js');
+    expect(launchHtml).toContain('/polyfills-XYZ999.js');
+    expect(launchHtml).toContain('/chunk-shared.js');
+    expect(launchHtml).not.toContain('/chunk-text-view.js');
+    expect(launchHtml).not.toContain('/chunk-workspace.js');
+    expect(launchHtml).not.toContain('/chunk-flow-view.js');
   });
 });
