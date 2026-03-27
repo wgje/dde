@@ -9,6 +9,7 @@ import { environment } from '../environments/environment';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { saveAuthCache } from './guards/auth.guard';
+import { pushStartupTrace } from '../utils/startup-trace';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -161,6 +162,11 @@ export class AuthService {
   private checkSessionPromise: Promise<{ userId: string | null; email: string | null }> | null = null;
   
   async checkSession(): Promise<{ userId: string | null; email: string | null }> {
+    pushStartupTrace('auth.check_session', {
+      runtimeState: this.runtimeState(),
+      sessionInitialized: this.sessionInitialized(),
+      currentUserId: this.currentUserId(),
+    });
     // 如果已有进行中的 checkSession，直接复用
     if (this.checkSessionPromise) {
       return this.checkSessionPromise;
@@ -285,6 +291,10 @@ export class AuthService {
       // 否则 sessionInitialized 永远为 false → handoff 永远 pending → 界面空白。
       this.sessionInitialized.set(true);
       this.setProvisionalAuthState('ready');
+      pushStartupTrace('auth.fast_path_hit', {
+        userId: localSession.userId,
+        runtimeState: this.runtimeState(),
+      });
 
       // 后台异步刷新 SDK session 状态，确保 token 最终同步
       this.scheduleBackgroundSessionRefresh();
@@ -425,6 +435,10 @@ export class AuthService {
             const errorName = (result.error as { name?: string }).name;
             if (errorName === 'ClientUnavailable') {
               this.logger.debug('[BackgroundRefresh] SDK 客户端不可用，保留本地状态（稍后重试）');
+              pushStartupTrace('auth.background_refresh_client_unavailable', {
+                runtimeState: this.runtimeState(),
+                currentUserId: this.currentUserId(),
+              });
               return;
             }
             this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误，清除本地会话', result.error);
@@ -434,6 +448,10 @@ export class AuthService {
           const session = result.data?.session;
           if (!session?.user) {
             this.logger.warn('[BackgroundRefresh] SDK 返回空会话，本地缓存已失效');
+            pushStartupTrace('auth.background_refresh_invalid_session', {
+              runtimeState: this.runtimeState(),
+              currentUserId: this.currentUserId(),
+            });
             this.handleBackgroundSessionInvalid();
             return;
           }
@@ -447,10 +465,16 @@ export class AuthService {
             error: null,
           }));
           this.logger.debug('[BackgroundRefresh] SDK session 已同步');
+          pushStartupTrace('auth.background_refresh_synced', {
+            userId: session.user.id,
+          });
         })
         .catch(e => {
           // 网络失败不清除状态 — 可能只是暂时离线，本地缓存仍有效
           this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（网络问题，保留本地状态）', e);
+          pushStartupTrace('auth.background_refresh_network_preserved', {
+            currentUserId: this.currentUserId(),
+          });
         });
     });
   }
@@ -460,6 +484,9 @@ export class AuthService {
    * 这会让 showLoginRequired 生效，触发登录兜底 UI。
    */
   private handleBackgroundSessionInvalid(): void {
+    pushStartupTrace('auth.background_refresh_clear_local_session', {
+      currentUserId: this.currentUserId(),
+    });
     this.currentUserId.set(null);
     this.sessionEmail.set(null);
     this.authState.update(s => ({

@@ -585,8 +585,8 @@
                 <div class="flex items-start gap-2.5">
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-1.5">
-                      <span class="rounded-full border border-indigo-400/20 bg-indigo-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-indigo-100">
-                        Planner
+                      <span class="rounded-full border border-amber-400/25 bg-amber-500/12 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-amber-200/90">
+                        补全
                       </span>
                       <span class="rounded-full border border-slate-700/70 bg-slate-900/80 px-1.5 py-0.5 text-[9px] text-slate-300">
                         {{ plannerEntry.isMain ? '主任务' : (plannerEntry.lane === 'combo-select' ? '副任务' : '备选任务') }}
@@ -813,6 +813,7 @@
         <div class="flex gap-3 overflow-x-auto pb-2 hide-scrollbar snap-x"
              role="group"
              aria-label="停泊坞任务列表"
+             (dragenter)="dragDrop.onDockRailDragEnter($event)"
              (dragover)="dragDrop.onDockRailDragOver($event)"
              (dragleave)="dragDrop.onDockRailDragLeave()"
              (drop)="onDrop($event)">
@@ -914,6 +915,7 @@
             [class.reject]="dragDrop.dropState() === 'reject'"
             [class.opacity-50]="!canAcceptExternalDrop()"
             [style.--dock-drop-reject-shake-ms]="PARKING_CONFIG.DOCK_DROP_REJECT_SHAKE_MS + 'ms'"
+            (dragenter)="dragDrop.onDropZoneDragEnter($event)"
             (dragover)="dragDrop.onDropZoneDragOver($event)"
             (dragleave)="dragDrop.onDropZoneDragLeave()"
             (drop)="onDrop($event)"

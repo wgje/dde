@@ -426,6 +426,38 @@ describe('ParkingDockComponent v4', () => {
     expect(mockEngine.dockTaskFromExternalDrag).toHaveBeenCalledWith('legacy-task', undefined);
   });
 
+  it('drop-zone drag depth should prevent state jitter when moving over child elements', () => {
+    const taskDragTransfer = {
+      types: ['application/x-nanoflow-task'],
+    } as unknown as DataTransfer;
+
+    component.dragDrop.onDropZoneDragEnter({
+      preventDefault: vi.fn(),
+      dataTransfer: taskDragTransfer,
+    } as unknown as DragEvent);
+    component.dragDrop.onDropZoneDragEnter({
+      preventDefault: vi.fn(),
+      dataTransfer: taskDragTransfer,
+    } as unknown as DragEvent);
+
+    component.dragDrop.onDropZoneDragLeave();
+    expect(component.dragDrop.dropState()).toBe('isOver');
+
+    component.dragDrop.onDropZoneDragLeave();
+    expect(component.dragDrop.dropState()).toBe('canDrop');
+  });
+
+  it('drop-zone dragover without task types should not flash reject', () => {
+    component.dragDrop.dropState.set('isOver');
+
+    component.dragDrop.onDropZoneDragOver({
+      preventDefault: vi.fn(),
+      dataTransfer: { types: [] } as unknown as DataTransfer,
+    } as unknown as DragEvent);
+
+    expect(component.dragDrop.dropState()).toBe('canDrop');
+  });
+
   it('onDrop should ignore laneHint and still use default backup entrypoint', () => {
     const getData = vi.fn((mime: string) => {
       if (mime === 'application/x-nanoflow-task') {
@@ -579,9 +611,9 @@ describe('ParkingDockComponent v4', () => {
     expect(panel).toBeTruthy();
     expect(card?.contains(panel as Node)).toBe(false);
     expect(panel?.className).toContain('rounded-2xl');
-    expect(panel?.className).toContain('absolute');
-    expect(panel?.className).toContain('bottom-full');
-    expect(panel?.className).toContain('animate-[plannerSlideOpen_220ms_ease-out]');
+    expect(panel?.className).toContain('mx-2');
+    expect(panel?.className).toContain('border-amber-500/20');
+    expect(panel?.className).toContain('animate-[plannerInlineExpand_300ms');
     expect(panel?.getAttribute('data-presentation')).toBe('popover');
     expect(panel?.textContent).toContain('当前负荷');
     expect(panel?.textContent).toContain('预计投入');

@@ -88,6 +88,16 @@ interface Window {
       user: unknown;
     };
   };
+  __NANOFLOW_STARTUP_TRACE__?: StartupTraceEvent[];
+  __NANOFLOW_PUSH_STARTUP_TRACE__?: (event: string, data?: Record<string, unknown>) => void;
+}
+
+interface StartupTraceEvent {
+  seq: number;
+  event: string;
+  at: string;
+  monotonicMs: number;
+  data: Record<string, unknown> | null;
 }
 
 interface NanoFlowBootFlags {

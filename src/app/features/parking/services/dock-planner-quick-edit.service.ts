@@ -83,26 +83,26 @@ export class DockPlannerQuickEditService implements OnDestroy {
     return count;
   });
 
-  /** CSS class string for the planner panel（响应式：popover 绝对定位 / sheet 内嵌） */
+  /** CSS class string for the planner panel（内联展开，从 banner 原位延伸） */
   readonly panelClasses = computed(() => {
-    const baseClasses = [
+    return [
       'pointer-events-auto',
       'overflow-y-auto',
       'hide-scrollbar',
       'rounded-2xl',
       'border',
-      'border-slate-700/75',
+      'border-amber-500/20',
       'bg-slate-950/97',
       'p-3.5',
-      'shadow-[0_18px_56px_rgba(2,6,23,0.46)]',
+      'shadow-[0_8px_32px_rgba(2,6,23,0.36)]',
       'backdrop-blur-md',
-      'animate-[plannerSlideOpen_220ms_ease-out]',
-      'origin-top',
+      'mx-2',
+      'mt-1',
+      'animate-[plannerInlineExpand_300ms_cubic-bezier(0.22,0.61,0.36,1)]',
+      this.presentation() === 'popover'
+        ? 'max-h-[min(340px,calc(100dvh-180px))]'
+        : 'max-h-[min(46dvh,320px)]',
     ].join(' ');
-    if (this.presentation() === 'popover') {
-      return `${baseClasses} absolute bottom-full right-2 z-20 mb-2 w-[min(calc(100%-1rem),26rem)] max-h-[min(340px,calc(100dvh-180px))]`;
-    }
-    return `${baseClasses} mx-2 mt-2 max-h-[min(46dvh,320px)]`;
   });
 
   // ── Timers ──────────────────────────────────────────────────

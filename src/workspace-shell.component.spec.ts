@@ -1,5 +1,6 @@
 import { vi, describe, it, expect } from 'vitest';
 import { WorkspaceShellComponent } from './workspace-shell.component';
+import { FEATURE_FLAGS } from './config/feature-flags.config';
 
 describe('WorkspaceShellComponent 输入事件处理', () => {
   it('onUnifiedSearchInput 应转发输入值到 onUnifiedSearchChange', () => {
@@ -299,8 +300,10 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
 
   it('signalWorkspaceHandoffReady 应只通知一次 boot stage handoff', () => {
     const markWorkspaceHandoffReady = vi.fn();
+    const markLayoutStable = vi.fn();
     const context = {
       bootStage: { markWorkspaceHandoffReady },
+      handoffCoordinator: { markLayoutStable },
       workspaceHandoffSignaled: false,
     } as unknown as WorkspaceShellComponent;
 
@@ -311,7 +314,13 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       signalWorkspaceHandoffReady: (this: WorkspaceShellComponent) => void;
     }).signalWorkspaceHandoffReady.call(context);
 
-    expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
+    if (FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
+      expect(markLayoutStable).toHaveBeenCalledTimes(1);
+      expect(markWorkspaceHandoffReady).not.toHaveBeenCalled();
+    } else {
+      expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
+      expect(markLayoutStable).not.toHaveBeenCalled();
+    }
   });
 
 });

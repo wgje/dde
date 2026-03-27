@@ -2,6 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import type { LaunchSnapshot } from './launch-snapshot.service';
 import { BootStageService } from './boot-stage.service';
 import { resolveRouteIntent } from '../utils/route-intent';
+import { pushStartupTrace } from '../utils/startup-trace';
 
 export type HandoffResultKind =
   | 'pending'
@@ -29,6 +30,23 @@ export interface HandoffDecisionInput {
   snapshot: LaunchSnapshot | null;
 }
 
+export type HandoffTriggerSource = 'raf' | 'timeout100' | 'timeout0' | 'safety8s';
+
+function applyNonBlockingLoginFallback(
+  input: HandoffDecisionInput,
+  result: HandoffResult
+): HandoffResult {
+  if (!(input.authConfigured && input.showLoginRequired && input.hasProjects)) {
+    return result;
+  }
+
+  if (result.kind === 'full' && result.degradeReason === null) {
+    return { kind: 'full', degradeReason: 'login-required-nonblocking' };
+  }
+
+  return result;
+}
+
 export function shouldDegradeMobileStartupRoute(routeUrl: string, isMobile: boolean): boolean {
   if (!isMobile) {
     return false;
@@ -48,7 +66,7 @@ export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult
     return { kind: 'full', degradeReason: 'bootstrap-failed' };
   }
 
-  if (input.authConfigured && input.showLoginRequired) {
+  if (input.authConfigured && input.showLoginRequired && !input.hasProjects) {
     return { kind: 'login-required', degradeReason: null };
   }
 
@@ -61,18 +79,18 @@ export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult
   }
 
   if (!input.hasProjects) {
-    return { kind: 'empty-workspace', degradeReason: null };
+    return applyNonBlockingLoginFallback(input, { kind: 'empty-workspace', degradeReason: null });
   }
 
   if (wantsSpecificProject && routeIntent.projectId && !input.activeProjectId) {
-    return { kind: 'degraded-to-project', degradeReason: 'project-unavailable' };
+    return applyNonBlockingLoginFallback(input, { kind: 'degraded-to-project', degradeReason: 'project-unavailable' });
   }
 
   if (mobileDegraded) {
-    return { kind: 'degraded-to-text', degradeReason: mobileDegradeReason };
+    return applyNonBlockingLoginFallback(input, { kind: 'degraded-to-text', degradeReason: mobileDegradeReason });
   }
 
-  return { kind: 'full', degradeReason: null };
+  return applyNonBlockingLoginFallback(input, { kind: 'full', degradeReason: null });
 }
 
 @Injectable({
@@ -81,14 +99,17 @@ export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult
 export class HandoffCoordinatorService {
   private readonly bootStage = inject(BootStageService);
   private readonly resultState = signal<HandoffResult>({ kind: 'pending', degradeReason: null });
+  private readonly handoffTriggerSourceState = signal<HandoffTriggerSource | null>(null);
   private layoutStable = false;
   private handoffScheduled = false;
   private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+  private safetyTriggered = false;
 
   /** 最大等待时间（ms），超时后强制 handoff 防止永久卡在 launch-shell */
   private readonly HANDOFF_SAFETY_TIMEOUT_MS = 8000;
 
   readonly result = this.resultState.asReadonly();
+  readonly handoffTriggerSource = this.handoffTriggerSourceState.asReadonly();
 
   markLayoutStable(): void {
     this.layoutStable = true;
@@ -110,7 +131,13 @@ export class HandoffCoordinatorService {
         return;
       }
       // 强制降级 handoff — 比永远卡住好
+      this.safetyTriggered = true;
       this.resultState.set({ kind: 'full', degradeReason: 'handoff-safety-timeout' });
+      pushStartupTrace('handoff.safety_timeout', {
+        layoutStable: this.layoutStable,
+        resultKind: this.resultState().kind,
+        degradeReason: this.resultState().degradeReason,
+      });
       this.scheduleHandoffIfReady();
     }, this.HANDOFF_SAFETY_TIMEOUT_MS);
   }
@@ -118,6 +145,19 @@ export class HandoffCoordinatorService {
   resolve(input: HandoffDecisionInput): HandoffResult {
     const next = resolveHandoffResult(input);
     this.resultState.set(next);
+    pushStartupTrace('handoff.resolve', {
+      routeUrl: input.routeUrl,
+      hasProjects: input.hasProjects,
+      activeProjectId: input.activeProjectId,
+      authRuntimeState: input.authRuntimeState,
+      isCheckingSession: input.isCheckingSession,
+      showLoginRequired: input.showLoginRequired,
+      bootstrapFailed: input.bootstrapFailed,
+      resultKind: next.kind,
+      degradeReason: next.degradeReason,
+      hidden: typeof document !== 'undefined' ? document.hidden : null,
+      online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+    });
     this.scheduleHandoffIfReady();
     return next;
   }
@@ -128,24 +168,37 @@ export class HandoffCoordinatorService {
     }
 
     this.handoffScheduled = true;
-    const trigger = () => this.bootStage.markWorkspaceHandoffReady();
+    const trigger = (source: HandoffTriggerSource) => {
+      this.handoffTriggerSourceState.set(source);
+      pushStartupTrace('handoff.trigger', {
+        source,
+        resultKind: this.resultState().kind,
+        degradeReason: this.resultState().degradeReason,
+      });
+      this.bootStage.markWorkspaceHandoffReady();
+    };
+
+    if (this.safetyTriggered) {
+      setTimeout(() => trigger('safety8s'), 0);
+      return;
+    }
 
     // 【Bug 修复 2026-03-26】rAF 在隐藏标签页（包括 PWA 后台启动）中被浏览器节流/暂停，
     // 导致 handoff 永不触发，用户卡在 launch-shell。
     // 改为 rAF + setTimeout 双保险：谁先触发谁执行，另一个忽略。
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
       let fired = false;
-      const onceTrigger = () => {
+      const onceTrigger = (source: HandoffTriggerSource) => {
         if (!fired) {
           fired = true;
-          trigger();
+          trigger(source);
         }
       };
-      window.requestAnimationFrame(onceTrigger);
-      setTimeout(onceTrigger, 100);
+      window.requestAnimationFrame(() => onceTrigger('raf'));
+      setTimeout(() => onceTrigger('timeout100'), 100);
       return;
     }
 
-    setTimeout(trigger, 0);
+    setTimeout(() => trigger('timeout0'), 0);
   }
 }

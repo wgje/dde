@@ -23,7 +23,6 @@ import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../../config/sync.config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { FOCUS_CONFIG } from '../../../../config/focus.config';
-import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 
@@ -52,6 +51,16 @@ export interface ParkedTaskDeltaResult {
   entries: ParkedTaskEntry[];
   removedTaskIds: string[];
   nextCursor: string | null;
+}
+
+export type StartupOfflineSnapshotSource = 'idb' | 'localStorage' | 'none';
+
+export interface StartupOfflineSnapshotLoadResult {
+  source: StartupOfflineSnapshotSource;
+  projectCount: number;
+  bytes: number;
+  migratedLegacy: boolean;
+  projects: Project[];
 }
 @Injectable({
   providedIn: 'root'
@@ -713,9 +722,8 @@ export class ProjectDataService {
   
   /**
    * 保存离线快照
-   * 
-   * 优先使用 IndexedDB（当 OFFLINE_SNAPSHOT_IDB_ENABLED 开启时），
-   * 降级回 localStorage。记录快照大小用于监控。
+   *
+   * 先写 IndexedDB，再保留 localStorage 作为迁移兼容兜底。
    */
   saveOfflineSnapshot(projects: Project[]): void {
     // 过滤已删除的任务
@@ -739,16 +747,11 @@ export class ProjectDataService {
         tags: { sizeKB: String(sizeKB), projectCount: String(projects.length) }
       });
     }
-    
-    // IDB 路径：特性开关开启时尝试 IndexedDB
-    if (FEATURE_FLAGS.OFFLINE_SNAPSHOT_IDB_ENABLED) {
-      void this.saveSnapshotToIDB(payload).catch(() => {
-        // IDB 失败时降级到 localStorage
-        this.saveSnapshotToLocalStorage(payload);
-      });
-      return;
-    }
-    
+
+    // 先写 IDB，确保启动恢复路径优先读取到最新快照
+    void this.saveSnapshotToIDB(payload).catch((error) => {
+      this.logger.warn('离线快照保存失败（IndexedDB）', error);
+    });
     this.saveSnapshotToLocalStorage(payload);
   }
   
@@ -768,19 +771,35 @@ export class ProjectDataService {
     return new Promise((resolve, reject) => {
       const tx = db.transaction('snapshots', 'readwrite');
       tx.objectStore('snapshots').put({ id: 'offline-snapshot', data: payload });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
     });
   }
-  
+
   /** IndexedDB 加载快照 */
   private async loadSnapshotFromIDB(): Promise<string | null> {
     const db = await this.openSnapshotDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction('snapshots', 'readonly');
       const req = tx.objectStore('snapshots').get('offline-snapshot');
-      req.onsuccess = () => resolve(req.result?.data ?? null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        db.close();
+        resolve(req.result?.data ?? null);
+      };
+      req.onerror = () => {
+        db.close();
+        reject(req.error);
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
     });
   }
   
@@ -801,45 +820,81 @@ export class ProjectDataService {
   
   /**
    * 加载离线快照
-   * 当 IDB 开关开启时优先从 IDB 读取，降级回 localStorage
+   * 兼容旧调用方：同步路径仍然只读 localStorage。
    */
   loadOfflineSnapshot(): Project[] | null {
-    // IDB 路径不能同步返回，但这个方法签名是同步的
-    // 保留 localStorage 作为同步路径，IDB 路径需要在外部 async 调用
     return this.loadOfflineSnapshotFromLocalStorage();
   }
-  
+
+  /**
+   * 启动恢复快照加载
+   *
+   * 优先读取 IndexedDB；如果只有 legacy localStorage 快照，则加载后写回 IDB。
+   */
+  async loadStartupOfflineSnapshot(): Promise<StartupOfflineSnapshotLoadResult> {
+    const idbPayload = await this.loadSnapshotFromIDB().catch((error) => {
+      this.logger.warn('启动快照加载失败（IndexedDB）', error);
+      return null;
+    });
+
+    if (idbPayload) {
+      const projects = this.parseSnapshotData(idbPayload);
+      if (projects) {
+        return this.buildStartupSnapshotResult('idb', idbPayload, projects, false);
+      }
+    }
+
+    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw();
+    if (!localStoragePayload) {
+      return {
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      };
+    }
+
+    const projects = this.parseSnapshotData(localStoragePayload);
+    if (!projects) {
+      return {
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      };
+    }
+
+    const migratedLegacy = await this.migrateLegacySnapshotToIDB(localStoragePayload);
+    return this.buildStartupSnapshotResult('localStorage', localStoragePayload, projects, migratedLegacy);
+  }
+
   /**
    * 异步加载离线快照（支持 IDB）
    */
   async loadOfflineSnapshotAsync(): Promise<Project[] | null> {
-    if (FEATURE_FLAGS.OFFLINE_SNAPSHOT_IDB_ENABLED) {
-      try {
-        const data = await this.loadSnapshotFromIDB();
-        if (data) {
-          return this.parseSnapshotData(data);
-        }
-      } catch {
-        this.logger.warn('IDB 离线快照加载失败，降级到 localStorage');
-      }
-    }
-    return this.loadOfflineSnapshotFromLocalStorage();
+    const snapshot = await this.loadStartupOfflineSnapshot();
+    return snapshot.projectCount > 0 ? snapshot.projects : null;
   }
-  
-  /** 从 localStorage 加载快照 */
-  private loadOfflineSnapshotFromLocalStorage(): Project[] | null {
+
+  /** 从 localStorage 读取快照原始内容 */
+  private loadSnapshotFromLocalStorageRaw(): string | null {
     if (typeof localStorage === 'undefined') return null;
     try {
-      const cached = localStorage.getItem(this.OFFLINE_CACHE_KEY);
-      if (cached) {
-        return this.parseSnapshotData(cached);
-      }
+      return localStorage.getItem(this.OFFLINE_CACHE_KEY);
     } catch (e) {
-      this.logger.warn('离线快照加载失败', e);
+      this.logger.warn('离线快照加载失败（localStorage）', e);
+      return null;
     }
-    return null;
   }
-  
+
+  /** 从 localStorage 加载快照 */
+  private loadOfflineSnapshotFromLocalStorage(): Project[] | null {
+    const cached = this.loadSnapshotFromLocalStorageRaw();
+    return cached ? this.parseSnapshotData(cached) : null;
+  }
+
   /** 解析快照 JSON 数据 */
   private parseSnapshotData(raw: string): Project[] | null {
     try {
@@ -855,18 +910,72 @@ export class ProjectDataService {
     }
     return null;
   }
+
+  private buildStartupSnapshotResult(
+    source: StartupOfflineSnapshotSource,
+    raw: string,
+    projects: Project[],
+    migratedLegacy: boolean
+  ): StartupOfflineSnapshotLoadResult {
+    return {
+      source,
+      projectCount: projects.length,
+      bytes: this.getSnapshotByteSize(raw),
+      migratedLegacy,
+      projects,
+    };
+  }
+
+  private getSnapshotByteSize(raw: string): number {
+    try {
+      return new TextEncoder().encode(raw).byteLength;
+    } catch {
+      return raw.length;
+    }
+  }
+
+  private async migrateLegacySnapshotToIDB(payload: string): Promise<boolean> {
+    try {
+      await this.saveSnapshotToIDB(payload);
+      return true;
+    } catch (error) {
+      this.logger.warn('legacy 离线快照迁移到 IndexedDB 失败', error);
+      return false;
+    }
+  }
   
   /**
    * 清除离线快照
    */
   clearOfflineSnapshot(): void {
-    if (typeof localStorage === 'undefined') return;
     try {
-      localStorage.removeItem(this.OFFLINE_CACHE_KEY);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(this.OFFLINE_CACHE_KEY);
+      }
       this.logger.info('离线快照已清除');
     } catch (e) {
       this.logger.warn('清除离线快照失败', e);
     }
+
+    void this.clearSnapshotFromIDB().catch((error) => {
+      this.logger.warn('清除离线快照失败（IndexedDB）', error);
+    });
+  }
+
+  private async clearSnapshotFromIDB(): Promise<void> {
+    const db = await this.openSnapshotDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('snapshots', 'readwrite');
+      tx.objectStore('snapshots').delete('offline-snapshot');
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    });
   }
 
   // ==================== 停泊任务轻量缓存与增量拉取 ====================

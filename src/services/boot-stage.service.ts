@@ -1,4 +1,5 @@
 import { Injectable, computed, signal } from '@angular/core';
+import { pushStartupTrace } from '../utils/startup-trace';
 
 export type BootStage = 'booting' | 'launch-shell' | 'handoff' | 'ready';
 
@@ -76,6 +77,10 @@ export class BootStageService {
       next.blankGapMs = this.computeBlankGap(next);
       return next;
     });
+    pushStartupTrace('boot.loader_hidden', {
+      loaderHiddenMs: this.metricsState().loaderHiddenMs,
+      blankGapMs: this.metricsState().blankGapMs,
+    });
     this.publishGlobals();
   }
 
@@ -114,6 +119,10 @@ export class BootStageService {
     window.__NANOFLOW_BOOT_STAGE__ = this.stage();
     window.__NANOFLOW_LAUNCH_SHELL_VISIBLE__ = this.isLaunchShellVisible();
     window.__NANOFLOW_READY__ = this.isApplicationReady();
+    pushStartupTrace('boot.stage', {
+      stage: this.stage(),
+      metrics: this.metrics(),
+    });
 
     window.dispatchEvent(new CustomEvent('nanoflow:boot-stage', {
       detail: {

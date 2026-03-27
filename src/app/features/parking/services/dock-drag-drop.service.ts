@@ -37,6 +37,8 @@ export class DockDragDropService implements OnDestroy {
   draggingDockTaskId: string | null = null;
   touchStartY = 0;
   touchTaskId: string | null = null;
+  private dockRailDragDepth = 0;
+  private dropZoneDragDepth = 0;
 
   // ── Timers ──────────────────────────────────────────────────
   private readonly longPress = new TimerHandle();
@@ -153,8 +155,27 @@ export class DockDragDropService implements OnDestroy {
     }
   }
 
+  onDockRailDragEnter(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    event.preventDefault();
+    this.dockRailDragDepth += 1;
+    if (this.hasDockReorderType(event.dataTransfer)) {
+      this.dropState.set('idle');
+      return;
+    }
+    if (!hasTaskDragTypes(event.dataTransfer)) {
+      return;
+    }
+    this.scheduleSemicircleDragExpand();
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('canDrop');
+    }
+  }
+
   onDockRailDragLeave(): void {
     if (!this.canAcceptExternalDrop()) return;
+    this.dockRailDragDepth = Math.max(0, this.dockRailDragDepth - 1);
+    if (this.dockRailDragDepth > 0) return;
     if (this.dropState() !== 'reject') {
       this.dropState.set('idle');
     }
@@ -162,11 +183,26 @@ export class DockDragDropService implements OnDestroy {
   }
 
   // ── Drop zone handlers ──────────────────────────────────────
+  onDropZoneDragEnter(event: DragEvent): void {
+    if (!this.canAcceptExternalDrop()) return;
+    event.preventDefault();
+    this.dropZoneDragDepth += 1;
+    if (!hasTaskDragTypes(event.dataTransfer)) {
+      return;
+    }
+    this.scheduleSemicircleDragExpand();
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('isOver');
+    }
+  }
+
   onDropZoneDragOver(event: DragEvent): void {
     if (!this.canAcceptExternalDrop()) return;
     event.preventDefault();
     if (!hasTaskDragTypes(event.dataTransfer)) {
-      this.triggerDropReject();
+      if (this.dropState() === 'isOver') {
+        this.dropState.set('canDrop');
+      }
       return;
     }
     this.scheduleSemicircleDragExpand();
@@ -177,6 +213,8 @@ export class DockDragDropService implements OnDestroy {
 
   onDropZoneDragLeave(): void {
     if (!this.canAcceptExternalDrop()) return;
+    this.dropZoneDragDepth = Math.max(0, this.dropZoneDragDepth - 1);
+    if (this.dropZoneDragDepth > 0) return;
     if (this.dropState() === 'isOver') {
       this.dropState.set('canDrop');
     }
@@ -185,7 +223,12 @@ export class DockDragDropService implements OnDestroy {
 
   onDrop(event: DragEvent, markRecentlyDocked: (taskId: string) => void): void {
     if (!this.canAcceptExternalDrop()) return;
+    this.dockRailDragDepth = 0;
+    this.dropZoneDragDepth = 0;
     event.preventDefault();
+    // 阻止冒泡：drop zone 嵌套在 dock rail 内，若不阻止，
+    // 事件冒泡到 dock rail 时任务已入坞，canDropCandidate 判定已存在会误触 reject 动画
+    event.stopPropagation?.();
     const reorderTaskId = this.extractDockReorderTaskId(event.dataTransfer);
     if (reorderTaskId) {
       this.draggingDockTaskId = null;
@@ -273,6 +316,8 @@ export class DockDragDropService implements OnDestroy {
   }
 
   private triggerDropReject(): void {
+    this.dockRailDragDepth = 0;
+    this.dropZoneDragDepth = 0;
     this.dropState.set('reject');
     this.scheduleSemicircleAutoCollapse();
     this.dropRejectReset.schedule(() => {

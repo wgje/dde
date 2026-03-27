@@ -14,6 +14,7 @@ import { AUTH_CONFIG } from '../../../config/auth.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { AttachmentService } from '../../../services/attachment.service';
 import type { MigrationService } from '../../../services/migration.service';
+import { pushStartupTrace } from '../../../utils/startup-trace';
 
 /**
  * 应用认证协调器
@@ -100,6 +101,9 @@ export class AppAuthCoordinatorService {
     this.bootstrapScheduled = true;
     const runBootstrap = () => {
       this.bootstrapScheduled = false;
+      pushStartupTrace('auth.bootstrap_scheduled_run', {
+        bootStage: typeof window !== 'undefined' ? window.__NANOFLOW_BOOT_STAGE__ ?? null : null,
+      });
       this.bootstrapSession().catch(_e => {
         // 错误已在 bootstrapSession 内部处理
       });
@@ -200,6 +204,11 @@ export class AppAuthCoordinatorService {
     }
 
     this.logger.debug('[Bootstrap] ========== 启动会话检查 ==========');
+    pushStartupTrace('auth.bootstrap_start', {
+      runtimeState: this.auth.runtimeState(),
+      sessionInitialized: this.auth.sessionInitialized(),
+      currentUserId: this.auth.currentUserId(),
+    });
     const totalStartTime = Date.now();
     this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
@@ -234,6 +243,10 @@ export class AppAuthCoordinatorService {
             `[Bootstrap] 步骤 2/3: 数据加载超过 ${this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS}ms，转后台继续`,
             { elapsed: loadElapsed }
           );
+          pushStartupTrace('auth.bootstrap_background_continue', {
+            elapsedMs: loadElapsed,
+            userId: result.userId,
+          });
 
           void loadPromise.then(() => {
             const backgroundElapsed = Date.now() - loadStartTime;
@@ -260,6 +273,10 @@ export class AppAuthCoordinatorService {
       }
 
       this.logger.debug('[Bootstrap] ========== 启动成功 ==========');
+      pushStartupTrace('auth.bootstrap_success', {
+        projectCount: this.projectState.projects().length,
+        activeProjectId: this.projectState.activeProjectId(),
+      });
     } catch (e: unknown) {
       const err = e as Error | undefined;
       this.logger.error('[Bootstrap] ========== 启动失败 ==========');
@@ -271,6 +288,9 @@ export class AppAuthCoordinatorService {
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
+      pushStartupTrace('auth.bootstrap_failure', {
+        message: errorMsg,
+      });
 
       // 【P0 修复】auth 启动失败时加载离线缓存，防止用户数据"消失"
       // 根因：bootstrapSession 抛出异常（网络故障/Supabase 不可达）后，
@@ -284,6 +304,10 @@ export class AppAuthCoordinatorService {
       }
     } finally {
       const totalElapsed = Date.now() - totalStartTime;
+      pushStartupTrace('auth.bootstrap_complete', {
+        elapsedMs: totalElapsed,
+        bootstrapFailed: this.bootstrapFailed(),
+      });
       this.logger.debug(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
       this.isCheckingSession.set(false);
       this.bootstrapInFlight = false;

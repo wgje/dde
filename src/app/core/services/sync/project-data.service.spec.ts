@@ -8,6 +8,103 @@ import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 
+const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
+const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
+const OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
+const OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY = 'nanoflow.offline-cache-v2';
+
+async function writeOfflineSnapshotToIdb(payload: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
+
+    request.onerror = () => reject(request.error);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(OFFLINE_SNAPSHOT_STORE_NAME)) {
+        db.createObjectStore(OFFLINE_SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readwrite');
+      tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).put({
+        id: OFFLINE_SNAPSHOT_RECORD_ID,
+        data: payload,
+      });
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  });
+}
+
+async function readOfflineSnapshotFromIdb(): Promise<string | null> {
+  return await new Promise<string | null>((resolve) => {
+    try {
+      const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
+
+      request.onerror = () => resolve(null);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(OFFLINE_SNAPSHOT_STORE_NAME)) {
+          db.createObjectStore(OFFLINE_SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readonly');
+        const req = tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).get(OFFLINE_SNAPSHOT_RECORD_ID);
+        req.onsuccess = () => {
+          db.close();
+          resolve(req.result?.data ?? null);
+        };
+        req.onerror = () => {
+          db.close();
+          resolve(null);
+        };
+        tx.onerror = () => {
+          db.close();
+          resolve(null);
+        };
+      };
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function clearOfflineSnapshotIdb(): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
+
+    request.onerror = () => reject(request.error);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(OFFLINE_SNAPSHOT_STORE_NAME)) {
+        db.createObjectStore(OFFLINE_SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readwrite');
+      tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).delete(OFFLINE_SNAPSHOT_RECORD_ID);
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  });
+}
+
 describe('ProjectDataService', () => {
   it('P0001 Access Denied 时不应 fallback 到 loadFullProject', async () => {
     const rpc = vi.fn().mockResolvedValue({
@@ -395,5 +492,203 @@ describe('ProjectDataService', () => {
 
     expect(result).toBeNull();
     expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('startup snapshot 应优先读取 IndexedDB 并返回元数据', async () => {
+    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
+    await clearOfflineSnapshotIdb();
+
+    const idbPayload = JSON.stringify({
+      projects: [
+        {
+          id: 'idb-project',
+          name: 'IDB Project',
+          description: 'from idb',
+          createdDate: '2026-03-26T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 7,
+    });
+    const localStoragePayload = JSON.stringify({
+      projects: [
+        {
+          id: 'legacy-project',
+          name: 'Legacy Project',
+          description: 'from localStorage',
+          createdDate: '2026-03-25T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 6,
+    });
+
+    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, localStoragePayload);
+    await writeOfflineSnapshotToIdb(idbPayload);
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService) as unknown as {
+      loadStartupOfflineSnapshot: () => Promise<{
+        source: 'idb' | 'localStorage' | 'none';
+        projectCount: number;
+        bytes: number;
+        migratedLegacy: boolean;
+        projects: unknown[];
+      }>;
+    };
+
+    const snapshot = await service.loadStartupOfflineSnapshot();
+
+    expect(snapshot.source).toBe('idb');
+    expect(snapshot.projectCount).toBe(1);
+    expect(snapshot.migratedLegacy).toBe(false);
+    expect(snapshot.bytes).toBeGreaterThan(0);
+    expect(snapshot.projects).toHaveLength(1);
+    expect((snapshot.projects[0] as { id?: string }).id).toBe('idb-project');
+  });
+
+  it('startup snapshot 仅有 legacy localStorage 时应回迁到 IndexedDB', async () => {
+    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
+    await clearOfflineSnapshotIdb();
+
+    const legacyPayload = JSON.stringify({
+      projects: [
+        {
+          id: 'legacy-project',
+          name: 'Legacy Project',
+          description: 'from localStorage',
+          createdDate: '2026-03-25T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 6,
+    });
+
+    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, legacyPayload);
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService) as unknown as {
+      loadStartupOfflineSnapshot: () => Promise<{
+        source: 'idb' | 'localStorage' | 'none';
+        projectCount: number;
+        bytes: number;
+        migratedLegacy: boolean;
+        projects: unknown[];
+      }>;
+    };
+
+    const snapshot = await service.loadStartupOfflineSnapshot();
+    const migratedPayload = await readOfflineSnapshotFromIdb();
+
+    expect(snapshot.source).toBe('localStorage');
+    expect(snapshot.projectCount).toBe(1);
+    expect(snapshot.migratedLegacy).toBe(true);
+    expect(snapshot.bytes).toBeGreaterThan(0);
+    expect(snapshot.projects).toHaveLength(1);
+    expect((snapshot.projects[0] as { id?: string }).id).toBe('legacy-project');
+    expect(migratedPayload).toBe(legacyPayload);
   });
 });

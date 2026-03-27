@@ -371,6 +371,13 @@ describe('SimpleSyncService', () => {
       loadSingleProject: vi.fn().mockResolvedValue(null),
       saveOfflineSnapshot: vi.fn(),
       loadOfflineSnapshot: vi.fn().mockReturnValue(null),
+      loadStartupOfflineSnapshot: vi.fn().mockResolvedValue({
+        source: 'none' as const,
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      }),
       clearOfflineSnapshot: vi.fn(),
       addLocalTombstones: vi.fn(),
       invalidateTombstoneCache: vi.fn(),
@@ -2904,6 +2911,28 @@ describe('SimpleSyncService', () => {
       await vi.advanceTimersByTimeAsync(120);
       expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledTimes(2);
       vi.useRealTimers();
+    });
+  });
+
+  describe('startup snapshot', () => {
+    it('SimpleSync 应转发新的 startup snapshot 元数据 API', async () => {
+      const snapshot = await (service as unknown as {
+        loadStartupOfflineSnapshot: () => Promise<{
+          source: 'idb' | 'localStorage' | 'none';
+          projectCount: number;
+          bytes: number;
+          migratedLegacy: boolean;
+          projects: unknown[];
+        }>;
+      }).loadStartupOfflineSnapshot();
+
+      expect(snapshot).toEqual({
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      });
     });
   });
   

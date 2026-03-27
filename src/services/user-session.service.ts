@@ -16,11 +16,13 @@ import { FOCUS_CONFIG } from '../config/focus.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
+import { pushStartupTrace } from '../utils/startup-trace';
 
 @Injectable({
   providedIn: 'root'
 })
 export class UserSessionService {
+  private readonly IDLE_TASK_FALLBACK_MS = 1500;
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('UserSession');
   private authService = inject(AuthService);
@@ -109,6 +111,12 @@ export class UserSessionService {
       isUserChange,
       forceLoad
     });
+    pushStartupTrace('user_session.set_current_user', {
+      previousUserId,
+      userId,
+      isUserChange,
+      forceLoad,
+    });
     
     // 清理旧用户的附件监控和回调，防止内存泄漏
     if (isUserChange || forceLoad) {
@@ -146,7 +154,7 @@ export class UserSessionService {
           this.logger.warn('loadUserData 失败', error);
           // 降级处理：至少加载种子数据
           try {
-            this.loadFromCacheOrSeed();
+            await this.loadFromCacheOrSeed();
           } catch (fallbackError) {
             this.logger.warn('降级加载种子数据也失败', fallbackError);
             // 即使种子数据加载失败，也不阻断应用启动
@@ -156,7 +164,7 @@ export class UserSessionService {
       }
     } else {
       try {
-        this.loadFromCacheOrSeed();
+        await this.loadFromCacheOrSeed();
       } catch (error) {
         this.logger.warn('loadFromCacheOrSeed 失败', error);
         // 不重新抛出异常
@@ -330,12 +338,13 @@ export class UserSessionService {
     const perfStart = performance.now();
     const userId = this.currentUserId();
     this.logger.debug('loadProjects 开始（本地优先模式）', { userId });
+    pushStartupTrace('user_session.load_projects_start', { userId });
     
     // === 阶段 1: 立即渲染本地数据 ===
     
     if (!userId) {
       this.logger.debug('无 userId，从缓存或种子加载');
-      this.loadFromCacheOrSeed();
+      await this.loadFromCacheOrSeed();
       this.logger.debug(`⚡ 数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       return;
     }
@@ -344,15 +353,20 @@ export class UserSessionService {
     // 立即返回，避免触发任何网络请求或会话检查
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，从缓存或种子加载');
-      this.loadFromCacheOrSeed();
+      await this.loadFromCacheOrSeed();
       this.logger.debug(`⚡ 本地模式数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       // 确保不启动后台同步任务
       return;
     }
 
     const previousActive = this.projectState.activeProjectId();
-    const offlineProjects = this.syncCoordinator.core.loadOfflineSnapshot();
-    this.logger.debug('离线缓存项目数量', { count: offlineProjects?.length ?? 0 });
+    const startupSnapshot = await this.loadStartupSnapshotResult();
+    const offlineProjects = startupSnapshot.projects;
+    this.logger.debug('离线缓存项目数量', {
+      count: startupSnapshot.projectCount,
+      source: startupSnapshot.source,
+      migratedLegacy: startupSnapshot.migratedLegacy,
+    });
     
     // 【关键改动】立即渲染本地缓存数据，不等待云端
     if (offlineProjects && offlineProjects.length > 0) {
@@ -388,14 +402,20 @@ export class UserSessionService {
         }
         
         this.logger.debug('本地数据已渲染，用户可以操作');
+        pushStartupTrace('user_session.snapshot_rendered', {
+          source: startupSnapshot.source,
+          projectCount: validProjects.length,
+          activeProjectId: this.projectState.activeProjectId(),
+          migratedLegacy: startupSnapshot.migratedLegacy,
+        });
       } else {
         // 缓存数据无效，使用种子数据
-        this.loadFromCacheOrSeed();
+        await this.loadFromCacheOrSeed(startupSnapshot);
       }
     } else {
       // 无本地缓存，立即生成种子数据让用户可以操作
       this.logger.debug('无本地缓存，生成种子数据');
-      this.loadFromCacheOrSeed();
+      await this.loadFromCacheOrSeed(startupSnapshot);
     }
     
     // === 阶段 2: 后台静默同步云端数据 ===
@@ -410,10 +430,23 @@ export class UserSessionService {
   }
 
   private runIdleTask(task: () => void): void {
+    let fired = false;
+    const runOnce = () => {
+      if (fired) return;
+      fired = true;
+      task();
+    };
+
     if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      (window as unknown as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(() => task());
+      const fallbackTimer = setTimeout(runOnce, this.IDLE_TASK_FALLBACK_MS);
+      (
+        window as unknown as { requestIdleCallback: (cb: () => void) => void }
+      ).requestIdleCallback(() => {
+        clearTimeout(fallbackTimer);
+        runOnce();
+      });
     } else {
-      setTimeout(task, 0);
+      setTimeout(runOnce, 0);
     }
   }
   
@@ -689,6 +722,7 @@ export class UserSessionService {
     const beforePruneCount = updatedProjects.length;
     const shouldSkipPruning =
       accessibleProjectIds.size === 0 ||
+      (beforePruneCount <= 2 && accessibleProjectIds.size < beforePruneCount) ||
       (beforePruneCount >= 3 && accessibleProjectIds.size < beforePruneCount * 0.5);
 
     if (shouldSkipPruning) {
@@ -938,7 +972,7 @@ export class UserSessionService {
       this.logger.warn('loadProjects 未捕获异常', error);
       // 确保至少有可用的数据
       try {
-        this.loadFromCacheOrSeed();
+        await this.loadFromCacheOrSeed();
       } catch (fallbackError) {
         this.logger.warn('种子数据加载失败', fallbackError);
       }
@@ -965,9 +999,49 @@ export class UserSessionService {
   }
 
   /** 从缓存或种子数据加载（含数据完整性检查） */
-  private loadFromCacheOrSeed(): void {
-    const cached = this.syncCoordinator.core.loadOfflineSnapshot();
+  private async loadStartupSnapshotResult(): Promise<{
+    source: 'idb' | 'localStorage' | 'none';
+    projectCount: number;
+    bytes: number;
+    migratedLegacy: boolean;
+    projects: Project[];
+  }> {
+    const core = this.syncCoordinator.core as {
+      loadStartupOfflineSnapshot?: () => Promise<{
+        source: 'idb' | 'localStorage' | 'none';
+        projectCount: number;
+        bytes: number;
+        migratedLegacy: boolean;
+        projects: Project[];
+      }>;
+      loadOfflineSnapshot: () => Project[] | null;
+    };
+
+    if (typeof core.loadStartupOfflineSnapshot === 'function') {
+      return core.loadStartupOfflineSnapshot();
+    }
+
+    const projects = core.loadOfflineSnapshot() ?? [];
+    return {
+      source: projects.length > 0 ? 'localStorage' : 'none',
+      projectCount: projects.length,
+      bytes: 0,
+      migratedLegacy: false,
+      projects,
+    };
+  }
+
+  private async loadFromCacheOrSeed(snapshotOverride?: {
+    source: 'idb' | 'localStorage' | 'none';
+    projectCount: number;
+    bytes: number;
+    migratedLegacy: boolean;
+    projects: Project[];
+  }): Promise<void> {
+    const snapshot = snapshotOverride ?? await this.loadStartupSnapshotResult();
+    const cached = snapshot.projects;
     let projects: Project[] = [];
+    let usedSeed = false;
 
     if (cached && cached.length > 0) {
       // 验证并迁移每个缓存的项目
@@ -997,13 +1071,26 @@ export class UserSessionService {
         );
       }
       
-      projects = validProjects.length > 0 ? validProjects : this.seedProjects();
+      if (validProjects.length > 0) {
+        projects = validProjects;
+      } else {
+        projects = this.seedProjects();
+        usedSeed = true;
+      }
     } else {
       projects = this.seedProjects();
+      usedSeed = true;
     }
 
     this.projectState.setProjects(projects);
     this.projectState.setActiveProjectId(projects[0]?.id ?? null);
+    pushStartupTrace('user_session.snapshot_applied', {
+      source: snapshot.source,
+      projectCount: projects.length,
+      bytes: snapshot.bytes,
+      migratedLegacy: snapshot.migratedLegacy,
+      usedSeed,
+    });
   }
 
   /** 迁移项目数据格式 */

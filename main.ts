@@ -3,6 +3,7 @@ import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angu
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
 import { provideServiceWorker } from '@angular/service-worker';
 import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-registration-strategy';
+import { pushStartupTrace } from './src/utils/startup-trace';
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -265,6 +266,9 @@ function scheduleSupabaseSdkPrewarmAfterShell(): void {
 // ========== 应用启动函数 ==========
 async function startApplication() {
   log('🏗️ 准备启动 Angular...');
+  pushStartupTrace('app.start', {
+    startTime: START_TIME,
+  });
   
   // 添加启动超时保护（15秒）
   const startupTimeout = setTimeout(() => {
@@ -346,6 +350,7 @@ async function startApplication() {
     window.dispatchEvent(new CustomEvent('nanoflow:bootstrap-complete', {
       detail: { elapsed },
     }));
+    pushStartupTrace('app.bootstrap_complete', { elapsed });
 
     // 检查 Zone.js 是否正常工作 - 尝试触发变更检测
     try {
@@ -382,6 +387,9 @@ async function startApplication() {
   } catch (err: unknown) {
     clearTimeout(startupTimeout);
     logError('❌ 启动失败', err);
+    pushStartupTrace('app.bootstrap_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
     showStartupError('启动失败', '应用无法正常启动', err);
   }
 }

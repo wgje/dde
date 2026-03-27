@@ -154,6 +154,13 @@ describe('UserSessionService', () => {
         teardownRealtimeSubscription: vi.fn(),
         clearOfflineCache: vi.fn(),
         loadOfflineSnapshot: vi.fn(() => null),
+        loadStartupOfflineSnapshot: vi.fn().mockResolvedValue({
+          source: 'none',
+          projectCount: 0,
+          bytes: 0,
+          migratedLegacy: false,
+          projects: [],
+        }),
         saveOfflineSnapshot: vi.fn(),
         saveProjectSmart: vi.fn().mockResolvedValue({ ok: true }),
         initRealtimeSubscription: vi.fn().mockResolvedValue(undefined),
@@ -353,6 +360,28 @@ describe('UserSessionService', () => {
       expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
     });
 
+    it('设置用户 ID 为 null 时应优先使用 startup snapshot 而不是种子数据', async () => {
+      const restoredProject = createProject({ id: 'restored-idb-project', name: 'Recovered' });
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: false,
+        projects: [restoredProject],
+      });
+
+      await service.setCurrentUser(null);
+
+      expect(
+        (mockSyncCoordinator['core'] as { loadStartupOfflineSnapshot: ReturnType<typeof vi.fn> }).loadStartupOfflineSnapshot
+      ).toHaveBeenCalled();
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([expect.objectContaining({ id: 'restored-idb-project' })]);
+    });
+
     it('用户切换时清理旧数据', async () => {
       // Set a previous userId through the signal
       userIdSignal.set('old-user');
@@ -363,6 +392,39 @@ describe('UserSessionService', () => {
 
       expect(mockAttachmentService['clearMonitoredAttachments']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
+    });
+  });
+
+  describe('runIdleTask', () => {
+    it('requestIdleCallback 不触发时应由超时兜底执行任务', () => {
+      vi.useFakeTimers();
+      const originalRic = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+      const task = vi.fn();
+
+      Object.defineProperty(window, 'requestIdleCallback', {
+        value: vi.fn(() => 1),
+        configurable: true,
+        writable: true,
+      });
+
+      (
+        service as unknown as {
+          runIdleTask: (task: () => void) => void;
+        }
+      ).runIdleTask(task);
+
+      expect(task).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(2000);
+
+      expect(task).toHaveBeenCalledTimes(1);
+
+      Object.defineProperty(window, 'requestIdleCallback', {
+        value: originalRic,
+        configurable: true,
+        writable: true,
+      });
+      vi.useRealTimers();
     });
   });
 
@@ -593,18 +655,25 @@ describe('UserSessionService', () => {
       });
     }
 
-    it('应清理不可访问且无待同步改动的非活跃项目', async () => {
+    it('在项目数达到裁剪阈值时，应清理不可访问且无待同步改动的非活跃项目', async () => {
       const keepProject = createProject({ id: 'proj-ok', name: 'Keep' });
+      const keepProject2 = createProject({ id: 'proj-ok-2', name: 'Keep 2' });
       const staleProject = createProject({ id: 'proj-stale', name: 'Stale' });
-      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([keepProject, staleProject]);
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([keepProject, keepProject2, staleProject]);
       // activeProjectId 设为 null，以便 staleProject 可被裁剪
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
       (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-      setupSupabaseQuery([{
-        id: 'proj-ok', title: 'Keep', description: '',
-        created_date: keepProject.createdDate, updated_at: keepProject.updatedAt, version: 1,
-      }]);
+      setupSupabaseQuery([
+        {
+          id: 'proj-ok', title: 'Keep', description: '',
+          created_date: keepProject.createdDate, updated_at: keepProject.updatedAt, version: 1,
+        },
+        {
+          id: 'proj-ok-2', title: 'Keep 2', description: '',
+          created_date: keepProject2.createdDate, updated_at: keepProject2.updatedAt, version: 1,
+        },
+      ]);
 
       const result = await (
         service as unknown as {
@@ -613,8 +682,12 @@ describe('UserSessionService', () => {
       ).syncProjectListMetadata('user-1');
 
       expect(result.has('proj-ok')).toBe(true);
+      expect(result.has('proj-ok-2')).toBe(true);
       expect(result.has('proj-stale')).toBe(false);
-      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([expect.objectContaining({ id: 'proj-ok' })]);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'proj-ok' }),
+        expect.objectContaining({ id: 'proj-ok-2' }),
+      ]);
     });
 
     it('当前活跃项目不应被裁剪（由调用方处理）', async () => {
@@ -704,6 +777,33 @@ describe('UserSessionService', () => {
       if ((mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls.length > 0) {
         const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0][0];
         expect(setProjectsCall.length).toBe(4);
+      }
+    });
+
+    it('本地仅有 2 个项目且服务端返回子集时也应跳过裁剪', async () => {
+      const localProjects = [
+        createProject({ id: 'p1', name: 'P1' }),
+        createProject({ id: 'p2', name: 'P2' }),
+      ];
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue(localProjects);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([{
+        id: 'p1', title: 'P1', description: '',
+        created_date: localProjects[0].createdDate, updated_at: localProjects[0].updatedAt, version: 1,
+      }]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      if ((mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls.length > 0) {
+        const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(setProjectsCall.some((p: Project) => p.id === 'p1')).toBe(true);
+        expect(setProjectsCall.some((p: Project) => p.id === 'p2')).toBe(true);
       }
     });
 

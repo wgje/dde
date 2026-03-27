@@ -154,6 +154,53 @@ describe('HandoffCoordinatorService', () => {
     expect(result.kind).toBe('login-required');
   });
 
+  it('should keep local workspace visible when login is required but projects are already restored', () => {
+    service.markLayoutStable();
+
+    const result = service.resolve({
+      routeUrl: '/projects/p-1',
+      isMobile: false,
+      hasProjects: true,
+      activeProjectId: 'p-1',
+      authConfigured: true,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: true,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot(),
+    });
+
+    expect(result.kind).toBe('full');
+    expect(result.degradeReason).toBe('login-required-nonblocking');
+  });
+
+  it('should record timeout100 as handoff trigger source when rAF is starved', () => {
+    const originalRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = vi.fn(() => 1);
+
+    service.markLayoutStable();
+    service.resolve({
+      routeUrl: '/projects',
+      isMobile: false,
+      hasProjects: true,
+      activeProjectId: 'p-1',
+      authConfigured: false,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: false,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot(),
+    });
+
+    vi.advanceTimersByTime(100);
+
+    expect(
+      (service as unknown as { handoffTriggerSource: () => string | null }).handoffTriggerSource()
+    ).toBe('timeout100');
+
+    window.requestAnimationFrame = originalRaf;
+  });
+
   it('should degrade to project rail when target project is unavailable but local projects exist', () => {
     service.markLayoutStable();
 

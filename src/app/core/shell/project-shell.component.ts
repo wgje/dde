@@ -169,8 +169,8 @@ interface NetworkInformationLike {
              
              <!-- Desktop Layout -->
              @if (!uiState.isMobile()) {
-               <div class="h-full flex items-center justify-between">
-                 <div class="flex items-center gap-3">
+               <div class="h-full flex items-center justify-between min-w-0 gap-2">
+                 <div class="flex items-center gap-3 min-w-0">
                    <button (click)="toggleSidebar()" 
                            class="text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 transition-colors p-2 hover:bg-stone-200/50 dark:hover:bg-stone-700/50 rounded-full" 
                            aria-label="切换侧边栏">
@@ -178,7 +178,7 @@ interface NetworkInformationLike {
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                       </svg>
                    </button>
-                   <span class="font-bold text-stone-800 dark:text-stone-200 text-lg tracking-tight">文本视图</span>
+                   <span class="font-bold text-stone-800 dark:text-stone-200 text-lg tracking-tight truncate max-w-[7rem] lg:max-w-none">文本视图</span>
                  </div>
                  
                  <!-- 折叠文本栏按钮 -->
@@ -192,15 +192,15 @@ interface NetworkInformationLike {
                  </button>
                  
                  <!-- Filter -->
-                 <div class="relative flex items-center gap-2">
+                  <div class="relative flex items-center gap-2 min-w-0">
                    <button 
                       (click)="isFilterOpen.set(!isFilterOpen()); $event.stopPropagation()"
                       [attr.aria-expanded]="isFilterOpen()"
                       aria-haspopup="listbox"
                       aria-label="任务过滤器"
-                      class="flex items-center gap-2 bg-transparent text-xs font-medium text-stone-500 dark:text-stone-400 hover:text-indigo-800 dark:hover:text-indigo-400 transition-colors py-1.5 px-3 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 border border-transparent active:bg-indigo-100 dark:active:bg-indigo-900/30">
-                       <span>{{ currentFilterLabel() }}</span>
-                       <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 transition-transform duration-200" [class.rotate-180]="isFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                     class="flex items-center gap-2 min-w-0 max-w-[8rem] xl:max-w-none bg-transparent text-xs font-medium text-stone-500 dark:text-stone-400 hover:text-indigo-800 dark:hover:text-indigo-400 transition-colors py-1.5 px-3 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 border border-transparent active:bg-indigo-100 dark:active:bg-indigo-900/30">
+                      <span class="truncate">{{ currentFilterLabel() }}</span>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0 transition-transform duration-200" [class.rotate-180]="isFilterOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                        </svg>
                    </button>

@@ -3,9 +3,9 @@ import { STARTUP_PERF_CONFIG } from './startup-performance.config';
 
 describe('STARTUP_PERF_CONFIG', () => {
   it('should expose tiered startup delays', () => {
-    expect(STARTUP_PERF_CONFIG.P1_INTERACTION_HYDRATE_DELAY_MS).toBe(500);
-    expect(STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS).toBe(2000);
-    expect(STARTUP_PERF_CONFIG.P2_SYNC_MIN_VISIBLE_MS).toBe(1200);
+    expect(STARTUP_PERF_CONFIG.P1_INTERACTION_HYDRATE_DELAY_MS).toBe(150);
+    expect(STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS).toBe(800);
+    expect(STARTUP_PERF_CONFIG.P2_SYNC_MIN_VISIBLE_MS).toBe(500);
   });
 
   it('should expose tightened startup guards', () => {
@@ -67,7 +67,7 @@ describe('STARTUP_PERF_CONFIG', () => {
   it('should expose remaining build gate values', () => {
     expect(STARTUP_PERF_CONFIG.STARTUP_MAIN_MAX_KB).toBe(260);
     expect(STARTUP_PERF_CONFIG.STARTUP_INITIAL_FETCH_MAX).toBe(12);
-    expect(STARTUP_PERF_CONFIG.STARTUP_MODULEPRELOAD_MAX).toBe(10);
+    expect(STARTUP_PERF_CONFIG.STARTUP_MODULEPRELOAD_MAX).toBe(8);
     expect(STARTUP_PERF_CONFIG.INDEX_PRELOAD_FETCH_ENABLED).toBe(false);
   });
 });

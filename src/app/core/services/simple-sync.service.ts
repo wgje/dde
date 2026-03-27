@@ -38,6 +38,7 @@ import {
   type RetryableEntityType,
   type RetryableOperation
 } from './sync';
+import type { StartupOfflineSnapshotLoadResult } from './sync/project-data.service';
 import { Task, Project, Connection, UserPreferences } from '../../../models';
 import {
   DockSnapshot,
@@ -1185,6 +1186,14 @@ export class SimpleSyncService {
   
   loadOfflineSnapshot(): Project[] | null {
     return this.projectDataService.loadOfflineSnapshot();
+  }
+
+  async loadStartupOfflineSnapshot(): Promise<StartupOfflineSnapshotLoadResult> {
+    return this.projectDataService.loadStartupOfflineSnapshot();
+  }
+
+  async loadOfflineSnapshotAsync(): Promise<Project[] | null> {
+    return this.projectDataService.loadOfflineSnapshotAsync();
   }
   
   // ==================== 会话管理 ====================

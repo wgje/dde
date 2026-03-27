@@ -22,6 +22,9 @@ describe('BootStageService', () => {
       __NANOFLOW_LAUNCH_SHELL_VISIBLE__?: boolean;
       __NANOFLOW_BOOT_STAGE__?: string;
     }).__NANOFLOW_BOOT_STAGE__;
+    delete (window as Window & {
+      __NANOFLOW_STARTUP_TRACE__?: unknown;
+    }).__NANOFLOW_STARTUP_TRACE__;
     service = new BootStageService();
   });
 
@@ -36,6 +39,13 @@ describe('BootStageService', () => {
     expect(service.currentStage()).toBe('launch-shell');
     expect(window.__NANOFLOW_LAUNCH_SHELL_VISIBLE__).toBe(true);
     expect(window.__NANOFLOW_BOOT_STAGE__).toBe('launch-shell');
+    expect(
+      (
+        window as Window & {
+          __NANOFLOW_STARTUP_TRACE__?: Array<{ event: string; data?: Record<string, unknown> | null }>;
+        }
+      ).__NANOFLOW_STARTUP_TRACE__?.some((entry) => entry.event === 'boot.stage')
+    ).toBe(true);
 
     service.markWorkspaceHandoffReady();
     expect(service.currentStage()).toBe('handoff');
