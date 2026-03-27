@@ -428,6 +428,11 @@ export class SyncCoordinatorService {
         const projects = this.projectState.projects();
         if (projects.length === 0) return;
 
+        // 【P0 守卫 2026-03-27】当前用户为空或是本地模式兜底生成的种子数据时，
+        // 禁止自动保存覆盖离线快照，防止 auth 失败降级场景下种子数据吞掉真实数据。
+        const userId = this.authService.currentUserId();
+        if (!userId) return;
+
         // 脏检查：计算简易哈希，跳过无变更的写入
         const hash = projects.map(p => `${p.id}:${p.updatedAt ?? ''}:${p.version ?? 0}`).join('|');
         if (hash === this.lastSnapshotHash) return;

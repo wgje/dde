@@ -115,10 +115,12 @@ export class UserSessionService {
       try {
         this.attachmentServiceRef?.clearMonitoredAttachments();
         this.projectState.setActiveProjectId(null);
-        // 【P0 修复 2026-02-08】不再先清空再加载，避免双重 setProjects 触发信号风暴
-        // 旧行为：setProjects([]) → loadData → setProjects(data) — 两次信号通知
-        // 新行为：直接 loadData → setProjects(data) — 一次信号通知
-        if (isUserChange) {
+        // 【P0 修复 2026-02-08 / 2026-03-27 加固】
+        // 仅在切换到另一个真实用户时清空项目（避免旧用户数据泄露给新用户）。
+        // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的，
+        // 多余的 setProjects([]) 会触发信号风暴（handoff/snapshot/computed 全部重算），
+        // 在移动端造成主线程阻塞（"卡死"）和 handoff 状态闪烁。
+        if (isUserChange && previousUserId !== null) {
           this.projectState.setProjects([]);
         }
         this.undoService.clearHistory();

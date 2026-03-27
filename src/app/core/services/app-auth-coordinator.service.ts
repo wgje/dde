@@ -248,7 +248,15 @@ export class AppAuthCoordinatorService {
           activeProjectId: this.projectState.activeProjectId()
         });
       } else {
-        this.logger.debug('[Bootstrap] 步骤 2/3: 无现有会话，跳过数据加载');
+        this.logger.debug('[Bootstrap] 步骤 2/3: 无现有会话');
+        // 【P0 修复】无会话时也加载离线缓存，避免用户看到空工作区
+        // 先前行为：跳过数据加载 → 工作区空白
+        // 修复后：加载离线快照，用户至少能看到上次的数据
+        try {
+          await this.userSession.setCurrentUser(null);
+        } catch (loadError) {
+          this.logger.warn('[Bootstrap] 离线数据加载失败', loadError);
+        }
       }
 
       this.logger.debug('[Bootstrap] ========== 启动成功 ==========');
@@ -263,6 +271,17 @@ export class AppAuthCoordinatorService {
       this.bootstrapFailed.set(true);
       this.bootstrapErrorMessage.set(errorMsg);
       this.authError.set(errorMsg);
+
+      // 【P0 修复】auth 启动失败时加载离线缓存，防止用户数据"消失"
+      // 根因：bootstrapSession 抛出异常（网络故障/Supabase 不可达）后，
+      // 既不调用 setCurrentUser 也不调用 loadFromCacheOrSeed，
+      // 导致 projectState 始终为空，用户看到空白工作区。
+      // 修复：降级到离线模式，加载本地缓存数据。
+      try {
+        await this.userSession.setCurrentUser(null);
+      } catch (fallbackError) {
+        this.logger.warn('[Bootstrap] 降级离线数据加载也失败', fallbackError);
+      }
     } finally {
       const totalElapsed = Date.now() - totalStartTime;
       this.logger.debug(`[Bootstrap] 完成，设置 isCheckingSession = false (总耗时 ${totalElapsed}ms)`);
