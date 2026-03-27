@@ -31,6 +31,7 @@ export class StartupTierOrchestratorService {
 
   private p1Timer: ReturnType<typeof setTimeout> | null = null;
   private p2Timer: ReturnType<typeof setTimeout> | null = null;
+  private p2SafetyTimer: ReturnType<typeof setTimeout> | null = null;
   private minVisibleTimer: ReturnType<typeof setTimeout> | null = null;
 
   private visibleSince = typeof document !== 'undefined' && !document.hidden ? Date.now() : 0;
@@ -70,6 +71,15 @@ export class StartupTierOrchestratorService {
     this.p2Timer = setTimeout(() => {
       void this.triggerNow('p2', 'timer');
     }, STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS);
+
+    // 安全兜底：如果 P2 在 8s 内仍未激活（authReady/visible/online 条件一直不满足），
+    // 强制绕过所有前置条件激活 P2，确保 simpleSync.startRuntime() 必定执行。
+    this.p2SafetyTimer = setTimeout(() => {
+      if (this.isTierReady('p2')) return;
+      this.addBreadcrumb('startup.tier.p2.safety_force', { reason: 'timeout_8s' });
+      this.authReady = true;
+      this.setTier('p2', true, 'timer');
+    }, 8000);
 
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.onlineListener, { passive: true });
@@ -125,6 +135,10 @@ export class StartupTierOrchestratorService {
     if (this.p2Timer) {
       clearTimeout(this.p2Timer);
       this.p2Timer = null;
+    }
+    if (this.p2SafetyTimer) {
+      clearTimeout(this.p2SafetyTimer);
+      this.p2SafetyTimer = null;
     }
     if (this.minVisibleTimer) {
       clearTimeout(this.minVisibleTimer);
@@ -216,7 +230,14 @@ export class StartupTierOrchestratorService {
 
     if (tier === 'p0') this.tierP0.set(ready);
     if (tier === 'p1') this.tierP1.set(ready);
-    if (tier === 'p2') this.tierP2.set(ready);
+    if (tier === 'p2') {
+      this.tierP2.set(ready);
+      // P2 已激活，清除安全兜底定时器
+      if (ready && this.p2SafetyTimer) {
+        clearTimeout(this.p2SafetyTimer);
+        this.p2SafetyTimer = null;
+      }
+    }
 
     this.addBreadcrumb(`startup.tier.${tier}.done`, { tier, reason, ready });
   }

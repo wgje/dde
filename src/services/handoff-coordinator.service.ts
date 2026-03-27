@@ -83,12 +83,36 @@ export class HandoffCoordinatorService {
   private readonly resultState = signal<HandoffResult>({ kind: 'pending', degradeReason: null });
   private layoutStable = false;
   private handoffScheduled = false;
+  private safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 最大等待时间（ms），超时后强制 handoff 防止永久卡在 launch-shell */
+  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 8000;
 
   readonly result = this.resultState.asReadonly();
 
   markLayoutStable(): void {
     this.layoutStable = true;
     this.scheduleHandoffIfReady();
+    this.startSafetyTimer();
+  }
+
+  /**
+   * 安全超时：layoutStable 后若 handoff 在 8s 内仍未触发（result 一直 pending），
+   * 强制将 result 设为 'full'（降级）并执行 handoff。
+   * 防止任何状态机死锁导致用户永久卡在启动壳。
+   */
+  private startSafetyTimer(): void {
+    if (this.safetyTimer || this.handoffScheduled) {
+      return;
+    }
+    this.safetyTimer = setTimeout(() => {
+      if (this.handoffScheduled) {
+        return;
+      }
+      // 强制降级 handoff — 比永远卡住好
+      this.resultState.set({ kind: 'full', degradeReason: 'handoff-safety-timeout' });
+      this.scheduleHandoffIfReady();
+    }, this.HANDOFF_SAFETY_TIMEOUT_MS);
   }
 
   resolve(input: HandoffDecisionInput): HandoffResult {

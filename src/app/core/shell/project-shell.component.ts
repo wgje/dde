@@ -589,7 +589,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     const handoffResult = this.handoffCoordinator.result();
     const snapshotRouteIntent = this.startupLaunchSnapshot?.routeIntent;
     const snapshotMatchesCurrentRoute =
-      snapshotRouteIntent?.projectId === projectId
+      !!snapshotRouteIntent
+      && snapshotRouteIntent.projectId === projectId
       && (
         (snapshotRouteIntent.kind === 'task' && snapshotRouteIntent.taskId === taskId)
         || (snapshotRouteIntent.kind === 'flow' && currentUrl.endsWith('/flow'))
