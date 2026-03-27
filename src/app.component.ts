@@ -88,6 +88,9 @@ export class AppComponent {
     this.showLaunchShell() || this.launchShellFadingOut(),
   );
 
+  /** 淡出动画是否已触发（普通布尔值，不是 signal，防止 effect 重入循环） */
+  private handoffFadeStarted = false;
+
   constructor() {
     // 第一阶段预热：仅拉取 workspace-shell chunk
     this.workspaceStartupPreloader.start();
@@ -96,7 +99,11 @@ export class AppComponent {
       this.bootStage.markLaunchShellVisible();
     });
 
-    // 【P0 新增 2026-03-27】启动壳淡出动画：handoff 完成后先淡出再移除
+    // 启动壳淡出动画：handoff 完成后先淡出再移除
+    // 【P0 修复】使用普通布尔 handoffFadeStarted 防止循环：
+    // 旧实现读取 launchShellFadingOut() 信号作为 effect 依赖，
+    // setTimeout 回调将其重置为 false 后 effect 重新运行，
+    // 导致淡出→重置→淡出的无限 200ms 循环，启动壳永远不消失。
     effect(() => {
       const workspaceReady = this.bootStage.isWorkspaceHandoffReady();
       const appReady = this.bootStage.isApplicationReady();
@@ -105,8 +112,9 @@ export class AppComponent {
         this.bootStage.markApplicationReady();
       }
 
-      // handoff 完成 → 触发淡出
-      if (workspaceReady && !this.launchShellFadingOut()) {
+      // handoff 完成 → 触发淡出（仅触发一次）
+      if (workspaceReady && !this.handoffFadeStarted) {
+        this.handoffFadeStarted = true;
         this.launchShellFadingOut.set(true);
         // 200ms 淡出动画后从 DOM 移除
         setTimeout(() => {
