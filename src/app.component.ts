@@ -81,6 +81,13 @@ export class AppComponent {
     this.bootShellEnabled && !this.bootStage.isWorkspaceHandoffReady(),
   );
 
+  /** 淡出中标志：handoff 后先加 fade class，动画结束再从 DOM 移除 */
+  readonly launchShellFadingOut = signal(false);
+  /** DOM 存在标志：淡出动画完成后才变 false，避免硬切闪烁 */
+  readonly showLaunchShellDom = computed(() =>
+    this.showLaunchShell() || this.launchShellFadingOut(),
+  );
+
   constructor() {
     // 第一阶段预热：仅拉取 workspace-shell chunk
     this.workspaceStartupPreloader.start();
@@ -89,12 +96,22 @@ export class AppComponent {
       this.bootStage.markLaunchShellVisible();
     });
 
+    // 【P0 新增 2026-03-27】启动壳淡出动画：handoff 完成后先淡出再移除
     effect(() => {
       const workspaceReady = this.bootStage.isWorkspaceHandoffReady();
       const appReady = this.bootStage.isApplicationReady();
 
       if (workspaceReady && !appReady) {
         this.bootStage.markApplicationReady();
+      }
+
+      // handoff 完成 → 触发淡出
+      if (workspaceReady && !this.launchShellFadingOut()) {
+        this.launchShellFadingOut.set(true);
+        // 200ms 淡出动画后从 DOM 移除
+        setTimeout(() => {
+          this.launchShellFadingOut.set(false);
+        }, 200);
       }
     });
 

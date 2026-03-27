@@ -17,6 +17,7 @@ import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
+import type { LaunchSnapshot, LaunchSnapshotProject } from '../models/launch-shell';
 
 @Injectable({
   providedIn: 'root'
@@ -93,6 +94,119 @@ export class UserSessionService {
       });
 
     return this.attachmentServicePromise;
+  }
+
+  /**
+   * 从启动快照预填充 Store（使 handoff 不再等待 auth + 数据加载）
+   *
+   * 【P0 新增 2026-03-27】
+   * 冷启动时从 localStorage 中已有的 launch-snapshot 构建轻量 Project 列表，
+   * 使 ProjectStore.projects().length > 0 立即成立，
+   * 从而解除 handoff 对 auth 完成的阻塞依赖。
+   *
+   * 仅在 Store 为空时填充（避免覆盖已有真实数据）。
+   * 后续 loadUserData() 完成后会用完整数据替换。
+   *
+   * @returns 是否成功预填充
+   */
+  prehydrateFromSnapshot(): boolean {
+    // Store 已有数据，无需预填充
+    if (this.projectState.projects().length > 0) {
+      return true;
+    }
+
+    const snapshot = this.readSnapshotForPrehydrate();
+    if (!snapshot?.projects?.length) {
+      return false;
+    }
+
+    try {
+      const projects = this.buildPrehydrateProjects(snapshot.projects);
+      if (projects.length === 0) {
+        return false;
+      }
+
+      this.projectState.setProjects(projects);
+      this.projectState.setActiveProjectId(
+        snapshot.activeProjectId ?? projects[0]?.id ?? null,
+      );
+
+      pushStartupTrace('user_session.snapshot_prehydrate', {
+        projectCount: projects.length,
+        activeProjectId: snapshot.activeProjectId,
+      });
+      this.logger.debug('快照预填充完成', { projectCount: projects.length });
+      return true;
+    } catch (error) {
+      this.logger.warn('快照预填充失败，静默跳过', error);
+      return false;
+    }
+  }
+
+  /** 读取全局或 localStorage 中的启动快照 */
+  private readSnapshotForPrehydrate(): LaunchSnapshot | null {
+    if (typeof window === 'undefined') return null;
+
+    // 优先读取 index.html 内联脚本已注入的全局快照
+    const globalSnap = (
+      window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }
+    ).__NANOFLOW_LAUNCH_SNAPSHOT__;
+    if (globalSnap && typeof globalSnap === 'object' && 'projects' in globalSnap) {
+      return globalSnap as LaunchSnapshot;
+    }
+
+    // 回退读取 localStorage
+    try {
+      const raw = localStorage.getItem('nanoflow.launch-snapshot.v2');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === 'object' && 'projects' in parsed) {
+        return parsed as LaunchSnapshot;
+      }
+    } catch {
+      // 损坏的 localStorage 数据，静默忽略
+    }
+
+    return null;
+  }
+
+  /** 从快照 projects 构建轻量 Project 对象供 Store 预填充 */
+  private buildPrehydrateProjects(snapshotProjects: LaunchSnapshotProject[]): Project[] {
+    const now = new Date().toISOString();
+    const results: Project[] = [];
+
+    for (const sp of snapshotProjects) {
+      if (!sp.id || typeof sp.id !== 'string') continue;
+
+      const tasks: Task[] = (sp.recentTasks ?? [])
+        .filter(t => t.id && typeof t.id === 'string')
+        .map((t, idx) => ({
+          id: t.id,
+          title: t.title || '',
+          content: t.title || '',
+          stage: null,
+          parentId: null,
+          order: idx,
+          rank: 10000 + idx,
+          status: t.status || 'active',
+          x: 0,
+          y: 0,
+          createdDate: now,
+          displayId: t.displayId || '?',
+        }));
+
+      results.push({
+        id: sp.id,
+        name: sp.name || 'Untitled',
+        description: sp.description || '',
+        createdDate: now,
+        updatedAt: sp.updatedAt ?? now,
+        tasks,
+        connections: [],
+      });
+    }
+
+    return results;
   }
 
   /**
@@ -1074,12 +1188,29 @@ export class UserSessionService {
       if (validProjects.length > 0) {
         projects = validProjects;
       } else {
+        // 【P0 修复 2026-03-27】已登录用户不创建种子数据，等后台同步填充真实数据
+        // 种子数据仅在未登录/离线模式下创建，避免覆盖用户真实数据
+        const isAuthenticatedUser = !!this.authService.currentUserId()
+          && this.authService.currentUserId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+        if (isAuthenticatedUser) {
+          this.logger.warn('已登录用户无有效本地缓存，跳过种子数据，等待后台同步');
+          projects = [];
+        } else {
+          projects = this.seedProjects();
+          usedSeed = true;
+        }
+      }
+    } else {
+      // 【P0 修复 2026-03-27】同上：保护已登录用户免受种子覆盖
+      const isAuthenticatedUser = !!this.authService.currentUserId()
+        && this.authService.currentUserId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+      if (isAuthenticatedUser) {
+        this.logger.warn('已登录用户无本地缓存，跳过种子数据，等待后台同步');
+        projects = [];
+      } else {
         projects = this.seedProjects();
         usedSeed = true;
       }
-    } else {
-      projects = this.seedProjects();
-      usedSeed = true;
     }
 
     this.projectState.setProjects(projects);

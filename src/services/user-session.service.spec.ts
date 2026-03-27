@@ -828,4 +828,175 @@ describe('UserSessionService', () => {
       // 真正触发 toast 的是 startBackgroundSync 中的 access preflight
     });
   });
+
+  // ====== 快照预填充测试 ======
+  describe('prehydrateFromSnapshot', () => {
+    it('Store 为空时应从全局快照预填充项目', () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+      // 模拟 index.html 注入的全局快照
+      (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__ = {
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        activeProjectId: 'p-1',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'p-1',
+            name: 'Alpha Protocol',
+            description: 'Test project',
+            updatedAt: '2026-03-27T10:00:00.000Z',
+            taskCount: 2,
+            openTaskCount: 2,
+            recentTasks: [
+              { id: 't-1', title: '阶段 1: 环境搭建', displayId: '1', status: 'active' },
+              { id: 't-2', title: '核心逻辑实现', displayId: '1,a', status: 'active' },
+            ],
+          },
+        ],
+      };
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'p-1',
+            name: 'Alpha Protocol',
+            tasks: expect.arrayContaining([
+              expect.objectContaining({ id: 't-1', content: '阶段 1: 环境搭建' }),
+              expect.objectContaining({ id: 't-2', content: '核心逻辑实现' }),
+            ]),
+          }),
+        ]),
+      );
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('p-1');
+
+      // 清理全局快照
+      delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
+    });
+
+    it('Store 已有数据时应跳过预填充并返回 true', () => {
+      const existingProject = createProject({ id: 'existing-1' });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([existingProject]);
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalled();
+    });
+
+    it('无快照数据时应返回 false', () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+      // 确保全局和 localStorage 都没有快照
+      delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
+      localStorage.removeItem('nanoflow.launch-snapshot.v2');
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(false);
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalled();
+    });
+
+    it('从 localStorage 快照预填充', () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+      const snapshot = {
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        activeProjectId: 'p-ls',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'p-ls',
+            name: 'LocalStorage Project',
+            description: '',
+            updatedAt: null,
+            taskCount: 0,
+            openTaskCount: 0,
+            recentTasks: [],
+          },
+        ],
+      };
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify(snapshot));
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'p-ls', name: 'LocalStorage Project' }),
+        ]),
+      );
+    });
+  });
+
+  // ====== 种子数据保护测试 ======
+  describe('loadFromCacheOrSeed 种子保护', () => {
+    it('已登录用户无缓存时不应创建种子数据', async () => {
+      // 设置已登录状态
+      userIdSignal.set('real-user-123');
+
+      const loadFromCacheOrSeed = (
+        service as unknown as {
+          loadFromCacheOrSeed: (override?: {
+            source: string;
+            projectCount: number;
+            bytes: number;
+            migratedLegacy: boolean;
+            projects: Project[];
+          }) => Promise<void>;
+        }
+      ).loadFromCacheOrSeed.bind(service);
+
+      await loadFromCacheOrSeed({
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      });
+
+      // 应设置空列表（非种子数据），等后台同步
+      const setProjectsCalls = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls;
+      const lastCallProjects = setProjectsCalls[setProjectsCalls.length - 1][0] as Project[];
+      expect(lastCallProjects.length).toBe(0);
+    });
+
+    it('未登录用户无缓存时应创建种子数据', async () => {
+      // 未登录状态
+      userIdSignal.set(null);
+
+      const loadFromCacheOrSeed = (
+        service as unknown as {
+          loadFromCacheOrSeed: (override?: {
+            source: string;
+            projectCount: number;
+            bytes: number;
+            migratedLegacy: boolean;
+            projects: Project[];
+          }) => Promise<void>;
+        }
+      ).loadFromCacheOrSeed.bind(service);
+
+      await loadFromCacheOrSeed({
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      });
+
+      // 未登录用户应生成种子数据
+      const setProjectsCalls = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls;
+      const lastCallProjects = setProjectsCalls[setProjectsCalls.length - 1][0] as Project[];
+      expect(lastCallProjects.length).toBeGreaterThan(0);
+    });
+  });
 });

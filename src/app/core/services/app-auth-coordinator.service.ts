@@ -228,7 +228,10 @@ export class AppAuthCoordinatorService {
         this.sessionEmail.set(result.email);
         this.logger.debug('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
         const loadStartTime = Date.now();
-        const loadPromise = this.userSession.setCurrentUser(result.userId);
+        // 【P0 修复 2026-03-27】冷启动路径必须传 forceLoad: true
+        // 修复竞态：auth guard 快速路径可能已设 currentUserId，导致 isUserChange=false，
+        // 如果快照预填充已让 hasProjects=true，loadUserData 会被跳过 → 数据未加载。
+        const loadPromise = this.userSession.setCurrentUser(result.userId, { forceLoad: true });
         const loadStatus = await this.waitWithTimeout(
           loadPromise,
           this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS
@@ -252,7 +255,12 @@ export class AppAuthCoordinatorService {
             const backgroundElapsed = Date.now() - loadStartTime;
             this.logger.info(`[Bootstrap] 后台数据加载完成 (耗时 ${backgroundElapsed}ms)`);
           }).catch((error: unknown) => {
-            this.logger.error('[Bootstrap] 后台数据加载失败', error);
+            this.logger.error('[Bootstrap] 后台数据加载失败，尝试离线缓存恢复', error);
+            // 【P0 修复 2026-03-27】超时后的后台加载失败时，降级加载离线缓存
+            // 避免用户停留在空白或种子数据状态
+            void this.userSession.setCurrentUser(null).catch((fallbackError: unknown) => {
+              this.logger.error('[Bootstrap] 离线缓存恢复也失败', fallbackError);
+            });
           });
         }
 

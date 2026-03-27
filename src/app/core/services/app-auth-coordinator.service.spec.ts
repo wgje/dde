@@ -435,3 +435,26 @@ describe('handleResetPassword error propagation', () => {
     expect(service.authError()).toBe('邮箱格式不正确或未验证');
   });
 });
+
+describe('bootstrapSession forceLoad', () => {
+  beforeEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('冷启动 bootstrapSession 应传 forceLoad: true 给 setCurrentUser', async () => {
+    const { service, authMock, userSessionMock, userId } = setup();
+    // 补充 bootstrapSession 内部使用的 signal 属性
+    authMock.runtimeState = vi.fn(() => 'idle');
+    authMock.sessionInitialized = vi.fn(() => false);
+    authMock.checkSession.mockImplementation(async () => {
+      userId.set('cold-start-user');
+      return { userId: 'cold-start-user', email: 'test@x.com' };
+    });
+    userSessionMock.setCurrentUser.mockResolvedValue(undefined);
+
+    // 触发 bootstrap
+    await (service as unknown as { bootstrapSession: () => Promise<void> }).bootstrapSession();
+
+    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith('cold-start-user', { forceLoad: true });
+  });
+});

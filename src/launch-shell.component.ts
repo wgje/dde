@@ -27,6 +27,12 @@ import type { BootStage } from './services/boot-stage.service';
         radial-gradient(circle at bottom right, rgba(13, 148, 136, 0.14), transparent 30%),
         linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
       color: #1c1917;
+      transition: opacity 200ms ease-out;
+    }
+
+    :host-context(.launch-shell--fading-out) {
+      opacity: 0;
+      pointer-events: none;
     }
 
     .launch-shell {

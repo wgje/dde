@@ -5,7 +5,7 @@
     "preToolUse": [
       {
         "type": "command",
-        "command": "powershell.exe -NoProfile -NonInteractive -OutputFormat Text -File .github/hooks/scripts/pre-tool-check.ps1",
+        "command": "bash .github/hooks/scripts/pre-tool-check.sh",
         "timeoutSec": 10
       }
     ]

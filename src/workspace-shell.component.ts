@@ -776,6 +776,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     //   - Deferred to first user interaction or requestIdleCallback.
     // ──────────────────────────────────────────────────────────────────────
     this.appLifecycle.initialize();
+
+    // 【P0 新增 2026-03-27】快照预填充 Store
+    // 从 launch-snapshot 预填充项目状态，使 hasProjects=true 立即成立，
+    // 解除 handoff 对 auth + 数据加载的串行阻塞依赖。
+    this.userSession.prehydrateFromSnapshot();
     
     // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
     this.setupSignalEffects();

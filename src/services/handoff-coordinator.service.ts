@@ -106,7 +106,10 @@ export class HandoffCoordinatorService {
   private safetyTriggered = false;
 
   /** 最大等待时间（ms），超时后强制 handoff 防止永久卡在 launch-shell */
-  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 8000;
+  // 【P0 修复 2026-03-27】从 8s 降至 3s
+  // A1 快照预填充 + B1 forceLoad 修复后，正常场景 handoff < 500ms 完成。
+  // 3s 仅覆盖极端异常（快照损坏 + 缓存丢失 + 网络超时），8s 对移动端体验是灾难。
+  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 3000;
 
   readonly result = this.resultState.asReadonly();
   readonly handoffTriggerSource = this.handoffTriggerSourceState.asReadonly();

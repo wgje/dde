@@ -3,8 +3,9 @@
     <router-outlet></router-outlet>
   </div>
 
-  @if (showLaunchShell()) {
+  @if (showLaunchShellDom()) {
     <app-launch-shell
+      [class.launch-shell--fading-out]="launchShellFadingOut()"
       [snapshot]="launchSnapshot()"
       [stage]="bootStage.currentStage()"></app-launch-shell>
   }
