@@ -125,7 +125,12 @@ export class AuthService {
       return this.runtimeAuthReadyPromise;
     }
 
-    this.setProvisionalAuthState('pending');
+    // 【Bug 修复 2026-03-27】仅当 runtimeState 还是 'idle' 时才降级为 'pending'。
+    // FastPath 已提前将 runtimeState 设为 'ready'，此处不能将其回退为 'pending'，
+    // 否则 handoff 条件中 runtimeState === 'pending' 会让结果卡在 'pending'。
+    if (this.runtimeState() === 'idle') {
+      this.setProvisionalAuthState('pending');
+    }
     this.runtimeAuthReadyPromise = this.initAuthStateListener()
       .then(() => {
         this.authRuntimeReady = true;
@@ -404,6 +409,14 @@ export class AuthService {
       void this.supabase.getSession()
         .then(result => {
           if (result.error) {
+            // 区分"SDK 不可用"和"会话真的无效"：
+            // SDK 不可用（动态 import 失败、客户端初始化失败）时不清除状态，
+            // 与网络失败同等对待 — 本地缓存可能仍然有效。
+            const errorName = (result.error as { name?: string }).name;
+            if (errorName === 'ClientUnavailable') {
+              this.logger.debug('[BackgroundRefresh] SDK 客户端不可用，保留本地状态（稍后重试）');
+              return;
+            }
             this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误，清除本地会话', result.error);
             this.handleBackgroundSessionInvalid();
             return;

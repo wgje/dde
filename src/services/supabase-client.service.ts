@@ -179,7 +179,9 @@ export class SupabaseClientService {
   async getSession(): Promise<{ data: { session: Session | null }; error: null | { message: string; status?: number; name?: string } }> {
     const client = await this.clientAsync();
     if (!client) {
-      return { data: { session: null }, error: null };
+      // 客户端不可用时返回 error，而非 { session: null, error: null }。
+      // 后者会被误判为"用户确实未登录"，导致 FastPath 乐观状态被清除。
+      return { data: { session: null }, error: { message: 'Supabase 客户端不可用', name: 'ClientUnavailable' } };
     }
     return client.auth.getSession();
   }
