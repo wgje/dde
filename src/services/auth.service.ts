@@ -289,6 +289,16 @@ export class AuthService {
       // 后台异步刷新 SDK session 状态，确保 token 最终同步
       this.scheduleBackgroundSessionRefresh();
 
+      // 【Bug 修复 2026-03-27】FastPath 跳过了 ensureRuntimeAuthReady()，
+      // 导致 onAuthStateChange 监听器从未注册 → TOKEN_REFRESHED / SIGNED_OUT
+      // 事件无法被处理 → token 可能过期而不刷新、跨标签登出不同步。
+      // 在后台延迟初始化，不阻塞 FastPath 的即时返回。
+      queueMicrotask(() => {
+        void this.ensureRuntimeAuthReady().catch(() => {
+          // initAuthStateListener 失败不影响当前已登录状态
+        });
+      });
+
       return localSession;
     }
     
