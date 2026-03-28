@@ -300,9 +300,10 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
 
   it('signalWorkspaceHandoffReady 应只通知一次 boot stage handoff', () => {
     const markWorkspaceHandoffReady = vi.fn();
+    const markApplicationReady = vi.fn();
     const markLayoutStable = vi.fn();
     const context = {
-      bootStage: { markWorkspaceHandoffReady },
+      bootStage: { markWorkspaceHandoffReady, markApplicationReady },
       handoffCoordinator: { markLayoutStable },
       workspaceHandoffSignaled: false,
     } as unknown as WorkspaceShellComponent;
@@ -314,13 +315,10 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       signalWorkspaceHandoffReady: (this: WorkspaceShellComponent) => void;
     }).signalWorkspaceHandoffReady.call(context);
 
-    if (FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
-      expect(markLayoutStable).toHaveBeenCalledTimes(1);
-      expect(markWorkspaceHandoffReady).not.toHaveBeenCalled();
-    } else {
-      expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
-      expect(markLayoutStable).not.toHaveBeenCalled();
-    }
+    // 启动壳移除后，signalWorkspaceHandoffReady 统一调用所有三步
+    expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
+    expect(markApplicationReady).toHaveBeenCalledTimes(1);
+    expect(markLayoutStable).toHaveBeenCalledTimes(1);
   });
 
 });

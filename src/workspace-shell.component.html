@@ -1,7 +1,7 @@
 
 
 <!-- 整体布局容器 -->
-<div class="h-full min-h-screen w-full flex flex-col overflow-hidden">
+<div class="h-full w-full flex flex-col overflow-hidden">
   
   <!-- 启动失败阻断性 UI - 优先级最高，阻止所有其他内容 -->
   @if (authCoord.bootstrapFailed() && !authCoord.isCheckingSession()) {

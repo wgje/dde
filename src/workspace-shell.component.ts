@@ -1085,7 +1085,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.workspaceHandoffSignaled = true;
 
     // 工作区视图已就绪，隐藏 index.html 的 initial-loader
-    if (typeof window !== 'undefined') {
+    if (typeof document !== 'undefined') {
       const loader = document.getElementById('initial-loader');
       if (loader) {
         loader.style.display = 'none';

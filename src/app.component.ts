@@ -32,6 +32,11 @@ import { BootStageService } from './services/boot-stage.service';
       display: block;
       width: 100%;
       height: 100dvh;
+      /* 使用与 index.html loader 一致的背景色，避免 loader 隐藏后出现白闪 */
+      background-color: var(--theme-bg, #F9F8F6);
+    }
+    :host-context([data-color-mode="dark"]) {
+      background-color: var(--theme-bg, #1a1a1a);
     }
 
     .app-root-shell {

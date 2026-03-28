@@ -146,11 +146,11 @@
   <style>
     /* 【2026-03-28 大改】启动壳已移除，仅保留 #initial-loader 最小样式 */
     :root {
-      --loader-bg: #f5f5f4;
+      --loader-bg: #F9F8F6;
       --loader-skeleton-base: #e7e5e4;
     }
     [data-color-mode="dark"] {
-      --loader-bg: #0f172a;
+      --loader-bg: #1a1a1a;
       --loader-skeleton-base: #374151;
     }
     #initial-loader {
@@ -172,7 +172,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192x192.png">
   <link rel="apple-touch-icon" href="icons/icon-192x192.png">
 </head>
-<body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 h-screen w-screen overflow-hidden">
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 overflow-hidden" style="height:100dvh;width:100vw;margin:0;">
   <script>
     window.__DEBUG_LOG__ = window.__DEBUG_LOG__ || [];
     window.__DEBUG_LOG__.push({t: Date.now(), m: 'body 开始'});
@@ -454,13 +454,21 @@
         }
       });
 
-      // 兜底轮询
+      // 兜底轮询 — 仅在 WorkspaceShell 真正渲染后才隐藏 loader
+      // 不能仅靠 app-root.children.length > 0 判断，因为 AppComponent 模板
+      // 只有一个空的 <div><router-outlet></div>，此时 WorkspaceShell 可能还未渲染
       var checkReady = function() {
         if (dismissed) return;
 
-        // Angular 已启动
-        var appRoot = document.querySelector('app-root');
-        if (appRoot && appRoot.children.length > 0) {
+        // WorkspaceShell 已渲染（router-outlet 内有实质内容）
+        var shellRoot = document.querySelector('app-workspace-shell');
+        if (shellRoot && shellRoot.children.length > 0) {
+          dismissLoader();
+          return;
+        }
+
+        // 或者 boot-stage 全局标记已就绪
+        if (window.__NANOFLOW_BOOT_STAGE__ === 'ready' || window.__NANOFLOW_BOOT_STAGE__ === 'handoff') {
           dismissLoader();
           return;
         }
