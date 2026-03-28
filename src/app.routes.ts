@@ -39,23 +39,35 @@ if (!ROUTE_GUARD_LAZY_IMPORT_ENABLED) {
 export const requireAuthGuardLazy: CanActivateFn = async (route, state) => {
   // 关键：在 await 之前捕获注入上下文，否则 async 恢复后 inject() 会抛 NG0203
   const injector = inject(Injector);
-  const module = await loadAuthGuardModule();
-  const result = runInInjectionContext(injector, () => module.requireAuthGuard(route, state));
-  if (isObservable(result)) {
-    return firstValueFrom(result);
+  try {
+    const module = await loadAuthGuardModule();
+    const result = runInInjectionContext(injector, () => module.requireAuthGuard(route, state));
+    if (isObservable(result)) {
+      return firstValueFrom(result);
+    }
+    return result;
+  } catch {
+    // 守卫懒加载失败（网络异常 / SW 缓存损坏 / 碎片 JS 缺失）时
+    // 不能阻断路由，否则 WorkspaceShellComponent 永远不挂载，
+    // 启动壳卡死且无安全超时。允许挂载，壳层自行处理登录 UI。
+    return true;
   }
-  return result;
 };
 
 export const projectExistsGuardLazy: CanActivateFn = async (route, state) => {
   // 关键：在 await 之前捕获注入上下文，否则 async 恢复后 inject() 会抛 NG0203
   const injector = inject(Injector);
-  const module = await loadProjectGuardModule();
-  const result = runInInjectionContext(injector, () => module.projectExistsGuard(route, state));
-  if (isObservable(result)) {
-    return firstValueFrom(result);
+  try {
+    const module = await loadProjectGuardModule();
+    const result = runInInjectionContext(injector, () => module.projectExistsGuard(route, state));
+    if (isObservable(result)) {
+      return firstValueFrom(result);
+    }
+    return result;
+  } catch {
+    // 懒加载失败时放行，避免阻断路由导致应用卡死
+    return true;
   }
-  return result;
 };
 
 export const unsavedChangesGuardLazy: CanDeactivateFn<unknown> = async (

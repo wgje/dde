@@ -1046,6 +1046,15 @@
           dismissLoader();
           return;
         }
+
+        // 【P0 兜底 2026-03-28】Angular 已启动（app-root 有子节点），
+        // 即使 boot-stage 事件未收到也强制 dismiss initial-loader。
+        // 这覆盖了 initial-loader 事件监听器注册晚于事件触发的边缘时序。
+        var appRoot = document.querySelector('app-root');
+        if (appRoot && appRoot.children.length > 0) {
+          dismissLoader();
+          return;
+        }
         
         var elapsed = Date.now() - startTime;
         if (elapsed > 3000) updateStatus('加载中，请稍候...');

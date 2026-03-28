@@ -2,6 +2,7 @@ import {
   Component,
   ChangeDetectionStrategy,
   DestroyRef,
+  NgZone,
   afterNextRender,
   computed,
   effect,
@@ -91,6 +92,17 @@ export class AppComponent {
   /** 淡出动画是否已触发（普通布尔值，不是 signal，防止 effect 重入循环） */
   private handoffFadeStarted = false;
 
+  /**
+   * 最终兜底超时（ms）。
+   * 不依赖 WorkspaceShellComponent 是否加载成功，
+   * 如果 handoff 在此时间内仍未到达 'handoff' 阶段，
+   * AppComponent 直接强制推进，避免用户永远卡在启动壳。
+   *
+   * 选择 5s 的理由：正常路径 < 500ms，3s 安全超时在 HandoffCoordinator，
+   * 这里 5s 作为最终终极兜底（WorkspaceShell 根本未加载的灾难场景）。
+   */
+  private static readonly MASTER_SAFETY_TIMEOUT_MS = 5000;
+
   constructor() {
     // 第一阶段预热：仅拉取 workspace-shell chunk
     this.workspaceStartupPreloader.start();
@@ -100,10 +112,6 @@ export class AppComponent {
     });
 
     // 启动壳淡出动画：handoff 完成后先淡出再移除
-    // 【P0 修复】使用普通布尔 handoffFadeStarted 防止循环：
-    // 旧实现读取 launchShellFadingOut() 信号作为 effect 依赖，
-    // setTimeout 回调将其重置为 false 后 effect 重新运行，
-    // 导致淡出→重置→淡出的无限 200ms 循环，启动壳永远不消失。
     effect(() => {
       const workspaceReady = this.bootStage.isWorkspaceHandoffReady();
       const appReady = this.bootStage.isApplicationReady();
@@ -122,6 +130,30 @@ export class AppComponent {
         }, 200);
       }
     });
+
+    // 【P0 终极兜底 2026-03-28】
+    // 即使 WorkspaceShellComponent 从未加载（路由守卫失败、懒加载超时、
+    // JS 碎片加载失败等灾难场景），确保启动壳一定消失。
+    // 不依赖 HandoffCoordinator（它的安全超时由 markLayoutStable 启动，
+    // 而 markLayoutStable 在 WorkspaceShell.ngAfterViewInit 中调用——
+    // 如果 WorkspaceShell 从未挂载，HandoffCoordinator 的安全超时永远不会开始）。
+    if (this.bootShellEnabled) {
+      // runOutsideAngular：避免 Zone.js 追踪此定时器（不阻塞测试稳定性，不触发额外 CD）
+      const ngZone = inject(NgZone);
+      let masterTimer: ReturnType<typeof setTimeout> | null = null;
+      ngZone.runOutsideAngular(() => {
+        masterTimer = setTimeout(() => {
+          if (!this.bootStage.isWorkspaceHandoffReady()) {
+            console.warn(
+              '[NanoFlow] 启动壳终极兜底触发：5s 内 handoff 未完成，强制推进。',
+              'stage:', this.bootStage.currentStage(),
+            );
+            ngZone.run(() => this.bootStage.markWorkspaceHandoffReady());
+          }
+        }, AppComponent.MASTER_SAFETY_TIMEOUT_MS);
+      });
+      this.destroyRef.onDestroy(() => { if (masterTimer) clearTimeout(masterTimer); });
+    }
 
     if (typeof window !== 'undefined') {
       const loaderHiddenListener = () => {
