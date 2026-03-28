@@ -28,6 +28,7 @@ export interface HandoffDecisionInput {
   showLoginRequired: boolean;
   bootstrapFailed: boolean;
   snapshot: LaunchSnapshot | null;
+  snapshotProjectsTrusted: boolean;
 }
 
 export type HandoffTriggerSource = 'raf' | 'timeout100' | 'timeout0' | 'safety8s';
@@ -65,7 +66,7 @@ export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult
   // 【P0 秒开修复 2026-03-28】快照感知：快照中有项目时视为 hasProjects=true，
   // 避免 effect 异步时序导致 prehydrate 结果未被 signal 反映而卡在 pending。
   const effectiveHasProjects = input.hasProjects
-    || (input.snapshot?.projects?.length ?? 0) > 0;
+    || (input.snapshotProjectsTrusted && (input.snapshot?.projects?.length ?? 0) > 0);
 
   if (input.bootstrapFailed) {
     return { kind: 'full', degradeReason: 'bootstrap-failed' };

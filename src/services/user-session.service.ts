@@ -1,5 +1,5 @@
 /** UserSessionService - 用户会话管理：登录/登出清理、项目切换、数据加载 */
-import { Injectable, inject, DestroyRef, Injector } from '@angular/core';
+import { Injectable, inject, DestroyRef, Injector, signal } from '@angular/core';
 import { AuthService } from './auth.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
@@ -18,6 +18,8 @@ import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import type { LaunchSnapshot, LaunchSnapshotProject } from '../models/launch-shell';
+
+type StartupProjectCatalogStage = 'unresolved' | 'partial' | 'resolved';
 
 @Injectable({
   providedIn: 'root'
@@ -38,6 +40,13 @@ export class UserSessionService {
   private destroyRef = inject(DestroyRef);
   private attachmentServiceRef: AttachmentService | null = null;
   private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
+  private prehydratedSnapshotApplied = false;
+  private prehydratedSnapshotOwnerId: string | null = null;
+  private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
+  private readonly trustedPrehydratedSnapshotState = signal(false);
+
+  readonly startupProjectCatalogStage = this.startupProjectCatalogStageState.asReadonly();
+  readonly trustedPrehydratedSnapshotVisible = this.trustedPrehydratedSnapshotState.asReadonly();
 
   /** 当前用户 ID (代理 AuthService) */
   readonly currentUserId = this.authService.currentUserId;
@@ -112,17 +121,29 @@ export class UserSessionService {
   prehydrateFromSnapshot(): boolean {
     // Store 已有数据，无需预填充
     if (this.projectState.projects().length > 0) {
+      this.markStartupProjectCatalogResolved();
       return true;
     }
 
     const snapshot = this.readSnapshotForPrehydrate();
     if (!snapshot?.projects?.length) {
+      this.clearStartupProjectCatalogState();
+      return false;
+    }
+
+    const trustedSnapshotOwnerId = this.resolveTrustedSnapshotOwnerId(snapshot);
+    if (!trustedSnapshotOwnerId) {
+      this.logger.debug('跳过未验证 owner 的启动快照预填充', {
+        snapshotUserId: snapshot.userId ?? null,
+      });
+      this.clearStartupProjectCatalogState();
       return false;
     }
 
     try {
       const projects = this.buildPrehydrateProjects(snapshot.projects);
       if (projects.length === 0) {
+        this.clearStartupProjectCatalogState();
         return false;
       }
 
@@ -130,17 +151,83 @@ export class UserSessionService {
       this.projectState.setActiveProjectId(
         snapshot.activeProjectId ?? projects[0]?.id ?? null,
       );
+      this.prehydratedSnapshotApplied = true;
+      this.prehydratedSnapshotOwnerId = trustedSnapshotOwnerId;
+      this.trustedPrehydratedSnapshotState.set(true);
+      this.startupProjectCatalogStageState.set('partial');
 
       pushStartupTrace('user_session.snapshot_prehydrate', {
         projectCount: projects.length,
         activeProjectId: snapshot.activeProjectId,
+        snapshotUserId: this.prehydratedSnapshotOwnerId,
       });
       this.logger.debug('快照预填充完成', { projectCount: projects.length });
       return true;
     } catch (error) {
       this.logger.warn('快照预填充失败，静默跳过', error);
+      this.clearStartupProjectCatalogState();
       return false;
     }
+  }
+
+  private clearStartupProjectCatalogState(): void {
+    this.prehydratedSnapshotApplied = false;
+    this.prehydratedSnapshotOwnerId = null;
+    this.trustedPrehydratedSnapshotState.set(false);
+    this.startupProjectCatalogStageState.set('unresolved');
+  }
+
+  private markStartupProjectCatalogResolved(): void {
+    this.trustedPrehydratedSnapshotState.set(false);
+    this.startupProjectCatalogStageState.set('resolved');
+  }
+
+  private markStartupProjectCatalogAwaitingRemoteResolution(): void {
+    this.trustedPrehydratedSnapshotState.set(false);
+    this.startupProjectCatalogStageState.set('partial');
+  }
+
+  private syncStartupProjectCatalogStageAfterLocalRestore(userId: string | null): void {
+    if (userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.markStartupProjectCatalogAwaitingRemoteResolution();
+      return;
+    }
+
+    this.markStartupProjectCatalogResolved();
+  }
+
+  private resolveTrustedSnapshotOwnerId(snapshot: LaunchSnapshot): string | null {
+    const snapshotUserId = typeof snapshot.userId === 'string' && snapshot.userId.length > 0
+      ? snapshot.userId
+      : null;
+
+    if (snapshotUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return snapshotUserId;
+    }
+
+    if (!this.authService.isConfigured) {
+      return snapshotUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    if (!snapshotUserId) {
+      return null;
+    }
+
+    const currentUserId = this.currentUserId();
+    if (currentUserId === snapshotUserId) {
+      return snapshotUserId;
+    }
+
+    return this.authService.peekPersistedSessionIdentity()?.userId === snapshotUserId
+      ? snapshotUserId
+      : null;
+  }
+
+  private shouldPreservePrehydratedSelection(userId: string | null): boolean {
+    return !!userId
+      && this.prehydratedSnapshotApplied
+      && this.prehydratedSnapshotOwnerId !== null
+      && this.prehydratedSnapshotOwnerId === userId;
   }
 
   /** 读取全局或 localStorage 中的启动快照 */
@@ -236,7 +323,19 @@ export class UserSessionService {
     if (isUserChange || forceLoad) {
       try {
         this.attachmentServiceRef?.clearMonitoredAttachments();
-        this.projectState.setActiveProjectId(null);
+        const shouldResetProjectSelection = isUserChange && previousUserId !== null;
+        const shouldPreservePrehydratedSelection = this.shouldPreservePrehydratedSelection(userId);
+        const shouldClearPrehydratedSnapshotState = forceLoad && !shouldPreservePrehydratedSelection;
+
+        // 冷启动 bootstrap(forceLoad) 允许继续沿用「已确认归属于当前用户」的 launch snapshot。
+        // 若快照 owner 缺失或与当前 userId 不一致，则必须立即清空，避免旧账号项目短暂暴露。
+        if (shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) {
+          this.projectState.setActiveProjectId(null);
+        }
+        if (shouldClearPrehydratedSnapshotState) {
+          this.projectState.setProjects([]);
+          this.clearStartupProjectCatalogState();
+        }
         // 【P0 修复 2026-02-08 / 2026-03-27 加固】
         // 仅在切换到另一个真实用户时清空项目（避免旧用户数据泄露给新用户）。
         // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的，
@@ -244,6 +343,7 @@ export class UserSessionService {
         // 在移动端造成主线程阻塞（"卡死"）和 handoff 状态闪烁。
         if (isUserChange && previousUserId !== null) {
           this.projectState.setProjects([]);
+          this.clearStartupProjectCatalogState();
         }
         this.undoService.clearHistory();
         this.syncCoordinator.core.teardownRealtimeSubscription();
@@ -323,6 +423,7 @@ export class UserSessionService {
     this.uiState.clearAllState();
     this.undoService.clearHistory();
     this.syncCoordinator.core.clearOfflineCache();
+    this.clearStartupProjectCatalogState();
   }
 
   /** 完整本地数据清理（登出时必须调用，防止数据泄露） */
@@ -514,6 +615,8 @@ export class UserSessionService {
         if (activeProject) {
           void this.monitorProjectAttachments(activeProject);
         }
+
+        this.syncStartupProjectCatalogStageAfterLocalRestore(userId);
         
         this.logger.debug('本地数据已渲染，用户可以操作');
         pushStartupTrace('user_session.snapshot_rendered', {
@@ -767,6 +870,7 @@ export class UserSessionService {
       }
     }
     
+    this.markStartupProjectCatalogResolved();
     this.logger.debug('后台同步完成', { currentProjectSynced });
   }
   
@@ -1215,6 +1319,7 @@ export class UserSessionService {
 
     this.projectState.setProjects(projects);
     this.projectState.setActiveProjectId(projects[0]?.id ?? null);
+    this.syncStartupProjectCatalogStageAfterLocalRestore(this.authService.currentUserId());
     pushStartupTrace('user_session.snapshot_applied', {
       source: snapshot.source,
       projectCount: projects.length,

@@ -74,6 +74,8 @@ describe('generate-launch-html', () => {
     expect(launchHtml).toContain('<meta charset="utf-8">');
     expect(launchHtml).toContain('__NANOFLOW_BOOT_FLAGS__');
     expect(launchHtml).toContain('__LOADER_DISMISS__');
+    expect(launchHtml).toContain('history.replaceState');
+    expect(launchHtml).toContain('loader-status');
     expect(launchHtml).toContain('polyfills-XYZ999.js');
     expect(launchHtml).toContain('main-ABC123.js');
     expect(launchHtml).not.toContain('__NANOFLOW_SESSION_PREWARM__');

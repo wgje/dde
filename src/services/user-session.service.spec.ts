@@ -128,6 +128,8 @@ describe('UserSessionService', () => {
 
     mockAuthService = {
       currentUserId: userIdSignal,
+      isConfigured: true,
+      peekPersistedSessionIdentity: vi.fn().mockReturnValue(null),
     };
 
     const projectsMock = vi.fn(() => projectsState);
@@ -392,6 +394,65 @@ describe('UserSessionService', () => {
 
       expect(mockAttachmentService['clearMonitoredAttachments']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
+    });
+
+    it('冷启动 forceLoad 时应保留预填充的 activeProjectId，避免首屏主内容掉空', async () => {
+      const restoredProject = createProject({ id: 'proj-snapshot', name: 'Recovered' });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([restoredProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-snapshot');
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+        }
+      ).prehydratedSnapshotApplied = true;
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+        }
+      ).prehydratedSnapshotOwnerId = 'new-user';
+
+      vi.spyOn(
+        service as unknown as {
+          loadUserData: (userId: string) => Promise<void>;
+        },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockProjectState['setActiveProjectId']).not.toHaveBeenCalledWith(null);
+    });
+
+    it('冷启动 forceLoad 遇到未知或非当前用户的快照时应立即清空预填充内容', async () => {
+      const restoredProject = createProject({ id: 'proj-snapshot', name: 'Recovered' });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([restoredProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-snapshot');
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+        }
+      ).prehydratedSnapshotApplied = true;
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+        }
+      ).prehydratedSnapshotOwnerId = 'other-user';
+
+      vi.spyOn(
+        service as unknown as {
+          loadUserData: (userId: string) => Promise<void>;
+        },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
     });
   });
 
@@ -833,11 +894,16 @@ describe('UserSessionService', () => {
   describe('prehydrateFromSnapshot', () => {
     it('Store 为空时应从全局快照预填充项目', () => {
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue({
+        userId: 'snapshot-user',
+        email: 'snapshot@example.com',
+      });
 
       // 模拟 index.html 注入的全局快照
       (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__ = {
         version: 2,
         savedAt: '2026-03-27T10:00:00.000Z',
+        userId: 'snapshot-user',
         activeProjectId: 'p-1',
         lastActiveView: 'text',
         theme: 'default',
@@ -904,10 +970,15 @@ describe('UserSessionService', () => {
 
     it('从 localStorage 快照预填充', () => {
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue({
+        userId: 'snapshot-user',
+        email: 'snapshot@example.com',
+      });
 
       const snapshot = {
         version: 2,
         savedAt: '2026-03-27T10:00:00.000Z',
+        userId: 'snapshot-user',
         activeProjectId: 'p-ls',
         lastActiveView: 'text',
         theme: 'default',
@@ -934,6 +1005,41 @@ describe('UserSessionService', () => {
           expect.objectContaining({ id: 'p-ls', name: 'LocalStorage Project' }),
         ]),
       );
+    });
+
+    it('owner 未通过本地会话确认时不应预填充快照', () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue({
+        userId: 'current-user',
+        email: 'current@example.com',
+      });
+
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        userId: 'stale-user',
+        activeProjectId: 'p-stale',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'p-stale',
+            name: 'Stale Project',
+            description: '',
+            updatedAt: null,
+            taskCount: 0,
+            openTaskCount: 0,
+            recentTasks: [],
+          },
+        ],
+      }));
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(false);
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalled();
+      expect(service.startupProjectCatalogStage()).toBe('unresolved');
     });
   });
 

@@ -28,6 +28,7 @@ export interface LaunchRouteIntent {
 export interface LaunchSnapshot {
   version: 1 | 2;
   savedAt: string;
+  userId?: string | null;
   activeProjectId: string | null;
   lastActiveView: 'text' | 'flow' | null;
   preferredView?: 'text' | 'flow' | null;

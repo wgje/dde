@@ -974,6 +974,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupModalEffects();
     this.setupDataProtectionEffect();
     this.setupLaunchSnapshotEffect();
+    this.setupRouteProjectSelectionEffect();
     this.setupHandoffEffect();
     this.setupWorkspaceReadyEffect();
     this.setupFocusProbeEffect();
@@ -1045,6 +1046,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     // 仅将原始数据传递给 schedulePersist，在防抖回调内部做 capture。
     effect(() => {
       const projects = this.projectState.projects();
+      const userId = this.resolveLaunchSnapshotUserId();
       const activeProjectId = this.projectState.activeProjectId();
       const lastActiveView = this.uiState.activeView();
       const theme = this.preferenceService.theme();
@@ -1055,6 +1057,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       const degradeReason = mobileDegraded ? 'mobile-default-text' : null;
 
       this.launchSnapshot.schedulePersistDeferred(projects, {
+        userId,
         activeProjectId,
         lastActiveView,
         routeUrl,
@@ -1079,6 +1082,20 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return 'system';
   }
 
+  private resolveLaunchSnapshotUserId(): string | null {
+    const currentUserId = this.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    const authSettling = !this.authService.sessionInitialized() || this.authCoord.isCheckingSession();
+    if (authSettling) {
+      return this.startupLaunchSnapshot?.userId ?? null;
+    }
+
+    return null;
+  }
+
   private signalWorkspaceHandoffReady(): void {
     if (this.workspaceHandoffSignaled) {
       return;
@@ -1096,6 +1113,32 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.handoffCoordinator.markLayoutStable();
   }
 
+  private setupRouteProjectSelectionEffect(): void {
+    effect(() => {
+      this.routeUrl();
+      this.projectState.projects();
+      this.projectState.activeProjectId();
+      this.syncStateFromRoute();
+    });
+  }
+
+  private resolveStartupProjectFallbackId(projects: Project[]): string | null {
+    if (projects.length === 0) {
+      return null;
+    }
+
+    const snapshotProjectId =
+      this.startupLaunchSnapshot?.currentProject?.id
+      ?? this.startupLaunchSnapshot?.activeProjectId
+      ?? null;
+
+    if (snapshotProjectId && projects.some((project) => project.id === snapshotProjectId)) {
+      return snapshotProjectId;
+    }
+
+    return projects[0]?.id ?? null;
+  }
+
   private setupHandoffEffect(): void {
     // HandoffCoordinator.resolve() 驱动移动端路由降级和登录检测。
     // 启动壳已移除，但 resolve 结果仍影响：
@@ -1109,6 +1152,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       const currentRouteUrl = this.routeUrl();
       const projects = this.projectState.projects();
       const activeProjectId = this.projectState.activeProjectId();
+      const startupProjectCatalogStage = this.userSession.startupProjectCatalogStage();
+      const trustedStartupSnapshot =
+        this.userSession.trustedPrehydratedSnapshotVisible() && startupProjectCatalogStage === 'partial'
+          ? this.startupLaunchSnapshot
+          : null;
       const result = this.handoffCoordinator.resolve({
         routeUrl: currentRouteUrl,
         isMobile: this.uiState.isMobile(),
@@ -1119,11 +1167,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         isCheckingSession: this.authCoord.isCheckingSession(),
         showLoginRequired: this.authCoord.showLoginRequired(),
         bootstrapFailed: this.authCoord.bootstrapFailed(),
-        snapshot: this.startupLaunchSnapshot,
+        snapshot: trustedStartupSnapshot,
+        snapshotProjectsTrusted: trustedStartupSnapshot !== null,
       });
 
       if (result.kind === 'degraded-to-project' && !activeProjectId && projects.length > 0) {
-        const snapshotProjectId = this.startupLaunchSnapshot?.currentProject?.id ?? null;
+        const snapshotProjectId = trustedStartupSnapshot?.currentProject?.id ?? null;
         const fallbackProjectId = projects.some((project) => project.id === snapshotProjectId)
           ? snapshotProjectId
           : projects[0].id;
@@ -1664,17 +1713,29 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     
     const params = currentRoute.snapshot.params;
     const projectId = params['projectId'];
-    
-    if (projectId && projectId !== this.projectState.activeProjectId()) {
-      // 项目列表尚未加载完成时，不要基于空列表做重定向，避免深链接被误判。
-      if (this.projectState.projects().length === 0) {
+    const projects = this.projectState.projects();
+    const startupProjectCatalogStage = this.userSession.startupProjectCatalogStage();
+
+    if (!projectId) {
+      if (this.projectState.activeProjectId() || projects.length === 0) {
         return;
       }
 
+      const fallbackProjectId = this.resolveStartupProjectFallbackId(projects);
+      if (fallbackProjectId) {
+        this.projectState.setActiveProjectId(fallbackProjectId);
+      }
+      return;
+    }
+    
+    if (projectId && projectId !== this.projectState.activeProjectId()) {
       // 检查项目是否存在
-      const projectExists = this.projectState.projects().some(p => p.id === projectId);
+      const projectExists = projects.some(p => p.id === projectId);
       if (projectExists) {
         this.projectState.setActiveProjectId(projectId);
+      } else if (startupProjectCatalogStage !== 'resolved') {
+        // 预填充阶段只有最近项目摘要，不能据此判定 deep-link 项目不存在。
+        return;
       } else {
         // 项目不存在，重定向到默认路由
         void this.router.navigate(['/projects']);

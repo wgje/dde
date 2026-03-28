@@ -6,6 +6,34 @@ const DEFAULT_INDEX_HTML = path.join(DEFAULT_DIST_DIR, 'index.html');
 const DEFAULT_TEMPLATE_PATH = path.join(__dirname, '..', 'public', 'launch.html');
 const DEFAULT_OUTPUT_PATH = path.join(DEFAULT_DIST_DIR, 'launch.html');
 
+const DEFAULT_LAUNCH_LOADER_MARKUP = `
+<div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:100dvh;">
+  <div style="text-align:center;">
+    <div style="width:32px;height:32px;border:3px solid var(--loader-skeleton-base,#e7e5e4);border-top-color:#4f46e5;border-radius:50%;animation:loader-spin 0.8s linear infinite;margin:0 auto 12px;"></div>
+    <div id="loader-status" style="font-size:13px;color:#78716c;"></div>
+  </div>
+</div>
+<style>@keyframes loader-spin { to { transform: rotate(360deg); } }</style>
+`.trim();
+
+const LAUNCH_PATH_NORMALIZER = `
+<script>
+  (function() {
+    if (typeof window === 'undefined' || typeof history?.replaceState !== 'function') {
+      return;
+    }
+
+    var pathname = window.location.pathname || '';
+    if (!/\/launch\.html$/.test(pathname)) {
+      return;
+    }
+
+    var normalizedPath = pathname.replace(/launch\.html$/, '') || '/';
+    history.replaceState(null, '', normalizedPath + window.location.search + window.location.hash);
+  })();
+</script>
+`.trim();
+
 function readFileStrict(filepath) {
   if (!fs.existsSync(filepath)) {
     throw new Error(`文件不存在: ${filepath}`);
@@ -65,6 +93,7 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
   const loaderDismiss = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_LOADER_DISMISS');
   const bodyOpenTag = extractBodyOpenTag(indexHtml);
   const entryScripts = extractEntryScripts(indexHtml);
+  const launchLoaderMarkup = shell || DEFAULT_LAUNCH_LOADER_MARKUP;
 
   if (entryScripts.length === 0) {
     throw new Error('未在 index.html 中找到 main/polyfills 入口脚本，launch.html 无法引导 Angular');
@@ -79,8 +108,9 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
     '</head>',
     bodyOpenTag,
     '<div id="initial-loader">',
-    shell,
+    launchLoaderMarkup,
     '</div>',
+    LAUNCH_PATH_NORMALIZER,
     bootFlags,
     snapshotRenderer,
     '<app-root></app-root>',

@@ -60,6 +60,7 @@ describe('HandoffCoordinatorService', () => {
         mobileDegraded: true,
         degradeReason: 'mobile-default-text',
       }),
+      snapshotProjectsTrusted: true,
     });
 
     expect(result.kind).toBe('degraded-to-text');
@@ -86,6 +87,7 @@ describe('HandoffCoordinatorService', () => {
         mobileDegraded: true,
         degradeReason: 'mobile-default-text',
       }),
+      snapshotProjectsTrusted: true,
     });
 
     expect(result.kind).toBe('degraded-to-text');
@@ -110,6 +112,7 @@ describe('HandoffCoordinatorService', () => {
       snapshot: launchSnapshot({
         routeIntent: { kind: 'flow', projectId: 'p-1', taskId: null },
       }),
+      snapshotProjectsTrusted: true,
     });
 
     expect(result.kind).toBe('full');
@@ -130,6 +133,7 @@ describe('HandoffCoordinatorService', () => {
       showLoginRequired: false,
       bootstrapFailed: false,
       snapshot: null,
+      snapshotProjectsTrusted: false,
     });
 
     expect(result.kind).toBe('empty-workspace');
@@ -149,6 +153,7 @@ describe('HandoffCoordinatorService', () => {
       showLoginRequired: true,
       bootstrapFailed: false,
       snapshot: null,
+      snapshotProjectsTrusted: false,
     });
 
     expect(result.kind).toBe('login-required');
@@ -168,6 +173,7 @@ describe('HandoffCoordinatorService', () => {
       showLoginRequired: true,
       bootstrapFailed: false,
       snapshot: launchSnapshot(),
+      snapshotProjectsTrusted: true,
     });
 
     expect(result.kind).toBe('full');
@@ -190,6 +196,7 @@ describe('HandoffCoordinatorService', () => {
       showLoginRequired: false,
       bootstrapFailed: false,
       snapshot: launchSnapshot(),
+      snapshotProjectsTrusted: true,
     });
 
     vi.advanceTimersByTime(100);
@@ -217,9 +224,42 @@ describe('HandoffCoordinatorService', () => {
       snapshot: launchSnapshot({
         routeIntent: { kind: 'task', projectId: 'p-404', taskId: 't-1' },
       }),
+      snapshotProjectsTrusted: true,
     });
 
     expect(result.kind).toBe('degraded-to-project');
     expect(result.degradeReason).toBe('project-unavailable');
+  });
+
+  it('should ignore untrusted snapshot projects and keep login-required gating intact', () => {
+    service.markLayoutStable();
+
+    const result = service.resolve({
+      routeUrl: '/projects',
+      isMobile: true,
+      hasProjects: false,
+      activeProjectId: null,
+      authConfigured: true,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: true,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot({
+        projects: [
+          {
+            id: 'stale-project',
+            name: 'Stale Project',
+            description: '',
+            updatedAt: null,
+            taskCount: 0,
+            openTaskCount: 0,
+            recentTasks: [],
+          },
+        ],
+      }),
+      snapshotProjectsTrusted: false,
+    });
+
+    expect(result.kind).toBe('login-required');
   });
 });

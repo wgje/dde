@@ -383,4 +383,178 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     }
   });
 
+  it('resolveLaunchSnapshotUserId 应在认证仍未完成时沿用启动快照 owner', () => {
+    const context = {
+      currentUserId: () => null,
+      authService: {
+        sessionInitialized: () => false,
+      },
+      authCoord: {
+        isCheckingSession: () => false,
+      },
+      startupLaunchSnapshot: {
+        userId: 'snapshot-user',
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      resolveLaunchSnapshotUserId: (this: WorkspaceShellComponent) => string | null;
+    }).resolveLaunchSnapshotUserId.call(context);
+
+    expect(result).toBe('snapshot-user');
+  });
+
+  it('resolveLaunchSnapshotUserId 应在认证已稳定且无用户时返回 null', () => {
+    const context = {
+      currentUserId: () => null,
+      authService: {
+        sessionInitialized: () => true,
+      },
+      authCoord: {
+        isCheckingSession: () => false,
+      },
+      startupLaunchSnapshot: {
+        userId: 'snapshot-user',
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      resolveLaunchSnapshotUserId: (this: WorkspaceShellComponent) => string | null;
+    }).resolveLaunchSnapshotUserId.call(context);
+
+    expect(result).toBeNull();
+  });
+
+  it('syncStateFromRoute 应在 /projects 根路由回填启动项目，避免主内容空壳', () => {
+    const setActiveProjectId = vi.fn();
+    const context = {
+      route: {
+        snapshot: { params: {} },
+        firstChild: null,
+      },
+      projectState: {
+        activeProjectId: () => null,
+        projects: () => [{ id: 'project-1' }, { id: 'project-2' }],
+        setActiveProjectId,
+      },
+      userSession: {
+        startupProjectCatalogStage: () => 'resolved',
+      },
+      startupLaunchSnapshot: {
+        activeProjectId: 'project-2',
+        currentProject: { id: 'project-2' },
+      },
+      router: {
+        navigate: vi.fn(),
+      },
+      resolveStartupProjectFallbackId: (projects: Array<{ id: string }>) =>
+        (WorkspaceShellComponent.prototype as unknown as {
+          resolveStartupProjectFallbackId: (
+            this: WorkspaceShellComponent,
+            projects: Array<{ id: string }>
+          ) => string | null;
+        }).resolveStartupProjectFallbackId.call(context as unknown as WorkspaceShellComponent, projects as never),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(setActiveProjectId).toHaveBeenCalledWith('project-2');
+  });
+
+  it('syncStateFromRoute 应在项目异步到达后补上深链接项目选择', () => {
+    const setActiveProjectId = vi.fn();
+    const navigate = vi.fn();
+    const context = {
+      route: {
+        snapshot: { params: {} },
+        firstChild: {
+          snapshot: { params: { projectId: 'project-1' } },
+          firstChild: null,
+        },
+      },
+      projectState: {
+        activeProjectId: () => null,
+        projects: () => [{ id: 'project-1' }],
+        setActiveProjectId,
+      },
+      userSession: {
+        startupProjectCatalogStage: () => 'resolved',
+      },
+      startupLaunchSnapshot: null,
+      router: { navigate },
+      resolveStartupProjectFallbackId: vi.fn(),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(setActiveProjectId).toHaveBeenCalledWith('project-1');
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('syncStateFromRoute 不应把 partial 启动目录误当成完整真相并提前吃掉 deep-link', () => {
+    const setActiveProjectId = vi.fn();
+    const navigate = vi.fn();
+    const context = {
+      route: {
+        snapshot: { params: {} },
+        firstChild: {
+          snapshot: { params: { projectId: 'project-9' } },
+          firstChild: null,
+        },
+      },
+      projectState: {
+        activeProjectId: () => null,
+        projects: () => [{ id: 'project-1' }],
+        setActiveProjectId,
+      },
+      userSession: {
+        startupProjectCatalogStage: () => 'partial',
+      },
+      startupLaunchSnapshot: null,
+      router: { navigate },
+      resolveStartupProjectFallbackId: vi.fn(),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(setActiveProjectId).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('syncStateFromRoute 应在项目目录已 resolved 且目标不存在时回退到 /projects', () => {
+    const navigate = vi.fn();
+    const context = {
+      route: {
+        snapshot: { params: {} },
+        firstChild: {
+          snapshot: { params: { projectId: 'project-9' } },
+          firstChild: null,
+        },
+      },
+      projectState: {
+        activeProjectId: () => null,
+        projects: () => [{ id: 'project-1' }],
+        setActiveProjectId: vi.fn(),
+      },
+      userSession: {
+        startupProjectCatalogStage: () => 'resolved',
+      },
+      startupLaunchSnapshot: null,
+      router: { navigate },
+      resolveStartupProjectFallbackId: vi.fn(),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(navigate).toHaveBeenCalledWith(['/projects']);
+  });
+
 });

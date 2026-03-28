@@ -14,6 +14,7 @@ const MAX_TASKS_PER_PROJECT = 3;
 const PERSIST_DEBOUNCE_MS = 400;
 
 type CaptureOptions = {
+  userId?: string | null;
   activeProjectId: string | null;
   lastActiveView: 'text' | 'flow' | null;
   routeUrl?: string | null;
@@ -73,6 +74,7 @@ export class LaunchSnapshotService {
     return {
       version: LAUNCH_SNAPSHOT_VERSION_V2,
       savedAt: new Date().toISOString(),
+      userId: options.userId ?? null,
       activeProjectId: options.activeProjectId,
       lastActiveView: options.lastActiveView,
       preferredView,
@@ -235,6 +237,7 @@ export class LaunchSnapshotService {
     return {
       version: LAUNCH_SNAPSHOT_VERSION_V2,
       savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
+      userId: typeof source.userId === 'string' ? source.userId : null,
       activeProjectId,
       lastActiveView: source.lastActiveView === 'flow' || source.lastActiveView === 'text' ? source.lastActiveView : preferredView,
       preferredView,
@@ -321,6 +324,7 @@ export class LaunchSnapshotService {
     return {
       version: LAUNCH_SNAPSHOT_VERSION_V1,
       savedAt: snapshot.savedAt,
+      userId: snapshot.userId ?? null,
       activeProjectId: snapshot.activeProjectId,
       lastActiveView: snapshot.preferredView ?? snapshot.lastActiveView ?? null,
       theme: snapshot.theme,

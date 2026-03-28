@@ -28,6 +28,11 @@ export interface AuthResult {
   needsConfirmation?: boolean;
 }
 
+export interface PersistedSessionIdentity {
+  userId: string;
+  email: string | null;
+}
+
 /**
  * 认证服务
  * 负责用户登录、注册、登出
@@ -191,7 +196,15 @@ export class AuthService {
    * 
    * 预期收益：冷启动节省 1-3s（跳过 getSession 网络往返）
    */
-  private tryLocalSessionFastPath(): { userId: string; email: string | null } | null {
+  peekPersistedSessionIdentity(): PersistedSessionIdentity | null {
+    return this.readPersistedSessionIdentity(false);
+  }
+
+  private tryLocalSessionFastPath(): PersistedSessionIdentity | null {
+    return this.readPersistedSessionIdentity(true);
+  }
+
+  private readPersistedSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
     try {
       // 阶段 1：检查 index.html 预热脚本是否已拿到新鲜 session
       const prewarm = (window as Window & { __NANOFLOW_SESSION_PREWARM__?: {
@@ -203,10 +216,12 @@ export class AuthService {
         const { session } = prewarm;
         // 预热拿到的 session 包含 user 字段（从 /auth/v1/token 返回）
         if (session.user?.id) {
-          this.logger.debug('[FastPath] 使用 index.html 预热 session', {
-            userId: session.user.id.substring(0, 8) + '...',
-            expiresAt: session.expires_at
-          });
+          if (shouldLog) {
+            this.logger.debug('[FastPath] 使用 index.html 预热 session', {
+              userId: session.user.id.substring(0, 8) + '...',
+              expiresAt: session.expires_at
+            });
+          }
           return { userId: session.user.id, email: session.user.email ?? null };
         }
         // 预热成功但没有 user 字段 → 回退到 localStorage 解析
@@ -235,7 +250,9 @@ export class AuthService {
         const expiresAt = rawExpiresAt > 1e12 ? Math.floor(rawExpiresAt / 1000) : rawExpiresAt;
         const nowSec = Math.floor(Date.now() / 1000);
         if (expiresAt <= nowSec + 60) {
-          this.logger.debug('[FastPath] 本地 token 即将过期，回退到网络检查');
+          if (shouldLog) {
+            this.logger.debug('[FastPath] 本地 token 即将过期，回退到网络检查');
+          }
           return null;
         }
       }
@@ -247,17 +264,21 @@ export class AuthService {
         const userId = userRecord['id'];
         if (typeof userId === 'string' && userId) {
           const email = typeof userRecord['email'] === 'string' ? userRecord['email'] : null;
-          this.logger.debug('[FastPath] 使用 localStorage 缓存 session', {
-            userId: userId.substring(0, 8) + '...',
-            expiresAt: rawExpiresAt
-          });
+          if (shouldLog) {
+            this.logger.debug('[FastPath] 使用 localStorage 缓存 session', {
+              userId: userId.substring(0, 8) + '...',
+              expiresAt: rawExpiresAt
+            });
+          }
           return { userId, email };
         }
       }
 
       return null;
     } catch (e) {
-      this.logger.debug('[FastPath] 本地会话读取失败，回退到网络检查', e);
+      if (shouldLog) {
+        this.logger.debug('[FastPath] 本地会话读取失败，回退到网络检查', e);
+      }
       return null;
     }
   }

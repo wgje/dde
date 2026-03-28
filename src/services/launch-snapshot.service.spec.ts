@@ -53,6 +53,7 @@ describe('LaunchSnapshotService', () => {
         createProject('project-2', 'Hot Path', '2026-03-25T09:00:00.000Z', 4),
       ],
       {
+        userId: 'user-2',
         activeProjectId: 'project-2',
         lastActiveView: 'flow',
         theme: 'ocean',
@@ -60,6 +61,7 @@ describe('LaunchSnapshotService', () => {
       },
     );
 
+    expect(snapshot.userId).toBe('user-2');
     expect(snapshot.activeProjectId).toBe('project-2');
     expect(snapshot.lastActiveView).toBe('flow');
     expect(snapshot.projects[0].id).toBe('project-2');
@@ -145,6 +147,7 @@ describe('LaunchSnapshotService', () => {
     localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
       version: 2,
       savedAt: '2026-03-25T09:00:00.000Z',
+      userId: 'user-v2',
       activeProjectId: 'project-v2',
       preferredView: 'flow',
       resolvedLaunchView: 'text',
@@ -165,6 +168,7 @@ describe('LaunchSnapshotService', () => {
     };
 
     expect(snapshot.version).toBe(2);
+  expect(snapshot.userId).toBe('user-v2');
     expect(snapshot.activeProjectId).toBe('project-v2');
     expect(snapshot.routeIntent.kind).toBe('task');
     expect(snapshot.resolvedLaunchView).toBe('text');

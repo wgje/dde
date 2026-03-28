@@ -10,4 +10,11 @@ describe('startup launch contract', () => {
 
     expect(appCore?.resources?.files).toContain('/polyfills*.js');
   });
+
+  it('manifest start_url should point to root startup path instead of launch.html', () => {
+    const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    expect(manifest.start_url).toBe('./');
+  });
 });
