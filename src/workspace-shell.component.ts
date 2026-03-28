@@ -1084,14 +1084,14 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.workspaceHandoffSignaled = true;
-    if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
-      this.bootStage.markWorkspaceHandoffReady();
-      return;
-    }
-    this.handoffCoordinator.markLayoutStable();
+    // 【2026-03-28 大改】启动壳已移除，直接标记 handoff 完成
+    this.bootStage.markWorkspaceHandoffReady();
   }
 
   private setupHandoffEffect(): void {
+    // 【2026-03-28 大改】启动壳已移除，handoff 不再阻塞。
+    // HandoffCoordinator.resolve() 仍被调用以驱动移动端路由降级逻辑，
+    // 但结果不再影响 UI 可见性。
     effect(() => {
       if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
         return;
@@ -1144,15 +1144,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   /** 分层启动补水：auth → p1 warmup → p2 sync */
   private setupStartupTierEffects(): void {
-    // 【P1 秒开优化 2026-03-28】handoff 完成时立即推进 P1，替代固定 150ms 定时器
-    effect(() => {
-      if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) return;
-      const handoffResult = this.handoffCoordinator.result();
-      if (handoffResult.kind !== 'pending') {
-        this.startupTier.markHandoffReady();
-      }
-    });
-
     effect(() => {
       if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) return;
       if (!this.currentUserId()) return;

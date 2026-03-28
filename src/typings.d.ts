@@ -111,7 +111,6 @@ interface NanoFlowBootFlags {
   TAB_SYNC_LOCAL_REFRESH_V1?: boolean;
   STRICT_MODULEPRELOAD_V2?: boolean;
   ROOT_STARTUP_DEP_PRUNE_V1?: boolean;
-  BOOT_SHELL_SPLIT_V1?: boolean;
   TIERED_STARTUP_HYDRATION_V1?: boolean;
   SUPABASE_DEFERRED_SDK_V1?: boolean;
   CONFIG_BARREL_PRUNE_V1?: boolean;

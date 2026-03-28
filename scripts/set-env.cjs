@@ -54,10 +54,6 @@ const rootStartupDepPruneV1 = parseBooleanEnv(
   process.env.NG_APP_ROOT_STARTUP_DEP_PRUNE_V1 || localEnv.NG_APP_ROOT_STARTUP_DEP_PRUNE_V1,
   true
 );
-const bootShellSplitV1 = parseBooleanEnv(
-  process.env.NG_APP_BOOT_SHELL_SPLIT_V1 || localEnv.NG_APP_BOOT_SHELL_SPLIT_V1,
-  true
-);
 const tieredStartupHydrationV1 = parseBooleanEnv(
   process.env.NG_APP_TIERED_STARTUP_HYDRATION_V1 || localEnv.NG_APP_TIERED_STARTUP_HYDRATION_V1,
   true
@@ -251,7 +247,6 @@ try {
   const tabSyncLocalRefreshPattern = /TAB_SYNC_LOCAL_REFRESH_V1:\s*(true|false),/;
   const strictModulepreloadPattern = /STRICT_MODULEPRELOAD_V2:\s*(true|false),/;
   const rootStartupDepPrunePattern = /ROOT_STARTUP_DEP_PRUNE_V1:\s*(true|false),/;
-  const bootShellSplitPattern = /BOOT_SHELL_SPLIT_V1:\s*(true|false),/;
   const tieredStartupHydrationPattern = /TIERED_STARTUP_HYDRATION_V1:\s*(true|false),/;
   const supabaseDeferredSdkPattern = /SUPABASE_DEFERRED_SDK_V1:\s*(true|false),/;
   const configBarrelPrunePattern = /CONFIG_BARREL_PRUNE_V1:\s*(true|false),/;
@@ -333,15 +328,6 @@ try {
     );
   } else {
     console.warn('⚠️ index.html 中未找到 ROOT_STARTUP_DEP_PRUNE_V1 注入位置，跳过注入');
-  }
-
-  if (bootShellSplitPattern.test(indexHtml)) {
-    indexHtml = indexHtml.replace(
-      bootShellSplitPattern,
-      `BOOT_SHELL_SPLIT_V1: ${bootShellSplitV1},`
-    );
-  } else {
-    console.warn('⚠️ index.html 中未找到 BOOT_SHELL_SPLIT_V1 注入位置，跳过注入');
   }
 
   if (tieredStartupHydrationPattern.test(indexHtml)) {

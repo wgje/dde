@@ -10,7 +10,6 @@ const DIST_LAUNCH_HTML_PATH = path.join(DIST_DIR, 'launch.html');
 const REQUIRED_MARKERS = [
   'LAUNCH_SHARED_HEAD',
   'LAUNCH_SHARED_STYLES',
-  'LAUNCH_SHARED_SHELL',
   'LAUNCH_SHARED_SNAPSHOT_RENDERER',
   'LAUNCH_SHARED_BOOT_FLAGS',
   'LAUNCH_SHARED_LOADER_DISMISS',
@@ -57,14 +56,10 @@ function validateSourceMarkers(indexHtml) {
 function validateDistShell(html, shellName) {
   const violations = [];
   const bootFlagsIndex = html.indexOf('__NANOFLOW_BOOT_FLAGS__');
-  const snapshotShellIndex = html.indexOf('snapshot-shell');
   const loaderDismissIndex = html.indexOf('nanoflow:boot-stage');
   const mainScriptIndex = html.search(/<script\b[^>]*src=["'][^"']*main-[A-Z0-9]+\.js["'][^>]*>/i);
   const polyfillsScriptIndex = html.search(/<script\b[^>]*src=["'][^"']*polyfills-[A-Z0-9]+\.js["'][^>]*>/i);
 
-  if (snapshotShellIndex === -1) {
-    violations.push(`${shellName} 缺少 snapshot-shell`);
-  }
   if (bootFlagsIndex === -1) {
     violations.push(`${shellName} 缺少 Boot Flags`);
   }

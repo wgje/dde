@@ -31,11 +31,7 @@ function createFixture(): { root: string; distDir: string } {
   <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
 </head>
 <body>
-  <!-- LAUNCH_SHARED_SHELL_START -->
-  <div id="initial-loader"><div id="snapshot-shell"></div></div>
-  <!-- LAUNCH_SHARED_SHELL_END -->
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
-  <script>window.__SNAPSHOT_RENDERER__ = true;</script>
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
   <!-- LAUNCH_SHARED_PREWARM_START -->
   <script>window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };</script>
@@ -77,8 +73,6 @@ describe('generate-launch-html', () => {
 
     expect(launchHtml).toContain('<meta charset="utf-8">');
     expect(launchHtml).toContain('__NANOFLOW_BOOT_FLAGS__');
-    expect(launchHtml).toContain('snapshot-shell');
-    expect(launchHtml).toContain('__SNAPSHOT_RENDERER__');
     expect(launchHtml).toContain('__LOADER_DISMISS__');
     expect(launchHtml).toContain('polyfills-XYZ999.js');
     expect(launchHtml).toContain('main-ABC123.js');
@@ -98,14 +92,10 @@ describe('generate-launch-html', () => {
   <!-- LAUNCH_SHARED_HEAD_END -->
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-slate-900 h-screen w-screen overflow-hidden">
-  <!-- LAUNCH_SHARED_SHELL_START -->
-  <div id="snapshot-shell"></div>
-  <!-- LAUNCH_SHARED_SHELL_END -->
   <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
   <script>window.__FLAGS__ = {};</script>
   <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
-  <script>true;</script>
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
   <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
   <script>true;</script>
@@ -138,14 +128,10 @@ describe('generate-launch-html', () => {
   <!-- LAUNCH_SHARED_HEAD_END -->
 </head>
 <body>
-  <!-- LAUNCH_SHARED_SHELL_START -->
-  <div id="snapshot-shell"></div>
-  <!-- LAUNCH_SHARED_SHELL_END -->
   <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
   <script>window.__FLAGS__ = {};</script>
   <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
-  <script>true;</script>
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
   <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
   <script>true;</script>

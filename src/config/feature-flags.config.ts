@@ -149,8 +149,6 @@ export const FEATURE_FLAGS = {
   USER_SESSION_ATTACHMENT_ON_DEMAND_V1: true,
   /** UserSession 移除启动期 MigrationService 注入 */
   USER_SESSION_MIGRATION_PRUNE_V1: true,
-  /** BootShell / WorkspaceShell 架构拆分 */
-  BOOT_SHELL_SPLIT_V1: true,
   /** 分层启动水合（P0/P1/P2） */
   TIERED_STARTUP_HYDRATION_V1: true,
   /** Supabase SDK 延迟装载 */

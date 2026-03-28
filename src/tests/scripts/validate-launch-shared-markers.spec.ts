@@ -32,8 +32,7 @@ describe('validate-launch-shared-markers', () => {
   <!-- LAUNCH_SHARED_STYLES_START --><style></style><!-- LAUNCH_SHARED_STYLES_END -->
 </head>
 <body>
-  <!-- LAUNCH_SHARED_SHELL_START --><div id="snapshot-shell"></div><!-- LAUNCH_SHARED_SHELL_END -->
-  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START --><script>window.__NANOFLOW_LAUNCH_SNAPSHOT__ = {};</script><!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START --><!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
   <!-- LAUNCH_SHARED_BOOT_FLAGS_START --><script>window.__NANOFLOW_BOOT_FLAGS__ = {};</script><!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
   <!-- LAUNCH_SHARED_LOADER_DISMISS_START --><script>window.addEventListener('nanoflow:boot-stage', function() {});</script><!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
 </body>
@@ -45,7 +44,6 @@ describe('validate-launch-shared-markers', () => {
   <script>window.__NANOFLOW_BOOT_FLAGS__ = {};</script>
 </head>
 <body>
-  <div id="snapshot-shell"></div>
   <script>window.addEventListener('nanoflow:boot-stage', function() {});</script>
   <script type="module" src="polyfills-AAA.js"></script>
   <script type="module" src="main-BBB.js"></script>

@@ -10,6 +10,5 @@ test.describe('Startup Shell Visibility', () => {
     await page.goto('/projects', { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('#initial-loader')).toBeVisible();
-    await expect(page.locator('#snapshot-shell')).toBeVisible();
   });
 });

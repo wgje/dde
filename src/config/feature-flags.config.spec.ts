@@ -103,10 +103,6 @@ describe('Feature Flags 安全校验', () => {
     expect(FEATURE_FLAGS.USER_SESSION_MIGRATION_PRUNE_V1).toBe(true);
   });
 
-  it('BOOT_SHELL_SPLIT_V1 应默认启用', () => {
-    expect(FEATURE_FLAGS.BOOT_SHELL_SPLIT_V1).toBe(true);
-  });
-
   it('TIERED_STARTUP_HYDRATION_V1 应默认启用', () => {
     expect(FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1).toBe(true);
   });

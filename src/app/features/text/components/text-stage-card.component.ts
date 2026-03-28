@@ -17,7 +17,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
   template: `
     <article 
       [attr.data-stage-number]="stage().stageNumber"
-      class="text-stage-card flex flex-col min-w-0 bg-retro-cream/70 dark:bg-stone-800/70 backdrop-blur border border-retro-muted/20 dark:border-stone-700/50 rounded-xl shadow-sm overflow-visible transition-all flex-shrink-0"
+      class="text-stage-card flex flex-col min-w-0 bg-retro-cream/70 dark:bg-stone-800/70 backdrop-blur border border-retro-muted/20 dark:border-stone-700/50 rounded-xl shadow-sm overflow-hidden transition-all flex-shrink-0"
       [ngClass]="{
         'rounded-2xl': !isMobile(), 
         'w-full': isMobile(),
@@ -52,7 +52,7 @@ import { TextTaskCardComponent } from './text-task-card.component';
       <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar task-stack transition-all duration-150 ease-out"
            [attr.data-stage-task-list]="stage().stageNumber"
            [ngClass]="{
-             'space-y-2 px-3 pb-3 max-h-[999px] opacity-100 animate-collapse-open': isExpanded() && !isMobile(),
+             'space-y-2 px-3 pb-3 max-h-[60vh] opacity-100 animate-collapse-open': isExpanded() && !isMobile(),
              'space-y-1.5 px-2 pb-2 max-h-[40vh] opacity-100 animate-collapse-open': isExpanded() && isMobile(),
              'max-h-0 opacity-0 pointer-events-none overflow-hidden py-0 px-0 collapsed-section': !isExpanded()
            }"
