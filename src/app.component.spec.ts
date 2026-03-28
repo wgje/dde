@@ -36,6 +36,7 @@ describe('AppComponent (Launch Shell)', () => {
     currentStage: ReturnType<typeof computed<string>>;
     isWorkspaceHandoffReady: ReturnType<typeof computed<boolean>>;
     isApplicationReady: ReturnType<typeof computed<boolean>>;
+    metrics: ReturnType<typeof computed>;
     markLaunchShellVisible: ReturnType<typeof vi.fn>;
     markApplicationReady: ReturnType<typeof vi.fn>;
     noteLoaderHidden: ReturnType<typeof vi.fn>;
@@ -66,6 +67,13 @@ describe('AppComponent (Launch Shell)', () => {
       }),
       isWorkspaceHandoffReady: computed(() => handoffReady()),
       isApplicationReady: computed(() => appReady()),
+      metrics: computed(() => ({
+        launchShellVisibleMs: null,
+        workspaceHandoffMs: handoffReady() ? 100 : null,
+        appReadyMs: null,
+        loaderHiddenMs: null,
+        blankGapMs: 0,
+      })),
       markLaunchShellVisible: vi.fn(),
       markApplicationReady: vi.fn(() => appReady.set(true)),
       noteLoaderHidden: vi.fn(),

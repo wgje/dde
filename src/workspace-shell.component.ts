@@ -1144,6 +1144,15 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   /** 分层启动补水：auth → p1 warmup → p2 sync */
   private setupStartupTierEffects(): void {
+    // 【P1 秒开优化 2026-03-28】handoff 完成时立即推进 P1，替代固定 150ms 定时器
+    effect(() => {
+      if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) return;
+      const handoffResult = this.handoffCoordinator.result();
+      if (handoffResult.kind !== 'pending') {
+        this.startupTier.markHandoffReady();
+      }
+    });
+
     effect(() => {
       if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1) return;
       if (!this.currentUserId()) return;

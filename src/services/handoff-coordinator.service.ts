@@ -62,23 +62,28 @@ export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult
     || shouldDegradeMobileStartupRoute(input.routeUrl, input.isMobile);
   const mobileDegradeReason = input.snapshot?.degradeReason ?? 'mobile-default-text';
 
+  // 【P0 秒开修复 2026-03-28】快照感知：快照中有项目时视为 hasProjects=true，
+  // 避免 effect 异步时序导致 prehydrate 结果未被 signal 反映而卡在 pending。
+  const effectiveHasProjects = input.hasProjects
+    || (input.snapshot?.projects?.length ?? 0) > 0;
+
   if (input.bootstrapFailed) {
     return { kind: 'full', degradeReason: 'bootstrap-failed' };
   }
 
-  if (input.authConfigured && input.showLoginRequired && !input.hasProjects) {
+  if (input.authConfigured && input.showLoginRequired && !effectiveHasProjects) {
     return { kind: 'login-required', degradeReason: null };
   }
 
   if (
     input.authConfigured &&
-    !input.hasProjects &&
+    !effectiveHasProjects &&
     (input.isCheckingSession || input.authRuntimeState === 'idle' || input.authRuntimeState === 'pending')
   ) {
     return { kind: 'pending', degradeReason: null };
   }
 
-  if (!input.hasProjects) {
+  if (!effectiveHasProjects) {
     return applyNonBlockingLoginFallback(input, { kind: 'empty-workspace', degradeReason: null });
   }
 
@@ -106,10 +111,10 @@ export class HandoffCoordinatorService {
   private safetyTriggered = false;
 
   /** 最大等待时间（ms），超时后强制 handoff 防止永久卡在 launch-shell */
-  // 【P0 修复 2026-03-27】从 8s 降至 3s
-  // A1 快照预填充 + B1 forceLoad 修复后，正常场景 handoff < 500ms 完成。
-  // 3s 仅覆盖极端异常（快照损坏 + 缓存丢失 + 网络超时），8s 对移动端体验是灾难。
-  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 3000;
+  // 【P0 秒开优化 2026-03-28】从 3s 降至 1.5s
+  // P0-1 快照感知修复后，正常路径 handoff < 100ms 完成。
+  // 1.5s 足够覆盖极端异常（快照损坏 + 缓存丢失 + 网络超时）。
+  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 1500;
 
   readonly result = this.resultState.asReadonly();
   readonly handoffTriggerSource = this.handoffTriggerSourceState.asReadonly();

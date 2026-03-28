@@ -22,7 +22,7 @@
     {
       "name": "app-lazy",
       "installMode": "lazy",
-      "updateMode": "lazy",
+      "updateMode": "prefetch",
       "resources": {
         "files": [
           "/chunk*.js",

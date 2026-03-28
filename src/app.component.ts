@@ -98,10 +98,10 @@ export class AppComponent {
    * 如果 handoff 在此时间内仍未到达 'handoff' 阶段，
    * AppComponent 直接强制推进，避免用户永远卡在启动壳。
    *
-   * 选择 5s 的理由：正常路径 < 500ms，3s 安全超时在 HandoffCoordinator，
-   * 这里 5s 作为最终终极兜底（WorkspaceShell 根本未加载的灾难场景）。
+   * 【P0 秒开优化 2026-03-28】从 5s 降至 2.5s
+   * HandoffCoordinator 安全超时已降至 1.5s，此处 2.5s 作为终极兜底。
    */
-  private static readonly MASTER_SAFETY_TIMEOUT_MS = 5000;
+  private static readonly MASTER_SAFETY_TIMEOUT_MS = 2500;
 
   constructor() {
     // 第一阶段预热：仅拉取 workspace-shell chunk
@@ -111,7 +111,7 @@ export class AppComponent {
       this.bootStage.markLaunchShellVisible();
     });
 
-    // 启动壳淡出动画：handoff 完成后先淡出再移除
+    // 启动壳淡出动画：handoff 完成后根据启动速度决定是否淡出
     effect(() => {
       const workspaceReady = this.bootStage.isWorkspaceHandoffReady();
       const appReady = this.bootStage.isApplicationReady();
@@ -120,14 +120,24 @@ export class AppComponent {
         this.bootStage.markApplicationReady();
       }
 
-      // handoff 完成 → 触发淡出（仅触发一次）
+      // handoff 完成 → 触发移除（仅触发一次）
       if (workspaceReady && !this.handoffFadeStarted) {
         this.handoffFadeStarted = true;
-        this.launchShellFadingOut.set(true);
-        // 200ms 淡出动画后从 DOM 移除
-        setTimeout(() => {
+        // 【P1 秒开优化 2026-03-28】快速 handoff 时跳过 200ms 淡出动画。
+        // 当 handoff 在 initial-loader 消失前就完成（快照预填充成功路径），
+        // 用户看不到 LaunchShell，无需淡出直接移除。
+        const metrics = this.bootStage.metrics();
+        const handoffFast = (metrics.workspaceHandoffMs ?? Infinity) < 500;
+        if (handoffFast) {
+          // 快速路径：直接移除，不做淡出动画
           this.launchShellFadingOut.set(false);
-        }, 200);
+        } else {
+          // 慢速路径：保留 200ms 淡出，避免硬切闪烁
+          this.launchShellFadingOut.set(true);
+          setTimeout(() => {
+            this.launchShellFadingOut.set(false);
+          }, 200);
+        }
       }
     });
 
@@ -145,7 +155,7 @@ export class AppComponent {
         masterTimer = setTimeout(() => {
           if (!this.bootStage.isWorkspaceHandoffReady()) {
             console.warn(
-              '[NanoFlow] 启动壳终极兜底触发：5s 内 handoff 未完成，强制推进。',
+              '[NanoFlow] 启动壳终极兜底触发：2.5s 内 handoff 未完成，强制推进。',
               'stage:', this.bootStage.currentStage(),
             );
             ngZone.run(() => this.bootStage.markWorkspaceHandoffReady());

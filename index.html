@@ -1013,17 +1013,16 @@
           });
         }
         var loader = document.getElementById('initial-loader');
-        if (loader && !loader.classList.contains('fade-out')) {
-          loader.classList.add('fade-out');
-          setTimeout(function() {
-            loader.style.display = 'none';
-            if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-              window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.hidden', {
-                elapsedMs: Date.now() - startTime
-              });
-            }
-            window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
-          }, 200);
+        if (loader) {
+          // 【P0 秒开优化 2026-03-28】去掉 200ms fade-out 动画，直接隐藏。
+          // 快照与 LaunchShell 视觉对齐后无需淡出过渡。
+          loader.style.display = 'none';
+          if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
+            window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.hidden', {
+              elapsedMs: Date.now() - startTime
+            });
+          }
+          window.dispatchEvent(new CustomEvent('nanoflow:loader-hidden'));
         }
       }
       

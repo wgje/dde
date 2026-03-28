@@ -109,46 +109,9 @@ export class AppAuthCoordinatorService {
       });
     };
 
-    if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && typeof window !== 'undefined') {
-      const stage = window.__NANOFLOW_BOOT_STAGE__;
-      // 【Bug 修复 2026-03-26】扩展匹配条件：'launch-shell' 也立即放行。
-      // 原来只匹配 'handoff'|'ready'，但此时 stage 已是 'launch-shell'
-      // （AppComponent.afterNextRender 先执行），造成 bootstrap 总是等 2500ms 超时。
-      if (stage === 'launch-shell' || stage === 'handoff' || stage === 'ready') {
-        queueMicrotask(runBootstrap);
-        return;
-      }
-
-      let fallbackTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-        cleanup();
-        runBootstrap();
-      }, 2500);
-
-      const onBootStage = (event: Event) => {
-        const detail = (event as CustomEvent<{ stage?: string }>).detail;
-        // 同步扩展：事件监听也匹配 'launch-shell'
-        if (detail?.stage === 'launch-shell' || detail?.stage === 'handoff' || detail?.stage === 'ready') {
-          cleanup();
-          runBootstrap();
-        }
-      };
-
-      const cleanup = () => {
-        window.removeEventListener('nanoflow:boot-stage', onBootStage as EventListener);
-        if (fallbackTimer) {
-          clearTimeout(fallbackTimer);
-          fallbackTimer = null;
-        }
-      };
-
-      window.addEventListener('nanoflow:boot-stage', onBootStage as EventListener, { once: true });
-      return;
-    }
-
-    // 【性能优化 2026-03-23】移除 requestAnimationFrame 延迟
-    // 原策略等待首帧渲染后再启动会话检查，增加 ~16-32ms 延迟。
-    // 改为 queueMicrotask：在当前事件循环末尾执行，不阻塞首帧但也不额外等待帧完成。
-    // 会话检查是纯异步网络操作，不会阻塞渲染。
+    // 【P1 秒开优化 2026-03-28】bootstrap 不再等 boot-stage 事件，直接异步执行。
+    // P0-1 已修复 handoff 不依赖 auth，auth 可安全地在后台完成。
+    // 原来等 boot-stage 事件/2500ms fallback 的逻辑已不必要。
     queueMicrotask(runBootstrap);
   }
 

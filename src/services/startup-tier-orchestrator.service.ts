@@ -98,6 +98,22 @@ export class StartupTierOrchestratorService {
     void this.triggerNow('p2', 'auth-ready');
   }
 
+  /**
+   * 【P1 秒开优化 2026-03-28】handoff 完成时立即激活 P1，
+   * 不再等固定 150ms 定时器。P2 定时器也提前到 handoff 完成后开始计算。
+   */
+  markHandoffReady(): void {
+    if (!this.initialized || this.destroyed) return;
+
+    // P1：handoff 完成即可安全预热交互层
+    void this.triggerNow('p1', 'timer');
+
+    // P2：如果 authReady 也已满足，立即激活
+    if (this.authReady) {
+      void this.triggerNow('p2', 'auth-ready');
+    }
+  }
+
   isTierReady(tier: StartupTier): boolean {
     if (tier === 'p0') return this.tierP0();
     if (tier === 'p1') return this.tierP1();
