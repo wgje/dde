@@ -450,7 +450,7 @@ export class ParkingDockComponent implements OnDestroy {
   toggleDockExpanded(): void {
     if (this.gateActive()) return;
     const next = !this.engine.dockExpanded();
-    this.engine.setDockExpanded(next);
+    this.engine.setDockExpanded(next, { persistPreference: true });
     if (next) {
       this.dragDrop.semicircleHoverExpanded.set(true);
       this.dragDrop.cancelAutoCollapse();
@@ -565,7 +565,7 @@ export class ParkingDockComponent implements OnDestroy {
 
     if (this.focusTransitionService.prefersReducedMotion()) {
       if (this.engine.dockExpanded()) {
-        this.engine.setDockExpanded(false);
+        this.engine.setDockExpanded(false, { persistPreference: false });
         this.dragDrop.scheduleSemicircleAutoCollapse();
       }
       this.focusTransitionService.clearExitVisualSnapshot();
@@ -578,7 +578,7 @@ export class ParkingDockComponent implements OnDestroy {
     this.focusTransitionService.runEnterFocusTransition();
     // 先捕获 enter 几何，再让停泊坞下沉，避免源卡片首帧抖动。
     if (this.engine.dockExpanded()) {
-      this.engine.setDockExpanded(false);
+      this.engine.setDockExpanded(false, { persistPreference: false });
       this.dragDrop.scheduleSemicircleAutoCollapse();
     }
   }
@@ -720,7 +720,7 @@ export class ParkingDockComponent implements OnDestroy {
     if (!this.canCreateBackupTask()) return;
     const createdId = this.engine.createInDock(DOCK_DEFAULT_TASK_TITLE, 'backup', 'low');
     if (!createdId) return;
-    this.engine.setDockExpanded(true);
+    this.engine.setDockExpanded(true, { persistPreference: true });
     this.dragDrop.semicircleHoverExpanded.set(true);
     this.planner.markRecentlyDocked(createdId);
     if (this.engine.focusMode()) {

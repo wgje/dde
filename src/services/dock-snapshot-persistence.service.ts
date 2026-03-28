@@ -293,7 +293,7 @@ export class DockSnapshotPersistenceService {
       version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries,
       focusMode,
-      isDockExpanded: source.isDockExpanded === undefined ? true : Boolean(source.isDockExpanded),
+      isDockExpanded: source.isDockExpanded === undefined ? false : Boolean(source.isDockExpanded),
       muteWaitTone: Boolean(source.muteWaitTone),
       session,
       firstDragDone: session.firstDragIntervened,

@@ -84,7 +84,7 @@ export class UiStateService {
   /** 流程图视图 - 详情面板展开 */
   readonly isFlowDetailOpen = signal(false);
 
-  /** 停泊坞展开状态（localStorage 持久化） */
+  /** 停泊坞展开偏好（localStorage 持久化，供启动恢复/桌面回退使用） */
   readonly isParkingDockOpen = signal(false);
   
   // ========== 搜索状态（纯 UI 状态） ==========
@@ -286,7 +286,7 @@ export class UiStateService {
   }
 
   /**
-   * 切换停泊坞展开状态（带 localStorage 持久化）
+   * 切换停泊坞展开偏好（带 localStorage 持久化）
    */
   toggleParkingDock(): void {
     this.isParkingDockOpen.update(v => !v);
@@ -294,7 +294,7 @@ export class UiStateService {
   }
 
   /**
-   * 设置停泊坞展开状态
+   * 设置停泊坞展开偏好
    */
   setParkingDockOpen(open: boolean): void {
     this.isParkingDockOpen.set(open);

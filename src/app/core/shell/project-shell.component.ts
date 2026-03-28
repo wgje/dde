@@ -238,7 +238,7 @@ interface NetworkInformationLike {
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                       </svg>
                    </button>
-                   <span class="font-bold text-stone-700 dark:text-stone-200 text-base">文本</span>
+                   <span data-testid="mobile-text-view-label" class="font-bold text-stone-700 dark:text-stone-200 text-base">文本</span>
                  </div>
                  
                  <div class="flex items-center gap-1 shrink-0">

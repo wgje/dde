@@ -727,6 +727,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private startupDiagnosticsPromise: Promise<StartupDiagnosticsLike[] | null> | null = null;
   private pwaPromptInitScheduled = false;
   private workspaceHandoffSignaled = false;
+  private workspaceReadyCommitted = false;
 
   constructor() {
     // 启动流程：仅执行必要的同步初始化
@@ -974,6 +975,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupDataProtectionEffect();
     this.setupLaunchSnapshotEffect();
     this.setupHandoffEffect();
+    this.setupWorkspaceReadyEffect();
     this.setupFocusProbeEffect();
     this.setupStartupTierEffects();
     this.setupRemoteCallbackEffect();
@@ -1084,19 +1086,13 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     this.workspaceHandoffSignaled = true;
 
-    // 工作区视图已就绪，隐藏 index.html 的 initial-loader
-    if (typeof document !== 'undefined') {
-      const loader = document.getElementById('initial-loader');
-      if (loader) {
-        loader.style.display = 'none';
-      }
+    // 真实布局树已挂载完成，但是否允许交接仍交由 HandoffCoordinator 判断。
+    // 这样 loader 隐藏、handoff、ready 三者会严格串联，避免秒开阶段直接暴露半稳定 UI。
+    if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
+      this.bootStage.markWorkspaceHandoffReady();
+      return;
     }
 
-    // 推进启动阶段：handoff → ready
-    this.bootStage.markWorkspaceHandoffReady();
-    this.bootStage.markApplicationReady();
-
-    // 通知 HandoffCoordinator 布局已稳定，驱动移动端路由降级逻辑
     this.handoffCoordinator.markLayoutStable();
   }
 
@@ -1134,6 +1130,36 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         this.projectState.setActiveProjectId(fallbackProjectId);
       }
     });
+  }
+
+  private setupWorkspaceReadyEffect(): void {
+    effect(() => {
+      if (!this.bootStage.isWorkspaceHandoffReady()) {
+        return;
+      }
+
+      this.commitWorkspaceHandoff();
+    });
+  }
+
+  private commitWorkspaceHandoff(): void {
+    if (this.workspaceReadyCommitted || !this.bootStage.isWorkspaceHandoffReady()) {
+      return;
+    }
+
+    this.workspaceReadyCommitted = true;
+
+    // handoff 真正生效后再移除初始 loader，避免移动端在视图切换与布局计算之间出现空白或崩坏。
+    if (typeof document !== 'undefined') {
+      const loader = document.getElementById('initial-loader');
+      if (loader) {
+        loader.style.display = 'none';
+      }
+    }
+
+    this.bootStage.noteLoaderHidden();
+    this.startupTier.markHandoffReady();
+    this.bootStage.markApplicationReady();
   }
 
   /** Focus 启动探针：登录后尽早执行本地 gate 检查 */
@@ -1873,7 +1899,7 @@ async signOut() {
     }
 
     if (isParked) {
-      this.uiState.setParkingDockOpen(true);
+      this.dockEngine.setDockExpanded(true, { persistPreference: false });
       this.parkingService.previewTask(taskId);
       return;
     }

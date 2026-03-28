@@ -95,7 +95,7 @@ describe('DockPlannerQuickEditService', () => {
   it('should open planner and expand dock', () => {
     service.togglePlannerQuickEdit('task-1');
     expect(service.plannerQuickEditTaskId()).toBe('task-1');
-    expect(mockDockEngineService.setDockExpanded).toHaveBeenCalledWith(true);
+    expect(mockDockEngineService.setDockExpanded).toHaveBeenCalledWith(true, { persistPreference: false });
   });
 
   it('should close planner when toggled with same taskId', () => {

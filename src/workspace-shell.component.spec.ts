@@ -37,6 +37,33 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(updateProjectDraft).toHaveBeenCalledWith('proj-1', 'description', 'Project intro');
   });
 
+  it('onSearchTaskClick 命中停泊任务时应直接展开停泊坞并预览任务', () => {
+    const setActiveProjectId = vi.fn();
+    const setDockExpanded = vi.fn();
+    const previewTask = vi.fn();
+    const context = {
+      taskStore: {
+        getTaskProjectId: () => 'project-1',
+      },
+      projectState: {
+        activeProjectId: () => 'project-2',
+        setActiveProjectId,
+      },
+      dockEngine: {
+        setDockExpanded,
+      },
+      parkingService: {
+        previewTask,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.onSearchTaskClick.call(context, 'task-1', true);
+
+    expect(setActiveProjectId).toHaveBeenCalledWith('project-1');
+    expect(setDockExpanded).toHaveBeenCalledWith(true, { persistPreference: false });
+    expect(previewTask).toHaveBeenCalledWith('task-1');
+  });
+
   it('focus workspace takeover 应覆盖进入与退出过渡', () => {
     const enteringContext = {
       resolveFocusWorkspaceTakeoverPhase: () => 'entering',
@@ -298,7 +325,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     ).toBe('none');
   });
 
-  it('signalWorkspaceHandoffReady 应只通知一次 boot stage handoff', () => {
+  it('signalWorkspaceHandoffReady 应只通知一次布局稳定，真正 handoff 交给协调器触发', () => {
     const markWorkspaceHandoffReady = vi.fn();
     const markApplicationReady = vi.fn();
     const markLayoutStable = vi.fn();
@@ -315,10 +342,45 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       signalWorkspaceHandoffReady: (this: WorkspaceShellComponent) => void;
     }).signalWorkspaceHandoffReady.call(context);
 
-    // 启动壳移除后，signalWorkspaceHandoffReady 统一调用所有三步
-    expect(markWorkspaceHandoffReady).toHaveBeenCalledTimes(1);
-    expect(markApplicationReady).toHaveBeenCalledTimes(1);
+    expect(markWorkspaceHandoffReady).not.toHaveBeenCalled();
+    expect(markApplicationReady).not.toHaveBeenCalled();
     expect(markLayoutStable).toHaveBeenCalledTimes(1);
+  });
+
+  it('commitWorkspaceHandoff 应在 handoff 后隐藏 loader、记录指标并推进 ready', () => {
+    const loader = document.createElement('div');
+    loader.id = 'initial-loader';
+    loader.style.display = 'flex';
+    document.body.appendChild(loader);
+
+    const noteLoaderHidden = vi.fn();
+    const markApplicationReady = vi.fn();
+    const markHandoffReady = vi.fn();
+    const context = {
+      bootStage: {
+        isWorkspaceHandoffReady: () => true,
+        noteLoaderHidden,
+        markApplicationReady,
+      },
+      startupTier: { markHandoffReady },
+      workspaceReadyCommitted: false,
+    } as unknown as WorkspaceShellComponent;
+
+    try {
+      (WorkspaceShellComponent.prototype as unknown as {
+        commitWorkspaceHandoff: (this: WorkspaceShellComponent) => void;
+      }).commitWorkspaceHandoff.call(context);
+      (WorkspaceShellComponent.prototype as unknown as {
+        commitWorkspaceHandoff: (this: WorkspaceShellComponent) => void;
+      }).commitWorkspaceHandoff.call(context);
+
+      expect(loader.style.display).toBe('none');
+      expect(noteLoaderHidden).toHaveBeenCalledTimes(1);
+      expect(markHandoffReady).toHaveBeenCalledTimes(1);
+      expect(markApplicationReady).toHaveBeenCalledTimes(1);
+    } finally {
+      loader.remove();
+    }
   });
 
 });

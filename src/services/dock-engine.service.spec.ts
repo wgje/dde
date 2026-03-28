@@ -16,10 +16,13 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { FocusAttentionService } from './focus-attention.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
+import { UiStateService } from './ui-state.service';
 import { Task } from '../models';
 import { DockSnapshot } from '../models/parking-dock';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
+
+const PARKING_DOCK_OPEN_KEY = 'nanoflow.parking-dock-open';
 
 describe('DockEngineService', () => {
   let service: DockEngineService;
@@ -180,6 +183,28 @@ describe('DockEngineService', () => {
     projectConnections.set(projectId, list);
   };
 
+  const configureDockEngineTestingModule = (): void => {
+    TestBed.configureTestingModule({
+      providers: [
+        UiStateService,
+        DockEngineService,
+        { provide: TaskStore, useValue: mockTaskStore },
+        { provide: PreferenceService, useValue: mockPreferenceService },
+        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOps },
+        { provide: BlackBoxService, useValue: mockBlackBoxService },
+        { provide: AuthService, useValue: { currentUserId } },
+        { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: ToastService, useValue: mockToast },
+        { provide: FocusAttentionService, useValue: mockFocusAttention },
+        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
+      ],
+    });
+  };
+
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
@@ -214,33 +239,98 @@ describe('DockEngineService', () => {
     mockFocusAttention.notify.mockClear();
     mockFocusHudWindow.isActive.set(false);
     mockFocusPreferenceService.update.mockClear();
+    localStorage.removeItem(PARKING_DOCK_OPEN_KEY);
 
-    TestBed.configureTestingModule({
-      providers: [
-        DockEngineService,
-        { provide: TaskStore, useValue: mockTaskStore },
-        { provide: PreferenceService, useValue: mockPreferenceService },
-        { provide: SimpleSyncService, useValue: mockSyncService },
-        { provide: ActionQueueService, useValue: mockActionQueue },
-        { provide: ProjectStateService, useValue: mockProjectState },
-        { provide: TaskOperationAdapterService, useValue: mockTaskOps },
-        { provide: BlackBoxService, useValue: mockBlackBoxService },
-        { provide: AuthService, useValue: { currentUserId } },
-        { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
-        { provide: LoggerService, useValue: mockLogger },
-        { provide: ToastService, useValue: mockToast },
-        { provide: FocusAttentionService, useValue: mockFocusAttention },
-        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
-      ],
-    });
+    configureDockEngineTestingModule();
 
     service = TestBed.inject(DockEngineService);
   });
 
   afterEach(() => {
+    localStorage.removeItem(PARKING_DOCK_OPEN_KEY);
     TestBed.resetTestingModule();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  it('应在移动端启动与快照恢复时保持停泊坞收起且不污染桌面偏好', async () => {
+    const originalInnerWidth = window.innerWidth;
+    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
+
+    TestBed.resetTestingModule();
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    });
+    window.dispatchEvent(new Event('resize'));
+
+    try {
+      configureDockEngineTestingModule();
+
+      const mobileService = TestBed.inject(DockEngineService);
+      const uiState = TestBed.inject(UiStateService);
+      const snapshot = mobileService.exportSnapshot();
+
+      snapshot.isDockExpanded = true;
+      mobileService.restoreSnapshot(snapshot);
+
+      await Promise.resolve();
+
+      expect(mobileService.dockExpanded()).toBe(false);
+      expect(mobileService.exportSnapshot().isDockExpanded).toBe(true);
+      expect(uiState.isParkingDockOpen()).toBe(true);
+      expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('true');
+
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        value: 1280,
+      });
+      window.dispatchEvent(new Event('resize'));
+
+      mobileService.reset();
+
+      expect(mobileService.dockExpanded()).toBe(true);
+      expect(uiState.isParkingDockOpen()).toBe(true);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+      window.dispatchEvent(new Event('resize'));
+    }
+  });
+
+  it('应在桌面端无快照场景保留已持久化的停泊坞展开偏好', () => {
+    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
+
+    TestBed.resetTestingModule();
+    configureDockEngineTestingModule();
+
+    const desktopService = TestBed.inject(DockEngineService);
+    const uiState = TestBed.inject(UiStateService);
+
+    desktopService.reset();
+
+    expect(desktopService.dockExpanded()).toBe(true);
+    expect(uiState.isParkingDockOpen()).toBe(true);
+  });
+
+  it('应只在显式切换时持久化停泊坞偏好', () => {
+    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
+
+    TestBed.resetTestingModule();
+    configureDockEngineTestingModule();
+
+    const persistedService = TestBed.inject(DockEngineService);
+
+    persistedService.setDockExpanded(false, { persistPreference: false });
+    expect(persistedService.dockExpanded()).toBe(false);
+    expect(persistedService.exportSnapshot().isDockExpanded).toBe(true);
+    expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('true');
+
+    persistedService.setDockExpanded(false, { persistPreference: true });
+    expect(persistedService.exportSnapshot().isDockExpanded).toBe(false);
+    expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('false');
   });
 
   it('only first drag auto-sets main task in a focus session', () => {
@@ -877,7 +967,7 @@ describe('DockEngineService', () => {
   it('export snapshot should include v3 fields', () => {
     seedTask('A');
     service.dockTask('A');
-    service.setDockExpanded(false);
+    service.setDockExpanded(false, { persistPreference: true });
     service.toggleMuteWaitTone();
     const snapshot = service.exportSnapshot();
 

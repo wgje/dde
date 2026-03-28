@@ -120,7 +120,7 @@ export class DockPlannerQuickEditService implements OnDestroy {
       return;
     }
     this.plannerQuickEditTaskId.set(taskId);
-    this.engine.setDockExpanded(true);
+    this.engine.setDockExpanded(true, { persistPreference: false });
   }
 
   closePlannerQuickEdit(): string | null {

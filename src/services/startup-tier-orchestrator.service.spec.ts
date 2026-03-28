@@ -41,23 +41,46 @@ describe('StartupTierOrchestratorService', () => {
     expect(service.isTierReady('p0')).toBe(true);
   });
 
-  it('p1 应按延时自动就绪', async () => {
+  it('p1 应在 handoff 后立即就绪', async () => {
     service.initialize();
     expect(service.isTierReady('p1')).toBe(false);
 
     await vi.advanceTimersByTimeAsync(500);
+    expect(service.isTierReady('p1')).toBe(false);
+
+    service.markHandoffReady();
+    await Promise.resolve();
 
     expect(service.isTierReady('p1')).toBe(true);
   });
 
-  it('p2 需要 auth ready 才能就绪', async () => {
+  it('p2 需要 handoff 与 auth ready 才能就绪', async () => {
     service.initialize();
 
+    service.markAuthReady();
     await vi.advanceTimersByTimeAsync(2500);
     expect(service.isTierReady('p2')).toBe(false);
 
-    service.markAuthReady();
+    service.markHandoffReady();
+
     await vi.advanceTimersByTimeAsync(1300);
+
+    expect(service.isTierReady('p2')).toBe(true);
+  });
+
+  it('handoff 前的焦点事件不应旁路启动 p2', async () => {
+    service.initialize();
+    service.markAuthReady();
+
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+
+    expect(service.isTierReady('p2')).toBe(false);
+
+    service.markHandoffReady();
+    window.dispatchEvent(new Event('focus'));
+
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(service.isTierReady('p2')).toBe(true);
   });
@@ -74,6 +97,7 @@ describe('StartupTierOrchestratorService', () => {
 
   it('triggerNow single-flight: 并发触发应稳定', async () => {
     service.initialize();
+    service.markHandoffReady();
 
     const p1 = service.triggerNow('p1', 'manual');
     const p2 = service.triggerNow('p1', 'manual');

@@ -26,6 +26,7 @@ export class StartupTierOrchestratorService {
   private readonly tierP2 = signal(false);
 
   private initialized = false;
+  private handoffReady = false;
   private authReady = false;
   private destroyed = false;
 
@@ -64,22 +65,8 @@ export class StartupTierOrchestratorService {
       return;
     }
 
-    this.p1Timer = setTimeout(() => {
-      void this.triggerNow('p1', 'timer');
-    }, STARTUP_PERF_CONFIG.P1_INTERACTION_HYDRATE_DELAY_MS);
-
-    this.p2Timer = setTimeout(() => {
-      void this.triggerNow('p2', 'timer');
-    }, STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS);
-
-    // 安全兜底：如果 P2 在 8s 内仍未激活（authReady/visible/online 条件一直不满足），
-    // 强制绕过所有前置条件激活 P2，确保 simpleSync.startRuntime() 必定执行。
-    this.p2SafetyTimer = setTimeout(() => {
-      if (this.isTierReady('p2')) return;
-      this.addBreadcrumb('startup.tier.p2.safety_force', { reason: 'timeout_8s' });
-      this.authReady = true;
-      this.setTier('p2', true, 'timer');
-    }, 8000);
+    // P1/P2 都改为 handoff 后才启动，避免在真实内容尚未稳定时抢占主线程。
+    // markHandoffReady() 会负责立即打开 P1，并启动 P2 的延时/安全兜底。
 
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.onlineListener, { passive: true });
@@ -95,7 +82,9 @@ export class StartupTierOrchestratorService {
 
   markAuthReady(): void {
     this.authReady = true;
-    void this.triggerNow('p2', 'auth-ready');
+    if (this.handoffReady) {
+      void this.triggerNow('p2', 'auth-ready');
+    }
   }
 
   /**
@@ -104,9 +93,26 @@ export class StartupTierOrchestratorService {
    */
   markHandoffReady(): void {
     if (!this.initialized || this.destroyed) return;
+    this.handoffReady = true;
 
     // P1：handoff 完成即可安全预热交互层
-    void this.triggerNow('p1', 'timer');
+    void this.triggerNow('p1', 'manual');
+
+    if (!this.p2Timer) {
+      this.p2Timer = setTimeout(() => {
+        void this.triggerNow('p2', 'timer');
+      }, STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS);
+    }
+
+    if (!this.p2SafetyTimer) {
+      // 安全兜底：handoff 后若 P2 在 8s 内仍未激活，则强制推进，避免同步层永久饿死。
+      this.p2SafetyTimer = setTimeout(() => {
+        if (this.isTierReady('p2')) return;
+        this.addBreadcrumb('startup.tier.p2.safety_force', { reason: 'timeout_8s' });
+        this.authReady = true;
+        this.setTier('p2', true, 'timer');
+      }, 8000);
+    }
 
     // P2：如果 authReady 也已满足，立即激活
     if (this.authReady) {
@@ -172,6 +178,15 @@ export class StartupTierOrchestratorService {
 
   private async runTrigger(tier: StartupTier, reason: TriggerReason): Promise<void> {
     if (this.isTierReady(tier)) return;
+
+    if (tier !== 'p0' && !this.handoffReady) {
+      this.addBreadcrumb('startup.tier.skip_reason', {
+        tier,
+        reason,
+        skip: 'handoff_not_ready'
+      });
+      return;
+    }
 
     const now = Date.now();
     const cooldown = STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS;

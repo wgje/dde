@@ -567,7 +567,7 @@ export class FlowDragDropService implements OnDestroy {
 
     // 自动展开停泊坞面板
     if (!this.dockEngine.dockExpanded()) {
-      this.dockEngine.setDockExpanded(true);
+      this.dockEngine.setDockExpanded(true, { persistPreference: false });
     }
 
     // 绑定全局指针事件

@@ -255,7 +255,7 @@ export class DockDragDropService implements OnDestroy {
     if (this.semicircleDragExpand.active) return;
     this.semicircleDragExpand.schedule(() => {
       this.semicircleHoverExpanded.set(true);
-      this.engine.setDockExpanded(true);
+      this.engine.setDockExpanded(true, { persistPreference: false });
       this.scheduleSemicircleAutoCollapse();
     }, PARKING_CONFIG.DOCK_SEMICIRCLE_DRAG_EXPAND_DELAY_MS);
   }

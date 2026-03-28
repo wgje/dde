@@ -446,11 +446,11 @@ describe('DockSnapshotPersistenceService', () => {
       expect(result!.entries).toHaveLength(2);
     });
 
-    it('should default isDockExpanded to true when undefined', () => {
+    it('should default isDockExpanded to false when undefined', () => {
       const raw = makeMinimalSnapshot();
       delete (raw as Record<string, unknown>).isDockExpanded;
       const result = service.normalizeSnapshot(raw, ctx);
-      expect(result!.isDockExpanded).toBe(true);
+      expect(result!.isDockExpanded).toBe(false);
     });
 
     it('should default dailyResetDate to todayDateKey', () => {

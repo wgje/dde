@@ -3,8 +3,9 @@ import { test, expect, devices } from '@playwright/test';
 test.use({ ...devices['Pixel 5'] });
 
 test.describe('Mobile Startup Shell', () => {
-  test('should render launch shell without horizontal overflow and keep text launch label on mobile', async ({ page }) => {
+  test('should render text startup without horizontal overflow and keep dock collapsed on mobile', async ({ page }) => {
     await page.addInitScript(() => {
+      localStorage.setItem('nanoflow.parking-dock-open', 'true');
       localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
         version: 2,
         savedAt: new Date().toISOString(),
@@ -33,7 +34,9 @@ test.describe('Mobile Startup Shell', () => {
     await page.goto('/projects/project-1/flow', { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('#initial-loader')).toBeVisible();
-    await expect(page.locator('#snapshot-view-label')).toContainText('文本');
+    await expect(page.locator('[data-testid="mobile-text-view-label"]')).toContainText('文本');
+    await expect(page.locator('[data-testid="dock-v3-semicircle"]')).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('[data-testid="dock-v3-panel"]')).toHaveClass(/focus-collapsed/);
 
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow).toBeLessThanOrEqual(0);

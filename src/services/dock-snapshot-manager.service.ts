@@ -29,6 +29,7 @@ import { DockDailySlotService } from './dock-daily-slot.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
 import { LoggerService } from './logger.service';
+import { UiStateService } from './ui-state.service';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -65,6 +66,8 @@ export interface DockSnapshotManagerContext {
   waitEndNotifiedIds: Set<string>;
   
   // Callbacks for methods that remain on engine
+  getDockExpandedPreference: () => boolean;
+  persistDockExpandedPreference: (expanded: boolean) => void;
   clearFirstMainSelectionWindow: () => void;
   rebalanceAutoZones: () => void;
 }
@@ -80,6 +83,7 @@ export class DockSnapshotManagerService {
   private readonly fragmentRest = inject(DockFragmentRestService);
   private readonly lifecycle = inject(DockEngineLifecycleService);
   private readonly logger = inject(LoggerService).category('DockSnapshotManager');
+  private readonly uiState = inject(UiStateService);
 
   private _ctx: DockSnapshotManagerContext | null = null;
 
@@ -119,7 +123,7 @@ export class DockSnapshotManagerService {
       version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries: this.ctx.entries(),
       focusMode: this.ctx.focusMode(),
-      isDockExpanded: this.ctx.dockExpanded(),
+      isDockExpanded: this.ctx.getDockExpandedPreference(),
       muteWaitTone: this.ctx.muteWaitTone(),
       session,
       firstDragDone: this.ctx.firstDragIntervened(),
@@ -157,7 +161,7 @@ export class DockSnapshotManagerService {
     this.ctx.entries.set([]);
     this.ctx.consoleVisibleOrderHint.set([]);
     this.ctx.focusMode.set(false);
-    this.ctx.dockExpanded.set(true);
+    this.ctx.dockExpanded.set(!this.uiState.isMobile() && this.ctx.getDockExpandedPreference());
     this.ctx.muteWaitTone.set(false);
     this.ctx.focusScrimOn.set(true);
     this.ctx.firstDragIntervened.set(false);
@@ -332,10 +336,14 @@ export class DockSnapshotManagerService {
 
   /** 从规范化快照恢复所有信号状态 */
   private hydrateSignalsFromSnapshot(normalized: DockSnapshot, entries: DockEntry[]): void {
+    const restoreDockExpanded = !this.uiState.isMobile() && normalized.isDockExpanded;
+
     this.ctx.entries.set(entries);
     this.ctx.consoleVisibleOrderHint.set([]);
     this.ctx.focusMode.set(normalized.focusMode);
-    this.ctx.dockExpanded.set(normalized.isDockExpanded);
+    this.ctx.persistDockExpandedPreference(normalized.isDockExpanded);
+    // 移动端启动恢复时强制从折叠态进入，避免启动后首屏内容被大面积覆盖。
+    this.ctx.dockExpanded.set(restoreDockExpanded);
     this.ctx.muteWaitTone.set(normalized.muteWaitTone);
     this.ctx.focusScrimOn.set(normalized.session.focusScrimOn);
     this.ctx.firstDragIntervened.set(normalized.session.firstDragIntervened);
