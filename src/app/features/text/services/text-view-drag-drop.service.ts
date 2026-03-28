@@ -621,6 +621,13 @@ export class TextViewDragDropService {
     document.addEventListener('dragover', this.boundHandleDragAutoScroll);
     this.ensureAutoScrollLoop();
   }
+
+  updateAutoScrollContainer(container: HTMLElement | null, clientY?: number) {
+    this.autoScrollState.scrollContainer = container;
+    if (clientY !== undefined) {
+      this.autoScrollState.lastClientY = clientY;
+    }
+  }
   
   /** 执行触摸自动滚动 */
   performTouchAutoScroll(container: HTMLElement, clientY: number) {

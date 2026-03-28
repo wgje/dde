@@ -14,6 +14,8 @@ export default defineConfig({
       'src/services/**/*.test.ts',
       'src/app/core/**/*.spec.ts',
       'src/app/core/**/*.test.ts',
+      'src/app/features/text/services/**/*.spec.ts',
+      'src/app/features/text/services/**/*.test.ts',
       'src/utils/**/*.spec.ts',
       'src/utils/**/*.test.ts',
       'src/models/**/*.spec.ts',

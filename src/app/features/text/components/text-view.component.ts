@@ -37,7 +37,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
   providers: [TextViewTaskOpsService],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div #scrollContainer class="flex flex-col h-full min-w-0 theme-bg overflow-y-auto overflow-x-hidden text-view-scroll-container"
+    <div #scrollContainer class="flex flex-col h-full min-h-0 min-w-0 theme-bg overflow-y-auto overflow-x-hidden text-view-scroll-container"
          (click)="ops.onContainerClick($event)"
          (touchmove)="onGlobalTouchMove($event)"
          (touchend)="onGlobalTouchEnd($event)"
@@ -326,7 +326,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       event.dataTransfer.effectAllowed = 'move';
     }
     
-    const container = this.ops.getScrollContainer();
+    const container = this.ops.resolveAutoScrollContainer(task.stage, event.clientY);
     if (container) {
       this.dragDropService.startAutoScroll(container, event.clientY);
     }
@@ -364,6 +364,8 @@ export class TextViewComponent implements OnInit, OnDestroy {
       const nextTask = stage?.tasks[idx + 1];
       this.dragDropService.updateDropTarget(stageNumber, nextTask?.id ?? null);
     }
+
+    this.dragDropService.updateAutoScrollContainer(this.ops.resolveAutoScrollContainer(stageNumber, event.clientY), event.clientY);
   }
   
   onStageDragOver(data: { event: DragEvent; stageNumber: number }) {
@@ -377,6 +379,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
     if (result.expand !== undefined) this.stagesRef?.expandStage(result.expand);
 
     this.ops.collapseSourceStageIfNeeded(stageNumber);
+    this.dragDropService.updateAutoScrollContainer(this.ops.resolveAutoScrollContainer(stageNumber, event.clientY), event.clientY);
   }
   
   onStageDragLeave(data: { event: DragEvent; stageNumber: number }) {
@@ -388,6 +391,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       const collapseStage = this.dragDropService.handleStageDragLeave(stageNumber);
       if (collapseStage !== null) this.stagesRef?.collapseStage(collapseStage);
       this.ops.collapseSourceStageIfNeeded(null);
+      this.dragDropService.updateAutoScrollContainer(this.ops.getScrollContainer(), event.clientY);
     }
   }
   
@@ -459,12 +463,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
     if (!isActiveDragging) return;
     
     if (event.cancelable) event.preventDefault();
-    
-    // 自动滚动
-    const container = this.ops.getScrollContainer();
-    if (container) {
-      this.dragDropService.performTouchAutoScroll(container, touch.clientY);
-    }
+    let activeScrollStage: number | null = null;
     
     // 查找目标阶段
     const elements = document.elementsFromPoint(touch.clientX, touch.clientY);
@@ -525,6 +524,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       
       this.dragDropService.updateGhostVisualFeedback(true);
       this.dragDropService.clearUnassignedTarget();
+      activeScrollStage = stageNum;
       foundStage = true;
       break;
     }
@@ -560,6 +560,11 @@ export class TextViewComponent implements OnInit, OnDestroy {
         }
         this.ops.collapseSourceStageIfNeeded(null);
       }
+    }
+
+    const container = this.ops.resolveAutoScrollContainer(activeScrollStage, touch.clientY);
+    if (container) {
+      this.dragDropService.performTouchAutoScroll(container, touch.clientY);
     }
   }
   

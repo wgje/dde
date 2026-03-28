@@ -15,6 +15,9 @@ import { TextStageCardComponent } from './text-stage-card.component';
   selector: 'app-text-stages',
   standalone: true,
   imports: [CommonModule, TextStageCardComponent],
+  host: {
+    class: 'flex flex-1 min-h-0 min-w-0',
+  },
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section 

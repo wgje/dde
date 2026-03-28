@@ -432,9 +432,9 @@
   
   <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
   <script>
-    // 【2026-03-28 大改】简化的加载指示器消除逻辑
-    // Angular 启动后 AppComponent 会直接隐藏 #initial-loader。
-    // 此脚本仅作为兜底：angular 完全无法启动时显示错误。
+    // 加载指示器消除逻辑
+    // WorkspaceShell.ngAfterViewInit() 会直接隐藏 #initial-loader。
+    // 此脚本仅作为兜底：Angular 完全无法启动时显示错误。
     (function() {
       var startTime = Date.now();
       var dismissed = false;
@@ -446,10 +446,10 @@
         if (loader) loader.style.display = 'none';
       }
 
-      // 事件驱动：Angular boot-stage 事件
+      // 事件驱动：仅在 handoff/ready 阶段才隐藏（工作区视图已就绪）
       window.addEventListener('nanoflow:boot-stage', function(e) {
         var detail = e && e.detail;
-        if (detail && (detail.stage === 'launch-shell' || detail.stage === 'handoff' || detail.stage === 'ready')) {
+        if (detail && (detail.stage === 'handoff' || detail.stage === 'ready')) {
           dismissLoader();
         }
       });

@@ -85,6 +85,57 @@ export class TextViewTaskOpsService {
     return this.elementRef.nativeElement.querySelector('.text-view-scroll-container');
   }
 
+  getStageTaskListContainer(stageNumber: number | null | undefined): HTMLElement | null {
+    if (stageNumber === null || stageNumber === undefined) {
+      return null;
+    }
+    return this.elementRef.nativeElement.querySelector(`[data-stage-task-list="${stageNumber}"]`);
+  }
+
+  resolveAutoScrollContainer(stageNumber: number | null | undefined, clientY?: number): HTMLElement | null {
+    const scrollContainer = this.getScrollContainer();
+    const stageTaskList = this.getStageTaskListContainer(stageNumber);
+    if (!this.canAutoScroll(stageTaskList)) {
+      return scrollContainer;
+    }
+
+    if (clientY === undefined) {
+      return stageTaskList;
+    }
+
+    const direction = this.getAutoScrollDirection(stageTaskList, clientY);
+    if (direction < 0) {
+      return stageTaskList.scrollTop > 0 ? stageTaskList : scrollContainer;
+    }
+
+    if (direction > 0) {
+      const maxScrollTop = Math.max(0, stageTaskList.scrollHeight - stageTaskList.clientHeight);
+      return stageTaskList.scrollTop < maxScrollTop ? stageTaskList : scrollContainer;
+    }
+
+    return stageTaskList;
+  }
+
+  private canAutoScroll(container: HTMLElement | null): container is HTMLElement {
+    return !!container && container.clientHeight > 0 && container.scrollHeight > container.clientHeight;
+  }
+
+  private getAutoScrollDirection(container: HTMLElement, clientY: number): -1 | 0 | 1 {
+    const rect = container.getBoundingClientRect();
+    const edgeSize = 100;
+    const edgeOverflow = 20;
+
+    if (clientY < rect.top + edgeSize && clientY > rect.top - edgeOverflow) {
+      return -1;
+    }
+
+    if (clientY > rect.bottom - edgeSize && clientY < rect.bottom + edgeOverflow) {
+      return 1;
+    }
+
+    return 0;
+  }
+
   scrollToElementById(selector: string): void {
     this.ngZone.runOutsideAngular(() => {
       requestAnimationFrame(() => {

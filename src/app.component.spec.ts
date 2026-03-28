@@ -6,15 +6,11 @@ import { BootStageService } from './services/boot-stage.service';
 describe('AppComponent', () => {
   let bootStageMock: {
     markLaunchShellVisible: ReturnType<typeof vi.fn>;
-    markWorkspaceHandoffReady: ReturnType<typeof vi.fn>;
-    markApplicationReady: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
     bootStageMock = {
       markLaunchShellVisible: vi.fn(),
-      markWorkspaceHandoffReady: vi.fn(),
-      markApplicationReady: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -31,7 +27,6 @@ describe('AppComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    // 无启动壳覆盖层
     expect(fixture.nativeElement.querySelector('[data-testid="launch-shell"]')).toBeFalsy();
     expect(fixture.nativeElement.querySelector('router-outlet')).toBeTruthy();
   });

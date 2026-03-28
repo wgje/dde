@@ -935,7 +935,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   ngAfterViewInit(): void {
     this.signalWorkspaceHandoffReady();
   }
-  
   /**
    * 启动时校验关键 Feature Flags
    * 
@@ -1084,14 +1083,28 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.workspaceHandoffSignaled = true;
-    // 【2026-03-28 大改】启动壳已移除，直接标记 handoff 完成
+
+    // 工作区视图已就绪，隐藏 index.html 的 initial-loader
+    if (typeof window !== 'undefined') {
+      const loader = document.getElementById('initial-loader');
+      if (loader) {
+        loader.style.display = 'none';
+      }
+    }
+
+    // 推进启动阶段：handoff → ready
     this.bootStage.markWorkspaceHandoffReady();
+    this.bootStage.markApplicationReady();
+
+    // 通知 HandoffCoordinator 布局已稳定，驱动移动端路由降级逻辑
+    this.handoffCoordinator.markLayoutStable();
   }
 
   private setupHandoffEffect(): void {
-    // 【2026-03-28 大改】启动壳已移除，handoff 不再阻塞。
-    // HandoffCoordinator.resolve() 仍被调用以驱动移动端路由降级逻辑，
-    // 但结果不再影响 UI 可见性。
+    // HandoffCoordinator.resolve() 驱动移动端路由降级和登录检测。
+    // 启动壳已移除，但 resolve 结果仍影响：
+    // 1. 移动端文本视图回退（degraded-to-text / degraded-to-project）
+    // 2. showLoginRequired 条件判断
     effect(() => {
       if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2) {
         return;
