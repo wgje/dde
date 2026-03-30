@@ -158,7 +158,7 @@ export class DockCloudSyncService implements OnDestroy {
         await this.hydrateRoutineSlots(userId);
         return;
       }
-      let remoteRaw = loadResult.value;
+      const remoteRaw = loadResult.value;
 
       // H-3 fix: 异步点后检查用户是否已切换
       if (!this.isCurrentUser(userId)) return;

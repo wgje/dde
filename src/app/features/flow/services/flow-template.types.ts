@@ -82,27 +82,3 @@ export interface LinkStyleConfig {
   captureRadius: number;
 }
 
-/**
- * 连接线标签点击事件数据
- */
-export interface LinkLabelClickEventData {
-  sourceId: string;
-  targetId: string;
-}
-
-/**
- * 节点点击事件数据
- */
-export interface NodeClickEventData {
-  taskId: string;
-  isCtrlClick: boolean;
-}
-
-/**
- * 节点选择事件数据
- */
-export interface NodeSelectionEventData {
-  taskId: string;
-  selected: boolean;
-  isMultiSelect: boolean;
-}

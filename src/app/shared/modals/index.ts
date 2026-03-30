@@ -1,6 +1,3 @@
-// 模态框基类
-export { BaseModalComponent, ConfirmModalComponent, EditableModalComponent } from './base-modal.component';
-
 // 模态框组件导出
 export { SettingsModalComponent } from './settings-modal.component';
 export { LoginModalComponent } from './login-modal.component';

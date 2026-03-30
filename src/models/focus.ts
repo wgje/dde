@@ -98,20 +98,6 @@ export type GateState =
   | 'disabled';     // 用户禁用大门功能
 
 /**
- * 大门上下文
- */
-export interface GateContext {
-  /** 待处理的黑匣子条目 */
-  pendingItems: BlackBoxEntry[];
-  /** 当前条目索引 */
-  currentIndex: number;
-  /** 大门状态 */
-  state: GateState;
-  /** 当日已跳过次数 */
-  snoozeCount: number;
-}
-
-/**
  * 专注模式用户偏好
  */
 export interface FocusPreferences {
@@ -177,22 +163,6 @@ export interface StrataLayer {
   opacity: number;
   /** 是否折叠 */
   collapsed?: boolean;
-}
-
-/**
- * 转写使用量记录
- */
-export interface TranscriptionUsage {
-  /** UUID - 由 Edge Function 生成 */
-  id: string;
-  /** 用户 ID */
-  userId: string;
-  /** 日期 YYYY-MM-DD */
-  date: string;
-  /** 音频秒数 */
-  audioSeconds: number;
-  /** 创建时间 */
-  createdAt: string;
 }
 
 /**

@@ -5,22 +5,6 @@ import { ProjectStateService } from './project-state.service';
 import { UiStateService } from './ui-state.service';
 
 /**
- * 搜索结果
- */
-export interface SearchResult {
-  tasks: Task[];
-  totalCount: number;
-}
-
-/**
- * 项目搜索结果
- */
-export interface ProjectSearchResult {
-  projects: Project[];
-  totalCount: number;
-}
-
-/**
  * 搜索服务
  * 从 StoreService 拆分出来，专注于搜索逻辑
  * 

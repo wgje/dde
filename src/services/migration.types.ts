@@ -85,13 +85,3 @@ export interface MigrationResult {
   error?: string;
 }
 
-/**
- * 迁移进度
- */
-export interface MigrationProgress {
-  phase: number;
-  totalPhases: number;
-  message: string;
-  projectsCompleted: number;
-  projectsTotal: number;
-}

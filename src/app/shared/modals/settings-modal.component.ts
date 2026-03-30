@@ -234,6 +234,7 @@ interface TaskAttachmentMetadata {
                 </div>
                 <div class="flex items-center gap-2">
                   <button 
+                    data-testid="settings-export-button"
                     (click)="handleExport()"
                     [disabled]="exportService.isExporting()"
                     class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-[10px] font-bold text-slate-600 dark:text-stone-300 hover:bg-slate-50 dark:hover:bg-stone-600 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
@@ -245,6 +246,7 @@ interface TaskAttachmentMetadata {
                     <span>导出</span>
                   </button>
                   <button 
+                    data-testid="settings-import-button"
                     (click)="triggerImportFileSelect()"
                     [disabled]="importService.isImporting()"
                     class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-slate-200 dark:border-stone-600 rounded-md text-[10px] font-bold text-slate-600 dark:text-stone-300 hover:bg-slate-50 dark:hover:bg-stone-600 hover:border-slate-300 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
@@ -255,7 +257,7 @@ interface TaskAttachmentMetadata {
                     }
                     <span>导入</span>
                   </button>
-                  <input #fileInput type="file" accept=".json,application/json" class="hidden" (change)="handleFileSelected($event)" />
+                  <input #fileInput data-testid="settings-import-input" type="file" accept=".json,application/json" class="hidden" (change)="handleFileSelected($event)" />
                 </div>
               </div>
 
@@ -314,6 +316,9 @@ interface TaskAttachmentMetadata {
                 <button 
                   type="button"
                   (click)="toggleGateEnabled()"
+                  data-testid="settings-gate-toggle"
+                  role="switch"
+                  [attr.aria-checked]="focusPreferenceService.preferences().gateEnabled"
                   class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
                   [class.bg-indigo-500]="focusPreferenceService.preferences().gateEnabled"
                   [class.bg-slate-200]="!focusPreferenceService.preferences().gateEnabled">
@@ -333,6 +338,9 @@ interface TaskAttachmentMetadata {
                 <button 
                   type="button"
                   (click)="toggleSpotlightEnabled()"
+                  data-testid="settings-spotlight-toggle"
+                  role="switch"
+                  [attr.aria-checked]="focusPreferenceService.preferences().spotlightEnabled"
                   class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
                   [class.bg-indigo-500]="focusPreferenceService.preferences().spotlightEnabled"
                   [class.bg-slate-200]="!focusPreferenceService.preferences().spotlightEnabled">
@@ -353,6 +361,8 @@ interface TaskAttachmentMetadata {
                   type="button"
                   (click)="toggleBlackBoxEnabled()"
                   data-testid="settings-blackbox-toggle"
+                  role="switch"
+                  [attr.aria-checked]="focusPreferenceService.preferences().blackBoxEnabled"
                   class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
                   [class.bg-indigo-500]="focusPreferenceService.preferences().blackBoxEnabled"
                   [class.bg-slate-200]="!focusPreferenceService.preferences().blackBoxEnabled">
@@ -372,6 +382,9 @@ interface TaskAttachmentMetadata {
                 <button 
                   type="button"
                   (click)="toggleStrataEnabled()"
+                  data-testid="settings-strata-toggle"
+                  role="switch"
+                  [attr.aria-checked]="focusPreferenceService.preferences().strataEnabled"
                   class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
                   [class.bg-indigo-500]="focusPreferenceService.preferences().strataEnabled"
                   [class.bg-slate-200]="!focusPreferenceService.preferences().strataEnabled">

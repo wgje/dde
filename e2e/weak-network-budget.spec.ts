@@ -16,6 +16,7 @@
 import { test, expect } from '@playwright/test';
 import { ensurePerfAuthenticated, getPerfTargetPath } from './perf/authenticated-perf.setup';
 import { initPerfMetrics, mergePerfMetrics } from './perf/perf-metrics';
+import { waitForAppReady, waitForCountToStabilize } from './shared/page-helpers';
 
 // 弱网性能预算阈值
 const BUDGET = {
@@ -77,7 +78,11 @@ test.describe('弱网性能预算门禁', () => {
 
     // 导航到应用
     await page.goto(getPerfTargetPath(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForTimeout(10_000);
+    await waitForAppReady(page, { timeoutMs: 20_000 });
+    await waitForCountToStabilize(
+      () => allResponses.filter((item) => item.resourceType === 'fetch' || item.resourceType === 'xhr').length,
+      { idleMs: 1_500, timeoutMs: 20_000, pollMs: 250 },
+    );
 
     // 收集 LCP
     const lcp = await page.evaluate(() => {

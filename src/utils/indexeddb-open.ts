@@ -1,10 +1,11 @@
-export type IndexedDBUpgradeHandler = (db: IDBDatabase) => void;
+export type IndexedDBUpgradeHandler = (db: IDBDatabase, transaction: IDBTransaction | null) => void;
 
 export interface OpenIndexedDBAdaptiveOptions {
   dbName: string;
   targetVersion: number;
   ensureStores?: IndexedDBUpgradeHandler;
   requiredStores?: readonly string[];
+  schemaNeedsUpgrade?: (db: IDBDatabase) => boolean;
 }
 
 /**
@@ -13,7 +14,7 @@ export interface OpenIndexedDBAdaptiveOptions {
  * 2. Upgrade only when schema version or required stores are behind.
  */
 export async function openIndexedDBAdaptive(options: OpenIndexedDBAdaptiveOptions): Promise<IDBDatabase> {
-  const { dbName, targetVersion, ensureStores, requiredStores = [] } = options;
+  const { dbName, targetVersion, ensureStores, requiredStores = [], schemaNeedsUpgrade } = options;
 
   if (!Number.isInteger(targetVersion) || targetVersion < 1) {
     throw new Error(`Invalid IndexedDB targetVersion for ${dbName}: ${targetVersion}`);
@@ -21,8 +22,15 @@ export async function openIndexedDBAdaptive(options: OpenIndexedDBAdaptiveOption
 
   const existingDb = await openIndexedDB(dbName);
   const missingStores = requiredStores.filter(store => !existingDb.objectStoreNames.contains(store));
+  let missingSchema = false;
+  try {
+    missingSchema = schemaNeedsUpgrade?.(existingDb) === true;
+  } catch (error) {
+    existingDb.close();
+    throw error;
+  }
   const needsVersionUpgrade = existingDb.version < targetVersion;
-  const needsSchemaRepair = missingStores.length > 0;
+  const needsSchemaRepair = missingStores.length > 0 || missingSchema;
 
   if (!needsVersionUpgrade && !needsSchemaRepair) {
     return existingDb;
@@ -46,6 +54,7 @@ function openIndexedDB(
   ensureStores?: IndexedDBUpgradeHandler
 ): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    let blockedTimer = null;
     let request: IDBOpenDBRequest;
     try {
       request = version === undefined ? indexedDB.open(dbName) : indexedDB.open(dbName, version);
@@ -59,7 +68,7 @@ function openIndexedDB(
     request.onupgradeneeded = () => {
       if (!ensureStores) return;
       try {
-        ensureStores(request.result);
+        ensureStores(request.result, request.transaction ?? null);
       } catch (error) {
         upgradeFailed = true;
         request.transaction?.abort();
@@ -68,6 +77,9 @@ function openIndexedDB(
     };
 
     request.onsuccess = () => {
+      if (blockedTimer !== null) {
+        clearTimeout(blockedTimer);
+      }
       if (upgradeFailed) {
         request.result.close();
         return;
@@ -76,11 +88,19 @@ function openIndexedDB(
     };
 
     request.onerror = () => {
+      if (blockedTimer !== null) {
+        clearTimeout(blockedTimer);
+      }
       reject(request.error ?? new Error(`Unknown IndexedDB error while opening ${dbName}`));
     };
 
     request.onblocked = () => {
-      reject(new Error(`IndexedDB open blocked for ${dbName}`));
+      if (blockedTimer !== null) {
+        clearTimeout(blockedTimer);
+      }
+      blockedTimer = setTimeout(() => {
+        reject(new Error(`IndexedDB open blocked for ${dbName}`));
+      }, 5000);
     };
   });
 }

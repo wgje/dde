@@ -110,9 +110,10 @@ describe('FlowConnectionEditorComponent', () => {
     expect(fixture.nativeElement.querySelector('textarea')).toBeNull();
   });
 
-  it('编辑态触摸编辑器外部时应自动保存并关闭编辑器', () => {
+  it('编辑态触摸编辑器外部时应自动保存并退出编辑态', () => {
     const saveSpy = vi.spyOn(component.save, 'emit');
     const closeSpy = vi.spyOn(component.close, 'emit');
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
 
     (component as any).position = signal({ x: 160, y: 240 });
     (component as any).connectionTasks = signal({
@@ -164,8 +165,9 @@ describe('FlowConnectionEditorComponent', () => {
       title: '依赖',
       description: '新描述',
     });
-    // 触摸外部应保存并关闭编辑器
-    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
+    expect(component.isEditMode()).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('同一关联块会话从预览切到编辑时应响应外部 mode 变化', () => {
@@ -370,9 +372,10 @@ describe('FlowConnectionEditorComponent', () => {
     expect(component.isEditMode()).toBe(false);
   });
 
-  it('触摸编辑器外部时应优先保存输入框中的最新 DOM 值并关闭编辑器', () => {
+  it('触摸编辑器外部时应优先保存输入框中的最新 DOM 值并退出编辑态', () => {
     const saveSpy = vi.spyOn(component.save, 'emit');
     const closeSpy = vi.spyOn(component.close, 'emit');
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
 
     (component as any).position = signal({ x: 160, y: 240 });
     (component as any).connectionTasks = signal({
@@ -417,13 +420,15 @@ describe('FlowConnectionEditorComponent', () => {
       title: 'DOM 最新标题',
       description: 'DOM 最新描述',
     });
-    // 触摸外部应保存并关闭编辑器
-    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
+    expect(component.isEditMode()).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
-  it('输入法组合输入期间触摸编辑器外部时也应保存最后可见文本并关闭', () => {
+  it('输入法组合输入期间触摸编辑器外部时也应保存最后可见文本并退出编辑态', () => {
     const saveSpy = vi.spyOn(component.save, 'emit');
     const closeSpy = vi.spyOn(component.close, 'emit');
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
 
     (component as any).position = signal({ x: 160, y: 240 });
     (component as any).connectionTasks = signal({
@@ -469,8 +474,9 @@ describe('FlowConnectionEditorComponent', () => {
       title: '依赖',
       description: '中文输入中的最新值',
     });
-    // IME 输入中触摸外部也应关闭编辑器
-    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
+    expect(component.isEditMode()).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('父层直接清空编辑器数据时也应保存最新 DOM 值', () => {
@@ -519,9 +525,10 @@ describe('FlowConnectionEditorComponent', () => {
     });
   });
 
-  it('服务层回流更新后用户继续编辑再触摸外部仍应保存最新内容', () => {
+  it('服务层回流更新后用户继续编辑再触摸外部仍应保存最新内容并退出编辑态', () => {
     const saveSpy = vi.spyOn(component.save, 'emit');
     const closeSpy = vi.spyOn(component.close, 'emit');
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
 
     const dataSignal = signal<any>({
       sourceId: 'source-task',
@@ -586,6 +593,8 @@ describe('FlowConnectionEditorComponent', () => {
       title: '最终标题',
       description: '最终描述',
     });
-    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
+    expect(component.isEditMode()).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 });

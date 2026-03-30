@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DestroyRef, Injector } from '@angular/core';
 import { StartupTierOrchestratorService } from './startup-tier-orchestrator.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 
 describe('StartupTierOrchestratorService', () => {
   let service: StartupTierOrchestratorService;
@@ -18,6 +19,11 @@ describe('StartupTierOrchestratorService', () => {
     Object.defineProperty(document, 'hidden', {
       configurable: true,
       get: () => false,
+    });
+
+    Object.defineProperty(window.navigator, 'onLine', {
+      configurable: true,
+      get: () => true,
     });
 
     const injector = Injector.create({
@@ -78,9 +84,13 @@ describe('StartupTierOrchestratorService', () => {
     expect(service.isTierReady('p2')).toBe(false);
 
     service.markHandoffReady();
-    window.dispatchEvent(new Event('focus'));
 
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(
+      Math.max(
+        STARTUP_PERF_CONFIG.P2_SYNC_HYDRATE_DELAY_MS,
+        STARTUP_PERF_CONFIG.P2_SYNC_MIN_VISIBLE_MS,
+      ) + 50,
+    );
 
     expect(service.isTierReady('p2')).toBe(true);
   });

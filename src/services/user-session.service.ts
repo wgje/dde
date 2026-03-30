@@ -17,6 +17,7 @@ import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
+import { isValidUUID } from '../utils/validation';
 import type { LaunchSnapshot, LaunchSnapshotProject } from '../models/launch-shell';
 
 type StartupProjectCatalogStage = 'unresolved' | 'partial' | 'resolved';
@@ -259,18 +260,24 @@ export class UserSessionService {
 
   /** 从快照 projects 构建轻量 Project 对象供 Store 预填充 */
   private buildPrehydrateProjects(snapshotProjects: LaunchSnapshotProject[]): Project[] {
+    // 安全限制：最多预填充 50 个项目，防止恶意 localStorage 注入导致内存/渲染爆炸
+    const MAX_PREHYDRATE_PROJECTS = 50;
+    const MAX_RECENT_TASKS = 20;
+    const MAX_NAME_LENGTH = 200;
     const now = new Date().toISOString();
     const results: Project[] = [];
 
-    for (const sp of snapshotProjects) {
-      if (!sp.id || typeof sp.id !== 'string') continue;
+    for (const sp of snapshotProjects.slice(0, MAX_PREHYDRATE_PROJECTS)) {
+      // 安全校验：ID 必须是合法 UUID，防止注入恶意字符串
+      if (!sp.id || typeof sp.id !== 'string' || !isValidUUID(sp.id)) continue;
 
       const tasks: Task[] = (sp.recentTasks ?? [])
-        .filter(t => t.id && typeof t.id === 'string')
+        .slice(0, MAX_RECENT_TASKS)
+        .filter(t => t.id && typeof t.id === 'string' && isValidUUID(t.id))
         .map((t, idx) => ({
           id: t.id,
-          title: t.title || '',
-          content: t.title || '',
+          title: this.sanitizeSnapshotString(t.title, MAX_NAME_LENGTH),
+          content: this.sanitizeSnapshotString(t.title, MAX_NAME_LENGTH),
           stage: null,
           parentId: null,
           order: idx,
@@ -284,8 +291,8 @@ export class UserSessionService {
 
       results.push({
         id: sp.id,
-        name: sp.name || 'Untitled',
-        description: sp.description || '',
+        name: this.sanitizeSnapshotString(sp.name, MAX_NAME_LENGTH) || 'Untitled',
+        description: this.sanitizeSnapshotString(sp.description, MAX_NAME_LENGTH),
         createdDate: now,
         updatedAt: sp.updatedAt ?? now,
         tasks,
@@ -294,6 +301,14 @@ export class UserSessionService {
     }
 
     return results;
+  }
+
+  /** 清理快照字段：截断过长文本，去除可能的 HTML 标签 */
+  private sanitizeSnapshotString(value: unknown, maxLength: number): string {
+    if (typeof value !== 'string') return '';
+    // 去除可能的 HTML 标签（Angular 模板默认转义，但多一层防护）
+    const cleaned = value.replace(/<[^>]*>/g, '');
+    return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
   }
 
   /**
@@ -332,16 +347,13 @@ export class UserSessionService {
         if (shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) {
           this.projectState.setActiveProjectId(null);
         }
-        if (shouldClearPrehydratedSnapshotState) {
-          this.projectState.setProjects([]);
-          this.clearStartupProjectCatalogState();
-        }
         // 【P0 修复 2026-02-08 / 2026-03-27 加固】
-        // 仅在切换到另一个真实用户时清空项目（避免旧用户数据泄露给新用户）。
-        // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的，
-        // 多余的 setProjects([]) 会触发信号风暴（handoff/snapshot/computed 全部重算），
-        // 在移动端造成主线程阻塞（"卡死"）和 handoff 状态闪烁。
-        if (isUserChange && previousUserId !== null) {
+        // 仅在用户切换（旧用户→新用户）或快照不可信时清空项目列表。
+        // 合并两个分支，避免 setProjects([]) 被触发两次产生信号风暴。
+        // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的。
+        const shouldClearProjects = shouldClearPrehydratedSnapshotState
+          || (isUserChange && previousUserId !== null);
+        if (shouldClearProjects) {
           this.projectState.setProjects([]);
           this.clearStartupProjectCatalogState();
         }
@@ -450,6 +462,9 @@ export class UserSessionService {
       'nanoflow.escape-pod',
       'nanoflow.safari-warning-time',
       'nanoflow.guest-data',
+      // 启动快照必须在登出时清理，防止跨用户数据泄露
+      'nanoflow.launch-snapshot.v1',
+      'nanoflow.launch-snapshot.v2',
     ];
     
     localStorageKeysToRemove.forEach(key => {
@@ -492,6 +507,16 @@ export class UserSessionService {
       }
     } catch (e) {
       this.logger.warn('Supabase signOut 失败', e);
+    }
+
+    // 6. 清理 window 全局启动快照，防止跨用户数据泄露
+    if (typeof window !== 'undefined') {
+      try {
+        delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
+        delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
+      } catch {
+        // 静默忽略
+      }
     }
     
     this.logger.info('本地数据清理完成');

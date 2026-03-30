@@ -46,7 +46,6 @@ function countMatches(content, pattern) {
 function extractMetric(content, pattern) {
   const values = [];
   let match;
-  // eslint-disable-next-line no-cond-assign
   while ((match = pattern.exec(content)) !== null) {
     values.push(Number(match[1]));
   }

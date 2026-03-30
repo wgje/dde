@@ -14,7 +14,9 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
+      data-testid="task-card"
       [attr.data-task-id]="task().id"
+      [attr.data-indent-level]="task().parentId ? '1' : '0'"
       (click)="onCardClick($event)"
       [attr.draggable]="!isSelected()"
       (dragstart)="onDragStart($event)"
@@ -63,6 +65,13 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
             }">
             {{ task().status === 'completed' ? 'Completed' : 'Active' }}
           </span>
+          @if (task().parentId) {
+            <span
+              data-testid="parent-indicator"
+              class="text-[8px] px-1 py-0.5 rounded font-medium bg-slate-100 dark:bg-stone-700 text-slate-600 dark:text-stone-300">
+              Child
+            </span>
+          }
         </div>
         <span class="text-retro-muted/60 dark:text-stone-500 font-light"
               [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
@@ -72,6 +81,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 
       @if (!isSelected()) {
         <div class="font-medium text-retro-dark dark:text-stone-200 leading-snug line-clamp-2 cursor-pointer"
+             data-testid="task-title-label"
              [ngClass]="{'text-sm mb-1': !isMobile(), 'text-xs mb-0.5': isMobile()}">
           {{ task().title || 'Untitled task' }}
         </div>

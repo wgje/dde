@@ -110,4 +110,41 @@ describe('openIndexedDBAdaptive', () => {
       await deleteRawDB(dbName);
     }
   });
+
+  it('repairs missing indexes when schemaNeedsUpgrade reports stale store shape', async () => {
+    const dbName = createDbName('idb-adaptive-index-repair');
+
+    try {
+      const existingDb = await openRawDB(dbName, 2, db => {
+        if (!db.objectStoreNames.contains('tasks')) {
+          const store = db.createObjectStore('tasks', { keyPath: 'id' });
+          store.createIndex('projectId', 'projectId', { unique: false });
+        }
+      });
+      existingDb.close();
+
+      const db = await openIndexedDBAdaptive({
+        dbName,
+        targetVersion: 2,
+        requiredStores: ['tasks'],
+        schemaNeedsUpgrade: openedDb => {
+          const tx = openedDb.transaction('tasks', 'readonly');
+          return !tx.objectStore('tasks').indexNames.contains('projectId_updatedAt');
+        },
+        ensureStores: (_db, transaction) => {
+          const store = transaction?.objectStore('tasks');
+          if (store && !store.indexNames.contains('projectId_updatedAt')) {
+            store.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
+          }
+        },
+      });
+
+      expect(db.version).toBe(3);
+      const tx = db.transaction('tasks', 'readonly');
+      expect(tx.objectStore('tasks').indexNames.contains('projectId_updatedAt')).toBe(true);
+      db.close();
+    } finally {
+      await deleteRawDB(dbName);
+    }
+  });
 });

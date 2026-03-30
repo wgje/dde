@@ -607,7 +607,7 @@ export class SimpleSyncService {
       });
     };
 
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    if (typeof window !== 'undefined' && typeof (window as Window & { requestIdleCallback?: unknown }).requestIdleCallback === 'function') {
       (
         window as Window & {
           requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;

@@ -6,8 +6,45 @@ const projectRoot = process.cwd();
 const DEFAULT_BASELINE = 'scripts/test-duration-baseline.json';
 const DEFAULT_QUARANTINE = 'scripts/test-quarantine.json';
 const DEFAULT_ALPHA = 0.35;
-const TIMING_FILE_REGEX = /vitest-shard-\d+\.json$/;
+const TIMING_FILE_REGEX = /^vitest-(?!report)(?:.+-)?shard-(?:all|\d+(?:-\d+)?)\.json$/;
+const VITEST_REPORT_FILE_REGEX = /^vitest-report(?:-.+)?\.json$/;
 const UPDATED_BY = 'scripts/update-test-duration-baseline.cjs@v2';
+const KNOWN_LANES = new Set([
+  'lane_node_minimal',
+  'lane_browser_minimal',
+  'lane_testbed_service',
+  'lane_testbed_component',
+]);
+
+function isRecognizedTimingBasename(baseName) {
+  if (/^vitest-shard-\d+\.json$/.test(baseName)) {
+    return true;
+  }
+
+  const match = /^vitest-(local|ci)-(.+)-shard-(all|\d+(?:-\d+)?)\.json$/.exec(baseName);
+  if (!match) {
+    return false;
+  }
+
+  const laneKey = match[2];
+  if (laneKey === 'all-lanes') {
+    return true;
+  }
+
+  const laneParts = laneKey.split('__').filter(Boolean);
+  return laneParts.length > 0 && laneParts.every((lane) => KNOWN_LANES.has(lane));
+}
+
+function isMatrixTimingPayload(parsed) {
+  return Boolean(
+    parsed
+    && typeof parsed === 'object'
+    && typeof parsed.mode === 'string'
+    && typeof parsed.strategy === 'string'
+    && typeof parsed.scheduler === 'string'
+    && Array.isArray(parsed.lanes)
+  );
+}
 
 const toPosix = (value) => value.split(path.sep).join('/');
 
@@ -232,6 +269,37 @@ function countSamples(sampleMap) {
   return total;
 }
 
+function mergeSampleMaps(...sampleMaps) {
+  const merged = new Map();
+
+  for (const sampleMap of sampleMaps) {
+    for (const [key, samples] of sampleMap.entries()) {
+      const bucket = merged.get(key) ?? [];
+      bucket.push(...samples);
+      merged.set(key, bucket);
+    }
+  }
+
+  return merged;
+}
+
+function mergePreferredSampleMaps(preferredMap, fallbackMap) {
+  const merged = new Map();
+
+  for (const [key, samples] of preferredMap.entries()) {
+    merged.set(key, [...samples]);
+  }
+
+  for (const [key, samples] of fallbackMap.entries()) {
+    if (merged.has(key)) {
+      continue;
+    }
+    merged.set(key, [...samples]);
+  }
+
+  return merged;
+}
+
 function ewma(prev, current, alpha) {
   const p = parsePositiveNumber(prev);
   const c = parsePositiveNumber(current);
@@ -294,7 +362,7 @@ function collectTimingObservations(timingPaths) {
 
     if (!parsed || typeof parsed !== 'object') continue;
 
-    if (TIMING_FILE_REGEX.test(path.basename(absolute)) || /^(\d+)\/(\d+)$/.test(String(parsed.shard ?? ''))) {
+    if (isMatrixTimingPayload(parsed)) {
       shardTimingPaths.add(normalizeRelativePath(absolute));
     }
 
@@ -330,6 +398,50 @@ function collectTimingObservations(timingPaths) {
   };
 }
 
+function collectGeneratedVitestReportInputs(timingPaths) {
+  const reports = new Set();
+
+  for (const timingPath of timingPaths) {
+    let parsed;
+    try {
+      parsed = loadJsonIfExists(timingPath);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      continue;
+    }
+
+    const generated = parsed.generatedVitestReports;
+    if (generated && typeof generated === 'object') {
+      const loadedPaths = Array.isArray(generated.loadedPaths) ? generated.loadedPaths : [];
+      const requestedPaths = Array.isArray(generated.requestedPaths) ? generated.requestedPaths : [];
+      for (const reportPath of [...loadedPaths, ...requestedPaths]) {
+        if (typeof reportPath === 'string' && reportPath.trim()) {
+          reports.add(normalizeRelativePath(reportPath));
+        }
+      }
+    }
+
+    if (Array.isArray(parsed.lanes)) {
+      for (const lane of parsed.lanes) {
+        if (!lane || typeof lane !== 'object' || !Array.isArray(lane.segments)) {
+          continue;
+        }
+
+        for (const segment of lane.segments) {
+          const reportPath = segment?.vitestJsonReportPath;
+          if (typeof reportPath === 'string' && reportPath.trim()) {
+            reports.add(normalizeRelativePath(reportPath));
+          }
+        }
+      }
+    }
+  }
+
+  return [...reports].sort();
+}
+
 function listDefaultTimingInputs() {
   const roots = [
     toAbsolutePath('test-results'),
@@ -337,10 +449,32 @@ function listDefaultTimingInputs() {
 
   const files = [];
   for (const root of roots) {
-    files.push(...collectFilesRecursive(root, (absolute) => TIMING_FILE_REGEX.test(path.basename(absolute))));
+    files.push(...collectFilesRecursive(root, (absolute) => {
+      const baseName = path.basename(absolute);
+      if (!TIMING_FILE_REGEX.test(baseName) || !isRecognizedTimingBasename(baseName)) {
+        return false;
+      }
+
+      try {
+        return isMatrixTimingPayload(JSON.parse(fs.readFileSync(absolute, 'utf8')));
+      } catch {
+        return false;
+      }
+    }));
   }
 
   const unique = [...new Set(files.map((absolute) => normalizeRelativePath(absolute)))];
+  unique.sort();
+  return unique;
+}
+
+function listDefaultVitestReportInputs() {
+  const reports = collectFilesRecursive(toAbsolutePath('test-results'), (absolute) => {
+    const baseName = path.basename(absolute);
+    return VITEST_REPORT_FILE_REGEX.test(baseName);
+  });
+
+  const unique = [...new Set(reports.map((absolute) => normalizeRelativePath(absolute)))];
   unique.sort();
   return unique;
 }
@@ -360,43 +494,58 @@ function main() {
 
   const existing = loadExistingBaseline(options.baselinePath);
   const quarantineList = loadQuarantineList(options.quarantinePath);
+  const timingObservations = collectTimingObservations(timingInputs);
+  const generatedVitestReportInputs = collectGeneratedVitestReportInputs(timingInputs);
 
   const vitestReportInputs = options.vitestReports.length > 0
-    ? options.vitestReports
-    : collectFilesRecursive(toAbsolutePath('test-results'), (absolute) => path.basename(absolute).includes('vitest-report'))
-      .map((absolute) => normalizeRelativePath(absolute));
+    ? [...new Set(options.vitestReports.map((reportPath) => normalizeRelativePath(reportPath)))].sort()
+    : (generatedVitestReportInputs.length > 0
+      ? generatedVitestReportInputs
+      : listDefaultVitestReportInputs());
 
-  const timingObservations = collectTimingObservations(timingInputs);
   const vitestObservations = collectTimingObservations(vitestReportInputs);
+  const combinedFileSamples = mergePreferredSampleMaps(
+    timingObservations.fileSamples,
+    vitestObservations.fileSamples,
+  );
   const shardTimingFilesLoaded = timingObservations.shardTimingPaths.length;
-  const canUpdateLaneDurations = shardTimingFilesLoaded >= 2;
+  const eligibleLaneNames = new Set(
+    [...timingObservations.laneSharedSamples.entries()]
+      .filter(([, samples]) => samples.length >= 2)
+      .map(([laneName]) => laneName)
+  );
 
   const tasks = { ...existing.tasks };
-  if (canUpdateLaneDurations) {
-    for (const [taskName, samples] of timingObservations.laneSamples.entries()) {
-      const observedMean = mean(samples);
-      const nextValue = ewma(tasks[taskName], observedMean, options.alpha);
-      if (nextValue) {
-        tasks[taskName] = Math.round(nextValue);
-      }
+  for (const [taskName, samples] of timingObservations.laneSamples.entries()) {
+    const laneName = String(taskName).split('/')[0];
+    if (!eligibleLaneNames.has(laneName) || samples.length < 2) {
+      continue;
+    }
+
+    const observedMean = mean(samples);
+    const nextValue = ewma(tasks[taskName], observedMean, options.alpha);
+    if (nextValue) {
+      tasks[taskName] = Math.round(nextValue);
     }
   }
 
   const laneAverages = { ...existing.laneAverages };
-  if (canUpdateLaneDurations) {
-    for (const [laneName, samples] of timingObservations.laneSharedSamples.entries()) {
-      const observedMean = mean(samples);
-      const previous = laneAverages[laneName] ?? tasks[`${laneName}/shared`];
-      const nextValue = ewma(previous, observedMean, options.alpha);
-      if (nextValue) {
-        laneAverages[laneName] = Math.round(nextValue);
-      }
+  for (const [laneName, samples] of timingObservations.laneSharedSamples.entries()) {
+    if (!eligibleLaneNames.has(laneName) || samples.length < 2) {
+      continue;
+    }
+
+    const observedMean = mean(samples);
+    const previous = laneAverages[laneName] ?? tasks[`${laneName}/shared`];
+    const nextValue = ewma(previous, observedMean, options.alpha);
+    if (nextValue) {
+      laneAverages[laneName] = Math.round(nextValue);
     }
   }
 
   const files = { ...existing.files };
-  if (vitestObservations.loadedPaths.length > 0) {
-    for (const [fileName, samples] of vitestObservations.fileSamples.entries()) {
+  if (combinedFileSamples.size > 0) {
+    for (const [fileName, samples] of combinedFileSamples.entries()) {
       const observedMean = mean(samples);
       const nextValue = ewma(files[fileName], observedMean, options.alpha);
       if (nextValue) {
@@ -422,7 +571,7 @@ function main() {
       vitestReportsLoaded: vitestObservations.loadedPaths.length,
       laneTaskSampleCount: countSamples(timingObservations.laneSamples),
       laneAverageSampleCount: countSamples(timingObservations.laneSharedSamples),
-      fileSampleCount: countSamples(vitestObservations.fileSamples),
+      fileSampleCount: countSamples(combinedFileSamples),
     },
     updatedBy: UPDATED_BY,
     inputs: {
@@ -437,8 +586,8 @@ function main() {
   writeBaseline(options.baselinePath, baseline);
 
   console.log(`[baseline] updated ${options.baselinePath}`);
-  console.log(`[baseline] timingLoaded=${timingObservations.loadedPaths.length} shardTimingLoaded=${shardTimingFilesLoaded} laneUpdates=${canUpdateLaneDurations ? 'enabled' : 'skipped'}`);
-  console.log(`[baseline] vitestReportsLoaded=${vitestObservations.loadedPaths.length} fileBuckets=${vitestObservations.fileSamples.size}`);
+  console.log(`[baseline] timingLoaded=${timingObservations.loadedPaths.length} shardTimingLoaded=${shardTimingFilesLoaded} laneUpdates=${eligibleLaneNames.size > 0 ? 'enabled' : 'skipped'}`);
+  console.log(`[baseline] vitestReportsLoaded=${vitestObservations.loadedPaths.length} fileBuckets=${combinedFileSamples.size}`);
   console.log(`[baseline] quarantine=${quarantine.length} alpha=${options.alpha}`);
 }
 

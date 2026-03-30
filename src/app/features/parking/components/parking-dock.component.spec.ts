@@ -211,6 +211,7 @@ describe('ParkingDockComponent v4', () => {
     warning: vi.fn(),
   };
 
+  // 组件模板和依赖较重，共享测试 lane 下 compileComponents 可能超过默认 1s hookTimeout。
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -278,7 +279,7 @@ describe('ParkingDockComponent v4', () => {
     uiState = TestBed.inject(UiStateService);
     uiState.isMobile.set(false);
     fixture.detectChanges();
-  });
+  }, 5000);
 
   afterEach(() => {
     vi.runOnlyPendingTimers();

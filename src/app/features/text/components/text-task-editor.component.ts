@@ -37,6 +37,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           <!-- 标题编辑 -->
         <input
           #titleInput
+          data-testid="task-title-input"
           data-title-input
           type="text"
           [value]="localTitle()"
@@ -76,6 +77,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           @if (isPreview()) {
             <!-- Markdown 预览 - 点击切换到编辑模式，点击 checkbox 切换待办状态 -->
             <div
+              data-testid="task-content"
               (click)="onPreviewClick($event)"
               class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
               [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
@@ -86,6 +88,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             <!-- Markdown 编辑 -->
             <textarea
               #contentInput
+              data-testid="task-content-editor"
               [value]="localContent()"
               (input)="onContentInput(contentInput.value)"
               (focus)="onInputFocus('content')"
@@ -192,6 +195,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             </button>
             <button
               (click)="addChild.emit()"
+              data-testid="add-child-task-btn"
               class="flex-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 font-medium rounded-md flex items-center justify-center transition-all"
               [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
               title="添加下级">

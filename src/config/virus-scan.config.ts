@@ -295,24 +295,3 @@ export const TOCTOU_PROTECTION = {
  * └─────────────────────────────────────────────────────────────────┘
  */
 
-/**
- * 扫描服务需要实现的接口
- */
-export interface VirusScannerService {
-  /** 扫描单个文件 */
-  scanFile(file: Blob | ArrayBuffer, filename: string): Promise<ScanResult>;
-  
-  /** 批量扫描 */
-  scanBatch(files: Array<{ id: string; url: string }>): Promise<ScanResult[]>;
-  
-  /** 检查扫描状态 */
-  checkStatus(fileId: string): Promise<ScanResult | null>;
-  
-  /** 获取引擎信息 */
-  getEngineInfo(): Promise<{
-    name: string;
-    version: string;
-    signatureVersion: string;
-    lastUpdate: string;
-  }>;
-}

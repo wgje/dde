@@ -41,12 +41,24 @@ export default defineConfig({
     // 覆盖率配置
     coverage: {
       provider: 'v8',
+      all: true,
       reporter: ['text', 'json', 'html'],
-      include: ['src/services/**/*.ts'],
+      include: [
+        'src/services/**/*.ts',
+        'src/app/core/**/*.ts',
+        'src/app/features/**/services/**/*.ts',
+        'src/app/features/**/utils/**/*.ts',
+        'src/utils/**/*.ts',
+      ],
       exclude: [
         'src/**/*.spec.ts',
         'src/**/*.test.ts',
         'src/**/index.ts',
+        'src/**/*.d.ts',
+        'src/models/**',
+        'src/types/**',
+        'src/config/**',
+        'src/test-setup*.ts',
       ],
     },
     

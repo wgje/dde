@@ -18,11 +18,6 @@ import {
 } from '../../../../models/flow-view-state';
 import { UI_CONFIG } from '../../../../config';
 
-/**
- * 连接类型
- */
-export type LinkType = 'parent-child' | 'cross-tree';
-
 interface OpenConnectionEditorOptions {
   isCrossTree: boolean;
   mode: ConnectionEditorMode;

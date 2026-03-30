@@ -20,13 +20,11 @@ export {
   CIRCUIT_BREAKER_CONFIG,
   CACHE_CONFIG,
   OPTIMISTIC_CONFIG,
-  OPTIMISTIC_LOCK_CONFIG,
   QUEUE_CONFIG,
   FIELD_SELECT_CONFIG,
   STORAGE_QUOTA_CONFIG,
   PERMISSION_DENIED_CONFIG,
   INDEXEDDB_HEALTH_CONFIG,
-  CLOCK_SYNC_CONFIG,
   TAB_CONCURRENCY_CONFIG,
   MOBILE_SYNC_CONFIG
 } from './sync.config';
@@ -36,8 +34,6 @@ export type { ConcurrentEditStrategy } from './sync.config';
 export {
   UI_CONFIG,
   TOAST_CONFIG,
-  SEARCH_CONFIG,
-  DEEP_LINK_CONFIG,
   FLOW_VIEW_CONFIG
 } from './ui.config';
 
@@ -56,8 +52,7 @@ export type { TimeoutLevel } from './timeout.config';
 
 // 附件配置
 export {
-  ATTACHMENT_CONFIG,
-  ATTACHMENT_CLEANUP_CONFIG
+  ATTACHMENT_CONFIG
 } from './attachment.config';
 
 // 任务配置
@@ -91,8 +86,7 @@ export {
   TOCTOU_PROTECTION,
   type ScanStatus,
   type ScanResult,
-  type AttachmentScanMetadata,
-  type VirusScannerService
+  type AttachmentScanMetadata
 } from './virus-scan.config';
 
 // 本地备份配置
@@ -106,33 +100,20 @@ export {
 
 // Focus Mode 配置
 export {
-  FOCUS_CONFIG,
-  FocusErrorCodes,
-  FocusErrorMessages
+  FOCUS_CONFIG
 } from './focus.config';
 
 // 移动端抽屉配置
 export {
   DRAWER_CONFIG,
-  type SnapPointName,
   type DrawerLayer,
-  type DrawerStateChangeEvent,
-  type DrawerDragEvent
+  type DrawerStateChangeEvent
 } from './drawer.config';
 
 // State Overlap / Parking 配置
 export {
   PARKING_CONFIG
 } from './parking.config';
-
-// 性能优化配置（P0-P3 优化 2026-01-26）
-export {
-  PERFORMANCE_FLAGS,
-  BATCH_LOAD_CONFIG,
-  GOJS_PERF_CONFIG,
-  SKELETON_CONFIG,
-  PERF_MONITORING_CONFIG
-} from './performance.config';
 
 // 应用生命周期配置
 export {

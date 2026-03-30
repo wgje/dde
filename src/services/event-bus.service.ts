@@ -63,6 +63,12 @@ export interface SessionRestoredEvent {
   readonly source: string;
 }
 
+/** 后台刷新发现会话已失效（FastPath 乐观设置被推翻） */
+export interface SessionInvalidatedEvent {
+  readonly type: 'session-invalidated';
+  readonly source: string;
+}
+
 /** 所有事件类型联合 */
 export type AppEvent = 
   | UndoRequestEvent 
@@ -71,7 +77,8 @@ export type AppEvent =
   | SyncStatusEvent
   | ForceSyncRequestEvent
   | TaskUpdateEvent
-  | SessionRestoredEvent;
+  | SessionRestoredEvent
+  | SessionInvalidatedEvent;
 
 // ============================================
 // EventBusService
@@ -87,6 +94,7 @@ export class EventBusService {
   private readonly _forceSyncRequest$ = new Subject<ForceSyncRequestEvent>();
   private readonly _taskUpdate$ = new Subject<TaskUpdateEvent>();
   private readonly _sessionRestored$ = new Subject<SessionRestoredEvent>();
+  private readonly _sessionInvalidated$ = new Subject<SessionInvalidatedEvent>();
   
   // 通用事件通道（用于扩展）
   private readonly _events$ = new Subject<AppEvent>();
@@ -116,6 +124,9 @@ export class EventBusService {
   
   /** 会话恢复事件流 */
   readonly onSessionRestored$: Observable<SessionRestoredEvent> = this._sessionRestored$.asObservable();
+  
+  /** 会话失效事件流（后台刷新推翻 FastPath 乐观身份） */
+  readonly onSessionInvalidated$: Observable<SessionInvalidatedEvent> = this._sessionInvalidated$.asObservable();
   
   /** 所有事件流（调试/日志用） */
   readonly allEvents$: Observable<AppEvent> = this._events$.asObservable();
@@ -207,6 +218,17 @@ export class EventBusService {
   publishSessionRestored(userId: string, source: string): void {
     const event: SessionRestoredEvent = { type: 'session-restored', userId, source };
     this._sessionRestored$.next(event);
+    this._events$.next(event);
+    this._lastEvent.set(event);
+  }
+
+  /**
+   * 发布会话失效事件（后台刷新推翻 FastPath 乐观身份）
+   * 订阅方应停止所有依赖有效会话的操作（同步推送、重试队列等）
+   */
+  publishSessionInvalidated(source: string): void {
+    const event: SessionInvalidatedEvent = { type: 'session-invalidated', source };
+    this._sessionInvalidated$.next(event);
     this._events$.next(event);
     this._lastEvent.set(event);
   }

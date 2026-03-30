@@ -632,7 +632,7 @@ DO $$ BEGIN
     TO authenticated USING ((SELECT auth.uid()) = user_id);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
-
+111111111111111111111111111111
 DO $$ BEGIN
   CREATE POLICY "routine_tasks_insert"
     ON routine_tasks FOR INSERT

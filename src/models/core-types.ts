@@ -99,33 +99,3 @@ export interface Task {
   parkingMeta?: import('./parking').TaskParkingMeta | null;
 }
 
-/**
- * 项目模型
- */
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  createdDate: string;
-  tasks: Task[];
-  connections: Connection[];
-  updatedAt?: string;
-  version?: number;
-  /** Sync source marker for local-only vs cloud-linked project. */
-  syncSource?: 'local-only' | 'synced';
-  /** Whether there are unsynced local changes. */
-  pendingSync?: boolean;
-  viewState?: ViewState;
-  flowchartUrl?: string;
-  flowchartThumbnailUrl?: string;
-}
-
-/**
- * 视图状态（用于持久化流程图视口位置）
- * 【P0-11 修复】统一为 positionX/positionY 扁平结构，与 models/index.ts 保持一致
- */
-export interface ViewState {
-  scale: number;
-  positionX: number;
-  positionY: number;
-}

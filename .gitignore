@@ -35,6 +35,7 @@ src/environments/environment.development.ts
 *.sln
 *.sw?
 .angular/
+.tmp/
 
 # Test coverage
 coverage/

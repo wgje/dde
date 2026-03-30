@@ -904,21 +904,21 @@ describe('UserSessionService', () => {
         version: 2,
         savedAt: '2026-03-27T10:00:00.000Z',
         userId: 'snapshot-user',
-        activeProjectId: 'p-1',
+        activeProjectId: 'a0000000-0000-4000-8000-000000000001',
         lastActiveView: 'text',
         theme: 'default',
         colorMode: 'dark',
         projects: [
           {
-            id: 'p-1',
+            id: 'a0000000-0000-4000-8000-000000000001',
             name: 'Alpha Protocol',
             description: 'Test project',
             updatedAt: '2026-03-27T10:00:00.000Z',
             taskCount: 2,
             openTaskCount: 2,
             recentTasks: [
-              { id: 't-1', title: '阶段 1: 环境搭建', displayId: '1', status: 'active' },
-              { id: 't-2', title: '核心逻辑实现', displayId: '1,a', status: 'active' },
+              { id: 'b0000000-0000-4000-8000-000000000001', title: '阶段 1: 环境搭建', displayId: '1', status: 'active' },
+              { id: 'b0000000-0000-4000-8000-000000000002', title: '核心逻辑实现', displayId: '1,a', status: 'active' },
             ],
           },
         ],
@@ -930,16 +930,16 @@ describe('UserSessionService', () => {
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith(
         expect.arrayContaining([
           expect.objectContaining({
-            id: 'p-1',
+            id: 'a0000000-0000-4000-8000-000000000001',
             name: 'Alpha Protocol',
             tasks: expect.arrayContaining([
-              expect.objectContaining({ id: 't-1', content: '阶段 1: 环境搭建' }),
-              expect.objectContaining({ id: 't-2', content: '核心逻辑实现' }),
+              expect.objectContaining({ id: 'b0000000-0000-4000-8000-000000000001', content: '阶段 1: 环境搭建' }),
+              expect.objectContaining({ id: 'b0000000-0000-4000-8000-000000000002', content: '核心逻辑实现' }),
             ]),
           }),
         ]),
       );
-      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('p-1');
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('a0000000-0000-4000-8000-000000000001');
 
       // 清理全局快照
       delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
@@ -979,13 +979,13 @@ describe('UserSessionService', () => {
         version: 2,
         savedAt: '2026-03-27T10:00:00.000Z',
         userId: 'snapshot-user',
-        activeProjectId: 'p-ls',
+        activeProjectId: 'c0000000-0000-4000-8000-000000000001',
         lastActiveView: 'text',
         theme: 'default',
         colorMode: 'dark',
         projects: [
           {
-            id: 'p-ls',
+            id: 'c0000000-0000-4000-8000-000000000001',
             name: 'LocalStorage Project',
             description: '',
             updatedAt: null,
@@ -1002,7 +1002,7 @@ describe('UserSessionService', () => {
       expect(result).toBe(true);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith(
         expect.arrayContaining([
-          expect.objectContaining({ id: 'p-ls', name: 'LocalStorage Project' }),
+          expect.objectContaining({ id: 'c0000000-0000-4000-8000-000000000001', name: 'LocalStorage Project' }),
         ]),
       );
     });
@@ -1018,13 +1018,13 @@ describe('UserSessionService', () => {
         version: 2,
         savedAt: '2026-03-27T10:00:00.000Z',
         userId: 'stale-user',
-        activeProjectId: 'p-stale',
+        activeProjectId: 'd0000000-0000-4000-8000-000000000001',
         lastActiveView: 'text',
         theme: 'default',
         colorMode: 'dark',
         projects: [
           {
-            id: 'p-stale',
+            id: 'd0000000-0000-4000-8000-000000000001',
             name: 'Stale Project',
             description: '',
             updatedAt: null,

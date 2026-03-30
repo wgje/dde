@@ -72,7 +72,7 @@ export function createFlipGhostState(
 // ===== 矩形计算 =====
 
 /** 停泊坞卡片的源矩形（进入专注的起点 / 退出专注的终点） */
-export function getDockSourceRect(el?: HTMLElement | null): DockFlipRect | null {
+function getDockSourceRect(el?: HTMLElement | null): DockFlipRect | null {
   const explicitMain = el ?? document.querySelector<HTMLElement>(
     '[data-testid="dock-v3-item"].main-card',
   );
@@ -92,12 +92,12 @@ export function getDockSourceRect(el?: HTMLElement | null): DockFlipRect | null 
 }
 
 /** 停泊坞卡片的目标矩形（退出专注的终点） */
-export function getDockTargetRect(el?: HTMLElement | null): DockFlipRect | null {
+function getDockTargetRect(el?: HTMLElement | null): DockFlipRect | null {
   return getDockSourceRect(el);
 }
 
 /** 主控台卡片的源矩形（退出专注的起点） */
-export function getConsoleSourceRect(el?: HTMLElement | null): DockFlipRect | null {
+function getConsoleSourceRect(el?: HTMLElement | null): DockFlipRect | null {
   const card = el ?? document.querySelector<HTMLElement>('[data-testid="dock-v3-console-card"]');
   if (card) {
     return toFlipRect(card.getBoundingClientRect());
@@ -106,7 +106,7 @@ export function getConsoleSourceRect(el?: HTMLElement | null): DockFlipRect | nu
 }
 
 /** 主控台卡片的目标矩形（进入专注的终点） */
-export function getConsoleTargetRect(dockExpanded: boolean, el?: HTMLElement | null): DockFlipRect | null {
+function getConsoleTargetRect(dockExpanded: boolean, el?: HTMLElement | null): DockFlipRect | null {
   const card = el ?? document.querySelector<HTMLElement>('[data-testid="dock-v3-console-card"]');
   if (card) {
     return toFlipRect(card.getBoundingClientRect());

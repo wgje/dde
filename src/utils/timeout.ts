@@ -138,7 +138,7 @@ export async function withTimeout<T>(
  * @param options 重试选项
  * @returns 带超时和重试保护的 Promise
  */
-export async function withRetry<T>(
+async function withRetry<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {}
 ): Promise<T> {
@@ -190,7 +190,7 @@ export async function withRetry<T>(
  * @param timeout 超时时间
  * @returns fetch 响应
  */
-export async function fetchWithTimeout(
+async function fetchWithTimeout(
   url: string,
   init?: RequestInit,
   timeout: number | TimeoutLevel = 'STANDARD'
@@ -214,7 +214,7 @@ export async function fetchWithTimeout(
  * 创建带超时和重试的 fetch 请求
  * 仅适用于 GET 等幂等请求
  */
-export async function fetchWithRetry(
+async function fetchWithRetry(
   url: string,
   init?: RequestInit,
   options: RetryOptions = {}
@@ -235,7 +235,7 @@ export async function fetchWithRetry(
  * );
  * ```
  */
-export async function supabaseWithTimeout<T>(
+async function supabaseWithTimeout<T>(
   queryFn: () => PromiseLike<T>,
   timeout: number | TimeoutLevel = 'STANDARD'
 ): Promise<T> {

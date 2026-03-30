@@ -7,9 +7,14 @@ export default [
   // 全局忽略规则
   {
     ignores: [
+      '.angular/**',
+      '.tmp/**',
       'dist/**',
       'node_modules/**',
-      'src/environments/**'
+      'playwright-report/**',
+      'src/environments/**',
+      'test-results/**',
+      'tmp/**'
     ]
   },
   {

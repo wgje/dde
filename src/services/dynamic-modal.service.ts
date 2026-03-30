@@ -407,13 +407,3 @@ export const MODAL_DATA = new InjectionToken<unknown>('MODAL_DATA');
  * 组件使用 inject(MODAL_REF) 获取关闭模态框的能力
  */
 export const MODAL_REF = new InjectionToken<{ close: (result?: unknown) => void }>('MODAL_REF');
-
-/**
- * 类型辅助：从组件类型推断数据类型
- */
-export type InferModalData<C> = C extends { data: infer D } ? D : unknown;
-
-/**
- * 类型辅助：从组件类型推断结果类型
- */
-export type InferModalResult<C> = C extends { close: { emit: (result: infer R) => void } } ? R : unknown;

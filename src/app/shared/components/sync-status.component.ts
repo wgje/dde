@@ -95,6 +95,8 @@ import type { QueuedAction } from '../../../services/action-queue.types';
             <div data-testid="sync-status-indicator" class="w-2 h-2 rounded-full flex-shrink-0" 
                  [attr.data-testid-offline]="!isOnline() || offlineMode() ? 'offline-indicator' : null"
                  [attr.data-testid-pending]="pendingCount() > 0 ? 'pending-sync-indicator' : null"
+                [attr.data-testid-busy]="isAnySyncing() || isResyncing() || isRetrying() || isProcessing() ? 'sync-busy-indicator' : null"
+                [attr.data-testid-last-sync]="syncService.syncState().lastSyncTime"
                  [attr.data-testid-success]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues() ? 'sync-success-indicator' : null"
                  [class.bg-green-500]="isLoggedIn() && isOnline() && !offlineMode() && !hasIssues()"
                  [class.bg-amber-500]="!isOnline() || offlineMode() || pendingCount() > 0 || !isLoggedIn()"
@@ -148,6 +150,7 @@ import type { QueuedAction } from '../../../services/action-queue.types';
             <!-- 刷新同步按钮（次要操作） -->
             @if (isLoggedIn() && isOnline() && !offlineMode()) {
               <button
+                data-testid="sync-resync-project-btn"
                 (click)="resyncProject(); $event.stopPropagation()"
                 [disabled]="isResyncing()"
                 class="p-1 text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-700 rounded transition-colors disabled:opacity-50"

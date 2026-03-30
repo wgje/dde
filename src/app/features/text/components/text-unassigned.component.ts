@@ -39,6 +39,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
           <div class="flex items-center gap-2">
             <button 
               (click)="onCreateClick($event)"
+              data-testid="add-task-btn"
               class="flex items-center gap-1 px-2 py-1 rounded-md border border-retro-teal/50 bg-retro-teal/10 text-retro-teal hover:bg-retro-teal hover:text-white transition-colors"
               [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">
               <span class="text-base leading-none">+</span>
@@ -60,6 +61,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                 @if (editingTaskId() === task.id) {
                   <!-- 编辑/预览模式 -->
                   <div 
+                    data-testid="task-card"
                     [attr.data-unassigned-task]="task.id"
                     class="w-full rounded-lg shadow-sm animate-collapse-open"
                     [ngClass]="{
@@ -70,6 +72,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                       <!-- 【修复】编辑容器需要防止事件冒泡导致缩小 -->
                       <div class="space-y-2" (click)="$event.stopPropagation()">
                         <input #editInput
+                          data-testid="task-title-input"
                           data-title-input
                           class="w-full bg-transparent border-none focus:ring-0 text-retro-dark dark:text-stone-200 p-0 mb-1"
                           [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}"
@@ -82,6 +85,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                           (click)="$event.stopPropagation()">
                         <textarea
                           #contentInput
+                          data-testid="task-content-editor"
                           class="w-full border border-stone-200 dark:border-stone-700 rounded-md bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300 focus:ring-1 focus:ring-retro-teal focus:border-retro-teal outline-none resize-none"
                           [ngClass]="{'text-xs p-2 min-h-[90px]': !isMobile(), 'text-[11px] p-1.5 min-h-[100px]': isMobile()}"
                           [value]="localContent()"
@@ -92,7 +96,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                           placeholder="输入任务内容 (Markdown)..."></textarea>
                         <div class="flex justify-end gap-2">
                           <button (click)="cancelEdit(); $event.stopPropagation()" class="text-[10px] text-stone-400 hover:text-stone-600">取消</button>
-                          <button (click)="saveTask(task); $event.stopPropagation()" class="text-[10px] text-retro-teal hover:text-retro-teal/80 font-bold">保存</button>
+                          <button data-testid="save-task-btn" (click)="saveTask(task); $event.stopPropagation()" class="text-[10px] text-retro-teal hover:text-retro-teal/80 font-bold">保存</button>
                         </div>
                         <div class="flex gap-2 items-center">
                           <button
@@ -150,6 +154,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                         <!-- 【修复】点击内容区域直接进入编辑，不触发卡片切换逻辑 -->
                         <div class="flex-1 min-w-0 cursor-text" (click)="onContentPreviewClick($event, task)">
                           <div class="font-medium text-retro-dark dark:text-stone-200 truncate"
+                               data-testid="task-title-label"
                                [ngClass]="{'text-sm': !isMobile(), 'text-xs': isMobile()}">
                             {{task.title}}
                           </div>
@@ -163,7 +168,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                             {{ task.status === 'completed' ? 'Completed' : 'Active' }}
                           </div>
                           @if (task.content) {
-                            <div class="prose prose-stone dark:prose-invert max-w-none mt-1 opacity-80"
+                            <div data-testid="task-content" class="prose prose-stone dark:prose-invert max-w-none mt-1 opacity-80"
                                  [ngClass]="{'text-xs': !isMobile(), 'text-[10px] line-clamp-2': isMobile()}"
                                  [innerHTML]="task.content | safeMarkdown">
                             </div>
@@ -172,11 +177,13 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                         <!-- 操作按钮组 -->
                         <div class="flex gap-1 shrink-0 mt-0.5 opacity-0 group-hover/preview:opacity-100 transition-opacity">
                           <button (click)="enterEdit(task); $event.stopPropagation()" 
+                              data-testid="edit-task-btn"
                                   class="p-1 text-stone-400 hover:text-retro-teal transition-colors"
                                   title="编辑任务">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
                           </button>
                           <button (click)="deleteTask(task.id); $event.stopPropagation()" 
+                              data-testid="delete-task-btn"
                                   class="p-1 text-stone-400 hover:text-retro-rust transition-colors"
                                   title="删除任务">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
@@ -188,6 +195,7 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                 } @else {
                   <!-- 【修复】普通展示模式：卡片外框用于在场景间切换，内容区域专用于编辑 -->
                   <div 
+                    data-testid="task-card"
                     [attr.data-unassigned-task]="task.id"
                     (click)="onTaskCardClick(task); $event.stopPropagation()"
                     [attr.draggable]="true"
@@ -203,11 +211,10 @@ import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
                       'text-[10px]': isMobile(),
                       'opacity-40 scale-98 border border-retro-teal border-dashed bg-retro-teal/10': draggingTaskId() === task.id
                     }">
-                    <span class="text-retro-dark dark:text-stone-300">{{task.title || '未命名任务'}}
-                      @if (task.content) {
+                    <span data-testid="task-title-label" class="text-retro-dark dark:text-stone-300">{{task.title || '未命名任务'}}</span>
+                    @if (task.content) {
                       <span class="ml-1 text-[10px] text-stone-400">· 内容</span>
-                      }
-                    </span>
+                    }
                   </div>
                 }
               }

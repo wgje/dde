@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ensurePerfAuthenticated, getPerfTargetPath } from './authenticated-perf.setup';
 import { initPerfMetrics, mergePerfMetrics } from './perf-metrics';
+import { waitForAppReady, waitForCountToStabilize } from '../shared/page-helpers';
 
 const PERF_GUARD = {
   MAX_INITIAL_DATA_FETCH: 20,
@@ -42,7 +43,11 @@ test.describe('Weak Network Startup Guard', () => {
     });
 
     await page.goto(getPerfTargetPath(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForTimeout(10_000);
+    await waitForAppReady(page, { timeoutMs: 20_000 });
+    await waitForCountToStabilize(
+      () => responses.filter((item) => item.resourceType === 'fetch' || item.resourceType === 'xhr').length,
+      { idleMs: 1_500, timeoutMs: 20_000, pollMs: 250 },
+    );
 
     const startupWindowRequests = responses.filter(
       (item) => item.resourceType === 'fetch' || item.resourceType === 'xhr'

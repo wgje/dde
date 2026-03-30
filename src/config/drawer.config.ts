@@ -56,9 +56,6 @@ export const DRAWER_CONFIG = {
   GESTURE_HINT_SHOWN_KEY: 'nanoflow_drawer_hint_shown',
 };
 
-/** 吸附点名称 */
-export type SnapPointName = 'collapsed' | 'half' | 'expanded';
-
 /** 抽屉层类型 */
 export type DrawerLayer = 'top' | 'middle' | 'bottom';
 
@@ -69,9 +66,3 @@ export interface DrawerStateChangeEvent {
   triggeredBy: 'gesture' | 'programmatic';
 }
 
-/** 拖拽进度事件 */
-export interface DrawerDragEvent {
-  direction: 'up' | 'down';
-  progress: number; // 0-1
-  velocity: number;
-}

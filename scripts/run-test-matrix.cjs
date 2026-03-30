@@ -60,6 +60,8 @@ const DEFAULT_STRATEGY_CI = 'weighted';
 const DEFAULT_FILE_ESTIMATE_MS = 1000;
 const DEFAULT_BASELINE_MAX_AGE_HOURS = 24;
 const DEFAULT_MIN_FILE_ESTIMATES = 20;
+const DEFAULT_TIMING_OUT_DIR = 'test-results';
+const DEFAULT_VITEST_JSON_OUT_DIR = 'test-results/vitest-reports';
 const MAX_LIST_PREVIEW = 30;
 
 const toPosix = (value) => value.split(path.sep).join('/');
@@ -446,6 +448,44 @@ function parseArgs(argv) {
     quarantinePath = process.env.TEST_QUARANTINE_FILE || DEFAULT_QUARANTINE;
   }
 
+  const resolvedSelectedLanes = selectedLanes.size > 0
+    ? [...selectedLanes].sort()
+    : [...ALL_LANES];
+
+  for (const lane of resolvedSelectedLanes) {
+    if (!ALL_LANES.includes(lane)) {
+      throw new Error(`Invalid lane "${lane}", expected one of: ${ALL_LANES.join(', ')}`);
+    }
+  }
+
+  if (!timingOut && enableLpt) {
+    const shardLabel = shard?.value
+      ? sanitizeFilePart(shard.value)
+      : 'all';
+    const laneKey = resolvedSelectedLanes.length === ALL_LANES.length
+      ? 'all-lanes'
+      : resolvedSelectedLanes.join('__');
+    timingOut = path.join(
+      DEFAULT_TIMING_OUT_DIR,
+      `vitest-${sanitizeFilePart(mode)}-${sanitizeFilePart(laneKey)}-shard-${shardLabel}.json`
+    );
+  }
+
+  if (timingInputPaths.length === 0) {
+    const defaultTimingInputs = [];
+    if (durationBaselinePath) {
+      defaultTimingInputs.push(durationBaselinePath);
+    }
+    if (timingOut) {
+      defaultTimingInputs.push(timingOut);
+    }
+    timingInputPaths.push(...new Set(defaultTimingInputs));
+  }
+
+  if (!vitestJsonOutDir && enableLpt) {
+    vitestJsonOutDir = DEFAULT_VITEST_JSON_OUT_DIR;
+  }
+
   if (lptRequireFreshBaseline === undefined) {
     lptRequireFreshBaseline = true;
   }
@@ -458,14 +498,6 @@ function parseArgs(argv) {
 
   if (includeQuarantine === undefined) {
     includeQuarantine = process.env.TEST_INCLUDE_QUARANTINE === '1' || mode === 'ci';
-  }
-
-  if (selectedLanes.size > 0) {
-    for (const lane of selectedLanes) {
-      if (!ALL_LANES.includes(lane)) {
-        throw new Error(`Invalid lane "${lane}", expected one of: ${ALL_LANES.join(', ')}`);
-      }
-    }
   }
 
   return {
@@ -484,7 +516,7 @@ function parseArgs(argv) {
     lptRequireFreshBaseline,
     baselineMaxAgeHours,
     minFileEstimates,
-    selectedLanes: selectedLanes.size > 0 ? [...selectedLanes] : ALL_LANES,
+    selectedLanes: resolvedSelectedLanes,
     passthrough,
   };
 }
@@ -746,10 +778,12 @@ function buildVitestJsonReportPath(vitestJsonOutDir, task) {
   const absoluteDir = path.isAbsolute(vitestJsonOutDir)
     ? vitestJsonOutDir
     : path.join(projectRoot, vitestJsonOutDir);
+  const safeMode = sanitizeFilePart(task.mode) || 'mode';
+  const safeShard = sanitizeFilePart(task.shardLabel) || 'all';
   const safeLane = sanitizeFilePart(task.laneName) || 'lane';
   const safeSegment = sanitizeFilePart(task.segmentName) || 'segment';
   const safeOrder = String(task.order).padStart(2, '0');
-  return path.join(absoluteDir, `vitest-report-${safeLane}-${safeSegment}-${safeOrder}.json`);
+  return path.join(absoluteDir, `vitest-report-${safeMode}-${safeShard}-${safeLane}-${safeSegment}-${safeOrder}.json`);
 }
 
 function buildVitestArgs(laneName, files, passthrough, forceIsolate, vitestJsonReportPath) {
@@ -1011,6 +1045,86 @@ function loadTimingInputs(inputPaths) {
   return result;
 }
 
+function mean(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return undefined;
+  }
+
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function collectTimingObservations(inputPaths) {
+  const result = {
+    loadedPaths: [],
+    fileSamples: new Map(),
+  };
+
+  if (!inputPaths || inputPaths.length === 0) {
+    return result;
+  }
+
+  const addSample = (file, value) => {
+    const n = parsePositiveNumber(value);
+    if (!file || !n) return;
+
+    const normalized = normalizeRelativePath(file);
+    if (normalized.startsWith('..')) return;
+
+    const samples = result.fileSamples.get(normalized) ?? [];
+    samples.push(n);
+    result.fileSamples.set(normalized, samples);
+  };
+
+  const registerFileDurationsObject = (obj) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+
+    for (const [file, value] of Object.entries(obj)) {
+      addSample(file, value);
+    }
+  };
+
+  const registerVitestResults = (entries) => {
+    if (!Array.isArray(entries)) return;
+
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || typeof entry.name !== 'string') continue;
+
+      const duration = parsePositiveNumber(entry.duration)
+        ?? (parsePositiveNumber(entry.endTime) && parsePositiveNumber(entry.startTime)
+          ? Number(entry.endTime) - Number(entry.startTime)
+          : undefined);
+
+      addSample(entry.name, duration);
+    }
+  };
+
+  for (const maybePath of inputPaths) {
+    const absolutePath = toAbsolutePath(maybePath);
+    if (!fs.existsSync(absolutePath)) {
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(absolutePath, 'utf8'));
+    } catch {
+      continue;
+    }
+
+    result.loadedPaths.push(normalizeRelativePath(absolutePath));
+
+    if (!parsed || typeof parsed !== 'object') {
+      continue;
+    }
+
+    registerFileDurationsObject(parsed.files);
+    registerFileDurationsObject(parsed.fileDurations);
+    registerVitestResults(parsed.testResults);
+  }
+
+  return result;
+}
+
 function createFileEstimator(timingInputs, durationBaseline, laneByFile) {
   return (file) => {
     if (timingInputs.fileEstimates.has(file)) {
@@ -1050,8 +1164,12 @@ function computeBaselineAgeHours(generatedAt) {
   return (Date.now() - timestamp) / (1000 * 60 * 60);
 }
 
-function resolveLptState(options, durationBaseline) {
+function resolveLptState(options, durationBaseline, timingInputs) {
   const baselineAgeHours = computeBaselineAgeHours(durationBaseline.generatedAt);
+  const fileEstimateCount = new Set([
+    ...durationBaseline.fileEstimates.keys(),
+    ...timingInputs.fileEstimates.keys(),
+  ]).size;
   const lptRequested = options.enableLpt;
   let lptEnabled = lptRequested;
   let lptDisabledReason = null;
@@ -1062,13 +1180,14 @@ function resolveLptState(options, durationBaseline) {
       lptEnabled: false,
       lptDisabledReason: null,
       baselineAgeHours,
+      fileEstimateCount,
     };
   }
 
   if (!durationBaseline.exists) {
     lptEnabled = false;
     lptDisabledReason = 'baseline_missing';
-  } else if (durationBaseline.fileEstimates.size < options.minFileEstimates) {
+  } else if (fileEstimateCount < options.minFileEstimates) {
     lptEnabled = false;
     lptDisabledReason = 'insufficient_file_estimates';
   } else if (options.lptRequireFreshBaseline) {
@@ -1089,6 +1208,7 @@ function resolveLptState(options, durationBaseline) {
     lptEnabled,
     lptDisabledReason,
     baselineAgeHours,
+    fileEstimateCount,
   };
 }
 
@@ -1214,6 +1334,9 @@ async function runLaneTask(task, passthrough) {
   const vitestJsonReportPath = buildVitestJsonReportPath(task.vitestJsonOutDir, task);
   if (vitestJsonReportPath) {
     fs.mkdirSync(path.dirname(vitestJsonReportPath), { recursive: true });
+    if (fs.existsSync(vitestJsonReportPath)) {
+      fs.unlinkSync(vitestJsonReportPath);
+    }
   }
 
   const startedAt = Date.now();
@@ -1238,14 +1361,16 @@ async function runLaneTask(task, passthrough) {
     spawnOverheadMs: result.spawnOverheadMs,
     status: 'executed',
     segmentOrder: task.segmentOrder,
-    vitestJsonReportPath: vitestJsonReportPath ? toProjectPathOrAbsolute(vitestJsonReportPath) : null,
+    vitestJsonReportPath: vitestJsonReportPath && result.exitCode === 0 && fs.existsSync(vitestJsonReportPath)
+      ? toProjectPathOrAbsolute(vitestJsonReportPath)
+      : null,
   };
 
   console.log(`[test:run] finish ${taskLabel}: exit=${segmentResult.exitCode} durationMs=${segmentResult.durationMs}`);
   return segmentResult;
 }
 
-async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enableLpt, vitestJsonOutDir) {
+async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enableLpt, vitestJsonOutDir, mode, shardLabel) {
   const pendingTasks = [...taskQueue];
   const completed = new Map();
   let active = 0;
@@ -1276,6 +1401,8 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
 
         runLaneTask({
           ...task,
+          mode,
+          shardLabel,
           vitestJsonOutDir,
         }, passthrough)
           .then((segmentResult) => {
@@ -1345,7 +1472,7 @@ async function main() {
   );
 
   const estimateFile = createFileEstimator(timingInputs, durationBaseline, laneByFile);
-  const lptState = resolveLptState(options, durationBaseline);
+  const lptState = resolveLptState(options, durationBaseline, timingInputs);
   const shardFiles = applyShard(effectiveFiles, options.shard, options.strategy, estimateFile);
   const shardEstimatedWeightMs = shardFiles
     .reduce((sum, file) => sum + Math.max(1, Math.floor(estimateFile(file))), 0);
@@ -1374,6 +1501,7 @@ async function main() {
   console.log(`[test:run] mode=${options.mode} maxProcs=${maxProcs} selectedLanes=${selectedLanes.join(',')}`);
   console.log(`[test:run] scheduler=${lptState.lptEnabled ? 'lpt' : 'fifo'} lptRequested=${lptState.lptRequested} lptDisabledReason=${lptState.lptDisabledReason ?? 'none'}`);
   console.log(`[test:run] durationBaseline=${durationBaseline.path} loaded=${durationBaseline.exists} baselineAgeHours=${lptState.baselineAgeHours === null ? 'unknown' : lptState.baselineAgeHours.toFixed(2)}`);
+  console.log(`[test:run] fileEstimates baseline=${durationBaseline.fileEstimates.size} timingIn=${timingInputs.fileEstimates.size} effective=${lptState.fileEstimateCount}`);
   console.log(`[test:run] shardEstimatedWeightMs=${shardEstimatedWeightMs}`);
   console.log(`[test:run] timingIn loaded=${timingInputs.loadedPaths.length}/${options.timingInputPaths.length} includeQuarantine=${options.includeQuarantine}`);
   if (options.vitestJsonOutDir) {
@@ -1391,7 +1519,9 @@ async function main() {
     maxProcs,
     options.passthrough,
     lptState.lptEnabled,
-    options.vitestJsonOutDir
+    options.vitestJsonOutDir,
+    options.mode,
+    options.shard?.value ?? 'all'
   );
   const totalDurationMs = Date.now() - startedAt;
 
@@ -1417,6 +1547,19 @@ async function main() {
     };
   });
 
+  const generatedVitestReportPaths = laneOutput.flatMap((lane) =>
+    lane.segments
+      .map((segment) => segment.vitestJsonReportPath)
+      .filter((reportPath) => typeof reportPath === 'string' && reportPath.length > 0)
+  );
+  const generatedVitestObservations = collectTimingObservations(generatedVitestReportPaths);
+  const fileDurations = {};
+  for (const [file, samples] of generatedVitestObservations.fileSamples.entries()) {
+    const observedMean = mean(samples);
+    if (!observedMean) continue;
+    fileDurations[file] = Math.max(1, Math.round(observedMean));
+  }
+
   writeTiming(options.timingOut, {
     mode: options.mode,
     shard: options.shard?.value ?? null,
@@ -1431,6 +1574,7 @@ async function main() {
     lptRequested: lptState.lptRequested,
     lptEnabled: lptState.lptEnabled,
     lptDisabledReason: lptState.lptDisabledReason,
+    fileEstimateCount: lptState.fileEstimateCount,
     baselineAgeHours: lptState.baselineAgeHours === null
       ? null
       : Number(lptState.baselineAgeHours.toFixed(3)),
@@ -1454,6 +1598,12 @@ async function main() {
       loadedPaths: timingInputs.loadedPaths,
       fileEntries: timingInputs.fileEstimates.size,
     },
+    generatedVitestReports: {
+      requestedPaths: generatedVitestReportPaths,
+      loadedPaths: generatedVitestObservations.loadedPaths,
+      fileEntries: generatedVitestObservations.fileSamples.size,
+    },
+    files: fileDurations,
     lanes: laneOutput,
     durationMs: totalDurationMs,
     createdAt: new Date().toISOString(),

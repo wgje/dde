@@ -411,6 +411,29 @@ describe('ParkingService', () => {
       expect(service.pendingNotices().length).toBe(0);
       onlineSpy.mockRestore();
     });
+
+    it('恢复在线后应立即重新执行衰老清理并发出通知', () => {
+      const staleTask = createTask({ id: 'offline-retry-1', parkingMeta: createParkingMeta() });
+      taskMap.set(staleTask.id, staleTask);
+      syncParkedSignals();
+
+      let isOnline = false;
+      const onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => isOnline);
+
+      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+
+      expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeTruthy();
+      expect(service.pendingNotices().length).toBe(0);
+
+      isOnline = true;
+      window.dispatchEvent(new Event('online'));
+
+      expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeUndefined();
+      expect(service.pendingNotices().length).toBe(1);
+      expect(service.pendingNotices()[0].type).toBe('eviction');
+
+      onlineSpy.mockRestore();
+    });
   });
 
   describe('停泊轻量同步鉴权保护', () => {

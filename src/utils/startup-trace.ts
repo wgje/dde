@@ -6,8 +6,6 @@ export interface StartupTraceEvent {
   data: Record<string, unknown> | null;
 }
 
-type StartupTracePusher = (event: string, data?: Record<string, unknown>) => void;
-
 const MAX_TRACE_EVENTS = 200;
 
 function createTraceEvent(

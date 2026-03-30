@@ -18,11 +18,7 @@ import {
 // 重新导出类型以保持向后兼容
 export type {
   ConflictResolutionStrategy,
-  ConflictData,
-  MergeResult,
-  TombstoneQueryResult,
-  RecoveredTaskInfo,
-  MergeStats
+  MergeResult
 } from './conflict-resolution.types';
 
 /**

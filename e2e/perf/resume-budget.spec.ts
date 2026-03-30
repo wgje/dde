@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ensurePerfAuthenticated, getPerfTargetPath } from './authenticated-perf.setup';
 import { initPerfMetrics, mergePerfMetrics } from './perf-metrics';
+import { waitForAppReady } from '../shared/page-helpers';
 
 const RESUME_BUDGET = {
   MAX_INTERACTION_READY_MS: 150,
@@ -21,7 +22,7 @@ test.describe('Resume Budget Guard', () => {
     const authResult = await ensurePerfAuthenticated(page);
 
     await page.goto(getPerfTargetPath(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForTimeout(1500);
+    await waitForAppReady(page, { timeoutMs: 20_000 });
 
     await page.evaluate(() => {
       const scope = window as Window & {

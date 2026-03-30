@@ -22,7 +22,7 @@ import { ParkingService } from './services/parking.service';
 import { BlackBoxService } from './services/black-box.service';
 import { FocusPreferenceService } from './services/focus-preference.service';
 import { BeforeUnloadManagerService } from './services/before-unload-manager.service';
-import { BeforeUnloadGuardService } from './services/guards';
+import { BeforeUnloadGuardService, isLocalModeEnabled } from './services/guards';
 import { AppAuthCoordinatorService } from './app/core/services/app-auth-coordinator.service';
 import { AppProjectCoordinatorService } from './app/core/services/app-project-coordinator.service';
 import { ToastContainerComponent } from './app/shared/components/toast-container.component';
@@ -50,6 +50,7 @@ import { FocusStartupProbeService } from './services/focus-startup-probe.service
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
 import { AuthService } from './services/auth.service';
+import { EventBusService } from './services/event-bus.service';
 import { BootStageService } from './services/boot-stage.service';
 import { HandoffCoordinatorService } from './services/handoff-coordinator.service';
 import { LaunchSnapshotService } from './services/launch-snapshot.service';
@@ -214,6 +215,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
+  private readonly eventBus = inject(EventBusService);
   readonly bootStage = inject(BootStageService);
   private readonly handoffCoordinator = inject(HandoffCoordinatorService);
   private readonly launchSnapshot = inject(LaunchSnapshotService);
@@ -412,7 +414,17 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   readonly shouldMountFocusMode = computed(() => {
     // 开发测试强制显示大门时，gateState 会直接设为 'reviewing'，绕过 coreDataLoaded 检查
     if (gateState() === 'reviewing') return true;
-    if (!this.coreDataLoaded()) return false;
+
+    // Focus 覆盖层在本地模式/纯离线模式下也需要按需挂载，
+    // 不能把“存在云端 userId”误当成唯一的数据就绪条件。
+    const sessionCheckDone = !this.authCoord.isCheckingSession();
+    const notAuthLoading = !this.authCoord.isAuthLoading();
+    const hasFocusModeAccess =
+      !!this.currentUserId()
+      || isLocalModeEnabled()
+      || !this.authService.isConfigured;
+
+    if (!sessionCheckDone || !notAuthLoading || !hasFocusModeAccess) return false;
     if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) return true;
     return this.focusStartupProbe.hasPendingGateWork() || this.focusModeIntentActivated();
   });
@@ -982,6 +994,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupRemoteCallbackEffect();
     this.setupSubscriptionEffect();
     this.setupSyncPulseEffect();
+    this.setupSessionInvalidatedHandler();
   }
 
   /** 模态框请求信号监听（可恢复错误 / 登录 / 迁移） */
@@ -1360,6 +1373,25 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       }
 
       this.initializeSyncPulse();
+    });
+  }
+
+  /**
+   * 会话失效处理：后台刷新发现 FastPath 乐观身份无效时，
+   * 立即停止同步运行时和重试队列，防止以失效 token 推送数据。
+   */
+  private setupSessionInvalidatedHandler(): void {
+    this.eventBus.onSessionInvalidated$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(() => {
+      this.logger.warn('会话失效，停止同步运行时和重试队列');
+      this.simpleSync.stopRuntime();
+      this.simpleSync.clearRetryQueue();
+      if (this.subscribedProjectId !== null) {
+        this.subscribedProjectId = null;
+        void this.simpleSync.unsubscribeFromProject();
+      }
+      this.destroySyncPulse();
     });
   }
 

@@ -1,4 +1,5 @@
-import { test, expect, Page, BrowserContext, Route } from '@playwright/test';
+import { test, expect, Page, Route } from '@playwright/test';
+import { getTestEnvConfig, testHelpers as criticalPathHelpers } from './critical-paths/helpers';
 
 /**
  * NanoFlow 同步数据完整性 E2E 测试
@@ -50,14 +51,22 @@ interface TaskPayload {
   [key: string]: any;
 }
 
+const syncMarkerByPage = new WeakMap<Page, string | null>();
+
+async function readLastSyncMarker(page: Page): Promise<string | null> {
+  return page.locator('[data-testid="sync-status-indicator"]').first().getAttribute('data-testid-last-sync').catch(() => null);
+}
+
 // ============================================================================
 // 测试辅助函数
 // ============================================================================
 
 const helpers: TestHelpers = {
   async waitForAppReady(page: Page): Promise<void> {
-    await page.waitForSelector('[data-testid="app-container"]', { timeout: 15000 });
-    await expect(page.locator('[data-testid="loading-indicator"]')).not.toBeVisible({ timeout: 10000 });
+    await criticalPathHelpers.waitForAppReady(page);
+    await criticalPathHelpers.ensureCloudAuthenticated(page);
+    await criticalPathHelpers.ensureEditorReady(page, { mode: 'cloud' });
+    syncMarkerByPage.set(page, await readLastSyncMarker(page));
   },
 
   uniqueId(): string {
@@ -65,49 +74,18 @@ const helpers: TestHelpers = {
   },
 
   async createTaskWithContent(page: Page, title: string, content: string): Promise<void> {
-    // 点击添加任务按钮
-    await page.click('[data-testid="add-task-btn"]');
-    
-    // 输入标题
-    const titleInput = page.locator('[data-testid="task-title-input"]');
-    if (await titleInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await titleInput.fill(title);
-    }
-    
-    // 输入内容
-    const contentEditor = page.locator('[data-testid="task-content-editor"], [data-testid="task-editor"]');
-    if (await contentEditor.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await contentEditor.fill(content);
-    }
-    
-    // 保存任务
-    const saveBtn = page.locator('[data-testid="save-task-btn"]');
-    if (await saveBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await saveBtn.click();
-    } else {
-      // 有些 UI 通过按 Enter 或失焦保存
-      await page.keyboard.press('Escape');
-    }
-    
-    await page.waitForTimeout(500);
+    await criticalPathHelpers.createTask(page, title, { content });
   },
 
   async openTaskDetail(page: Page, title: string): Promise<void> {
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${title}")`);
-    await expect(taskCard).toBeVisible({ timeout: 5000 });
-    await taskCard.click();
-    await page.waitForTimeout(300);
+    await criticalPathHelpers.openTaskTitleEditor(page, title);
+    await expect(page.locator('[data-testid="task-content"], [data-testid="task-content-editor"]').first()).toBeVisible({ timeout: 5_000 });
   },
 
   async getTaskContent(page: Page): Promise<string> {
-    // 尝试多种可能的内容选择器
     const selectors = [
       '[data-testid="task-content-editor"]',
-      '[data-testid="task-editor"]',
       '[data-testid="task-content"]',
-      '[data-testid="task-detail-content"]',
-      '.task-content-area textarea',
-      '.task-editor textarea',
     ];
     
     for (const selector of selectors) {
@@ -130,28 +108,44 @@ const helpers: TestHelpers = {
   },
 
   async waitForSync(page: Page): Promise<void> {
-    const syncIndicator = page.locator('[data-testid="sync-status"]');
-    if (await syncIndicator.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await expect(syncIndicator).toHaveAttribute('data-sync-state', 'synced', { timeout: 10000 });
-    } else {
-      await page.waitForTimeout(2000);
-    }
+    const previousSyncMarker = syncMarkerByPage.get(page) ?? null;
+    await criticalPathHelpers.waitForCloudSyncSettled(page, {
+      timeout: 10_000,
+      previousSyncMarker,
+    });
+    syncMarkerByPage.set(page, await readLastSyncMarker(page));
   },
 
   async closeTaskDetail(page: Page): Promise<void> {
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(300);
   },
 
   async triggerSync(page: Page): Promise<void> {
-    // 尝试点击同步按钮
-    const syncBtn = page.locator('[data-testid="sync-trigger"], [data-testid="sync-btn"]');
-    if (await syncBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await syncBtn.click();
-    }
-    await page.waitForTimeout(1000);
+    const resyncButton = page.locator('[data-testid="sync-resync-project-btn"], button[title="刷新同步当前项目"]').first();
+    await expect(resyncButton).toBeVisible({ timeout: 5_000 });
+
+    const previousSyncMarker = syncMarkerByPage.get(page) ?? await readLastSyncMarker(page);
+
+    const tasksResponse = page.waitForResponse((response) => {
+      return response.request().method() === 'GET' && response.url().includes('/rest/v1/tasks');
+    }, { timeout: 10_000 });
+
+    const waitForSyncCycle = criticalPathHelpers.waitForCloudSyncSettled(page, {
+      timeout: 10_000,
+      observeActivity: true,
+      previousSyncMarker,
+    });
+
+    await resyncButton.click();
+    await Promise.all([tasksResponse, waitForSyncCycle]);
+    syncMarkerByPage.set(page, await readLastSyncMarker(page));
   },
 };
+
+test.beforeEach(() => {
+  const { TEST_USER_EMAIL, TEST_USER_PASSWORD } = getTestEnvConfig();
+  test.skip(!TEST_USER_EMAIL || !TEST_USER_PASSWORD, '跳过：未配置 TEST_USER_EMAIL / TEST_USER_PASSWORD');
+});
 
 /**
  * 创建恶意响应拦截器 - 移除 content 字段
@@ -268,13 +262,7 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     // 2. 验证任务已创建
     await helpers.openTaskDetail(page, testTitle);
     const contentBefore = await helpers.getTaskContent(page);
-    
-    // 如果 UI 不支持显示内容，跳过此测试
-    if (!contentBefore && !preciousContent) {
-      console.log('ℹ️ 跳过：UI 不支持内容编辑功能');
-      test.skip();
-      return;
-    }
+    expect(contentBefore).toContain('My Precious Content');
     
     await helpers.closeTaskDetail(page);
     
@@ -283,20 +271,13 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     
     // 4. 触发同步
     await helpers.triggerSync(page);
-    await page.waitForTimeout(2000);  // 等待合并逻辑执行
+    await helpers.waitForSync(page);
     
     // 5. 🚨 核心断言：验证内容没有消失
     await helpers.openTaskDetail(page, testTitle);
     const contentAfter = await helpers.getTaskContent(page);
-    
-    // 内容应该保持不变或至少不为空
-    if (contentBefore) {
-      expect(contentAfter).toBe(contentBefore);
-      console.log('✅ 内容保护验证通过：本地 content 未被覆盖');
-    } else {
-      // 如果原本就没有内容可验证，至少确保没有报错
-      console.log('ℹ️ 内容字段为空，验证基本流程正常');
-    }
+
+    expect(contentAfter).toBe(contentBefore);
   });
 
   /**
@@ -316,7 +297,7 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     await helpers.waitForSync(page);
     
     // 2. 获取任务 ID（从 DOM 中）
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${testTitle}")`);
+    const taskCard = await criticalPathHelpers.getTaskCard(page, testTitle, { timeout: 5_000 });
     await expect(taskCard).toBeVisible();
     const taskId = await taskCard.getAttribute('data-task-id') || 'unknown';
     
@@ -324,19 +305,15 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     await helpers.openTaskDetail(page, testTitle);
     const contentBefore = await helpers.getTaskContent(page);
     await helpers.closeTaskDetail(page);
-    
-    if (!contentBefore) {
-      console.log('ℹ️ 跳过：无法获取初始内容');
-      test.skip();
-      return;
-    }
+    expect(contentBefore).toContain(testContent);
     
     // 4. 设置拦截器 - 模拟只返回位置更新
     await createPositionOnlyUpdateInterceptor(page, taskId);
     
     // 5. 触发同步
     await helpers.triggerSync(page);
-    await page.waitForTimeout(2000);
+    // 等待合并逻辑完成
+    await helpers.waitForSync(page);
     
     // 6. 验证内容完整
     await helpers.openTaskDetail(page, testTitle);
@@ -367,12 +344,7 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     await helpers.openTaskDetail(page, testTitle);
     const initialContent = await helpers.getTaskContent(page);
     await helpers.closeTaskDetail(page);
-    
-    if (!initialContent) {
-      console.log('ℹ️ 跳过：无法获取初始内容');
-      test.skip();
-      return;
-    }
+    expect(initialContent).toContain(testContent);
     
     // 3. 设置恶意拦截器
     await createContentStripperInterceptor(page);
@@ -380,7 +352,6 @@ test.describe('同步数据完整性：Content 字段保护', () => {
     // 4. 执行多次同步
     for (let i = 0; i < 3; i++) {
       await helpers.triggerSync(page);
-      await page.waitForTimeout(1500);
     }
     
     // 5. 验证内容仍然完整
@@ -420,12 +391,7 @@ test.describe('同步数据完整性：LWW 合并策略', () => {
     await helpers.openTaskDetail(page, testTitle);
     const contentBefore = await helpers.getTaskContent(page);
     await helpers.closeTaskDetail(page);
-    
-    if (!contentBefore) {
-      console.log('ℹ️ 跳过：无法获取初始内容');
-      test.skip();
-      return;
-    }
+    expect(contentBefore).toContain(testContent);
     
     // 3. 设置拦截器 - 返回更新的时间戳但无 content
     await page.route('**/rest/v1/tasks*', async (route: Route) => {
@@ -458,7 +424,7 @@ test.describe('同步数据完整性：LWW 合并策略', () => {
     
     // 4. 触发同步
     await helpers.triggerSync(page);
-    await page.waitForTimeout(2000);
+    await helpers.waitForSync(page);
     
     // 5. 验证内容保护
     await helpers.openTaskDetail(page, testTitle);
@@ -506,7 +472,7 @@ test.describe('同步数据完整性：监控埋点验证', () => {
     
     // 3. 触发同步
     await helpers.triggerSync(page);
-    await page.waitForTimeout(2000);
+    await helpers.waitForSync(page);
     
     // 4. 检查是否有相关警告（保护机制触发的日志）
     // 注：具体日志格式取决于实现，这里检查是否有 content 相关的警告
@@ -557,7 +523,7 @@ test.describe('同步数据完整性：边界情况', () => {
     await helpers.waitForSync(page);
     
     // 2. 验证任务存在
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${testTitle}")`);
+    const taskCard = await criticalPathHelpers.getTaskCard(page, testTitle, { timeout: 5_000 });
     await expect(taskCard).toBeVisible();
     
     // 3. 设置拦截器
@@ -565,7 +531,6 @@ test.describe('同步数据完整性：边界情况', () => {
     
     // 4. 触发同步
     await helpers.triggerSync(page);
-    await page.waitForTimeout(1500);
     
     // 5. 验证任务仍然存在且功能正常
     await expect(taskCard).toBeVisible();
@@ -590,15 +555,11 @@ test.describe('同步数据完整性：边界情况', () => {
     
     // 2. 模拟离线
     await context.setOffline(true);
-    await page.waitForTimeout(500);
     
     // 3. 离线编辑
     await helpers.openTaskDetail(page, testTitle);
-    const editor = page.locator('[data-testid="task-content-editor"], [data-testid="task-editor"]');
-    if (await editor.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await editor.fill(offlineContent);
-      await page.waitForTimeout(500);
-    }
+    const editor = await criticalPathHelpers.openTaskContentEditor(page, testTitle);
+    await editor.fill(offlineContent);
     await helpers.closeTaskDetail(page);
     
     // 4. 设置拦截器（重连时生效）
@@ -606,18 +567,12 @@ test.describe('同步数据完整性：边界情况', () => {
     
     // 5. 恢复在线
     await context.setOffline(false);
-    await page.waitForTimeout(2000);
+    await helpers.waitForSync(page);
     
     // 6. 验证内容
     await helpers.openTaskDetail(page, testTitle);
     const content = await helpers.getTaskContent(page);
-    
-    if (content) {
-      // 应该保持离线编辑的内容，或至少不为空
-      expect(content.length).toBeGreaterThan(0);
-      console.log('✅ 离线编辑内容在重连后保持');
-    } else {
-      console.log('ℹ️ 无法验证内容，跳过断言');
-    }
+
+    expect(content).toContain(offlineContent);
   });
 });

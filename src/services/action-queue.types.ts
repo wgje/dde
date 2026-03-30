@@ -109,23 +109,3 @@ export interface DeadLetterItem {
   reason: string;
 }
 
-/**
- * 队列状态信息
- */
-export interface QueueStatus {
-  /** 当前队列长度 */
-  queueLength: number;
-  /** 死信队列长度 */
-  deadLetterLength: number;
-  /** 正在处理 */
-  isProcessing: boolean;
-  /** 暂停状态 */
-  isPaused: boolean;
-  /** 下次重试时间（如果有） */
-  nextRetryTime?: number;
-}
-
-/**
- * 操作处理器类型
- */
-export type ActionProcessor = (action: QueuedAction) => Promise<boolean>;

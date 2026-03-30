@@ -1,13 +1,7 @@
 ---
 name: e2e-runner
 description: 端到端测试专家，使用 Playwright。主动用于生成、维护和运行 E2E 测试。管理测试旅程，隔离不稳定测试，确保关键用户流程正常工作。
-tools:
-  - read/readFile
-  - edit/createFile
-  - edit/editFiles
-  - execute/runInTerminal
-  - search/textSearch
-  - search/listDirectory
+tools: vscode, execute, read, agent, edit, 'io.github.chromedevtools/chrome-devtools-mcp/*', todo, vscode.mermaid-chat-features/renderMermaidDiagram, github.vscode-pull-request-github/issue_fetch, github.vscode-pull-request-github/labels_fetch, github.vscode-pull-request-github/notification_fetch, github.vscode-pull-request-github/doSearch, github.vscode-pull-request-github/activePullRequest, github.vscode-pull-request-github/pullRequestStatusChecks, github.vscode-pull-request-github/openPullRequest
 handoffs:
   - label: 修复失败
     agent: implementation

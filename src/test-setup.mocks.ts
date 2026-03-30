@@ -153,18 +153,6 @@ const mockSupabaseClient = {
   },
 };
 
-// 导出辅助函数：设置特定查询的返回值
-export function mockSupabaseQueryResult(
-  table: string, 
-  response: { data: unknown; error: unknown }
-) {
-  const chainable = createChainableQuery(response as { data: null; error: null });
-  mockSupabaseClient.from.mockImplementation((t?: string) => {
-    return t === table ? chainable : createChainableQuery();
-  });
-  return chainable;
-}
-
 // 导出 mock 实例（供测试中直接访问）
 export { mockSupabaseClient, mockSupabaseQuery, mockSupabaseChannel, mockSupabaseStorage, mockSupabaseAuth };
 
@@ -424,14 +412,6 @@ export function createMockDestroyRef() {
   return { destroyRef, destroy };
 }
 
-// 简单版本（向后兼容）
-export const mockDestroyRef = {
-  onDestroy: vi.fn((callback: () => void) => {
-    // 立即注册但不执行，测试可以手动触发
-    return () => {};
-  }),
-};
-
 // ============================================
 // 清理函数
 // ============================================
@@ -525,14 +505,6 @@ export const disablePollutionGuard = () => {
 
 export const enablePollutionGuard = () => {
   pollutionGuardConfig.disabled = false;
-};
-
-export const ignorePollutionEventTypes = (types: string[]) => {
-  types.forEach(type => pollutionGuardConfig.ignoreEventTypes.add(type));
-};
-
-export const ignorePollutionTarget = (target: EventTarget) => {
-  pollutionGuardConfig.ignoreTargets.add(target);
 };
 
 const listenerRegistry = new Map<EventTarget, ListenerRegistry>();

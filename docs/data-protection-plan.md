@@ -3327,7 +3327,7 @@ async switchProject(newProjectId: string): Promise<void> {
 | 对象存储配置 | 2h | R2/B2 bucket | ✅ | 手动验证 | scripts/backup-setup.sql |
 | 全量备份 Edge Function | 8h | `backup-full` | ✅ | ≥80% 覆盖 | supabase/functions/backup-full |
 | 增量备份 Edge Function | 6h | `backup-incremental` | ✅ | ≥80% 覆盖 | supabase/functions/backup-incremental |
-| 备份加密实现 | 4h | AES-256-GCM | ✅ | ≥90% 覆盖 | supabase/functions/_shared/backup-utils.ts |
+| 备份加密实现 | 4h | AES-256-GCM | 🗑️ 已清理 | - | 未接入运行路径，已于 2026-03 清理冗余实现 |
 | **密钥生命周期管理** | 3h | 密钥存储 + 轮换 + 多版本解密 | ✅ | 手动验证 | backup_encryption_keys 表 |
 | 健康校验逻辑（增强） | 5h | `validateBackup()` + 绝对值+相对值结合 | ✅ | ≥90% 覆盖 | backup-utils.ts#validateBackup |
 | 版本保留清理 | 3h | 过期备份清理 | ✅ | ≥80% 覆盖 | supabase/functions/backup-cleanup |

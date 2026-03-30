@@ -255,13 +255,7 @@ export interface ZoneAssignment {
  * StatusHUD 预设位置偏好（策划案 §5.5）
  * 注意：与 dock-hud-position.ts 中的 HudPosition { x, y } 坐标类型不同
  */
-export type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
-
-export interface FocusHudPreference {
-  position: HudPresetPosition;
-  opacity: number;
-  minimized: boolean;
-}
+type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
 
 /**
  * 日常任务定义（策划案 §10.1）
@@ -464,12 +458,6 @@ export interface DailySlotEntry {
   createdAt: string;
 }
 
-export interface ScheduleRecommendation {
-  recommended: string[];
-  reason: string;
-  isFragmentPhase: boolean;
-}
-
 export interface DockPendingDecision {
   rootTaskId: string;
   rootRemainingMinutes: number;
@@ -491,15 +479,6 @@ export interface DockPendingDecisionEntry {
   load: CognitiveLoad;
   expectedMinutes: number | null;
   recommendedScore: number | null;
-}
-
-export interface PendingDecisionViewModel {
-  candidateGroups: Array<{
-    type: RecommendationGroupType;
-    taskIds: string[];
-  }>;
-  reason: string;
-  expiresAt?: string;
 }
 
 export interface DockSessionState {
@@ -556,17 +535,3 @@ export interface DockSnapshot {
 // ---------------------------------------------------------------------------
 //  DockEntry 类型守卫（sourceKind 辨识）
 // ---------------------------------------------------------------------------
-
-/** 就地创建条目：携带 inline 专属字段（M-8: 仅窄化 sourceKind，其他字段保持原始可选性） */
-export function isInlineDockEntry(entry: DockEntry): entry is DockEntry & {
-  sourceKind: 'dock-created';
-} {
-  return entry.sourceKind === 'dock-created';
-}
-
-/** 项目任务条目：来自现有项目任务 */
-export function isProjectDockEntry(entry: DockEntry): entry is DockEntry & {
-  sourceKind: 'project-task';
-} {
-  return entry.sourceKind === 'project-task';
-}

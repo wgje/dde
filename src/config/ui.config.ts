@@ -60,27 +60,6 @@ export const TOAST_CONFIG = {
 } as const;
 
 /**
- * 搜索配置
- */
-export const SEARCH_CONFIG = {
-  /** 搜索防抖延迟（毫秒） */
-  DEBOUNCE_DELAY: 300,
-} as const;
-
-/**
- * 深链接配置
- * 任务深链接定位相关配置
- */
-export const DEEP_LINK_CONFIG = {
-  /** 最大重试次数 */
-  MAX_RETRIES: 20,
-  /** 基础延迟（毫秒） */
-  BASE_DELAY: 100,
-  /** 最大延迟（毫秒） */
-  MAX_DELAY: 500,
-} as const;
-
-/**
  * 流程图配置
  * 图表初始化和重试相关配置
  */

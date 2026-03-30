@@ -38,6 +38,7 @@ import { Task } from '../../../../models';
             <div class="mt-3 p-3 bg-amber-50 dark:bg-amber-900/30 border border-amber-100 dark:border-amber-800/50 rounded-lg">
               <label class="flex items-start gap-2 cursor-pointer">
                 <input 
+                  data-testid="keep-children-checkbox"
                   type="checkbox" 
                   [checked]="keepChildren"
                   (change)="keepChildrenChange.emit(!keepChildren)"
@@ -54,11 +55,13 @@ import { Task } from '../../../../models';
         </div>
         <div class="flex border-t border-stone-100 dark:border-stone-700">
           <button 
+            data-testid="cancel-delete-btn"
             (click)="cancel.emit()"
             class="flex-1 px-4 py-3 text-sm font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-stone-800 transition-colors">
             取消
           </button>
           <button 
+            data-testid="confirm-delete-btn"
             (click)="confirm.emit(keepChildren)"
             class="flex-1 px-4 py-3 text-sm font-medium text-white bg-red-500 hover:bg-red-600 transition-colors">
             删除

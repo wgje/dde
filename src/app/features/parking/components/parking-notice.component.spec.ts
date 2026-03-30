@@ -150,6 +150,81 @@ describe('ParkingNoticeComponent', () => {
     });
   });
 
+  describe('交互消散生命周期', () => {
+    it('immune 窗口内的外部点击不应 dismiss eviction', () => {
+      pendingNotices.set([createEvictionNotice({ minVisibleMs: 50 })]);
+      fixture.detectChanges();
+
+      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      vi.advanceTimersByTime(49);
+      fixture.detectChanges();
+
+      expect(component.currentNotice()?.id).toBe('eviction-1');
+      expect(component.isExiting()).toBe(false);
+      expect(mockParkingService.consumeNotice).not.toHaveBeenCalled();
+    });
+
+    it('进入 interactive 后 reminder 应在外部点击时 dismiss', () => {
+      activeReminder.set(createReminderNotice());
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(10);
+      fixture.detectChanges();
+
+      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(component.isExiting()).toBe(true);
+
+      vi.advanceTimersByTime(300);
+      fixture.detectChanges();
+
+      expect(activeReminder()).toBeNull();
+    });
+
+    it('进入 interactive 后 eviction 应在外部 input 时 dismiss', () => {
+      pendingNotices.set([createEvictionNotice()]);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(10);
+      fixture.detectChanges();
+
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.body.removeChild(input);
+
+      expect(component.isExiting()).toBe(true);
+
+      vi.advanceTimersByTime(300);
+      fixture.detectChanges();
+
+      expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
+    });
+
+    it('进入 interactive 后 eviction 应在有效滚动时 dismiss', () => {
+      pendingNotices.set([createEvictionNotice()]);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(10);
+      fixture.detectChanges();
+
+      let currentScrollY = 0;
+      const scrollSpy = vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => currentScrollY);
+
+      document.dispatchEvent(new Event('scroll'));
+      expect(component.isExiting()).toBe(false);
+
+      currentScrollY = 40;
+      document.dispatchEvent(new Event('scroll'));
+      expect(component.isExiting()).toBe(true);
+
+      vi.advanceTimersByTime(300);
+      fixture.detectChanges();
+
+      expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
+      scrollSpy.mockRestore();
+    });
+  });
+
   // ─── 动作委托 ───
 
   describe('handleAction 动作委托', () => {

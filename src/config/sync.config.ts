@@ -259,41 +259,6 @@ export const OPTIMISTIC_CONFIG = {
 } as const;
 
 /**
- * 乐观锁配置
- * 控制版本冲突检测和处理策略
- * 
- * 【Week 4 强化】从 warn_and_lww 改为 reject 模式
- * 服务端触发器 check_version_increment() 已改为 RAISE EXCEPTION
- * 
- * @reserved 预留的乐观锁配置，供版本冲突处理使用
- */
-export const OPTIMISTIC_LOCK_CONFIG = {
-  /** 
-   * 是否启用严格模式（拒绝版本回退）
-   * true: 服务端和客户端都拒绝版本回退
-   * false: 仅警告，允许覆盖（LWW）
-   */
-  STRICT_MODE: true,
-  
-  /** 
-   * 版本冲突处理策略
-   * 'reject': 拒绝操作，提示用户刷新
-   * 'warn_and_lww': 警告并使用 LWW 覆盖
-   * 'silent_lww': 静默使用 LWW 覆盖
-   */
-  CONFLICT_STRATEGY: 'reject' as const,
-  
-  /** 是否记录版本冲突到日志 */
-  LOG_CONFLICTS: true,
-  
-  /** 版本冲突后的重试间隔（毫秒）*/
-  CONFLICT_RETRY_DELAY: 1000,
-  
-  /** 版本冲突最大重试次数（自动刷新远程数据后重试）*/
-  MAX_CONFLICT_RETRIES: 2,
-} as const;
-
-/**
  * 队列配置
  */
 export const QUEUE_CONFIG = {
@@ -412,39 +377,6 @@ export const INDEXEDDB_HEALTH_CONFIG = {
 
   /** 连接必填字段 */
   REQUIRED_CONNECTION_FIELDS: ['id', 'source_id', 'target_id'] as const,
-} as const;
-
-/**
- * 【v5.10】时钟同步配置
- * 检测客户端与服务端时钟偏移，保护 LWW 策略
- * 
- * @reserved 此配置供外部引用，实际使用在 clock-sync.service.ts 中有相同定义
- * TODO: 考虑整合为单一来源
- */
-export const CLOCK_SYNC_CONFIG = {
-  /** 是否启用服务端时间校正 */
-  USE_SERVER_TIME: true,
-  
-  /** 时钟偏移警告阈值（毫秒）- 1 分钟 */
-  CLOCK_DRIFT_WARNING_THRESHOLD: 60 * 1000,
-  
-  /** 时钟偏移错误阈值（毫秒）- 5 分钟 */
-  CLOCK_DRIFT_ERROR_THRESHOLD: 5 * 60 * 1000,
-  
-  /** 网络延迟过大阈值（毫秒）- 超过此值认为检测不可信 */
-  MAX_RELIABLE_RTT: 5000,
-  
-  /** 定期检测间隔（毫秒）- 每 10 分钟 */
-  CHECK_INTERVAL: 10 * 60 * 1000,
-  
-  /** 启动时自动检测 */
-  CHECK_ON_INIT: true,
-  
-  /** 同步操作前检测（如果上次检测超过此时间） */
-  CHECK_BEFORE_SYNC_INTERVAL: 5 * 60 * 1000,
-  
-  /** 缓存有效期（毫秒）*/
-  CACHE_TTL: 5 * 60 * 1000,
 } as const;
 
 /**

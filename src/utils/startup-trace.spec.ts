@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('startup-trace', () => {
-  afterEach(() => {
+  const clearStartupTraceGlobals = () => {
     delete (window as Window & {
       __NANOFLOW_STARTUP_TRACE__?: unknown;
       __NANOFLOW_PUSH_STARTUP_TRACE__?: unknown;
@@ -10,6 +10,14 @@ describe('startup-trace', () => {
       __NANOFLOW_STARTUP_TRACE__?: unknown;
       __NANOFLOW_PUSH_STARTUP_TRACE__?: unknown;
     }).__NANOFLOW_PUSH_STARTUP_TRACE__;
+  };
+
+  beforeEach(() => {
+    clearStartupTraceGlobals();
+  });
+
+  afterEach(() => {
+    clearStartupTraceGlobals();
     vi.resetModules();
   });
 

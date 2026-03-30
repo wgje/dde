@@ -71,13 +71,3 @@ export interface FieldLockData {
   duration: number;
 }
 
-/**
- * 任务字段变更
- */
-export interface TaskFieldChange {
-  taskId: string;
-  projectId: string;
-  field: string;
-  oldValue: unknown;
-  newValue: unknown;
-}

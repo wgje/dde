@@ -17,7 +17,6 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
 import { ProjectStore } from '../../../core/state/stores';
 import {
   RadarLayoutItem,
-  ComboSector,
   RadarAvoidRect,
   DEFAULT_RADAR_LAYOUT_CONFIG,
   layoutEntries,

@@ -490,12 +490,23 @@ export class AuthService {
             userId: session.user.id,
           });
         })
-        .catch(e => {
-          // 网络失败不清除状态 — 可能只是暂时离线，本地缓存仍有效
-          this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（网络问题，保留本地状态）', e);
-          pushStartupTrace('auth.background_refresh_network_preserved', {
-            currentUserId: this.currentUserId(),
-          });
+        .catch((e: unknown) => {
+          // 区分认证错误和网络错误：
+          // - 认证错误（401/403/token-related）→ 会话已失效，必须清除本地状态
+          // - 网络错误（timeout/dns/offline）→ 临时离线，保留本地缓存
+          const isAuthError = this.isAuthenticationError(e);
+          if (isAuthError) {
+            this.logger.warn('[BackgroundRefresh] SDK 抛出认证异常，清除本地会话', e);
+            pushStartupTrace('auth.background_refresh_auth_error', {
+              currentUserId: this.currentUserId(),
+            });
+            this.handleBackgroundSessionInvalid();
+          } else {
+            this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（网络问题，保留本地状态）', e);
+            pushStartupTrace('auth.background_refresh_network_preserved', {
+              currentUserId: this.currentUserId(),
+            });
+          }
         });
     });
   }
@@ -529,6 +540,31 @@ export class AuthService {
     } catch {
       // localStorage 不可用时静默降级
     }
+    // 【安全加固 2026-03-30】通知同步层停止所有依赖有效会话的操作，
+    // 防止 FastPath 乐观窗口内的待发送数据以失效 token 推送到服务端。
+    this.eventBus.publishSessionInvalidated('AuthService.backgroundRefresh');
+  }
+
+  /**
+   * 区分认证错误和网络错误
+   * 认证错误（会话失效）：必须清除本地状态
+   * 网络错误（暂时离线）：保留本地缓存
+   */
+  private isAuthenticationError(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const err = error as { status?: number; message?: string; code?: string; name?: string };
+    // HTTP 401/403 明确表示认证失效
+    if (err.status === 401 || err.status === 403) return true;
+    // Supabase SDK 的特定错误码
+    if (err.code === 'session_not_found' || err.code === 'refresh_token_not_found') return true;
+    // 错误消息中包含认证相关关键词
+    const msg = (err.message ?? '').toLowerCase();
+    if (msg.includes('refresh token') || msg.includes('invalid token') ||
+        msg.includes('token expired') || msg.includes('session expired') ||
+        msg.includes('invalid claim') || msg.includes('jwt expired')) {
+      return true;
+    }
+    return false;
   }
 
   /**

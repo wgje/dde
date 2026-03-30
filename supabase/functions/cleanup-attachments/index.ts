@@ -5,7 +5,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// 配置常量 - 与前端 constants.ts 中的 ATTACHMENT_CLEANUP_CONFIG 保持一致
+// 配置常量 - 与前端附件清理策略保持一致
 const RETENTION_DAYS = 30; // 软删除附件保留天数
 const BATCH_SIZE = 100; // 每批处理的文件数
 const MAX_TASKS_PER_RUN = 500; // 每次执行最多处理的任务数（防止超时）

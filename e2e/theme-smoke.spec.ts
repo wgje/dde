@@ -2,7 +2,18 @@ import { test, expect, Page } from '@playwright/test';
 
 async function waitForAppReady(page: Page): Promise<void> {
   await page.waitForSelector('[data-testid="app-container"]', { timeout: 15000 });
-  await expect(page.locator('[data-testid="loading-indicator"]')).not.toBeVisible({ timeout: 10000 });
+
+  // 等待 loading-indicator 消失（若存在）
+  const loadingIndicator = page.locator('[data-testid="loading-indicator"]');
+  const loadingVisible = await loadingIndicator
+    .isVisible({ timeout: 1500 })
+    .catch(() => false);
+
+  if (loadingVisible) {
+    await expect(loadingIndicator).not.toBeVisible({ timeout: 15000 });
+  }
+
+  await page.waitForLoadState('domcontentloaded').catch(() => undefined);
 }
 
 async function bootWithTheme(

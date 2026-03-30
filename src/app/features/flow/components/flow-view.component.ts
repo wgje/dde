@@ -28,7 +28,6 @@ import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service'
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { SimpleSyncService } from '../../../core/services/simple-sync.service';
 import { AuthService } from '../../../../services/auth.service';
-import { ParkingService } from '../../../../services/parking.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, TIMEOUT_CONFIG } from '../../../../config';
 import { FlowToolbarComponent } from './flow-toolbar.component';

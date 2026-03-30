@@ -23,7 +23,7 @@ export type Json =
 /**
  * Supabase 数据库 Schema 定义
  */
-export interface Database {
+interface Database {
   public: {
     Tables: {
       /** 项目表 */

@@ -180,6 +180,7 @@ npm run test:run:pure
 npm run test:run:services
 npm run test:run:components
 npm run test:e2e
+npm run test:e2e:perf
 ```
 
 ### 质量与性能门禁
@@ -203,6 +204,7 @@ npm run db:types
 
 - 本地默认测试入口是 `scripts/run-test-matrix.cjs`
 - 支持 Lane 分片、Quarantine 隔离、LPT 调度
+- `npm run test:e2e` 默认只跑关键路径 E2E；性能预算门禁使用 `npm run test:e2e:perf`
 - 更细的测试矩阵与脚本说明见 [`scripts/README.md`](scripts/README.md)
 
 ## 部署与基础设施

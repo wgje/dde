@@ -3,19 +3,6 @@ import { Task } from '../models';
 import { GoJSNodeData, GoJSLinkData } from '../app/features/flow/services/flow-diagram-config.service';
 
 /**
- * 血缘关系数据结构
- * 用于追溯每个节点的始祖节点
- */
-export interface LineageData {
-  /** 始祖节点索引（1, 2, 3 等顶级任务的索引） */
-  rootAncestorIndex: number;
-  /** 始祖节点 ID */
-  rootAncestorId: string;
-  /** 家族专属颜色（HSL 格式） */
-  familyColor: string;
-}
-
-/**
  * 预处理后的节点数据（包含血缘信息）
  */
 export interface LineageNodeData extends GoJSNodeData {

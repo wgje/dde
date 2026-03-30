@@ -1,0 +1,35 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "vitest.*.mts",
+    "lighthouserc.js",
+    "scripts/**/*.cjs",
+    "scripts/**/*.js",
+    "supabase/functions/**/index.ts",
+    "test-edge-cases.js",
+    "test-handoff-loop.ts",
+    "test-startup-bugs.js",
+    "src/test-setup.node.ts"
+  ],
+  "project": [
+    "src/**/*.{ts,html,scss,css}",
+    "scripts/**/*.{js,cjs,mjs,ts}",
+    "supabase/functions/**/*.ts",
+    "e2e/**/*.{ts,js}",
+    "*.{js,ts,mts}"
+  ],
+  "ignore": [
+    "src/styles.css",
+    "supabase/functions/_shared/deno.d.ts"
+  ],
+  "ignoreDependencies": [
+    "@angular/cli",
+    "@types/dompurify",
+    "esbuild",
+    "jsr"
+  ],
+  "ignoreBinaries": [
+    "supabase"
+  ],
+  "ignoreExportsUsedInFile": true
+}

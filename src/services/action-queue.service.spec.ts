@@ -197,6 +197,7 @@ describe('ActionQueueService', () => {
   afterEach(() => {
     service.reset();
     destroyRefCleanup?.();
+    vi.useRealTimers();
 
     consoleWarnSpy?.mockRestore();
     consoleErrorSpy?.mockRestore();
@@ -635,6 +636,8 @@ describe('ActionQueueService', () => {
   
   describe('并发处理保护', () => {
     it('正在处理时不应该重复处理', async () => {
+      vi.useFakeTimers();
+
       const processor = vi.fn().mockImplementation(async () => {
         await new Promise(r => setTimeout(r, 100));
         return true;
@@ -649,6 +652,8 @@ describe('ActionQueueService', () => {
       
       const promise1 = service.processQueue();
       const promise2 = service.processQueue();
+
+      await vi.advanceTimersByTimeAsync(100);
       
       await Promise.all([promise1, promise2]);
       

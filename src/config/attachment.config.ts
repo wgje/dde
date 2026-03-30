@@ -48,15 +48,3 @@ export const ATTACHMENT_CONFIG = {
    */
   SIGNED_URL_EXPIRY: 60 * 60 * 24 * 30
 } as const;
-
-/**
- * 附件清理配置
- * 用于前端和 Edge Function 共用的配置
- * @reserved Edge Function cleanup-attachments 依赖此配置值
- */
-export const ATTACHMENT_CLEANUP_CONFIG = {
-  /** 软删除附件保留天数 */
-  RETENTION_DAYS: 30,
-  /** 每批处理的文件数 */
-  BATCH_SIZE: 100,
-} as const;

@@ -9,6 +9,7 @@
   "scripts": {
     "ng": "node scripts/run-ng.cjs",
     "start": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs serve",
+    "start:e2e": "node scripts/set-env.cjs && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs serve",
     "build": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build && node scripts/generate-launch-html.cjs && node scripts/inject-modulepreload.cjs && node scripts/patch-ngsw-html-hashes.cjs && node scripts/validate-launch-shared-markers.cjs && node scripts/validate-launch-artifact-closure.cjs",
     "build:stats": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build --stats-json && node scripts/generate-launch-html.cjs && node scripts/inject-modulepreload.cjs && node scripts/patch-ngsw-html-hashes.cjs && node scripts/validate-launch-shared-markers.cjs && node scripts/validate-launch-artifact-closure.cjs",
     "build:clean": "npm run config && cross-env NODE_OPTIONS=--max_old_space_size=2048 NG_BUILD_MAX_WORKERS=1 NG_BUILD_PARALLEL_TS=0 NG_BUILD_TYPE_CHECK=0 node scripts/run-ng.cjs build && node scripts/generate-launch-html.cjs && node scripts/inject-modulepreload.cjs && node scripts/patch-ngsw-html-hashes.cjs && node scripts/validate-launch-shared-markers.cjs && node scripts/validate-launch-artifact-closure.cjs",
@@ -42,6 +43,7 @@
     "test:perf": "vitest run --config vitest.perf.config.mts",
     "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
+    "test:e2e:perf": "cross-env PERF_BUDGET_TEST=1 PLAYWRIGHT_INCLUDE_PERF=1 playwright test e2e/weak-network-budget.spec.ts e2e/perf",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "lint": "eslint 'src/**/*.ts' --no-warn-ignored",

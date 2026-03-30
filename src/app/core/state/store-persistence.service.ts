@@ -846,6 +846,3 @@ export class StorePersistenceService {
   /** 删除备份 */
   async deleteBackup(backupDbName: string): Promise<boolean> { return this.backupService.deleteBackup(backupDbName); }
 }
-
-// 类型定义导出从 persistence/types.ts
-export type { OfflineIntegrityResult, OfflineIntegrityIssue } from './persistence/types';

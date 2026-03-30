@@ -26,7 +26,7 @@ import type { GoJSLinkData } from '../../../../types/gojs-extended';
 import * as go from 'gojs';
 
 // ========== 自定义事件名称常量（供向后兼容） ==========
-export const FLOW_EVENTS = {
+const FLOW_EVENTS = {
   NODE_CLICKED: 'NodeClicked',
   NODE_DOUBLE_CLICKED: 'NodeDoubleClicked',
   LINK_CLICKED: 'LinkClicked',

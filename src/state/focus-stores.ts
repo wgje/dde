@@ -62,7 +62,7 @@ if (typeof window !== 'undefined') {
 /**
  * 【P3-04】清理 todayDate 定时器（用于测试 teardown 和 SSR）
  */
-export function cleanupTodayDateInterval(): void {
+function cleanupTodayDateInterval(): void {
   if (todayDateIntervalId !== null) {
     clearInterval(todayDateIntervalId);
     todayDateIntervalId = null;
@@ -196,10 +196,6 @@ export const unreadBlackBoxCount = computed(() =>
 /**
  * 待处理条目数量（用于大门显示）
  */
-export const pendingBlackBoxCount = computed(() => 
-  pendingBlackBoxEntries().length
-);
-
 // ============================================
 // 大门状态
 // ============================================
@@ -450,5 +446,6 @@ export function resetFocusState(): void {
   offlinePendingCount.set(0);
   remainingQuota.set(50);
   showBlackBoxPanel.set(false);
+  cleanupTodayDateInterval();
   todayDate.set(getTodayDate());
 }

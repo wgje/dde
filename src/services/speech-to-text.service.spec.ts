@@ -9,6 +9,8 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
+import { AuthService } from './auth.service';
+import { BlackBoxService } from './black-box.service';
 import { signal } from '@angular/core';
 import { isRecording, isTranscribing } from '../state/focus-stores';
 
@@ -30,6 +32,13 @@ describe('SpeechToTextService', () => {
   };
   let mockSupabaseClient: {
     getClient: ReturnType<typeof vi.fn>;
+  };
+  let mockAuthService: {
+    currentUserId: ReturnType<typeof signal<string | null>>;
+    isConfigured: boolean;
+  };
+  let mockBlackBoxService: {
+    create: ReturnType<typeof vi.fn>;
   };
   let mockNetworkAwareness: {
     isOnline: ReturnType<typeof signal<boolean>>;
@@ -83,6 +92,15 @@ describe('SpeechToTextService', () => {
       })
     };
 
+    mockAuthService = {
+      currentUserId: signal('local-user'),
+      isConfigured: false,
+    };
+
+    mockBlackBoxService = {
+      create: vi.fn(),
+    };
+
     mockNetworkAwareness = {
       isOnline: signal(true),
       networkQuality: signal('high')
@@ -94,6 +112,8 @@ describe('SpeechToTextService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SupabaseClientService, useValue: mockSupabaseClient },
+        { provide: AuthService, useValue: mockAuthService },
+        { provide: BlackBoxService, useValue: mockBlackBoxService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwareness },
       ]
     });

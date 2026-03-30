@@ -372,7 +372,7 @@ export function getTodoIndexFromClick(event: MouseEvent): number | null {
 /**
  * 提取纯文本摘要（用于预览）
  */
-export function extractPlainText(content: string, maxLength: number = 100): string {
+function extractPlainText(content: string, maxLength: number = 100): string {
   if (!content) return '';
   
   // 移除 Markdown 语法

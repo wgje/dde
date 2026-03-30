@@ -12,6 +12,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { RequestThrottleService } from './request-throttle.service';
 import { LoggerService } from './logger.service';
+import { REQUEST_THROTTLE_CONFIG } from '../config';
 
 describe('RequestThrottleService', () => {
   let service: RequestThrottleService;
@@ -50,6 +51,7 @@ describe('RequestThrottleService', () => {
     service.clearAll();
     // 清理 RequestThrottleService 构造函数里注册的定时器清理逻辑
     for (const cb of destroyCallbacks) cb();
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -343,36 +345,76 @@ describe('RequestThrottleService', () => {
   });
 
   describe('优先级处理', () => {
-    it.skip('低优先级请求在队列满时应该被拒绝', async () => {
-      // TODO: 此测试需要重新设计，当前实现可能与队列满的判断逻辑不匹配
-      // 填满队列（创建足够多的阻塞请求）
-      const blockPromises: Promise<any>[] = [];
-      const blockers: (() => void)[] = [];
-      
-      // 进一步减少到 10 个以加快测试
-      for (let i = 0; i < 10; i++) {
-        let resolve: () => void;
-        const block = new Promise<void>(r => { resolve = r; });
-        blockers.push(resolve!);
-        blockPromises.push(
-          service.execute(`blocker-${i}`, async () => {
+    it('低优先级请求在队列满时应该被拒绝', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`blocker-${i}`, async () => {
             await block;
             return i;
-          }).catch(e => e.message)
-        );
-      }
+          });
+        }
+      );
 
-      // 等待一小段时间确保队列填充
-      await new Promise(r => setTimeout(r, 200));
+      await vi.advanceTimersByTimeAsync(0);
 
-      // 尝试添加低优先级请求应该失败
+      expect(service.getStatus()).toMatchObject({
+        activeCount: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT,
+        queueLength: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE,
+      });
+
       await expect(
         service.execute('low-priority', async () => 'result', { priority: 'low' })
       ).rejects.toThrow(/队列已满/);
 
-      // 清理：解除所有阻塞
-      blockers.forEach(r => r());
-      await Promise.all(blockPromises);
-    }, 8000);
+      blockers.forEach((resolve) => resolve());
+      await Promise.allSettled(blockingRequests);
+    });
+
+    it('高优先级请求在队列满时应抢占一个低优先级请求', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`low-${i}`, async () => {
+            await block;
+            return i;
+          }, { priority: 'low' })
+            .then(() => 'completed')
+            .catch((error: Error) => error.message);
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      const highPriorityExecutor = vi.fn().mockResolvedValue('high-result');
+      const highPriorityPromise = service.execute('high-priority', highPriorityExecutor, {
+        priority: 'high',
+      });
+
+      await Promise.resolve();
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      blockers.forEach((resolve) => resolve());
+      const results = await Promise.all([...blockingRequests, highPriorityPromise]);
+
+      expect(highPriorityExecutor).toHaveBeenCalledTimes(1);
+      expect(results).toContain('被更高优先级请求抢占');
+      expect(results).toContain('high-result');
+    });
   });
 });

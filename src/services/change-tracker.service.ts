@@ -16,8 +16,7 @@ export type {
   EntityType,
   ChangeRecord,
   ProjectChangeSummary,
-  FieldLockData,
-  TaskFieldChange
+  FieldLockData
 } from './change-tracker.types';
 
 @Injectable({

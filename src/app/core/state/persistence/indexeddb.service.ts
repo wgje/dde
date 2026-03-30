@@ -60,6 +60,7 @@ export class IndexedDBService {
             dbName: DB_CONFIG.name,
             targetVersion: DB_CONFIG.version,
             requiredStores: Object.values(DB_CONFIG.stores),
+            schemaNeedsUpgrade: this.hasMissingIndexes.bind(this),
             ensureStores: this.ensureStores.bind(this),
           });
           
@@ -91,27 +92,57 @@ export class IndexedDBService {
    * 确保所有必需的 object stores 存在
    * 在 onupgradeneeded 事件中调用
    */
-  private ensureStores(db: IDBDatabase): void {
+  private ensureStores(db: IDBDatabase, transaction: IDBTransaction | null): void {
     if (!db.objectStoreNames.contains(DB_CONFIG.stores.projects)) {
       db.createObjectStore(DB_CONFIG.stores.projects, { keyPath: 'id' });
     }
+
+    let taskStore: IDBObjectStore | null = null;
     if (!db.objectStoreNames.contains(DB_CONFIG.stores.tasks)) {
-      const taskStore = db.createObjectStore(DB_CONFIG.stores.tasks, { keyPath: 'id' });
-      taskStore.createIndex('projectId', 'projectId', { unique: false });
-      // 【P3-05】复合索引：支持按 projectId + updatedAt 范围查询增量任务
-      taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
-    } else {
-      // 数据库已存在 tasks store，检查是否需要补建索引
-      // 注意：只有在 onupgradeneeded 事务中才能修改索引
-      // openIndexedDBAdaptive 会在检测到 missing stores 时触发 version bump
+      taskStore = db.createObjectStore(DB_CONFIG.stores.tasks, { keyPath: 'id' });
+    } else if (transaction) {
+      taskStore = transaction.objectStore(DB_CONFIG.stores.tasks);
     }
+
+    if (taskStore) {
+      if (!taskStore.indexNames.contains('projectId')) {
+        taskStore.createIndex('projectId', 'projectId', { unique: false });
+      }
+      if (!taskStore.indexNames.contains('projectId_updatedAt')) {
+        // 【P3-05】复合索引：支持按 projectId + updatedAt 范围查询增量任务
+        taskStore.createIndex('projectId_updatedAt', ['projectId', 'updatedAt'], { unique: false });
+      }
+    }
+
+    let connStore: IDBObjectStore | null = null;
     if (!db.objectStoreNames.contains(DB_CONFIG.stores.connections)) {
-      const connStore = db.createObjectStore(DB_CONFIG.stores.connections, { keyPath: 'id' });
+      connStore = db.createObjectStore(DB_CONFIG.stores.connections, { keyPath: 'id' });
+    } else if (transaction) {
+      connStore = transaction.objectStore(DB_CONFIG.stores.connections);
+    }
+
+    if (connStore && !connStore.indexNames.contains('projectId')) {
       connStore.createIndex('projectId', 'projectId', { unique: false });
     }
+
     if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
       db.createObjectStore(DB_CONFIG.stores.meta, { keyPath: 'key' });
     }
+  }
+
+  private hasMissingIndexes(db: IDBDatabase): boolean {
+    return this.isIndexMissing(db, DB_CONFIG.stores.tasks, 'projectId')
+      || this.isIndexMissing(db, DB_CONFIG.stores.tasks, 'projectId_updatedAt')
+      || this.isIndexMissing(db, DB_CONFIG.stores.connections, 'projectId');
+  }
+
+  private isIndexMissing(db: IDBDatabase, storeName: string, indexName: string): boolean {
+    if (!db.objectStoreNames.contains(storeName)) {
+      return false;
+    }
+
+    const transaction = db.transaction(storeName, 'readonly');
+    return !transaction.objectStore(storeName).indexNames.contains(indexName);
   }
   
   /**

@@ -19,18 +19,6 @@ export interface SwipeGestureState {
 }
 
 /**
- * 创建初始滑动手势状态
- */
-export function createSwipeGestureState(): SwipeGestureState {
-  return { 
-    startX: 0, 
-    startY: 0, 
-    startTime: 0,
-    isActive: false 
-  };
-}
-
-/**
  * 滑动方向
  */
 export type SwipeDirection = 'left' | 'right';
@@ -50,7 +38,7 @@ export interface SwipeGestureConfig {
 /**
  * 默认滑动手势配置
  */
-export const DEFAULT_SWIPE_CONFIG: SwipeGestureConfig = {
+const DEFAULT_SWIPE_CONFIG: SwipeGestureConfig = {
   threshold: 50,
   horizontalRatio: 1.5,
   maxDuration: 500,

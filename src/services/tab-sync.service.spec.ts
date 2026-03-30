@@ -41,45 +41,74 @@ class MockBroadcastChannel {
 
 describe('TabSyncService', () => {
   let service: TabSyncService;
+  let managedServices: TabSyncService[];
   let mockToast: { warning: ReturnType<typeof vi.fn>; success: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
   let mockLogger: { category: () => { debug: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> } };
   
   // Store original BroadcastChannel
   const originalBroadcastChannel = (globalThis as unknown as { BroadcastChannel?: typeof BroadcastChannel }).BroadcastChannel;
-  
-  beforeEach(() => {
-    // Reset mock channels
-    MockBroadcastChannel.reset();
-    
-    // Mock BroadcastChannel
-    (globalThis as unknown as { BroadcastChannel?: typeof MockBroadcastChannel }).BroadcastChannel = MockBroadcastChannel;
-    
-    mockToast = {
-      warning: vi.fn(),
-      success: vi.fn(),
-      info: vi.fn(),
-      error: vi.fn(),
-    };
-    
-    const loggerMethods = {
+
+  const createToastMock = () => ({
+    warning: vi.fn(),
+    success: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+  });
+
+  const createLoggerMock = () => {
+    const methods = {
       debug: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
       info: vi.fn(),
     };
-    mockLogger = {
-      category: () => loggerMethods
+
+    return {
+      provider: {
+        category: () => methods,
+      },
+      methods,
     };
+  };
+
+  const createServiceInstance = () => {
+    const toast = createToastMock();
+    const logger = createLoggerMock();
 
     const injector = Injector.create({
       providers: [
-        { provide: ToastService, useValue: mockToast },
-        { provide: LoggerService, useValue: mockLogger },
+        { provide: ToastService, useValue: toast },
+        { provide: LoggerService, useValue: logger.provider },
       ],
     });
 
-    // TabSyncService 内部使用 inject()，必须在注入上下文中实例化。
-    service = runInInjectionContext(injector, () => new TabSyncService());
+    const instance = runInInjectionContext(injector, () => new TabSyncService());
+    managedServices.push(instance);
+
+    return {
+      service: instance,
+      toast,
+      logger: logger.provider,
+      loggerMethods: logger.methods,
+    };
+  };
+
+  const flushBroadcast = async (): Promise<void> => {
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
+  
+  beforeEach(() => {
+    // Reset mock channels
+    MockBroadcastChannel.reset();
+    managedServices = [];
+    
+    // Mock BroadcastChannel
+    (globalThis as unknown as { BroadcastChannel?: typeof MockBroadcastChannel }).BroadcastChannel = MockBroadcastChannel;
+
+    const primary = createServiceInstance();
+    service = primary.service;
+    mockToast = primary.toast;
+    mockLogger = primary.logger;
   });
   
   afterEach(() => {
@@ -90,9 +119,10 @@ describe('TabSyncService', () => {
       delete (globalThis as { BroadcastChannel?: typeof BroadcastChannel }).BroadcastChannel;
     }
     
-    if (service) {
-      service.ngOnDestroy();
+    for (const managedService of managedServices) {
+      managedService.ngOnDestroy();
     }
+    managedServices = [];
     MockBroadcastChannel.reset();
   });
   
@@ -137,6 +167,46 @@ describe('TabSyncService', () => {
     it('应该能获取指定任务的编辑者列表', () => {
       const editors = service.getOtherEditorsForTask('task-1');
       expect(editors).toEqual([]);
+    });
+
+    it('另一标签页持锁时应暴露远程编辑状态', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+
+      firstTab.service.acquireEditLock('task-1', 'content');
+      await flushBroadcast();
+
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(true);
+      expect(secondTab.service.getOtherEditorsForTask('task-1')).toHaveLength(1);
+    });
+
+    it('同字段冲突时应触发并发回调与提醒', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+      const onConcurrentEdit = vi.fn();
+
+      secondTab.service.setOnConcurrentEditCallback(onConcurrentEdit);
+
+      firstTab.service.acquireEditLock('task-1', 'content');
+      await flushBroadcast();
+
+      expect(secondTab.service.acquireEditLock('task-1', 'content')).toBe(true);
+      expect(onConcurrentEdit).toHaveBeenCalledTimes(1);
+      expect(secondTab.service.concurrentEditCount()).toBeGreaterThan(0);
+      expect(secondTab.toast.warning).toHaveBeenCalled();
+    });
+
+    it('远程标签页释放锁后不应继续报告冲突', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+
+      firstTab.service.acquireEditLock('task-1', 'content');
+      await flushBroadcast();
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(true);
+
+      firstTab.service.releaseEditLock('task-1', 'content');
+      await flushBroadcast();
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(false);
     });
   });
   

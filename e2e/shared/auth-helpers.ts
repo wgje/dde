@@ -60,6 +60,35 @@ async function tryOpenLoginModal(page: Page, selector: string): Promise<void> {
   }
 }
 
+async function waitForRetryReady(page: Page, timeoutMs: number): Promise<void> {
+  if (timeoutMs <= 0) {
+    return;
+  }
+
+  const submitButton = page.locator('[data-testid="submit-login"]');
+  const authError = page.locator('[data-testid="auth-error"]');
+
+  await page
+    .waitForFunction(
+      ({ submitSelector, errorSelector }) => {
+        const submit = document.querySelector<HTMLButtonElement>(submitSelector);
+        const error = document.querySelector<HTMLElement>(errorSelector);
+        const submitReady = !!submit && !submit.disabled;
+        const errorVisible = !!error && error.offsetParent !== null;
+        return submitReady || errorVisible;
+      },
+      {
+        submitSelector: '[data-testid="submit-login"]',
+        errorSelector: '[data-testid="auth-error"]',
+      },
+      { timeout: timeoutMs },
+    )
+    .catch(async () => {
+      await submitButton.waitFor({ state: 'visible', timeout: timeoutMs }).catch(() => undefined);
+      await authError.waitFor({ state: 'visible', timeout: 300 }).catch(() => undefined);
+    });
+}
+
 export async function ensureLoginModalVisible(
   page: Page,
   modalTimeoutMs = DEFAULT_OPTIONS.modalTimeoutMs
@@ -77,9 +106,17 @@ export async function ensureLoginModalVisible(
     return;
   }
 
-  await tryOpenLoginModal(page, '[data-testid="login-btn"]');
-  if (!(await loginModal.isVisible({ timeout: 300 }).catch(() => false))) {
-    await tryOpenLoginModal(page, 'button:has-text("登录账号")');
+  const triggerSelectors = [
+    '[data-testid="login-btn"]',
+    'button:has-text("登录 / 注册")',
+    'button:has-text("登录账号")',
+  ];
+
+  for (const selector of triggerSelectors) {
+    await tryOpenLoginModal(page, selector);
+    if (await loginModal.isVisible({ timeout: 300 }).catch(() => false)) {
+      break;
+    }
   }
 
   await loginModal.waitFor({
@@ -111,7 +148,7 @@ async function readAuthError(page: Page): Promise<string | undefined> {
   return text || undefined;
 }
 
-export async function submitLoginWithRetry(
+async function submitLoginWithRetry(
   page: Page,
   credentials: LoginCredentials,
   options?: LoginOptions
@@ -135,7 +172,7 @@ export async function submitLoginWithRetry(
 
     lastError = (await readAuthError(page)) ?? `登录超时（第 ${attemptCount} 次）`;
     if (attemptCount < resolved.maxAttempts) {
-      await page.waitForTimeout(resolved.retryDelayMs);
+      await waitForRetryReady(page, resolved.retryDelayMs);
       await ensureLoginModalVisible(page, resolved.modalTimeoutMs);
     }
   }

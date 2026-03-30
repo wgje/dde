@@ -4,14 +4,16 @@
  * 从 critical-paths.spec.ts 拆分
  * 防止输入内容丢失的测试
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import { testHelpers, createdTestData } from './helpers';
 
 test.describe('关键路径 5: Split-Brain 输入防护', () => {
   
   test.beforeEach(async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-03-01T08:00:00Z') });
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { mode: 'local' });
   });
 
   /**
@@ -28,32 +30,19 @@ test.describe('关键路径 5: Split-Brain 输入防护', () => {
     
     await titleInput.fill(taskTitle);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
     
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
-    await expect(taskCard).toBeVisible({ timeout: 3000 });
-    await taskCard.click();
-    await page.waitForTimeout(300);
-    
-    const editTitleInput = page.locator('[data-title-input]').or(page.locator('[data-testid="task-title-input"]'));
-    if (await editTitleInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await editTitleInput.focus();
-      
-      // 模拟"思考"
-      await page.waitForTimeout(3000);
-      
-      const newTitle = `${taskTitle}-思考后更新`;
-      await editTitleInput.fill(newTitle);
-      await editTitleInput.blur();
-      await page.waitForTimeout(1000);
-      
-      const updatedCard = page.locator(`[data-testid="task-card"]:has-text("思考后更新")`);
-      await expect(updatedCard).toBeVisible({ timeout: 5000 });
-      
-      console.log('慢思考者测试通过：长时间聚焦后输入正确保存');
-    } else {
-      console.log('慢思考者测试跳过：未找到编辑输入框');
-    }
+    const editTitleInput = await testHelpers.openTaskTitleEditor(page, taskTitle);
+    await editTitleInput.focus();
+
+    // 使用虚拟时钟推进，避免真实阻塞等待。
+    await page.clock.fastForward(3000);
+
+    const newTitle = `${taskTitle}-思考后更新`;
+    await editTitleInput.fill(newTitle);
+    await editTitleInput.blur();
+
+    const updatedCard = page.locator(`[data-testid="task-card"]:has-text("思考后更新")`);
+    await expect(updatedCard).toBeVisible({ timeout: 5000 });
   });
 
   /**
@@ -69,37 +58,25 @@ test.describe('关键路径 5: Split-Brain 输入防护', () => {
     await page.click('[data-testid="add-task-btn"]');
     await page.fill('[data-testid="task-title-input"]', taskTitleA);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
+    await testHelpers.waitForTaskCard(page, taskTitleA);
     
     await page.click('[data-testid="add-task-btn"]');
     await page.fill('[data-testid="task-title-input"]', taskTitleB);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
+    await testHelpers.waitForTaskCard(page, taskTitleB);
     
-    const taskCardA = page.locator(`[data-testid="task-card"]:has-text("${taskTitleA}")`);
     const taskCardB = page.locator(`[data-testid="task-card"]:has-text("${taskTitleB}")`);
-    await expect(taskCardA).toBeVisible({ timeout: 3000 });
     await expect(taskCardB).toBeVisible({ timeout: 3000 });
-    
-    await taskCardA.click();
-    await page.waitForTimeout(300);
-    
-    const editInputA = page.locator('[data-title-input]').or(page.locator('[data-testid="task-title-input"]'));
-    if (await editInputA.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const updatedTitleA = `${taskTitleA}-已编辑`;
-      await editInputA.fill(updatedTitleA);
-      
-      // 立即点击任务 B（不等待，模拟快速切换）
-      await taskCardB.click();
-      await page.waitForTimeout(500);
-      
-      const updatedCardA = page.locator(`[data-testid="task-card"]:has-text("已编辑")`);
-      await expect(updatedCardA).toBeVisible({ timeout: 5000 });
-      
-      console.log('快速切换测试通过：任务 A 正确保存，任务 B 正确切换');
-    } else {
-      console.log('快速切换测试跳过：未找到编辑输入框');
-    }
+
+    const editInputA = await testHelpers.openTaskTitleEditor(page, taskTitleA);
+    const updatedTitleA = `${taskTitleA}-已编辑`;
+    await editInputA.fill(updatedTitleA);
+
+    // 立即点击任务 B（不等待，模拟快速切换）
+    await taskCardB.click({ force: true });
+
+    const updatedCardA = page.locator(`[data-testid="task-card"]:has-text("已编辑")`);
+    await expect(updatedCardA).toBeVisible({ timeout: 5000 });
   });
 
   /**
@@ -113,56 +90,46 @@ test.describe('关键路径 5: Split-Brain 输入防护', () => {
     await page.click('[data-testid="add-task-btn"]');
     await page.fill('[data-testid="task-title-input"]', taskTitle);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
-    
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
-    await expect(taskCard).toBeVisible({ timeout: 3000 });
-    
-    await taskCard.click();
-    await page.waitForTimeout(300);
-    
-    const editInput = page.locator('[data-title-input]').or(page.locator('[data-testid="task-title-input"]'));
-    if (await editInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await editInput.focus();
-      
-      // 打开第二个标签页
-      const page2 = await context.newPage();
-      await page2.goto('/');
-      await testHelpers.waitForAppReady(page2);
-      
-      const taskCard2 = page2.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
-      if (await taskCard2.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await taskCard2.click();
-        await page2.waitForTimeout(300);
-        
-        const editInput2 = page2.locator('[data-title-input]').or(page2.locator('[data-testid="task-title-input"]'));
-        if (await editInput2.isVisible({ timeout: 1000 }).catch(() => false)) {
-          const tab2Title = `${taskTitle}-来自标签页2`;
-          await editInput2.fill(tab2Title);
-          await editInput2.blur();
-          await page2.waitForTimeout(1000);
-        }
-      }
-      
-      await page.bringToFront();
-      
-      const currentValue = await editInput.inputValue();
-      expect(currentValue).toBe(taskTitle);
-      
-      const tab1Title = `${taskTitle}-来自标签页1`;
-      await editInput.fill(tab1Title);
-      await editInput.blur();
-      await page.waitForTimeout(1000);
-      
-      const finalCard = page.locator(`[data-testid="task-card"]:has-text("来自标签页1")`);
-      await expect(finalCard).toBeVisible({ timeout: 5000 });
-      
-      await page2.close();
-      
-      console.log('跨标签页测试通过：聚焦时阻止了外部更新，后写优先');
-    } else {
-      console.log('跨标签页测试跳过：未找到编辑输入框');
+
+    const initialSaveButton = page.getByRole('button', { name: '保存' }).first();
+    if (await initialSaveButton.isVisible({ timeout: 800 }).catch(() => false)) {
+      await initialSaveButton.click({ force: true });
     }
+    await testHelpers.waitForTaskCard(page, taskTitle, { timeout: 10_000 });
+
+    await page.reload();
+    await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { mode: 'local' });
+    await testHelpers.waitForTaskCard(page, taskTitle, { timeout: 10_000 });
+    
+    const editInput = await testHelpers.openTaskTitleEditor(page, taskTitle);
+    await editInput.focus();
+
+    // 打开第二个标签页
+    const page2 = await context.newPage();
+    await page2.goto('/');
+    await testHelpers.waitForAppReady(page2);
+    await testHelpers.ensureEditorReady(page2, { mode: 'local' });
+    await testHelpers.waitForTaskCard(page2, taskTitle, { timeout: 10_000 });
+
+    const editInput2 = await testHelpers.openTaskTitleEditor(page2, taskTitle);
+    const tab2Title = `${taskTitle}-来自标签页2`;
+    await editInput2.fill(tab2Title);
+    await editInput2.blur();
+
+    await page.bringToFront();
+
+    const currentValue = await editInput.inputValue();
+    expect(currentValue).toBe(taskTitle);
+
+    const tab1Title = `${taskTitle}-来自标签页1`;
+    await editInput.fill(tab1Title);
+    await editInput.blur();
+
+    const finalCard = page.locator(`[data-testid="task-card"]:has-text("来自标签页1")`);
+    await expect(finalCard).toBeVisible({ timeout: 5000 });
+
+    await page2.close();
   });
 
   /**
@@ -176,16 +143,17 @@ test.describe('关键路径 5: Split-Brain 输入防护', () => {
     await page.click('[data-testid="add-task-btn"]');
     await page.fill('[data-testid="task-title-input"]', taskTitle);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
+    await testHelpers.waitForTaskCard(page, taskTitle);
     
     const taskCard = page.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
     await expect(taskCard).toBeVisible({ timeout: 3000 });
     
     await page.reload();
     await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { mode: 'local' });
     
     const persistedCard = page.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
-    await expect(persistedCard).toBeVisible({ timeout: 5000 });
+    await expect(persistedCard).toBeVisible({ timeout: 10000 });
     
     console.log('基本输入测试通过：任务正确创建和持久化');
   });
@@ -201,27 +169,15 @@ test.describe('关键路径 5: Split-Brain 输入防护', () => {
     await page.click('[data-testid="add-task-btn"]');
     await page.fill('[data-testid="task-title-input"]', taskTitle);
     await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
+    await testHelpers.waitForTaskCard(page, taskTitle);
     
-    const taskCard = page.locator(`[data-testid="task-card"]:has-text("${taskTitle}")`);
-    await expect(taskCard).toBeVisible({ timeout: 3000 });
-    await taskCard.click();
-    await page.waitForTimeout(300);
-    
-    const editInput = page.locator('[data-title-input]').or(page.locator('[data-testid="task-title-input"]'));
-    if (await editInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const updatedTitle = `${taskTitle}-已更新`;
-      await editInput.fill(updatedTitle);
-      await editInput.blur();
-      
-      await page.waitForTimeout(500);
-      const updatedCard = page.locator(`[data-testid="task-card"]:has-text("已更新")`);
-      await expect(updatedCard).toBeVisible({ timeout: 3000 });
-      
-      console.log('延迟解锁测试通过：blur 后内容立即保存到本地');
-    } else {
-      console.log('延迟解锁测试跳过：未找到编辑输入框');
-    }
+    const editInput = await testHelpers.openTaskTitleEditor(page, taskTitle);
+    const updatedTitle = `${taskTitle}-已更新`;
+    await editInput.fill(updatedTitle);
+    await editInput.blur();
+
+    const updatedCard = page.locator(`[data-testid="task-card"]:has-text("已更新")`);
+    await expect(updatedCard).toBeVisible({ timeout: 3000 });
   });
 });
 

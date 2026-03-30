@@ -43,16 +43,6 @@ export interface ScanResponse {
 }
 
 /**
- * 批量扫描任务接口（预留用于后续批量扫描功能）
- */
-export interface ScanTask {
-  fileId: string;
-  file: Blob;
-  filename: string;
-  hash?: string;
-}
-
-/**
  * 病毒扫描服务
  * 
  * 功能：

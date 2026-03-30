@@ -85,13 +85,9 @@ const activeTasks = tasks.filter(t => !t.deletedAt);
 })
 ```
 
-### 模态框基类
-所有模态框继承 `BaseModalComponent`：
-```typescript
-export class MyModalComponent extends BaseModalComponent {
-  // 自动处理：ESC 关闭、点击外部关闭、焦点管理
-}
-```
+### 模态框约定
+当前模态框统一使用 standalone 组件，并通过 `DynamicModalService` / `ModalLoaderService` 按需加载。
+项目中不再维护通用 `BaseModalComponent` 继承层，模态框行为按组件实际需求显式实现。
 
 ---
 

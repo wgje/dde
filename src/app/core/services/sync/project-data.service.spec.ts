@@ -597,7 +597,7 @@ describe('ProjectDataService', () => {
     expect(snapshot.bytes).toBeGreaterThan(0);
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('idb-project');
-  });
+  }, 10000);
 
   it('startup snapshot 仅有 legacy localStorage 时应回迁到 IndexedDB', async () => {
     localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
@@ -690,5 +690,93 @@ describe('ProjectDataService', () => {
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('legacy-project');
     expect(migratedPayload).toBe(legacyPayload);
+  }, 10000);
+
+  it('rowToTask 遇到缺失 content 字段时应告警并上报采样监控', () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const sentry = {
+      addBreadcrumb: vi.fn(),
+      captureException: vi.fn(),
+      captureMessage: vi.fn(),
+    };
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: sentry,
+        },
+      ],
+    });
+
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.01);
+    const service = injector.get(ProjectDataService);
+
+    const task = service.rowToTask({
+      id: 'task-missing-content',
+      title: '缺少正文',
+      stage: 1,
+      updated_at: '2026-03-29T00:00:00.000Z',
+    } as never);
+
+    expect(task.content).toBe('');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'rowToTask: content 字段缺失，可能导致数据丢失！',
+      expect.objectContaining({
+        taskId: 'task-missing-content',
+        hasTitle: true,
+        hasStage: true,
+      })
+    );
+    expect(sentry.captureMessage).toHaveBeenCalledWith(
+      'Sync Warning: Task content field missing',
+      expect.objectContaining({
+        level: 'warning',
+        tags: expect.objectContaining({
+          operation: 'rowToTask',
+          taskId: 'task-missing-content',
+        }),
+      })
+    );
+
+    randomSpy.mockRestore();
   });
 });

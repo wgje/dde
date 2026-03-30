@@ -56,7 +56,7 @@ export function shouldDegradeMobileStartupRoute(routeUrl: string, isMobile: bool
   return routeUrl.endsWith('/flow') || routeUrl.includes('/task/');
 }
 
-export function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
+function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
   const routeIntent = input.snapshot?.routeIntent ?? resolveRouteIntent(input.routeUrl, input.activeProjectId);
   const wantsSpecificProject = routeIntent.kind !== 'projects';
   const mobileDegraded = input.snapshot?.mobileDegraded === true
