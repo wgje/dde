@@ -6,6 +6,7 @@ import { ActionQueueService } from './action-queue.service';
 import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
 import type { DockSnapshot } from '../models/parking-dock';
+import { AUTH_CONFIG } from '../config/auth.config';
 
 // ─── Mocks ──────────────────────────────────
 
@@ -28,6 +29,7 @@ const mockSyncService = {
 
 const mockActionQueue = {
   enqueue: vi.fn(() => crypto.randomUUID()),
+  enqueueForOwner: vi.fn(() => Promise.resolve(crypto.randomUUID())),
 };
 
 const mockSnapshotPersistence = {
@@ -89,6 +91,7 @@ describe('DockCloudSyncService', () => {
     vi.useFakeTimers();
 
     mockActionQueue.enqueue.mockClear();
+    mockActionQueue.enqueueForOwner.mockClear();
     mockSyncService.loadFocusSession.mockClear();
     mockSyncService.listRoutineTasks.mockClear();
     mockSyncService.importLegacyDockSnapshot.mockClear();
@@ -130,8 +133,8 @@ describe('DockCloudSyncService', () => {
       // Advance past debounce (CLOUD_PUSH_DEBOUNCE_MS = SYNC_CONFIG.DEBOUNCE_DELAY = 3000)
       vi.advanceTimersByTime(3000);
 
-      // If callbacks were stored, enqueue would have been called
-      expect(mockActionQueue.enqueue).toHaveBeenCalled();
+      // If callbacks were stored, owner-scoped enqueue would have been called
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalled();
     });
 
     it('should not trigger cloud push when init was never called', () => {
@@ -141,7 +144,7 @@ describe('DockCloudSyncService', () => {
 
       vi.advanceTimersByTime(5000);
 
-      expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
     });
   });
 
@@ -156,7 +159,7 @@ describe('DockCloudSyncService', () => {
       service.cancelTimers();
       vi.advanceTimersByTime(5000);
 
-      expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
     });
 
     it('should clear pending cloud pull timer', () => {
@@ -172,11 +175,41 @@ describe('DockCloudSyncService', () => {
     it('should be safe to call when no timers are pending', () => {
       expect(() => service.cancelTimers()).not.toThrow();
     });
+
+    it('should reset cloud pull circuit breaker so owner switch can force a new pull', async () => {
+      service.init(makeCallbacks());
+      mockSyncService.loadFocusSession.mockRejectedValueOnce({ status: 401, message: 'unauthorized' });
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(1);
+
+      service.cancelTimers();
+
+      mockSyncService.loadFocusSession.mockResolvedValueOnce({ ok: true, value: null });
+      mockSyncService.listRoutineTasks.mockResolvedValueOnce({ ok: true, value: [] });
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ─── scheduleCloudPush ──────────────────────
 
   describe('scheduleCloudPush', () => {
+    it('should skip cloud push scheduling for local-user', () => {
+      const callbacks = makeCallbacks();
+      service.init(callbacks);
+
+      service.scheduleCloudPush(AUTH_CONFIG.LOCAL_MODE_USER_ID, makeSnapshot());
+      vi.advanceTimersByTime(5000);
+
+      expect(callbacks.scheduleLocalPersist).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    });
+
     it('should debounce: calling twice quickly triggers enqueue only once', () => {
       const callbacks = makeCallbacks();
       service.init(callbacks);
@@ -188,7 +221,7 @@ describe('DockCloudSyncService', () => {
       // Now advance past the full debounce from the second call
       vi.advanceTimersByTime(3000);
 
-      expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
     });
 
     it('should fire after debounce delay elapses', () => {
@@ -197,11 +230,11 @@ describe('DockCloudSyncService', () => {
 
       // Not yet
       vi.advanceTimersByTime(2999);
-      expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
 
       // Now
       vi.advanceTimersByTime(1);
-      expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
     });
 
     it('should defer when getNonCriticalHoldDelay returns positive value', () => {
@@ -219,11 +252,11 @@ describe('DockCloudSyncService', () => {
       // Advance past initial debounce
       vi.advanceTimersByTime(3000);
       // holdDelay was 500, so enqueue should not fire yet
-      expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
 
       // Advance past the hold delay
       vi.advanceTimersByTime(500);
-      expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
     });
 
     it('should use exportSnapshot when snapshot argument is null', () => {
@@ -237,13 +270,57 @@ describe('DockCloudSyncService', () => {
       vi.advanceTimersByTime(3000);
 
       expect(callbacks.exportSnapshot).toHaveBeenCalled();
-      expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
+    });
+
+    it('should freeze snapshot at schedule time instead of reading the latest snapshot on timer fire', () => {
+      const baseSession = makeSnapshot().session;
+      const snapshotA = makeSnapshot({
+        focusMode: false,
+        session: { ...baseSession, mainTaskId: 'task-a' },
+      });
+      const snapshotB = makeSnapshot({
+        focusMode: true,
+        session: { ...baseSession, mainTaskId: 'task-b' },
+      });
+      let currentSnapshot = snapshotA;
+      const callbacks = makeCallbacks({
+        exportSnapshot: vi.fn(() => currentSnapshot),
+      });
+      service.init(callbacks);
+
+      service.scheduleCloudPush('user-a', null);
+      currentSnapshot = snapshotB;
+      vi.advanceTimersByTime(3000);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-a',
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            record: expect.objectContaining({
+              snapshot: expect.objectContaining({
+                focusMode: false,
+                session: expect.objectContaining({ mainTaskId: 'task-a' }),
+              }),
+            }),
+          }),
+        }),
+      );
     });
   });
 
   // ─── scheduleCloudPull ──────────────────────
 
   describe('scheduleCloudPull', () => {
+    it('should skip cloud pull scheduling for local-user', () => {
+      service.init(makeCallbacks());
+
+      service.scheduleCloudPull(AUTH_CONFIG.LOCAL_MODE_USER_ID, true);
+      vi.advanceTimersByTime(5000);
+
+      expect(mockSyncService.loadFocusSession).not.toHaveBeenCalled();
+    });
+
     it('should respect minimum interval between pulls', () => {
       service.init(makeCallbacks());
 
@@ -305,17 +382,58 @@ describe('DockCloudSyncService', () => {
       const snapshot = makeSnapshot();
       service.enqueueFocusSessionSync('user-1', snapshot);
 
-      expect(mockActionQueue.enqueue).toHaveBeenCalledWith(
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-1',
         expect.objectContaining({
           type: 'update',
           entityType: 'focus-session',
+          payload: expect.objectContaining({
+            sourceUserId: 'user-1',
+            record: expect.objectContaining({ userId: 'user-1' }),
+          }),
           priority: 'critical',
         }),
+      );
+    });
+
+    it('相同快照仅在同一 owner 下去重，不应跨 owner 共享指纹', () => {
+      service.init(makeCallbacks());
+      const snapshot = makeSnapshot();
+
+      service.enqueueFocusSessionSync('user-1', snapshot);
+      service.enqueueFocusSessionSync('user-1', snapshot);
+      service.enqueueFocusSessionSync('user-2', snapshot);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(2);
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenNthCalledWith(
+        1,
+        'user-1',
+        expect.objectContaining({ entityType: 'focus-session' }),
+      );
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenNthCalledWith(
+        2,
+        'user-2',
+        expect.objectContaining({ entityType: 'focus-session' }),
       );
     });
   });
 
   describe('enqueueRoutineTaskSync', () => {
+    it('should skip routine-task enqueue for local-user', () => {
+      service.init(makeCallbacks());
+      const routineTask = {
+        routineId: 'r-local',
+        title: 'Local only',
+        triggerCondition: 'any-blank-period' as const,
+        maxTimesPerDay: 1,
+        isEnabled: true,
+      };
+
+      service.enqueueRoutineTaskSync(AUTH_CONFIG.LOCAL_MODE_USER_ID, routineTask);
+
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    });
+
     it('should enqueue a routine-task action', () => {
       service.init(makeCallbacks());
       const routineTask = {
@@ -327,11 +445,16 @@ describe('DockCloudSyncService', () => {
       };
       service.enqueueRoutineTaskSync('user-1', routineTask);
 
-      expect(mockActionQueue.enqueue).toHaveBeenCalledWith(
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-1',
         expect.objectContaining({
           type: 'update',
           entityType: 'routine-task',
           entityId: 'r-1',
+          payload: expect.objectContaining({
+            userId: 'user-1',
+            sourceUserId: 'user-1',
+          }),
           priority: 'normal',
         }),
       );
@@ -339,6 +462,20 @@ describe('DockCloudSyncService', () => {
   });
 
   describe('enqueueRoutineCompletionSync', () => {
+    it('should skip routine-completion enqueue for local-user', () => {
+      service.init(makeCallbacks());
+      const completion = {
+        completionId: 'c-local',
+        userId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+        routineId: 'r-1',
+        dateKey: '2025-01-01',
+      };
+
+      service.enqueueRoutineCompletionSync(completion);
+
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    });
+
     it('should enqueue a routine-completion action', () => {
       service.init(makeCallbacks());
       const completion = {
@@ -349,11 +486,16 @@ describe('DockCloudSyncService', () => {
       };
       service.enqueueRoutineCompletionSync(completion);
 
-      expect(mockActionQueue.enqueue).toHaveBeenCalledWith(
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-1',
         expect.objectContaining({
           type: 'create',
           entityType: 'routine-completion',
           entityId: 'c-1',
+          payload: expect.objectContaining({
+            completion: expect.objectContaining({ userId: 'user-1' }),
+            sourceUserId: 'user-1',
+          }),
           priority: 'normal',
         }),
       );

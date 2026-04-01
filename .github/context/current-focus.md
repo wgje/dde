@@ -18,7 +18,6 @@
 - [x] 基础认证流程（Supabase Auth + Local Mode）
 - [x] 专注模式全量实现
   - [x] Gate（大门）：`GateOverlayComponent` + `GateActionsComponent` + `GateCardComponent`
-  - [x] Spotlight（聚光灯）：`SpotlightViewComponent` + `SpotlightCardComponent` + `SpotlightTriggerComponent`
   - [x] Strata（地质层）：`StrataViewComponent` + `StrataLayerComponent` + `StrataItemComponent`
   - [x] BlackBox（黑匣子）：`BlackBoxPanelComponent` + `BlackBoxRecorderComponent` + `BlackBoxEntryComponent`
 - [x] 停泊坞（Parking Dock）功能实现

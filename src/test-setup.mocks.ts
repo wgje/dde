@@ -448,6 +448,7 @@ export function resetMocks() {
   mockSentryLazyLoaderService.captureMessage.mockClear();
   mockSentryLazyLoaderService.addBreadcrumb.mockClear();
   mockSentryLazyLoaderService.withScope.mockClear();
+  mockSentryLazyLoaderService.setUser.mockClear();
 
   // Supabase Client
   mockSupabaseClient.from.mockClear();

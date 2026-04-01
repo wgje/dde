@@ -61,6 +61,7 @@ describe('SimpleSyncService', () => {
   let mockRealtimePolling: any;
   let mockSessionManager: any;
   let mockRealtimeEnabledState = false;
+  let mockProjectData: any;
   
   // 【技术债务重构】RetryQueueService Mock - 提升到 describe 级别方便测试用例访问队列状态
   let mockRetryQueueService: {
@@ -364,12 +365,13 @@ describe('SimpleSyncService', () => {
       importLegacyDockSnapshot: vi.fn().mockResolvedValue(null),
     };
     
-    const mockProjectData = {
+    mockProjectData = {
       loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
       loadFullProject: vi.fn().mockResolvedValue(null),
       loadProjectsFromCloud: vi.fn().mockResolvedValue([]),
       loadSingleProject: vi.fn().mockResolvedValue(null),
       saveOfflineSnapshot: vi.fn(),
+      saveOfflineSnapshotAndWait: vi.fn().mockResolvedValue(undefined),
       loadOfflineSnapshot: vi.fn().mockReturnValue(null),
       loadStartupOfflineSnapshot: vi.fn().mockResolvedValue({
         source: 'none' as const,
@@ -529,6 +531,22 @@ describe('SimpleSyncService', () => {
       expect(mockRealtimePolling.teardownRuntime).toHaveBeenCalledTimes(1);
       expect(windowRemoveEventListenerSpy).toHaveBeenCalledWith('online', expect.any(Function));
       expect(windowRemoveEventListenerSpy).toHaveBeenCalledWith('offline', expect.any(Function));
+    });
+
+    it('saveOfflineSnapshot 应透传 ownerUserId 到 ProjectDataService', () => {
+      const projects = [createMockProject({ id: 'project-owner-pass-through' })];
+
+      service.saveOfflineSnapshot(projects, 'target-user');
+
+      expect(mockProjectData.saveOfflineSnapshot).toHaveBeenCalledWith(projects, 'target-user');
+    });
+
+    it('saveOfflineSnapshotAndWait 应透传 ownerUserId 到 ProjectDataService', async () => {
+      const projects = [createMockProject({ id: 'project-owner-pass-through-await' })];
+
+      await service.saveOfflineSnapshotAndWait(projects, 'target-user');
+
+      expect(mockProjectData.saveOfflineSnapshotAndWait).toHaveBeenCalledWith(projects, 'target-user');
     });
   });
   
@@ -719,6 +737,37 @@ describe('SimpleSyncService', () => {
       expect(payload['updated_at']).toBeUndefined();
       expect(payload['id']).toBe(project.id);
       expect(payload['owner_id']).toBe('test-user-id');
+    });
+
+    it('pushProject 从重试队列回放时若会话 owner 已切换，不应写入云端', async () => {
+      const project = createMockProject({ id: 'project-owner-mismatch' });
+
+      const projectsQueryMock = {
+        upsert: vi.fn().mockResolvedValue({ error: null })
+      };
+
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'new-owner' } } }
+      });
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'projects') return projectsQueryMock;
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null })
+            })
+          }),
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null })
+          })
+        };
+      });
+
+      const result = await service.pushProject(project, true, 'old-owner');
+
+      expect(result).toBe(false);
+      expect(projectsQueryMock.upsert).not.toHaveBeenCalled();
     });
     
     it('pushConnection 应该成功推送', async () => {
@@ -2307,6 +2356,64 @@ describe('SimpleSyncService', () => {
       // setCallbacks 在构造函数中被调用，验证它是一个被 mock 的函数
       // 由于 mock 是在每个测试前重新创建的，我们验证 setCallbacks 存在且是函数
       expect(typeof batchSvc.setCallbacks).toBe('function');
+    });
+
+    it('BatchSync 回调应透传 VersionConflictError 为 conflict 结果', async () => {
+      const project = createMockProject({ id: 'project-conflict', tasks: [], connections: [] });
+      const remoteProject = createMockProject({ id: 'project-conflict', version: 9, tasks: [], connections: [] });
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+      };
+
+      vi.spyOn(service, 'pushProject').mockRejectedValueOnce(
+        new PermanentFailureError(
+          'Version conflict',
+          Object.assign(new Error('版本冲突：数据已被修改，请刷新后重试'), { errorType: 'VersionConflictError' })
+        )
+      );
+      vi.spyOn(service, 'loadFullProjectOptimized').mockResolvedValueOnce(remoteProject);
+
+      const result = await callbacks.pushProject(project);
+
+      expect(result).toEqual({
+        success: false,
+        conflict: true,
+        remoteData: remoteProject,
+      });
+    });
+
+    it('BatchSync 回调应透传 sourceUserId 到 pushProject', async () => {
+      const project = createMockProject({ id: 'project-owner-pass-through', tasks: [], connections: [] });
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+      };
+
+      const pushProjectSpy = vi.spyOn(service, 'pushProject').mockResolvedValueOnce(true);
+
+      const result = await callbacks.pushProject(project, false, 'owner-a');
+
+      expect(result).toEqual({ success: true });
+      expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a');
+    });
+
+    it('BatchSync 回调应透传 sourceUserId 到 task、position 与 connection 同步', async () => {
+      const task = createMockTask({ id: 'task-owner-pass-through' });
+      const connection = createMockConnection({ id: 'connection-owner-pass-through' });
+      const taskSyncOps = service['taskSyncOps'];
+      const connectionSyncOps = service['connectionSyncOps'];
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        pushTask: (task: Task, projectId: string, skipTombstoneCheck?: boolean, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<boolean>;
+        pushTaskPosition: (taskId: string, x: number, y: number, projectId?: string, fallbackTask?: Task, sourceUserId?: string) => Promise<boolean>;
+        pushConnection: (connection: Connection, projectId: string, skipTombstoneCheck?: boolean, skipTaskExistenceCheck?: boolean, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<boolean>;
+      };
+
+      await callbacks.pushTask(task, 'project-1', true, false, 'owner-a');
+      await callbacks.pushTaskPosition(task.id, 10, 20, 'project-1', task, 'owner-a');
+      await callbacks.pushConnection(connection, 'project-1', true, false, false, 'owner-a');
+
+      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', true, false, 'owner-a');
+      expect(taskSyncOps.pushTaskPosition).toHaveBeenCalledWith(task.id, 10, 20, 'project-1', task, 'owner-a');
+      expect(connectionSyncOps.pushConnection).toHaveBeenCalledWith(connection, 'project-1', true, false, false, 'owner-a');
     });
   });
 

@@ -53,7 +53,6 @@ describe('UserPreferencesSyncService', () => {
         local_backup_interval_ms: 3600000,
         focus_preferences: {
           gateEnabled: true,
-          spotlightEnabled: true,
           strataEnabled: true,
           blackBoxEnabled: true,
           maxSnoozePerDay: 3,

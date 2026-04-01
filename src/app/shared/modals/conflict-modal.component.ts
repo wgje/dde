@@ -1,16 +1,17 @@
 import { Component, signal, Output, EventEmitter, input, computed, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Project, Task } from '../../../models';
+import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conflict-task-diff.component';
 
 /**
  * 冲突解决模态框组件
  * 提供本地/远程版本选择及智能合并功能
- * 包含任务级别的差异对比视图
+ * 包含字段级别的差异对比视图和逐任务选择性保留
  */
 @Component({
   selector: 'app-conflict-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, ConflictTaskDiffComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4">
@@ -26,7 +27,7 @@ import { Project, Task } from '../../../models';
             <p class="text-xs text-stone-500 dark:text-stone-400">本地和云端数据存在差异，请选择解决方案</p>
           </div>
         </div>
-        
+
         <!-- 差异概览 -->
         <div class="mb-4 p-3 bg-stone-50 dark:bg-stone-800 rounded-lg border border-stone-200 dark:border-stone-700">
           <div class="text-xs font-medium text-stone-600 dark:text-stone-300 mb-2 flex items-center gap-1.5">
@@ -50,78 +51,40 @@ import { Project, Task } from '../../../models';
             </div>
           </div>
         </div>
-        
-        <!-- 详细差异对比 -->
-        @if (showDetailedDiff()) {
-          <div class="mb-4 border border-stone-200 dark:border-stone-700 rounded-lg overflow-hidden">
-            <div class="px-3 py-2 bg-stone-50 dark:bg-stone-800 border-b border-stone-200 dark:border-stone-700 flex items-center justify-between">
-              <span class="text-xs font-medium text-stone-700 dark:text-stone-300">任务级别差异对比</span>
-              <button (click)="showDetailedDiff.set(false)" class="text-xs text-stone-500 hover:text-stone-300 dark:text-stone-400 dark:hover:text-stone-200">收起</button>
-            </div>
-            <div class="max-h-48 overflow-y-auto">
-              <table class="w-full text-[10px]">
-                <thead class="bg-stone-50 dark:bg-stone-800 sticky top-0">
-                  <tr>
-                    <th class="px-2 py-1.5 text-left text-stone-500 dark:text-stone-400 font-medium">任务</th>
-                    <th class="px-2 py-1.5 text-center text-indigo-500 dark:text-indigo-400 font-medium">本地</th>
-                    <th class="px-2 py-1.5 text-center text-teal-500 dark:text-teal-400 font-medium">云端</th>
-                    <th class="px-2 py-1.5 text-left text-stone-500 dark:text-stone-400 font-medium">状态</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-stone-100 dark:divide-stone-700">
-                  @for (diff of taskDiffs(); track diff.id) {
-                    <tr class="hover:bg-stone-50 dark:hover:bg-stone-700/50">
-                      <td class="px-2 py-1.5 font-medium text-stone-700 dark:text-stone-200 truncate max-w-[150px]">{{ diff.title }}</td>
-                      <td class="px-2 py-1.5 text-center">
-                        @if (diff.inLocal) {
-                          <span class="inline-block w-2 h-2 rounded-full bg-indigo-400"></span>
-                        } @else {
-                          <span class="inline-block w-2 h-2 rounded-full bg-stone-200 dark:bg-stone-600"></span>
-                        }
-                      </td>
-                      <td class="px-2 py-1.5 text-center">
-                        @if (diff.inRemote) {
-                          <span class="inline-block w-2 h-2 rounded-full bg-teal-400"></span>
-                        } @else {
-                          <span class="inline-block w-2 h-2 rounded-full bg-stone-200 dark:bg-stone-600"></span>
-                        }
-                      </td>
-                      <td class="px-2 py-1.5">
-                        <span class="px-1.5 py-0.5 rounded text-[9px]"
-                              [ngClass]="{
-                                'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300': diff.status === 'same',
-                                'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300': diff.status === 'modified',
-                                'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300': diff.status === 'local-only',
-                                'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-300': diff.status === 'remote-only'
-                              }">
-                          {{ getStatusLabel(diff.status) }}
-                        </span>
-                      </td>
-                    </tr>
-                  }
-                </tbody>
-              </table>
-            </div>
-          </div>
-        } @else {
-          <button 
-            (click)="showDetailedDiff.set(true)"
-            class="mb-4 w-full px-3 py-2 text-xs text-stone-600 dark:text-stone-300 bg-stone-50 dark:bg-stone-800 hover:bg-stone-100 dark:hover:bg-stone-700 rounded-lg border border-stone-200 dark:border-stone-600 transition-colors flex items-center justify-center gap-1">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-            </svg>
-            查看详细差异
+
+        <!-- 字段级差异对比（使用新的差异组件，支持逐任务展开和选择性保留） -->
+        <div class="mb-4">
+          <app-conflict-task-diff
+            [localTasks]="localTasks()"
+            [remoteTasks]="remoteTasks()"
+            [selectable]="selectiveMode()"
+            (selectionChange)="onSelectionChange($event)" />
+        </div>
+
+        <!-- 解决模式切换 -->
+        <div class="mb-4 flex items-center gap-2">
+          <button
+            (click)="selectiveMode.set(!selectiveMode())"
+            class="text-[10px] font-medium px-2.5 py-1 rounded-md transition-colors"
+            [ngClass]="{
+              'bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 border border-violet-300 dark:border-violet-600': selectiveMode(),
+              'bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 border border-stone-200 dark:border-stone-600 hover:bg-stone-200 dark:hover:bg-stone-700': !selectiveMode()
+            }">
+            {{ selectiveMode() ? '✓ 逐任务选择模式' : '开启逐任务选择' }}
           </button>
-        }
-        
+          @if (selectiveMode()) {
+            <span class="text-[9px] text-stone-400 dark:text-stone-500">对冲突任务逐个指定保留本地或云端版本</span>
+          }
+        </div>
+
+        <!-- 解决方案选项 -->
         <div class="grid grid-cols-2 gap-3 mb-4">
           <!-- 本地版本 -->
           <div class="p-3 rounded-lg border-2 border-stone-200 dark:border-stone-600 hover:border-indigo-400 dark:hover:border-indigo-500 transition-colors cursor-pointer group"
                (click)="resolveLocal.emit()">
             <div class="flex items-center gap-2 mb-2">
               <svg class="w-4 h-4 text-indigo-500 dark:text-indigo-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="4" width="18" height="16" rx="2"/>
-                <path d="M7 8h10M7 12h6"/>
+                <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h6"/>
               </svg>
               <span class="text-sm font-medium text-stone-700 dark:text-stone-200 group-hover:text-indigo-700 dark:group-hover:text-indigo-400">本地版本</span>
             </div>
@@ -139,7 +102,7 @@ import { Project, Task } from '../../../models';
               点击选择本地版本
             </div>
           </div>
-          
+
           <!-- 云端版本 -->
           <div class="p-3 rounded-lg border-2 border-stone-200 dark:border-stone-600 hover:border-teal-400 dark:hover:border-teal-500 transition-colors cursor-pointer group"
                (click)="resolveRemote.emit()">
@@ -164,7 +127,7 @@ import { Project, Task } from '../../../models';
             </div>
           </div>
         </div>
-        
+
         <!-- 智能合并选项 -->
         <div class="mb-4 p-3 bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-900/30 dark:to-indigo-900/30 rounded-lg border border-violet-200 dark:border-violet-700">
           <div class="flex items-start gap-2">
@@ -174,7 +137,7 @@ import { Project, Task } from '../../../models';
             <div class="flex-1">
               <div class="text-xs font-medium text-violet-700 dark:text-violet-300 mb-1">智能合并（推荐）</div>
               <p class="text-[10px] text-violet-600 dark:text-violet-400 mb-2">保留双方的新增内容，合并修改。如果同一任务在双方都有修改，将优先使用较新的版本。</p>
-              <button 
+              <button
                 (click)="resolveMerge.emit()"
                 class="px-3 py-1.5 bg-violet-500 text-white text-xs font-medium rounded-lg hover:bg-violet-600 transition-colors flex items-center gap-1.5">
                 <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -185,13 +148,15 @@ import { Project, Task } from '../../../models';
             </div>
           </div>
         </div>
-        
+
         <div class="text-xs text-stone-400 dark:text-stone-500 mb-4 p-2 bg-stone-50 dark:bg-stone-800 rounded-lg">
-          💡 <span class="font-medium">提示：</span>选择「本地版本」将覆盖云端数据；选择「云端版本」将丢弃本地未同步的更改；「智能合并」会尝试保留双方的修改。
+          💡 <span class="font-medium">提示：</span>展开任务可查看具体字段的变更详情。
+          选择「本地版本」将覆盖云端数据；选择「云端版本」将丢弃本地未同步的更改；
+          「智能合并」会尝试保留双方的修改。
         </div>
-        
+
         <div class="flex justify-between items-center">
-          <button 
+          <button
             (click)="cancel.emit()"
             class="px-3 py-1.5 text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 text-xs transition-colors">
             稍后解决
@@ -216,83 +181,30 @@ export class ConflictModalComponent {
     remoteProject: Project;
     projectId: string;
   } | null>(null);
-  
+
   @Output() resolveLocal = new EventEmitter<void>();
   @Output() resolveRemote = new EventEmitter<void>();
   @Output() resolveMerge = new EventEmitter<void>();
   @Output() cancel = new EventEmitter<void>();
-  
-  showDetailedDiff = signal(false);
-  
-  /** 计算任务级别的差异 */
-  taskDiffs = computed(() => {
+
+  /** 是否启用逐任务选择模式 */
+  selectiveMode = signal(false);
+  /** 用户逐任务选择结果 */
+  taskResolutions = signal<TaskResolutionMap>(new Map());
+
+  /** 计算本地任务列表 */
+  localTasks = computed<Task[]>(() => {
     const data = this.conflictData();
-    if (!data) return [];
-    
-    const localTasks: Task[] = data.localProject?.tasks || [];
-    const remoteTasks: Task[] = data.remoteProject?.tasks || [];
-    
-    const localMap = new Map<string, Task>(localTasks.map((t: Task) => [t.id, t]));
-    const remoteMap = new Map<string, Task>(remoteTasks.map((t: Task) => [t.id, t]));
-    
-    const allIds = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
-    const diffs: Array<{
-      id: string;
-      title: string;
-      inLocal: boolean;
-      inRemote: boolean;
-      status: 'same' | 'modified' | 'local-only' | 'remote-only';
-    }> = [];
-    
-    allIds.forEach(id => {
-      const localTask = localMap.get(id);
-      const remoteTask = remoteMap.get(id);
-      
-      let status: 'same' | 'modified' | 'local-only' | 'remote-only';
-      let title: string;
-      
-      if (localTask && remoteTask) {
-        // 两边都有 - 进行全面比较
-        const isSame = localTask.title === remoteTask.title && 
-                       localTask.content === remoteTask.content &&
-                       localTask.status === remoteTask.status &&
-                       localTask.priority === remoteTask.priority &&
-                       localTask.dueDate === remoteTask.dueDate &&
-                       ((localTask.tags ?? []).length === (remoteTask.tags ?? []).length &&
-                        (localTask.tags ?? []).every((t, i) => t === (remoteTask.tags ?? [])[i])) &&
-                       ((localTask.attachments ?? []).length === (remoteTask.attachments ?? []).length &&
-                        (localTask.attachments ?? []).every((a, i) => a.id === (remoteTask.attachments ?? [])[i]?.id));
-        status = isSame ? 'same' : 'modified';
-        title = localTask.title || remoteTask.title || '未命名';
-      } else if (localTask) {
-        status = 'local-only';
-        title = localTask.title || '未命名';
-      } else {
-        status = 'remote-only';
-        title = remoteTask!.title || '未命名';
-      }
-      
-      diffs.push({
-        id,
-        title,
-        inLocal: !!localTask,
-        inRemote: !!remoteTask,
-        status
-      });
-    });
-    
-    // 按状态排序：modified > local-only > remote-only > same
-    const order = { 'modified': 0, 'local-only': 1, 'remote-only': 2, 'same': 3 };
-    return diffs.sort((a, b) => order[a.status] - order[b.status]);
+    return data?.localProject?.tasks || [];
   });
-  
-  getStatusLabel(status: string): string {
-    const labels: Record<string, string> = {
-      'same': '一致',
-      'modified': '有修改',
-      'local-only': '仅本地',
-      'remote-only': '仅云端'
-    };
-    return labels[status] || status;
+
+  /** 计算云端任务列表 */
+  remoteTasks = computed<Task[]>(() => {
+    const data = this.conflictData();
+    return data?.remoteProject?.tasks || [];
+  });
+
+  onSelectionChange(selections: TaskResolutionMap): void {
+    this.taskResolutions.set(selections);
   }
 }

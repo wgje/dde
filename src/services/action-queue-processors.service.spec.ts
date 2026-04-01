@@ -4,8 +4,8 @@
  * 验证 setupProcessors 注册了正确数量的处理器（13 个），
  * 并逐类型验证处理器的行为（通过捕获 registerProcessor mock 调用的 handler）。
  */
+import { Injector, runInInjectionContext } from '@angular/core';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ActionQueueService } from './action-queue.service';
 import { QueuedAction } from './action-queue.types';
@@ -13,6 +13,9 @@ import { SimpleSyncService } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { ToastService } from './toast.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 
 // ── Mock factories ───────────────────────────────────────────
 
@@ -22,12 +25,16 @@ const mockLoggerService = { category: vi.fn(() => mockLoggerCategory) };
 const mockActionQueueService = {
   registerProcessor: vi.fn(),
   setQueueProcessCallbacks: vi.fn(),
+  moveToDeadLetter: vi.fn(),
+  getCurrentQueueViewGeneration: vi.fn(() => 1),
+  isQueueViewCurrent: vi.fn(() => true),
 };
 
 const mockSyncService = {
   pauseRealtimeUpdates: vi.fn(),
   resumeRealtimeUpdates: vi.fn(),
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
+  loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
   deleteProjectFromCloud: vi.fn().mockResolvedValue(true),
   pushTask: vi.fn().mockResolvedValue(true),
   deleteTask: vi.fn().mockResolvedValue(true),
@@ -37,8 +44,10 @@ const mockSyncService = {
   incrementRoutineCompletion: vi.fn().mockResolvedValue({ ok: true }),
 };
 
-const mockProjectStateService = { updateProjects: vi.fn() };
+const mockProjectStateService = { updateProjects: vi.fn(), getProject: vi.fn(() => undefined) };
 const mockAuthService = { currentUserId: vi.fn(() => 'test-user') };
+const mockConflictStorageService = { saveConflict: vi.fn().mockResolvedValue(true) };
+const mockToastService = { warning: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn() };
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -53,22 +62,40 @@ function getProcessor(type: string): (action: QueuedAction) => Promise<boolean> 
 
 describe('ActionQueueProcessorsService', () => {
   let service: ActionQueueProcessorsService;
+  let injector: Injector;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAuthService.currentUserId.mockReturnValue('test-user');
+    mockProjectStateService.getProject.mockReturnValue(undefined);
+    mockSyncService.saveProjectSmart.mockResolvedValue({ success: true, newVersion: 2 });
+    mockSyncService.loadFullProjectOptimized.mockResolvedValue(null);
+    mockSyncService.deleteProjectFromCloud.mockResolvedValue(true);
+    mockSyncService.pushTask.mockResolvedValue(true);
+    mockSyncService.deleteTask.mockResolvedValue(true);
+    mockSyncService.saveUserPreferences.mockResolvedValue(true);
+    mockSyncService.saveFocusSession.mockResolvedValue({ ok: true });
+    mockSyncService.upsertRoutineTask.mockResolvedValue({ ok: true });
+    mockSyncService.incrementRoutineCompletion.mockResolvedValue({ ok: true });
+    mockConflictStorageService.saveConflict.mockResolvedValue(true);
+    mockActionQueueService.getCurrentQueueViewGeneration.mockReturnValue(1);
+    mockActionQueueService.isQueueViewCurrent.mockReturnValue(true);
 
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        ActionQueueProcessorsService,
+        { provide: ActionQueueProcessorsService, useClass: ActionQueueProcessorsService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: SimpleSyncService, useValue: mockSyncService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
+        { provide: ConflictStorageService, useValue: mockConflictStorageService },
+        { provide: ToastService, useValue: mockToastService },
       ],
     });
 
-    service = TestBed.inject(ActionQueueProcessorsService);
+    service = runInInjectionContext(injector, () => injector.get(ActionQueueProcessorsService));
+    service.setProjectConflictHandler(vi.fn());
     service.setupProcessors();
   });
 
@@ -88,7 +115,7 @@ describe('ActionQueueProcessorsService', () => {
     const handler = getProcessor('project:update');
     const project = { id: 'p-1', name: 'Test' };
 
-    const result = await handler({ payload: { project } });
+    const result = await handler({ payload: { project, sourceUserId: 'test-user' } } as QueuedAction);
 
     expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user');
     expect(mockProjectStateService.updateProjects).toHaveBeenCalled();
@@ -105,15 +132,276 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockLoggerCategory.warn).toHaveBeenCalled();
   });
 
+  it('project:update should discard local-only project queue items', async () => {
+    const handler = getProcessor('project:update');
+
+    const result = await handler({ payload: { project: { id: 'p-local', syncSource: 'local-only' } } });
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+  });
+
+  it('project:update should move ambiguous legacy queue items to dead letter', async () => {
+    const handler = getProcessor('project:update');
+
+    const result = await handler({ payload: { project: { id: 'p-legacy' } } } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: { project: { id: 'p-legacy' } } }),
+      expect.stringContaining('legacy 队列项缺少来源元数据')
+    );
+    expect(mockToastService.warning).toHaveBeenCalled();
+  });
+
+  it('project:update should move legacy synced queue items without owner to dead letter', async () => {
+    const handler = getProcessor('project:update');
+    mockProjectStateService.getProject.mockReturnValueOnce({ id: 'p-legacy-synced', syncSource: 'synced' });
+    const action = {
+      payload: { project: { id: 'p-legacy-synced', syncSource: 'synced' } },
+    } as QueuedAction;
+
+    const result = await handler(action);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+      action,
+      expect.stringContaining('legacy 队列项缺少来源元数据')
+    );
+  });
+
+  it('project:update should move mixed-state legacy queue items without owner to dead letter', async () => {
+    const handler = getProcessor('project:update');
+    mockProjectStateService.getProject.mockReturnValueOnce({ id: 'p-promoted', syncSource: 'synced' });
+    const action = {
+      payload: { project: { id: 'p-promoted', syncSource: 'local-only' } },
+    } as QueuedAction;
+
+    const result = await handler(action);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+      action,
+      expect.stringContaining('legacy 队列项缺少来源元数据')
+    );
+  });
+
+  it('project:update should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-foreign', syncSource: 'synced' },
+        sourceUserId: 'other-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
+  it('project:update should surface conflicts to the registered handler', async () => {
+    const onConflict = vi.fn();
+    service.setProjectConflictHandler(onConflict);
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: { id: 'p-1', syncSource: 'synced' },
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-1', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(onConflict).toHaveBeenCalledWith(
+      { id: 'p-1', syncSource: 'synced' },
+      { id: 'p-1', syncSource: 'synced' },
+      'test-user'
+    );
+  });
+
+  it('project:update should persist conflict when remote snapshot is unavailable', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-1', syncSource: 'synced', version: 3, tasks: [], connections: [] },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockConflictStorageService.saveConflict).toHaveBeenCalled();
+    expect(mockToastService.warning).toHaveBeenCalled();
+  });
+
+  it('project:update should reload remote snapshot before persisting fallback conflict', async () => {
+    const onConflict = vi.fn();
+    service.setProjectConflictHandler(onConflict);
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    mockSyncService.loadFullProjectOptimized.mockResolvedValueOnce({
+      id: 'p-1',
+      syncSource: 'synced',
+      version: 4,
+      tasks: [],
+      connections: [],
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-1', syncSource: 'synced', version: 3, tasks: [], connections: [] },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(onConflict).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'p-1', version: 3 }),
+      expect.objectContaining({ id: 'p-1', version: 4 }),
+      'test-user'
+    );
+    expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
+  });
+
+  it('project:update 在队列视图失效后不应再向当前会话注入冲突回调', async () => {
+    const onConflict = vi.fn();
+    service.setProjectConflictHandler(onConflict);
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: { id: 'p-stale', syncSource: 'synced' },
+    });
+    mockActionQueueService.isQueueViewCurrent.mockReturnValueOnce(false);
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-stale', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
+  });
+
+  it('project:create 在补拉远端快照期间若队列视图失效，不应再写入冲突存储', async () => {
+    const onConflict = vi.fn();
+    service.setProjectConflictHandler(onConflict);
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    mockSyncService.loadFullProjectOptimized.mockResolvedValueOnce({
+      id: 'p-create-stale',
+      syncSource: 'synced',
+      version: 2,
+      tasks: [],
+      connections: [],
+    });
+    mockActionQueueService.isQueueViewCurrent
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const handler = getProcessor('project:create');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-create-stale', syncSource: 'synced', version: 1, tasks: [], connections: [] },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
+    expect(mockToastService.warning).not.toHaveBeenCalledWith('检测到数据冲突', expect.any(String));
+  });
+
+  it('project:create should persist conflict when remote snapshot is unavailable', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    const handler = getProcessor('project:create');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-create', syncSource: 'synced', version: 1, tasks: [], connections: [] },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockConflictStorageService.saveConflict).toHaveBeenCalled();
+    expect(mockToastService.warning).toHaveBeenCalled();
+  });
+
   // ── project:delete ─────────────────────────────────────────
 
   it('project:delete should call deleteProjectFromCloud', async () => {
     const handler = getProcessor('project:delete');
 
-    const result = await handler({ entityId: 'p-1' });
+    const result = await handler({
+      entityId: 'p-1',
+      payload: { projectId: 'p-1', userId: 'test-user', sourceUserId: 'test-user' },
+    } as QueuedAction);
 
     expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith('p-1', 'test-user');
     expect(result).toBe(true);
+  });
+
+  it('project:delete should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('project:delete');
+
+    const result = await handler({
+      entityId: 'p-1',
+      payload: { projectId: 'p-1', userId: 'other-user', sourceUserId: 'other-user' },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.deleteProjectFromCloud).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
+  it('project:delete should move split owner hints to dead letter', async () => {
+    const handler = getProcessor('project:delete');
+
+    const result = await handler({
+      entityId: 'p-1',
+      payload: { projectId: 'p-1', userId: 'other-user', sourceUserId: 'test-user' },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.deleteProjectFromCloud).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
+  it('project:create should discard queue items while running in local mode', async () => {
+    mockAuthService.currentUserId.mockReturnValueOnce(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    const handler = getProcessor('project:create');
+
+    const result = await handler({ payload: { project: { id: 'p-local' } } });
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
   });
 
   // ── task:create ────────────────────────────────────────────
@@ -122,10 +410,76 @@ describe('ActionQueueProcessorsService', () => {
     const handler = getProcessor('task:create');
     const task = { id: 't-1', title: 'Task' };
 
-    const result = await handler({ payload: { task, projectId: 'p-1' } });
+    const result = await handler({ payload: { task, projectId: 'p-1', sourceUserId: 'test-user' } });
 
     expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-1', false);
     expect(result).toBe(true);
+  });
+
+  it('task:create should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('task:create');
+
+    const result = await handler({
+      payload: {
+        task: { id: 't-foreign', title: 'Foreign Task' },
+        projectId: 'p-1',
+        sourceUserId: 'other-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.pushTask).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
+  it('task:create should move legacy queue items without owner to dead letter', async () => {
+    const handler = getProcessor('task:create');
+    mockProjectStateService.getProject.mockReturnValueOnce({ id: 'p-1', syncSource: 'synced' });
+    const action = {
+      payload: {
+        task: { id: 't-legacy', title: 'Legacy Task' },
+        projectId: 'p-1',
+      },
+    } as QueuedAction;
+
+    const result = await handler(action);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.pushTask).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+      action,
+      expect.stringContaining('legacy 队列项缺少来源元数据')
+    );
+  });
+
+  it('preference:update should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('preference:update');
+
+    const result = await handler({
+      payload: {
+        userId: 'other-user',
+        preferences: { theme: 'dark' },
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveUserPreferences).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
+  it('preference:update should call saveUserPreferences with explicit source user', async () => {
+    const handler = getProcessor('preference:update');
+
+    const result = await handler({
+      payload: {
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+        preferences: { theme: 'dark' },
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveUserPreferences).toHaveBeenCalledWith('test-user', { theme: 'dark' });
   });
 
   // ── focus-session:create ───────────────────────────────────
@@ -140,16 +494,47 @@ describe('ActionQueueProcessorsService', () => {
     expect(result).toBe(true);
   });
 
+  it('focus-session:create should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('focus-session:create');
+
+    const result = await handler({
+      payload: {
+        record: { userId: 'other-user', sessionId: 's-foreign' },
+        sourceUserId: 'other-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.saveFocusSession).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
   // ── routine-task:create ────────────────────────────────────
 
   it('routine-task:create should return result.ok', async () => {
     const handler = getProcessor('routine-task:create');
     const routineTask = { id: 'rt-1', title: 'Routine' };
 
-    const result = await handler({ payload: { routineTask } });
+    const result = await handler({ payload: { userId: 'test-user', routineTask } });
 
     expect(mockSyncService.upsertRoutineTask).toHaveBeenCalledWith('test-user', routineTask);
     expect(result).toBe(true);
+  });
+
+  it('routine-task:create should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('routine-task:create');
+
+    const result = await handler({
+      payload: {
+        userId: 'other-user',
+        sourceUserId: 'other-user',
+        routineTask: { id: 'rt-foreign', title: 'Foreign Routine' },
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.upsertRoutineTask).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
   });
 
   // ── routine-completion:create ──────────────────────────────
@@ -164,13 +549,30 @@ describe('ActionQueueProcessorsService', () => {
     expect(result).toBe(true);
   });
 
+  it('routine-completion:create should move queue items from another user to dead letter', async () => {
+    const handler = getProcessor('routine-completion:create');
+
+    const result = await handler({
+      payload: {
+        completion: { userId: 'other-user', routineTaskId: 'rt-foreign' },
+        sourceUserId: 'other-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.incrementRoutineCompletion).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
+  });
+
   // ── Error handling ─────────────────────────────────────────
 
   it('processor should catch exceptions and return false', async () => {
     mockSyncService.pushTask.mockRejectedValueOnce(new Error('network error'));
     const handler = getProcessor('task:create');
 
-    const result = await handler({ payload: { task: { id: 't-1' }, projectId: 'p-1' } });
+      const result = await handler({
+        payload: { task: { id: 't-1' }, projectId: 'p-1', sourceUserId: 'test-user' },
+      });
 
     expect(result).toBe(false);
     expect(mockLoggerCategory.error).toHaveBeenCalled();

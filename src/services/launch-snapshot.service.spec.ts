@@ -134,6 +134,21 @@ describe('LaunchSnapshotService', () => {
     expect(stored.colorMode).toBe('dark');
   });
 
+  it('should cancel pending deferred persist without writing snapshot', () => {
+    service.schedulePersistDeferred([createProject('project-3', 'Canceled', '2026-03-25T09:30:00.000Z')], {
+      activeProjectId: 'project-3',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'dark',
+    });
+
+    service.cancelPendingPersist();
+    service.flushPendingPersist();
+
+    expect(localStorage.getItem('nanoflow.launch-snapshot.v1')).toBeNull();
+    expect(localStorage.getItem('nanoflow.launch-snapshot.v2')).toBeNull();
+  });
+
   it('should prefer v2 payloads over v1 when both snapshots exist', () => {
     localStorage.setItem('nanoflow.launch-snapshot.v1', JSON.stringify({
       version: 1,

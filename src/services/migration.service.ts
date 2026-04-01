@@ -83,15 +83,19 @@ export class MigrationService {
       this.needsMigration.set(false);
       return false;
     }
+
+    const effectiveRemoteProjects = remoteProjects.filter(project => project.syncSource === 'synced');
+    const remoteProjectIds = new Set(effectiveRemoteProjects.map(project => project.id));
+    const remoteProjectMap = new Map(effectiveRemoteProjects.map(project => [project.id, project]));
     
     // 有本地数据，检查是否与远程数据不同
     const hasLocalOnlyProjects = localData.some(local => 
-      !remoteProjects.some(remote => remote.id === local.id)
+      !remoteProjectIds.has(local.id)
     );
     
     // 检查是否有本地修改但远程存在的项目（可能需要合并）
     const hasPendingChanges = localData.some(local => {
-      const remote = remoteProjects.find(r => r.id === local.id);
+      const remote = remoteProjectMap.get(local.id);
       if (!remote) return false;
       // 简单的版本比较
       return (local.version ?? 0) > (remote.version ?? 0);

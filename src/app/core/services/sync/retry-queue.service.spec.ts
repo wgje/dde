@@ -1,10 +1,13 @@
-import { TestBed } from '@angular/core/testing';
+import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { RetryQueueService, RetryOperationHandler } from './retry-queue.service';
+import { RetryQueueItem, RetryQueueService, RetryOperationHandler } from './retry-queue.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-import { Task } from '../../../../models';
+import { AuthService } from '../../../../services/auth.service';
+import { ProjectStateService } from '../../../../services/project-state.service';
+import { AUTH_CONFIG } from '../../../../config/auth.config';
+import { Project, Task } from '../../../../models';
 
 /** 生成稳定的 UUID 供测试去重使用，同一 label 返回同一 UUID */
 const uuidCache = new Map<string, string>();
@@ -35,8 +38,23 @@ function createTask(label: string): Task {
   };
 }
 
+function createProject(label: string): Project {
+  const id = stableUUID(`project-${label}`);
+  const now = new Date().toISOString();
+  return {
+    id,
+    name: `Project ${label}`,
+    description: '',
+    createdDate: now,
+    updatedAt: now,
+    tasks: [],
+    connections: [],
+  };
+}
+
 describe('RetryQueueService', () => {
   let service: RetryQueueService;
+  let injector: Injector;
   let loggerCategory: {
     info: ReturnType<typeof vi.fn>;
     warn: ReturnType<typeof vi.fn>;
@@ -45,16 +63,33 @@ describe('RetryQueueService', () => {
   };
   let handler: RetryOperationHandler;
   let online = false;
+  const authServiceMock = {
+    currentUserId: vi.fn(() => 'test-user')
+  };
+  const projectStateMock = {
+    getProject: vi.fn(() => undefined),
+  };
+  const destroyCallbacks: Array<() => void> = [];
+  const destroyRefMock: Pick<DestroyRef, 'onDestroy'> = {
+    onDestroy: (callback: () => void) => {
+      destroyCallbacks.push(callback);
+    },
+  };
   let toastMock: {
     warning: ReturnType<typeof vi.fn>;
     error: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
     success: ReturnType<typeof vi.fn>;
   };
+  let initDbSpy: ReturnType<typeof vi.spyOn>;
+  let loadFromStorageSpy: ReturnType<typeof vi.spyOn>;
+  let saveToStorageSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     // 每个测试用例重置 UUID 缓存，保证测试隔离
     uuidCache.clear();
+    localStorage.clear();
+    destroyCallbacks.length = 0;
 
     loggerCategory = {
       info: vi.fn(),
@@ -70,9 +105,16 @@ describe('RetryQueueService', () => {
       success: vi.fn()
     };
 
-    TestBed.configureTestingModule({
+    initDbSpy = vi.spyOn(RetryQueueService.prototype as unknown as {
+      initDb: () => Promise<IDBDatabase | null>;
+    }, 'initDb').mockResolvedValue(null);
+    loadFromStorageSpy = vi.spyOn(RetryQueueService.prototype as unknown as {
+      loadFromStorage: () => void;
+    }, 'loadFromStorage').mockImplementation(() => {});
+
+    injector = Injector.create({
       providers: [
-        RetryQueueService,
+        { provide: RetryQueueService, useClass: RetryQueueService },
         {
           provide: LoggerService,
           useValue: {
@@ -84,6 +126,14 @@ describe('RetryQueueService', () => {
           useValue: toastMock
         },
         {
+          provide: AuthService,
+          useValue: authServiceMock
+        },
+        {
+          provide: ProjectStateService,
+          useValue: projectStateMock,
+        },
+        {
           provide: SentryLazyLoaderService,
           useValue: {
             captureMessage: vi.fn(),
@@ -91,17 +141,23 @@ describe('RetryQueueService', () => {
             setTag: vi.fn(),
             setContext: vi.fn()
           }
+        },
+        {
+          provide: DestroyRef,
+          useValue: destroyRefMock,
         }
       ]
     });
 
-    service = TestBed.inject(RetryQueueService);
+    service = runInInjectionContext(injector, () => injector.get(RetryQueueService));
 
     // 测试中不依赖持久化副作用，避免 IndexedDB 异步写入噪音。
-    vi.spyOn(service as unknown as { saveToStorage: () => Promise<void> }, 'saveToStorage')
+    saveToStorageSpy = vi.spyOn(service as unknown as { saveToStorage: () => Promise<void> }, 'saveToStorage')
       .mockResolvedValue(undefined);
 
     online = false;
+    authServiceMock.currentUserId.mockReturnValue('test-user');
+    projectStateMock.getProject.mockReturnValue(undefined);
     handler = {
       pushTask: vi.fn().mockResolvedValue(true),
       deleteTask: vi.fn().mockResolvedValue(true),
@@ -113,6 +169,332 @@ describe('RetryQueueService', () => {
       onProcessingStateChange: vi.fn()
     };
     service.setOperationHandler(handler);
+  });
+
+  it('入队时应记录来源用户，避免跨账号重放', () => {
+    service.add('task', 'upsert', createTask('t-source-user'), 'p-1');
+
+    expect(service.getItems()[0]?.sourceUserId).toBe('test-user');
+  });
+
+  it('显式传入来源用户时应优先使用捕获 owner，避免晚到失败被当前 auth 污染', () => {
+    authServiceMock.currentUserId.mockReturnValue('new-user');
+
+    service.add('task', 'upsert', createTask('t-captured-owner'), 'p-1', 'old-user');
+
+    expect(service.getItems()[0]?.sourceUserId).toBe('old-user');
+  });
+
+  it('processQueueSlice 重放项目时应透传捕获的 sourceUserId', async () => {
+    const project = createProject('captured-owner');
+    service.add('project', 'upsert', project, undefined, 'owner-a');
+    online = true;
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(handler.pushProject).toHaveBeenCalledWith(project, 'owner-a');
+  });
+
+  it('切账号后清空当前视图并保存，不应覆盖其它账号的持久化重试项', async () => {
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    const currentTask = createTask('t-current-owner');
+    const otherTask = createTask('t-other-owner');
+    const storedItems: RetryQueueItem[] = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: currentTask,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'test-user',
+      },
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: otherTask,
+        projectId: 'p-2',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'other-user',
+      },
+    ];
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: storedItems,
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems().map(item => item.data.id)).toEqual([currentTask.id]);
+    });
+
+    service.clearCurrentView();
+    (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+
+    const persistedAfterClear = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as {
+      items?: RetryQueueItem[];
+    };
+    expect(new Set((persistedAfterClear.items ?? []).map(item => item.data.id))).toEqual(
+      new Set([currentTask.id, otherTask.id])
+    );
+
+    authServiceMock.currentUserId.mockReturnValue('other-user');
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems().map(item => item.data.id)).toEqual([otherTask.id]);
+    });
+  });
+
+  it('晚到的存储加载结果不应覆盖当前 owner 新增的重试项', async () => {
+    loadFromStorageSpy.mockRestore();
+    saveToStorageSpy.mockResolvedValue(undefined);
+
+    let resolveDbInit: ((db: IDBDatabase | null) => void) | null = null;
+    initDbSpy.mockReturnValue(new Promise(resolve => {
+      resolveDbInit = resolve;
+    }));
+
+    const staleTask = createTask('t-stale-reload');
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: staleTask,
+          projectId: 'p-stale',
+          retryCount: 0,
+          createdAt: Date.now(),
+          sourceUserId: 'test-user',
+        },
+      ],
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    const freshTask = createTask('t-fresh-after-reload');
+    service.add('task', 'upsert', freshTask, 'p-fresh');
+
+    resolveDbInit?.(null);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.waitFor(() => {
+      expect(service.getItems().map(item => item.data.id)).toEqual([freshTask.id]);
+    });
+  });
+
+  it('clearCurrentView 应按当前 owner 重新刷新 legacyReviewCount', () => {
+    localStorage.setItem('nanoflow.retry-queue.legacy-review.test-user', JSON.stringify([
+      {
+        item: {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: createTask('legacy-review-user-a'),
+          projectId: 'p-1',
+          retryCount: 0,
+          createdAt: Date.now(),
+          sourceUserId: 'test-user',
+        },
+        reason: 'legacy',
+        quarantinedAt: new Date().toISOString(),
+        ownerUserId: 'test-user',
+      },
+    ]));
+
+    service.refreshLegacyReviewCount();
+    expect(service.legacyReviewCount()).toBe(1);
+
+    authServiceMock.currentUserId.mockReturnValue(null);
+    service.clearCurrentView();
+
+    expect(service.legacyReviewCount()).toBe(0);
+  });
+
+  it('clear 应清空包含 hidden items 在内的全量重试数据', () => {
+    (service as unknown as { queue: RetryQueueItem[] }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: createTask('t-visible-clear-all'),
+        projectId: 'p-visible',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'test-user',
+      },
+    ];
+    (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: createTask('t-hidden-clear-all'),
+        projectId: 'p-hidden',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'other-user',
+      },
+    ];
+
+    service.clear();
+
+    expect(service.getItems()).toEqual([]);
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
+  });
+
+  it('加载阶段应立即隔离缺少来源元数据的 legacy 重试项', async () => {
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    authServiceMock.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    const legacyTask = createTask('t-legacy-load');
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: legacyTask,
+          projectId: 'p-legacy',
+          retryCount: 0,
+          createdAt: Date.now(),
+        },
+      ],
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems()).toEqual([]);
+    });
+
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('t-legacy-load');
+    const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as { items?: RetryQueueItem[] };
+    expect(persisted.items ?? []).toHaveLength(0);
+  });
+
+  it('认证态下无法确认归属的 legacy 重试项应隔离保留而不是静默丢弃', async () => {
+    const task = createTask('t-legacy-retry');
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+      },
+    ];
+    online = true;
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('t-legacy-retry');
+    expect(toastMock.warning).toHaveBeenCalled();
+  });
+
+  it('认证态下即使项目已存在也应隔离缺少来源元数据的 legacy 重试项', async () => {
+    const task = createTask('t-legacy-adopt');
+    projectStateMock.getProject.mockReturnValueOnce({ id: 'p-1', syncSource: 'synced' });
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+      },
+    ];
+    online = true;
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('t-legacy-adopt');
+    expect(toastMock.warning).toHaveBeenCalled();
+  });
+
+  it('legacy local-user 重试项应隔离保留而不是自动上云', async () => {
+    const task = createTask('t-legacy-local-user');
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      },
+    ];
+    online = true;
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('legacy local-user');
+  });
+
+  it('跨账号重试项应隔离保留而不是在当前账号下重放', async () => {
+    const task = createTask('t-foreign-user');
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'other-user',
+      },
+    ];
+    online = true;
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.other-user')).toContain('other-user');
   });
 
   it('queue_full 压力模式在容量恢复后应自动解锁', () => {
@@ -151,6 +533,135 @@ describe('RetryQueueService', () => {
     expect((service as unknown as { isProcessingQueue: boolean }).isProcessingQueue).toBe(false);
     expect(handler.onProcessingStateChange).toHaveBeenCalledWith(true, 1);
     expect(handler.onProcessingStateChange).toHaveBeenCalledWith(false, 0);
+  });
+
+  it('处理切片中被移除的项目重试项不应继续重放', async () => {
+    const firstTask = createTask('t-keep-processing');
+    const secondTask = createTask('t-removed-during-slice');
+    service.add('task', 'upsert', firstTask, 'p-keep');
+    service.add('task', 'upsert', secondTask, 'p-drop');
+    online = true;
+
+    (handler.pushTask as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => {
+        service.removeByProjectId('p-drop');
+        return true;
+      })
+      .mockResolvedValue(true);
+
+    await service.processQueueSlice();
+
+    expect(handler.pushTask).toHaveBeenCalledTimes(1);
+    expect(handler.pushTask).toHaveBeenCalledWith(firstTask, 'p-keep');
+    expect(service.getItems().some(item => item.projectId === 'p-drop')).toBe(false);
+  });
+
+  it('切账号期间已成功的 in-flight 重试项应从 hidden 持久化队列移除', async () => {
+    initDbSpy.mockResolvedValue(null);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    const task = createTask('retry-inflight-success');
+    service.add('task', 'upsert', task, 'p-retry');
+    const inFlightItemId = service.getItems()[0]?.id;
+    online = true;
+
+    let resolvePush: ((value: boolean) => void) | null = null;
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<boolean>(resolve => {
+      resolvePush = resolve;
+    }));
+
+    const processing = service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+    await vi.waitFor(() => {
+      expect(handler.pushTask).toHaveBeenCalledOnce();
+    });
+
+    authServiceMock.currentUserId.mockReturnValue('other-user');
+    service.clearCurrentView();
+    resolvePush?.(true);
+    await processing;
+
+    const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as {
+      items?: RetryQueueItem[];
+    };
+
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
+    expect((persisted.items ?? []).find(item => item.id === inFlightItemId)).toBeUndefined();
+  });
+
+  it('切账号期间失败的 in-flight 重试项应保留在 hidden 队列并递增 retryCount', async () => {
+    initDbSpy.mockResolvedValue(null);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    const task = createTask('retry-inflight-failure');
+    service.add('task', 'upsert', task, 'p-retry');
+    const inFlightItemId = service.getItems()[0]?.id;
+    online = true;
+
+    let rejectPush: ((reason?: unknown) => void) | null = null;
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockImplementationOnce(() => new Promise<boolean>((_resolve, reject) => {
+      rejectPush = reject;
+    }));
+
+    const processing = service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+    await vi.waitFor(() => {
+      expect(handler.pushTask).toHaveBeenCalledOnce();
+    });
+
+    authServiceMock.currentUserId.mockReturnValue('other-user');
+    service.clearCurrentView();
+    rejectPush?.(new Error('network down'));
+    await processing;
+
+    const hiddenItems = (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems;
+    const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as {
+      items?: RetryQueueItem[];
+    };
+    const persistedItem = (persisted.items ?? []).find(item => item.id === inFlightItemId);
+
+    expect(hiddenItems).toHaveLength(1);
+    expect(hiddenItems[0]?.retryCount).toBe(1);
+    expect(persistedItem?.retryCount).toBe(1);
+  });
+
+  it('切账号后新的 owner 不应被旧 in-flight 处理锁阻塞', async () => {
+    let resolveFirst: ((value: boolean) => void) | null = null;
+    const firstTask = createTask('retry-owner-switch-first');
+    const secondTask = createTask('retry-owner-switch-second');
+    service.add('task', 'upsert', firstTask, 'p-first');
+    online = true;
+
+    (handler.pushTask as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+        resolveFirst = resolve;
+      }))
+      .mockResolvedValueOnce(true);
+
+    const firstProcessing = service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+    await vi.waitFor(() => {
+      expect(handler.pushTask).toHaveBeenCalledTimes(1);
+    });
+
+    authServiceMock.currentUserId.mockReturnValue('other-user');
+    service.clearCurrentView();
+
+    service.add('task', 'upsert', secondTask, 'p-second');
+    const secondProcessing = service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    await vi.waitFor(() => {
+      expect(handler.pushTask).toHaveBeenCalledTimes(2);
+    });
+
+    resolveFirst?.(true);
+    await firstProcessing;
+    await secondProcessing;
+
+    expect((service as unknown as { isProcessingQueue: boolean }).isProcessingQueue).toBe(false);
   });
 
   it('满队列进入压力模式后，在线状态应触发应急处理并继续入队', async () => {

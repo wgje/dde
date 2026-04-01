@@ -360,6 +360,8 @@ export class AppLifecycleOrchestratorService {
       return { deferred: false, reason: session.reason };
     }
 
+    this.kickPendingPersistRecovery(reason);
+
     const interactionStartAt = this.monotonicNow();
     if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
       this.recordRecoveryStep('sync-recovery-light', reason);
@@ -427,6 +429,39 @@ export class AppLifecycleOrchestratorService {
     this.lastHeavyRecoveryAtSignal.set(Date.now());
 
     return { deferred: false, interactionReadyMs, fastPathHit: blackBoxResult.skipped };
+  }
+
+  private kickPendingPersistRecovery(reason: AppResumeReason): void {
+    if (!this.syncCoordinator.hasPendingLocalChanges()) {
+      return;
+    }
+
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'lifecycle',
+      message: 'recovery.step',
+      level: 'info',
+      data: {
+        step: 'resume-pending-persist-recovery',
+        reason,
+      }
+    });
+
+    const runRecovery = () => {
+      void this.syncCoordinator.flushPendingPersistToCloud(`resume:${reason}`).catch((error) => {
+        this.logger.warn('Resume pending persist recovery failed', { reason, error });
+        this.sentryLazyLoader.captureException(error, {
+          operation: 'lifecycle.resume.pending-persist',
+          reason,
+        });
+      });
+    };
+
+    if (typeof queueMicrotask === 'function') {
+      queueMicrotask(runRecovery);
+      return;
+    }
+
+    void Promise.resolve().then(runRecovery);
   }
 
   private scheduleRecoveryCompensation(
@@ -516,12 +551,15 @@ export class AppLifecycleOrchestratorService {
   }
 
   private runIdleTask(task: () => void): void {
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      (
-        window as Window & {
-          requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-        }
-      ).requestIdleCallback(() => task(), { timeout: 1200 });
+    const requestIdleCallback = typeof window !== 'undefined'
+      ? (
+          window as Window & {
+            requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+          }
+        ).requestIdleCallback
+      : undefined;
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => task(), { timeout: 1200 });
       return;
     }
     setTimeout(task, 0);

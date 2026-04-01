@@ -11,10 +11,12 @@
  */
 import { Injectable, inject, signal, WritableSignal } from '@angular/core';
 import { QUEUE_CONFIG } from '../config';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
+import { AuthService } from './auth.service';
 import { QueuedAction, DeadLetterItem } from './action-queue.types';
 
 // ========== IndexedDB 备份支持 ==========
@@ -74,12 +76,22 @@ export interface ActionQueueContext {
   queueSize: WritableSignal<number>;
 }
 
+interface LegacyActionReviewItem {
+  action: QueuedAction;
+  source: 'legacy-global-queue' | 'legacy-idb-backup';
+  capturedAt: string;
+  ownerUserId: string;
+}
+
+const LEGACY_UNKNOWN_OWNER_USER_ID = '__legacy_unknown__';
+
 @Injectable({ providedIn: 'root' })
 export class ActionQueueStorageService {
   private readonly logger = inject(LoggerService).category('ActionQueueStorage');
   private readonly toast = inject(ToastService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly networkAwareness = inject(NetworkAwarenessService);
+  private readonly authService = inject(AuthService);
 
   // ========== 死信队列 ==========
   readonly deadLetterQueue = signal<DeadLetterItem[]>([]);
@@ -105,6 +117,11 @@ export class ActionQueueStorageService {
 
   // ========== 重试定时器 ==========
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private readonly LEGACY_QUEUE_BACKUP_RECORD_ID = 'queue';
+  private readonly LEGACY_REVIEW_STORAGE_KEY_PREFIX = 'nanoflow.action-queue.legacy-review.';
+  private legacyReviewWarningShown = false;
+  private queueRestoreGeneration = 0;
   
   /** 冻结期定时重试落盘的定时器 */
   private frozenRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -148,6 +165,418 @@ export class ActionQueueStorageService {
   /** 注册存储失败回调（逃生模式） */
   onStorageFailure(callback: (data: { queue: QueuedAction[]; deadLetter: DeadLetterItem[] }) => void): void {
     this.storageFailureCallback = callback;
+  }
+
+  private getCurrentOwnerUserId(): string {
+    return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private getScopedStorageKey(baseKey: string, ownerUserId = this.getCurrentOwnerUserId()): string {
+    return `${baseKey}.${ownerUserId}`;
+  }
+
+  private getQueueBackupRecordId(ownerUserId = this.getCurrentOwnerUserId()): string {
+    return `queue:${ownerUserId}`;
+  }
+
+  private getLegacyReviewStorageKey(ownerUserId = this.getCurrentOwnerUserId()): string {
+    return `${this.LEGACY_REVIEW_STORAGE_KEY_PREFIX}${ownerUserId}`;
+  }
+
+  private invalidateLocalQueueSnapshot(ownerUserId = this.getCurrentOwnerUserId()): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId));
+      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+      }
+    } catch (error) {
+      this.logger.warn('清理失效的 localStorage 队列快照失败', { ownerUserId, error });
+    }
+  }
+
+  private readQueueSnapshotFromLocalStorage(ownerUserId: string): {
+    found: boolean;
+    queue: QueuedAction[];
+  } {
+    if (typeof localStorage === 'undefined') {
+      return { found: false, queue: [] };
+    }
+
+    const scopedKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId);
+    const scopedValue = localStorage.getItem(scopedKey);
+    if (scopedValue !== null) {
+      try {
+        const queue = JSON.parse(scopedValue) as QueuedAction[];
+        return { found: true, queue: Array.isArray(queue) ? queue : [] };
+      } catch (error) {
+        this.logger.warn('读取 owner-scoped 队列失败，按空队列处理', { ownerUserId, error });
+        return { found: true, queue: [] };
+      }
+    }
+
+    if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return { found: false, queue: [] };
+    }
+
+    const legacyValue = localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+    if (legacyValue === null) {
+      return { found: false, queue: [] };
+    }
+
+    try {
+      const queue = JSON.parse(legacyValue) as QueuedAction[];
+      return { found: true, queue: Array.isArray(queue) ? queue : [] };
+    } catch (error) {
+      this.logger.warn('读取 legacy local-user 队列失败，按空队列处理', { error });
+      return { found: true, queue: [] };
+    }
+  }
+
+  private readDeadLetterSnapshotFromLocalStorage(ownerUserId: string): DeadLetterItem[] {
+    if (typeof localStorage === 'undefined') {
+      return [];
+    }
+
+    const scopedKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId);
+    const scopedValue = localStorage.getItem(scopedKey);
+    if (scopedValue !== null) {
+      try {
+        const queue = JSON.parse(scopedValue) as DeadLetterItem[];
+        return Array.isArray(queue) ? queue : [];
+      } catch (error) {
+        this.logger.warn('读取 owner-scoped dead-letter 失败，按空队列处理', { ownerUserId, error });
+        return [];
+      }
+    }
+
+    if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return [];
+    }
+
+    const legacyValue = localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
+    if (!legacyValue) {
+      return [];
+    }
+
+    try {
+      const queue = JSON.parse(legacyValue) as DeadLetterItem[];
+      return Array.isArray(queue) ? queue : [];
+    } catch (error) {
+      this.logger.warn('读取 legacy local-user dead-letter 失败，按空队列处理', { error });
+      return [];
+    }
+  }
+
+  private async loadPersistedQueueForOwner(ownerUserId: string): Promise<QueuedAction[]> {
+    const localSnapshot = this.readQueueSnapshotFromLocalStorage(ownerUserId);
+    if (localSnapshot.found) {
+      return localSnapshot.queue;
+    }
+
+    const backupQueue = await this.restoreQueueFromIndexedDB(ownerUserId);
+    return backupQueue ?? [];
+  }
+
+  private async saveQueueSnapshotForOwner(ownerUserId: string, queue: QueuedAction[]): Promise<void> {
+    let localSnapshotSaved = false;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(
+          this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId),
+          JSON.stringify(queue)
+        );
+        if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+        }
+        localSnapshotSaved = true;
+      } catch (error) {
+        this.logger.warn('保存 owner-scoped 队列快照失败，降级写入 IndexedDB 备份', {
+          ownerUserId,
+          error,
+        });
+      }
+    }
+
+    const backupSucceeded = await this.backupQueueToIndexedDB(queue, ownerUserId);
+    if (!localSnapshotSaved && backupSucceeded) {
+      this.invalidateLocalQueueSnapshot(ownerUserId);
+    }
+  }
+
+  private saveDeadLetterSnapshotForOwner(ownerUserId: string, queue: DeadLetterItem[]): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      localStorage.setItem(
+        this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId),
+        JSON.stringify(queue)
+      );
+      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        localStorage.removeItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
+      }
+    } catch (error) {
+      this.logger.warn('保存 owner-scoped dead-letter 快照失败', { ownerUserId, error });
+    }
+  }
+
+  async settleSuccessfulActionForOwner(ownerUserId: string, actionId: string): Promise<boolean> {
+    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
+    const nextQueue = queue.filter(action => action.id !== actionId);
+    if (nextQueue.length === queue.length) {
+      this.logger.debug('旧 owner 队列中未找到待收口的成功 action', { ownerUserId, actionId });
+      return false;
+    }
+
+    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
+    return true;
+  }
+
+  async settleFailedActionForOwner(
+    ownerUserId: string,
+    action: QueuedAction,
+    error: string
+  ): Promise<'retry' | 'dead-letter' | 'missing'> {
+    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
+    const existingAction = queue.find(item => item.id === action.id);
+    if (!existingAction) {
+      this.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
+        ownerUserId,
+        actionId: action.id,
+      });
+      return 'missing';
+    }
+
+    const errorType = this.classifyError(error);
+    if (errorType === 'business' || errorType === 'permission' || existingAction.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
+      const nextQueue = queue.filter(item => item.id !== action.id);
+      const deadLetterItem: DeadLetterItem = {
+        action: {
+          ...existingAction,
+          lastError: error,
+          errorType,
+        },
+        failedAt: new Date().toISOString(),
+        reason: errorType === 'business' || errorType === 'permission'
+          ? `${errorType === 'business' ? '业务' : '权限'}错误: ${error}`
+          : `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${error}`,
+      };
+
+      const deadLetters = this.readDeadLetterSnapshotFromLocalStorage(ownerUserId)
+        .filter(item => item.action.id !== action.id);
+      deadLetters.push(deadLetterItem);
+
+      await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
+      this.saveDeadLetterSnapshotForOwner(
+        ownerUserId,
+        deadLetters.slice(-LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE)
+      );
+      return 'dead-letter';
+    }
+
+    const nextQueue = queue.map(item => item.id === action.id
+      ? {
+          ...item,
+          retryCount: item.retryCount + 1,
+          lastError: error,
+          errorType,
+        }
+      : item
+    );
+    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
+    return 'retry';
+  }
+
+  async appendActionForOwner(ownerUserId: string, action: QueuedAction): Promise<void> {
+    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
+    await this.saveQueueSnapshotForOwner(ownerUserId, [
+      ...queue.filter(existing => existing.id !== action.id),
+      action,
+    ]);
+  }
+
+  private clearLegacyGlobalStorageIfLocalOwner(baseKey: string): void {
+    if (this.getCurrentOwnerUserId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return;
+    }
+
+    localStorage.removeItem(baseKey);
+  }
+
+  private readScopedDeadLetterQueueFromStorage(): DeadLetterItem[] {
+    if (typeof localStorage === 'undefined') {
+      return [];
+    }
+
+    try {
+      const raw = localStorage.getItem(this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY));
+      if (!raw) {
+        return [];
+      }
+
+      const parsed = JSON.parse(raw) as DeadLetterItem[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      this.logger.warn('读取 scoped dead-letter 失败，已退回内存态合并', { error });
+      return [];
+    }
+  }
+
+  private mergeLegacyDeadLetters(deadLetters: DeadLetterItem[], ownerUserId: string): void {
+    if (deadLetters.length === 0) {
+      return;
+    }
+
+    const mergedByActionId = new Map<string, DeadLetterItem>();
+    const existingDeadLetters = ownerUserId === this.getCurrentOwnerUserId()
+      ? [
+          ...this.readScopedDeadLetterQueueFromStorage(),
+          ...this.deadLetterQueue(),
+        ]
+      : this.readDeadLetterSnapshotFromStorage(ownerUserId);
+
+    for (const item of [...existingDeadLetters, ...deadLetters]) {
+      mergedByActionId.set(item.action.id, item);
+    }
+
+    const mergedQueue = Array.from(mergedByActionId.values()).slice(-LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
+    this.saveDeadLetterSnapshotForOwner(ownerUserId, mergedQueue);
+
+    if (ownerUserId === this.getCurrentOwnerUserId()) {
+      this.deadLetterQueue.set(mergedQueue);
+      this.deadLetterSize.set(mergedQueue.length);
+      this.ctx.syncSentryContext();
+    }
+  }
+
+  private quarantineLegacyQueueForReview(
+    actions: QueuedAction[],
+    source: 'legacy-global-queue' | 'legacy-idb-backup'
+  ): void {
+    if (typeof localStorage === 'undefined' || actions.length === 0) {
+      return;
+    }
+
+    const ownerUserId = LEGACY_UNKNOWN_OWNER_USER_ID;
+    const key = this.getLegacyReviewStorageKey(ownerUserId);
+
+    try {
+      const existing = localStorage.getItem(key);
+      const records = existing ? JSON.parse(existing) as LegacyActionReviewItem[] : [];
+      const deduped = records.filter(record => !actions.some(action => action.id === record.action.id));
+      const nextRecords = [
+        ...deduped,
+        ...actions.map(action => ({
+          action,
+          source,
+          capturedAt: new Date().toISOString(),
+          ownerUserId,
+        } satisfies LegacyActionReviewItem)),
+      ];
+      localStorage.setItem(key, JSON.stringify(nextRecords));
+      this.mergeLegacyDeadLetters(actions.map(action => ({
+        action,
+        failedAt: new Date().toISOString(),
+        reason: source === 'legacy-global-queue'
+          ? '旧版全局离线队列已隔离待确认'
+          : '旧版离线备份队列已隔离待确认',
+      })), ownerUserId);
+
+      if (!this.legacyReviewWarningShown) {
+        this.legacyReviewWarningShown = true;
+        this.toast.warning('检测到待确认的离线操作', '旧版离线队列已隔离保留，不会在当前账号下自动执行');
+      }
+
+      this.logger.warn('检测到 legacy ActionQueue 数据，已隔离保留待人工确认', {
+        ownerUserId,
+        source,
+        count: actions.length,
+      });
+    } catch (error) {
+      this.logger.warn('隔离 legacy ActionQueue 数据失败，已保留原始存储键', { source, error });
+    }
+  }
+
+  private quarantineLegacyDeadLetters(deadLetters: DeadLetterItem[]): void {
+    if (deadLetters.length === 0) {
+      return;
+    }
+
+    const ownerUserId = LEGACY_UNKNOWN_OWNER_USER_ID;
+
+    const migratedDeadLetters = deadLetters.map(item => ({
+      ...item,
+      reason: `旧版全局死信已隔离待确认: ${item.reason}`,
+    }));
+    this.mergeLegacyDeadLetters(migratedDeadLetters, ownerUserId);
+
+    if (!this.legacyReviewWarningShown) {
+      this.legacyReviewWarningShown = true;
+      this.toast.warning('检测到待确认的离线操作', '旧版离线死信已隔离保留，不会并入当前账号的失败队列');
+    }
+
+    this.logger.warn('检测到 legacy dead-letter 数据，已隔离到未知 owner 桶', {
+      ownerUserId,
+      count: deadLetters.length,
+    });
+  }
+
+  private loadScopedOrLegacyStorage(baseKey: string): string | null {
+    const scopedKey = this.getScopedStorageKey(baseKey);
+    const scopedValue = localStorage.getItem(scopedKey);
+    if (scopedValue !== null) {
+      return scopedValue;
+    }
+
+    const legacyValue = localStorage.getItem(baseKey);
+    if (legacyValue === null) {
+      return null;
+    }
+
+    if (this.getCurrentOwnerUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      localStorage.setItem(scopedKey, legacyValue);
+      localStorage.removeItem(baseKey);
+      return legacyValue;
+    }
+
+    if (baseKey === LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY) {
+      try {
+        const legacyQueue = JSON.parse(legacyValue) as QueuedAction[];
+        if (Array.isArray(legacyQueue) && legacyQueue.length > 0) {
+          try {
+            this.quarantineLegacyQueueForReview(legacyQueue, 'legacy-global-queue');
+          } finally {
+            localStorage.removeItem(baseKey);
+          }
+        }
+      } catch (error) {
+        this.logger.warn('读取 legacy 全局队列失败，已保留原始存储键', { error });
+      }
+      return null;
+    }
+
+    if (baseKey === LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY) {
+      try {
+        const legacyDeadLetters = JSON.parse(legacyValue) as DeadLetterItem[];
+        if (Array.isArray(legacyDeadLetters) && legacyDeadLetters.length > 0) {
+          try {
+            this.quarantineLegacyDeadLetters(legacyDeadLetters);
+          } finally {
+            localStorage.removeItem(baseKey);
+          }
+        }
+      } catch (error) {
+        this.logger.warn('读取 legacy 全局死信失败，已保留原始存储键', { error });
+      }
+      return null;
+    }
+
+    return null;
   }
 
   // ========== 死信队列公共操作 ==========
@@ -451,10 +880,12 @@ export class ActionQueueStorageService {
     if (typeof localStorage === 'undefined') return;
 
     try {
+      const queueStorageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
       localStorage.setItem(
-        LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
+        queueStorageKey,
         JSON.stringify(this.ctx.pendingActions())
       );
+      this.clearLegacyGlobalStorageIfLocalOwner(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
       this.clearQueueFreeze();
     } catch (e: unknown) {
       const isQuotaError =
@@ -468,6 +899,7 @@ export class ActionQueueStorageService {
         this.freezeQueueWrites('quota_exceeded');
         void this.backupQueueToIndexedDB(currentQueue).then(success => {
           if (success) {
+            this.invalidateLocalQueueSnapshot();
             this.toast.warning('存储空间不足', '同步队列已冻结。请释放浏览器存储后继续写入。', {
               duration: 10000
             });
@@ -489,7 +921,9 @@ export class ActionQueueStorageService {
     if (typeof localStorage === 'undefined') return;
 
     try {
-      const saved = localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+      const restoreGeneration = ++this.queueRestoreGeneration;
+      const restoreOwnerUserId = this.getCurrentOwnerUserId();
+      const saved = this.loadScopedOrLegacyStorage(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
       if (saved) {
         const queue = JSON.parse(saved) as QueuedAction[];
         if (Array.isArray(queue)) {
@@ -502,6 +936,11 @@ export class ActionQueueStorageService {
 
       // localStorage 为空，尝试从 IndexedDB 恢复
       void this.restoreQueueFromIndexedDB().then(backupQueue => {
+        if (restoreGeneration !== this.queueRestoreGeneration || restoreOwnerUserId !== this.getCurrentOwnerUserId()) {
+          this.logger.debug('忽略过期的队列备份恢复结果', { restoreOwnerUserId });
+          return;
+        }
+
         if (backupQueue && backupQueue.length > 0) {
           this.ctx.pendingActions.set(backupQueue);
           this.ctx.queueSize.set(backupQueue.length);
@@ -521,10 +960,12 @@ export class ActionQueueStorageService {
     if (typeof localStorage === 'undefined') return;
 
     try {
+      const deadLetterStorageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
       localStorage.setItem(
-        LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY,
+        deadLetterStorageKey,
         JSON.stringify(this.deadLetterQueue())
       );
+      this.clearLegacyGlobalStorageIfLocalOwner(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
     } catch (e) {
       this.logger.warn('Failed to save dead letter queue to storage', { error: e });
     }
@@ -537,7 +978,7 @@ export class ActionQueueStorageService {
     if (typeof localStorage === 'undefined') return;
 
     try {
-      const saved = localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
+      const saved = this.loadScopedOrLegacyStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
       if (saved) {
         const queue = JSON.parse(saved) as DeadLetterItem[];
         if (Array.isArray(queue)) {
@@ -586,21 +1027,29 @@ export class ActionQueueStorageService {
     }
   }
 
-  private async backupQueueToIndexedDB(queue: QueuedAction[]): Promise<boolean> {
+  private async backupQueueToIndexedDB(
+    queue: QueuedAction[],
+    ownerUserId = this.getCurrentOwnerUserId()
+  ): Promise<boolean> {
     if (typeof indexedDB === 'undefined') return false;
 
     try {
+      const recordId = this.getQueueBackupRecordId(ownerUserId);
       const db = await this.openQueueBackupDb();
       return new Promise((resolve) => {
         const transaction = db.transaction([QUEUE_BACKUP_STORE_NAME], 'readwrite');
         const store = transaction.objectStore(QUEUE_BACKUP_STORE_NAME);
-        const clearRequest = store.clear();
-        clearRequest.onsuccess = () => {
-          const putRequest = store.put({ id: 'queue', actions: queue, savedAt: new Date().toISOString() });
-          putRequest.onsuccess = () => { this.logger.info('队列已备份到 IndexedDB', { count: queue.length }); resolve(true); };
-          putRequest.onerror = () => { this.logger.error('IndexedDB 写入失败', putRequest.error); resolve(false); };
+        const putRequest = store.put({ id: recordId, ownerUserId, actions: queue, savedAt: new Date().toISOString() });
+        putRequest.onsuccess = () => {
+          db.close();
+          this.logger.info('队列已备份到 IndexedDB', { count: queue.length, ownerUserId });
+          resolve(true);
         };
-        clearRequest.onerror = () => { this.logger.error('IndexedDB 清空失败', clearRequest.error); resolve(false); };
+        putRequest.onerror = () => {
+          db.close();
+          this.logger.error('IndexedDB 写入失败', putRequest.error);
+          resolve(false);
+        };
       });
     } catch (e) {
       this.logger.error('IndexedDB 备份异常', e);
@@ -608,23 +1057,59 @@ export class ActionQueueStorageService {
     }
   }
 
-  private async restoreQueueFromIndexedDB(): Promise<QueuedAction[] | null> {
+  private async restoreQueueFromIndexedDB(
+    ownerUserId = this.getCurrentOwnerUserId()
+  ): Promise<QueuedAction[] | null> {
     if (typeof indexedDB === 'undefined') return null;
 
     try {
+      const recordId = this.getQueueBackupRecordId(ownerUserId);
       const db = await this.openQueueBackupDb();
       return new Promise((resolve) => {
         const transaction = db.transaction([QUEUE_BACKUP_STORE_NAME], 'readonly');
         const store = transaction.objectStore(QUEUE_BACKUP_STORE_NAME);
-        const request = store.get('queue');
+        const request = store.get(recordId);
         request.onsuccess = () => {
           const data = request.result as { id: string; actions: QueuedAction[]; savedAt: string } | undefined;
           if (data?.actions) {
+            db.close();
             this.logger.info('从 IndexedDB 恢复队列备份', { count: data.actions.length, savedAt: data.savedAt });
             resolve(data.actions);
-          } else { resolve(null); }
+            return;
+          }
+
+          const legacyRequest = store.get(this.LEGACY_QUEUE_BACKUP_RECORD_ID);
+          legacyRequest.onsuccess = () => {
+            const legacyData = legacyRequest.result as { id: string; actions: QueuedAction[]; savedAt: string } | undefined;
+            if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+              db.close();
+              if (legacyData?.actions && legacyData.actions.length > 0) {
+                this.quarantineLegacyQueueForReview(legacyData.actions, 'legacy-idb-backup');
+              }
+              resolve(null);
+              return;
+            }
+
+            if (legacyData?.actions) {
+              db.close();
+              this.logger.info('从 IndexedDB 恢复 legacy 队列备份', { count: legacyData.actions.length, savedAt: legacyData.savedAt });
+              resolve(legacyData.actions);
+            } else {
+              db.close();
+              resolve(null);
+            }
+          };
+          legacyRequest.onerror = () => {
+            db.close();
+            this.logger.warn('从 IndexedDB 读取 legacy 备份失败', legacyRequest.error);
+            resolve(null);
+          };
         };
-        request.onerror = () => { this.logger.warn('从 IndexedDB 读取备份失败', request.error); resolve(null); };
+        request.onerror = () => {
+          db.close();
+          this.logger.warn('从 IndexedDB 读取备份失败', request.error);
+          resolve(null);
+        };
       });
     } catch (e) {
       this.logger.warn('IndexedDB 恢复异常', e);

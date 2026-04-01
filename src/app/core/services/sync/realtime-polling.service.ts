@@ -10,10 +10,11 @@
  * 从 SimpleSyncService 提取，作为 Sprint 9 技术债务修复的一部分
  */
 
-import { Injectable, inject, signal, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, DestroyRef, effect } from '@angular/core';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
+import { MobileSyncStrategyService } from '../../../../services/mobile-sync-strategy.service';
 import { SyncStateService } from './sync-state.service';
 import { SYNC_CONFIG } from '../../../../config';
 import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
@@ -43,6 +44,7 @@ export class RealtimePollingService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RealtimePolling');
   private readonly toast = inject(ToastService);
+  private readonly mobileSyncStrategy = inject(MobileSyncStrategyService);
   private readonly syncState = inject(SyncStateService);
   private readonly destroyRef = inject(DestroyRef);
 
@@ -55,6 +57,7 @@ export class RealtimePollingService {
   /** 当前订阅的项目 ID */
   private currentProjectId: string | null = null;
   private currentUserId: string | null = null;
+  private transportGeneration = 0;
   
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
@@ -84,6 +87,13 @@ export class RealtimePollingService {
   private runtimeInitialized = false;
 
   constructor() {
+    effect(() => {
+      const enableRealtime = this.mobileSyncStrategy.currentStrategy().enableRealtime;
+      if (this.isRealtimeEnabled() !== enableRealtime) {
+        this.setRealtimeEnabled(enableRealtime);
+      }
+    });
+
     this.destroyRef.onDestroy(() => {
       this.cleanup();
     });
@@ -129,6 +139,68 @@ export class RealtimePollingService {
       // eslint-disable-next-line no-restricted-syntax -- 保持空客户端判定，避免在订阅路径抛出阻断异常
       return null;
     }
+  }
+
+  private beginTransportGeneration(): number {
+    this.transportGeneration += 1;
+    return this.transportGeneration;
+  }
+
+  private isTransportGenerationCurrent(transportGeneration: number): boolean {
+    return this.transportGeneration === transportGeneration;
+  }
+
+  private isTransportContextCurrent(
+    transportGeneration: number,
+    projectId: string,
+    userId: string | null
+  ): boolean {
+    return this.isTransportGenerationCurrent(transportGeneration)
+      && this.currentProjectId === projectId
+      && this.currentUserId === userId;
+  }
+
+  private async unsubscribeFromProjectInternal(): Promise<void> {
+    this.currentProjectId = null;
+    this.currentUserId = null;
+
+    this.stopPolling();
+
+    const channel = this.realtimeChannel;
+    this.realtimeChannel = null;
+
+    if (channel) {
+      const client = this.getSupabaseClient();
+      if (client) {
+        await client.removeChannel(channel);
+      }
+    }
+  }
+
+  private async activateProjectTransport(
+    projectId: string,
+    userId: string | null,
+    transportGeneration: number
+  ): Promise<void> {
+    if (!this.isTransportGenerationCurrent(transportGeneration)) {
+      return;
+    }
+
+    this.currentProjectId = projectId;
+    this.currentUserId = userId;
+
+    if (!userId) {
+      this.logger.warn('Realtime 重订阅缺少 userId，回退到轮询', { projectId });
+      this.startPolling(projectId, userId, transportGeneration);
+      return;
+    }
+
+    if (this.isRealtimeEnabled()) {
+      await this.subscribeToProjectRealtime(projectId, userId, transportGeneration);
+      return;
+    }
+
+    this.startPolling(projectId, userId, transportGeneration);
   }
 
   /**
@@ -212,18 +284,26 @@ export class RealtimePollingService {
    */
   setRealtimeEnabled(enabled: boolean): void {
     this.isRealtimeEnabled.set(enabled);
-    
-    if (this.currentProjectId) {
-      const projectId = this.currentProjectId;
-      const userId = this.currentUserId;
-      this.unsubscribeFromProject().then(() => {
-        if (!userId) {
-          this.logger.warn('Realtime 重订阅缺少 userId，回退到轮询', { projectId });
-          this.startPolling(projectId);
-          return;
-        }
-        this.subscribeToProject(projectId, userId);
-      });
+
+    const projectId = this.currentProjectId;
+    const userId = this.currentUserId;
+    if (projectId) {
+      const transportGeneration = this.beginTransportGeneration();
+      void this.unsubscribeFromProjectInternal()
+        .then(async () => {
+          if (!this.isTransportGenerationCurrent(transportGeneration)) {
+            return;
+          }
+
+          await this.activateProjectTransport(projectId, userId, transportGeneration);
+        })
+        .catch((error: unknown) => {
+          if (!this.isTransportGenerationCurrent(transportGeneration)) {
+            return;
+          }
+
+          this.logger.warn('Realtime 传输方式切换失败', { error, enabled, projectId });
+        });
     }
     
     this.logger.info(`Realtime ${enabled ? '已启用' : '已禁用，使用轮询'}`);
@@ -233,16 +313,14 @@ export class RealtimePollingService {
    * 订阅项目变更（自动选择 Realtime 或轮询）
    */
   async subscribeToProject(projectId: string, userId: string): Promise<void> {
-    await this.unsubscribeFromProject();
-    
-    this.currentProjectId = projectId;
-    this.currentUserId = userId;
-    
-    if (this.isRealtimeEnabled()) {
-      await this.subscribeToProjectRealtime(projectId, userId);
-    } else {
-      this.startPolling(projectId);
+    const transportGeneration = this.beginTransportGeneration();
+    await this.unsubscribeFromProjectInternal();
+
+    if (!this.isTransportGenerationCurrent(transportGeneration)) {
+      return;
     }
+
+    await this.activateProjectTransport(projectId, userId, transportGeneration);
   }
 
   /**
@@ -250,7 +328,11 @@ export class RealtimePollingService {
    * 【2026-02-15 修复】添加互斥锁防止 poll 并发执行
    * 确保上一次 poll 完成后才调度下一次，避免同步回调堆积
    */
-  private startPolling(projectId: string): void {
+  private startPolling(projectId: string, userId: string | null, transportGeneration: number): void {
+    if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+
     if (this.pollingTimer) {
       clearTimeout(this.pollingTimer);
     }
@@ -258,6 +340,7 @@ export class RealtimePollingService {
     this.logger.info('启动轮询同步', { projectId, interval: SYNC_CONFIG.POLLING_INTERVAL });
     
     const poll = async () => {
+      if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) return;
       if (!this.syncState.syncState().isOnline || this.realtimePaused) return;
       // 互斥锁：如果上一次 poll 回调尚未完成，跳过本次
       if (this.isPolling) {
@@ -283,13 +366,24 @@ export class RealtimePollingService {
       this.isUserActive ? SYNC_CONFIG.POLLING_ACTIVE_INTERVAL : SYNC_CONFIG.POLLING_INTERVAL;
     
     const scheduleNextPoll = () => {
+      if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+        return;
+      }
+
       this.pollingTimer = setTimeout(async () => {
+        if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+          return;
+        }
         await poll();
         scheduleNextPoll();
       }, getPollingInterval());
     };
     
-    poll().then(() => scheduleNextPoll());
+    void poll().then(() => {
+      if (this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+        scheduleNextPoll();
+      }
+    });
   }
 
   /**
@@ -305,7 +399,15 @@ export class RealtimePollingService {
   /**
    * 订阅项目实时变更（Realtime 模式）
    */
-  private async subscribeToProjectRealtime(projectId: string, userId: string): Promise<void> {
+  private async subscribeToProjectRealtime(
+    projectId: string,
+    userId: string,
+    transportGeneration: number
+  ): Promise<void> {
+    if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+
     const client = this.getSupabaseClient();
     if (!client) return;
     
@@ -328,6 +430,10 @@ export class RealtimePollingService {
           filter: `project_id=eq.${projectId}`
         },
         (payload) => {
+          if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+            return;
+          }
+
           const taskData = (payload.new || payload.old) as { id?: string; project_id?: string } | undefined;
           if (taskData?.project_id && taskData.project_id !== projectId) {
             return;
@@ -367,6 +473,10 @@ export class RealtimePollingService {
           filter: `project_id=eq.${projectId}`
         },
         (payload) => {
+          if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+            return;
+          }
+
           const connData = (payload.new || payload.old) as { project_id?: string } | undefined;
           if (connData?.project_id && connData.project_id !== projectId) {
             return;
@@ -392,6 +502,10 @@ export class RealtimePollingService {
           filter: userId ? `user_id=eq.${userId}` : undefined
         },
         (payload) => {
+          if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+            return;
+          }
+
           this.logger.debug('收到用户偏好变更', { event: payload.eventType });
           if (this.onUserPreferencesChangeCallback && !this.realtimePaused && userId) {
             this.onUserPreferencesChangeCallback({
@@ -402,6 +516,10 @@ export class RealtimePollingService {
         }
       )
       .subscribe((status, err) => {
+        if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+          return;
+        }
+
         this.logger.info('Realtime 订阅状态', { status, channel: channelName, previousStatus });
         
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -413,7 +531,7 @@ export class RealtimePollingService {
           
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
             this.logger.warn('Realtime 连续失败，降级到轮询', { consecutiveErrors });
-            this.fallbackToPolling(projectId);
+            this.fallbackToPolling(projectId, userId, transportGeneration);
             return;
           }
         } else if (status === 'SUBSCRIBED') {
@@ -440,20 +558,30 @@ export class RealtimePollingService {
   /**
    * Realtime 降级到轮询
    */
-  private fallbackToPolling(projectId: string): void {
+  private fallbackToPolling(projectId: string, userId: string, transportGeneration: number): void {
+    if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+
     this.logger.info('Realtime 降级到轮询模式', { projectId });
-    
-    if (this.realtimeChannel) {
+
+    const channel = this.realtimeChannel;
+    this.realtimeChannel = null;
+
+    if (channel) {
       const client = this.getSupabaseClient();
       if (client) {
-        client.removeChannel(this.realtimeChannel).catch((e: unknown) => {
+        client.removeChannel(channel).catch((e: unknown) => {
           this.logger.debug('移除 Realtime 通道失败（可能已断开）', { error: e });
         });
       }
-      this.realtimeChannel = null;
     }
-    
-    this.startPolling(projectId);
+
+    if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+
+    this.startPolling(projectId, userId, transportGeneration);
     this.toast.info('实时同步暂不可用', '已切换到定时同步模式');
   }
 
@@ -461,18 +589,8 @@ export class RealtimePollingService {
    * 取消订阅
    */
   async unsubscribeFromProject(): Promise<void> {
-    this.currentProjectId = null;
-    this.currentUserId = null;
-    
-    this.stopPolling();
-    
-    if (this.realtimeChannel) {
-      const client = this.getSupabaseClient();
-      if (client) {
-        await client.removeChannel(this.realtimeChannel);
-      }
-      this.realtimeChannel = null;
-    }
+    this.beginTransportGeneration();
+    await this.unsubscribeFromProjectInternal();
   }
 
   /**
@@ -500,17 +618,22 @@ export class RealtimePollingService {
    * 清理资源
    */
   private cleanup(): void {
+    this.beginTransportGeneration();
+    this.currentProjectId = null;
+    this.currentUserId = null;
     this.stopPolling();
 
     // 清理 realtime channel
-    if (this.realtimeChannel) {
+    const channel = this.realtimeChannel;
+    this.realtimeChannel = null;
+
+    if (channel) {
       const client = this.getSupabaseClient();
       if (client) {
-        client.removeChannel(this.realtimeChannel).catch((e: unknown) => {
+        client.removeChannel(channel).catch((e: unknown) => {
           this.logger.debug('清理时移除 Realtime 通道失败', { error: e });
         });
       }
-      this.realtimeChannel = null;
     }
 
     if (this.userActiveTimer) {

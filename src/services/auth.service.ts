@@ -8,8 +8,10 @@ import { supabaseErrorToError } from '../utils/supabase-error';
 import { environment } from '../environments/environment';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
-import { saveAuthCache } from './guards/auth.guard';
+import { isLocalModeEnabled, saveAuthCache } from './guards/auth.guard';
 import { pushStartupTrace } from '../utils/startup-trace';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -53,6 +55,7 @@ export class AuthService {
   private logger = inject(LoggerService).category('AuthService');
   private destroyRef = inject(DestroyRef);
   private eventBus = inject(EventBusService);
+  private sentryLazyLoader = inject(SentryLazyLoaderService);
   
   /** 是否已尝试过开发环境自动登录 */
   private devAutoLoginAttempted = false;
@@ -102,14 +105,31 @@ export class AuthService {
 
   /** 当前用户 ID */
   readonly currentUserId = signal<string | null>(null);
+  /**
+   * 【P1 秒开优化 2026-03-31】临时 userId 预设，用于快照预填充阶段。
+   * 仅在 currentUserId 为 null 时生效。checkSession 完成后若为同一用户则为 no-op，
+   * 若为不同用户则 checkSession 会覆盖。
+   */
+  setProvisionalCurrentUserId(userId: string): void {
+    if (!this.currentUserId()) {
+      this.currentUserId.set(userId);
+    }
+  }
+  private readonly persistedOwnerHintState = signal<string | null>(null);
+  readonly persistedOwnerHint = this.persistedOwnerHintState.asReadonly();
+  private readonly persistedSessionUserIdState = signal<string | null>(null);
+  readonly persistedSessionUserId = this.persistedSessionUserIdState.asReadonly();
   
   /** 当前用户邮箱 */
   readonly sessionEmail = signal<string | null>(null);
+  private pendingStorageBridgeSessionIdentity: PersistedSessionIdentity | null = null;
   
   constructor() {
     if (!this.supabase.isConfigured) {
       this.runtimeState.set('ready');
     }
+    this.syncPersistedOwnerHintFromStorage();
+    this.syncPersistedSessionUserIdFromStorage();
     this.initStorageBridge();
     
     // 组件销毁时清理订阅
@@ -200,8 +220,117 @@ export class AuthService {
     return this.readPersistedSessionIdentity(false);
   }
 
+  /**
+   * 仅用于本地 owner 匹配的 userId 提示，不代表当前会话已经通过认证校验。
+   * 当 access token 临近过期、但 refresh token 仍可恢复时，冷启动预填充依赖此提示命中正确的 owner-scoped 快照。
+   */
+  peekPersistedOwnerHint(): string | null {
+    const persistedIdentity = this.readPersistedSessionIdentity(false);
+    if (persistedIdentity?.userId) {
+      return persistedIdentity.userId;
+    }
+
+    return this.readPersistedOwnerHintFromStorage();
+  }
+
+  private setPersistedOwnerHint(userId: string | null): void {
+    this.persistedOwnerHintState.set(userId);
+  }
+
+  private syncPersistedOwnerHintFromStorage(): void {
+    this.persistedOwnerHintState.set(this.peekPersistedOwnerHint());
+  }
+
+  private setPersistedSessionUserId(userId: string | null): void {
+    this.persistedSessionUserIdState.set(userId);
+  }
+
+  private syncPersistedSessionUserIdFromStorage(): void {
+    this.persistedSessionUserIdState.set(this.peekPersistedSessionIdentity()?.userId ?? null);
+  }
+
   private tryLocalSessionFastPath(): PersistedSessionIdentity | null {
     return this.readPersistedSessionIdentity(true);
+  }
+
+  private readPersistedOwnerHintFromStorage(): string | null {
+    try {
+      const storageKey = this.supabase.getStorageKey();
+      if (!storageKey) return null;
+
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return null;
+
+      const authData: unknown = JSON.parse(raw);
+      const sessionRecord = this.resolvePersistedSessionRecord(authData);
+      if (!sessionRecord) return null;
+
+      const refreshToken = sessionRecord['refresh_token'];
+      const accessToken = sessionRecord['access_token'];
+      if ((typeof refreshToken !== 'string' || !refreshToken)
+        && (typeof accessToken !== 'string' || !accessToken)) {
+        return null;
+      }
+
+      const user = sessionRecord['user'];
+      if (!user || typeof user !== 'object') {
+        return null;
+      }
+
+      const userId = (user as Record<string, unknown>)['id'];
+      return typeof userId === 'string' && userId.length > 0 ? userId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolvePersistedSessionRecord(authData: unknown): Record<string, unknown> | null {
+    if (!authData || typeof authData !== 'object') {
+      return null;
+    }
+
+    const rootRecord = authData as Record<string, unknown>;
+    const currentSession = rootRecord['currentSession'];
+    if (currentSession && typeof currentSession === 'object') {
+      return currentSession as Record<string, unknown>;
+    }
+
+    const session = rootRecord['session'];
+    if (session && typeof session === 'object') {
+      return session as Record<string, unknown>;
+    }
+
+    return rootRecord;
+  }
+
+  private resolvePersistedSessionIdentityFromAuthData(authData: unknown): PersistedSessionIdentity | null {
+    const sessionRecord = this.resolvePersistedSessionRecord(authData);
+    if (!sessionRecord) {
+      return null;
+    }
+
+    const refreshToken = sessionRecord['refresh_token'];
+    const accessToken = sessionRecord['access_token'];
+    if ((typeof refreshToken !== 'string' || !refreshToken)
+      && (typeof accessToken !== 'string' || !accessToken)) {
+      return null;
+    }
+
+    const user = sessionRecord['user'];
+    if (!user || typeof user !== 'object') {
+      return null;
+    }
+
+    const userRecord = user as Record<string, unknown>;
+    const userId = userRecord['id'];
+    if (typeof userId !== 'string' || !userId) {
+      return null;
+    }
+
+    return {
+      userId,
+      email: typeof userRecord['email'] === 'string' ? userRecord['email'] : null,
+    };
   }
 
   private readPersistedSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
@@ -235,9 +364,8 @@ export class AuthService {
       if (!raw) return null;
 
       const authData: unknown = JSON.parse(raw);
-      if (!authData || typeof authData !== 'object') return null;
-
-      const record = authData as Record<string, unknown>;
+  const record = this.resolvePersistedSessionRecord(authData);
+  if (!record) return null;
 
       // Supabase JS SDK v2 存储格式：{ access_token, refresh_token, expires_at, user }
       const accessToken = record['access_token'];
@@ -300,6 +428,8 @@ export class AuthService {
     if (localSession) {
       this.logger.debug('[FastPath] 本地会话命中，跳过网络 getSession()');
       this.currentUserId.set(localSession.userId);
+      this.setPersistedOwnerHint(localSession.userId);
+      this.setPersistedSessionUserId(localSession.userId);
       this.sessionEmail.set(localSession.email);
       this.authState.update(s => ({
         ...s,
@@ -308,6 +438,9 @@ export class AuthService {
         error: null,
         isCheckingSession: false,
       }));
+
+      // 设置 Sentry 用户上下文（FastPath 也需要）
+      this.sentryLazyLoader.setUser({ id: localSession.userId, email: localSession.email ?? undefined });
       // 【Bug 修复 2026-03-26】FastPath 必须完成与 finally 块相同的状态收尾，
       // 否则 sessionInitialized 永远为 false → handoff 永远 pending → 界面空白。
       this.sessionInitialized.set(true);
@@ -379,6 +512,8 @@ export class AuthService {
         });
         
         this.currentUserId.set(userId);
+        this.setPersistedOwnerHint(userId);
+        this.setPersistedSessionUserId(userId);
         this.sessionEmail.set(email);
         this.authState.update(s => ({
           ...s,
@@ -386,6 +521,9 @@ export class AuthService {
           email,
           error: null
         }));
+
+        // 设置 Sentry 用户上下文（网络路径）
+        this.sentryLazyLoader.setUser({ id: userId, email: email ?? undefined });
         
         this.logger.debug('========== checkSession 成功 ==========');
         return { userId, email };
@@ -400,6 +538,8 @@ export class AuthService {
       }
       
       this.logger.debug('========== 无会话，未登录 ==========');
+      this.setPersistedOwnerHint(null);
+      this.setPersistedSessionUserId(null);
       return { userId: null, email: null };
     } catch (e: unknown) {
       const err = e as Error | undefined;
@@ -478,6 +618,8 @@ export class AuthService {
           }
           // 用 SDK 返回的最新 user 信息更新状态（可能 userId/email 有变化）
           this.currentUserId.set(session.user.id);
+          this.setPersistedOwnerHint(session.user.id);
+          this.setPersistedSessionUserId(session.user.id);
           this.sessionEmail.set(session.user.email ?? null);
           this.authState.update(s => ({
             ...s,
@@ -516,33 +658,11 @@ export class AuthService {
    * 这会让 showLoginRequired 生效，触发登录兜底 UI。
    */
   private handleBackgroundSessionInvalid(): void {
+    const invalidatedUserId = this.currentUserId();
     pushStartupTrace('auth.background_refresh_clear_local_session', {
-      currentUserId: this.currentUserId(),
+      currentUserId: invalidatedUserId,
     });
-    this.currentUserId.set(null);
-    this.sessionEmail.set(null);
-    this.authState.update(s => ({
-      ...s,
-      userId: null,
-      email: null,
-      error: null,
-      isCheckingSession: false,
-    }));
-    // 清除 localStorage 中已失效的 auth 缓存
-    try {
-      const storageKey = this.supabase.getStorageKey();
-      if (storageKey) {
-        localStorage.removeItem(storageKey);
-      }
-      // 【Bug 修复 2026-03-26】同步清除 guard 的独立 auth-cache，
-      // 否则下次冷启动 guard FastPath 仍会读到失效缓存并立即放行。
-      saveAuthCache(null);
-    } catch {
-      // localStorage 不可用时静默降级
-    }
-    // 【安全加固 2026-03-30】通知同步层停止所有依赖有效会话的操作，
-    // 防止 FastPath 乐观窗口内的待发送数据以失效 token 推送到服务端。
-    this.eventBus.publishSessionInvalidated('AuthService.backgroundRefresh');
+    this.teardownInvalidatedSession('AuthService.backgroundRefresh');
   }
 
   /**
@@ -811,9 +931,12 @@ export class AuthService {
   async signOut(): Promise<void> {
     // 标记为手动登出，避免触发 sessionExpired 提示
     this.isManualSignOut = true;
+    this.pendingStorageBridgeSessionIdentity = null;
     
     // 先清理本地状态
     this.currentUserId.set(null);
+    this.setPersistedOwnerHint(null);
+    this.setPersistedSessionUserId(null);
     this.sessionEmail.set(null);
     this.sessionExpired.set(false);
     this.authState.update(s => ({
@@ -822,6 +945,9 @@ export class AuthService {
       email: null,
       error: null
     }));
+
+    // 清除 Sentry 用户上下文
+    this.sentryLazyLoader.setUser(null);
     
     // 再调用 Supabase 登出
     if (this.supabase.isConfigured) {
@@ -851,7 +977,10 @@ export class AuthService {
     if (typeof window !== 'undefined') {
       window.removeEventListener('storage', this.storageListener);
     }
+    this.pendingStorageBridgeSessionIdentity = null;
     this.currentUserId.set(null);
+    this.setPersistedOwnerHint(null);
+    this.setPersistedSessionUserId(null);
     this.sessionEmail.set(null);
     this.sessionExpired.set(false);
     this.sessionInitialized.set(false);
@@ -940,13 +1069,7 @@ export class AuthService {
 
     // 登出（token 被清除）在任何阶段都应立即响应
     if (!event.newValue) {
-      this.currentUserId.set(null);
-      this.sessionEmail.set(null);
-      this.authState.update((state) => ({
-        ...state,
-        userId: null,
-        email: null,
-      }));
+      this.teardownInvalidatedSession('AuthService.storageBridge');
       return;
     }
 
@@ -955,21 +1078,107 @@ export class AuthService {
       return;
     }
 
-    try {
-      const parsed = JSON.parse(event.newValue) as { user?: { id?: unknown; email?: unknown } };
-      const userId = typeof parsed.user?.id === 'string' ? parsed.user.id : null;
-      const email = typeof parsed.user?.email === 'string' ? parsed.user.email : null;
+    if (isLocalModeEnabled() || this.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.debug('Storage bridge 忽略 local-user 模式下的跨标签页登入事件');
+      return;
+    }
 
-      this.currentUserId.set(userId);
-      this.sessionEmail.set(email);
-      this.authState.update((state) => ({
-        ...state,
-        userId,
-        email,
-      }));
+    try {
+      const parsed = JSON.parse(event.newValue) as unknown;
+      const sessionIdentity = this.resolvePersistedSessionIdentityFromAuthData(parsed);
+      const userId = sessionIdentity?.userId ?? null;
+      const email = sessionIdentity?.email ?? null;
+
+      if (!userId) {
+        this.syncPersistedOwnerHintFromStorage();
+        this.syncPersistedSessionUserIdFromStorage();
+        return;
+      }
+
+      if (this.currentUserId() === userId) {
+        this.pendingStorageBridgeSessionIdentity = null;
+        this.applyConfirmedSessionIdentity(userId, email, {
+          publishSessionRestored: this.sessionExpired(),
+          source: 'AuthService.storageBridge',
+        });
+        return;
+      }
+
+      const previousPendingUserId = this.pendingStorageBridgeSessionIdentity?.userId ?? null;
+      this.pendingStorageBridgeSessionIdentity = { userId, email };
+      this.setPersistedOwnerHint(userId);
+
+      if (previousPendingUserId === userId) {
+        return;
+      }
+
+      this.eventBus.publishSessionRestored(userId, 'AuthService.storageBridge');
     } catch (error) {
+      this.syncPersistedOwnerHintFromStorage();
+      this.syncPersistedSessionUserIdFromStorage();
       this.logger.debug('Storage bridge 解析 auth token 失败，已忽略', error);
     }
+  }
+
+  private resolveInvalidatedOwnerUserId(currentUserId = this.currentUserId()): string | null {
+    if (currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return null;
+    }
+
+    const candidates = [
+      currentUserId,
+      this.persistedSessionUserId(),
+      this.persistedOwnerHint(),
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate && candidate !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private teardownInvalidatedSession(source: string): { invalidatedUserId: string | null; keepLocalModeUser: boolean } {
+    const currentUserId = this.currentUserId();
+    const keepLocalModeUser = currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const invalidatedUserId = this.resolveInvalidatedOwnerUserId(currentUserId);
+    this.pendingStorageBridgeSessionIdentity = null;
+
+    // 中文注释：先同步广播 teardown，让 WorkspaceShell 立即停写 launch snapshot，
+    // 再清空 auth signal，避免旧 owner 项目摘要落进 anonymous bucket。
+    if (invalidatedUserId) {
+      this.eventBus.publishSessionInvalidated(source, invalidatedUserId);
+    }
+
+    if (!keepLocalModeUser) {
+      this.currentUserId.set(null);
+    }
+    this.setPersistedOwnerHint(null);
+    this.setPersistedSessionUserId(null);
+    this.sessionEmail.set(null);
+    this.authState.update((state) => ({
+      ...state,
+      userId: keepLocalModeUser ? AUTH_CONFIG.LOCAL_MODE_USER_ID : null,
+      email: null,
+      error: null,
+      isCheckingSession: false,
+    }));
+
+    try {
+      const storageKey = this.supabase.getStorageKey();
+      if (storageKey) {
+        localStorage.removeItem(storageKey);
+      }
+      saveAuthCache(null);
+    } catch {
+      // localStorage 不可用时静默降级
+    }
+
+    this.sentryLazyLoader.setUser(null);
+
+    return { invalidatedUserId, keepLocalModeUser };
   }
   
   /**
@@ -981,7 +1190,7 @@ export class AuthService {
       this.logger.info('用户主动登出');
       // 重置标志
       this.isManualSignOut = false;
-    } else if (this.currentUserId()) {
+    } else if (this.currentUserId() && this.currentUserId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       // 仅当之前存在已登录用户时，才视为会话过期
       // 防止启动阶段 Supabase 触发的初始 SIGNED_OUT 事件被误判为过期
       this.logger.warn('检测到非主动登出，Token 过期');
@@ -998,17 +1207,8 @@ export class AuthService {
    * 【Week 8-9 数据保护 - JWT 刷新失败监听】
    */
   private handleSessionExpired(): void {
+    this.teardownInvalidatedSession('AuthService.signedOut');
     this.sessionExpired.set(true);
-    
-    // 清理认证状态
-    this.currentUserId.set(null);
-    this.sessionEmail.set(null);
-    this.authState.update(s => ({
-      ...s,
-      userId: null,
-      email: null,
-      isCheckingSession: false,
-    }));
     
     // 显示重新登录提示
     this.toast.warning('登录已过期', '请重新登录以继续同步数据', { duration: 0 });
@@ -1021,18 +1221,13 @@ export class AuthService {
    */
   private handleTokenRefreshed(session: { user?: { id: string; email?: string | null } } | null): void {
     this.logger.debug('Token 刷新成功');
-    
-    // 清除过期标记
-    if (this.sessionExpired()) {
-      this.sessionExpired.set(false);
-      // 【P0 Critical 修复 2026-01-31】通知 SimpleSyncService 会话已恢复
-      this.notifySyncServiceSessionRestored();
-    }
-    
+
     // 更新会话信息
     if (session?.user) {
-      this.currentUserId.set(session.user.id);
-      this.sessionEmail.set(session.user.email ?? null);
+      this.applyConfirmedSessionIdentity(session.user.id, session.user.email ?? null, {
+        publishSessionRestored: true,
+        source: 'AuthService',
+      });
     }
   }
   
@@ -1042,22 +1237,65 @@ export class AuthService {
   private handleSignedIn(session: { user?: { id: string; email?: string | null } } | null): void {
     if (session?.user) {
       this.logger.info('用户已登录', { userId: session.user.id });
-      this.currentUserId.set(session.user.id);
-      this.sessionEmail.set(session.user.email ?? null);
-      
-      // 【P0 Critical 修复 2026-01-31】会话恢复，通知 SimpleSyncService
-      if (this.sessionExpired()) {
-        this.sessionExpired.set(false);
-        this.notifySyncServiceSessionRestored();
+      if (this.pendingStorageBridgeSessionIdentity?.userId === session.user.id && this.currentUserId() !== session.user.id) {
+        this.pendingStorageBridgeSessionIdentity = {
+          userId: session.user.id,
+          email: session.user.email ?? null,
+        };
+        this.setPersistedOwnerHint(session.user.id);
+        return;
       }
-      
-      this.authState.update(s => ({
-        ...s,
-        userId: session.user!.id,
-        email: session.user!.email ?? null,
-        isCheckingSession: false,
-      }));
+
+      this.pendingStorageBridgeSessionIdentity = null;
+      this.applyConfirmedSessionIdentity(session.user.id, session.user.email ?? null, {
+        publishSessionRestored: true,
+        source: 'AuthService',
+      });
     }
+  }
+
+  completeCrossTabSessionRestore(userId: string): void {
+    if (this.currentUserId() !== userId) {
+      return;
+    }
+
+    const sessionIdentity = this.peekPersistedSessionIdentity();
+    if (!sessionIdentity || sessionIdentity.userId !== userId) {
+      return;
+    }
+
+    this.pendingStorageBridgeSessionIdentity = null;
+    this.applyConfirmedSessionIdentity(userId, sessionIdentity.email ?? null);
+  }
+
+  private applyConfirmedSessionIdentity(
+    userId: string,
+    email: string | null,
+    options?: {
+      publishSessionRestored?: boolean;
+      source?: string;
+    },
+  ): void {
+    this.currentUserId.set(userId);
+    this.setPersistedOwnerHint(userId);
+    this.setPersistedSessionUserId(userId);
+    this.sessionEmail.set(email);
+    this.sentryLazyLoader.setUser({ id: userId, email: email ?? undefined });
+
+    if (this.sessionExpired()) {
+      this.sessionExpired.set(false);
+      if (options?.publishSessionRestored) {
+        this.notifySyncServiceSessionRestored(userId, options.source ?? 'AuthService');
+      }
+    }
+
+    this.authState.update(s => ({
+      ...s,
+      userId,
+      email,
+      error: null,
+      isCheckingSession: false,
+    }));
   }
   
   /**
@@ -1066,10 +1304,9 @@ export class AuthService {
    * 【技术债务修复 2026-01-31】
    * 使用 EventBusService 替代 injector hack，彻底解决循环依赖
    */
-  private notifySyncServiceSessionRestored(): void {
-    const userId = this.authState().userId;
+  private notifySyncServiceSessionRestored(userId = this.authState().userId, source = 'AuthService'): void {
     if (userId) {
-      this.eventBus.publishSessionRestored(userId, 'AuthService');
+      this.eventBus.publishSessionRestored(userId, source);
     }
   }
 }

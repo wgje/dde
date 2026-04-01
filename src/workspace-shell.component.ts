@@ -41,7 +41,6 @@ import { UI_CONFIG } from './config/ui.config';
 import { FEATURE_FLAGS, validateCriticalFlags } from './config/feature-flags.config';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { showBlackBoxPanel, gateState } from './state/focus-stores';
-import { SpotlightService } from './services/spotlight.service';
 import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
 import { ExportService } from './services/export.service';
 import { AppLifecycleOrchestratorService } from './services/app-lifecycle-orchestrator.service';
@@ -127,7 +126,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly preferenceService = inject(PreferenceService);
   private readonly userSession = inject(UserSessionService);
   private readonly projectOps = inject(ProjectOperationService);
-  private readonly spotlightService = inject(SpotlightService);
 
   // ========== 延迟注入服务（P0-3 性能优化 2026-03-24）==========
   // 以下服务不在首屏渲染路径上，改为按需获取以减少首次 DI 解析耗时。
@@ -182,6 +180,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   readonly activeProjectId = this.projectState.activeProjectId;
   get deletedTasks() { return this.projectState.deletedTasks; }
   get currentUserId() { return this.userSession.currentUserId; }
+  hintOnlyStartupPlaceholderVisible(): boolean {
+    return this.userSession.isHintOnlyStartupPlaceholderVisible();
+  }
   
   /** 同步状态 */
   get offlineMode() { return this.syncCoordinator.offlineMode; }
@@ -238,14 +239,14 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   /** 代理 UiStateService.sidebarOpen，所有 .set()/.update() 调用均作用于服务层信号 */
   get isSidebarOpen() { return this.uiState.sidebarOpen; }
   isFilterOpen = signal(false);
-  readonly spotlightTriggerComponent = signal<Type<unknown> | null>(null);
+  readonly focusSessionTriggerComponent = signal<Type<unknown> | null>(null);
   readonly blackBoxRecorderComponent = signal<Type<unknown> | null>(null);
   readonly blackBoxRecorderOutletInputs = {
     appearance: 'obsidian' as const,
     onTranscribed: (text: string) => this.onSidebarVoiceTranscribed(text),
   };
 
-  private spotlightTriggerLoadPromise: Promise<Type<unknown> | null> | null = null;
+  private focusSessionTriggerLoadPromise: Promise<Type<unknown> | null> | null = null;
   private blackBoxRecorderLoadPromise: Promise<Type<unknown> | null> | null = null;
   private focusModePreloadPromise: Promise<void> | null = null;
   private startupFontSchedulerInitPromise: Promise<void> | null = null;
@@ -584,7 +585,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
 
   private preloadSidebarTools(reason: 'startup' | 'p1' | 'intent'): void {
-    void this.loadSpotlightTriggerComponent();
+    void this.loadFocusSessionTriggerComponent();
     void this.preloadFocusModeAssets(reason);
 
     if (this.focusPrefs.isBlackBoxEnabled()) {
@@ -599,32 +600,32 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     });
   }
 
-  private loadSpotlightTriggerComponent(): Promise<Type<unknown> | null> {
-    const current = this.spotlightTriggerComponent();
+  private loadFocusSessionTriggerComponent(): Promise<Type<unknown> | null> {
+    const current = this.focusSessionTriggerComponent();
     if (current) return Promise.resolve(current);
-    if (this.spotlightTriggerLoadPromise) return this.spotlightTriggerLoadPromise;
+    if (this.focusSessionTriggerLoadPromise) return this.focusSessionTriggerLoadPromise;
 
-    this.spotlightTriggerLoadPromise = import('./app/features/focus/components/spotlight/spotlight-trigger.component')
+    this.focusSessionTriggerLoadPromise = import('./app/features/focus/components/focus-session-trigger.component')
       .then((module) => {
-        const component = module.SpotlightTriggerComponent as Type<unknown>;
+        const component = module.FocusSessionTriggerComponent as Type<unknown>;
         // 防御性校验：确保动态导入的组件是有效的构造函数
         // 在 SW 缓存不一致时，导入可能成功但导出值为 undefined
         if (typeof component !== 'function') {
-          this.logger.warn('SpotlightTriggerComponent 导入值无效（疑似 chunk 版本偏移）', { type: typeof component });
+          this.logger.warn('FocusSessionTriggerComponent 导入值无效（疑似 chunk 版本偏移）', { type: typeof component });
           return null;
         }
-        this.spotlightTriggerComponent.set(component);
+        this.focusSessionTriggerComponent.set(component);
         return component;
       })
       .catch((error: unknown) => {
-        this.logger.warn('SpotlightTriggerComponent 懒加载失败', error);
+        this.logger.warn('FocusSessionTriggerComponent 懒加载失败', error);
         return null;
       })
       .finally(() => {
-        this.spotlightTriggerLoadPromise = null;
+        this.focusSessionTriggerLoadPromise = null;
       });
 
-    return this.spotlightTriggerLoadPromise;
+    return this.focusSessionTriggerLoadPromise;
   }
 
   private loadBlackBoxRecorderComponent(): Promise<Type<unknown> | null> {
@@ -740,6 +741,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private pwaPromptInitScheduled = false;
   private workspaceHandoffSignaled = false;
   private workspaceReadyCommitted = false;
+  private readonly launchSnapshotWriteBlocked = signal(false);
 
   constructor() {
     // 启动流程：仅执行必要的同步初始化
@@ -855,13 +857,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
       event.preventDefault();
       showBlackBoxPanel.update(v => !v);
-      return;
-    }
-
-    // Ctrl+. / Cmd+.: 进入聚光灯专注模式
-    if ((event.ctrlKey || event.metaKey) && key === '.') {
-      event.preventDefault();
-      this.spotlightService.enter();
       return;
     }
   };
@@ -994,6 +989,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupRemoteCallbackEffect();
     this.setupSubscriptionEffect();
     this.setupSyncPulseEffect();
+    this.setupSessionRestoredHandler();
     this.setupSessionInvalidatedHandler();
   }
 
@@ -1058,6 +1054,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     // capture() 含 sort/slice/map，避免每次信号变化都执行。
     // 仅将原始数据传递给 schedulePersist，在防抖回调内部做 capture。
     effect(() => {
+      if (this.launchSnapshotWriteBlocked() || this.hintOnlyStartupPlaceholderVisible()) {
+        this.launchSnapshot.cancelPendingPersist();
+        return;
+      }
+
       const projects = this.projectState.projects();
       const userId = this.resolveLaunchSnapshotUserId();
       const activeProjectId = this.projectState.activeProjectId();
@@ -1102,8 +1103,13 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     const authSettling = !this.authService.sessionInitialized() || this.authCoord.isCheckingSession();
-    if (authSettling) {
-      return this.startupLaunchSnapshot?.userId ?? null;
+    if (!authSettling) {
+      return null;
+    }
+
+    const prehydratedOwnerUserId = this.userSession?.getLaunchSnapshotPersistOwnerDuringAuthSettle?.() ?? null;
+    if (prehydratedOwnerUserId) {
+      return prehydratedOwnerUserId;
     }
 
     return null;
@@ -1377,21 +1383,83 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
 
   /**
+   * 跨标签页登录恢复：先完成 owner 切换，再允许同步运行时恢复到新会话。
+   */
+  private setupSessionRestoredHandler(): void {
+    this.eventBus.onSessionRestored$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe((event) => {
+      if (event.source !== 'AuthService.storageBridge') {
+        return;
+      }
+
+      if (this.currentUserId() === event.userId) {
+        this.authService.completeCrossTabSessionRestore(event.userId);
+        return;
+      }
+
+      this.logger.warn('跨标签页会话恢复，切换 owner 视图', {
+        restoredUserId: event.userId,
+        source: event.source,
+      });
+      this.launchSnapshotWriteBlocked.set(true);
+      this.launchSnapshot.cancelPendingPersist();
+      this.simpleSync.stopRuntime();
+      if (this.subscribedProjectId !== null) {
+        this.subscribedProjectId = null;
+        void this.simpleSync.unsubscribeFromProject();
+      }
+      this.destroySyncPulse();
+      void this.userSession.setCurrentUser(event.userId, {
+        forceLoad: true,
+      }).then(() => {
+        if (this.currentUserId() !== event.userId) {
+          return;
+        }
+
+        this.authService.completeCrossTabSessionRestore(event.userId);
+        if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1 || this.startupTier.isTierReady('p2')) {
+          this.simpleSync.startRuntime();
+        }
+      }).catch((error) => {
+        this.logger.warn('跨标签页会话恢复失败，已保持同步运行时暂停', {
+          restoredUserId: event.userId,
+          source: event.source,
+          error,
+        });
+      }).finally(() => {
+        this.launchSnapshotWriteBlocked.set(false);
+      });
+    });
+  }
+
+  /**
    * 会话失效处理：后台刷新发现 FastPath 乐观身份无效时，
    * 立即停止同步运行时和重试队列，防止以失效 token 推送数据。
    */
   private setupSessionInvalidatedHandler(): void {
     this.eventBus.onSessionInvalidated$.pipe(
       takeUntilDestroyed(this.destroyRef)
-    ).subscribe(() => {
-      this.logger.warn('会话失效，停止同步运行时和重试队列');
+    ).subscribe((event) => {
+      this.logger.warn('会话失效，停止同步运行时并清空旧 owner 视图', {
+        invalidatedUserId: event.userId,
+        source: event.source,
+      });
+      this.launchSnapshotWriteBlocked.set(true);
+      this.launchSnapshot.cancelPendingPersist();
       this.simpleSync.stopRuntime();
-      this.simpleSync.clearRetryQueue();
       if (this.subscribedProjectId !== null) {
         this.subscribedProjectId = null;
         void this.simpleSync.unsubscribeFromProject();
       }
       this.destroySyncPulse();
+      void this.userSession.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: event.userId,
+        preserveOfflineSnapshot: true,
+      }).finally(() => {
+        this.launchSnapshotWriteBlocked.set(false);
+      });
     });
   }
 

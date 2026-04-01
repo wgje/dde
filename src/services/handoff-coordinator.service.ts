@@ -112,10 +112,10 @@ export class HandoffCoordinatorService {
   private safetyTriggered = false;
 
   /** 最大等待时间（ms），超时后强制 handoff 防止永久卡在 launch-shell */
-  // 【P0 秒开优化 2026-03-28】从 3s 降至 1.5s
-  // P0-1 快照感知修复后，正常路径 handoff < 100ms 完成。
-  // 1.5s 足够覆盖极端异常（快照损坏 + 缓存丢失 + 网络超时）。
-  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 1500;
+  // 【P1 秒开优化 2026-03-31】从 800ms 降至 300ms。
+  // 快照预填充 + provisional userId 使正常路径 handoff < 10ms，
+  // 300ms 仅覆盖快照完全损坏的极端降级场景。
+  private readonly HANDOFF_SAFETY_TIMEOUT_MS = 300;
 
   readonly result = this.resultState.asReadonly();
   readonly handoffTriggerSource = this.handoffTriggerSourceState.asReadonly();
@@ -192,10 +192,10 @@ export class HandoffCoordinatorService {
       return;
     }
 
-    // 【Bug 修复 2026-03-26】rAF 在隐藏标签页（包括 PWA 后台启动）中被浏览器节流/暂停，
-    // 导致 handoff 永不触发，用户卡在 launch-shell。
-    // 改为 rAF + setTimeout 双保险：谁先触发谁执行，另一个忽略。
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    // 【P1 秒开优化 2026-03-31】使用 microtask 即时触发 handoff，
+    // 取代 rAF + setTimeout(100ms)。快照预填充使内容在构造函数阶段即可用，
+    // 无需等待下一帧渲染。setTimeout(16ms) 作为 microtask 被吞掉时的兜底。
+    if (typeof queueMicrotask === 'function') {
       let fired = false;
       const onceTrigger = (source: HandoffTriggerSource) => {
         if (!fired) {
@@ -203,8 +203,8 @@ export class HandoffCoordinatorService {
           trigger(source);
         }
       };
-      window.requestAnimationFrame(() => onceTrigger('raf'));
-      setTimeout(() => onceTrigger('timeout100'), 100);
+      queueMicrotask(() => onceTrigger('raf'));
+      setTimeout(() => onceTrigger('timeout0'), 16);
       return;
     }
 

@@ -8,6 +8,7 @@ import { environment } from '../environments/environment';
 interface SentryModule {
   init: typeof import('@sentry/angular').init;
   browserTracingIntegration: typeof import('@sentry/angular').browserTracingIntegration;
+  replayIntegration: typeof import('@sentry/angular').replayIntegration;
   captureException: typeof import('@sentry/angular').captureException;
   captureMessage: typeof import('@sentry/angular').captureMessage;
   withScope: typeof import('@sentry/angular').withScope;
@@ -100,6 +101,9 @@ export class SentryLazyLoaderService {
   private initPromise: Promise<void> | null = null;
   private hasLoggedMissingDsn = false;
 
+  /** 初始化前缓存的用户信息，待 Sentry 就绪后设置 */
+  private pendingUser: { id: string; email?: string } | null = null;
+
   isConfigured(): boolean {
     return this.isConfiguredFlag;
   }
@@ -158,14 +162,25 @@ export class SentryLazyLoaderService {
       // 使用与 main.ts 相同的配置（但不阻塞首屏）
       Sentry.init({
         dsn: this.sentryDsn,
+        // 版本标识：用于 Sentry release 追踪和 source map 关联
+        release: this.buildRelease(),
         integrations: [
-          // 仅保留轻量级性能追踪
+          // 轻量级性能追踪
           Sentry.browserTracingIntegration(),
+          // 错误发生时录制 Session Replay，辅助复现
+          Sentry.replayIntegration({
+            // 仅在错误发生前后录制，不录制整个会话
+            maskAllText: true,
+            blockAllMedia: true,
+          }),
         ],
         // 只允许来自我们域名的请求被追踪
         tracePropagationTargets: ['localhost', /^https:\/\/dde[-\w]*\.vercel\.app/],
-        // 采样率：生产环境禁用性能追踪
-        tracesSampleRate: 0,
+        // 性能采样率：5% 低采样率收集关键路径数据，不影响首屏性能
+        tracesSampleRate: environment.production ? 0.05 : 0,
+        // Session Replay：仅在错误发生时录制（100%），日常不录制（0%）
+        replaysSessionSampleRate: 0,
+        replaysOnErrorSampleRate: 1.0,
         // 环境标识
         environment: environment.production ? 'production' : 'development',
         // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
@@ -201,6 +216,12 @@ export class SentryLazyLoaderService {
       
       // 发送队列中的待处理事件
       this.flushPendingEvents();
+
+      // 设置初始化前缓存的用户上下文
+      if (this.pendingUser) {
+        Sentry.setUser(this.pendingUser);
+        this.pendingUser = null;
+      }
 
       this.logDiagnostic('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
@@ -370,13 +391,18 @@ export class SentryLazyLoaderService {
 
   /**
    * 设置用户信息（登录后调用）
+   * 如果 Sentry 未初始化，会缓存用户信息待初始化后设置
    */
   setUser(user: { id: string; email?: string } | null): void {
     const sentry = this.sentryModule();
     if (sentry) {
       sentry.setUser(user);
+    } else if (user) {
+      // 缓存用户信息，待 Sentry 初始化后设置
+      this.pendingUser = user;
+    } else {
+      this.pendingUser = null;
     }
-    // 如果 Sentry 未初始化，用户信息将在下次初始化时通过 auth 事件设置
   }
 
   /**
@@ -487,6 +513,21 @@ export class SentryLazyLoaderService {
       return window.localStorage.getItem('nanoflow.verbose') === 'true';
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * 构建 release 标识符
+   * 使用入口 chunk URL 的 hash 作为部署指纹，确保每次构建唯一
+   */
+  private buildRelease(): string {
+    try {
+      const entryUrl = new URL(import.meta.url, window.location.href);
+      // 提取文件名中的 hash 部分作为构建指纹
+      const pathHash = entryUrl.pathname.replace(/^.*\//, '').replace(/\.\w+$/, '');
+      return `nanoflow@${pathHash}`;
+    } catch {
+      return 'nanoflow@unknown';
     }
   }
 }

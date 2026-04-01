@@ -103,8 +103,6 @@ export type GateState =
 export interface FocusPreferences {
   /** 是否启用大门（默认 true） */
   gateEnabled: boolean;
-  /** 是否启用聚光灯模式 */
-  spotlightEnabled: boolean;
   /** 是否启用地质层 */
   strataEnabled: boolean;
   /** 是否启用黑匣子 */
@@ -126,7 +124,6 @@ export interface FocusPreferences {
  */
 export const DEFAULT_FOCUS_PREFERENCES: FocusPreferences = {
   gateEnabled: true,
-  spotlightEnabled: true,
   strataEnabled: true,
   blackBoxEnabled: true,
   maxSnoozePerDay: FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY,

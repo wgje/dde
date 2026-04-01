@@ -26,6 +26,7 @@ import { LoggerService } from './logger.service';
 import { withTimeout } from '../utils/timeout';
 import { TimerHandle } from '../utils/timer-handle';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { AUTH_CONFIG } from '../config/auth.config';
 
 const CLOUD_PUSH_DEBOUNCE_MS = SYNC_CONFIG.DEBOUNCE_DELAY;
 const CLOUD_PULL_DEBOUNCE_MS = PARKING_CONFIG.CLOUD_PULL_DEBOUNCE_MS;
@@ -64,8 +65,8 @@ export class DockCloudSyncService implements OnDestroy {
   /** 断路器：连续不可恢复错误（如 401/403）时停止重试 */
   private circuitBreakerOpen = false;
   private circuitBreakerResetTimer = new TimerHandle();
-  /** 免费层优化：上次入队的快照指纹，用于跳过无变化的 focus_sessions 写入 */
-  private lastEnqueuedSnapshotFingerprint = '';
+  /** 免费层优化：按 owner 记录上次入队的快照指纹，避免跨账号相互去重 */
+  private readonly lastEnqueuedSnapshotFingerprints = new Map<string, string>();
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
 
@@ -92,6 +93,10 @@ export class DockCloudSyncService implements OnDestroy {
   // ─── Cloud Push ───────────────────────────────
 
   scheduleCloudPush(userId: string, snapshot: DockSnapshot | null): void {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return;
+    }
+
     const cb = this.callbacks;
     if (!cb) {
       // H-4 fix: 未初始化时记录警告而非静默吞掉，防止 init 顺序变更后
@@ -99,6 +104,7 @@ export class DockCloudSyncService implements OnDestroy {
       this.logger.warn('scheduleCloudPush called before init() — skipping', { userId });
       return;
     }
+    const frozenSnapshot = snapshot ?? cb.exportSnapshot();
 
     const runPush = () => {
       const holdDelay = cb.getNonCriticalHoldDelay();
@@ -106,10 +112,9 @@ export class DockCloudSyncService implements OnDestroy {
         this.cloudPushTimer.schedule(runPush, holdDelay);
         return;
       }
-      const resolved = snapshot ?? cb.exportSnapshot();
       // 保证本地持久化先于云端推送，维护 offline-first 不变式
-      cb.scheduleLocalPersist(resolved, userId);
-      this.enqueueFocusSessionSync(userId, resolved);
+      cb.scheduleLocalPersist(frozenSnapshot, userId);
+      this.enqueueFocusSessionSync(userId, frozenSnapshot);
     };
     this.cloudPushTimer.schedule(runPush, CLOUD_PUSH_DEBOUNCE_MS);
   }
@@ -117,6 +122,10 @@ export class DockCloudSyncService implements OnDestroy {
   // ─── Cloud Pull ───────────────────────────────
 
   scheduleCloudPull(userId: string, force: boolean): void {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return;
+    }
+
     if (!force && Date.now() - this.lastCloudPullAt < CLOUD_PULL_MIN_INTERVAL_MS) return;
     // H-4 fix: 强制拉取时重置重试计数（用户切换场景）
     if (force) this.cloudPullRetryCount = 0;
@@ -318,17 +327,17 @@ export class DockCloudSyncService implements OnDestroy {
   enqueueFocusSessionSync(userId: string, snapshot: DockSnapshot): void {
     // 免费层优化：生成快照指纹，跳过无变化的写入（日均节省 ~100 次 focus_sessions UPDATE）
     const fingerprint = this.computeSnapshotFingerprint(snapshot);
-    if (fingerprint === this.lastEnqueuedSnapshotFingerprint) {
+    if (fingerprint === this.lastEnqueuedSnapshotFingerprints.get(userId)) {
       return;
     }
-    this.lastEnqueuedSnapshotFingerprint = fingerprint;
+    this.lastEnqueuedSnapshotFingerprints.set(userId, fingerprint);
 
     const record = this.buildFocusSessionRecord(userId, snapshot);
-    this.actionQueue.enqueue({
+    void this.actionQueue.enqueueForOwner(userId, {
       type: 'update',
       entityType: 'focus-session',
       entityId: record.id,
-      payload: { record },
+      payload: { record, sourceUserId: userId },
       priority: 'critical',
     });
   }
@@ -346,21 +355,29 @@ export class DockCloudSyncService implements OnDestroy {
   }
 
   enqueueRoutineTaskSync(userId: string, routineTask: RoutineTask): void {
-    this.actionQueue.enqueue({
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return;
+    }
+
+    void this.actionQueue.enqueueForOwner(userId, {
       type: 'update',
       entityType: 'routine-task',
       entityId: routineTask.routineId,
-      payload: { userId, routineTask },
+      payload: { userId, routineTask, sourceUserId: userId },
       priority: 'normal',
     });
   }
 
   enqueueRoutineCompletionSync(completion: RoutineCompletionMutation): void {
-    this.actionQueue.enqueue({
+    if (completion.userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return;
+    }
+
+    void this.actionQueue.enqueueForOwner(completion.userId, {
       type: 'create',
       entityType: 'routine-completion',
       entityId: completion.completionId,
-      payload: { completion },
+      payload: { completion, sourceUserId: completion.userId },
       priority: 'normal',
     });
   }
@@ -375,6 +392,9 @@ export class DockCloudSyncService implements OnDestroy {
     this.cloudPushTimer.cancel();
     this.cloudPullTimer.cancel();
     this.circuitBreakerResetTimer.cancel();
+    this.circuitBreakerOpen = false;
+    this.cloudPullRetryCount = 0;
+    this.lastCloudPullAt = 0;
   }
 
   /** 断路器：不可恢复错误时停止重试，30 秒后自动半开 */

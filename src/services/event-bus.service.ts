@@ -67,6 +67,7 @@ export interface SessionRestoredEvent {
 export interface SessionInvalidatedEvent {
   readonly type: 'session-invalidated';
   readonly source: string;
+  readonly userId: string | null;
 }
 
 /** 所有事件类型联合 */
@@ -226,8 +227,8 @@ export class EventBusService {
    * 发布会话失效事件（后台刷新推翻 FastPath 乐观身份）
    * 订阅方应停止所有依赖有效会话的操作（同步推送、重试队列等）
    */
-  publishSessionInvalidated(source: string): void {
-    const event: SessionInvalidatedEvent = { type: 'session-invalidated', source };
+  publishSessionInvalidated(source: string, userId: string | null): void {
+    const event: SessionInvalidatedEvent = { type: 'session-invalidated', source, userId };
     this._sessionInvalidated$.next(event);
     this._events$.next(event);
     this._lastEvent.set(event);

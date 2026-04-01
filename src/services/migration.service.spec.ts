@@ -83,7 +83,20 @@ describe('MigrationService', () => {
     it('本地和远程项目完全一致时不需要迁移', () => {
       const proj = createProject();
       service.saveGuestData([proj]);
-      expect(service.checkMigrationNeeded([proj])).toBe(false);
+      expect(service.checkMigrationNeeded([{ ...proj, syncSource: 'synced' }])).toBe(false);
+    });
+
+    it('应忽略仅本地保留的项目影子，仍提示用户做迁移决策', () => {
+      const proj = createProject();
+      service.saveGuestData([proj]);
+
+      expect(service.checkMigrationNeeded([
+        {
+          ...proj,
+          syncSource: 'local-only',
+          pendingSync: true,
+        },
+      ])).toBe(true);
     });
   });
 

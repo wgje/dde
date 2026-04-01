@@ -116,12 +116,16 @@ describe('FocusConsoleSyncService', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('loadFocusSession should return failure when Supabase is not configured', async () => {
+  it('loadFocusSession should return success(null) when Supabase is not configured (offline fallback)', async () => {
     mockSupabaseClientService.isConfigured = false;
 
     const result = await service.loadFocusSession('user-1');
 
-    expect(result.ok).toBe(false);
+    // 离线时返回 success(null)，让调用方使用本地数据
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toBeNull();
+    }
     expect(mockSupabaseClientService.client).not.toHaveBeenCalled();
     mockSupabaseClientService.isConfigured = true;
   });

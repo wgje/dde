@@ -4,6 +4,7 @@
  * 职责：
  * - 完整项目加载 (loadFullProject, loadFullProjectOptimized)
  * - 项目列表加载 (loadProjectsFromCloud)
+ * - 轻量项目元数据加载 (loadProjectListMetadataFromCloud)
  * - 单个项目加载 (loadSingleProject)
  * - 离线快照管理 (saveOfflineSnapshot, loadOfflineSnapshot)
  * 
@@ -12,6 +13,7 @@
 
 import { Injectable, inject, signal } from '@angular/core';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
 import { SyncStateService } from './sync-state.service';
@@ -23,8 +25,10 @@ import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../../config/sync.config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { FOCUS_CONFIG } from '../../../../config/focus.config';
+import { TIMEOUT_CONFIG } from '../../../../config/timeout.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 
 interface ParkedTaskCacheRecord {
   taskId: string;
@@ -61,13 +65,22 @@ export interface StartupOfflineSnapshotLoadResult {
   bytes: number;
   migratedLegacy: boolean;
   projects: Project[];
+  ownerUserId?: string | null;
 }
+
+interface OfflineSnapshotLoadOptions {
+  allowOwnerHint?: boolean;
+  ownerUserId?: string | null;
+}
+
 @Injectable({
   providedIn: 'root'
 })
 export class ProjectDataService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly startupPlaceholderState = inject(StartupPlaceholderStateService, { optional: true });
   private readonly supabase = inject(SupabaseClientService);
+  private readonly authService = inject(AuthService, { optional: true });
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectData');
   private readonly throttle = inject(RequestThrottleService);
@@ -80,6 +93,7 @@ export class ProjectDataService {
   /** 离线缓存配置 */
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
+  private readonly LEGACY_OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
   /** 停泊任务轻量缓存游标键（A3.4） */
   private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
   /** 避免本地离线模式重复打印“未配置”告警 */
@@ -306,7 +320,8 @@ export class ProjectDataService {
           const { data, error } = await client
             .from('connections')
             .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-            .eq('project_id', projectId);
+            .eq('project_id', projectId)
+            .is('deleted_at', null);
           if (error) {
             this.logger.error('连接查询失败', { projectId, error: error.message });
             return [];
@@ -348,6 +363,52 @@ export class ProjectDataService {
     }
   }
   
+  /**
+   * 轻量加载项目列表元数据
+   *
+   * 仅返回迁移判断所需的项目壳数据；拉取失败时返回 null，
+   * 让上层能区分“云端已确认为空”和“当前无法确认云端状态”。
+   */
+  async loadProjectListMetadataFromCloud(userId: string): Promise<Project[] | null> {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.debug('本地模式，跳过云端项目元数据加载');
+      return [];
+    }
+
+    const client = await this.getSupabaseClient();
+    if (!client) return null;
+
+    try {
+      const projectList = await this.throttle.execute(
+        `project-list-metadata:${userId}`,
+        async () => {
+          const { data, error } = await client
+            .from('projects')
+            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
+            .eq('owner_id', userId)
+            .order('updated_at', { ascending: false });
+
+          if (error) throw supabaseErrorToError(error);
+          return data || [];
+        },
+        {
+          deduplicate: true,
+          priority: 'high',
+          timeout: TIMEOUT_CONFIG.QUICK,
+          retries: 0,
+        }
+      );
+
+      return projectList.map(row => this.rowToProject(row));
+    } catch (e) {
+      this.logger.warn('加载项目元数据列表失败', e);
+      this.sentryLazyLoader.captureException(e, {
+        tags: { operation: 'loadProjectListMetadataFromCloud' }
+      });
+      return null;
+    }
+  }
+
   /**
    * 加载项目列表
    */
@@ -725,16 +786,35 @@ export class ProjectDataService {
    *
    * 先写 IndexedDB，再保留 localStorage 作为迁移兼容兜底。
    */
-  saveOfflineSnapshot(projects: Project[]): void {
+  saveOfflineSnapshot(projects: Project[], ownerUserId?: string | null): void {
+    void this.persistOfflineSnapshot(projects, ownerUserId);
+  }
+
+  async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
+    await this.persistOfflineSnapshot(projects, ownerUserId);
+  }
+
+  private async persistOfflineSnapshot(projects: Project[], ownerUserId?: string | null): Promise<void> {
+    if (this.startupPlaceholderState?.isHintOnlyActive()) {
+      this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
+      return;
+    }
+
     // 过滤已删除的任务
     const cleanedProjects = projects.map(p => ({
       ...p,
       tasks: (p.tasks || []).filter(t => !t.deletedAt)
     }));
+
+    const snapshotOwnerUserId = ownerUserId
+      ?? this.authService?.currentUserId()
+      ?? this.authService?.peekPersistedSessionIdentity?.()?.userId
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     
     const payload = JSON.stringify({
       projects: cleanedProjects,
-      version: this.CACHE_VERSION
+      version: this.CACHE_VERSION,
+      ownerUserId: snapshotOwnerUserId,
     });
     
     const sizeKB = Math.round(payload.length / 1024);
@@ -748,29 +828,54 @@ export class ProjectDataService {
       });
     }
 
-    // 先写 IDB，确保启动恢复路径优先读取到最新快照
-    void this.saveSnapshotToIDB(payload).catch((error) => {
+    // 先同步写 localStorage，再等待 IDB 落盘，避免 owner 改写后的首次恢复读到旧快照。
+    this.saveSnapshotToLocalStorage(payload, snapshotOwnerUserId);
+
+    try {
+      await this.saveSnapshotToIDB(payload, snapshotOwnerUserId);
+    } catch (error) {
       this.logger.warn('离线快照保存失败（IndexedDB）', error);
-    });
-    this.saveSnapshotToLocalStorage(payload);
+    }
+  }
+
+  private normalizeSnapshotOwnerUserId(ownerUserId?: string | null): string {
+    return typeof ownerUserId === 'string' && ownerUserId.length > 0
+      ? ownerUserId
+      : AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private getOfflineSnapshotStorageKey(ownerUserId = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
+    return `${this.OFFLINE_CACHE_KEY}.${ownerUserId}`;
+  }
+
+  private getOfflineSnapshotRecordId(ownerUserId = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
+    return `${this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID}:${ownerUserId}`;
   }
   
   /** localStorage 保存快照 */
-  private saveSnapshotToLocalStorage(payload: string): void {
+  private saveSnapshotToLocalStorage(payload: string, ownerUserId: string): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      localStorage.setItem(this.OFFLINE_CACHE_KEY, payload);
+      const normalizedOwnerUserId = this.normalizeSnapshotOwnerUserId(ownerUserId);
+      localStorage.setItem(this.getOfflineSnapshotStorageKey(normalizedOwnerUserId), payload);
+      if (normalizedOwnerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        localStorage.removeItem(this.OFFLINE_CACHE_KEY);
+      }
     } catch (e) {
       this.logger.warn('离线快照保存失败（localStorage）', e);
     }
   }
   
   /** IndexedDB 保存快照 */
-  private async saveSnapshotToIDB(payload: string): Promise<void> {
+  private async saveSnapshotToIDB(payload: string, ownerUserId: string): Promise<void> {
     const db = await this.openSnapshotDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction('snapshots', 'readwrite');
-      tx.objectStore('snapshots').put({ id: 'offline-snapshot', data: payload });
+      tx.objectStore('snapshots').put({
+        id: this.getOfflineSnapshotRecordId(this.normalizeSnapshotOwnerUserId(ownerUserId)),
+        ownerUserId: this.normalizeSnapshotOwnerUserId(ownerUserId),
+        data: payload,
+      });
       tx.oncomplete = () => {
         db.close();
         resolve();
@@ -783,18 +888,34 @@ export class ProjectDataService {
   }
 
   /** IndexedDB 加载快照 */
-  private async loadSnapshotFromIDB(): Promise<string | null> {
+  private async loadSnapshotFromIDB(options?: OfflineSnapshotLoadOptions): Promise<string | null> {
     const db = await this.openSnapshotDB();
+    const ownerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
     return new Promise((resolve, reject) => {
       const tx = db.transaction('snapshots', 'readonly');
-      const req = tx.objectStore('snapshots').get('offline-snapshot');
-      req.onsuccess = () => {
-        db.close();
-        resolve(req.result?.data ?? null);
+      const store = tx.objectStore('snapshots');
+      const scopedReq = store.get(this.getOfflineSnapshotRecordId(ownerUserId));
+      scopedReq.onsuccess = () => {
+        const scopedPayload = scopedReq.result?.data ?? null;
+        if (scopedPayload || ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          db.close();
+          resolve(scopedPayload);
+          return;
+        }
+
+        const legacyReq = store.get(this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID);
+        legacyReq.onsuccess = () => {
+          db.close();
+          resolve(legacyReq.result?.data ?? null);
+        };
+        legacyReq.onerror = () => {
+          db.close();
+          reject(legacyReq.error);
+        };
       };
-      req.onerror = () => {
+      scopedReq.onerror = () => {
         db.close();
-        reject(req.error);
+        reject(scopedReq.error);
       };
       tx.onerror = () => {
         db.close();
@@ -822,8 +943,8 @@ export class ProjectDataService {
    * 加载离线快照
    * 兼容旧调用方：同步路径仍然只读 localStorage。
    */
-  loadOfflineSnapshot(): Project[] | null {
-    return this.loadOfflineSnapshotFromLocalStorage();
+  loadOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Project[] | null {
+    return this.loadOfflineSnapshotFromLocalStorage(options);
   }
 
   /**
@@ -831,20 +952,25 @@ export class ProjectDataService {
    *
    * 优先读取 IndexedDB；如果只有 legacy localStorage 快照，则加载后写回 IDB。
    */
-  async loadStartupOfflineSnapshot(): Promise<StartupOfflineSnapshotLoadResult> {
-    const idbPayload = await this.loadSnapshotFromIDB().catch((error) => {
+  async loadStartupOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Promise<StartupOfflineSnapshotLoadResult> {
+    const startupOptions: OfflineSnapshotLoadOptions = {
+      allowOwnerHint: true,
+      ...options,
+    };
+
+    const idbPayload = await this.loadSnapshotFromIDB(startupOptions).catch((error) => {
       this.logger.warn('启动快照加载失败（IndexedDB）', error);
       return null;
     });
 
     if (idbPayload) {
-      const projects = this.parseSnapshotData(idbPayload);
-      if (projects) {
-        return this.buildStartupSnapshotResult('idb', idbPayload, projects, false);
+      const parsedSnapshot = this.parseSnapshotEnvelope(idbPayload);
+      if (parsedSnapshot) {
+        return this.buildStartupSnapshotResult('idb', idbPayload, parsedSnapshot, false);
       }
     }
 
-    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw();
+    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw(startupOptions);
     if (!localStoragePayload) {
       return {
         source: 'none',
@@ -855,34 +981,48 @@ export class ProjectDataService {
       };
     }
 
-    const projects = this.parseSnapshotData(localStoragePayload);
-    if (!projects) {
+    const parsedSnapshot = this.parseSnapshotEnvelope(localStoragePayload);
+    if (!parsedSnapshot) {
       return {
         source: 'none',
         projectCount: 0,
         bytes: 0,
         migratedLegacy: false,
         projects: [],
+        ownerUserId: null,
       };
     }
 
-    const migratedLegacy = await this.migrateLegacySnapshotToIDB(localStoragePayload);
-    return this.buildStartupSnapshotResult('localStorage', localStoragePayload, projects, migratedLegacy);
+    const migratedLegacy = await this.migrateLegacySnapshotToIDB(
+      localStoragePayload,
+      this.resolveSnapshotVisibleOwnerUserId(startupOptions)
+    );
+    return this.buildStartupSnapshotResult('localStorage', localStoragePayload, parsedSnapshot, migratedLegacy);
   }
 
   /**
    * 异步加载离线快照（支持 IDB）
    */
-  async loadOfflineSnapshotAsync(): Promise<Project[] | null> {
-    const snapshot = await this.loadStartupOfflineSnapshot();
+  async loadOfflineSnapshotAsync(options?: OfflineSnapshotLoadOptions): Promise<Project[] | null> {
+    const snapshot = await this.loadStartupOfflineSnapshot(options);
     return snapshot.projectCount > 0 ? snapshot.projects : null;
   }
 
   /** 从 localStorage 读取快照原始内容 */
-  private loadSnapshotFromLocalStorageRaw(): string | null {
+  private loadSnapshotFromLocalStorageRaw(options?: OfflineSnapshotLoadOptions): string | null {
     if (typeof localStorage === 'undefined') return null;
     try {
-      return localStorage.getItem(this.OFFLINE_CACHE_KEY);
+      const ownerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
+      const scopedPayload = localStorage.getItem(this.getOfflineSnapshotStorageKey(ownerUserId));
+      if (scopedPayload !== null) {
+        return scopedPayload;
+      }
+
+      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        return localStorage.getItem(this.OFFLINE_CACHE_KEY);
+      }
+
+      return null;
     } catch (e) {
       this.logger.warn('离线快照加载失败（localStorage）', e);
       return null;
@@ -890,20 +1030,92 @@ export class ProjectDataService {
   }
 
   /** 从 localStorage 加载快照 */
-  private loadOfflineSnapshotFromLocalStorage(): Project[] | null {
-    const cached = this.loadSnapshotFromLocalStorageRaw();
-    return cached ? this.parseSnapshotData(cached) : null;
+  private loadOfflineSnapshotFromLocalStorage(options?: OfflineSnapshotLoadOptions): Project[] | null {
+    const cached = this.loadSnapshotFromLocalStorageRaw(options);
+    if (!cached) {
+      return null;
+    }
+
+    const snapshot = this.parseSnapshotEnvelope(cached);
+    if (!snapshot) {
+      return null;
+    }
+
+    if (!this.isSnapshotVisibleToCurrentOwner(snapshot.ownerUserId, 'sync-load', options)) {
+      return null;
+    }
+
+    return snapshot.projects;
   }
 
-  /** 解析快照 JSON 数据 */
-  private parseSnapshotData(raw: string): Project[] | null {
+  private resolveSnapshotVisibleOwnerUserId(options?: OfflineSnapshotLoadOptions): string {
+    if (typeof options?.ownerUserId === 'string' && options.ownerUserId.length > 0) {
+      return options.ownerUserId;
+    }
+
+    const currentOwnerUserId = this.authService?.currentUserId();
+    if (typeof currentOwnerUserId === 'string' && currentOwnerUserId.length > 0) {
+      return currentOwnerUserId;
+    }
+
+    const persistedSessionUserId = this.authService?.peekPersistedSessionIdentity?.()?.userId ?? null;
+    if (typeof persistedSessionUserId === 'string' && persistedSessionUserId.length > 0) {
+      return persistedSessionUserId;
+    }
+
+    if (options?.allowOwnerHint) {
+      // owner hint 只用于非 trusted 的占位预填充，不应默认放宽同步读取的可见性边界。
+      const persistedOwnerHint = typeof this.authService?.peekPersistedOwnerHint === 'function'
+        ? this.authService.peekPersistedOwnerHint()
+        : null;
+      if (typeof persistedOwnerHint === 'string' && persistedOwnerHint.length > 0) {
+        return persistedOwnerHint;
+      }
+    }
+
+    return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private isSnapshotVisibleToCurrentOwner(
+    ownerUserId: string | null,
+    stage: 'sync-load',
+    options?: OfflineSnapshotLoadOptions,
+  ): boolean {
+    const currentOwnerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
+
+    if (!ownerUserId) {
+      this.logger.warn('同步快照缺少 owner 元数据，已忽略本次读取', {
+        stage,
+        currentOwnerUserId,
+      });
+      return false;
+    }
+
+    if (ownerUserId !== currentOwnerUserId) {
+      this.logger.warn('同步快照 owner 不匹配，已忽略本次读取', {
+        stage,
+        snapshotOwnerUserId: ownerUserId,
+        currentOwnerUserId,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  private parseSnapshotEnvelope(raw: string): { projects: Project[]; ownerUserId: string | null } | null {
     try {
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown };
       if (Array.isArray(parsed?.projects)) {
-        return parsed.projects.map((p: Project) => ({
-          ...p,
-          tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
-        }));
+        return {
+          projects: parsed.projects.map((p: Project) => ({
+            ...p,
+            tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
+          })),
+          ownerUserId: typeof parsed.ownerUserId === 'string' && parsed.ownerUserId.trim().length > 0
+            ? parsed.ownerUserId
+            : null,
+        };
       }
     } catch (e) {
       this.logger.warn('快照数据解析失败', e);
@@ -911,18 +1123,24 @@ export class ProjectDataService {
     return null;
   }
 
+  /** 解析快照 JSON 数据 */
+  private parseSnapshotData(raw: string): Project[] | null {
+    return this.parseSnapshotEnvelope(raw)?.projects ?? null;
+  }
+
   private buildStartupSnapshotResult(
     source: StartupOfflineSnapshotSource,
     raw: string,
-    projects: Project[],
+    snapshot: { projects: Project[]; ownerUserId: string | null },
     migratedLegacy: boolean
   ): StartupOfflineSnapshotLoadResult {
     return {
       source,
-      projectCount: projects.length,
+      projectCount: snapshot.projects.length,
       bytes: this.getSnapshotByteSize(raw),
       migratedLegacy,
-      projects,
+      projects: snapshot.projects,
+      ownerUserId: snapshot.ownerUserId,
     };
   }
 
@@ -934,9 +1152,9 @@ export class ProjectDataService {
     }
   }
 
-  private async migrateLegacySnapshotToIDB(payload: string): Promise<boolean> {
+  private async migrateLegacySnapshotToIDB(payload: string, ownerUserId: string): Promise<boolean> {
     try {
-      await this.saveSnapshotToIDB(payload);
+      await this.saveSnapshotToIDB(payload, ownerUserId);
       return true;
     } catch (error) {
       this.logger.warn('legacy 离线快照迁移到 IndexedDB 失败', error);
@@ -947,26 +1165,36 @@ export class ProjectDataService {
   /**
    * 清除离线快照
    */
-  clearOfflineSnapshot(): void {
+  clearOfflineSnapshot(ownerUserId?: string | null): void {
+    const resolvedOwnerUserId = this.normalizeSnapshotOwnerUserId(
+      ownerUserId ?? this.authService?.currentUserId()
+    );
     try {
       if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(this.OFFLINE_CACHE_KEY);
+        localStorage.removeItem(this.getOfflineSnapshotStorageKey(resolvedOwnerUserId));
+        if (resolvedOwnerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          localStorage.removeItem(this.OFFLINE_CACHE_KEY);
+        }
       }
-      this.logger.info('离线快照已清除');
+      this.logger.info('离线快照已清除', { ownerUserId: resolvedOwnerUserId });
     } catch (e) {
       this.logger.warn('清除离线快照失败', e);
     }
 
-    void this.clearSnapshotFromIDB().catch((error) => {
+    void this.clearSnapshotFromIDB(resolvedOwnerUserId).catch((error) => {
       this.logger.warn('清除离线快照失败（IndexedDB）', error);
     });
   }
 
-  private async clearSnapshotFromIDB(): Promise<void> {
+  private async clearSnapshotFromIDB(ownerUserId: string): Promise<void> {
     const db = await this.openSnapshotDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction('snapshots', 'readwrite');
-      tx.objectStore('snapshots').delete('offline-snapshot');
+      const store = tx.objectStore('snapshots');
+      store.delete(this.getOfflineSnapshotRecordId(ownerUserId));
+      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        store.delete(this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID);
+      }
       tx.oncomplete = () => {
         db.close();
         resolve();

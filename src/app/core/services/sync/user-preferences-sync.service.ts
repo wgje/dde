@@ -63,7 +63,6 @@ export class UserPreferencesSyncService {
         const fp = data.focus_preferences as Record<string, unknown>;
         focusPreferences = {
           gateEnabled: (fp['gateEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.gateEnabled,
-          spotlightEnabled: (fp['spotlightEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.spotlightEnabled,
           strataEnabled: (fp['strataEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.strataEnabled,
           blackBoxEnabled: (fp['blackBoxEnabled'] as boolean) ?? DEFAULT_FOCUS_PREFERENCES.blackBoxEnabled,
           maxSnoozePerDay: (fp['maxSnoozePerDay'] as number) ?? DEFAULT_FOCUS_PREFERENCES.maxSnoozePerDay,

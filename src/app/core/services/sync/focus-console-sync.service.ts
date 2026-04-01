@@ -98,7 +98,11 @@ export class FocusConsoleSyncService {
     localUpdatedAt?: string,
   ): Promise<Result<DockSnapshot | null, OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
+    if (!client) {
+      // 离线时返回 null，让调用方使用本地数据继续工作
+      this.logger.debug('离线模式，跳过远端专注会话加载');
+      return success(null);
+    }
 
     try {
       const { data, error } = await client
@@ -179,7 +183,11 @@ export class FocusConsoleSyncService {
 
   async listRoutineTasks(userId: string): Promise<Result<RoutineTask[], OperationError>> {
     const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
+    if (!client) {
+      // 离线时返回空列表，让调用方使用本地缓存的日常任务
+      this.logger.debug('离线模式，跳过远端日常任务加载');
+      return success([]);
+    }
 
     try {
       const { data, error } = await client

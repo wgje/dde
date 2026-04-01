@@ -18,6 +18,8 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
+import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import type { QueuedAction, DeadLetterItem } from './action-queue.types';
 
@@ -71,12 +73,14 @@ function createMockContext(overrides: Partial<ActionQueueContext> = {}): ActionQ
 describe('ActionQueueStorageService', () => {
   let service: ActionQueueStorageService;
   let ctx: ActionQueueContext;
+  let currentUserId: ReturnType<typeof signal<string | null>>;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    currentUserId = signal<string | null>('user-a');
 
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -88,6 +92,7 @@ describe('ActionQueueStorageService', () => {
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
+        { provide: AuthService, useValue: { currentUserId } },
       ],
     });
 
@@ -252,17 +257,142 @@ describe('ActionQueueStorageService', () => {
 
       service.saveQueueToStorage();
 
-      const saved = localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
+      const saved = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`);
       expect(saved).toBeTruthy();
       const parsed = JSON.parse(saved!);
       expect(parsed).toHaveLength(1);
       expect(parsed[0].id).toBe(action.id);
     });
 
+    it('saveQueueToStorage 在 localStorage 配额失败但 IDB 备份成功后应让旧快照失效', async () => {
+      const staleAction = createMockAction({ id: 'stale-local-action' });
+      const freshAction = createMockAction({ id: 'fresh-idb-action' });
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const originalLocalStorage = globalThis.localStorage;
+      const storageData = new Map<string, string>([[scopedKey, JSON.stringify([staleAction])]]);
+      const quotaStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === scopedKey) {
+            throw new DOMException('quota exceeded', 'QuotaExceededError');
+          }
+          storageData.set(key, String(value));
+        },
+        removeItem: (key: string) => {
+          storageData.delete(key);
+        },
+        clear: () => {
+          storageData.clear();
+        },
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: quotaStorage,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        ctx.pendingActions.set([freshAction]);
+
+        const backupSpy = vi.spyOn(service as unknown as {
+          backupQueueToIndexedDB: (queue: QueuedAction[], ownerUserId?: string) => Promise<boolean>;
+        }, 'backupQueueToIndexedDB').mockResolvedValue(true);
+        const restoreSpy = vi.spyOn(service as unknown as {
+          restoreQueueFromIndexedDB: (ownerUserId?: string) => Promise<QueuedAction[] | null>;
+        }, 'restoreQueueFromIndexedDB').mockResolvedValue([freshAction]);
+
+        service.saveQueueToStorage();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(backupSpy).toHaveBeenCalled();
+        expect(globalThis.localStorage.getItem(scopedKey)).toBeNull();
+
+        ctx.pendingActions.set([]);
+        ctx.queueSize.set(0);
+        service.loadQueueFromStorage();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(restoreSpy).toHaveBeenCalled();
+        expect(ctx.pendingActions()).toEqual([freshAction]);
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('saveQueueSnapshotForOwner 在 localStorage 配额失败时应优先使用 IDB 版本恢复 owner 队列', async () => {
+      const staleAction = createMockAction({ id: 'stale-owner-action' });
+      const freshAction = createMockAction({ id: 'fresh-owner-action' });
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const originalLocalStorage = globalThis.localStorage;
+      const storageData = new Map<string, string>([[scopedKey, JSON.stringify([staleAction])]]);
+      const quotaStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === scopedKey) {
+            throw new DOMException('quota exceeded', 'QuotaExceededError');
+          }
+          storageData.set(key, String(value));
+        },
+        removeItem: (key: string) => {
+          storageData.delete(key);
+        },
+        clear: () => {
+          storageData.clear();
+        },
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: quotaStorage,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        vi.spyOn(service as unknown as {
+          backupQueueToIndexedDB: (queue: QueuedAction[], ownerUserId?: string) => Promise<boolean>;
+        }, 'backupQueueToIndexedDB').mockResolvedValue(true);
+        vi.spyOn(service as unknown as {
+          restoreQueueFromIndexedDB: (ownerUserId?: string) => Promise<QueuedAction[] | null>;
+        }, 'restoreQueueFromIndexedDB').mockResolvedValue([freshAction]);
+
+        await (service as unknown as {
+          saveQueueSnapshotForOwner: (ownerUserId: string, queue: QueuedAction[]) => Promise<void>;
+        }).saveQueueSnapshotForOwner('user-a', [freshAction]);
+
+        const loaded = await (service as unknown as {
+          loadPersistedQueueForOwner: (ownerUserId: string) => Promise<QueuedAction[]>;
+        }).loadPersistedQueueForOwner('user-a');
+
+        expect(globalThis.localStorage.getItem(scopedKey)).toBeNull();
+        expect(loaded).toEqual([freshAction]);
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('loadQueueFromStorage should restore queue from localStorage', () => {
       const action = createMockAction();
       localStorage.setItem(
-        LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`,
         JSON.stringify([action])
       );
 
@@ -272,8 +402,59 @@ describe('ActionQueueStorageService', () => {
       expect(ctx.queueSize()).toBe(1);
     });
 
+    it('loadQueueFromStorage should ignore another owner scoped queue', () => {
+      const foreignAction = createMockAction({ id: 'foreign-action' });
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.other-user`,
+        JSON.stringify([foreignAction])
+      );
+
+      service.loadQueueFromStorage();
+
+      expect(ctx.pendingActions()).toEqual([]);
+      expect(ctx.queueSize()).toBe(0);
+    });
+
+    it('loadQueueFromStorage should quarantine signed-in legacy global queue into unknown-owner bucket', () => {
+      const legacyAction = createMockAction({ id: 'legacy-global-action' });
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, JSON.stringify([legacyAction]));
+
+      service.loadQueueFromStorage();
+
+      expect(ctx.pendingActions()).toEqual([]);
+      expect(service.deadLetterQueue()).toEqual([]);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(localStorage.getItem('nanoflow.action-queue.legacy-review.__legacy_unknown__')).toContain('legacy-global-action');
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('loadQueueFromStorage should migrate legacy global queue into local-user scoped key only', () => {
+      currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      const action = createMockAction();
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, JSON.stringify([action]));
+
+      service.loadQueueFromStorage();
+
+      expect(ctx.pendingActions()).toEqual([action]);
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)).toBeNull();
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${AUTH_CONFIG.LOCAL_MODE_USER_ID}`)).toBeTruthy();
+    });
+
+    it('saveQueueToStorage should not delete untouched legacy global queue for signed-in owners', () => {
+      const legacyAction = createMockAction({ id: 'legacy-global-action' });
+      const scopedAction = createMockAction({ id: 'scoped-user-action' });
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, JSON.stringify([legacyAction]));
+      ctx.pendingActions.set([scopedAction]);
+
+      service.saveQueueToStorage();
+
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)).toContain('legacy-global-action');
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toContain('scoped-user-action');
+    });
+
     it('loadQueueFromStorage should handle corrupted data gracefully', () => {
-      localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, '{invalid json}');
+      localStorage.setItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`, '{invalid json}');
 
       expect(() => service.loadQueueFromStorage()).not.toThrow();
       expect(mockLoggerCategory.warn).toHaveBeenCalled();
@@ -283,10 +464,25 @@ describe('ActionQueueStorageService', () => {
       const action = createMockAction();
       service.moveToDeadLetter(action, 'test');
 
-      const saved = localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
+      const saved = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`);
       expect(saved).toBeTruthy();
       const parsed = JSON.parse(saved!);
       expect(parsed).toHaveLength(1);
+    });
+
+    it('saveDeadLetterToStorage should not delete untouched legacy global dead-letter queue for signed-in owners', () => {
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([
+        {
+          action: createMockAction({ id: 'legacy-dead-letter' }),
+          failedAt: new Date().toISOString(),
+          reason: 'legacy',
+        },
+      ]));
+
+      service.moveToDeadLetter(createMockAction({ id: 'scoped-dead-letter' }), 'scoped');
+
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toContain('legacy-dead-letter');
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toContain('scoped-dead-letter');
     });
 
     it('loadDeadLetterFromStorage should restore dead letter queue with TTL filtering', () => {
@@ -302,7 +498,7 @@ describe('ActionQueueStorageService', () => {
       };
 
       localStorage.setItem(
-        LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY,
+        `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`,
         JSON.stringify([recentItem, expiredItem])
       );
 
@@ -311,6 +507,21 @@ describe('ActionQueueStorageService', () => {
       // Only the recent item should survive TTL filtering
       expect(service.deadLetterQueue().length).toBe(1);
       expect(service.deadLetterQueue()[0].reason).toBe('recent');
+    });
+
+    it('loadDeadLetterFromStorage should quarantine signed-in legacy global dead-letter into unknown-owner bucket', () => {
+      const legacyDeadLetter: DeadLetterItem = {
+        action: createMockAction({ id: 'legacy-global-dead-letter' }),
+        failedAt: new Date().toISOString(),
+        reason: 'legacy failed',
+      };
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([legacyDeadLetter]));
+
+      service.loadDeadLetterFromStorage();
+
+      expect(service.deadLetterQueue()).toEqual([]);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toBeNull();
     });
   });
 

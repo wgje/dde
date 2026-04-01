@@ -22,6 +22,8 @@ describe('AppLifecycleOrchestratorService', () => {
     recoverAfterResume: ReturnType<typeof vi.fn>;
   };
   let mockSyncCoordinator: {
+    hasPendingLocalChanges: ReturnType<typeof vi.fn>;
+    flushPendingPersistToCloud: ReturnType<typeof vi.fn>;
     refreshBlackBoxWatermarkIfNeeded: ReturnType<typeof vi.fn>;
   };
   let mockToast: {
@@ -62,6 +64,8 @@ describe('AppLifecycleOrchestratorService', () => {
     };
 
     mockSyncCoordinator = {
+      hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+      flushPendingPersistToCloud: vi.fn().mockResolvedValue(false),
       refreshBlackBoxWatermarkIfNeeded: vi.fn().mockResolvedValue({ skipped: true }),
     };
 
@@ -166,6 +170,29 @@ describe('AppLifecycleOrchestratorService', () => {
       retryProcessing: 'background',
     }));
     expect(mockSyncCoordinator.refreshBlackBoxWatermarkIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('应在恢复时自动补发尚未完成的本地持久化', async () => {
+    mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+
+    await service.triggerResume('visibility-quick');
+    await Promise.resolve();
+
+    expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:visibility-quick');
+  });
+
+  it('online 恢复命中会话快照时也应异步补发 pending persist', async () => {
+    mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+    mockSessionManager.getRecentValidationSnapshot.mockReturnValue({
+      valid: true,
+      userId: 'user-1',
+      at: Date.now(),
+    });
+
+    await service.triggerResume('online');
+    await Promise.resolve();
+
+    expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:online');
   });
 
   it('应为恢复流程生成 ticket 并传递给 recoverAfterResume', async () => {

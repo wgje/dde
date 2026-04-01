@@ -8,6 +8,7 @@ import type {
 import type { DockEntry, DockSnapshot } from '../models/parking-dock';
 
 vi.mock('idb-keyval', () => ({
+  del: vi.fn(),
   get: vi.fn(),
   set: vi.fn(),
 }));
@@ -94,6 +95,7 @@ async function callNormalizeNullableNumber(value: unknown): Promise<number | nul
 describe('DockSnapshotPersistenceService', () => {
   let service: DockSnapshotPersistenceServiceType;
   let serviceClass: typeof import('./dock-snapshot-persistence.service').DockSnapshotPersistenceService;
+  let mockDel: ReturnType<typeof vi.fn>;
   let mockGet: ReturnType<typeof vi.fn>;
   let mockSet: ReturnType<typeof vi.fn>;
 
@@ -102,8 +104,10 @@ describe('DockSnapshotPersistenceService', () => {
     const idbKeyval = await import('idb-keyval');
     const dockSnapshotModule = await import('./dock-snapshot-persistence.service');
     serviceClass = dockSnapshotModule.DockSnapshotPersistenceService;
+    mockDel = vi.mocked(idbKeyval.del);
     mockGet = vi.mocked(idbKeyval.get);
     mockSet = vi.mocked(idbKeyval.set);
+    mockDel.mockReset();
     mockGet.mockReset();
     mockSet.mockReset();
     localStorage.clear();
@@ -539,6 +543,114 @@ describe('DockSnapshotPersistenceService', () => {
       expect(restored?.session.focusScrimOn).toBe(false);
       expect(localStorage.getItem(service.legacyLocalStorageKey('user-1'))).toBeNull();
     });
+
+    it('should migrate legacy anonymous IDB snapshot into local-user bucket on restore', async () => {
+      const anonymousSnapshot = makeMinimalSnapshot({
+        focusMode: true,
+        savedAt: '2025-01-15T11:00:00.000Z',
+      });
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === service.localCacheKey(null)) {
+          return anonymousSnapshot;
+        }
+
+        return null;
+      });
+
+      const restored = await service.restoreLocalSnapshot('local-user', ctx);
+
+      expect(restored?.focusMode).toBe(true);
+      expect(mockSet).toHaveBeenCalledWith(
+        service.localCacheKey('local-user'),
+        expect.objectContaining({ focusMode: true }),
+      );
+      expect(mockDel).toHaveBeenCalledWith(service.localCacheKey(null));
+      expect(localStorage.getItem(service.legacyLocalStorageKey('local-user'))).not.toBeNull();
+      expect(localStorage.getItem(service.legacyLocalStorageKey(null))).toBeNull();
+    });
+
+    it('should prefer a newer anonymous snapshot over an older local-user snapshot during migration', async () => {
+      const localUserSnapshot = makeMinimalSnapshot({
+        focusMode: false,
+        savedAt: '2025-01-15T10:00:00.000Z',
+      });
+      const anonymousSnapshot = makeMinimalSnapshot({
+        focusMode: true,
+        savedAt: '2025-01-15T12:00:00.000Z',
+      });
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === service.localCacheKey('local-user')) {
+          return localUserSnapshot;
+        }
+
+        if (key === service.localCacheKey(null)) {
+          return anonymousSnapshot;
+        }
+
+        return null;
+      });
+
+      const restored = await service.restoreLocalSnapshot('local-user', ctx);
+
+      expect(restored?.focusMode).toBe(true);
+      expect(mockSet).toHaveBeenCalledWith(
+        service.localCacheKey('local-user'),
+        expect.objectContaining({ focusMode: true }),
+      );
+      expect(mockDel).toHaveBeenCalledWith(service.localCacheKey(null));
+    });
+
+    it('should keep a newer local-user snapshot and clean up stale anonymous fallback bucket', async () => {
+      const localUserSnapshot = makeMinimalSnapshot({
+        focusMode: true,
+        savedAt: '2025-01-15T12:00:00.000Z',
+      });
+      const anonymousSnapshot = makeMinimalSnapshot({
+        focusMode: false,
+        savedAt: '2025-01-15T10:00:00.000Z',
+      });
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === service.localCacheKey('local-user')) {
+          return localUserSnapshot;
+        }
+
+        if (key === service.localCacheKey(null)) {
+          return anonymousSnapshot;
+        }
+
+        return null;
+      });
+
+      const restored = await service.restoreLocalSnapshot('local-user', ctx);
+
+      expect(restored?.focusMode).toBe(true);
+      expect(mockSet).not.toHaveBeenCalled();
+      expect(mockDel).toHaveBeenCalledWith(service.localCacheKey(null));
+    });
+
+    it('should migrate legacy anonymous localStorage snapshot into local-user bucket on restore', async () => {
+      mockGet.mockResolvedValue(null);
+      localStorage.setItem(
+        service.legacyLocalStorageKey(null),
+        JSON.stringify(
+          makeMinimalSnapshot({
+            focusMode: true,
+            savedAt: '2025-01-15T12:00:00.000Z',
+          }),
+        ),
+      );
+
+      const restored = await service.restoreLocalSnapshot('local-user', ctx);
+
+      expect(restored?.focusMode).toBe(true);
+      expect(mockSet).toHaveBeenCalledWith(
+        service.localCacheKey('local-user'),
+        expect.objectContaining({ focusMode: true }),
+      );
+      expect(mockDel).toHaveBeenCalledWith(service.localCacheKey(null));
+      expect(localStorage.getItem(service.legacyLocalStorageKey('local-user'))).not.toBeNull();
+      expect(localStorage.getItem(service.legacyLocalStorageKey(null))).toBeNull();
+    });
   });
 
   // ─── normalizePendingDecision ─────────────────
@@ -733,6 +845,22 @@ describe('DockSnapshotPersistenceService', () => {
       service.cancelPendingPersist();
       service.cancelPendingPersist();
       // no throw
+    });
+
+    it('discardPendingPersist should drop scheduled snapshot without shadow persist', async () => {
+      const snapshotFn = vi.fn(() =>
+        makeMinimalSnapshot({
+          savedAt: '2025-01-15T12:00:00.000Z',
+        }) as unknown as DockSnapshot,
+      );
+      service.scheduleLocalPersist(snapshotFn, 'user-1', () => 0);
+
+      await service.discardPendingPersist();
+      vi.advanceTimersByTime(1000);
+
+      expect(snapshotFn).not.toHaveBeenCalled();
+      expect(mockSet).not.toHaveBeenCalled();
+      expect(localStorage.getItem(service.legacyLocalStorageKey('user-1'))).toBeNull();
     });
   });
 });

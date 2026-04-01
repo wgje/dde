@@ -39,21 +39,45 @@ export interface BatchSyncResult {
 
 /** 批量同步回调函数类型 */
 export interface BatchSyncCallbacks {
-  pushProject: (project: Project, fromRetryQueue?: boolean) => Promise<boolean>;
-  pushTask: (task: Task, projectId: string, skipTombstoneCheck?: boolean, fromRetryQueue?: boolean) => Promise<boolean>;
+  pushProject: (
+    project: Project,
+    fromRetryQueue?: boolean,
+    sourceUserId?: string,
+  ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+  pushTask: (
+    task: Task,
+    projectId: string,
+    skipTombstoneCheck?: boolean,
+    fromRetryQueue?: boolean,
+    sourceUserId?: string,
+  ) => Promise<boolean>;
   pushTaskPosition: (
     taskId: string,
     x: number,
     y: number,
     projectId?: string,
-    fallbackTask?: Task
+    fallbackTask?: Task,
+    sourceUserId?: string,
   ) => Promise<boolean>;
-  pushConnection: (connection: Connection, projectId: string, skipTombstoneCheck?: boolean, skipTaskExistenceCheck?: boolean, fromRetryQueue?: boolean) => Promise<boolean>;
+  pushConnection: (
+    connection: Connection,
+    projectId: string,
+    skipTombstoneCheck?: boolean,
+    skipTaskExistenceCheck?: boolean,
+    fromRetryQueue?: boolean,
+    sourceUserId?: string,
+  ) => Promise<boolean>;
   getTombstoneIds: (projectId: string) => Promise<Set<string>>;
   getConnectionTombstoneIds: (projectId: string) => Promise<Set<string>>;
   purgeTasksFromCloud: (projectId: string, taskIds: string[]) => Promise<boolean>;
   topologicalSortTasks: (tasks: Task[]) => Task[];
-  addToRetryQueue: (type: 'task' | 'project' | 'connection', operation: 'upsert' | 'delete', data: unknown, projectId?: string) => void;
+  addToRetryQueue: (
+    type: 'task' | 'project' | 'connection',
+    operation: 'upsert' | 'delete',
+    data: unknown,
+    projectId?: string,
+    sourceUserId?: string,
+  ) => void;
 }
 
 @Injectable({
@@ -189,7 +213,7 @@ export class BatchSyncService {
     // 网络感知检查
     if (!this.mobileSync.shouldAllowSync()) {
       this.logger.debug('网络感知: 同步被延迟', { projectId: project.id });
-      this.callbacks.addToRetryQueue('project', 'upsert', project);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
       retryEnqueued.push(`project:${project.id}`);
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
@@ -207,7 +231,7 @@ export class BatchSyncService {
     
     const client = this.getSupabaseClient();
     if (!client) {
-      this.callbacks.addToRetryQueue('project', 'upsert', project);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
       retryEnqueued.push(`project:${project.id}`);
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
@@ -215,20 +239,33 @@ export class BatchSyncService {
     // Session 验证
     try {
       const { data: { session } } = await client.auth.getSession();
-      if (!session?.user?.id) {
+      const sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
         this.syncState.setSessionExpired(true);
         // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
-        this.callbacks.addToRetryQueue('project', 'upsert', project);
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
         retryEnqueued.push(`project:${project.id}`);
         this.logger.warn('Session 过期，项目数据已入重试队列', { projectId: project.id });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+        return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      }
+
+      if (sessionUserId !== userId) {
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+        retryEnqueued.push(`project:${project.id}`);
+        this.logger.warn('检测到项目批量同步 owner 与当前会话不匹配，已拒绝云端写入', {
+          projectId: project.id,
+          expectedUserId: userId,
+          sessionUserId,
+        });
+        this.syncState.setSyncError('账号已切换，项目稍后将按原 owner 重试');
         return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
       }
     } catch (e) {
       this.logger.error('Session 验证失败', e);
       this.syncState.setSessionExpired(true);
       // 【NEW-3 修复】Session 验证异常时同样保护数据
-      this.callbacks.addToRetryQueue('project', 'upsert', project);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
       retryEnqueued.push(`project:${project.id}`);
       this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
       this.toast.warning('登录已过期', '请重新登录以继续同步数据');
@@ -261,9 +298,32 @@ export class BatchSyncService {
       }
       
       // 3. 保存项目元数据
-      projectPushed = await this.callbacks.pushProject(projectSnapshot);
+      const projectPushResult = await this.callbacks.pushProject(projectSnapshot, false, userId);
+      projectPushed = projectPushResult.success;
+      if (projectPushResult.conflict) {
+        this.syncState.setSyncing(false);
+        this.syncState.setSyncError('检测到版本冲突');
+        return {
+          success: false,
+          conflict: true,
+          remoteData: projectPushResult.remoteData,
+          projectPushed,
+          failedTaskIds,
+          failedConnectionIds,
+          retryEnqueued,
+        };
+      }
       if (!projectPushed) {
         retryEnqueued.push(`project:${projectSnapshot.id}`);
+        this.syncState.setSyncing(false);
+        this.syncState.setSyncError('项目元数据同步失败，已停止批量同步并等待重试');
+        return {
+          success: false,
+          projectPushed,
+          failedTaskIds,
+          failedConnectionIds,
+          retryEnqueued,
+        };
       }
       
       // 4. 批量保存任务（拓扑排序）
@@ -290,7 +350,8 @@ export class BatchSyncService {
               task.x,
               task.y,
               projectSnapshot.id,
-              task
+              task,
+              userId,
             );
             // 位置增量更新失败时，立即回退到完整 upsert，避免 406 导致依赖断裂
             if (!success) {
@@ -298,10 +359,10 @@ export class BatchSyncService {
                 projectId: projectSnapshot.id,
                 taskId: task.id
               });
-              success = await this.callbacks.pushTask(task, projectSnapshot.id, true);
+              success = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
             }
           } else {
-            success = await this.callbacks.pushTask(task, projectSnapshot.id, true);
+            success = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
           }
           
           if (success) {
@@ -360,7 +421,7 @@ export class BatchSyncService {
         });
         failedConnectionIds.push(blocked.id);
         retryEnqueued.push(`connection:${blocked.id}`);
-        this.callbacks.addToRetryQueue('connection', 'upsert', blocked, projectSnapshot.id);
+        this.callbacks.addToRetryQueue('connection', 'upsert', blocked, projectSnapshot.id, userId);
       }
       
       for (let i = 0; i < connectionsToSync.length; i++) {
@@ -368,7 +429,7 @@ export class BatchSyncService {
         
         try {
           const connection = connectionsToSync[i];
-          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false);
+          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false, false, userId);
           if (!pushed) {
             failedConnectionIds.push(connection.id);
             retryEnqueued.push(`connection:${connection.id}`);
@@ -409,6 +470,10 @@ export class BatchSyncService {
         retryEnqueued
       };
     } catch (e) {
+      if (!retryEnqueued.includes(`project:${project.id}`)) {
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+        retryEnqueued.push(`project:${project.id}`);
+      }
       this.logger.error('保存项目失败', e);
       this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'saveProjectToCloud' },

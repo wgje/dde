@@ -465,6 +465,7 @@ export class SyncStatusComponent {
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
   readonly queueFrozen = this.actionQueue.queueFrozen;
+  readonly legacyReviewCount = this.retryQueue.legacyReviewCount;
 
   constructor() {
     effect(() => {
@@ -557,7 +558,7 @@ export class SyncStatusComponent {
   /** 状态点颜色（互斥优先级：同步中 > 失败 > 警告 > 正常） */
   readonly statusDotClass = computed(() => {
     if (this.isSyncing()) return 'bg-blue-500';
-    if (this.deadLetterCount() > 0 || this.queueFrozen()) return 'bg-red-500';
+    if (this.deadLetterCount() > 0 || this.queueFrozen() || this.legacyReviewCount() > 0) return 'bg-red-500';
     if (!this.isOnline() || this.offlineMode() || this.pendingCount() > 0 || !this.isLoggedIn()) return 'bg-amber-500';
     return 'bg-green-500';
   });
@@ -573,6 +574,7 @@ export class SyncStatusComponent {
     this.deadLetterCount() > 0 ||
     this.pendingCount() > 0 ||
     this.queueFrozen() ||
+    this.legacyReviewCount() > 0 ||
     !!this.syncError() ||
     this.offlineMode() ||
     this.conflictCount() > 0
@@ -582,6 +584,7 @@ export class SyncStatusComponent {
     this.deadLetterCount() +
     (this.pendingCount() > 0 ? 1 : 0) +
     (this.queueFrozen() ? 1 : 0) +
+    (this.legacyReviewCount() > 0 ? 1 : 0) +
     (this.syncError() ? 1 : 0) +
     (this.offlineMode() ? 1 : 0) +
     this.conflictCount()
@@ -633,6 +636,9 @@ export class SyncStatusComponent {
     }
     if (this.queueFrozen()) {
       return '同步队列已冻结，请释放存储空间';
+    }
+    if (this.legacyReviewCount() > 0) {
+      return `${this.legacyReviewCount()} 个旧版离线同步项待确认`;
     }
     if (this.deadLetterCount() > 0) {
       return `${this.deadLetterCount()} 个操作失败`;

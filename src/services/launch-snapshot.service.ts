@@ -156,6 +156,16 @@ export class LaunchSnapshotService {
     }, PERSIST_DEBOUNCE_MS);
   }
 
+  cancelPendingPersist(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+
+    this.pendingCaptureArgs = null;
+    this.pendingSnapshot = null;
+  }
+
   flushPendingPersist(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);

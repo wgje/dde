@@ -13,7 +13,7 @@
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { GOJS_CONFIG } from '../../../../config';
+import { GOJS_CONFIG, LAYOUT_CONFIG } from '../../../../config';
 import * as go from 'gojs';
 
 /**
@@ -60,33 +60,90 @@ export class FlowLayoutService {
   }
   
   /**
-   * 应用自动布局（分层有向图布局）
+   * 应用自动布局（按阶段对齐）
+   * 同阶段的节点排列在同一列，保证任务按阶段数上下对应
    * @param options 布局选项
    */
   applyAutoLayout(options: LayoutOptions = {}): void {
     if (!this.diagram) return;
     
-    const $ = go.GraphObject.make;
     const {
-      direction = 0,
-      layerSpacing = GOJS_CONFIG.LAYER_SPACING,
-      columnSpacing = GOJS_CONFIG.COLUMN_SPACING
+      layerSpacing = LAYOUT_CONFIG.STAGE_SPACING,
+      columnSpacing = LAYOUT_CONFIG.ROW_SPACING
     } = options;
     
     // 【P1-12 根治】事务内同步完成布局 + 位置保存，不跨 setTimeout
     this.diagram.startTransaction('auto-layout');
-    this.diagram.layout = $(go.LayeredDigraphLayout, {
-      direction,
-      layerSpacing,
-      columnSpacing,
-      setsPortSpots: false
+    
+    // 按阶段分组节点
+    const stageGroups = new Map<number, go.Node[]>();
+    const unassignedNodes: go.Node[] = [];
+    
+    this.diagram.nodes.each((node: go.Node) => {
+      const data = node.data;
+      if (data?.stage != null && data.stage > 0) {
+        const list = stageGroups.get(data.stage) || [];
+        list.push(node);
+        stageGroups.set(data.stage, list);
+      } else {
+        unassignedNodes.push(node);
+      }
     });
-    this.diagram.layoutDiagram(true);
+    
+    // 从连线构建父子关系映射
+    const parentMap = new Map<string, string>();
+    this.diagram.links.each((link: go.Link) => {
+      const fromData = link.fromNode?.data;
+      const toData = link.toNode?.data;
+      if (fromData?.key && toData?.key && !link.data?.isCrossTree) {
+        parentMap.set(toData.key, fromData.key);
+      }
+    });
+    
+    // 获取排序后的阶段编号
+    const stageNums = Array.from(stageGroups.keys()).sort((a, b) => a - b);
+    
+    // 逐阶段定位节点，同阶段的节点在同一列
+    const nodeYMap = new Map<string, number>();
+    
+    for (let stageIdx = 0; stageIdx < stageNums.length; stageIdx++) {
+      const stage = stageNums[stageIdx];
+      const nodes = stageGroups.get(stage)!;
+      
+      // 按父节点 Y 位置排序（减少连线交叉），同父则按 rank 排序
+      nodes.sort((a, b) => {
+        const aParent = parentMap.get(a.data.key);
+        const bParent = parentMap.get(b.data.key);
+        const aParentY = aParent ? (nodeYMap.get(aParent) ?? 0) : 0;
+        const bParentY = bParent ? (nodeYMap.get(bParent) ?? 0) : 0;
+        if (aParentY !== bParentY) return aParentY - bParentY;
+        return (a.data.rank || 0) - (b.data.rank || 0);
+      });
+      
+      const x = stageIdx * layerSpacing;
+      for (let j = 0; j < nodes.length; j++) {
+        const y = j * columnSpacing;
+        nodes[j].location = new go.Point(x, y);
+        nodeYMap.set(nodes[j].data.key, y);
+      }
+    }
+    
+    // 未分配阶段的节点放在所有阶段列的右侧
+    if (unassignedNodes.length > 0) {
+      const unassignedX = stageNums.length > 0
+        ? stageNums.length * layerSpacing
+        : 0;
+      unassignedNodes.sort((a, b) => (a.data.rank || 0) - (b.data.rank || 0));
+      for (let j = 0; j < unassignedNodes.length; j++) {
+        const y = j * columnSpacing;
+        unassignedNodes[j].location = new go.Point(unassignedX, y);
+      }
+    }
+    
     this.saveAllNodePositions();
-    this.diagram.layout = $(go.Layout);
     this.diagram.commitTransaction('auto-layout');
     
-    this.logger.info('自动布局已应用');
+    this.logger.info('自动布局已应用（按阶段对齐）');
   }
   
   /**

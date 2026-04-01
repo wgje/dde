@@ -1,0 +1,668 @@
+import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { Injector, runInInjectionContext } from '@angular/core';
+import { ProjectOperationService } from './project-operation.service';
+import { ProjectStateService } from './project-state.service';
+import { SyncCoordinatorService } from './sync-coordinator.service';
+import { UserSessionService } from './user-session.service';
+import { ActionQueueService } from './action-queue.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { OptimisticStateService } from './optimistic-state.service';
+import { LayoutService } from './layout.service';
+import { UndoService } from './undo.service';
+import { ToastService } from './toast.service';
+import { LoggerService } from './logger.service';
+import { ChangeTrackerService } from './change-tracker.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { AUTH_CONFIG } from '../config/auth.config';
+import type { Project } from '../models';
+
+function createProject(overrides: Partial<Project> = {}): Project {
+  const now = '2026-03-30T00:00:00.000Z';
+  return {
+    id: overrides.id ?? 'proj-1',
+    name: overrides.name ?? 'Project',
+    description: overrides.description ?? '',
+    createdDate: overrides.createdDate ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+    version: overrides.version ?? 1,
+    tasks: overrides.tasks ?? [],
+    connections: overrides.connections ?? [],
+    ...overrides,
+  };
+}
+
+describe('ProjectOperationService', () => {
+  let service: ProjectOperationService;
+
+  const mockProjectState = {
+    projects: vi.fn<Project[]>(() => []),
+    updateProjects: vi.fn(),
+    setActiveProjectId: vi.fn(),
+    activeProjectId: vi.fn(() => null),
+    getProject: vi.fn(() => undefined),
+  };
+
+  const mockSyncCoordinator = {
+    core: {
+      saveProjectSmart: vi.fn().mockResolvedValue({ success: false, conflict: false }),
+      deleteProjectFromCloud: vi.fn().mockResolvedValue(false),
+      saveOfflineSnapshot: vi.fn(),
+    },
+    conflictData: vi.fn(() => null),
+    resolveConflict: vi.fn().mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) }),
+    validateAndRebalance: vi.fn((project: Project) => project),
+    captureConflict: vi.fn().mockResolvedValue(undefined),
+    clearActiveConflict: vi.fn(),
+    loadSingleProjectFromCloud: vi.fn().mockResolvedValue(null),
+    markLocalChanges: vi.fn(),
+    schedulePersist: vi.fn(),
+  };
+
+  const mockUserSession = {
+    currentUserId: vi.fn(() => AUTH_CONFIG.LOCAL_MODE_USER_ID),
+    getCurrentSessionGeneration: vi.fn(() => 1),
+    isSessionContextCurrent: vi.fn(() => true),
+  };
+
+  const mockActionQueue = {
+    enqueue: vi.fn(),
+    enqueueForOwner: vi.fn().mockResolvedValue('queued-old-owner'),
+    discardActions: vi.fn(),
+  };
+
+  const mockRetryQueue = {
+    removeByProjectId: vi.fn(),
+  };
+
+  const mockConflictStorage = {
+    getConflict: vi.fn().mockResolvedValue(null),
+    saveConflict: vi.fn().mockResolvedValue(true),
+    deleteConflict: vi.fn().mockResolvedValue(true),
+  };
+
+  const mockOptimisticState = {
+    createSnapshot: vi.fn(() => ({ id: 'snap-1' })),
+    commitSnapshot: vi.fn(),
+  };
+
+  const mockLayout = {
+    rebalance: vi.fn((project: Project) => project),
+  };
+
+  const mockUndo = { clearHistory: vi.fn() };
+
+  const mockChangeTracker = {
+    clearProjectFieldLocks: vi.fn(),
+    clearProjectChanges: vi.fn(),
+  };
+
+  const mockToast = {
+    info: vi.fn(),
+    success: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  };
+
+  const mockLoggerService = {
+    category: vi.fn(() => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    })),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockProjectState.projects.mockReturnValue([]);
+    mockUserSession.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    mockUserSession.getCurrentSessionGeneration.mockReturnValue(1);
+    mockUserSession.isSessionContextCurrent.mockReturnValue(true);
+    mockSyncCoordinator.core.saveProjectSmart.mockReset();
+    mockSyncCoordinator.resolveConflict.mockReset();
+    mockSyncCoordinator.captureConflict.mockReset();
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockReset();
+    mockConflictStorage.getConflict.mockReset();
+    mockConflictStorage.saveConflict.mockReset();
+    mockConflictStorage.deleteConflict.mockReset();
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValue({ success: false, conflict: false });
+    mockSyncCoordinator.resolveConflict.mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) });
+    mockSyncCoordinator.captureConflict.mockResolvedValue(undefined);
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValue(null);
+    mockConflictStorage.getConflict.mockResolvedValue(null);
+    mockConflictStorage.saveConflict.mockResolvedValue(true);
+    mockConflictStorage.deleteConflict.mockResolvedValue(true);
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectOperationService, useClass: ProjectOperationService },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
+        { provide: UserSessionService, useValue: mockUserSession },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: RetryQueueService, useValue: mockRetryQueue },
+        { provide: ConflictStorageService, useValue: mockConflictStorage },
+        { provide: OptimisticStateService, useValue: mockOptimisticState },
+        { provide: LayoutService, useValue: mockLayout },
+        { provide: UndoService, useValue: mockUndo },
+        { provide: ToastService, useValue: mockToast },
+        { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
+      ],
+    });
+
+    service = runInInjectionContext(injector, () => injector.get(ProjectOperationService));
+  });
+
+  it('本地模式创建项目失败时不应写入云端 ActionQueue', async () => {
+    await service.addProject(createProject({ id: 'proj-local-only' }));
+
+    expect(mockSyncCoordinator.core.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockOptimisticState.commitSnapshot).toHaveBeenCalled();
+    expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
+    expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
+  });
+
+  it('认证用户离线创建项目时应保留 synced 标记并进入 create 队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: false, conflict: false });
+
+    await service.addProject(createProject({ id: 'proj-cloud-offline' }));
+
+    const updater = mockProjectState.updateProjects.mock.calls[0]?.[0] as ((projects: Project[]) => Project[]);
+    const updatedProjects = updater([]);
+    expect(updatedProjects[0]).toEqual(expect.objectContaining({
+      id: 'proj-cloud-offline',
+      syncSource: 'synced',
+      pendingSync: true,
+    }));
+    expect(mockActionQueue.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'create',
+      entityType: 'project',
+      entityId: 'proj-cloud-offline',
+      payload: expect.objectContaining({
+        sourceUserId: 'user-1',
+        project: expect.objectContaining({
+          syncSource: 'synced',
+          pendingSync: true,
+        }),
+      }),
+    }));
+  });
+
+  it('导入项目的旧会话非冲突失败结果应写回原 owner 队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(undefined);
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: false, conflict: false });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-stale-failure' }));
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'create',
+      entityType: 'project',
+      entityId: 'proj-import-stale-failure',
+      payload: expect.objectContaining({
+        sourceUserId: 'user-1',
+        project: expect.objectContaining({
+          id: 'proj-import-stale-failure',
+          syncSource: 'synced',
+          pendingSync: true,
+        }),
+      }),
+    }));
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('导入项目的旧会话异常结果应写回原 owner 的 update 队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-import-stale-error', name: 'Existing Import' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockRejectedValueOnce(new Error('network down'));
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-stale-error', name: 'Imported Error' }));
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'update',
+      entityType: 'project',
+      entityId: 'proj-import-stale-error',
+      payload: expect.objectContaining({
+        sourceUserId: 'user-1',
+        project: expect.objectContaining({
+          id: 'proj-import-stale-error',
+          syncSource: 'synced',
+          pendingSync: true,
+        }),
+      }),
+    }));
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('创建项目的旧会话失败结果应写回原 owner 队列而不是当前会话', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: false, conflict: false });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.addProject(createProject({ id: 'proj-stale-create' }));
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'create',
+      entityType: 'project',
+      entityId: 'proj-stale-create',
+      payload: expect.objectContaining({
+        sourceUserId: 'user-1',
+        project: expect.objectContaining({
+          id: 'proj-stale-create',
+          syncSource: 'synced',
+          pendingSync: true,
+        }),
+      }),
+    }));
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('删除项目的旧会话异常结果应写回原 owner 队列而不是当前会话', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.deleteProjectFromCloud.mockRejectedValueOnce(new Error('network down'));
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.deleteProject('proj-stale-delete');
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'delete',
+      entityType: 'project',
+      entityId: 'proj-stale-delete',
+      payload: expect.objectContaining({
+        projectId: 'proj-stale-delete',
+        userId: 'user-1',
+        sourceUserId: 'user-1',
+      }),
+    }));
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('导入现有项目在云端保存失败时应进入 project:update 队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-1', name: 'Existing' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: false, conflict: false });
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-1', name: 'Imported' }));
+
+    expect(result.success).toBe(true);
+    expect(mockActionQueue.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'update',
+      entityType: 'project',
+      entityId: 'proj-1',
+      payload: expect.objectContaining({ sourceUserId: 'user-1' }),
+    }));
+  });
+
+  it('导入现有项目遇到冲突时应接入统一冲突链', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-1', name: 'Existing' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: createProject({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+    });
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-1', name: 'Imported' }));
+
+    expect(result.success).toBe(false);
+    expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
+      expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+      'user-1'
+    );
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('导入冲突缺少 remoteData 时应补拉远端版本再进入冲突链', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-1', name: 'Existing' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(
+      createProject({ id: 'proj-1', name: 'Remote Existing', version: 2 })
+    );
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-1', name: 'Imported' }));
+
+    expect(result.success).toBe(false);
+    expect(mockSyncCoordinator.loadSingleProjectFromCloud).toHaveBeenCalledWith('proj-1');
+    expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
+      expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+      'user-1'
+    );
+  });
+
+  it('导入项目的冲突结果若已属于旧会话，不应注入当前冲突链', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-1', name: 'Existing' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: createProject({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-1', name: 'Imported' }));
+
+    expect(result.success).toBe(true);
+    expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
+    expect(mockConflictStorage.saveConflict).not.toHaveBeenCalled();
+    expect(mockToast.warning).not.toHaveBeenCalledWith('导入存在冲突', expect.any(String));
+  });
+
+  it('冲突解决时若项目不在当前列表，应将 resolvedProject upsert 回本地状态', async () => {
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-missing',
+      localProject: createProject({ id: 'proj-missing', name: 'Local Missing' }),
+      remoteProject: createProject({ id: 'proj-missing', name: 'Remote Missing' }),
+    });
+    mockProjectState.getProject.mockReturnValue(undefined);
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-missing', name: 'Resolved Missing' }),
+    });
+
+    await service.resolveConflict('proj-missing', 'local');
+
+    const finalProjects = mockProjectState.updateProjects.mock.calls.reduce((projects, call) => {
+      const updater = call[0] as ((items: Project[]) => Project[]);
+      return updater(projects);
+    }, [] as Project[]);
+    expect(finalProjects).toEqual([
+      expect.objectContaining({ id: 'proj-missing', name: 'Resolved Missing' }),
+    ]);
+  });
+
+  it('remote 解决冲突前应尝试补拉远端版本', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-remote',
+      local: createProject({ id: 'proj-remote', name: 'Local Only Conflict' }),
+      remote: undefined,
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-remote',
+      localProject: createProject({ id: 'proj-remote', name: 'Local Only Conflict' }),
+    });
+    mockProjectState.getProject.mockReturnValue(undefined);
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(
+      createProject({ id: 'proj-remote', name: 'Remote Reloaded', version: 5 })
+    );
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-remote', name: 'Remote Reloaded', version: 5 }),
+    });
+
+    await service.resolveConflict('proj-remote', 'remote');
+
+    expect(mockSyncCoordinator.loadSingleProjectFromCloud).toHaveBeenCalledWith('proj-remote');
+    expect(mockSyncCoordinator.resolveConflict).toHaveBeenCalledWith(
+      'proj-remote',
+      'remote',
+      expect.objectContaining({ id: 'proj-remote', name: 'Local Only Conflict' }),
+      expect.objectContaining({ id: 'proj-remote', name: 'Remote Reloaded', version: 5 })
+    );
+    expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
+  });
+
+  it('resolveConflict 若会话已切换，不应继续回写本地状态或删除冲突', async () => {
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-switched',
+      localProject: createProject({ id: 'proj-switched', name: 'Local Switched' }),
+      remoteProject: createProject({ id: 'proj-switched', name: 'Remote Switched', version: 2 }),
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.resolveConflict('proj-switched', 'local');
+
+    expect(result).toBe(false);
+    expect(mockSyncCoordinator.resolveConflict).not.toHaveBeenCalled();
+    expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+    expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
+  });
+
+  it('冲突解决成功后应回写同步状态并清理脏标记', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-success',
+      local: createProject({ id: 'proj-success', name: 'Local Conflict', pendingSync: true }),
+      remote: createProject({ id: 'proj-success', name: 'Remote Conflict', version: 3 }),
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-success',
+      localProject: createProject({ id: 'proj-success', name: 'Local Conflict', pendingSync: true }),
+      remoteProject: createProject({ id: 'proj-success', name: 'Remote Conflict', version: 3 }),
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-success', name: 'Local Conflict', pendingSync: true }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-success', name: 'Resolved Success', version: 4, pendingSync: true }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: true,
+      newVersion: 9,
+    });
+
+    await service.resolveConflict('proj-success', 'local');
+
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(updater([createProject({ id: 'proj-success', name: 'Resolved Success', pendingSync: true })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-success',
+        version: 9,
+        syncSource: 'synced',
+        pendingSync: false,
+      }),
+    ]);
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-success');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-success');
+    expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-success');
+  });
+
+  it('解决冲突后二次冲突且缺少 remoteData 时应降级为 stale 冲突记录', async () => {
+    const existingRemote = createProject({ id: 'proj-conflict', name: 'Remote Existing', version: 4 });
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-conflict',
+      local: createProject({ id: 'proj-conflict', name: 'Local Existing' }),
+      remote: existingRemote,
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-conflict',
+      localProject: createProject({ id: 'proj-conflict', name: 'Local Existing' }),
+      remoteProject: existingRemote,
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-conflict', name: 'Local Existing' }));
+    mockProjectState.activeProjectId.mockReturnValue('proj-conflict');
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-conflict', name: 'Resolved Local', version: 5 }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+
+    await service.resolveConflict('proj-conflict', 'local');
+
+    expect(mockConflictStorage.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'proj-conflict',
+      localProject: expect.objectContaining({ id: 'proj-conflict', name: 'Resolved Local', version: 5 }),
+      remoteProject: expect.objectContaining({ id: 'proj-conflict', name: 'Remote Existing', version: 4 }),
+      remoteSnapshotFresh: false,
+    }));
+    expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
+  });
+
+  it('解决冲突后的二次冲突若已属于旧会话，不应写入当前冲突链', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-conflict-stale',
+      local: createProject({ id: 'proj-conflict-stale', name: 'Local Existing' }),
+      remote: createProject({ id: 'proj-conflict-stale', name: 'Remote Existing', version: 4 }),
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-conflict-stale',
+      localProject: createProject({ id: 'proj-conflict-stale', name: 'Local Existing' }),
+      remoteProject: createProject({ id: 'proj-conflict-stale', name: 'Remote Existing', version: 4 }),
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-conflict-stale', name: 'Local Existing' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-conflict-stale', name: 'Resolved Local', version: 5 }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: createProject({ id: 'proj-conflict-stale', name: 'Remote Existing', version: 6 }),
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.resolveConflict('proj-conflict-stale', 'local');
+
+    expect(result).toBe(false);
+    expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
+    expect(mockConflictStorage.saveConflict).not.toHaveBeenCalled();
+    expect(mockToast.error).not.toHaveBeenCalledWith('同步冲突', expect.any(String));
+  });
+
+  it('冲突 fallback 落盘后若会话已切换，不应清空当前 active conflict', async () => {
+    const fallbackRemote = createProject({ id: 'proj-conflict-fallback-stale', name: 'Remote Existing', version: 4 });
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-conflict-fallback-stale',
+      local: createProject({ id: 'proj-conflict-fallback-stale', name: 'Local Existing' }),
+      remote: fallbackRemote,
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-conflict-fallback-stale',
+      localProject: createProject({ id: 'proj-conflict-fallback-stale', name: 'Local Existing' }),
+      remoteProject: fallbackRemote,
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-conflict-fallback-stale', name: 'Local Existing' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-conflict-fallback-stale', name: 'Resolved Local', version: 5 }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+    });
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(null);
+
+    const sessionStates = [true, true, true, true, true, true, false];
+    mockUserSession.isSessionContextCurrent.mockImplementation(() => sessionStates.shift() ?? false);
+
+    const result = await service.resolveConflict('proj-conflict-fallback-stale', 'local');
+
+    expect(result).toBe(true);
+    expect(mockConflictStorage.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'proj-conflict-fallback-stale',
+      remoteSnapshotFresh: false,
+    }));
+    expect(mockSyncCoordinator.clearActiveConflict).not.toHaveBeenCalled();
+    expect(mockToast.error).not.toHaveBeenCalledWith('同步冲突', expect.any(String));
+  });
+
+  it('stale remote 快照不应直接用于下一次 remote 解决', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-stale',
+      local: createProject({ id: 'proj-stale', name: 'Local Stale' }),
+      remote: undefined,
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-stale',
+      localProject: createProject({ id: 'proj-stale', name: 'Local Stale' }),
+      remoteProject: createProject({ id: 'proj-stale', name: 'Old Remote', version: 4 }),
+      remoteSnapshotFresh: false,
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-stale', name: 'Local Stale' }));
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(null);
+
+    await service.resolveConflict('proj-stale', 'remote');
+
+    expect(mockSyncCoordinator.resolveConflict).not.toHaveBeenCalled();
+    expect(mockToast.error).toHaveBeenCalledWith('冲突解决失败', '远端版本暂不可用，请稍后重试，或先保留本地版本');
+  });
+
+  it('缺少 freshness 标记的存量 remote 快照也应重新拉取', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-unknown-freshness',
+      local: createProject({ id: 'proj-unknown-freshness', name: 'Local Unknown' }),
+      remote: undefined,
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-unknown-freshness',
+      localProject: createProject({ id: 'proj-unknown-freshness', name: 'Local Unknown' }),
+      remoteProject: createProject({ id: 'proj-unknown-freshness', name: 'Old Remote', version: 4 }),
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-unknown-freshness', name: 'Local Unknown' }));
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(null);
+
+    await service.resolveConflict('proj-unknown-freshness', 'remote');
+
+    expect(mockSyncCoordinator.loadSingleProjectFromCloud).toHaveBeenCalledWith('proj-unknown-freshness');
+    expect(mockSyncCoordinator.resolveConflict).not.toHaveBeenCalled();
+  });
+
+  it('active conflict 自带 remote 快照时应优先使用，不受存量 freshness 标记影响', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-active-remote',
+      local: createProject({ id: 'proj-active-remote', name: 'Local Active' }),
+      remote: createProject({ id: 'proj-active-remote', name: 'Fresh Active Remote', version: 6 }),
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-active-remote',
+      localProject: createProject({ id: 'proj-active-remote', name: 'Local Active' }),
+      remoteProject: createProject({ id: 'proj-active-remote', name: 'Stale Stored Remote', version: 3 }),
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-active-remote', name: 'Local Active' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-active-remote', name: 'Fresh Active Remote', version: 6 }),
+    });
+
+    await service.resolveConflict('proj-active-remote', 'remote');
+
+    expect(mockSyncCoordinator.loadSingleProjectFromCloud).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.resolveConflict).toHaveBeenCalledWith(
+      'proj-active-remote',
+      'remote',
+      expect.objectContaining({ id: 'proj-active-remote', name: 'Local Active' }),
+      expect.objectContaining({ id: 'proj-active-remote', name: 'Fresh Active Remote', version: 6 })
+    );
+  });
+
+  it('fresh remoteData 仍应直接进入统一冲突链', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-1', name: 'Existing' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: createProject({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+    });
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-1', name: 'Imported' }));
+
+    expect(result.success).toBe(false);
+    expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
+      expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
+      'user-1'
+    );
+  });
+});

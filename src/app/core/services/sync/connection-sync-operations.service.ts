@@ -55,7 +55,8 @@ export class ConnectionSyncOperationsService {
     type: 'task' | 'project' | 'connection',
     operation: 'upsert' | 'delete',
     data: Connection | { id: string },
-    projectId?: string
+    projectId?: string,
+    sourceUserId?: string,
   ): void {
     if (this.syncStateService.isSessionExpired()) return;
     if (!data?.id) {
@@ -66,7 +67,7 @@ export class ConnectionSyncOperationsService {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId);
     if (enqueued) {
       this.syncStateService.setPendingCount(this.retryQueueService.length);
     } else {
@@ -136,13 +137,14 @@ export class ConnectionSyncOperationsService {
     projectId: string, 
     skipTombstoneCheck = false, 
     skipTaskExistenceCheck = false, 
-    fromRetryQueue = false
+    fromRetryQueue = false,
+    sourceUserId?: string,
   ): Promise<boolean> {
     // 会话过期检查 — 【P0-06 修复】会话过期时入重试队列，防止数据丢失
     if (this.syncStateService.isSessionExpired()) {
       this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
       }
       return false;
     }
@@ -151,7 +153,7 @@ export class ConnectionSyncOperationsService {
     if (!this.retryQueueService.checkCircuitBreaker()) {
       this.logger.debug('Circuit Breaker: 熔断中，跳过连接推送', { connectionId: connection.id });
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
       }
       return false;
     }
@@ -159,7 +161,7 @@ export class ConnectionSyncOperationsService {
     const client = this.getSupabaseClient();
     if (!client) {
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
       }
       return false;
     }
@@ -167,14 +169,27 @@ export class ConnectionSyncOperationsService {
     try {
       // 验证用户会话
       const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
+      const sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
         this.syncStateService.setSessionExpired(true);
         this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
         // 【P0-06 修复】会话丢失时入队重试，防止连接数据永久丢失
         if (!fromRetryQueue) {
-          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+        }
+        return false;
+      }
+
+      if (sourceUserId && sessionUserId !== sourceUserId) {
+        this.logger.warn('检测到连接同步归属与当前会话不匹配，已拒绝云端写入', {
+          connectionId: connection.id,
+          projectId,
+          sourceUserId,
+          sessionUserId,
+        });
+        if (!fromRetryQueue) {
+          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
         }
         return false;
       }
@@ -206,7 +221,7 @@ export class ConnectionSyncOperationsService {
         
         if (!validationResult.valid) {
           if (!fromRetryQueue) {
-            this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+            this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
           }
           return false;
         }
@@ -272,7 +287,7 @@ export class ConnectionSyncOperationsService {
       
       return true;
     } catch (e) {
-      return this.handlePushConnectionError(e, connection, projectId, fromRetryQueue);
+      return this.handlePushConnectionError(e, connection, projectId, fromRetryQueue, sourceUserId);
     }
   }
   
@@ -372,7 +387,8 @@ export class ConnectionSyncOperationsService {
     e: unknown,
     connection: Connection,
     projectId: string,
-    fromRetryQueue: boolean
+    fromRetryQueue: boolean,
+    sourceUserId?: string,
   ): boolean {
     const enhanced = supabaseErrorToError(e);
     
@@ -416,7 +432,7 @@ export class ConnectionSyncOperationsService {
       });
 
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
       }
       
       return false;
@@ -451,7 +467,7 @@ export class ConnectionSyncOperationsService {
     
     // 加入重试队列
     if (enhanced.isRetryable && !fromRetryQueue) {
-      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId);
+      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
     } else if (!enhanced.isRetryable) {
       this.logger.warn('不可重试的错误，不加入重试队列', {
         connectionId: connection.id,

@@ -16,12 +16,10 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateOverlayComponent } from './components/gate/gate-overlay.component';
-import { SpotlightViewComponent } from './components/spotlight/spotlight-view.component';
 import { GateService } from '../../../services/gate.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { 
   gateState, 
-  spotlightMode, 
   focusPreferences 
 } from '../../../state/focus-stores';
 import { LoggerService } from '../../../services/logger.service';
@@ -35,7 +33,6 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
   imports: [
     CommonModule,
     GateOverlayComponent,
-    SpotlightViewComponent
   ],
   template: `
     <!-- 大门覆盖层 - 优先级最高，包含地质层预览 -->
@@ -43,12 +40,6 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
       <app-gate-overlay
         (closed)="onGateClosed()">
       </app-gate-overlay>
-    }
-
-    <!-- 聚光灯模式 -->
-    @if (isSpotlightActive()) {
-      <app-spotlight-view>
-      </app-spotlight-view>
     }
   `,
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -78,10 +69,6 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     gateState() === 'reviewing' && focusPreferences().gateEnabled
   );
 
-  readonly isSpotlightActive = computed(() => 
-    spotlightMode() && focusPreferences().spotlightEnabled
-  );
-
   ngOnInit(): void {
     this.ensureFocusAnimationStyleLoaded();
     this.logger.debug('FocusMode', '初始化');
@@ -94,7 +81,7 @@ export class FocusModeComponent implements OnInit, OnDestroy {
 
     if (FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
       // 默认路径下，启动探针负责 gate 判断，全局同步链路负责黑匣子拉取。
-      // FocusModeComponent 只负责渲染 gate / spotlight，避免在专注模式关闭时
+      // FocusModeComponent 只负责渲染 gate，避免在专注模式关闭时
       // 因重复 gate probe 或 resume recheck 出现突发 blur。
       this.logger.debug('FocusMode', 'throttled 路径下保持被动，启动探针接管 gate 检查');
       return;

@@ -114,8 +114,7 @@ export class AppProjectCoordinatorService {
     const projectId = this.renamingProjectId();
     const rawName = this.renameProjectName();
     const newName = (typeof rawName === 'string' ? rawName : '').trim();
-    if (projectId && newName && newName !== this.originalProjectName) {
-      this.projectState.renameProject(projectId, newName);
+    if (projectId && newName && newName !== this.originalProjectName && this.projectOps.renameProject(projectId, newName)) {
       this.toast.success('项目重命名成功');
     }
     this.cancelRenameProject();
@@ -233,10 +232,12 @@ export class AppProjectCoordinatorService {
   async handleImportComplete(project: Project): Promise<void> {
     const existingProject = this.projectState.getProject(project.id);
     if (existingProject) {
-      this.projectState.updateProjects(projects =>
-        projects.map(p => p.id === project.id ? project : p)
-      );
-      this.toast.success('导入成功', `项目 "${project.name}" 已更新`);
+      const result = await this.projectOps.upsertImportedProject(project);
+      if (result.success) {
+        this.toast.success('导入成功', `项目 "${project.name}" 已更新`);
+      } else {
+        this.toast.error('导入失败', `无法更新项目 "${project.name}"`);
+      }
     } else {
       const result = await this.projectOps.addProject(project);
       if (result.success) {

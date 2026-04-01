@@ -37,6 +37,7 @@ import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
 import { Project } from '../models';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
@@ -167,6 +168,10 @@ export class SyncCoordinatorService {
   });
   
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private localSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushPendingPersistPromise: Promise<boolean> | null = null;
+  private persistActiveProjectPromise: Promise<void> | null = null;
+  private localChangeVersion = 0;
   
   /** 
    * 冲突事件 Subject - 使用发布-订阅模式替代回调
@@ -200,6 +205,8 @@ export class SyncCoordinatorService {
   private readonly projectManifestWatermarkKeyPrefix = 'nanoflow.project-manifest-watermark';
   /** 黑匣子同步水位本地缓存键前缀（按用户隔离） */
   private readonly blackBoxManifestWatermarkKeyPrefix = 'nanoflow.blackbox-manifest-watermark';
+  private authContextGeneration = 0;
+  private lastObservedAuthUserId: string | null | undefined = undefined;
 
   constructor() {
     // 【性能审计 2026-02-07】延迟初始化：构造函数仅注入依赖，不启动副作用
@@ -207,6 +214,9 @@ export class SyncCoordinatorService {
     this.destroyRef.onDestroy(() => {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer);
+      }
+      if (this.localSnapshotTimer) {
+        clearTimeout(this.localSnapshotTimer);
       }
       this.persistScheduler.stopLocalAutosave();
       this.destroy();
@@ -224,6 +234,9 @@ export class SyncCoordinatorService {
     if (this.isInitialized) return;
     this.isInitialized = true;
 
+    this.actionQueueProcessors.setProjectConflictHandler((localProject, remoteProject, ownerUserId) => {
+      this.publishConflict(localProject, remoteProject, ownerUserId);
+    });
     this.actionQueueProcessors.setupProcessors();
     this.validateRequiredProcessors();
     this.startLocalAutosave();
@@ -485,11 +498,51 @@ export class SyncCoordinatorService {
    * 标记有本地变更待同步
    */
   markLocalChanges(updateType: 'content' | 'structure' | 'position' = 'structure') {
+    this.localChangeVersion += 1;
     this.persistState.update(s => ({
       ...s,
       hasPendingLocalChanges: true,
       lastUpdateType: updateType
     }));
+
+    this.markActiveProjectPendingSync();
+    this.scheduleLocalSnapshotSave();
+  }
+
+  private markActiveProjectPendingSync(): void {
+    const activeProjectId = this.projectState.activeProjectId() ?? this.projectState.activeProject()?.id ?? null;
+    if (!activeProjectId) {
+      return;
+    }
+
+    this.projectState.updateProjects(projects => projects.map(project => {
+      if (project.id !== activeProjectId || project.pendingSync === true) {
+        return project;
+      }
+
+      return {
+        ...project,
+        pendingSync: true,
+      };
+    }));
+  }
+
+  private scheduleLocalSnapshotSave(): void {
+    if (this.localSnapshotTimer) {
+      clearTimeout(this.localSnapshotTimer);
+    }
+
+    const debounceMs = Math.max(250, Math.min(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL, 1000));
+    this.localSnapshotTimer = setTimeout(() => {
+      this.localSnapshotTimer = null;
+      const projects = this.projectState.projects();
+      if (projects.length === 0) {
+        return;
+      }
+
+      this.core.saveOfflineSnapshot(projects);
+      this.logger.debug('本地快照已提前保存', { projectCount: projects.length });
+    }, debounceMs);
   }
   
   /**
@@ -517,6 +570,7 @@ export class SyncCoordinatorService {
    * 调度持久化
    */
   schedulePersist() {
+    this.scheduleLocalSnapshotSave();
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
     }
@@ -532,9 +586,14 @@ export class SyncCoordinatorService {
    * 注意：这是同步方法，只保存到本地缓存
    */
   flushPendingPersist(): void {
+    const hadScheduledPersist = this.persistTimer !== null;
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
+    }
+    if (this.localSnapshotTimer) {
+      clearTimeout(this.localSnapshotTimer);
+      this.localSnapshotTimer = null;
     }
     
     // 同步保存到本地缓存（不等待云端）
@@ -543,6 +602,157 @@ export class SyncCoordinatorService {
       this.core.saveOfflineSnapshot(projects);
       this.logger.info('页面卸载前已保存本地缓存', { projectCount: projects.length });
     }
+
+    const shouldAttemptRemoteFlush = hadScheduledPersist || this.persistState().hasPendingLocalChanges;
+    if (!shouldAttemptRemoteFlush) {
+      return;
+    }
+
+    void this.flushPendingPersistToCloud('before-unload');
+  }
+
+  async preparePendingPersistForOwnerChange(ownerUserId: string | null, reason: string): Promise<boolean> {
+    const hadScheduledPersist = this.persistTimer !== null || this.localSnapshotTimer !== null;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (this.localSnapshotTimer) {
+      clearTimeout(this.localSnapshotTimer);
+      this.localSnapshotTimer = null;
+    }
+
+    const projects = this.projectState.projects();
+    if (projects.length > 0) {
+      this.core.saveOfflineSnapshot(projects, ownerUserId);
+      this.logger.info('切换账号前已保存本地快照', {
+        projectCount: projects.length,
+        ownerUserId,
+        reason,
+      });
+    }
+
+    if (this.persistActiveProjectPromise) {
+      await this.persistActiveProjectPromise;
+    }
+
+    const activeProjectId = this.projectState.activeProject()?.id ?? null;
+
+    const hasPendingLocalChanges = this.persistState().hasPendingLocalChanges;
+    if (!hadScheduledPersist && !hasPendingLocalChanges) {
+      return !this.hasProtectedOfflineProjects();
+    }
+
+    const flushedToCloud = await this.flushPendingPersistToCloud(reason);
+    const activeProjectHandled = flushedToCloud || !this.persistState().hasPendingLocalChanges;
+    if (activeProjectHandled) {
+      return !this.hasProtectedOfflineProjects(
+        activeProjectId ? new Set([activeProjectId]) : undefined,
+      );
+    }
+
+    const handoffPrepared = await this.handoffPendingProjectToOwnerQueue(ownerUserId, reason);
+    if (!handoffPrepared) {
+      return false;
+    }
+
+    return !this.hasProtectedOfflineProjects(
+      activeProjectId ? new Set([activeProjectId]) : undefined,
+    );
+  }
+
+  private hasProtectedOfflineProjects(excludedProjectIds?: Set<string>): boolean {
+    return this.projectState.projects().some(project => {
+      if (excludedProjectIds?.has(project.id)) {
+        return false;
+      }
+
+      return project.pendingSync === true || project.syncSource === 'local-only';
+    });
+  }
+
+  private async handoffPendingProjectToOwnerQueue(ownerUserId: string | null, reason: string): Promise<boolean> {
+    const project = this.projectState.activeProject();
+    if (!project) {
+      return false;
+    }
+
+    if (!ownerUserId || ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID || project.syncSource === 'local-only') {
+      this.logger.info('切换账号前保留 owner 隔离快照作为最后副本', {
+        projectId: project.id,
+        ownerUserId,
+        syncSource: project.syncSource,
+        reason,
+      });
+      return false;
+    }
+
+    await this.actionQueue.enqueueForOwner(ownerUserId, {
+      type: 'update',
+      entityType: 'project',
+      entityId: project.id,
+      payload: {
+        project: {
+          ...project,
+          syncSource: 'synced',
+          pendingSync: true,
+        },
+        sourceUserId: ownerUserId,
+      }
+    });
+    this.logger.info('切换账号前已将待持久化项目转交原 owner 队列', {
+      projectId: project.id,
+      ownerUserId,
+      reason,
+    });
+    return true;
+  }
+
+  /**
+   * 在页面切入后台/卸载前抢发一次云端持久化。
+   * 同步本地快照仍是第一优先级；此方法仅在有待同步改动且在线时尝试补齐跨设备可见性。
+   */
+  async flushPendingPersistToCloud(reason: string): Promise<boolean> {
+    if (this.flushPendingPersistPromise) {
+      return this.flushPendingPersistPromise;
+    }
+
+    const state = this.persistState();
+    const hasPendingTimer = this.persistTimer !== null;
+    const hasPendingLocalChanges = state.hasPendingLocalChanges;
+    if (!hasPendingTimer && !hasPendingLocalChanges) {
+      return false;
+    }
+
+    if (state.isPersisting) {
+      this.persistState.update(s => ({
+        ...s,
+        hasPending: true,
+        hasPendingLocalChanges: true,
+      }));
+      this.logger.debug('后台刷盘时已有持久化在进行，跳过重复触发', { reason });
+      return false;
+    }
+
+    const userId = this.authService.currentUserId();
+    if (!userId) {
+      this.logger.debug('后台刷盘缺少有效用户，仅保留本地快照', { reason });
+      return false;
+    }
+
+    const browserOnline = typeof navigator === 'undefined' ? this.core.syncState().isOnline : navigator.onLine;
+    if (!this.core.syncState().isOnline && !browserOnline) {
+      this.logger.debug('后台刷盘时当前离线，等待重试队列后续补齐', { reason });
+      return false;
+    }
+
+    this.flushPendingPersistPromise = this.persistActiveProject()
+      .then(() => !this.persistState().hasPendingLocalChanges)
+      .finally(() => {
+        this.flushPendingPersistPromise = null;
+      });
+
+    return this.flushPendingPersistPromise;
   }
   
   /**
@@ -1060,19 +1270,38 @@ export class SyncCoordinatorService {
    */
   private async saveConflictSilently(
     localProject: Project, 
-    remoteProject: Project,
-    conflictedFields: string[]
+    remoteProject: Project | undefined,
+    conflictedFields: string[],
+    ownerUserId?: string | null
   ): Promise<void> {
     await this.conflictStorage.saveConflict({
       projectId: localProject.id,
       localProject,
       remoteProject,
+      ownerUserId,
+      remoteSnapshotFresh: !!remoteProject,
       conflictedAt: new Date().toISOString(),
       localVersion: localProject.version ?? 0,
-      remoteVersion: remoteProject.version ?? 0,
+      remoteVersion: remoteProject?.version ?? 0,
       reason: 'version_mismatch',
       conflictedFields,
       acknowledged: false
+    });
+  }
+
+  private publishConflict(localProject: Project, remoteProject: Project, ownerUserId?: string | null): void {
+    void this.saveConflictSilently(localProject, remoteProject, [], ownerUserId).catch(error => {
+      this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
+    });
+    this.core.setConflict({
+      local: localProject,
+      remote: remoteProject,
+      projectId: localProject.id,
+    });
+    this.conflict$.next({
+      localProject,
+      remoteProject,
+      projectId: localProject.id,
     });
   }
   
@@ -1101,6 +1330,19 @@ export class SyncCoordinatorService {
       localProject,
       remoteProject
     );
+  }
+
+  async captureConflict(localProject: Project, remoteProject?: Project, ownerUserId?: string | null): Promise<void> {
+    if (remoteProject) {
+      this.publishConflict(localProject, remoteProject, ownerUserId);
+      return;
+    }
+
+    await this.saveConflictSilently(localProject, undefined, [], ownerUserId);
+  }
+
+  clearActiveConflict(): void {
+    this.core.clearConflict();
   }
   
   /**
@@ -1142,11 +1384,7 @@ export class SyncCoordinatorService {
       offlineProjects,
       userId,
       (projectId) => this.getTombstoneIds(projectId),
-      (local, remote) => this.conflict$.next({
-        localProject: local,
-        remoteProject: remote,
-        projectId: local.id
-      })
+      (local, remote) => this.publishConflict(local, remote)
     );
 
     // 同时同步黑匣子数据（不阻塞主流程）
@@ -1195,33 +1433,91 @@ export class SyncCoordinatorService {
       this.persistState.update(s => ({ ...s, hasPending: true }));
       return;
     }
-    
-    this.persistState.update(s => ({ ...s, isPersisting: true }));
-    let outcome: PersistOutcome = { remoteConfirmed: false };
-    
-    try {
-      outcome = await this.doPersistActiveProject();
-    } finally {
-      const currentState = this.persistState();
-      this.persistState.update(s => ({ 
-        ...s, 
-        isPersisting: false,
-        lastPersistAt: Date.now(),
-        hasPendingLocalChanges: outcome.remoteConfirmed
-          ? false
-          : currentState.hasPendingLocalChanges
-      }));
-      
-      if (currentState.hasPending) {
-        this.persistState.update(s => ({ ...s, hasPending: false }));
-        this.schedulePersist();
-      }
+    const runPersist = async () => {
+      const persistVersion = this.localChangeVersion;
 
-      this.updateSyncObservability(outcome);
+      this.persistState.update(s => ({ ...s, isPersisting: true }));
+      let outcome: PersistOutcome = { remoteConfirmed: false };
+
+      try {
+        outcome = await this.doPersistActiveProject(persistVersion);
+      } finally {
+        const currentState = this.persistState();
+        const shouldClearPendingLocalChanges = outcome.remoteConfirmed
+          && this.shouldClearProjectDirtyState(persistVersion);
+        this.persistState.update(s => ({ 
+          ...s, 
+          isPersisting: false,
+          lastPersistAt: Date.now(),
+          hasPendingLocalChanges: shouldClearPendingLocalChanges
+            ? false
+            : currentState.hasPendingLocalChanges
+        }));
+
+        if (currentState.hasPending) {
+          this.persistState.update(s => ({ ...s, hasPending: false }));
+          this.schedulePersist();
+        }
+
+        this.updateSyncObservability(outcome);
+      }
+    };
+
+    this.persistActiveProjectPromise = runPersist().finally(() => {
+      this.persistActiveProjectPromise = null;
+    });
+    await this.persistActiveProjectPromise;
+  }
+
+  private shouldClearProjectDirtyState(persistVersion: number): boolean {
+    const state = this.persistState();
+    return this.localChangeVersion === persistVersion && !state.hasPending;
+  }
+
+  private syncAuthContextGeneration(): void {
+    const currentUserId = this.authService.currentUserId();
+    if (this.lastObservedAuthUserId === undefined) {
+      this.lastObservedAuthUserId = currentUserId;
+      this.authContextGeneration = 1;
+      return;
+    }
+
+    if (this.lastObservedAuthUserId !== currentUserId) {
+      this.lastObservedAuthUserId = currentUserId;
+      this.authContextGeneration += 1;
     }
   }
+
+  private captureAuthContext(userId: string | null): { userId: string | null; generation: number } {
+    this.syncAuthContextGeneration();
+    return {
+      userId,
+      generation: this.authContextGeneration,
+    };
+  }
+
+  private isAuthContextCurrent(
+    context: { userId: string | null; generation: number },
+    stage: string,
+    projectId: string
+  ): boolean {
+    this.syncAuthContextGeneration();
+    if (context.generation === this.authContextGeneration && this.authService.currentUserId() === context.userId) {
+      return true;
+    }
+
+    this.logger.debug('忽略过期的自动持久化结果', {
+      stage,
+      projectId,
+      expectedUserId: context.userId,
+      currentUserId: this.authService.currentUserId(),
+      generation: context.generation,
+      currentGeneration: this.authContextGeneration,
+    });
+    return false;
+  }
   
-  private async doPersistActiveProject(): Promise<PersistOutcome> {
+  private async doPersistActiveProject(persistVersion: number): Promise<PersistOutcome> {
     const project = this.projectState.activeProject();
     const projects = this.projectState.projects();
     const now = new Date().toISOString();
@@ -1257,24 +1553,52 @@ export class SyncCoordinatorService {
       return { remoteConfirmed: false, projectId: project.id };
     }
 
+    if (project.syncSource === 'local-only') {
+      this.logger.info('local-only 项目跳过自动云端持久化，等待用户迁移决策', {
+        projectId: project.id,
+      });
+      this.projectState.updateProjects(ps =>
+        ps.map(p =>
+          p.id === project.id
+            ? {
+                ...p,
+                updatedAt: now,
+                syncSource: 'local-only',
+                pendingSync: userId === AUTH_CONFIG.LOCAL_MODE_USER_ID
+                  ? (p.pendingSync ?? false)
+                  : true,
+              }
+            : p
+        )
+      );
+      this.core.saveOfflineSnapshot(this.projectState.projects());
+      return { remoteConfirmed: false, projectId: project.id };
+    }
+
+    const authContext = this.captureAuthContext(userId);
+
     try {
       // 使用智能同步：根据变更量自动选择增量或全量同步
       const result = await this.core.saveProjectSmart(
         { ...project, updatedAt: now },
         userId
       );
+      if (!this.isAuthContextCurrent(authContext, 'doPersistActiveProject:saveProjectSmart', project.id)) {
+        return { remoteConfirmed: false, projectId: project.id };
+      }
       
       if (result.success) {
+        const shouldClearProjectDirtyState = this.shouldClearProjectDirtyState(persistVersion);
         // 更新本地状态：updatedAt 和 version（如果有返回）
         this.projectState.updateProjects(ps =>
           ps.map(p => 
             p.id === project.id 
               ? {
                   ...p,
-                  updatedAt: now,
+                  updatedAt: p.updatedAt && p.updatedAt > now ? p.updatedAt : now,
                   version: result.newVersion ?? p.version,
                   syncSource: 'synced',
-                  pendingSync: false
+                  pendingSync: shouldClearProjectDirtyState ? false : true
                 }
               : p
           )
@@ -1282,11 +1606,13 @@ export class SyncCoordinatorService {
         // 同步成功后，再次保存快照以确保版本号同步
         this.core.saveOfflineSnapshot(this.projectState.projects());
         
-        // 【关键】同步成功后，解锁该项目的所有字段锁
-        this.changeTracker.clearProjectFieldLocks(project.id);
-        this.changeTracker.clearProjectChanges(project.id);
+        if (shouldClearProjectDirtyState) {
+          // 【关键】仅当本轮之后没有新增本地编辑时，才清理项目级 dirty 标记
+          this.changeTracker.clearProjectFieldLocks(project.id);
+          this.changeTracker.clearProjectChanges(project.id);
+        }
 
-        if (FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
+        if (shouldClearProjectDirtyState && FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
           this.tabSync.notifyDataSynced(project.id, now);
         }
         
@@ -1298,10 +1624,18 @@ export class SyncCoordinatorService {
           });
         }
         return { remoteConfirmed: true, projectId: project.id };
-      } else if (result.conflict && result.remoteData) {
-        // 版本冲突处理：静默保存到冲突仓库，不弹窗打扰用户
-        await this.saveConflictSilently(project, result.remoteData, []);
-        this.logger.warn('检测到数据冲突，已保存到冲突仓库', { projectId: project.id });
+      } else if (result.conflict) {
+        // 版本冲突：通知用户手动解决，而非静默保存
+        this.logger.warn('检测到数据冲突，展示冲突解决界面', { projectId: project.id });
+        if (result.remoteData) {
+          this.publishConflict({ ...project, updatedAt: now }, result.remoteData, authContext.userId);
+        } else {
+          await this.saveConflictSilently({ ...project, updatedAt: now }, undefined, [], authContext.userId);
+          if (!this.isAuthContextCurrent(authContext, 'doPersistActiveProject:save-conflict', project.id)) {
+            return { remoteConfirmed: false, projectId: project.id };
+          }
+          this.toastService.warning('检测到数据冲突', '已保留本地版本，远端详情可稍后在冲突中心查看');
+        }
         return { remoteConfirmed: false, projectId: project.id };
       } else if (result.validationWarnings && result.validationWarnings.length > 0) {
         // 验证失败导致同步中止
@@ -1332,6 +1666,9 @@ export class SyncCoordinatorService {
       }
       return { remoteConfirmed: false, projectId: project.id };
     } catch (error) {
+      if (!this.isAuthContextCurrent(authContext, 'doPersistActiveProject:saveProjectSmart-error', project.id)) {
+        return { remoteConfirmed: false, projectId: project.id };
+      }
       this.logger.error('持久化项目时发生异常', { error });
       // 乐观UI：静默记录错误，不阻塞用户操作
       // 数据已保存到本地离线快照，网络恢复后会自动重试

@@ -285,6 +285,13 @@ export class TextUnassignedComponent implements OnDestroy {
         this.cdr.markForCheck();
       }
     });
+
+    // 没有待分配任务时自动折叠，减少移动端空白区域
+    effect(() => {
+      if (this.projectState.unassignedTasks().length === 0) {
+        this.uiState.isTextUnassignedOpen.set(false);
+      }
+    });
   }
 
   ngOnDestroy(): void {

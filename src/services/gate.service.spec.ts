@@ -61,7 +61,6 @@ describe('GateService', () => {
     setBlackBoxEntries([]);
     focusPreferences.set({
       gateEnabled: true,
-      spotlightEnabled: true,
       strataEnabled: true,
       blackBoxEnabled: true,
       maxSnoozePerDay: 3,

@@ -1,7 +1,6 @@
 /**
- * 聚光灯触发按钮（现已覆盖为专注模式切换按钮）
+ * 专注模式切换按钮
  *
- * 逻辑与 UI 与 project-shell-focus-session-toggle 保持一致：
  * 派发 dock-focus-session-toggle 自定义事件，由 DockEngineService 响应。
  */
 
@@ -11,7 +10,7 @@ import {
 } from '@angular/core';
 
 @Component({
-  selector: 'app-spotlight-trigger',
+  selector: 'app-focus-session-trigger',
   standalone: true,
   imports: [],
   template: `
@@ -25,7 +24,7 @@ import {
              dark:focus:ring-offset-stone-900"
       (click)="toggleDockFocusSession()"
       aria-label="切换专注模式"
-      data-testid="spotlight-trigger">
+      data-testid="focus-session-trigger">
       <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"
            class="w-4 h-4 shrink-0 text-amber-500 dark:text-amber-400">
         <path stroke-linecap="round" stroke-linejoin="round"
@@ -36,7 +35,7 @@ import {
   `,
   changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class SpotlightTriggerComponent {
+export class FocusSessionTriggerComponent {
   /**
    * 切换专注模式：派发全局自定义事件，由 DockEngineService 监听并处理
    */

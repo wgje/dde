@@ -23,6 +23,25 @@ import { Task } from '../../../../models';
 describe('TaskSyncOperationsService', () => {
   let service: TaskSyncOperationsService;
   let upsertPayload: Record<string, unknown> | null;
+  const mockRetryQueue = {
+    checkCircuitBreaker: vi.fn(() => true),
+    add: vi.fn(() => true),
+    length: 0,
+    recordCircuitSuccess: vi.fn(),
+    recordCircuitFailure: vi.fn(),
+  };
+  const mockSyncState = {
+    isSessionExpired: vi.fn(() => false),
+    setPendingCount: vi.fn(),
+    setSyncError: vi.fn(),
+    setLastSyncTime: vi.fn(),
+  };
+  const mockSessionManager = {
+    tryRefreshSession: vi.fn(async () => false),
+    handleSessionExpired: vi.fn(),
+    isSessionExpiredError: vi.fn(() => false),
+    handleAuthErrorWithRefresh: vi.fn(async () => false),
+  };
 
   const mockLogger = {
     debug: vi.fn(),
@@ -102,33 +121,17 @@ describe('TaskSyncOperationsService', () => {
         },
         {
           provide: SessionManagerService,
-          useValue: {
-            tryRefreshSession: vi.fn(async () => false),
-            handleSessionExpired: vi.fn(),
-            isSessionExpiredError: vi.fn(() => false),
-            handleAuthErrorWithRefresh: vi.fn(async () => false),
-          },
+          useValue: mockSessionManager,
         },
         { provide: TombstoneService, useValue: {} },
         { provide: ProjectDataService, useValue: {} },
         {
           provide: RetryQueueService,
-          useValue: {
-            checkCircuitBreaker: vi.fn(() => true),
-            add: vi.fn(() => true),
-            length: 0,
-            recordCircuitSuccess: vi.fn(),
-            recordCircuitFailure: vi.fn(),
-          },
+          useValue: mockRetryQueue,
         },
         {
           provide: SyncStateService,
-          useValue: {
-            isSessionExpired: vi.fn(() => false),
-            setPendingCount: vi.fn(),
-            setSyncError: vi.fn(),
-            setLastSyncTime: vi.fn(),
-          },
+          useValue: mockSyncState,
         },
         {
           provide: SentryLazyLoaderService,
@@ -175,5 +178,32 @@ describe('TaskSyncOperationsService', () => {
     expect(result).toBe(true);
     expect(upsertPayload).toBeTruthy();
     expect(upsertPayload?.['parking_meta']).toEqual(parkingMeta);
+  });
+
+  it('sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
+    const task: Task = {
+      id: 'task-owner-mismatch',
+      title: '任务 owner mismatch',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-2',
+      createdDate: new Date().toISOString(),
+      deletedAt: null,
+    };
+    mockClient.auth.getSession.mockResolvedValueOnce({
+      data: { session: { user: { id: 'user-2' } } },
+    });
+
+    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(upsertPayload).toBeNull();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
   });
 });

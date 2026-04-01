@@ -212,6 +212,7 @@ export class FlowZoomService {
     const projectId = this.projectState.activeProjectId();
     if (viewState && projectId) {
       this.projectState.updateViewState(projectId, viewState);
+      this.syncCoordinator.markLocalChanges('position');
       this.syncCoordinator.schedulePersist();
       this.logger.debug('视图状态已保存', viewState);
     }

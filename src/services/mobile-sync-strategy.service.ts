@@ -94,6 +94,7 @@ export class MobileSyncStrategyService {
   
   /** 批量刷新回调（由 SimpleSyncService 注册） */
   private batchFlushCallback: ((requests: BatchedRequest[]) => Promise<void>) | null = null;
+  private visibilityChangeHandler: (() => void) | null = null;
   
   constructor() {
     this.initialize();
@@ -109,7 +110,7 @@ export class MobileSyncStrategyService {
   private initialize(): void {
     // 监听页面可见性变化
     if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', () => {
+      this.visibilityChangeHandler = () => {
         this.isBackground.set(document.visibilityState === 'hidden');
         
         if (document.visibilityState === 'hidden') {
@@ -119,7 +120,8 @@ export class MobileSyncStrategyService {
         } else {
           this.logger.debug('页面恢复前台');
         }
-      });
+      };
+      document.addEventListener('visibilitychange', this.visibilityChangeHandler);
     }
     
     this.logger.info('移动端同步策略服务已初始化');
@@ -177,29 +179,33 @@ export class MobileSyncStrategyService {
       requestTimeout: SYNC_CONFIG.CLOUD_LOAD_TIMEOUT,
       retryCount: 3
     };
+
+    let strategy: SyncStrategyConfig;
     
     // 根据网络质量调整
     switch (quality) {
       case 'high':
         // WiFi/4G - 正常配置
-        return {
+        strategy = {
           ...baseConfig,
           allowAttachmentSync: !this.network.isCellular() || !MOBILE_SYNC_CONFIG.DISABLE_ATTACHMENT_SYNC_ON_CELLULAR
         };
+        break;
         
       case 'medium':
         // 3G - 延迟同步
-        return {
+        strategy = {
           ...baseConfig,
           syncInterval: MOBILE_SYNC_CONFIG.MEDIUM_QUALITY_SYNC_DELAY,
           allowAttachmentSync: false,
           batchWaitMs: 10000,
           maxPayloadBytes: 30 * 1024, // 30 KB
         };
+        break;
         
       case 'low':
         // 2G/弱网 - 仅手动同步
-        return {
+        strategy = {
           ...baseConfig,
           allowAutoSync: false,
           allowAttachmentSync: false,
@@ -210,21 +216,27 @@ export class MobileSyncStrategyService {
           requestTimeout: MOBILE_SYNC_CONFIG.WEAK_NETWORK_TIMEOUT,
           retryCount: MOBILE_SYNC_CONFIG.WEAK_NETWORK_RETRIES
         };
+        break;
         
       case 'offline':
         // 离线
-        return {
+        strategy = {
           ...baseConfig,
           allowAutoSync: false,
           allowAttachmentSync: false,
           enableRealtime: false,
         };
+        break;
+
+      default:
+        strategy = baseConfig;
+        break;
     }
     
     // Data Saver 模式覆盖
     if (dataSaver) {
-      return {
-        ...baseConfig,
+      strategy = {
+        ...strategy,
         enableRealtime: false,
         allowAttachmentSync: false,
         batchRequests: true,
@@ -233,14 +245,14 @@ export class MobileSyncStrategyService {
     
     // 低电量模式覆盖
     if (lowBattery) {
-      return {
-        ...baseConfig,
-        syncInterval: MOBILE_SYNC_CONFIG.LOW_BATTERY_SYNC_INTERVAL,
+      strategy = {
+        ...strategy,
+        syncInterval: Math.max(strategy.syncInterval, MOBILE_SYNC_CONFIG.LOW_BATTERY_SYNC_INTERVAL),
         enableRealtime: false,
       };
     }
     
-    return baseConfig;
+    return strategy;
   }
   
   /**
@@ -406,6 +418,11 @@ export class MobileSyncStrategyService {
   private cleanup(): void {
     if (this.batchFlushTimer) {
       clearTimeout(this.batchFlushTimer);
+    }
+
+    if (this.visibilityChangeHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
+      this.visibilityChangeHandler = null;
     }
     
     // 刷新剩余队列

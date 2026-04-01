@@ -258,7 +258,6 @@ describe('DisasterBackupService', () => {
 
     const focusPreferences = {
       gateEnabled: true,
-      spotlightEnabled: true,
       strataEnabled: true,
       blackBoxEnabled: true,
       maxSnoozePerDay: 3,

@@ -180,10 +180,7 @@ describe('HandoffCoordinatorService', () => {
     expect(result.degradeReason).toBe('login-required-nonblocking');
   });
 
-  it('should record timeout100 as handoff trigger source when rAF is starved', () => {
-    const originalRaf = window.requestAnimationFrame;
-    window.requestAnimationFrame = vi.fn(() => 1);
-
+  it('should record timeout0 as handoff trigger source when microtask fallback fires', () => {
     service.markLayoutStable();
     service.resolve({
       routeUrl: '/projects',
@@ -199,13 +196,12 @@ describe('HandoffCoordinatorService', () => {
       snapshotProjectsTrusted: true,
     });
 
-    vi.advanceTimersByTime(100);
+    // microtask 先触发，但在 fake timers 下需用 setTimeout fallback
+    vi.advanceTimersByTime(16);
 
     expect(
       (service as unknown as { handoffTriggerSource: () => string | null }).handoffTriggerSource()
-    ).toBe('timeout100');
-
-    window.requestAnimationFrame = originalRaf;
+    ).toBe('timeout0');
   });
 
   it('should degrade to project rail when target project is unavailable but local projects exist', () => {

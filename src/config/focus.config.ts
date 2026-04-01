@@ -20,14 +20,6 @@ export const FOCUS_CONFIG = {
     IDLE_RECHECK_THRESHOLD: 5 * 60 * 1000,
   },
   
-  // 聚光灯配置
-  SPOTLIGHT: {
-    /** 任务完成后延迟显示下一个（毫秒） */
-    NEXT_TASK_DELAY: 500,
-    /** 背景地质层透明度 */
-    STRATA_BACKGROUND_OPACITY: 0.3,
-  },
-  
   // 地质层配置
   STRATA: {
     /** 显示的最大天数 */

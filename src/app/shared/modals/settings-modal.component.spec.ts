@@ -22,7 +22,6 @@ describe('SettingsModalComponent', () => {
 
   type MockFocusPreferences = {
     gateEnabled: boolean;
-    spotlightEnabled: boolean;
     blackBoxEnabled: boolean;
     strataEnabled: boolean;
     maxSnoozePerDay: number;
@@ -47,7 +46,6 @@ describe('SettingsModalComponent', () => {
   ]);
   const focusPreferences = signal<MockFocusPreferences>({
     gateEnabled: true,
-    spotlightEnabled: true,
     blackBoxEnabled: true,
     strataEnabled: true,
     maxSnoozePerDay: 3,
@@ -164,7 +162,6 @@ describe('SettingsModalComponent', () => {
     ]);
     focusPreferences.set({
       gateEnabled: true,
-      spotlightEnabled: true,
       blackBoxEnabled: true,
       strataEnabled: true,
       maxSnoozePerDay: 3,

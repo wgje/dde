@@ -53,7 +53,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
           [ngClass]="{
             'text-sm p-2': !isMobile(),
             'text-xs p-1.5': isMobile(),
-            'bg-retro-muted/5 dark:bg-stone-800 border-retro-muted/20 dark:border-stone-700': isPreview(),
+            'bg-transparent border-transparent': isPreview(),
             'bg-white dark:bg-stone-700 border-stone-200 dark:border-stone-600': !isPreview()
           }"
           placeholder="任务名称...">
@@ -79,7 +79,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             <div
               data-testid="task-content"
               (click)="onPreviewClick($event)"
-              class="w-full border border-retro-muted/20 dark:border-stone-700 rounded-lg bg-retro-muted/5 dark:bg-stone-800 overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer hover:border-stone-300 dark:hover:border-stone-600 transition-colors"
+              class="w-full border border-transparent rounded-lg bg-transparent overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer transition-colors"
               [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
               [innerHTML]="localContent() ? (localContent() | safeMarkdown) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
               title="点击编辑">

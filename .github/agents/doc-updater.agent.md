@@ -1,14 +1,7 @@
 ---
 name: doc-updater
 description: 文档和代码地图专家。主动用于更新代码地图和文档。更新 README 和指南，保持文档与代码同步。
-tools:
-  - read/readFile
-  - edit/createFile
-  - edit/editFiles
-  - execute/runInTerminal
-  - search/textSearch
-  - search/codebase
-  - search/listDirectory
+tools:[vscode, execute, read, agent, edit, search, web, 'io.github.chromedevtools/chrome-devtools-mcp/*', 'context7/*', 'supabase/*', todo, vscode.mermaid-chat-features/renderMermaidDiagram, github.vscode-pull-request-github/issue_fetch, github.vscode-pull-request-github/labels_fetch, github.vscode-pull-request-github/notification_fetch, github.vscode-pull-request-github/doSearch, github.vscode-pull-request-github/activePullRequest, github.vscode-pull-request-github/pullRequestStatusChecks, github.vscode-pull-request-github/openPullRequest]
 handoffs:
   - label: 审查文档
     agent: code-reviewer

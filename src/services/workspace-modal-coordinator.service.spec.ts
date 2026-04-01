@@ -1,8 +1,8 @@
 /**
  * WorkspaceModalCoordinatorService 单元测试
  */
+import { Injector, runInInjectionContext } from '@angular/core';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TestBed } from '@angular/core/testing';
 import { WorkspaceModalCoordinatorService } from './workspace-modal-coordinator.service';
 import { ToastService } from './toast.service';
 import { GlobalErrorHandler } from './global-error-handler.service';
@@ -10,6 +10,7 @@ import { DynamicModalService } from './dynamic-modal.service';
 import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
+import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
 import { Router } from '@angular/router';
 import { type ConflictData } from './modal.service';
@@ -23,7 +24,14 @@ const mockToast = { error: vi.fn(), info: vi.fn() };
 const mockRouter = { navigateByUrl: vi.fn() };
 const mockErrorHandler = { dismissRecoveryDialog: vi.fn() };
 
-const mockModalCloseRef = { close: vi.fn() };
+let resolveModalResult: ((value?: unknown) => void) | null = null;
+const mockModalCloseRef = {
+  close: vi.fn((value?: unknown) => {
+    resolveModalResult?.(value);
+  }),
+  result: Promise.resolve(undefined),
+  componentRef: {} as never,
+};
 const mockDynamicModal = {
   open: vi.fn(() => mockModalCloseRef),
   close: vi.fn(),
@@ -44,6 +52,7 @@ const mockModalLoader = {
 
 const mockProjectState = { projects: vi.fn(() => []) };
 const mockProjectOps = { resolveConflict: vi.fn().mockResolvedValue(undefined) };
+const mockSyncCoordinator = { clearActiveConflict: vi.fn() };
 const mockAuthCoord = {
   sessionEmail: vi.fn(() => ''),
   authError: vi.fn(() => null),
@@ -54,13 +63,18 @@ const mockAuthCoord = {
 
 describe('WorkspaceModalCoordinatorService', () => {
   let service: WorkspaceModalCoordinatorService;
+  let injector: Injector;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockProjectOps.resolveConflict.mockResolvedValue(true);
+    mockModalCloseRef.result = new Promise(resolve => {
+      resolveModalResult = resolve;
+    });
 
-    TestBed.configureTestingModule({
+    injector = Injector.create({
       providers: [
-        WorkspaceModalCoordinatorService,
+        { provide: WorkspaceModalCoordinatorService, useClass: WorkspaceModalCoordinatorService },
         { provide: ToastService, useValue: mockToast },
         { provide: Router, useValue: mockRouter },
         { provide: GlobalErrorHandler, useValue: mockErrorHandler },
@@ -68,11 +82,12 @@ describe('WorkspaceModalCoordinatorService', () => {
         { provide: ModalLoaderService, useValue: mockModalLoader },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: ProjectOperationService, useValue: mockProjectOps },
+        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: AppAuthCoordinatorService, useValue: mockAuthCoord },
       ],
     });
 
-    service = TestBed.inject(WorkspaceModalCoordinatorService);
+    service = runInInjectionContext(injector, () => injector.get(WorkspaceModalCoordinatorService));
   });
 
   // ── Initial state ──────────────────────────────────────────
@@ -191,6 +206,24 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(service.isModalLoading('trash')).toBe(false);
   });
 
+  it('should not reopen dashboard while it is already open', async () => {
+    await service.openDashboard();
+    await service.openDashboard();
+
+    expect(mockModalLoader.loadDashboardModal).toHaveBeenCalledOnce();
+    expect(mockDynamicModal.open).toHaveBeenCalledOnce();
+  });
+
+  it('should allow reopening dashboard after modal ref is externally closed', async () => {
+    await service.openDashboard();
+    mockModalCloseRef.close();
+    await Promise.resolve();
+    await service.openDashboard();
+
+    expect(mockModalLoader.loadDashboardModal).toHaveBeenCalledTimes(2);
+    expect(mockDynamicModal.open).toHaveBeenCalledTimes(2);
+  });
+
   // ── resolveConflictLocal ───────────────────────────────────
 
   it('should resolve conflict and close modal', async () => {
@@ -205,6 +238,22 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(mockModalCloseRef.close).toHaveBeenCalledWith({ choice: 'local' });
   });
 
+  it('should keep conflict modal open when resolveConflict returns false', async () => {
+    service.setPendingConflict({ projectId: 'p-1' } as ConflictData);
+    await service.openConflictModal({ projectId: 'p-1' } as ConflictData);
+    mockProjectOps.resolveConflict.mockResolvedValueOnce(false);
+
+    await service.resolveConflictLocal();
+
+    expect(mockProjectOps.resolveConflict).toHaveBeenCalledWith('p-1', 'local');
+    expect(mockModalCloseRef.close).not.toHaveBeenCalled();
+
+    mockProjectOps.resolveConflict.mockResolvedValueOnce(true);
+    await service.resolveConflictLocal();
+
+    expect(mockModalCloseRef.close).toHaveBeenCalledWith({ choice: 'local' });
+  });
+
   // ── cancelConflictResolution ───────────────────────────────
 
   it('should close modal and show info toast', async () => {
@@ -213,6 +262,7 @@ describe('WorkspaceModalCoordinatorService', () => {
     service.cancelConflictResolution();
 
     expect(mockModalCloseRef.close).toHaveBeenCalledWith({ choice: 'cancel' });
+    expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
     expect(mockToast.info).toHaveBeenCalled();
   });
 });

@@ -49,6 +49,7 @@ describe('SyncStatusComponent', () => {
   const hasUnresolvedConflicts = signal(false);
   const isLoadingRemote = signal(false);
   const activeProjectId = signal('project-1');
+  const legacyReviewCount = signal(0);
 
   const actionQueueMock = {
     pendingActions,
@@ -85,6 +86,7 @@ describe('SyncStatusComponent', () => {
     hasUnresolvedConflicts.set(false);
     isLoadingRemote.set(false);
     activeProjectId.set('project-1');
+    legacyReviewCount.set(0);
 
     await TestBed.configureTestingModule({
       imports: [SyncStatusComponent],
@@ -101,7 +103,13 @@ describe('SyncStatusComponent', () => {
         { provide: ProjectStateService, useValue: { activeProjectId } },
         { provide: AuthService, useValue: { currentUserId } },
         { provide: ConflictStorageService, useValue: { conflictCount, hasUnresolvedConflicts } },
-        { provide: RetryQueueService, useValue: { getCapacityPercent: vi.fn().mockReturnValue(0) } },
+        {
+          provide: RetryQueueService,
+          useValue: {
+            getCapacityPercent: vi.fn().mockReturnValue(0),
+            legacyReviewCount,
+          },
+        },
         {
           provide: ToastService,
           useValue: {
@@ -116,7 +124,7 @@ describe('SyncStatusComponent', () => {
 
     fixture = TestBed.createComponent(SyncStatusComponent);
     fixture.detectChanges();
-  });
+  }, 5000);
 
   it('不应将后台 focus-session 自动同步显示为用户待同步', () => {
     pendingActions.set([createQueuedAction('focus-session')]);
@@ -132,5 +140,13 @@ describe('SyncStatusComponent', () => {
 
     expect(fixture.componentInstance.pendingCount()).toBe(1);
     expect(fixture.componentInstance.detailedStatus()).toBe('1 个操作待同步');
+  });
+
+  it('应显示待人工确认的 legacy retry 数据', () => {
+    legacyReviewCount.set(2);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.detailedStatus()).toBe('2 个旧版离线同步项待确认');
+    expect(fixture.componentInstance.hasIssues()).toBe(true);
   });
 });

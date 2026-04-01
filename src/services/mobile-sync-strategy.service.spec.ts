@@ -17,6 +17,7 @@ import { MobileSyncStrategyService, SyncStrategyConfig } from './mobile-sync-str
 import { NetworkAwarenessService, NetworkQuality, DataSaverMode } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { MOBILE_SYNC_CONFIG } from '../config/sync.config';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 
 // Mock NetworkAwarenessService
@@ -49,8 +50,11 @@ const mockLogger = {
 };
 
 // Mock DestroyRef
+const destroyCallbacks: Array<() => void> = [];
 const mockDestroyRef = {
-  onDestroy: vi.fn((callback: () => void) => callback),
+  onDestroy: vi.fn((callback: () => void) => {
+    destroyCallbacks.push(callback);
+  }),
 };
 
 describe('MobileSyncStrategyService', () => {
@@ -74,6 +78,9 @@ describe('MobileSyncStrategyService', () => {
   });
   
   afterEach(() => {
+    while (destroyCallbacks.length > 0) {
+      destroyCallbacks.pop()?.();
+    }
     vi.clearAllMocks();
   });
   
@@ -138,6 +145,28 @@ describe('MobileSyncStrategyService', () => {
       
       expect(strategy.allowAutoSync).toBe(true);
       expect(strategy.allowAttachmentSync).toBe(false);
+    });
+
+    it('应该在高网络质量但开启省流模式时关闭 Realtime', () => {
+      mockNetworkService.networkQuality.set('high');
+      mockNetworkService.dataSaverMode.set('on');
+
+      const strategy = service.currentStrategy();
+
+      expect(strategy.enableRealtime).toBe(false);
+      expect(strategy.allowAttachmentSync).toBe(false);
+      expect(strategy.batchRequests).toBe(true);
+    });
+
+    it('应该在高网络质量但低电量未充电时关闭 Realtime 并放缓同步', () => {
+      mockNetworkService.networkQuality.set('high');
+      mockNetworkService.isLowBattery.set(true);
+      mockNetworkService.isCharging.set(false);
+
+      const strategy = service.currentStrategy();
+
+      expect(strategy.enableRealtime).toBe(false);
+      expect(strategy.syncInterval).toBeGreaterThanOrEqual(MOBILE_SYNC_CONFIG.LOW_BATTERY_SYNC_INTERVAL);
     });
     
     it('应该在离线时禁用所有同步', () => {

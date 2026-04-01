@@ -34,39 +34,47 @@ export type ActionPayload =
 
 export interface ProjectPayload {
   project: Project;
+  sourceUserId?: string;
 }
 
 export interface ProjectDeletePayload {
   projectId: string;
   userId: string;
+  sourceUserId?: string;
 }
 
 export interface TaskPayload {
   task: Task;
   projectId: string;
+  sourceUserId?: string;
 }
 
 export interface TaskDeletePayload {
   taskId: string;
   projectId: string;
+  sourceUserId?: string;
 }
 
 export interface PreferencePayload {
   preferences: Partial<UserPreferences>;
   userId: string;
+  sourceUserId?: string;
 }
 
 export interface FocusSessionPayload {
   record: FocusSessionRecord;
+  sourceUserId?: string;
 }
 
 export interface RoutineTaskPayload {
   userId: string;
   routineTask: RoutineTask;
+  sourceUserId?: string;
 }
 
 export interface RoutineCompletionPayload {
   completion: RoutineCompletionMutation;
+  sourceUserId?: string;
 }
 
 /**

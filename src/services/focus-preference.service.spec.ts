@@ -71,11 +71,11 @@ describe('FocusPreferenceService', () => {
     });
 
     it('应该持久化到 localStorage', () => {
-      service.update({ spotlightEnabled: false });
+      service.update({ gateEnabled: false });
 
       const stored = localStorage.getItem('focus_preferences');
       expect(stored).not.toBeNull();
-      expect(JSON.parse(stored!).spotlightEnabled).toBe(false);
+      expect(JSON.parse(stored!).gateEnabled).toBe(false);
     });
   });
 
@@ -86,13 +86,6 @@ describe('FocusPreferenceService', () => {
 
       service.setGateEnabled(true);
       expect(focusPreferences().gateEnabled).toBe(true);
-    });
-  });
-
-  describe('setSpotlightEnabled', () => {
-    it('应该设置聚光灯启用状态', () => {
-      service.setSpotlightEnabled(false);
-      expect(focusPreferences().spotlightEnabled).toBe(false);
     });
   });
 
@@ -135,11 +128,10 @@ describe('FocusPreferenceService', () => {
 
   describe('reset', () => {
     it('应该重置为默认值', () => {
-      service.update({ gateEnabled: false, spotlightEnabled: false });
+      service.update({ gateEnabled: false });
       service.reset();
 
       expect(focusPreferences().gateEnabled).toBe(DEFAULT_FOCUS_PREFERENCES.gateEnabled);
-      expect(focusPreferences().spotlightEnabled).toBe(DEFAULT_FOCUS_PREFERENCES.spotlightEnabled);
     });
   });
 
@@ -156,15 +148,6 @@ describe('FocusPreferenceService', () => {
       
       service.setGateEnabled(false);
       expect(service.isGateEnabled()).toBe(false);
-    });
-  });
-
-  describe('isSpotlightEnabled', () => {
-    it('应该返回聚光灯是否启用', () => {
-      expect(service.isSpotlightEnabled()).toBe(true);
-      
-      service.setSpotlightEnabled(false);
-      expect(service.isSpotlightEnabled()).toBe(false);
     });
   });
 

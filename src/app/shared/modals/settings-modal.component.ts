@@ -29,8 +29,8 @@ interface TaskAttachmentMetadata {
   imports: [CommonModule, FormsModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
-      <div data-testid="settings-modal" class="bg-slate-50 dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5 dark:ring-stone-700" (click)="$event.stopPropagation()">
+    <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-2 sm:p-4" (click)="close.emit()">
+      <div data-testid="settings-modal" class="bg-slate-50 dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-[420px] animate-scale-in max-h-[calc(100vh-1rem)] sm:max-h-[85vh] flex flex-col overflow-hidden ring-1 ring-slate-900/5 dark:ring-stone-700" (click)="$event.stopPropagation()">
         <!-- 头部 -->
         <div class="px-4 py-3 border-b border-slate-200/60 dark:border-stone-700 flex items-center justify-between bg-white dark:bg-stone-800 sticky top-0 z-10">
           <h2 class="text-base font-bold text-slate-800 dark:text-stone-200">系统设置</h2>
@@ -41,7 +41,7 @@ interface TaskAttachmentMetadata {
           </button>
         </div>
         
-        <div class="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
+        <div class="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-4 custom-scrollbar">
           
           <!-- 账户信息 (置顶) -->
           <section class="bg-white dark:bg-stone-800 rounded-xl border border-slate-200 dark:border-stone-700 shadow-sm p-3">
@@ -92,7 +92,7 @@ interface TaskAttachmentMetadata {
             <div class="bg-white dark:bg-stone-800 border border-slate-200 dark:border-stone-700 rounded-xl p-2.5 shadow-sm space-y-3">
               
               <!-- 颜色模式切换 -->
-              <div class="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-stone-700">
+              <div class="flex flex-wrap items-center justify-between gap-y-1.5 pb-2 border-b border-slate-100 dark:border-stone-700">
                 <span class="text-xs font-medium text-slate-600 dark:text-stone-400">颜色模式</span>
                 <div class="flex items-center gap-1 bg-slate-100 dark:bg-stone-700 rounded-lg p-0.5">
                   <!-- 浅色 -->
@@ -227,12 +227,12 @@ interface TaskAttachmentMetadata {
               </div>
               
               <!-- 备份与恢复 -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div class="flex-1">
+              <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div class="flex-1 min-w-0">
                   <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">备份与恢复</div>
                   <div class="text-[10px] text-slate-400 dark:text-stone-500">JSON 格式数据</div>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-shrink-0">
                   <button 
                     data-testid="settings-export-button"
                     (click)="handleExport()"
@@ -262,12 +262,12 @@ interface TaskAttachmentMetadata {
               </div>
 
               <!-- 附件导出导入 -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div class="flex-1">
+              <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div class="flex-1 min-w-0">
                   <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">附件备份（ZIP）</div>
-                  <div class="text-[10px] text-slate-400 dark:text-stone-500">{{ attachmentTransferStatus() }}</div>
+                  <div class="text-[10px] text-slate-400 dark:text-stone-500 truncate">{{ attachmentTransferStatus() }}</div>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-shrink-0">
                   <button
                     (click)="handleAttachmentExport()"
                     [disabled]="attachmentExportService.isExporting() || attachmentImportService.isImporting()"
@@ -329,28 +329,6 @@ interface TaskAttachmentMetadata {
                 </button>
               </div>
               
-              <!-- 聚光灯功能 -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div>
-                  <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">🔦 聚光灯</div>
-                  <div class="text-[10px] text-slate-400 dark:text-stone-500">单任务专注模式</div>
-                </div>
-                <button 
-                  type="button"
-                  (click)="toggleSpotlightEnabled()"
-                  data-testid="settings-spotlight-toggle"
-                  role="switch"
-                  [attr.aria-checked]="focusPreferenceService.preferences().spotlightEnabled"
-                  class="relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none"
-                  [class.bg-indigo-500]="focusPreferenceService.preferences().spotlightEnabled"
-                  [class.bg-slate-200]="!focusPreferenceService.preferences().spotlightEnabled">
-                  <span 
-                    class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform duration-200"
-                    [class.translate-x-4]="focusPreferenceService.preferences().spotlightEnabled">
-                  </span>
-                </button>
-              </div>
-              
               <!-- 黑匣子功能 -->
               <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
                 <div>
@@ -398,13 +376,13 @@ interface TaskAttachmentMetadata {
               <!-- Snooze 配置兼容保留：Gate UI 已移除跳过动作，这里隐藏入口 -->
               
               <!-- 开发工具（仅开发模式可见） -->
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div>
+              <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div class="min-w-0">
                   <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">高负荷休息提醒</div>
                   <div class="text-[10px] text-slate-400 dark:text-stone-500">累计高负荷专注多久后给轻提醒</div>
                 </div>
                 <select
-                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200 flex-shrink-0"
                   [value]="focusPreferenceService.preferences().restReminderHighLoadMinutes"
                   (change)="updateRestReminderHighLoadMinutes($event)"
                   data-testid="settings-rest-reminder-high">
@@ -414,13 +392,13 @@ interface TaskAttachmentMetadata {
                 </select>
               </div>
 
-              <div class="px-3 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
-                <div>
+              <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+                <div class="min-w-0">
                   <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">低负荷休息提醒</div>
                   <div class="text-[10px] text-slate-400 dark:text-stone-500">累计低负荷专注多久后给轻提醒</div>
                 </div>
                 <select
-                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                  class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200 flex-shrink-0"
                   [value]="focusPreferenceService.preferences().restReminderLowLoadMinutes"
                   (change)="updateRestReminderLowLoadMinutes($event)"
                   data-testid="settings-rest-reminder-low">
@@ -454,13 +432,13 @@ interface TaskAttachmentMetadata {
 
             <div class="bg-white dark:bg-stone-800 border border-slate-200 dark:border-stone-700 rounded-xl shadow-sm overflow-hidden">
               <div class="px-3 py-3 border-b border-slate-100 dark:border-stone-700 space-y-3">
-                <div class="flex items-center justify-between gap-3">
-                  <div>
+                <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+                  <div class="min-w-0">
                     <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">重置时间</div>
                     <div class="text-[10px] text-slate-400 dark:text-stone-500">日常任务每日计数按本地小时切日</div>
                   </div>
                   <select
-                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200"
+                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1 text-[11px] text-slate-700 dark:text-stone-200 flex-shrink-0"
                     [value]="focusPreferenceService.preferences().routineResetHourLocal"
                     (change)="updateRoutineResetHour($event)">
                     @for (hour of routineResetHours; track hour) {
@@ -469,7 +447,7 @@ interface TaskAttachmentMetadata {
                   </select>
                 </div>
 
-                <div class="grid grid-cols-[1fr,84px,auto] gap-2 items-center">
+                <div class="grid grid-cols-[1fr,64px,auto] gap-2 items-center">
                   <input
                     type="text"
                     [(ngModel)]="newRoutineTitle"
@@ -493,7 +471,7 @@ interface TaskAttachmentMetadata {
 
               <div class="divide-y divide-slate-100 dark:divide-stone-700">
                 @for (slot of routineSlots(); track slot.id) {
-                  <div class="px-3 py-2.5 flex items-center gap-2">
+                  <div class="px-3 py-2.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
                     <div class="min-w-0 flex-1">
                       <div class="text-xs font-semibold text-slate-700 dark:text-stone-200 truncate">{{ slot.title }}</div>
                       <div class="text-[10px] text-slate-400 dark:text-stone-500">
@@ -577,8 +555,8 @@ interface TaskAttachmentMetadata {
                       <button (click)="handleRevokeLocalBackup()" class="text-[10px] font-bold text-amber-600 hover:text-amber-800 px-2">取消</button>
                     </div>
                     
-                    <div class="flex items-center justify-between px-1 gap-3">
-                      <div>
+                    <div class="flex flex-wrap items-center justify-between px-1 gap-x-3 gap-y-1.5">
+                      <div class="min-w-0">
                         <div class="text-[11px] font-semibold text-amber-800 dark:text-amber-300">自动定时备份</div>
                         <div class="text-[10px] text-amber-600/80 dark:text-amber-400/80">当前默认间隔 {{ selectedBackupInterval() }}</div>
                       </div>
@@ -725,7 +703,7 @@ interface TaskAttachmentMetadata {
         </div>
         
         <!-- 底部操作 -->
-        <div class="p-3 bg-slate-50 border-t border-slate-200/60 flex justify-end">
+        <div class="p-3 bg-slate-50 dark:bg-stone-900 border-t border-slate-200/60 dark:border-stone-700 flex justify-end flex-shrink-0">
           <button (click)="close.emit()" class="px-5 py-1.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-all text-xs font-bold shadow-md shadow-slate-200 active:scale-95">
             完成
           </button>
@@ -1288,14 +1266,6 @@ export class SettingsModalComponent {
   toggleGateEnabled(): void {
     const current = this.focusPreferenceService.preferences().gateEnabled;
     this.focusPreferenceService.update({ gateEnabled: !current });
-  }
-  
-  /**
-   * 切换聚光灯功能
-   */
-  toggleSpotlightEnabled(): void {
-    const current = this.focusPreferenceService.preferences().spotlightEnabled;
-    this.focusPreferenceService.update({ spotlightEnabled: !current });
   }
   
   /**

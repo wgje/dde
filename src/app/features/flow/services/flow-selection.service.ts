@@ -286,6 +286,9 @@ export class FlowSelectionService {
 
   // ========== 带重试逻辑的节点选中 ==========
 
+  /** 当前重试目标 taskId，用于取消过期重试 */
+  private retryTargetTaskId: string | null = null;
+
   /** 节点选中重试的 rAF ID 列表（用于取消） */
   private pendingRetryRafIds: number[] = [];
 
@@ -328,7 +331,16 @@ export class FlowSelectionService {
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [0, 16, 50, 100, 200]; // 渐进延迟：立即、1帧、50ms、100ms、200ms
 
+    // 首次调用时，取消旧的重试序列并记录新目标
+    if (retryCount === 0) {
+      this.cancelPendingRetries();
+      this.retryTargetTaskId = taskId;
+    }
+
     if (this.isDestroyed) return;
+
+    // 如果目标已切换到另一个 taskId，放弃当前重试（防止过期回调重选旧节点）
+    if (this.retryTargetTaskId !== taskId) return;
 
     if (!this.diagram) return;
 

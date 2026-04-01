@@ -71,7 +71,7 @@
 
 ### ADR-007: 专注模式独立 Store（focus-stores.ts）
 
-**背景**：Gate/Spotlight/Strata/BlackBox 需要共享但独立于主 store 的状态
+**背景**：Gate/Strata/BlackBox 需要共享但独立于主 store 的状态
 
 **决策**：创建独立 `focus-stores.ts`，不污染 `TaskStore`/`ProjectStore`/`ConnectionStore`
 

@@ -17,6 +17,7 @@ import { DynamicModalService, type ModalRef } from './dynamic-modal.service';
 import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
+import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
 import type { StorageEscapeData } from '../app/shared/modals';
 import { ThemeType, Project } from '../models';
@@ -30,6 +31,7 @@ export class WorkspaceModalCoordinatorService {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly projectState = inject(ProjectStateService);
   private readonly projectOps = inject(ProjectOperationService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly authCoord = inject(AppAuthCoordinatorService);
 
   // ── State ───────────────────────────────────────────────────────────
@@ -133,20 +135,31 @@ export class WorkspaceModalCoordinatorService {
 
   // ── Dashboard ──────────────────────────────────────────────────────
 
+  private _dashboardModalRef: ModalRef | null = null;
+
   async openDashboardFromSettings(): Promise<void> {
     this.dynamicModal.close(); // close settings first
     await this.openDashboard();
   }
 
   async openDashboard(): Promise<void> {
-    if (this.isModalLoading('dashboard')) return;
+    if (this._dashboardModalRef || this.isModalLoading('dashboard')) return;
     this.setModalLoading('dashboard', true);
     try {
       const component = await this.modalLoader.loadDashboardModal();
-      this.dynamicModal.open(component, {
+      const dashboardModalRef = this.dynamicModal.open(component, {
         outputs: {
-          close: () => this.dynamicModal.close(),
+          close: () => {
+            this._dashboardModalRef = null;
+            this.dynamicModal.close();
+          },
           openConflictCenter: () => this.openConflictCenterFromDashboard()
+        }
+      });
+      this._dashboardModalRef = dashboardModalRef;
+      void dashboardModalRef.result.finally(() => {
+        if (this._dashboardModalRef === dashboardModalRef) {
+          this._dashboardModalRef = null;
         }
       });
     } catch {
@@ -157,6 +170,7 @@ export class WorkspaceModalCoordinatorService {
   }
 
   openConflictCenterFromDashboard(): void {
+    this._dashboardModalRef = null;
     this.dynamicModal.close();
     this.toast.info('冲突解决中心', '请从项目列表中选择有冲突的项目进行处理');
   }
@@ -393,7 +407,10 @@ export class WorkspaceModalCoordinatorService {
     try {
       const data = this._pendingConflict;
       if (data) {
-        await this.projectOps.resolveConflict(data.projectId, strategy);
+        const resolved = await this.projectOps.resolveConflict(data.projectId, strategy);
+        if (!resolved) {
+          return;
+        }
       }
       this._conflictModalRef?.close({ choice: strategy });
       this._pendingConflict = null;
@@ -417,6 +434,7 @@ export class WorkspaceModalCoordinatorService {
 
   cancelConflictResolution(): void {
     this._conflictModalRef?.close({ choice: 'cancel' });
+    this.syncCoordinator.clearActiveConflict();
     this._pendingConflict = null;
     this._conflictModalRef = null;
     this.toast.info('冲突待解决，下次同步时会再次提示');

@@ -1,4 +1,12 @@
+import {
+  Injector,
+  runInInjectionContext,
+  signal,
+  ɵChangeDetectionScheduler as ChangeDetectionScheduler,
+  ɵEffectScheduler as EffectScheduler,
+} from '@angular/core';
 import { vi, describe, it, expect } from 'vitest';
+import { Subject } from 'rxjs';
 import { WorkspaceShellComponent } from './workspace-shell.component';
 import { FEATURE_FLAGS } from './config/feature-flags.config';
 
@@ -383,7 +391,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     }
   });
 
-  it('resolveLaunchSnapshotUserId 应在认证仍未完成时沿用启动快照 owner', () => {
+  it('resolveLaunchSnapshotUserId 应在认证仍未完成但没有已确认 owner 时暂停写入', () => {
     const context = {
       currentUserId: () => null,
       authService: {
@@ -401,7 +409,31 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       resolveLaunchSnapshotUserId: (this: WorkspaceShellComponent) => string | null;
     }).resolveLaunchSnapshotUserId.call(context);
 
-    expect(result).toBe('snapshot-user');
+    expect(result).toBeNull();
+  });
+
+  it('resolveLaunchSnapshotUserId 应在认证未完成但已确认预填充 owner 时优先使用该 owner', () => {
+    const context = {
+      currentUserId: () => null,
+      authService: {
+        sessionInitialized: () => false,
+      },
+      authCoord: {
+        isCheckingSession: () => false,
+      },
+      userSession: {
+        getLaunchSnapshotPersistOwnerDuringAuthSettle: () => 'offline-owner',
+      },
+      startupLaunchSnapshot: {
+        userId: 'snapshot-user',
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      resolveLaunchSnapshotUserId: (this: WorkspaceShellComponent) => string | null;
+    }).resolveLaunchSnapshotUserId.call(context);
+
+    expect(result).toBe('offline-owner');
   });
 
   it('resolveLaunchSnapshotUserId 应在认证已稳定且无用户时返回 null', () => {
@@ -423,6 +455,249 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     }).resolveLaunchSnapshotUserId.call(context);
 
     expect(result).toBeNull();
+  });
+
+  it('setupLaunchSnapshotEffect 在 hint-only 占位期间应取消 pending persist 且不继续写入', () => {
+    const cancelPendingPersist = vi.fn();
+    const schedulePersistDeferred = vi.fn();
+    const injector = Injector.create({
+      providers: [
+        {
+          provide: ChangeDetectionScheduler,
+          useValue: {
+            notify: vi.fn(),
+            runningTick: false,
+          } satisfies ChangeDetectionScheduler,
+        },
+        {
+          provide: EffectScheduler,
+          useValue: {
+            schedule: (effect: { run: () => void }) => {
+              effect.run();
+            },
+            flush: vi.fn(),
+            remove: vi.fn(),
+          } satisfies EffectScheduler,
+        },
+      ],
+    });
+    const context = {
+      hintOnlyStartupPlaceholderVisible: signal(true),
+      launchSnapshotWriteBlocked: signal(false),
+      launchSnapshot: {
+        cancelPendingPersist,
+        schedulePersistDeferred,
+      },
+      projectState: {
+        projects: signal([]),
+        activeProjectId: signal<string | null>(null),
+      },
+      uiState: {
+        activeView: signal<'text' | 'flow'>('text'),
+        isMobile: () => false,
+      },
+      preferenceService: {
+        theme: () => 'default',
+      },
+      readCurrentColorMode: () => 'light',
+      routeUrl: () => '/projects',
+      resolveLaunchSnapshotUserId: () => 'user-1',
+    } as unknown as WorkspaceShellComponent;
+
+    runInInjectionContext(injector, () => {
+      (WorkspaceShellComponent.prototype as unknown as {
+        setupLaunchSnapshotEffect: (this: WorkspaceShellComponent) => void;
+      }).setupLaunchSnapshotEffect.call(context);
+    });
+
+    expect(cancelPendingPersist).toHaveBeenCalledTimes(1);
+    expect(schedulePersistDeferred).not.toHaveBeenCalled();
+  });
+
+  it('setupLaunchSnapshotEffect 在 owner 切换写屏障期间应取消 pending persist 且不继续写入', () => {
+    const cancelPendingPersist = vi.fn();
+    const schedulePersistDeferred = vi.fn();
+    const injector = Injector.create({
+      providers: [
+        {
+          provide: ChangeDetectionScheduler,
+          useValue: {
+            notify: vi.fn(),
+            runningTick: false,
+          } satisfies ChangeDetectionScheduler,
+        },
+        {
+          provide: EffectScheduler,
+          useValue: {
+            schedule: (effect: { run: () => void }) => {
+              effect.run();
+            },
+            flush: vi.fn(),
+            remove: vi.fn(),
+          } satisfies EffectScheduler,
+        },
+      ],
+    });
+    const context = {
+      hintOnlyStartupPlaceholderVisible: signal(false),
+      launchSnapshotWriteBlocked: signal(true),
+      launchSnapshot: {
+        cancelPendingPersist,
+        schedulePersistDeferred,
+      },
+      projectState: {
+        projects: signal([]),
+        activeProjectId: signal<string | null>(null),
+      },
+      uiState: {
+        activeView: signal<'text' | 'flow'>('text'),
+        isMobile: () => false,
+      },
+      preferenceService: {
+        theme: () => 'default',
+      },
+      readCurrentColorMode: () => 'light',
+      routeUrl: () => '/projects',
+      resolveLaunchSnapshotUserId: () => 'user-1',
+    } as unknown as WorkspaceShellComponent;
+
+    runInInjectionContext(injector, () => {
+      (WorkspaceShellComponent.prototype as unknown as {
+        setupLaunchSnapshotEffect: (this: WorkspaceShellComponent) => void;
+      }).setupLaunchSnapshotEffect.call(context);
+    });
+
+    expect(cancelPendingPersist).toHaveBeenCalledTimes(1);
+    expect(schedulePersistDeferred).not.toHaveBeenCalled();
+  });
+
+  it('setupSessionInvalidatedHandler 应取消 launch snapshot 写入并清空旧 owner 视图', async () => {
+    const sessionInvalidated$ = new Subject<{ type: 'session-invalidated'; source: string; userId: string | null }>();
+    const cancelPendingPersist = vi.fn();
+    const stopRuntime = vi.fn();
+    const unsubscribeFromProject = vi.fn().mockResolvedValue(undefined);
+    const setCurrentUser = vi.fn().mockResolvedValue(undefined);
+    const destroySyncPulse = vi.fn();
+    const destroyCallbacks: Array<() => void> = [];
+    const context = {
+      eventBus: {
+        onSessionInvalidated$: sessionInvalidated$.asObservable(),
+      },
+      launchSnapshotWriteBlocked: signal(false),
+      destroyRef: {
+        onDestroy: (callback: () => void) => {
+          destroyCallbacks.push(callback);
+        },
+      },
+      logger: {
+        warn: vi.fn(),
+      },
+      launchSnapshot: {
+        cancelPendingPersist,
+      },
+      simpleSync: {
+        stopRuntime,
+        unsubscribeFromProject,
+      },
+      userSession: {
+        setCurrentUser,
+      },
+      destroySyncPulse,
+      subscribedProjectId: 'project-1',
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      setupSessionInvalidatedHandler: (this: WorkspaceShellComponent) => void;
+    }).setupSessionInvalidatedHandler.call(context);
+
+    sessionInvalidated$.next({
+      type: 'session-invalidated',
+      source: 'AuthService.backgroundRefresh',
+      userId: 'stale-user',
+    });
+    await Promise.resolve();
+
+    expect(cancelPendingPersist).toHaveBeenCalledTimes(1);
+    expect(stopRuntime).toHaveBeenCalledTimes(1);
+    expect(unsubscribeFromProject).toHaveBeenCalledTimes(1);
+    expect(destroySyncPulse).toHaveBeenCalledTimes(1);
+    expect(setCurrentUser).toHaveBeenCalledWith(null, {
+      skipPersistentReload: true,
+      previousUserIdHint: 'stale-user',
+      preserveOfflineSnapshot: true,
+    });
+    expect((context as unknown as { launchSnapshotWriteBlocked: ReturnType<typeof signal<boolean>> }).launchSnapshotWriteBlocked()).toBe(false);
+    expect((context as unknown as { subscribedProjectId: string | null }).subscribedProjectId).toBeNull();
+  });
+
+  it('setupSessionRestoredHandler 应先完成 owner 切换再确认跨标签页登录态', async () => {
+    const sessionRestored$ = new Subject<{ type: 'session-restored'; source: string; userId: string }>();
+    const cancelPendingPersist = vi.fn();
+    const stopRuntime = vi.fn();
+    const startRuntime = vi.fn();
+    const unsubscribeFromProject = vi.fn().mockResolvedValue(undefined);
+    const completeCrossTabSessionRestore = vi.fn();
+    let currentUserId = 'old-user';
+    const setCurrentUser = vi.fn().mockImplementation(async (userId: string) => {
+      currentUserId = userId;
+    });
+    const destroySyncPulse = vi.fn();
+    const context = {
+      eventBus: {
+        onSessionRestored$: sessionRestored$.asObservable(),
+      },
+      launchSnapshotWriteBlocked: signal(false),
+      destroyRef: {
+        onDestroy: vi.fn(),
+      },
+      logger: {
+        warn: vi.fn(),
+      },
+      launchSnapshot: {
+        cancelPendingPersist,
+      },
+      simpleSync: {
+        stopRuntime,
+        startRuntime,
+        unsubscribeFromProject,
+      },
+      authService: {
+        completeCrossTabSessionRestore,
+      },
+      userSession: {
+        setCurrentUser,
+      },
+      startupTier: {
+        isTierReady: vi.fn().mockReturnValue(true),
+      },
+      destroySyncPulse,
+      currentUserId: () => currentUserId,
+      subscribedProjectId: 'project-1',
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      setupSessionRestoredHandler: (this: WorkspaceShellComponent) => void;
+    }).setupSessionRestoredHandler.call(context);
+
+    sessionRestored$.next({
+      type: 'session-restored',
+      source: 'AuthService.storageBridge',
+      userId: 'new-user',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(cancelPendingPersist).toHaveBeenCalledTimes(1);
+    expect(stopRuntime).toHaveBeenCalledTimes(1);
+    expect(unsubscribeFromProject).toHaveBeenCalledTimes(1);
+    expect(destroySyncPulse).toHaveBeenCalledTimes(1);
+    expect(setCurrentUser).toHaveBeenCalledWith('new-user', {
+      forceLoad: true,
+    });
+    expect(completeCrossTabSessionRestore).toHaveBeenCalledWith('new-user');
+    expect(startRuntime).toHaveBeenCalledTimes(1);
+    expect((context as unknown as { launchSnapshotWriteBlocked: ReturnType<typeof signal<boolean>> }).launchSnapshotWriteBlocked()).toBe(false);
+    expect((context as unknown as { subscribedProjectId: string | null }).subscribedProjectId).toBeNull();
   });
 
   it('syncStateFromRoute 应在 /projects 根路由回填启动项目，避免主内容空壳', () => {

@@ -56,6 +56,20 @@ const createMockSyncState = (overrides?: Partial<SyncState>): SyncState => ({
 const mockSyncService = {
   syncState: signal(createMockSyncState()),
   isLoadingRemote: signal(false),
+  setConflict: vi.fn((conflictData) => {
+    mockSyncService.syncState.update(state => ({
+      ...state,
+      hasConflict: true,
+      conflictData,
+    }));
+  }),
+  clearConflict: vi.fn(() => {
+    mockSyncService.syncState.update(state => ({
+      ...state,
+      hasConflict: false,
+      conflictData: null,
+    }));
+  }),
   saveOfflineSnapshot: vi.fn(),
   loadOfflineSnapshot: vi.fn().mockReturnValue(null),
   clearOfflineCache: vi.fn(),
@@ -93,6 +107,7 @@ const mockActionQueueService = {
   getRegisteredProcessorTypes: vi.fn().mockReturnValue([]),
   getPendingActionsForProject: vi.fn().mockReturnValue([]),
   enqueue: vi.fn().mockResolvedValue(true),
+  enqueueForOwner: vi.fn().mockResolvedValue(true),
   processQueue: vi.fn().mockResolvedValue(undefined),
   queueFrozen: signal(false),
 };
@@ -259,6 +274,7 @@ const mockPersistSchedulerService = {
 
 // Sprint 9 新增：ActionQueueProcessorsService mock
 const mockActionQueueProcessorsService = {
+  setProjectConflictHandler: vi.fn(),
   setupProcessors: vi.fn(),
 };
 
@@ -452,6 +468,25 @@ describe('持久化状态管理', () => {
       expect(service.hasPendingLocalChanges()).toBe(true);
     });
 
+    it('markLocalChanges 应将活动项目标记为 pendingSync 并提前保存本地快照', async () => {
+      const project = createTestProject({ id: 'proj-mark-dirty', pendingSync: false });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveOfflineSnapshot.mockClear();
+
+      service.markLocalChanges('content');
+
+      const updatedProject = mockProjectStateService.projects().find(p => p.id === 'proj-mark-dirty');
+      expect(updatedProject?.pendingSync).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'proj-mark-dirty', pendingSync: true })
+        ])
+      );
+    });
+
     it('markLocalChanges 应该更新 lastUpdateType', () => {
       service.markLocalChanges('content');
       expect(service.getLastUpdateType()).toBe('content');
@@ -540,6 +575,31 @@ describe('持久化状态管理', () => {
       expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
     });
 
+    it('local-only 项目应仅保留本地，不自动上传云端', async () => {
+      const project = createTestProject({
+        id: 'proj-local-only',
+        syncSource: 'local-only',
+        pendingSync: false,
+      });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+
+      mockSyncService.saveOfflineSnapshot.mockClear();
+      mockSyncService.saveProjectSmart.mockClear();
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3500);
+
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
+      }, { timeout: 500, interval: 20 });
+
+      expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+      const persistedProject = mockProjectStateService.projects().find(p => p.id === 'proj-local-only');
+      expect(persistedProject?.syncSource).toBe('local-only');
+      expect(persistedProject?.pendingSync).toBe(true);
+    });
+
     it('remoteConfirmed 后应广播 data-synced', async () => {
       const project = createTestProject({ id: 'proj-1' });
       mockProjectStateService.activeProject.set(project);
@@ -552,6 +612,179 @@ describe('持久化状态管理', () => {
       await vi.waitFor(() => {
         expect(mockTabSyncService.notifyDataSynced).toHaveBeenCalledWith('proj-1', expect.any(String));
       });
+    });
+
+    it('旧会话的自动持久化冲突结果不应注入当前 active conflict', async () => {
+      const project = createTestProject({ id: 'proj-stale-conflict' });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.setConflict.mockClear();
+      mockConflictStorageService.saveConflict.mockClear();
+
+      let resolvePersist: ((value: { success: boolean; conflict?: boolean; remoteData?: Project }) => void) | null = null;
+      mockSyncService.saveProjectSmart.mockImplementationOnce(() => new Promise(resolve => {
+        resolvePersist = resolve;
+      }));
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
+      });
+
+      (service as unknown as { authContextGeneration: number }).authContextGeneration += 1;
+      mockAuthService.currentUserId.mockReturnValue('user-456');
+
+      resolvePersist?.({
+        success: false,
+        conflict: true,
+        remoteData: createTestProject({ id: 'proj-stale-conflict', version: 3 }),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockSyncService.setConflict).not.toHaveBeenCalled();
+      expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
+    });
+
+    it('flushPendingPersist 应在后台切走前抢发一次云端持久化', async () => {
+      const project = createTestProject({ id: 'proj-bg-flush' });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockClear();
+      mockSyncService.saveOfflineSnapshot.mockClear();
+
+      service.markLocalChanges('content');
+      service.flushPendingPersist();
+
+      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('flushPendingPersistToCloud 离线时应只保留本地快照', async () => {
+      const project = createTestProject({ id: 'proj-offline-flush' });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.syncState.set(createMockSyncState({ isOnline: false }));
+      mockSyncService.saveProjectSmart.mockClear();
+
+      const previousOnline = navigator.onLine;
+      Object.defineProperty(navigator, 'onLine', {
+        value: false,
+        configurable: true,
+      });
+
+      service.markLocalChanges('content');
+      const flushed = await service.flushPendingPersistToCloud('before-unload:test');
+
+      expect(flushed).toBe(false);
+      expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+
+      Object.defineProperty(navigator, 'onLine', {
+        value: previousOnline,
+        configurable: true,
+      });
+    });
+
+    it('后台 flush 遇到进行中的持久化时应保留脏标记并补刷下一轮', async () => {
+      const project = createTestProject({ id: 'proj-inflight-flush' });
+      const resolvers: Array<(value: { success: boolean; newVersion: number }) => void> = [];
+
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockClear();
+      mockChangeTrackerService.clearProjectFieldLocks.mockClear();
+      mockChangeTrackerService.clearProjectChanges.mockClear();
+      mockSyncService.saveProjectSmart.mockImplementation(
+        () => new Promise(resolve => {
+          resolvers.push(resolve as (value: { success: boolean; newVersion: number }) => void);
+        })
+      );
+
+      service.markLocalChanges('content');
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
+      });
+
+      service.markLocalChanges('content');
+      service.schedulePersist();
+      service.flushPendingPersist();
+
+      expect(service.hasPendingLocalChanges()).toBe(true);
+
+      resolvers[0]?.({ success: true, newVersion: 2 });
+      await vi.waitFor(() => {
+        expect(service.hasPendingLocalChanges()).toBe(true);
+      });
+      expect(mockProjectStateService.projects().find(p => p.id === 'proj-inflight-flush')?.pendingSync).toBe(true);
+      expect(mockChangeTrackerService.clearProjectFieldLocks).not.toHaveBeenCalled();
+      expect(mockChangeTrackerService.clearProjectChanges).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(2);
+      });
+
+      resolvers[1]?.({ success: true, newVersion: 3 });
+      await vi.waitFor(() => {
+        expect(service.hasPendingLocalChanges()).toBe(false);
+      });
+      expect(mockProjectStateService.projects().find(p => p.id === 'proj-inflight-flush')?.pendingSync).toBe(false);
+      expect(mockChangeTrackerService.clearProjectFieldLocks).toHaveBeenCalledTimes(1);
+      expect(mockChangeTrackerService.clearProjectChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('preparePendingPersistForOwnerChange 在云端失败后应把项目转交给原 owner 队列', async () => {
+      const project = createTestProject({ id: 'proj-owner-handoff', pendingSync: true });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: false });
+
+      service.markLocalChanges('content');
+      const prepared = await service.preparePendingPersistForOwnerChange('user-123', 'owner-switch:user-123->user-456');
+
+      expect(prepared).toBe(true);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledWith(
+        'user-123',
+        expect.objectContaining({
+          type: 'update',
+          entityType: 'project',
+          entityId: 'proj-owner-handoff',
+          payload: expect.objectContaining({
+            sourceUserId: 'user-123',
+            project: expect.objectContaining({
+              id: 'proj-owner-handoff',
+              pendingSync: true,
+              syncSource: 'synced',
+            }),
+          }),
+        })
+      );
+    });
+
+    it('preparePendingPersistForOwnerChange 存在未处理的非活动项目时不应允许清空旧 owner 快照', async () => {
+      const inactiveProject = createTestProject({ id: 'proj-inactive-dirty', pendingSync: true });
+      const activeProject = createTestProject({ id: 'proj-active-handoff', pendingSync: true });
+      mockProjectStateService.activeProject.set(activeProject);
+      mockProjectStateService.projects.set([inactiveProject, activeProject]);
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: false });
+
+      service.markLocalChanges('content');
+      const prepared = await service.preparePendingPersistForOwnerChange(
+        'user-123',
+        'owner-switch:user-123->user-456',
+      );
+
+      expect(prepared).toBe(false);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledWith(
+        'user-123',
+        expect.objectContaining({ entityId: 'proj-active-handoff' }),
+      );
     });
 
     it('收到 data-synced 广播应走本地回填并受 cooldown 限制', () => {
@@ -714,6 +947,13 @@ describe('持久化状态管理', () => {
         localProject: offlineProject,
         remoteProject: cloudProject,
         projectId: 'proj-1'
+      });
+      expect(mockConflictStorageService.saveConflict).toHaveBeenCalled();
+      expect(service.hasConflict()).toBe(true);
+      expect(service.conflictData()).toEqual({
+        local: offlineProject,
+        remote: cloudProject,
+        projectId: 'proj-1',
       });
       
       subscription.unsubscribe();
@@ -1176,6 +1416,10 @@ describe('持久化状态管理', () => {
     it('应该在初始化时委托给 ActionQueueProcessorsService 设置处理器', () => {
       expect(mockActionQueueProcessorsService.setupProcessors).toHaveBeenCalled();
     });
+
+    it('应该在初始化时注册 project conflict 回调', () => {
+      expect(mockActionQueueProcessorsService.setProjectConflictHandler).toHaveBeenCalledWith(expect.any(Function));
+    });
   });
 
   // ==================== 动作处理器注册（已移至 ActionQueueProcessorsService） ====================
@@ -1226,6 +1470,7 @@ describe('持久化状态管理', () => {
       mockProjectStateService.projects.set([project]);
 
       mockSyncService.saveOfflineSnapshot.mockClear();
+      mockSyncService.saveProjectSmart.mockClear();
 
       // 快速连续调用
       for (let i = 0; i < 10; i++) {
@@ -1238,10 +1483,10 @@ describe('持久化状态管理', () => {
 
       // 等待异步持久化操作完成
       await vi.waitFor(() => {
-        // persist 触发保存（至少 2 次：保存到云端前 + 成功后同步版本号）
-        // 加上 autosave 定时器可能的额外调用
-        expect(mockSyncService.saveOfflineSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
       });
+
+      expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
     });
   });
 

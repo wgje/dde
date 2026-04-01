@@ -17,6 +17,7 @@ import { ToastService } from './toast.service';
 import { FocusAttentionService } from './focus-attention.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import { UiStateService } from './ui-state.service';
+import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { Task } from '../models';
 import { DockSnapshot } from '../models/parking-dock';
 import { PARKING_CONFIG } from '../config/parking.config';
@@ -46,6 +47,7 @@ describe('DockEngineService', () => {
 
   const mockActionQueue = {
     enqueue: vi.fn(() => crypto.randomUUID()),
+    enqueueForOwner: vi.fn(() => Promise.resolve(crypto.randomUUID())),
   };
 
   const mockTaskOps = {
@@ -220,6 +222,7 @@ describe('DockEngineService', () => {
     mockSyncService.listRoutineTasks.mockClear();
     mockSyncService.importLegacyDockSnapshot.mockClear();
     mockActionQueue.enqueue.mockClear();
+    mockActionQueue.enqueueForOwner.mockClear();
     mockTaskStore.getTasksByProject.mockClear();
     mockTaskOps.updateTaskContent.mockClear();
     mockTaskOps.updateTaskExpectedMinutes.mockClear();
@@ -251,6 +254,40 @@ describe('DockEngineService', () => {
     TestBed.resetTestingModule();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  it('scheduleLocalPersist should prefer the provided snapshot over a later export', () => {
+    const snapshotPersistence = TestBed.inject(DockSnapshotPersistenceService);
+    let capturedSnapshotFn: (() => DockSnapshot) | null = null;
+    vi.spyOn(snapshotPersistence, 'scheduleLocalPersist').mockImplementation((snapshotFn) => {
+      capturedSnapshotFn = snapshotFn;
+    });
+    const baseSnapshot = service.exportSnapshot();
+    const frozenSnapshot: DockSnapshot = {
+      ...baseSnapshot,
+      focusMode: false,
+      session: {
+        ...baseSnapshot.session,
+        mainTaskId: 'from-arg',
+      },
+    };
+    const latestSnapshot: DockSnapshot = {
+      ...baseSnapshot,
+      focusMode: true,
+      session: {
+        ...baseSnapshot.session,
+        mainTaskId: 'from-current',
+      },
+    };
+
+    (service as unknown as {
+      scheduleLocalPersist: (snapshot: DockSnapshot | null, userId: string | null) => void;
+    }).scheduleLocalPersist(frozenSnapshot, 'user-1');
+    service.restoreSnapshot(latestSnapshot);
+
+    expect(capturedSnapshotFn).not.toBeNull();
+    expect(capturedSnapshotFn?.().focusMode).toBe(false);
+    expect(capturedSnapshotFn?.().session.mainTaskId).toBe('from-arg');
   });
 
   it('应在移动端启动与快照恢复时保持停泊坞收起且不污染桌面偏好', async () => {
@@ -1717,17 +1754,17 @@ describe('DockEngineService', () => {
 
   it('holdNonCriticalWork should defer cloud push timer', () => {
     (service as unknown as { restoringSnapshot: { set: (v: boolean) => void } }).restoringSnapshot.set(false);
-    mockActionQueue.enqueue.mockClear();
+    mockActionQueue.enqueueForOwner.mockClear();
 
     service.holdNonCriticalWork(2600);
     service.toggleFocusScrim();
-    mockActionQueue.enqueue.mockClear();
+    mockActionQueue.enqueueForOwner.mockClear();
 
     vi.advanceTimersByTime(PARKING_CONFIG.NOTICE_MIN_VISIBLE_MS);
-    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(PARKING_CONFIG.FRAGMENT_SILENT_FADE_MS);
-    expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
   });
 
   it('focusSessionState should keep stable sessionId/sessionStartedAt within one session', () => {
@@ -2443,12 +2480,13 @@ describe('DockEngineService', () => {
 
   it('completeDailySlot should enqueue UUID-based routine completion mutation', () => {
     const slotId = service.dailySlotService.addDailySlot('Daily Task', 1);
-    mockActionQueue.enqueue.mockClear();
+    mockActionQueue.enqueueForOwner.mockClear();
 
     service.dailySlotService.completeDailySlot(slotId);
 
-    expect(mockActionQueue.enqueue).toHaveBeenCalledTimes(1);
-    const payload = mockActionQueue.enqueue.mock.calls[0][0];
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
+    expect(mockActionQueue.enqueueForOwner.mock.calls[0][0]).toBe('user-1');
+    const payload = mockActionQueue.enqueueForOwner.mock.calls[0][1];
     expect(payload.entityType).toBe('routine-completion');
     expect(payload.payload.completion.userId).toBe('user-1');
     expect(payload.payload.completion.routineId).toBe(slotId);

@@ -35,6 +35,8 @@ import { IntervalHandle, TimerHandle } from '../utils/timer-handle';
 import { DockAudioPlayer } from './dock-audio.utils';
 import { isWaitExpired, isWaitingLike, patchAllEntries } from './dock-engine.utils';
 import { TaskStore } from '../core-bridge';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { isLocalModeEnabled } from './guards/auth.guard';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入运行时引用
@@ -117,6 +119,7 @@ export class DockEngineLifecycleService {
   private switchMaintenanceIdleId: number | null = null;
   private readonly switchMaintenanceFallback = new TimerHandle();
   private switchMaintenanceToken = 0;
+  private snapshotRestoreToken = 0;
   private nonCriticalWorkHoldUntil = 0;
   private visibilityListener: (() => void) | null = null;
 
@@ -154,11 +157,17 @@ export class DockEngineLifecycleService {
   // ---------------------------------------------------------------------------
 
   restoreInitialSnapshot(): void {
-    this.ctx.setCurrentSnapshotUserId(this.auth.currentUserId());
-    this.ctx.restoringSnapshot.set(true);
-    void this.restoreLocalSnapshot(this.ctx.getCurrentSnapshotUserId()).finally(() => {
-      this.ctx.restoringSnapshot.set(false);
-    });
+    const ownerUserId = this.resolveConfirmedRestoreOwnerUserId();
+    if (this.shouldDeferRestoreUntilAuthConfirmed(ownerUserId)) {
+      this.clearSnapshotStateForUnconfirmedOwner();
+      return;
+    }
+    if (ownerUserId === null) {
+      this.clearSnapshotStateForUnconfirmedOwner();
+      return;
+    }
+    this.ctx.setCurrentSnapshotUserId(ownerUserId);
+    this.startSnapshotRestore(ownerUserId, { cloudPullMode: 'idle' });
   }
 
   // ---------------------------------------------------------------------------
@@ -175,26 +184,39 @@ export class DockEngineLifecycleService {
   private registerCoreEffects(): void {
     // DATA-C2 fix: cloud pull 必须在 local restore 完成后调度，避免竞态覆盖
     effect(() => {
-      const userId = this.auth.currentUserId();
+      const userId = this.resolveConfirmedRestoreOwnerUserId();
+      if (this.shouldDeferRestoreUntilAuthConfirmed(userId)) {
+        this.clearSnapshotStateForUnconfirmedOwner();
+        return;
+      }
+      if (userId === null) {
+        this.clearSnapshotStateForUnconfirmedOwner();
+        return;
+      }
       if (userId === this.ctx.getCurrentSnapshotUserId()) return;
       this.ctx.setCurrentSnapshotUserId(userId);
-      this.ctx.restoringSnapshot.set(true);
-      void this.restoreLocalSnapshot(userId).finally(() => {
-        this.ctx.restoringSnapshot.set(false);
-        if (userId) this.cloudSync.scheduleCloudPull(userId, true);
-      });
+      this.startSnapshotRestore(userId, { cloudPullMode: 'immediate' });
     });
 
     // 状态变更时触发本地持久化和云端推送（通过 persistenceDeps 聚合信号，避免冗余触发）
     effect(() => {
       this.ctx.persistenceDeps();
+      const confirmedOwnerUserId = this.resolveConfirmedRestoreOwnerUserId();
+      if (this.shouldDeferRestoreUntilAuthConfirmed(confirmedOwnerUserId)) {
+        this.cancelSnapshotPersistenceWork();
+        return;
+      }
+
+      if (confirmedOwnerUserId === null) {
+        this.cancelSnapshotPersistenceWork();
+        return;
+      }
+
       if (this.ctx.restoringSnapshot()) return;
 
-      this.ctx.scheduleLocalPersist(null, this.ctx.getCurrentSnapshotUserId());
-      const userId = this.ctx.getCurrentSnapshotUserId();
-      if (userId) {
-        this.cloudSync.scheduleCloudPush(userId, null);
-      }
+      const snapshot = this.ctx.exportSnapshot();
+      this.ctx.scheduleLocalPersist(snapshot, confirmedOwnerUserId);
+      this.cloudSync.scheduleCloudPush(confirmedOwnerUserId, snapshot);
     });
 
     // 软限制通知重置
@@ -290,19 +312,28 @@ export class DockEngineLifecycleService {
 
   /**
    * 延迟触发初始云端拉取，避免在启动热路径上与关键 API 请求竞争带宽。
-   * 使用 requestIdleCallback 推迟到浏览器空闲阶段，减少首屏阻塞。
+   * 仅最新 restore token 且 owner 未切换时才允许真正调度。
    */
-  triggerInitialCloudPull(): void {
-    const userId = this.ctx.getCurrentSnapshotUserId();
-    if (!userId) return;
+  private scheduleIdleCloudPull(userId: string, restoreToken: number): void {
     const scheduleIdle = (cb: () => void) => {
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(cb);
+      const requestIdleCallback = typeof window !== 'undefined'
+        ? (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback
+        : undefined;
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(cb);
       } else {
         setTimeout(cb, 2000);
       }
     };
     scheduleIdle(() => {
+      if (restoreToken !== this.snapshotRestoreToken) {
+        return;
+      }
+
+      if (userId !== this.ctx.getCurrentSnapshotUserId() || this.ctx.restoringSnapshot()) {
+        return;
+      }
+
       this.cloudSync.scheduleCloudPull(userId, true);
     });
   }
@@ -492,6 +523,9 @@ export class DockEngineLifecycleService {
   // ---------------------------------------------------------------------------
 
   async restoreLocalSnapshot(userId: string | null): Promise<void> {
+    // 中文注释：切账号或恢复本地快照前先废弃旧的云同步防抖任务，防止旧 owner 定时器回写新快照。
+    this.snapshotPersistence.cancelPendingPersist();
+    this.cloudSync.cancelTimers();
     const ctx = this.ctx.buildNormalizeContext();
     const normalized = await this.snapshotPersistence.restoreLocalSnapshot(userId, ctx);
     // C-2 fix: 丢弃过期的异步恢复（用户已切换到其他账户）
@@ -501,5 +535,74 @@ export class DockEngineLifecycleService {
       return;
     }
     this.ctx.reset();
+  }
+
+  private startSnapshotRestore(
+    userId: string | null,
+    options: { cloudPullMode: 'none' | 'immediate' | 'idle' },
+  ): void {
+    const restoreToken = ++this.snapshotRestoreToken;
+    this.ctx.restoringSnapshot.set(true);
+    void this.restoreLocalSnapshot(userId).finally(() => {
+      if (restoreToken !== this.snapshotRestoreToken) {
+        return;
+      }
+
+      if (userId !== this.ctx.getCurrentSnapshotUserId()) {
+        return;
+      }
+
+      this.ctx.restoringSnapshot.set(false);
+      if (options.cloudPullMode === 'immediate' && userId) {
+        this.cloudSync.scheduleCloudPull(userId, true);
+      }
+
+      if (options.cloudPullMode === 'idle' && userId) {
+        this.scheduleIdleCloudPull(userId, restoreToken);
+      }
+    });
+  }
+
+  private clearSnapshotStateForUnconfirmedOwner(): void {
+    ++this.snapshotRestoreToken;
+    this.cancelSnapshotPersistenceWork();
+    this.ctx.restoringSnapshot.set(false);
+    if (this.ctx.getCurrentSnapshotUserId() !== null) {
+      this.ctx.setCurrentSnapshotUserId(null);
+    }
+    this.ctx.reset();
+  }
+
+  private cancelSnapshotPersistenceWork(): void {
+    this.snapshotPersistence.cancelPendingPersist();
+    this.cloudSync.cancelTimers();
+  }
+
+  private resolveConfirmedRestoreOwnerUserId(): string | null {
+    const currentUserId = this.auth.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    const persistedSessionUserId = this.auth.persistedSessionUserId?.()
+      ?? this.auth.peekPersistedSessionIdentity?.()?.userId
+      ?? null;
+    if (persistedSessionUserId) {
+      return persistedSessionUserId;
+    }
+
+    if (!this.auth.isConfigured || isLocalModeEnabled()) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    return null;
+  }
+
+  private shouldDeferRestoreUntilAuthConfirmed(ownerUserId: string | null): boolean {
+    if (ownerUserId !== null) {
+      return false;
+    }
+
+    return Boolean(this.auth.persistedOwnerHint?.() ?? this.auth.peekPersistedOwnerHint?.());
   }
 }

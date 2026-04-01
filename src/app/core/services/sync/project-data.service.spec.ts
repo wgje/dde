@@ -2,11 +2,13 @@ import { Injector } from '@angular/core';
 import { describe, expect, it, vi } from 'vitest';
 import { ProjectDataService } from './project-data.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
 import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 
 const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
 const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
@@ -126,6 +128,12 @@ describe('ProjectDataService', () => {
           },
         },
         {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
+          },
+        },
+        {
           provide: LoggerService,
           useValue: {
             category: () => ({
@@ -192,6 +200,12 @@ describe('ProjectDataService', () => {
           useValue: {
             isConfigured: true,
             clientAsync: vi.fn(async () => ({ rpc })),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
           },
         },
         {
@@ -262,6 +276,12 @@ describe('ProjectDataService', () => {
             isConfigured: false,
             isOfflineMode: () => true,
             clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => null),
           },
         },
         {
@@ -350,7 +370,9 @@ describe('ProjectDataService', () => {
       }
       return {
         select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockResolvedValue({ data: [], error: null }),
+          eq: vi.fn().mockReturnValue({
+            is: vi.fn().mockResolvedValue({ data: [], error: null }),
+          }),
         }),
       };
     });
@@ -363,6 +385,12 @@ describe('ProjectDataService', () => {
           useValue: {
             isConfigured: true,
             clientAsync: vi.fn(async () => ({ rpc, from })),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
           },
         },
         {
@@ -444,6 +472,12 @@ describe('ProjectDataService', () => {
           useValue: {
             isConfigured: true,
             clientAsync: vi.fn(async () => ({ rpc, from })),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
           },
         },
         {
@@ -539,6 +573,12 @@ describe('ProjectDataService', () => {
           },
         },
         {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
+          },
+        },
+        {
           provide: LoggerService,
           useValue: {
             category: () => ({
@@ -594,6 +634,7 @@ describe('ProjectDataService', () => {
     expect(snapshot.source).toBe('idb');
     expect(snapshot.projectCount).toBe(1);
     expect(snapshot.migratedLegacy).toBe(false);
+    expect(snapshot.ownerUserId).toBeNull();
     expect(snapshot.bytes).toBeGreaterThan(0);
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('idb-project');
@@ -627,6 +668,12 @@ describe('ProjectDataService', () => {
           useValue: {
             isConfigured: false,
             clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
           },
         },
         {
@@ -686,11 +733,664 @@ describe('ProjectDataService', () => {
     expect(snapshot.source).toBe('localStorage');
     expect(snapshot.projectCount).toBe(1);
     expect(snapshot.migratedLegacy).toBe(true);
+    expect(snapshot.ownerUserId).toBeNull();
     expect(snapshot.bytes).toBeGreaterThan(0);
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('legacy-project');
     expect(migratedPayload).toBe(legacyPayload);
   }, 10000);
+
+  it('saveOfflineSnapshot 应写入 ownerUserId，并在启动恢复时返回该元数据', async () => {
+    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
+    await clearOfflineSnapshotIdb();
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'owner-user'),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    service.saveOfflineSnapshot([
+      {
+        id: 'owner-project',
+        name: 'Owner Project',
+        description: '',
+        createdDate: '2026-03-31T00:00:00.000Z',
+        tasks: [],
+        connections: [],
+      },
+    ] as any);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const snapshot = await service.loadStartupOfflineSnapshot();
+
+    expect(snapshot.ownerUserId).toBe('owner-user');
+    expect(snapshot.projects).toHaveLength(1);
+  }, 10000);
+
+  it('saveOfflineSnapshot 在 currentUserId 为空但 confirmed session 已知时应写入真实 owner', async () => {
+    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
+    await clearOfflineSnapshotIdb();
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => null),
+            peekPersistedSessionIdentity: vi.fn(() => ({
+              userId: 'confirmed-owner',
+              email: 'confirmed@example.com',
+            })),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    service.saveOfflineSnapshot([
+      {
+        id: 'confirmed-session-project',
+        name: 'Confirmed Session Project',
+        description: '',
+        createdDate: '2026-03-31T00:00:00.000Z',
+        tasks: [],
+        connections: [],
+      },
+    ] as any);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const snapshot = await service.loadStartupOfflineSnapshot();
+    expect(snapshot.ownerUserId).toBe('confirmed-owner');
+  }, 10000);
+
+  it('hint-only 启动占位态下不应覆盖真实离线快照', async () => {
+    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
+    await clearOfflineSnapshotIdb();
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: StartupPlaceholderStateService,
+          useValue: {
+            isHintOnlyActive: vi.fn(() => true),
+          },
+        },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => null),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    service.saveOfflineSnapshot([
+      {
+        id: 'placeholder-project',
+        name: 'Project 1',
+        description: '',
+        createdDate: '2026-03-31T00:00:00.000Z',
+        tasks: [],
+        connections: [],
+      },
+    ] as any);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(localStorage.getItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY)).toBeNull();
+    const snapshot = await service.loadStartupOfflineSnapshot();
+    expect(snapshot.projectCount).toBe(0);
+  }, 10000);
+
+  it('loadOfflineSnapshot 默认不应因 persisted owner hint 放宽 owner 可见性', () => {
+    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+      projects: [
+        {
+          id: 'persisted-owner-project',
+          name: 'Persisted Owner Project',
+          description: 'from scoped snapshot',
+          createdDate: '2026-03-25T00:00:00.000Z',
+          updatedAt: '2026-03-25T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 6,
+      ownerUserId: 'user-1',
+    }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => null),
+            peekPersistedSessionIdentity: vi.fn(() => null),
+            peekPersistedOwnerHint: vi.fn(() => 'user-1'),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const safeSnapshot = service.loadOfflineSnapshot();
+    const hintedSnapshot = service.loadOfflineSnapshot({ allowOwnerHint: true });
+
+    expect(safeSnapshot).toBeNull();
+    expect(hintedSnapshot).toEqual([
+      expect.objectContaining({ id: 'persisted-owner-project', name: 'Persisted Owner Project' }),
+    ]);
+  });
+
+  it('loadOfflineSnapshot 在当前 owner 与快照 owner 不匹配时应直接丢弃', () => {
+    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+      projects: [
+        {
+          id: 'foreign-owner-project',
+          name: 'Foreign Owner Project',
+          description: 'should stay isolated',
+          createdDate: '2026-03-25T00:00:00.000Z',
+          updatedAt: '2026-03-25T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 6,
+      ownerUserId: 'user-1',
+    }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-2'),
+            peekPersistedSessionIdentity: vi.fn(() => null),
+            peekPersistedOwnerHint: vi.fn(() => 'user-1'),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+
+    expect(service.loadOfflineSnapshot()).toBeNull();
+    expect(service.loadOfflineSnapshot({ allowOwnerHint: true })).toBeNull();
+  });
+
+  it('loadOfflineSnapshot 缺少 owner 元数据时应直接丢弃', () => {
+    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+      projects: [
+        {
+          id: 'ownerless-project',
+          name: 'Ownerless Project',
+          description: 'legacy payload without owner',
+          createdDate: '2026-03-25T00:00:00.000Z',
+          updatedAt: '2026-03-25T00:00:00.000Z',
+          tasks: [],
+          connections: [],
+        },
+      ],
+      version: 6,
+    }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+
+    expect(service.loadOfflineSnapshot()).toBeNull();
+  });
+
+  it('loadProjectListMetadataFromCloud 应仅返回项目壳数据，不触发完整项目展开', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const throttleExecute = vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation());
+    const order = vi.fn().mockResolvedValue({
+      data: [{
+        id: 'proj-remote',
+        title: '云端项目',
+        description: '只需要壳数据',
+        created_date: '2026-03-30T00:00:00.000Z',
+        updated_at: '2026-03-30T01:00:00.000Z',
+        version: 3,
+      }],
+      error: null,
+    });
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    const from = vi.fn(() => ({ select }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: true,
+            clientAsync: vi.fn(async () => ({ from })),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: throttleExecute,
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const loadFullProjectSpy = vi.spyOn(service, 'loadFullProjectOptimized');
+
+    const result = await service.loadProjectListMetadataFromCloud('user-1');
+
+    expect(result).toEqual([
+      {
+        id: 'proj-remote',
+        name: '云端项目',
+        description: '只需要壳数据',
+        createdDate: '2026-03-30T00:00:00.000Z',
+        updatedAt: '2026-03-30T01:00:00.000Z',
+        version: 3,
+        syncSource: 'synced',
+        pendingSync: false,
+        tasks: [],
+        connections: [],
+      },
+    ]);
+    expect(loadFullProjectSpy).not.toHaveBeenCalled();
+    expect(throttleExecute).toHaveBeenCalledOnce();
+  });
+
+  it('loadProjectListMetadataFromCloud 遇到错误时应返回 null，避免把失败误判为空列表', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const sentry = {
+      addBreadcrumb: vi.fn(),
+      captureException: vi.fn(),
+      captureMessage: vi.fn(),
+    };
+    const throttleExecute = vi.fn().mockRejectedValue(new Error('network unavailable'));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: true,
+            clientAsync: vi.fn(async () => ({ from: vi.fn() })),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: throttleExecute,
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: sentry,
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+
+    const result = await service.loadProjectListMetadataFromCloud('user-1');
+
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith('加载项目元数据列表失败', expect.any(Error));
+    expect(sentry.captureException).toHaveBeenCalledWith(expect.any(Error), {
+      tags: { operation: 'loadProjectListMetadataFromCloud' }
+    });
+  });
 
   it('rowToTask 遇到缺失 content 字段时应告警并上报采样监控', () => {
     const logger = {

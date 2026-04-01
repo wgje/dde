@@ -311,6 +311,7 @@ export class ProjectSyncOperationsService {
       projectId: localProject.id,
       localProject,
       remoteProject,
+      remoteSnapshotFresh: true,
       conflictedAt: new Date().toISOString(),
       localVersion: localProject.version ?? 0,
       remoteVersion: remoteProject.version ?? 0,

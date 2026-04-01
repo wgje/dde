@@ -368,10 +368,13 @@ export class LayoutService {
     if (parentId) {
       const parent = existingTasks.find(t => t.id === parentId);
       if (parent && parent.x !== undefined && parent.y !== undefined) {
-        // 在父节点右侧偏下方创建
+        // 按同父的已有子节点数计算偏移量，避免使用阶段总任务数导致位置过远
+        const siblingCount = existingTasks.filter(
+          t => t.parentId === parentId && !t.deletedAt && t.status !== 'archived'
+        ).length;
         return {
           x: parent.x + LAYOUT_CONFIG.STAGE_SPACING,
-          y: parent.y + (index * 60) // 每个子节点垂直间隔60
+          y: parent.y + (siblingCount * LAYOUT_CONFIG.ROW_SPACING)
         };
       }
     }

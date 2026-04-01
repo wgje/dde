@@ -19,7 +19,9 @@ import {
   output,
   OnInit,
   OnDestroy,
-  inject
+  AfterViewInit,
+  inject,
+  ElementRef
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MobileDrawerGestureService } from '../services/mobile-drawer-gesture.service';
@@ -46,7 +48,7 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
                  shadow-lg z-20 flex flex-col will-change-[height]"
           [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
           [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [style.height.vh]="gestureService.topPanelHeight()">
+          [style.height.%]="gestureService.topPanelHeight()">
           
           <!-- 内容区域（flex-1 填充，滚动） -->
           <div class="flex-1 min-h-0 overflow-hidden">
@@ -70,9 +72,9 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
       
       <!-- 中间层：流程图（填充剩余空间） -->
       <div 
-        class="absolute inset-0 z-10"
-        [style.top.vh]="gestureService.topPanelHeight()"
-        [style.bottom.vh]="gestureService.bottomPanelHeight()">
+        class="absolute inset-0 z-10 overflow-hidden"
+        [style.top.%]="gestureService.topPanelHeight()"
+        [style.bottom.%]="gestureService.bottomPanelHeight()">
         <ng-content select="[slot=middle]"></ng-content>
       </div>
       
@@ -83,7 +85,7 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
                  shadow-lg z-20 flex flex-col will-change-[height]"
           [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
           [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [style.height.vh]="gestureService.bottomPanelHeight()">
+          [style.height.%]="gestureService.bottomPanelHeight()">
           
           <!-- 顶部把手（固定在面板顶部） -->
           <div 
@@ -108,7 +110,7 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
       <!-- 首次使用手势提示 -->
       @if (gestureService.showGestureHint()) {
         <div class="absolute inset-x-0 z-50 pointer-events-none flex flex-col items-center"
-             [style.top.vh]="gestureService.topPanelHeight()">
+             [style.top.%]="gestureService.topPanelHeight()">
           <div class="bg-black/70 text-white text-xs px-3 py-1.5 rounded-full mt-2 animate-bounce">
             ↕ 拖动把手调整面板高度
           </div>
@@ -142,8 +144,9 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
     }
   `]
 })
-export class MobileDrawerContainerComponent implements OnInit, OnDestroy {
+export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterViewInit {
   readonly gestureService = inject(MobileDrawerGestureService);
+  private readonly elementRef = inject(ElementRef);
   
   // 配置输入
   readonly enableTopDrawer = input<boolean>(true);
@@ -160,6 +163,14 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy {
   
   ngOnInit(): void {
     this.gestureService.initialize();
+  }
+
+  ngAfterViewInit(): void {
+    // 绑定容器元素，使手势服务基于容器实际尺寸而非视口尺寸
+    const el = this.elementRef.nativeElement?.querySelector?.('.mobile-drawer-container');
+    if (el) {
+      this.gestureService.setContainer(el);
+    }
   }
   
   ngOnDestroy(): void {

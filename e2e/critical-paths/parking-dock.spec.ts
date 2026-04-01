@@ -85,7 +85,7 @@ async function dragTaskToDock(page: Page, sourceSelector: string): Promise<void>
 
 async function clickVisibleFocusToggle(page: Page): Promise<boolean> {
   const selectors = [
-    '[data-testid="spotlight-trigger"]',
+    '[data-testid="focus-session-trigger"]',
     '[data-testid="project-shell-focus-session-toggle"]',
   ];
 

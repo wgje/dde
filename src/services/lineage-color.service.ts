@@ -102,10 +102,26 @@ export class LineageColorService {
     
     // 步骤2：追溯每个任务的始祖节点
     const lineageCache = new Map<string, { rootId: string; rootIndex: number }>();
-    const rootNodes: string[] = []; // 按发现顺序记录始祖节点
+    const rootNodes: string[] = []; // 记录始祖节点
     
     for (const task of tasks) {
       this.traceRootAncestor(task.id, taskMap, lineageCache, rootNodes);
+    }
+    
+    // 步骤2.5：按 ID 排序始祖节点，确保颜色分配与加载顺序无关
+    // 这样无论手机端还是电脑端、无论何时打开项目，同一棵树始终获得相同颜色
+    rootNodes.sort();
+    
+    // 重建排序后的 rootIndex 映射
+    const sortedRootIndexMap = new Map<string, number>();
+    rootNodes.forEach((rootId, index) => {
+      sortedRootIndexMap.set(rootId, index);
+    });
+    
+    // 更新 lineageCache 中的 rootIndex 为排序后的值
+    for (const [taskId, lineage] of lineageCache) {
+      const sortedIndex = sortedRootIndexMap.get(lineage.rootId) ?? 0;
+      lineageCache.set(taskId, { rootId: lineage.rootId, rootIndex: sortedIndex });
     }
     
     // 步骤3：计算每个始祖节点的家族颜色

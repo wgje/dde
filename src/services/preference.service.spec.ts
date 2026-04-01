@@ -1,5 +1,10 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { Injector } from '@angular/core';
+import {
+  Injector,
+  runInInjectionContext,
+  ɵChangeDetectionScheduler as ChangeDetectionScheduler,
+  ɵEffectScheduler as EffectScheduler,
+} from '@angular/core';
 import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
@@ -11,26 +16,55 @@ const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
 };
 
+const mockSyncService = {
+  saveUserPreferences: vi.fn(),
+  loadUserPreferences: vi.fn(),
+  setUserPreferencesChangeCallback: vi.fn(),
+};
+
+const mockActionQueue = {
+  enqueue: vi.fn(),
+  enqueueForOwner: vi.fn(),
+};
+
+const mockThemeService = {
+  theme: vi.fn(() => 'system'),
+  setTheme: vi.fn(),
+  loadUserTheme: vi.fn(),
+};
+
+const mockChangeDetectionScheduler: ChangeDetectionScheduler = {
+  notify: vi.fn(),
+  runningTick: false,
+};
+
+const mockEffectScheduler: EffectScheduler = {
+  schedule: (effect: { run: () => void }) => {
+    queueMicrotask(() => effect.run());
+  },
+  flush: vi.fn(),
+  remove: vi.fn(),
+};
+
 describe('PreferenceService', () => {
   let service: PreferenceService;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     const injector = Injector.create({
       providers: [
         { provide: PreferenceService, useClass: PreferenceService },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
-        { provide: SimpleSyncService, useValue: { upsert: vi.fn().mockResolvedValue({ ok: true }), query: vi.fn().mockResolvedValue({ ok: true, value: [] }) } },
-        { provide: ActionQueueService, useValue: { enqueue: vi.fn() } },
+        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: AuthService, useValue: { currentUserId: vi.fn(() => null) } },
-        { provide: ThemeService, useValue: { theme: vi.fn(() => 'system'), setTheme: vi.fn() } },
+        { provide: ThemeService, useValue: mockThemeService },
+        { provide: ChangeDetectionScheduler, useValue: mockChangeDetectionScheduler },
+        { provide: EffectScheduler, useValue: mockEffectScheduler },
       ],
     });
 
-    try {
-      service = injector.get(PreferenceService);
-    } catch {
-      // If it fails due to missing deps, tests will be skipped
-    }
+    service = runInInjectionContext(injector, () => injector.get(PreferenceService));
   });
 
   describe('signals', () => {
@@ -50,8 +84,43 @@ describe('PreferenceService', () => {
 
   describe('loadLocalPreferences', () => {
     it('加载不出错', () => {
-      if (!service) return;
       expect(() => service.loadLocalPreferences()).not.toThrow();
+    });
+  });
+
+  describe('saveUserPreferences', () => {
+    it('云端失败时入队的 payload 应携带 sourceUserId', async () => {
+      mockSyncService.saveUserPreferences.mockResolvedValueOnce(false);
+
+      await service.saveUserPreferences('user-1', { theme: 'dark' });
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          payload: {
+            preferences: { theme: 'dark' },
+            userId: 'user-1',
+            sourceUserId: 'user-1',
+          },
+        }),
+      );
+    });
+
+    it('云端异常时入队的 payload 应携带 sourceUserId', async () => {
+      mockSyncService.saveUserPreferences.mockRejectedValueOnce(new Error('network down'));
+
+      await service.saveUserPreferences('user-1', { layoutMode: 'compact' as never });
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          payload: {
+            preferences: { layoutMode: 'compact' },
+            userId: 'user-1',
+            sourceUserId: 'user-1',
+          },
+        }),
+      );
     });
   });
 });

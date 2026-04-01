@@ -1,4 +1,4 @@
-import { Component, inject, ChangeDetectionStrategy, ElementRef, input, output, viewChild, effect } from '@angular/core';
+import { Component, inject, ChangeDetectionStrategy, ElementRef, input, output, signal, viewChild, effect } from '@angular/core';
 import { CommonModule, DatePipe } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
@@ -109,7 +109,8 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
           (deleteTask)="deleteTask.emit()"
           (parkTask)="parkTask.emit()"
           (attachmentError)="attachmentError.emit($event)"
-          (openLinkedTask)="openLinkedTask.emit($event)">
+          (openLinkedTask)="openLinkedTask.emit($event)"
+          (previewModeChange)="onEditorPreviewChange($event)">
         </app-text-task-editor>
       }
     </div>
@@ -122,6 +123,9 @@ export class TextTaskCardComponent {
 
   taskEditor = viewChild<TextTaskEditorComponent>('taskEditor');
   taskEditorElement = viewChild('taskEditor', { read: ElementRef });
+
+  /** 编辑器是否处于预览模式（选中态子状态） */
+  editorPreview = signal(true);
 
   private lastClickTime = 0;
   private lastClickWasNonEdit = false;
@@ -183,14 +187,23 @@ export class TextTaskCardComponent {
   }
 
   get cardClasses() {
+    const selected = this.isSelected();
+    const preview = this.editorPreview();
     return {
       'p-3': !this.isMobile(),
       'p-2': this.isMobile(),
-      'shadow-sm border-retro-muted/20': !this.isSelected() && !this.isDragging(),
-      'ring-1 ring-retro-gold shadow-md': this.isSelected(),
+      'shadow-sm border-retro-muted/20': !selected && !this.isDragging(),
+      // 预览态：去掉可见边框和金色ring，保持阴影区分层级
+      'border-transparent shadow-sm': selected && preview,
+      // 编辑态：保留金色ring和边框，作为编辑状态的视觉提示
+      'ring-1 ring-retro-gold shadow-md': selected && !preview,
       'ring-2 ring-indigo-400/70 shadow-[0_0_0_1px_rgba(99,102,241,0.18),0_0_20px_rgba(99,102,241,0.16)]': this.isDockFocused(),
       'opacity-40 scale-98 border-2 border-retro-teal border-dashed bg-retro-teal/5': this.isDragging(),
     };
+  }
+
+  onEditorPreviewChange(isPreview: boolean) {
+    this.editorPreview.set(isPreview);
   }
 
   isDocked(): boolean {

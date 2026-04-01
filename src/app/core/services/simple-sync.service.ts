@@ -204,23 +204,29 @@ export class SimpleSyncService {
     
     // 初始化 BatchSyncService 回调
     this.batchSyncService.setCallbacks({
-      pushProject: (p, f) => this.pushProject(p, f),
-      pushTask: (t, pid, s, f) => this.pushTask(t, pid, s, f),
-      pushTaskPosition: (tid, x, y, pid, fallbackTask) =>
-        this.pushTaskPosition(tid, x, y, pid, fallbackTask),
-      pushConnection: (c, pid, s, te, f) => this.pushConnection(c, pid, s, te, f),
+      pushProject: (p, f, sourceUserId) => this.pushProjectWithResult(p, f, sourceUserId),
+      pushTask: (t, pid, s, f, sourceUserId) => this.pushTask(t, pid, s, f, sourceUserId),
+      pushTaskPosition: (tid, x, y, pid, fallbackTask, sourceUserId) =>
+        this.pushTaskPosition(tid, x, y, pid, fallbackTask, sourceUserId),
+      pushConnection: (c, pid, s, te, f, sourceUserId) => this.pushConnection(c, pid, s, te, f, sourceUserId),
       getTombstoneIds: (pid) => this.getTombstoneIds(pid),
       getConnectionTombstoneIds: (pid) => this.getConnectionTombstoneIds(pid),
       purgeTasksFromCloud: (pid, tids) => this.purgeTasksFromCloud(pid, tids),
       topologicalSortTasks: (tasks) => this.topologicalSortTasks(tasks),
-      addToRetryQueue: (t, o, d, p) => this.addToRetryQueue(t, o, d as Task | Project | Connection | { id: string }, p)
+      addToRetryQueue: (t, o, d, p, sourceUserId) => this.addToRetryQueue(
+        t,
+        o,
+        d as Task | Project | Connection | { id: string },
+        p,
+        sourceUserId,
+      )
     });
     
     // 设置重试队列操作处理器
     this.retryQueueService.setOperationHandler({
       pushTask: (task, pid) => this.pushTask(task, pid, true, true),
       deleteTask: (tid, pid) => this.deleteTask(tid, pid),
-      pushProject: (project) => this.pushProject(project, true),
+      pushProject: (project, sourceUserId) => this.pushProject(project, true, sourceUserId),
       // 重试连接时保留任务存在性校验，避免 23503 外键错误风暴
       pushConnection: (conn, pid) => this.pushConnection(conn, pid, true, false, true),
       pushBlackBoxEntry: (entry: BlackBoxEntry) => this.blackBoxSync.pushToServer(entry),
@@ -640,8 +646,14 @@ export class SimpleSyncService {
   
   // ==================== 任务同步（委托） ====================
   
-  async pushTask(task: Task, projectId: string, skipTombstoneCheck = false, fromRetryQueue = false): Promise<boolean> {
-    return this.taskSyncOps.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue);
+  async pushTask(
+    task: Task,
+    projectId: string,
+    skipTombstoneCheck = false,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<boolean> {
+    return this.taskSyncOps.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue, sourceUserId);
   }
   
   async pushTaskPosition(
@@ -649,9 +661,10 @@ export class SimpleSyncService {
     x: number,
     y: number,
     projectId?: string,
-    fallbackTask?: Task
+    fallbackTask?: Task,
+    sourceUserId?: string,
   ): Promise<boolean> {
-    return this.taskSyncOps.pushTaskPosition(taskId, x, y, projectId, fallbackTask);
+    return this.taskSyncOps.pushTaskPosition(taskId, x, y, projectId, fallbackTask, sourceUserId);
   }
   
   async pullTasks(projectId: string, since?: string): Promise<Task[]> {
@@ -696,8 +709,22 @@ export class SimpleSyncService {
   
   // ==================== 连接同步（委托） ====================
   
-  async pushConnection(connection: Connection, projectId: string, skipTombstoneCheck = false, skipTaskExistenceCheck = false, fromRetryQueue = false): Promise<boolean> {
-    return this.connectionSyncOps.pushConnection(connection, projectId, skipTombstoneCheck, skipTaskExistenceCheck, fromRetryQueue);
+  async pushConnection(
+    connection: Connection,
+    projectId: string,
+    skipTombstoneCheck = false,
+    skipTaskExistenceCheck = false,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<boolean> {
+    return this.connectionSyncOps.pushConnection(
+      connection,
+      projectId,
+      skipTombstoneCheck,
+      skipTaskExistenceCheck,
+      fromRetryQueue,
+      sourceUserId,
+    );
   }
   
   async getConnectionTombstoneIds(projectId: string): Promise<Set<string>> {
@@ -713,7 +740,7 @@ export class SimpleSyncService {
   
   // ==================== 项目同步 ====================
   
-  async pushProject(project: Project, fromRetryQueue = false): Promise<boolean> {
+  async pushProject(project: Project, fromRetryQueue = false, sourceUserId?: string): Promise<boolean> {
     if (this.syncState().sessionExpired) {
       this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id });
       return false;
@@ -721,37 +748,50 @@ export class SimpleSyncService {
     
     const client = await this.getSupabaseClient();
     if (!client) {
-      if (!fromRetryQueue) this.addToRetryQueue('project', 'upsert', project);
+      if (!fromRetryQueue) this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId);
       return false;
     }
     
     // 【#95057880 修复】支持自动刷新后重试的内部执行函数（与 pushTask 对齐）
-    const executeProjectPush = async (): Promise<void> => {
+    const executeProjectPush = async (): Promise<boolean> => {
       const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
+      let sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
         // 先尝试刷新会话，而非立即标记永久失败
         const refreshed = await this.sessionManager.tryRefreshSession('pushProject.getSession');
         if (refreshed) {
           const { data: { session: newSession } } = await client.auth.getSession();
-          if (newSession?.user?.id) {
-            return await this.doProjectPush(client, project, newSession.user.id);
-          }
+          sessionUserId = newSession?.user?.id ?? null;
         }
-        this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
-        return;
       }
-      
-      return await this.doProjectPush(client, project, userId);
+
+      if (!sessionUserId) {
+        this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
+        return false;
+      }
+
+      if (sourceUserId && sessionUserId !== sourceUserId) {
+        this.logger.warn('检测到项目重试归属与当前会话不匹配，已拒绝云端写入', {
+          projectId: project.id,
+          sourceUserId,
+          sessionUserId,
+        });
+        if (!fromRetryQueue) {
+          this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId);
+        }
+        return false;
+      }
+
+      await this.doProjectPush(client, project, sourceUserId ?? sessionUserId);
+      return true;
     };
     
     try {
-      await this.throttle.execute(
+      return await this.throttle.execute(
         `push-project:${project.id}`,
         executeProjectPush,
         { priority: 'high', retries: 2 }
       );
-      return true;
     } catch (e) {
       // 【#95057880 修复】PermanentFailureError 直接向上冒泡，不做二次处理
       if (isPermanentFailureError(e)) {
@@ -768,8 +808,7 @@ export class SimpleSyncService {
         });
         if (canRetry) {
           try {
-            await executeProjectPush();
-            return true;
+            return await executeProjectPush();
           } catch (retryError) {
             if (isPermanentFailureError(retryError)) throw retryError;
             const retryEnhanced = supabaseErrorToError(retryError);
@@ -793,9 +832,38 @@ export class SimpleSyncService {
       }
       
       if (enhanced.isRetryable && !fromRetryQueue) {
-        this.addToRetryQueue('project', 'upsert', project);
+        this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId);
       }
       return false;
+    }
+  }
+
+  private async pushProjectWithResult(
+    project: Project,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }> {
+    try {
+      const success = await this.pushProject(project, fromRetryQueue, sourceUserId);
+      return { success };
+    } catch (error) {
+      if (!isPermanentFailureError(error)) {
+        throw error;
+      }
+
+      const enhanced = error.originalError
+        ? supabaseErrorToError(error.originalError)
+        : null;
+      if (enhanced?.errorType !== 'VersionConflictError') {
+        throw error;
+      }
+
+      const remoteData = await this.loadFullProjectOptimized(project.id).catch(() => null);
+      return {
+        success: false,
+        conflict: true,
+        remoteData: remoteData ?? undefined,
+      };
     }
   }
   
@@ -847,7 +915,8 @@ export class SimpleSyncService {
     type: RetryableEntityType,
     operation: RetryableOperation,
     data: Task | Project | Connection | { id: string },
-    projectId?: string
+    projectId?: string,
+    sourceUserId?: string,
   ): void {
     if (this.syncState().sessionExpired) return;
     if (!data?.id) {
@@ -858,7 +927,7 @@ export class SimpleSyncService {
       this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId);
     if (enqueued) {
       this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
     } else {
@@ -1107,6 +1176,10 @@ export class SimpleSyncService {
   async loadProjectsFromCloud(userId: string, _silent?: boolean): Promise<Project[]> {
     return this.projectDataService.loadProjectsFromCloud(userId);
   }
+
+  async loadProjectListMetadataFromCloud(userId: string): Promise<Project[] | null> {
+    return this.projectDataService.loadProjectListMetadataFromCloud(userId);
+  }
   
   async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {
     const client = await this.getSupabaseClient();
@@ -1175,17 +1248,26 @@ export class SimpleSyncService {
   }
   
   clearOfflineCache(): void {
+    this.projectDataService.clearOfflineSnapshot();
     this.retryQueueService.clear();
     this.syncState.update(s => ({ ...s, pendingCount: 0 }));
     this.logger.info('离线缓存已清除');
   }
-  
-  saveOfflineSnapshot(projects: Project[]): void {
-    this.projectDataService.saveOfflineSnapshot(projects);
+
+  clearOfflineSnapshot(): void {
+    this.projectDataService.clearOfflineSnapshot();
   }
   
-  loadOfflineSnapshot(): Project[] | null {
-    return this.projectDataService.loadOfflineSnapshot();
+  saveOfflineSnapshot(projects: Project[], ownerUserId?: string | null): void {
+    this.projectDataService.saveOfflineSnapshot(projects, ownerUserId);
+  }
+
+  async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
+    await this.projectDataService.saveOfflineSnapshotAndWait(projects, ownerUserId);
+  }
+  
+  loadOfflineSnapshot(options?: { allowOwnerHint?: boolean }): Project[] | null {
+    return this.projectDataService.loadOfflineSnapshot(options);
   }
 
   async loadStartupOfflineSnapshot(): Promise<StartupOfflineSnapshotLoadResult> {

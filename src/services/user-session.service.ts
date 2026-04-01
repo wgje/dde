@@ -6,21 +6,40 @@ import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
 import type { AttachmentService } from './attachment.service';
+import { ActionQueueService } from './action-queue.service';
+import { ConflictStorageService } from './conflict-storage.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project, Task, Connection } from '../models';
 import { CACHE_CONFIG, SYNC_CONFIG } from '../config/sync.config';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { FOCUS_CONFIG } from '../config/focus.config';
+import { PARKING_CONFIG } from '../config/parking.config';
+import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
+import {
+  DOCK_SNAPSHOT_IDB_DB_NAME,
+  DockSnapshotPersistenceService,
+} from './dock-snapshot-persistence.service';
+import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { isValidUUID } from '../utils/validation';
-import type { LaunchSnapshot, LaunchSnapshotProject } from '../models/launch-shell';
 
 type StartupProjectCatalogStage = 'unresolved' | 'partial' | 'resolved';
+
+interface SessionGuardContext {
+  userId: string | null;
+  generation: number;
+}
+
+const FULL_WIPE_LOCAL_STORAGE_PREFIXES = [
+  'nanoflow.project-manifest-watermark',
+  'nanoflow.blackbox-manifest-watermark',
+];
 
 @Injectable({
   providedIn: 'root'
@@ -31,23 +50,41 @@ export class UserSessionService {
   private readonly logger = this.loggerService.category('UserSession');
   private authService = inject(AuthService);
   private syncCoordinator = inject(SyncCoordinatorService);
+  private actionQueue = inject(ActionQueueService);
+  private retryQueue = inject(RetryQueueService);
+  private conflictStorage = inject(ConflictStorageService);
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
+  private startupPlaceholderState = inject(StartupPlaceholderStateService, { optional: true });
   private injector = inject(Injector);
   private layoutService = inject(LayoutService);
   private toastService = inject(ToastService);
   private supabase = inject(SupabaseClientService);
+  private dockSnapshotPersistence = inject(DockSnapshotPersistenceService);
   private destroyRef = inject(DestroyRef);
   private attachmentServiceRef: AttachmentService | null = null;
   private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
   private prehydratedSnapshotApplied = false;
   private prehydratedSnapshotOwnerId: string | null = null;
+  private sessionRequestGeneration = 0;
   private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
   private readonly trustedPrehydratedSnapshotState = signal(false);
 
   readonly startupProjectCatalogStage = this.startupProjectCatalogStageState.asReadonly();
   readonly trustedPrehydratedSnapshotVisible = this.trustedPrehydratedSnapshotState.asReadonly();
+
+  isHintOnlyStartupPlaceholderVisible(): boolean {
+    return this.startupPlaceholderState?.isHintOnlyActive() ?? false;
+  }
+
+  getLaunchSnapshotPersistOwnerDuringAuthSettle(): string | null {
+    if (!this.prehydratedSnapshotApplied || this.isHintOnlyStartupPlaceholderVisible()) {
+      return null;
+    }
+
+    return this.prehydratedSnapshotOwnerId;
+  }
 
   /** 当前用户 ID (代理 AuthService) */
   readonly currentUserId = this.authService.currentUserId;
@@ -127,51 +164,56 @@ export class UserSessionService {
     }
 
     const snapshot = this.readSnapshotForPrehydrate();
-    if (!snapshot?.projects?.length) {
-      this.clearStartupProjectCatalogState();
-      return false;
-    }
+    if (snapshot?.projects?.length) {
+      const trustedSnapshotOwnerId = this.resolveTrustedSnapshotOwnerId(snapshot);
+      if (trustedSnapshotOwnerId) {
+        try {
+          const projects = this.buildPrehydrateProjects(snapshot.projects);
+          if (projects.length > 0) {
+            this.projectState.setProjects(projects);
+            this.projectState.setActiveProjectId(
+              snapshot.activeProjectId ?? projects[0]?.id ?? null,
+            );
+            this.startupPlaceholderState?.clear();
+            this.prehydratedSnapshotApplied = true;
+            this.prehydratedSnapshotOwnerId = trustedSnapshotOwnerId;
+            this.trustedPrehydratedSnapshotState.set(true);
+            this.startupProjectCatalogStageState.set('partial');
 
-    const trustedSnapshotOwnerId = this.resolveTrustedSnapshotOwnerId(snapshot);
-    if (!trustedSnapshotOwnerId) {
-      this.logger.debug('跳过未验证 owner 的启动快照预填充', {
-        snapshotUserId: snapshot.userId ?? null,
-      });
-      this.clearStartupProjectCatalogState();
-      return false;
-    }
+            // 【P1 秒开优化 2026-03-31】预设临时 userId，使 coreDataLoaded 立即生效。
+            // checkSession 完成后会确认或覆盖此值。对个人项目始终为同一用户，无副作用。
+            if (trustedSnapshotOwnerId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+              this.authService.setProvisionalCurrentUserId(trustedSnapshotOwnerId);
+            }
 
-    try {
-      const projects = this.buildPrehydrateProjects(snapshot.projects);
-      if (projects.length === 0) {
-        this.clearStartupProjectCatalogState();
-        return false;
+            pushStartupTrace('user_session.snapshot_prehydrate', {
+              projectCount: projects.length,
+              activeProjectId: snapshot.activeProjectId,
+              snapshotUserId: this.prehydratedSnapshotOwnerId,
+            });
+            this.logger.debug('快照预填充完成', { projectCount: projects.length });
+            return true;
+          }
+        } catch (error) {
+          this.logger.warn('快照预填充失败，静默回退到离线快照', error);
+        }
+      } else {
+        this.logger.debug('跳过未验证 owner 的启动快照预填充', {
+          snapshotUserId: snapshot.userId ?? null,
+        });
       }
-
-      this.projectState.setProjects(projects);
-      this.projectState.setActiveProjectId(
-        snapshot.activeProjectId ?? projects[0]?.id ?? null,
-      );
-      this.prehydratedSnapshotApplied = true;
-      this.prehydratedSnapshotOwnerId = trustedSnapshotOwnerId;
-      this.trustedPrehydratedSnapshotState.set(true);
-      this.startupProjectCatalogStageState.set('partial');
-
-      pushStartupTrace('user_session.snapshot_prehydrate', {
-        projectCount: projects.length,
-        activeProjectId: snapshot.activeProjectId,
-        snapshotUserId: this.prehydratedSnapshotOwnerId,
-      });
-      this.logger.debug('快照预填充完成', { projectCount: projects.length });
-      return true;
-    } catch (error) {
-      this.logger.warn('快照预填充失败，静默跳过', error);
-      this.clearStartupProjectCatalogState();
-      return false;
     }
+
+    if (this.prehydrateFromOfflineSnapshot(snapshot)) {
+      return true;
+    }
+
+    this.clearStartupProjectCatalogState();
+    return false;
   }
 
   private clearStartupProjectCatalogState(): void {
+    this.startupPlaceholderState?.clear();
     this.prehydratedSnapshotApplied = false;
     this.prehydratedSnapshotOwnerId = null;
     this.trustedPrehydratedSnapshotState.set(false);
@@ -179,11 +221,15 @@ export class UserSessionService {
   }
 
   private markStartupProjectCatalogResolved(): void {
+    this.startupPlaceholderState?.clear();
     this.trustedPrehydratedSnapshotState.set(false);
     this.startupProjectCatalogStageState.set('resolved');
   }
 
-  private markStartupProjectCatalogAwaitingRemoteResolution(): void {
+  private markStartupProjectCatalogAwaitingRemoteResolution(options?: { retainHintPlaceholder?: boolean }): void {
+    if (!options?.retainHintPlaceholder) {
+      this.startupPlaceholderState?.clear();
+    }
     this.trustedPrehydratedSnapshotState.set(false);
     this.startupProjectCatalogStageState.set('partial');
   }
@@ -197,12 +243,141 @@ export class UserSessionService {
     this.markStartupProjectCatalogResolved();
   }
 
+  private resolvePrehydrateOwnerUserId(): string {
+    const currentUserId = this.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    if (!this.authService.isConfigured) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    return this.authService.peekPersistedSessionIdentity?.()?.userId
+      ?? this.authService.peekPersistedOwnerHint?.()
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private hasConfirmedPrehydrateOwner(ownerUserId: string): boolean {
+    if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return true;
+    }
+
+    if (!this.authService.isConfigured) {
+      return true;
+    }
+
+    const currentUserId = this.currentUserId();
+    if (currentUserId === ownerUserId) {
+      return true;
+    }
+
+    // 中文注释：owner hint 只用于定位 owner-scoped bucket，不能直接解锁真实项目名/内容。
+    // 只有 runtime user 或 persisted session 已确认 owner 时，才允许展示完整离线快照。
+    return this.authService.peekPersistedSessionIdentity?.()?.userId === ownerUserId;
+  }
+
+  private cloneOfflineProjectsForPrehydrate(projects: Project[]): Project[] {
+    return projects.map((project) => ({
+      ...project,
+      tasks: Array.isArray(project.tasks) ? [...project.tasks] : [],
+      connections: Array.isArray(project.connections) ? [...project.connections] : [],
+    }));
+  }
+
+  private buildHintScopedPlaceholderProjects(projects: Project[]): Project[] {
+    return projects.map((project, index) => ({
+      id: project.id,
+      name: `Project ${index + 1}`,
+      description: '',
+      createdDate: project.createdDate,
+      updatedAt: project.updatedAt,
+      version: project.version,
+      syncSource: project.syncSource,
+      pendingSync: project.pendingSync,
+      tasks: [],
+      connections: [],
+    }));
+  }
+
+  private prehydrateFromOfflineSnapshot(snapshot: LaunchSnapshot | null): boolean {
+    const core = this.syncCoordinator.core as {
+      loadOfflineSnapshot?: (options?: { allowOwnerHint?: boolean }) => Project[] | null;
+    };
+    if (typeof core.loadOfflineSnapshot !== 'function') {
+      return false;
+    }
+
+    const offlineProjects = core.loadOfflineSnapshot({ allowOwnerHint: true });
+    if (!offlineProjects?.length) {
+      return false;
+    }
+
+    const ownerUserId = this.resolvePrehydrateOwnerUserId();
+    const ownerConfirmed = this.hasConfirmedPrehydrateOwner(ownerUserId);
+    const projects = ownerConfirmed
+      ? this.cloneOfflineProjectsForPrehydrate(offlineProjects)
+      : this.buildHintScopedPlaceholderProjects(offlineProjects);
+    const preferredProjectId = snapshot?.activeProjectId ?? null;
+    const activeProjectId = preferredProjectId && projects.some((project) => project.id === preferredProjectId)
+      ? preferredProjectId
+      : projects[0]?.id ?? null;
+
+    this.projectState.setProjects(projects);
+    this.projectState.setActiveProjectId(activeProjectId);
+    if (ownerConfirmed) {
+      this.startupPlaceholderState?.clear();
+      // 【P1 秒开优化 2026-03-31】离线快照 owner 已确认时也预设 userId，
+      // 使 coreDataLoaded 提前生效，消除等待 auth 的 UI 空档。
+      if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        this.authService.setProvisionalCurrentUserId(ownerUserId);
+      }
+    } else {
+      this.startupPlaceholderState?.activate(ownerUserId);
+    }
+    this.prehydratedSnapshotApplied = true;
+    this.prehydratedSnapshotOwnerId = ownerUserId;
+    if (ownerConfirmed) {
+      this.syncStartupProjectCatalogStageAfterLocalRestore(ownerUserId);
+    } else {
+      this.markStartupProjectCatalogAwaitingRemoteResolution({ retainHintPlaceholder: true });
+    }
+
+    pushStartupTrace('user_session.offline_snapshot_prehydrate', {
+      projectCount: projects.length,
+      activeProjectId,
+      ownerUserId,
+      ownerConfirmed,
+    });
+    this.logger.debug('离线快照预填充完成', {
+      projectCount: projects.length,
+      ownerUserId,
+      ownerConfirmed,
+    });
+    return true;
+  }
+
   private resolveTrustedSnapshotOwnerId(snapshot: LaunchSnapshot): string | null {
     const snapshotUserId = typeof snapshot.userId === 'string' && snapshot.userId.length > 0
       ? snapshot.userId
       : null;
 
+    const persistedSessionUserId = this.authService.peekPersistedSessionIdentity?.()?.userId ?? null;
+    const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.()
+      ?? persistedSessionUserId
+      ?? null;
+
+    const currentUserId = this.currentUserId();
+    const runtimeOwnerHint = currentUserId ?? persistedOwnerHint;
+
     if (snapshotUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      if (this.authService.isConfigured
+        && typeof runtimeOwnerHint === 'string'
+        && runtimeOwnerHint.length > 0
+        && runtimeOwnerHint !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        return null;
+      }
+
       return snapshotUserId;
     }
 
@@ -214,12 +389,11 @@ export class UserSessionService {
       return null;
     }
 
-    const currentUserId = this.currentUserId();
     if (currentUserId === snapshotUserId) {
       return snapshotUserId;
     }
 
-    return this.authService.peekPersistedSessionIdentity()?.userId === snapshotUserId
+    return persistedSessionUserId === snapshotUserId
       ? snapshotUserId
       : null;
   }
@@ -311,15 +485,207 @@ export class UserSessionService {
     return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
   }
 
+  private createSessionGuard(userId: string | null): SessionGuardContext {
+    return {
+      userId,
+      generation: ++this.sessionRequestGeneration,
+    };
+  }
+
+  private isSessionGuardCurrent(guard: SessionGuardContext): boolean {
+    return this.sessionRequestGeneration === guard.generation
+      && this.currentUserId() === guard.userId;
+  }
+
+  private shouldAbortStaleSession(guard: SessionGuardContext | undefined, stage: string): boolean {
+    if (!guard) {
+      return false;
+    }
+
+    if (this.isSessionGuardCurrent(guard)) {
+      return false;
+    }
+
+    this.logger.debug('忽略过期的会话加载结果', {
+      stage,
+      expectedUserId: guard.userId,
+      currentUserId: this.currentUserId(),
+      generation: guard.generation,
+      currentGeneration: this.sessionRequestGeneration,
+    });
+    return true;
+  }
+
+  private shouldAbortStaleSessionGeneration(guard: SessionGuardContext | undefined, stage: string): boolean {
+    if (!guard) {
+      return false;
+    }
+
+    if (this.sessionRequestGeneration === guard.generation) {
+      return false;
+    }
+
+    this.logger.debug('忽略过期的会话预处理结果', {
+      stage,
+      expectedUserId: guard.userId,
+      currentUserId: this.currentUserId(),
+      generation: guard.generation,
+      currentGeneration: this.sessionRequestGeneration,
+    });
+    return true;
+  }
+
+  getCurrentSessionGeneration(): number {
+    return this.sessionRequestGeneration;
+  }
+
+  isSessionContextCurrent(sessionGeneration: number, userId: string | null): boolean {
+    return this.sessionRequestGeneration === sessionGeneration
+      && this.currentUserId() === userId;
+  }
+
+  private getSnapshotProjectsForSession(
+    snapshot: { ownerUserId?: string | null; projects: Project[] },
+    expectedUserId: string | null | undefined,
+    stage: string
+  ): { projects: Project[]; ownerMatched: boolean } {
+    const expectedOwnerUserId = expectedUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (!snapshot.ownerUserId) {
+      this.logger.warn('检测到缺少 owner 元数据的离线快照，已忽略本次恢复', {
+        stage,
+        expectedOwnerUserId,
+      });
+      return { projects: [], ownerMatched: false };
+    }
+
+    if (snapshot.ownerUserId !== expectedOwnerUserId) {
+      this.logger.warn('检测到 owner 不匹配的离线快照，已忽略本次恢复', {
+        stage,
+        snapshotOwnerUserId: snapshot.ownerUserId,
+        expectedOwnerUserId,
+      });
+      return { projects: [], ownerMatched: false };
+    }
+
+    return { projects: snapshot.projects, ownerMatched: true };
+  }
+
+  private async resolveGuestDraftProjectsForCloudLogin(
+    targetUserId: string | null,
+    sessionGuard: SessionGuardContext
+  ): Promise<Project[]> {
+    if (!targetUserId || targetUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return [];
+    }
+
+    if (this.isHintOnlyStartupPlaceholderVisible()) {
+      this.logger.debug('hint-only 启动占位不参与 guest draft 迁移', {
+        targetUserId,
+      });
+      return [];
+    }
+
+    const localGuestProjects = this.projectState.projects()
+      .filter(project => project.syncSource === 'local-only')
+      .map(project => this.migrateProject(project));
+    if (localGuestProjects.length > 0) {
+      return localGuestProjects;
+    }
+
+    const startupSnapshot = await this.loadStartupSnapshotResult();
+    if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-snapshot')) {
+      return [];
+    }
+
+    if (startupSnapshot.ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID || startupSnapshot.projects.length === 0) {
+      return [];
+    }
+
+    return startupSnapshot.projects.map(project => this.migrateProject(project));
+  }
+
+  private async saveProjectsToOfflineSnapshot(projects: Project[], ownerUserId: string | null): Promise<void> {
+    if (projects.length === 0) {
+      return;
+    }
+
+    const core = this.syncCoordinator.core as {
+      saveOfflineSnapshot: (projects: Project[], ownerUserId?: string | null) => Promise<void> | void;
+      saveOfflineSnapshotAndWait?: (projects: Project[], ownerUserId?: string | null) => Promise<void>;
+    };
+
+    if (typeof core.saveOfflineSnapshotAndWait === 'function') {
+      await core.saveOfflineSnapshotAndWait(projects, ownerUserId);
+      return;
+    }
+
+    await core.saveOfflineSnapshot(projects, ownerUserId);
+  }
+
+  private sanitizePreviousUserIdHint(previousUserIdHint: string | null): string | null {
+    if (!previousUserIdHint) {
+      return null;
+    }
+
+    if (this.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID && previousUserIdHint !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return null;
+    }
+
+    return previousUserIdHint;
+  }
+
+  private canPersistCurrentProjectsForPreviousOwner(): boolean {
+    if (this.isHintOnlyStartupPlaceholderVisible()) {
+      return false;
+    }
+
+    if (this.prehydratedSnapshotApplied && this.startupProjectCatalogStage() !== 'resolved') {
+      return false;
+    }
+
+    return true;
+  }
+
+  private forceClearCurrentSessionView(): void {
+    this.projectState.setActiveProjectId(null);
+    this.projectState.setProjects([]);
+    this.clearStartupProjectCatalogState();
+    this.actionQueue.clearCurrentView();
+    this.retryQueue.clearCurrentView();
+    this.undoService.clearHistory();
+    this.syncCoordinator.clearActiveConflict();
+    this.syncCoordinator.core.teardownRealtimeSubscription();
+  }
+
   /**
    * 设置当前用户（登录/登出时调用，总是会加载项目数据）
    * @param userId 用户 ID，null 表示登出
    * @param opts.forceLoad 强制加载数据，跳过 isUserChange 检查（登录时必须为 true）
+   * @param opts.skipPersistentReload 仅切换身份与清空内存，不重新加载任何本地持久化数据；
+   *  用于 full wipe 失败后的安全登出，避免旧快照被重新灌回匿名态。
+   * @param opts.previousUserIdHint 当前 auth signal 已提前清空时，仍用于完成旧 owner 的安全 teardown。
+   * @param opts.preserveOfflineSnapshot 仅清理内存视图，不清空旧 owner 的离线快照桶。
    */
-  async setCurrentUser(userId: string | null, opts?: { forceLoad?: boolean }): Promise<void> {
-    const previousUserId = this.currentUserId();
+  async setCurrentUser(
+    userId: string | null,
+    opts?: {
+      forceLoad?: boolean;
+      skipPersistentReload?: boolean;
+      previousUserIdHint?: string | null;
+      preserveOfflineSnapshot?: boolean;
+    }
+  ): Promise<void> {
+    const sessionGuard = this.createSessionGuard(userId);
+    const previousUserIdHint = this.sanitizePreviousUserIdHint(opts?.previousUserIdHint ?? null);
+    const previousUserId = previousUserIdHint ?? this.currentUserId();
     const isUserChange = previousUserId !== userId;
     const forceLoad = opts?.forceLoad ?? false;
+    const skipPersistentReload = opts?.skipPersistentReload ?? false;
+    const preserveOfflineSnapshot = opts?.preserveOfflineSnapshot ?? false;
+    const shouldPreservePrehydratedSelection = this.shouldPreservePrehydratedSelection(userId);
+    const shouldClearPrehydratedSnapshotState = forceLoad && !shouldPreservePrehydratedSelection;
+    const shouldForceClearVisibleStateOnCleanupFailure = (isUserChange && previousUserId !== null)
+      || shouldClearPrehydratedSnapshotState;
     
     this.logger.debug('setCurrentUser', {
       previousUserId: previousUserId?.substring(0, 8),
@@ -338,34 +704,96 @@ export class UserSessionService {
     if (isUserChange || forceLoad) {
       try {
         this.attachmentServiceRef?.clearMonitoredAttachments();
-        const shouldResetProjectSelection = isUserChange && previousUserId !== null;
-        const shouldPreservePrehydratedSelection = this.shouldPreservePrehydratedSelection(userId);
-        const shouldClearPrehydratedSnapshotState = forceLoad && !shouldPreservePrehydratedSelection;
+        const isCloudBackedLogin = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+        const preservedGuestProjects = isCloudBackedLogin
+          && (!previousUserId || previousUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID)
+          ? await this.resolveGuestDraftProjectsForCloudLogin(userId, sessionGuard)
+          : [];
+        if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-resolved')) {
+          return;
+        }
+        const shouldPreserveGuestDrafts = preservedGuestProjects.length > 0;
+        const shouldResetProjectSelection = isUserChange && previousUserId !== null && !shouldPreserveGuestDrafts;
+        const shouldFlushPendingPersist = !skipPersistentReload && (isUserChange || shouldClearPrehydratedSnapshotState);
+        let shouldClearOfflineSnapshot = !shouldPreserveGuestDrafts && !preserveOfflineSnapshot;
+
+        const canPersistCurrentProjectsForPreviousOwner = this.canPersistCurrentProjectsForPreviousOwner();
+        if (preserveOfflineSnapshot && previousUserId !== null && !shouldPreserveGuestDrafts && canPersistCurrentProjectsForPreviousOwner) {
+          await this.saveProjectsToOfflineSnapshot(this.projectState.projects(), previousUserId);
+          if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:preserve-offline-snapshot')) {
+            return;
+          }
+        }
+
+        if (shouldFlushPendingPersist) {
+          shouldClearOfflineSnapshot = await this.syncCoordinator.preparePendingPersistForOwnerChange(
+            previousUserId,
+            `owner-switch:${previousUserId ?? 'anonymous'}->${userId ?? 'anonymous'}`
+          );
+        }
+
+        if (shouldPreserveGuestDrafts) {
+          // 中文注释：先把游客草稿重新落盘，再清理歧义队列，避免登录瞬间丢失唯一离线副本。
+          await this.saveProjectsToOfflineSnapshot(preservedGuestProjects, userId);
+          if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-saved')) {
+            return;
+          }
+        }
 
         // 冷启动 bootstrap(forceLoad) 允许继续沿用「已确认归属于当前用户」的 launch snapshot。
         // 若快照 owner 缺失或与当前 userId 不一致，则必须立即清空，避免旧账号项目短暂暴露。
-        if (shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) {
+        if ((shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) && !shouldPreserveGuestDrafts) {
           this.projectState.setActiveProjectId(null);
         }
         // 【P0 修复 2026-02-08 / 2026-03-27 加固】
         // 仅在用户切换（旧用户→新用户）或快照不可信时清空项目列表。
         // 合并两个分支，避免 setProjects([]) 被触发两次产生信号风暴。
         // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的。
-        const shouldClearProjects = shouldClearPrehydratedSnapshotState
-          || (isUserChange && previousUserId !== null);
+        const shouldClearProjects = !shouldPreserveGuestDrafts && (
+          shouldClearPrehydratedSnapshotState
+          || (isUserChange && previousUserId !== null)
+        );
         if (shouldClearProjects) {
           this.projectState.setProjects([]);
           this.clearStartupProjectCatalogState();
         }
+        if ((isUserChange && previousUserId !== null) || shouldPreserveGuestDrafts) {
+          this.actionQueue.clearCurrentView();
+          this.retryQueue.clearCurrentView();
+          if (!shouldPreserveGuestDrafts && shouldClearOfflineSnapshot) {
+            this.syncCoordinator.core.clearOfflineSnapshot();
+          }
+        }
         this.undoService.clearHistory();
+        this.syncCoordinator.clearActiveConflict();
         this.syncCoordinator.core.teardownRealtimeSubscription();
       } catch (cleanupError) {
         this.logger.warn('清理旧用户数据失败', cleanupError);
+        if (shouldForceClearVisibleStateOnCleanupFailure) {
+          this.forceClearCurrentSessionView();
+        }
         // 继续执行，不阻断流程
       }
     }
 
     this.authService.currentUserId.set(userId);
+    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-auth-set')) {
+      return;
+    }
+
+    if (skipPersistentReload) {
+      this.actionQueue.clearCurrentView();
+      this.retryQueue.clearCurrentView();
+    } else {
+      this.actionQueue.reloadFromStorageForCurrentOwner();
+      this.retryQueue.reloadFromStorageForCurrentOwner();
+    }
+
+    await this.conflictStorage.refreshConflictCount();
+
+    if (skipPersistentReload) {
+      return;
+    }
 
     if (userId) {
       // 【P0 修复 2026-02-08】forceLoad=true 时强制加载数据
@@ -374,13 +802,13 @@ export class UserSessionService {
       const hasProjects = this.projectState.projects().length > 0;
       if (forceLoad || !hasProjects || isUserChange) {
         try {
-          await this.loadUserData(userId);
+          await this.loadUserData(userId, sessionGuard);
         } catch (error) {
           // loadUserData 内部已有错误处理，这里是最后的防线
           this.logger.warn('loadUserData 失败', error);
           // 降级处理：至少加载种子数据
           try {
-            await this.loadFromCacheOrSeed();
+            await this.loadFromCacheOrSeed(undefined, sessionGuard);
           } catch (fallbackError) {
             this.logger.warn('降级加载种子数据也失败', fallbackError);
             // 即使种子数据加载失败，也不阻断应用启动
@@ -390,7 +818,7 @@ export class UserSessionService {
       }
     } else {
       try {
-        await this.loadFromCacheOrSeed();
+        await this.loadFromCacheOrSeed(undefined, sessionGuard);
       } catch (error) {
         this.logger.warn('loadFromCacheOrSeed 失败', error);
         // 不重新抛出异常
@@ -435,15 +863,23 @@ export class UserSessionService {
     this.uiState.clearAllState();
     this.undoService.clearHistory();
     this.syncCoordinator.core.clearOfflineCache();
+    this.syncCoordinator.clearActiveConflict();
     this.clearStartupProjectCatalogState();
   }
 
   /** 完整本地数据清理（登出时必须调用，防止数据泄露） */
   async clearAllLocalData(userId?: string): Promise<void> {
     this.logger.info('执行完整的本地数据清理', { userId });
+
+    await this.dockSnapshotPersistence.discardPendingPersist();
     
     // 1. 清理内存状态（原有逻辑）
     this.clearLocalData();
+    this.actionQueue.clearQueue();
+    this.actionQueue.clearDeadLetterQueue();
+    this.retryQueue.clear();
+    await this.retryQueue.closeStorageConnections();
+    await this.conflictStorage.closeStorageConnections();
     
     // 1.5 【P0 安全修复】兜底清理 sessionStorage，防止撤销历史等敏感数据残留
     try {
@@ -457,6 +893,8 @@ export class UserSessionService {
       CACHE_CONFIG.OFFLINE_CACHE_KEY,
       'nanoflow.offline-cache',
       'nanoflow.retry-queue',
+      LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
+      LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY,
       'nanoflow.local-tombstones',
       'nanoflow.auth-cache',
       'nanoflow.escape-pod',
@@ -474,8 +912,28 @@ export class UserSessionService {
         this.logger.warn(`清理 localStorage 键失败: ${key}`, e);
       }
     });
+
+    try {
+      this.listLocalStorageKeys()
+        .filter(key =>
+          key.startsWith(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.`)
+          || key.startsWith(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.`)
+        )
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理 owner-scoped action queue 键失败', e);
+    }
     
-    // 3. 清理用户偏好键（带 userId 前缀的）
+    // 1. 清理离线快照键
+    try {
+      this.listLocalStorageKeys()
+        .filter(key => key.startsWith(`${CACHE_CONFIG.OFFLINE_CACHE_KEY}.`))
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理 owner-scoped 离线快照键失败', e);
+    }
+    
+    // 2. 清理用户偏好键（带 userId 前缀的）
     if (userId) {
       const prefixToRemove = `nanoflow.preference.${userId}`;
       try {
@@ -495,12 +953,71 @@ export class UserSessionService {
     } catch (e) {
       this.logger.warn('清理旧偏好键失败', e);
     }
+
+    try {
+      this.listLocalStorageKeys()
+        .filter(key => key.startsWith('nanoflow.retry-queue.legacy-review.'))
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理 legacy retry review 键失败', e);
+    }
+
+    try {
+      this.listLocalStorageKeys()
+        .filter(key => key.startsWith('nanoflow.action-queue.legacy-review.'))
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理 legacy action queue review 键失败', e);
+    }
+
+    try {
+      this.listLocalStorageKeys()
+        .filter(key => FULL_WIPE_LOCAL_STORAGE_PREFIXES.some(prefix => key.startsWith(prefix)))
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理同步水位缓存键失败', e);
+    }
+
+    try {
+      this.listLocalStorageKeys()
+        .filter(key => key.startsWith(`${PARKING_CONFIG.DOCK_SNAPSHOT_STORAGE_KEY}.`))
+        .forEach(key => localStorage.removeItem(key));
+    } catch (e) {
+      this.logger.warn('清理 Dock 快照影子键失败', e);
+    }
+
+    this.conflictStorage.clearAllFallbackStorage();
+    await this.clearSupabaseSessionArtifacts();
+
     // 4. 清理 IndexedDB
-    await this.clearIndexedDB('nanoflow-db');
-    await this.clearIndexedDB('nanoflow-queue-backup');
-    await this.clearIndexedDB(FOCUS_CONFIG.SYNC.IDB_NAME);
+    const indexedDbCleanup = await Promise.all([
+      this.clearIndexedDB('nanoflow-db'),
+      this.clearIndexedDB('nanoflow-queue-backup'),
+      this.clearIndexedDB('nanoflow-retry-queue'),
+      this.clearIndexedDB('nanoflow-conflicts'),
+      this.clearIndexedDB('nanoflow-offline-snapshots'),
+      this.clearIndexedDB(FOCUS_CONFIG.SYNC.IDB_NAME),
+      this.clearIndexedDB(DOCK_SNAPSHOT_IDB_DB_NAME),
+    ]);
+    const cleanupTargets = [
+      'nanoflow-db',
+      'nanoflow-queue-backup',
+      'nanoflow-retry-queue',
+      'nanoflow-conflicts',
+      'nanoflow-offline-snapshots',
+      FOCUS_CONFIG.SYNC.IDB_NAME,
+      DOCK_SNAPSHOT_IDB_DB_NAME,
+    ];
+    const failedCleanupTargets = cleanupTargets.filter((_, index) => !indexedDbCleanup[index]);
+    if (failedCleanupTargets.length > 0) {
+      this.logger.error('本地 IndexedDB 清理未完成', { failedCleanupTargets });
+      throw new Error(`IndexedDB 清理未完成: ${failedCleanupTargets.join(', ')}`);
+    }
     
-    // 5. 【P3-12 修复】清理 Supabase auth token
+    this.logger.info('本地数据清理完成');
+  }
+
+  private async clearSupabaseSessionArtifacts(): Promise<void> {
     try {
       if (this.supabase.isConfigured) {
         await this.supabase.signOut();
@@ -509,29 +1026,51 @@ export class UserSessionService {
       this.logger.warn('Supabase signOut 失败', e);
     }
 
-    // 6. 清理 window 全局启动快照，防止跨用户数据泄露
-    if (typeof window !== 'undefined') {
-      try {
-        delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
-        delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
-      } catch {
-        // 静默忽略
-      }
-    }
-    
-    this.logger.info('本地数据清理完成');
+    this.clearSupabaseLocalSessionArtifacts();
+    this.clearStartupWindowArtifacts();
   }
-  private async clearIndexedDB(dbName: string): Promise<void> {
-    if (typeof indexedDB === 'undefined') return;
+
+  private clearSupabaseLocalSessionArtifacts(): void {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    const storageKey = this.supabase.getStorageKey();
+    if (!storageKey) {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(storageKey);
+    } catch (e) {
+      this.logger.warn('清理 Supabase 本地凭证失败', e);
+    }
+  }
+
+  private clearStartupWindowArtifacts(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
+      delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
+    } catch {
+      // 静默忽略
+    }
+  }
+
+  private async clearIndexedDB(dbName: string): Promise<boolean> {
+    if (typeof indexedDB === 'undefined') return true;
 
     // 设置超时上限：blocked 场景最多等 3 秒后放弃等待
     const CLEAR_TIMEOUT_MS = 3000;
 
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       try {
         const timeoutId = setTimeout(() => {
-          this.logger.warn(`IndexedDB ${dbName} 删除超时 (${CLEAR_TIMEOUT_MS}ms)，继续流程`);
-          resolve();
+          this.logger.warn(`IndexedDB ${dbName} 删除超时 (${CLEAR_TIMEOUT_MS}ms)，判定为清理失败`);
+          resolve(false);
         }, CLEAR_TIMEOUT_MS);
 
         const request = indexedDB.deleteDatabase(dbName);
@@ -539,13 +1078,13 @@ export class UserSessionService {
         request.onsuccess = () => {
           clearTimeout(timeoutId);
           this.logger.debug(`IndexedDB ${dbName} 已删除`);
-          resolve();
+          resolve(true);
         };
 
         request.onerror = () => {
           clearTimeout(timeoutId);
           this.logger.warn(`删除 IndexedDB ${dbName} 失败`, request.error);
-          resolve(); // 不阻塞流程
+          resolve(false);
         };
 
         request.onblocked = () => {
@@ -554,7 +1093,7 @@ export class UserSessionService {
         };
       } catch (e) {
         this.logger.warn(`清理 IndexedDB ${dbName} 异常`, e);
-        resolve();
+        resolve(false);
       }
     });
   }
@@ -575,16 +1114,23 @@ export class UserSessionService {
    * 3. 智能合并云端数据
    */
   async loadProjects(): Promise<void> {
+    return this.loadProjectsForSession(this.createSessionGuard(this.currentUserId()));
+  }
+
+  private async loadProjectsForSession(sessionGuard: SessionGuardContext): Promise<void> {
     const perfStart = performance.now();
-    const userId = this.currentUserId();
+    const userId = sessionGuard.userId;
     this.logger.debug('loadProjects 开始（本地优先模式）', { userId });
     pushStartupTrace('user_session.load_projects_start', { userId });
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadProjects:start')) {
+      return;
+    }
     
     // === 阶段 1: 立即渲染本地数据 ===
     
     if (!userId) {
       this.logger.debug('无 userId，从缓存或种子加载');
-      await this.loadFromCacheOrSeed();
+      await this.loadFromCacheOrSeed(undefined, sessionGuard);
       this.logger.debug(`⚡ 数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       return;
     }
@@ -593,7 +1139,7 @@ export class UserSessionService {
     // 立即返回，避免触发任何网络请求或会话检查
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，从缓存或种子加载');
-      await this.loadFromCacheOrSeed();
+      await this.loadFromCacheOrSeed(undefined, sessionGuard);
       this.logger.debug(`⚡ 本地模式数据加载完成 (${(performance.now() - perfStart).toFixed(1)}ms)`);
       // 确保不启动后台同步任务
       return;
@@ -601,12 +1147,24 @@ export class UserSessionService {
 
     const previousActive = this.projectState.activeProjectId();
     const startupSnapshot = await this.loadStartupSnapshotResult();
-    const offlineProjects = startupSnapshot.projects;
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadProjects:startup-snapshot')) {
+      return;
+    }
+    const snapshotProjects = this.getSnapshotProjectsForSession(
+      startupSnapshot,
+      sessionGuard.userId,
+      'loadProjects:startup-snapshot'
+    );
+    const offlineProjects = snapshotProjects.projects;
     this.logger.debug('离线缓存项目数量', {
       count: startupSnapshot.projectCount,
       source: startupSnapshot.source,
       migratedLegacy: startupSnapshot.migratedLegacy,
     });
+
+    if (!snapshotProjects.ownerMatched) {
+      this.clearStartupProjectCatalogState();
+    }
     
     // 【关键改动】立即渲染本地缓存数据，不等待云端
     if (offlineProjects && offlineProjects.length > 0) {
@@ -626,6 +1184,9 @@ export class UserSessionService {
       }
       
       if (validProjects.length > 0) {
+        if (this.shouldAbortStaleSession(sessionGuard, 'loadProjects:apply-local-projects')) {
+          return;
+        }
         this.projectState.setProjects(validProjects);
         
         // 恢复之前的活动项目，或选择第一个
@@ -652,19 +1213,27 @@ export class UserSessionService {
         });
       } else {
         // 缓存数据无效，使用种子数据
-        await this.loadFromCacheOrSeed(startupSnapshot);
+        await this.loadFromCacheOrSeed(startupSnapshot, sessionGuard);
       }
     } else {
       // 无本地缓存，立即生成种子数据让用户可以操作
       this.logger.debug('无本地缓存，生成种子数据');
-      await this.loadFromCacheOrSeed(startupSnapshot);
+      await this.loadFromCacheOrSeed(startupSnapshot, sessionGuard);
+    }
+
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadProjects:before-background-sync')) {
+      return;
     }
     
     // === 阶段 2: 后台静默同步云端数据 ===
     // 【关键改动】不阻塞，使用 .then() 而非 await
     
     this.runIdleTask(() => {
-      this.startBackgroundSync(userId, previousActive).catch(error => {
+      if (this.shouldAbortStaleSession(sessionGuard, 'loadProjects:idle-background-sync')) {
+        return;
+      }
+
+      this.startBackgroundSync(userId, previousActive, sessionGuard).catch(error => {
         this.logger.warn('后台同步失败', error);
         // 后台同步失败不影响用户操作，静默处理
       });
@@ -691,12 +1260,32 @@ export class UserSessionService {
       setTimeout(runOnce, 0);
     }
   }
+
+  private isLocalOnlyProject(projectId: string | null | undefined): boolean {
+    if (!projectId) {
+      return false;
+    }
+
+    return this.projectState.getProject(projectId)?.syncSource === 'local-only';
+  }
+
+  private hasLocalOnlyProjectsAwaitingPromotion(): boolean {
+    return this.projectState.projects().some(project => project.syncSource === 'local-only');
+  }
   
   /** 后台静默同步云端数据（不阻塞 UI，Delta Sync 优先） */
-  private async startBackgroundSync(userId: string, _previousActive: string | null): Promise<void> {
+  private async startBackgroundSync(
+    userId: string,
+    _previousActive: string | null,
+    sessionGuard?: SessionGuardContext
+  ): Promise<void> {
     // 【修复】本地模式不启动后台同步，防止将 'local-user' 传递给 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过后台同步');
+      return;
+    }
+
+    if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:start')) {
       return;
     }
 
@@ -715,7 +1304,12 @@ export class UserSessionService {
     // 阶段 1: 聚合 RPC 探测（单次调用获取多个水位信息）
     if (FEATURE_FLAGS.RESUME_COMPOSITE_PROBE_RPC_V1) {
       try {
-        resumeProbe = await this.syncCoordinator.core.getResumeRecoveryProbe(activeProjectId ?? undefined);
+        resumeProbe = await this.syncCoordinator.core.getResumeRecoveryProbe(
+          this.isLocalOnlyProject(activeProjectId) ? undefined : (activeProjectId ?? undefined)
+        );
+        if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:resume-probe')) {
+          return;
+        }
       } catch (error) {
         this.logger.warn('恢复聚合探测失败，降级为分步探测', error);
       }
@@ -723,7 +1317,7 @@ export class UserSessionService {
 
     // 标记 access preflight 是否确认了当前项目可访问（用于后续并行优化）
     let accessPreflightConfirmed = false;
-    if (FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 && activeProjectId) {
+    if (FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 && activeProjectId && !this.isLocalOnlyProject(activeProjectId)) {
       try {
         const probe = resumeProbe && resumeProbe.activeProjectId === activeProjectId
           ? {
@@ -732,6 +1326,9 @@ export class UserSessionService {
             watermark: resumeProbe.activeWatermark,
           }
           : await this.syncCoordinator.core.getAccessibleProjectProbe(activeProjectId);
+        if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:access-preflight')) {
+          return;
+        }
         if (probe && !probe.accessible) {
           this.logger.warn('activeProject 探测为不可访问，提前清理避免无效 RPC', { projectId: activeProjectId });
           this.projectState.setActiveProjectId(null);
@@ -790,6 +1387,33 @@ export class UserSessionService {
 
     // 等待所有并行水位探测完成
     await Promise.allSettled(parallelTasks);
+    if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:after-parallel-probes')) {
+      return;
+    }
+
+    if (skipProjectSyncSlowPath && this.hasLocalOnlyProjectsAwaitingPromotion()) {
+      try {
+        const accessibleProjectIds = await this.syncProjectListMetadata(userId);
+        if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:fastpath-metadata-promotion')) {
+          return;
+        }
+
+        activeProjectId = this.projectState.activeProjectId();
+        if (
+          FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1
+          && activeProjectId
+          && !this.isLocalOnlyProject(activeProjectId)
+          && !accessibleProjectIds.has(activeProjectId)
+        ) {
+          this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: activeProjectId });
+          this.projectState.setActiveProjectId(null);
+          this.toastService.info('当前项目不可访问，已自动切换');
+          activeProjectId = null;
+        }
+      } catch (error) {
+        this.logger.warn('项目清单快路命中，但 local-only 项目 promotion 失败', error);
+      }
+    }
 
     // 【性能优化】项目列表元数据同步与当前项目 delta sync 并行执行
     // - 如果 access preflight 已确认 activeProjectId 可访问，可安全并行
@@ -798,7 +1422,7 @@ export class UserSessionService {
 
     if (skipProjectSyncSlowPath) {
       // 水位快路命中，跳过项目列表同步，只做 delta sync
-      if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+      if (activeProjectId && !this.isLocalOnlyProject(activeProjectId) && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
         try {
           const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
           if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
@@ -809,17 +1433,20 @@ export class UserSessionService {
           this.logger.warn('Delta Sync 失败', deltaSyncError);
         }
       }
-    } else if (accessPreflightConfirmed && activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+    } else if (accessPreflightConfirmed && activeProjectId && !this.isLocalOnlyProject(activeProjectId) && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
       // access preflight 已确认项目可访问，并行执行列表同步和 delta sync
       const [metadataResult, deltaResult] = await Promise.allSettled([
         this.syncProjectListMetadata(userId),
         this.syncCoordinator.performDeltaSync(activeProjectId),
       ]);
+      if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:parallel-metadata-delta')) {
+        return;
+      }
 
       if (metadataResult.status === 'fulfilled') {
         const accessibleProjectIds = metadataResult.value;
         const currentActive = this.projectState.activeProjectId();
-        if (currentActive && !accessibleProjectIds.has(currentActive)) {
+        if (currentActive && !this.isLocalOnlyProject(currentActive) && !accessibleProjectIds.has(currentActive)) {
           this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: currentActive });
           this.projectState.setActiveProjectId(null);
           this.toastService.info('当前项目不可访问，已自动切换');
@@ -843,6 +1470,9 @@ export class UserSessionService {
       let accessibleProjectIds = new Set<string>();
       try {
         accessibleProjectIds = await this.syncProjectListMetadata(userId);
+        if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:serial-metadata')) {
+          return;
+        }
       } catch (e) {
         this.logger.warn('项目列表元数据同步失败', e);
       }
@@ -852,6 +1482,7 @@ export class UserSessionService {
       if (
         FEATURE_FLAGS.ACTIVE_PROJECT_ACCESS_PREFLIGHT_V1 &&
         activeProjectId &&
+        !this.isLocalOnlyProject(activeProjectId) &&
         !accessibleProjectIds.has(activeProjectId)
       ) {
         this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: activeProjectId });
@@ -860,7 +1491,7 @@ export class UserSessionService {
         activeProjectId = null;
       }
 
-      if (activeProjectId && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
+      if (activeProjectId && !this.isLocalOnlyProject(activeProjectId) && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
         try {
           const deltaResult = await this.syncCoordinator.performDeltaSync(activeProjectId);
           if (deltaResult.taskChanges > 0 || deltaResult.connectionChanges > 0) {
@@ -876,10 +1507,13 @@ export class UserSessionService {
     // === 策略 2: 如果 Delta Sync 失败，只加载当前项目（按需加载）===
     // 【优化 2026-01-27】不自动加载其他项目，节省带宽
     // 其他项目在用户切换项目时再加载
-    if (!skipProjectSyncSlowPath && !currentProjectSynced && activeProjectId) {
+    if (!skipProjectSyncSlowPath && !currentProjectSynced && activeProjectId && !this.isLocalOnlyProject(activeProjectId)) {
       try {
         this.logger.debug('按需加载当前项目', { projectId: activeProjectId });
         const currentProject = await this.syncCoordinator.loadSingleProjectFromCloud(activeProjectId);
+        if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:load-single-project')) {
+          return;
+        }
         if (currentProject) {
           await this.mergeSingleProject(currentProject, userId);
           currentProjectSynced = true;
@@ -935,6 +1569,8 @@ export class UserSessionService {
           createdDate: remote.created_date || new Date().toISOString(),
           updatedAt: remote.updated_at || new Date().toISOString(),
           version: remote.version || 1,
+          syncSource: 'synced',
+          pendingSync: false,
           tasks: [],
           connections: []
         });
@@ -942,13 +1578,26 @@ export class UserSessionService {
       } else {
         // 已有项目：只更新元数据，不覆盖 tasks
         const local = updatedProjects[localIndex];
-        if (remote.updated_at && remote.updated_at > (local.updatedAt || '')) {
-          updatedProjects[localIndex] = {
-            ...local,
+        const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(local.id);
+        const nextProject: Project = {
+          ...local,
+          syncSource: 'synced',
+          pendingSync: hasPendingLocalChanges,
+          ...(remote.updated_at && remote.updated_at > (local.updatedAt || '') ? {
             name: remote.title || local.name,
             description: remote.description || local.description,
-            version: remote.version || local.version
-          };
+            version: remote.version || local.version,
+          } : {}),
+        };
+
+        if (
+          nextProject.syncSource !== local.syncSource ||
+          nextProject.pendingSync !== local.pendingSync ||
+          nextProject.name !== local.name ||
+          nextProject.description !== local.description ||
+          nextProject.version !== local.version
+        ) {
+          updatedProjects[localIndex] = nextProject;
           hasChanges = true;
         }
       }
@@ -976,6 +1625,7 @@ export class UserSessionService {
     } else {
       updatedProjects = updatedProjects.filter(project => {
         if (accessibleProjectIds.has(project.id)) return true;
+        if (project.syncSource === 'local-only') return true;
         // 不裁剪当前活跃项目，交由调用方处理
         if (project.id === activeProjectId) return true;
         const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(project.id);
@@ -1067,18 +1717,44 @@ export class UserSessionService {
     return Array.from(taskMap.values());
   }
   
-  /** LWW 合并连接列表 */
+  /** LWW 合并连接列表（Tombstone Wins + updatedAt 比较） */
   private mergeConnectionsWithLWW(localConns: Connection[], cloudConns: Connection[]): Connection[] {
     const connMap = new Map<string, Connection>();
     
+    // 先添加云端连接
     for (const conn of cloudConns) {
       connMap.set(conn.id, conn);
     }
     
-    // Connection 类型没有 updatedAt 字段，简化为优先使用本地连接
-    // 这是保守策略，避免本地编辑丢失
+    // 合并本地连接：使用 updatedAt LWW + 删除优先策略
     for (const conn of localConns) {
-      connMap.set(conn.id, conn);
+      const cloudConn = connMap.get(conn.id);
+      if (!cloudConn) {
+        // 本地新建的连接，直接添加
+        connMap.set(conn.id, conn);
+      } else {
+        // 两边都有，应用 Tombstone Wins 策略
+        if (cloudConn.deletedAt && !conn.deletedAt) {
+          // 云端已删除、本地未删除 → 保持云端删除状态，防止删除被逆转
+          // 不做操作，保留 cloudConn（已在 map 中）
+        } else if (!cloudConn.deletedAt && conn.deletedAt) {
+          // 本地已删除、云端未删除 → 保持本地删除状态
+          connMap.set(conn.id, conn);
+        } else if (cloudConn.deletedAt && conn.deletedAt) {
+          // 两边都删除了，保留较早的删除时间
+          const cloudTime = new Date(cloudConn.deletedAt).getTime();
+          const localTime = new Date(conn.deletedAt).getTime();
+          connMap.set(conn.id, cloudTime < localTime ? cloudConn : conn);
+        } else {
+          // 两边都未删除，使用 updatedAt LWW
+          const cloudTime = cloudConn.updatedAt ? new Date(cloudConn.updatedAt).getTime() : 0;
+          const localTime = conn.updatedAt ? new Date(conn.updatedAt).getTime() : 0;
+          if (localTime > cloudTime) {
+            connMap.set(conn.id, conn);
+          }
+          // 否则保留云端版本（已在 map 中）
+        }
+      }
     }
     
     return Array.from(connMap.values());
@@ -1206,16 +1882,23 @@ export class UserSessionService {
   // ========== 私有方法 ==========
 
   /** 加载用户数据：加载项目 + 后台建立实时订阅 */
-  private async loadUserData(userId: string): Promise<void> {
+  private async loadUserData(userId: string, sessionGuard?: SessionGuardContext): Promise<void> {
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadUserData:start')) {
+      return;
+    }
+
     // 先加载项目数据（这个需要等待）
     try {
-      await this.loadProjects();
+      await this.loadProjectsForSession(sessionGuard ?? this.createSessionGuard(userId));
     } catch (error) {
+      if (this.shouldAbortStaleSession(sessionGuard, 'loadUserData:load-projects-error')) {
+        return;
+      }
       // loadProjects 内部已有错误处理，这里是最后的防线
       this.logger.warn('loadProjects 未捕获异常', error);
       // 确保至少有可用的数据
       try {
-        await this.loadFromCacheOrSeed();
+        await this.loadFromCacheOrSeed(undefined, sessionGuard);
       } catch (fallbackError) {
         this.logger.warn('种子数据加载失败', fallbackError);
       }
@@ -1223,6 +1906,10 @@ export class UserSessionService {
       // 向用户显示友好的错误提示
       this.toastService.error('数据加载失败', '已尝试加载本地数据，如问题持续请刷新页面');
       
+      return;
+    }
+
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadUserData:after-load-projects')) {
       return;
     }
     
@@ -1248,6 +1935,7 @@ export class UserSessionService {
     bytes: number;
     migratedLegacy: boolean;
     projects: Project[];
+    ownerUserId?: string | null;
   }> {
     const core = this.syncCoordinator.core as {
       loadStartupOfflineSnapshot?: () => Promise<{
@@ -1280,9 +1968,25 @@ export class UserSessionService {
     bytes: number;
     migratedLegacy: boolean;
     projects: Project[];
-  }): Promise<void> {
+    ownerUserId?: string | null;
+  }, sessionGuard?: SessionGuardContext): Promise<void> {
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadFromCacheOrSeed:start')) {
+      return;
+    }
+
     const snapshot = snapshotOverride ?? await this.loadStartupSnapshotResult();
-    const cached = snapshot.projects;
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadFromCacheOrSeed:snapshot-loaded')) {
+      return;
+    }
+    const snapshotProjects = this.getSnapshotProjectsForSession(
+      snapshot,
+      sessionGuard?.userId ?? this.authService.currentUserId(),
+      'loadFromCacheOrSeed:snapshot-loaded'
+    );
+    if (!snapshotProjects.ownerMatched) {
+      this.clearStartupProjectCatalogState();
+    }
+    const cached = snapshotProjects.projects;
     let projects: Project[] = [];
     let usedSeed = false;
 
@@ -1342,6 +2046,10 @@ export class UserSessionService {
       }
     }
 
+    if (this.shouldAbortStaleSession(sessionGuard, 'loadFromCacheOrSeed:apply-projects')) {
+      return;
+    }
+
     this.projectState.setProjects(projects);
     this.projectState.setActiveProjectId(projects[0]?.id ?? null);
     this.syncStartupProjectCatalogStageAfterLocalRestore(this.authService.currentUserId());
@@ -1357,9 +2065,15 @@ export class UserSessionService {
   /** 迁移项目数据格式 */
   private migrateProject(project: Project): Project {
     const migrated = { ...project };
+    const currentUserId = this.authService.currentUserId();
+    const isAuthenticatedUser = !!currentUserId && currentUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
 
     migrated.updatedAt = migrated.updatedAt || new Date().toISOString();
     migrated.version = CACHE_CONFIG.CACHE_VERSION;
+    migrated.syncSource = migrated.syncSource === 'synced' ? 'synced' : 'local-only';
+    migrated.pendingSync = migrated.syncSource === 'local-only'
+      ? (isAuthenticatedUser || migrated.pendingSync === true)
+      : (migrated.pendingSync ?? false);
 
     const safeTasks = Array.isArray(migrated.tasks) ? migrated.tasks : [];
     migrated.tasks = safeTasks.map(t => ({
@@ -1389,6 +2103,8 @@ export class UserSessionService {
         name: 'Alpha Protocol',
         description: 'NanoFlow 核心引擎启动计划。',
         createdDate: now,
+        syncSource: 'local-only',
+        pendingSync: false,
         tasks: [
           {
             id: task1Id,

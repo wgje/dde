@@ -33,7 +33,7 @@ describe('AppProjectCoordinatorService rename guard', () => {
       renamingProjectId: () => 'proj-1',
       renameProjectName: () => null,
       originalProjectName: '',
-      projectState: { renameProject },
+      projectOps: { renameProject },
       toast: { success },
       cancelRenameProject,
     } as unknown as AppProjectCoordinatorService;
@@ -42,5 +42,49 @@ describe('AppProjectCoordinatorService rename guard', () => {
     expect(renameProject).not.toHaveBeenCalled();
     expect(success).not.toHaveBeenCalled();
     expect(cancelRenameProject).toHaveBeenCalledOnce();
+  });
+
+  it('executeRenameProject should delegate to ProjectOperationService on valid rename', () => {
+    const renameProject = vi.fn().mockReturnValue(true);
+    const success = vi.fn();
+    const cancelRenameProject = vi.fn();
+    const context = {
+      renamingProjectId: () => 'proj-1',
+      renameProjectName: () => '  New Name  ',
+      originalProjectName: 'Old Name',
+      projectOps: { renameProject },
+      toast: { success },
+      cancelRenameProject,
+    } as unknown as AppProjectCoordinatorService;
+
+    AppProjectCoordinatorService.prototype.executeRenameProject.call(context);
+
+    expect(renameProject).toHaveBeenCalledWith('proj-1', 'New Name');
+    expect(success).toHaveBeenCalledOnce();
+    expect(cancelRenameProject).toHaveBeenCalledOnce();
+  });
+
+  it('handleImportComplete should delegate existing project import to ProjectOperationService', async () => {
+    const upsertImportedProject = vi.fn().mockResolvedValue({ success: true });
+    const success = vi.fn();
+    const context = {
+      projectState: {
+        getProject: vi.fn().mockReturnValue({ id: 'proj-1' }),
+      },
+      projectOps: { upsertImportedProject },
+      toast: { success, error: vi.fn() },
+    } as unknown as AppProjectCoordinatorService;
+
+    await AppProjectCoordinatorService.prototype.handleImportComplete.call(context, {
+      id: 'proj-1',
+      name: 'Imported',
+      description: '',
+      createdDate: '2026-03-30T00:00:00.000Z',
+      tasks: [],
+      connections: [],
+    });
+
+    expect(upsertImportedProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'proj-1' }));
+    expect(success).toHaveBeenCalledWith('导入成功', '项目 "Imported" 已更新');
   });
 });

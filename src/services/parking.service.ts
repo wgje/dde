@@ -31,7 +31,6 @@ import { GateService } from './gate.service';
 import { ContextRestoreService } from './context-restore.service';
 import { AuthService } from './auth.service';
 import { isLocalModeEnabled } from './guards/auth.guard';
-import { spotlightMode } from '../state/focus-stores';
 import { ProjectDataService } from '../core-bridge';
 
 interface SnapshotDraft {
@@ -218,12 +217,6 @@ export class ParkingService implements OnDestroy {
     // 目标必须是 active 状态（A4 不变量）
     if (targetTask.status !== 'active') {
       this.logger.warn('ParkingService', 'startWork: 只能对 active 任务执行', { taskId, status: targetTask.status });
-      return;
-    }
-
-    // Block switches while spotlight mode is active.
-    if (spotlightMode()) {
-      this.toastService.info('请先退出 Spotlight 模式', '当前无法切换停泊任务');
       return;
     }
 

@@ -14,10 +14,11 @@
  * 8. 死信队列的 TTL 清理
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
+import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
-import { ActionQueueStorageService } from './action-queue-storage.service';
+import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
 import { Task, Project } from '../models';
+import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
@@ -98,9 +99,82 @@ function createMockProject(overrides: Partial<Project> = {}): Project {
 
 describe('ActionQueueService', () => {
   let service: ActionQueueService;
+  let currentUserIdSignal = signal<string | null>('test-user');
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
   let destroyRefCleanup: (() => void) | undefined;
+  let restoreWindowEvents: (() => void) | undefined;
+
+  function installWindowEventBridge(): () => void {
+    const originalAddEventListener = window.addEventListener;
+    const originalRemoveEventListener = window.removeEventListener;
+    const originalDispatchEvent = window.dispatchEvent;
+    const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+
+    Object.defineProperty(window, 'addEventListener', {
+      configurable: true,
+      writable: true,
+      value: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (!listener) {
+          return;
+        }
+        const bucket = listeners.get(type) ?? new Set<EventListenerOrEventListenerObject>();
+        bucket.add(listener);
+        listeners.set(type, bucket);
+      },
+    });
+
+    Object.defineProperty(window, 'removeEventListener', {
+      configurable: true,
+      writable: true,
+      value: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (!listener) {
+          return;
+        }
+        listeners.get(type)?.delete(listener);
+      },
+    });
+
+    Object.defineProperty(window, 'dispatchEvent', {
+      configurable: true,
+      writable: true,
+      value: (event: Event) => {
+        const bucket = listeners.get(event.type);
+        if (!bucket) {
+          return true;
+        }
+
+        for (const listener of bucket) {
+          if (typeof listener === 'function') {
+            listener.call(window, event);
+            continue;
+          }
+
+          listener.handleEvent(event);
+        }
+
+        return true;
+      },
+    });
+
+    return () => {
+      Object.defineProperty(window, 'addEventListener', {
+        configurable: true,
+        writable: true,
+        value: originalAddEventListener,
+      });
+      Object.defineProperty(window, 'removeEventListener', {
+        configurable: true,
+        writable: true,
+        value: originalRemoveEventListener,
+      });
+      Object.defineProperty(window, 'dispatchEvent', {
+        configurable: true,
+        writable: true,
+        value: originalDispatchEvent,
+      });
+    };
+  }
 
   // 辅助函数：模拟网络状态（不触发事件）
   function setNetworkStatus(online: boolean) {
@@ -171,6 +245,10 @@ describe('ActionQueueService', () => {
       writable: true,
       configurable: true,
     });
+
+    currentUserIdSignal = signal<string | null>('test-user');
+
+    restoreWindowEvents = installWindowEventBridge();
     
     const { destroyRef, destroy } = createMockDestroyRef();
     destroyRefCleanup = destroy;
@@ -185,6 +263,7 @@ describe('ActionQueueService', () => {
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
+        { provide: AuthService, useValue: { currentUserId: currentUserIdSignal } },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });
@@ -197,6 +276,7 @@ describe('ActionQueueService', () => {
   afterEach(() => {
     service.reset();
     destroyRefCleanup?.();
+    restoreWindowEvents?.();
     vi.useRealTimers();
 
     consoleWarnSpy?.mockRestore();
@@ -251,6 +331,26 @@ describe('ActionQueueService', () => {
       
       expect(service.queueSize()).toBe(0);
     });
+
+    it('切账号时清空当前视图不应覆盖已持久化的队列和死信', () => {
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+      const queuedAction = service.pendingActions()[0];
+      service.moveToDeadLetter(queuedAction, 'test dead letter');
+
+      const queueStorageKey = 'nanoflow.action-queue.test-user';
+      const deadLetterStorageKey = 'nanoflow.dead-letter-queue.test-user';
+
+      expect(localStorage.getItem(queueStorageKey)).toBe('[]');
+      expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
+
+      service.clearCurrentView();
+
+      expect(service.queueSize()).toBe(0);
+      expect(service.deadLetterSize()).toBe(0);
+      expect(localStorage.getItem(queueStorageKey)).toBe('[]');
+      expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
+    });
   });
 
   // ==================== 处理器注册和执行 ====================
@@ -304,6 +404,222 @@ describe('ActionQueueService', () => {
       expect(result.failed).toBe(1);
       expect(service.queueSize()).toBe(1); // 仍在队列中
     });
+
+    it('切账号后旧处理循环失败结果应进入旧 owner 死信而不是污染新 owner', async () => {
+      let rejectProcessing: ((reason?: unknown) => void) | null = null;
+      const processor = vi.fn().mockImplementation(
+        () => new Promise<boolean>((_resolve, reject) => {
+          rejectProcessing = reject;
+        })
+      );
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      const actionId = service.enqueue(createTestProjectAction());
+      service.pendingActions.update(queue => queue.map(action =>
+        action.id === actionId
+          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
+          : action
+      ));
+      service.storage.saveQueueToStorage();
+
+      setNetworkStatus(true);
+      const processingPromise = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+
+      currentUserIdSignal.set('other-user');
+      service.clearCurrentView();
+
+      rejectProcessing?.(new Error('network timeout'));
+      await processingPromise;
+
+      expect(service.deadLetterSize()).toBe(0);
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).not.toContain(actionId);
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toContain(actionId);
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.other-user')).toBeNull();
+    });
+
+    it('切账号后旧处理循环成功结果应从旧 owner 的持久化队列中移除', async () => {
+      let resolveProcessing: ((value: boolean) => void) | null = null;
+      const processor = vi.fn().mockImplementation(
+        () => new Promise<boolean>(resolve => {
+          resolveProcessing = resolve;
+        })
+      );
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      const actionId = service.enqueue(createTestProjectAction());
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toContain(actionId);
+
+      setNetworkStatus(true);
+      const processingPromise = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+
+      currentUserIdSignal.set('other-user');
+      service.clearCurrentView();
+
+      resolveProcessing?.(true);
+      await processingPromise;
+
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).not.toContain(actionId);
+      expect(localStorage.getItem('nanoflow.action-queue.other-user')).toBeNull();
+    });
+
+    it('切账号后旧处理循环返回 false 时也应推进旧 owner 的失败收口', async () => {
+      let resolveProcessing: ((value: boolean) => void) | null = null;
+      const processor = vi.fn().mockImplementation(
+        () => new Promise<boolean>(resolve => {
+          resolveProcessing = resolve;
+        })
+      );
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      const actionId = service.enqueue(createTestProjectAction());
+      setNetworkStatus(true);
+
+      const processingPromise = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+
+      currentUserIdSignal.set('other-user');
+      service.clearCurrentView();
+
+      resolveProcessing?.(false);
+      await processingPromise;
+
+      const persistedOldQueue = localStorage.getItem('nanoflow.action-queue.test-user') ?? '';
+      expect(persistedOldQueue).toContain(actionId);
+      expect(persistedOldQueue).toContain('"retryCount":1');
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.other-user')).toBeNull();
+    });
+
+    it('full wipe 开始后旧处理循环成功结果不应把旧 owner 队列写回本地', async () => {
+      let resolveProcessing: ((value: boolean) => void) | null = null;
+      const processor = vi.fn().mockImplementation(
+        () => new Promise<boolean>(resolve => {
+          resolveProcessing = resolve;
+        })
+      );
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      const actionId = service.enqueue(createTestProjectAction());
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toContain(actionId);
+
+      setNetworkStatus(true);
+      const processingPromise = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+
+      currentUserIdSignal.set(null);
+      service.clearCurrentView();
+      service.clearQueue();
+      localStorage.removeItem('nanoflow.action-queue.test-user');
+      localStorage.removeItem('nanoflow.dead-letter-queue.test-user');
+
+      resolveProcessing?.(true);
+      await processingPromise;
+
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBeNull();
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toBeNull();
+    });
+
+    it('full wipe 开始后旧处理循环失败结果不应把旧 owner 死信写回本地', async () => {
+      let rejectProcessing: ((reason?: unknown) => void) | null = null;
+      const processor = vi.fn().mockImplementation(
+        () => new Promise<boolean>((_resolve, reject) => {
+          rejectProcessing = reject;
+        })
+      );
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      const actionId = service.enqueue(createTestProjectAction());
+      service.pendingActions.update(queue => queue.map(action =>
+        action.id === actionId
+          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
+          : action
+      ));
+      service.storage.saveQueueToStorage();
+
+      setNetworkStatus(true);
+      const processingPromise = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+
+      currentUserIdSignal.set(null);
+      service.clearCurrentView();
+      service.clearQueue();
+      localStorage.removeItem('nanoflow.action-queue.test-user');
+      localStorage.removeItem('nanoflow.dead-letter-queue.test-user');
+
+      rejectProcessing?.(new Error('network timeout'));
+      await processingPromise;
+
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBeNull();
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toBeNull();
+    });
+
+    it('切账号后旧循环 finally 不应覆盖新 owner 的 processing 状态', async () => {
+      let resolveFirst: ((value: boolean) => void) | null = null;
+      let resolveSecond: ((value: boolean) => void) | null = null;
+      const onStart = vi.fn();
+      const onEnd = vi.fn();
+      const processor = vi.fn()
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+          resolveFirst = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+          resolveSecond = resolve;
+        }));
+      service.registerProcessor('project:update', processor);
+      service.setQueueProcessCallbacks(onStart, onEnd);
+
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+      setNetworkStatus(true);
+
+      const firstProcessing = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
+      expect(onStart).toHaveBeenCalledTimes(1);
+
+      currentUserIdSignal.set('other-user');
+      service.clearCurrentView();
+      expect(service.isProcessing()).toBe(false);
+      expect(onEnd).toHaveBeenCalledTimes(1);
+
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+      setNetworkStatus(true);
+
+      const secondProcessing = service.processQueue();
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(2);
+      });
+      expect(service.isProcessing()).toBe(true);
+      expect(onStart).toHaveBeenCalledTimes(2);
+
+      resolveFirst?.(true);
+      await firstProcessing;
+      expect(service.isProcessing()).toBe(true);
+      expect(onEnd).toHaveBeenCalledTimes(1);
+
+      resolveSecond?.(true);
+      await secondProcessing;
+      expect(service.isProcessing()).toBe(false);
+      expect(onEnd).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ==================== 离线/在线状态处理 ====================
@@ -326,7 +642,14 @@ describe('ActionQueueService', () => {
     });
     
     it('网络恢复时应该自动处理队列', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
+      let resolveProcessed: (() => void) | null = null;
+      const processedPromise = new Promise<void>((resolve) => {
+        resolveProcessed = resolve;
+      });
+      const processor = vi.fn().mockImplementation(async () => {
+        resolveProcessed?.();
+        return true;
+      });
       service.registerProcessor('project:update', processor);
       
       // 先离线
@@ -337,10 +660,16 @@ describe('ActionQueueService', () => {
       // 恢复在线 - 使用事件触发自动处理
       triggerNetworkEvent(true);
       
-      // 等待处理完成（使用短超时提高测试速度）
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalled();
-      }, { timeout: 100, interval: 10 });
+      // 等待自动处理真正触发，避免并发矩阵下 100ms 轮询窗口抖动
+      await Promise.race([
+        processedPromise,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('网络恢复后未触发自动处理')), 1000);
+        }),
+      ]);
+
+      expect(processor).toHaveBeenCalledTimes(1);
+      expect(service.queueSize()).toBe(0);
     });
   });
 
@@ -515,7 +844,7 @@ describe('ActionQueueService', () => {
       setNetworkStatus(false);
       service.enqueue(createTestProjectAction());
       
-      const saved = localStorage.getItem('nanoflow.action-queue');
+      const saved = localStorage.getItem('nanoflow.action-queue.test-user');
       expect(saved).toBeTruthy();
       
       const parsed = JSON.parse(saved!);
@@ -537,7 +866,7 @@ describe('ActionQueueService', () => {
       setNetworkStatus(true);
       await service.processQueue();
       
-      const savedDeadLetter = localStorage.getItem('nanoflow.dead-letter-queue');
+      const savedDeadLetter = localStorage.getItem('nanoflow.dead-letter-queue.test-user');
       expect(savedDeadLetter).toBeTruthy();
       
       const parsed = JSON.parse(savedDeadLetter!);

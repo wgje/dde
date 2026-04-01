@@ -203,15 +203,11 @@ export class ConflictResolutionService {
       }
     }
     
-    // 合并 connections（简单去重）
+    // 合并 connections（Tombstone Wins 策略，确保删除状态不被逆转）
     const localConnections = Array.isArray(localProject.connections) ? localProject.connections : [];
     const remoteConnections = Array.isArray(remoteProject.connections) ? remoteProject.connections : [];
-    const connectionMap = new Map(remoteConnections.map(c => [c.id, c]));
-    for (const localConn of localConnections) {
-      if (!connectionMap.has(localConn.id)) {
-        connectionMap.set(localConn.id, localConn);
-      }
-    }
+    const mergedConnections = this.conflictDetection.mergeConnections(localConnections, remoteConnections);
+    const connectionMap = new Map(mergedConnections.map(c => [c.id, c]));
     
     // 构建合并后的项目
     let resolvedProject: Project = {

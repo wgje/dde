@@ -18,7 +18,21 @@ import { ActionQueueService } from './action-queue.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { ToastService } from './toast.service';
 import { Project, Task, UserPreferences } from '../models';
+import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  FocusSessionPayload,
+  PreferencePayload,
+  ProjectDeletePayload,
+  ProjectPayload,
+  QueuedAction,
+  RoutineCompletionPayload,
+  RoutineTaskPayload,
+  TaskDeletePayload,
+  TaskPayload,
+} from './action-queue.types';
 import {
   FocusSessionRecord,
   RoutineCompletionMutation,
@@ -35,6 +49,10 @@ export class ActionQueueProcessorsService {
   private readonly syncService = inject(SimpleSyncService);
   private readonly projectState = inject(ProjectStateService);
   private readonly authService = inject(AuthService);
+  private readonly conflictStorage = inject(ConflictStorageService);
+  private readonly toast = inject(ToastService);
+  private projectConflictHandler: ((localProject: Project, remoteProject: Project, ownerUserId?: string | null) => void) | null = null;
+  private legacyQueueWarningShown = false;
 
   /** 初始化所有处理器 */
   setupProcessors(): void {
@@ -43,6 +61,106 @@ export class ActionQueueProcessorsService {
     this.setupTaskProcessors();
     this.setupPreferenceProcessors();
     this.setupFocusConsoleProcessors();
+  }
+
+  setProjectConflictHandler(
+    handler: (localProject: Project, remoteProject: Project, ownerUserId?: string | null) => void
+  ): void {
+    this.projectConflictHandler = handler;
+  }
+
+  private resolveActionSourceUserId(...candidates: Array<string | null | undefined>): string | null {
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private hasConflictingOwnerHints(
+    action: QueuedAction,
+    actionType: string,
+    ...candidates: Array<string | null | undefined>
+  ): boolean {
+    const ownerHints = [...new Set(candidates.filter((candidate): candidate is string =>
+      typeof candidate === 'string' && candidate.length > 0
+    ))];
+    if (ownerHints.length <= 1) {
+      return false;
+    }
+
+    this.quarantineLegacyQueueAction(
+      action,
+      `${actionType} 队列 owner 元数据冲突 (${ownerHints.join(' vs ')})，已转入失败记录`
+    );
+    return true;
+  }
+
+  private shouldStopUserScopedQueueAction(
+    action: QueuedAction,
+    currentUserId: string,
+    actionType: string,
+    sourceUserId: string | null,
+  ): boolean {
+    if (currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.warn(`${actionType} 跳过：本地模式不进入云端队列`);
+      return true;
+    }
+
+    if (sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `${actionType} legacy local-user 队列项禁止自动上云，请人工确认后重试`
+      );
+      return true;
+    }
+
+    if (!sourceUserId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `${actionType} legacy 队列项缺少来源元数据，无法安全判断归属，已转入失败记录`
+      );
+      return true;
+    }
+
+    if (sourceUserId !== currentUserId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `${actionType} 队列来源用户 ${sourceUserId} 与当前账号 ${currentUserId} 不匹配，已转入失败记录`
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private captureProjectMutationContext(ownerUserId: string): {
+    ownerUserId: string;
+    queueViewGeneration: number;
+  } {
+    return {
+      ownerUserId,
+      queueViewGeneration: this.actionQueue.getCurrentQueueViewGeneration(),
+    };
+  }
+
+  private isProjectMutationContextCurrent(
+    context: { ownerUserId: string; queueViewGeneration: number },
+    actionType: 'project:create' | 'project:update',
+    projectId: string
+  ): boolean {
+    if (this.actionQueue.isQueueViewCurrent(context.queueViewGeneration, context.ownerUserId)) {
+      return true;
+    }
+
+    this.logger.debug(`${actionType} 结果已过期，跳过本地副作用`, {
+      projectId,
+      ownerUserId: context.ownerUserId,
+      queueViewGeneration: context.queueViewGeneration,
+    });
+    return false;
   }
 
   private setupQueueSyncCoordination(): void {
@@ -58,9 +176,16 @@ export class ActionQueueProcessorsService {
       const userId = this.authService.currentUserId();
       if (!userId) { this.logger.warn('project:update 失败：用户未登录'); return false; }
       
-      const payload = action.payload as { project: Project };
+      const payload = action.payload as ProjectPayload;
+      const mutationContext = this.captureProjectMutationContext(userId);
+      if (this.shouldStopProjectMutation(action, userId, payload, 'update')) {
+        return true;
+      }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        if (!this.isProjectMutationContextCurrent(mutationContext, 'project:update', payload.project.id)) {
+          return result.success || result.conflict === true;
+        }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
@@ -68,6 +193,11 @@ export class ActionQueueProcessorsService {
         }
         if (result.conflict) {
           this.logger.warn('project:update 冲突', { projectId: payload.project.id });
+          if (result.remoteData) {
+            this.projectConflictHandler?.(payload.project, result.remoteData, mutationContext.ownerUserId);
+          } else {
+            return await this.persistConflictWithoutRemote(payload.project, mutationContext, 'project:update');
+          }
           return true; // 冲突由冲突解决流程处理
         }
         return result.success;
@@ -81,8 +211,19 @@ export class ActionQueueProcessorsService {
     this.actionQueue.registerProcessor('project:delete', async (action) => {
       const userId = this.authService.currentUserId();
       if (!userId) { this.logger.warn('project:delete 失败：用户未登录'); return false; }
+      const payload = action.payload as ProjectDeletePayload;
+      if (this.hasConflictingOwnerHints(action, 'project:delete', payload.sourceUserId, payload.userId)) {
+        return true;
+      }
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.userId);
+      if (this.shouldStopProjectDelete(action, userId, payload, sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
+        return false;
+      }
       try {
-        return await this.syncService.deleteProjectFromCloud(action.entityId, userId);
+        return await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
       } catch (error) {
         this.logger.error('project:delete 异常', { error, projectId: action.entityId });
         return false;
@@ -94,13 +235,29 @@ export class ActionQueueProcessorsService {
       const userId = this.authService.currentUserId();
       if (!userId) { this.logger.warn('project:create 失败：用户未登录'); return false; }
       
-      const payload = action.payload as { project: Project };
+      const payload = action.payload as ProjectPayload;
+      const mutationContext = this.captureProjectMutationContext(userId);
+      if (this.shouldStopProjectMutation(action, userId, payload, 'create')) {
+        return true;
+      }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        if (!this.isProjectMutationContextCurrent(mutationContext, 'project:create', payload.project.id)) {
+          return result.success || result.conflict === true;
+        }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
           ));
+        }
+        if (result.conflict) {
+          this.logger.warn('project:create 冲突', { projectId: payload.project.id });
+          if (result.remoteData) {
+            this.projectConflictHandler?.(payload.project, result.remoteData, mutationContext.ownerUserId);
+          } else {
+            return await this.persistConflictWithoutRemote(payload.project, mutationContext, 'project:create');
+          }
+          return true;
         }
         return result.success;
       } catch (error) {
@@ -110,10 +267,149 @@ export class ActionQueueProcessorsService {
     });
   }
 
+  private shouldStopProjectMutation(
+    action: QueuedAction,
+    userId: string,
+    payload: ProjectPayload,
+    actionType: 'create' | 'update'
+  ): boolean {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.warn(`project:${actionType} 跳过：本地模式不进入云端队列`, {
+        projectId: payload.project.id,
+      });
+      return true;
+    }
+
+    const currentProject = this.projectState.getProject(payload.project.id);
+    const currentProjectSynced = currentProject?.syncSource === 'synced';
+    if ((payload.project.syncSource === 'local-only' || currentProject?.syncSource === 'local-only') && !currentProjectSynced) {
+      this.logger.warn(`project:${actionType} 跳过：local-only 项目不进入云端队列`, {
+        projectId: payload.project.id,
+      });
+      return true;
+    }
+
+    if (payload.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `project:${actionType} legacy local-user 队列项禁止自动上云，请人工确认后重试`
+      );
+      return true;
+    }
+
+    if (payload.sourceUserId && payload.sourceUserId !== userId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `project:${actionType} 队列来源用户 ${payload.sourceUserId} 与当前账号 ${userId} 不匹配，已转入失败记录`
+      );
+      return true;
+    }
+
+    if (typeof payload.sourceUserId !== 'string') {
+      this.quarantineLegacyQueueAction(
+        action,
+        `project:${actionType} legacy 队列项缺少来源元数据，无法安全判断归属，已转入失败记录`
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private async persistConflictWithoutRemote(
+    localProject: Project,
+    mutationContext: { ownerUserId: string; queueViewGeneration: number },
+    actionType: 'project:create' | 'project:update'
+  ): Promise<boolean> {
+    const remoteProject = await this.syncService.loadFullProjectOptimized(localProject.id).catch(() => null);
+    if (!this.isProjectMutationContextCurrent(mutationContext, actionType, localProject.id)) {
+      return true;
+    }
+
+    if (remoteProject) {
+      if (this.projectConflictHandler) {
+        this.projectConflictHandler(localProject, remoteProject, mutationContext.ownerUserId);
+        return true;
+      }
+
+      await this.conflictStorage.saveConflict({
+        projectId: localProject.id,
+        localProject,
+        remoteProject,
+        ownerUserId: mutationContext.ownerUserId,
+        remoteSnapshotFresh: true,
+        conflictedAt: new Date().toISOString(),
+        localVersion: localProject.version ?? 0,
+        remoteVersion: remoteProject.version ?? 0,
+        reason: 'version_mismatch',
+        acknowledged: false,
+      });
+      this.toast.warning('检测到数据冲突', '已补拉远端版本，冲突详情已转入冲突中心');
+      return true;
+    }
+
+    await this.conflictStorage.saveConflict({
+      projectId: localProject.id,
+      localProject,
+      ownerUserId: mutationContext.ownerUserId,
+      conflictedAt: new Date().toISOString(),
+      localVersion: localProject.version ?? 0,
+      reason: 'version_mismatch',
+      acknowledged: false,
+    });
+    this.toast.warning('检测到数据冲突', '远端详情暂不可用，已转入冲突中心等待处理');
+    return true;
+  }
+
+  private shouldStopProjectDelete(
+    action: QueuedAction,
+    userId: string,
+    payload: ProjectDeletePayload,
+    sourceUserId: string | null,
+  ): boolean {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.warn('project:delete 跳过：本地模式不进入云端队列', {
+        projectId: payload.projectId,
+      });
+      return true;
+    }
+
+    if (sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.quarantineLegacyQueueAction(
+        action,
+        'project:delete legacy local-user 删除队列项禁止自动上云，请人工确认后重试'
+      );
+      return true;
+    }
+
+    if (!sourceUserId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        'project:delete legacy 队列项缺少来源元数据，无法安全判断归属，已转入失败记录'
+      );
+      return true;
+    }
+
+    if (sourceUserId !== userId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `project:delete 队列来源用户 ${sourceUserId} 与当前账号 ${userId} 不匹配，已转入失败记录`
+      );
+      return true;
+    }
+
+    return false;
+  }
+
   private setupTaskProcessors(): void {
     // 任务创建
     this.actionQueue.registerProcessor('task:create', async (action) => {
-      const payload = action.payload as { task: Task; projectId: string };
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('task:create 失败：用户未登录'); return false; }
+      const payload = action.payload as TaskPayload;
+      if (this.shouldStopTaskMutation(action, userId, payload, 'create')) {
+        return true;
+      }
       try {
         return await this.syncService.pushTask(payload.task, payload.projectId, false);
       } catch (error) {
@@ -124,7 +420,12 @@ export class ActionQueueProcessorsService {
 
     // 任务更新
     this.actionQueue.registerProcessor('task:update', async (action) => {
-      const payload = action.payload as { task: Task; projectId: string };
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('task:update 失败：用户未登录'); return false; }
+      const payload = action.payload as TaskPayload;
+      if (this.shouldStopTaskMutation(action, userId, payload, 'update')) {
+        return true;
+      }
       try {
         return await this.syncService.pushTask(payload.task, payload.projectId, false);
       } catch (error) {
@@ -135,7 +436,12 @@ export class ActionQueueProcessorsService {
 
     // 任务删除
     this.actionQueue.registerProcessor('task:delete', async (action) => {
-      const payload = action.payload as { taskId: string; projectId: string };
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('task:delete 失败：用户未登录'); return false; }
+      const payload = action.payload as TaskDeletePayload;
+      if (this.shouldStopTaskDelete(action, userId, payload)) {
+        return true;
+      }
       try {
         return await this.syncService.deleteTask(payload.taskId, payload.projectId);
       } catch (error) {
@@ -145,14 +451,124 @@ export class ActionQueueProcessorsService {
     });
   }
 
+  private shouldStopTaskMutation(
+    action: QueuedAction,
+    userId: string,
+    payload: TaskPayload,
+    actionType: 'create' | 'update'
+  ): boolean {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.warn(`task:${actionType} 跳过：本地模式不进入云端队列`, {
+        taskId: payload.task.id,
+        projectId: payload.projectId,
+      });
+      return true;
+    }
+
+    if (payload.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `task:${actionType} legacy local-user 队列项禁止自动上云，请人工确认后重试`
+      );
+      return true;
+    }
+
+    if (payload.sourceUserId && payload.sourceUserId !== userId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `task:${actionType} 队列来源用户 ${payload.sourceUserId} 与当前账号 ${userId} 不匹配，已转入失败记录`
+      );
+      return true;
+    }
+
+    const currentProject = this.projectState.getProject(payload.projectId);
+    if (currentProject?.syncSource === 'local-only') {
+      this.logger.warn(`task:${actionType} 跳过：local-only 项目不进入云端队列`, {
+        taskId: payload.task.id,
+        projectId: payload.projectId,
+      });
+      return true;
+    }
+
+    if (typeof payload.sourceUserId !== 'string') {
+      this.quarantineLegacyQueueAction(
+        action,
+        `task:${actionType} legacy 队列项缺少来源元数据，无法安全判断归属，已转入失败记录`
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  private shouldStopTaskDelete(action: QueuedAction, userId: string, payload: TaskDeletePayload): boolean {
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.logger.warn('task:delete 跳过：本地模式不进入云端队列', {
+        taskId: payload.taskId,
+        projectId: payload.projectId,
+      });
+      return true;
+    }
+
+    if (payload.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      this.quarantineLegacyQueueAction(
+        action,
+        'task:delete legacy local-user 队列项禁止自动上云，请人工确认后重试'
+      );
+      return true;
+    }
+
+    if (payload.sourceUserId && payload.sourceUserId !== userId) {
+      this.quarantineLegacyQueueAction(
+        action,
+        `task:delete 队列来源用户 ${payload.sourceUserId} 与当前账号 ${userId} 不匹配，已转入失败记录`
+      );
+      return true;
+    }
+
+    const currentProject = this.projectState.getProject(payload.projectId);
+    if (currentProject?.syncSource === 'local-only') {
+      this.logger.warn('task:delete 跳过：local-only 项目不进入云端队列', {
+        taskId: payload.taskId,
+        projectId: payload.projectId,
+      });
+      return true;
+    }
+
+    if (typeof payload.sourceUserId !== 'string') {
+      this.quarantineLegacyQueueAction(
+        action,
+        'task:delete legacy 队列项缺少来源元数据，无法安全判断归属，已转入失败记录'
+      );
+      return true;
+    }
+
+    return false;
+  }
+
   private setupPreferenceProcessors(): void {
     this.actionQueue.registerProcessor('preference:update', async (action) => {
       const userId = this.authService.currentUserId();
       if (!userId) { this.logger.warn('preference:update 失败：用户未登录'); return false; }
+      if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+        this.logger.warn('preference:update 跳过：本地模式不进入云端队列');
+        return true;
+      }
       
-      const payload = action.payload as { preferences: Partial<UserPreferences> };
+      const payload = action.payload as PreferencePayload;
+      if (this.hasConflictingOwnerHints(action, 'preference:update', payload.sourceUserId, payload.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'preference:update', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
+        return false;
+      }
       try {
-        return await this.syncService.saveUserPreferences(userId, payload.preferences);
+        return await this.syncService.saveUserPreferences(sourceUserId, payload.preferences);
       } catch (error) {
         this.logger.error('preference:update 异常', { error });
         return false;
@@ -160,15 +576,44 @@ export class ActionQueueProcessorsService {
     });
   }
 
+  private quarantineLegacyQueueAction(action: QueuedAction, reason: string): void {
+    this.logger.warn('检测到需人工确认的离线队列项，已转入失败记录', {
+      actionId: action.id,
+      entityType: action.entityType,
+      entityId: action.entityId,
+      reason,
+    });
+    this.actionQueue.moveToDeadLetter(action, reason);
+    if (!this.legacyQueueWarningShown) {
+      this.legacyQueueWarningShown = true;
+      this.toast.warning('检测到待确认的离线变更', '旧版或跨账号的队列项已转入失败记录，请确认后再重试');
+    }
+  }
+
   private setupFocusConsoleProcessors(): void {
     this.actionQueue.registerProcessor('focus-session:create', async action => {
-      const payload = action.payload as { record: FocusSessionRecord };
-      if (!payload.record?.userId) {
-        this.logger.warn('focus-session:create 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('focus-session:create 失败：用户未登录'); return false; }
+
+      const payload = action.payload as FocusSessionPayload;
+      if (!payload.record) { this.logger.warn('focus-session:create 失败：缺少 record'); return false; }
+      if (this.hasConflictingOwnerHints(action, 'focus-session:create', payload.sourceUserId, payload.record.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.record.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'focus-session:create', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.saveFocusSession(payload.record);
+        const record: FocusSessionRecord = payload.record.userId
+          ? payload.record
+          : { ...payload.record, userId: sourceUserId };
+        const result = await this.syncService.saveFocusSession(record);
         return result.ok;
       } catch (error) {
         this.logger.error('focus-session:create 异常', { error });
@@ -177,13 +622,28 @@ export class ActionQueueProcessorsService {
     });
 
     this.actionQueue.registerProcessor('focus-session:update', async action => {
-      const payload = action.payload as { record: FocusSessionRecord };
-      if (!payload.record?.userId) {
-        this.logger.warn('focus-session:update 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('focus-session:update 失败：用户未登录'); return false; }
+
+      const payload = action.payload as FocusSessionPayload;
+      if (!payload.record) { this.logger.warn('focus-session:update 失败：缺少 record'); return false; }
+      if (this.hasConflictingOwnerHints(action, 'focus-session:update', payload.sourceUserId, payload.record.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.record.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'focus-session:update', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.saveFocusSession(payload.record);
+        const record: FocusSessionRecord = payload.record.userId
+          ? payload.record
+          : { ...payload.record, userId: sourceUserId };
+        const result = await this.syncService.saveFocusSession(record);
         return result.ok;
       } catch (error) {
         this.logger.error('focus-session:update 异常', { error });
@@ -192,14 +652,24 @@ export class ActionQueueProcessorsService {
     });
 
     this.actionQueue.registerProcessor('routine-task:create', async action => {
-      const payload = action.payload as { userId?: string; routineTask: RoutineTask };
-      const userId = payload.userId ?? this.authService.currentUserId();
-      if (!userId) {
-        this.logger.warn('routine-task:create 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('routine-task:create 失败：用户未登录'); return false; }
+
+      const payload = action.payload as RoutineTaskPayload;
+      if (this.hasConflictingOwnerHints(action, 'routine-task:create', payload.sourceUserId, payload.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'routine-task:create', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
         return result.ok;
       } catch (error) {
         this.logger.error('routine-task:create 异常', { error });
@@ -208,14 +678,24 @@ export class ActionQueueProcessorsService {
     });
 
     this.actionQueue.registerProcessor('routine-task:update', async action => {
-      const payload = action.payload as { userId?: string; routineTask: RoutineTask };
-      const userId = payload.userId ?? this.authService.currentUserId();
-      if (!userId) {
-        this.logger.warn('routine-task:update 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('routine-task:update 失败：用户未登录'); return false; }
+
+      const payload = action.payload as RoutineTaskPayload;
+      if (this.hasConflictingOwnerHints(action, 'routine-task:update', payload.sourceUserId, payload.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'routine-task:update', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.upsertRoutineTask(userId, payload.routineTask);
+        const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
         return result.ok;
       } catch (error) {
         this.logger.error('routine-task:update 异常', { error });
@@ -224,13 +704,28 @@ export class ActionQueueProcessorsService {
     });
 
     this.actionQueue.registerProcessor('routine-completion:create', async action => {
-      const payload = action.payload as { completion: RoutineCompletionMutation };
-      if (!payload.completion?.userId) {
-        this.logger.warn('routine-completion:create 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('routine-completion:create 失败：用户未登录'); return false; }
+
+      const payload = action.payload as RoutineCompletionPayload;
+      if (!payload.completion) { this.logger.warn('routine-completion:create 失败：缺少 completion'); return false; }
+      if (this.hasConflictingOwnerHints(action, 'routine-completion:create', payload.sourceUserId, payload.completion.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.completion.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'routine-completion:create', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.incrementRoutineCompletion(payload.completion);
+        const completion: RoutineCompletionMutation = payload.completion.userId
+          ? payload.completion
+          : { ...payload.completion, userId: sourceUserId };
+        const result = await this.syncService.incrementRoutineCompletion(completion);
         return result.ok;
       } catch (error) {
         this.logger.error('routine-completion:create 异常', { error });
@@ -239,13 +734,28 @@ export class ActionQueueProcessorsService {
     });
 
     this.actionQueue.registerProcessor('routine-completion:update', async action => {
-      const payload = action.payload as { completion: RoutineCompletionMutation };
-      if (!payload.completion?.userId) {
-        this.logger.warn('routine-completion:update 失败：用户未登录');
+      const userId = this.authService.currentUserId();
+      if (!userId) { this.logger.warn('routine-completion:update 失败：用户未登录'); return false; }
+
+      const payload = action.payload as RoutineCompletionPayload;
+      if (!payload.completion) { this.logger.warn('routine-completion:update 失败：缺少 completion'); return false; }
+      if (this.hasConflictingOwnerHints(action, 'routine-completion:update', payload.sourceUserId, payload.completion.userId)) {
+        return true;
+      }
+
+      const sourceUserId = this.resolveActionSourceUserId(payload.sourceUserId, payload.completion.userId);
+      if (this.shouldStopUserScopedQueueAction(action, userId, 'routine-completion:update', sourceUserId)) {
+        return true;
+      }
+      if (!sourceUserId) {
         return false;
       }
+
       try {
-        const result = await this.syncService.incrementRoutineCompletion(payload.completion);
+        const completion: RoutineCompletionMutation = payload.completion.userId
+          ? payload.completion
+          : { ...payload.completion, userId: sourceUserId };
+        const result = await this.syncService.incrementRoutineCompletion(completion);
         return result.ok;
       } catch (error) {
         this.logger.error('routine-completion:update 异常', { error });

@@ -257,25 +257,6 @@ export const isGateActive = computed(() =>
 );
 
 // ============================================
-// 聚光灯状态
-// ============================================
-
-/**
- * 当前聚光灯任务
- */
-export const spotlightTask = signal<Task | null>(null);
-
-/**
- * 是否处于聚光灯模式
- */
-export const spotlightMode = signal<boolean>(false);
-
-/**
- * 聚光灯任务队列（预加载下几个任务）
- */
-export const spotlightQueue = signal<Task[]>([]);
-
-// ============================================
 // 地质层状态
 // ============================================
 
@@ -435,9 +416,6 @@ export function resetFocusState(): void {
   blackBoxEntriesMap.set(new Map());
   blackBoxEntriesByDate.set(new Map());
   resetGateState();
-  spotlightTask.set(null);
-  spotlightMode.set(false);
-  spotlightQueue.set([]);
   strataLayers.set([]);
   focusPreferences.set(DEFAULT_FOCUS_PREFERENCES);
   isRecording.set(false);

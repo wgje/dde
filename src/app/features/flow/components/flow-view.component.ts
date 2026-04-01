@@ -267,6 +267,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       this.selectedTaskId.set(null);
       this.drawerManualOverride.set(false);
       this.drawerHeight.set(8);
+
+      // 视图切换后延迟触发布局刷新，确保容器尺寸已稳定
+      this.scheduleTimer(() => {
+        if (!this.isDestroyed) {
+          this.bumpDetailLayoutTick();
+          this.diagram.diagramInstance?.requestUpdate();
+        }
+      }, 150);
     }, { injector: this.injector }));
   }
   
@@ -683,7 +691,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.taskOps.createUnassignedTask('新任务');
   }
   
-  addSiblingTask(task: Task): void {
+  addSiblingTask(_eventTask: Task): void {
+    // 使用当前 selectedTask 信号值，避免模板变量在快速切换时可能的过期引用
+    const task = this.selectedTask() ?? _eventTask;
     const newTaskId = this.taskOps.addSiblingTask(task);
     if (newTaskId) {
       // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）
@@ -692,7 +702,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     }
   }
   
-  addChildTask(task: Task): void {
+  addChildTask(_eventTask: Task): void {
+    // 使用当前 selectedTask 信号值，避免模板变量在快速切换时可能的过期引用
+    const task = this.selectedTask() ?? _eventTask;
     const newTaskId = this.taskOps.addChildTask(task);
     if (newTaskId) {
       // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）

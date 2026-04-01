@@ -17,7 +17,10 @@
 import { Injectable, inject, DestroyRef, signal } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
+import { AuthService } from '../../../../services/auth.service';
+import { ProjectStateService } from '../../../../services/project-state.service';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config';
+import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
@@ -50,6 +53,15 @@ export interface RetryQueueItem {
   retryCount: number;
   /** 创建时间戳 */
   createdAt: number;
+  /** 来源用户，用于跨账号 replay 隔离 */
+  sourceUserId?: string;
+}
+
+interface LegacyRetryReviewItem {
+  item: RetryQueueItem;
+  reason: string;
+  quarantinedAt: string;
+  ownerUserId: string;
 }
 
 /**
@@ -59,7 +71,7 @@ export interface RetryQueueItem {
 export interface RetryOperationHandler {
   pushTask(task: Task, projectId: string): Promise<boolean>;
   deleteTask(taskId: string, projectId: string): Promise<boolean>;
-  pushProject(project: Project): Promise<boolean>;
+  pushProject(project: Project, sourceUserId?: string): Promise<boolean>;
   pushConnection(connection: Connection, projectId: string): Promise<boolean>;
   /** 推送黑匣子条目到服务器（专注模式数据同步） */
   pushBlackBoxEntry?(entry: BlackBoxEntry): Promise<boolean>;
@@ -80,6 +92,8 @@ export interface RetryQueueSliceResult {
   completed: boolean;
 }
 
+const LEGACY_UNKNOWN_OWNER_USER_ID = '__legacy_unknown__';
+
 /**
  * 重试队列服务
  * 
@@ -93,10 +107,14 @@ export class RetryQueueService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RetryQueue');
   private readonly toast = inject(ToastService);
+  private readonly authService = inject(AuthService);
+  private readonly projectState = inject(ProjectStateService);
   private readonly destroyRef = inject(DestroyRef);
   
   /** 重试队列 */
   private queue: RetryQueueItem[] = [];
+  /** 当前 owner 不可见但仍需保留的其它账号条目 */
+  private hiddenQueueItems: RetryQueueItem[] = [];
   
   /** IndexedDB 数据库实例 */
   private db: IDBDatabase | null = null;
@@ -147,6 +165,10 @@ export class RetryQueueService {
   private operationHandler: RetryOperationHandler | null = null;
   /** 队列处理锁 */
   private isProcessingQueue = false;
+  /** 当前可见队列视图代次；切账号清空时递增以作废旧处理锁 */
+  private queueViewGeneration = 0;
+  /** 队列内存态代次；本地新增/删除/切账号后用于作废晚到的存储加载结果 */
+  private queueStateGeneration = 0;
   private lastProcessTime = 0;
   /** 队列处理超时保护（120s）—— 副作用是释放 isProcessingQueue 死锁 */
   private readonly PROCESS_TIMEOUT = 120_000;
@@ -166,10 +188,112 @@ export class RetryQueueService {
   
   /** 版本号 */
   private readonly VERSION = 1;
+  private readonly LEGACY_REVIEW_STORAGE_KEY_PREFIX = 'nanoflow.retry-queue.legacy-review.';
   /** 队列压力状态 */
   readonly queuePressure = signal(false);
   readonly queuePressureReason = signal<string | null>(null);
+  readonly legacyReviewCount = signal(0);
   private pressureEventCount = 0;
+  private legacyReviewWarningShown = false;
+
+  private getCurrentOwnerUserId(): string {
+    return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private resolveItemOwnerUserId(item: RetryQueueItem): string {
+    return item.sourceUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private partitionItemsForCurrentOwner(items: RetryQueueItem[]): {
+    visible: RetryQueueItem[];
+    hidden: RetryQueueItem[];
+  } {
+    const currentOwnerUserId = this.getCurrentOwnerUserId();
+    const visible: RetryQueueItem[] = [];
+    const hidden: RetryQueueItem[] = [];
+
+    for (const item of items) {
+      if (this.resolveItemOwnerUserId(item) === currentOwnerUserId) {
+        visible.push(item);
+        continue;
+      }
+
+      hidden.push(item);
+    }
+
+    return { visible, hidden };
+  }
+
+  private applyLoadedItems(items: RetryQueueItem[]): void {
+    const { visible, hidden } = this.partitionItemsForCurrentOwner(items);
+    this.queue = visible;
+    this.hiddenQueueItems = hidden;
+    this.touchQueueState();
+  }
+
+  private touchQueueState(): void {
+    this.queueStateGeneration += 1;
+  }
+
+  private captureStorageLoadToken(): { ownerUserId: string; queueStateGeneration: number } {
+    return {
+      ownerUserId: this.getCurrentOwnerUserId(),
+      queueStateGeneration: this.queueStateGeneration,
+    };
+  }
+
+  private isStorageLoadTokenCurrent(token: { ownerUserId: string; queueStateGeneration: number }): boolean {
+    return token.ownerUserId === this.getCurrentOwnerUserId()
+      && token.queueStateGeneration === this.queueStateGeneration;
+  }
+
+  private logStaleStorageLoad(token: { ownerUserId: string; queueStateGeneration: number }, stage: string): void {
+    this.logger.debug('忽略过期的重试队列加载结果', {
+      stage,
+      expectedOwnerUserId: token.ownerUserId,
+      currentOwnerUserId: this.getCurrentOwnerUserId(),
+      expectedQueueStateGeneration: token.queueStateGeneration,
+      currentQueueStateGeneration: this.queueStateGeneration,
+    });
+  }
+
+  private sanitizeLoadedItems(items: RetryQueueItem[]): {
+    safeItems: RetryQueueItem[];
+    quarantinedCount: number;
+  } {
+    const safeItems: RetryQueueItem[] = [];
+    let quarantinedCount = 0;
+
+    for (const item of items) {
+      if (!item.sourceUserId) {
+        this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，加载时已隔离');
+        quarantinedCount++;
+        continue;
+      }
+
+      safeItems.push(item);
+    }
+
+    return { safeItems, quarantinedCount };
+  }
+
+  private getPersistedItems(): RetryQueueItem[] {
+    const merged = new Map<string, RetryQueueItem>();
+    for (const item of [...this.hiddenQueueItems, ...this.queue]) {
+      merged.set(item.id, item);
+    }
+    return Array.from(merged.values());
+  }
+
+  private removeItemsFromAllViews(itemIds: Set<string>): void {
+    if (itemIds.size === 0) {
+      return;
+    }
+
+    this.queue = this.queue.filter(item => !itemIds.has(item.id));
+    this.hiddenQueueItems = this.hiddenQueueItems.filter(item => !itemIds.has(item.id));
+    this.touchQueueState();
+  }
   
   constructor() {
     // 初始化时加载队列
@@ -179,6 +303,7 @@ export class RetryQueueService {
     
     // 【P2-19 修复】恢复熔断器状态
     this.loadCircuitState();
+    this.refreshLegacyReviewCount();
     
     this.destroyRef.onDestroy(() => {
       this.stopLoop();
@@ -187,8 +312,34 @@ export class RetryQueueService {
         clearTimeout(this.saveDebounceTimer);
         this.saveDebounceTimer = null;
       }
-      this.saveToStorageImmediate();
+      void this.saveToStorageImmediate().finally(() => {
+        void this.closeStorageConnections();
+      });
     });
+  }
+  
+  async closeStorageConnections(): Promise<void> {
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
+
+    const pendingDbInit = this.dbInitPromise;
+    this.dbInitPromise = null;
+
+    if (pendingDbInit) {
+      try {
+        const pendingDb = await pendingDbInit;
+        pendingDb?.close();
+      } catch {
+        // 忽略打开失败：此时不存在可关闭连接
+      }
+    }
+
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
   }
   
   // ==================== 公共 API ====================
@@ -231,6 +382,7 @@ export class RetryQueueService {
     if (index === -1) return false;
 
     this.queue.splice(index, 1);
+    this.touchQueueState();
     this.saveToStorage();
     this.logger.debug('跨队列去重：移除 RetryQueue 中的旧条目', { type, entityId });
     return true;
@@ -241,9 +393,39 @@ export class RetryQueueService {
    */
   clear(): void {
     this.queue = [];
+    this.hiddenQueueItems = [];
+    this.touchQueueState();
     this.clearPressureMode();
     this.saveToStorage();
     this.logger.info('重试队列已清空');
+  }
+
+  /**
+   * 仅清空当前 owner 的内存视图，不覆盖持久化中的其它账号条目。
+   * 用于切账号时立即断开旧账号的可见重试项，再按新 owner 重新加载。
+   */
+  clearCurrentView(): void {
+    this.hiddenQueueItems = this.getPersistedItems();
+    this.queue = [];
+    this.touchQueueState();
+    this.queueViewGeneration += 1;
+    this.isProcessingQueue = false;
+    this.lastProcessTime = 0;
+    this.refreshLegacyReviewCount();
+    this.clearPressureMode();
+    if (this.operationHandler) {
+      try {
+        this.operationHandler.onProcessingStateChange(false, 0);
+      } catch (error) {
+        this.logger.warn('clearCurrentView: 同步处理状态失败', error);
+      }
+    }
+  }
+
+  reloadFromStorageForCurrentOwner(): void {
+    this.clearCurrentView();
+    this.refreshLegacyReviewCount();
+    void this.loadFromStorage();
   }
   
   /**
@@ -257,7 +439,8 @@ export class RetryQueueService {
     type: RetryableEntityType,
     operation: RetryableOperation,
     data: Task | Project | Connection | BlackBoxEntry | { id: string },
-    projectId?: string
+    projectId?: string,
+    sourceUserId?: string,
   ): boolean {
     // 入队前校验实体 ID 格式，拦截脏数据
     if (data?.id && !isValidUUID(data.id)) {
@@ -279,8 +462,10 @@ export class RetryQueueService {
         operation,
         data,
         projectId: projectId ?? existing.projectId,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        sourceUserId: existing.sourceUserId ?? sourceUserId ?? this.authService.currentUserId() ?? undefined,
       };
+      this.touchQueueState();
       this.logger.debug('更新队列中的现有项', { 
         type, 
         operation, 
@@ -330,10 +515,12 @@ export class RetryQueueService {
       data,
       projectId,
       retryCount: 0,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      sourceUserId: sourceUserId ?? this.authService.currentUserId() ?? undefined,
     };
     
     this.queue.push(item);
+    this.touchQueueState();
     this.saveToStorage();
 
     this.logger.debug('添加到重试队列', { type, operation, dataId: data.id });
@@ -351,8 +538,32 @@ export class RetryQueueService {
     const originalLength = this.queue.length;
     this.queue = this.queue.filter(item => item.data.id !== entityId);
     if (this.queue.length < originalLength) {
+      this.touchQueueState();
       this.saveToStorage();
     }
+  }
+
+  /** 移除指定项目相关的所有待重试项，用于冲突解决后的旧 mutation 收口 */
+  removeByProjectId(projectId: string): number {
+    const originalLength = this.queue.length;
+    this.queue = this.queue.filter(item => {
+      if (item.projectId === projectId) {
+        return false;
+      }
+
+      if (item.type === 'project' && item.data.id === projectId) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const removedCount = originalLength - this.queue.length;
+    if (removedCount > 0) {
+      this.touchQueueState();
+      this.saveToStorage();
+    }
+    return removedCount;
   }
   
   /**
@@ -389,6 +600,7 @@ export class RetryQueueService {
     
     const cleaned = originalLength - this.queue.length;
     if (cleaned > 0) {
+      this.touchQueueState();
       this.saveToStorage();
       this.logger.info('清理队列', { cleaned, remaining: this.queue.length });
     }
@@ -669,6 +881,94 @@ export class RetryQueueService {
       }
     }
   }
+
+  private getLegacyReviewStorageKey(ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
+    return `${this.LEGACY_REVIEW_STORAGE_KEY_PREFIX}${ownerUserId}`;
+  }
+
+  private resolveLegacyReviewOwnerUserId(item: RetryQueueItem): string {
+    if (item.sourceUserId && item.sourceUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return item.sourceUserId;
+    }
+
+    return LEGACY_UNKNOWN_OWNER_USER_ID;
+  }
+
+  refreshLegacyReviewCount(): void {
+    const ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (typeof localStorage === 'undefined') {
+      this.legacyReviewCount.set(0);
+      return;
+    }
+
+    try {
+      const raw = localStorage.getItem(this.getLegacyReviewStorageKey(ownerUserId));
+      if (!raw) {
+        this.legacyReviewCount.set(0);
+        return;
+      }
+
+      const items = JSON.parse(raw) as LegacyRetryReviewItem[];
+      this.legacyReviewCount.set(Array.isArray(items) ? items.length : 0);
+    } catch {
+      this.legacyReviewCount.set(0);
+    }
+  }
+
+  getLegacyReviewItems(): LegacyRetryReviewItem[] {
+    if (typeof localStorage === 'undefined') {
+      return [];
+    }
+
+    try {
+      const raw = localStorage.getItem(this.getLegacyReviewStorageKey());
+      if (!raw) {
+        return [];
+      }
+
+      const items = JSON.parse(raw) as LegacyRetryReviewItem[];
+      return Array.isArray(items) ? items : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private quarantineLegacyRetryItem(item: RetryQueueItem, reason: string): void {
+    const ownerUserId = this.resolveLegacyReviewOwnerUserId(item);
+    const record: LegacyRetryReviewItem = {
+      item: { ...item },
+      reason,
+      quarantinedAt: new Date().toISOString(),
+      ownerUserId,
+    };
+
+    if (typeof localStorage !== 'undefined') {
+      const key = this.getLegacyReviewStorageKey(ownerUserId);
+      try {
+        const existing = localStorage.getItem(key);
+        const records = existing ? JSON.parse(existing) as LegacyRetryReviewItem[] : [];
+        const deduped = records.filter(entry => entry.item.id !== item.id);
+        deduped.push(record);
+        localStorage.setItem(key, JSON.stringify(deduped));
+        this.refreshLegacyReviewCount();
+      } catch (error) {
+        this.logger.warn('保存 legacy retry 隔离记录失败', { error, itemId: item.id, reason });
+      }
+    }
+
+    this.logger.warn('检测到需人工确认的 legacy retry 项，已隔离保留', {
+      itemId: item.id,
+      type: item.type,
+      operation: item.operation,
+      ownerUserId,
+      reason,
+    });
+
+    if (!this.legacyReviewWarningShown) {
+      this.legacyReviewWarningShown = true;
+      this.toast.warning('检测到待确认的离线同步数据', '旧版或跨账号的重试项已隔离保留，不会被静默丢弃');
+    }
+  }
   
   // ==================== 熔断器 ====================
   
@@ -792,6 +1092,7 @@ export class RetryQueueService {
    */
   async processQueueSlice(options: RetryQueueSliceOptions = {}): Promise<RetryQueueSliceResult> {
     const sliceStartedAt = Date.now();
+    const processGeneration = this.queueViewGeneration;
     const maxItems = typeof options.maxItems === 'number' && options.maxItems > 0
       ? options.maxItems
       : Number.POSITIVE_INFINITY;
@@ -873,6 +1174,7 @@ export class RetryQueueService {
       }
       if (expiredIds.size > 0) {
         this.queue = this.queue.filter(item => !expiredIds.has(item.id));
+        this.touchQueueState();
         this.saveToStorage();
         this.logger.info('清理过期队列项', { expiredCount: expiredIds.size });
       }
@@ -891,6 +1193,10 @@ export class RetryQueueService {
 
         processedCount++;
 
+        if (!this.queue.some(queueItem => queueItem.id === item.id)) {
+          continue;
+        }
+
         if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
           processedIds.add(item.id);
           continue;
@@ -898,6 +1204,26 @@ export class RetryQueueService {
 
         if (item.data?.id && !isValidUUID(item.data.id)) {
           this.logger.warn('队列中发现非法 ID，自动移除', { type: item.type, id: item.data.id });
+          processedIds.add(item.id);
+          continue;
+        }
+
+        const currentUserId = this.authService.currentUserId();
+        if (item.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          this.quarantineLegacyRetryItem(item, 'legacy local-user 重试项禁止自动上云');
+          processedIds.add(item.id);
+          continue;
+        }
+        if (item.sourceUserId && currentUserId && item.sourceUserId !== currentUserId) {
+          this.quarantineLegacyRetryItem(
+            item,
+            `跨账号重试项来源 ${item.sourceUserId} 与当前账号 ${currentUserId} 不匹配`
+          );
+          processedIds.add(item.id);
+          continue;
+        }
+        if (!item.sourceUserId) {
+          this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
           processedIds.add(item.id);
           continue;
         }
@@ -912,7 +1238,7 @@ export class RetryQueueService {
               ? await this.operationHandler.pushTask(item.data as Task, item.projectId!)
               : await this.operationHandler.deleteTask(item.data.id, item.projectId!);
           } else if (item.type === 'project') {
-            success = await this.operationHandler.pushProject(item.data as Project);
+            success = await this.operationHandler.pushProject(item.data as Project, item.sourceUserId);
           } else if (item.type === 'connection') {
             success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!);
           } else if (item.type === 'blackbox') {
@@ -946,6 +1272,7 @@ export class RetryQueueService {
         }
 
         item.retryCount++;
+        this.touchQueueState();
         if (item.retryCount >= this.MAX_RETRIES) {
           processedIds.add(item.id);
           exceededCount++;
@@ -958,7 +1285,8 @@ export class RetryQueueService {
       }
 
       if (processedIds.size > 0) {
-        this.queue = this.queue.filter(item => !processedIds.has(item.id));
+        // 中文注释：切账号期间转入 hidden 的 in-flight 条目也必须同步收口，避免旧 owner 再次 replay。
+        this.removeItemsFromAllViews(processedIds);
       }
 
       const durationMs = Date.now() - sliceStartedAt;
@@ -1001,10 +1329,12 @@ export class RetryQueueService {
         completed: false
       };
     } finally {
-      this.isProcessingQueue = false;
+      if (processGeneration === this.queueViewGeneration) {
+        this.isProcessingQueue = false;
+      }
       // 【2026-03-20 优化】只有在实际通知了同步开始时才通知同步结束
       // 避免未发起任何网络请求的空转也触发状态切换
-      if (hasNotifiedSyncStart) {
+      if (hasNotifiedSyncStart && processGeneration === this.queueViewGeneration) {
         try {
           this.operationHandler.onProcessingStateChange(false, this.queue.length);
         } catch (error) {
@@ -1087,13 +1417,41 @@ export class RetryQueueService {
    * 从存储加载队列（优先 IndexedDB，降级 localStorage）
    */
   private async loadFromStorage(): Promise<void> {
+    const loadToken = this.captureStorageLoadToken();
     const db = await this.initDb();
+
+    if (!this.isStorageLoadTokenCurrent(loadToken)) {
+      this.logStaleStorageLoad(loadToken, 'loadFromStorage:init-db');
+      return;
+    }
     
     if (db) {
       const items = await this.loadFromIdb(db);
+
+      if (!this.isStorageLoadTokenCurrent(loadToken)) {
+        this.logStaleStorageLoad(loadToken, 'loadFromStorage:idb');
+        return;
+      }
+
       if (items.length > 0) {
-        this.queue = items;
-        this.logger.info('从 IndexedDB 加载队列', { count: items.length });
+        const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(items);
+
+        if (!this.isStorageLoadTokenCurrent(loadToken)) {
+          this.logStaleStorageLoad(loadToken, 'loadFromStorage:idb-sanitized');
+          return;
+        }
+
+        this.applyLoadedItems(safeItems);
+        this.logger.info('从 IndexedDB 加载队列', {
+          count: items.length,
+          visibleCount: this.queue.length,
+          hiddenCount: this.hiddenQueueItems.length,
+          quarantinedCount,
+          ownerUserId: this.getCurrentOwnerUserId(),
+        });
+        if (quarantinedCount > 0) {
+          this.saveToStorage();
+        }
         this.checkCapacityWarning();
         this.syncPendingCountToState();
         return;
@@ -1101,7 +1459,24 @@ export class RetryQueueService {
     }
     
     // 降级到 localStorage
-    this.loadFromLocalStorage();
+    const localStorageItems = this.loadFromLocalStorage();
+
+    if (!this.isStorageLoadTokenCurrent(loadToken)) {
+      this.logStaleStorageLoad(loadToken, 'loadFromStorage:localStorage');
+      return;
+    }
+
+    const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(localStorageItems);
+
+    if (!this.isStorageLoadTokenCurrent(loadToken)) {
+      this.logStaleStorageLoad(loadToken, 'loadFromStorage:localStorage-sanitized');
+      return;
+    }
+
+    this.applyLoadedItems(safeItems);
+    if (quarantinedCount > 0) {
+      this.saveToStorage();
+    }
     this.checkCapacityWarning();
     this.syncPendingCountToState();
   }
@@ -1178,18 +1553,18 @@ export class RetryQueueService {
   /**
    * 从 localStorage 加载
    */
-  private loadFromLocalStorage(): void {
-    if (typeof localStorage === 'undefined') return;
+  private loadFromLocalStorage(): RetryQueueItem[] {
+    if (typeof localStorage === 'undefined') return [];
     
     try {
       const data = localStorage.getItem(this.STORAGE_KEY);
-      if (!data) return;
+      if (!data) return [];
       
       const parsed = JSON.parse(data);
       if (parsed.version === this.VERSION && Array.isArray(parsed.items)) {
         // 过滤过期项 + 非法 ID 脏数据
         const now = Date.now();
-        this.queue = parsed.items.filter((item: RetryQueueItem) => {
+        const items = parsed.items.filter((item: RetryQueueItem) => {
           if (now - item.createdAt >= this.MAX_ITEM_AGE) return false;
           if (item.retryCount >= this.MAX_RETRIES) return false;
           // 过滤非法 ID 的脏数据
@@ -1199,11 +1574,14 @@ export class RetryQueueService {
           }
           return true;
         });
-        this.logger.info('从 localStorage 加载队列', { count: this.queue.length });
+        this.logger.info('从 localStorage 加载队列', { count: items.length });
+        return items;
       }
     } catch (e) {
       this.logger.error('localStorage 加载失败', e);
     }
+
+    return [];
   }
   
   /**
@@ -1269,15 +1647,20 @@ export class RetryQueueService {
       try {
         const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
         const store = transaction.objectStore(this.DB_CONFIG.storeName);
+        const items = this.getPersistedItems();
         
         store.clear();
         
-        for (const item of this.queue) {
+        for (const item of items) {
           store.put(this.minifyItem(item));
         }
         
         transaction.oncomplete = () => {
-          this.logger.debug('保存到 IndexedDB 成功', { count: this.queue.length });
+          this.logger.debug('保存到 IndexedDB 成功', {
+            count: items.length,
+            visibleCount: this.queue.length,
+            hiddenCount: this.hiddenQueueItems.length,
+          });
           resolve(true);
         };
         
@@ -1299,9 +1682,10 @@ export class RetryQueueService {
     if (typeof localStorage === 'undefined') return;
     
     try {
+      const items = this.getPersistedItems();
       const data = {
         version: this.VERSION,
-        items: this.queue.map(item => this.minifyItem(item)),
+        items: items.map(item => this.minifyItem(item)),
         savedAt: Date.now()
       };
       

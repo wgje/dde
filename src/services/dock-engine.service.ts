@@ -424,7 +424,6 @@ export class DockEngineService {
     this.lifecycle.restoreInitialSnapshot();
     this.lifecycle.registerEffects();
     this.lifecycle.registerVisibilityListener();
-    this.lifecycle.triggerInitialCloudPull();
     this.lifecycle.registerDestroyCleanup(() => {
       // engine 侧额外清理
       this.taskFlow.destroy();
@@ -815,9 +814,9 @@ export class DockEngineService {
     this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
   }
 
-  private scheduleLocalPersist(_snapshot: DockSnapshot | null, userId: string | null): void {
+  private scheduleLocalPersist(snapshot: DockSnapshot | null, userId: string | null): void {
     this.snapshotPersistence.scheduleLocalPersist(
-      () => this.exportSnapshot(),
+      () => snapshot ?? this.exportSnapshot(),
       userId,
       () => this.lifecycle.getNonCriticalHoldDelay(),
     );

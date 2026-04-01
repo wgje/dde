@@ -4,6 +4,7 @@ import { environment } from '../environments/environment';
 
 type MutableService = SentryLazyLoaderService & {
   pendingEvents: Array<Record<string, unknown>>;
+  pendingUser: { id: string; email?: string } | null;
   sentryModule: { set: (value: unknown) => void };
   flushPendingEvents: () => void;
 };
@@ -137,5 +138,60 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
     service.triggerLazyInit();
 
     expect(infoSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SentryLazyLoaderService setUser', () => {
+  let service: SentryLazyLoaderService;
+  const originalDsn = environment.SENTRY_DSN;
+
+  beforeEach(() => {
+    localStorage.clear();
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = 'https://dsn.example.invalid/1';
+    service = new SentryLazyLoaderService();
+    vi.spyOn(service, 'triggerLazyInit').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+    (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
+  });
+
+  it('Sentry 已初始化时直接调用 setUser', () => {
+    const scope = createScopeMock();
+    const sentryMock = createSentryMock(scope);
+    (service as MutableService).sentryModule.set(sentryMock);
+
+    service.setUser({ id: 'user-123', email: 'test@example.com' });
+
+    expect(sentryMock.setUser).toHaveBeenCalledWith({ id: 'user-123', email: 'test@example.com' });
+  });
+
+  it('Sentry 未初始化时缓存用户信息', () => {
+    service.setUser({ id: 'user-456', email: 'cached@example.com' });
+
+    expect((service as MutableService).pendingUser).toEqual({
+      id: 'user-456',
+      email: 'cached@example.com',
+    });
+  });
+
+  it('setUser(null) 清除缓存的用户信息', () => {
+    service.setUser({ id: 'user-789' });
+    expect((service as MutableService).pendingUser).not.toBeNull();
+
+    service.setUser(null);
+    expect((service as MutableService).pendingUser).toBeNull();
+  });
+
+  it('Sentry 已初始化时 setUser(null) 直接清除', () => {
+    const scope = createScopeMock();
+    const sentryMock = createSentryMock(scope);
+    (service as MutableService).sentryModule.set(sentryMock);
+
+    service.setUser(null);
+
+    expect(sentryMock.setUser).toHaveBeenCalledWith(null);
   });
 });

@@ -7,11 +7,17 @@ import { ToastService } from './toast.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LayoutService } from './layout.service';
 import { AttachmentService } from './attachment.service';
+import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
+import { ActionQueueService } from './action-queue.service';
+import { ConflictStorageService } from './conflict-storage.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { Project, Task } from '../models';
+import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 
 function createStorageMock(): Storage {
   const store: Record<string, string> = {};
@@ -71,6 +77,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
     connections: overrides.connections ?? [],
     updatedAt: overrides.updatedAt ?? now,
     version: overrides.version ?? 1,
+    ...overrides,
   };
 }
 
@@ -94,13 +101,25 @@ describe('UserSessionService', () => {
   let mockSyncCoordinator: Record<string, unknown>;
   let mockUndoService: Record<string, unknown>;
   let mockUiState: Record<string, unknown>;
+  let mockActionQueue: Record<string, unknown>;
+  let mockRetryQueue: Record<string, unknown>;
+  let mockConflictStorage: Record<string, unknown>;
+  let mockDockSnapshotPersistence: Record<string, unknown>;
+  let mockStartupPlaceholderState: {
+    isHintOnlyActive: ReturnType<typeof vi.fn>;
+    activate: ReturnType<typeof vi.fn>;
+    clear: ReturnType<typeof vi.fn>;
+  };
   let mockAttachmentService: Record<string, unknown>;
   let mockLayoutService: Record<string, unknown>;
   let mockToastService: Record<string, unknown>;
   let mockSupabaseClientService: {
+    isConfigured: boolean;
     client: ReturnType<typeof vi.fn>;
     clientAsync: ReturnType<typeof vi.fn>;
     getClient: ReturnType<typeof vi.fn>;
+    getStorageKey: ReturnType<typeof vi.fn>;
+    signOut: ReturnType<typeof vi.fn>;
   };
   let userIdSignal: WritableSignal<string | null>;
   let originalLocalStorage: Storage;
@@ -130,6 +149,8 @@ describe('UserSessionService', () => {
       currentUserId: userIdSignal,
       isConfigured: true,
       peekPersistedSessionIdentity: vi.fn().mockReturnValue(null),
+      peekPersistedOwnerHint: vi.fn().mockReturnValue(null),
+      setProvisionalCurrentUserId: vi.fn(),
     };
 
     const projectsMock = vi.fn(() => projectsState);
@@ -152,9 +173,12 @@ describe('UserSessionService', () => {
     };
 
     mockSyncCoordinator = {
+      flushPendingPersist: vi.fn(),
+      preparePendingPersistForOwnerChange: vi.fn().mockResolvedValue(true),
       core: {
         teardownRealtimeSubscription: vi.fn(),
         clearOfflineCache: vi.fn(),
+        clearOfflineSnapshot: vi.fn(),
         loadOfflineSnapshot: vi.fn(() => null),
         loadStartupOfflineSnapshot: vi.fn().mockResolvedValue({
           source: 'none',
@@ -178,12 +202,45 @@ describe('UserSessionService', () => {
       tryReloadConflictData: vi.fn(),
       refreshProjectManifestIfNeeded: vi.fn().mockResolvedValue({ skipped: false }),
       refreshBlackBoxWatermarkIfNeeded: vi.fn().mockResolvedValue({ skipped: false }),
+      clearActiveConflict: vi.fn(),
+      clearOfflineSnapshot: vi.fn(),
     };
 
     mockUndoService = {
       clearHistory: vi.fn(),
       flushPendingAction: vi.fn(),
       onProjectSwitch: vi.fn(),
+    };
+
+    mockActionQueue = {
+      clearQueue: vi.fn(),
+      clearDeadLetterQueue: vi.fn(),
+      clearCurrentView: vi.fn(),
+      reloadFromStorageForCurrentOwner: vi.fn(),
+    };
+
+    mockRetryQueue = {
+      clear: vi.fn(),
+      clearCurrentView: vi.fn(),
+      reloadFromStorageForCurrentOwner: vi.fn(),
+      closeStorageConnections: vi.fn(),
+    };
+
+    mockConflictStorage = {
+      clearFallbackStorageForOwner: vi.fn(),
+      clearAllFallbackStorage: vi.fn(),
+      closeStorageConnections: vi.fn(),
+      refreshConflictCount: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mockDockSnapshotPersistence = {
+      discardPendingPersist: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mockStartupPlaceholderState = {
+      isHintOnlyActive: vi.fn(() => false),
+      activate: vi.fn(),
+      clear: vi.fn(),
     };
 
     mockUiState = {
@@ -212,9 +269,12 @@ describe('UserSessionService', () => {
     };
 
     mockSupabaseClientService = {
+      isConfigured: true,
       client: vi.fn(() => null),
       clientAsync: vi.fn(() => Promise.resolve(null)),
       getClient: vi.fn(() => null),
+      getStorageKey: vi.fn(() => 'sb-test-auth-token'),
+      signOut: vi.fn().mockResolvedValue(undefined),
     };
 
     const injector = Injector.create({
@@ -223,6 +283,11 @@ describe('UserSessionService', () => {
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
         { provide: AuthService, useValue: mockAuthService },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: RetryQueueService, useValue: mockRetryQueue },
+        { provide: ConflictStorageService, useValue: mockConflictStorage },
+        { provide: DockSnapshotPersistenceService, useValue: mockDockSnapshotPersistence },
+        { provide: StartupPlaceholderStateService, useValue: mockStartupPlaceholderState },
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
@@ -238,6 +303,8 @@ describe('UserSessionService', () => {
   });
 
   afterEach(() => {
+    delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
+    delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
     Object.defineProperty(globalThis, 'localStorage', {
       value: originalLocalStorage,
       configurable: true,
@@ -296,13 +363,14 @@ describe('UserSessionService', () => {
 
       expect(mockProjectState['clearData']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
+      expect(mockSyncCoordinator['clearActiveConflict']).toHaveBeenCalled();
     });
   });
 
   describe('clearAllLocalData', () => {
     beforeEach(() => {
-      vi.spyOn(service as unknown as { clearIndexedDB: (dbName: string) => Promise<void> }, 'clearIndexedDB')
-        .mockResolvedValue(undefined);
+      vi.spyOn(service as unknown as { clearIndexedDB: (dbName: string) => Promise<boolean> }, 'clearIndexedDB')
+        .mockResolvedValue(true);
     });
 
     it('清除内存和持久化数据', async () => {
@@ -310,6 +378,7 @@ describe('UserSessionService', () => {
 
       expect(mockProjectState['clearData']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
+      expect(mockDockSnapshotPersistence['discardPendingPersist']).toHaveBeenCalled();
     });
 
     it('应清理 sessionStorage 遗留数据', async () => {
@@ -320,6 +389,20 @@ describe('UserSessionService', () => {
 
       expect(sessionStorage.getItem('nanoflow.undo-history')).toBeNull();
       expect(sessionStorage.getItem('nanoflow.optimistic-snapshot')).toBeNull();
+    });
+
+    it('应清理 action queue 持久化键', async () => {
+      localStorage.setItem('nanoflow.action-queue', JSON.stringify([{ id: 'q-1' }]));
+      localStorage.setItem('nanoflow.dead-letter-queue', JSON.stringify([{ id: 'd-1' }]));
+
+      await service.clearAllLocalData();
+
+      expect(localStorage.getItem('nanoflow.action-queue')).toBeNull();
+      expect(localStorage.getItem('nanoflow.dead-letter-queue')).toBeNull();
+      expect(mockActionQueue['clearQueue']).toHaveBeenCalled();
+      expect(mockActionQueue['clearDeadLetterQueue']).toHaveBeenCalled();
+      expect(mockRetryQueue['clear']).toHaveBeenCalled();
+      expect(mockRetryQueue['closeStorageConnections']).toHaveBeenCalled();
     });
 
     it('应清理用户偏好前缀键', async () => {
@@ -336,13 +419,73 @@ describe('UserSessionService', () => {
 
     it('应清理 focus_mode IndexedDB 缓存', async () => {
       const clearIndexedDBSpy = vi.spyOn(
-        service as unknown as { clearIndexedDB: (dbName: string) => Promise<void> },
+        service as unknown as { clearIndexedDB: (dbName: string) => Promise<boolean> },
         'clearIndexedDB'
       );
 
       await service.clearAllLocalData();
 
+      expect(clearIndexedDBSpy).toHaveBeenCalledWith('nanoflow-retry-queue');
+      expect(clearIndexedDBSpy).toHaveBeenCalledWith('nanoflow-conflicts');
+      expect(clearIndexedDBSpy).toHaveBeenCalledWith('nanoflow-offline-snapshots');
       expect(clearIndexedDBSpy).toHaveBeenCalledWith('focus_mode');
+      expect(clearIndexedDBSpy).toHaveBeenCalledWith('keyval-store');
+    });
+
+    it('应清理 Dock 快照影子键', async () => {
+      localStorage.setItem('nanoflow.dock-snapshot.v3.user-123', JSON.stringify({ savedAt: '2026-03-31T00:00:00.000Z' }));
+      localStorage.setItem('nanoflow.dock-snapshot.v3.anonymous', JSON.stringify({ savedAt: '2026-03-31T00:00:00.000Z' }));
+
+      await service.clearAllLocalData();
+
+      expect(localStorage.getItem('nanoflow.dock-snapshot.v3.user-123')).toBeNull();
+      expect(localStorage.getItem('nanoflow.dock-snapshot.v3.anonymous')).toBeNull();
+    });
+
+    it('应清理 owner-scoped 离线快照影子键', async () => {
+      localStorage.setItem('nanoflow.offline-cache-v2.user-123', JSON.stringify({ projects: [{ id: 'p-1' }] }));
+      localStorage.setItem('nanoflow.offline-cache-v2.anonymous', JSON.stringify({ projects: [{ id: 'p-2' }] }));
+
+      await service.clearAllLocalData();
+
+      expect(localStorage.getItem('nanoflow.offline-cache-v2.user-123')).toBeNull();
+      expect(localStorage.getItem('nanoflow.offline-cache-v2.anonymous')).toBeNull();
+    });
+
+    it('应全量清理 conflict fallback 存储', async () => {
+      await service.clearAllLocalData();
+
+      expect(mockConflictStorage['clearAllFallbackStorage']).toHaveBeenCalled();
+    });
+
+    it('应清理项目清单和黑匣子水位缓存键', async () => {
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      localStorage.setItem('nanoflow.blackbox-manifest-watermark.user-123', '2026-02-16T10:00:00.000Z');
+      localStorage.setItem('nanoflow.project-manifest-watermark', 'legacy-project-watermark');
+      localStorage.setItem('nanoflow.blackbox-manifest-watermark', 'legacy-blackbox-watermark');
+
+      await service.clearAllLocalData('user-123');
+
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBeNull();
+      expect(localStorage.getItem('nanoflow.blackbox-manifest-watermark.user-123')).toBeNull();
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark')).toBeNull();
+      expect(localStorage.getItem('nanoflow.blackbox-manifest-watermark')).toBeNull();
+    });
+
+    it('IndexedDB 未真正删除时应中止 full wipe', async () => {
+      localStorage.setItem('sb-test-auth-token', JSON.stringify({ access_token: 'token' }));
+      (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__ = { projects: ['stale'] };
+      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = { userId: 'stale-user' };
+      vi.spyOn(service as unknown as { clearIndexedDB: (dbName: string) => Promise<boolean> }, 'clearIndexedDB')
+        .mockResolvedValueOnce(false);
+
+      await expect(service.clearAllLocalData()).rejects.toThrow('IndexedDB 清理未完成');
+
+      expect(mockSupabaseClientService.signOut).toHaveBeenCalled();
+      expect(localStorage.getItem('sb-test-auth-token')).toBeNull();
+      expect((window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__).toBeUndefined();
+      expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
+      expect(mockConflictStorage['clearAllFallbackStorage']).toHaveBeenCalled();
     });
   });
 
@@ -362,6 +505,359 @@ describe('UserSessionService', () => {
       expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
     });
 
+    it('skipPersistentReload 登出时不应重新加载本地快照或 owner-scoped 队列', async () => {
+      userIdSignal.set('old-user');
+      const loadFromCacheOrSeedSpy = vi.spyOn(
+        service as unknown as {
+          loadFromCacheOrSeed: () => Promise<void>;
+        },
+        'loadFromCacheOrSeed'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser(null, { skipPersistentReload: true });
+
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(mockConflictStorage['refreshConflictCount']).toHaveBeenCalled();
+      expect(loadFromCacheOrSeedSpy).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['preparePendingPersistForOwnerChange']).not.toHaveBeenCalled();
+    });
+
+    it('session invalidated teardown 应清空旧 owner 视图但保留离线快照桶', async () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'stale-project', name: 'Stale Project' }),
+      ]);
+
+      await service.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: 'stale-user',
+        preserveOfflineSnapshot: true,
+      });
+
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith(expect.any(Array), 'stale-user');
+      expect((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot)
+        .not.toHaveBeenCalled();
+      expect(mockRetryQueue['clear']).not.toHaveBeenCalled();
+    });
+
+    it('hint-only 启动占位下的 session invalidated teardown 不应把占位壳回写旧 owner 快照', async () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'hint-placeholder', name: 'Placeholder', syncSource: 'local-only' }),
+      ]);
+      mockStartupPlaceholderState.isHintOnlyActive.mockReturnValue(true);
+
+      await service.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: 'hint-user',
+        preserveOfflineSnapshot: true,
+      });
+
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .not.toHaveBeenCalled();
+    });
+
+    it('trusted launch snapshot 仅处于 partial 预填充态时不应回写旧 owner durable snapshot', async () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'trusted-shell', name: 'Trusted Shell', tasks: [createTask({ title: 'Preview Task' })] }),
+      ]);
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+          startupProjectCatalogStageState: WritableSignal<'unresolved' | 'partial' | 'resolved'>;
+        }
+      ).prehydratedSnapshotApplied = true;
+      (
+        service as unknown as {
+          prehydratedSnapshotApplied: boolean;
+          prehydratedSnapshotOwnerId: string | null;
+          startupProjectCatalogStageState: WritableSignal<'unresolved' | 'partial' | 'resolved'>;
+        }
+      ).prehydratedSnapshotOwnerId = 'trusted-user';
+      (
+        service as unknown as {
+          startupProjectCatalogStageState: WritableSignal<'unresolved' | 'partial' | 'resolved'>;
+        }
+      ).startupProjectCatalogStageState.set('partial');
+
+      await service.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: 'trusted-user',
+        preserveOfflineSnapshot: true,
+      });
+
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .not.toHaveBeenCalled();
+    });
+
+    it('session invalidated teardown 在保留旧 owner 快照失败时也应强制清空旧视图', async () => {
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'stale-project', name: 'Stale Project' }),
+      ]);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot
+        .mockRejectedValueOnce(new Error('save-offline-snapshot-failed'));
+
+      await service.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: 'stale-user',
+        preserveOfflineSnapshot: true,
+      });
+
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+    });
+
+    it('local-user 遇到错误的云端 previousUserIdHint 时不应把本地草稿写进云端快照桶', async () => {
+      userIdSignal.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'local-draft', name: 'Local Draft', syncSource: 'local-only' }),
+      ]);
+
+      await service.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: 'cloud-user',
+        preserveOfflineSnapshot: true,
+      });
+
+      const saveCalls = ((mockSyncCoordinator['core'] as {
+        saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+      }).saveOfflineSnapshot).mock.calls;
+      expect(saveCalls.some(([, ownerUserId]) => ownerUserId === 'cloud-user')).toBe(false);
+      expect(saveCalls.some(([, ownerUserId]) => ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID)).toBe(true);
+    });
+
+    it('旧会话的 forceLoad 在 logout 后不应回灌项目或恢复 realtime', async () => {
+      let resolveSnapshot: ((value: {
+        source: 'idb';
+        projectCount: number;
+        bytes: number;
+        migratedLegacy: boolean;
+        projects: Project[];
+      }) => void) | null = null;
+      vi.spyOn(
+        service as unknown as {
+          loadStartupSnapshotResult: () => Promise<{
+            source: 'idb';
+            projectCount: number;
+            bytes: number;
+            migratedLegacy: boolean;
+            projects: Project[];
+          }>;
+        },
+        'loadStartupSnapshotResult'
+      ).mockImplementation(() => new Promise(resolve => {
+        resolveSnapshot = resolve;
+      }));
+
+      const staleLoad = service.setCurrentUser('stale-user', { forceLoad: true });
+      await service.setCurrentUser(null, { skipPersistentReload: true });
+
+      resolveSnapshot?.({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: false,
+        projects: [createProject({ id: 'stale-project', name: 'Stale Project' })],
+      });
+      await staleLoad;
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'stale-project' }),
+      ]);
+      expect((mockSyncCoordinator['core'] as { initRealtimeSubscription: ReturnType<typeof vi.fn> }).initRealtimeSubscription)
+        .not.toHaveBeenCalledWith('stale-user');
+    });
+
+    it('切换账号时应清理 action queue', async () => {
+      userIdSignal.set('old-user');
+
+      await service.setCurrentUser('new-user');
+
+      expect(mockSyncCoordinator['preparePendingPersistForOwnerChange']).toHaveBeenCalledWith(
+        'old-user',
+        'owner-switch:old-user->new-user'
+      );
+      expect((mockSyncCoordinator['preparePendingPersistForOwnerChange'] as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
+        .toBeLessThan(((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot).mock.invocationCallOrder[0]);
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { clearOfflineCache: ReturnType<typeof vi.fn> }).clearOfflineCache).not.toHaveBeenCalled();
+      expect(mockConflictStorage['clearFallbackStorageForOwner']).not.toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockConflictStorage['refreshConflictCount']).toHaveBeenCalled();
+    });
+
+    it('切换账号前若 durable handoff 未完成，不应提前清空离线快照', async () => {
+      userIdSignal.set('old-user');
+      (mockSyncCoordinator['preparePendingPersistForOwnerChange'] as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+
+      await service.setCurrentUser('new-user');
+
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('切换账号时 durable handoff 清理失败也应先强制清空旧 owner 视图', async () => {
+      userIdSignal.set('old-user');
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        createProject({ id: 'old-project', name: 'Old Project' }),
+      ]);
+      (mockSyncCoordinator['preparePendingPersistForOwnerChange'] as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('prepare-pending-persist-failed'));
+      vi.spyOn(
+        service as unknown as {
+          loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void>;
+        },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser('new-user');
+
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+    });
+
+    it('匿名态登录且存在 local-only 项目时应保留本地草稿快照并只清理歧义队列', async () => {
+      const localOnlyProject = createProject({ id: 'local-only', syncSource: 'local-only' });
+      let preservedProjects: Project[] = [];
+      let preservedOwnerUserId: string | null = null;
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localOnlyProject]);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockImplementation((projects: Project[], ownerUserId?: string | null) => {
+        preservedProjects = projects;
+        preservedOwnerUserId = ownerUserId ?? null;
+      });
+      (mockSyncCoordinator['core'] as {
+        loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+      }).loadStartupOfflineSnapshot.mockImplementation(async () => ({
+        source: 'idb',
+        projectCount: preservedProjects.length,
+        bytes: 128,
+        migratedLegacy: false,
+        ownerUserId: preservedOwnerUserId,
+        projects: preservedProjects,
+      }));
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'local-only', syncSource: 'local-only' }),
+      ], 'new-user');
+      expect((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot).not.toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'local-only', syncSource: 'local-only', pendingSync: true }),
+      ]);
+    });
+
+    it('local-user 登录真实账号时也应保留 local-only 草稿快照', async () => {
+      const localOnlyProject = createProject({ id: 'local-mode-project', syncSource: 'local-only' });
+      let preservedProjects: Project[] = [];
+      let preservedOwnerUserId: string | null = null;
+      userIdSignal.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localOnlyProject]);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockImplementation((projects: Project[], ownerUserId?: string | null) => {
+        preservedProjects = projects;
+        preservedOwnerUserId = ownerUserId ?? null;
+      });
+      (mockSyncCoordinator['core'] as {
+        loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+      }).loadStartupOfflineSnapshot.mockImplementation(async () => ({
+        source: 'idb',
+        projectCount: preservedProjects.length,
+        bytes: 128,
+        migratedLegacy: false,
+        ownerUserId: preservedOwnerUserId,
+        projects: preservedProjects,
+      }));
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'local-mode-project', syncSource: 'local-only' }),
+      ], 'new-user');
+      expect((mockSyncCoordinator['core'] as { clearOfflineSnapshot: ReturnType<typeof vi.fn> }).clearOfflineSnapshot).not.toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).toHaveBeenCalled();
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'local-mode-project', syncSource: 'local-only', pendingSync: true }),
+      ]);
+    });
+
+    it('hint-only 启动占位不应被当成 guest draft 迁移到目标 owner', async () => {
+      const placeholderProject = createProject({
+        id: 'hint-local-only',
+        name: 'Placeholder Shell',
+        syncSource: 'local-only',
+      });
+      mockStartupPlaceholderState.isHintOnlyActive.mockReturnValue(true);
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([placeholderProject]);
+      vi.spyOn(
+        service as unknown as {
+          loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void>;
+        },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      const saveCalls = ((mockSyncCoordinator['core'] as {
+        saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+      }).saveOfflineSnapshot).mock.calls;
+      expect(saveCalls.some(([projects, ownerUserId]) => {
+        return ownerUserId === 'new-user'
+          && Array.isArray(projects)
+          && projects.some((project: Project) => project.id === 'hint-local-only');
+      })).toBe(false);
+    });
+
+    it('启动快照尚未恢复到 store 时登录，也应先把游客草稿改写为目标 owner', async () => {
+      const localOnlyProject = createProject({ id: 'bootstrapping-local-only', syncSource: 'local-only' });
+      let preservedProjects: Project[] = [localOnlyProject];
+      let preservedOwnerUserId: string | null = AUTH_CONFIG.LOCAL_MODE_USER_ID;
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockImplementation((projects: Project[], ownerUserId?: string | null) => {
+        preservedProjects = projects;
+        preservedOwnerUserId = ownerUserId ?? null;
+      });
+      (mockSyncCoordinator['core'] as {
+        loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+      }).loadStartupOfflineSnapshot.mockImplementation(async () => ({
+        source: 'idb',
+        projectCount: preservedProjects.length,
+        bytes: 128,
+        migratedLegacy: false,
+        ownerUserId: preservedOwnerUserId,
+        projects: preservedProjects,
+      }));
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'bootstrapping-local-only', syncSource: 'local-only' }),
+      ], 'new-user');
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'bootstrapping-local-only', syncSource: 'local-only', pendingSync: true }),
+      ]);
+    });
+
     it('设置用户 ID 为 null 时应优先使用 startup snapshot 而不是种子数据', async () => {
       const restoredProject = createProject({ id: 'restored-idb-project', name: 'Recovered' });
       (
@@ -373,6 +869,7 @@ describe('UserSessionService', () => {
         projectCount: 1,
         bytes: 256,
         migratedLegacy: false,
+        ownerUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
         projects: [restoredProject],
       });
 
@@ -382,6 +879,88 @@ describe('UserSessionService', () => {
         (mockSyncCoordinator['core'] as { loadStartupOfflineSnapshot: ReturnType<typeof vi.fn> }).loadStartupOfflineSnapshot
       ).toHaveBeenCalled();
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([expect.objectContaining({ id: 'restored-idb-project' })]);
+    });
+
+    it('owner 不匹配的 startup snapshot 不应在匿名态被恢复', async () => {
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: false,
+        ownerUserId: 'user-123',
+        projects: [createProject({ id: 'leaked-project', name: 'Leaked Project' })],
+      });
+
+      await service.setCurrentUser(null);
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'leaked-project' }),
+      ]);
+    });
+
+    it('缺少 owner 元数据的 startup snapshot 不应在匿名态被恢复', async () => {
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: true,
+        projects: [createProject({ id: 'ownerless-guest-project', name: 'Ownerless Guest Project' })],
+      });
+
+      await service.setCurrentUser(null);
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'ownerless-guest-project' }),
+      ]);
+    });
+
+    it('owner 不匹配的 startup snapshot 不应在登录态被恢复', async () => {
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: false,
+        ownerUserId: 'old-user',
+        projects: [createProject({ id: 'wrong-owner-project', name: 'Wrong Owner Project' })],
+      });
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'wrong-owner-project' }),
+      ]);
+    });
+
+    it('缺少 owner 元数据的 startup snapshot 不应在登录态被恢复', async () => {
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'idb',
+        projectCount: 1,
+        bytes: 256,
+        migratedLegacy: true,
+        projects: [createProject({ id: 'ownerless-login-project', name: 'Ownerless Login Project' })],
+      });
+
+      await service.setCurrentUser('new-user', { forceLoad: true });
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'ownerless-login-project' }),
+      ]);
     });
 
     it('用户切换时清理旧数据', async () => {
@@ -695,6 +1274,55 @@ describe('UserSessionService', () => {
         { prefetchedRemoteWatermark: '2026-02-17T10:03:00.000Z' }
       );
     });
+
+    it('项目清单快路命中时，owner 匹配的 local-only 恢复项目仍应补做元数据同步以恢复云同步', async () => {
+      const localOnlyProject = createProject({
+        id: 'proj-legacy-local-only',
+        name: 'Recovered Project',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([localOnlyProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-legacy-local-only');
+      (
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        activeProjectId: null,
+        activeAccessible: false,
+        activeWatermark: null,
+        projectsWatermark: '2026-02-17T10:02:00.000Z',
+        blackboxWatermark: '2026-02-17T10:03:00.000Z',
+        serverNow: '2026-02-17T10:03:01.000Z',
+      });
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: true, watermark: '2026-02-17T10:02:00.000Z' });
+
+      const syncProjectListMetadataSpy = vi.spyOn(
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        },
+        'syncProjectListMetadata'
+      ).mockImplementation(async () => {
+        (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([
+          {
+            ...localOnlyProject,
+            syncSource: 'synced',
+            pendingSync: false,
+          },
+        ]);
+        return new Set(['proj-legacy-local-only']);
+      });
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(syncProjectListMetadataSpy).toHaveBeenCalledWith('user-1');
+      expect(mockSyncCoordinator['performDeltaSync']).toHaveBeenCalledWith('proj-legacy-local-only');
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+    });
   });
 
   describe('syncProjectListMetadata', () => {
@@ -866,6 +1494,72 @@ describe('UserSessionService', () => {
         expect(setProjectsCall.some((p: Project) => p.id === 'p1')).toBe(true);
         expect(setProjectsCall.some((p: Project) => p.id === 'p2')).toBe(true);
       }
+    });
+
+    it('服务端存在的项目应被提升为 synced，清除 local-only 影子标记', async () => {
+      const localProject = createProject({
+        id: 'proj-shadow',
+        name: 'Shadow',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([{
+        id: 'proj-shadow', title: 'Shadow', description: '',
+        created_date: localProject.createdDate, updated_at: localProject.updatedAt, version: localProject.version,
+      }]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall).toBeDefined();
+      const syncedProject = setProjectsCall?.find((project: Project) => project.id === 'proj-shadow');
+      expect(syncedProject?.syncSource).toBe('synced');
+      expect(syncedProject?.pendingSync).toBe(false);
+    });
+
+    it('local-only 项目即使服务端不存在也应继续保留，等待用户决定是否迁移', async () => {
+      const remoteProjectA = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
+      const remoteProjectB = createProject({ id: 'proj-b', name: 'B', syncSource: 'synced' });
+      const localOnlyProject = createProject({
+        id: 'proj-local-only',
+        name: 'Guest Draft',
+        syncSource: 'local-only',
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        remoteProjectA,
+        remoteProjectB,
+        localOnlyProject,
+      ]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([
+        {
+          id: 'proj-a', title: 'A', description: '',
+          created_date: remoteProjectA.createdDate, updated_at: remoteProjectA.updatedAt, version: 1,
+        },
+        {
+          id: 'proj-b', title: 'B', description: '',
+          created_date: remoteProjectB.createdDate, updated_at: remoteProjectB.updatedAt, version: 1,
+        },
+      ]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.some((project: Project) => project.id === 'proj-local-only')).toBe(true);
     });
 
     it('裁剪后清理不可访问的 activeProjectId 时应弹提示', async () => {
@@ -1041,6 +1735,180 @@ describe('UserSessionService', () => {
       expect(mockProjectState['setProjects']).not.toHaveBeenCalled();
       expect(service.startupProjectCatalogStage()).toBe('unresolved');
     });
+
+    it('仅有匹配 owner hint 时不应把真实 launch snapshot 标记为 trusted', () => {
+      const offlineProject = createProject({
+        id: 'hint-only-project',
+        name: 'Hint Only Offline Project',
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockAuthService['peekPersistedOwnerHint'] as ReturnType<typeof vi.fn>).mockReturnValue('hint-user');
+      (
+        mockSyncCoordinator['core'] as {
+          loadOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadOfflineSnapshot.mockReturnValue([offlineProject]);
+
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        userId: 'hint-user',
+        activeProjectId: 'd0000000-0000-4000-8000-000000000011',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'd0000000-0000-4000-8000-000000000011',
+            name: 'Sensitive Launch Project',
+            description: '',
+            updatedAt: '2026-03-27T10:00:00.000Z',
+            taskCount: 1,
+            openTaskCount: 1,
+            recentTasks: [
+              {
+                id: 'd0000000-0000-4000-8000-000000000012',
+                title: 'sensitive recent task',
+                displayId: '1',
+                status: 'active'
+              },
+            ],
+          },
+        ],
+      }));
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'hint-only-project', name: 'Project 1', tasks: [] }),
+      ]);
+      expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
+      expect(service.startupProjectCatalogStage()).toBe('partial');
+    });
+
+    it('launch snapshot owner 不可信时应回退到离线快照预填充', () => {
+      const offlineProject = createProject({
+        id: 'offline-project-1',
+        name: 'Offline Recovery Project',
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockAuthService['peekPersistedOwnerHint'] as ReturnType<typeof vi.fn>).mockReturnValue('current-user');
+      (
+        mockSyncCoordinator['core'] as {
+          loadOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadOfflineSnapshot.mockReturnValue([offlineProject]);
+
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        userId: 'stale-user',
+        activeProjectId: 'd0000000-0000-4000-8000-000000000021',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'd0000000-0000-4000-8000-000000000021',
+            name: 'Stale Snapshot Project',
+            description: '',
+            updatedAt: null,
+            taskCount: 0,
+            openTaskCount: 0,
+            recentTasks: [],
+          },
+        ],
+      }));
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'offline-project-1', name: 'Project 1', tasks: [] }),
+      ]);
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('offline-project-1');
+      expect(service.startupProjectCatalogStage()).toBe('partial');
+      expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
+    });
+
+    it('owner 已通过 persisted session 确认时应恢复完整离线快照内容', () => {
+      const offlineProject = createProject({
+        id: 'confirmed-offline-project',
+        name: 'Confirmed Offline Project',
+        tasks: [createTask({ id: 'confirmed-task', content: 'confirmed task content' })],
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>).mockReturnValue({
+        userId: 'current-user',
+        email: 'current@example.com',
+      });
+      (mockAuthService['peekPersistedOwnerHint'] as ReturnType<typeof vi.fn>).mockReturnValue('current-user');
+      (
+        mockSyncCoordinator['core'] as {
+          loadOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadOfflineSnapshot.mockReturnValue([offlineProject]);
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: 'confirmed-offline-project',
+          name: 'Confirmed Offline Project',
+          tasks: [expect.objectContaining({ id: 'confirmed-task', content: 'confirmed task content' })],
+        }),
+      ]);
+      expect(service.startupProjectCatalogStage()).toBe('partial');
+      expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
+    });
+
+    it('存在云端 owner hint 时不应把 local-user launch snapshot 视为 trusted', () => {
+      const offlineProject = createProject({
+        id: 'cloud-owned-project',
+        name: 'Cloud Owned Project',
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockAuthService['peekPersistedOwnerHint'] as ReturnType<typeof vi.fn>).mockReturnValue('cloud-user');
+      (
+        mockSyncCoordinator['core'] as {
+          loadOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadOfflineSnapshot.mockReturnValue([offlineProject]);
+
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+        version: 2,
+        savedAt: '2026-03-27T10:00:00.000Z',
+        userId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+        activeProjectId: 'd0000000-0000-4000-8000-000000000031',
+        lastActiveView: 'text',
+        theme: 'default',
+        colorMode: 'dark',
+        projects: [
+          {
+            id: 'd0000000-0000-4000-8000-000000000031',
+            name: 'Guest Snapshot Project',
+            description: '',
+            updatedAt: null,
+            taskCount: 0,
+            openTaskCount: 0,
+            recentTasks: [],
+          },
+        ],
+      }));
+
+      const result = service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'cloud-owned-project', name: 'Project 1', tasks: [] }),
+      ]);
+      expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
+      expect(service.startupProjectCatalogStage()).toBe('partial');
+    });
   });
 
   // ====== 种子数据保护测试 ======
@@ -1057,6 +1925,7 @@ describe('UserSessionService', () => {
             bytes: number;
             migratedLegacy: boolean;
             projects: Project[];
+            ownerUserId?: string | null;
           }) => Promise<void>;
         }
       ).loadFromCacheOrSeed.bind(service);
@@ -1087,6 +1956,7 @@ describe('UserSessionService', () => {
             bytes: number;
             migratedLegacy: boolean;
             projects: Project[];
+            ownerUserId?: string | null;
           }) => Promise<void>;
         }
       ).loadFromCacheOrSeed.bind(service);
@@ -1103,6 +1973,61 @@ describe('UserSessionService', () => {
       const setProjectsCalls = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls;
       const lastCallProjects = setProjectsCalls[setProjectsCalls.length - 1][0] as Project[];
       expect(lastCallProjects.length).toBeGreaterThan(0);
+    });
+
+    it('已登录用户恢复旧缓存项目时应将其标记为 local-only', async () => {
+      userIdSignal.set('real-user-123');
+      const legacyProject = createProject({ id: 'legacy-local-project' });
+
+      const loadFromCacheOrSeed = (
+        service as unknown as {
+          loadFromCacheOrSeed: (override?: {
+            source: string;
+            projectCount: number;
+            bytes: number;
+            migratedLegacy: boolean;
+            projects: Project[];
+            ownerUserId?: string | null;
+          }) => Promise<void>;
+        }
+      ).loadFromCacheOrSeed.bind(service);
+
+      await loadFromCacheOrSeed({
+        source: 'localStorage',
+        projectCount: 1,
+        bytes: 128,
+        migratedLegacy: false,
+        ownerUserId: 'real-user-123',
+        projects: [legacyProject],
+      });
+
+      const setProjectsCalls = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls;
+      const lastCallProjects = setProjectsCalls[setProjectsCalls.length - 1][0] as Project[];
+      expect(lastCallProjects[0]?.syncSource).toBe('local-only');
+      expect(lastCallProjects[0]?.pendingSync).toBe(true);
+    });
+  });
+
+  describe('startBackgroundSync local-only 保护', () => {
+    it('当前项目是 local-only 时应跳过云端探测和按需加载', async () => {
+      const localOnlyProject = createProject({
+        id: 'proj-local-only',
+        name: 'Guest Draft',
+        syncSource: 'local-only',
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localOnlyProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-local-only');
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect((mockSyncCoordinator['core'] as Record<string, unknown>)['getAccessibleProjectProbe']).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+      expect(mockProjectState['setActiveProjectId']).not.toHaveBeenCalledWith(null);
     });
   });
 });

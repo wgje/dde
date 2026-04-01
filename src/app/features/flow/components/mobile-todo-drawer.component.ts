@@ -5,7 +5,7 @@
  * 从 FlowPaletteComponent 中提取移动端专用内容
  */
 
-import { Component, ChangeDetectionStrategy, inject, signal, input, output, OnDestroy } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, input, output, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
@@ -179,6 +179,20 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly isUnfinishedOpen = signal(true);
   readonly isUnassignedOpen = signal(true);
   readonly draggingId = signal<string | null>(null);
+
+  constructor() {
+    // 没有待办/待分配任务时自动折叠，减少移动端空白区域
+    effect(() => {
+      if (this.projectState.unfinishedItems().length === 0) {
+        this.isUnfinishedOpen.set(false);
+      }
+    });
+    effect(() => {
+      if (this.projectState.unassignedTasks().length === 0) {
+        this.isUnassignedOpen.set(false);
+      }
+    });
+  }
   
   // 触摸拖动状态
   private touchState = {

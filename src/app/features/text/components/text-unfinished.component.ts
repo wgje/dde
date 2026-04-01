@@ -1,4 +1,4 @@
-import { Component, inject, input, output, ChangeDetectionStrategy } from '@angular/core';
+import { Component, inject, input, output, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -73,6 +73,15 @@ export class TextUnfinishedComponent {
   
   readonly isMobile = input(false);
   readonly jumpToTask = output<string>();
+
+  constructor() {
+    // 没有待办事项时自动折叠，减少移动端空白区域
+    effect(() => {
+      if (this.projectState.unfinishedItems().length === 0) {
+        this.uiState.isTextUnfinishedOpen.set(false);
+      }
+    });
+  }
   
   trackItem = (item: UnfinishedItem) => `${item.taskId}-${item.text}`;
   

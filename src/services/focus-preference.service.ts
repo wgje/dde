@@ -139,13 +139,6 @@ export class FocusPreferenceService {
   }
 
   /**
-   * 启用/禁用聚光灯模式
-   */
-  setSpotlightEnabled(enabled: boolean): void {
-    this.update({ spotlightEnabled: enabled });
-  }
-
-  /**
    * 启用/禁用黑匣子
    */
   setBlackBoxEnabled(enabled: boolean): void {
@@ -190,13 +183,6 @@ export class FocusPreferenceService {
    */
   isGateEnabled(): boolean {
     return focusPreferences().gateEnabled;
-  }
-
-  /**
-   * 检查聚光灯是否启用
-   */
-  isSpotlightEnabled(): boolean {
-    return focusPreferences().spotlightEnabled;
   }
 
   /**

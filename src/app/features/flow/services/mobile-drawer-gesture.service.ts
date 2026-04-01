@@ -24,10 +24,10 @@ interface GestureState {
 
 @Injectable()
 export class MobileDrawerGestureService {
-  // 顶部面板当前高度（vh百分比）
+  // 顶部面板当前高度（容器百分比）
   readonly topPanelHeight = signal(DRAWER_CONFIG.TOP_SNAP_POINTS.COLLAPSED);
   
-  // 底部面板当前高度（vh百分比）
+  // 底部面板当前高度（容器百分比）
   readonly bottomPanelHeight = signal(DRAWER_CONFIG.BOTTOM_SNAP_POINTS.COLLAPSED);
   
   // 是否正在拖拽
@@ -50,15 +50,45 @@ export class MobileDrawerGestureService {
   private animationFrameId: number | null = null;
   private hintTimerId: ReturnType<typeof setTimeout> | null = null;
   
-  // 视口高度缓存
-  private viewportHeight = 0;
+  // 容器高度缓存（替代 viewportHeight，避免移动端 vh 与实际容器高度不一致）
+  private containerHeight = 0;
+  // 容器顶部偏移量（用于触摸坐标从视口坐标转换为容器坐标）
+  private containerTop = 0;
+  // 容器元素引用
+  private containerEl: HTMLElement | null = null;
+  // 容器尺寸观察器
+  private resizeObserver: ResizeObserver | null = null;
   
   /**
    * 初始化服务
    */
   initialize(): void {
-    this.viewportHeight = window.innerHeight;
+    // 回退到 window.innerHeight，setContainer 调用后会覆盖
+    this.containerHeight = window.innerHeight;
     this.checkAndShowGestureHint();
+  }
+  
+  /**
+   * 绑定容器元素，使用 ResizeObserver 实时跟踪容器实际尺寸。
+   * 解决移动端 vh 单位与容器实际高度不匹配导致底部元素超出屏幕的问题。
+   */
+  setContainer(el: HTMLElement): void {
+    this.containerEl = el;
+    this.refreshContainerMetrics();
+
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = new ResizeObserver(() => {
+      this.refreshContainerMetrics();
+    });
+    this.resizeObserver.observe(el);
+  }
+
+  /** 刷新容器尺寸缓存 */
+  private refreshContainerMetrics(): void {
+    if (!this.containerEl) return;
+    const rect = this.containerEl.getBoundingClientRect();
+    this.containerHeight = rect.height || window.innerHeight;
+    this.containerTop = rect.top;
   }
   
   /**
@@ -73,6 +103,9 @@ export class MobileDrawerGestureService {
       clearTimeout(this.hintTimerId);
       this.hintTimerId = null;
     }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.containerEl = null;
   }
   
   /**
@@ -115,26 +148,28 @@ export class MobileDrawerGestureService {
    * @returns 'top' | 'bottom' | null
    */
   detectHandleTouch(touchY: number): 'top' | 'bottom' | null {
-    this.viewportHeight = window.innerHeight;
+    this.refreshContainerMetrics();
     
-    const topHeightPx = this.topPanelHeight() * this.viewportHeight / 100;
-    const bottomHeightPx = this.bottomPanelHeight() * this.viewportHeight / 100;
+    // 将视口坐标转换为容器内坐标
+    const localY = touchY - this.containerTop;
+    
+    const topHeightPx = this.topPanelHeight() * this.containerHeight / 100;
+    const bottomHeightPx = this.bottomPanelHeight() * this.containerHeight / 100;
     
     // 扩大触摸热区（实际把手仅 20px，但触摸区域扩展到 48px）
-    // touchZone 常量定义在配置中，此处使用硬编码值以匹配把手和触摸区域
     
     // 顶部面板把手在面板底部边缘
     // 把手视觉位置：从 (topHeightPx - HANDLE_HEIGHT) 到 topHeightPx
     // 触摸区域：把手上方 10px 到 把手下方 28px
-    if (touchY >= topHeightPx - DRAWER_CONFIG.HANDLE_HEIGHT - 10 && touchY <= topHeightPx + 28) {
+    if (localY >= topHeightPx - DRAWER_CONFIG.HANDLE_HEIGHT - 10 && localY <= topHeightPx + 28) {
       return 'top';
     }
     
     // 底部面板把手在其顶部边缘
-    const bottomPanelTop = this.viewportHeight - bottomHeightPx;
+    const bottomPanelTop = this.containerHeight - bottomHeightPx;
     // 把手视觉位置：从 bottomPanelTop 到 bottomPanelTop + HANDLE_HEIGHT
     // 触摸区域：把手上方 28px 到 把手下方 10px
-    if (touchY >= bottomPanelTop - 28 && touchY <= bottomPanelTop + DRAWER_CONFIG.HANDLE_HEIGHT + 10) {
+    if (localY >= bottomPanelTop - 28 && localY <= bottomPanelTop + DRAWER_CONFIG.HANDLE_HEIGHT + 10) {
       return 'bottom';
     }
     
@@ -211,9 +246,9 @@ export class MobileDrawerGestureService {
       this.isDragging.set(true);
     }
     
-    // 计算新高度
+    // 计算新高度（基于容器实际高度而非 viewport，避免移动端 vh 偏差）
     const panel = this.gestureState.panel;
-    const deltaVh = (deltaY / this.viewportHeight) * 100;
+    const deltaVh = (deltaY / this.containerHeight) * 100;
     
     if (panel === 'top') {
       // 顶部面板：向下拉增加高度，向上推减少高度

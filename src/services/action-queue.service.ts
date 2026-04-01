@@ -7,6 +7,8 @@ import { extractErrorMessage } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
 import { RetryQueueService, type RetryableEntityType } from '../core-bridge';
+import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { 
   OperationPriority, 
   TaskPayload, 
@@ -46,6 +48,7 @@ export class ActionQueueService {
   private readonly logger = this.loggerService.category('ActionQueue');
   private readonly toast = inject(ToastService);
   private readonly sentryAlert = inject(SentryAlertService);
+  private readonly authService = inject(AuthService);
   private readonly destroyRef = inject(DestroyRef);
   readonly storage = inject(ActionQueueStorageService);
   /** 跨队列去重：当新操作入队时移除 RetryQueue 中同一实体的旧重试 */
@@ -89,6 +92,13 @@ export class ActionQueueService {
   /** 队列处理生命周期回调 */
   private onQueueProcessStart: (() => void) | null = null;
   private onQueueProcessEnd: (() => void) | null = null;
+  /** 当前可见队列/死信视图的代次；切账号或强制清空时递增，使旧处理循环失效 */
+  private queueViewGeneration = 0;
+  /** 记录每次视图失效的 stale 处理策略，供旧循环返回后决定如何收口 */
+  private queueInvalidations: Array<{ generation: number; stalePolicy: 'discard' | 'settle-owner' }> = [];
+  /** 真实 in-flight 处理循环 token，用于切账号时立即释放旧生命周期 */
+  private activeProcessTokens = new Set<number>();
+  private nextProcessLifecycleToken = 0;
   /** 压力模式通知节流 */
   private readonly QUEUE_PRESSURE_NOTICE_COOLDOWN = 60_000;
   private lastQueuePressureNoticeAt = 0;
@@ -171,18 +181,7 @@ export class ActionQueueService {
       this.notifyQueuePressureOnce('同步队列存储受限', '当前写入先保存在内存中，请尽快释放浏览器存储空间');
     }
 
-    // 设置默认优先级
-    const defaultPriority: OperationPriority = 
-      action.entityType === 'project' || action.entityType === 'focus-session' ? 'critical' :
-      action.entityType === 'preference' ? 'low' : 'normal';
-    
-    const queuedAction: QueuedAction = {
-      ...action,
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      retryCount: 0,
-      priority: action.priority ?? defaultPriority
-    };
+    const queuedAction = this.createQueuedAction(action);
     let resolvedActionId = queuedAction.id;
     let wasEnqueued = false;
     /** 智能合并导致队列缩小（如 create+delete 取消） */
@@ -311,6 +310,23 @@ export class ActionQueueService {
     return resolvedActionId;
   }
 
+  async enqueueForOwner(ownerUserId: string, action: EnqueueParams): Promise<string> {
+    if (ownerUserId === this.getCurrentOwnerUserId()) {
+      return this.enqueue(action);
+    }
+
+    const queuedAction = this.createQueuedAction(action);
+    await this.storage.appendActionForOwner(ownerUserId, queuedAction);
+    this.logger.info('已将离线操作写入指定 owner 队列', {
+      ownerUserId,
+      actionId: queuedAction.id,
+      type: queuedAction.type,
+      entityType: queuedAction.entityType,
+      entityId: queuedAction.entityId,
+    });
+    return queuedAction.id;
+  }
+
   private notifyQueuePressureOnce(title: string, message: string): void {
     const now = Date.now();
     if (now - this.lastQueuePressureNoticeAt < this.QUEUE_PRESSURE_NOTICE_COOLDOWN) {
@@ -350,6 +366,134 @@ export class ActionQueueService {
     this.onQueueProcessStart = onStart;
     this.onQueueProcessEnd = onEnd;
   }
+
+  private getCurrentOwnerUserId(): string {
+    return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private createQueuedAction(action: EnqueueParams): QueuedAction {
+    const defaultPriority: OperationPriority = 
+      action.entityType === 'project' || action.entityType === 'focus-session' ? 'critical' :
+      action.entityType === 'preference' ? 'low' : 'normal';
+
+    return {
+      ...action,
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      retryCount: 0,
+      priority: action.priority ?? defaultPriority
+    };
+  }
+
+  private beginQueueProcessLifecycle(): number {
+    const token = ++this.nextProcessLifecycleToken;
+    const shouldNotifyStart = this.activeProcessTokens.size === 0;
+    this.activeProcessTokens.add(token);
+    if (shouldNotifyStart) {
+      this.onQueueProcessStart?.();
+    }
+    return token;
+  }
+
+  private endQueueProcessLifecycle(token: number): void {
+    if (!this.activeProcessTokens.delete(token)) {
+      return;
+    }
+
+    if (this.activeProcessTokens.size === 0) {
+      this.onQueueProcessEnd?.();
+    }
+  }
+
+  private releaseAllQueueProcessLifecycles(reason: string): void {
+    if (this.activeProcessTokens.size === 0) {
+      return;
+    }
+
+    this.activeProcessTokens.clear();
+    this.logger.debug('强制释放旧队列处理生命周期', { reason });
+    this.onQueueProcessEnd?.();
+  }
+
+  private invalidateQueueView(
+    reason: string,
+    stalePolicy: 'discard' | 'settle-owner' = 'discard'
+  ): number {
+    this.queueViewGeneration += 1;
+    this.queueInvalidations.push({ generation: this.queueViewGeneration, stalePolicy });
+    if (this.queueInvalidations.length > 16) {
+      this.queueInvalidations = this.queueInvalidations.slice(-16);
+    }
+    this.logger.debug('队列视图已失效，旧处理循环将停止收尾', {
+      reason,
+      generation: this.queueViewGeneration,
+      stalePolicy,
+    });
+    return this.queueViewGeneration;
+  }
+
+  private isStaleProcess(processGeneration: number): boolean {
+    return processGeneration !== this.queueViewGeneration;
+  }
+
+  getCurrentQueueViewGeneration(): number {
+    return this.queueViewGeneration;
+  }
+
+  isQueueViewCurrent(queueViewGeneration: number, ownerUserId?: string | null): boolean {
+    if (queueViewGeneration !== this.queueViewGeneration) {
+      return false;
+    }
+
+    if (typeof ownerUserId === 'string') {
+      return this.getCurrentOwnerUserId() === ownerUserId;
+    }
+
+    return true;
+  }
+
+  private getStaleProcessPolicy(processGeneration: number): 'discard' | 'settle-owner' {
+    return [...this.queueInvalidations]
+      .reverse()
+      .find(entry => entry.generation > processGeneration)?.stalePolicy ?? 'discard';
+  }
+
+  private async settleStaleActionResult(
+    processGeneration: number,
+    processOwnerUserId: string,
+    action: QueuedAction,
+    outcome: { success: true } | { success: false; error: string }
+  ): Promise<void> {
+    const stalePolicy = this.getStaleProcessPolicy(processGeneration);
+    if (stalePolicy !== 'settle-owner') {
+      this.logger.debug('旧处理循环结果已丢弃（非 owner 切换场景）', {
+        actionId: action.id,
+        processOwnerUserId,
+        stalePolicy,
+      });
+      return;
+    }
+
+    if (outcome.success) {
+      await this.storage.settleSuccessfulActionForOwner(processOwnerUserId, action.id);
+      this.logger.debug('旧 owner 的成功 action 已在持久化队列中收口', {
+        actionId: action.id,
+        processOwnerUserId,
+      });
+      return;
+    }
+
+    const settleResult = await this.storage.settleFailedActionForOwner(
+      processOwnerUserId,
+      action,
+      outcome.error
+    );
+    this.logger.debug('旧 owner 的失败 action 已在持久化队列中收口', {
+      actionId: action.id,
+      processOwnerUserId,
+      settleResult,
+    });
+  }
   
   /**
    * 处理队列中的所有操作
@@ -361,6 +505,9 @@ export class ActionQueueService {
     if (this.isProcessing() || !this.storage.isOnline) {
       return { processed: 0, failed: 0, movedToDeadLetter: 0 };
     }
+
+    const processGeneration = this.queueViewGeneration;
+    const processOwnerUserId = this.getCurrentOwnerUserId();
     
     const queueSnapshot = this.pendingActions();
     
@@ -375,7 +522,7 @@ export class ActionQueueService {
     });
     
     this.isProcessing.set(true);
-    this.onQueueProcessStart?.();
+    const processLifecycleToken = this.beginQueueProcessLifecycle();
     
     let processed = 0;
     let failed = 0;
@@ -388,6 +535,15 @@ export class ActionQueueService {
       const queue = [...this.pendingActions()];
 
       for (const action of queue) {
+        if (this.isStaleProcess(processGeneration)) {
+          this.logger.debug('检测到过期的队列处理循环，停止后续处理', {
+            actionId: action.id,
+            processGeneration,
+            currentGeneration: this.queueViewGeneration,
+          });
+          break;
+        }
+
         // 验证 action 仍在队列中（可能已被 dequeue 或前一次处理移除）
         if (!this.pendingActions().some(a => a.id === action.id)) {
           continue;
@@ -437,6 +593,30 @@ export class ActionQueueService {
         
         try {
           const success = await processor(action);
+
+          if (this.isStaleProcess(processGeneration)) {
+            if (success) {
+              await this.settleStaleActionResult(processGeneration, processOwnerUserId, action, {
+                success: true,
+              });
+            } else {
+              await this.settleStaleActionResult(processGeneration, processOwnerUserId, action, {
+                success: false,
+                error: 'Operation returned false',
+              });
+            }
+            this.logger.debug('旧账号队列项处理结果已失效，已转入旧 owner 收口流程', {
+              actionId: action.id,
+              processGeneration,
+              currentGeneration: this.queueViewGeneration,
+            });
+            if (success) {
+              processed++;
+            } else {
+              failed++;
+            }
+            break;
+          }
           
           if (success) {
             this.dequeue(action.id);
@@ -453,6 +633,21 @@ export class ActionQueueService {
             failed++;
           }
         } catch (error: unknown) {
+          if (this.isStaleProcess(processGeneration)) {
+            const errorMessage = extractErrorMessage(error);
+            await this.settleStaleActionResult(processGeneration, processOwnerUserId, action, {
+              success: false,
+              error: errorMessage,
+            });
+            this.logger.debug('旧账号队列项处理异常已失效，已转入旧 owner 收口流程', {
+              actionId: action.id,
+              processGeneration,
+              currentGeneration: this.queueViewGeneration,
+            });
+            failed++;
+            break;
+          }
+
           const errorMessage = extractErrorMessage(error);
           const result = this.storage.handleRetry(action, errorMessage);
           if (result === 'dead-letter') {
@@ -466,8 +661,10 @@ export class ActionQueueService {
         }
       }
     } finally {
-      this.isProcessing.set(false);
-      this.onQueueProcessEnd?.();
+      this.endQueueProcessLifecycle(processLifecycleToken);
+      if (!this.isStaleProcess(processGeneration)) {
+        this.isProcessing.set(false);
+      }
       
       this.sentryLazyLoader.addBreadcrumb({
         category: 'sync',
@@ -482,20 +679,51 @@ export class ActionQueueService {
   
   /** 清空队列 */
   clearQueue() {
+    this.invalidateQueueView('clear-queue', 'discard');
+    this.releaseAllQueueProcessLifecycles('clear-queue');
     this.pendingActions.set([]);
     this.queueSize.set(0);
+    this.isProcessing.set(false);
     this.storage.saveQueueToStorage();
     this.syncSentryContext();
   }
   
   /** 清空死信队列 */
   clearDeadLetterQueue() { this.storage.clearDeadLetterQueue(); }
+
+  /**
+   * 仅清空当前内存视图，不覆盖持久化数据。
+   * 用于切账号时先断开旧 owner 的可见队列，再按新 owner 重新加载。
+   */
+  clearCurrentView(): void {
+    this.invalidateQueueView('clear-current-view', 'settle-owner');
+    this.releaseAllQueueProcessLifecycles('clear-current-view');
+    this.pendingActions.set([]);
+    this.queueSize.set(0);
+    this.storage.deadLetterQueue.set([]);
+    this.storage.deadLetterSize.set(0);
+    this.isProcessing.set(false);
+    this.syncSentryContext();
+  }
+
+  /** 按当前 owner 重新加载持久化队列，避免跨账号会话看到旧队列/死信。 */
+  reloadFromStorageForCurrentOwner(): void {
+    this.clearCurrentView();
+    this.storage.loadQueueFromStorage();
+    this.storage.loadDeadLetterFromStorage();
+    this.syncSentryContext();
+  }
   
   /** 从死信队列重试操作 */
   retryDeadLetter(itemId: string) { this.storage.retryDeadLetter(itemId); }
   
   /** 从死信队列删除操作（放弃同步） */
   dismissDeadLetter(itemId: string) { this.storage.dismissDeadLetter(itemId); }
+
+  /** 将待处理操作直接转入死信队列，保留数据供人工确认或稍后重试 */
+  moveToDeadLetter(action: QueuedAction, reason: string): void {
+    this.storage.moveToDeadLetter(action, reason);
+  }
   
   /** 获取特定实体的待处理操作 */
   getActionsForEntity(entityType: string, entityId: string): QueuedAction[] {
@@ -525,6 +753,23 @@ export class ActionQueueService {
   /** 检查是否有待处理的操作 */
   hasPendingActions(): boolean {
     return this.pendingActions().length > 0;
+  }
+
+  /** 丢弃满足条件的待处理操作，并立即持久化队列 */
+  discardActions(predicate: (action: QueuedAction) => boolean): number {
+    const currentQueue = this.pendingActions();
+    const nextQueue = currentQueue.filter(action => !predicate(action));
+    const discardedCount = currentQueue.length - nextQueue.length;
+
+    if (discardedCount === 0) {
+      return 0;
+    }
+
+    this.pendingActions.set(nextQueue);
+    this.queueSize.set(nextQueue.length);
+    this.storage.saveQueueToStorage();
+    this.syncSentryContext();
+    return discardedCount;
   }
   
   /** 检查是否有死信 */
@@ -569,6 +814,7 @@ export class ActionQueueService {
    * 显式重置服务状态（测试 / HMR）
    */
   reset(): void {
+    this.invalidateQueueView('reset', 'discard');
     this.storage.reset();
     
     this.pendingActions.set([]);

@@ -164,7 +164,6 @@
     "src/services/remote-change-handler.service.spec.ts": 65,
     "src/services/simple-reminder.service.spec.ts": 108,
     "src/services/speech-to-text.service.spec.ts": 90,
-    "src/services/spotlight.service.spec.ts": 60,
     "src/services/startup-font-scheduler.service.spec.ts": 36,
     "src/services/strata.service.spec.ts": 61,
     "src/services/sync-coordinator.service.spec.ts": 408,

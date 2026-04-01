@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
+import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService } from '../../services/action-queue.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from '../../services/action-queue-storage.service';
 import { ChangeTrackerService } from '../../services/change-tracker.service';
@@ -8,6 +8,7 @@ import { ToastService } from '../../services/toast.service';
 import { SentryAlertService } from '../../services/sentry-alert.service';
 import { SentryLazyLoaderService } from '../../services/sentry-lazy-loader.service';
 import { NetworkAwarenessService } from '../../services/network-awareness.service';
+import { AuthService } from '../../services/auth.service';
 import { RetryQueueService } from '../../app/core/services/sync/retry-queue.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
@@ -94,6 +95,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
+        { provide: AuthService, useValue: { currentUserId: signal<string | null>('test-user') } },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });

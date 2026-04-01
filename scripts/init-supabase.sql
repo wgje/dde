@@ -389,7 +389,7 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
   auto_resolve_conflicts BOOLEAN DEFAULT true,
   local_backup_enabled BOOLEAN DEFAULT false,
   local_backup_interval_ms INTEGER DEFAULT 3600000,
-  focus_preferences JSONB DEFAULT '{"gateEnabled":true,"spotlightEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::jsonb,
+  focus_preferences JSONB DEFAULT '{"gateEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::jsonb,
   -- 【2026-02-25 新增】停泊坞快照（跨设备同步）
   dock_snapshot JSONB DEFAULT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -632,7 +632,7 @@ DO $$ BEGIN
     TO authenticated USING ((SELECT auth.uid()) = user_id);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
-111111111111111111111111111111
+
 DO $$ BEGIN
   CREATE POLICY "routine_tasks_insert"
     ON routine_tasks FOR INSERT

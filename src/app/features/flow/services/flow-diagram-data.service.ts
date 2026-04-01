@@ -199,7 +199,7 @@ export class FlowDiagramDataService {
       if (model) {
         const currentLinkCount = (model.linkDataArray || []).length;
         const parentChildCount = newTasks.filter(t => t.parentId).length;
-        const crossTreeCount = project.connections?.length || 0;
+        const crossTreeCount = project.connections?.filter(c => !c.deletedAt).length || 0;
         const expectedLinkCount = parentChildCount + crossTreeCount;
         if (currentLinkCount !== expectedLinkCount) {
           return true;
@@ -384,6 +384,7 @@ export class FlowDiagramDataService {
         positionX: pos.x,
         positionY: pos.y
       });
+      this.syncCoordinator.markLocalChanges('position');
       this.syncCoordinator.schedulePersist();
 
       this.viewStateSaveTimer = null;

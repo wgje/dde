@@ -69,7 +69,8 @@ export class TaskSyncOperationsService {
     type: 'task' | 'project' | 'connection',
     operation: 'upsert' | 'delete',
     data: Task | { id: string },
-    projectId?: string
+    projectId?: string,
+    sourceUserId?: string,
   ): void {
     if (this.syncStateService.isSessionExpired()) return;
     if (!data?.id) {
@@ -80,7 +81,7 @@ export class TaskSyncOperationsService {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
       return;
     }
-    const enqueued = this.retryQueueService.add(type, operation, data, projectId);
+    const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId);
     if (enqueued) {
       this.syncStateService.setPendingCount(this.retryQueueService.length);
     } else {
@@ -135,7 +136,13 @@ export class TaskSyncOperationsService {
   // 任务同步操作
 
   /** 推送任务到云端（LWW upsert，支持 tombstone 检查和重试队列） */
-  async pushTask(task: Task, projectId: string, skipTombstoneCheck = false, fromRetryQueue = false): Promise<boolean> {
+  async pushTask(
+    task: Task,
+    projectId: string,
+    skipTombstoneCheck = false,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<boolean> {
     // 会话过期检查
     if (this.syncStateService.isSessionExpired()) {
       this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId });
@@ -146,7 +153,7 @@ export class TaskSyncOperationsService {
     if (!this.retryQueueService.checkCircuitBreaker()) {
       this.logger.debug('Circuit Breaker: 熔断中，跳过推送', { taskId: task.id });
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('task', 'upsert', task, projectId);
+        this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
       }
       return false;
     }
@@ -154,7 +161,7 @@ export class TaskSyncOperationsService {
     const client = this.getSupabaseClient();
     if (!client) {
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('task', 'upsert', task, projectId);
+        this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
       }
       return false;
     }
@@ -162,16 +169,30 @@ export class TaskSyncOperationsService {
     // 支持自动刷新后重试的内部执行函数
     const executeTaskPush = async (): Promise<boolean> => {
       const { data: { session } } = await client.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) {
+      let sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
         const refreshed = await this.sessionManager.tryRefreshSession('pushTask.getSession');
         if (refreshed) {
           const { data: { session: newSession } } = await client.auth.getSession();
-          if (newSession?.user?.id) {
-            return await this.doTaskPush(client, task, projectId, skipTombstoneCheck);
-          }
+          sessionUserId = newSession?.user?.id ?? null;
         }
+      }
+
+      if (!sessionUserId) {
         this.sessionManager.handleSessionExpired('pushTask.getSession', { taskId: task.id, projectId });
+        return false;
+      }
+
+      if (sourceUserId && sessionUserId !== sourceUserId) {
+        this.logger.warn('检测到任务同步归属与当前会话不匹配，已拒绝云端写入', {
+          taskId: task.id,
+          projectId,
+          sourceUserId,
+          sessionUserId,
+        });
+        if (!fromRetryQueue) {
+          this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
+        }
         return false;
       }
       
@@ -210,7 +231,7 @@ export class TaskSyncOperationsService {
               });
               return false;
             }
-            return this.handlePushTaskError(retryEnhanced, task, projectId, fromRetryQueue);
+            return this.handlePushTaskError(retryEnhanced, task, projectId, fromRetryQueue, sourceUserId);
           }
         } else {
           this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId, errorCode: enhanced.code });
@@ -218,7 +239,7 @@ export class TaskSyncOperationsService {
         }
       }
       
-      return this.handlePushTaskError(enhanced, task, projectId, fromRetryQueue);
+      return this.handlePushTaskError(enhanced, task, projectId, fromRetryQueue, sourceUserId);
     }
   }
   
@@ -295,7 +316,13 @@ export class TaskSyncOperationsService {
   }
   
   /** 处理 pushTask 错误 */
-  private handlePushTaskError(enhanced: EnhancedError, task: Task, projectId: string, fromRetryQueue = false): boolean {
+  private handlePushTaskError(
+    enhanced: EnhancedError,
+    task: Task,
+    projectId: string,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): boolean {
     if (enhanced.errorType === 'VersionConflictError') {
       this.logger.warn('推送任务版本冲突', { taskId: task.id, projectId });
       this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
@@ -327,7 +354,7 @@ export class TaskSyncOperationsService {
     });
     
     if (enhanced.isRetryable && !fromRetryQueue) {
-      this.safeAddToRetryQueue('task', 'upsert', task, projectId);
+      this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
     } else if (!enhanced.isRetryable) {
       this.logger.warn('不可重试的错误，不加入重试队列', {
         taskId: task.id,
@@ -344,7 +371,8 @@ export class TaskSyncOperationsService {
     x: number,
     y: number,
     projectId?: string,
-    _fallbackTask?: Task
+    _fallbackTask?: Task,
+    sourceUserId?: string,
   ): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
@@ -359,6 +387,33 @@ export class TaskSyncOperationsService {
     const client = this.getSupabaseClient();
     if (!client) {
       return false;
+    }
+
+    if (sourceUserId) {
+      const { data: { session } } = await client.auth.getSession();
+      let sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
+        const refreshed = await this.sessionManager.tryRefreshSession('pushTaskPosition.getSession');
+        if (refreshed) {
+          const { data: { session: newSession } } = await client.auth.getSession();
+          sessionUserId = newSession?.user?.id ?? null;
+        }
+      }
+
+      if (!sessionUserId) {
+        this.sessionManager.handleSessionExpired('pushTaskPosition.getSession', { taskId, projectId });
+        return false;
+      }
+
+      if (sessionUserId !== sourceUserId) {
+        this.logger.warn('检测到任务位置同步归属与当前会话不匹配，已拒绝云端写入', {
+          taskId,
+          projectId,
+          sourceUserId,
+          sessionUserId,
+        });
+        return false;
+      }
     }
     
     try {

@@ -229,7 +229,7 @@ src/
   app/core/                 # 核心单例（sync/state/shell）
   app/features/flow/        # GoJS 流程图
   app/features/text/        # 移动端默认文本视图
-  app/features/focus/       # 专注模式（components/gate|spotlight|strata|black-box）
+  app/features/focus/       # 专注模式（components/gate|strata|black-box）
   app/features/parking/     # 停泊坞（任务暂存与提醒）
   app/shared/               # 共享组件、模态框、管道
   services/                 # 业务服务层（85+ 服务）

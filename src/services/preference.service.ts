@@ -120,22 +120,22 @@ export class PreferenceService {
       const success = await this.syncService.saveUserPreferences(userId, preferences);
       if (!success) {
         // 离线时加入队列
-        this.actionQueue.enqueue({
+        await this.actionQueue.enqueueForOwner(userId, {
           type: 'update',
           entityType: 'preference',
           entityId: userId,
-          payload: { preferences, userId }
+          payload: { preferences, userId, sourceUserId: userId }
         });
       }
       return success;
     } catch (error) {
       this.logger.error('保存用户偏好失败', error);
       this.lastLocalPreferencesWriteAt = Date.now();
-      this.actionQueue.enqueue({
+      await this.actionQueue.enqueueForOwner(userId, {
         type: 'update',
         entityType: 'preference',
         entityId: userId,
-        payload: { preferences, userId }
+        payload: { preferences, userId, sourceUserId: userId }
       });
       return false;
     }

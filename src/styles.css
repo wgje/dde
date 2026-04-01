@@ -750,6 +750,16 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   -webkit-user-select: none;
   user-select: none;
   contain: strict; /* 最强隔离：布局、绘制、大小 */
+  /* 【修复】移动端触碰流程图时消除白色边框/轮廓 */
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+/* GoJS 内部生成的 div/canvas 也需要消除 focus 轮廓和触碰高亮 */
+.flow-canvas-container *,
+.flow-canvas-container canvas,
+.flow-canvas-container div {
+  outline: none !important;
+  -webkit-tap-highlight-color: transparent !important;
 }
 
 /* 文本视图滚动容器 - 隔离布局和绘制 */
