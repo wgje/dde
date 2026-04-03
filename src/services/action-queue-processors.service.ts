@@ -39,6 +39,18 @@ import {
   RoutineTask,
 } from '../models/parking-dock';
 
+type ProjectSyncResult = {
+  success: boolean;
+  conflict?: boolean;
+  remoteData?: Project;
+  newVersion?: number;
+  projectPushed?: boolean;
+  failedTaskIds?: string[];
+  failedConnectionIds?: string[];
+  retryEnqueued?: string[];
+  failureReason?: string;
+};
+
 @Injectable({
   providedIn: 'root'
 })
@@ -252,6 +264,7 @@ export class ActionQueueProcessorsService {
       }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload.project.id);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
           : payload.project;
@@ -259,12 +272,15 @@ export class ActionQueueProcessorsService {
           await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
         }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:update', payload.project.id)) {
-          return result.success || result.conflict === true;
+          return result.success || result.conflict === true || failureTransferred;
         }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
           ));
+        }
+        if (result.success) {
+          return true;
         }
         if (result.conflict) {
           this.logger.warn('project:update 冲突', { projectId: payload.project.id });
@@ -285,7 +301,16 @@ export class ActionQueueProcessorsService {
           }
           return true; // 冲突由冲突解决流程处理
         }
-        return result.success;
+        if (failureTransferred) {
+          this.logger.info('project:update 已转交 RetryQueue，当前 ActionQueue 项视为完成', {
+            projectId: payload.project.id,
+            retryEnqueued: result.retryEnqueued,
+            failedTaskIds: result.failedTaskIds,
+            failedConnectionIds: result.failedConnectionIds,
+          });
+          return true;
+        }
+        throw new Error(result.failureReason ?? 'project:update 未提供失败原因');
       } catch (error) {
         this.logger.error('project:update 异常', { error, projectId: payload.project.id });
         return false;
@@ -327,6 +352,7 @@ export class ActionQueueProcessorsService {
       }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload.project.id);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
           : payload.project;
@@ -334,12 +360,15 @@ export class ActionQueueProcessorsService {
           await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
         }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:create', payload.project.id)) {
-          return result.success || result.conflict === true;
+          return result.success || result.conflict === true || failureTransferred;
         }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
             p.id === payload.project.id ? { ...p, version: result.newVersion } : p
           ));
+        }
+        if (result.success) {
+          return true;
         }
         if (result.conflict) {
           this.logger.warn('project:create 冲突', { projectId: payload.project.id });
@@ -360,12 +389,44 @@ export class ActionQueueProcessorsService {
           }
           return true;
         }
-        return result.success;
+        if (failureTransferred) {
+          this.logger.info('project:create 已转交 RetryQueue，当前 ActionQueue 项视为完成', {
+            projectId: payload.project.id,
+            retryEnqueued: result.retryEnqueued,
+            failedTaskIds: result.failedTaskIds,
+            failedConnectionIds: result.failedConnectionIds,
+          });
+          return true;
+        }
+        throw new Error(result.failureReason ?? 'project:create 未提供失败原因');
       } catch (error) {
         this.logger.error('project:create 异常', { error, projectId: payload.project.id });
         return false;
       }
     });
+  }
+
+  private wasProjectFailureTransferredToRetryQueue(
+    result: ProjectSyncResult,
+    projectId: string,
+  ): boolean {
+    const retryEntries = new Set(result.retryEnqueued ?? []);
+    if (retryEntries.size === 0) {
+      return false;
+    }
+
+    if (result.projectPushed === false && !retryEntries.has(`project:${projectId}`)) {
+      return false;
+    }
+
+    const allFailedTasksTransferred = (result.failedTaskIds ?? [])
+      .every(taskId => retryEntries.has(`task:${taskId}`));
+    if (!allFailedTasksTransferred) {
+      return false;
+    }
+
+    return (result.failedConnectionIds ?? [])
+      .every(connectionId => retryEntries.has(`connection:${connectionId}`));
   }
 
   private shouldStopProjectMutation(

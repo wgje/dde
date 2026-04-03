@@ -147,6 +147,10 @@ describe('Feature Flags 安全校验', () => {
     expect(FEATURE_FLAGS.PWA_PROMPT_DEFER_V2).toBe(true);
   });
 
+  it('PWA_NATIVE_INSTALL_PROMPT_V1 应默认启用', () => {
+    expect(FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1).toBe(true);
+  });
+
   it('RESUME_SESSION_SNAPSHOT_V1 应默认启用', () => {
     expect(FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1).toBe(true);
   });

@@ -117,7 +117,7 @@ describe('BatchSyncService owner isolation', () => {
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: MobileSyncStrategyService, useValue: mockMobileSync },
         { provide: SyncStateService, useValue: mockSyncState },
-        { provide: RetryQueueService, useValue: {} },
+        { provide: RetryQueueService, useValue: { removeByEntity: vi.fn() } },
         { provide: SentryLazyLoaderService, useValue: mockSentry },
       ],
     });
@@ -126,12 +126,12 @@ describe('BatchSyncService owner isolation', () => {
 
     callbacks = {
       pushProject: vi.fn().mockResolvedValue({ success: true }),
-      pushTask: vi.fn().mockResolvedValue(true),
+      pushTask: vi.fn().mockResolvedValue({ success: true, retryEnqueued: false }),
       pushTaskPosition: vi.fn().mockResolvedValue(true),
-      pushConnection: vi.fn().mockResolvedValue(true),
+      pushConnection: vi.fn().mockResolvedValue({ success: true, retryEnqueued: false }),
       getTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
       getConnectionTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
-      purgeTasksFromCloud: vi.fn().mockResolvedValue(true),
+      purgeTasksFromCloud: vi.fn().mockResolvedValue({ success: true, retriedTaskIds: [] }),
       topologicalSortTasks: vi.fn((tasks) => tasks),
       addToRetryQueue: vi.fn(),
     };
@@ -219,6 +219,25 @@ describe('BatchSyncService owner isolation', () => {
     expect(result.success).toBe(false);
     expect(callbacks.pushTask).not.toHaveBeenCalled();
     expect(callbacks.pushConnection).not.toHaveBeenCalled();
+  });
+
+  it('项目元数据失败但未真正入 RetryQueue 时，不应伪造 project retryEnqueued', async () => {
+    const project = createProject({ id: 'project-no-retry-transfer' });
+    callbacks.pushProject = vi.fn().mockResolvedValue({
+      success: false,
+      retryEnqueued: false,
+      failureReason: 'permission denied',
+    });
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.retryEnqueued).not.toContain('project:project-no-retry-transfer');
+    expect(result.failureReason).toBe('permission denied');
   });
 
   it('saveProjectToCloud 应将 sourceUserId 透传给 task 与 connection 回调', async () => {
@@ -368,7 +387,7 @@ describe('BatchSyncService owner isolation', () => {
       taskIdsToDelete: ['task-delete-a'],
       taskUpdateFieldsById: {},
     });
-    callbacks.purgeTasksFromCloud = vi.fn().mockResolvedValue(false);
+    callbacks.purgeTasksFromCloud = vi.fn().mockResolvedValue({ success: false, retriedTaskIds: ['task-delete-a'] });
     service.setCallbacks(callbacks);
     mockClient.auth.getSession.mockResolvedValue({
       data: { session: { user: { id: 'user-a' } } },
@@ -378,6 +397,7 @@ describe('BatchSyncService owner isolation', () => {
 
     expect(result.success).toBe(false);
     expect(result.failedTaskIds).toEqual(['task-delete-a']);
+    expect(result.retryEnqueued).toContain('task:task-delete-a');
   });
 
   it('task purge 成功后不应为引用已 purge 任务的连接创建无意义重试', async () => {

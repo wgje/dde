@@ -22,6 +22,7 @@ type RuntimeBootFlag =
   | 'FONT_AGGRESSIVE_DEFER_V2'
   | 'SYNC_STATUS_DEFERRED_MOUNT_V1'
   | 'PWA_PROMPT_DEFER_V2'
+  | 'PWA_NATIVE_INSTALL_PROMPT_V1'
   | 'RESUME_SESSION_SNAPSHOT_V1'
   | 'USER_PROJECTS_WATERMARK_RPC_V1'
   | 'RECOVERY_TICKET_DEDUP_V1'
@@ -119,6 +120,8 @@ export const FEATURE_FLAGS = {
   BLACKBOX_PULL_COOLDOWN_V1: true,
   /** PWA 安装提示与安装态体验 */
   PWA_INSTALL_PROMPT_V1: true,
+  /** PWA 安装提示优先交给浏览器原生 UX，仅 iOS 保留手动指引 */
+  PWA_NATIVE_INSTALL_PROMPT_V1: readRuntimeBooleanFlag('PWA_NATIVE_INSTALL_PROMPT_V1', true),
   /** 禁用 index.html 首屏数据预加载 fetch（弱网优先） */
   DISABLE_INDEX_DATA_PRELOAD_V1: true,
   /** 字体极致首屏策略（增强字体延后加载） */

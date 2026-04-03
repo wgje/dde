@@ -25,6 +25,7 @@ export class PwaInstallPromptService {
 
   private readonly dismissedSignal = signal<boolean>(this.readDismissedFlag());
   readonly canInstall = signal<boolean>(false);
+  readonly nativeInstallHintAvailable = signal<boolean>(false);
   readonly isStandaloneMode = signal<boolean>(this.detectStandaloneMode());
   readonly isIos = signal<boolean>(false);
   readonly isAndroid = signal<boolean>(false);
@@ -38,10 +39,24 @@ export class PwaInstallPromptService {
       return false;
     }
 
+    if (FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1) {
+      return this.isIos() || this.nativeInstallHintAvailable();
+    }
+
     return this.canInstall() || this.isIos() || this.isAndroid();
   });
 
   readonly installHint = computed(() => {
+    if (FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1) {
+      if (this.isIos()) {
+        return 'iOS: 在浏览器分享菜单中选择“添加到主屏幕”';
+      }
+
+      if (this.nativeInstallHintAvailable()) {
+        return '请使用浏览器地址栏或菜单中的“安装应用/添加到主屏幕”入口';
+      }
+    }
+
     if (this.canInstall()) {
       return '可一键安装，获得更接近原生应用的体验';
     }
@@ -60,6 +75,7 @@ export class PwaInstallPromptService {
   private beforeInstallPromptHandler: ((event: Event) => void) | null = null;
   private appInstalledHandler: (() => void) | null = null;
   private displayModeHandler: (() => void) | null = null;
+  private displayModeMedia: MediaQueryList | null = null;
 
   private static readonly DISMISSED_KEY = 'nanoflow.pwa-install.dismissed';
 
@@ -81,9 +97,18 @@ export class PwaInstallPromptService {
         return;
       }
 
+      if (FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1) {
+        this.deferredPrompt = null;
+        this.canInstall.set(false);
+        this.nativeInstallHintAvailable.set(true);
+        this.logger.info('检测到 beforeinstallprompt 事件，交由浏览器原生安装 UX 处理');
+        return;
+      }
+
       event.preventDefault();
       this.deferredPrompt = installEvent;
       this.canInstall.set(true);
+      this.nativeInstallHintAvailable.set(false);
       this.logger.info('捕获 beforeinstallprompt 事件');
     };
 
@@ -91,6 +116,7 @@ export class PwaInstallPromptService {
       this.logger.info('PWA 安装完成');
       this.deferredPrompt = null;
       this.canInstall.set(false);
+      this.nativeInstallHintAvailable.set(false);
       this.isStandaloneMode.set(true);
       this.dismissedSignal.set(true);
       this.writeDismissedFlag(true);
@@ -101,8 +127,8 @@ export class PwaInstallPromptService {
     window.addEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
     window.addEventListener('appinstalled', this.appInstalledHandler);
 
-    const media = window.matchMedia('(display-mode: standalone)');
-    media.addEventListener('change', this.displayModeHandler);
+    this.displayModeMedia = window.matchMedia('(display-mode: standalone)');
+    this.displayModeMedia.addEventListener('change', this.displayModeHandler);
 
     this.initialized = true;
     this.logger.debug('PWA 安装提示服务已初始化', {
@@ -212,10 +238,11 @@ export class PwaInstallPromptService {
     }
 
     if (this.displayModeHandler) {
-      const media = window.matchMedia('(display-mode: standalone)');
-      media.removeEventListener('change', this.displayModeHandler);
+      this.displayModeMedia?.removeEventListener('change', this.displayModeHandler);
       this.displayModeHandler = null;
     }
+
+    this.displayModeMedia = null;
 
     this.initialized = false;
   }

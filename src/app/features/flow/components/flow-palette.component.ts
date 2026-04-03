@@ -427,6 +427,16 @@ export class FlowPaletteComponent implements OnDestroy {
    * 分子：已完成的录音内容（项目历史回顾中的已完成条目）
    */
   readonly completionRate = computed(() => {
+    if (!this.projectState.activeProject()) {
+      return 0;
+    }
+
+    // 当项目中已没有任何存活任务时，仪表盘应显示为 100%，
+    // 避免历史黑匣子条目让完成率停留在旧值。
+    if (this.totalTaskCount() === 0) {
+      return 100;
+    }
+
     const entries = this.allBlackBoxEntries();
     const total = entries.length;
     const completed = entries.filter(e => e.isCompleted).length;

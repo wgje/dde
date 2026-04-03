@@ -324,6 +324,93 @@ describe('ActionQueueProcessorsService', () => {
     );
   });
 
+  it('project:update should acknowledge failures already transferred to RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: true,
+      failedTaskIds: ['task-a'],
+      failedConnectionIds: ['connection-a'],
+      retryEnqueued: ['task:task-a', 'connection:connection-a'],
+      failureReason: 'project batch sync delegated remaining work to retry queue',
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-retry-handoff', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockLoggerCategory.info).toHaveBeenCalledWith(
+      'project:update 已转交 RetryQueue，当前 ActionQueue 项视为完成',
+      expect.objectContaining({
+        projectId: 'p-retry-handoff',
+      })
+    );
+  });
+
+  it('project:update should keep failing when failed entities were not transferred to RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: true,
+      failedTaskIds: ['task-a'],
+      retryEnqueued: [],
+      failureReason: 'permanent task failure',
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-permanent-failure', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
+    expect(mockLoggerCategory.error).toHaveBeenCalled();
+  });
+
+  it('project:update should not acknowledge project metadata failures when pushProject did not enqueue RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: [],
+      failureReason: 'permission denied',
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-no-retry-transfer', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
+  });
+
+  it('project:update should acknowledge RetryQueue handoff even after queue view becomes stale', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: ['project:p-stale-retry-transfer'],
+      failureReason: 'offline sync deferred',
+    });
+    mockActionQueueService.isQueueViewCurrent.mockReturnValueOnce(false);
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-stale-retry-transfer', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+  });
+
   it('project:update should persist conflict when remote snapshot is unavailable', async () => {
     mockSyncService.saveProjectSmart.mockResolvedValueOnce({
       success: false,
@@ -429,6 +516,65 @@ describe('ActionQueueProcessorsService', () => {
     expect(onConflict).not.toHaveBeenCalled();
     expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
     expect(mockToastService.warning).not.toHaveBeenCalledWith('检测到数据冲突', expect.any(String));
+  });
+
+  it('project:create should acknowledge failures already transferred to RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: true,
+      failedTaskIds: ['task-a'],
+      retryEnqueued: ['task:task-a'],
+      failureReason: 'project batch sync delegated remaining work to retry queue',
+    });
+    const handler = getProcessor('project:create');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-create-retry-handoff', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+  });
+
+  it('project:create should keep failing when failed entities were not transferred to RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: true,
+      failedTaskIds: ['task-a'],
+      retryEnqueued: [],
+      failureReason: 'permanent task failure',
+    });
+    const handler = getProcessor('project:create');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-create-permanent-failure', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
+  });
+
+  it('project:create should not acknowledge project metadata failures when pushProject did not enqueue RetryQueue', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: [],
+      failureReason: 'permission denied',
+    });
+    const handler = getProcessor('project:create');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-create-no-retry-transfer', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
   });
 
   it('project:create should persist conflict when remote snapshot is unavailable', async () => {

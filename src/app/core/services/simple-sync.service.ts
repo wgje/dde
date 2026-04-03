@@ -212,13 +212,13 @@ export class SimpleSyncService {
     // 初始化 BatchSyncService 回调
     this.batchSyncService.setCallbacks({
       pushProject: (p, f, sourceUserId, taskIdsToDelete) => this.pushProjectWithResult(p, f, sourceUserId, taskIdsToDelete),
-      pushTask: (t, pid, s, f, sourceUserId) => this.pushTask(t, pid, s, f, sourceUserId),
+      pushTask: (t, pid, s, f, sourceUserId) => this.pushTaskWithResult(t, pid, s, f, sourceUserId),
       pushTaskPosition: (tid, x, y, pid, fallbackTask, sourceUserId) =>
         this.pushTaskPosition(tid, x, y, pid, fallbackTask, sourceUserId),
-      pushConnection: (c, pid, s, te, f, sourceUserId) => this.pushConnection(c, pid, s, te, f, sourceUserId),
+      pushConnection: (c, pid, s, te, f, sourceUserId) => this.pushConnectionWithResult(c, pid, s, te, f, sourceUserId),
       getTombstoneIds: (pid) => this.getTombstoneIds(pid),
       getConnectionTombstoneIds: (pid) => this.getConnectionTombstoneIds(pid),
-      purgeTasksFromCloud: (pid, tids, sourceUserId) => this.purgeTasksFromCloud(pid, tids, sourceUserId),
+      purgeTasksFromCloud: (pid, tids, sourceUserId) => this.purgeTasksFromCloudWithResult(pid, tids, sourceUserId),
       topologicalSortTasks: (tasks) => this.topologicalSortTasks(tasks),
       addToRetryQueue: (t, o, d, p, sourceUserId, taskIdsToDelete) => this.addToRetryQueue(
         t,
@@ -761,6 +761,60 @@ export class SimpleSyncService {
     return this.connectionSyncOps.getConnectionTombstoneIds(projectId);
   }
 
+  private async pushTaskWithResult(
+    task: Task,
+    projectId: string,
+    skipTombstoneCheck = false,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<{ success: boolean; retryEnqueued?: boolean }> {
+    const success = await this.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue, sourceUserId);
+    return {
+      success,
+      retryEnqueued: !success && this.hasRetryQueueEntity('task', task.id),
+    };
+  }
+
+  private async pushConnectionWithResult(
+    connection: Connection,
+    projectId: string,
+    skipTombstoneCheck = false,
+    skipTaskExistenceCheck = false,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+  ): Promise<{ success: boolean; retryEnqueued?: boolean }> {
+    const success = await this.pushConnection(
+      connection,
+      projectId,
+      skipTombstoneCheck,
+      skipTaskExistenceCheck,
+      fromRetryQueue,
+      sourceUserId,
+    );
+    return {
+      success,
+      retryEnqueued: !success && this.hasRetryQueueEntity('connection', connection.id),
+    };
+  }
+
+  private async purgeTasksFromCloudWithResult(
+    projectId: string,
+    taskIds: string[],
+    sourceUserId?: string,
+  ): Promise<{ success: boolean; retriedTaskIds?: string[] }> {
+    const success = await this.purgeTasksFromCloud(projectId, taskIds, sourceUserId);
+    if (success) {
+      return { success: true, retriedTaskIds: [] };
+    }
+
+    return {
+      success: false,
+      retriedTaskIds: taskIds.filter(taskId =>
+        this.hasRetryQueueEntity('task', taskId)
+      ),
+    };
+  }
+
   /** 批量预热所有项目的 tombstone 缓存（单次 RPC 替代 N 次查询） */
   async batchPreloadTombstones(projectIds: string[]): Promise<boolean> {
     const client = await this.getSupabaseClient();
@@ -776,17 +830,44 @@ export class SimpleSyncService {
     sourceUserId?: string,
     taskIdsToDelete?: string[],
   ): Promise<boolean> {
+    const result = await this.pushProjectWithStatus(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
+    return result.success;
+  }
+
+  private async pushProjectWithStatus(
+    project: Project,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ): Promise<{ success: boolean; retryEnqueued: boolean; failureReason?: string }> {
+    let retryEnqueued = false;
+
+    const enqueueRetry = (): void => {
+      if (fromRetryQueue) {
+        return;
+      }
+
+      this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+      retryEnqueued = true;
+    };
+
     if (this.syncState().sessionExpired) {
       this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id });
-      return false;
+      return {
+        success: false,
+        retryEnqueued,
+        failureReason: 'project sync session expired',
+      };
     }
     
     const client = await this.getSupabaseClient();
     if (!client) {
-      if (!fromRetryQueue) {
-        this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-      }
-      return false;
+      enqueueRetry();
+      return {
+        success: false,
+        retryEnqueued,
+        failureReason: 'supabase client unavailable for project sync',
+      };
     }
     
     // 【#95057880 修复】支持自动刷新后重试的内部执行函数（与 pushTask 对齐）
@@ -803,9 +884,7 @@ export class SimpleSyncService {
       }
 
       if (!sessionUserId) {
-        if (!fromRetryQueue) {
-          this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-        }
+        enqueueRetry();
         this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
         return false;
       }
@@ -816,9 +895,7 @@ export class SimpleSyncService {
           sourceUserId,
           sessionUserId,
         });
-        if (!fromRetryQueue) {
-          this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-        }
+        enqueueRetry();
         return false;
       }
 
@@ -827,11 +904,16 @@ export class SimpleSyncService {
     };
     
     try {
-      return await this.throttle.execute(
+      const success = await this.throttle.execute(
         `push-project:${project.id}`,
         executeProjectPush,
         { priority: 'high', retries: 2 }
       );
+      return {
+        success,
+        retryEnqueued,
+        failureReason: success ? undefined : 'project push returned false',
+      };
     } catch (e) {
       // 【#95057880 修复】PermanentFailureError 直接向上冒泡，不做二次处理
       if (isPermanentFailureError(e)) {
@@ -848,27 +930,42 @@ export class SimpleSyncService {
         });
         if (canRetry) {
           try {
-            return await executeProjectPush();
+            const success = await executeProjectPush();
+            return {
+              success,
+              retryEnqueued,
+              failureReason: success ? undefined : 'project push returned false after session refresh',
+            };
           } catch (retryError) {
             if (isPermanentFailureError(retryError)) throw retryError;
             const retryEnhanced = supabaseErrorToError(retryError);
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              if (!fromRetryQueue) {
-                this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-              }
+              enqueueRetry();
               this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
                 projectId: project.id,
                 errorCode: retryEnhanced.code
               });
-              return false;
+              return {
+                success: false,
+                retryEnqueued,
+                failureReason: 'project sync session expired after refresh',
+              };
             }
+
+            return {
+              success: false,
+              retryEnqueued,
+              failureReason: retryEnhanced.message,
+            };
           }
         } else {
-          if (!fromRetryQueue) {
-            this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-          }
+          enqueueRetry();
           this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
-          return false;
+          return {
+            success: false,
+            retryEnqueued,
+            failureReason: 'project sync session expired',
+          };
         }
       }
       
@@ -877,10 +974,14 @@ export class SimpleSyncService {
         throw new PermanentFailureError('Version conflict', enhanced, { operation: 'pushProject', projectId: project.id });
       }
       
-      if (enhanced.isRetryable && !fromRetryQueue) {
-        this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+      if (enhanced.isRetryable) {
+        enqueueRetry();
       }
-      return false;
+      return {
+        success: false,
+        retryEnqueued,
+        failureReason: enhanced.message,
+      };
     }
   }
 
@@ -889,10 +990,14 @@ export class SimpleSyncService {
     fromRetryQueue = false,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }> {
+  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }> {
     try {
-      const success = await this.pushProject(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
-      return { success };
+      const result = await this.pushProjectWithStatus(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
+      return {
+        success: result.success,
+        retryEnqueued: result.retryEnqueued,
+        failureReason: result.failureReason,
+      };
     } catch (error) {
       if (!isPermanentFailureError(error)) {
         throw error;
@@ -910,6 +1015,8 @@ export class SimpleSyncService {
         success: false,
         conflict: true,
         remoteData: remoteData ?? undefined,
+        retryEnqueued: false,
+        failureReason: 'project sync version conflict',
       };
     }
   }
@@ -989,6 +1096,16 @@ export class SimpleSyncService {
     this.state.update(s => ({ ...s, pendingCount: 0 }));
     this.logger.info(`已清理 ${count} 个重试项`);
     this.toast.info(`已清理 ${count} 个待同步项`);
+  }
+
+  private hasRetryQueueEntity(type: RetryableEntityType, entityId: string): boolean {
+    const retryQueue = this.retryQueueService as RetryQueueService & {
+      hasEntity?: (entityType: RetryableEntityType, targetEntityId: string) => boolean;
+    };
+
+    return typeof retryQueue.hasEntity === 'function'
+      ? retryQueue.hasEntity(type, entityId)
+      : false;
   }
   
   // ==================== Realtime / 轮询 ====================
@@ -1208,11 +1325,11 @@ export class SimpleSyncService {
   
   // ==================== 项目加载 ====================
   
-  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; failedTaskIds?: string[]; failedConnectionIds?: string[] }> {
+  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
     return this.batchSyncService.saveProjectToCloud(project, userId);
   }
 
-  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; failedTaskIds?: string[]; failedConnectionIds?: string[] }> {
+  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
     const result = await this.saveProjectToCloud(project, userId);
     return { ...result, newVersion: project.version };
   }

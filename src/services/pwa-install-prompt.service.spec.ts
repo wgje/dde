@@ -6,15 +6,28 @@ import { FEATURE_FLAGS } from '../config/feature-flags.config';
 
 const DISMISSED_KEY = 'nanoflow.pwa-install.dismissed';
 
+interface MockBeforeInstallPromptEvent {
+  preventDefault: ReturnType<typeof vi.fn>;
+  prompt: ReturnType<typeof vi.fn>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+}
+
 describe('PwaInstallPromptService', () => {
   let service: PwaInstallPromptService;
   const destroyCallbacks: Array<() => void> = [];
   const originalFlag = FEATURE_FLAGS.PWA_INSTALL_PROMPT_V1;
+  const originalNativeFlag = FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1;
   let matchMediaMatches: boolean;
 
   const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
     onDestroy: (cb: () => void) => {
       destroyCallbacks.push(cb);
+      return () => {
+        const index = destroyCallbacks.indexOf(cb);
+        if (index >= 0) {
+          destroyCallbacks.splice(index, 1);
+        }
+      };
     },
   };
 
@@ -38,6 +51,30 @@ describe('PwaInstallPromptService', () => {
     return runInInjectionContext(injector, () => injector.get(PwaInstallPromptService));
   }
 
+  function emitBeforeInstallPrompt(
+    overrides: Partial<MockBeforeInstallPromptEvent> = {},
+  ): MockBeforeInstallPromptEvent {
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    service.initialize();
+
+    const handler = addSpy.mock.calls.find((call) => call[0] === 'beforeinstallprompt')?.[1] as
+      | ((event: Event) => void)
+      | undefined;
+    if (!handler) {
+      throw new Error('beforeinstallprompt listener not registered');
+    }
+
+    const event: MockBeforeInstallPromptEvent = {
+      preventDefault: vi.fn(),
+      prompt: vi.fn().mockResolvedValue(undefined),
+      userChoice: Promise.resolve({ outcome: 'dismissed', platform: 'web' }),
+      ...overrides,
+    };
+
+    handler(event as unknown as Event);
+    return event;
+  }
+
   beforeEach(() => {
     destroyCallbacks.length = 0;
     localStorage.removeItem(DISMISSED_KEY);
@@ -54,6 +91,7 @@ describe('PwaInstallPromptService', () => {
     );
 
     (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_INSTALL_PROMPT_V1 = true;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_NATIVE_INSTALL_PROMPT_V1 = false;
     service = createService();
   });
 
@@ -64,6 +102,7 @@ describe('PwaInstallPromptService', () => {
     localStorage.removeItem(DISMISSED_KEY);
     vi.restoreAllMocks();
     (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_INSTALL_PROMPT_V1 = originalFlag;
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_NATIVE_INSTALL_PROMPT_V1 = originalNativeFlag;
   });
 
   // --- 初始化 ---
@@ -88,16 +127,21 @@ describe('PwaInstallPromptService', () => {
   // --- beforeinstallprompt 事件 ---
 
   it('捕获 beforeinstallprompt 事件后 canInstall 应为 true', () => {
-    service.initialize();
-
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn().mockResolvedValue(undefined),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
 
     expect(service.canInstall()).toBe(true);
+  });
+
+  it('原生提示模式下 beforeinstallprompt 不应被拦截，也不应暴露自定义安装入口', () => {
+    (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_NATIVE_INSTALL_PROMPT_V1 = true;
+    service = createService();
+
+    const event = emitBeforeInstallPrompt();
+
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(service.canInstall()).toBe(false);
+    expect(service.canShowInstallPrompt()).toBe(true);
+    expect(service.installHint()).toContain('浏览器地址栏');
   });
 
   it('缺少 prompt/userChoice 的事件应被忽略', () => {
@@ -118,16 +162,11 @@ describe('PwaInstallPromptService', () => {
   });
 
   it('用户接受安装后 promptInstall 应返回 true 并清除 canInstall', async () => {
-    service.initialize();
-
-    // 模拟 beforeinstallprompt
     const promptFn = vi.fn().mockResolvedValue(undefined);
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
+    emitBeforeInstallPrompt({
       prompt: promptFn,
       userChoice: Promise.resolve({ outcome: 'accepted', platform: 'web' }),
     });
-    window.dispatchEvent(event);
 
     const result = await service.promptInstall();
     expect(result).toBe(true);
@@ -136,14 +175,9 @@ describe('PwaInstallPromptService', () => {
   });
 
   it('用户拒绝安装后 promptInstall 应返回 false 且保留 canInstall', async () => {
-    service.initialize();
-
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn().mockResolvedValue(undefined),
+    emitBeforeInstallPrompt({
       userChoice: Promise.resolve({ outcome: 'dismissed', platform: 'web' }),
     });
-    window.dispatchEvent(event);
 
     const result = await service.promptInstall();
     expect(result).toBe(false);
@@ -151,14 +185,10 @@ describe('PwaInstallPromptService', () => {
   });
 
   it('prompt 抛出异常时 promptInstall 应返回 false', async () => {
-    service.initialize();
-
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
+    emitBeforeInstallPrompt({
       prompt: vi.fn().mockRejectedValue(new Error('test')),
       userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
     });
-    window.dispatchEvent(event);
 
     const result = await service.promptInstall();
     expect(result).toBe(false);
@@ -181,28 +211,13 @@ describe('PwaInstallPromptService', () => {
 
   it('功能开关关闭时 canShowInstallPrompt 应为 false', () => {
     (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_INSTALL_PROMPT_V1 = false;
-    service.initialize();
-
-    // 即使 canInstall 为 true 也不应显示
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn(),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
 
     expect(service.canShowInstallPrompt()).toBe(false);
   });
 
   it('已关闭提示后 canShowInstallPrompt 应为 false', () => {
-    service.initialize();
-
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn(),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
 
     service.dismissPrompt();
     expect(service.canShowInstallPrompt()).toBe(false);
@@ -220,14 +235,7 @@ describe('PwaInstallPromptService', () => {
   // --- installHint ---
 
   it('canInstall 时 installHint 应提示一键安装', () => {
-    service.initialize();
-
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn(),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
 
     expect(service.installHint()).toContain('一键安装');
   });
@@ -239,15 +247,7 @@ describe('PwaInstallPromptService', () => {
   // --- appinstalled 事件 ---
 
   it('appinstalled 事件应清除 canInstall 并标记 standalone', () => {
-    service.initialize();
-
-    // 先设置 canInstall
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn(),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
     expect(service.canInstall()).toBe(true);
 
     // 触发 appinstalled
@@ -271,15 +271,7 @@ describe('PwaInstallPromptService', () => {
   });
 
   it('cleanup 后 beforeinstallprompt 事件不应影响已清理的服务', () => {
-    service.initialize();
-
-    // 先捕获一个事件
-    const event = new Event('beforeinstallprompt', { cancelable: true });
-    Object.assign(event, {
-      prompt: vi.fn(),
-      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
-    });
-    window.dispatchEvent(event);
+    emitBeforeInstallPrompt();
     expect(service.canInstall()).toBe(true);
 
     // 清理

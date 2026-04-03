@@ -2385,10 +2385,10 @@ describe('SimpleSyncService', () => {
       const project = createMockProject({ id: 'project-conflict', tasks: [], connections: [] });
       const remoteProject = createMockProject({ id: 'project-conflict', version: 9, tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
-        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      vi.spyOn(service, 'pushProject').mockRejectedValueOnce(
+      vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockRejectedValueOnce(
         new PermanentFailureError(
           'Version conflict',
           Object.assign(new Error('版本冲突：数据已被修改，请刷新后重试'), { errorType: 'VersionConflictError' })
@@ -2402,34 +2402,42 @@ describe('SimpleSyncService', () => {
         success: false,
         conflict: true,
         remoteData: remoteProject,
+        retryEnqueued: false,
+        failureReason: 'project sync version conflict',
       });
     });
 
     it('BatchSync 回调应透传 sourceUserId 到 pushProject', async () => {
       const project = createMockProject({ id: 'project-owner-pass-through', tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
-        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      const pushProjectSpy = vi.spyOn(service, 'pushProject').mockResolvedValueOnce(true);
+      const pushProjectSpy = vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
+        success: true,
+        retryEnqueued: false,
+      });
 
       const result = await callbacks.pushProject(project, false, 'owner-a');
 
-      expect(result).toEqual({ success: true });
+      expect(result).toEqual({ success: true, retryEnqueued: false, failureReason: undefined });
       expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a', undefined);
     });
 
     it('BatchSync 回调应透传 pending taskIdsToDelete 到 pushProject', async () => {
       const project = createMockProject({ id: 'project-delete-intent-pass-through', tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
-        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      const pushProjectSpy = vi.spyOn(service, 'pushProject').mockResolvedValueOnce(true);
+      const pushProjectSpy = vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
+        success: true,
+        retryEnqueued: false,
+      });
 
       const result = await callbacks.pushProject(project, false, 'owner-a', ['task-delete-a']);
 
-      expect(result).toEqual({ success: true });
+      expect(result).toEqual({ success: true, retryEnqueued: false, failureReason: undefined });
       expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a', ['task-delete-a']);
     });
 

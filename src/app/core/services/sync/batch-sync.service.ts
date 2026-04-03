@@ -35,6 +35,7 @@ export interface BatchSyncResult {
   failedTaskIds?: string[];
   failedConnectionIds?: string[];
   retryEnqueued?: string[];
+  failureReason?: string;
 }
 
 /** 批量同步回调函数类型 */
@@ -44,14 +45,14 @@ export interface BatchSyncCallbacks {
     fromRetryQueue?: boolean,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+  ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
   pushTask: (
     task: Task,
     projectId: string,
     skipTombstoneCheck?: boolean,
     fromRetryQueue?: boolean,
     sourceUserId?: string,
-  ) => Promise<boolean>;
+  ) => Promise<{ success: boolean; retryEnqueued?: boolean }>;
   pushTaskPosition: (
     taskId: string,
     x: number,
@@ -67,10 +68,10 @@ export interface BatchSyncCallbacks {
     skipTaskExistenceCheck?: boolean,
     fromRetryQueue?: boolean,
     sourceUserId?: string,
-  ) => Promise<boolean>;
+  ) => Promise<{ success: boolean; retryEnqueued?: boolean }>;
   getTombstoneIds: (projectId: string) => Promise<Set<string>>;
   getConnectionTombstoneIds: (projectId: string) => Promise<Set<string>>;
-  purgeTasksFromCloud: (projectId: string, taskIds: string[], sourceUserId?: string) => Promise<boolean>;
+  purgeTasksFromCloud: (projectId: string, taskIds: string[], sourceUserId?: string) => Promise<{ success: boolean; retriedTaskIds?: string[] }>;
   topologicalSortTasks: (tasks: Task[]) => Task[];
   addToRetryQueue: (
     type: 'task' | 'project' | 'connection',
@@ -206,7 +207,14 @@ export class BatchSyncService {
 
     if (!this.callbacks) {
       this.logger.error('BatchSyncService: 回调未初始化');
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'BatchSync callbacks not initialized',
+      };
     }
 
     const changes = this.changeTracker.getProjectChanges(project.id);
@@ -215,7 +223,14 @@ export class BatchSyncService {
     // 本地模式快速退出
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过云端同步');
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'project sync skipped in local mode',
+      };
     }
 
     // 网络感知检查
@@ -223,7 +238,14 @@ export class BatchSyncService {
       this.logger.debug('网络感知: 同步被延迟', { projectId: project.id });
       this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
       retryEnqueued.push(`project:${project.id}`);
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'project sync deferred by network awareness',
+      };
     }
 
     // 熔断层校验
@@ -234,14 +256,28 @@ export class BatchSyncService {
         level: 'error',
         tags: { operation: 'saveProjectToCloud', projectId: project.id }
       });
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'project sync blocked by circuit breaker',
+      };
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
       this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
       retryEnqueued.push(`project:${project.id}`);
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'supabase client unavailable for project sync',
+      };
     }
     
     // Session 验证
@@ -255,7 +291,14 @@ export class BatchSyncService {
         retryEnqueued.push(`project:${project.id}`);
         this.logger.warn('Session 过期，项目数据已入重试队列', { projectId: project.id });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-        return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+        return {
+          success: false,
+          failedTaskIds,
+          failedConnectionIds,
+          retryEnqueued,
+          projectPushed,
+          failureReason: 'project sync session expired',
+        };
       }
 
       if (sessionUserId !== userId) {
@@ -267,7 +310,14 @@ export class BatchSyncService {
           sessionUserId,
         });
         this.syncState.setSyncError('账号已切换，项目稍后将按原 owner 重试');
-        return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+        return {
+          success: false,
+          failedTaskIds,
+          failedConnectionIds,
+          retryEnqueued,
+          projectPushed,
+          failureReason: 'project sync owner mismatch',
+        };
       }
     } catch (e) {
       this.logger.error('Session 验证失败', e);
@@ -277,7 +327,14 @@ export class BatchSyncService {
       retryEnqueued.push(`project:${project.id}`);
       this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
       this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
+      return {
+        success: false,
+        failedTaskIds,
+        failedConnectionIds,
+        retryEnqueued,
+        projectPushed,
+        failureReason: 'project sync session validation failed',
+      };
     }
     
     this.syncState.setSyncing(true);
@@ -314,10 +371,13 @@ export class BatchSyncService {
           failedTaskIds,
           failedConnectionIds,
           retryEnqueued,
+          failureReason: projectPushResult.failureReason ?? 'project sync version conflict',
         };
       }
       if (!projectPushed) {
-        retryEnqueued.push(`project:${projectSnapshot.id}`);
+        if (projectPushResult.retryEnqueued) {
+          retryEnqueued.push(`project:${projectSnapshot.id}`);
+        }
         this.syncState.setSyncing(false);
         this.syncState.setSyncError('项目元数据同步失败，已停止批量同步并等待重试');
         return {
@@ -326,18 +386,24 @@ export class BatchSyncService {
           failedTaskIds,
           failedConnectionIds,
           retryEnqueued,
+          failureReason: projectPushResult.failureReason ?? 'project metadata sync failed',
         };
       }
 
       // 3. 处理永久删除的任务
       if (changes.taskIdsToDelete.length > 0) {
-        taskPurgeSucceeded = await this.callbacks.purgeTasksFromCloud(projectSnapshot.id, changes.taskIdsToDelete, userId);
+        for (const taskId of changes.taskIdsToDelete) {
+          this.retryQueue.removeByEntity('task', taskId);
+        }
+        const purgeResult = await this.callbacks.purgeTasksFromCloud(projectSnapshot.id, changes.taskIdsToDelete, userId);
+        taskPurgeSucceeded = purgeResult.success;
         if (taskPurgeSucceeded) {
           for (const taskId of changes.taskIdsToDelete) {
             this.changeTracker.clearTaskChange(projectSnapshot.id, taskId);
           }
         } else {
           failedTaskIds.push(...changes.taskIdsToDelete);
+          retryEnqueued.push(...(purgeResult.retriedTaskIds ?? []).map(taskId => `task:${taskId}`));
         }
       }
 
@@ -352,7 +418,8 @@ export class BatchSyncService {
 
         try {
           const connection = deletedConnections[i];
-          const pushed = await this.callbacks.pushConnection(
+          this.retryQueue.removeByEntity('connection', connection.id);
+          const connectionResult = await this.callbacks.pushConnection(
             connection,
             projectSnapshot.id,
             true,
@@ -360,9 +427,11 @@ export class BatchSyncService {
             false,
             userId,
           );
-          if (!pushed) {
+          if (!connectionResult.success) {
             failedConnectionIds.push(connection.id);
-            retryEnqueued.push(`connection:${connection.id}`);
+            if (connectionResult.retryEnqueued) {
+              retryEnqueued.push(`connection:${connection.id}`);
+            }
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -384,6 +453,7 @@ export class BatchSyncService {
         
         try {
           const task = sortedTasks[i];
+          this.retryQueue.removeByEntity('task', task.id);
           const changedFields = taskUpdateFieldsById[task.id];
           
           // 位置增量更新优化
@@ -391,9 +461,9 @@ export class BatchSyncService {
             changedFields.length > 0 &&
             changedFields.every(f => f === 'x' || f === 'y' || f === 'rank');
           
-          let success: boolean;
+          let taskResult: { success: boolean; retryEnqueued?: boolean };
           if (isPositionOnlyUpdate) {
-            success = await this.callbacks.pushTaskPosition(
+            const positionSuccess = await this.callbacks.pushTaskPosition(
               task.id,
               task.x,
               task.y,
@@ -402,22 +472,26 @@ export class BatchSyncService {
               userId,
             );
             // 位置增量更新失败时，立即回退到完整 upsert，避免 406 导致依赖断裂
-            if (!success) {
+            if (!positionSuccess) {
               this.logger.warn('任务位置增量推送失败，回退完整任务推送', {
                 projectId: projectSnapshot.id,
                 taskId: task.id
               });
-              success = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
+              taskResult = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
+            } else {
+              taskResult = { success: true };
             }
           } else {
-            success = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
+            taskResult = await this.callbacks.pushTask(task, projectSnapshot.id, true, false, userId);
           }
           
-          if (success) {
+          if (taskResult.success) {
             successfulTaskIds.add(task.id);
           } else {
             failedTaskIds.push(task.id);
-            retryEnqueued.push(`task:${task.id}`);
+            if (taskResult.retryEnqueued) {
+              retryEnqueued.push(`task:${task.id}`);
+            }
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -491,10 +565,13 @@ export class BatchSyncService {
         
         try {
           const connection = connectionsToSync[i];
-          const pushed = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false, false, userId);
-          if (!pushed) {
+          this.retryQueue.removeByEntity('connection', connection.id);
+          const connectionResult = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false, false, userId);
+          if (!connectionResult.success) {
             failedConnectionIds.push(connection.id);
-            retryEnqueued.push(`connection:${connection.id}`);
+            if (connectionResult.retryEnqueued) {
+              retryEnqueued.push(`connection:${connection.id}`);
+            }
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -530,7 +607,8 @@ export class BatchSyncService {
         projectPushed,
         failedTaskIds,
         failedConnectionIds,
-        retryEnqueued
+        retryEnqueued,
+        failureReason: success ? undefined : 'project batch sync delegated remaining work to retry queue'
       };
     } catch (e) {
       if (!retryEnqueued.includes(`project:${project.id}`)) {
@@ -549,7 +627,8 @@ export class BatchSyncService {
         projectPushed,
         failedTaskIds,
         failedConnectionIds,
-        retryEnqueued
+        retryEnqueued,
+        failureReason: e instanceof Error ? e.message : 'project batch sync failed unexpectedly'
       };
     }
   }
