@@ -40,7 +40,9 @@ describe('BatchSyncService owner isolation', () => {
         return {
           select: vi.fn(() => ({
             eq: vi.fn(() => ({
-              in: vi.fn(async () => ({ data: [], error: null })),
+              in: vi.fn(() => ({
+                is: vi.fn(async () => ({ data: [], error: null })),
+              })),
             })),
           })),
         };

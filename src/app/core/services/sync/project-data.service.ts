@@ -800,11 +800,18 @@ export class ProjectDataService {
       return;
     }
 
-    // 过滤已删除的任务
-    const cleanedProjects = projects.map(p => ({
-      ...p,
-      tasks: (p.tasks || []).filter(t => !t.deletedAt)
-    }));
+    // 过滤已删除的任务及其关联连接
+    const cleanedProjects = projects.map(p => {
+      const activeTasks = (p.tasks || []).filter(t => !t.deletedAt);
+      const activeTaskIds = new Set(activeTasks.map(t => t.id));
+      return {
+        ...p,
+        tasks: activeTasks,
+        connections: (p.connections || []).filter(c =>
+          !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
+        ),
+      };
+    });
 
     const snapshotOwnerUserId = ownerUserId
       ?? this.authService?.currentUserId()
@@ -1122,10 +1129,17 @@ export class ProjectDataService {
       const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown };
       if (Array.isArray(parsed?.projects)) {
         return {
-          projects: parsed.projects.map((p: Project) => ({
-            ...p,
-            tasks: (p.tasks || []).filter((t: Task) => !t.deletedAt)
-          })),
+          projects: parsed.projects.map((p: Project) => {
+            const activeTasks = (p.tasks || []).filter((t: Task) => !t.deletedAt);
+            const activeTaskIds = new Set(activeTasks.map((t: Task) => t.id));
+            return {
+              ...p,
+              tasks: activeTasks,
+              connections: (p.connections || []).filter((c: Connection) =>
+                !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
+              ),
+            };
+          }),
           ownerUserId: typeof parsed.ownerUserId === 'string' && parsed.ownerUserId.trim().length > 0
             ? parsed.ownerUserId
             : null,

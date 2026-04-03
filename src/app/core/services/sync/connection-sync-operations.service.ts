@@ -300,12 +300,14 @@ export class ConnectionSyncOperationsService {
     connection: Connection
   ): Promise<{ valid: boolean }> {
     try {
+      // 中文注释：必须排除软删除任务，否则会为已删除任务创建/保留连接
       const result = await supabaseWithRetry(
         () => client
           .from('tasks')
           .select('id')
           .in('id', [connection.source, connection.target])
-          .eq('project_id', projectId),
+          .eq('project_id', projectId)
+          .is('deleted_at', null),
         {
           timeout: 'QUICK',
           maxRetries: 2

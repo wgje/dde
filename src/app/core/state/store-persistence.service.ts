@@ -534,8 +534,11 @@ export class StorePersistenceService {
         this.logger.debug('已过滤已删除任务', { projectId, filteredCount });
       }
       
-      // 【P1-05 修复】同样过滤软删除的连接，防止复活
-      const activeConnections = connections.filter(c => !c.deletedAt);
+      // 【P1-05 修复】过滤软删除的连接以及引用已删除任务的孤立连接
+      const activeTaskIds = new Set(activeTasks.map(t => t.id));
+      const activeConnections = connections.filter(c =>
+        !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
+      );
       const filteredConnCount = connections.length - activeConnections.length;
       if (filteredConnCount > 0) {
         this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });

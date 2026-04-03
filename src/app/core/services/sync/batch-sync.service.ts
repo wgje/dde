@@ -156,11 +156,13 @@ export class BatchSyncService {
     const CHUNK_SIZE = 100;
     for (let offset = 0; offset < taskIds.length; offset += CHUNK_SIZE) {
       const chunk = taskIds.slice(offset, offset + CHUNK_SIZE);
+      // 中文注释：必须排除软删除任务，避免为已删除任务同步连接
       const { data, error } = await client
         .from('tasks')
         .select('id')
         .eq('project_id', projectId)
-        .in('id', chunk);
+        .in('id', chunk)
+        .is('deleted_at', null);
 
       if (error) {
         this.logger.warn('查询远端任务存在性失败，连接依赖校验降级为本地成功集', {
