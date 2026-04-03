@@ -718,8 +718,6 @@ export class UserSessionService {
     const preserveOfflineSnapshot = opts?.preserveOfflineSnapshot ?? false;
     const shouldPreservePrehydratedSelection = this.shouldPreservePrehydratedSelection(userId);
     const shouldClearPrehydratedSnapshotState = forceLoad && !shouldPreservePrehydratedSelection;
-    const shouldForceClearVisibleStateOnCleanupFailure = (isUserChange && previousUserId !== null)
-      || shouldClearPrehydratedSnapshotState;
     
     this.logger.debug('setCurrentUser', {
       previousUserId: previousUserId?.substring(0, 8),
@@ -736,86 +734,101 @@ export class UserSessionService {
     
     // 清理旧用户的附件监控和回调，防止内存泄漏
     if (isUserChange || forceLoad) {
+      // 【P1 修复 2026-04-03】将可失败的异步 I/O 操作与必须成功的同步清理分离。
+      // 之前整块 try-catch 导致任何一个异步操作（IDB/网络）失败就跳过全部同步清理，
+      // 触发 forceClearCurrentSessionView 再次失败的级联告警。
+      this.attachmentServiceRef?.clearMonitoredAttachments();
+
+      // === 阶段 1：可失败的异步持久化操作（单独 try-catch） ===
+      let preservedGuestProjects: Project[] = [];
+      let shouldClearOfflineSnapshot = !preserveOfflineSnapshot;
+
       try {
-        this.attachmentServiceRef?.clearMonitoredAttachments();
         const isCloudBackedLogin = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
-        const preservedGuestProjects = isCloudBackedLogin
+        preservedGuestProjects = isCloudBackedLogin
           && (!previousUserId || previousUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID)
           ? await this.resolveGuestDraftProjectsForCloudLogin(userId, sessionGuard)
           : [];
-        if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-resolved')) {
+      } catch (guestDraftError) {
+        this.logger.warn('解析游客草稿失败，降级为无草稿模式', guestDraftError);
+      }
+      if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-resolved')) {
+        return;
+      }
+
+      const shouldPreserveGuestDrafts = preservedGuestProjects.length > 0;
+      const shouldResetProjectSelection = isUserChange && previousUserId !== null && !shouldPreserveGuestDrafts;
+      const shouldFlushPendingPersist = !skipPersistentReload && (isUserChange || shouldClearPrehydratedSnapshotState);
+      shouldClearOfflineSnapshot = !shouldPreserveGuestDrafts && !preserveOfflineSnapshot;
+
+      const canPersistCurrentProjectsForPreviousOwner = this.canPersistCurrentProjectsForPreviousOwner();
+      if (preserveOfflineSnapshot && previousUserId !== null && !shouldPreserveGuestDrafts && canPersistCurrentProjectsForPreviousOwner) {
+        try {
+          await this.saveProjectsToOfflineSnapshot(this.projectState.projects(), previousUserId);
+        } catch (snapshotError) {
+          this.logger.warn('保存旧用户离线快照失败，继续清理', snapshotError);
+        }
+        if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:preserve-offline-snapshot')) {
           return;
         }
-        const shouldPreserveGuestDrafts = preservedGuestProjects.length > 0;
-        const shouldResetProjectSelection = isUserChange && previousUserId !== null && !shouldPreserveGuestDrafts;
-        const shouldFlushPendingPersist = !skipPersistentReload && (isUserChange || shouldClearPrehydratedSnapshotState);
-        let shouldClearOfflineSnapshot = !shouldPreserveGuestDrafts && !preserveOfflineSnapshot;
+      }
 
-        const canPersistCurrentProjectsForPreviousOwner = this.canPersistCurrentProjectsForPreviousOwner();
-        if (preserveOfflineSnapshot && previousUserId !== null && !shouldPreserveGuestDrafts && canPersistCurrentProjectsForPreviousOwner) {
-          await this.saveProjectsToOfflineSnapshot(this.projectState.projects(), previousUserId);
-          if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:preserve-offline-snapshot')) {
-            return;
-          }
-        }
-
-        if (shouldFlushPendingPersist) {
+      if (shouldFlushPendingPersist) {
+        try {
           shouldClearOfflineSnapshot = await this.syncCoordinator.preparePendingPersistForOwnerChange(
             previousUserId,
             `owner-switch:${previousUserId ?? 'anonymous'}->${userId ?? 'anonymous'}`
           );
+        } catch (persistError) {
+          this.logger.warn('刷盘待持久化数据失败，继续清理', persistError);
         }
-
-        if (shouldPreserveGuestDrafts) {
-          // 中文注释：先把游客草稿重新落盘，再清理歧义队列，避免登录瞬间丢失唯一离线副本。
-          await this.saveProjectsToOfflineSnapshot(preservedGuestProjects, userId);
-          if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-saved')) {
-            return;
-          }
-        }
-
-        // 冷启动 bootstrap(forceLoad) 允许继续沿用「已确认归属于当前用户」的 launch snapshot。
-        // 若快照 owner 缺失或与当前 userId 不一致，则必须立即清空，避免旧账号项目短暂暴露。
-        if ((shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) && !shouldPreserveGuestDrafts) {
-          this.projectState.setActiveProjectId(null);
-        }
-        // 【P0 修复 2026-02-08 / 2026-03-27 加固】
-        // 仅在用户切换（旧用户→新用户）或快照不可信时清空项目列表。
-        // 合并两个分支，避免 setProjects([]) 被触发两次产生信号风暴。
-        // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的。
-        const shouldClearProjects = !shouldPreserveGuestDrafts && (
-          shouldClearPrehydratedSnapshotState
-          || (isUserChange && previousUserId !== null)
-        );
-        if (shouldClearProjects) {
-          this.projectState.setProjects([]);
-          this.clearStartupProjectCatalogState();
-        }
-        if ((isUserChange && previousUserId !== null) || shouldPreserveGuestDrafts) {
-          this.actionQueue.clearCurrentView();
-          this.retryQueue.clearCurrentView();
-          if (!shouldPreserveGuestDrafts && shouldClearOfflineSnapshot) {
-            this.syncCoordinator.core.clearOfflineSnapshot();
-          }
-        }
-        if (isUserChange && previousUserId !== null) {
-          this.changeTracker.clearAllChanges();
-          resetFocusState();
-        }
-        this.undoService.clearHistory();
-        this.syncCoordinator.clearActiveConflict();
-        this.syncCoordinator.core.teardownRealtimeSubscription();
-      } catch (cleanupError) {
-        this.logger.warn('清理旧用户数据失败', cleanupError);
-        if (shouldForceClearVisibleStateOnCleanupFailure) {
-          try {
-            this.forceClearCurrentSessionView();
-          } catch (forceCleanupError) {
-            this.logger.warn('强制清理会话视图也失败，静默继续', forceCleanupError);
-          }
-        }
-        // 继续执行，不阻断流程
       }
+
+      if (shouldPreserveGuestDrafts) {
+        // 中文注释：先把游客草稿重新落盘，再清理歧义队列，避免登录瞬间丢失唯一离线副本。
+        try {
+          await this.saveProjectsToOfflineSnapshot(preservedGuestProjects, userId);
+        } catch (guestSaveError) {
+          this.logger.warn('保存游客草稿快照失败，继续清理', guestSaveError);
+        }
+        if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:guest-drafts-saved')) {
+          return;
+        }
+      }
+
+      // === 阶段 2：必须成功的同步状态清理（不依赖外部 I/O） ===
+      // 冷启动 bootstrap(forceLoad) 允许继续沿用「已确认归属于当前用户」的 launch snapshot。
+      // 若快照 owner 缺失或与当前 userId 不一致，则必须立即清空，避免旧账号项目短暂暴露。
+      if ((shouldResetProjectSelection || shouldClearPrehydratedSnapshotState) && !shouldPreserveGuestDrafts) {
+        this.projectState.setActiveProjectId(null);
+      }
+      // 【P0 修复 2026-02-08 / 2026-03-27 加固】
+      // 仅在用户切换（旧用户→新用户）或快照不可信时清空项目列表。
+      // 合并两个分支，避免 setProjects([]) 被触发两次产生信号风暴。
+      // 从 null→userId（冷启动首次登录）不清空，因为 store 本来就是空的。
+      const shouldClearProjects = !shouldPreserveGuestDrafts && (
+        shouldClearPrehydratedSnapshotState
+        || (isUserChange && previousUserId !== null)
+      );
+      if (shouldClearProjects) {
+        this.projectState.setProjects([]);
+        this.clearStartupProjectCatalogState();
+      }
+      if ((isUserChange && previousUserId !== null) || shouldPreserveGuestDrafts) {
+        this.actionQueue.clearCurrentView();
+        this.retryQueue.clearCurrentView();
+        if (!shouldPreserveGuestDrafts && shouldClearOfflineSnapshot) {
+          this.syncCoordinator.core.clearOfflineSnapshot();
+        }
+      }
+      if (isUserChange && previousUserId !== null) {
+        this.changeTracker.clearAllChanges();
+        this.uiState.clearAllState();
+        resetFocusState();
+      }
+      this.undoService.clearHistory();
+      this.syncCoordinator.clearActiveConflict();
+      this.syncCoordinator.core.teardownRealtimeSubscription();
     }
 
     this.authService.currentUserId.set(userId);
