@@ -1201,6 +1201,10 @@ export class SimpleSyncService {
   setConflict(conflictData: ConflictData): void {
     this.syncState.update(s => ({ ...s, hasConflict: true, conflictData }));
   }
+
+  clearConflict(): void {
+    this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
+  }
   
   // ==================== 项目加载 ====================
   
