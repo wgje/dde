@@ -958,6 +958,11 @@ export class ProjectDataService {
       ...options,
     };
 
+    // 快照 JSON 中可能缺少 ownerUserId（旧版本保存的快照），
+    // 但 IDB/localStorage key 本身就是按 userId 分区的，
+    // 因此可安全使用查找时的 userId 作为 fallback。
+    const resolvedOwnerUserId = this.resolveSnapshotVisibleOwnerUserId(startupOptions);
+
     const idbPayload = await this.loadSnapshotFromIDB(startupOptions).catch((error) => {
       this.logger.warn('启动快照加载失败（IndexedDB）', error);
       return null;
@@ -966,6 +971,10 @@ export class ProjectDataService {
     if (idbPayload) {
       const parsedSnapshot = this.parseSnapshotEnvelope(idbPayload);
       if (parsedSnapshot) {
+        // 旧版快照可能缺少 ownerUserId，用 IDB key 对应的 userId 补全
+        if (!parsedSnapshot.ownerUserId && resolvedOwnerUserId) {
+          parsedSnapshot.ownerUserId = resolvedOwnerUserId;
+        }
         return this.buildStartupSnapshotResult('idb', idbPayload, parsedSnapshot, false);
       }
     }
@@ -993,9 +1002,14 @@ export class ProjectDataService {
       };
     }
 
+    // 旧版快照可能缺少 ownerUserId，用 localStorage key 对应的 userId 补全
+    if (!parsedSnapshot.ownerUserId && resolvedOwnerUserId) {
+      parsedSnapshot.ownerUserId = resolvedOwnerUserId;
+    }
+
     const migratedLegacy = await this.migrateLegacySnapshotToIDB(
       localStoragePayload,
-      this.resolveSnapshotVisibleOwnerUserId(startupOptions)
+      resolvedOwnerUserId
     );
     return this.buildStartupSnapshotResult('localStorage', localStoragePayload, parsedSnapshot, migratedLegacy);
   }

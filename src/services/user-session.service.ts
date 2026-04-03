@@ -554,6 +554,19 @@ export class UserSessionService {
   ): { projects: Project[]; ownerMatched: boolean } {
     const expectedOwnerUserId = expectedUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     if (!snapshot.ownerUserId) {
+      // 旧版快照可能缺少 ownerUserId 字段，尝试通过 persisted hint 推断归属
+      if (this.authService.isConfigured && snapshot.projects.length > 0) {
+        const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.() ?? null;
+        if (persistedOwnerHint && persistedOwnerHint === expectedOwnerUserId) {
+          this.logger.debug('缺少 owner 元数据的快照通过 persisted hint 匹配，允许恢复', {
+            stage,
+            expectedOwnerUserId,
+            persistedOwnerHint,
+            projectCount: snapshot.projects.length,
+          });
+          return { projects: snapshot.projects, ownerMatched: true };
+        }
+      }
       this.logger.warn('检测到缺少 owner 元数据的离线快照，已忽略本次恢复', {
         stage,
         expectedOwnerUserId,
@@ -1550,6 +1563,20 @@ export class UserSessionService {
     // === 策略 2: 如果 Delta Sync 失败，只加载当前项目（按需加载）===
     // 【优化 2026-01-27】不自动加载其他项目，节省带宽
     // 其他项目在用户切换项目时再加载
+
+    // 【修复 2026-04-03】登录后无本地缓存时 activeProjectId 为 null，
+    // 但 syncProjectListMetadata 可能已从云端创建了项目壳。
+    // 仅在初始就无 activeProjectId 时自动选择首个可用项目，
+    // 不覆盖同步流程中因"不可访问"而主动清除的 activeProjectId。
+    if (!activeProjectId && this.projectState.projects().length > 0) {
+      const firstSyncedProject = this.projectState.projects().find(p => !this.isLocalOnlyProject(p.id));
+      if (firstSyncedProject) {
+        this.logger.debug('后台同步后自动选择首个可用项目', { projectId: firstSyncedProject.id });
+        this.projectState.setActiveProjectId(firstSyncedProject.id);
+        activeProjectId = firstSyncedProject.id;
+      }
+    }
+
     if (!skipProjectSyncSlowPath && !currentProjectSynced && activeProjectId && !this.isLocalOnlyProject(activeProjectId)) {
       try {
         this.logger.debug('按需加载当前项目', { projectId: activeProjectId });
