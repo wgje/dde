@@ -193,13 +193,22 @@ export class TaskRepositoryService {
   async deleteTask(taskId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
-    // 1) 优先走 purge RPC（后端会记录 tombstone）
-    const purgeResult = await this.supabase.client().rpc('purge_tasks', {
-      p_task_ids: [taskId]
-    });
+    // 1) 优先走 project-scoped purge RPC（后端会记录 tombstone）
+    const { data: taskRow, error: lookupError } = await this.supabase.client()
+      .from('tasks')
+      .select('project_id')
+      .eq('id', taskId)
+      .maybeSingle();
 
-    if (!purgeResult.error) {
-      return { success: true };
+    if (!lookupError && taskRow?.project_id) {
+      const purgeResult = await this.supabase.client().rpc('purge_tasks_v2', {
+        p_project_id: taskRow.project_id,
+        p_task_ids: [taskId],
+      });
+
+      if (!purgeResult.error) {
+        return { success: true };
+      }
     }
 
     // 2) 降级：软删除

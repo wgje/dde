@@ -35,6 +35,7 @@ export type ActionPayload =
 export interface ProjectPayload {
   project: Project;
   sourceUserId?: string;
+  taskIdsToDelete?: string[];
 }
 
 export interface ProjectDeletePayload {

@@ -43,7 +43,7 @@
 | `cleanup-v1-data.sql` | 迁移验证通过后清理 v1 遗留数据 |
 | `purge-deleted-tasks.sql` | 早期版本的软删除清理（功能已整合进 init-supabase.sql） |
 
-### legacy/ — 已废弃，仅供考古
+### legacy/ — 已废弃，已归档至 docs/archive/legacy-sql/
 
 全部内容已整合进 `init-supabase.sql`，不要执行。
 

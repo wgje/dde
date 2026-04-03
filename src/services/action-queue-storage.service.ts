@@ -218,22 +218,7 @@ export class ActionQueueStorageService {
       }
     }
 
-    if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return { found: false, queue: [] };
-    }
-
-    const legacyValue = localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-    if (legacyValue === null) {
-      return { found: false, queue: [] };
-    }
-
-    try {
-      const queue = JSON.parse(legacyValue) as QueuedAction[];
-      return { found: true, queue: Array.isArray(queue) ? queue : [] };
-    } catch (error) {
-      this.logger.warn('读取 legacy local-user 队列失败，按空队列处理', { error });
-      return { found: true, queue: [] };
-    }
+    return { found: false, queue: [] };
   }
 
   private readDeadLetterSnapshotFromLocalStorage(ownerUserId: string): DeadLetterItem[] {
@@ -253,22 +238,7 @@ export class ActionQueueStorageService {
       }
     }
 
-    if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return [];
-    }
-
-    const legacyValue = localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-    if (!legacyValue) {
-      return [];
-    }
-
-    try {
-      const queue = JSON.parse(legacyValue) as DeadLetterItem[];
-      return Array.isArray(queue) ? queue : [];
-    } catch (error) {
-      this.logger.warn('读取 legacy local-user dead-letter 失败，按空队列处理', { error });
-      return [];
-    }
+    return [];
   }
 
   private async loadPersistedQueueForOwner(ownerUserId: string): Promise<QueuedAction[]> {
@@ -304,7 +274,16 @@ export class ActionQueueStorageService {
     const backupSucceeded = await this.backupQueueToIndexedDB(queue, ownerUserId);
     if (!localSnapshotSaved && backupSucceeded) {
       this.invalidateLocalQueueSnapshot(ownerUserId);
+      return;
     }
+
+    if (localSnapshotSaved || backupSucceeded) {
+      return;
+    }
+
+    this.freezeQueueWrites('storage_failure');
+    this.triggerStorageFailureEscapeMode();
+    throw new Error(`owner-scoped 队列保存失败: ${ownerUserId}`);
   }
 
   private saveDeadLetterSnapshotForOwner(ownerUserId: string, queue: DeadLetterItem[]): void {
@@ -536,12 +515,6 @@ export class ActionQueueStorageService {
     const legacyValue = localStorage.getItem(baseKey);
     if (legacyValue === null) {
       return null;
-    }
-
-    if (this.getCurrentOwnerUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      localStorage.setItem(scopedKey, legacyValue);
-      localStorage.removeItem(baseKey);
-      return legacyValue;
     }
 
     if (baseKey === LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY) {
@@ -1081,23 +1054,11 @@ export class ActionQueueStorageService {
           const legacyRequest = store.get(this.LEGACY_QUEUE_BACKUP_RECORD_ID);
           legacyRequest.onsuccess = () => {
             const legacyData = legacyRequest.result as { id: string; actions: QueuedAction[]; savedAt: string } | undefined;
-            if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-              db.close();
-              if (legacyData?.actions && legacyData.actions.length > 0) {
-                this.quarantineLegacyQueueForReview(legacyData.actions, 'legacy-idb-backup');
-              }
-              resolve(null);
-              return;
+            db.close();
+            if (legacyData?.actions && legacyData.actions.length > 0) {
+              this.quarantineLegacyQueueForReview(legacyData.actions, 'legacy-idb-backup');
             }
-
-            if (legacyData?.actions) {
-              db.close();
-              this.logger.info('从 IndexedDB 恢复 legacy 队列备份', { count: legacyData.actions.length, savedAt: legacyData.savedAt });
-              resolve(legacyData.actions);
-            } else {
-              db.close();
-              resolve(null);
-            }
+            resolve(null);
           };
           legacyRequest.onerror = () => {
             db.close();

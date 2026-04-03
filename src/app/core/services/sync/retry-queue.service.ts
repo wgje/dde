@@ -55,6 +55,8 @@ export interface RetryQueueItem {
   createdAt: number;
   /** 来源用户，用于跨账号 replay 隔离 */
   sourceUserId?: string;
+  /** project 级快照重放时需要继续保留的删除意图 */
+  taskIdsToDelete?: string[];
 }
 
 interface LegacyRetryReviewItem {
@@ -69,10 +71,10 @@ interface LegacyRetryReviewItem {
  * 由 SimpleSyncService 实现，提供实际的推送方法
  */
 export interface RetryOperationHandler {
-  pushTask(task: Task, projectId: string): Promise<boolean>;
-  deleteTask(taskId: string, projectId: string): Promise<boolean>;
-  pushProject(project: Project, sourceUserId?: string): Promise<boolean>;
-  pushConnection(connection: Connection, projectId: string): Promise<boolean>;
+  pushTask(task: Task, projectId: string, sourceUserId?: string): Promise<boolean>;
+  deleteTask(taskId: string, projectId: string, sourceUserId?: string): Promise<boolean>;
+  pushProject(project: Project, sourceUserId?: string, taskIdsToDelete?: string[]): Promise<boolean>;
+  pushConnection(connection: Connection, projectId: string, sourceUserId?: string): Promise<boolean>;
   /** 推送黑匣子条目到服务器（专注模式数据同步） */
   pushBlackBoxEntry?(entry: BlackBoxEntry): Promise<boolean>;
   isSessionExpired(): boolean;
@@ -441,6 +443,7 @@ export class RetryQueueService {
     data: Task | Project | Connection | BlackBoxEntry | { id: string },
     projectId?: string,
     sourceUserId?: string,
+    taskIdsToDelete?: string[],
   ): boolean {
     // 入队前校验实体 ID 格式，拦截脏数据
     if (data?.id && !isValidUUID(data.id)) {
@@ -449,28 +452,36 @@ export class RetryQueueService {
     }
     this.tryRecoverQueueFullPressure();
 
+    const currentOwnerUserId = this.getCurrentOwnerUserId();
+    const targetOwnerUserId = sourceUserId ?? currentOwnerUserId;
+    const targetQueue = targetOwnerUserId !== currentOwnerUserId
+      ? this.hiddenQueueItems
+      : this.queue;
+
     // 去重：检查是否已存在同一实体
-    const existingIndex = this.queue.findIndex(
-      item => item.type === type && item.data.id === data.id
+    const existingIndex = targetQueue.findIndex(
+      item => item.type === type && item.data.id === data.id && this.resolveItemOwnerUserId(item) === targetOwnerUserId
     );
     
     if (existingIndex !== -1) {
       // 更新已存在的项
-      const existing = this.queue[existingIndex];
-      this.queue[existingIndex] = {
+      const existing = targetQueue[existingIndex];
+      targetQueue[existingIndex] = {
         ...existing,
         operation,
         data,
         projectId: projectId ?? existing.projectId,
         createdAt: Date.now(),
-        sourceUserId: existing.sourceUserId ?? sourceUserId ?? this.authService.currentUserId() ?? undefined,
+        sourceUserId: existing.sourceUserId ?? targetOwnerUserId,
+        taskIdsToDelete: taskIdsToDelete ?? existing.taskIdsToDelete,
       };
       this.touchQueueState();
       this.logger.debug('更新队列中的现有项', { 
         type, 
         operation, 
         dataId: data.id,
-        retryCount: existing.retryCount
+        retryCount: existing.retryCount,
+        hidden: targetQueue === this.hiddenQueueItems,
       });
       this.saveToStorage();
       this.checkCapacityWarning();
@@ -478,7 +489,7 @@ export class RetryQueueService {
     }
 
     const absoluteLimit = this.maxQueueSize * this.MAX_QUEUE_OVERFLOW_FACTOR;
-    if (this.queue.length >= absoluteLimit) {
+    if (this.queue.length + this.hiddenQueueItems.length >= absoluteLimit) {
       this.reportEnqueueRejected(type, operation, data.id, 'absolute_limit');
       this.checkCapacityWarning();
       return false;
@@ -516,16 +527,23 @@ export class RetryQueueService {
       projectId,
       retryCount: 0,
       createdAt: Date.now(),
-      sourceUserId: sourceUserId ?? this.authService.currentUserId() ?? undefined,
+      sourceUserId: targetOwnerUserId,
+      taskIdsToDelete,
     };
     
-    this.queue.push(item);
+    targetQueue.push(item);
     this.touchQueueState();
     this.saveToStorage();
 
-    this.logger.debug('添加到重试队列', { type, operation, dataId: data.id });
+    this.logger.debug('添加到重试队列', {
+      type,
+      operation,
+      dataId: data.id,
+      hidden: targetQueue === this.hiddenQueueItems,
+      targetOwnerUserId,
+    });
     this.checkCapacityWarning();
-    if (this.queue.length >= Math.floor(this.maxQueueSize * 0.9)) {
+    if (targetQueue === this.queue && this.queue.length >= Math.floor(this.maxQueueSize * 0.9)) {
       this.triggerEmergencyProcessQueue('high_watermark');
     }
     return true;
@@ -1235,12 +1253,12 @@ export class RetryQueueService {
         try {
           if (item.type === 'task') {
             success = item.operation === 'upsert'
-              ? await this.operationHandler.pushTask(item.data as Task, item.projectId!)
-              : await this.operationHandler.deleteTask(item.data.id, item.projectId!);
+              ? await this.operationHandler.pushTask(item.data as Task, item.projectId!, item.sourceUserId)
+              : await this.operationHandler.deleteTask(item.data.id, item.projectId!, item.sourceUserId);
           } else if (item.type === 'project') {
-            success = await this.operationHandler.pushProject(item.data as Project, item.sourceUserId);
+            success = await this.operationHandler.pushProject(item.data as Project, item.sourceUserId, item.taskIdsToDelete);
           } else if (item.type === 'connection') {
-            success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!);
+            success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!, item.sourceUserId);
           } else if (item.type === 'blackbox') {
             if (this.operationHandler.pushBlackBoxEntry) {
               success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry);

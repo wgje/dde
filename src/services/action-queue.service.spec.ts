@@ -351,6 +351,43 @@ describe('ActionQueueService', () => {
       expect(localStorage.getItem(queueStorageKey)).toBe('[]');
       expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
     });
+
+    it('project update 合并时应保留 sourceUserId 并合并 taskIdsToDelete', () => {
+      setNetworkStatus(false);
+      const projectId = 'proj-merge-delete-intent';
+
+      service.enqueue({
+        type: 'update',
+        entityType: 'project',
+        entityId: projectId,
+        payload: {
+          project: createMockProject({ id: projectId, name: 'Before Merge' }),
+          sourceUserId: 'owner-a',
+          taskIdsToDelete: ['task-delete-a'],
+        },
+      });
+
+      service.enqueue({
+        type: 'update',
+        entityType: 'project',
+        entityId: projectId,
+        payload: {
+          project: createMockProject({ id: projectId, name: 'After Merge' }),
+          taskIdsToDelete: ['task-delete-b'],
+        },
+      });
+
+      expect(service.queueSize()).toBe(1);
+      expect(service.pendingActions()[0]).toEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            sourceUserId: 'owner-a',
+            project: expect.objectContaining({ id: projectId, name: 'After Merge' }),
+            taskIdsToDelete: expect.arrayContaining(['task-delete-a', 'task-delete-b']),
+          }),
+        }),
+      );
+    });
   });
 
   // ==================== 处理器注册和执行 ====================

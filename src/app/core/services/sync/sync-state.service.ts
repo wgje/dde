@@ -46,6 +46,8 @@ export interface ConflictData {
   remote: Project;
   /** 项目 ID */
   projectId: string;
+  /** 冲突前已确认的待删除任务，解决冲突后仍需继续回放 */
+  pendingTaskDeleteIds?: string[];
 }
 
 /**

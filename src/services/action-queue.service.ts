@@ -11,6 +11,7 @@ import { AuthService } from './auth.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { 
   OperationPriority, 
+  ProjectPayload,
   TaskPayload, 
   TaskDeletePayload, 
   QueuedAction,
@@ -210,7 +211,7 @@ export class ActionQueueService {
         // 场景2: 两个update → 合并为一次
         if (existing.type === 'update' && action.type === 'update') {
           this.logger.debug(`合并重复的update操作`, { entityType: action.entityType, entityId: action.entityId });
-          newQueue[existingIndex] = { ...queuedAction, id: existing.id };
+          newQueue[existingIndex] = { ...this.mergeQueuedAction(existing, queuedAction), id: existing.id };
           resolvedActionId = existing.id;
           wasEnqueued = true;
           return newQueue;
@@ -219,7 +220,11 @@ export class ActionQueueService {
         // 场景3: create + update → 合并到create中
         if (existing.type === 'create' && action.type === 'update') {
           this.logger.debug(`合并create后的update`, { entityType: action.entityType, entityId: action.entityId });
-          newQueue[existingIndex] = { ...queuedAction, type: 'create', id: existing.id };
+          newQueue[existingIndex] = {
+            ...this.mergeQueuedAction(existing, queuedAction),
+            type: 'create',
+            id: existing.id,
+          };
           resolvedActionId = existing.id;
           wasEnqueued = true;
           return newQueue;
@@ -382,6 +387,38 @@ export class ActionQueueService {
       timestamp: Date.now(),
       retryCount: 0,
       priority: action.priority ?? defaultPriority
+    };
+  }
+
+  private mergeProjectPayload(
+    existingPayload: ProjectPayload,
+    nextPayload: ProjectPayload,
+  ): ProjectPayload {
+    const mergedTaskIdsToDelete = [
+      ...(existingPayload.taskIdsToDelete ?? []),
+      ...(nextPayload.taskIdsToDelete ?? []),
+    ];
+
+    return {
+      ...nextPayload,
+      sourceUserId: nextPayload.sourceUserId ?? existingPayload.sourceUserId,
+      taskIdsToDelete: mergedTaskIdsToDelete.length > 0
+        ? Array.from(new Set(mergedTaskIdsToDelete))
+        : undefined,
+    };
+  }
+
+  private mergeQueuedAction(existing: QueuedAction, next: QueuedAction): QueuedAction {
+    if (existing.entityType !== 'project' || next.entityType !== 'project') {
+      return next;
+    }
+
+    return {
+      ...next,
+      payload: this.mergeProjectPayload(
+        existing.payload as ProjectPayload,
+        next.payload as ProjectPayload,
+      ),
     };
   }
 

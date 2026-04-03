@@ -26,6 +26,7 @@ const mockActionQueueService = {
   registerProcessor: vi.fn(),
   setQueueProcessCallbacks: vi.fn(),
   moveToDeadLetter: vi.fn(),
+  enqueueForOwner: vi.fn().mockResolvedValue('queued-owner-action'),
   getCurrentQueueViewGeneration: vi.fn(() => 1),
   isQueueViewCurrent: vi.fn(() => true),
 };
@@ -120,6 +121,72 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user');
     expect(mockProjectStateService.updateProjects).toHaveBeenCalled();
     expect(result).toBe(true);
+  });
+
+  it('project:update should replay deferred task deletes only after project save succeeds', async () => {
+    const handler = getProcessor('project:update');
+    const project = { id: 'p-delete-after-project', name: 'Test' };
+
+    const result = await handler({
+      payload: {
+        project,
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-a', 'task-b'],
+      },
+    } as QueuedAction);
+
+    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user');
+    expect(mockSyncService.deleteTask).toHaveBeenNthCalledWith(1, 'task-a', 'p-delete-after-project', 'test-user');
+    expect(mockSyncService.deleteTask).toHaveBeenNthCalledWith(2, 'task-b', 'p-delete-after-project', 'test-user');
+    expect(result).toBe(true);
+  });
+
+  it('project:update should not replay deferred task deletes when project save conflicts', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: { id: 'p-conflict', syncSource: 'synced' },
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-conflict', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-a'],
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.deleteTask).not.toHaveBeenCalled();
+  });
+
+  it('project:update should hand off remaining task deletes when queue view becomes stale mid-replay', async () => {
+    const handler = getProcessor('project:update');
+    const project = { id: 'p-stale-delete-handoff', name: 'Test' };
+    mockActionQueueService.isQueueViewCurrent
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    const result = await handler({
+      payload: {
+        project,
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-a', 'task-b'],
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockSyncService.deleteTask).toHaveBeenCalledTimes(1);
+    expect(mockSyncService.deleteTask).toHaveBeenCalledWith('task-a', 'p-stale-delete-handoff', 'test-user');
+    expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledWith('test-user', expect.objectContaining({
+      type: 'update',
+      entityType: 'project',
+      entityId: 'p-stale-delete-handoff',
+      payload: expect.objectContaining({
+        taskIdsToDelete: ['task-b'],
+      }),
+    }));
   });
 
   it('project:update should return false when userId is missing', async () => {
@@ -225,7 +292,35 @@ describe('ActionQueueProcessorsService', () => {
     expect(onConflict).toHaveBeenCalledWith(
       { id: 'p-1', syncSource: 'synced' },
       { id: 'p-1', syncSource: 'synced' },
-      'test-user'
+      'test-user',
+      undefined,
+    );
+  });
+
+  it('project:update should preserve deferred task deletes when surfacing conflicts', async () => {
+    const onConflict = vi.fn();
+    service.setProjectConflictHandler(onConflict);
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      conflict: true,
+      remoteData: { id: 'p-delete-conflict', syncSource: 'synced' },
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-delete-conflict', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-a'],
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(onConflict).toHaveBeenCalledWith(
+      { id: 'p-delete-conflict', syncSource: 'synced' },
+      { id: 'p-delete-conflict', syncSource: 'synced' },
+      'test-user',
+      ['task-a'],
     );
   });
 
@@ -275,7 +370,8 @@ describe('ActionQueueProcessorsService', () => {
     expect(onConflict).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'p-1', version: 3 }),
       expect.objectContaining({ id: 'p-1', version: 4 }),
-      'test-user'
+      'test-user',
+      undefined,
     );
     expect(mockConflictStorageService.saveConflict).not.toHaveBeenCalled();
   });
@@ -412,7 +508,28 @@ describe('ActionQueueProcessorsService', () => {
 
     const result = await handler({ payload: { task, projectId: 'p-1', sourceUserId: 'test-user' } });
 
-    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-1', false);
+    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-1', false, false, 'test-user');
+    expect(result).toBe(true);
+  });
+
+  it('task:update should call pushTask with sourceUserId', async () => {
+    const handler = getProcessor('task:update');
+    const task = { id: 't-2', title: 'Task update' };
+
+    const result = await handler({ payload: { task, projectId: 'p-2', sourceUserId: 'test-user' } } as QueuedAction);
+
+    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-2', false, false, 'test-user');
+    expect(result).toBe(true);
+  });
+
+  it('task:delete should call deleteTask with sourceUserId', async () => {
+    const handler = getProcessor('task:delete');
+
+    const result = await handler({
+      payload: { taskId: 't-1', projectId: 'p-1', sourceUserId: 'test-user' },
+    } as QueuedAction);
+
+    expect(mockSyncService.deleteTask).toHaveBeenCalledWith('t-1', 'p-1', 'test-user');
     expect(result).toBe(true);
   });
 

@@ -182,18 +182,73 @@ describe('RetryQueueService', () => {
 
     service.add('task', 'upsert', createTask('t-captured-owner'), 'p-1', 'old-user');
 
-    expect(service.getItems()[0]?.sourceUserId).toBe('old-user');
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems[0]?.sourceUserId).toBe('old-user');
+  });
+
+  it('跨账号来源的新重试项应直接进入 hidden bucket，不污染当前可见队列', () => {
+    authServiceMock.currentUserId.mockReturnValue('new-user');
+
+    service.add('task', 'delete', { id: stableUUID('task-hidden-owner') }, 'p-1', 'old-user');
+
+    expect(service.length).toBe(0);
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([
+      expect.objectContaining({
+        projectId: 'p-1',
+        sourceUserId: 'old-user',
+        data: expect.objectContaining({ id: stableUUID('task-hidden-owner') }),
+      }),
+    ]);
   });
 
   it('processQueueSlice 重放项目时应透传捕获的 sourceUserId', async () => {
     const project = createProject('captured-owner');
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
     service.add('project', 'upsert', project, undefined, 'owner-a');
     online = true;
     authServiceMock.currentUserId.mockReturnValue('owner-a');
 
     await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
 
-    expect(handler.pushProject).toHaveBeenCalledWith(project, 'owner-a');
+    expect(handler.pushProject).toHaveBeenCalledWith(project, 'owner-a', undefined);
+  });
+
+  it('processQueueSlice 重放项目时应透传 durable taskIdsToDelete', async () => {
+    const project = createProject('captured-owner-with-deletes');
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+    service.add('project', 'upsert', project, undefined, 'owner-a', ['task-delete-a']);
+    online = true;
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(handler.pushProject).toHaveBeenCalledWith(project, 'owner-a', ['task-delete-a']);
+  });
+
+  it('processQueueSlice 重放连接时应透传捕获的 sourceUserId', async () => {
+    const connection = {
+      id: stableUUID('connection-captured-owner'),
+      source: 'task-1',
+      target: 'task-2',
+    };
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+    service.add('connection', 'upsert', connection, 'project-1', 'owner-a');
+    online = true;
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(handler.pushConnection).toHaveBeenCalledWith(connection, 'project-1', 'owner-a');
+  });
+
+  it('processQueueSlice 重放任务删除时应透传捕获的 sourceUserId', async () => {
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+    service.add('task', 'delete', { id: stableUUID('task-delete-captured-owner') }, 'project-1', 'owner-a');
+    online = true;
+    authServiceMock.currentUserId.mockReturnValue('owner-a');
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(handler.deleteTask).toHaveBeenCalledWith(stableUUID('task-delete-captured-owner'), 'project-1', 'owner-a');
   });
 
   it('切账号后清空当前视图并保存，不应覆盖其它账号的持久化重试项', async () => {
@@ -552,7 +607,7 @@ describe('RetryQueueService', () => {
     await service.processQueueSlice();
 
     expect(handler.pushTask).toHaveBeenCalledTimes(1);
-    expect(handler.pushTask).toHaveBeenCalledWith(firstTask, 'p-keep');
+    expect(handler.pushTask).toHaveBeenCalledWith(firstTask, 'p-keep', 'test-user');
     expect(service.getItems().some(item => item.projectId === 'p-drop')).toBe(false);
   });
 

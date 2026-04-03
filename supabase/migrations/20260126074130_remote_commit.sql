@@ -68,19 +68,33 @@ CREATE OR REPLACE FUNCTION "public"."append_task_attachment"("p_task_id" "uuid",
 DECLARE
   v_current_attachments JSONB;
   v_attachment_id TEXT;
+  v_project_id UUID;
 BEGIN
   v_attachment_id := p_attachment->>'id';
   IF v_attachment_id IS NULL THEN RAISE EXCEPTION 'Attachment must have an id'; END IF;
   
-  SELECT attachments INTO v_current_attachments FROM tasks WHERE id = p_task_id FOR UPDATE;
+  SELECT project_id, attachments INTO v_project_id, v_current_attachments
+  FROM public.tasks
+  WHERE id = p_task_id
+  FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = v_project_id
+      AND p.owner_id = auth.uid()
+  ) THEN
+    RAISE EXCEPTION 'not authorized';
+  END IF;
   IF v_current_attachments IS NULL THEN v_current_attachments := '[]'::JSONB; END IF;
   
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' = v_attachment_id) THEN
     RETURN TRUE;
   END IF;
   
-  UPDATE tasks SET attachments = v_current_attachments || p_attachment, updated_at = NOW() WHERE id = p_task_id;
+  UPDATE public.tasks
+  SET attachments = v_current_attachments || p_attachment, updated_at = NOW()
+  WHERE id = p_task_id;
   RETURN TRUE;
 END; $$;
 
@@ -103,25 +117,19 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized: not authenticated';
   END IF;
   
-  -- 权限校验：验证用户是项目所有者或成员
+  -- 权限校验：仅项目 owner 可批量写入，避免陈旧任务 payload 覆盖附件状态
   IF NOT EXISTS (
     SELECT 1 FROM public.projects p
     WHERE p.id = p_project_id 
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = v_user_id
-        )
-      )
+      AND p.owner_id = v_user_id
   ) THEN
-    RAISE EXCEPTION 'Unauthorized: not project owner or member (project_id: %, user_id: %)', p_project_id, v_user_id;
+    RAISE EXCEPTION 'Unauthorized: not project owner';
   END IF;
   
   -- 事务内执行，任何失败自动回滚
   FOREACH v_task IN ARRAY p_tasks
   LOOP
-    INSERT INTO public.tasks (
+    INSERT INTO public.tasks AS existing (
       id, project_id, title, content, stage, parent_id, 
       "order", rank, status, x, y, short_id, deleted_at,
       attachments
@@ -140,7 +148,7 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      COALESCE(v_task->'attachments', '[]'::jsonb)
+      '[]'::jsonb
     )
     ON CONFLICT (id) DO UPDATE SET
       title = EXCLUDED.title,
@@ -154,8 +162,13 @@ BEGIN
       y = EXCLUDED.y,
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
-      attachments = EXCLUDED.attachments,
-      updated_at = NOW();
+      attachments = COALESCE(existing.attachments, '[]'::jsonb),
+      updated_at = NOW()
+    WHERE existing.project_id = p_project_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Task project mismatch';
+    END IF;
     
     v_count := v_count + 1;
   END LOOP;
@@ -170,7 +183,7 @@ $$;
 ALTER FUNCTION "public"."batch_upsert_tasks"("p_tasks" "jsonb"[], "p_project_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."batch_upsert_tasks"("p_tasks" "jsonb"[], "p_project_id" "uuid") IS 'Batch upsert tasks with transaction guarantee. Includes attachments field support (v5.2.3 - fixed owner_id reference).';
+COMMENT ON FUNCTION "public"."batch_upsert_tasks"("p_tasks" "jsonb"[], "p_project_id" "uuid") IS 'Owner-only batch upsert for task core fields; attachments stay on dedicated RPCs.';
 
 
 
@@ -407,13 +420,7 @@ BEGIN
     SELECT 1 FROM public.connections c
     JOIN public.projects p ON c.project_id = p.id
     WHERE c.id = p_connection_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
+      AND p.owner_id = auth.uid()
   ) THEN
     RETURN false;
   END IF;
@@ -764,10 +771,39 @@ BEGIN
     RAISE EXCEPTION 'not authorized';
   END IF;
 
-  -- 先落 tombstone（即使 tasks 行已不存在也会生效）
+  -- 仅为当前 project 中真实存在的任务落 tombstone，禁止跨项目污染
+  WITH to_purge AS (
+    SELECT candidate.task_id
+    FROM (
+      SELECT t.id AS task_id
+      FROM public.tasks t
+      WHERE t.project_id = p_project_id
+        AND t.id = ANY(p_task_ids)
+
+      UNION
+
+      SELECT tt.task_id
+      FROM public.task_tombstones tt
+      WHERE tt.project_id = p_project_id
+        AND tt.task_id = ANY(p_task_ids)
+    ) AS candidate
+  )
   INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
+  SELECT task_id, p_project_id, now(), auth.uid()
+  FROM to_purge
   ON CONFLICT (task_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  -- 中文注释：任务 purge 会直接带走关联连接，必须先显式落 connection tombstone，避免另一端长期残留旧连接。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  SELECT c.id, c.project_id, now(), auth.uid()
+  FROM public.connections c
+  WHERE c.project_id = p_project_id
+    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids))
+  ON CONFLICT (connection_id)
   DO UPDATE SET
     project_id = EXCLUDED.project_id,
     deleted_at = EXCLUDED.deleted_at,
@@ -893,10 +929,38 @@ BEGIN
     END LOOP;
   END LOOP;
 
-  -- 落 tombstone
+  -- 仅为当前 project 中真实存在的任务落 tombstone，禁止跨项目污染
   INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
+  SELECT purge_scope.task_id, p_project_id, now(), auth.uid()
+  FROM (
+    SELECT candidate.task_id
+    FROM (
+      SELECT t.id AS task_id
+      FROM public.tasks t
+      WHERE t.project_id = p_project_id
+        AND t.id = ANY(p_task_ids)
+
+      UNION
+
+      SELECT tt.task_id
+      FROM public.task_tombstones tt
+      WHERE tt.project_id = p_project_id
+        AND tt.task_id = ANY(p_task_ids)
+    ) AS candidate
+  ) AS purge_scope
   ON CONFLICT (task_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  -- 中文注释：任务 purge 会直接带走关联连接，必须先显式落 connection tombstone，避免另一端长期残留旧连接。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  SELECT c.id, c.project_id, now(), auth.uid()
+  FROM public.connections c
+  WHERE c.project_id = p_project_id
+    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids))
+  ON CONFLICT (connection_id)
   DO UPDATE SET
     project_id = EXCLUDED.project_id,
     deleted_at = EXCLUDED.deleted_at,
@@ -934,12 +998,14 @@ CREATE OR REPLACE FUNCTION "public"."record_connection_tombstone"() RETURNS "tri
     SET "search_path" TO 'pg_catalog', 'public'
     AS $$
 BEGIN
-  -- 只在真正删除时记录（不是软删除）
-  IF OLD.deleted_at IS NOT NULL THEN
-    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_by)
-    VALUES (OLD.id, OLD.project_id, auth.uid())
-    ON CONFLICT (connection_id) DO NOTHING;
-  END IF;
+  -- 中文注释：任何物理删除都要落 tombstone，覆盖任务 purge 的级联删除路径。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  VALUES (OLD.id, OLD.project_id, now(), auth.uid())
+  ON CONFLICT (connection_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
   RETURN OLD;
 END;
 $$;
@@ -955,15 +1021,29 @@ CREATE OR REPLACE FUNCTION "public"."remove_task_attachment"("p_task_id" "uuid",
 DECLARE
   v_current_attachments JSONB;
   v_new_attachments JSONB;
+  v_project_id UUID;
 BEGIN
-  SELECT attachments INTO v_current_attachments FROM tasks WHERE id = p_task_id FOR UPDATE;
+  SELECT project_id, attachments INTO v_project_id, v_current_attachments
+  FROM public.tasks
+  WHERE id = p_task_id
+  FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = v_project_id
+      AND p.owner_id = auth.uid()
+  ) THEN
+    RAISE EXCEPTION 'not authorized';
+  END IF;
   IF v_current_attachments IS NULL OR jsonb_array_length(v_current_attachments) = 0 THEN RETURN TRUE; END IF;
   
   SELECT COALESCE(jsonb_agg(elem), '[]'::JSONB) INTO v_new_attachments
   FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' != p_attachment_id;
   
-  UPDATE tasks SET attachments = v_new_attachments, updated_at = NOW() WHERE id = p_task_id;
+  UPDATE public.tasks
+  SET attachments = v_new_attachments, updated_at = NOW()
+  WHERE id = p_task_id;
   RETURN TRUE;
 END; $$;
 
@@ -1945,11 +2025,7 @@ CREATE POLICY "black_box_insert_policy" ON "public"."black_box_entries" FOR INSE
 
 CREATE POLICY "black_box_select_policy" ON "public"."black_box_entries" FOR SELECT USING (((( SELECT "auth"."uid"() AS "uid") = "user_id") OR ("project_id" IN ( SELECT "projects"."id"
    FROM "public"."projects"
-  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid"))
-UNION
- SELECT "project_members"."project_id"
-   FROM "public"."project_members"
-  WHERE ("project_members"."user_id" = ( SELECT "auth"."uid"() AS "uid"))))));
+  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid")))))));
 
 
 
@@ -1984,11 +2060,7 @@ ALTER TABLE "public"."connection_tombstones" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "connection_tombstones_insert" ON "public"."connection_tombstones" FOR INSERT TO "authenticated" WITH CHECK (("project_id" IN ( SELECT "projects"."id"
    FROM "public"."projects"
-  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid"))
-UNION
- SELECT "project_members"."project_id"
-   FROM "public"."project_members"
-  WHERE ("project_members"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid")))));
 
 
 
@@ -1998,11 +2070,7 @@ COMMENT ON POLICY "connection_tombstones_insert" ON "public"."connection_tombsto
 
 CREATE POLICY "connection_tombstones_select" ON "public"."connection_tombstones" FOR SELECT TO "authenticated" USING (("project_id" IN ( SELECT "projects"."id"
    FROM "public"."projects"
-  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid"))
-UNION
- SELECT "project_members"."project_id"
-   FROM "public"."project_members"
-  WHERE ("project_members"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+  WHERE ("projects"."owner_id" = ( SELECT "auth"."uid"() AS "uid")))));
 
 
 
@@ -2046,21 +2114,21 @@ CREATE POLICY "owner insert" ON "public"."projects" FOR INSERT WITH CHECK ((( SE
 
 
 CREATE POLICY "owner select" ON "public"."projects" FOR SELECT USING (((( SELECT "auth"."uid"() AS "uid") = "owner_id") OR (EXISTS ( SELECT 1
-   FROM "public"."project_members"
-  WHERE (("project_members"."project_id" = "projects"."id") AND ("project_members"."user_id" = ( SELECT "auth"."uid"() AS "uid")))))));
+  FROM "public"."projects" "p"
+  WHERE (("p"."id" = "projects"."id") AND (( SELECT "auth"."uid"() AS "uid") = "owner_id"))))));
 
 
 
 CREATE POLICY "owner update" ON "public"."projects" FOR UPDATE USING (((( SELECT "auth"."uid"() AS "uid") = "owner_id") OR (EXISTS ( SELECT 1
-   FROM "public"."project_members"
-  WHERE (("project_members"."project_id" = "projects"."id") AND ("project_members"."user_id" = ( SELECT "auth"."uid"() AS "uid")) AND (("project_members"."role")::"text" = ANY ((ARRAY['editor'::character varying, 'admin'::character varying])::"text"[])))))));
+  FROM "public"."projects" "p"
+  WHERE (("p"."id" = "projects"."id") AND (( SELECT "auth"."uid"() AS "uid") = "owner_id"))))));
 
 
 
 ALTER TABLE "public"."project_members" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "project_members delete" ON "public"."project_members" FOR DELETE USING ((("user_id" = ( SELECT "auth"."uid"() AS "uid")) OR (EXISTS ( SELECT 1
+CREATE POLICY "project_members delete" ON "public"."project_members" FOR DELETE USING ((EXISTS ( SELECT 1
    FROM "public"."projects" "p"
   WHERE (("p"."id" = "project_members"."project_id") AND ("p"."owner_id" = ( SELECT "auth"."uid"() AS "uid")))))));
 
@@ -2072,7 +2140,9 @@ CREATE POLICY "project_members insert" ON "public"."project_members" FOR INSERT 
 
 
 
-CREATE POLICY "project_members select" ON "public"."project_members" FOR SELECT USING (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+CREATE POLICY "project_members select" ON "public"."project_members" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."projects" "p"
+  WHERE (("p"."id" = "project_members"."project_id") AND ("p"."owner_id" = ( SELECT "auth"."uid"() AS "uid"))))));
 
 
 
@@ -2348,31 +2418,31 @@ GRANT ALL ON FUNCTION "public"."check_version_increment"() TO "service_role";
 
 
 REVOKE ALL ON FUNCTION "public"."cleanup_deleted_attachments"("retention_days" integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cleanup_deleted_attachments"("retention_days" integer) TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."cleanup_deleted_attachments"("retention_days" integer) FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."cleanup_deleted_attachments"("retention_days" integer) TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."cleanup_expired_scan_records"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cleanup_expired_scan_records"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."cleanup_expired_scan_records"() FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."cleanup_expired_scan_records"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."cleanup_old_deleted_connections"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cleanup_old_deleted_connections"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."cleanup_old_deleted_connections"() FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."cleanup_old_deleted_connections"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."cleanup_old_deleted_tasks"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cleanup_old_deleted_tasks"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."cleanup_old_deleted_tasks"() FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."cleanup_old_deleted_tasks"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."cleanup_old_logs"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cleanup_old_logs"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."cleanup_old_logs"() FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."cleanup_old_logs"() TO "service_role";
 
 
@@ -2403,13 +2473,13 @@ GRANT ALL ON FUNCTION "public"."is_task_tombstoned"("p_task_id" "uuid") TO "serv
 
 
 REVOKE ALL ON FUNCTION "public"."migrate_all_projects_to_v2"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."migrate_all_projects_to_v2"() TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."migrate_all_projects_to_v2"() FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."migrate_all_projects_to_v2"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."migrate_project_data_to_v2"("p_project_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."migrate_project_data_to_v2"("p_project_id" "uuid") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."migrate_project_data_to_v2"("p_project_id" "uuid") FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."migrate_project_data_to_v2"("p_project_id" "uuid") TO "service_role";
 
 
@@ -2427,7 +2497,7 @@ GRANT ALL ON FUNCTION "public"."prevent_tombstoned_task_writes"() TO "service_ro
 
 
 REVOKE ALL ON FUNCTION "public"."purge_tasks"("p_task_ids" "uuid"[]) FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."purge_tasks"("p_task_ids" "uuid"[]) TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."purge_tasks"("p_task_ids" "uuid"[]) FROM "authenticated";
 GRANT ALL ON FUNCTION "public"."purge_tasks"("p_task_ids" "uuid"[]) TO "service_role";
 
 
@@ -2632,6 +2702,34 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
 
+-- ============================================================
+-- 全量安全加固（对齐 hardened init 路径）
+-- ============================================================
+
+REVOKE ALL ON TABLE "public"."tasks" FROM "anon";
+REVOKE ALL ON TABLE "public"."projects" FROM "anon";
+REVOKE ALL ON TABLE "public"."connections" FROM "anon";
+REVOKE ALL ON TABLE "public"."user_preferences" FROM "anon";
+REVOKE ALL ON TABLE "public"."black_box_entries" FROM "anon";
+REVOKE ALL ON TABLE "public"."transcription_usage" FROM "anon";
+REVOKE ALL ON TABLE "public"."task_tombstones" FROM "anon";
+REVOKE ALL ON TABLE "public"."connection_tombstones" FROM "anon";
+REVOKE ALL ON TABLE "public"."project_members" FROM "anon";
+REVOKE ALL ON TABLE "public"."purge_rate_limits" FROM "anon";
+REVOKE ALL ON TABLE "public"."purge_rate_limits" FROM "authenticated";
+REVOKE ALL ON TABLE "public"."attachment_scans" FROM "anon";
+REVOKE ALL ON TABLE "public"."cleanup_logs" FROM "anon";
+REVOKE ALL ON TABLE "public"."circuit_breaker_logs" FROM "anon";
+REVOKE ALL ON TABLE "public"."app_config" FROM "anon";
+GRANT SELECT ON TABLE "public"."app_config" TO "anon";
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON SEQUENCES FROM "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON SEQUENCES FROM "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON FUNCTIONS FROM "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON FUNCTIONS FROM "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON TABLES FROM "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" REVOKE ALL ON TABLES FROM "authenticated";
+
 
 
 
@@ -2736,9 +2834,7 @@ alter table "public"."user_preferences" validate constraint "user_preferences_la
   as permissive
   for update
   to public
-using (((( SELECT auth.uid() AS uid) = owner_id) OR (EXISTS ( SELECT 1
-   FROM public.project_members
-  WHERE ((project_members.project_id = projects.id) AND (project_members.user_id = ( SELECT auth.uid() AS uid)) AND ((project_members.role)::text = ANY ((ARRAY['editor'::character varying, 'admin'::character varying])::text[])))))));
+using ((( SELECT auth.uid() AS uid) = owner_id));
 
 
 
@@ -2747,9 +2843,7 @@ using (((( SELECT auth.uid() AS uid) = owner_id) OR (EXISTS ( SELECT 1
   as permissive
   for select
   to authenticated
-using (((bucket_id = 'attachments'::text) AND (EXISTS ( SELECT 1
-   FROM public.project_members pm
-  WHERE ((pm.user_id = auth.uid()) AND ((pm.project_id)::text = (storage.foldername(objects.name))[2]))))));
+using (((bucket_id = 'attachments'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text)));
 
 
 

@@ -43,6 +43,7 @@ export interface BatchSyncCallbacks {
     project: Project,
     fromRetryQueue?: boolean,
     sourceUserId?: string,
+    taskIdsToDelete?: string[],
   ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
   pushTask: (
     task: Task,
@@ -69,7 +70,7 @@ export interface BatchSyncCallbacks {
   ) => Promise<boolean>;
   getTombstoneIds: (projectId: string) => Promise<Set<string>>;
   getConnectionTombstoneIds: (projectId: string) => Promise<Set<string>>;
-  purgeTasksFromCloud: (projectId: string, taskIds: string[]) => Promise<boolean>;
+  purgeTasksFromCloud: (projectId: string, taskIds: string[], sourceUserId?: string) => Promise<boolean>;
   topologicalSortTasks: (tasks: Task[]) => Task[];
   addToRetryQueue: (
     type: 'task' | 'project' | 'connection',
@@ -77,6 +78,7 @@ export interface BatchSyncCallbacks {
     data: unknown,
     projectId?: string,
     sourceUserId?: string,
+    taskIdsToDelete?: string[],
   ) => void;
 }
 
@@ -198,11 +200,15 @@ export class BatchSyncService {
     const failedConnectionIds: string[] = [];
     const retryEnqueued: string[] = [];
     let projectPushed = false;
+    let taskPurgeSucceeded = true;
 
     if (!this.callbacks) {
       this.logger.error('BatchSyncService: 回调未初始化');
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
+
+    const changes = this.changeTracker.getProjectChanges(project.id);
+    const pendingTaskIdsToDelete = changes.taskIdsToDelete;
     
     // 本地模式快速退出
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
@@ -213,7 +219,7 @@ export class BatchSyncService {
     // 网络感知检查
     if (!this.mobileSync.shouldAllowSync()) {
       this.logger.debug('网络感知: 同步被延迟', { projectId: project.id });
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
       retryEnqueued.push(`project:${project.id}`);
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
@@ -231,7 +237,7 @@ export class BatchSyncService {
     
     const client = this.getSupabaseClient();
     if (!client) {
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
       retryEnqueued.push(`project:${project.id}`);
       return { success: false, failedTaskIds, failedConnectionIds, retryEnqueued, projectPushed };
     }
@@ -243,7 +249,7 @@ export class BatchSyncService {
       if (!sessionUserId) {
         this.syncState.setSessionExpired(true);
         // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
         retryEnqueued.push(`project:${project.id}`);
         this.logger.warn('Session 过期，项目数据已入重试队列', { projectId: project.id });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
@@ -251,7 +257,7 @@ export class BatchSyncService {
       }
 
       if (sessionUserId !== userId) {
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
         retryEnqueued.push(`project:${project.id}`);
         this.logger.warn('检测到项目批量同步 owner 与当前会话不匹配，已拒绝云端写入', {
           projectId: project.id,
@@ -265,7 +271,7 @@ export class BatchSyncService {
       this.logger.error('Session 验证失败', e);
       this.syncState.setSessionExpired(true);
       // 【NEW-3 修复】Session 验证异常时同样保护数据
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
       retryEnqueued.push(`project:${project.id}`);
       this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
       this.toast.warning('登录已过期', '请重新登录以继续同步数据');
@@ -285,20 +291,15 @@ export class BatchSyncService {
       // 1. 获取 tombstones，过滤已永久删除的任务
       const tombstoneIds = await this.callbacks.getTombstoneIds(projectSnapshot.id);
       const tasksToSync = projectSnapshot.tasks.filter(task => !tombstoneIds.has(task.id));
+      const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(projectSnapshot.id);
       
-      // 2. 处理永久删除的任务
-      const changes = this.changeTracker.getProjectChanges(projectSnapshot.id);
-      if (changes.taskIdsToDelete.length > 0) {
-        const purgeSuccess = await this.callbacks.purgeTasksFromCloud(projectSnapshot.id, changes.taskIdsToDelete);
-        if (purgeSuccess) {
-          for (const taskId of changes.taskIdsToDelete) {
-            this.changeTracker.clearTaskChange(projectSnapshot.id, taskId);
-          }
-        }
-      }
-      
-      // 3. 保存项目元数据
-      const projectPushResult = await this.callbacks.pushProject(projectSnapshot, false, userId);
+      // 2. 保存项目元数据
+      const projectPushResult = await this.callbacks.pushProject(
+        projectSnapshot,
+        false,
+        userId,
+        pendingTaskIdsToDelete,
+      );
       projectPushed = projectPushResult.success;
       if (projectPushResult.conflict) {
         this.syncState.setSyncing(false);
@@ -324,6 +325,51 @@ export class BatchSyncService {
           failedConnectionIds,
           retryEnqueued,
         };
+      }
+
+      // 3. 处理永久删除的任务
+      if (changes.taskIdsToDelete.length > 0) {
+        taskPurgeSucceeded = await this.callbacks.purgeTasksFromCloud(projectSnapshot.id, changes.taskIdsToDelete, userId);
+        if (taskPurgeSucceeded) {
+          for (const taskId of changes.taskIdsToDelete) {
+            this.changeTracker.clearTaskChange(projectSnapshot.id, taskId);
+          }
+        } else {
+          failedTaskIds.push(...changes.taskIdsToDelete);
+        }
+      }
+
+      const deletedConnections = projectSnapshot.connections.filter(conn => {
+        if (!conn.deletedAt) return false;
+        if (connectionTombstoneIds.has(conn.id)) return false;
+        return true;
+      });
+
+      for (let i = 0; i < deletedConnections.length; i++) {
+        if (i > 0) await this.delay(200);
+
+        try {
+          const connection = deletedConnections[i];
+          const pushed = await this.callbacks.pushConnection(
+            connection,
+            projectSnapshot.id,
+            true,
+            true,
+            false,
+            userId,
+          );
+          if (!pushed) {
+            failedConnectionIds.push(connection.id);
+            retryEnqueued.push(`connection:${connection.id}`);
+          }
+        } catch (e) {
+          if (isPermanentFailureError(e)) {
+            failedConnectionIds.push(deletedConnections[i].id);
+            this.logger.warn('跳过永久失败的已删除连接', { connectionId: deletedConnections[i].id });
+            continue;
+          }
+          throw e;
+        }
       }
       
       // 4. 批量保存任务（拓扑排序）
@@ -382,7 +428,6 @@ export class BatchSyncService {
       }
       
       // 5. 批量保存连接
-      const connectionTombstoneIds = await this.callbacks.getConnectionTombstoneIds(projectSnapshot.id);
       const activeConnections = projectSnapshot.connections.filter(conn => {
         if (conn.deletedAt) return false;
         if (connectionTombstoneIds.has(conn.id)) return false;
@@ -398,6 +443,9 @@ export class BatchSyncService {
         referencedTaskIds
       );
       const allSyncedTaskIds = new Set<string>([...successfulTaskIds, ...remoteExistingTaskIds]);
+      const purgedTaskIds = taskPurgeSucceeded
+        ? new Set(changes.taskIdsToDelete)
+        : new Set<string>();
 
       const blockedConnections: Connection[] = [];
       const connectionsToSync = activeConnections.filter(conn => {
@@ -411,6 +459,18 @@ export class BatchSyncService {
       });
 
       for (const blocked of blockedConnections) {
+        const coveredByTaskPurge =
+          purgedTaskIds.has(blocked.source) || purgedTaskIds.has(blocked.target);
+        if (coveredByTaskPurge) {
+          this.logger.info('连接已随 task purge 在云端删除，跳过无意义重试', {
+            connectionId: blocked.id,
+            projectId: projectSnapshot.id,
+            source: blocked.source,
+            target: blocked.target,
+          });
+          continue;
+        }
+
         this.logger.warn('跳过连接（引用任务未同步）', {
           connectionId: blocked.id,
           projectId: projectSnapshot.id,
@@ -447,6 +507,7 @@ export class BatchSyncService {
 
       const success =
         projectPushed &&
+        taskPurgeSucceeded &&
         failedTaskIds.length === 0 &&
         failedConnectionIds.length === 0;
       
@@ -471,7 +532,7 @@ export class BatchSyncService {
       };
     } catch (e) {
       if (!retryEnqueued.includes(`project:${project.id}`)) {
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId);
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
         retryEnqueued.push(`project:${project.id}`);
       }
       this.logger.error('保存项目失败', e);

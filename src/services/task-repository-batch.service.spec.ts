@@ -235,8 +235,6 @@ describe('TaskRepositoryBatchService', () => {
     it('should fall back to soft delete when purge RPC fails', async () => {
       // v2 fails
       supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
-      // v1 also fails
-      supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
 
       await service.saveTasksIncremental('proj-1', [], [], ['task-del'], {});
 

@@ -52,6 +52,7 @@ export interface ConflictEvent {
   localProject: Project;
   remoteProject: Project;
   projectId: string;
+  pendingTaskDeleteIds?: string[];
 }
 
 /**
@@ -234,8 +235,8 @@ export class SyncCoordinatorService {
     if (this.isInitialized) return;
     this.isInitialized = true;
 
-    this.actionQueueProcessors.setProjectConflictHandler((localProject, remoteProject, ownerUserId) => {
-      this.publishConflict(localProject, remoteProject, ownerUserId);
+    this.actionQueueProcessors.setProjectConflictHandler((localProject, remoteProject, ownerUserId, pendingTaskDeleteIds) => {
+      this.publishConflict(localProject, remoteProject, ownerUserId, pendingTaskDeleteIds);
     });
     this.actionQueueProcessors.setupProcessors();
     this.validateRequiredProcessors();
@@ -637,28 +638,40 @@ export class SyncCoordinatorService {
     }
 
     const activeProjectId = this.projectState.activeProject()?.id ?? null;
+    const pendingOwnerHandoffProjectIds = this.getPendingOwnerHandoffProjectIds(activeProjectId);
 
     const hasPendingLocalChanges = this.persistState().hasPendingLocalChanges;
-    if (!hadScheduledPersist && !hasPendingLocalChanges) {
+    if (!hadScheduledPersist && !hasPendingLocalChanges && pendingOwnerHandoffProjectIds.size === 0) {
       return !this.hasProtectedOfflineProjects();
     }
 
-    const flushedToCloud = await this.flushPendingPersistToCloud(reason);
-    const activeProjectHandled = flushedToCloud || !this.persistState().hasPendingLocalChanges;
-    if (activeProjectHandled) {
-      return !this.hasProtectedOfflineProjects(
-        activeProjectId ? new Set([activeProjectId]) : undefined,
-      );
+    if (hadScheduledPersist || hasPendingLocalChanges) {
+      await this.flushPendingPersistToCloud(reason);
     }
 
-    const handoffPrepared = await this.handoffPendingProjectToOwnerQueue(ownerUserId, reason);
-    if (!handoffPrepared) {
-      return false;
+    const remainingOwnerHandoffProjectIds = this.getPendingOwnerHandoffProjectIds(activeProjectId);
+    if (remainingOwnerHandoffProjectIds.size === 0) {
+      return !this.hasProtectedOfflineProjects();
     }
 
-    return !this.hasProtectedOfflineProjects(
-      activeProjectId ? new Set([activeProjectId]) : undefined,
+    const handedOffProjectIds = await this.handoffPendingProjectsToOwnerQueue(
+      ownerUserId,
+      reason,
+      remainingOwnerHandoffProjectIds,
     );
+
+    return !this.hasProtectedOfflineProjects(handedOffProjectIds);
+  }
+
+  private getPendingOwnerHandoffProjectIds(activeProjectId: string | null): Set<string> {
+    const projectIds = new Set(this.changeTracker.getChangedProjectIds());
+
+    // 中文注释：active project 的本轮本地编辑并不一定都会进入 ChangeTracker，owner switch 时必须一起转交。
+    if (activeProjectId && this.persistState().hasPendingLocalChanges) {
+      projectIds.add(activeProjectId);
+    }
+
+    return projectIds;
   }
 
   private hasProtectedOfflineProjects(excludedProjectIds?: Set<string>): boolean {
@@ -671,41 +684,60 @@ export class SyncCoordinatorService {
     });
   }
 
-  private async handoffPendingProjectToOwnerQueue(ownerUserId: string | null, reason: string): Promise<boolean> {
-    const project = this.projectState.activeProject();
-    if (!project) {
-      return false;
-    }
+  private async handoffPendingProjectsToOwnerQueue(
+    ownerUserId: string | null,
+    reason: string,
+    projectIds: Set<string>,
+  ): Promise<Set<string>> {
+    const handedOffProjectIds = new Set<string>();
 
-    if (!ownerUserId || ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID || project.syncSource === 'local-only') {
-      this.logger.info('切换账号前保留 owner 隔离快照作为最后副本', {
+    for (const projectId of projectIds) {
+      const project = this.projectState.getProject(projectId)
+        ?? (this.projectState.activeProject()?.id === projectId ? this.projectState.activeProject() : null);
+      if (!project) {
+        this.logger.error('切换账号前未找到待转交项目，拒绝继续 owner handoff', {
+          projectId,
+          ownerUserId,
+          reason,
+        });
+        throw new Error(`Missing project for owner handoff: ${projectId}`);
+      }
+
+      if (!ownerUserId || ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID || project.syncSource === 'local-only') {
+        this.logger.info('切换账号前保留 owner 隔离快照作为最后副本', {
+          projectId: project.id,
+          ownerUserId,
+          syncSource: project.syncSource,
+          reason,
+        });
+        continue;
+      }
+
+      const changes = this.changeTracker.getProjectChanges(project.id);
+      await this.actionQueue.enqueueForOwner(ownerUserId, {
+        type: 'update',
+        entityType: 'project',
+        entityId: project.id,
+        payload: {
+          project: {
+            ...project,
+            syncSource: 'synced',
+            pendingSync: true,
+          },
+          sourceUserId: ownerUserId,
+          taskIdsToDelete: changes.taskIdsToDelete,
+        }
+      });
+      handedOffProjectIds.add(project.id);
+      this.logger.info('切换账号前已将待持久化项目转交原 owner 队列', {
         projectId: project.id,
         ownerUserId,
-        syncSource: project.syncSource,
+        taskDeleteCount: changes.taskIdsToDelete.length,
         reason,
       });
-      return false;
     }
 
-    await this.actionQueue.enqueueForOwner(ownerUserId, {
-      type: 'update',
-      entityType: 'project',
-      entityId: project.id,
-      payload: {
-        project: {
-          ...project,
-          syncSource: 'synced',
-          pendingSync: true,
-        },
-        sourceUserId: ownerUserId,
-      }
-    });
-    this.logger.info('切换账号前已将待持久化项目转交原 owner 队列', {
-      projectId: project.id,
-      ownerUserId,
-      reason,
-    });
-    return true;
+    return handedOffProjectIds;
   }
 
   /**
@@ -1272,7 +1304,8 @@ export class SyncCoordinatorService {
     localProject: Project, 
     remoteProject: Project | undefined,
     conflictedFields: string[],
-    ownerUserId?: string | null
+    ownerUserId?: string | null,
+    pendingTaskDeleteIds?: string[],
   ): Promise<void> {
     await this.conflictStorage.saveConflict({
       projectId: localProject.id,
@@ -1285,23 +1318,31 @@ export class SyncCoordinatorService {
       remoteVersion: remoteProject?.version ?? 0,
       reason: 'version_mismatch',
       conflictedFields,
+      pendingTaskDeleteIds,
       acknowledged: false
     });
   }
 
-  private publishConflict(localProject: Project, remoteProject: Project, ownerUserId?: string | null): void {
-    void this.saveConflictSilently(localProject, remoteProject, [], ownerUserId).catch(error => {
+  private publishConflict(
+    localProject: Project,
+    remoteProject: Project,
+    ownerUserId?: string | null,
+    pendingTaskDeleteIds?: string[],
+  ): void {
+    void this.saveConflictSilently(localProject, remoteProject, [], ownerUserId, pendingTaskDeleteIds).catch(error => {
       this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
     });
     this.core.setConflict({
       local: localProject,
       remote: remoteProject,
       projectId: localProject.id,
+      pendingTaskDeleteIds,
     });
     this.conflict$.next({
       localProject,
       remoteProject,
       projectId: localProject.id,
+      pendingTaskDeleteIds,
     });
   }
   
@@ -1332,13 +1373,18 @@ export class SyncCoordinatorService {
     );
   }
 
-  async captureConflict(localProject: Project, remoteProject?: Project, ownerUserId?: string | null): Promise<void> {
+  async captureConflict(
+    localProject: Project,
+    remoteProject?: Project,
+    ownerUserId?: string | null,
+    pendingTaskDeleteIds?: string[],
+  ): Promise<void> {
     if (remoteProject) {
-      this.publishConflict(localProject, remoteProject, ownerUserId);
+      this.publishConflict(localProject, remoteProject, ownerUserId, pendingTaskDeleteIds);
       return;
     }
 
-    await this.saveConflictSilently(localProject, undefined, [], ownerUserId);
+    await this.saveConflictSilently(localProject, undefined, [], ownerUserId, pendingTaskDeleteIds);
   }
 
   clearActiveConflict(): void {

@@ -72,6 +72,7 @@ describe('SimpleSyncService', () => {
     lastWarningPercent: number;
     isProcessingQueue: boolean;
     length: number;
+    add: ReturnType<typeof vi.fn>;
     setOperationHandler: ReturnType<typeof vi.fn>;
     startLoop: ReturnType<typeof vi.fn>;
     stopLoop: ReturnType<typeof vi.fn>;
@@ -434,6 +435,28 @@ describe('SimpleSyncService', () => {
       lastWarningPercent: 0,
       isProcessingQueue: false,
       get length() { return this.queue.length; },
+      add: vi.fn().mockImplementation(function(
+        this: { queue: RetryQueueItem[] },
+        type: RetryQueueItem['type'],
+        operation: RetryQueueItem['operation'],
+        data: RetryQueueItem['data'],
+        projectId?: string,
+        sourceUserId?: string,
+        taskIdsToDelete?: string[],
+      ) {
+        this.queue.push({
+          id: crypto.randomUUID(),
+          type,
+          operation,
+          data,
+          projectId,
+          retryCount: 0,
+          createdAt: Date.now(),
+          sourceUserId,
+          taskIdsToDelete,
+        });
+        return true;
+      }),
       setOperationHandler: vi.fn(),
       startLoop: vi.fn(),
       stopLoop: vi.fn(),
@@ -2362,7 +2385,7 @@ describe('SimpleSyncService', () => {
       const project = createMockProject({ id: 'project-conflict', tasks: [], connections: [] });
       const remoteProject = createMockProject({ id: 'project-conflict', version: 9, tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
-        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
       };
 
       vi.spyOn(service, 'pushProject').mockRejectedValueOnce(
@@ -2385,7 +2408,7 @@ describe('SimpleSyncService', () => {
     it('BatchSync 回调应透传 sourceUserId 到 pushProject', async () => {
       const project = createMockProject({ id: 'project-owner-pass-through', tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
-        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
       };
 
       const pushProjectSpy = vi.spyOn(service, 'pushProject').mockResolvedValueOnce(true);
@@ -2393,7 +2416,66 @@ describe('SimpleSyncService', () => {
       const result = await callbacks.pushProject(project, false, 'owner-a');
 
       expect(result).toEqual({ success: true });
-      expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a');
+      expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a', undefined);
+    });
+
+    it('BatchSync 回调应透传 pending taskIdsToDelete 到 pushProject', async () => {
+      const project = createMockProject({ id: 'project-delete-intent-pass-through', tasks: [], connections: [] });
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project }>;
+      };
+
+      const pushProjectSpy = vi.spyOn(service, 'pushProject').mockResolvedValueOnce(true);
+
+      const result = await callbacks.pushProject(project, false, 'owner-a', ['task-delete-a']);
+
+      expect(result).toEqual({ success: true });
+      expect(pushProjectSpy).toHaveBeenCalledWith(project, false, 'owner-a', ['task-delete-a']);
+    });
+
+    it('pushProject 失败回退到重试队列时应保留 taskIdsToDelete', async () => {
+      const project = createMockProject({ id: 'project-delete-intent-retry', tasks: [], connections: [] });
+
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'new-owner' } } }
+      });
+
+      const result = await service.pushProject(project, false, 'owner-a', ['task-delete-a']);
+
+      expect(result).toBe(false);
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        project,
+        undefined,
+        'owner-a',
+        ['task-delete-a'],
+      );
+    });
+
+    it('BatchSync addToRetryQueue 回调应透传 taskIdsToDelete', () => {
+      const project = createMockProject({ id: 'project-batch-retry-adapter', tasks: [], connections: [] });
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        addToRetryQueue: (
+          type: 'task' | 'project' | 'connection',
+          operation: 'upsert' | 'delete',
+          data: unknown,
+          projectId?: string,
+          sourceUserId?: string,
+          taskIdsToDelete?: string[],
+        ) => void;
+      };
+
+      callbacks.addToRetryQueue('project', 'upsert', project, undefined, 'owner-a', ['task-delete-a']);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        project,
+        undefined,
+        'owner-a',
+        ['task-delete-a'],
+      );
     });
 
     it('BatchSync 回调应透传 sourceUserId 到 task、position 与 connection 同步', async () => {

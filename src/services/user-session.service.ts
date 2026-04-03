@@ -5,6 +5,7 @@ import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import type { AttachmentService } from './attachment.service';
 import { ActionQueueService } from './action-queue.service';
 import { ConflictStorageService } from './conflict-storage.service';
@@ -28,6 +29,7 @@ import { isFailure } from '../utils/result';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { isValidUUID } from '../utils/validation';
+import { resetFocusState } from '../state/focus-stores';
 
 type StartupProjectCatalogStage = 'unresolved' | 'partial' | 'resolved';
 
@@ -56,6 +58,7 @@ export class UserSessionService {
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
+  private changeTracker = inject(ChangeTrackerService);
   private startupPlaceholderState = inject(StartupPlaceholderStateService, { optional: true });
   private injector = inject(Injector);
   private layoutService = inject(LayoutService);
@@ -650,8 +653,11 @@ export class UserSessionService {
     this.projectState.setActiveProjectId(null);
     this.projectState.setProjects([]);
     this.clearStartupProjectCatalogState();
+    this.uiState.clearAllState();
     this.actionQueue.clearCurrentView();
     this.retryQueue.clearCurrentView();
+    this.changeTracker.clearAllChanges();
+    resetFocusState();
     this.undoService.clearHistory();
     this.syncCoordinator.clearActiveConflict();
     this.syncCoordinator.core.teardownRealtimeSubscription();
@@ -764,6 +770,10 @@ export class UserSessionService {
             this.syncCoordinator.core.clearOfflineSnapshot();
           }
         }
+        if (isUserChange && previousUserId !== null) {
+          this.changeTracker.clearAllChanges();
+          resetFocusState();
+        }
         this.undoService.clearHistory();
         this.syncCoordinator.clearActiveConflict();
         this.syncCoordinator.core.teardownRealtimeSubscription();
@@ -862,12 +872,17 @@ export class UserSessionService {
     this.projectState.clearData();
     this.uiState.clearAllState();
     this.undoService.clearHistory();
+    this.changeTracker.clearAllChanges();
+    resetFocusState();
     this.syncCoordinator.core.clearOfflineCache();
     this.syncCoordinator.clearActiveConflict();
     this.clearStartupProjectCatalogState();
   }
 
-  /** 完整本地数据清理（登出时必须调用，防止数据泄露） */
+  /**
+   * 完整本地持久化数据清理。
+   * 登出流程中应在 setCurrentUser(null) 之后调用；会话级 realtime teardown 由前一阶段负责。
+   */
   async clearAllLocalData(userId?: string): Promise<void> {
     this.logger.info('执行完整的本地数据清理', { userId });
 
@@ -896,6 +911,7 @@ export class UserSessionService {
       LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
       LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY,
       'nanoflow.local-tombstones',
+      'nanoflow.local-connection-tombstones',
       'nanoflow.auth-cache',
       'nanoflow.escape-pod',
       'nanoflow.safari-warning-time',

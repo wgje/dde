@@ -46,6 +46,7 @@ describe('ProjectOperationService', () => {
     core: {
       saveProjectSmart: vi.fn().mockResolvedValue({ success: false, conflict: false }),
       deleteProjectFromCloud: vi.fn().mockResolvedValue(false),
+      deleteTask: vi.fn().mockResolvedValue(true),
       saveOfflineSnapshot: vi.fn(),
     },
     conflictData: vi.fn(() => null),
@@ -119,6 +120,7 @@ describe('ProjectOperationService', () => {
     mockUserSession.getCurrentSessionGeneration.mockReturnValue(1);
     mockUserSession.isSessionContextCurrent.mockReturnValue(true);
     mockSyncCoordinator.core.saveProjectSmart.mockReset();
+    mockSyncCoordinator.core.deleteTask.mockReset();
     mockSyncCoordinator.resolveConflict.mockReset();
     mockSyncCoordinator.captureConflict.mockReset();
     mockSyncCoordinator.loadSingleProjectFromCloud.mockReset();
@@ -126,6 +128,7 @@ describe('ProjectOperationService', () => {
     mockConflictStorage.saveConflict.mockReset();
     mockConflictStorage.deleteConflict.mockReset();
     mockSyncCoordinator.core.saveProjectSmart.mockResolvedValue({ success: false, conflict: false });
+    mockSyncCoordinator.core.deleteTask.mockResolvedValue(true);
     mockSyncCoordinator.resolveConflict.mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) });
     mockSyncCoordinator.captureConflict.mockResolvedValue(undefined);
     mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValue(null);
@@ -317,7 +320,8 @@ describe('ProjectOperationService', () => {
     expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
       expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
-      'user-1'
+      'user-1',
+      undefined,
     );
     expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
   });
@@ -340,7 +344,8 @@ describe('ProjectOperationService', () => {
     expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
       expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
-      'user-1'
+      'user-1',
+      undefined,
     );
   });
 
@@ -443,6 +448,7 @@ describe('ProjectOperationService', () => {
       projectId: 'proj-success',
       localProject: createProject({ id: 'proj-success', name: 'Local Conflict', pendingSync: true }),
       remoteProject: createProject({ id: 'proj-success', name: 'Remote Conflict', version: 3 }),
+      pendingTaskDeleteIds: ['task-delete-1'],
     });
     mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-success', name: 'Local Conflict', pendingSync: true }));
     mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
@@ -470,6 +476,116 @@ describe('ProjectOperationService', () => {
     expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-success');
     expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-success');
     expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-success');
+    expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledWith('task-delete-1', 'proj-success', 'user-1');
+  });
+
+  it('后置待删任务回放遇到会话切换时应把剩余删除意图写回原 owner 队列', async () => {
+    mockUserSession.isSessionContextCurrent
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    const replayPendingTaskDeletes = service as unknown as {
+      replayPendingTaskDeletes: (
+        project: Project,
+        pendingTaskDeleteIds: string[],
+        sessionContext: { ownerUserId: string | null; sessionGeneration: number },
+      ) => Promise<void>;
+    };
+
+    await replayPendingTaskDeletes.replayPendingTaskDeletes(
+      createProject({ id: 'proj-replay-handoff', version: 9 }),
+      ['task-delete-1', 'task-delete-2'],
+      { ownerUserId: 'user-1', sessionGeneration: 1 },
+    );
+
+    expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledTimes(1);
+    expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledWith('task-delete-1', 'proj-replay-handoff', 'user-1');
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'update',
+      entityType: 'project',
+      entityId: 'proj-replay-handoff',
+      payload: expect.objectContaining({
+        taskIdsToDelete: ['task-delete-2'],
+      }),
+    }));
+  });
+
+  it('resolveConflict 应优先使用 active conflict 中的 pendingTaskDeleteIds', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-active-pending-delete',
+      local: createProject({ id: 'proj-active-pending-delete', name: 'Local Conflict' }),
+      remote: createProject({ id: 'proj-active-pending-delete', name: 'Remote Conflict', version: 3 }),
+      pendingTaskDeleteIds: ['task-delete-fast-click'],
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-active-pending-delete',
+      localProject: createProject({ id: 'proj-active-pending-delete', name: 'Local Conflict' }),
+      remoteProject: createProject({ id: 'proj-active-pending-delete', name: 'Remote Conflict', version: 3 }),
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-active-pending-delete', name: 'Local Conflict' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-active-pending-delete', name: 'Resolved Conflict', version: 4 }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: true,
+      newVersion: 10,
+    });
+
+    const resolved = await service.resolveConflict('proj-active-pending-delete', 'local');
+
+    expect(resolved).toBe(true);
+    expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledWith('task-delete-fast-click', 'proj-active-pending-delete', 'user-1');
+  });
+
+  it('resolveConflict 在 saveProjectSmart 成功后若会话已过期，应先回写 pendingTaskDeleteIds 到原 owner 队列', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-stale-after-save',
+      local: createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }),
+      remote: createProject({ id: 'proj-stale-after-save', name: 'Remote Conflict', version: 3 }),
+      pendingTaskDeleteIds: ['task-delete-stale'],
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-stale-after-save',
+      localProject: createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }),
+      remoteProject: createProject({ id: 'proj-stale-after-save', name: 'Remote Conflict', version: 3 }),
+      pendingTaskDeleteIds: ['task-delete-stale'],
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-stale-after-save', name: 'Resolved Conflict', version: 4 }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: true,
+      newVersion: 10,
+    });
+
+    const isProjectSessionContextCurrent = service as unknown as {
+      isProjectSessionContextCurrent: (
+        context: { ownerUserId: string | null; sessionGeneration: number },
+        stage: string,
+        projectId: string,
+      ) => boolean;
+    };
+    vi.spyOn(isProjectSessionContextCurrent, 'isProjectSessionContextCurrent').mockImplementation(
+      (_context, stage) => stage !== 'resolveConflict:saveProjectSmart',
+    );
+
+    const resolved = await service.resolveConflict('proj-stale-after-save', 'local');
+
+    expect(resolved).toBe(true);
+    expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      type: 'update',
+      entityType: 'project',
+      entityId: 'proj-stale-after-save',
+      payload: expect.objectContaining({
+        taskIdsToDelete: ['task-delete-stale'],
+      }),
+    }));
+    expect(mockSyncCoordinator.core.deleteTask).not.toHaveBeenCalled();
   });
 
   it('解决冲突后二次冲突且缺少 remoteData 时应降级为 stale 冲突记录', async () => {
@@ -483,6 +599,7 @@ describe('ProjectOperationService', () => {
       projectId: 'proj-conflict',
       localProject: createProject({ id: 'proj-conflict', name: 'Local Existing' }),
       remoteProject: existingRemote,
+      pendingTaskDeleteIds: ['task-delete-1'],
     });
     mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-conflict', name: 'Local Existing' }));
     mockProjectState.activeProjectId.mockReturnValue('proj-conflict');
@@ -503,6 +620,7 @@ describe('ProjectOperationService', () => {
       localProject: expect.objectContaining({ id: 'proj-conflict', name: 'Resolved Local', version: 5 }),
       remoteProject: expect.objectContaining({ id: 'proj-conflict', name: 'Remote Existing', version: 4 }),
       remoteSnapshotFresh: false,
+      pendingTaskDeleteIds: ['task-delete-1'],
     }));
     expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
     expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
@@ -662,7 +780,8 @@ describe('ProjectOperationService', () => {
     expect(mockSyncCoordinator.captureConflict).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'proj-1', name: 'Imported' }),
       expect.objectContaining({ id: 'proj-1', name: 'Remote Existing', version: 2 }),
-      'user-1'
+      'user-1',
+      undefined,
     );
   });
 });

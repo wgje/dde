@@ -54,6 +54,21 @@ describe('TaskSyncOperationsService', () => {
     auth: {
       getSession: vi.fn(async () => ({ data: { session: { user: { id: 'user-1' } } } })),
     },
+    rpc: vi.fn(async (fn: string, args: Record<string, unknown>) => {
+      if (fn === 'purge_tasks_v3') {
+        return {
+          data: { purged_count: 1, attachment_paths: [] },
+          error: null,
+          args,
+        };
+      }
+
+      if (fn === 'purge_tasks_v2') {
+        return { data: 1, error: null, args };
+      }
+
+      throw new Error(`Unexpected rpc: ${fn}`);
+    }),
     from: vi.fn((table: string) => {
       if (table === 'task_tombstones') {
         return {
@@ -88,6 +103,21 @@ describe('TaskSyncOperationsService', () => {
   beforeEach(() => {
     upsertPayload = null;
     vi.clearAllMocks();
+    mockClient.rpc.mockImplementation(async (fn: string, args: Record<string, unknown>) => {
+      if (fn === 'purge_tasks_v3') {
+        return {
+          data: { purged_count: 1, attachment_paths: [] },
+          error: null,
+          args,
+        };
+      }
+
+      if (fn === 'purge_tasks_v2') {
+        return { data: 1, error: null, args };
+      }
+
+      throw new Error(`Unexpected rpc: ${fn}`);
+    });
 
     TestBed.configureTestingModule({
       providers: [
@@ -123,7 +153,16 @@ describe('TaskSyncOperationsService', () => {
           provide: SessionManagerService,
           useValue: mockSessionManager,
         },
-        { provide: TombstoneService, useValue: {} },
+        {
+          provide: TombstoneService,
+          useValue: {
+            addLocalTombstones: vi.fn(),
+            invalidateCache: vi.fn(),
+            deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined),
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn(() => new Set<string>()),
+          },
+        },
         { provide: ProjectDataService, useValue: {} },
         {
           provide: RetryQueueService,
@@ -205,5 +244,50 @@ describe('TaskSyncOperationsService', () => {
     expect(result).toBe(false);
     expect(upsertPayload).toBeNull();
     expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
+  });
+
+  it('deleteTask 在 sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
+    mockClient.auth.getSession.mockResolvedValueOnce({
+      data: { session: { user: { id: 'user-2' } } },
+    });
+
+    const result = await service.deleteTask('task-delete-owner-mismatch', 'project-1', 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockRetryQueue.add).toHaveBeenCalledWith(
+      'task',
+      'delete',
+      { id: 'task-delete-owner-mismatch' },
+      'project-1',
+      'user-1',
+    );
+  });
+
+  it('deleteTask 应优先调用带 project_id 的 purge_tasks_v3', async () => {
+    const result = await service.deleteTask('task-delete-scoped', 'project-1', 'user-1');
+
+    expect(result).toBe(true);
+    expect(mockClient.rpc).toHaveBeenCalledWith('purge_tasks_v3', {
+      p_project_id: 'project-1',
+      p_task_ids: ['task-delete-scoped'],
+    });
+  });
+
+  it('purgeTasksFromCloud 在 sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
+    mockClient.auth.getSession.mockResolvedValueOnce({
+      data: { session: { user: { id: 'user-2' } } },
+    });
+
+    const result = await service.purgeTasksFromCloud('project-1', ['task-delete-bulk-owner-mismatch'], 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockClient.rpc).not.toHaveBeenCalled();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith(
+      'task',
+      'delete',
+      { id: 'task-delete-bulk-owner-mismatch' },
+      'project-1',
+      'user-1',
+    );
   });
 });

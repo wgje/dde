@@ -447,7 +447,6 @@ GRANT ALL ON TABLE public.project_members TO authenticated;
 GRANT ALL ON TABLE public.project_members TO service_role;
 GRANT ALL ON TABLE public.circuit_breaker_logs TO authenticated;
 GRANT ALL ON TABLE public.circuit_breaker_logs TO service_role;
-GRANT ALL ON TABLE public.purge_rate_limits TO authenticated;
 GRANT ALL ON TABLE public.purge_rate_limits TO service_role;
 GRANT ALL ON TABLE public.app_config TO authenticated;
 GRANT ALL ON TABLE public.app_config TO service_role;
@@ -663,19 +662,13 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized: not authenticated';
   END IF;
 
-  -- 验证用户是项目所有者或成员
+  -- 个人版后端仅允许 owner 批量写任务主字段，附件由专用 RPC 负责
   IF NOT EXISTS (
     SELECT 1 FROM public.projects p
     WHERE p.id = p_project_id
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm
-          WHERE pm.project_id = p.id AND pm.user_id = v_user_id
-        )
-      )
+      AND p.owner_id = v_user_id
   ) THEN
-    RAISE EXCEPTION 'Unauthorized: not project owner or member (project_id: %, user_id: %)', p_project_id, v_user_id;
+    RAISE EXCEPTION 'Unauthorized: not project owner';
   END IF;
 
   FOREACH v_task IN ARRAY p_tasks
@@ -705,7 +698,7 @@ BEGIN
       RAISE EXCEPTION 'cognitive_load must be low or high for task %', v_task->>'id';
     END IF;
 
-    INSERT INTO public.tasks (
+    INSERT INTO public.tasks AS existing (
       id, project_id, title, content, stage, parent_id,
       "order", rank, status, x, y, short_id, deleted_at,
       attachments, expected_minutes, cognitive_load, wait_minutes, parking_meta
@@ -724,7 +717,7 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      COALESCE(v_task->'attachments', '[]'::jsonb),
+      '[]'::jsonb,
       v_expected,
       COALESCE(v_cognitive, 'low'),
       v_wait,
@@ -742,12 +735,17 @@ BEGIN
       y = EXCLUDED.y,
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
-      attachments = EXCLUDED.attachments,
+      attachments = COALESCE(existing.attachments, '[]'::jsonb),
       expected_minutes = EXCLUDED.expected_minutes,
       cognitive_load = EXCLUDED.cognitive_load,
       wait_minutes = EXCLUDED.wait_minutes,
       parking_meta = EXCLUDED.parking_meta,
-      updated_at = now();
+      updated_at = now()
+    WHERE existing.project_id = p_project_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Task project mismatch';
+    END IF;
 
     v_count := v_count + 1;
   END LOOP;
@@ -759,7 +757,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) IS
-  'Batch upsert tasks with transaction guarantee. Supports attachments + Focus Console planning fields (v6.0.0).';
+  'Owner-only batch upsert for task core fields. Attachments stay on dedicated append/remove RPCs.';
 
 -- ============================================================================
 -- §10  数据安全深度加固

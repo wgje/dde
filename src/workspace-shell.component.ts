@@ -1859,10 +1859,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     // 订阅冲突事件流 - 使用命令式模态框
     this.syncCoordinator.onConflict$.pipe(
       takeUntilDestroyed(this.destroyRef)
-    ).subscribe(({ localProject, remoteProject, projectId }) => {
+    ).subscribe(({ localProject, remoteProject, projectId, pendingTaskDeleteIds }) => {
       // 存储冲突数据供解决方法使用
-      this.modalCoord.setPendingConflict({ localProject, remoteProject, projectId });
-      void this.modalCoord.openConflictModal({ localProject, remoteProject, projectId });
+      this.modalCoord.setPendingConflict({ localProject, remoteProject, projectId, pendingTaskDeleteIds });
+      void this.modalCoord.openConflictModal({ localProject, remoteProject, projectId, pendingTaskDeleteIds });
     });
   }
 

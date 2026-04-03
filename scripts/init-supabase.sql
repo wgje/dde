@@ -160,7 +160,7 @@ AS $$
   )
 $$;
 
--- 检查用户是否为项目所有者或成员
+-- 检查用户是否为项目所有者（个人版 owner-only）
 CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
 RETURNS BOOLEAN
 LANGUAGE SQL
@@ -173,14 +173,9 @@ AS $$
     WHERE p.id = p_project_id 
     AND p.owner_id = public.current_user_id()
   )
-  OR EXISTS (
-    SELECT 1 FROM public.project_members pm
-    WHERE pm.project_id = p_project_id 
-    AND pm.user_id = public.current_user_id()
-  )
 $$;
 
--- 获取用户可访问的所有项目 ID
+-- 获取用户可访问的所有项目 ID（个人版 owner-only）
 CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
 RETURNS SETOF UUID
 LANGUAGE SQL
@@ -189,8 +184,6 @@ PARALLEL SAFE
 SET search_path TO 'pg_catalog', 'public'
 AS $$
   SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
-  UNION
-  SELECT project_id FROM public.project_members WHERE user_id = public.current_user_id()
 $$;
 
 -- ============================================
@@ -846,12 +839,14 @@ CREATE TRIGGER trg_prevent_connection_resurrection
 CREATE OR REPLACE FUNCTION record_connection_tombstone()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- 只在真正删除时记录（不是软删除）
-  IF OLD.deleted_at IS NOT NULL THEN
-    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_by)
-    VALUES (OLD.id, OLD.project_id, auth.uid())
-    ON CONFLICT (connection_id) DO NOTHING;
-  END IF;
+  -- 中文注释：任何物理删除都要落 tombstone，覆盖任务 purge 的级联删除路径。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  VALUES (OLD.id, OLD.project_id, NOW(), auth.uid())
+  ON CONFLICT (connection_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
   RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
@@ -875,13 +870,7 @@ BEGIN
     SELECT 1 FROM public.connections c
     JOIN public.projects p ON c.project_id = p.id
     WHERE c.id = p_connection_id
-      AND (
-        p.owner_id = auth.uid() 
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm 
-          WHERE pm.project_id = p.id AND pm.user_id = auth.uid()
-        )
-      )
+      AND p.owner_id = auth.uid()
   ) THEN
     RETURN false;
   END IF;
@@ -911,15 +900,11 @@ DROP POLICY IF EXISTS "owner update" ON public.projects;
 DROP POLICY IF EXISTS "owner delete" ON public.projects;
 
 CREATE POLICY "owner select" ON public.projects FOR SELECT USING (
-  (select auth.uid()) = owner_id OR EXISTS (
-    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = (select auth.uid())
-  )
+  (select auth.uid()) = owner_id
 );
 CREATE POLICY "owner insert" ON public.projects FOR INSERT WITH CHECK ((select auth.uid()) = owner_id);
 CREATE POLICY "owner update" ON public.projects FOR UPDATE USING (
-  (select auth.uid()) = owner_id OR EXISTS (
-    SELECT 1 FROM public.project_members WHERE project_id = projects.id AND user_id = (select auth.uid()) AND role IN ('editor', 'admin')
-  )
+  (select auth.uid()) = owner_id
 );
 CREATE POLICY "owner delete" ON public.projects FOR DELETE USING ((select auth.uid()) = owner_id);
 
@@ -933,18 +918,16 @@ DROP POLICY IF EXISTS "project_members update" ON public.project_members;
 DROP POLICY IF EXISTS "project_members delete" ON public.project_members;
 
 CREATE POLICY "project_members select" ON public.project_members FOR SELECT USING (
-  user_id = auth.uid() OR EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
-  OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = project_members.project_id AND pm.user_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
 );
 CREATE POLICY "project_members insert" ON public.project_members FOR INSERT WITH CHECK (
   EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
-  OR EXISTS (SELECT 1 FROM public.project_members pm WHERE pm.project_id = project_members.project_id AND pm.user_id = auth.uid() AND pm.role = 'admin')
 );
 CREATE POLICY "project_members update" ON public.project_members FOR UPDATE USING (
   EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
 );
 CREATE POLICY "project_members delete" ON public.project_members FOR DELETE USING (
-  user_id = auth.uid() OR EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
 );
 
 -- ============================================
@@ -1018,19 +1001,26 @@ SET search_path TO 'pg_catalog', 'public' AS $$
 DECLARE
   v_current_attachments JSONB;
   v_attachment_id TEXT;
+  v_project_id UUID;
 BEGIN
   v_attachment_id := p_attachment->>'id';
   IF v_attachment_id IS NULL THEN RAISE EXCEPTION 'Attachment must have an id'; END IF;
   
-  SELECT attachments INTO v_current_attachments FROM tasks WHERE id = p_task_id FOR UPDATE;
+  SELECT project_id, attachments INTO v_project_id, v_current_attachments
+  FROM public.tasks
+  WHERE id = p_task_id
+  FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
+  IF NOT public.user_is_project_owner(v_project_id) THEN RAISE EXCEPTION 'not authorized'; END IF;
   IF v_current_attachments IS NULL THEN v_current_attachments := '[]'::JSONB; END IF;
   
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' = v_attachment_id) THEN
     RETURN TRUE;
   END IF;
   
-  UPDATE tasks SET attachments = v_current_attachments || p_attachment, updated_at = NOW() WHERE id = p_task_id;
+  UPDATE public.tasks
+  SET attachments = v_current_attachments || p_attachment, updated_at = NOW()
+  WHERE id = p_task_id;
   RETURN TRUE;
 END; $$;
 
@@ -1041,15 +1031,22 @@ SET search_path TO 'pg_catalog', 'public' AS $$
 DECLARE
   v_current_attachments JSONB;
   v_new_attachments JSONB;
+  v_project_id UUID;
 BEGIN
-  SELECT attachments INTO v_current_attachments FROM tasks WHERE id = p_task_id FOR UPDATE;
+  SELECT project_id, attachments INTO v_project_id, v_current_attachments
+  FROM public.tasks
+  WHERE id = p_task_id
+  FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
+  IF NOT public.user_is_project_owner(v_project_id) THEN RAISE EXCEPTION 'not authorized'; END IF;
   IF v_current_attachments IS NULL OR jsonb_array_length(v_current_attachments) = 0 THEN RETURN TRUE; END IF;
   
   SELECT COALESCE(jsonb_agg(elem), '[]'::JSONB) INTO v_new_attachments
   FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' != p_attachment_id;
   
-  UPDATE tasks SET attachments = v_new_attachments, updated_at = NOW() WHERE id = p_task_id;
+  UPDATE public.tasks
+  SET attachments = v_new_attachments, updated_at = NOW()
+  WHERE id = p_task_id;
   RETURN TRUE;
 END; $$;
 
@@ -1414,10 +1411,39 @@ BEGIN
     RAISE EXCEPTION 'not authorized';
   END IF;
 
-  -- 先落 tombstone（即使 tasks 行已不存在也会生效）
+  -- 仅为当前 project 中真实存在的任务落 tombstone，禁止跨项目污染
+  WITH to_purge AS (
+    SELECT candidate.task_id
+    FROM (
+      SELECT t.id AS task_id
+      FROM public.tasks t
+      WHERE t.project_id = p_project_id
+        AND t.id = ANY(p_task_ids)
+
+      UNION
+
+      SELECT tt.task_id
+      FROM public.task_tombstones tt
+      WHERE tt.project_id = p_project_id
+        AND tt.task_id = ANY(p_task_ids)
+    ) AS candidate
+  )
   INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
+  SELECT task_id, p_project_id, now(), auth.uid()
+  FROM to_purge
   ON CONFLICT (task_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  -- 中文注释：任务 purge 会直接带走关联连接，必须先显式落 connection tombstone，避免另一端长期残留旧连接。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  SELECT c.id, c.project_id, now(), auth.uid()
+  FROM public.connections c
+  WHERE c.project_id = p_project_id
+    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids))
+  ON CONFLICT (connection_id)
   DO UPDATE SET
     project_id = EXCLUDED.project_id,
     deleted_at = EXCLUDED.deleted_at,
@@ -1537,12 +1563,10 @@ CREATE POLICY "Users can update own attachments" ON storage.objects FOR UPDATE T
 USING (bucket_id = 'attachments' AND (storage.foldername(name))[1] = auth.uid()::text)
 WITH CHECK (bucket_id = 'attachments' AND (storage.foldername(name))[1] = auth.uid()::text);
 
--- 项目成员可以查看附件
+-- 兼容保留旧策略名，但读取范围收紧到 owner 自己的附件目录
 DROP POLICY IF EXISTS "Project members can view attachments" ON storage.objects;
 CREATE POLICY "Project members can view attachments" ON storage.objects FOR SELECT TO authenticated
-USING (bucket_id = 'attachments' AND EXISTS (
-  SELECT 1 FROM public.project_members pm WHERE pm.user_id = auth.uid() AND pm.project_id::text = (storage.foldername(name))[2]
-));
+USING (bucket_id = 'attachments' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ============================================
 -- 完成！
@@ -1683,7 +1707,14 @@ DROP POLICY IF EXISTS "project_members select" ON public.project_members;
 CREATE POLICY "project_members select" ON public.project_members
   FOR SELECT
   TO public
-  USING (user_id = (select auth.uid()));
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.projects p
+      WHERE p.id = project_members.project_id
+        AND p.owner_id = (select auth.uid())
+    )
+  );
 
 DROP POLICY IF EXISTS "project_members insert" ON public.project_members;
 CREATE POLICY "project_members insert" ON public.project_members
@@ -1716,8 +1747,7 @@ CREATE POLICY "project_members delete" ON public.project_members
   FOR DELETE
   TO public
   USING (
-    (user_id = (select auth.uid()))
-    OR EXISTS (
+    EXISTS (
       SELECT 1
       FROM public.projects p
       WHERE p.id = project_members.project_id
@@ -1949,7 +1979,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.purge_tasks(uuid[]) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.purge_tasks(uuid[]) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.purge_tasks(uuid[]) TO service_role;
 
 -- safe_delete_tasks: 安全删除任务（软删除+限制）
@@ -2113,10 +2143,38 @@ BEGIN
     END LOOP;
   END LOOP;
 
-  -- 落 tombstone
+  -- 仅为当前 project 中真实存在的任务落 tombstone，禁止跨项目污染
   INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
-  SELECT unnest(p_task_ids), p_project_id, now(), auth.uid()
+  SELECT purge_scope.task_id, p_project_id, now(), auth.uid()
+  FROM (
+    SELECT candidate.task_id
+    FROM (
+      SELECT t.id AS task_id
+      FROM public.tasks t
+      WHERE t.project_id = p_project_id
+        AND t.id = ANY(p_task_ids)
+
+      UNION
+
+      SELECT tt.task_id
+      FROM public.task_tombstones tt
+      WHERE tt.project_id = p_project_id
+        AND tt.task_id = ANY(p_task_ids)
+    ) AS candidate
+  ) AS purge_scope
   ON CONFLICT (task_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  -- 中文注释：任务 purge 会直接带走关联连接，必须先显式落 connection tombstone，避免另一端长期残留旧连接。
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  SELECT c.id, c.project_id, now(), auth.uid()
+  FROM public.connections c
+  WHERE c.project_id = p_project_id
+    AND (c.source_id = ANY(p_task_ids) OR c.target_id = ANY(p_task_ids))
+  ON CONFLICT (connection_id)
   DO UPDATE SET
     project_id = EXCLUDED.project_id,
     deleted_at = EXCLUDED.deleted_at,
@@ -2575,7 +2633,7 @@ COMMENT ON TABLE public.circuit_breaker_logs IS
 -- ============================================================
 -- [MIGRATION] 20260101000002_batch_upsert_tasks_attachments.sql
 -- ============================================================
--- batch_upsert_tasks 函数：支持批量 upsert 任务，包含 attachments + Focus Console 规划字段
+-- batch_upsert_tasks 函数：批量 upsert 任务主字段，附件变更仅允许走专用 RPC
 -- 用于批量操作的事务保护（≥20 个任务）
 -- 
 -- v6.0.0 修正：新增 parking_meta, expected_minutes, cognitive_load, wait_minutes 支持
@@ -2583,7 +2641,7 @@ COMMENT ON TABLE public.circuit_breaker_logs IS
 -- v5.2.3 修正：移除不存在的 owner_id 列引用，通过 project.owner_id 进行权限校验
 -- 安全特性：
 -- 1. SECURITY DEFINER + auth.uid() 权限校验
--- 2. 只能操作自己的项目和任务（通过 projects.owner_id 或 project_members 校验）
+-- 2. 只能操作自己的项目和任务（通过 projects.owner_id 校验）
 -- 3. 事务保证原子性
 -- 4. TEXT 长度限制防 DoS / 数据溢出
 -- 5. 数值范围约束防溢出
@@ -2613,19 +2671,9 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized: not authenticated';
   END IF;
 
-  -- 验证用户是项目所有者或成员
-  IF NOT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1 FROM public.project_members pm
-          WHERE pm.project_id = p.id AND pm.user_id = v_user_id
-        )
-      )
-  ) THEN
-    RAISE EXCEPTION 'Unauthorized: insufficient project access';
+  -- 附件只能通过专用 RPC 变更，批量 upsert 仅允许 owner 写任务主字段
+  IF NOT public.user_is_project_owner(p_project_id) THEN
+    RAISE EXCEPTION 'Unauthorized: not project owner';
   END IF;
 
   FOREACH v_task IN ARRAY p_tasks
@@ -2655,7 +2703,7 @@ BEGIN
       RAISE EXCEPTION 'cognitive_load must be low or high for task %', v_task->>'id';
     END IF;
 
-    INSERT INTO public.tasks (
+    INSERT INTO public.tasks AS existing (
       id, project_id, title, content, stage, parent_id,
       "order", rank, status, x, y, short_id, deleted_at,
       attachments, expected_minutes, cognitive_load, wait_minutes, parking_meta
@@ -2674,7 +2722,7 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      COALESCE(v_task->'attachments', '[]'::jsonb),
+      '[]'::jsonb,
       v_expected,
       COALESCE(v_cognitive, 'low'),
       v_wait,
@@ -2692,12 +2740,17 @@ BEGIN
       y = EXCLUDED.y,
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
-      attachments = EXCLUDED.attachments,
+      attachments = COALESCE(existing.attachments, '[]'::jsonb),
       expected_minutes = EXCLUDED.expected_minutes,
       cognitive_load = EXCLUDED.cognitive_load,
       wait_minutes = EXCLUDED.wait_minutes,
       parking_meta = EXCLUDED.parking_meta,
-      updated_at = NOW();
+      updated_at = NOW()
+    WHERE existing.project_id = p_project_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Task project mismatch';
+    END IF;
 
     v_count := v_count + 1;
   END LOOP;
@@ -2711,7 +2764,7 @@ $$;
 -- 授权
 GRANT EXECUTE ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) TO authenticated;
 
-COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Batch upsert tasks with transaction guarantee. Supports attachments + Focus Console planning fields (v6.0.0).';
+COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Owner-only batch upsert for task core fields. Attachments stay on dedicated append/remove RPCs (v6.0.1).';
 -- ============================================================
 -- [MIGRATION] 20260101000003_optimistic_lock_strict_mode.sql
 -- ============================================================
@@ -3038,24 +3091,12 @@ REVOKE EXECUTE ON FUNCTION public.get_dashboard_stats() FROM anon, public;
 DROP POLICY IF EXISTS "connection_tombstones_select" ON public.connection_tombstones;
 CREATE POLICY "connection_tombstones_select" ON public.connection_tombstones
   FOR SELECT TO authenticated
-  USING (
-    project_id IN (
-      SELECT id FROM public.projects WHERE owner_id = (select auth.uid())
-      UNION
-      SELECT project_id FROM public.project_members WHERE user_id = (select auth.uid())
-    )
-  );
+  USING (public.user_is_project_owner(project_id));
 
 DROP POLICY IF EXISTS "connection_tombstones_insert" ON public.connection_tombstones;
 CREATE POLICY "connection_tombstones_insert" ON public.connection_tombstones
   FOR INSERT TO authenticated
-  WITH CHECK (
-    project_id IN (
-      SELECT id FROM public.projects WHERE owner_id = (select auth.uid())
-      UNION
-      SELECT project_id FROM public.project_members WHERE user_id = (select auth.uid())
-    )
-  );
+  WITH CHECK (public.user_is_project_owner(project_id));
 
 -- 更新相关函数的 auth.uid() 调用也使用 initplan
 -- 注意：在函数中设置 search_path 以防止注入攻击
@@ -3136,15 +3177,8 @@ BEGIN
   -- 获取当前用户 ID
   v_user_id := auth.uid();
   
-  -- 权限检查：确保用户有权访问该项目
-  IF NOT EXISTS (
-    SELECT 1 FROM public.projects 
-    WHERE id = p_project_id 
-    AND (owner_id = v_user_id OR EXISTS (
-      SELECT 1 FROM public.project_members 
-      WHERE project_id = p_project_id AND user_id = v_user_id
-    ))
-  ) THEN
+  -- 权限检查：个人版仅允许 owner 访问
+  IF NOT public.user_has_project_access(p_project_id) THEN
     RAISE EXCEPTION 'Access denied to project %', p_project_id;
   END IF;
   
@@ -3742,7 +3776,7 @@ GRANT EXECUTE ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) TO authentica
 
 -- Purge / 删除
 REVOKE EXECUTE ON FUNCTION public.purge_tasks(uuid[]) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.purge_tasks(uuid[]) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.purge_tasks(uuid[]) FROM authenticated;
 
 REVOKE EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) TO authenticated;

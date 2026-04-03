@@ -29,6 +29,11 @@ import {
   type BackupCoverage,
 } from '../../supabase/functions/_shared/backup-utils';
 
+const ACTION_QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
+const ACTION_QUEUE_BACKUP_STORE_NAME = 'queue-backup';
+const OFFLINE_SNAPSHOT_STORAGE_KEY = 'nanoflow.offline-cache-v2';
+const OFFLINE_SNAPSHOT_RECORD_PREFIX = 'offline-snapshot:';
+
 export interface LocalDisasterBackupOptions {
   autoBackupEnabled: boolean;
   autoBackupIntervalMs: number;
@@ -94,12 +99,13 @@ export class DisasterBackupService {
     options: LocalDisasterBackupOptions,
   ): Promise<BackupData> {
     const userId = this.resolveEffectiveUserId();
+    const visibleProjectIds = new Set(projects.map((project) => project.id));
 
     const payloadBase = this.buildProjectPayload(projects, userId);
     const userPreferences = await this.collectUserPreferences(userId, options);
-    const blackBoxEntries = this.collectBlackBoxEntries();
+    const blackBoxEntries = this.collectBlackBoxEntries(userId);
     const remoteState = await this.collectRemoteUserState(userId);
-    const localState = await this.collectLocalState();
+    const localState = await this.collectLocalState(visibleProjectIds);
 
     const coverage: BackupCoverage = {
       includesProjectData: true,
@@ -267,9 +273,17 @@ export class DisasterBackupService {
     }));
   }
 
-  private collectBlackBoxEntries(): BackupBlackBoxEntry[] {
+  private collectBlackBoxEntries(userId: string | null): BackupBlackBoxEntry[] {
     const entriesMap = this.readValue<Map<string, BackupBlackBoxEntry>>(this.blackBoxService.entriesMap) ?? new Map();
     return Array.from(entriesMap.values()).map((entry) => ({
+      ...entry,
+    })).filter((entry) => {
+      if (!userId) {
+        return entry.userId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
+      }
+
+      return entry.userId === userId;
+    }).map((entry) => ({
       id: entry.id,
       projectId: entry.projectId,
       userId: entry.userId,
@@ -354,44 +368,92 @@ export class DisasterBackupService {
     return Array.isArray(result.data) ? (result.data as T[]) : [];
   }
 
-  private async collectLocalState(): Promise<BackupLocalState> {
+  private async collectLocalState(visibleProjectIds: Set<string>): Promise<BackupLocalState> {
+    const ownerUserId = this.resolveEffectiveUserId();
     const [
       indexedSnapshot,
       parkedTaskCache,
       retryQueue,
+      actionQueue,
+      deadLetters,
     ] = await Promise.all([
-      this.readSnapshotFromIndexedDb(),
-      this.readParkedTaskCache(),
-      this.readRetryQueue(),
+      this.readSnapshotFromIndexedDb(ownerUserId),
+      this.readParkedTaskCache(visibleProjectIds),
+      this.readRetryQueue(ownerUserId),
+      this.readActionQueue(ownerUserId),
+      this.readDeadLetters(ownerUserId),
     ]);
 
     return {
       offlineSnapshot: {
-        localStorage: this.safeGetLocalStorage('nanoflow.offline-cache-v2'),
+        localStorage: this.readOfflineSnapshotFromLocalStorage(ownerUserId),
         indexedDb: indexedSnapshot,
       },
       parkedTaskCache,
       retryQueue,
-      actionQueue: this.safeParseJson(this.safeGetLocalStorage(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)),
-      deadLetters: (this.safeParseJson(this.safeGetLocalStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)) ?? []) as unknown[],
-      taskTombstones: this.safeParseJson(this.safeGetLocalStorage('nanoflow.local-tombstones')) ?? {},
-      connectionTombstones: (this.safeParseJson(this.safeGetLocalStorage('nanoflow.local-connection-tombstones')) ?? []) as unknown[],
+      actionQueue,
+      deadLetters,
+      taskTombstones: this.readTaskTombstones(visibleProjectIds),
+      connectionTombstones: this.readConnectionTombstones(visibleProjectIds),
     };
   }
 
-  private async readSnapshotFromIndexedDb(): Promise<string | null> {
+  private readTaskTombstones(visibleProjectIds: Set<string>): Record<string, unknown> {
+    const parsed = this.safeParseJson(this.safeGetLocalStorage('nanoflow.local-tombstones'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([projectId]) => visibleProjectIds.has(projectId)),
+    );
+  }
+
+  private readConnectionTombstones(visibleProjectIds: Set<string>): unknown[] {
+    const parsed = this.safeParseJson(this.safeGetLocalStorage('nanoflow.local-connection-tombstones'));
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((entry) => {
+      if (!entry || typeof entry !== 'object' || !('projectId' in entry)) {
+        return false;
+      }
+
+      const projectId = entry.projectId;
+      return typeof projectId === 'string' && visibleProjectIds.has(projectId);
+    });
+  }
+
+  private async readSnapshotFromIndexedDb(ownerUserId: string | null): Promise<string | null> {
+    if (!ownerUserId) {
+      return null;
+    }
+
     const db = await this.openExistingDb('nanoflow-offline-snapshots');
     if (!db) return null;
 
     try {
-      const row = await this.getByKey<{ data?: string }>(db, 'snapshots', 'offline-snapshot');
+      const row = await this.getByKey<{ data?: string }>(
+        db,
+        'snapshots',
+        `${OFFLINE_SNAPSHOT_RECORD_PREFIX}${ownerUserId}`,
+      );
       return typeof row?.data === 'string' ? row.data : null;
     } finally {
       db.close();
     }
   }
 
-  private async readParkedTaskCache(): Promise<{ entries: unknown[]; syncMetadata: Record<string, unknown> }> {
+  private readOfflineSnapshotFromLocalStorage(ownerUserId: string | null): string | null {
+    if (!ownerUserId) {
+      return null;
+    }
+
+    return this.safeGetLocalStorage(`${OFFLINE_SNAPSHOT_STORAGE_KEY}.${ownerUserId}`);
+  }
+
+  private async readParkedTaskCache(visibleProjectIds: Set<string>): Promise<{ entries: unknown[]; syncMetadata: Record<string, unknown> }> {
     const db = await this.openExistingDb(FOCUS_CONFIG.SYNC.IDB_NAME);
     if (!db) {
       return { entries: [], syncMetadata: {} };
@@ -409,23 +471,77 @@ export class DisasterBackupService {
           .map((row) => [row.key, row.value]),
       );
 
-      return { entries, syncMetadata };
+      const filteredEntries = entries.filter((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return false;
+        }
+
+        const projectId = 'projectId' in entry ? entry.projectId : null;
+        return typeof projectId === 'string' && visibleProjectIds.has(projectId);
+      });
+
+      return {
+        entries: filteredEntries,
+        syncMetadata: filteredEntries.length > 0 ? syncMetadata : {},
+      };
     } finally {
       db.close();
     }
   }
 
-  private async readRetryQueue(): Promise<unknown[]> {
+  private async readRetryQueue(ownerUserId: string | null): Promise<unknown[]> {
+    if (!ownerUserId) {
+      return [];
+    }
+
     const db = await this.openExistingDb('nanoflow-retry-queue');
+    const items = db
+      ? await (async () => {
+          try {
+            return await this.getAllFromStore(db, 'offline_mutation_queue');
+          } finally {
+            db.close();
+          }
+        })()
+      : (this.safeParseJson(this.safeGetLocalStorage('nanoflow.retry-queue')) ?? []) as unknown[];
+
+    return items.filter((item) => this.resolveRetryQueueItemOwner(item) === ownerUserId);
+  }
+
+  private async readActionQueue(ownerUserId: string | null): Promise<unknown> {
+    if (!ownerUserId) {
+      return null;
+    }
+
+    const localSnapshot = this.safeParseJson(
+      this.readOwnerScopedLocalStorage(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId),
+    );
+    if (localSnapshot !== null) {
+      return localSnapshot;
+    }
+
+    const db = await this.openExistingDb(ACTION_QUEUE_BACKUP_DB_NAME);
     if (!db) {
-      return (this.safeParseJson(this.safeGetLocalStorage('nanoflow.retry-queue')) ?? []) as unknown[];
+      return null;
     }
 
     try {
-      return await this.getAllFromStore(db, 'offline_mutation_queue');
+      const queueRecordId = `queue:${ownerUserId}`;
+      const record = await this.getByKey<{ actions?: unknown }>(db, ACTION_QUEUE_BACKUP_STORE_NAME, queueRecordId);
+      return record?.actions ?? null;
     } finally {
       db.close();
     }
+  }
+
+  private async readDeadLetters(ownerUserId: string | null): Promise<unknown[]> {
+    if (!ownerUserId) {
+      return [];
+    }
+
+    return (this.safeParseJson(
+      this.readOwnerScopedLocalStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId),
+    ) ?? []) as unknown[];
   }
 
   private async openExistingDb(name: string): Promise<IDBDatabase | null> {
@@ -508,6 +624,21 @@ export class DisasterBackupService {
     } catch {
       return null;
     }
+  }
+
+  private readOwnerScopedLocalStorage(baseKey: string, ownerUserId: string): string | null {
+    return this.safeGetLocalStorage(`${baseKey}.${ownerUserId}`);
+  }
+
+  private resolveRetryQueueItemOwner(item: unknown): string {
+    if (!item || typeof item !== 'object') {
+      return '__legacy_unknown__';
+    }
+
+    const sourceUserId = (item as { sourceUserId?: unknown }).sourceUserId;
+    return typeof sourceUserId === 'string' && sourceUserId.length > 0
+      ? sourceUserId
+      : '__legacy_unknown__';
   }
 
   private resolveEffectiveUserId(): string | null {

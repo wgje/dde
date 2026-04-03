@@ -89,6 +89,7 @@ describe('DisasterBackupService', () => {
       'nanoflow-offline-snapshots',
       'focus_mode',
       'nanoflow-retry-queue',
+      'nanoflow-queue-backup',
     ]) {
       await new Promise<void>((resolve) => {
         const request = indexedDB.deleteDatabase(name);
@@ -100,20 +101,32 @@ describe('DisasterBackupService', () => {
   });
 
   it('buildLocalPayload should include full v2 business data and localState coverage', async () => {
-    localStorage.setItem('nanoflow.offline-cache-v2', JSON.stringify({
+    localStorage.setItem('nanoflow.offline-cache-v2.user-1', JSON.stringify({
       projects: [{ id: 'offline-project' }],
     }));
-    localStorage.setItem('nanoflow.action-queue', JSON.stringify({
-      pendingActions: [{ id: 'action-1', entityType: 'task' }],
+    localStorage.setItem('nanoflow.offline-cache-v2', JSON.stringify({
+      projects: [{ id: 'foreign-legacy-offline-project' }],
     }));
-    localStorage.setItem('nanoflow.dead-letter-queue', JSON.stringify([
+    localStorage.setItem('nanoflow.action-queue.user-1', JSON.stringify([
+      { id: 'action-1', entityType: 'task' },
+    ]));
+    localStorage.setItem('nanoflow.dead-letter-queue.user-1', JSON.stringify([
       { action: { id: 'dead-1' }, reason: 'failed' },
+    ]));
+    localStorage.setItem('nanoflow.action-queue.user-2', JSON.stringify([
+      { id: 'action-foreign', entityType: 'task' },
+    ]));
+    localStorage.setItem('nanoflow.dead-letter-queue.user-2', JSON.stringify([
+      { action: { id: 'dead-foreign' }, reason: 'foreign' },
     ]));
     localStorage.setItem('nanoflow.local-tombstones', JSON.stringify({
       'project-1': { 'task-deleted': 123 },
+      'project-2': { 'task-deleted-foreign': 456 },
     }));
     localStorage.setItem('nanoflow.local-connection-tombstones', JSON.stringify([
       { projectId: 'project-1', connectionId: 'conn-deleted', deletedAt: '2026-03-07T00:00:00.000Z' },
+      { projectId: 'project-2', connectionId: 'conn-deleted-foreign', deletedAt: '2026-03-07T00:00:00.000Z' },
+      { connectionId: 'conn-without-project', deletedAt: '2026-03-07T00:00:00.000Z' },
     ]));
 
     await seedStore(
@@ -128,8 +141,13 @@ describe('DisasterBackupService', () => {
         await new Promise<void>((resolve, reject) => {
           const tx = db.transaction('snapshots', 'readwrite');
           tx.objectStore('snapshots').put({
-            id: 'offline-snapshot',
+            id: 'offline-snapshot:user-1',
+            ownerUserId: 'user-1',
             data: JSON.stringify({ projects: [{ id: 'snapshot-project' }] }),
+          });
+          tx.objectStore('snapshots').put({
+            id: 'offline-snapshot',
+            data: JSON.stringify({ projects: [{ id: 'foreign-legacy-snapshot-project' }] }),
           });
           tx.oncomplete = () => resolve();
           tx.onerror = () => reject(tx.error);
@@ -161,6 +179,12 @@ describe('DisasterBackupService', () => {
             parkedAt: '2026-03-08T00:00:00.000Z',
             task: { id: 'task-parked', title: 'Parked' },
           });
+          tx.objectStore('parked_tasks').put({
+            taskId: 'task-parked-foreign',
+            projectId: 'project-2',
+            parkedAt: '2026-03-09T00:00:00.000Z',
+            task: { id: 'task-parked-foreign', title: 'Foreign Parked' },
+          });
           tx.oncomplete = () => resolve();
           tx.onerror = () => reject(tx.error);
         });
@@ -186,6 +210,17 @@ describe('DisasterBackupService', () => {
             projectId: 'project-1',
             retryCount: 1,
             createdAt: 123,
+            sourceUserId: 'user-1',
+          });
+          tx.objectStore('offline_mutation_queue').put({
+            id: 'retry-foreign',
+            type: 'task',
+            operation: 'upsert',
+            data: { id: 'task-foreign' },
+            projectId: 'project-2',
+            retryCount: 1,
+            createdAt: 456,
+            sourceUserId: 'user-2',
           });
           tx.oncomplete = () => resolve();
           tx.onerror = () => reject(tx.error);
@@ -292,6 +327,19 @@ describe('DisasterBackupService', () => {
                 isArchived: false,
                 deletedAt: null,
               }],
+              ['bb-foreign', {
+                id: 'bb-foreign',
+                projectId: null,
+                userId: 'user-2',
+                content: 'foreign-black-box',
+                date: '2026-03-06',
+                createdAt: '2026-03-06T00:00:00.000Z',
+                updatedAt: '2026-03-06T00:00:00.000Z',
+                isRead: false,
+                isCompleted: false,
+                isArchived: false,
+                deletedAt: null,
+              }],
             ])),
           },
         },
@@ -326,6 +374,9 @@ describe('DisasterBackupService', () => {
     expect(payload.blackBoxEntries).toEqual([
       expect.objectContaining({ id: 'bb-1', content: 'black-box' }),
     ]);
+    expect(payload.blackBoxEntries).not.toEqual([
+      expect.objectContaining({ id: 'bb-foreign', content: 'foreign-black-box' }),
+    ]);
     expect(payload.focusSessions).toHaveLength(1);
     expect(payload.transcriptionUsage).toHaveLength(1);
     expect(payload.routineTasks).toHaveLength(1);
@@ -341,13 +392,26 @@ describe('DisasterBackupService', () => {
           syncMetadata: { parking_sync_cursor_v1: 'cursor-1' },
         }),
         retryQueue: [expect.objectContaining({ id: 'retry-1' })],
-        actionQueue: expect.objectContaining({
-          pendingActions: [expect.objectContaining({ id: 'action-1' })],
-        }),
+        actionQueue: [expect.objectContaining({ id: 'action-1' })],
         deadLetters: [expect.objectContaining({ reason: 'failed' })],
         taskTombstones: { 'project-1': { 'task-deleted': 123 } },
         connectionTombstones: [expect.objectContaining({ connectionId: 'conn-deleted' })],
       }),
+    );
+    expect(payload.localState.offlineSnapshot?.localStorage).not.toContain('foreign-legacy-offline-project');
+    expect(payload.localState.offlineSnapshot?.indexedDb).not.toContain('foreign-legacy-snapshot-project');
+    expect(payload.localState.retryQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'retry-foreign' })]));
+    expect(payload.localState.actionQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'action-foreign' })]));
+    expect(payload.localState.deadLetters).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'foreign' })]));
+    expect(payload.localState.parkedTaskCache.entries).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ taskId: 'task-parked-foreign' })]),
+    );
+    expect(payload.localState.taskTombstones).toEqual({ 'project-1': { 'task-deleted': 123 } });
+    expect(payload.localState.connectionTombstones).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ connectionId: 'conn-deleted-foreign' })]),
+    );
+    expect(payload.localState.connectionTombstones).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ connectionId: 'conn-without-project' })]),
     );
     expect(payload.tableCounts).toEqual(expect.objectContaining({
       projects: 1,
@@ -364,5 +428,54 @@ describe('DisasterBackupService', () => {
       includesLocalState: true,
       includesCloudUserState: true,
     }));
+  });
+
+  it('buildLocalPayload should fallback to owner-scoped action queue IndexedDB backup', async () => {
+    await seedStore(
+      'nanoflow-queue-backup',
+      1,
+      (db) => {
+        if (!db.objectStoreNames.contains('queue-backup')) {
+          db.createObjectStore('queue-backup', { keyPath: 'id' });
+        }
+      },
+      async (db) => {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction('queue-backup', 'readwrite');
+          tx.objectStore('queue-backup').put({
+            id: 'queue:user-1',
+            ownerUserId: 'user-1',
+            actions: [{ id: 'action-backed-up', entityType: 'project' }],
+            savedAt: '2026-03-09T00:00:00.000Z',
+          });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      },
+    );
+
+    const injector = Injector.create({
+      providers: [
+        { provide: DisasterBackupService, useClass: DisasterBackupService },
+        { provide: LoggerService, useValue: { category: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) } },
+        { provide: AuthService, useValue: { currentUserId: vi.fn(() => 'user-1') } },
+        { provide: ThemeService, useValue: { theme: signal('forest'), colorMode: signal('dark') } },
+        { provide: UiStateService, useValue: { layoutDirection: signal('rtl'), floatingWindowPref: signal('fixed') } },
+        { provide: PreferenceService, useValue: { autoResolveConflicts: signal(false) } },
+        { provide: FocusPreferenceService, useValue: { preferences: signal({}), getPreferences: vi.fn(() => ({})) } },
+        { provide: BlackBoxService, useValue: { entriesMap: signal(new Map()) } },
+        { provide: SupabaseClientService, useValue: { isConfigured: false, client: vi.fn() } },
+      ],
+    });
+
+    const service = injector.get(DisasterBackupService);
+    const payload = await service.buildLocalPayload([createProject()], {
+      autoBackupEnabled: false,
+      autoBackupIntervalMs: 900000,
+    });
+
+    expect(payload.localState.actionQueue).toEqual([
+      expect.objectContaining({ id: 'action-backed-up', entityType: 'project' }),
+    ]);
   });
 });

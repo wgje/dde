@@ -497,42 +497,58 @@ export class TaskSyncOperationsService {
   }
   
   /** 删除云端任务（优先 purge RPC 写入 tombstone，降级为软删除） */
-  async deleteTask(taskId: string, projectId: string): Promise<boolean> {
+  async deleteTask(taskId: string, projectId: string, sourceUserId?: string): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
       this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId });
+      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
       return false;
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
-      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId);
+      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
       return false;
     }
     
     try {
-      // 【P0-2 修复】优先走 purge RPC（写入 tombstone + 删除行），阻断旧端 upsert 复活
-      const purgeResult = await client.rpc('purge_tasks', {
-        p_task_ids: [taskId]
-      });
-
-      if (purgeResult.error) {
-        // RPC 不可用时降级为软删除（不再使用物理 DELETE，防止任务复活）
-        this.logger.warn('purge_tasks RPC 不可用，降级为软删除', { taskId });
-        const { error } = await client
-          .from('tasks')
-          .update({ deleted_at: new Date().toISOString() })
-          .eq('id', taskId);
-
-        if (error) throw supabaseErrorToError(error);
+      const { data: { session } } = await client.auth.getSession();
+      let sessionUserId = session?.user?.id ?? null;
+      if (!sessionUserId) {
+        const refreshed = await this.sessionManager.tryRefreshSession('deleteTask.getSession');
+        if (refreshed) {
+          const { data: { session: newSession } } = await client.auth.getSession();
+          sessionUserId = newSession?.user?.id ?? null;
+        }
       }
-      
-      this.tombstoneService.invalidateCache(projectId);
-      return true;
+
+      if (!sessionUserId) {
+        this.sessionManager.handleSessionExpired('deleteTask.getSession', { taskId, projectId });
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+        return false;
+      }
+
+      if (sourceUserId && sessionUserId !== sourceUserId) {
+        this.logger.warn('检测到任务删除归属与当前会话不匹配，已拒绝云端写入', {
+          taskId,
+          projectId,
+          sourceUserId,
+          sessionUserId,
+        });
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+        return false;
+      }
+
+      const purgeSuccess = await this.purgeTasksFromCloud(projectId, [taskId], sourceUserId);
+      if (purgeSuccess) {
+        this.tombstoneService.invalidateCache(projectId);
+      }
+      return purgeSuccess;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
       
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
         this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId, errorCode: enhanced.code });
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
         return false;
       }
       
@@ -545,7 +561,7 @@ export class TaskSyncOperationsService {
       });
       
       if (enhanced.isRetryable) {
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId);
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
       }
       return false;
     }
@@ -639,19 +655,52 @@ export class TaskSyncOperationsService {
   }
   
   /** 永久删除云端任务（tombstone + 物理删除，v3→v2→v1 降级） */
-  async purgeTasksFromCloud(projectId: string, taskIds: string[]): Promise<boolean> {
+  async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string): Promise<boolean> {
     if (taskIds.length === 0) return true;
     
     const client = this.getSupabaseClient();
     if (!client) {
       this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
       for (const taskId of taskIds) {
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId);
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
       }
       return false;
     }
     
     try {
+      if (sourceUserId) {
+        const { data: { session } } = await client.auth.getSession();
+        let sessionUserId = session?.user?.id ?? null;
+        if (!sessionUserId) {
+          const refreshed = await this.sessionManager.tryRefreshSession('purgeTasksFromCloud.getSession');
+          if (refreshed) {
+            const { data: { session: newSession } } = await client.auth.getSession();
+            sessionUserId = newSession?.user?.id ?? null;
+          }
+        }
+
+        if (!sessionUserId) {
+          this.sessionManager.handleSessionExpired('purgeTasksFromCloud.getSession', { projectId, taskCount: taskIds.length });
+          for (const taskId of taskIds) {
+            this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+          }
+          return false;
+        }
+
+        if (sessionUserId !== sourceUserId) {
+          this.logger.warn('检测到批量任务删除归属与当前会话不匹配，已拒绝云端写入', {
+            projectId,
+            taskCount: taskIds.length,
+            sourceUserId,
+            sessionUserId,
+          });
+          for (const taskId of taskIds) {
+            this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+          }
+          return false;
+        }
+      }
+
       // 优先使用 purge_tasks_v3
       this.logger.debug('purgeTasksFromCloud: 调用 purge_tasks_v3', { projectId, taskIds });
       const purgeV3Result = await client.rpc('purge_tasks_v3', {
@@ -690,20 +739,9 @@ export class TaskSyncOperationsService {
         return true;
       }
       
-      // v2 失败，降级到 v1
-      this.logger.warn('purgeTasksFromCloud: purge_tasks_v2 失败，尝试 v1', purgeV2Result.error);
-      const purgeV1Result = await client.rpc('purge_tasks', { p_task_ids: taskIds });
-      
-      if (!purgeV1Result.error) {
-        this.logger.info('purge_tasks_v1 成功', { projectId, purgedCount: purgeV1Result.data });
-        this.addLocalTombstones(projectId, taskIds);
-        return true;
-      }
-      
-      // 降级为软删除
-      this.logger.warn('purgeTasksFromCloud: RPC 均失败，降级为软删除', { 
+      // 降级为软删除（保留 project_id 边界，禁止退回旧的 owner-only purge_tasks）
+      this.logger.warn('purgeTasksFromCloud: purge_tasks_v2 失败，降级为软删除', { 
         v2Error: purgeV2Result.error,
-        v1Error: purgeV1Result.error 
       });
       
       const { error } = await client
@@ -730,6 +768,9 @@ export class TaskSyncOperationsService {
         projectId,
         taskCount: taskIds.length
       });
+      for (const taskId of taskIds) {
+        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+      }
       return false;
     }
   }

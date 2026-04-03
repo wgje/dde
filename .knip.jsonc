@@ -6,9 +6,6 @@
     "scripts/**/*.cjs",
     "scripts/**/*.js",
     "supabase/functions/**/index.ts",
-    "test-edge-cases.js",
-    "test-handoff-loop.ts",
-    "test-startup-bugs.js",
     "src/test-setup.node.ts"
   ],
   "project": [
@@ -25,11 +22,7 @@
   "ignoreDependencies": [
     "@angular/cli",
     "@types/dompurify",
-    "esbuild",
-    "jsr"
-  ],
-  "ignoreBinaries": [
-    "supabase"
+    "esbuild"
   ],
   "ignoreExportsUsedInFile": true
 }

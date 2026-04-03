@@ -429,16 +429,17 @@ describe('ActionQueueStorageService', () => {
       expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)).toBeNull();
     });
 
-    it('loadQueueFromStorage should migrate legacy global queue into local-user scoped key only', () => {
+    it('loadQueueFromStorage should quarantine legacy global queue even for local-user', () => {
       currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
       const action = createMockAction();
       localStorage.setItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, JSON.stringify([action]));
 
       service.loadQueueFromStorage();
 
-      expect(ctx.pendingActions()).toEqual([action]);
+      expect(ctx.pendingActions()).toEqual([]);
       expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY)).toBeNull();
-      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${AUTH_CONFIG.LOCAL_MODE_USER_ID}`)).toBeTruthy();
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${AUTH_CONFIG.LOCAL_MODE_USER_ID}`)).toBeNull();
+      expect(localStorage.getItem('nanoflow.action-queue.legacy-review.__legacy_unknown__')).toContain(action.id);
     });
 
     it('saveQueueToStorage should not delete untouched legacy global queue for signed-in owners', () => {
@@ -521,6 +522,22 @@ describe('ActionQueueStorageService', () => {
 
       expect(service.deadLetterQueue()).toEqual([]);
       expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toBeNull();
+    });
+
+    it('loadDeadLetterFromStorage should quarantine legacy global dead-letter even for local-user', () => {
+      currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      const legacyDeadLetter: DeadLetterItem = {
+        action: createMockAction({ id: 'legacy-local-dead-letter' }),
+        failedAt: new Date().toISOString(),
+        reason: 'legacy local failed',
+      };
+      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([legacyDeadLetter]));
+
+      service.loadDeadLetterFromStorage();
+
+      expect(service.deadLetterQueue()).toEqual([]);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.${AUTH_CONFIG.LOCAL_MODE_USER_ID}`)).toBeNull();
       expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toBeNull();
     });
   });

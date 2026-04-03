@@ -5,6 +5,8 @@ import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { AuthService } from './auth.service';
+import { setBlackBoxEntries } from '../state/focus-stores';
 
 describe('BlackBoxSyncService', () => {
   let service: BlackBoxSyncService;
@@ -55,6 +57,13 @@ describe('BlackBoxSyncService', () => {
           },
         },
         {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
+            isConfigured: true,
+          },
+        },
+        {
           provide: SentryLazyLoaderService,
           useValue: mockSentry,
         },
@@ -67,6 +76,7 @@ describe('BlackBoxSyncService', () => {
   afterEach(() => {
     initDbSpy.mockRestore();
     setupNetworkSpy.mockRestore();
+    setBlackBoxEntries([]);
   });
 
   it('should apply resume pull cooldown by default', async () => {
@@ -180,5 +190,48 @@ describe('BlackBoxSyncService', () => {
       cognitiveLoad: 'low',
       dockEntryId: 'dock-entry-1',
     });
+  });
+
+  it('loadFromLocal 应只恢复当前用户的黑匣子条目', async () => {
+    const foreignEntry = {
+      id: 'entry-foreign',
+      projectId: null,
+      userId: 'user-2',
+      content: 'foreign',
+      date: '2026-03-04',
+      createdAt: '2026-03-04T00:00:00.000Z',
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isRead: false,
+      isCompleted: false,
+      isArchived: false,
+      deletedAt: null,
+    };
+    const ownEntry = {
+      ...foreignEntry,
+      id: 'entry-own',
+      userId: 'user-1',
+      content: 'own',
+    };
+    const getAll = vi.fn();
+    const transaction = vi.fn(() => ({
+      objectStore: vi.fn(() => ({
+        getAll: () => {
+          const request = {
+            result: [ownEntry, foreignEntry],
+            onsuccess: null as ((this: IDBRequest<unknown[]>, ev: Event) => unknown) | null,
+            onerror: null as ((this: IDBRequest<unknown[]>, ev: Event) => unknown) | null,
+          };
+          queueMicrotask(() => request.onsuccess?.call(request as unknown as IDBRequest<unknown[]>, new Event('success')));
+          getAll();
+          return request;
+        },
+      })),
+    }));
+    (service as unknown as { db: unknown }).db = { transaction };
+
+    const entries = await service.loadFromLocal();
+
+    expect(getAll).toHaveBeenCalledTimes(1);
+    expect(entries).toEqual([expect.objectContaining({ id: 'entry-own', userId: 'user-1' })]);
   });
 });

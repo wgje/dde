@@ -230,7 +230,7 @@ const mockChangeTrackerService = {
   clearProjectChanges: vi.fn(),
   getChangedProjectIds: vi.fn().mockReturnValue([]),
   hasProjectChanges: vi.fn().mockReturnValue(false),
-  clearAll: vi.fn(),
+  clearAllChanges: vi.fn(),
   getOldestChangeAgeMs: vi.fn().mockReturnValue(0),
 };
 
@@ -767,12 +767,68 @@ describe('持久化状态管理', () => {
       );
     });
 
-    it('preparePendingPersistForOwnerChange 存在未处理的非活动项目时不应允许清空旧 owner 快照', async () => {
+    it('preparePendingPersistForOwnerChange 应将待删除任务并入 project:update payload durable 到原 owner 队列', async () => {
+      const project = createTestProject({ id: 'proj-owner-delete-handoff', pendingSync: true });
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: false });
+      mockChangeTrackerService.getProjectChanges.mockReturnValueOnce({
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: ['task-delete-a', 'task-delete-b'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: true,
+        totalChanges: 2,
+      });
+
+      service.markLocalChanges('content');
+      const prepared = await service.preparePendingPersistForOwnerChange('user-123', 'owner-switch:user-123->user-456');
+
+      expect(prepared).toBe(true);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledTimes(1);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenNthCalledWith(1, 'user-123',
+        expect.objectContaining({
+          type: 'update',
+          entityType: 'project',
+          entityId: 'proj-owner-delete-handoff',
+          payload: expect.objectContaining({
+            sourceUserId: 'user-123',
+            taskIdsToDelete: ['task-delete-a', 'task-delete-b'],
+          }),
+        })
+      );
+    });
+
+    it('preparePendingPersistForOwnerChange 应将非活动 dirty project 一并 durable handoff 到原 owner 队列', async () => {
       const inactiveProject = createTestProject({ id: 'proj-inactive-dirty', pendingSync: true });
       const activeProject = createTestProject({ id: 'proj-active-handoff', pendingSync: true });
       mockProjectStateService.activeProject.set(activeProject);
       mockProjectStateService.projects.set([inactiveProject, activeProject]);
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: false });
+      mockChangeTrackerService.getChangedProjectIds.mockReturnValueOnce(['proj-inactive-dirty']);
+      mockChangeTrackerService.getChangedProjectIds.mockReturnValueOnce(['proj-inactive-dirty']);
+      mockChangeTrackerService.getProjectChanges.mockImplementationOnce((projectId: string) => ({
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: projectId === 'proj-inactive-dirty' ? ['task-inactive-delete'] : [],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: projectId === 'proj-inactive-dirty',
+        totalChanges: projectId === 'proj-inactive-dirty' ? 1 : 0,
+      }));
+      mockChangeTrackerService.getProjectChanges.mockImplementationOnce((projectId: string) => ({
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: projectId === 'proj-active-handoff' ? [] : ['task-inactive-delete'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: projectId === 'proj-inactive-dirty',
+        totalChanges: projectId === 'proj-inactive-dirty' ? 1 : 0,
+      }));
 
       service.markLocalChanges('content');
       const prepared = await service.preparePendingPersistForOwnerChange(
@@ -780,10 +836,56 @@ describe('持久化状态管理', () => {
         'owner-switch:user-123->user-456',
       );
 
-      expect(prepared).toBe(false);
-      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledWith(
+      expect(prepared).toBe(true);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledTimes(2);
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenNthCalledWith(
+        1,
+        'user-123',
+        expect.objectContaining({
+          entityId: 'proj-inactive-dirty',
+          payload: expect.objectContaining({ taskIdsToDelete: ['task-inactive-delete'] }),
+        }),
+      );
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenNthCalledWith(
+        2,
         'user-123',
         expect.objectContaining({ entityId: 'proj-active-handoff' }),
+      );
+    });
+
+    it('preparePendingPersistForOwnerChange 在没有 active pending 时也应转交非活动 dirty project 的删除意图', async () => {
+      const inactiveProject = createTestProject({ id: 'proj-inactive-only', pendingSync: true });
+      mockProjectStateService.activeProject.set(null);
+      mockProjectStateService.projects.set([inactiveProject]);
+      mockChangeTrackerService.getChangedProjectIds.mockReturnValueOnce(['proj-inactive-only']);
+      mockChangeTrackerService.getChangedProjectIds.mockReturnValueOnce(['proj-inactive-only']);
+      mockChangeTrackerService.getProjectChanges.mockReturnValueOnce({
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: ['task-offline-delete-a', 'task-offline-delete-b'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: true,
+        totalChanges: 2,
+      });
+
+      const prepared = await service.preparePendingPersistForOwnerChange(
+        'user-123',
+        'owner-switch:user-123->user-456',
+      );
+
+      expect(prepared).toBe(true);
+      expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+      expect(mockActionQueueService.enqueueForOwner).toHaveBeenCalledWith(
+        'user-123',
+        expect.objectContaining({
+          entityId: 'proj-inactive-only',
+          payload: expect.objectContaining({
+            sourceUserId: 'user-123',
+            taskIdsToDelete: ['task-offline-delete-a', 'task-offline-delete-b'],
+          }),
+        }),
       );
     });
 

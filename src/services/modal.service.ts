@@ -55,6 +55,7 @@ export interface ConflictData {
   localProject: Project;
   remoteProject: Project;
   projectId: string;
+  pendingTaskDeleteIds?: string[];
 }
 
 export interface ConnectionEditorData {

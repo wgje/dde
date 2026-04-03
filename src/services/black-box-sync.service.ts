@@ -32,6 +32,8 @@ import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 
 /**
  * IndexedDB 中的黑匣子条目格式
@@ -58,6 +60,7 @@ export interface PullChangesOptions {
 export class BlackBoxSyncService {
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
+  private auth = inject(AuthService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('BlackBoxSync');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
@@ -434,11 +437,12 @@ export class BlackBoxSyncService {
       const request = store.getAll();
 
       request.onsuccess = () => {
+        const visibleUserId = this.resolveVisibleUserId();
         const entries = (request.result as IDBBlackBoxEntry[]).map(e => {
 
           const { _localVersion, ...entry } = e;
           return entry;
-        });
+        }).filter(entry => visibleUserId ? entry.userId === visibleUserId : false);
 
         // 更新状态
         setBlackBoxEntries(entries);
@@ -448,6 +452,29 @@ export class BlackBoxSyncService {
 
       request.onerror = () => reject(request.error);
     });
+  }
+
+  private resolveVisibleUserId(): string | null {
+    const currentUserId = this.auth.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    if (!this.auth.isConfigured) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    try {
+      return localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true'
+        ? AUTH_CONFIG.LOCAL_MODE_USER_ID
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

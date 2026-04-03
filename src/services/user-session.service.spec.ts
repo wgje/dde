@@ -12,12 +12,14 @@ import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import { ActionQueueService } from './action-queue.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { Project, Task } from '../models';
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
+import { blackBoxEntriesMap, gateSnoozeCount, gateState, resetFocusState } from '../state/focus-stores';
 
 function createStorageMock(): Storage {
   const store: Record<string, string> = {};
@@ -99,6 +101,7 @@ describe('UserSessionService', () => {
   let mockAuthService: Record<string, unknown>;
   let mockProjectState: Record<string, unknown>;
   let mockSyncCoordinator: Record<string, unknown>;
+  let mockChangeTracker: Record<string, unknown>;
   let mockUndoService: Record<string, unknown>;
   let mockUiState: Record<string, unknown>;
   let mockActionQueue: Record<string, unknown>;
@@ -206,6 +209,10 @@ describe('UserSessionService', () => {
       clearOfflineSnapshot: vi.fn(),
     };
 
+    mockChangeTracker = {
+      clearAllChanges: vi.fn(),
+    };
+
     mockUndoService = {
       clearHistory: vi.fn(),
       flushPendingAction: vi.fn(),
@@ -291,6 +298,7 @@ describe('UserSessionService', () => {
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: AttachmentService, useValue: mockAttachmentService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: ToastService, useValue: mockToastService },
@@ -305,6 +313,7 @@ describe('UserSessionService', () => {
   afterEach(() => {
     delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
     delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
+    resetFocusState();
     Object.defineProperty(globalThis, 'localStorage', {
       value: originalLocalStorage,
       configurable: true,
@@ -363,6 +372,7 @@ describe('UserSessionService', () => {
 
       expect(mockProjectState['clearData']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
+      expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalled();
       expect(mockSyncCoordinator['clearActiveConflict']).toHaveBeenCalled();
     });
   });
@@ -394,11 +404,13 @@ describe('UserSessionService', () => {
     it('应清理 action queue 持久化键', async () => {
       localStorage.setItem('nanoflow.action-queue', JSON.stringify([{ id: 'q-1' }]));
       localStorage.setItem('nanoflow.dead-letter-queue', JSON.stringify([{ id: 'd-1' }]));
+      localStorage.setItem('nanoflow.local-connection-tombstones', JSON.stringify([{ id: 'conn-1' }]));
 
       await service.clearAllLocalData();
 
       expect(localStorage.getItem('nanoflow.action-queue')).toBeNull();
       expect(localStorage.getItem('nanoflow.dead-letter-queue')).toBeNull();
+      expect(localStorage.getItem('nanoflow.local-connection-tombstones')).toBeNull();
       expect(mockActionQueue['clearQueue']).toHaveBeenCalled();
       expect(mockActionQueue['clearDeadLetterQueue']).toHaveBeenCalled();
       expect(mockRetryQueue['clear']).toHaveBeenCalled();
@@ -505,6 +517,40 @@ describe('UserSessionService', () => {
       expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
     });
 
+    it('切换用户成功后应清空 ChangeTracker，避免旧 owner 删除意图残留', async () => {
+      userIdSignal.set('user-123');
+      gateSnoozeCount.set(3);
+      vi.spyOn(
+        service as unknown as { loadUserData: (userId: string) => Promise<void> },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser('user-456');
+
+      expect(mockSyncCoordinator['preparePendingPersistForOwnerChange']).toHaveBeenCalledWith(
+        'user-123',
+        'owner-switch:user-123->user-456',
+      );
+      expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalledTimes(1);
+      expect(gateSnoozeCount()).toBe(0);
+    });
+
+    it('切换用户前 handoff 抛错时应通过 fallback 清空 ChangeTracker', async () => {
+      userIdSignal.set('user-123');
+      gateSnoozeCount.set(2);
+      vi.spyOn(
+        service as unknown as { loadUserData: (userId: string) => Promise<void> },
+        'loadUserData'
+      ).mockResolvedValue(undefined);
+      (mockSyncCoordinator['preparePendingPersistForOwnerChange'] as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('owner handoff failed'));
+
+      await service.setCurrentUser('user-456');
+
+      expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalledTimes(1);
+      expect(gateSnoozeCount()).toBe(0);
+    });
+
     it('skipPersistentReload 登出时不应重新加载本地快照或 owner-scoped 队列', async () => {
       userIdSignal.set('old-user');
       const loadFromCacheOrSeedSpy = vi.spyOn(
@@ -601,6 +647,22 @@ describe('UserSessionService', () => {
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
         createProject({ id: 'stale-project', name: 'Stale Project' }),
       ]);
+      blackBoxEntriesMap.set(new Map([
+        ['stale-entry', {
+          id: 'stale-entry',
+          projectId: 'stale-project',
+          userId: 'stale-user',
+          content: 'stale',
+          date: '2026-03-18',
+          createdAt: '2026-03-18T00:00:00.000Z',
+          updatedAt: '2026-03-18T00:00:00.000Z',
+          isRead: false,
+          isCompleted: false,
+          isArchived: false,
+          deletedAt: null,
+        }],
+      ]));
+      gateState.set('reviewing');
       (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot
         .mockRejectedValueOnce(new Error('save-offline-snapshot-failed'));
 
@@ -612,8 +674,12 @@ describe('UserSessionService', () => {
 
       expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockUiState['clearAllState']).toHaveBeenCalled();
       expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
       expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalled();
+      expect(blackBoxEntriesMap().size).toBe(0);
+      expect(gateState()).toBe('checking');
     });
 
     it('local-user 遇到错误的云端 previousUserIdHint 时不应把本地草稿写进云端快照桶', async () => {
@@ -714,6 +780,22 @@ describe('UserSessionService', () => {
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
         createProject({ id: 'old-project', name: 'Old Project' }),
       ]);
+      blackBoxEntriesMap.set(new Map([
+        ['old-entry', {
+          id: 'old-entry',
+          projectId: 'old-project',
+          userId: 'old-user',
+          content: 'old',
+          date: '2026-03-18',
+          createdAt: '2026-03-18T00:00:00.000Z',
+          updatedAt: '2026-03-18T00:00:00.000Z',
+          isRead: false,
+          isCompleted: false,
+          isArchived: false,
+          deletedAt: null,
+        }],
+      ]));
+      gateState.set('reviewing');
       (mockSyncCoordinator['preparePendingPersistForOwnerChange'] as ReturnType<typeof vi.fn>)
         .mockRejectedValueOnce(new Error('prepare-pending-persist-failed'));
       vi.spyOn(
@@ -727,8 +809,12 @@ describe('UserSessionService', () => {
 
       expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockUiState['clearAllState']).toHaveBeenCalled();
       expect(mockActionQueue['clearCurrentView']).toHaveBeenCalled();
       expect(mockRetryQueue['clearCurrentView']).toHaveBeenCalled();
+      expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalled();
+      expect(blackBoxEntriesMap().size).toBe(0);
+      expect(gateState()).toBe('checking');
     });
 
     it('匿名态登录且存在 local-only 项目时应保留本地草稿快照并只清理歧义队列', async () => {

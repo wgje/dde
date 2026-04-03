@@ -281,3 +281,38 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
     expect(loaded[0].y).toBe(22);
   });
 });
+
+describe('TaskRepositoryService.deleteTask', () => {
+  it('prefers purge_tasks_v2 and no longer calls legacy purge_tasks', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { project_id: 'project-1' }, error: null });
+    const eq = vi.fn(() => ({ maybeSingle }));
+    const select = vi.fn(() => ({ eq }));
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') {
+        return {
+          select,
+          update: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })),
+        } as any;
+      }
+      return {} as any;
+    });
+    const rpc = vi.fn().mockResolvedValue({ data: 1, error: null });
+
+    const injector = Injector.create({
+      providers: [
+        { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from, rpc }) } },
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
+    });
+
+    const service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    const result = await service.deleteTask('task-1');
+
+    expect(result.success).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith('purge_tasks_v2', {
+      p_project_id: 'project-1',
+      p_task_ids: ['task-1'],
+    });
+  });
+});

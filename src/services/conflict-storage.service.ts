@@ -36,6 +36,8 @@ export interface ConflictRecord {
   reason: 'version_mismatch' | 'concurrent_edit' | 'network_recovery' | 'status_conflict' | 'field_conflict';
   /** 冲突的字段列表（用于展示差异） */
   conflictedFields?: string[];
+  /** 冲突前已确认的待删除任务，解决冲突后仍需继续回放 */
+  pendingTaskDeleteIds?: string[];
   /** 是否已读/已处理 */
   acknowledged?: boolean;
 }

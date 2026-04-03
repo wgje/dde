@@ -64,7 +64,12 @@ export class ActionQueueProcessorsService {
   }
 
   setProjectConflictHandler(
-    handler: (localProject: Project, remoteProject: Project, ownerUserId?: string | null) => void
+    handler: (
+      localProject: Project,
+      remoteProject: Project,
+      ownerUserId?: string | null,
+      taskIdsToDelete?: string[],
+    ) => void
   ): void {
     this.projectConflictHandler = handler;
   }
@@ -96,6 +101,70 @@ export class ActionQueueProcessorsService {
       `${actionType} 队列 owner 元数据冲突 (${ownerHints.join(' vs ')})，已转入失败记录`
     );
     return true;
+  }
+
+  private async replayDeferredTaskDeletes(
+    project: Project,
+    taskIdsToDelete: string[] | undefined,
+    sourceUserId: string | undefined,
+    mutationContext?: { ownerUserId: string; queueViewGeneration: number },
+  ): Promise<void> {
+    if (!taskIdsToDelete || taskIdsToDelete.length === 0) {
+      return;
+    }
+
+    const uniqueTaskIds = [...new Set(taskIdsToDelete.filter(taskId => typeof taskId === 'string' && taskId.length > 0))];
+    const replayOwnerUserId = sourceUserId ?? mutationContext?.ownerUserId;
+
+    for (let index = 0; index < uniqueTaskIds.length; index++) {
+      const remainingTaskIds = uniqueTaskIds.slice(index);
+      if (mutationContext && !this.actionQueue.isQueueViewCurrent(mutationContext.queueViewGeneration, mutationContext.ownerUserId)) {
+        await this.handoffDeferredTaskDeletes(replayOwnerUserId, project, remainingTaskIds);
+        return;
+      }
+
+      const currentUserId = this.authService.currentUserId();
+      if (!currentUserId || (replayOwnerUserId && currentUserId !== replayOwnerUserId)) {
+        await this.handoffDeferredTaskDeletes(replayOwnerUserId, project, remainingTaskIds);
+        return;
+      }
+
+      const taskId = remainingTaskIds[0];
+      const deleted = await this.syncService.deleteTask(taskId, project.id, sourceUserId);
+      if (!deleted) {
+        this.logger.warn('project 持久化成功，但后置 task:delete 未立即完成，已交给补偿链路', {
+          projectId: project.id,
+          taskId,
+          sourceUserId,
+        });
+      }
+    }
+  }
+
+  private async handoffDeferredTaskDeletes(
+    ownerUserId: string | undefined,
+    project: Project,
+    taskIdsToDelete: string[],
+  ): Promise<void> {
+    if (!ownerUserId || ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID || taskIdsToDelete.length === 0) {
+      return;
+    }
+
+    await this.actionQueue.enqueueForOwner(ownerUserId, {
+      type: 'update',
+      entityType: 'project',
+      entityId: project.id,
+      payload: {
+        project,
+        sourceUserId: ownerUserId,
+        taskIdsToDelete,
+      },
+    });
+    this.logger.info('project 后置删除已写回原 owner 队列', {
+      ownerUserId,
+      projectId: project.id,
+      pendingTaskDeleteCount: taskIdsToDelete.length,
+    });
   }
 
   private shouldStopUserScopedQueueAction(
@@ -183,6 +252,12 @@ export class ActionQueueProcessorsService {
       }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        const persistedProject = result.newVersion !== undefined
+          ? { ...payload.project, version: result.newVersion }
+          : payload.project;
+        if (result.success) {
+          await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
+        }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:update', payload.project.id)) {
           return result.success || result.conflict === true;
         }
@@ -194,9 +269,19 @@ export class ActionQueueProcessorsService {
         if (result.conflict) {
           this.logger.warn('project:update 冲突', { projectId: payload.project.id });
           if (result.remoteData) {
-            this.projectConflictHandler?.(payload.project, result.remoteData, mutationContext.ownerUserId);
+            this.projectConflictHandler?.(
+              payload.project,
+              result.remoteData,
+              mutationContext.ownerUserId,
+              payload.taskIdsToDelete,
+            );
           } else {
-            return await this.persistConflictWithoutRemote(payload.project, mutationContext, 'project:update');
+            return await this.persistConflictWithoutRemote(
+              payload.project,
+              mutationContext,
+              'project:update',
+              payload.taskIdsToDelete,
+            );
           }
           return true; // 冲突由冲突解决流程处理
         }
@@ -242,6 +327,12 @@ export class ActionQueueProcessorsService {
       }
       try {
         const result = await this.syncService.saveProjectSmart(payload.project, userId);
+        const persistedProject = result.newVersion !== undefined
+          ? { ...payload.project, version: result.newVersion }
+          : payload.project;
+        if (result.success) {
+          await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
+        }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:create', payload.project.id)) {
           return result.success || result.conflict === true;
         }
@@ -253,9 +344,19 @@ export class ActionQueueProcessorsService {
         if (result.conflict) {
           this.logger.warn('project:create 冲突', { projectId: payload.project.id });
           if (result.remoteData) {
-            this.projectConflictHandler?.(payload.project, result.remoteData, mutationContext.ownerUserId);
+            this.projectConflictHandler?.(
+              payload.project,
+              result.remoteData,
+              mutationContext.ownerUserId,
+              payload.taskIdsToDelete,
+            );
           } else {
-            return await this.persistConflictWithoutRemote(payload.project, mutationContext, 'project:create');
+            return await this.persistConflictWithoutRemote(
+              payload.project,
+              mutationContext,
+              'project:create',
+              payload.taskIdsToDelete,
+            );
           }
           return true;
         }
@@ -319,7 +420,8 @@ export class ActionQueueProcessorsService {
   private async persistConflictWithoutRemote(
     localProject: Project,
     mutationContext: { ownerUserId: string; queueViewGeneration: number },
-    actionType: 'project:create' | 'project:update'
+    actionType: 'project:create' | 'project:update',
+    pendingTaskDeleteIds?: string[],
   ): Promise<boolean> {
     const remoteProject = await this.syncService.loadFullProjectOptimized(localProject.id).catch(() => null);
     if (!this.isProjectMutationContextCurrent(mutationContext, actionType, localProject.id)) {
@@ -328,7 +430,7 @@ export class ActionQueueProcessorsService {
 
     if (remoteProject) {
       if (this.projectConflictHandler) {
-        this.projectConflictHandler(localProject, remoteProject, mutationContext.ownerUserId);
+        this.projectConflictHandler(localProject, remoteProject, mutationContext.ownerUserId, pendingTaskDeleteIds);
         return true;
       }
 
@@ -342,6 +444,7 @@ export class ActionQueueProcessorsService {
         localVersion: localProject.version ?? 0,
         remoteVersion: remoteProject.version ?? 0,
         reason: 'version_mismatch',
+        pendingTaskDeleteIds,
         acknowledged: false,
       });
       this.toast.warning('检测到数据冲突', '已补拉远端版本，冲突详情已转入冲突中心');
@@ -355,6 +458,7 @@ export class ActionQueueProcessorsService {
       conflictedAt: new Date().toISOString(),
       localVersion: localProject.version ?? 0,
       reason: 'version_mismatch',
+      pendingTaskDeleteIds,
       acknowledged: false,
     });
     this.toast.warning('检测到数据冲突', '远端详情暂不可用，已转入冲突中心等待处理');
@@ -411,7 +515,7 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.pushTask(payload.task, payload.projectId, false);
+        return await this.syncService.pushTask(payload.task, payload.projectId, false, false, payload.sourceUserId);
       } catch (error) {
         this.logger.error('task:create 异常', { error, taskId: payload.task.id });
         return false;
@@ -427,7 +531,7 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.pushTask(payload.task, payload.projectId, false);
+        return await this.syncService.pushTask(payload.task, payload.projectId, false, false, payload.sourceUserId);
       } catch (error) {
         this.logger.error('task:update 异常', { error, taskId: payload.task.id });
         return false;
@@ -443,7 +547,7 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.deleteTask(payload.taskId, payload.projectId);
+        return await this.syncService.deleteTask(payload.taskId, payload.projectId, payload.sourceUserId);
       } catch (error) {
         this.logger.error('task:delete 异常', { error, taskId: payload.taskId });
         return false;

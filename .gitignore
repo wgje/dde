@@ -48,8 +48,11 @@ playwright-report/
 # Build cache
 .cache/
 .parcel-cache/
-google-chrome-stable_current_amd64.deb
-tmp/page-screenshot.png
-tmp/
 .vercel
-.env*.local
+
+# Generated artifacts (local dev / test runners)
+__azurite_db_table__.json
+AzuriteConfig
+trace.json.gz
+tmp/
+playwright-report/

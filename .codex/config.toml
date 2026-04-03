@@ -1,6 +1,0 @@
-[mcp_servers.supabase]
-enabled = true
-url = "https://mcp.supabase.com/mcp?project_ref=fkhihclpghmmtbbywvoj&features=database,debugging,development,edge-functions,docs,branching,storage"
-bearer_token_env_var = "SUPABASE_ACCESS_TOKEN"
-[windows]
-sandbox = "elevated"

@@ -40,16 +40,9 @@ BEGIN
     SELECT 1
     FROM public.projects p
     WHERE p.id = p_project_id
-      AND (
-        p.owner_id = v_user_id
-        OR EXISTS (
-          SELECT 1
-          FROM public.project_members pm
-          WHERE pm.project_id = p.id AND pm.user_id = v_user_id
-        )
-      )
+      AND p.owner_id = v_user_id
   ) THEN
-    RAISE EXCEPTION 'Unauthorized: insufficient project access';
+    RAISE EXCEPTION 'Unauthorized: not project owner';
   END IF;
 
   FOREACH v_task IN ARRAY p_tasks
@@ -78,7 +71,7 @@ BEGIN
       RAISE EXCEPTION 'cognitive_load must be low or high for task %', v_task->>'id';
     END IF;
 
-    INSERT INTO public.tasks (
+    INSERT INTO public.tasks AS existing (
       id, project_id, title, content, stage, parent_id,
       "order", rank, status, x, y, short_id, deleted_at,
       attachments, expected_minutes, cognitive_load, wait_minutes, parking_meta
@@ -97,7 +90,7 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      COALESCE(v_task->'attachments', '[]'::jsonb),
+      '[]'::jsonb,
       v_expected,
       COALESCE(v_cognitive, 'low'),
       v_wait,
@@ -115,12 +108,17 @@ BEGIN
       y = EXCLUDED.y,
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
-      attachments = EXCLUDED.attachments,
+      attachments = COALESCE(existing.attachments, '[]'::jsonb),
       expected_minutes = EXCLUDED.expected_minutes,
       cognitive_load = EXCLUDED.cognitive_load,
       wait_minutes = EXCLUDED.wait_minutes,
       parking_meta = EXCLUDED.parking_meta,
-      updated_at = now();
+      updated_at = now()
+    WHERE existing.project_id = p_project_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Task project mismatch';
+    END IF;
 
     v_count := v_count + 1;
   END LOOP;
@@ -168,7 +166,6 @@ END $$;
 
 DO $$ BEGIN
   REVOKE ALL ON TABLE public.purge_rate_limits FROM authenticated;
-  GRANT SELECT, INSERT, UPDATE ON TABLE public.purge_rate_limits TO authenticated;
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 

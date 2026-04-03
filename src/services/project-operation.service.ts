@@ -82,18 +82,30 @@ export class ProjectOperationService {
     context: { ownerUserId: string | null; sessionGeneration: number },
     action: EnqueueParams,
     stage: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!context.ownerUserId || context.ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return;
+      return false;
     }
 
-    await this.actionQueue.enqueueForOwner(context.ownerUserId, action);
-    this.logger.info('过期项目 CRUD 已写回原 owner 队列', {
-      stage,
-      ownerUserId: context.ownerUserId,
-      actionType: action.type,
-      entityId: action.entityId,
-    });
+    try {
+      await this.actionQueue.enqueueForOwner(context.ownerUserId, action);
+      this.logger.info('过期项目 CRUD 已写回原 owner 队列', {
+        stage,
+        ownerUserId: context.ownerUserId,
+        actionType: action.type,
+        entityId: action.entityId,
+      });
+      return true;
+    } catch (error) {
+      this.logger.error('过期项目 CRUD 写回原 owner 队列失败', {
+        stage,
+        ownerUserId: context.ownerUserId,
+        actionType: action.type,
+        entityId: action.entityId,
+        error,
+      });
+      return false;
+    }
   }
 
   // ========== 项目 CRUD 操作 ==========
@@ -412,6 +424,12 @@ export class ProjectOperationService {
       ? activeConflict
       : null;
     const remoteSnapshotFresh = storedConflict?.remoteSnapshotFresh === true;
+    const pendingTaskDeleteIds = choice === 'remote'
+      ? []
+      : [...new Set([
+          ...(conflictData?.pendingTaskDeleteIds ?? []),
+          ...(storedConflict?.pendingTaskDeleteIds ?? []),
+        ].filter(taskId => typeof taskId === 'string' && taskId.length > 0))];
 
     const localProject = this.projectState.getProject(projectId)
       ?? storedConflict?.localProject;
@@ -446,7 +464,10 @@ export class ProjectOperationService {
       return false;
     }
     
-    const resolvedProject = this.syncCoordinator.validateAndRebalance(result.value);
+    const resolvedProject = this.applyPendingTaskDeletes(
+      this.syncCoordinator.validateAndRebalance(result.value),
+      pendingTaskDeleteIds,
+    );
     
     this.projectState.updateProjects(ps => {
       const hasExistingProject = ps.some(project => project.id === projectId);
@@ -472,7 +493,13 @@ export class ProjectOperationService {
       if (isCloudBackedUser) {
         try {
           const syncResult = await this.syncCoordinator.core.saveProjectSmart(resolvedProject, userId);
+          const persistedProject = syncResult.newVersion !== undefined
+            ? { ...resolvedProject, version: syncResult.newVersion }
+            : resolvedProject;
           if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:saveProjectSmart', projectId)) {
+            if (syncResult.success && !(await this.handoffPendingTaskDeletes(sessionContext, persistedProject, pendingTaskDeleteIds))) {
+              return false;
+            }
             return true;
           }
           if (!syncResult.success && !syncResult.conflict) {
@@ -480,7 +507,7 @@ export class ProjectOperationService {
               type: 'update',
               entityType: 'project',
               entityId: projectId,
-              payload: { project: resolvedProject, sourceUserId: userId }
+              payload: { project: resolvedProject, sourceUserId: userId, taskIdsToDelete: pendingTaskDeleteIds }
             });
             this.finalizeResolvedProject(projectId, resolvedProject, {
               pendingSync: true,
@@ -491,7 +518,8 @@ export class ProjectOperationService {
               resolvedProject,
               syncResult.remoteData,
               remoteProject,
-              sessionContext
+              sessionContext,
+              pendingTaskDeleteIds,
             );
             if (!captured) {
               return true;
@@ -499,6 +527,11 @@ export class ProjectOperationService {
             this.toastService.error('同步冲突', '解决冲突后又发生新冲突，请稍后重试');
             return false;
           } else {
+            await this.replayPendingTaskDeletes(
+              persistedProject,
+              pendingTaskDeleteIds,
+              sessionContext,
+            );
             this.finalizeResolvedProject(projectId, resolvedProject, {
               version: syncResult.newVersion ?? resolvedProject.version,
               pendingSync: false,
@@ -513,7 +546,7 @@ export class ProjectOperationService {
             type: 'update',
             entityType: 'project',
             entityId: projectId,
-            payload: { project: resolvedProject, sourceUserId: userId }
+            payload: { project: resolvedProject, sourceUserId: userId, taskIdsToDelete: pendingTaskDeleteIds }
           });
           this.finalizeResolvedProject(projectId, resolvedProject, {
             pendingSync: true,
@@ -553,24 +586,30 @@ export class ProjectOperationService {
     localProject: Project,
     remoteProject?: Project,
     fallbackRemoteProject?: Project,
-    sessionContext?: { ownerUserId: string | null; sessionGeneration: number }
+    sessionContext?: { ownerUserId: string | null; sessionGeneration: number },
+    pendingTaskDeleteIds?: string[],
   ): Promise<boolean> {
     if (sessionContext && !this.isProjectSessionContextCurrent(sessionContext, 'captureConflict:start', localProject.id)) {
       return false;
     }
 
     if (remoteProject) {
-      await this.syncCoordinator.captureConflict(localProject, remoteProject, sessionContext?.ownerUserId);
+      await this.syncCoordinator.captureConflict(localProject, remoteProject, sessionContext?.ownerUserId, pendingTaskDeleteIds);
       return true;
     }
 
-    const resolvedRemoteProject = await this.tryLoadRemoteConflictProject(localProject.id, localProject, sessionContext);
+    const resolvedRemoteProject = await this.tryLoadRemoteConflictProject(
+      localProject.id,
+      localProject,
+      sessionContext,
+      pendingTaskDeleteIds,
+    );
     if (sessionContext && !this.isProjectSessionContextCurrent(sessionContext, 'captureConflict:resolved-remote', localProject.id)) {
       return false;
     }
 
     if (resolvedRemoteProject) {
-      await this.syncCoordinator.captureConflict(localProject, resolvedRemoteProject, sessionContext?.ownerUserId);
+      await this.syncCoordinator.captureConflict(localProject, resolvedRemoteProject, sessionContext?.ownerUserId, pendingTaskDeleteIds);
       return true;
     }
 
@@ -584,6 +623,7 @@ export class ProjectOperationService {
       localVersion: localProject.version ?? 0,
       remoteVersion: fallbackRemoteProject?.version,
       reason: 'version_mismatch',
+      pendingTaskDeleteIds,
       acknowledged: false,
     });
     if (sessionContext && !this.isProjectSessionContextCurrent(sessionContext, 'captureConflict:fallback-saved', localProject.id)) {
@@ -596,7 +636,8 @@ export class ProjectOperationService {
   private async tryLoadRemoteConflictProject(
     projectId: string,
     localProject: Project,
-    sessionContext?: { ownerUserId: string | null; sessionGeneration: number }
+    sessionContext?: { ownerUserId: string | null; sessionGeneration: number },
+    pendingTaskDeleteIds?: string[],
   ): Promise<Project | undefined> {
     try {
       const remoteProject = await this.syncCoordinator.loadSingleProjectFromCloud(projectId);
@@ -615,6 +656,7 @@ export class ProjectOperationService {
           localVersion: localProject.version ?? 0,
           remoteVersion: remoteProject.version ?? 0,
           reason: 'version_mismatch',
+          pendingTaskDeleteIds,
           acknowledged: false,
         });
         return remoteProject;
@@ -645,6 +687,74 @@ export class ProjectOperationService {
     this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
     this.changeTracker.clearProjectFieldLocks(projectId);
     this.changeTracker.clearProjectChanges(projectId);
+  }
+
+  private applyPendingTaskDeletes(project: Project, pendingTaskDeleteIds: string[]): Project {
+    if (pendingTaskDeleteIds.length === 0) {
+      return project;
+    }
+
+    const deletedTaskIds = new Set(pendingTaskDeleteIds);
+    return this.syncCoordinator.validateAndRebalance({
+      ...project,
+      tasks: project.tasks.filter(task => !deletedTaskIds.has(task.id)),
+      connections: project.connections.filter(connection =>
+        !deletedTaskIds.has(connection.source) && !deletedTaskIds.has(connection.target)
+      ),
+    });
+  }
+
+  private async replayPendingTaskDeletes(
+    project: Project,
+    pendingTaskDeleteIds: string[],
+    sessionContext: { ownerUserId: string | null; sessionGeneration: number },
+  ): Promise<void> {
+    if (pendingTaskDeleteIds.length === 0) {
+      return;
+    }
+
+    for (let index = 0; index < pendingTaskDeleteIds.length; index++) {
+      const remainingTaskDeleteIds = pendingTaskDeleteIds.slice(index);
+      if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:replayPendingTaskDeletes', project.id)) {
+        await this.handoffPendingTaskDeletes(sessionContext, project, remainingTaskDeleteIds);
+        return;
+      }
+
+      const taskId = remainingTaskDeleteIds[0];
+      const deleted = await this.syncCoordinator.core.deleteTask(taskId, project.id, sessionContext.ownerUserId ?? undefined);
+      if (!deleted) {
+        this.logger.warn('冲突解决后待删除任务未立即完成，已交由补偿链路接管', {
+          projectId: project.id,
+          taskId,
+          userId: sessionContext.ownerUserId,
+        });
+      }
+    }
+  }
+
+  private async handoffPendingTaskDeletes(
+    sessionContext: { ownerUserId: string | null; sessionGeneration: number },
+    project: Project,
+    pendingTaskDeleteIds: string[],
+  ): Promise<boolean> {
+    if (pendingTaskDeleteIds.length === 0) {
+      return true;
+    }
+
+    return this.settleStaleProjectCrudFailure(
+      sessionContext,
+      {
+        type: 'update',
+        entityType: 'project',
+        entityId: project.id,
+        payload: {
+          project,
+          sourceUserId: sessionContext.ownerUserId ?? undefined,
+          taskIdsToDelete: pendingTaskDeleteIds,
+        },
+      },
+      'resolveConflict:replayPendingTaskDeletes',
+    );
   }
 
   private discardStaleProjectMutations(projectId: string): void {

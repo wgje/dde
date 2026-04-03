@@ -51,13 +51,19 @@ export const todayDate = signal(getTodayDate());
 /** 【P3-04】todayDate 定时器 ID，用于测试清理和 SSR 兼容 */
 let todayDateIntervalId: ReturnType<typeof setInterval> | null = null;
 
-// 浏览器环境下定时刷新日期信号
-if (typeof window !== 'undefined') {
+function ensureTodayDateInterval(): void {
+  if (typeof window === 'undefined' || todayDateIntervalId !== null) {
+    return;
+  }
+
   todayDateIntervalId = setInterval(() => {
     const now = getTodayDate();
     if (todayDate() !== now) todayDate.set(now);
   }, 60_000);
 }
+
+// 浏览器环境下定时刷新日期信号
+ensureTodayDateInterval();
 
 /**
  * 【P3-04】清理 todayDate 定时器（用于测试 teardown 和 SSR）
@@ -407,12 +413,14 @@ export function resetGateState(): void {
   gateState.set('checking');
   gatePendingItems.set([]);
   gateCurrentIndex.set(0);
+  gateSnoozeCount.set(0);
 }
 
 /**
- * 重置所有专注模式状态（含 todayDate 刷新，适用于测试 teardown）
+ * 重置所有专注模式状态。
+ * 默认保留运行时的跨天刷新定时器；测试如需彻底 teardown，可显式要求清理。
  */
-export function resetFocusState(): void {
+export function resetFocusState(options: { cleanupTodayDateInterval?: boolean } = {}): void {
   blackBoxEntriesMap.set(new Map());
   blackBoxEntriesByDate.set(new Map());
   resetGateState();
@@ -424,6 +432,10 @@ export function resetFocusState(): void {
   offlinePendingCount.set(0);
   remainingQuota.set(50);
   showBlackBoxPanel.set(false);
-  cleanupTodayDateInterval();
+  if (options.cleanupTodayDateInterval) {
+    cleanupTodayDateInterval();
+  } else {
+    ensureTodayDateInterval();
+  }
   todayDate.set(getTodayDate());
 }

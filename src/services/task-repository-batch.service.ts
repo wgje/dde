@@ -308,12 +308,8 @@ export class TaskRepositoryBatchService {
             p_task_ids: batch
           });
 
-          const purgeResult = purgeV2Result.error
-            ? await this.supabase.client().rpc('purge_tasks', { p_task_ids: batch })
-            : purgeV2Result;
-
           // 后端未部署/权限不足时降级为软删除（不再使用物理 DELETE）。
-          const error = purgeResult.error
+          const error = purgeV2Result.error
             ? (await this.supabase.client()
                 .from('tasks')
                 .update({ deleted_at: new Date().toISOString() })
@@ -562,11 +558,7 @@ export class TaskRepositoryBatchService {
         p_task_ids: batch
       });
 
-      const purgeResult = purgeV2Result.error
-        ? await this.supabase.client().rpc('purge_tasks', { p_task_ids: batch })
-        : purgeV2Result;
-
-      const error = purgeResult.error
+      const error = purgeV2Result.error
         ? (await this.supabase.client()
             .from('tasks')
             .update({ deleted_at: new Date().toISOString() })
