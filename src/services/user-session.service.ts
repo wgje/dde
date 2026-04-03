@@ -562,6 +562,21 @@ export class UserSessionService {
     }
 
     if (snapshot.ownerUserId !== expectedOwnerUserId) {
+      // 降级会话场景：Supabase 已配置但会话过期/网络不可达时，
+      // expectedUserId 为 null → 'local-user'，而快照 owner 是真实用户 ID。
+      // 通过 persisted owner hint 匹配，避免同一设备用户看到空工作区。
+      if (this.authService.isConfigured) {
+        const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.() ?? null;
+        if (persistedOwnerHint && snapshot.ownerUserId === persistedOwnerHint) {
+          this.logger.debug('owner 通过 persisted hint 匹配，允许恢复离线快照', {
+            stage,
+            snapshotOwnerUserId: snapshot.ownerUserId,
+            persistedOwnerHint,
+          });
+          return { projects: snapshot.projects, ownerMatched: true };
+        }
+      }
+
       this.logger.warn('检测到 owner 不匹配的离线快照，已忽略本次恢复', {
         stage,
         snapshotOwnerUserId: snapshot.ownerUserId,
@@ -780,7 +795,11 @@ export class UserSessionService {
       } catch (cleanupError) {
         this.logger.warn('清理旧用户数据失败', cleanupError);
         if (shouldForceClearVisibleStateOnCleanupFailure) {
-          this.forceClearCurrentSessionView();
+          try {
+            this.forceClearCurrentSessionView();
+          } catch (forceCleanupError) {
+            this.logger.warn('强制清理会话视图也失败，静默继续', forceCleanupError);
+          }
         }
         // 继续执行，不阻断流程
       }
@@ -791,15 +810,23 @@ export class UserSessionService {
       return;
     }
 
-    if (skipPersistentReload) {
-      this.actionQueue.clearCurrentView();
-      this.retryQueue.clearCurrentView();
-    } else {
-      this.actionQueue.reloadFromStorageForCurrentOwner();
-      this.retryQueue.reloadFromStorageForCurrentOwner();
+    try {
+      if (skipPersistentReload) {
+        this.actionQueue.clearCurrentView();
+        this.retryQueue.clearCurrentView();
+      } else {
+        this.actionQueue.reloadFromStorageForCurrentOwner();
+        this.retryQueue.reloadFromStorageForCurrentOwner();
+      }
+    } catch (queueReloadError) {
+      this.logger.warn('重新加载持久化队列失败，静默继续', queueReloadError);
     }
 
-    await this.conflictStorage.refreshConflictCount();
+    try {
+      await this.conflictStorage.refreshConflictCount();
+    } catch (conflictError) {
+      this.logger.warn('刷新冲突计数失败，静默继续', conflictError);
+    }
 
     if (skipPersistentReload) {
       return;
