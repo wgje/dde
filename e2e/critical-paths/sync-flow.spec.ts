@@ -127,7 +127,7 @@ async function createChildTask(page: Page, parentTitle: string, childTitle: stri
 }
 
 test.describe('关键路径 3: 拖拽 + 同步', () => {
-  test('拖入阶段后的下级任务应带父级标记', async ({ page }) => {
+  test('拖入阶段后的下级任务应保留层级缩进', async ({ page }) => {
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
     await testHelpers.ensureEditorReady(page, { mode: 'local' });
@@ -152,12 +152,11 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
     const childCard = await testHelpers.getTaskCard(page, childTitle, { timeout: 5_000 });
     await expect(childCard).toBeVisible({ timeout: 5_000 });
     await expect
-      .poll(async () => {
-        const indentLevel = await childCard.getAttribute('data-indent-level');
-        const hasParentIndicator = await childCard.locator('[data-testid="parent-indicator"]').isVisible().catch(() => false);
-        return `${indentLevel ?? '0'}|${hasParentIndicator}`;
-      }, { timeout: 5_000, intervals: [200, 300, 500] })
-      .not.toBe('0|false');
+      .poll(async () => childCard.getAttribute('data-indent-level'), {
+        timeout: 5_000,
+        intervals: [200, 300, 500],
+      })
+      .toBe('1');
   });
 
   test('流程图视图应允许创建并编辑节点标题', async ({ page }) => {

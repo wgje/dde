@@ -65,13 +65,6 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
             }">
             {{ task().status === 'completed' ? 'Completed' : 'Active' }}
           </span>
-          @if (task().parentId) {
-            <span
-              data-testid="parent-indicator"
-              class="text-[8px] px-1 py-0.5 rounded font-medium bg-slate-100 dark:bg-stone-700 text-slate-600 dark:text-stone-300">
-              Child
-            </span>
-          }
         </div>
         <span class="text-retro-muted/60 dark:text-stone-500 font-light"
               [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
