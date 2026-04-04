@@ -150,6 +150,10 @@ export class ProjectDataService {
       }
       return null;
     }
+    if (this.syncState.syncState().offlineMode || this.isSupabaseOfflineMode()) {
+      this.logger.debug('连接中断模式下跳过 ProjectData 远端读取');
+      return null;
+    }
     try {
       return await this.supabase.clientAsync();
     } catch (error) {

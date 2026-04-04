@@ -55,7 +55,7 @@ const mockMobileSyncStrategy = {
 };
 
 const mockSyncStateService = {
-  syncState: signal({ isOnline: true }),
+  syncState: signal({ isOnline: true, offlineMode: false }),
   setSyncError: vi.fn(),
 };
 
@@ -165,5 +165,34 @@ describe('RealtimePollingService', () => {
 
     expect(startPollingSpy).not.toHaveBeenCalled();
     expect(service.getCurrentProjectId()).toBeNull();
+  });
+
+  it('挂起传输后应保留项目上下文，并在恢复时重新激活', async () => {
+    await service.subscribeToProject('project-1', 'user-123');
+    expect(service.getCurrentProjectId()).toBe('project-1');
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+
+    await service.suspendTransport();
+    expect(mockClient.removeChannel).toHaveBeenCalledTimes(1);
+    expect(service.getCurrentProjectId()).toBe('project-1');
+
+    await service.resumeTransport();
+    expect(mockClient.channel).toHaveBeenCalledTimes(2);
+    expect(service.getCurrentProjectId()).toBe('project-1');
+  });
+
+  it('离线态订阅后恢复时应自动重新激活传输', async () => {
+    mockSyncStateService.syncState.set({ isOnline: true, offlineMode: true });
+
+    await service.subscribeToProject('project-2', 'user-456');
+
+    expect(service.getCurrentProjectId()).toBe('project-2');
+    expect(mockClient.channel).not.toHaveBeenCalled();
+
+    mockSyncStateService.syncState.set({ isOnline: true, offlineMode: false });
+    await service.resumeTransport();
+
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+    expect(service.getCurrentProjectId()).toBe('project-2');
   });
 });

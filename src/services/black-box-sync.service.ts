@@ -88,6 +88,18 @@ export class BlackBoxSyncService {
   private readonly DEBOUNCE_DELAY = SYNC_CONFIG.DEBOUNCE_DELAY;
   private initIndexedDBPromise: Promise<void> | null = null;
 
+  private isRemoteUnavailable(): boolean {
+    const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
+    if (typeof maybeSignal === 'function') {
+      try {
+        return Boolean(maybeSignal());
+      } catch {
+        return false;
+      }
+    }
+    return Boolean(maybeSignal);
+  }
+
   constructor() {
     // 初始化 IndexedDB
     void this.initIndexedDB().catch(error => {
@@ -488,6 +500,10 @@ export class BlackBoxSyncService {
       this.logger.debug('Supabase 未配置，跳过推送');
       return false;
     }
+    if (this.isRemoteUnavailable()) {
+      this.logger.debug('连接中断模式下跳过黑匣子推送');
+      return false;
+    }
 
     // 校验所有 UUID 字段，跳过 IndexedDB 中的脏数据（如 "dev-preview"、"dev-test"）
     if (!entry.id || !isValidUUID(entry.id)) {
@@ -622,7 +638,7 @@ export class BlackBoxSyncService {
       return this.pullInFlight;
     }
 
-    if (!this.supabase.isConfigured || !this.network.isOnline()) {
+    if (!this.supabase.isConfigured || !this.network.isOnline() || this.isRemoteUnavailable()) {
       this.logger.debug('Offline or unconfigured, loading from local');
       await this.loadFromLocal();
       return;
@@ -658,6 +674,11 @@ export class BlackBoxSyncService {
    */
   private async doPullChanges(): Promise<void> {
     try {
+      if (this.isRemoteUnavailable()) {
+        await this.loadFromLocal();
+        return;
+      }
+
       const client = await this.supabase.clientAsync();
       if (!client) {
         await this.loadFromLocal();

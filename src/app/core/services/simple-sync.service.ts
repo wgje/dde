@@ -16,7 +16,7 @@
 
 import { Injectable, inject, signal, computed, DestroyRef, Injector } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { SupabaseClientService } from '../../../services/supabase-client.service';
+import { SupabaseClientService, type SupabaseConnectivityChange } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { ActionQueueService } from '../../../services/action-queue.service';
@@ -146,6 +146,11 @@ export class SimpleSyncService {
       this.logger.warn('无法获取 Supabase 客户端', failure);
       return null;
     }
+    if (this.supabase.isOfflineMode()) {
+      this.syncStateService.setOfflineMode(true);
+      this.logger.debug('Supabase 远端暂不可达，已跳过云端客户端获取');
+      return null;
+    }
     try {
       return await this.supabase.clientAsync();
     } catch (error) {
@@ -191,16 +196,20 @@ export class SimpleSyncService {
     { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean }
   >();
   private runtimeStarted = false;
+  private connectivityRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectivityRecoveryPromise: Promise<void> | null = null;
+  private connectivityRecoveryEpoch = 0;
   private readonly handleOnline = () => {
     this.logger.info('网络恢复');
-    this.state.update(s => ({ ...s, isOnline: true }));
-    if (this.retryQueueService.length > 0) {
-      this.retryQueueService.processQueue();
-    }
+    this.syncStateService.setOnline(true);
+    void this.restoreRemoteConnectivity('online-event');
   };
   private readonly handleOffline = () => {
     this.logger.info('网络断开');
-    this.state.update(s => ({ ...s, isOnline: false }));
+    this.syncStateService.setOnline(false);
+    this.syncStateService.setOfflineMode(true);
+    this.clearConnectivityRecoveryTimer();
+    void this.realtimePollingService.suspendTransport();
   };
   
   constructor() {
@@ -272,7 +281,14 @@ export class SimpleSyncService {
       this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId ?? undefined);
     });
 
-    this.destroyRef.onDestroy(() => this.cleanup());
+    const detachConnectivityListener = this.supabase.onConnectivityChange((change) => {
+      this.handleSupabaseConnectivityChange(change);
+    });
+
+    this.destroyRef.onDestroy(() => {
+      detachConnectivityListener();
+      this.cleanup();
+    });
   }
 
   startRuntime(): void {
@@ -284,6 +300,11 @@ export class SimpleSyncService {
     this.realtimePollingService.initializeRuntime();
     this.setupNetworkListeners();
     this.retryQueueService.startLoop(this.RETRY_INTERVAL);
+
+    if (this.supabase.isConfigured && this.supabase.isOfflineMode()) {
+      this.syncStateService.setOfflineMode(true);
+      this.scheduleConnectivityRecovery('runtime-start', SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+    }
   }
 
   stopRuntime(): void {
@@ -292,6 +313,9 @@ export class SimpleSyncService {
     }
 
     this.runtimeStarted = false;
+  this.connectivityRecoveryEpoch += 1;
+    this.clearConnectivityRecoveryTimer();
+  this.connectivityRecoveryPromise = null;
     this.teardownNetworkListeners();
     this.retryQueueService.stopLoop();
     this.realtimePollingService.teardownRuntime();
@@ -316,6 +340,131 @@ export class SimpleSyncService {
   private cleanup(): void {
     this.stopRuntime();
     this.realtimePollingService.unsubscribeFromProject();
+  }
+
+  async suspendRemoteTransport(): Promise<void> {
+    this.clearConnectivityRecoveryTimer();
+    await this.realtimePollingService.suspendTransport();
+  }
+
+  private handleSupabaseConnectivityChange(change: SupabaseConnectivityChange): void {
+    this.syncStateService.setOfflineMode(change.offline);
+
+    if (!this.runtimeStarted || change.source !== 'request') {
+      return;
+    }
+
+    if (change.offline) {
+      this.clearConnectivityRecoveryTimer();
+      void this.realtimePollingService.suspendTransport();
+      this.scheduleConnectivityRecovery('supabase-request-offline', SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+      return;
+    }
+
+    if (!this.syncState().isOnline) {
+      return;
+    }
+
+    void this.restoreRemoteConnectivity('supabase-request-restored');
+  }
+
+  private clearConnectivityRecoveryTimer(): void {
+    if (!this.connectivityRecoveryTimer) {
+      return;
+    }
+
+    clearTimeout(this.connectivityRecoveryTimer);
+    this.connectivityRecoveryTimer = null;
+  }
+
+  private async probeRemoteReachability(
+    reason: string,
+    timeoutMs = SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT,
+    force = true
+  ): Promise<boolean> {
+    const reachable = await this.supabase.probeReachability({ timeoutMs, force });
+    this.syncStateService.setOfflineMode(!reachable);
+
+    if (!reachable) {
+      this.logger.info('Supabase 远端暂不可达，保持连接中断模式', { reason });
+      await this.realtimePollingService.suspendTransport();
+      return false;
+    }
+
+    return true;
+  }
+
+  private scheduleConnectivityRecovery(reason: string, delayMs = SYNC_CONFIG.DEBOUNCE_DELAY): void {
+    if (!this.runtimeStarted || this.connectivityRecoveryTimer) {
+      return;
+    }
+
+    this.connectivityRecoveryTimer = setTimeout(() => {
+      this.connectivityRecoveryTimer = null;
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return;
+      }
+
+      void this.restoreRemoteConnectivity(`scheduled:${reason}`);
+    }, delayMs);
+  }
+
+  private async restoreRemoteConnectivity(reason: string): Promise<void> {
+    if (this.connectivityRecoveryPromise) {
+      return this.connectivityRecoveryPromise;
+    }
+
+    this.clearConnectivityRecoveryTimer();
+    const recoveryEpoch = this.connectivityRecoveryEpoch;
+    let recoveryPromise: Promise<void>;
+    recoveryPromise = this.restoreRemoteConnectivityInternal(reason, recoveryEpoch)
+      .finally(() => {
+        if (this.connectivityRecoveryPromise === recoveryPromise) {
+          this.connectivityRecoveryPromise = null;
+        }
+      });
+
+    this.connectivityRecoveryPromise = recoveryPromise;
+
+    return this.connectivityRecoveryPromise;
+  }
+
+  private async restoreRemoteConnectivityInternal(reason: string, recoveryEpoch: number): Promise<void> {
+    const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
+    if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+      return;
+    }
+
+    if (!reachable) {
+      this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+      return;
+    }
+
+    await this.realtimePollingService.resumeTransport();
+    if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+      return;
+    }
+
+    this.realtimePollingService.resumeRealtimeUpdates();
+
+    if (this.retryQueueService.length > 0) {
+      this.retryQueueService.processQueue();
+    }
+
+    if (this.realtimePollingService.hasRemoteChangeCallback()) {
+      void this.realtimePollingService.triggerRemoteChange({
+        eventType: 'reconnect',
+        projectId: this.realtimePollingService.getCurrentProjectId() ?? undefined,
+      });
+    }
+
+    void this.blackBoxSync.pullChanges({ reason: 'resume' }).catch((error: unknown) => {
+      this.logger.warn('远端连接恢复后黑匣子补拉失败', {
+        reason,
+        error,
+      });
+    });
   }
   
   flushRetryQueueSync(): void {
@@ -406,6 +555,18 @@ export class SimpleSyncService {
       }
     }
 
+    this.clearConnectivityRecoveryTimer();
+
+    const remoteReady = await this.probeRemoteReachability(
+      reason,
+      Math.max(SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, resumeProbeTimeoutMs),
+      true
+    );
+    if (!remoteReady) {
+      this.scheduleConnectivityRecovery(reason);
+      return;
+    }
+
     // 1) 先处理离线积压队列
     if (!skipRetryQueue && this.retryQueueService.length > 0) {
       const retrySlice = Math.max(1, APP_LIFECYCLE_CONFIG.RESUME_RETRY_SLICE_MAX_ITEMS);
@@ -449,6 +610,7 @@ export class SimpleSyncService {
 
     // 2) 恢复实时更新状态（若之前被暂停），并在 heavy 下探测远端变更
     if (!skipRealtimeResume) {
+      await this.realtimePollingService.resumeTransport();
       this.realtimePollingService.resumeRealtimeUpdates();
     }
 

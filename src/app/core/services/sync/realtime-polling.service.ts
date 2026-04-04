@@ -58,6 +58,7 @@ export class RealtimePollingService {
   private currentProjectId: string | null = null;
   private currentUserId: string | null = null;
   private transportGeneration = 0;
+  private transportSuspended = false;
   
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
@@ -160,9 +161,20 @@ export class RealtimePollingService {
       && this.currentUserId === userId;
   }
 
-  private async unsubscribeFromProjectInternal(): Promise<void> {
-    this.currentProjectId = null;
-    this.currentUserId = null;
+  private canActivateRemoteTransport(): boolean {
+    const state = this.syncState.syncState();
+    return state.isOnline && !state.offlineMode && !this.transportSuspended;
+  }
+
+  private hasActiveTransport(): boolean {
+    return this.realtimeChannel !== null || this.pollingTimer !== null || this.isPolling;
+  }
+
+  private async teardownActiveTransport(preserveContext = false): Promise<void> {
+    if (!preserveContext) {
+      this.currentProjectId = null;
+      this.currentUserId = null;
+    }
 
     this.stopPolling();
 
@@ -177,6 +189,11 @@ export class RealtimePollingService {
     }
   }
 
+  private async unsubscribeFromProjectInternal(): Promise<void> {
+    this.transportSuspended = false;
+    await this.teardownActiveTransport(false);
+  }
+
   private async activateProjectTransport(
     projectId: string,
     userId: string | null,
@@ -188,6 +205,16 @@ export class RealtimePollingService {
 
     this.currentProjectId = projectId;
     this.currentUserId = userId;
+
+    if (!this.canActivateRemoteTransport()) {
+      this.transportSuspended = true;
+      this.logger.debug('远端传输暂不可用，已保留项目上下文等待恢复', {
+        projectId,
+        isOnline: this.syncState.syncState().isOnline,
+        offlineMode: this.syncState.syncState().offlineMode,
+      });
+      return;
+    }
 
     if (!userId) {
       this.logger.warn('Realtime 重订阅缺少 userId，回退到轮询', { projectId });
@@ -287,7 +314,7 @@ export class RealtimePollingService {
 
     const projectId = this.currentProjectId;
     const userId = this.currentUserId;
-    if (projectId) {
+    if (projectId && !this.transportSuspended) {
       const transportGeneration = this.beginTransportGeneration();
       void this.unsubscribeFromProjectInternal()
         .then(async () => {
@@ -313,6 +340,7 @@ export class RealtimePollingService {
    * 订阅项目变更（自动选择 Realtime 或轮询）
    */
   async subscribeToProject(projectId: string, userId: string): Promise<void> {
+    this.transportSuspended = false;
     const transportGeneration = this.beginTransportGeneration();
     await this.unsubscribeFromProjectInternal();
 
@@ -330,6 +358,9 @@ export class RealtimePollingService {
    */
   private startPolling(projectId: string, userId: string | null, transportGeneration: number): void {
     if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+    if (!this.canActivateRemoteTransport()) {
       return;
     }
 
@@ -405,6 +436,9 @@ export class RealtimePollingService {
     transportGeneration: number
   ): Promise<void> {
     if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      return;
+    }
+    if (!this.canActivateRemoteTransport()) {
       return;
     }
 
@@ -562,6 +596,9 @@ export class RealtimePollingService {
     if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
       return;
     }
+    if (!this.canActivateRemoteTransport()) {
+      return;
+    }
 
     this.logger.info('Realtime 降级到轮询模式', { projectId });
 
@@ -593,6 +630,29 @@ export class RealtimePollingService {
     await this.unsubscribeFromProjectInternal();
   }
 
+  async suspendTransport(): Promise<void> {
+    const transportGeneration = this.beginTransportGeneration();
+    this.transportSuspended = true;
+    await this.teardownActiveTransport(true);
+
+    if (!this.isTransportGenerationCurrent(transportGeneration)) {
+      return;
+    }
+  }
+
+  async resumeTransport(): Promise<void> {
+    const projectId = this.currentProjectId;
+    const userId = this.currentUserId;
+    const shouldResume = this.transportSuspended || (!!projectId && !this.hasActiveTransport());
+    if (!projectId || !shouldResume) {
+      return;
+    }
+
+    this.transportSuspended = false;
+    const transportGeneration = this.beginTransportGeneration();
+    await this.activateProjectTransport(projectId, userId, transportGeneration);
+  }
+
   /**
    * 暂停 Realtime 更新
    */
@@ -619,6 +679,7 @@ export class RealtimePollingService {
    */
   private cleanup(): void {
     this.beginTransportGeneration();
+    this.transportSuspended = false;
     this.currentProjectId = null;
     this.currentUserId = null;
     this.stopPolling();

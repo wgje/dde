@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
@@ -21,9 +21,11 @@ const mockLoggerCategory = {
 
 describe('SupabaseClientService', () => {
   let service: SupabaseClientService;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useClass: SupabaseClientService },
@@ -31,6 +33,10 @@ describe('SupabaseClientService', () => {
       ],
     });
     service = injector.get(SupabaseClientService);
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
   });
 
   describe('初始状态', () => {
@@ -96,6 +102,99 @@ describe('SupabaseClientService', () => {
       mutable.supabase = null;
 
       expect(() => service.client()).toThrow('Supabase 客户端尚未就绪');
+    });
+
+    it('probeReachability 成功时应清除连接中断状态', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      service.isOfflineMode.set(true);
+      fetchSpy.mockResolvedValue(new Response(null, { status: 204 }));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(true);
+
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        1,
+        'https://example.supabase.co/auth/v1/health',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ apikey: 'anon-key' }),
+        })
+      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        2,
+        'https://example.supabase.co/rest/v1/',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            apikey: 'anon-key',
+            Authorization: 'Bearer anon-key',
+            'Accept-Profile': 'public',
+          }),
+        })
+      );
+      expect(service.isOfflineMode()).toBe(false);
+    });
+
+    it('probeReachability 失败时应进入连接中断状态', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      fetchSpy.mockRejectedValue(new TypeError('Failed to fetch'));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(false);
+
+      expect(service.isOfflineMode()).toBe(true);
+    });
+
+    it('probeReachability 返回非 2xx 时应保持连接中断状态', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      fetchSpy
+        .mockResolvedValueOnce(new Response(null, { status: 200 }))
+        .mockResolvedValueOnce(new Response(null, { status: 503 }));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(false);
+
+      expect(service.isOfflineMode()).toBe(true);
+    });
+
+    it('请求级网络失败时应通知连接状态监听器', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      const listener = vi.fn();
+      const unsubscribe = service.onConnectivityChange(listener);
+      fetchSpy.mockRejectedValue(new TypeError('Failed to fetch'));
+
+      await expect(
+        mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects')
+      ).rejects.toThrow('Failed to fetch');
+
+      expect(listener).toHaveBeenCalledWith({ offline: true, source: 'request' });
+      unsubscribe();
     });
   });
 

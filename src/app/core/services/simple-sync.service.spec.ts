@@ -13,7 +13,7 @@
  * 架构：Injector 隔离模式（避免 TestBed 全局状态污染）
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
+import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/core';
 import { disablePollutionGuard, enablePollutionGuard, mockSentryLazyLoaderService } from '../../../test-setup.mocks';
 import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
@@ -62,6 +62,8 @@ describe('SimpleSyncService', () => {
   let mockSessionManager: any;
   let mockRealtimeEnabledState = false;
   let mockProjectData: any;
+  let mockSupabaseOfflineMode = signal(false);
+  let connectivityListener: ((change: { offline: boolean; source: 'probe' | 'request' | 'manual' }) => void) | null = null;
   
   // 【技术债务重构】RetryQueueService Mock - 提升到 describe 级别方便测试用例访问队列状态
   let mockRetryQueueService: {
@@ -154,6 +156,8 @@ describe('SimpleSyncService', () => {
   
   beforeEach(() => {
     disablePollutionGuard();
+    mockSupabaseOfflineMode = signal(false);
+    connectivityListener = null;
     windowAddEventListenerSpy = vi.spyOn(window, 'addEventListener');
     windowRemoveEventListenerSpy = vi.spyOn(window, 'removeEventListener');
     // 重置模拟客户端
@@ -200,6 +204,22 @@ describe('SimpleSyncService', () => {
     
     mockSupabase = {
       isConfigured: false,
+      isOfflineMode: mockSupabaseOfflineMode,
+      clearOfflineMode: vi.fn().mockImplementation(() => {
+        mockSupabaseOfflineMode.set(false);
+      }),
+      probeReachability: vi.fn().mockImplementation(async () => {
+        mockSupabaseOfflineMode.set(false);
+        return true;
+      }),
+      onConnectivityChange: vi.fn().mockImplementation((listener: (change: { offline: boolean; source: 'probe' | 'request' | 'manual' }) => void) => {
+        connectivityListener = listener;
+        return () => {
+          if (connectivityListener === listener) {
+            connectivityListener = null;
+          }
+        };
+      }),
       client: vi.fn().mockReturnValue(null),
       clientAsync: vi.fn().mockResolvedValue(mockClient)
     };
@@ -224,8 +244,8 @@ describe('SimpleSyncService', () => {
     
     // Mock RequestThrottleService - 直接执行传入的函数
     mockThrottle = {
-      execute: vi.fn().mockImplementation(async (_key: string, fn: () => Promise<void>) => {
-        await fn();
+      execute: vi.fn().mockImplementation(async (_key: string, fn: () => Promise<unknown>) => {
+        return await fn();
       })
     };
     
@@ -286,6 +306,8 @@ describe('SimpleSyncService', () => {
       }),
       subscribeToProject: vi.fn().mockResolvedValue(undefined),
       unsubscribeFromProject: vi.fn().mockResolvedValue(undefined),
+      suspendTransport: vi.fn().mockResolvedValue(undefined),
+      resumeTransport: vi.fn().mockResolvedValue(undefined),
       pauseRealtimeUpdates: vi.fn(),
       resumeRealtimeUpdates: vi.fn(),
       getCurrentProjectId: vi.fn().mockReturnValue(null),
@@ -396,7 +418,8 @@ describe('SimpleSyncService', () => {
 
     const mockBlackBoxSync = {
       setRetryQueueHandler: vi.fn(),
-      pushToServer: vi.fn().mockResolvedValue(true)
+      pushToServer: vi.fn().mockResolvedValue(true),
+      pullChanges: vi.fn().mockResolvedValue(undefined),
     };
     
     // 【技术债务重构】TaskSyncOperationsService Mock
@@ -2910,6 +2933,7 @@ describe('SimpleSyncService', () => {
         maxItems: 30,
         maxDurationMs: 150
       });
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
       expect(mockRealtimePolling.resumeRealtimeUpdates).toHaveBeenCalledTimes(1);
       expect(mockRealtimePolling.triggerRemoteChange).toHaveBeenCalledWith({
         eventType: 'resume',
@@ -2935,6 +2959,7 @@ describe('SimpleSyncService', () => {
 
       expect(mockRetryQueueService.processQueueSlice).toHaveBeenCalledTimes(1);
       expect(mockRealtimePolling.triggerRemoteChange).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
       expect(mockRealtimePolling.resumeRealtimeUpdates).toHaveBeenCalledTimes(1);
     });
 
@@ -2959,6 +2984,107 @@ describe('SimpleSyncService', () => {
 
       expect(mockRetryQueueService.processQueueSlice).not.toHaveBeenCalled();
       expect(mockRealtimePolling.resumeRealtimeUpdates).not.toHaveBeenCalled();
+    });
+
+    it('远端不可达时应切换为连接中断并跳过恢复链路', async () => {
+      mockSupabase.probeReachability.mockImplementation(async () => {
+        mockSupabaseOfflineMode.set(true);
+        return false;
+      });
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'heavy',
+        allowRemoteProbe: true,
+        sessionValidated: true,
+      });
+
+      expect(service.state().offlineMode).toBe(true);
+      expect(mockRealtimePolling.suspendTransport).toHaveBeenCalledTimes(1);
+      expect(mockRetryQueueService.processQueueSlice).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.triggerRemoteChange).not.toHaveBeenCalled();
+    });
+
+    it('前台请求失败触发连接中断时应挂起传输并安排恢复', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+      mockSupabase.probeReachability.mockResolvedValue(true);
+
+      connectivityListener?.({ offline: true, source: 'request' });
+
+      expect(service.state().offlineMode).toBe(true);
+      expect(mockRealtimePolling.suspendTransport).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(15000);
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalled();
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('前台请求先行恢复时应清掉挂起计时器，避免重复执行恢复链', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+      mockSupabase.probeReachability.mockResolvedValue(true);
+
+      connectivityListener?.({ offline: true, source: 'request' });
+      connectivityListener?.({ offline: false, source: 'request' });
+
+      await vi.runAllTimersAsync();
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('挂起恢复期间触发 recoverAfterResume 时应吸收旧计时器', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+      mockSupabase.probeReachability.mockResolvedValue(true);
+
+      connectivityListener?.({ offline: true, source: 'request' });
+
+      await service.recoverAfterResume('visibility-threshold', {
+        mode: 'light',
+        allowRemoteProbe: false,
+        force: true,
+        sessionValidated: true,
+      });
+      await vi.runAllTimersAsync();
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('停止 runtime 后应丢弃进行中的连接恢复副作用', async () => {
+      let resolveProbe: ((reachable: boolean) => void) | null = null;
+      mockSupabase.probeReachability.mockImplementation(() => new Promise<boolean>((resolve) => {
+        resolveProbe = resolve;
+      }));
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+        stopRuntime: () => void;
+        restoreRemoteConnectivity: (reason: string) => Promise<void>;
+      };
+      runtimeService.startRuntime();
+
+      const restorePromise = runtimeService.restoreRemoteConnectivity('online-event');
+      runtimeService.stopRuntime();
+      resolveProbe?.(true);
+      await restorePromise;
+
+      expect(mockRealtimePolling.resumeTransport).not.toHaveBeenCalled();
+      expect(mockRetryQueueService.processQueue).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.triggerRemoteChange).not.toHaveBeenCalled();
     });
 
     it('interaction-first 路径下无回调时不应全量加载所有项目', async () => {

@@ -36,6 +36,7 @@ describe('BlackBoxSyncService', () => {
           provide: SupabaseClientService,
           useValue: {
             isConfigured: true,
+            isOfflineMode: vi.fn(() => false),
             clientAsync: vi.fn().mockResolvedValue({}),
           },
         },
@@ -119,6 +120,27 @@ describe('BlackBoxSyncService', () => {
 
     resolvePull?.();
     await Promise.all([p1, p2]);
+  });
+
+  it('should fall back to local cache when remote transport is marked unavailable', async () => {
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      isOfflineMode: ReturnType<typeof vi.fn>;
+    };
+    supabase.isOfflineMode.mockReturnValue(true);
+
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(undefined);
+    const loadLocalSpy = vi.spyOn(
+      service as unknown as { loadFromLocal: () => Promise<unknown[]> },
+      'loadFromLocal'
+    ).mockResolvedValue([]);
+
+    await service.pullChanges({ reason: 'resume', force: true });
+
+    expect(doPullSpy).not.toHaveBeenCalled();
+    expect(loadLocalSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should block duplicate pull by freshness window and report to Sentry', async () => {

@@ -20,6 +20,7 @@ describe('AppLifecycleOrchestratorService', () => {
   };
   let mockSimpleSync: {
     recoverAfterResume: ReturnType<typeof vi.fn>;
+    suspendRemoteTransport: ReturnType<typeof vi.fn>;
   };
   let mockSyncCoordinator: {
     hasPendingLocalChanges: ReturnType<typeof vi.fn>;
@@ -61,6 +62,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     mockSimpleSync = {
       recoverAfterResume: vi.fn().mockResolvedValue(undefined),
+      suspendRemoteTransport: vi.fn().mockResolvedValue(undefined),
     };
 
     mockSyncCoordinator = {
@@ -141,6 +143,8 @@ describe('AppLifecycleOrchestratorService', () => {
 
     setVisibilityState('hidden');
     document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(mockSimpleSync.suspendRemoteTransport).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS + 1));
 

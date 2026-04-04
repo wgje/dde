@@ -116,6 +116,7 @@ export class AppLifecycleOrchestratorService {
     this.visibilityHandler = () => {
       if (document.visibilityState === 'hidden') {
         this.hiddenAt = Date.now();
+        void this.simpleSync.suspendRemoteTransport();
         return;
       }
 

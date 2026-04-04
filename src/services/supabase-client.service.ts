@@ -5,6 +5,13 @@ import { environment } from '../environments/environment';
 import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 
+export interface SupabaseConnectivityChange {
+  offline: boolean;
+  source: 'probe' | 'request' | 'manual';
+}
+
+type SupabaseConnectivityListener = (change: SupabaseConnectivityChange) => void;
+
 /**
  * 敏感密钥检测模式
  * 用于防止 SERVICE_ROLE_KEY 意外泄露到前端
@@ -18,6 +25,10 @@ export class SupabaseClientService {
   private readonly logger = inject(LoggerService).category('SupabaseClient');
   private supabase: SupabaseClient<Database> | null = null;
   private initPromise: Promise<SupabaseClient<Database> | null> | null = null;
+  private reachabilityProbePromise: Promise<boolean> | null = null;
+  private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
+  private lastReachabilityProbeAt = 0;
+  private lastReachabilityProbeResult = true;
 
   private readonly canInitialize: boolean;
   private readonly supabaseUrl: string;
@@ -157,6 +168,152 @@ export class SupabaseClientService {
     }
   }
 
+  onConnectivityChange(listener: SupabaseConnectivityListener): () => void {
+    this.connectivityListeners.add(listener);
+    return () => {
+      this.connectivityListeners.delete(listener);
+    };
+  }
+
+  private setOfflineModeState(
+    offline: boolean,
+    source: SupabaseConnectivityChange['source']
+  ): void {
+    const changed = this.isOfflineMode() !== offline;
+    this.isOfflineMode.set(offline);
+
+    if (!changed) {
+      return;
+    }
+
+    for (const listener of this.connectivityListeners) {
+      try {
+        listener({ offline, source });
+      } catch (error) {
+        this.logger.debug('Supabase 连通性监听器执行失败', { source, error });
+      }
+    }
+  }
+
+  async probeReachability(options?: { timeoutMs?: number; force?: boolean }): Promise<boolean> {
+    if (!this.canInitialize) {
+      this.setOfflineModeState(true, 'probe');
+      this.lastReachabilityProbeResult = false;
+      this.lastReachabilityProbeAt = Date.now();
+      return false;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.setOfflineModeState(true, 'probe');
+      this.lastReachabilityProbeResult = false;
+      this.lastReachabilityProbeAt = Date.now();
+      return false;
+    }
+
+    const now = Date.now();
+    const force = options?.force === true;
+    const timeoutMs = Math.max(250, options?.timeoutMs ?? 5000);
+    const cacheTtlMs = 15_000;
+
+    if (!force && this.reachabilityProbePromise) {
+      return this.reachabilityProbePromise;
+    }
+
+    if (!force && now - this.lastReachabilityProbeAt < cacheTtlMs) {
+      return this.lastReachabilityProbeResult;
+    }
+
+    if (typeof fetch !== 'function') {
+      this.setOfflineModeState(false, 'probe');
+      this.lastReachabilityProbeResult = true;
+      this.lastReachabilityProbeAt = now;
+      return true;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const authProbeUrl = new URL('/auth/v1/health', this.supabaseUrl).toString();
+    const restProbeUrl = new URL('/rest/v1/', this.supabaseUrl).toString();
+
+    this.reachabilityProbePromise = Promise.all([
+      fetch(authProbeUrl, {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          apikey: this.supabaseAnonKey,
+        },
+      }),
+      fetch(restProbeUrl, {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          apikey: this.supabaseAnonKey,
+          Authorization: `Bearer ${this.supabaseAnonKey}`,
+          'Accept-Profile': 'public',
+        },
+      }),
+    ])
+      .then(([authResponse, restResponse]) => {
+        const reachable = authResponse.ok && restResponse.ok;
+        this.setOfflineModeState(!reachable, 'probe');
+        this.lastReachabilityProbeResult = reachable;
+        this.lastReachabilityProbeAt = Date.now();
+
+        if (!reachable) {
+          this.logger.info('Supabase 连通性探测返回非健康状态', {
+            authStatus: authResponse.status,
+            restStatus: restResponse.status,
+          });
+        }
+
+        return reachable;
+      })
+      .catch((error: unknown) => {
+        this.setOfflineModeState(true, 'probe');
+        this.lastReachabilityProbeResult = false;
+        this.lastReachabilityProbeAt = Date.now();
+        this.logger.info('Supabase 连通性探测失败，进入连接中断模式', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      })
+      .finally(() => {
+        clearTimeout(timeoutId);
+        this.reachabilityProbePromise = null;
+      });
+
+    return this.reachabilityProbePromise;
+  }
+
+  clearOfflineMode(): void {
+    this.setOfflineModeState(false, 'manual');
+    this.lastReachabilityProbeResult = true;
+    this.lastReachabilityProbeAt = Date.now();
+  }
+
+  private shouldMarkOfflineFromFetchFailure(error: unknown): boolean {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return true;
+    }
+
+    if (error instanceof DOMException) {
+      return error.name === 'NetworkError';
+    }
+
+    if (error instanceof TypeError) {
+      const message = error.message.toLowerCase();
+      return message.includes('failed to fetch') || message.includes('network');
+    }
+
+    return false;
+  }
+
   /**
    * 同步客户端获取仅用于“已就绪路径”。
    * 未就绪时抛出可诊断错误，调用方应改用 clientAsync/ensureClientReady。
@@ -264,6 +421,16 @@ export class SupabaseClientService {
           return fetch(url, {
             ...options,
             signal: mergedSignal,
+          }).then((response) => {
+            if (this.isOfflineMode()) {
+              this.setOfflineModeState(false, 'request');
+            }
+            return response;
+          }).catch((error: unknown) => {
+            if (this.shouldMarkOfflineFromFetchFailure(error)) {
+              this.setOfflineModeState(true, 'request');
+            }
+            throw error;
           }).finally(() => clearTimeout(timeoutId));
         },
       },
