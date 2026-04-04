@@ -62,6 +62,7 @@ describe('FlowConnectionEditorComponent', () => {
 
   it('跨树关联首次打开应进入预览态', () => {
     (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = signal(false);
     (component as any).connectionTasks = signal({
       source: createTask({ id: 'source-task', displayId: 'A' }),
       target: createTask({ id: 'target-task', displayId: 'B' }),
@@ -84,6 +85,67 @@ describe('FlowConnectionEditorComponent', () => {
     expect(component.isEditMode()).toBe(false);
     expect(fixture.nativeElement.querySelector('input')).toBeNull();
     expect(fixture.nativeElement.querySelector('.markdown-preview')).not.toBeNull();
+  });
+
+  it('只读模式下点击预览区不应进入编辑态', () => {
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = signal(true);
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '依赖',
+      description: '需要先完成前置任务',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'preview',
+    });
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    component.onPreviewClick(new MouseEvent('click'));
+    fixture.detectChanges();
+
+    expect(component.isEditMode()).toBe(false);
+    expect(fixture.nativeElement.querySelector('input')).toBeNull();
+    expect(modeChangeSpy).not.toHaveBeenCalledWith('edit');
+  });
+
+  it('只读预览态应移除可编辑提示文案和可点击光标', () => {
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = signal(true);
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '',
+      description: '',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'preview',
+    });
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    const previewEl = fixture.nativeElement.querySelector('.cursor-default') as HTMLElement | null;
+
+    expect(previewEl).not.toBeNull();
+    expect(previewEl?.textContent).toContain('会话确认完成后可编辑标题和描述...');
+    expect(previewEl?.textContent).not.toContain('点击添加标题和描述...');
   });
 
   it('父子关系打开后应保持只读关系说明', () => {
@@ -205,6 +267,47 @@ describe('FlowConnectionEditorComponent', () => {
 
     expect(component.isEditMode()).toBe(true);
     expect(fixture.nativeElement.querySelector('input')).not.toBeNull();
+  });
+
+  it('只读状态切入时应从本地编辑态回落到预览态', () => {
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
+    const readOnlySignal = signal(false);
+    const dataSignal = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '旧标题',
+      description: '旧描述',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'edit',
+    });
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = readOnlySignal;
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = dataSignal;
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    expect(component.isEditMode()).toBe(true);
+
+    component.editingTitle = '未保存标题';
+    component.editingDescription = '未保存描述';
+
+    readOnlySignal.set(true);
+    fixture.detectChanges();
+
+    expect(component.isEditMode()).toBe(false);
+    expect(fixture.nativeElement.querySelector('input')).toBeNull();
+    expect(component.currentTitle()).toBe('旧标题');
+    expect(component.currentDescription()).toBe('旧描述');
+    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
   });
 
   it('同会话 data 更新后立即触摸外部也应退出编辑并保存（不应被保护窗口误拦截）', () => {

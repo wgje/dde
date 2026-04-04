@@ -422,29 +422,38 @@ export class FlowPaletteComponent implements OnDestroy {
   });
 
   /**
-   * 完成率 = 已完成的黑匣子条目 / 所有黑匣子条目
-   * 分母：所有录音内容（黑匣子 + 项目历史回顾中的）
-   * 分子：已完成的录音内容（项目历史回顾中的已完成条目）
+   * 完成率基数只包含两类可独立完成的内容：
+   * 1. 任务块中的 Markdown 待办事项
+   * 2. 黑匣子条目
+   *
+   * 任务块本身可独立设为 completed 并进入沉积层，但不作为完成率分母。
+   */
+  readonly completionBasis = computed(() => {
+    const todoStats = this.projectState.taskTodoStats();
+    const blackBoxEntries = this.allBlackBoxEntries();
+    const completedBlackBoxCount = blackBoxEntries.filter(entry => entry.isCompleted).length;
+
+    return {
+      total: todoStats.total + blackBoxEntries.length,
+      completed: todoStats.completed + completedBlackBoxCount,
+    };
+  });
+
+  /**
+   * 完成率 = (已完成待办事项 + 已完成黑匣子条目) / (待办事项总数 + 黑匣子条目总数)
+   * 任务块只是容器，不直接进入完成率计算。
    */
   readonly completionRate = computed(() => {
     if (!this.projectState.activeProject()) {
       return 0;
     }
 
-    // 当项目中已没有任何存活任务时，仪表盘应显示为 100%，
-    // 避免历史黑匣子条目让完成率停留在旧值。
-    if (this.totalTaskCount() === 0) {
-      return 100;
-    }
-
-    const entries = this.allBlackBoxEntries();
-    const total = entries.length;
-    const completed = entries.filter(e => e.isCompleted).length;
-    return this.calculatePercent(completed, total);
+    const basis = this.completionBasis();
+    return this.calculatePercent(basis.completed, basis.total);
   });
 
   readonly projectStatusLabel = computed(() => {
-    const total = this.allBlackBoxEntries().length;
+    const total = this.completionBasis().total;
     if (total === 0) return '初始化';
     if (this.completionRate() >= 70) return '稳态推进';
     if (this.completionRate() >= 35) return '高效执行';

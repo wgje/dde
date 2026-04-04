@@ -9,6 +9,7 @@ import { ProjectStateService } from './project-state.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { UserSessionService } from './user-session.service';
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
@@ -20,6 +21,7 @@ describe('ConnectionAdapterService', () => {
   let syncCoordinator: any;
   let undoService: any;
   let toastService: any;
+  let userSession: { isHintOnlyStartupPlaceholderVisible: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     taskOps = {
@@ -45,6 +47,9 @@ describe('ConnectionAdapterService', () => {
       error: vi.fn(),
       warning: vi.fn(),
     };
+    userSession = {
+      isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+    };
 
     const injector = Injector.create({
       providers: [
@@ -56,6 +61,7 @@ describe('ConnectionAdapterService', () => {
         { provide: ProjectStateService, useValue: { tasks: vi.fn(() => new Map()), connections: vi.fn(() => new Map()) } },
         { provide: LayoutService, useValue: {} },
         { provide: ToastService, useValue: toastService },
+        { provide: UserSessionService, useValue: userSession },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
       ],
     });
@@ -66,6 +72,15 @@ describe('ConnectionAdapterService', () => {
   describe('addCrossTreeConnection', () => {
     it('添加连接不出错', () => {
       expect(() => service.addCrossTreeConnection('src-1', 'tgt-1')).not.toThrow();
+    });
+
+    it('hint-only 时应阻止添加连接', () => {
+      userSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+      service.addCrossTreeConnection('src-1', 'tgt-1');
+
+      expect(taskOps.addCrossTreeConnection).not.toHaveBeenCalled();
+      expect(toastService.info).toHaveBeenCalledWith('会话确认中', '编辑关联暂不可用，owner 确认完成前保持只读');
     });
   });
 
@@ -84,6 +99,15 @@ describe('ConnectionAdapterService', () => {
   describe('updateConnectionContent', () => {
     it('更新内容不出错', () => {
       expect(() => service.updateConnectionContent('src-1', 'tgt-1', 'New Title', 'New desc')).not.toThrow();
+    });
+
+    it('hint-only 时应阻止更新关联内容', () => {
+      userSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+      service.updateConnectionContent('src-1', 'tgt-1', 'New Title', 'New desc');
+
+      expect(taskOps.updateConnectionContent).not.toHaveBeenCalled();
+      expect(toastService.info).toHaveBeenCalledWith('会话确认中', '编辑关联暂不可用，owner 确认完成前保持只读');
     });
   });
 });

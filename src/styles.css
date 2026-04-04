@@ -617,6 +617,14 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   overflow-wrap: anywhere;
 }
 
+.markdown-preview-adaptive > :first-child {
+  margin-top: 0;
+}
+
+.markdown-preview-adaptive > :last-child {
+  margin-bottom: 0;
+}
+
 .markdown-preview h1 {
   font-size: 1.25em;
   font-weight: 700;

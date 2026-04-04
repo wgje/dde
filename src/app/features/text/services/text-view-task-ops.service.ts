@@ -2,6 +2,7 @@ import { Injectable, inject, ElementRef, NgZone, type EventEmitter, type Signal,
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
+import { UserSessionService } from '../../../../services/user-session.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ParkingService } from '../../../../services/parking.service';
@@ -40,6 +41,7 @@ export class TextViewTaskOpsService {
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
+  private readonly userSession = inject(UserSessionService);
   private readonly toast = inject(ToastService);
   private readonly dragDropService = inject(TextViewDragDropService);
   private readonly elementRef = inject(ElementRef);
@@ -57,6 +59,15 @@ export class TextViewTaskOpsService {
   /** 初始化：接收组件 signal 和 ViewChild 引用 */
   init(ctx: TextViewOpsContext): void {
     this.ctx = ctx;
+  }
+
+  private guardHintOnlyMutation(actionLabel: string): boolean {
+    if (!this.userSession.isHintOnlyStartupPlaceholderVisible()) {
+      return false;
+    }
+
+    this.toast.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
   }
 
   /** 销毁：清理定时器 */
@@ -157,9 +168,7 @@ export class TextViewTaskOpsService {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' });
             if (inputSelector) {
               const focusTimer = setTimeout(() => {
-                const input = el.querySelector(inputSelector) as HTMLInputElement;
-                input?.focus();
-                input?.select?.();
+                this.focusTaskInput(el, inputSelector);
                 this.removeTimer(focusTimer);
               }, 100);
               this.pendingTimers.push(focusTimer);
@@ -175,6 +184,47 @@ export class TextViewTaskOpsService {
     if (index > -1) {
       this.pendingTimers.splice(index, 1);
     }
+  }
+
+  private focusTaskInput(el: Element, inputSelector: string): void {
+    const input = el.querySelector<HTMLInputElement | HTMLTextAreaElement>(inputSelector);
+    if (input) {
+      input.focus();
+      input.select?.();
+      return;
+    }
+
+    if (inputSelector !== 'input[data-title-input]') {
+      return;
+    }
+
+    const previewTrigger = el.querySelector<HTMLElement>('[data-title-preview-trigger]');
+    if (!previewTrigger) {
+      return;
+    }
+
+    previewTrigger.click();
+
+    this.retryFocusTaskInput(el, inputSelector, 4);
+  }
+
+  private retryFocusTaskInput(el: Element, inputSelector: string, attemptsLeft: number): void {
+    const retryTimer = setTimeout(() => {
+      const revealedInput = el.querySelector<HTMLInputElement | HTMLTextAreaElement>(inputSelector);
+      if (revealedInput) {
+        revealedInput.focus();
+        revealedInput.select?.();
+        this.removeTimer(retryTimer);
+        return;
+      }
+
+      this.removeTimer(retryTimer);
+      if (attemptsLeft > 0) {
+        this.retryFocusTaskInput(el, inputSelector, attemptsLeft - 1);
+      }
+    }, 0);
+
+    this.pendingTimers.push(retryTimer);
   }
 
   // ========== 阶段折叠管理 ==========
@@ -260,6 +310,10 @@ export class TextViewTaskOpsService {
   }
 
   onCreateUnassigned(): void {
+    if (this.guardHintOnlyMutation('创建任务')) {
+      return;
+    }
+
     const result = this.taskOpsAdapter.addTask('', '', null, null, false);
     if (isFailure(result)) {
       this.toast.error('创建任务失败', getErrorMessage(result.error));
@@ -308,6 +362,10 @@ export class TextViewTaskOpsService {
   }
 
   onAddSibling(task: Task): void {
+    if (this.guardHintOnlyMutation('创建任务')) {
+      return;
+    }
+
     const result = this.taskOpsAdapter.addTask('', '', task.stage, task.parentId, true);
     if (isFailure(result)) {
       this.toast.error('添加任务失败', getErrorMessage(result.error));
@@ -317,6 +375,10 @@ export class TextViewTaskOpsService {
   }
 
   onAddChild(task: Task): void {
+    if (this.guardHintOnlyMutation('创建子任务')) {
+      return;
+    }
+
     const newStage = (task.stage || 0) + 1;
     const result = this.taskOpsAdapter.addTask('', '', newStage, task.id, false);
     if (isFailure(result)) {
@@ -327,11 +389,19 @@ export class TextViewTaskOpsService {
   }
 
   onDeleteTask(task: Task): void {
+    if (this.guardHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     this.ctx.deleteConfirmTask.set(task);
   }
 
   /** 停泊任务——将当前任务放入「稍后处理」停泊槽 */
   onParkTask(task: Task): void {
+    if (this.guardHintOnlyMutation('停泊任务')) {
+      return;
+    }
+
     this.parkingService.parkTask(task.id);
     if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
       this.dockEngine.dockTask(task.id, undefined, {
@@ -344,6 +414,10 @@ export class TextViewTaskOpsService {
   }
 
   onConfirmDelete(keepChildren: boolean): void {
+    if (this.guardHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     const task = this.ctx.deleteConfirmTask();
     if (task) {
       this.ctx.selectedTaskId.set(null);
@@ -378,6 +452,10 @@ export class TextViewTaskOpsService {
   }
 
   onAddNewStage(): void {
+    if (this.guardHintOnlyMutation('创建阶段')) {
+      return;
+    }
+
     const maxStage = Math.max(...this.projectState.stages().map(s => s.stageNumber), 0);
     const result = this.taskOpsAdapter.addTask('', '', maxStage + 1, null, false);
     if (isFailure(result)) {

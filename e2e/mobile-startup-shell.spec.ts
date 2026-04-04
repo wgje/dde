@@ -42,6 +42,115 @@ test.describe('Mobile Startup Shell', () => {
     expect(overflow).toBeLessThanOrEqual(0);
   });
 
+  test('should clamp flow drawer layout to the visual viewport after switching from text view', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+        version: 2,
+        savedAt: new Date().toISOString(),
+        activeProjectId: 'project-1',
+        lastActiveView: 'text',
+        preferredView: 'text',
+        resolvedLaunchView: 'text',
+        routeIntent: { kind: 'project', projectId: 'project-1', taskId: null },
+        mobileDegraded: false,
+        degradeReason: null,
+        theme: 'default',
+        colorMode: 'light',
+        projects: [{
+          id: 'project-1',
+          name: 'Viewport Project',
+          description: 'mobile flow viewport clamp',
+          updatedAt: new Date().toISOString(),
+          taskCount: 1,
+          openTaskCount: 1,
+          recentTasks: [{ id: 'task-1', title: 'Task 1', displayId: '1', status: 'active' }],
+        }],
+        currentProject: null,
+      }));
+
+      const listeners = new Map<string, Set<(event: Event) => void>>();
+      const mockVisualViewport = {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        offsetTop: 0,
+        offsetLeft: 0,
+        pageTop: 0,
+        pageLeft: 0,
+        scale: 1,
+        addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+          const callback = typeof listener === 'function'
+            ? listener
+            : listener.handleEvent.bind(listener);
+          if (!listeners.has(type)) {
+            listeners.set(type, new Set());
+          }
+          listeners.get(type)?.add(callback);
+        },
+        removeEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+          const callback = typeof listener === 'function'
+            ? listener
+            : listener.handleEvent.bind(listener);
+          listeners.get(type)?.delete(callback);
+        },
+      };
+
+      Object.defineProperty(window, 'visualViewport', {
+        configurable: true,
+        value: mockVisualViewport,
+      });
+
+      (window as Window & {
+        __setMockVisualViewport?: (height: number, offsetTop?: number) => void;
+      }).__setMockVisualViewport = (height: number, offsetTop = 0) => {
+        mockVisualViewport.height = height;
+        mockVisualViewport.offsetTop = offsetTop;
+        mockVisualViewport.width = window.innerWidth;
+
+        for (const type of ['resize', 'scroll']) {
+          for (const listener of listeners.get(type) ?? []) {
+            listener(new Event(type));
+          }
+        }
+      };
+    });
+
+    await page.goto('/projects/project-1/text', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('[data-testid="mobile-text-view-label"]')).toContainText('文本');
+
+    await page.locator('[data-testid="flow-view-tab"]').first().click();
+    await page.waitForSelector('[data-testid="flow-diagram"]', { timeout: 30000 });
+
+    await page.evaluate(() => {
+      const setter = (window as Window & {
+        __setMockVisualViewport?: (height: number, offsetTop?: number) => void;
+      }).__setMockVisualViewport;
+      setter?.(660, 0);
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    await page.waitForFunction(() => {
+      const viewport = document.querySelector('.mobile-drawer-viewport');
+      if (!viewport) return false;
+      const rect = viewport.getBoundingClientRect();
+      return Math.abs(rect.height - 630) < 2 && rect.bottom <= 661;
+    });
+
+    const metrics = await page.evaluate(() => {
+      const viewport = document.querySelector('.mobile-drawer-viewport')?.getBoundingClientRect();
+      const diagram = document.querySelector('[data-testid="flow-diagram"]')?.getBoundingClientRect();
+      return {
+        viewportHeight: viewport?.height ?? 0,
+        viewportBottom: viewport?.bottom ?? 0,
+        diagramBottom: diagram?.bottom ?? 0,
+      };
+    });
+
+    expect(metrics.viewportHeight).toBeGreaterThan(628);
+    expect(metrics.viewportHeight).toBeLessThan(632);
+    expect(metrics.viewportBottom).toBeLessThanOrEqual(661);
+    expect(metrics.diagramBottom).toBeLessThanOrEqual(661);
+  });
+
   test('should expose startup trace from static loader into Angular startup', async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({

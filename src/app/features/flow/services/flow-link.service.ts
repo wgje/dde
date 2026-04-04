@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone, DestroyRef } from '@angular/core';
+import { Injectable, inject, signal, NgZone, DestroyRef, effect } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -61,6 +61,36 @@ export class FlowLinkService {
   
   /** 连接模式下选中的源任务 */
   readonly linkSourceTask = signal<Task | null>(null);
+
+  private readonly hintOnlyUiEffect = effect(() => {
+    if (!this.taskOps.isHintOnlyStartupReadOnly()) {
+      return;
+    }
+
+    if (this.isLinkMode()) {
+      this.cancelLinkMode();
+    }
+
+    if (this.linkTypeDialog()) {
+      this.linkTypeDialog.set(null);
+    }
+
+    if (this.linkDeleteHint()) {
+      this.cancelLinkDelete();
+    }
+
+    if (this.linkActionMenu()) {
+      this.cancelActionMenu();
+    }
+
+    const currentEditor = this.connectionEditorData();
+    if (currentEditor?.mode === 'edit') {
+      this.connectionEditorData.set({
+        ...currentEditor,
+        mode: 'preview',
+      });
+    }
+  });
   
   constructor() {
     // 注册自动清理
@@ -108,11 +138,24 @@ export class FlowLinkService {
   private isDestroyed = false;
   
   // ========== 连接模式方法 ==========
+
+  private guardHintOnlyLinkMutation(actionLabel: string): boolean {
+    if (!this.taskOps.isHintOnlyStartupReadOnly()) {
+      return false;
+    }
+
+    this.toast.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
+  }
   
   /**
    * 切换连接模式
    */
   toggleLinkMode(): void {
+    if (!this.isLinkMode() && this.guardHintOnlyLinkMutation('创建连接')) {
+      return;
+    }
+
     this.isLinkMode.update(v => !v);
     this.linkSourceTask.set(null);
   }
@@ -134,6 +177,12 @@ export class FlowLinkService {
     const task = this.projectState.getTask(taskId);
     if (!task) return false;
 
+    if (this.guardHintOnlyLinkMutation('创建连接')) {
+      this.linkSourceTask.set(null);
+      this.isLinkMode.set(false);
+      return false;
+    }
+
     const source = this.linkSourceTask();
     if (!source) {
       // 选择源节点
@@ -146,10 +195,22 @@ export class FlowLinkService {
       return false;
     } else {
       // 选择目标节点，创建连接
+      if (this.guardHintOnlyLinkMutation('创建关联')) {
+        this.linkSourceTask.set(null);
+        this.isLinkMode.set(false);
+        return false;
+      }
+
       // 场景二：若目标是“待分配块”，先将其任务化（赋予阶段/序号），再创建连接
       if (task.stage === null) {
         const inferredStage = source.stage ?? 1;
-        this.taskOps.moveTaskToStage(taskId, inferredStage, undefined, null);
+        const result = this.taskOps.moveTaskToStage(taskId, inferredStage, undefined, null);
+        if (!result.ok) {
+          this.toast.error('创建关联失败', result.error?.message || '未知错误');
+          this.linkSourceTask.set(null);
+          this.isLinkMode.set(false);
+          return false;
+        }
       }
       this.taskOps.connectionAdapter.addCrossTreeConnection(source.id, taskId);
       this.linkSourceTask.set(null);
@@ -171,6 +232,10 @@ export class FlowLinkService {
     x: number,
     y: number
   ): void {
+    if (this.guardHintOnlyLinkMutation('创建连接')) {
+      return;
+    }
+
     // 防止自连接
     if (sourceId === targetId) {
       this.toast.warning('无法连接', '节点不能连接到自身');
@@ -194,15 +259,19 @@ export class FlowLinkService {
   /**
    * 确认创建父子关系连接
    */
-  confirmParentChildLink(): void {
+  confirmParentChildLink(): boolean {
     const dialog = this.linkTypeDialog();
-    if (!dialog) return;
+    if (!dialog) return false;
+
+    if (this.guardHintOnlyLinkMutation('创建连接')) {
+      return false;
+    }
     
     // 最后一道防线：再次检查自连接
     if (dialog.sourceId === dialog.targetId) {
       this.toast.warning('无法连接', '节点不能连接到自身');
       this.linkTypeDialog.set(null);
-      return;
+      return false;
     }
     
     // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
@@ -210,7 +279,7 @@ export class FlowLinkService {
         dialog.targetTask && dialog.targetTask.stage !== null) {
       this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
       this.linkTypeDialog.set(null);
-      return;
+      return false;
     }
     
     const parentTask = dialog.sourceTask;
@@ -221,37 +290,54 @@ export class FlowLinkService {
       const result = this.taskOps.moveTaskToStage(dialog.targetId, null, undefined, dialog.sourceId);
       if (!result.ok) {
         this.toast.error('连接失败', result.error?.message || '未知错误');
+        this.linkTypeDialog.set(null);
+        return false;
       }
       this.linkTypeDialog.set(null);
-      return;
+      return true;
     }
 
     const nextStage = parentStage !== null ? parentStage + 1 : 1;
 
-    this.taskOps.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
+    const result = this.taskOps.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
+    if (!result.ok) {
+      this.toast.error('连接失败', result.error?.message || '未知错误');
+      this.linkTypeDialog.set(null);
+      return false;
+    }
     this.linkTypeDialog.set(null);
+    return true;
   }
   
   /**
    * 确认创建关联连接（跨树）
    */
-  confirmCrossTreeLink(): void {
+  confirmCrossTreeLink(): boolean {
     const dialog = this.linkTypeDialog();
-    if (!dialog) return;
+    if (!dialog) return false;
+    if (this.guardHintOnlyLinkMutation('创建关联')) {
+      return false;
+    }
     // 最后一道防线：再次检查自连接
     if (dialog.sourceId === dialog.targetId) {
       this.toast.warning('无法连接', '节点不能连接到自身');
       this.linkTypeDialog.set(null);
-      return;
+      return false;
     }
     // 场景二：若目标是“待分配块”，在创建关联连接前先任务化（否则不会从待分配区消失）
     if (dialog.targetTask?.stage === null) {
       const inferredStage = dialog.sourceTask?.stage ?? 1;
-      this.taskOps.moveTaskToStage(dialog.targetId, inferredStage, undefined, null);
+      const result = this.taskOps.moveTaskToStage(dialog.targetId, inferredStage, undefined, null);
+      if (!result.ok) {
+        this.toast.error('创建关联失败', result.error?.message || '未知错误');
+        this.linkTypeDialog.set(null);
+        return false;
+      }
     }
 
     this.taskOps.connectionAdapter.addCrossTreeConnection(dialog.sourceId, dialog.targetId);
     this.linkTypeDialog.set(null);
+    return true;
   }
   
   /**
@@ -303,6 +389,10 @@ export class FlowLinkService {
       return 'none';
     }
 
+    if (this.guardHintOnlyLinkMutation('创建连接')) {
+      return 'none';
+    }
+
     // ========== 场景1：任务块 → 待分配块（从普通端口拖出新线条） ==========
     // 当任务块连接到待分配块时，将待分配块及其子树分配给任务块
     // 使用添加模式（replaceMode = false）：保留源任务原有的子任务
@@ -339,6 +429,10 @@ export class FlowLinkService {
       }
       
       // 目标已有父节点且已分配，只能创建跨树连接
+      if (this.guardHintOnlyLinkMutation('创建关联')) {
+        return 'none';
+      }
+
       this.taskOps.connectionAdapter.addCrossTreeConnection(sourceId, targetId);
       this.toast.success('已创建关联', '目标任务已有父级，已创建关联连接');
       return 'create-cross-tree';
@@ -347,6 +441,10 @@ export class FlowLinkService {
     // 目标没有父节点，显示选择对话框
     this.showLinkTypeDialog(sourceId, targetId, x, y);
     return 'show-dialog';
+  }
+
+  isHintOnlyStartupReadOnly(): boolean {
+    return this.taskOps.isHintOnlyStartupReadOnly();
   }
 
   // ========== 联系块编辑器方法 ==========
@@ -379,6 +477,12 @@ export class FlowLinkService {
       options
     });
 
+    const requestedMode = options.mode;
+    const editorMode =
+      requestedMode === 'edit' && this.guardHintOnlyLinkMutation('编辑关联')
+        ? 'preview'
+        : requestedMode;
+
     const currentEditor = this.connectionEditorData();
     const isSameConnection =
       currentEditor &&
@@ -391,8 +495,13 @@ export class FlowLinkService {
         this.uiState.isMobile() &&
         currentEditor.isCrossTree &&
         currentEditor.mode === 'preview' &&
-        options.mode === 'preview'
+        requestedMode === 'preview'
       ) {
+        if (this.taskOps.isHintOnlyStartupReadOnly()) {
+          this.guardHintOnlyLinkMutation('编辑关联');
+          return;
+        }
+
         this.logger.debug('移动端同一跨树关联二次点击，切换到编辑态');
         this.armConnectionEditorBackgroundCloseGuard();
         this.connectionEditorData.set({
@@ -407,12 +516,12 @@ export class FlowLinkService {
         return;
       }
 
-      if (currentEditor.mode !== options.mode) {
-        this.logger.debug('同一关联块切换模式', { from: currentEditor.mode, to: options.mode });
+      if (currentEditor.mode !== editorMode) {
+        this.logger.debug('同一关联块切换模式', { from: currentEditor.mode, to: editorMode });
         this.armConnectionEditorBackgroundCloseGuard();
         this.connectionEditorData.set({
           ...currentEditor,
-          mode: options.mode,
+          mode: editorMode,
         });
       }
       return;
@@ -483,7 +592,7 @@ export class FlowLinkService {
       title,
       description,
       isCrossTree: options.isCrossTree,
-      mode: options.mode,
+      mode: editorMode,
       x: adjustedX,
       y: adjustedY
     };
@@ -518,6 +627,10 @@ export class FlowLinkService {
       return;
     }
 
+    if (mode === 'edit' && this.guardHintOnlyLinkMutation('编辑关联')) {
+      return;
+    }
+
     this.armConnectionEditorBackgroundCloseGuard();
     this.connectionEditorData.set({
       ...data,
@@ -534,7 +647,11 @@ export class FlowLinkService {
    * @param title 标题（外显内容）
    * @param description 描述（悬停显示）
    */
-  saveConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
+  saveConnectionContent(sourceId: string, targetId: string, title: string, description: string): boolean {
+    if (this.guardHintOnlyLinkMutation('编辑关联')) {
+      return false;
+    }
+
     this.taskOps.connectionAdapter.updateConnectionContent(sourceId, targetId, title, description);
 
     const data = this.connectionEditorData();
@@ -546,6 +663,8 @@ export class FlowLinkService {
         description
       });
     }
+
+    return true;
   }
   
   /**
@@ -556,6 +675,10 @@ export class FlowLinkService {
     const data = this.connectionEditorData();
     if (!data) {
       this.logger.warn('deleteCurrentConnection: 没有当前编辑的连接数据');
+      return false;
+    }
+
+    if (this.guardHintOnlyLinkMutation('删除关联')) {
       return false;
     }
     
@@ -731,7 +854,9 @@ export class FlowLinkService {
     
     const result = this.deleteLinkInternal(hint.link);
     this.logger.info('删除连接线完成', result);
-    this.linkDeleteHint.set(null);
+    if (result) {
+      this.linkDeleteHint.set(null);
+    }
     return result;
   }
   
@@ -753,6 +878,10 @@ export class FlowLinkService {
    */
   showLinkActionMenu(linkData: go.ObjectData, x: number, y: number): void {
     this.logger.debug('showLinkActionMenu', { linkData, x, y });
+
+    if (this.guardHintOnlyLinkMutation('管理连接')) {
+      return;
+    }
     
     // 先关闭可能存在的删除提示
     this.linkDeleteHint.set(null);
@@ -791,6 +920,10 @@ export class FlowLinkService {
     const menu = this.linkActionMenu();
     if (!menu?.link?.data) {
       this.logger.warn('openEditorFromActionMenu: 没有操作菜单数据');
+      return;
+    }
+
+    if (this.guardHintOnlyLinkMutation('编辑关联')) {
       return;
     }
     
@@ -854,10 +987,12 @@ export class FlowLinkService {
     
     const result = this.deleteLinkInternal(menu.link);
     this.logger.info('从操作菜单删除连接完成', result);
-    this.linkActionMenu.set(null);
-    if (this.linkActionMenuTimer) {
-      clearTimeout(this.linkActionMenuTimer);
-      this.linkActionMenuTimer = null;
+    if (result) {
+      this.linkActionMenu.set(null);
+      if (this.linkActionMenuTimer) {
+        clearTimeout(this.linkActionMenuTimer);
+        this.linkActionMenuTimer = null;
+      }
     }
     return result;
   }
@@ -882,6 +1017,10 @@ export class FlowLinkService {
     const isCrossTree = linkData?.isCrossTree;
     
     if (!fromKey || !toKey) return null;
+
+    if (this.guardHintOnlyLinkMutation('删除关联')) {
+      return null;
+    }
     
     if (isCrossTree) {
       this.taskOps.connectionAdapter.removeConnection(fromKey, toKey);
@@ -899,6 +1038,10 @@ export class FlowLinkService {
    * @param selectedLinks 选中的连接线数据列表
    */
   handleDeleteCrossTreeLinks(selectedLinks: go.ObjectData[]): void {
+    if (this.guardHintOnlyLinkMutation('删除关联')) {
+      return;
+    }
+
     selectedLinks.forEach(linkData => {
       if (linkData?.isCrossTree) {
         const fromKey = linkData.from;
@@ -955,6 +1098,10 @@ export class FlowLinkService {
     
     if (!fromKey || !toKey) {
       this.logger.warn('deleteLinkInternal: 缺少 fromKey 或 toKey');
+      return null;
+    }
+
+    if (this.guardHintOnlyLinkMutation('删除关联')) {
       return null;
     }
     

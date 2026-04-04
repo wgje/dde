@@ -40,82 +40,88 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
       (touchstart)="onTouchStart($event)"
       (touchmove)="onTouchMove($event)"
       (touchend)="onTouchEnd($event)">
-      
-      <!-- 顶部面板：从顶部向下延伸，内容在上，把手在下 -->
-      @if (enableTopDrawer()) {
-        <div 
-          class="absolute inset-x-0 top-0 bg-stone-50 dark:bg-stone-900 
-                 shadow-lg z-20 flex flex-col will-change-[height]"
-          [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [style.height.%]="gestureService.topPanelHeight()">
-          
-          <!-- 内容区域（flex-1 填充，滚动） -->
-          <div class="flex-1 min-h-0 overflow-hidden">
-            @defer (when gestureService.hasOpenedTop() || gestureService.topPanelHeight() > collapsedThreshold) {
-              <ng-content select="[slot=top]"></ng-content>
-            } @error {
-              <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
-            }
-          </div>
 
-          <!-- 顶部把手（固定在面板底部） -->
+      <div
+        class="mobile-drawer-viewport absolute inset-x-0 overflow-hidden"
+        [style.top.px]="gestureService.visibleContainerOffsetTopPx()"
+        [style.height.px]="gestureService.visibleContainerHeightPx()">
+
+        <!-- 顶部面板：从顶部向下延伸，内容在上，把手在下 -->
+        @if (enableTopDrawer()) {
           <div 
-            class="drawer-handle shrink-0 h-5 flex items-center justify-center cursor-grab active:cursor-grabbing
-                   border-t border-stone-200/30 dark:border-stone-700/30"
-            (click)="toggleTopPanel()">
-            <!-- 紧凑拖把图标 -->
-            <div class="w-10 h-1 bg-stone-400 dark:bg-stone-500 rounded-full opacity-50"></div>
+            class="absolute inset-x-0 top-0 bg-stone-50 dark:bg-stone-900 
+                   shadow-lg z-20 flex flex-col will-change-[height]"
+            [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
+            [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
+            [style.height.%]="gestureService.topPanelHeight()">
+            
+            <!-- 内容区域（flex-1 填充，滚动） -->
+            <div class="flex-1 min-h-0 overflow-hidden">
+              @defer (when gestureService.hasOpenedTop() || gestureService.topPanelHeight() > collapsedThreshold) {
+                <ng-content select="[slot=top]"></ng-content>
+              } @error {
+                <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
+              }
+            </div>
+
+            <!-- 顶部把手（固定在面板底部） -->
+            <div 
+              class="drawer-handle shrink-0 h-5 flex items-center justify-center cursor-grab active:cursor-grabbing
+                     border-t border-stone-200/30 dark:border-stone-700/30"
+              (click)="toggleTopPanel()">
+              <!-- 紧凑拖把图标 -->
+              <div class="w-10 h-1 bg-stone-400 dark:bg-stone-500 rounded-full opacity-50"></div>
+            </div>
           </div>
-        </div>
-      }
-      
-      <!-- 中间层：流程图（填充剩余空间） -->
-      <div 
-        class="absolute inset-0 z-10 overflow-hidden"
-        [style.top.%]="gestureService.topPanelHeight()"
-        [style.bottom.%]="gestureService.bottomPanelHeight()">
-        <ng-content select="[slot=middle]"></ng-content>
-      </div>
-      
-      <!-- 底部面板：从底部向上延伸，把手在上，内容在下 -->
-      @if (enableBottomDrawer()) {
+        }
+        
+        <!-- 中间层：流程图（填充剩余空间） -->
         <div 
-          class="absolute inset-x-0 bottom-0 bg-stone-50 dark:bg-stone-900 
-                 shadow-lg z-20 flex flex-col will-change-[height]"
-          [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
-          [style.height.%]="gestureService.bottomPanelHeight()">
-          
-          <!-- 顶部把手（固定在面板顶部） -->
+          class="absolute inset-0 z-10 overflow-hidden"
+          [style.top.%]="gestureService.topPanelHeight()"
+          [style.bottom.%]="gestureService.bottomPanelHeight()">
+          <ng-content select="[slot=middle]"></ng-content>
+        </div>
+        
+        <!-- 底部面板：从底部向上延伸，把手在上，内容在下 -->
+        @if (enableBottomDrawer()) {
           <div 
-            class="drawer-handle shrink-0 h-5 flex items-center justify-center cursor-grab active:cursor-grabbing
-                   border-t border-stone-200/30 dark:border-stone-700/30"
-            (click)="toggleBottomPanel()">
-            <!-- 紧凑拖把图标 -->
-            <div class="w-10 h-1 bg-stone-400 dark:bg-stone-500 rounded-full opacity-50"></div>
+            class="absolute inset-x-0 bottom-0 bg-stone-50 dark:bg-stone-900 
+                   shadow-lg z-20 flex flex-col will-change-[height]"
+            [class.transition-all]="!gestureService.isDragging() && gestureService.isAnimating()"
+            [class.duration-200]="!gestureService.isDragging() && gestureService.isAnimating()"
+            [style.height.%]="gestureService.bottomPanelHeight()">
+            
+            <!-- 顶部把手（固定在面板顶部） -->
+            <div 
+              class="drawer-handle shrink-0 h-5 flex items-center justify-center cursor-grab active:cursor-grabbing
+                     border-t border-stone-200/30 dark:border-stone-700/30"
+              (click)="toggleBottomPanel()">
+              <!-- 紧凑拖把图标 -->
+              <div class="w-10 h-1 bg-stone-400 dark:bg-stone-500 rounded-full opacity-50"></div>
+            </div>
+            
+            <!-- 内容区域（flex-1 填充，滚动） -->
+            <div class="flex-1 min-h-0 overflow-hidden">
+              @defer (when gestureService.hasOpenedBottom() || gestureService.bottomPanelHeight() > collapsedThreshold) {
+                <ng-content select="[slot=bottom]"></ng-content>
+              } @error {
+                <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
+              }
+            </div>
           </div>
-          
-          <!-- 内容区域（flex-1 填充，滚动） -->
-          <div class="flex-1 min-h-0 overflow-hidden">
-            @defer (when gestureService.hasOpenedBottom() || gestureService.bottomPanelHeight() > collapsedThreshold) {
-              <ng-content select="[slot=bottom]"></ng-content>
-            } @error {
-              <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
-            }
+        }
+        
+        <!-- 首次使用手势提示 -->
+        @if (gestureService.showGestureHint()) {
+          <div class="absolute inset-x-0 z-50 pointer-events-none flex flex-col items-center"
+               [style.top.%]="gestureService.topPanelHeight()">
+            <div class="bg-black/70 text-white text-xs px-3 py-1.5 rounded-full mt-2 animate-bounce">
+              ↕ 拖动把手调整面板高度
+            </div>
           </div>
-        </div>
-      }
-      
-      <!-- 首次使用手势提示 -->
-      @if (gestureService.showGestureHint()) {
-        <div class="absolute inset-x-0 z-50 pointer-events-none flex flex-col items-center"
-             [style.top.%]="gestureService.topPanelHeight()">
-          <div class="bg-black/70 text-white text-xs px-3 py-1.5 rounded-full mt-2 animate-bounce">
-            ↕ 拖动把手调整面板高度
-          </div>
-        </div>
-      }
+        }
+      </div>
     </div>
   `,
   styles: [`

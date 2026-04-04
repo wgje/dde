@@ -70,6 +70,7 @@ describe('FlowPaletteComponent', () => {
   const tasks = signal<Task[]>([]);
   const unfinishedItems = signal<UnfinishedItem[]>([]);
   const unassignedTasks = signal<Task[]>([]);
+  const taskTodoStats = signal({ total: 0, completed: 0, pending: 0 });
   const activeProject = signal<Project | null>({
     id: 'project-1',
     name: '测试项目',
@@ -88,6 +89,7 @@ describe('FlowPaletteComponent', () => {
   const mockProjectState = {
     tasks,
     unfinishedItems,
+    taskTodoStats,
     unassignedTasks,
     activeProject,
   };
@@ -111,6 +113,7 @@ describe('FlowPaletteComponent', () => {
     tasks.set([]);
     unfinishedItems.set([]);
     unassignedTasks.set([]);
+    taskTodoStats.set({ total: 0, completed: 0, pending: 0 });
     activeProject.set({
       id: 'project-1',
       name: '测试项目',
@@ -151,18 +154,15 @@ describe('FlowPaletteComponent', () => {
     resetFocusState();
   });
 
-  it('在没有任何任务时应显示 100% 完成率', () => {
-    blackBoxEntriesMap.set(new Map([
-      ['bb-1', createBlackBoxEntry('bb-1', true)],
-      ['bb-2', createBlackBoxEntry('bb-2', false)],
-      ['bb-3', createBlackBoxEntry('bb-3', false)],
-    ]));
+  it('在没有待办和黑匣子条目时应显示 0% 完成率', () => {
+    blackBoxEntriesMap.set(new Map());
 
     expect(component.totalTaskCount()).toBe(0);
-    expect(component.completionRate()).toBe(100);
+    expect(component.completionBasis()).toEqual({ total: 0, completed: 0 });
+    expect(component.completionRate()).toBe(0);
   });
 
-  it('在未选中项目时不应误显示 100% 完成率', () => {
+  it('在未选中项目时不应误显示完成率', () => {
     activeProject.set(null);
     blackBoxEntriesMap.set(new Map([
       ['bb-1', createBlackBoxEntry('bb-1', true)],
@@ -172,15 +172,31 @@ describe('FlowPaletteComponent', () => {
     expect(component.completionRate()).toBe(0);
   });
 
-  it('在仍有任务时继续按黑匣子完成率计算', () => {
-    tasks.set([createTask('task-1')]);
+  it('应按待办事项与黑匣子条目共同计算完成率', () => {
+    taskTodoStats.set({ total: 4, completed: 1, pending: 3 });
     blackBoxEntriesMap.set(new Map([
       ['bb-1', createBlackBoxEntry('bb-1', true)],
       ['bb-2', createBlackBoxEntry('bb-2', true)],
       ['bb-3', createBlackBoxEntry('bb-3', false)],
     ]));
 
-    expect(component.totalTaskCount()).toBe(1);
-    expect(component.completionRate()).toBe(67);
+    expect(component.completionBasis()).toEqual({ total: 7, completed: 3 });
+    expect(component.completionRate()).toBe(43);
+  });
+
+  it('任务块完成进入沉积层时不应直接计入完成率基数', () => {
+    tasks.set([
+      createTask('task-1', 'completed'),
+      createTask('task-2', 'active'),
+    ]);
+    taskTodoStats.set({ total: 2, completed: 1, pending: 1 });
+    blackBoxEntriesMap.set(new Map([
+      ['bb-1', createBlackBoxEntry('bb-1', false)],
+    ]));
+
+    expect(component.totalTaskCount()).toBe(2);
+    expect(component.completedTaskCount()).toBe(1);
+    expect(component.completionBasis()).toEqual({ total: 3, completed: 1 });
+    expect(component.completionRate()).toBe(33);
   });
 });

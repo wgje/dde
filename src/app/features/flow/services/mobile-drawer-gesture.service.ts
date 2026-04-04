@@ -38,6 +38,10 @@ export class MobileDrawerGestureService {
   
   // 是否显示手势提示
   readonly showGestureHint = signal(false);
+
+  // 当前真正可见的容器顶部偏移与高度（相对容器），用于规避移动端浏览器工具栏造成的命中区漂移。
+  readonly visibleContainerOffsetTopPx = signal(0);
+  readonly visibleContainerHeightPx = signal(typeof window !== 'undefined' ? window.innerHeight : 0);
   
   // 顶层是否曾经打开过（用于 @defer 懒加载）
   readonly hasOpenedTop = signal(false);
@@ -58,6 +62,9 @@ export class MobileDrawerGestureService {
   private containerEl: HTMLElement | null = null;
   // 容器尺寸观察器
   private resizeObserver: ResizeObserver | null = null;
+  private readonly handleWindowMetricsChange = () => {
+    this.refreshContainerMetrics();
+  };
   
   /**
    * 初始化服务
@@ -65,6 +72,12 @@ export class MobileDrawerGestureService {
   initialize(): void {
     // 回退到 window.innerHeight，setContainer 调用后会覆盖
     this.containerHeight = window.innerHeight;
+    this.visibleContainerOffsetTopPx.set(0);
+    this.visibleContainerHeightPx.set(window.visualViewport?.height ?? window.innerHeight);
+    window.addEventListener('resize', this.handleWindowMetricsChange, { passive: true });
+    window.addEventListener('orientationchange', this.handleWindowMetricsChange, { passive: true });
+    window.visualViewport?.addEventListener('resize', this.handleWindowMetricsChange, { passive: true });
+    window.visualViewport?.addEventListener('scroll', this.handleWindowMetricsChange, { passive: true });
     this.checkAndShowGestureHint();
   }
   
@@ -85,10 +98,38 @@ export class MobileDrawerGestureService {
 
   /** 刷新容器尺寸缓存 */
   private refreshContainerMetrics(): void {
-    if (!this.containerEl) return;
+    if (!this.containerEl) {
+      const fallbackHeight = window.visualViewport?.height ?? window.innerHeight;
+      this.containerHeight = fallbackHeight;
+      this.containerTop = 0;
+      this.visibleContainerOffsetTopPx.set(0);
+      this.visibleContainerHeightPx.set(fallbackHeight);
+      return;
+    }
+
     const rect = this.containerEl.getBoundingClientRect();
-    this.containerHeight = rect.height || window.innerHeight;
-    this.containerTop = rect.top;
+    const visualViewport = window.visualViewport;
+    const fallbackHeight = rect.height || visualViewport?.height || window.innerHeight;
+    let visibleTop = rect.top;
+    let visibleHeight = fallbackHeight;
+
+    if (visualViewport && visualViewport.height > 0) {
+      const viewportTop = visualViewport.offsetTop;
+      const viewportBottom = visualViewport.offsetTop + visualViewport.height;
+      const intersectionTop = Math.max(rect.top, viewportTop);
+      const intersectionBottom = Math.min(rect.bottom, viewportBottom);
+      const intersectionHeight = intersectionBottom - intersectionTop;
+
+      if (intersectionHeight > 0) {
+        visibleTop = intersectionTop;
+        visibleHeight = intersectionHeight;
+      }
+    }
+
+    this.containerHeight = visibleHeight;
+    this.containerTop = visibleTop;
+    this.visibleContainerOffsetTopPx.set(Math.max(0, visibleTop - rect.top));
+    this.visibleContainerHeightPx.set(Math.max(visibleHeight, 0));
   }
   
   /**
@@ -105,6 +146,10 @@ export class MobileDrawerGestureService {
     }
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    window.removeEventListener('resize', this.handleWindowMetricsChange);
+    window.removeEventListener('orientationchange', this.handleWindowMetricsChange);
+    window.visualViewport?.removeEventListener('resize', this.handleWindowMetricsChange);
+    window.visualViewport?.removeEventListener('scroll', this.handleWindowMetricsChange);
     this.containerEl = null;
   }
   

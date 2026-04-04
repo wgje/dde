@@ -67,16 +67,18 @@ type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targ
             <span class="text-[10px] font-medium text-violet-700 dark:text-violet-300 flex-1">
               {{ isParentChildLink() ? '父子关系' : '跨树连接' }}
             </span>
-            <!-- 删除按钮 -->
-            <button 
-              (click)="onDeleteClick($event)"
-              (touchend)="onDeleteClick($event)"
-              class="text-stone-400 hover:text-red-500 p-0.5 transition-colors"
-              [title]="isParentChildLink() ? '解除关系' : '删除连接'">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
-            </button>
+            @if (!readOnly()) {
+              <!-- 删除按钮 -->
+              <button 
+                (click)="onDeleteClick($event)"
+                (touchend)="onDeleteClick($event)"
+                class="text-stone-400 hover:text-red-500 p-0.5 transition-colors"
+                [title]="isParentChildLink() ? '解除关系' : '删除连接'">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            }
             <span class="text-[8px] text-violet-300 ml-0.5">☰</span>
           </div>
           
@@ -93,7 +95,7 @@ type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targ
                 <span class="font-bold text-indigo-500 truncate max-w-[55px]">{{ compressDisplayId(target.displayId) }}</span>
               }
               <!-- 预览/编辑模式切换按钮（仅跨树连接显示） -->
-              @if (!isParentChildLink()) {
+              @if (!isParentChildLink() && !readOnly()) {
                 <button 
                   (click)="toggleEditMode(); $event.stopPropagation()"
                   class="ml-auto text-[8px] px-1 py-0.5 rounded transition-colors"
@@ -169,8 +171,11 @@ type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targ
               } @else {
                 <!-- 预览模式 -->
                 <div 
-                  class="text-[11px] text-stone-600 dark:text-stone-300 min-h-[48px] px-1.5 py-1 rounded border border-transparent hover:border-stone-200 dark:hover:border-stone-700 cursor-pointer transition-colors max-h-28 overflow-y-auto"
-                  (click)="enterEditMode(); $event.stopPropagation()">
+                  class="text-[11px] text-stone-600 dark:text-stone-300 min-h-[48px] px-1.5 py-1 rounded border border-transparent transition-colors max-h-28 overflow-y-auto"
+                  [ngClass]="readOnly()
+                    ? 'cursor-default'
+                    : 'cursor-pointer hover:border-stone-200 dark:hover:border-stone-700'"
+                  (click)="onPreviewClick($event)">
                   <!-- 标题 -->
                   @if (currentTitle()) {
                     <div class="font-medium text-violet-700 dark:text-violet-300 mb-1 flex items-center gap-1">
@@ -182,7 +187,9 @@ type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targ
                   @if (currentDescription()) {
                     <div class="markdown-preview leading-relaxed text-stone-600 dark:text-stone-300" [innerHTML]="currentDescription() | safeMarkdown:'raw'"></div>
                   } @else if (!currentTitle()) {
-                    <span class="text-stone-400 dark:text-stone-500 italic">点击添加标题和描述...</span>
+                    <span class="text-stone-400 dark:text-stone-500 italic">
+                      {{ readOnly() ? '会话确认完成后可编辑标题和描述...' : '点击添加标题和描述...' }}
+                    </span>
                   } @else {
                     <span class="text-stone-400 dark:text-stone-500 italic text-[10px]">无描述</span>
                   }
@@ -205,6 +212,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
 
   readonly data = input<ConnectionEditorData | null>(null);
   readonly position = input<{ x: number; y: number }>({ x: 0, y: 0 });
+  readonly readOnly = input(false);
   readonly connectionTasks = input<ConnectionTasks>({ source: null, target: null });
   
   readonly close = output<void>();
@@ -251,6 +259,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   // 当 data 变化时：按会话/模式精细同步，避免移动端误吞外部点击
   private readonly dataSyncEffect = effect(() => {
     const data = this.data();
+    const readOnly = this.readOnly();
     const previousSessionKey = this.lastSessionKey;
     const previousContext = this.activeSessionContext;
 
@@ -269,7 +278,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
 
     const sessionKey = `${data.sourceId}->${data.targetId}@${data.x},${data.y}`;
     const isNewSession = previousSessionKey !== sessionKey;
-    const nextIsEditMode = data.mode === 'edit';
+    const nextIsEditMode = data.mode === 'edit' && !readOnly;
     const currentIsEditMode = untracked(() => this.isEditMode());
     const shouldRefreshOutsideGuard = isNewSession || (!currentIsEditMode && nextIsEditMode);
 
@@ -308,12 +317,21 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
 
       if (modeChanged) {
         if (currentIsEditMode && !nextIsEditMode && !this.closeRequested && !this.deleteRequested) {
-          // 父层强制 edit -> preview 时，先保存输入框里最后可见值（含 IME 末尾字符）
-          this.persistCurrentEdits(previousContext ?? undefined);
+          if (readOnly) {
+            this.editingTitle = data.title || '';
+            this.editingDescription = data.description || '';
+            this.lastEmittedPayloadKey = null;
+          } else {
+            // 父层强制 edit -> preview 时，先保存输入框里最后可见值（含 IME 末尾字符）
+            this.persistCurrentEdits(previousContext ?? undefined);
+          }
           // 防止同一次外部点击在预览态分支被当作“点击外部关闭”处理
           this.ignoreOutsideUntil = Date.now() + 220;
         }
         this.isEditMode.set(nextIsEditMode);
+        if (currentIsEditMode && !nextIsEditMode && readOnly) {
+          this.modeChange.emit('preview');
+        }
         if (nextIsEditMode) {
           this.scheduleFocusInput();
         }
@@ -543,12 +561,17 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    * 进入编辑模式
    */
   enterEditMode(): void {
-    if (this.isEditMode()) {
+    if (this.isEditMode() || this.readOnly()) {
       return;
     }
     this.isEditMode.set(true);
     this.modeChange.emit('edit');
     this.scheduleFocusInput();
+  }
+
+  onPreviewClick(event: Event): void {
+    event.stopPropagation();
+    this.enterEditMode();
   }
 
   /**
@@ -756,6 +779,9 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   onDeleteClick(event: Event): void {
     event.preventDefault();
     event.stopPropagation();
+    if (this.readOnly()) {
+      return;
+    }
     this.logger.debug('删除按钮被点击');
     // 设置忽略外部点击的保护窗口，防止 document:click 立即关闭编辑器
     this.ignoreOutsideUntil = Date.now() + 300;

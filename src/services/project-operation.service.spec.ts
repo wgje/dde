@@ -64,6 +64,7 @@ describe('ProjectOperationService', () => {
     currentUserId: vi.fn(() => AUTH_CONFIG.LOCAL_MODE_USER_ID),
     getCurrentSessionGeneration: vi.fn(() => 1),
     isSessionContextCurrent: vi.fn(() => true),
+    isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
   };
 
   const mockActionQueue = {
@@ -120,6 +121,7 @@ describe('ProjectOperationService', () => {
     mockUserSession.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
     mockUserSession.getCurrentSessionGeneration.mockReturnValue(1);
     mockUserSession.isSessionContextCurrent.mockReturnValue(true);
+    mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockSyncCoordinator.core.saveProjectSmart.mockReset();
     mockSyncCoordinator.core.deleteTask.mockReset();
     mockSyncCoordinator.resolveConflict.mockReset();
@@ -168,6 +170,17 @@ describe('ProjectOperationService', () => {
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalled();
     expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
     expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
+  });
+
+  it('hint-only 启动占位下创建项目应被只读门控阻止', async () => {
+    mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    const result = await service.addProject(createProject({ id: 'proj-hint-only' }));
+
+    expect(result).toEqual({ success: false, error: '会话确认中，owner 确认完成前暂时只读' });
+    expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+    expect(mockOptimisticState.createSnapshot).not.toHaveBeenCalled();
+    expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建项目暂不可用，owner 确认完成前保持只读');
   });
 
   it('认证用户离线创建项目时应保留 synced 标记并进入 create 队列', async () => {

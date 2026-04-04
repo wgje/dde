@@ -7,6 +7,7 @@ import { FlowDragDropService } from './flow-drag-drop.service';
 import { FlowSelectionService } from './flow-selection.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { UiStateService } from '../../../../services/ui-state.service';
+import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
 import * as go from 'gojs';
@@ -34,6 +35,7 @@ export class FlowEventRegistrationService {
   private readonly selectionService = inject(FlowSelectionService);
   private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly uiState = inject(UiStateService);
+  private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService).category('FlowEventReg');
   private readonly zone = inject(NgZone);
 
@@ -196,6 +198,18 @@ export class FlowEventRegistrationService {
    */
   registerSelectionMovedHandler(handleNodeMoved: (key: string, loc: go.Point, isUnassigned: boolean, diagram: go.Diagram) => void): void {
     this.eventService.onSelectionMoved((movedNodes) => {
+      if (this.taskOpsAdapter.isHintOnlyStartupReadOnly()) {
+        const diagramInstance = this.diagram.diagramInstance;
+        if (diagramInstance) {
+          diagramInstance.updateAllTargetBindings();
+          diagramInstance.requestUpdate();
+        }
+        if (movedNodes.length > 0) {
+          this.toast.info('会话确认中', '移动节点暂不可用，owner 确认完成前保持只读');
+        }
+        return;
+      }
+
       // 多节点移动时使用批处理模式，合并为单个撤销单元
       const needsBatch = movedNodes.length > 1;
       
@@ -215,7 +229,7 @@ export class FlowEventRegistrationService {
           } else {
             // 单节点：带撤销的位置更新；批量：普通更新（由 endBatch 统一记录）
             if (needsBatch) {
-              this.taskOpsAdapter.core.updateTaskPositionWithRankSync(node.key, node.x, node.y);
+              this.taskOpsAdapter.updateTaskPositionWithRankSync(node.key, node.x, node.y, { toast: false });
             } else {
               // 单节点拖拽完成，带撤销记录
               this.taskOpsAdapter.updateTaskPositionWithUndo(node.key, node.x, node.y);

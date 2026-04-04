@@ -87,7 +87,8 @@
 
     <!-- PWA 安装提示（浏览器模式） -->
     @if (showInstallPrompt()) {
-      <div class="fixed left-1/2 top-3 z-30 -translate-x-1/2 px-3 py-2 rounded-xl border border-stone-200/80 dark:border-stone-700/80 bg-white/90 dark:bg-stone-900/90 backdrop-blur-md shadow-sm max-w-[92vw]">
+      <div class="fixed left-1/2 z-30 -translate-x-1/2 px-3 py-2 rounded-xl border border-stone-200/80 dark:border-stone-700/80 bg-white/90 dark:bg-stone-900/90 backdrop-blur-md shadow-sm max-w-[92vw]"
+           [style.top]="installPromptTop()">
         <div class="flex items-center gap-2">
           <div class="text-[11px] text-stone-600 dark:text-stone-300">
             {{ pwaInstallHint() }}
@@ -124,11 +125,26 @@
   <!-- Toast 通知容器 -->
   <app-toast-container data-testid="toast-container"></app-toast-container>
 
-  @if (hintOnlyStartupPlaceholderVisible()) {
-    <div class="fixed inset-0 z-[70] flex items-center justify-center bg-[color:var(--theme-bg)]/72 backdrop-blur-[2px]">
+  @if (showBlockingStartupHintOverlay()) {
+    <div data-testid="startup-hint-overlay" class="fixed inset-0 z-[70] flex items-center justify-center bg-[color:var(--theme-bg)]/72 backdrop-blur-[2px]">
       <div class="mx-4 max-w-sm rounded-2xl border border-stone-200/80 bg-white/92 px-4 py-3 text-center shadow-lg dark:border-stone-700/80 dark:bg-stone-900/92">
         <div class="text-sm font-medium text-stone-800 dark:text-stone-100">正在确认会话</div>
         <div class="mt-1 text-xs text-stone-500 dark:text-stone-400">已恢复启动占位视图，确认 owner 前暂时只读。</div>
+      </div>
+    </div>
+  }
+
+  @if (showCompactStartupHintBanner()) {
+    <div data-testid="startup-hint-banner" class="fixed inset-x-3 z-[45] flex justify-center pointer-events-none"
+         [style.top]="compactStartupHintBannerTop()">
+      <div class="w-full max-w-sm rounded-2xl border border-stone-200/75 bg-white/90 px-3 py-2 shadow-lg backdrop-blur-sm dark:border-stone-700/75 dark:bg-stone-900/90">
+        <div class="flex items-start gap-2">
+          <div class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400/90"></div>
+          <div class="min-w-0">
+            <div class="text-[12px] font-medium leading-4 text-stone-800 dark:text-stone-100">正在确认会话</div>
+            <div class="mt-0.5 text-[10px] leading-4 text-stone-500 dark:text-stone-400">已恢复启动占位视图，可先进入文本栏，owner 确认在后台继续。</div>
+          </div>
+        </div>
       </div>
     </div>
   }
@@ -363,12 +379,11 @@
                     } @else {
                       <div 
                         class="w-full text-xs text-stone-500 dark:text-stone-400 whitespace-pre-wrap hover:bg-stone-50/80 dark:hover:bg-stone-700/30 rounded-md px-2 py-1.5 transition-colors cursor-text line-clamp-3 min-h-[2em]"
-                        (click)="projectCoord.isEditingDescription.set(true); $event.stopPropagation()"
-                        (touchend)="projectCoord.isEditingDescription.set(true); $event.stopPropagation()"
+                        (click)="startProjectDescriptionEdit($event)"
                         title="点击编辑简介"
                         role="button"
                         tabindex="0"
-                        (keydown.enter)="projectCoord.isEditingDescription.set(true); $event.stopPropagation()">
+                        (keydown.enter)="startProjectDescriptionEdit($event)">
                         {{ draft.description || '点击添加简介...' }}
                       </div>
                     }

@@ -19,4 +19,22 @@ describe('flow-view.component.html', () => {
     expect(sharedSection).toContain('<app-flow-connection-editor');
     expect(sharedSection).toContain('<app-flow-link-type-dialog');
   });
+
+  it('应把 hint-only 只读态透传给连接编辑器', () => {
+    const templatePath = join(process.cwd(), 'src/app/features/flow/components/flow-view.component.html');
+    const template = readFileSync(templatePath, 'utf8');
+
+    expect(template).toContain('[readOnly]="link.isHintOnlyStartupReadOnly()"');
+  });
+});
+
+describe('flow-view.component.ts', () => {
+  it('应仅在连接操作成功时刷新流程图', () => {
+    const sourcePath = join(process.cwd(), 'src/app/features/flow/components/flow-view.component.ts');
+    const source = readFileSync(sourcePath, 'utf8');
+
+    expect(source).toContain('if (this.link.confirmParentChildLink()) {');
+    expect(source).toContain('if (this.link.confirmCrossTreeLink()) {');
+    expect(source).toContain('if (this.link.saveConnectionContent(data.sourceId, data.targetId, data.title, data.description)) {');
+  });
 });

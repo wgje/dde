@@ -20,6 +20,7 @@ import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { UserSessionService } from './user-session.service';
 import { Project } from '../models';
 import { LayoutService } from './layout.service';
 
@@ -34,8 +35,18 @@ export class ConnectionAdapterService {
   private readonly projectState = inject(ProjectStateService);
   private readonly layoutService = inject(LayoutService);
   private readonly toastService = inject(ToastService);
+  private readonly userSession = inject(UserSessionService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ConnectionAdapter');
+
+  private blockHintOnlyMutation(actionLabel: string): boolean {
+    if (!(this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false)) {
+      return false;
+    }
+
+    this.toastService.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
+  }
 
   // ========== 连接操作 ==========
   
@@ -43,6 +54,10 @@ export class ConnectionAdapterService {
    * 添加跨树连接
    */
   addCrossTreeConnection(sourceId: string, targetId: string): void {
+    if (this.blockHintOnlyMutation('编辑关联')) {
+      return;
+    }
+
     this.taskOps.addCrossTreeConnection(sourceId, targetId);
     
     const isMobile = this.uiState.isMobile();
@@ -67,6 +82,10 @@ export class ConnectionAdapterService {
    * 删除连接
    */
   removeConnection(sourceId: string, targetId: string): void {
+    if (this.blockHintOnlyMutation('编辑关联')) {
+      return;
+    }
+
     this.taskOps.removeConnection(sourceId, targetId);
     
     const isMobile = this.uiState.isMobile();
@@ -97,6 +116,10 @@ export class ConnectionAdapterService {
     newSourceId: string,
     newTargetId: string
   ): void {
+    if (this.blockHintOnlyMutation('编辑关联')) {
+      return;
+    }
+
     this.taskOps.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
     
     const isMobile = this.uiState.isMobile();
@@ -121,6 +144,10 @@ export class ConnectionAdapterService {
    * 更新连接内容（标题和描述）
    */
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
+    if (this.blockHintOnlyMutation('编辑关联')) {
+      return;
+    }
+
     this.uiState.markEditing();
     this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
   }

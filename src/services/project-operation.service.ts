@@ -49,6 +49,20 @@ export class ProjectOperationService {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly retryQueue = inject(RetryQueueService);
 
+  private isHintOnlyStartupReadOnly(): boolean {
+    return this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false;
+  }
+
+  private blockHintOnlyProjectMutation(actionLabel: string): { success: false; error: string } | null {
+    if (!this.isHintOnlyStartupReadOnly()) {
+      return null;
+    }
+
+    const message = '会话确认中，owner 确认完成前暂时只读';
+    this.toastService.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return { success: false, error: message };
+  }
+
   private captureProjectSessionContext(ownerUserId: string | null): {
     ownerUserId: string | null;
     sessionGeneration: number;
@@ -120,6 +134,9 @@ export class ProjectOperationService {
    * 3. 失败时回滚或加入离线队列
    */
   async addProject(project: Project): Promise<{ success: boolean; error?: string }> {
+    const blocked = this.blockHintOnlyProjectMutation('创建项目');
+    if (blocked) return blocked;
+
     const balanced = this.layoutService.rebalance(project);
     const userId = this.userSession.currentUserId();
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -192,6 +209,9 @@ export class ProjectOperationService {
    * 删除项目
    */
   async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
+    const blocked = this.blockHintOnlyProjectMutation('删除项目');
+    if (blocked) return blocked;
+
     const userId = this.userSession.currentUserId();
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const sessionContext = this.captureProjectSessionContext(userId);
@@ -256,6 +276,8 @@ export class ProjectOperationService {
    * 更新项目元数据（描述、创建日期）
    */
   updateProjectMetadata(projectId: string, metadata: { description?: string; createdDate?: string }): void {
+    if (this.blockHintOnlyProjectMutation('保存项目设置')) return;
+
     this.projectState.updateProjects(projects => projects.map(p => p.id === projectId ? {
       ...p,
       description: metadata.description ?? p.description,
@@ -272,6 +294,10 @@ export class ProjectOperationService {
    * 重命名项目
    */
   renameProject(projectId: string, newName: string): boolean {
+    if (this.blockHintOnlyProjectMutation('重命名项目')) {
+      return false;
+    }
+
     const success = this.projectState.renameProject(projectId, newName);
     if (success) {
       this.syncCoordinator.markLocalChanges('structure');
@@ -281,6 +307,9 @@ export class ProjectOperationService {
   }
 
   async upsertImportedProject(project: Project): Promise<{ success: boolean; error?: string }> {
+    const blocked = this.blockHintOnlyProjectMutation('导入项目');
+    if (blocked) return blocked;
+
     const snapshot = this.optimisticState.createSnapshot('project-import', '导入项目');
     const userId = this.userSession.currentUserId();
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -391,6 +420,8 @@ export class ProjectOperationService {
    * 更新项目的流程图缩略图 URL
    */
   updateProjectFlowchartUrl(projectId: string, flowchartUrl: string, thumbnailUrl?: string): void {
+    if (this.blockHintOnlyProjectMutation('更新流程图')) return;
+
     this.projectState.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return {

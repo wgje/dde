@@ -9,7 +9,7 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postCreateCommand": "npm ci && npx playwright install --with-deps chromium",
+  "postCreateCommand": "npm ci && npx playwright install chromium && bash scripts/init-vscode-env.sh",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -23,13 +23,24 @@
         "editor.formatOnSave": true,
         "[typescript]": {
           "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "terminal.integrated.env.linux": {
+          "CHROME_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "CHROMIUM_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "BROWSER": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "PUPPETEER_EXECUTABLE_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "true",
+          "GOOGLE_CHROME_BIN": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
         }
       }
     }
   },
   "remoteEnv": {
-    "BROWSER": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "CHROME_PATH": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "PUPPETEER_EXECUTABLE_PATH": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+    "CHROME_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "CHROMIUM_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "BROWSER": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "PUPPETEER_EXECUTABLE_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "true",
+    "GOOGLE_CHROME_BIN": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
   }
 }

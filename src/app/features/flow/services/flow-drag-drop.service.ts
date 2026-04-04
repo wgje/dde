@@ -142,6 +142,11 @@ export class FlowDragDropService implements OnDestroy {
     const task = this.resolveDroppedTask(event.dataTransfer);
     if (!task) return false;
     if (task.stage !== null) {
+      if (this.taskOps.isHintOnlyStartupReadOnly()) {
+        this.toast.info('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+        return false;
+      }
+
       this.taskOps.detachTask(task.id);
       this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
       return true;
@@ -266,7 +271,11 @@ export class FlowDragDropService implements OnDestroy {
     this.logger.info('插入任务到连接线', { taskId, sourceId, targetId });
     
     // 使用 taskOps 的方法完成插入
-    this.taskOps.insertTaskBetween(taskId, sourceId, targetId);
+    const result = this.taskOps.insertTaskBetween(taskId, sourceId, targetId);
+    if (!result.ok) {
+      this.toast.error('插入失败', getErrorMessage(result.error));
+      return false;
+    }
     
     // 更新拖放位置
     setTimeout(() => {
@@ -288,7 +297,7 @@ export class FlowDragDropService implements OnDestroy {
   ): void {
     // 场景二：待分配节点在流程图内移动，仅更新位置。
     // 不再支持“拖到连接线上立即插入并任务化”，任务化只在“拉线”确认时发生。
-    this.taskOps.core.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
+    this.taskOps.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
   }
   
   // ========== 私有方法 ==========
@@ -399,6 +408,11 @@ export class FlowDragDropService implements OnDestroy {
     delayMs: number = 100
   ): void {
     const tasks = this.projectState.tasks();
+
+    if (this.taskOps.isHintOnlyStartupReadOnly()) {
+      this.toast.info('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+      return;
+    }
     
     // 场景：待分配块拖入画布仅更新位置，不立刻任务化
     if (task.stage === null) {
@@ -414,7 +428,11 @@ export class FlowDragDropService implements OnDestroy {
       const parentTask = this.projectState.getTask(insertInfo.parentId);
       if (parentTask) {
         const newStage = (parentTask.stage || 1) + 1;
-        this.taskOps.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
+        const result = this.taskOps.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
+        if (!result.ok) {
+          this.toast.error('移动任务失败', getErrorMessage(result.error));
+          return;
+        }
         setTimeout(() => {
           this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
         }, delayMs);
@@ -428,9 +446,17 @@ export class FlowDragDropService implements OnDestroy {
             .sort((a, b) => a.rank - b.rank);
           const afterIndex = siblings.findIndex(t => t.id === refTask.id);
           const nextSibling = siblings[afterIndex + 1];
-          this.taskOps.moveTaskToStage(task.id, refTask.stage, nextSibling?.id || null, refTask.parentId);
+          const result = this.taskOps.moveTaskToStage(task.id, refTask.stage, nextSibling?.id || null, refTask.parentId);
+          if (!result.ok) {
+            this.toast.error('移动任务失败', getErrorMessage(result.error));
+            return;
+          }
         } else {
-          this.taskOps.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
+          const result = this.taskOps.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
+          if (!result.ok) {
+            this.toast.error('移动任务失败', getErrorMessage(result.error));
+            return;
+          }
         }
         setTimeout(() => {
           this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
@@ -461,6 +487,11 @@ export class FlowDragDropService implements OnDestroy {
 
     // 场景2：待分配块之间拖放 → 改变父子关系
     if (draggedTask.stage === null) {
+      if (this.taskOps.isHintOnlyStartupReadOnly()) {
+        this.toast.info('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+        return false;
+      }
+
       const unassignedTasks = this.projectState.unassignedTasks();
       const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
 
@@ -642,6 +673,12 @@ export class FlowDragDropService implements OnDestroy {
 
     if (isOverDock) {
       this.zone.run(() => {
+        if (this.taskOps.isHintOnlyStartupReadOnly()) {
+          this.toast.info('会话确认中', '拖入停泊坞暂不可用，owner 确认完成前保持只读');
+          this.endAltDragToDock();
+          return;
+        }
+
         let dockedCount = 0;
         for (const taskId of taskIds) {
           const task = this.projectState.getTask(taskId);

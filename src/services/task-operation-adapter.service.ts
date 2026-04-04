@@ -16,9 +16,11 @@ import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { LoggerService } from './logger.service';
+import { ToastService } from './toast.service';
+import { UserSessionService } from './user-session.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
 import { Task, Attachment } from '../models';
-import { Result, OperationError } from '../utils/result';
+import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
 
 @Injectable({
   providedIn: 'root'
@@ -37,6 +39,8 @@ export class TaskOperationAdapterService {
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
   private optimisticState = inject(OptimisticStateService);
+  private toastService = inject(ToastService);
+  private userSession = inject(UserSessionService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOpsAdapter');
   private warmupPromise: Promise<void> | null = null;
@@ -70,6 +74,29 @@ export class TaskOperationAdapterService {
     return this.recorder.lastUpdateType;
   }
 
+  isHintOnlyStartupReadOnly(): boolean {
+    return this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false;
+  }
+
+  private blockHintOnlyMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
+    if (!this.isHintOnlyStartupReadOnly()) {
+      return false;
+    }
+
+    if (options?.toast !== false) {
+      this.toastService.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    }
+    return true;
+  }
+
+  private blockHintOnlyMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
+    if (!this.blockHintOnlyMutation(actionLabel)) {
+      return null;
+    }
+
+    return failure(ErrorCodes.PERMISSION_DENIED, '会话确认中，owner 确认完成前暂时只读');
+  }
+
   markEditing(): void {
     this.uiState.markEditing();
     this.syncCoordinator.markLocalChanges(this.recorder.lastUpdateType);
@@ -80,25 +107,49 @@ export class TaskOperationAdapterService {
   }
 
   /** 执行撤销操作 */
-  performUndo(): void { this.recorder.performUndo(); }
+  performUndo(): void {
+    if (this.blockHintOnlyMutation('撤销操作')) {
+      return;
+    }
+
+    this.recorder.performUndo();
+  }
   /** 执行重做操作 */
-  performRedo(): void { this.recorder.performRedo(); }
+  performRedo(): void {
+    if (this.blockHintOnlyMutation('重做操作')) {
+      return;
+    }
+
+    this.recorder.performRedo();
+  }
   
   // ========== 任务内容操作 ==========
 
   updateTaskContent(taskId: string, newContent: string): void {
+    if (this.blockHintOnlyMutation('编辑任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskContent(taskId, newContent);
   }
 
   updateTaskTitle(taskId: string, title: string): void {
+    if (this.blockHintOnlyMutation('编辑任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskTitle(taskId, title);
   }
 
   addTodoItem(taskId: string, itemText: string): void {
+    if (this.blockHintOnlyMutation('编辑任务')) {
+      return;
+    }
+
     this.markEditing();
     this.core.addTodoItem(taskId, itemText);
   }
@@ -108,16 +159,28 @@ export class TaskOperationAdapterService {
   // ========== 任务位置操作 ==========
 
   updateTaskPosition(taskId: string, x: number, y: number): void {
+    if (this.blockHintOnlyMutation('移动任务', { toast: false })) {
+      return;
+    }
+
     this.recorder.lastUpdateType = 'position';
     this.core.updateTaskPosition(taskId, x, y);
   }
 
   beginPositionBatch(): void {
+    if (this.blockHintOnlyMutation('移动任务')) {
+      return;
+    }
+
     const project = this.projectState.activeProject();
     if (project) this.undoService.beginBatch(project);
   }
 
   endPositionBatch(): void {
+    if (this.isHintOnlyStartupReadOnly()) {
+      return;
+    }
+
     const project = this.projectState.activeProject();
     if (project) {
       this.undoService.endBatch(project);
@@ -131,6 +194,10 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskPositionWithUndo(taskId: string, x: number, y: number): void {
+    if (this.blockHintOnlyMutation('移动任务')) {
+      return;
+    }
+
     this.recorder.lastUpdateType = 'position';
     const task = this.projectState.getTask(taskId);
     if (!task) return;
@@ -144,10 +211,23 @@ export class TaskOperationAdapterService {
       )
     }));
   }
+
+  updateTaskPositionWithRankSync(taskId: string, x: number, y: number, options?: { toast?: boolean }): void {
+    if (this.blockHintOnlyMutation('移动任务', options)) {
+      return;
+    }
+
+    this.recorder.lastUpdateType = 'position';
+    this.core.updateTaskPositionWithRankSync(taskId, x, y);
+  }
   
   // ========== 任务状态操作 ==========
 
   updateTaskStatus(taskId: string, status: Task['status']): void {
+    if (this.blockHintOnlyMutation('更新任务状态')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     const project = this.projectState.activeProject();
@@ -161,54 +241,90 @@ export class TaskOperationAdapterService {
   // ========== 任务扩展属性 ==========
 
   updateTaskAttachments(taskId: string, attachments: Attachment[]): void {
+    if (this.blockHintOnlyMutation('更新任务附件')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskAttachments(taskId, attachments);
   }
 
   addTaskAttachment(taskId: string, attachment: Attachment): void {
+    if (this.blockHintOnlyMutation('添加任务附件')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.addTaskAttachment(taskId, attachment);
   }
 
   removeTaskAttachment(taskId: string, attachmentId: string): void {
+    if (this.blockHintOnlyMutation('移除任务附件')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.removeTaskAttachment(taskId, attachmentId);
   }
 
   updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined): void {
+    if (this.blockHintOnlyMutation('更新任务优先级')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskPriority(taskId, priority);
   }
 
   updateTaskDueDate(taskId: string, dueDate: string | null): void {
+    if (this.blockHintOnlyMutation('更新任务截止时间')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskDueDate(taskId, dueDate);
   }
 
   updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
+    if (this.blockHintOnlyMutation('更新任务预估时长')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskExpectedMinutes(taskId, expectedMinutes);
   }
 
   updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
+    if (this.blockHintOnlyMutation('更新任务认知负荷')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskCognitiveLoad(taskId, load);
   }
 
   updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
+    if (this.blockHintOnlyMutation('更新任务等待时长')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskWaitMinutes(taskId, waitMinutes);
   }
 
   updateTaskTags(taskId: string, tags: string[]): void {
+    if (this.blockHintOnlyMutation('更新任务标签')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'content';
     this.core.updateTaskTags(taskId, tags);
@@ -226,6 +342,9 @@ export class TaskOperationAdapterService {
     parentId: string | null,
     isSibling: boolean
   ): Result<string, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<string>('创建任务');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
@@ -242,6 +361,10 @@ export class TaskOperationAdapterService {
 
   /** 添加浮动任务（Flow 视图中双击创建） */
   addFloatingTask(title: string, content: string, x: number, y: number): void {
+    if (this.blockHintOnlyMutation('创建任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
@@ -252,6 +375,10 @@ export class TaskOperationAdapterService {
 
   /** 删除任务（带乐观更新） */
   deleteTask(taskId: string): void {
+    if (this.blockHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const task = this.projectState.getTask(taskId);
@@ -264,6 +391,10 @@ export class TaskOperationAdapterService {
 
   /** 永久删除任务（从回收站中删除） */
   permanentlyDeleteTask(taskId: string): void {
+    if (this.blockHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '删除');
@@ -276,6 +407,9 @@ export class TaskOperationAdapterService {
     if (explicitIds.length === 0) return 0;
     const projectId = this.projectState.activeProjectId();
     if (!projectId) return 0;
+    if (this.blockHintOnlyMutation('删除任务')) {
+      return 0;
+    }
 
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
@@ -295,6 +429,10 @@ export class TaskOperationAdapterService {
 
   /** 恢复已删除的任务 */
   restoreTask(taskId: string): void {
+    if (this.blockHintOnlyMutation('恢复任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     this.core.restoreTask(taskId);
@@ -302,6 +440,10 @@ export class TaskOperationAdapterService {
 
   /** 清空回收站 */
   emptyTrash(): void {
+    if (this.blockHintOnlyMutation('清空回收站')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot('', '删除');
@@ -318,6 +460,9 @@ export class TaskOperationAdapterService {
     beforeTaskId?: string | null,
     newParentId?: string | null
   ): Result<void, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<void>('移动任务');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
 
@@ -356,6 +501,9 @@ export class TaskOperationAdapterService {
 
   /** 将任务插入到两个任务之间 */
   insertTaskBetween(taskId: string, sourceId: string, targetId: string): Result<void, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<void>('移动任务');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
@@ -371,6 +519,9 @@ export class TaskOperationAdapterService {
 
   /** 将整个子任务树迁移到新的父任务下 */
   moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<void>('移动子树');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
@@ -387,6 +538,10 @@ export class TaskOperationAdapterService {
 
   /** 重排阶段内任务顺序 */
   reorderStage(stage: number, orderedIds: string[]): void {
+    if (this.blockHintOnlyMutation('重排任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     this.core.reorderStage(stage, orderedIds);
@@ -394,6 +549,10 @@ export class TaskOperationAdapterService {
 
   /** 分离任务（移回待分配区） */
   detachTask(taskId: string): void {
+    if (this.blockHintOnlyMutation('移动任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     this.core.detachTask(taskId);
@@ -401,6 +560,9 @@ export class TaskOperationAdapterService {
 
   /** 分离任务及其整个子树（移回待分配区） */
   detachTaskWithSubtree(taskId: string) {
+    const blocked = this.blockHintOnlyMutationResult<void>('移动子树');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const result = this.core.detachTaskWithSubtree(taskId);
@@ -416,6 +578,9 @@ export class TaskOperationAdapterService {
     targetUnassignedId: string,
     specificChildId?: string
   ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<{ detachedSubtreeRootId: string | null }>('重新挂载任务');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
@@ -436,6 +601,9 @@ export class TaskOperationAdapterService {
     sourceTaskId: string,
     targetUnassignedId: string
   ): Result<void, OperationError> {
+    const blocked = this.blockHintOnlyMutationResult<void>('重新挂载任务');
+    if (blocked) return blocked;
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
@@ -462,6 +630,10 @@ export class TaskOperationAdapterService {
 
   /** 删除任务但保留子任务 */
   deleteTaskKeepChildren(taskId: string): void {
+    if (this.blockHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     this.markEditing();
     this.recorder.lastUpdateType = 'structure';
     const task = this.projectState.getTask(taskId);

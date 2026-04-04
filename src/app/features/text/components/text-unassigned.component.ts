@@ -1,11 +1,13 @@
 import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { ToastService } from '../../../../services/toast.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { ParkingService } from '../../../../services/parking.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { SimpleReminderService } from '../../../../services/simple-reminder.service';
+import { UserSessionService } from '../../../../services/user-session.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
@@ -260,6 +262,8 @@ export class TextUnassignedComponent implements OnDestroy {
   protected parkingService = inject(ParkingService);
   protected dockEngine = inject(DockEngineService);
   protected reminderService = inject(SimpleReminderService);
+  protected toast = inject(ToastService);
+  protected userSession = inject(UserSessionService);
   private cdr = inject(ChangeDetectorRef);
 
   protected editingTaskId = signal<string | null>(null);
@@ -296,6 +300,27 @@ export class TextUnassignedComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.cancelEdit();
+  }
+
+  private guardHintOnlyMutation(actionLabel: string): boolean {
+    if (!this.userSession.isHintOnlyStartupPlaceholderVisible()) {
+      return false;
+    }
+
+    this.toast.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
+  }
+
+  private beginTaskEdit(task: Task): boolean {
+    if (this.guardHintOnlyMutation('编辑任务')) {
+      return false;
+    }
+
+    this.editingTaskId.set(task.id);
+    this.isEditMode.set(true);
+    this.localTitle.set(task.title || '');
+    this.localContent.set(task.content || '');
+    return true;
   }
 
   /**
@@ -345,9 +370,7 @@ export class TextUnassignedComponent implements OnDestroy {
     // 如果已经展开过，再次点击则进行下一步操作
     if (this.editingTaskId() === task.id) {
       // 再次点击已展开的卡片：进入编辑模式（而不是折叠）
-      this.isEditMode.set(true);
-      this.localTitle.set(task.title || '');
-      this.localContent.set(task.content || '');
+      this.beginTaskEdit(task);
     } else {
       // 首次展开：显示预览
       this.editingTaskId.set(task.id);
@@ -357,10 +380,7 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected enterEdit(task: Task): void {
-    this.editingTaskId.set(task.id);
-    this.isEditMode.set(true);
-    this.localTitle.set(task.title || '');
-    this.localContent.set(task.content || '');
+    this.beginTaskEdit(task);
   }
 
   /**
@@ -371,6 +391,10 @@ export class TextUnassignedComponent implements OnDestroy {
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
+      if (this.guardHintOnlyMutation('编辑任务')) {
+        return;
+      }
+
       // 点击了待办 checkbox，切换状态
       const newContent = toggleMarkdownTodo(task.content || '', todoIndex);
       this.taskAdapter.updateTaskContent(task.id, newContent);
@@ -409,6 +433,10 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected saveTask(task: Task): void {
+    if (this.guardHintOnlyMutation('编辑任务')) {
+      return;
+    }
+
     const persisted = this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: false });
     if (!persisted) {
       this.cancelEdit();
@@ -421,6 +449,10 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected parkTaskNow(task: Task): void {
+    if (this.guardHintOnlyMutation('停泊任务')) {
+      return;
+    }
+
     if (task.parkingMeta?.state === 'parked') return;
 
     // 停泊前先落盘当前编辑内容，避免用户点“停泊”丢掉刚输入的标题/正文。
@@ -442,6 +474,10 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected async deleteTask(taskId: string): Promise<void> {
+    if (this.guardHintOnlyMutation('删除任务')) {
+      return;
+    }
+
     await this.taskAdapter.deleteTask(taskId);
     if (this.editingTaskId() === taskId) {
       this.cancelEdit();
@@ -488,6 +524,10 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected setReminderPreset(taskId: string, minutes: number): void {
+    if (this.guardHintOnlyMutation('设置提醒')) {
+      return;
+    }
+
     const reminderAt = new Date(Date.now() + minutes * 60_000).toISOString();
     this.reminderService.setReminder(taskId, reminderAt);
     this.reminderMenuTaskId.set(null);
@@ -495,6 +535,10 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   protected clearReminder(taskId: string): void {
+    if (this.guardHintOnlyMutation('取消提醒')) {
+      return;
+    }
+
     this.reminderService.cancelReminder(taskId);
     this.reminderMenuTaskId.set(null);
     this.cdr.markForCheck();

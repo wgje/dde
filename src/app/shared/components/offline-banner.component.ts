@@ -3,6 +3,10 @@ import { CommonModule } from '@angular/common';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
 import { ToastService } from '../../../services/toast.service';
 import { ActionQueueService } from '../../../services/action-queue.service';
+import { UiStateService } from '../../../services/ui-state.service';
+import { AuthService } from '../../../services/auth.service';
+import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
+import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
 
 /**
  * 离线状态通知 + 持久化状态指示器组件
@@ -22,9 +26,12 @@ import { ActionQueueService } from '../../../services/action-queue.service';
   template: `
     <!-- 持久化状态指示器 -->
     @if (showIndicator()) {
-      <div class="fixed top-2 right-2 z-50 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-medium backdrop-blur-sm transition-all duration-300 shadow-sm"
+      <div class="fixed z-50 flex items-center rounded-full font-medium backdrop-blur-sm transition-all duration-300 shadow-sm pointer-events-none"
            data-testid="offline-indicator"
+           [style.top]="offlineIndicatorTop()"
            [ngClass]="{
+             'right-2 gap-1.5 px-2.5 py-1.5 text-[10px]': !isMobile(),
+             'left-1/2 -translate-x-1/2 gap-1 px-2 py-1 text-[9px] max-w-[calc(100vw-16px)]': isMobile(),
              'bg-sky-50/95 dark:bg-sky-900/80 text-sky-700 dark:text-sky-300 border border-sky-200/60 dark:border-sky-700/60': isOffline() && !isStorageFrozen(),
              'bg-amber-100/90 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-700/60': isStorageFrozen(),
              'bg-green-100/90 dark:bg-green-900/70 text-green-700 dark:text-green-300 opacity-0 border border-green-200/60 dark:border-green-700/60': !isOffline() && !isStorageFrozen()
@@ -37,7 +44,7 @@ import { ActionQueueService } from '../../../services/action-queue.service';
              }">
         </div>
         @if (isOffline() && !isStorageFrozen()) {
-          <span>离线模式 · 数据已安全保存</span>
+          <span>{{ isMobile() ? '离线数据已保存' : '离线模式 · 数据已安全保存' }}</span>
           @if (pendingEditCount() > 0) {
             <span class="px-1 py-0.5 rounded bg-sky-200/60 dark:bg-sky-800/60 text-[9px]">{{ pendingEditCount() }} 待同步</span>
           }
@@ -49,10 +56,13 @@ import { ActionQueueService } from '../../../services/action-queue.service';
   `,
 })
 export class OfflineBannerComponent {
+  private static readonly DEMO_BANNER_DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
   private syncService = inject(SimpleSyncService);
   private actionQueue = inject(ActionQueueService);
   private toast = inject(ToastService);
+  private uiState = inject(UiStateService);
   private destroyRef = inject(DestroyRef);
+  private auth = inject(AuthService);
   
   /** 上一次的网络连接状态（用于检测状态变化） */
   private previousOnlineState: boolean | null = null;
@@ -62,6 +72,9 @@ export class OfflineBannerComponent {
 
   /** 是否显示指示器 */
   readonly showIndicator = signal(false);
+
+  /** 设备类型（用于移动端避免遮挡顶部视图切换按钮） */
+  readonly isMobile = this.uiState.isMobile;
 
   /** 离线状态 */
   readonly isOffline = computed(() => 
@@ -140,6 +153,56 @@ export class OfflineBannerComponent {
     if (this.fadeOutTimer) {
       clearTimeout(this.fadeOutTimer);
       this.fadeOutTimer = null;
+    }
+  }
+
+  offlineIndicatorTop(): string {
+    const topOffset = this.isMobile()
+      ? (this.showMobileDemoBanner() ? 104 : 42)
+      : 8;
+    return `calc(env(safe-area-inset-top, 0px) + ${topOffset}px)`;
+  }
+
+  private showMobileDemoBanner(): boolean {
+    if (!this.isMobile()) {
+      return false;
+    }
+
+    if (this.isDemoBannerDismissed()) {
+      return false;
+    }
+
+    return isLocalModeEnabled()
+      || this.auth.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID
+      || (FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false);
+  }
+
+  private isDemoBannerDismissed(): boolean {
+    if (typeof localStorage === 'undefined') {
+      return false;
+    }
+
+    try {
+      const stored = localStorage.getItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+      if (!stored) {
+        return false;
+      }
+
+      const data = JSON.parse(stored) as { timestamp?: unknown } | null;
+      if (!data || typeof data.timestamp !== 'number') {
+        localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+        return false;
+      }
+
+      const dismissExpiryMs = 7 * 24 * 60 * 60 * 1000;
+      if (Date.now() - data.timestamp < dismissExpiryMs) {
+        return true;
+      }
+
+      localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+      return false;
+    } catch {
+      return false;
     }
   }
 }

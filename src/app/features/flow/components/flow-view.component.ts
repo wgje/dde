@@ -606,13 +606,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 连接线操作 ==========
   
   confirmParentChildLink(): void {
-    this.link.confirmParentChildLink();
-    this.refreshDiagram();
+    if (this.link.confirmParentChildLink()) {
+      this.refreshDiagram();
+    }
   }
   
   confirmCrossTreeLink(): void {
-    this.link.confirmCrossTreeLink();
-    this.refreshDiagram();
+    if (this.link.confirmCrossTreeLink()) {
+      this.refreshDiagram();
+    }
   }
   
   // ========== 级联分配 ==========
@@ -639,8 +641,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 保存联系块的标题和描述 */
   saveConnectionDescription(data: ConnectionEditorSavePayload): void {
-    this.link.saveConnectionContent(data.sourceId, data.targetId, data.title, data.description);
-    this.refreshDiagram();
+    if (this.link.saveConnectionContent(data.sourceId, data.targetId, data.title, data.description)) {
+      this.refreshDiagram();
+    }
   }
   
   deleteConnection(): void {

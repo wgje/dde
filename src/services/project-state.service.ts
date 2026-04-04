@@ -14,6 +14,13 @@ export interface TaskConnectionInfo {
   incoming: { sourceId: string; sourceTask: Task | undefined; description?: string }[];
 }
 
+interface TaskTodoSnapshot {
+  unfinishedItems: UnfinishedItem[];
+  total: number;
+  completed: number;
+  pending: number;
+}
+
 /**
  * 项目状态服务
  * 从 StoreService 拆分出来，专注于项目和任务的状态管理
@@ -95,40 +102,68 @@ export class ProjectStateService {
     return this.tasks().filter(t => t.deletedAt);
   });
 
-  readonly unfinishedItems = computed<UnfinishedItem[]>(() => {
-    const items: UnfinishedItem[] = [];
-    const tasks = this.tasks();
+  private readonly filteredTaskTodoSnapshot = computed<TaskTodoSnapshot>(() => {
     const filter = this.uiState.filterMode();
-    
     let rootDisplayId = '';
+
     if (filter !== 'all') {
       const root = this.getTask(filter);
       if (root) rootDisplayId = root.displayId;
     }
 
-    const todoRegex = /[-*]\s*\[ \]\s*(.+)/g;
-    const codeBlockRegex = /```[\s\S]*?```/g;
+    return this.collectTaskTodoSnapshot(rootDisplayId);
+  });
 
-    tasks.forEach(t => {
-      if (t.deletedAt) return;
-      
+  private readonly projectTaskTodoSnapshot = computed<TaskTodoSnapshot>(() => {
+    return this.collectTaskTodoSnapshot();
+  });
+
+  private collectTaskTodoSnapshot(rootDisplayId: string = ''): TaskTodoSnapshot {
+    const tasks = this.tasks();
+    const unfinishedItems: UnfinishedItem[] = [];
+    let total = 0;
+    let completed = 0;
+
+    tasks.forEach(task => {
+      if (task.deletedAt) return;
+
       if (rootDisplayId) {
-        const isDescendant = t.displayId === rootDisplayId || t.displayId.startsWith(rootDisplayId + ',');
+        const isDescendant = task.displayId === rootDisplayId || task.displayId.startsWith(rootDisplayId + ',');
         if (!isDescendant) return;
       }
 
-      const contentWithoutCodeBlocks = t.content.replace(codeBlockRegex, '');
-      
-      let match;
-      while ((match = todoRegex.exec(contentWithoutCodeBlocks)) !== null) {
-        items.push({
-          taskId: t.id,
-          taskDisplayId: t.displayId,
-          text: match[1].trim()
+      const todoStats = this.extractTaskTodoStats(task.content || '');
+      total += todoStats.total;
+      completed += todoStats.completed;
+
+      todoStats.unfinishedItems.forEach(text => {
+        unfinishedItems.push({
+          taskId: task.id,
+          taskDisplayId: task.displayId,
+          text,
         });
-      }
+      });
     });
-    return items;
+
+    return {
+      unfinishedItems,
+      total,
+      completed,
+      pending: total - completed,
+    };
+  }
+
+  readonly unfinishedItems = computed<UnfinishedItem[]>(() => {
+    return this.filteredTaskTodoSnapshot().unfinishedItems;
+  });
+
+  readonly taskTodoStats = computed(() => {
+    const snapshot = this.projectTaskTodoSnapshot();
+    return {
+      total: snapshot.total,
+      completed: snapshot.completed,
+      pending: snapshot.pending,
+    };
   });
 
   readonly rootTasks = computed(() => {
@@ -147,6 +182,50 @@ export class ProjectStateService {
       .filter(t => t.stage === 1 && !t.deletedAt)
       .sort((a, b) => a.rank - b.rank);
   });
+
+  private extractTaskTodoStats(content: string): {
+    total: number;
+    completed: number;
+    unfinishedItems: string[];
+  } {
+    let total = 0;
+    let completed = 0;
+    const unfinishedItems: string[] = [];
+
+    let inCodeBlock = false;
+    const lines = content.split('\n');
+
+    lines.forEach(line => {
+      if (line.startsWith('```')) {
+        inCodeBlock = !inCodeBlock;
+        return;
+      }
+
+      if (inCodeBlock) {
+        return;
+      }
+
+      const match = line.match(/^[-*]\s*\[([ xX])\]\s*(.+)$/);
+      if (!match) {
+        return;
+      }
+
+      total += 1;
+
+      if ((match[1] ?? '').toLowerCase() === 'x') {
+        completed += 1;
+        return;
+      }
+
+      unfinishedItems.push((match[2] ?? '').trim());
+    });
+
+    return {
+      total,
+      completed,
+      unfinishedItems,
+    };
+  }
 
   /**
    * 【性能优化】所有任务的连接关系缓存

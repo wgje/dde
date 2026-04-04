@@ -1,4 +1,4 @@
-import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy, viewChild } from '@angular/core';
+import { Component, inject, input, output, signal, computed, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy, viewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
@@ -34,36 +34,47 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
       <!-- 主编辑区域-->
       <div [ngClass]="{'flex-1 min-w-0 space-y-2': !isMobile(), 'space-y-1.5': isMobile()}">
 
-          <!-- 标题编辑 -->
-        <input
-          #titleInput
-          data-testid="task-title-input"
-          data-title-input
-          type="text"
-          [value]="localTitle()"
-          (input)="onTitleInput(titleInput.value)"
-          (focus)="onInputFocus('title')"
-          (blur)="onInputBlur('title')"
-          (compositionstart)="onCompositionStart('title')"
-          (compositionend)="onCompositionEnd('title', titleInput.value)"
-          (mousedown)="isSelecting = true"
-          (mouseup)="isSelecting = false"
-          spellcheck="false"
-          class="w-full font-medium text-retro-dark dark:text-stone-200 border rounded-lg focus:ring-1 focus:ring-stone-400 dark:focus:ring-stone-500 focus:border-stone-400 dark:focus:border-stone-500 outline-none touch-manipulation transition-colors"
-          [ngClass]="{
-            'text-sm p-2': !isMobile(),
-            'text-xs p-1.5': isMobile(),
-            'bg-transparent border-transparent': isPreview(),
-            'bg-white dark:bg-stone-700 border-stone-200 dark:border-stone-600': !isPreview()
-          }"
-          placeholder="任务名称...">
+        @if (isPreview()) {
+          <button
+            type="button"
+            data-testid="task-title-preview"
+            data-title-preview-trigger
+            (click)="enterEditMode('title'); $event.stopPropagation()"
+            class="block w-full rounded-md text-left font-medium text-retro-dark dark:text-stone-200 leading-snug transition-colors hover:bg-stone-100/70 dark:hover:bg-stone-800/60 line-clamp-3"
+            [ngClass]="{'text-sm px-1 py-0.5': !isMobile(), 'text-xs px-0.5 py-0.5': isMobile()}"
+            title="点击编辑标题">
+            {{ previewTitle() }}
+          </button>
+        } @else {
+          <input
+            #titleInput
+            data-testid="task-title-input"
+            data-title-input
+            type="text"
+            [value]="localTitle()"
+            (input)="onTitleInput(titleInput.value)"
+            (focus)="onInputFocus('title')"
+            (blur)="onInputBlur('title')"
+            (compositionstart)="onCompositionStart('title')"
+            (compositionend)="onCompositionEnd('title', titleInput.value)"
+            (mousedown)="isSelecting = true"
+            (mouseup)="isSelecting = false"
+            spellcheck="false"
+            class="w-full font-medium text-retro-dark dark:text-stone-200 border rounded-lg focus:ring-1 focus:ring-stone-400 dark:focus:ring-stone-500 focus:border-stone-400 dark:focus:border-stone-500 outline-none touch-manipulation transition-colors"
+            [ngClass]="{
+              'text-sm p-2': !isMobile(),
+              'text-xs p-1.5': isMobile(),
+              'bg-white dark:bg-stone-700 border-stone-200 dark:border-stone-600': !isPreview()
+            }"
+            placeholder="任务名称...">
+        }
 
         <!-- 内容编辑/预览 -->
         <div class="relative">
           <!-- 预览/编辑切换按钮 -->
           <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
             <button
-              (click)="togglePreview(); $event.stopPropagation()"
+              (click)="onPreviewToggleButtonClick($event)"
               class="px-1.5 py-0.5 text-[9px] rounded transition-all opacity-70 hover:opacity-100"
               [ngClass]="{
                 'bg-indigo-500 dark:bg-indigo-600 text-white': isPreview(),
@@ -76,14 +87,26 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
 
           @if (isPreview()) {
             <!-- Markdown 预览 - 点击切换到编辑模式，点击 checkbox 切换待办状态 -->
-            <div
-              data-testid="task-content"
-              (click)="onPreviewClick($event)"
-              class="w-full border border-transparent rounded-lg bg-transparent overflow-y-auto overflow-x-hidden markdown-preview cursor-pointer transition-colors"
-              [ngClass]="{'min-h-24 max-h-48 p-3 text-xs': !isMobile(), 'min-h-28 max-h-40 p-2 text-[11px]': isMobile()}"
-              [innerHTML]="localContent() ? (localContent() | safeMarkdown) : '<span class=&quot;text-stone-400 italic&quot;>点击输入内容...</span>'"
-              title="点击编辑">
-            </div>
+            @if (hasPreviewContent()) {
+              <div
+                data-testid="task-content"
+                (click)="onPreviewClick($event)"
+                class="w-full rounded-lg border border-transparent overflow-y-auto overflow-x-hidden markdown-preview markdown-preview-adaptive cursor-pointer transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
+                [ngClass]="{'max-h-40 px-1 py-0.5 text-xs': !isMobile(), 'max-h-32 px-0.5 py-0.5 text-[11px]': isMobile()}"
+                [innerHTML]="localContent() | safeMarkdown"
+                title="点击编辑">
+              </div>
+            } @else {
+              <button
+                type="button"
+                data-testid="task-content-empty"
+                (click)="enterEditMode('content'); $event.stopPropagation()"
+                class="w-full min-h-[1.25rem] rounded-md text-left text-stone-400 dark:text-stone-500 italic transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
+                [ngClass]="{'px-1 py-0.5 text-xs': !isMobile(), 'px-0.5 py-0.5 text-[11px]': isMobile()}"
+                title="点击输入内容">
+                点击输入内容...
+              </button>
+            }
           } @else {
             <!-- Markdown 编辑 -->
             <textarea
@@ -367,6 +390,11 @@ export class TextTaskEditorComponent implements OnDestroy {
   protected readonly localTitle = signal('');
   /** 本地内容（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localContent = signal('');
+  protected readonly previewTitle = computed(() => {
+    const title = this.localTitle().trim();
+    return title || 'Untitled task';
+  });
+  protected readonly hasPreviewContent = computed(() => this.localContent().trim().length > 0);
   protected readonly localExpectedMinutes = signal('');
   protected readonly localWaitMinutes = signal('');
   protected readonly localCognitiveLoad = signal<'high' | 'low' | ''>('');
@@ -384,6 +412,8 @@ export class TextTaskEditorComponent implements OnDestroy {
 
   /** 标记是否正在进行文本选择操作 */
   isSelecting = false;
+
+  private focusRequestTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 最大附件数量*/
   private readonly maxAttachments = 5;
@@ -429,6 +459,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     // 【关键】组件销毁前，确保当前编辑的内容被保存
     // 这是修复手机端点击关联块编辑后无法自动保存的核心逻辑
     this.persistCurrentEdits();
+    this.clearFocusRequestTimer();
 
     // 清理所有未完成的解锁定时器
     for (const timer of this.unlockTimers.values()) {
@@ -530,6 +561,27 @@ export class TextTaskEditorComponent implements OnDestroy {
     const newValue = !this.isPreview();
     this.isPreview.set(newValue);
     this.previewModeChange.emit(newValue);
+    if (newValue) {
+      this.clearFocusRequestTimer();
+    }
+  }
+
+  enterEditMode(field: 'title' | 'content') {
+    if (this.isPreview()) {
+      this.isPreview.set(false);
+      this.previewModeChange.emit(false);
+    }
+
+    this.focusEditorField(field);
+  }
+
+  onPreviewToggleButtonClick(event: Event) {
+    event.stopPropagation();
+    if (this.isPreview()) {
+      this.enterEditMode('content');
+      return;
+    }
+    this.togglePreview();
   }
 
   /**
@@ -539,6 +591,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     if (!this.isPreview()) {
       this.isPreview.set(true);
       this.previewModeChange.emit(true);
+      this.clearFocusRequestTimer();
     }
   }
 
@@ -698,7 +751,7 @@ export class TextTaskEditorComponent implements OnDestroy {
       // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
       this.cdr.markForCheck();
     } else {
-      this.togglePreview();
+      this.enterEditMode('content');
     }
   }
 
@@ -824,6 +877,39 @@ export class TextTaskEditorComponent implements OnDestroy {
     const parsed = Number(trimmed);
     if (!Number.isFinite(parsed) || parsed <= 0) return null;
     return Math.floor(parsed);
+  }
+
+  private focusEditorField(field: 'title' | 'content'): void {
+    this.clearFocusRequestTimer();
+    this.focusRequestTimer = setTimeout(() => {
+      const input = this.resolveEditorFieldElement(field);
+
+      input?.focus();
+      input?.select?.();
+      this.focusRequestTimer = null;
+    }, 0);
+  }
+
+  private resolveEditorFieldElement(field: 'title' | 'content'): HTMLInputElement | HTMLTextAreaElement | null {
+    const selector = field === 'title'
+      ? '[data-testid="task-title-input"]'
+      : '[data-testid="task-content-editor"]';
+
+    const host = this.elementRef.nativeElement as HTMLElement | null;
+    if (!host) {
+      return null;
+    }
+
+    return host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+  }
+
+  private clearFocusRequestTimer(): void {
+    if (!this.focusRequestTimer) {
+      return;
+    }
+
+    clearTimeout(this.focusRequestTimer);
+    this.focusRequestTimer = null;
   }
 }
 

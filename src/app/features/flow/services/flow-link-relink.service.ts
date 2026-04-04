@@ -26,6 +26,15 @@ export class FlowLinkRelinkService {
   private readonly logger = this.loggerService.category('FlowLinkRelink');
   private readonly toast = inject(ToastService);
 
+  private guardHintOnlyLinkMutation(actionLabel: string): boolean {
+    if (!this.taskOps.isHintOnlyStartupReadOnly()) {
+      return false;
+    }
+
+    this.toast.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
+  }
+
   // ========== 任务块→待分配块连接 ==========
 
   /**
@@ -322,6 +331,10 @@ export class FlowLinkRelinkService {
     newTargetId: string,
     changedEnd: 'from' | 'to'
   ): 'success' | 'cancelled' | 'error' {
+    if (this.guardHintOnlyLinkMutation('重连关联')) {
+      return 'cancelled';
+    }
+
     // 防止自连接
     if (newSourceId === newTargetId) {
       this.toast.warning('无法连接', '节点不能连接到自身');

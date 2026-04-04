@@ -39,6 +39,7 @@ import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { ThemeType, Project } from './models';
 import { UI_CONFIG } from './config/ui.config';
 import { FEATURE_FLAGS, validateCriticalFlags } from './config/feature-flags.config';
+import { AUTH_CONFIG } from './config/auth.config';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { showBlackBoxPanel, gateState } from './state/focus-stores';
 import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
@@ -117,6 +118,7 @@ type StartupDiagnosticsLike = {
 })
 
 export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit {
+  private static readonly DEMO_BANNER_DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
   
   public throwTestError(): void {
     throw new Error("Sentry Test Error");
@@ -189,6 +191,109 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   get currentUserId() { return this.userSession.currentUserId; }
   hintOnlyStartupPlaceholderVisible(): boolean {
     return this.userSession.isHintOnlyStartupPlaceholderVisible();
+  }
+
+  showBlockingStartupHintOverlay(): boolean {
+    return this.hintOnlyStartupPlaceholderVisible() && !this.isMobile();
+  }
+
+  showCompactStartupHintBanner(): boolean {
+    return this.hintOnlyStartupPlaceholderVisible() && this.isMobile();
+  }
+
+  isMobileOfflineNoticeVisible(): boolean {
+    return this.isMobile() && (
+      !this.networkAwareness.isOnline()
+      || this.offlineMode()
+      || this.actionQueue.queueFrozen()
+    );
+  }
+
+  showMobileDemoBanner(): boolean {
+    if (!this.isMobile()) {
+      return false;
+    }
+
+    if (this.isDemoBannerDismissed()) {
+      return false;
+    }
+
+    return isLocalModeEnabled()
+      || this.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID
+      || (FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false);
+  }
+
+  resolveMobileFloatingNoticeBaseTopOffsetPx(): number {
+    const demoOffset = this.showMobileDemoBanner() ? 104 : 0;
+    if (this.isMobileOfflineNoticeVisible()) {
+      const offlineTopOffset = demoOffset > 0 ? demoOffset : 42;
+      return offlineTopOffset + 42;
+    }
+
+    return demoOffset;
+  }
+
+  installPromptTop(): string {
+    const topOffset = this.isMobile()
+      ? Math.max(12, this.resolveMobileFloatingNoticeBaseTopOffsetPx())
+      : 12;
+    return `calc(env(safe-area-inset-top, 0px) + ${topOffset}px)`;
+  }
+
+  compactStartupHintBannerTop(): string {
+    let topOffset = 56;
+
+    if (this.isMobile()) {
+      if (this.isMobileOfflineNoticeVisible()) {
+        topOffset = Math.max(topOffset, 84);
+      }
+
+      topOffset = Math.max(topOffset, this.resolveMobileFloatingNoticeBaseTopOffsetPx());
+
+      if (this.showInstallPrompt()) {
+        topOffset = Math.max(topOffset, Math.max(12, this.resolveMobileFloatingNoticeBaseTopOffsetPx()) + 44);
+      }
+    }
+
+    return `calc(env(safe-area-inset-top, 0px) + ${topOffset}px)`;
+  }
+
+  private isDemoBannerDismissed(): boolean {
+    if (typeof localStorage === 'undefined') {
+      return false;
+    }
+
+    try {
+      const raw = localStorage.getItem(WorkspaceShellComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+      if (!raw) {
+        return false;
+      }
+
+      const data = JSON.parse(raw) as { timestamp?: unknown } | null;
+      if (!data || typeof data.timestamp !== 'number') {
+        localStorage.removeItem(WorkspaceShellComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+        return false;
+      }
+
+      const dismissExpiryMs = 7 * 24 * 60 * 60 * 1000;
+      if (Date.now() - data.timestamp < dismissExpiryMs) {
+        return true;
+      }
+
+      localStorage.removeItem(WorkspaceShellComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  private blockHintOnlyMutation(actionLabel: string): boolean {
+    if (!this.userSession.isHintOnlyStartupPlaceholderVisible()) {
+      return false;
+    }
+
+    this.toast.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
+    return true;
   }
   
   /** 同步状态 */
@@ -2191,15 +2296,42 @@ async signOut() {
   @HostListener('document:click', ['$event'])
   onGlobalClick(event: MouseEvent) { this.projectCoord.handleGlobalClick(event); }
   enterProject(id: string) { this.projectCoord.enterProject(id, this.isSidebarOpen); }
-  handleProjectDoubleClick(id: string, event: MouseEvent) { this.projectCoord.handleProjectDoubleClick(id, event, this.isSidebarOpen); }
-  startRenameProject(projectId: string, currentName: string, event: Event) { this.projectCoord.startRenameProject(projectId, currentName, event); }
-  executeRenameProject() { this.projectCoord.executeRenameProject(); }
+  handleProjectDoubleClick(id: string, event: MouseEvent) {
+    if (this.userSession.isHintOnlyStartupPlaceholderVisible()) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.projectCoord.enterProject(id, this.isSidebarOpen);
+      return;
+    }
+
+    this.projectCoord.handleProjectDoubleClick(id, event, this.isSidebarOpen);
+  }
+  startProjectDescriptionEdit(event: Event) {
+    event.stopPropagation();
+    if (this.blockHintOnlyMutation('编辑项目简介')) return;
+    this.projectCoord.isEditingDescription.set(true);
+  }
+  startRenameProject(projectId: string, currentName: string, event: Event) {
+    if (this.blockHintOnlyMutation('重命名项目')) return;
+    this.projectCoord.startRenameProject(projectId, currentName, event);
+  }
+  executeRenameProject() {
+    this.projectCoord.executeRenameProject();
+  }
   cancelRenameProject() { this.projectCoord.cancelRenameProject(); }
   onRenameKeydown(event: KeyboardEvent) { this.projectCoord.onRenameKeydown(event); }
   projectDraft(projectId: string) { return this.projectCoord.projectDraft(projectId); }
-  updateProjectDraft(projectId: string, field: 'description' | 'createdDate', value: string) { this.projectCoord.updateProjectDraft(projectId, field, value); }
-  saveProjectDetails(projectId: string) { this.projectCoord.saveProjectDetails(projectId); }
-  createNewProject() { void this.openNewProjectModal(); }
+  updateProjectDraft(projectId: string, field: 'description' | 'createdDate', value: string) {
+    if (this.userSession.isHintOnlyStartupPlaceholderVisible()) return;
+    this.projectCoord.updateProjectDraft(projectId, field, value);
+  }
+  saveProjectDetails(projectId: string) {
+    this.projectCoord.saveProjectDetails(projectId);
+  }
+  createNewProject() {
+    if (this.blockHintOnlyMutation('创建项目')) return;
+    void this.openNewProjectModal();
+  }
   onFocusFlowNode(taskId: string) { this.projectCoord.onFocusFlowNode(taskId); }
   onSearchTaskClick(taskId: string, isParked: boolean): void {
     const projectId = this.taskStore.getTaskProjectId(taskId)
@@ -2217,8 +2349,14 @@ async signOut() {
     this.onFocusFlowNode(taskId);
   }
   async confirmCreateProject(name: string, desc: string) { await this.projectCoord.confirmCreateProject(name, desc); }
-  async confirmDeleteProject(projectId: string, projectName: string, event: Event) { await this.projectCoord.confirmDeleteProject(projectId, projectName, event); }
-  async handleImportComplete(project: Project) { await this.projectCoord.handleImportComplete(project); }
+  async confirmDeleteProject(projectId: string, projectName: string, event: Event) {
+    if (this.blockHintOnlyMutation('删除项目')) return;
+    await this.projectCoord.confirmDeleteProject(projectId, projectName, event);
+  }
+  async handleImportComplete(project: Project) {
+    if (this.blockHintOnlyMutation('导入项目')) return;
+    await this.projectCoord.handleImportComplete(project);
+  }
   
   // ========== Modal methods (delegated to WorkspaceModalCoordinatorService) ==========
 

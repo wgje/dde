@@ -417,6 +417,7 @@
 <app-flow-connection-editor
   [data]="link.connectionEditorData()"
   [position]="link.connectionEditorPos()"
+  [readOnly]="link.isHintOnlyStartupReadOnly()"
   [connectionTasks]="link.getConnectionTasks()"
   (close)="link.closeConnectionEditor()"
   (save)="saveConnectionDescription($event)"

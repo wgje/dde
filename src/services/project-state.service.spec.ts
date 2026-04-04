@@ -289,3 +289,137 @@ describe('ProjectStateService - taskConnectionsMap', () => {
     expect(result.outgoing[0].targetTask).toBeUndefined();
   });
 });
+
+describe('ProjectStateService - taskTodoStats', () => {
+  let service: ProjectStateService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockTasksMap.clear();
+    mockConnectionsMap.clear();
+    mockProjectsSignal.set([]);
+    mockActiveProjectIdSignal.set(null);
+    mockUiStateService.filterMode.mockReturnValue('all');
+
+    const injector = Injector.create({
+      providers: [
+        { provide: TaskStore, useValue: mockTaskStore },
+        { provide: ProjectStore, useValue: mockProjectStore },
+        { provide: ConnectionStore, useValue: mockConnectionStore },
+        { provide: LayoutService, useValue: mockLayoutService },
+        { provide: UiStateService, useValue: mockUiStateService },
+      ],
+    });
+
+    service = runInInjectionContext(injector, () => new ProjectStateService());
+  });
+
+  it('should count completed and pending markdown todos while excluding code blocks', () => {
+    const task = createTask({
+      id: 'task-1',
+      displayId: '1',
+      content: '- [ ] 待处理事项\n- [x] 已完成事项\n```md\n- [ ] 代码块中的待办不计入\n```',
+    });
+
+    mockProjectsSignal.set([
+      createProject({
+        id: 'proj-1',
+        tasks: [task],
+      }),
+    ]);
+    mockActiveProjectIdSignal.set('proj-1');
+
+    expect(service.taskTodoStats()).toEqual({ total: 2, completed: 1, pending: 1 });
+    expect(service.unfinishedItems()).toEqual([
+      {
+        taskId: 'task-1',
+        taskDisplayId: '1',
+        text: '待处理事项',
+      },
+    ]);
+  });
+
+  it('should keep counting todos inside completed tasks because task blocks and todo items are independent', () => {
+    const completedTask = createTask({
+      id: 'task-2',
+      displayId: '2',
+      status: 'completed',
+      content: '- [ ] 复核遗留项\n- [x] 已勾选项',
+    });
+
+    mockProjectsSignal.set([
+      createProject({
+        id: 'proj-1',
+        tasks: [completedTask],
+      }),
+    ]);
+    mockActiveProjectIdSignal.set('proj-1');
+
+    expect(service.taskTodoStats()).toEqual({ total: 2, completed: 1, pending: 1 });
+    expect(service.unfinishedItems()).toEqual([
+      {
+        taskId: 'task-2',
+        taskDisplayId: '2',
+        text: '复核遗留项',
+      },
+    ]);
+  });
+
+  it('should keep taskTodoStats project scoped even when unfinishedItems follows the current root filter', () => {
+    const rootTask = createTask({
+      id: 'task-root',
+      displayId: '1',
+      content: '- [ ] 根任务待办',
+    });
+    const siblingTask = createTask({
+      id: 'task-sibling',
+      displayId: '2',
+      content: '- [x] 兄弟任务待办',
+    });
+
+    mockTasksMap.set(rootTask.id, rootTask);
+    mockTasksMap.set(siblingTask.id, siblingTask);
+    mockProjectsSignal.set([
+      createProject({
+        id: 'proj-1',
+        tasks: [rootTask, siblingTask],
+      }),
+    ]);
+    mockActiveProjectIdSignal.set('proj-1');
+    mockUiStateService.filterMode.mockReturnValue('task-root');
+
+    expect(service.unfinishedItems()).toEqual([
+      {
+        taskId: 'task-root',
+        taskDisplayId: '1',
+        text: '根任务待办',
+      },
+    ]);
+    expect(service.taskTodoStats()).toEqual({ total: 2, completed: 1, pending: 1 });
+  });
+
+  it('should ignore todos inside an unclosed fenced code block', () => {
+    const task = createTask({
+      id: 'task-3',
+      displayId: '3',
+      content: '- [ ] 正常待办\n```md\n- [ ] 未闭合代码块中的待办',
+    });
+
+    mockProjectsSignal.set([
+      createProject({
+        id: 'proj-1',
+        tasks: [task],
+      }),
+    ]);
+    mockActiveProjectIdSignal.set('proj-1');
+
+    expect(service.taskTodoStats()).toEqual({ total: 1, completed: 0, pending: 1 });
+    expect(service.unfinishedItems()).toEqual([
+      {
+        taskId: 'task-3',
+        taskDisplayId: '3',
+        text: '正常待办',
+      },
+    ]);
+  });
+});

@@ -18,6 +18,8 @@ import { ProjectStateService } from './project-state.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { LoggerService } from './logger.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
+import { ToastService } from './toast.service';
+import { UserSessionService } from './user-session.service';
 import { Project, Task } from '../models';
 import { success } from '../utils/result';
 
@@ -79,6 +81,7 @@ const mockProjectStateService = {
 
 const mockTaskOperationService = {
   moveTaskToStage: vi.fn(),
+  updateTaskContent: vi.fn(),
   setCallbacks: vi.fn(),
 };
 
@@ -122,6 +125,9 @@ const mockUiStateService = {
   isEditing: false, 
   isMobile: vi.fn(() => false),
   markEditing: vi.fn(),  // 【关键修复】添加 markEditing mock
+};
+const mockUserSessionService = {
+  isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
 };
 const mockLayoutService = {};
 const mockEventBusService = {
@@ -169,6 +175,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiStateService },
         { provide: ConnectionAdapterService, useValue: mockConnectionAdapterService },
+        { provide: ToastService, useValue: mockToastService },
+        { provide: UserSessionService, useValue: mockUserSessionService },
       ],
     });
 
@@ -181,6 +189,51 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     
     mockProjectsSignal.set([project]);
     mockActiveProjectIdSignal.set('proj-1');
+    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
+  });
+
+  it('should block moveTaskToStage while hint-only startup placeholder is read-only', () => {
+    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    const result = service.moveTaskToStage('task-1', 2, null, null);
+
+    expect(result.ok).toBe(false);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
+    expect(mockOptimisticStateService.createTaskSnapshot).not.toHaveBeenCalled();
+    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should block content updates while hint-only startup placeholder is read-only', () => {
+    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    service.updateTaskContent('task-1', 'new content');
+
+    expect(mockUiStateService.markEditing).not.toHaveBeenCalled();
+    expect(mockTaskOperationService.updateTaskContent).not.toHaveBeenCalled();
+    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '编辑任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should block position updates while hint-only startup placeholder is read-only', () => {
+    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    service.beginPositionBatch();
+    service.updateTaskPositionWithUndo('task-1', 100, 200);
+
+    expect(mockUiStateService.markEditing).not.toHaveBeenCalled();
+    expect(mockRecorderService.recordAndUpdate).not.toHaveBeenCalled();
+    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should block undo and redo while hint-only startup placeholder is read-only', () => {
+    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    service.performUndo();
+    service.performRedo();
+
+    expect(mockRecorderService.performUndo).not.toHaveBeenCalled();
+    expect(mockRecorderService.performRedo).not.toHaveBeenCalled();
+    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '撤销操作暂不可用，owner 确认完成前保持只读');
+    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '重做操作暂不可用，owner 确认完成前保持只读');
   });
 
   it('should not show toast when task is not actually moved (same stage and parentId)', () => {

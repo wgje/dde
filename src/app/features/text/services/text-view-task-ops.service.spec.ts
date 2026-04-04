@@ -10,12 +10,23 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ParkingService } from '../../../../services/parking.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
+import { UserSessionService } from '../../../../services/user-session.service';
 
 describe('TextViewTaskOpsService', () => {
   let service: TextViewTaskOpsService;
   let hostElement: HTMLElement;
   let outerScrollContainer: HTMLElement;
   let stageTaskList: HTMLElement;
+  const mockTaskOpsAdapter = {
+    addTask: vi.fn(),
+  };
+  const mockToast = {
+    info: vi.fn(),
+    error: vi.fn(),
+  };
+  const mockUserSession = {
+    isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+  };
 
   const mockRect = (element: HTMLElement, top: number, height: number) => {
     vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({
@@ -63,10 +74,10 @@ describe('TextViewTaskOpsService', () => {
         TextViewTaskOpsService,
         { provide: ElementRef, useValue: new ElementRef(hostElement) },
         { provide: NgZone, useValue: new NgZone({ enableLongStackTrace: false }) },
-        { provide: TaskOperationAdapterService, useValue: {} },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
         { provide: ProjectStateService, useValue: {} },
         { provide: UiStateService, useValue: {} },
-        { provide: ToastService, useValue: {} },
+        { provide: ToastService, useValue: mockToast },
         {
           provide: LoggerService,
           useValue: {
@@ -79,6 +90,7 @@ describe('TextViewTaskOpsService', () => {
         },
         { provide: ParkingService, useValue: {} },
         { provide: DockEngineService, useValue: {} },
+        { provide: UserSessionService, useValue: mockUserSession },
         {
           provide: TextViewDragDropService,
           useValue: {
@@ -90,6 +102,10 @@ describe('TextViewTaskOpsService', () => {
     });
 
     service = TestBed.inject(TextViewTaskOpsService);
+    mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
+    mockTaskOpsAdapter.addTask.mockReset();
+    mockToast.info.mockReset();
+    mockToast.error.mockReset();
   });
 
   it('should prefer the stage task list when that list can scroll', () => {
@@ -159,5 +175,67 @@ describe('TextViewTaskOpsService', () => {
     stageTaskList.scrollTop = 0;
 
     expect(service.resolveAutoScrollContainer(1, 110)).toBe(outerScrollContainer);
+  });
+
+  it('should block create actions while hint-only startup placeholder is read-only', () => {
+    mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
+
+    service.onCreateUnassigned();
+
+    expect(mockTaskOpsAdapter.addTask).not.toHaveBeenCalled();
+    expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should reveal the compact title preview and focus the real title input when scrolling to a new task', () => {
+    vi.useFakeTimers();
+    const scrollIntoView = vi.fn();
+    const revealEditor = vi.fn();
+    const inputFocus = vi.fn();
+    const inputSelect = vi.fn();
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback: FrameRequestCallback) => {
+      callback(0);
+      return 0;
+    });
+
+    try {
+      const taskCard = document.createElement('div');
+      taskCard.setAttribute('data-task-id', 'task-1');
+      Object.defineProperty(taskCard, 'scrollIntoView', {
+        configurable: true,
+        value: scrollIntoView,
+      });
+
+      const previewButton = document.createElement('button');
+      previewButton.setAttribute('data-title-preview-trigger', '');
+      previewButton.addEventListener('click', () => {
+        revealEditor();
+        const input = document.createElement('input');
+        input.setAttribute('data-title-input', '');
+        Object.defineProperty(input, 'focus', {
+          configurable: true,
+          value: inputFocus,
+        });
+        Object.defineProperty(input, 'select', {
+          configurable: true,
+          value: inputSelect,
+        });
+        taskCard.appendChild(input);
+      });
+
+      taskCard.appendChild(previewButton);
+      hostElement.appendChild(taskCard);
+
+      service.scrollToTaskAndFocus('task-1', 'input[data-title-input]');
+      vi.runAllTimers();
+
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
+      expect(revealEditor).toHaveBeenCalledTimes(1);
+      expect(taskCard.querySelector('input[data-title-input]')).not.toBeNull();
+      expect(inputFocus).toHaveBeenCalledTimes(1);
+      expect(inputSelect).toHaveBeenCalledTimes(1);
+    } finally {
+      rafSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

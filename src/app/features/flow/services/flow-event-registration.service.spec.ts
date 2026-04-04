@@ -16,4 +16,10 @@ describe('flow-event-registration.service.ts', () => {
     expect(source).toContain("this.link.setConnectionEditorMode('preview')");
     expect(source).toContain('this.link.closeConnectionEditor();');
   });
+
+  it('hint-only 时节点拖拽完成后应立即按 store 回滚图上位置', () => {
+    expect(source).toContain('this.taskOpsAdapter.isHintOnlyStartupReadOnly()');
+    expect(source).toContain('diagramInstance.updateAllTargetBindings()');
+    expect(source).toContain('diagramInstance.requestUpdate()');
+  });
 });

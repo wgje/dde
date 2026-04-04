@@ -45,6 +45,24 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(updateProjectDraft).toHaveBeenCalledWith('proj-1', 'description', 'Project intro');
   });
 
+  it('onProjectDescriptionInput 在 hint-only 期间不应继续写入本地草稿', () => {
+    const updateProjectDraft = vi.fn();
+    const context = {
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+      projectCoord: {
+        updateProjectDraft,
+      },
+      updateProjectDraft: WorkspaceShellComponent.prototype.updateProjectDraft,
+    } as unknown as WorkspaceShellComponent;
+    const event = { target: { value: 'Project intro' } } as Event;
+
+    WorkspaceShellComponent.prototype.onProjectDescriptionInput.call(context, 'proj-1', event);
+
+    expect(updateProjectDraft).not.toHaveBeenCalled();
+  });
+
   it('onSearchTaskClick 命中停泊任务时应直接展开停泊坞并预览任务', () => {
     const setActiveProjectId = vi.fn();
     const setDockExpanded = vi.fn();
@@ -526,6 +544,309 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         resolveWorkspaceSidebarPointerEvents: (this: WorkspaceShellComponent) => 'none' | 'auto';
       }).resolveWorkspaceSidebarPointerEvents.call(restoringContext),
     ).toBe('none');
+  });
+
+  it('showBlockingStartupHintOverlay 应只在桌面端保留全屏启动遮罩', () => {
+    const desktopContext = {
+      hintOnlyStartupPlaceholderVisible: () => true,
+      isMobile: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const mobileContext = {
+      hintOnlyStartupPlaceholderVisible: () => true,
+      isMobile: () => true,
+    } as unknown as WorkspaceShellComponent;
+    const inactiveContext = {
+      hintOnlyStartupPlaceholderVisible: () => false,
+      isMobile: () => false,
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showBlockingStartupHintOverlay: (this: WorkspaceShellComponent) => boolean;
+      }).showBlockingStartupHintOverlay.call(desktopContext),
+    ).toBe(true);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showBlockingStartupHintOverlay: (this: WorkspaceShellComponent) => boolean;
+      }).showBlockingStartupHintOverlay.call(mobileContext),
+    ).toBe(false);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showBlockingStartupHintOverlay: (this: WorkspaceShellComponent) => boolean;
+      }).showBlockingStartupHintOverlay.call(inactiveContext),
+    ).toBe(false);
+  });
+
+  it('showCompactStartupHintBanner 应在移动端降级为非阻塞提示', () => {
+    const mobileContext = {
+      hintOnlyStartupPlaceholderVisible: () => true,
+      isMobile: () => true,
+    } as unknown as WorkspaceShellComponent;
+    const desktopContext = {
+      hintOnlyStartupPlaceholderVisible: () => true,
+      isMobile: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const inactiveContext = {
+      hintOnlyStartupPlaceholderVisible: () => false,
+      isMobile: () => true,
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showCompactStartupHintBanner: (this: WorkspaceShellComponent) => boolean;
+      }).showCompactStartupHintBanner.call(mobileContext),
+    ).toBe(true);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showCompactStartupHintBanner: (this: WorkspaceShellComponent) => boolean;
+      }).showCompactStartupHintBanner.call(desktopContext),
+    ).toBe(false);
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        showCompactStartupHintBanner: (this: WorkspaceShellComponent) => boolean;
+      }).showCompactStartupHintBanner.call(inactiveContext),
+    ).toBe(false);
+  });
+
+  it('compactStartupHintBannerTop 应在移动端顶部已有状态提示时自动下移', () => {
+    const stackedContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => true,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 72,
+      showInstallPrompt: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const clearContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => false,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 0,
+      showInstallPrompt: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const installPromptContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => false,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 0,
+      showInstallPrompt: () => true,
+    } as unknown as WorkspaceShellComponent;
+    const demoBannerContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => false,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 104,
+      showInstallPrompt: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const demoOfflineContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => true,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 146,
+      showInstallPrompt: () => false,
+    } as unknown as WorkspaceShellComponent;
+    const stackedInstallContext = {
+      isMobile: () => true,
+      isMobileOfflineNoticeVisible: () => true,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 146,
+      showInstallPrompt: () => true,
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(stackedContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 84px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(clearContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 56px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(installPromptContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 56px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(demoBannerContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 104px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(demoOfflineContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 146px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        compactStartupHintBannerTop: (this: WorkspaceShellComponent) => string;
+      }).compactStartupHintBannerTop.call(stackedInstallContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 190px)');
+  });
+
+  it('installPromptTop 应在移动端顶部已有提示时自动避让', () => {
+    const stackedContext = {
+      isMobile: () => true,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 104,
+    } as unknown as WorkspaceShellComponent;
+    const stackedOfflineContext = {
+      isMobile: () => true,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 146,
+    } as unknown as WorkspaceShellComponent;
+    const desktopContext = {
+      isMobile: () => false,
+      resolveMobileFloatingNoticeBaseTopOffsetPx: () => 0,
+    } as unknown as WorkspaceShellComponent;
+
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        installPromptTop: (this: WorkspaceShellComponent) => string;
+      }).installPromptTop.call(stackedContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 104px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        installPromptTop: (this: WorkspaceShellComponent) => string;
+      }).installPromptTop.call(stackedOfflineContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 146px)');
+    expect(
+      (WorkspaceShellComponent.prototype as unknown as {
+        installPromptTop: (this: WorkspaceShellComponent) => string;
+      }).installPromptTop.call(desktopContext),
+    ).toBe('calc(env(safe-area-inset-top, 0px) + 12px)');
+  });
+
+  it('showMobileDemoBanner 在横幅已关闭时不应继续预留顶部空间', () => {
+    localStorage.setItem('nanoflow.demo-banner-dismissed', JSON.stringify({ timestamp: Date.now() }));
+
+    const context = {
+      isMobile: () => true,
+      currentUserId: () => AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      isDemoBannerDismissed: (WorkspaceShellComponent.prototype as unknown as {
+        isDemoBannerDismissed: (this: WorkspaceShellComponent) => boolean;
+      }).isDemoBannerDismissed,
+    } as unknown as WorkspaceShellComponent;
+
+    try {
+      expect(
+        (WorkspaceShellComponent.prototype as unknown as {
+          showMobileDemoBanner: (this: WorkspaceShellComponent) => boolean;
+        }).showMobileDemoBanner.call(context),
+      ).toBe(false);
+    } finally {
+      localStorage.removeItem('nanoflow.demo-banner-dismissed');
+    }
+  });
+
+  it('blockHintOnlyMutation 应在 hint-only 启动占位期间提示只读并阻止写操作', () => {
+    const info = vi.fn();
+    const context = {
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+      toast: {
+        info,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    const blocked = (WorkspaceShellComponent.prototype as unknown as {
+      blockHintOnlyMutation: (this: WorkspaceShellComponent, actionLabel: string) => boolean;
+    }).blockHintOnlyMutation.call(context, '创建项目');
+
+    expect(blocked).toBe(true);
+    expect(info).toHaveBeenCalledWith('会话确认中', '创建项目暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('executeRenameProject 应继续交给 coordinator 完成 UI 收尾，即使 hint-only 期间最终写入会被服务层阻止', () => {
+    const executeRenameProject = vi.fn();
+    const context = {
+      projectCoord: {
+        executeRenameProject,
+      },
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.executeRenameProject.call(context);
+
+    expect(executeRenameProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('saveProjectDetails 应继续交给 coordinator 收起编辑态，即使 hint-only 期间最终写入会被服务层阻止', () => {
+    const saveProjectDetails = vi.fn();
+    const context = {
+      projectCoord: {
+        saveProjectDetails,
+      },
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.saveProjectDetails.call(context, 'proj-1');
+
+    expect(saveProjectDetails).toHaveBeenCalledWith('proj-1');
+  });
+
+  it('updateProjectDraft 应在 hint-only 期间静默忽略草稿写入', () => {
+    const updateProjectDraft = vi.fn();
+    const context = {
+      projectCoord: {
+        updateProjectDraft,
+      },
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.updateProjectDraft.call(context, 'proj-1', 'description', 'draft');
+
+    expect(updateProjectDraft).not.toHaveBeenCalled();
+  });
+
+  it('startProjectDescriptionEdit 应在 hint-only 启动占位期间阻止进入简介编辑态', () => {
+    const info = vi.fn();
+    const set = vi.fn();
+    const stopPropagation = vi.fn();
+    const context = {
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+      toast: {
+        info,
+      },
+      projectCoord: {
+        isEditingDescription: { set },
+      },
+      blockHintOnlyMutation: WorkspaceShellComponent.prototype['blockHintOnlyMutation'],
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.startProjectDescriptionEdit.call(context, { stopPropagation } as unknown as Event);
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(set).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith('会话确认中', '编辑项目简介暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('handleProjectDoubleClick 在 hint-only 期间应仅进入项目而不进入简介编辑态', () => {
+    const enterProject = vi.fn();
+    const handleProjectDoubleClick = vi.fn();
+    const preventDefault = vi.fn();
+    const stopPropagation = vi.fn();
+    const context = {
+      userSession: {
+        isHintOnlyStartupPlaceholderVisible: () => true,
+      },
+      projectCoord: {
+        enterProject,
+        handleProjectDoubleClick,
+      },
+      isSidebarOpen: signal(false),
+    } as unknown as WorkspaceShellComponent;
+
+    WorkspaceShellComponent.prototype.handleProjectDoubleClick.call(context, 'proj-1', {
+      preventDefault,
+      stopPropagation,
+    } as unknown as MouseEvent);
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(enterProject).toHaveBeenCalledWith('proj-1', context.isSidebarOpen);
+    expect(handleProjectDoubleClick).not.toHaveBeenCalled();
   });
 
   it('signalWorkspaceHandoffReady 应只通知一次布局稳定，真正 handoff 交给协调器触发', () => {

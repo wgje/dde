@@ -290,11 +290,18 @@ export class FlowToolbarComponent {
 
   /** 当前视口高度（回退到基准高度） */
   private viewportHeight(): number {
-    if (typeof window !== 'undefined' && window.innerHeight > 0) {
-      return window.innerHeight;
+    if (typeof window !== 'undefined') {
+      const visualHeight = window.visualViewport?.height ?? 0;
+      if (visualHeight > 0) {
+        return visualHeight;
+      }
+      if (window.innerHeight > 0) {
+        return window.innerHeight;
+      }
     }
     return FlowToolbarComponent.MOBILE_BASE_HEIGHT_PX;
   }
+
   
   // 计算移动端工具栏底部位置
   // 抽屉在顶部，工具栏固定在底部
