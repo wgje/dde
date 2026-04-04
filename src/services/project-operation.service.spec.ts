@@ -51,6 +51,7 @@ describe('ProjectOperationService', () => {
     },
     conflictData: vi.fn(() => null),
     resolveConflict: vi.fn().mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) }),
+    resolveConflictWithPlan: vi.fn().mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) }),
     validateAndRebalance: vi.fn((project: Project) => project),
     captureConflict: vi.fn().mockResolvedValue(undefined),
     clearActiveConflict: vi.fn(),
@@ -122,6 +123,7 @@ describe('ProjectOperationService', () => {
     mockSyncCoordinator.core.saveProjectSmart.mockReset();
     mockSyncCoordinator.core.deleteTask.mockReset();
     mockSyncCoordinator.resolveConflict.mockReset();
+    mockSyncCoordinator.resolveConflictWithPlan.mockReset();
     mockSyncCoordinator.captureConflict.mockReset();
     mockSyncCoordinator.loadSingleProjectFromCloud.mockReset();
     mockConflictStorage.getConflict.mockReset();
@@ -130,6 +132,7 @@ describe('ProjectOperationService', () => {
     mockSyncCoordinator.core.saveProjectSmart.mockResolvedValue({ success: false, conflict: false });
     mockSyncCoordinator.core.deleteTask.mockResolvedValue(true);
     mockSyncCoordinator.resolveConflict.mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) });
+    mockSyncCoordinator.resolveConflictWithPlan.mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) });
     mockSyncCoordinator.captureConflict.mockResolvedValue(undefined);
     mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValue(null);
     mockConflictStorage.getConflict.mockResolvedValue(null);
@@ -419,6 +422,65 @@ describe('ProjectOperationService', () => {
       expect.objectContaining({ id: 'proj-remote', name: 'Remote Reloaded', version: 5 })
     );
     expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
+  });
+
+  it('resolveConflictWithPlan 应委托逐任务计划并清理冲突状态', async () => {
+    const localProject = createProject({
+      id: 'proj-plan',
+      name: 'Local Plan',
+      tasks: [{ id: 'task-delete-1' } as Project['tasks'][number]],
+    });
+    const remoteProject = createProject({
+      id: 'proj-plan',
+      name: 'Remote Plan',
+      version: 3,
+      tasks: [{ id: 'task-delete-1' } as Project['tasks'][number]],
+    });
+
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-plan',
+      local: localProject,
+      remote: remoteProject,
+      pendingTaskDeleteIds: ['task-delete-1'],
+    });
+    mockConflictStorage.getConflict.mockResolvedValueOnce({
+      projectId: 'proj-plan',
+      localProject,
+      remoteProject,
+      pendingTaskDeleteIds: ['task-delete-1'],
+    });
+    mockProjectState.getProject.mockReturnValue(localProject);
+    mockSyncCoordinator.resolveConflictWithPlan.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({
+        id: 'proj-plan',
+        name: 'Resolved Plan',
+        version: 4,
+        tasks: [{ id: 'task-delete-1' } as Project['tasks'][number]],
+      }),
+    });
+
+    const resolved = await service.resolveConflictWithPlan('proj-plan', {
+      taskChoices: { 'task-delete-1': 'remote' },
+      appliedBy: 'mixed',
+    });
+
+    const finalProjects = mockProjectState.updateProjects.mock.calls.reduce((projects, call) => {
+      const updater = call[0] as ((items: Project[]) => Project[]);
+      return updater(projects);
+    }, [] as Project[]);
+
+    expect(resolved).toBe(true);
+    expect(mockSyncCoordinator.resolveConflictWithPlan).toHaveBeenCalledWith(
+      'proj-plan',
+      { taskChoices: { 'task-delete-1': 'remote' }, appliedBy: 'mixed' },
+      expect.objectContaining({ id: 'proj-plan', name: 'Local Plan' }),
+      expect.objectContaining({ id: 'proj-plan', name: 'Remote Plan', version: 3 }),
+    );
+    expect(mockSyncCoordinator.resolveConflict).not.toHaveBeenCalled();
+    expect(finalProjects[0]?.tasks.some(task => task.id === 'task-delete-1')).toBe(true);
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalled();
     expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
   });
 

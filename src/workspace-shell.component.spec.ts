@@ -72,6 +72,201 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(previewTask).toHaveBeenCalledWith('task-1');
   });
 
+  it('triggerSyncPulse 在同步层未就绪时不应提前懒加载 pulse 服务', async () => {
+    const getEventDrivenSyncPulseLazy = vi.fn();
+    const context = {
+      isSyncPulseReady: () => false,
+      getEventDrivenSyncPulseLazy,
+    } as unknown as WorkspaceShellComponent;
+
+    await (WorkspaceShellComponent.prototype as unknown as {
+      triggerSyncPulse: (
+        this: WorkspaceShellComponent,
+        reason: 'focus-entry' | 'manual' | 'focus' | 'visible' | 'pageshow' | 'online' | 'heartbeat'
+      ) => Promise<unknown>;
+    }).triggerSyncPulse.call(context, 'focus-entry');
+
+    expect(getEventDrivenSyncPulseLazy).not.toHaveBeenCalled();
+  });
+
+  it('dispatchFocusEntrySyncPulseIfReady 应在 pulse 成功后标记为已派发', async () => {
+    const triggerSyncPulse = vi.fn().mockResolvedValue({ status: 'success' });
+    const clearFocusEntrySyncPulseRetry = vi.fn();
+    const scheduleFocusEntrySyncPulseRetry = vi.fn();
+    const context = {
+      focusModeIntentActivated: () => true,
+      focusEntryPulseDispatched: false,
+      focusEntryPulsePending: false,
+      isSyncPulseReady: () => true,
+      clearFocusEntrySyncPulseRetry,
+      scheduleFocusEntrySyncPulseRetry,
+      triggerSyncPulse,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryPulseDispatched: boolean;
+      focusEntryPulsePending: boolean;
+    };
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+    }).dispatchFocusEntrySyncPulseIfReady.call(context);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(clearFocusEntrySyncPulseRetry).toHaveBeenCalledTimes(1);
+    expect(triggerSyncPulse).toHaveBeenCalledWith('focus-entry');
+    expect(context.focusEntryPulseDispatched).toBe(true);
+    expect(context.focusEntryPulsePending).toBe(false);
+    expect(scheduleFocusEntrySyncPulseRetry).not.toHaveBeenCalled();
+  });
+
+  it('dispatchFocusEntrySyncPulseIfReady 在 pulse 被 cooldown 跳过时应保留补发机会', async () => {
+    const triggerSyncPulse = vi.fn().mockResolvedValue({
+      status: 'skipped',
+      skipReason: 'cooldown',
+      retryAfterMs: 250,
+    });
+    const clearFocusEntrySyncPulseRetry = vi.fn();
+    const scheduleFocusEntrySyncPulseRetry = vi.fn();
+    const context = {
+      focusModeIntentActivated: () => true,
+      focusEntryPulseDispatched: false,
+      focusEntryPulsePending: false,
+      isSyncPulseReady: () => true,
+      clearFocusEntrySyncPulseRetry,
+      scheduleFocusEntrySyncPulseRetry,
+      triggerSyncPulse,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryPulseDispatched: boolean;
+      focusEntryPulsePending: boolean;
+    };
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+    }).dispatchFocusEntrySyncPulseIfReady.call(context);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(clearFocusEntrySyncPulseRetry).toHaveBeenCalledTimes(1);
+    expect(triggerSyncPulse).toHaveBeenCalledWith('focus-entry');
+    expect(context.focusEntryPulseDispatched).toBe(false);
+    expect(context.focusEntryPulsePending).toBe(false);
+    expect(scheduleFocusEntrySyncPulseRetry).toHaveBeenCalledWith('cooldown', 250);
+  });
+
+  it('resetFocusEntrySyncPulseState 应重置会话级 focus-entry 状态并重新挂回首个交互监听', () => {
+    const set = vi.fn();
+    const clearFocusEntrySyncPulseRetry = vi.fn();
+    const teardownFocusMountIntentListener = vi.fn();
+    const setupFocusMountIntentListener = vi.fn();
+    const context = {
+      clearFocusEntrySyncPulseRetry,
+      focusEntryPulsePending: true,
+      focusEntryPulseDispatched: true,
+      focusModeIntentActivated: { set },
+      teardownFocusMountIntentListener,
+      setupFocusMountIntentListener,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryPulsePending: boolean;
+      focusEntryPulseDispatched: boolean;
+    };
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      resetFocusEntrySyncPulseState: (this: WorkspaceShellComponent) => void;
+    }).resetFocusEntrySyncPulseState.call(context);
+
+    expect(clearFocusEntrySyncPulseRetry).toHaveBeenCalledTimes(1);
+    expect(context.focusEntryPulsePending).toBe(false);
+    expect(context.focusEntryPulseDispatched).toBe(false);
+    expect(set).toHaveBeenCalledWith(!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1);
+    expect(teardownFocusMountIntentListener).toHaveBeenCalledTimes(1);
+    expect(setupFocusMountIntentListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatchFocusEntrySyncPulseIfReady 在 owner 切换后不应让旧 promise 回写新会话状态', async () => {
+    let resolvePulse: ((value: { status: 'success' }) => void) | null = null;
+    const triggerSyncPulse = vi.fn().mockImplementation(() => new Promise((resolve) => {
+      resolvePulse = resolve as (value: { status: 'success' }) => void;
+    }));
+    const clearFocusEntrySyncPulseRetry = vi.fn();
+    const teardownFocusMountIntentListener = vi.fn();
+    const setupFocusMountIntentListener = vi.fn();
+    const set = vi.fn();
+    const focusModeIntentActivated = Object.assign(() => true, { set });
+    const context = {
+      focusModeIntentActivated,
+      focusEntryPulseGeneration: 0,
+      focusEntryPulseDispatched: false,
+      focusEntryPulsePending: false,
+      isSyncPulseReady: () => true,
+      clearFocusEntrySyncPulseRetry,
+      scheduleFocusEntrySyncPulseRetry: vi.fn(),
+      triggerSyncPulse,
+      teardownFocusMountIntentListener,
+      setupFocusMountIntentListener,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryPulseGeneration: number;
+      focusEntryPulseDispatched: boolean;
+      focusEntryPulsePending: boolean;
+    };
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+    }).dispatchFocusEntrySyncPulseIfReady.call(context);
+
+    expect(context.focusEntryPulsePending).toBe(true);
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      resetFocusEntrySyncPulseState: (this: WorkspaceShellComponent, rearmIntentListener?: boolean) => void;
+    }).resetFocusEntrySyncPulseState.call(context, true);
+
+    resolvePulse?.({ status: 'success' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(context.focusEntryPulseDispatched).toBe(false);
+    expect(context.focusEntryPulsePending).toBe(false);
+    expect(context.focusEntryPulseGeneration).toBe(1);
+  });
+
+  it('dispatchFocusEntrySyncPulseIfReady 应在同步层就绪后只补发一次 focus-entry', async () => {
+    const triggerSyncPulse = vi.fn().mockResolvedValue({ status: 'success' });
+    const clearFocusEntrySyncPulseRetry = vi.fn();
+    const scheduleFocusEntrySyncPulseRetry = vi.fn();
+    const context = {
+      focusModeIntentActivated: () => true,
+      focusEntryPulseDispatched: false,
+      focusEntryPulsePending: false,
+      isSyncPulseReady: () => true,
+      clearFocusEntrySyncPulseRetry,
+      scheduleFocusEntrySyncPulseRetry,
+      triggerSyncPulse,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryPulseDispatched: boolean;
+      focusEntryPulsePending: boolean;
+    };
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+    }).dispatchFocusEntrySyncPulseIfReady.call(context);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(triggerSyncPulse).toHaveBeenCalledTimes(1);
+
+    triggerSyncPulse.mockClear();
+    (WorkspaceShellComponent.prototype as unknown as {
+      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+    }).dispatchFocusEntrySyncPulseIfReady.call(context);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(triggerSyncPulse).not.toHaveBeenCalled();
+  });
+
   it('focus workspace takeover 应覆盖进入与退出过渡', () => {
     const enteringContext = {
       resolveFocusWorkspaceTakeoverPhase: () => 'entering',
@@ -571,6 +766,61 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(schedulePersistDeferred).not.toHaveBeenCalled();
   });
 
+  it('setupFocusEntryOwnerEffect 应在 owner 切换后再复位并重挂 focus-entry 监听', () => {
+    const currentUserId = signal<string | null>(null);
+    const resetFocusEntrySyncPulseState = vi.fn();
+    const scheduledEffects: Array<{ run: () => void }> = [];
+    const injector = Injector.create({
+      providers: [
+        {
+          provide: ChangeDetectionScheduler,
+          useValue: {
+            notify: vi.fn(),
+            runningTick: false,
+          } satisfies ChangeDetectionScheduler,
+        },
+        {
+          provide: EffectScheduler,
+          useValue: {
+            schedule: (effect: { run: () => void }) => {
+              scheduledEffects.push(effect);
+            },
+            flush: () => {
+              while (scheduledEffects.length > 0) {
+                scheduledEffects.shift()?.run();
+              }
+            },
+            remove: vi.fn(),
+          } satisfies EffectScheduler,
+        },
+      ],
+    });
+    const context = {
+      currentUserId,
+      focusEntryOwnerScope: undefined,
+      resetFocusEntrySyncPulseState,
+    } as unknown as WorkspaceShellComponent & {
+      focusEntryOwnerScope: string | null | undefined;
+    };
+
+    runInInjectionContext(injector, () => {
+      (WorkspaceShellComponent.prototype as unknown as {
+        setupFocusEntryOwnerEffect: (this: WorkspaceShellComponent) => void;
+      }).setupFocusEntryOwnerEffect.call(context);
+    });
+    injector.get(EffectScheduler).flush();
+
+    expect(resetFocusEntrySyncPulseState).not.toHaveBeenCalled();
+
+    currentUserId.set('user-1');
+    injector.get(EffectScheduler).flush();
+    expect(resetFocusEntrySyncPulseState).toHaveBeenCalledWith(true);
+
+    currentUserId.set(null);
+    injector.get(EffectScheduler).flush();
+    expect(resetFocusEntrySyncPulseState).toHaveBeenLastCalledWith(false);
+  });
+
   it('setupSessionInvalidatedHandler 应取消 launch snapshot 写入并清空旧 owner 视图', async () => {
     const sessionInvalidated$ = new Subject<{ type: 'session-invalidated'; source: string; userId: string | null }>();
     const cancelPendingPersist = vi.fn();
@@ -578,6 +828,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     const unsubscribeFromProject = vi.fn().mockResolvedValue(undefined);
     const setCurrentUser = vi.fn().mockResolvedValue(undefined);
     const destroySyncPulse = vi.fn();
+    const resetFocusEntrySyncPulseState = vi.fn();
     const destroyCallbacks: Array<() => void> = [];
     const context = {
       eventBus: {
@@ -603,6 +854,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         setCurrentUser,
       },
       destroySyncPulse,
+      resetFocusEntrySyncPulseState,
       subscribedProjectId: 'project-1',
     } as unknown as WorkspaceShellComponent;
 
@@ -621,6 +873,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(stopRuntime).toHaveBeenCalledTimes(1);
     expect(unsubscribeFromProject).toHaveBeenCalledTimes(1);
     expect(destroySyncPulse).toHaveBeenCalledTimes(1);
+    expect(resetFocusEntrySyncPulseState).toHaveBeenCalledWith(false);
     expect(setCurrentUser).toHaveBeenCalledWith(null, {
       skipPersistentReload: true,
       previousUserIdHint: 'stale-user',
@@ -642,6 +895,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       currentUserId = userId;
     });
     const destroySyncPulse = vi.fn();
+    const resetFocusEntrySyncPulseState = vi.fn();
     const context = {
       eventBus: {
         onSessionRestored$: sessionRestored$.asObservable(),
@@ -671,6 +925,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         isTierReady: vi.fn().mockReturnValue(true),
       },
       destroySyncPulse,
+      resetFocusEntrySyncPulseState,
       currentUserId: () => currentUserId,
       subscribedProjectId: 'project-1',
     } as unknown as WorkspaceShellComponent;
@@ -691,6 +946,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(stopRuntime).toHaveBeenCalledTimes(1);
     expect(unsubscribeFromProject).toHaveBeenCalledTimes(1);
     expect(destroySyncPulse).toHaveBeenCalledTimes(1);
+    expect(resetFocusEntrySyncPulseState).toHaveBeenCalledWith(false);
     expect(setCurrentUser).toHaveBeenCalledWith('new-user', {
       forceLoad: true,
     });
@@ -698,6 +954,29 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(startRuntime).toHaveBeenCalledTimes(1);
     expect((context as unknown as { launchSnapshotWriteBlocked: ReturnType<typeof signal<boolean>> }).launchSnapshotWriteBlocked()).toBe(false);
     expect((context as unknown as { subscribedProjectId: string | null }).subscribedProjectId).toBeNull();
+  });
+
+  it('signOut 应复位 focus-entry 状态，避免下个会话复用旧 intent', async () => {
+    const resetFocusEntrySyncPulseState = vi.fn();
+    const destroySyncPulse = vi.fn();
+    const signOut = vi.fn().mockResolvedValue(undefined);
+    const clearState = vi.fn();
+    const set = vi.fn();
+    const context = {
+      resetFocusEntrySyncPulseState,
+      destroySyncPulse,
+      authCoord: { signOut },
+      projectCoord: { clearState },
+      unifiedSearchQuery: { set },
+    } as unknown as WorkspaceShellComponent;
+
+    await WorkspaceShellComponent.prototype.signOut.call(context);
+
+    expect(resetFocusEntrySyncPulseState).toHaveBeenCalledWith(false);
+    expect(destroySyncPulse).toHaveBeenCalledTimes(1);
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(clearState).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith('');
   });
 
   it('syncStateFromRoute 应在 /projects 根路由回填启动项目，避免主内容空壳', () => {

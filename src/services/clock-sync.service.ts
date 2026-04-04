@@ -293,6 +293,7 @@ export class ClockSyncService {
       const { data, error } = await this.supabase.client()
         .from('projects')
         .select('id')
+        .is('deleted_at', null)
         .limit(1);
       
       const clientTimeEnd = new Date();

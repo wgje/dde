@@ -50,7 +50,7 @@ interface IDBBlackBoxEntry extends BlackBoxEntry {
 type RetryQueueHandler = (entry: BlackBoxEntry) => void;
 
 export interface PullChangesOptions {
-  reason?: 'startup' | 'resume' | 'manual';
+  reason?: 'startup' | 'resume' | 'manual' | 'panel-open' | 'gate-review';
   force?: boolean;
 }
 
@@ -598,19 +598,21 @@ export class BlackBoxSyncService {
         level: 'info',
         data: { reason, elapsedSec, freshnessWindow: freshnessWindow / 1000 },
       });
-      // 【可观测性 2026-02-18】上报重复拉取阻断事件，用于 Sentry 告警聚合
-      this.sentryLazyLoader.captureMessage('BlackBox duplicate pull blocked', {
-        level: 'info',
-        tags: {
-          operation: 'pullChanges',
-          classification: 'duplicate_blocked'
-        },
-        extra: {
-          reason,
-          elapsedSec,
-          freshnessWindowSec: freshnessWindow / 1000
-        }
-      });
+      // 仅对真正的手动刷新保留事件上报；面板挂载/门禁轮询等被动刷新只记 breadcrumb，避免制造告警噪音。
+      if (reason === 'manual') {
+        this.sentryLazyLoader.captureMessage('BlackBox duplicate pull blocked', {
+          level: 'info',
+          tags: {
+            operation: 'pullChanges',
+            classification: 'duplicate_blocked'
+          },
+          extra: {
+            reason,
+            elapsedSec,
+            freshnessWindowSec: freshnessWindow / 1000
+          }
+        });
+      }
       return;
     }
 

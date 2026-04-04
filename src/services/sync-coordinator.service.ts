@@ -24,6 +24,7 @@ import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
 import { ProjectSyncOperationsService } from './project-sync-operations.service';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
+import { type ConflictResolutionPlan } from './conflict-resolution.types';
 import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
@@ -288,13 +289,38 @@ export class SyncCoordinatorService {
    * 确保本地的软删除状态不会被远程数据覆盖
    */
   private async downloadAndMerge(userId: string): Promise<void> {
-    const remoteProjects = await this.core.loadProjectsFromCloud(userId, true);
-    if (remoteProjects.length === 0) {
+    const remoteProjectMetas = await this.core.loadProjectListMetadataFromCloud(userId);
+    if (remoteProjectMetas === null) {
+      this.logger.warn('远端项目元数据获取失败，已跳过 download merge', { userId });
       return;
     }
+
+    const accessibleProjectIds = new Set(remoteProjectMetas.map(project => project.id));
+    const remoteProjects = remoteProjectMetas.length > 0
+      ? await this.core.loadProjectsFromCloud(userId, true)
+      : [];
+
+    if (remoteProjectMetas.length > 0 && remoteProjects.length === 0) {
+      this.logger.warn('远端项目元数据存在，但完整项目下载为空，已跳过 download merge', {
+        userId,
+        remoteCount: remoteProjectMetas.length,
+      });
+      return;
+    }
+
     const localProjects = this.projectState.projects();
     const localProjectMap = new Map(localProjects.map(p => [p.id, p]));
     const remoteProjectMap = new Map(remoteProjects.map(p => [p.id, p]));
+    const missingRemoteProjectMetas = remoteProjectMetas.filter(project => !remoteProjectMap.has(project.id));
+
+    if (missingRemoteProjectMetas.length > 0) {
+      this.logger.warn('远端完整项目下载不完整，缺失项目将保留本地或回退为 metadata 壳', {
+        userId,
+        missingProjectIds: missingRemoteProjectMetas.map(project => project.id),
+        remoteMetaCount: remoteProjectMetas.length,
+        remoteLoadedCount: remoteProjects.length,
+      });
+    }
     
     // 智能合并每个项目
     const mergedProjects: Project[] = [];
@@ -328,6 +354,20 @@ export class SyncCoordinatorService {
       }));
     }
 
+    for (const remoteMeta of missingRemoteProjectMetas) {
+      if (localProjectMap.has(remoteMeta.id)) {
+        continue;
+      }
+
+      mergedProjects.push(this.validateAndRebalance({
+        ...remoteMeta,
+        tasks: Array.isArray(remoteMeta.tasks) ? remoteMeta.tasks : [],
+        connections: Array.isArray(remoteMeta.connections) ? remoteMeta.connections : [],
+        syncSource: 'synced',
+        pendingSync: false,
+      }));
+    }
+
     // 保留 local-only 项目，禁止下载覆盖丢失
     for (const localProject of localProjects) {
       if (remoteProjectMap.has(localProject.id)) {
@@ -338,22 +378,20 @@ export class SyncCoordinatorService {
         || this.changeTracker.hasProjectChanges(localProject.id)
         || this.hasPendingChangesForProject(localProject.id);
 
-      // 【P0-10 修复】即使没有待同步变更，含有实际数据的项目也不应被静默删除
-      // 只有真正空的项目才允许被服务器删除操作清理
-      const hasSubstantialData = (localProject.tasks?.length ?? 0) > 0;
-
-      if (!hasPendingChanges && !hasSubstantialData) {
-        this.logger.info('跳过无数据且无待同步改动的 local-only 项目', {
-          projectId: localProject.id
-        });
+      if (accessibleProjectIds.has(localProject.id)) {
+        mergedProjects.push(this.validateAndRebalance({
+          ...localProject,
+          syncSource: 'synced',
+          pendingSync: hasPendingChanges,
+        }));
         continue;
       }
 
-      if (!hasPendingChanges && hasSubstantialData) {
-        this.logger.warn('本地存在含数据的项目但服务器不存在，保守保留', {
-          projectId: localProject.id,
-          taskCount: localProject.tasks?.length
+      if (!hasPendingChanges && localProject.syncSource !== 'local-only') {
+        this.logger.info('远端缺席且无待同步改动，已裁剪本地 synced 项目', {
+          projectId: localProject.id
         });
+        continue;
       }
 
       mergedProjects.push(this.validateAndRebalance({
@@ -365,6 +403,12 @@ export class SyncCoordinatorService {
     
     // 更新本地状态
     this.projectState.setProjects(mergedProjects);
+
+    const activeProjectId = this.projectState.activeProjectId() ?? this.projectState.activeProject()?.id ?? null;
+    if (activeProjectId && !mergedProjects.some(project => project.id === activeProjectId)) {
+      this.projectState.setActiveProjectId(mergedProjects[0]?.id ?? null);
+    }
+
     this.core.saveOfflineSnapshot(mergedProjects);
   }
 
@@ -1060,7 +1104,7 @@ export class SyncCoordinatorService {
    */
   async refreshProjectManifestIfNeeded(
     reason: string,
-    options?: { prefetchedRemoteWatermark?: string | null }
+    options?: { prefetchedRemoteWatermark?: string | null; deferCommit?: boolean }
   ): Promise<{ skipped: boolean; watermark?: string }> {
     if (!FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1) {
       return { skipped: false };
@@ -1102,7 +1146,9 @@ export class SyncCoordinatorService {
 
     // 冷启动/本地无水位时，不执行头信息 RPC，直接交由慢路元数据同步。
     if (!hasValidLocalWatermark) {
-      this.writeProjectManifestWatermark(remoteWatermark, userId);
+      if (!options?.deferCommit) {
+        this.writeProjectManifestWatermark(remoteWatermark, userId);
+      }
       this.sentryLazyLoader.addBreadcrumb({
         category: 'sync',
         message: 'manifest.refresh.cold_start_deferred',
@@ -1127,7 +1173,9 @@ export class SyncCoordinatorService {
       }));
     }
 
-    this.writeProjectManifestWatermark(remoteWatermark, userId);
+    if (!options?.deferCommit) {
+      this.writeProjectManifestWatermark(remoteWatermark, userId);
+    }
     this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: 'manifest.refresh.applied',
@@ -1141,6 +1189,10 @@ export class SyncCoordinatorService {
     });
     // heads 为空并不代表远端无变更，不允许据此跳过后续慢路。
     return { skipped: false, watermark: remoteWatermark };
+  }
+
+  commitProjectManifestWatermark(watermark: string, userId?: string | null): void {
+    this.writeProjectManifestWatermark(watermark, userId ?? this.authService.currentUserId());
   }
 
   /**
@@ -1370,6 +1422,20 @@ export class SyncCoordinatorService {
       choice,
       localProject,
       remoteProject
+    );
+  }
+
+  async resolveConflictWithPlan(
+    projectId: string,
+    plan: ConflictResolutionPlan,
+    localProject: Project,
+    remoteProject: Project | undefined,
+  ): Promise<Result<Project, OperationError>> {
+    return this.conflictService.resolveConflictWithPlan(
+      projectId,
+      plan,
+      localProject,
+      remoteProject,
     );
   }
 

@@ -1,6 +1,7 @@
 import { Component, computed, input, output, signal, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Task } from '../../../models';
+import type { TaskResolutionRecommendation } from '../../../services/conflict-auto-resolver.service';
 
 /** 单个字段的差异描述 */
 export interface FieldDiff {
@@ -10,7 +11,7 @@ export interface FieldDiff {
   remoteValue: string;
 }
 
-/** 增强的任务差异条目，包含字段级差异 */
+/** 增强的任务差异条目，包含字段级差异和系统推荐 */
 export interface TaskDiffItem {
   id: string;
   title: string;
@@ -20,6 +21,8 @@ export interface TaskDiffItem {
   fieldDiffs: FieldDiff[];
   /** 用户为此任务选择的保留策略（仅 selectable 模式） */
   resolution: 'local' | 'remote' | 'auto';
+  /** 系统自动解决推荐（来自 ConflictAutoResolverService） */
+  recommendation?: TaskResolutionRecommendation;
 }
 
 /** 用户对每个任务的保留选择映射 */
@@ -73,7 +76,7 @@ type FilterType = 'all' | 'modified' | 'local-only' | 'remote-only';
           <div class="flex items-center gap-2 px-3 py-2 cursor-pointer select-none"
                (click)="toggleExpand(diff.id)">
             <!-- 选择性保留 toggle（仅 modified 时可选） -->
-            @if (selectable() && diff.status === 'modified') {
+            @if (selectable() && diff.status !== 'same') {
               <div class="flex gap-0.5 rounded-md overflow-hidden border border-stone-200 dark:border-stone-600 flex-shrink-0"
                    (click)="$event.stopPropagation()">
                 <button
@@ -104,6 +107,20 @@ type FilterType = 'all' | 'modified' | 'local-only' | 'remote-only';
               {{ getStatusLabel(diff.status) }}
             </span>
 
+            <!-- 系统推荐标签 -->
+            @if (diff.recommendation && diff.status === 'modified') {
+              <span class="px-1.5 py-0.5 rounded text-[9px] font-medium flex-shrink-0"
+                    [ngClass]="{
+                      'bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400': diff.recommendation.confidence === 'auto',
+                      'bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400': diff.recommendation.confidence === 'suggest',
+                      'bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400': diff.recommendation.confidence === 'manual'
+                    }">
+                {{ getConfidenceLabel(diff.recommendation.confidence) }}
+                →
+                {{ diff.recommendation.recommendation === 'local' ? '本地' : '云端' }}
+              </span>
+            }
+
             <!-- 任务标题 -->
             <span class="flex-1 text-xs text-stone-700 dark:text-stone-200 truncate">
               {{ diff.title }}
@@ -123,6 +140,37 @@ type FilterType = 'all' | 'modified' | 'local-only' | 'remote-only';
               <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
             </svg>
           </div>
+
+          <!-- 系统推荐理由（展开时显示） -->
+          @if (isExpanded(diff.id) && diff.recommendation && diff.status !== 'same') {
+            <div class="mx-3 mb-2 p-2 rounded-lg text-[10px] border"
+                 [ngClass]="{
+                   'bg-green-50/50 dark:bg-green-900/10 border-green-100 dark:border-green-800/40': diff.recommendation.confidence === 'auto',
+                   'bg-sky-50/50 dark:bg-sky-900/10 border-sky-100 dark:border-sky-800/40': diff.recommendation.confidence === 'suggest',
+                   'bg-orange-50/50 dark:bg-orange-900/10 border-orange-100 dark:border-orange-800/40': diff.recommendation.confidence === 'manual'
+                 }">
+              <div class="flex items-center gap-1.5 mb-1">
+                <span class="font-medium text-stone-600 dark:text-stone-300">系统判断：</span>
+                <span class="text-stone-700 dark:text-stone-200">{{ diff.recommendation.reason }}</span>
+              </div>
+              <!-- 详细推理过程（可展开） -->
+              <button
+                (click)="toggleReasoningExpand(diff.id); $event.stopPropagation()"
+                class="text-[9px] text-stone-400 dark:text-stone-500 hover:text-stone-600 dark:hover:text-stone-300 underline">
+                {{ isReasoningExpanded(diff.id) ? '收起推理过程' : '查看推理过程' }}
+              </button>
+              @if (isReasoningExpanded(diff.id)) {
+                <ul class="mt-1 space-y-0.5 text-stone-500 dark:text-stone-400 pl-3">
+                  @for (step of diff.recommendation.reasoning; track $index) {
+                    <li class="flex items-start gap-1">
+                      <span class="text-[9px] mt-0.5 flex-shrink-0">{{ $index + 1 }}.</span>
+                      <span>{{ step }}</span>
+                    </li>
+                  }
+                </ul>
+              }
+            </div>
+          }
 
           <!-- 展开的字段级差异对比 -->
           @if (isExpanded(diff.id) && diff.status === 'modified') {
@@ -180,10 +228,10 @@ type FilterType = 'all' | 'modified' | 'local-only' | 'remote-only';
     </div>
 
     <!-- 选择性保留汇总（仅 selectable 模式） -->
-    @if (selectable() && modifiedCount() > 0) {
+    @if (selectable() && selectableDiffCount() > 0) {
       <div class="mt-3 px-3 py-2 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-700 text-[10px] text-violet-700 dark:text-violet-300 flex items-center justify-between">
         <span>
-          已选择: {{ resolvedCount() }} / {{ modifiedCount() }} 个冲突任务
+          已选择: {{ resolvedCount() }} / {{ selectableDiffCount() }} 个差异任务
         </span>
         <div class="flex gap-2">
           <button
@@ -208,6 +256,8 @@ export class ConflictTaskDiffComponent {
   remoteTasks = input<Task[]>([]);
   /** 是否允许用户逐任务选择保留策略 */
   selectable = input(false);
+  /** 系统自动解决推荐列表 */
+  recommendations = input<TaskResolutionRecommendation[]>([]);
 
   /** 当用户更改任务保留选择时触发 */
   selectionChange = output<TaskResolutionMap>();
@@ -217,6 +267,17 @@ export class ConflictTaskDiffComponent {
   private readonly expandedIds = signal<Set<string>>(new Set());
   /** 存储用户逐任务选择的保留策略 */
   private readonly resolutions = signal<Map<string, 'local' | 'remote'>>(new Map());
+  /** 存储展开推荐理由的任务 ID */
+  private readonly expandedReasoningIds = signal<Set<string>>(new Set());
+
+  /** 推荐映射（快速查找） */
+  private readonly recommendationMap = computed(() => {
+    const map = new Map<string, TaskResolutionRecommendation>();
+    for (const rec of this.recommendations()) {
+      map.set(rec.taskId, rec);
+    }
+    return map;
+  });
 
   readonly filters: { type: FilterType; label: string }[] = [
     { type: 'all', label: '全部' },
@@ -229,6 +290,7 @@ export class ConflictTaskDiffComponent {
   readonly allDiffs = computed<TaskDiffItem[]>(() => {
     const local = this.localTasks();
     const remote = this.remoteTasks();
+    const recMap = this.recommendationMap();
 
     const localMap = new Map<string, Task>(local.map(t => [t.id, t]));
     const remoteMap = new Map<string, Task>(remote.map(t => [t.id, t]));
@@ -239,6 +301,7 @@ export class ConflictTaskDiffComponent {
     allIds.forEach(id => {
       const lt = localMap.get(id);
       const rt = remoteMap.get(id);
+      const rec = recMap.get(id);
 
       if (lt && rt) {
         const fieldDiffs = this.compareFields(lt, rt);
@@ -250,6 +313,7 @@ export class ConflictTaskDiffComponent {
           status: fieldDiffs.length === 0 ? 'same' : 'modified',
           fieldDiffs,
           resolution: 'auto',
+          recommendation: rec,
         });
       } else if (lt) {
         diffs.push({
@@ -260,6 +324,7 @@ export class ConflictTaskDiffComponent {
           status: 'local-only',
           fieldDiffs: this.describeTask(lt, 'local'),
           resolution: 'local',
+          recommendation: rec,
         });
       } else {
         diffs.push({
@@ -270,6 +335,7 @@ export class ConflictTaskDiffComponent {
           status: 'remote-only',
           fieldDiffs: this.describeTask(rt!, 'remote'),
           resolution: 'remote',
+          recommendation: rec,
         });
       }
     });
@@ -287,6 +353,7 @@ export class ConflictTaskDiffComponent {
   });
 
   readonly modifiedCount = computed(() => this.allDiffs().filter(d => d.status === 'modified').length);
+  readonly selectableDiffCount = computed(() => this.allDiffs().filter(d => d.status !== 'same').length);
   readonly resolvedCount = computed(() => this.resolutions().size);
 
   countByStatus(status: FilterType): number {
@@ -305,6 +372,27 @@ export class ConflictTaskDiffComponent {
     return this.expandedIds().has(id);
   }
 
+  toggleReasoningExpand(id: string): void {
+    this.expandedReasoningIds.update(set => {
+      const next = new Set(set);
+      if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+  }
+
+  isReasoningExpanded(id: string): boolean {
+    return this.expandedReasoningIds().has(id);
+  }
+
+  getConfidenceLabel(confidence: 'auto' | 'suggest' | 'manual'): string {
+    const labels: Record<string, string> = {
+      auto: '自动',
+      suggest: '建议',
+      manual: '需确认',
+    };
+    return labels[confidence] || confidence;
+  }
+
   setResolution(taskId: string, resolution: 'local' | 'remote'): void {
     this.resolutions.update(map => {
       const next = new Map(map);
@@ -319,10 +407,10 @@ export class ConflictTaskDiffComponent {
   }
 
   setAllResolutions(resolution: 'local' | 'remote'): void {
-    const modifiedIds = this.allDiffs().filter(d => d.status === 'modified').map(d => d.id);
+    const diffIds = this.allDiffs().filter(d => d.status !== 'same').map(d => d.id);
     this.resolutions.update(() => {
       const next = new Map<string, 'local' | 'remote'>();
-      modifiedIds.forEach(id => next.set(id, resolution));
+      diffIds.forEach(id => next.set(id, resolution));
       return next;
     });
     this.selectionChange.emit(this.resolutions());
@@ -350,6 +438,15 @@ export class ConflictTaskDiffComponent {
       { key: 'tags', label: '标签', format: v => (v as string[] || []).join(', ') },
       { key: 'expected_minutes', label: '预估耗时', format: v => v ? `${v} 分钟` : '' },
       { key: 'cognitive_load', label: '认知负荷', format: v => v === 'high' ? '高' : v === 'low' ? '低' : '' },
+      { key: 'wait_minutes', label: '等待时间', format: v => v ? `${v} 分钟` : '' },
+      { key: 'attachments', label: '附件', format: v => this.formatAttachments(v) },
+      { key: 'parkingMeta', label: '停泊状态', format: v => this.formatJson(v) },
+      { key: 'stage', label: '阶段', format: v => String(v ?? '') },
+      { key: 'order', label: '排序', format: v => String(v ?? '') },
+      { key: 'parentId', label: '父任务', format: v => String(v ?? '') },
+      { key: 'rank', label: '层级排序', format: v => String(v ?? '') },
+      { key: 'x', label: 'X坐标', format: v => String(v ?? '') },
+      { key: 'y', label: 'Y坐标', format: v => String(v ?? '') },
     ];
 
     for (const f of fields) {
@@ -390,7 +487,10 @@ export class ConflictTaskDiffComponent {
     if (a === b) return true;
     if (a == null && b == null) return true;
     if (Array.isArray(a) && Array.isArray(b)) {
-      return a.length === b.length && a.every((v, i) => v === b[i]);
+      return JSON.stringify(a) === JSON.stringify(b);
+    }
+    if (typeof a === 'object' && typeof b === 'object' && a !== null && b !== null) {
+      return JSON.stringify(a) === JSON.stringify(b);
     }
     return false;
   }
@@ -407,5 +507,34 @@ export class ConflictTaskDiffComponent {
   private formatPriority(priority: string): string {
     const map: Record<string, string> = { low: '低', medium: '中', high: '高', urgent: '紧急' };
     return map[priority] || priority;
+  }
+
+  private formatJson(value: unknown): string {
+    if (value == null) {
+      return '';
+    }
+
+    try {
+      return this.truncate(JSON.stringify(value), 120);
+    } catch {
+      return String(value);
+    }
+  }
+
+  private formatAttachments(value: unknown): string {
+    if (!Array.isArray(value) || value.length === 0) {
+      return '';
+    }
+
+    return value
+      .map(item => {
+        if (typeof item !== 'object' || item === null) {
+          return String(item);
+        }
+
+        const attachment = item as { name?: string; id?: string; url?: string };
+        return attachment.name || attachment.id || attachment.url || '附件';
+      })
+      .join(', ');
   }
 }

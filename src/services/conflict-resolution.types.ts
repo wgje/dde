@@ -14,6 +14,22 @@ import { Project } from '../models';
 export type ConflictResolutionStrategy = 'local' | 'remote' | 'merge';
 
 /**
+ * 单个任务的冲突保留策略
+ */
+export type TaskResolutionChoice = 'local' | 'remote';
+
+/**
+ * 逐任务冲突解决计划
+ *
+ * 用于把“系统建议 + 用户覆写”转成稳定的任务级决议，
+ * 确保最终落盘结果与 UI 展示一致。
+ */
+export interface ConflictResolutionPlan {
+  taskChoices: Record<string, TaskResolutionChoice>;
+  appliedBy?: 'system' | 'user' | 'mixed';
+}
+
+/**
  * 合并结果
  */
 export interface MergeResult {

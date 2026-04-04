@@ -152,7 +152,7 @@ export class DataPreloaderService {
       }
     }).catch(function(e) { console.debug('[Preloader] 预加载 serverTime 失败', e); });
 
-    fetch(baseUrl + '/projects?select=id,title,updated_at&order=updated_at.desc', {
+    fetch(baseUrl + '/projects?select=id,title,updated_at&deleted_at=is.null&order=updated_at.desc', {
       headers: headers
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (window.__PRELOADED_DATA__) {

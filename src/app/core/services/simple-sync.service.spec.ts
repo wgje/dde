@@ -200,7 +200,8 @@ describe('SimpleSyncService', () => {
     
     mockSupabase = {
       isConfigured: false,
-      client: vi.fn().mockReturnValue(null)
+      client: vi.fn().mockReturnValue(null),
+      clientAsync: vi.fn().mockResolvedValue(mockClient)
     };
     
     // Create a consistent category logger mock
@@ -3136,6 +3137,31 @@ describe('SimpleSyncService', () => {
   // ==================== P0 修复：Session Refresh 自动恢复 ====================
   // 【技术债务重构】此测试组测试 pushProject 的错误处理逻辑
   // 需要根据新架构重新设计
+  describe('项目软删除', () => {
+    it('deleteProjectFromCloud 应通过 deleted_at 软删除项目行', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+
+      const eqOwner = vi.fn().mockResolvedValue({ error: null });
+      const eqId = vi.fn().mockReturnValue({ eq: eqOwner });
+      const update = vi.fn().mockReturnValue({ eq: eqId });
+
+      mockClient.from = vi.fn().mockReturnValue({ update });
+
+      const result = await service.deleteProjectFromCloud('project-1', 'user-1');
+
+      expect(result).toBe(true);
+      expect(mockClient.from).toHaveBeenCalledWith('projects');
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(eqId).toHaveBeenCalledWith('id', 'project-1');
+      expect(eqOwner).toHaveBeenCalledWith('owner_id', 'user-1');
+
+      const payload = update.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(payload).toHaveProperty('deleted_at');
+      expect(typeof payload['deleted_at']).toBe('string');
+    });
+  });
+
   describe.skip('【P0 修复】Session Expired 自动刷新恢复', () => {
     
     // 在每个测试前设置 Supabase 为已配置状态

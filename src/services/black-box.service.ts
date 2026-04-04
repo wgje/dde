@@ -18,7 +18,9 @@ import {
 } from '../state/focus-stores';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
+import { LoggerService } from './logger.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import type { PullChangesOptions } from './black-box-sync.service';
 
 @Injectable({
   providedIn: 'root'
@@ -26,6 +28,9 @@ import { AUTH_CONFIG } from '../config/auth.config';
 export class BlackBoxService {
   private syncService = inject(BlackBoxSyncService);
   private auth = inject(AuthService);
+  private readonly logger = inject(LoggerService).category('BlackBox');
+  private localHydrationPromise: Promise<void> | null = null;
+  private localHydratedUserKey: string | null = null;
   
   /**
    * 按日期分组的条目（暴露给组件）
@@ -259,8 +264,53 @@ export class BlackBoxService {
   /**
    * 从服务器加载条目
    */
-  async loadFromServer(): Promise<void> {
-    await this.syncService.pullChanges({ reason: 'manual' });
+  async loadFromServer(reason: PullChangesOptions['reason'] = 'manual'): Promise<void> {
+    await this.syncService.pullChanges({ reason });
+  }
+
+  /**
+   * 视图打开时先补本地快照，再走一次轻量远端刷新。
+   * 远端刷新会经过 watermark/single-flight/freshness window 去重。
+   */
+  async refreshForView(): Promise<void> {
+    await this.ensureLocalEntriesLoaded();
+    await this.loadFromServer('panel-open');
+  }
+
+  /**
+   * 确保面板首屏至少拿到本地快照。
+   *
+   * 说明：BlackBox 的远端刷新由启动/恢复协调器统一负责，
+   * 视图挂载时只做本地水合，避免切换 Tab 重复触发 manual pull。
+   */
+  async ensureLocalEntriesLoaded(): Promise<void> {
+    const hydrationKey = this.resolveLocalHydrationKey();
+    if (this.localHydratedUserKey === hydrationKey) {
+      return;
+    }
+
+    if (this.localHydrationPromise) {
+      return this.localHydrationPromise;
+    }
+
+    this.localHydrationPromise = this.syncService.loadFromLocal()
+      .then(() => {
+        this.localHydratedUserKey = hydrationKey;
+      })
+      .catch((error: unknown) => {
+        this.logger.debug('本地黑匣子快照水合失败', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        this.localHydrationPromise = null;
+      });
+
+    await this.localHydrationPromise;
+  }
+
+  private resolveLocalHydrationKey(): string {
+    return this.resolveEffectiveUserId() ?? '__anonymous__';
   }
   
   /**

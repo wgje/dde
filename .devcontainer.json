@@ -1,0 +1,35 @@
+{
+  "name": "NanoFlow DDE",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-noble",
+  "runArgs": [
+    "--cap-add=SYS_ADMIN",
+    "--security-opt",
+    "seccomp=unconfined"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "postCreateCommand": "npm ci && npx playwright install --with-deps chromium",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "Angular.ng-template",
+        "ms-vscode.vscode-typescript-next",
+        "GitHub.copilot",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true,
+        "[typescript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        }
+      }
+    }
+  },
+  "remoteEnv": {
+    "BROWSER": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "CHROME_PATH": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "PUPPETEER_EXECUTABLE_PATH": "/home/vscode/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+  }
+}

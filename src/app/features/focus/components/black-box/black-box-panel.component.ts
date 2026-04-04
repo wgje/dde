@@ -112,11 +112,11 @@ export class BlackBoxPanelComponent implements OnInit {
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   
   /**
-   * 组件初始化时从服务器加载数据
+   * 组件初始化时先补本地快照，再走轻量远端刷新。
+   * 远端刷新会被 single-flight 与 freshness window 去重，不再误报 manual pull。
    */
   ngOnInit(): void {
-    // 加载黑匣子数据（如果尚未加载）
-    this.blackBoxService.loadFromServer();
+    void this.blackBoxService.refreshForView();
   }
   
   /**

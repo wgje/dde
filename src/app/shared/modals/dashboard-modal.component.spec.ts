@@ -8,6 +8,8 @@ import { ConflictStorageService } from '../../../services/conflict-storage.servi
 import { ProjectOperationService } from '../../../services/project-operation.service';
 import { ToastService } from '../../../services/toast.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
+import { ConflictAutoResolverService } from '../../../services/conflict-auto-resolver.service';
+import { LoggerService } from '../../../services/logger.service';
 
 function createConflictRecord(remoteSnapshotFresh = false) {
   const now = '2026-03-30T00:00:00.000Z';
@@ -82,6 +84,7 @@ describe('DashboardModalComponent conflict resolution', () => {
 
   const projectOpsMock = {
     resolveConflict: vi.fn().mockResolvedValue(true),
+    resolveConflictWithPlan: vi.fn().mockResolvedValue(true),
   };
 
   const syncCoordinatorMock = {
@@ -96,11 +99,21 @@ describe('DashboardModalComponent conflict resolution', () => {
     info: vi.fn(),
   };
 
+  const loggerMock = {
+    category: () => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     conflictStorageCount.set(1);
     conflictStorageMock.getAllConflicts.mockResolvedValue([]);
     projectOpsMock.resolveConflict.mockResolvedValue(true);
+    projectOpsMock.resolveConflictWithPlan.mockResolvedValue(true);
 
     const injector = Injector.create({
       providers: [
@@ -111,6 +124,8 @@ describe('DashboardModalComponent conflict resolution', () => {
         { provide: ProjectOperationService, useValue: projectOpsMock },
         { provide: ToastService, useValue: toastMock },
         { provide: SyncCoordinatorService, useValue: syncCoordinatorMock },
+        { provide: LoggerService, useValue: loggerMock },
+        { provide: ConflictAutoResolverService, useClass: ConflictAutoResolverService, deps: [LoggerService] },
       ],
     });
 
@@ -138,5 +153,121 @@ describe('DashboardModalComponent conflict resolution', () => {
     expect(projectOpsMock.resolveConflict).toHaveBeenCalledWith('proj-1', 'merge');
     expect(toastMock.success).not.toHaveBeenCalled();
     expect(loadConflictsSpy).toHaveBeenCalled();
+  });
+
+  it('applyAutoResolution 应按逐任务计划调用 resolveConflictWithPlan，并优先采用用户选择', async () => {
+    const loadConflictsSpy = vi.spyOn(component, 'loadConflicts').mockResolvedValue(undefined);
+    const conflict = {
+      projectId: 'proj-1',
+      projectName: 'Local Project',
+      reason: 'version_mismatch',
+      reasonLabel: '版本不匹配',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localTaskCount: 2,
+      remoteTaskCount: 2,
+      localTasks: [],
+      remoteTasks: [],
+      remoteSnapshotFresh: true,
+      isResolving: false,
+      autoReport: {
+        projectId: 'proj-1',
+        recommendations: [
+          {
+            taskId: 'task-1',
+            title: 'Task 1',
+            recommendation: 'remote',
+            confidence: 'suggest',
+            reason: '云端版本较新',
+            reasoning: ['云端更新时间更晚'],
+            conflictedFields: ['content'],
+          },
+          {
+            taskId: 'task-2',
+            title: 'Task 2',
+            recommendation: 'remote',
+            confidence: 'auto',
+            reason: '任务仅存在于云端',
+            reasoning: ['其他设备新建'],
+            conflictedFields: [],
+          },
+        ],
+        autoCount: 1,
+        suggestCount: 1,
+        manualCount: 0,
+        generatedAt: '2026-03-30T00:00:00.000Z',
+        overallSuggestion: '可直接应用系统建议',
+      },
+      taskResolutions: new Map([['task-1', 'local']]),
+      selectiveMode: true,
+    } as unknown as Parameters<DashboardModalComponent['applyAutoResolution']>[0];
+
+    await component.applyAutoResolution(conflict);
+
+    expect(projectOpsMock.resolveConflictWithPlan).toHaveBeenCalledWith(
+      'proj-1',
+      expect.objectContaining({
+        taskChoices: expect.objectContaining({
+          'task-1': 'local',
+          'task-2': 'remote',
+        }),
+        appliedBy: 'mixed',
+      }),
+    );
+    expect(projectOpsMock.resolveConflict).not.toHaveBeenCalled();
+    expect(loadConflictsSpy).toHaveBeenCalled();
+    expect(toastMock.success).toHaveBeenCalledWith(
+      '智能解决完成',
+      expect.stringContaining('其中 1 项来自您的明确选择'),
+    );
+  });
+
+  it('远端快照过期时不应允许直接应用系统建议', async () => {
+    const loadConflictsSpy = vi.spyOn(component, 'loadConflicts').mockResolvedValue(undefined);
+    const staleConflict = {
+      projectId: 'proj-1',
+      projectName: 'Local Project',
+      reason: 'version_mismatch',
+      reasonLabel: '版本不匹配',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localTaskCount: 1,
+      remoteTaskCount: 1,
+      localTasks: [],
+      remoteTasks: [],
+      remoteSnapshotFresh: false,
+      isResolving: false,
+      autoReport: {
+        projectId: 'proj-1',
+        recommendations: [
+          {
+            taskId: 'task-1',
+            title: 'Task 1',
+            recommendation: 'remote',
+            confidence: 'suggest',
+            reason: '云端版本较新',
+            reasoning: ['云端更新时间更晚'],
+            conflictedFields: ['content'],
+          },
+        ],
+        autoCount: 0,
+        suggestCount: 1,
+        manualCount: 0,
+        generatedAt: '2026-03-30T00:00:00.000Z',
+        overallSuggestion: '建议先确认后再处理',
+      },
+      taskResolutions: new Map(),
+      selectiveMode: false,
+    } as unknown as Parameters<DashboardModalComponent['applyAutoResolution']>[0];
+
+    expect(component.canApplySuggestedResolution(staleConflict)).toBe(false);
+    expect(component.getSuggestedResolutionSummary(staleConflict)).toContain('不是本轮冲突中的最新结果');
+
+    await component.applyAutoResolution(staleConflict);
+
+    expect(projectOpsMock.resolveConflictWithPlan).not.toHaveBeenCalled();
+    expect(loadConflictsSpy).not.toHaveBeenCalled();
+    expect(toastMock.warning).toHaveBeenCalledWith(
+      '建议暂不可直接应用',
+      '当前云端快照不是本轮最新结果，请先重新同步或逐项确认后再处理',
+    );
   });
 });

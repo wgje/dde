@@ -504,6 +504,7 @@ export class TaskRepositoryService {
         .from('projects')
         .select(FIELD_SELECT_CONFIG.PROJECT_FULL_FIELDS)
         .eq('id', projectId)
+        .is('deleted_at', null)
         .maybeSingle(),
       this.loadTasks(projectId),
       this.loadConnections(projectId)

@@ -20,7 +20,7 @@ class FakeComponent {}
 
 // ── Mock factories ───────────────────────────────────────────
 
-const mockToast = { error: vi.fn(), info: vi.fn() };
+const mockToast = { error: vi.fn(), info: vi.fn(), success: vi.fn() };
 const mockRouter = { navigateByUrl: vi.fn() };
 const mockErrorHandler = { dismissRecoveryDialog: vi.fn() };
 
@@ -51,7 +51,10 @@ const mockModalLoader = {
 };
 
 const mockProjectState = { projects: vi.fn(() => []) };
-const mockProjectOps = { resolveConflict: vi.fn().mockResolvedValue(undefined) };
+const mockProjectOps = {
+  resolveConflict: vi.fn().mockResolvedValue(undefined),
+  resolveConflictWithPlan: vi.fn().mockResolvedValue(true),
+};
 const mockSyncCoordinator = { clearActiveConflict: vi.fn() };
 const mockAuthCoord = {
   sessionEmail: vi.fn(() => ''),
@@ -68,6 +71,7 @@ describe('WorkspaceModalCoordinatorService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockProjectOps.resolveConflict.mockResolvedValue(true);
+    mockProjectOps.resolveConflictWithPlan.mockResolvedValue(true);
     mockModalCloseRef.result = new Promise(resolve => {
       resolveModalResult = resolve;
     });
@@ -252,6 +256,23 @@ describe('WorkspaceModalCoordinatorService', () => {
     await service.resolveConflictLocal();
 
     expect(mockModalCloseRef.close).toHaveBeenCalledWith({ choice: 'local' });
+  });
+
+  it('should apply conflict resolution plan and close modal', async () => {
+    service.setPendingConflict({ projectId: 'p-1' } as ConflictData);
+    await service.openConflictModal({ projectId: 'p-1' } as ConflictData);
+
+    await service.applyConflictResolutionPlan({
+      taskChoices: { 'task-1': 'remote' },
+      appliedBy: 'mixed',
+    });
+
+    expect(mockProjectOps.resolveConflictWithPlan).toHaveBeenCalledWith('p-1', {
+      taskChoices: { 'task-1': 'remote' },
+      appliedBy: 'mixed',
+    });
+    expect(mockModalCloseRef.close).toHaveBeenCalledWith({ choice: 'merge' });
+    expect(mockToast.success).toHaveBeenCalled();
   });
 
   // ── cancelConflictResolution ───────────────────────────────

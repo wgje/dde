@@ -157,6 +157,7 @@ AS $$
     SELECT 1 FROM public.projects p
     WHERE p.id = p_project_id 
     AND p.owner_id = public.current_user_id()
+    AND p.deleted_at IS NULL
   )
 $$;
 
@@ -197,6 +198,7 @@ CREATE TABLE IF NOT EXISTS public.projects (
   description TEXT,
   created_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  deleted_at TIMESTAMP WITH TIME ZONE,
   version INTEGER DEFAULT 1,
   data JSONB DEFAULT '{}'::jsonb,
   migrated_to_v2 BOOLEAN DEFAULT FALSE
@@ -213,6 +215,9 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'projects' AND column_name = 'data') THEN
     ALTER TABLE public.projects ADD COLUMN data JSONB DEFAULT '{}'::jsonb;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'projects' AND column_name = 'deleted_at') THEN
+    ALTER TABLE public.projects ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE;
   END IF;
 END $$;
 
@@ -901,12 +906,17 @@ DROP POLICY IF EXISTS "owner delete" ON public.projects;
 
 CREATE POLICY "owner select" ON public.projects FOR SELECT USING (
   (select auth.uid()) = owner_id
+  AND deleted_at IS NULL
 );
 CREATE POLICY "owner insert" ON public.projects FOR INSERT WITH CHECK ((select auth.uid()) = owner_id);
 CREATE POLICY "owner update" ON public.projects FOR UPDATE USING (
   (select auth.uid()) = owner_id
+  AND deleted_at IS NULL
+) WITH CHECK ((select auth.uid()) = owner_id);
+CREATE POLICY "owner delete" ON public.projects FOR DELETE USING (
+  (select auth.uid()) = owner_id
+  AND deleted_at IS NULL
 );
-CREATE POLICY "owner delete" ON public.projects FOR DELETE USING ((select auth.uid()) = owner_id);
 
 -- ============================================
 -- 8. RLS 策略 - Project Members
@@ -918,16 +928,16 @@ DROP POLICY IF EXISTS "project_members update" ON public.project_members;
 DROP POLICY IF EXISTS "project_members delete" ON public.project_members;
 
 CREATE POLICY "project_members select" ON public.project_members FOR SELECT USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid() AND p.deleted_at IS NULL)
 );
 CREATE POLICY "project_members insert" ON public.project_members FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid() AND p.deleted_at IS NULL)
 );
 CREATE POLICY "project_members update" ON public.project_members FOR UPDATE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid() AND p.deleted_at IS NULL)
 );
 CREATE POLICY "project_members delete" ON public.project_members FOR DELETE USING (
-  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid())
+  EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project_members.project_id AND p.owner_id = auth.uid() AND p.deleted_at IS NULL)
 );
 
 -- ============================================
@@ -1403,11 +1413,7 @@ BEGIN
     RETURN 0;
   END IF;
 
-  -- 授权校验：仅项目 owner 可 purge
-  IF NOT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id AND p.owner_id = auth.uid()
-  ) THEN
+  IF NOT public.user_has_project_access(p_project_id) THEN
     RAISE EXCEPTION 'not authorized';
   END IF;
 
@@ -1713,6 +1719,7 @@ CREATE POLICY "project_members select" ON public.project_members
       FROM public.projects p
       WHERE p.id = project_members.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1726,6 +1733,7 @@ CREATE POLICY "project_members insert" ON public.project_members
       FROM public.projects p
       WHERE p.id = project_members.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1739,6 +1747,7 @@ CREATE POLICY "project_members update" ON public.project_members
       FROM public.projects p
       WHERE p.id = project_members.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1752,6 +1761,7 @@ CREATE POLICY "project_members delete" ON public.project_members
       FROM public.projects p
       WHERE p.id = project_members.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1766,6 +1776,7 @@ CREATE POLICY "tasks owner select" ON public.tasks
       FROM public.projects p
       WHERE p.id = tasks.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1779,6 +1790,7 @@ CREATE POLICY "tasks owner insert" ON public.tasks
       FROM public.projects p
       WHERE p.id = tasks.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1792,6 +1804,7 @@ CREATE POLICY "tasks owner update" ON public.tasks
       FROM public.projects p
       WHERE p.id = tasks.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1805,6 +1818,7 @@ CREATE POLICY "tasks owner delete" ON public.tasks
       FROM public.projects p
       WHERE p.id = tasks.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1819,6 +1833,7 @@ CREATE POLICY "connections owner select" ON public.connections
       FROM public.projects p
       WHERE p.id = connections.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1832,6 +1847,7 @@ CREATE POLICY "connections owner insert" ON public.connections
       FROM public.projects p
       WHERE p.id = connections.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1845,6 +1861,7 @@ CREATE POLICY "connections owner update" ON public.connections
       FROM public.projects p
       WHERE p.id = connections.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -1858,6 +1875,7 @@ CREATE POLICY "connections owner delete" ON public.connections
       FROM public.projects p
       WHERE p.id = connections.project_id
         AND p.owner_id = (select auth.uid())
+        AND p.deleted_at IS NULL
     )
   );
 
@@ -2002,11 +2020,7 @@ BEGIN
     RAISE EXCEPTION 'p_project_id is required';
   END IF;
 
-  -- 授权检查
-  IF NOT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id AND p.owner_id = auth.uid()
-  ) THEN
+  IF NOT public.user_has_project_access(p_project_id) THEN
     RAISE EXCEPTION 'not authorized';
   END IF;
 
@@ -2097,15 +2111,13 @@ BEGIN
     RAISE EXCEPTION 'Rate limit exceeded. Maximum % calls per minute', max_calls_per_minute;
   END IF;
 
-  -- 授权校验：仅项目 owner 可 purge
-  SELECT p.owner_id INTO v_owner_id
-  FROM public.projects p
-  WHERE p.id = p_project_id
-    AND p.owner_id = auth.uid();
-
-  IF v_owner_id IS NULL THEN
+  IF NOT public.user_has_project_access(p_project_id) THEN
     RAISE EXCEPTION 'not authorized';
   END IF;
+
+  SELECT p.owner_id INTO v_owner_id
+  FROM public.projects p
+  WHERE p.id = p_project_id;
 
   -- 收集附件路径
   FOR task_record IN
@@ -3046,6 +3058,7 @@ BEGIN
       FROM public.tasks t
       JOIN public.projects p ON t.project_id = p.id
       WHERE p.owner_id = current_user_id 
+        AND p.deleted_at IS NULL
         AND t.status = 'active' 
         AND t.deleted_at IS NULL
     ),
@@ -3054,10 +3067,11 @@ BEGIN
       FROM public.tasks t
       JOIN public.projects p ON t.project_id = p.id
       WHERE p.owner_id = current_user_id 
+        AND p.deleted_at IS NULL
         AND t.status = 'completed' 
         AND t.deleted_at IS NULL
     ),
-    'projects', (SELECT COUNT(*) FROM public.projects WHERE owner_id = current_user_id)
+    'projects', (SELECT COUNT(*) FROM public.projects WHERE owner_id = current_user_id AND deleted_at IS NULL)
   );
 END;
 $$;
@@ -3187,7 +3201,7 @@ BEGIN
     'project', (
       SELECT row_to_json(p.*) 
       FROM (
-        SELECT id, owner_id, title, description, created_date, updated_at, version
+        SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
         FROM public.projects WHERE id = p_project_id
       ) p
     ),
@@ -3251,9 +3265,9 @@ BEGIN
     'projects', COALESCE((
       SELECT json_agg(row_to_json(p.*))
       FROM (
-        SELECT id, owner_id, title, description, created_date, updated_at, version
+        SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
         FROM public.projects 
-        WHERE owner_id = v_user_id AND updated_at > p_since_timestamp
+        WHERE owner_id = v_user_id AND deleted_at IS NULL AND updated_at > p_since_timestamp
         ORDER BY updated_at DESC
       ) p
     ), '[]'::json),
@@ -3296,9 +3310,9 @@ BEGIN
     'projects', COALESCE((
       SELECT json_agg(row_to_json(p.*) ORDER BY p.updated_at DESC)
       FROM (
-        SELECT id, owner_id, title, description, created_date, updated_at, version
+        SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
         FROM public.projects 
-        WHERE owner_id = v_user_id AND updated_at > p_since_timestamp
+        WHERE owner_id = v_user_id AND deleted_at IS NULL AND updated_at > p_since_timestamp
       ) p
     ), '[]'::json),
     'server_time', now()
@@ -3351,11 +3365,12 @@ BEGIN
         SELECT *
         FROM public.projects 
         WHERE owner_id = v_user_id
+          AND deleted_at IS NULL
         ORDER BY updated_at DESC
         LIMIT p_limit OFFSET p_offset
       ) p
     ), '[]'::json),
-    'total', (SELECT COUNT(*) FROM public.projects WHERE owner_id = v_user_id),
+    'total', (SELECT COUNT(*) FROM public.projects WHERE owner_id = v_user_id AND deleted_at IS NULL),
     'server_time', now()
   ) INTO v_result;
   
@@ -3438,6 +3453,7 @@ BEGIN
     FROM public.projects p
     WHERE p.id = p_project_id
       AND p.owner_id = v_user_id
+      AND p.deleted_at IS NULL
   ) THEN
     RETURN NULL;
   END IF;
@@ -3487,11 +3503,18 @@ BEGIN
 
   -- 单用户 owner-only 模型（project_members 已移除）
   SELECT GREATEST(
-    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz)
+    COALESCE((
+      SELECT MAX(GREATEST(
+        COALESCE(p.updated_at, '-infinity'::timestamptz),
+        COALESCE(p.deleted_at, '-infinity'::timestamptz)
+      ))
+      FROM public.projects p
+      WHERE p.owner_id = v_user_id
+    ), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz)
   )
   INTO v_watermark;
 
@@ -3549,6 +3572,7 @@ BEGIN
       COALESCE(p.version, 1)::INTEGER AS version
     FROM public.projects p
     WHERE p.owner_id = v_user_id
+      AND p.deleted_at IS NULL
   )
   SELECT
     pc.project_id,
@@ -3598,6 +3622,7 @@ BEGIN
     FROM public.projects p
     WHERE p.id = p_project_id
       AND p.owner_id = v_user_id
+      AND p.deleted_at IS NULL
   )
   INTO v_accessible;
 
@@ -3704,6 +3729,7 @@ BEGIN
       FROM public.projects p
       WHERE p.id = p_project_id
         AND p.owner_id = v_user_id
+        AND p.deleted_at IS NULL
     )
     INTO v_active_accessible;
 
@@ -3724,11 +3750,18 @@ BEGIN
   END IF;
 
   SELECT GREATEST(
-    COALESCE((SELECT MAX(p.updated_at) FROM public.projects p WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id), '-infinity'::timestamptz)
+    COALESCE((
+      SELECT MAX(GREATEST(
+        COALESCE(p.updated_at, '-infinity'::timestamptz),
+        COALESCE(p.deleted_at, '-infinity'::timestamptz)
+      ))
+      FROM public.projects p
+      WHERE p.owner_id = v_user_id
+    ), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t JOIN public.projects p ON p.id = t.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(c.updated_at) FROM public.connections c JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL), '-infinity'::timestamptz)
   )
   INTO v_projects_watermark;
 
@@ -3986,6 +4019,7 @@ AS $$
   SELECT id
   FROM public.projects
   WHERE owner_id = public.current_user_id()
+    AND deleted_at IS NULL
 $$;
 
 CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id uuid)
@@ -4000,18 +4034,25 @@ AS $$
     FROM public.projects p
     WHERE p.id = p_project_id
       AND p.owner_id = public.current_user_id()
+      AND p.deleted_at IS NULL
   )
 $$;
 
 DROP POLICY IF EXISTS "owner select" ON public.projects;
 CREATE POLICY "owner select" ON public.projects
 FOR SELECT
-USING ((SELECT auth.uid() AS uid) = owner_id);
+USING (((SELECT auth.uid() AS uid) = owner_id) AND (deleted_at IS NULL));
 
 DROP POLICY IF EXISTS "owner update" ON public.projects;
 CREATE POLICY "owner update" ON public.projects
 FOR UPDATE
-USING ((SELECT auth.uid() AS uid) = owner_id);
+USING (((SELECT auth.uid() AS uid) = owner_id) AND (deleted_at IS NULL))
+WITH CHECK ((SELECT auth.uid() AS uid) = owner_id);
+
+DROP POLICY IF EXISTS "owner delete" ON public.projects;
+CREATE POLICY "owner delete" ON public.projects
+FOR DELETE
+USING (((SELECT auth.uid() AS uid) = owner_id) AND (deleted_at IS NULL));
 
 
 CREATE OR REPLACE FUNCTION public.cleanup_cron_job_run_details(

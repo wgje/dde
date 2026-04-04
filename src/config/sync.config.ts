@@ -172,9 +172,9 @@ export const FIELD_SELECT_CONFIG = {
   /** 连接完整字段（用于全量加载，替代 select('*')） */
   CONNECTION_FULL_FIELDS: 'id,project_id,source_id,target_id,title,description,deleted_at,updated_at',
   /** 项目列表字段 */
-  PROJECT_LIST_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id',
+  PROJECT_LIST_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id,deleted_at',
   /** 项目完整字段（用于全量加载，替代 select('*')） */
-  PROJECT_FULL_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id,migrated_to_v2',
+  PROJECT_FULL_FIELDS: 'id,title,description,created_date,updated_at,version,owner_id,deleted_at,migrated_to_v2',
   /** Tombstone 字段 */
   TOMBSTONE_FIELDS: 'task_id,deleted_at,project_id',
 } as const;

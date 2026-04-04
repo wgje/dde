@@ -20,6 +20,7 @@ describe('EventDrivenSyncPulseService', () => {
   let appLifecycleMock: {
     isResuming: ReturnType<typeof vi.fn>;
     isHeavyRecoveryInCooldown: ReturnType<typeof vi.fn>;
+    lastHeavyRecoveryAt: ReturnType<typeof vi.fn>;
     getCurrentRecoveryTicket: ReturnType<typeof vi.fn>;
     isRecoveryCompensationInFlight: ReturnType<typeof vi.fn>;
   };
@@ -59,6 +60,7 @@ describe('EventDrivenSyncPulseService', () => {
     appLifecycleMock = {
       isResuming: vi.fn(() => false),
       isHeavyRecoveryInCooldown: vi.fn(() => false),
+      lastHeavyRecoveryAt: vi.fn(() => null),
       getCurrentRecoveryTicket: vi.fn(() => null),
       isRecoveryCompensationInFlight: vi.fn(() => false),
     };
@@ -237,5 +239,15 @@ describe('EventDrivenSyncPulseService', () => {
     expect(addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
       message: 'sync.pulse.skipped.compensating',
     }));
+  });
+
+  it('destroy 后应清空 cooldown，避免新会话复用旧脉冲时间', async () => {
+    await service.triggerNow('manual');
+
+    service.destroy();
+
+    await service.triggerNow('manual');
+
+    expect(recoverAfterResume).toHaveBeenCalledTimes(2);
   });
 });

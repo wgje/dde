@@ -20,6 +20,7 @@ import { ProjectOperationService } from './project-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
 import type { StorageEscapeData } from '../app/shared/modals';
+import type { ConflictResolutionPlan } from './conflict-resolution.types';
 import { ThemeType, Project } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -172,7 +173,8 @@ export class WorkspaceModalCoordinatorService {
   openConflictCenterFromDashboard(): void {
     this._dashboardModalRef = null;
     this.dynamicModal.close();
-    this.toast.info('冲突解决中心', '请从项目列表中选择有冲突的项目进行处理');
+    // 重新打开仪表盘并自动跳转到冲突 tab
+    void this.openDashboard();
   }
 
   // ── Login ──────────────────────────────────────────────────────────
@@ -387,6 +389,7 @@ export class WorkspaceModalCoordinatorService {
           resolveLocal: () => this.resolveConflictLocal(),
           resolveRemote: () => this.resolveConflictRemote(),
           resolveMerge: () => this.resolveConflictMerge(),
+          applyPlan: (plan: ConflictResolutionPlan) => this.applyConflictResolutionPlan(plan),
           cancel: () => this.cancelConflictResolution()
         },
         closeOnBackdropClick: false,
@@ -430,6 +433,27 @@ export class WorkspaceModalCoordinatorService {
 
   async resolveConflictMerge(): Promise<void> {
     return this.resolveConflictWith('merge');
+  }
+
+  async applyConflictResolutionPlan(plan: ConflictResolutionPlan): Promise<void> {
+    if (this._isResolvingConflict) return;
+    this._isResolvingConflict = true;
+    try {
+      const data = this._pendingConflict;
+      if (data) {
+        const resolved = await this.projectOps.resolveConflictWithPlan(data.projectId, plan);
+        if (!resolved) {
+          return;
+        }
+      }
+
+      this._conflictModalRef?.close({ choice: 'merge' });
+      this._pendingConflict = null;
+      this._conflictModalRef = null;
+      this.toast.success('冲突已处理', '已按系统建议应用当前冲突解决方案');
+    } finally {
+      this._isResolvingConflict = false;
+    }
   }
 
   cancelConflictResolution(): void {

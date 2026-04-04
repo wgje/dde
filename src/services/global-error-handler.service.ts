@@ -99,8 +99,10 @@ export class GlobalErrorHandler implements ErrorHandler {
     { pattern: /404.*(?:favicon|icon|manifest)/i, severity: ErrorSeverity.SILENT },
     // ResizeObserver 循环警告（浏览器内部，无需处理）
     { pattern: /ResizeObserver loop/i, severity: ErrorSeverity.SILENT },
-    // 用户取消操作
-    { pattern: /\bAbortError\b|user.*cancel|request.*abort|fetch.*abort/i, severity: ErrorSeverity.SILENT },
+    // 用户取消操作 / 信号中止（含 Supabase fetch 超时产生的 AbortError）
+    { pattern: /\bAbortError\b|signal is aborted|user.*cancel|request.*abort|fetch.*abort/i, severity: ErrorSeverity.SILENT },
+    // Supabase token 刷新失败（离线/休眠唤醒时高频触发，静默处理）
+    { pattern: /token.*refresh|refresh.*token|_callRefreshToken|_refreshAccessToken/i, severity: ErrorSeverity.SILENT },
     // 非活动标签页的更新
     { pattern: /not active|inactive tab/i, severity: ErrorSeverity.SILENT },
     // 模态框加载超时（已由 ModalLoaderService 处理，静默记录）
@@ -229,7 +231,13 @@ export class GlobalErrorHandler implements ErrorHandler {
     const errorStack = error instanceof Error ? error.stack : undefined;
 
     // 确定错误级别
-    const severity = forceSeverity ?? this.classifyError(errorMessage);
+    let severity = forceSeverity ?? this.classifyError(errorMessage);
+
+    // 离线降级：设备离线时所有非致命错误（网络/认证/保存/同步）降为 SILENT
+    // 离线模式下用户应能无感编辑，Toast 风暴只会制造焦虑
+    if (this.isDeviceOffline && severity === ErrorSeverity.NOTIFY) {
+      severity = ErrorSeverity.SILENT;
+    }
 
     // 错误去重检查
     if (severity !== ErrorSeverity.FATAL && this.isDuplicateError(errorMessage)) {
@@ -437,10 +445,13 @@ export class GlobalErrorHandler implements ErrorHandler {
 
   /**
    * 提取错误消息
+   * 同时包含 error.name 以便分类规则能匹配 AbortError 等 DOMException 名称
    */
   private extractErrorMessage(error: unknown): string {
     if (error instanceof Error) {
-      return error.message;
+      // 将 error.name 拼入消息，确保 AbortError / TypeError 等分类规则能命中
+      const name = error.name && error.name !== 'Error' ? `${error.name}: ` : '';
+      return `${name}${error.message}`;
     }
     if (typeof error === 'string') {
       return error;
@@ -457,6 +468,7 @@ export class GlobalErrorHandler implements ErrorHandler {
 
   /**
    * 根据错误消息自动分类
+   * 离线时网络/认证类错误降级为 SILENT，避免 Toast 风暴
    */
   private classifyError(errorMessage: string): ErrorSeverity {
     for (const rule of this.classificationRules) {
@@ -471,6 +483,25 @@ export class GlobalErrorHandler implements ErrorHandler {
     
     // 默认为提示级（保守策略，未知错误告知用户）
     return ErrorSeverity.NOTIFY;
+  }
+
+  /**
+   * 判断当前是否处于离线状态
+   * 使用 navigator.onLine 快速判断，避免注入 NetworkAwarenessService 造成循环依赖
+   */
+  private get isDeviceOffline(): boolean {
+    return typeof navigator !== 'undefined' && !navigator.onLine;
+  }
+
+  /** 离线时应被静默的网络/认证相关错误模式 */
+  private static readonly NETWORK_RELATED_PATTERN =
+    /network|offline|fetch.*fail|http.*error|timeout|ECONNREFUSED|unauthorized|401|auth.*error|session.*expir|forbidden|403|\b(?:status|code|http)\s*[:=]?\s*(?:500|502|503|504)\b|server.*error|Gateway Timeout|net::ERR_/i;
+
+  /**
+   * 判断错误是否与网络/认证相关（离线时应降级为 SILENT）
+   */
+  private isNetworkRelatedError(errorMessage: string): boolean {
+    return GlobalErrorHandler.NETWORK_RELATED_PATTERN.test(errorMessage);
   }
 
   /**

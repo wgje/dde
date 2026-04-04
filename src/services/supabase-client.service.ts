@@ -240,7 +240,13 @@ export class SupabaseClientService {
       },
       global: {
         // 保留请求超时保护，并优先复用调用方 signal
+        // 离线时快速失败，避免 120s 超时爆出 AbortError
         fetch: (url: RequestInfo | URL, options: RequestInit = {}) => {
+          // 离线时直接拒绝，避免等待超时产生 AbortError
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
+          }
+
           const callerSignal = options.signal;
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 120000);

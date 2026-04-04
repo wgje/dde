@@ -144,8 +144,7 @@ export class MobileBlackBoxDrawerComponent implements OnInit {
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   
   ngOnInit(): void {
-    // 加载黑匣子数据（如果尚未加载）
-    this.blackBoxService.loadFromServer();
+    void this.blackBoxService.refreshForView();
   }
   
   /**

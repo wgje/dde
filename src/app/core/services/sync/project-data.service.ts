@@ -296,6 +296,7 @@ export class ProjectDataService {
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
             .eq('id', projectId)
+            .is('deleted_at', null)
             .maybeSingle();
           if (error) throw supabaseErrorToError(error);
           return data;
@@ -386,6 +387,7 @@ export class ProjectDataService {
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
             .eq('owner_id', userId)
+            .is('deleted_at', null)
             .order('updated_at', { ascending: false });
 
           if (error) throw supabaseErrorToError(error);
@@ -433,6 +435,7 @@ export class ProjectDataService {
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
             .eq('owner_id', userId)
+            .is('deleted_at', null)
             .order('updated_at', { ascending: false });
           
           if (error) throw supabaseErrorToError(error);
@@ -462,6 +465,11 @@ export class ProjectDataService {
         const result = results[i];
         if (result.status === 'fulfilled' && result.value) {
           projects.push(result.value);
+        } else if (result.status === 'fulfilled') {
+          failedCount++;
+          this.logger.warn('加载项目返回空结果', {
+            projectId: projectList[i]?.id,
+          });
         } else if (result.status === 'rejected') {
           failedCount++;
           this.logger.warn('加载项目失败', { 
@@ -1471,6 +1479,7 @@ export class ProjectDataService {
       description: row.description || '',
       createdDate: row.created_date || '',
       updatedAt: row.updated_at || undefined,
+      deletedAt: row.deleted_at || undefined,
       version: row.version || 1,
       syncSource: 'synced',
       pendingSync: false,

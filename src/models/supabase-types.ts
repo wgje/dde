@@ -327,6 +327,7 @@ export interface ProjectRow {
   description: string | null;
   created_date: string | null;
   updated_at: string | null;
+  deleted_at: string | null;
   version: number;
   /** @deprecated v1 格式，新数据使用 tasks/connections 独立表 */
   data: Json | null;
@@ -341,6 +342,7 @@ export interface ProjectInsert {
   title?: string | null;
   description?: string | null;
   created_date?: string | null;
+  deleted_at?: string | null;
   version?: number;
   data?: Json | null;
   migrated_to_v2?: boolean;
@@ -350,6 +352,7 @@ export interface ProjectInsert {
 export interface ProjectUpdate {
   title?: string | null;
   description?: string | null;
+  deleted_at?: string | null;
   version?: number;
   data?: Json | null;
   migrated_to_v2?: boolean;

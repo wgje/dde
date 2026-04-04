@@ -1248,11 +1248,13 @@ describe('ProjectDataService', () => {
         description: '只需要壳数据',
         created_date: '2026-03-30T00:00:00.000Z',
         updated_at: '2026-03-30T01:00:00.000Z',
+        deleted_at: null,
         version: 3,
       }],
       error: null,
     });
-    const eq = vi.fn(() => ({ order }));
+    const is = vi.fn(() => ({ order }));
+    const eq = vi.fn(() => ({ is }));
     const select = vi.fn(() => ({ eq }));
     const from = vi.fn(() => ({ select }));
 
@@ -1323,6 +1325,79 @@ describe('ProjectDataService', () => {
     ]);
     expect(loadFullProjectSpy).not.toHaveBeenCalled();
     expect(throttleExecute).toHaveBeenCalledOnce();
+    expect(is).toHaveBeenCalledWith('deleted_at', null);
+  });
+
+  it('rowToProject 应映射 deleted_at 字段', () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const project = service.rowToProject({
+      id: 'proj-deleted',
+      title: '已删除项目',
+      description: 'soft delete tombstone',
+      created_date: '2026-04-03T00:00:00.000Z',
+      updated_at: '2026-04-03T00:05:00.000Z',
+      deleted_at: '2026-04-03T00:06:00.000Z',
+      version: 7,
+    });
+
+    expect(project).toMatchObject({
+      id: 'proj-deleted',
+      deletedAt: '2026-04-03T00:06:00.000Z',
+      version: 7,
+    });
   });
 
   it('loadProjectListMetadataFromCloud 遇到错误时应返回 null，避免把失败误判为空列表', async () => {

@@ -11,12 +11,14 @@ import {
 } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
+  ConflictResolutionPlan,
   ConflictResolutionStrategy,
   MergeResult,
 } from './conflict-resolution.types';
 
 // 重新导出类型以保持向后兼容
 export type {
+  ConflictResolutionPlan,
   ConflictResolutionStrategy,
   MergeResult
 } from './conflict-resolution.types';
@@ -137,6 +139,48 @@ export class ConflictResolutionService {
         this.syncService.resolveConflict(projectId, resolvedProject, 'local');
     }
     
+    return success(resolvedProject);
+  }
+
+  /**
+   * 按逐任务计划解决冲突
+   *
+   * 用于把“系统推荐 + 用户逐任务覆写”真正落实到最终项目数据，
+   * 避免 UI 展示的是按任务选择，落盘时却退化成整体 local/remote 二选一。
+   */
+  async resolveConflictWithPlan(
+    projectId: string,
+    plan: ConflictResolutionPlan,
+    localProject: Project,
+    remoteProject?: Project,
+  ): Promise<Result<Project, OperationError>> {
+    this.logger.info('[Selective] 应用逐任务冲突解决方案', {
+      projectId,
+      taskChoiceCount: Object.keys(plan.taskChoices).length,
+      appliedBy: plan.appliedBy ?? 'system',
+    });
+
+    if (!remoteProject) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
+    }
+
+    const tombstoneResult = await this.syncService.getTombstoneIdsWithStatus(projectId);
+    const mergeResult = this.mergeWithResolutionPlan(
+      localProject,
+      remoteProject,
+      tombstoneResult.ids,
+      plan,
+      tombstoneResult.localCacheOnly,
+    );
+
+    const resolvedProject = mergeResult.project;
+    if (mergeResult.issues.length > 0) {
+      this.toast.info('冲突处理提示', `已自动修复 ${mergeResult.issues.length} 个数据问题`);
+    }
+    if (tombstoneResult.localCacheOnly && tombstoneResult.ids.size === 0) {
+      this.toast.warning('冲突处理提示', '无法确认远程删除状态，已保守处理');
+    }
+    this.syncService.resolveConflict(projectId, resolvedProject, 'local');
     return success(resolvedProject);
   }
 
@@ -438,6 +482,134 @@ export class ConflictResolutionService {
       project: mergedProject,
       issues,
       conflictCount
+    };
+  }
+
+  /**
+   * 基于逐任务计划合并冲突项目
+   */
+  private mergeWithResolutionPlan(
+    local: Project,
+    remote: Project,
+    tombstoneIds: Set<string>,
+    plan: ConflictResolutionPlan,
+    tombstoneQueryFailed: boolean = false,
+  ): MergeResult {
+    const issues: string[] = [];
+    let conflictCount = 0;
+
+    const taskChoices = plan.taskChoices ?? {};
+    const localTasks = Array.isArray(local.tasks) ? local.tasks : [];
+    const remoteTasks = Array.isArray(remote.tasks) ? remote.tasks : [];
+    const localConnections = Array.isArray(local.connections) ? local.connections : [];
+    const remoteConnections = Array.isArray(remote.connections) ? remote.connections : [];
+
+    const remoteTaskMap = new Map(remoteTasks.map(task => [task.id, task]));
+    const mergedTasks: Task[] = [];
+    const processedIds = new Set<string>();
+    let skippedTombstoneCount = 0;
+    let preservedSoftDeleteCount = 0;
+    let conservativeKeepCount = 0;
+
+    for (const localTask of localTasks) {
+      processedIds.add(localTask.id);
+
+      if (tombstoneIds.has(localTask.id)) {
+        skippedTombstoneCount++;
+        continue;
+      }
+
+      const remoteTask = remoteTaskMap.get(localTask.id);
+      const choice = taskChoices[localTask.id];
+      if (!remoteTask && choice === 'remote') {
+        continue;
+      }
+
+      if (!remoteTask && tombstoneQueryFailed && tombstoneIds.size === 0) {
+        mergedTasks.push(localTask);
+        conservativeKeepCount++;
+        continue;
+      }
+
+      if (localTask.deletedAt && !remoteTask) {
+        mergedTasks.push(localTask);
+        preservedSoftDeleteCount++;
+        continue;
+      }
+
+      if (!remoteTask) {
+        mergedTasks.push(localTask);
+        continue;
+      }
+
+      if (choice === 'local') {
+        mergedTasks.push(localTask);
+        continue;
+      }
+
+      if (choice === 'remote') {
+        mergedTasks.push(remoteTask);
+        continue;
+      }
+
+      const { mergedTask, hasConflict, contentConflictCopy } = this.conflictDetection.mergeTaskFields(
+        localTask,
+        remoteTask,
+        local.id,
+      );
+
+      if (hasConflict) {
+        conflictCount++;
+      }
+
+      mergedTasks.push(mergedTask);
+
+      if (contentConflictCopy) {
+        mergedTasks.push(contentConflictCopy);
+        issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
+      }
+    }
+
+    for (const remoteTask of remoteTasks) {
+      if (!processedIds.has(remoteTask.id) && taskChoices[remoteTask.id] !== 'local' && !remoteTask.deletedAt) {
+        mergedTasks.push(remoteTask);
+      }
+    }
+
+    if (skippedTombstoneCount > 0) {
+      issues.push(`已过滤 ${skippedTombstoneCount} 个已删除的任务`);
+    }
+
+    if (preservedSoftDeleteCount > 0) {
+      this.logger.info('selectiveMerge: 保留软删除任务', {
+        count: preservedSoftDeleteCount,
+        projectId: local.id,
+      });
+    }
+
+    if (conservativeKeepCount > 0) {
+      issues.push(`保守模式保留 ${conservativeKeepCount} 个本地任务`);
+    }
+
+    const mergedConnections = this.conflictDetection.mergeConnections(localConnections, remoteConnections);
+    let mergedProject: Project = {
+      ...local,
+      tasks: mergedTasks,
+      connections: mergedConnections,
+      updatedAt: new Date().toISOString(),
+      version: Math.max(local.version ?? 0, remote.version ?? 0) + 1,
+    };
+
+    const { project: validatedProject, issues: validationIssues } =
+      this.layoutService.validateAndFixTree(mergedProject);
+
+    issues.push(...validationIssues);
+    mergedProject = validatedProject;
+
+    return {
+      project: mergedProject,
+      issues,
+      conflictCount,
     };
   }
 

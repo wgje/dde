@@ -1046,7 +1046,10 @@ export class SimpleSyncService {
 
     try {
       const userId = this.sessionManager.getRecentValidationSnapshot(60_000)?.userId;
-      let query = client.from('projects').select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS);
+      let query = client
+        .from('projects')
+        .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
+        .is('deleted_at', null);
       if (userId) query = query.eq('owner_id', userId);
       if (since) query = query.gt('updated_at', since);
 

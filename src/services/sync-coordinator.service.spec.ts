@@ -73,6 +73,7 @@ const mockSyncService = {
   saveOfflineSnapshot: vi.fn(),
   loadOfflineSnapshot: vi.fn().mockReturnValue(null),
   clearOfflineCache: vi.fn(),
+  loadProjectListMetadataFromCloud: vi.fn().mockResolvedValue([]),
   loadProjectsFromCloud: vi.fn().mockResolvedValue([]),
   saveProjectToCloud: vi.fn().mockResolvedValue({ success: true }),
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
@@ -145,6 +146,7 @@ const mockProjectStateService = {
   activeProjectId: signal<string | null>(null),
   updateProjects: vi.fn(),
   setProjects: vi.fn(),
+  setActiveProjectId: vi.fn(),
   getProject: vi.fn((id: string) => mockProjectStateService.projects().find((p: Project) => p.id === id)),
 };
 
@@ -154,10 +156,24 @@ const bindProjectStateMockImplementations = () => {
   );
   mockProjectStateService.setProjects.mockImplementation((projects: Project[]) => {
     mockProjectStateService.projects.set(projects);
+    const activeProjectId = mockProjectStateService.activeProjectId();
+    mockProjectStateService.activeProject.set(
+      activeProjectId ? projects.find((project: Project) => project.id === activeProjectId) ?? null : null
+    );
+  });
+  mockProjectStateService.setActiveProjectId.mockImplementation((projectId: string | null) => {
+    mockProjectStateService.activeProjectId.set(projectId);
+    mockProjectStateService.activeProject.set(
+      projectId ? mockProjectStateService.projects().find((project: Project) => project.id === projectId) ?? null : null
+    );
   });
   mockProjectStateService.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
     const current = mockProjectStateService.projects();
     mockProjectStateService.projects.set(updater(current));
+    const activeProjectId = mockProjectStateService.activeProjectId();
+    mockProjectStateService.activeProject.set(
+      activeProjectId ? mockProjectStateService.projects().find((project: Project) => project.id === activeProjectId) ?? null : null
+    );
   });
 };
 
@@ -1218,6 +1234,26 @@ describe('持久化状态管理', () => {
       expect(mockSyncService.listProjectHeadsSince).not.toHaveBeenCalled();
     });
 
+    it('refreshProjectManifestIfNeeded 删除事件推动预加载 watermark 前进时不应命中快路', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      mockSyncService.listProjectHeadsSince.mockResolvedValueOnce([]);
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:prefetched-delete', {
+        prefetchedRemoteWatermark: '2026-02-15T08:20:00.000Z',
+        deferCommit: true,
+      });
+
+      expect(result).toEqual({
+        skipped: false,
+        watermark: '2026-02-15T08:20:00.000Z',
+      });
+      expect(mockSyncService.getUserProjectsWatermark).not.toHaveBeenCalled();
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:00:00.000Z');
+    });
+
     it('refreshProjectManifestIfNeeded 冷启动无本地水位时不应调用 heads RPC 且不跳过慢路', async () => {
       (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
       mockAuthService.currentUserId.mockReturnValue('user-123');
@@ -1332,6 +1368,66 @@ describe('持久化状态管理', () => {
   });
 
   describe('downloadAndMerge local-only 保留策略', () => {
+    it('远端成功返回空列表时，应裁剪缺失的 synced 项目', async () => {
+      const localProject = createTestProject({
+        id: 'local-deleted',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([]);
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set('local-deleted');
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      expect(mockSyncService.loadProjectsFromCloud).not.toHaveBeenCalled();
+      expect(mockProjectStateService.projects()).toEqual([]);
+      expect(mockProjectStateService.activeProjectId()).toBeNull();
+    });
+
+    it('裁剪当前活动项目后，应自动切换到首个剩余项目', async () => {
+      const remoteProject = createTestProject({ id: 'remote-1' });
+      const localProject = createTestProject({
+        id: 'local-stale',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set('local-stale');
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      expect(mockProjectStateService.projects().map(project => project.id)).toEqual(['remote-1']);
+      expect(mockProjectStateService.activeProjectId()).toBe('remote-1');
+    });
+
+    it('远端元数据获取失败时，应保留本地项目避免误删', async () => {
+      const localProject = createTestProject({
+        id: 'local-preserved',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce(null);
+      mockProjectStateService.projects.set([localProject]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      expect(mockSyncService.loadProjectsFromCloud).not.toHaveBeenCalled();
+      expect(mockProjectStateService.projects()).toEqual([localProject]);
+    });
+
     it('远程不存在且无本地待同步变更时，不应保留本地项目', async () => {
       const remoteProject = createTestProject({ id: 'remote-1' });
       const localProject = createTestProject({
@@ -1340,6 +1436,7 @@ describe('持久化状态管理', () => {
         pendingSync: false
       });
 
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
       mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
       mockProjectStateService.projects.set([localProject]);
       mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
@@ -1361,6 +1458,7 @@ describe('持久化状态管理', () => {
         pendingSync: true
       });
 
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
       mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
       mockProjectStateService.projects.set([localProject]);
       mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
@@ -1374,6 +1472,31 @@ describe('持久化状态管理', () => {
       expect(preservedLocal).toBeDefined();
       expect(preservedLocal?.syncSource).toBe('local-only');
       expect(preservedLocal?.pendingSync).toBe(true);
+    });
+
+    it('元数据成功但完整下载仅返回子集时，应保留缺失项目的 metadata 壳', async () => {
+      const remoteProjectA = createTestProject({ id: 'remote-1', name: 'Remote 1' });
+      const remoteProjectB = createTestProject({ id: 'remote-2', name: 'Remote 2' });
+
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProjectA, remoteProjectB]);
+      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProjectA]);
+      mockProjectStateService.projects.set([]);
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      const mergedProjects = mockProjectStateService.projects();
+      expect(mergedProjects.map(project => project.id)).toEqual(['remote-1', 'remote-2']);
+      expect(mergedProjects.find(project => project.id === 'remote-2')).toEqual(
+        expect.objectContaining({
+          id: 'remote-2',
+          name: 'Remote 2',
+          syncSource: 'synced',
+          pendingSync: false,
+        })
+      );
     });
   });
 

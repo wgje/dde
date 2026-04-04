@@ -204,6 +204,7 @@ describe('UserSessionService', () => {
       hasPendingChangesForProject: vi.fn().mockReturnValue(false),
       tryReloadConflictData: vi.fn(),
       refreshProjectManifestIfNeeded: vi.fn().mockResolvedValue({ skipped: false }),
+      commitProjectManifestWatermark: vi.fn(),
       refreshBlackBoxWatermarkIfNeeded: vi.fn().mockResolvedValue({ skipped: false }),
       clearActiveConflict: vi.fn(),
       clearOfflineSnapshot: vi.fn(),
@@ -1240,7 +1241,12 @@ describe('UserSessionService', () => {
 
   describe('startBackgroundSync', () => {
     it('activeProject 不可访问时应清理并跳过项目同步', async () => {
+      const deniedProject = createProject({ id: 'proj-denied', name: 'Denied', syncSource: 'synced' });
+      const keepProject = createProject({ id: 'proj-ok', name: 'Keep', syncSource: 'synced' });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([deniedProject, keepProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-denied');
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>).mockResolvedValue(keepProject);
       vi.spyOn(
         service as unknown as {
           syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
@@ -1255,13 +1261,24 @@ describe('UserSessionService', () => {
       ).startBackgroundSync('user-1', null);
 
       expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'proj-ok' }),
+      ]);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([
+          expect.objectContaining({ id: 'proj-ok' }),
+        ], 'user-1');
       expect(mockToastService['info']).toHaveBeenCalledWith('当前项目不可访问，已自动切换');
-      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).toHaveBeenCalledWith('proj-ok');
       expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
     });
 
     it('activeProject probe 不可访问时应提前清理，避免后续 full-project 路径', async () => {
+      const deniedProject = createProject({ id: 'proj-denied', name: 'Denied', syncSource: 'synced' });
+      const keepProject = createProject({ id: 'proj-ok', name: 'Keep', syncSource: 'synced' });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([deniedProject, keepProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-denied');
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
       (
         (mockSyncCoordinator['core'] as Record<string, unknown>)['getAccessibleProjectProbe'] as ReturnType<typeof vi.fn>
       ).mockResolvedValue({
@@ -1269,6 +1286,8 @@ describe('UserSessionService', () => {
         accessible: false,
         watermark: null,
       });
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: true, watermark: '2026-02-17T10:02:00.000Z' });
       vi.spyOn(
         service as unknown as {
           syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
@@ -1283,6 +1302,13 @@ describe('UserSessionService', () => {
       ).startBackgroundSync('user-1', null);
 
       expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'proj-ok' }),
+      ]);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([
+          expect.objectContaining({ id: 'proj-ok' }),
+        ], 'user-1');
       expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
       expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
     });
@@ -1313,7 +1339,7 @@ describe('UserSessionService', () => {
       ).toHaveBeenCalledWith('proj-1', '2026-02-17T10:00:00.000Z');
       expect(mockSyncCoordinator['refreshProjectManifestIfNeeded']).toHaveBeenCalledWith(
         'session-background-sync',
-        { prefetchedRemoteWatermark: '2026-02-17T10:02:00.000Z' }
+        { prefetchedRemoteWatermark: '2026-02-17T10:02:00.000Z', deferCommit: true }
       );
       expect(mockSyncCoordinator['refreshBlackBoxWatermarkIfNeeded']).toHaveBeenCalledWith(
         'session-background-sync',
@@ -1409,6 +1435,141 @@ describe('UserSessionService', () => {
       expect(mockSyncCoordinator['performDeltaSync']).toHaveBeenCalledWith('proj-legacy-local-only');
       expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
     });
+
+    it('项目元数据慢路成功后应提交 deferred manifest watermark', async () => {
+      const query = {
+        select: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        is: vi.fn().mockReturnThis(),
+        order: vi.fn().mockResolvedValue({
+          data: [{
+            id: 'proj-ok',
+            title: 'Keep',
+            description: '',
+            created_date: '2026-02-17T10:00:00.000Z',
+            updated_at: '2026-02-17T10:02:00.000Z',
+            version: 1,
+            owner_id: 'user-1',
+          }],
+          error: null,
+        }),
+      };
+      mockSupabaseClientService.clientAsync.mockResolvedValue({
+        from: vi.fn().mockReturnValue(query),
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: false, watermark: '2026-02-17T10:05:00.000Z' });
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>).mockResolvedValue(
+        createProject({ id: 'proj-ok', name: 'Keep', syncSource: 'synced' })
+      );
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(mockSyncCoordinator['commitProjectManifestWatermark']).toHaveBeenCalledWith(
+        '2026-02-17T10:05:00.000Z',
+        'user-1'
+      );
+    });
+
+    it('项目元数据慢路失败时不应提交 deferred manifest watermark', async () => {
+      const query = {
+        select: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        is: vi.fn().mockReturnThis(),
+        order: vi.fn().mockResolvedValue({
+          data: null,
+          error: { message: 'boom' },
+        }),
+      };
+      mockSupabaseClientService.clientAsync.mockResolvedValue({
+        from: vi.fn().mockReturnValue(query),
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: false, watermark: '2026-02-17T10:05:00.000Z' });
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(mockSyncCoordinator['commitProjectManifestWatermark']).not.toHaveBeenCalled();
+    });
+
+    it('项目清单快路命中且 activeProject 缺席但有待同步改动时，应降级为 local-only 并立即落盘', async () => {
+      const deniedProject = createProject({
+        id: 'proj-denied',
+        name: 'Denied',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+      const localOnlyProject = createProject({
+        id: 'proj-local-only',
+        name: 'Local Draft',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      const recoveredProject = createProject({
+        id: 'proj-recovered',
+        name: 'Recovered',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+      (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([deniedProject, localOnlyProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-denied');
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockImplementation(
+        (projectId: string) => projectId === 'proj-denied'
+      );
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
+      (
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        activeProjectId: 'proj-denied',
+        activeAccessible: true,
+        activeWatermark: '2026-02-17T10:01:00.000Z',
+        projectsWatermark: '2026-02-17T10:02:00.000Z',
+        blackboxWatermark: '2026-02-17T10:03:00.000Z',
+        serverNow: '2026-02-17T10:03:01.000Z',
+      });
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: true, watermark: '2026-02-17T10:02:00.000Z' });
+
+      vi.spyOn(
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        },
+        'syncProjectListMetadata'
+      ).mockImplementation(async () => {
+        (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([deniedProject, recoveredProject]);
+        return new Set(['proj-recovered']);
+      });
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'proj-denied', syncSource: 'local-only', pendingSync: true }),
+        expect.objectContaining({ id: 'proj-recovered', syncSource: 'synced' }),
+      ]);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([
+          expect.objectContaining({ id: 'proj-denied', syncSource: 'local-only', pendingSync: true }),
+          expect.objectContaining({ id: 'proj-recovered', syncSource: 'synced' }),
+        ], 'user-1');
+      expect(mockToastService['info']).not.toHaveBeenCalledWith('当前项目不可访问，已自动切换');
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+    });
   });
 
   describe('syncProjectListMetadata', () => {
@@ -1417,6 +1578,7 @@ describe('UserSessionService', () => {
       const query = {
         select: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
+        is: vi.fn().mockReturnThis(),
         order: vi.fn().mockResolvedValue({
           data: serverProjects,
           error: null,
@@ -1504,11 +1666,13 @@ describe('UserSessionService', () => {
       expect(setProjectsCall.some((p: Project) => p.id === 'proj-new')).toBe(true);
     });
 
-    it('服务端返回空列表时应跳过裁剪（安全守卫）', async () => {
+    it('服务端返回空列表时应裁剪全部不可访问的 synced 项目', async () => {
       const localA = createProject({ id: 'proj-a', name: 'A' });
       const localB = createProject({ id: 'proj-b', name: 'B' });
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localA, localB]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
 
       setupSupabaseQuery([]); // 服务端返回空
 
@@ -1518,14 +1682,12 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      // 不应调用 setProjects 来裁剪（但可能因新增壳触发，检查实际保留了所有本地项目）
-      if ((mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls.length > 0) {
-        const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0][0];
-        expect(setProjectsCall.length).toBeGreaterThanOrEqual(2);
-      }
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([], 'user-1');
     });
 
-    it('服务端项目数 < 本地 50% 且本地 ≥ 3 时应跳过裁剪（比例守卫）', async () => {
+    it('服务端项目数显著少于本地时仍应裁剪缺失的 synced 项目', async () => {
       const localProjects = [
         createProject({ id: 'p1', name: 'P1' }),
         createProject({ id: 'p2', name: 'P2' }),
@@ -1536,7 +1698,7 @@ describe('UserSessionService', () => {
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
       (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
-      // 服务端只返回 1/4 < 50%
+      // 服务端只返回 1/4，但查询已成功，应按真实远端状态裁剪
       setupSupabaseQuery([{
         id: 'p1', title: 'P1', description: '',
         created_date: localProjects[0].createdDate, updated_at: localProjects[0].updatedAt, version: 1,
@@ -1548,14 +1710,11 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      // 所有本地项目都保留（比例守卫拦截了裁剪）
-      if ((mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls.length > 0) {
-        const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0][0];
-        expect(setProjectsCall.length).toBe(4);
-      }
+      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
     });
 
-    it('本地仅有 2 个项目且服务端返回子集时也应跳过裁剪', async () => {
+    it('本地仅有 2 个项目时也应裁剪缺失的 synced 项目', async () => {
       const localProjects = [
         createProject({ id: 'p1', name: 'P1' }),
         createProject({ id: 'p2', name: 'P2' }),
@@ -1575,27 +1734,27 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      if ((mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls.length > 0) {
-        const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0][0];
-        expect(setProjectsCall.some((p: Project) => p.id === 'p1')).toBe(true);
-        expect(setProjectsCall.some((p: Project) => p.id === 'p2')).toBe(true);
-      }
+      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
     });
 
     it('服务端存在的项目应被提升为 synced，清除 local-only 影子标记', async () => {
+      const remoteUpdatedAt = '2026-04-04T04:00:00.000Z';
       const localProject = createProject({
         id: 'proj-shadow',
         name: 'Shadow',
+        updatedAt: '2026-04-04T03:00:00.000Z',
         syncSource: 'local-only',
         pendingSync: true,
       });
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
       (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
 
       setupSupabaseQuery([{
         id: 'proj-shadow', title: 'Shadow', description: '',
-        created_date: localProject.createdDate, updated_at: localProject.updatedAt, version: localProject.version,
+        created_date: localProject.createdDate, updated_at: remoteUpdatedAt, version: localProject.version,
       }]);
 
       await (
@@ -1609,6 +1768,16 @@ describe('UserSessionService', () => {
       const syncedProject = setProjectsCall?.find((project: Project) => project.id === 'proj-shadow');
       expect(syncedProject?.syncSource).toBe('synced');
       expect(syncedProject?.pendingSync).toBe(false);
+      expect(syncedProject?.updatedAt).toBe(remoteUpdatedAt);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([
+          expect.objectContaining({
+            id: 'proj-shadow',
+            syncSource: 'synced',
+            pendingSync: false,
+            updatedAt: remoteUpdatedAt,
+          }),
+        ], 'user-1');
     });
 
     it('local-only 项目即使服务端不存在也应继续保留，等待用户决定是否迁移', async () => {

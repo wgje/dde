@@ -238,10 +238,10 @@ import type { QueuedAction } from '../../../services/action-queue.types';
           </div>
         }
         
-        <!-- 离线模式提示 -->
+        <!-- 离线模式提示（安心感设计） -->
         @if (!isOnline()) {
-          <div class="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 px-2 py-1 rounded">
-            网络不可用，恢复后自动同步
+          <div class="text-[10px] text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-900/30 px-2 py-1 rounded">
+            离线模式 · 数据安全，联网后自动同步
           </div>
         }
         
@@ -402,8 +402,8 @@ import type { QueuedAction } from '../../../services/action-queue.types';
         
         <!-- 底部提示 -->
         @if (!isOnline()) {
-          <div class="px-3 py-1.5 bg-amber-50 dark:bg-amber-900/30 border-t border-amber-100 dark:border-amber-800 text-[10px] text-amber-700 dark:text-amber-300">
-            离线模式 - 恢复后自动同步
+          <div class="px-3 py-1.5 bg-sky-50 dark:bg-sky-900/30 border-t border-sky-100 dark:border-sky-800 text-[10px] text-sky-700 dark:text-sky-300">
+            离线模式 · 数据安全，联网后自动同步
           </div>
         }
       </div>

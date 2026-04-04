@@ -30,6 +30,7 @@ import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { isValidUUID } from '../utils/validation';
 import { resetFocusState } from '../state/focus-stores';
+import type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
 
 type StartupProjectCatalogStage = 'unresolved' | 'partial' | 'resolved';
 
@@ -71,6 +72,7 @@ export class UserSessionService {
   private prehydratedSnapshotApplied = false;
   private prehydratedSnapshotOwnerId: string | null = null;
   private sessionRequestGeneration = 0;
+  private lastProjectListMetadataSyncSucceeded = false;
   private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
   private readonly trustedPrehydratedSnapshotState = signal(false);
 
@@ -450,8 +452,8 @@ export class UserSessionService {
 
       const tasks: Task[] = (sp.recentTasks ?? [])
         .slice(0, MAX_RECENT_TASKS)
-        .filter(t => t.id && typeof t.id === 'string' && isValidUUID(t.id))
-        .map((t, idx) => ({
+        .filter((t: LaunchSnapshotTask) => t.id && typeof t.id === 'string' && isValidUUID(t.id))
+        .map((t: LaunchSnapshotTask, idx: number) => ({
           id: t.id,
           title: this.sanitizeSnapshotString(t.title, MAX_NAME_LENGTH),
           content: this.sanitizeSnapshotString(t.title, MAX_NAME_LENGTH),
@@ -635,8 +637,12 @@ export class UserSessionService {
     return startupSnapshot.projects.map(project => this.migrateProject(project));
   }
 
-  private async saveProjectsToOfflineSnapshot(projects: Project[], ownerUserId: string | null): Promise<void> {
-    if (projects.length === 0) {
+  private async saveProjectsToOfflineSnapshot(
+    projects: Project[],
+    ownerUserId: string | null,
+    options?: { allowEmpty?: boolean },
+  ): Promise<void> {
+    if (projects.length === 0 && !options?.allowEmpty) {
       return;
     }
 
@@ -1399,10 +1405,7 @@ export class UserSessionService {
           return;
         }
         if (probe && !probe.accessible) {
-          this.logger.warn('activeProject 探测为不可访问，提前清理避免无效 RPC', { projectId: activeProjectId });
-          this.projectState.setActiveProjectId(null);
-          this.toastService.info('当前项目不可访问，已自动切换');
-          activeProjectId = null;
+          activeProjectId = await this.reconcileInaccessibleActiveProject(activeProjectId, userId);
         } else if (probe?.watermark) {
           this.syncCoordinator.core.setLastSyncTime(activeProjectId, probe.watermark);
           accessPreflightConfirmed = true;
@@ -1416,6 +1419,7 @@ export class UserSessionService {
 
     // 阶段 2: 并行执行水位快路 + 黑匣子水位探测（原来是串行 await）
     let skipProjectSyncSlowPath = false;
+    let pendingProjectManifestWatermark: string | null = null;
     const parallelTasks: Promise<void>[] = [];
 
     if (FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1) {
@@ -1424,13 +1428,18 @@ export class UserSessionService {
           const manifestResult = resumeProbe
             ? await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync', {
               prefetchedRemoteWatermark: resumeProbe.projectsWatermark,
+              deferCommit: true,
             })
-            : await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync');
+            : await this.syncCoordinator.refreshProjectManifestIfNeeded('session-background-sync', {
+              deferCommit: true,
+            });
           if (manifestResult.skipped && manifestResult.watermark) {
             this.logger.debug('命中项目清单水位快路，跳过后台项目同步', {
               watermark: manifestResult.watermark
             });
             skipProjectSyncSlowPath = true;
+          } else if (manifestResult.watermark) {
+            pendingProjectManifestWatermark = manifestResult.watermark;
           }
         } catch (error) {
           this.logger.warn('项目清单水位快路失败，降级为常规后台同步', error);
@@ -1474,10 +1483,7 @@ export class UserSessionService {
           && !this.isLocalOnlyProject(activeProjectId)
           && !accessibleProjectIds.has(activeProjectId)
         ) {
-          this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: activeProjectId });
-          this.projectState.setActiveProjectId(null);
-          this.toastService.info('当前项目不可访问，已自动切换');
-          activeProjectId = null;
+          activeProjectId = await this.reconcileInaccessibleActiveProject(activeProjectId, userId);
         }
       } catch (error) {
         this.logger.warn('项目清单快路命中，但 local-only 项目 promotion 失败', error);
@@ -1514,12 +1520,13 @@ export class UserSessionService {
 
       if (metadataResult.status === 'fulfilled') {
         const accessibleProjectIds = metadataResult.value;
+        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceeded) {
+          this.syncCoordinator.commitProjectManifestWatermark(pendingProjectManifestWatermark, userId);
+          pendingProjectManifestWatermark = null;
+        }
         const currentActive = this.projectState.activeProjectId();
         if (currentActive && !this.isLocalOnlyProject(currentActive) && !accessibleProjectIds.has(currentActive)) {
-          this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: currentActive });
-          this.projectState.setActiveProjectId(null);
-          this.toastService.info('当前项目不可访问，已自动切换');
-          activeProjectId = null;
+          activeProjectId = await this.reconcileInaccessibleActiveProject(currentActive, userId);
         }
       } else {
         this.logger.warn('项目列表元数据同步失败', metadataResult.reason);
@@ -1539,6 +1546,10 @@ export class UserSessionService {
       let accessibleProjectIds = new Set<string>();
       try {
         accessibleProjectIds = await this.syncProjectListMetadata(userId);
+        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceeded) {
+          this.syncCoordinator.commitProjectManifestWatermark(pendingProjectManifestWatermark, userId);
+          pendingProjectManifestWatermark = null;
+        }
         if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:serial-metadata')) {
           return;
         }
@@ -1554,10 +1565,7 @@ export class UserSessionService {
         !this.isLocalOnlyProject(activeProjectId) &&
         !accessibleProjectIds.has(activeProjectId)
       ) {
-        this.logger.warn('activeProject 不可访问，清理并跳过项目同步', { projectId: activeProjectId });
-        this.projectState.setActiveProjectId(null);
-        this.toastService.info('当前项目不可访问，已自动切换');
-        activeProjectId = null;
+        activeProjectId = await this.reconcileInaccessibleActiveProject(activeProjectId, userId);
       }
 
       if (activeProjectId && !this.isLocalOnlyProject(activeProjectId) && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
@@ -1603,9 +1611,7 @@ export class UserSessionService {
         } else {
           // 【性能优化 2026-02-14】RPC 返回 null 说明项目不可访问（Access Denied 或已删除）
           // 清理不可访问的 activeProjectId，避免后续重复触发无效 RPC 请求链
-          this.logger.warn('清理不可访问的 activeProjectId', { projectId: activeProjectId });
-          this.projectState.setActiveProjectId(null);
-          this.toastService.info('当前项目不可访问，已自动切换');
+          activeProjectId = await this.reconcileInaccessibleActiveProject(activeProjectId, userId);
         }
       } catch (e) {
         this.logger.warn('当前项目同步失败', e);
@@ -1618,6 +1624,7 @@ export class UserSessionService {
   
   /** 同步项目列表元数据（不加载完整数据） */
   private async syncProjectListMetadata(userId: string): Promise<Set<string>> {
+    this.lastProjectListMetadataSyncSucceeded = false;
     const localProjects = this.projectState.projects();
     const fallbackIds = new Set(localProjects.map(p => p.id));
 
@@ -1628,12 +1635,15 @@ export class UserSessionService {
       .from('projects')
       .select('id,title,description,created_date,updated_at,version,owner_id')
       .eq('owner_id', userId)
+      .is('deleted_at', null)
       .order('updated_at', { ascending: false });
     
     if (error) {
       this.logger.warn('获取项目列表失败', { message: error.message });
       return fallbackIds;
     }
+
+    this.lastProjectListMetadataSyncSucceeded = true;
 
     const accessibleProjectIds = new Set<string>((data || []).map(row => String(row.id)));
     
@@ -1669,6 +1679,7 @@ export class UserSessionService {
           ...(remote.updated_at && remote.updated_at > (local.updatedAt || '') ? {
             name: remote.title || local.name,
             description: remote.description || local.description,
+            updatedAt: remote.updated_at,
             version: remote.version || local.version,
           } : {}),
         };
@@ -1678,6 +1689,7 @@ export class UserSessionService {
           nextProject.pendingSync !== local.pendingSync ||
           nextProject.name !== local.name ||
           nextProject.description !== local.description ||
+          nextProject.updatedAt !== local.updatedAt ||
           nextProject.version !== local.version
         ) {
           updatedProjects[localIndex] = nextProject;
@@ -1686,37 +1698,20 @@ export class UserSessionService {
       }
     }
 
-    // 深度优化：清理“远端不可访问且无本地待同步改动”的项目壳数据
-    // 避免 UI 残留无权限项目，减少后续无效同步链路与错误日志噪声
-    //
-    // 【安全守卫 2026-02-14】防止服务端返回空/截断结果时误删全部本地项目：
-    // 1. 服务端返回 0 条 → 跳过裁剪（极可能是网络/RLS 异常）
-    // 2. 本地 ≥ 3 个项目且服务端 < 50% → 跳过裁剪（疑似响应截断）
-    // 3. 不裁剪当前 activeProjectId 对应的项目（由调用方另行处理）
+    // 查询成功时，远端列表缺失意味着项目已不可访问或已被软删除。
+    // 这里允许列表合法收缩，但仍保留 local-only / active / pending changes 项目。
     const activeProjectId = this.projectState.activeProjectId();
     const beforePruneCount = updatedProjects.length;
-    const shouldSkipPruning =
-      accessibleProjectIds.size === 0 ||
-      (beforePruneCount <= 2 && accessibleProjectIds.size < beforePruneCount) ||
-      (beforePruneCount >= 3 && accessibleProjectIds.size < beforePruneCount * 0.5);
-
-    if (shouldSkipPruning) {
-      this.logger.warn('项目裁剪被安全守卫拦截，跳过裁剪', {
-        localCount: beforePruneCount,
-        remoteCount: accessibleProjectIds.size,
-      });
-    } else {
-      updatedProjects = updatedProjects.filter(project => {
-        if (accessibleProjectIds.has(project.id)) return true;
-        if (project.syncSource === 'local-only') return true;
-        // 不裁剪当前活跃项目，交由调用方处理
-        if (project.id === activeProjectId) return true;
-        const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(project.id);
-        return hasPendingLocalChanges;
-      });
-      if (updatedProjects.length !== beforePruneCount) {
-        hasChanges = true;
-      }
+    updatedProjects = updatedProjects.filter(project => {
+      if (accessibleProjectIds.has(project.id)) return true;
+      if (project.syncSource === 'local-only') return true;
+      // 不裁剪当前活跃项目，交由调用方处理
+      if (project.id === activeProjectId) return true;
+      const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(project.id);
+      return hasPendingLocalChanges;
+    });
+    if (updatedProjects.length !== beforePruneCount) {
+      hasChanges = true;
     }
     
     if (hasChanges) {
@@ -1727,10 +1722,66 @@ export class UserSessionService {
         this.projectState.setActiveProjectId(null);
         this.toastService.info('当前项目不可访问，已自动切换');
       }
+
+      try {
+        await this.saveProjectsToOfflineSnapshot(updatedProjects, userId, { allowEmpty: true });
+      } catch (snapshotError) {
+        this.logger.warn('持久化项目列表元数据快照失败', snapshotError);
+      }
+
       this.logger.debug('项目列表元数据已更新');
     }
 
     return accessibleProjectIds;
+  }
+
+  private async reconcileInaccessibleActiveProject(projectId: string, userId: string): Promise<string | null> {
+    const localProject = this.projectState.getProject(projectId);
+    if (!localProject) {
+      this.projectState.setActiveProjectId(null);
+      this.toastService.info('当前项目不可访问，已自动切换');
+      return null;
+    }
+
+    const hasPendingLocalChanges = localProject.syncSource === 'local-only'
+      || localProject.pendingSync === true
+      || this.syncCoordinator.hasPendingChangesForProject(projectId);
+
+    if (hasPendingLocalChanges) {
+      const preservedProjects: Project[] = this.projectState.projects().map(project => (
+        project.id === projectId
+          ? {
+              ...project,
+              syncSource: 'local-only' as const,
+              pendingSync: true,
+            }
+          : project
+      ));
+
+      this.projectState.setProjects(preservedProjects);
+      try {
+        await this.saveProjectsToOfflineSnapshot(preservedProjects, userId, { allowEmpty: true });
+      } catch (snapshotError) {
+        this.logger.warn('持久化 local-only 降级快照失败', snapshotError);
+      }
+
+      this.logger.warn('activeProject 不可访问，已降级为 local-only 草稿', { projectId });
+      return projectId;
+    }
+
+    const remainingProjects = this.projectState.projects().filter(project => project.id !== projectId);
+    this.projectState.setProjects(remainingProjects);
+    this.projectState.setActiveProjectId(null);
+
+    try {
+      await this.saveProjectsToOfflineSnapshot(remainingProjects, userId, { allowEmpty: true });
+    } catch (snapshotError) {
+      this.logger.warn('持久化 activeProject 移除后的快照失败', snapshotError);
+    }
+
+    this.toastService.info('当前项目不可访问，已自动切换');
+    this.logger.warn('activeProject 不可访问，已从本地项目列表移除', { projectId });
+    return null;
   }
   
   /** 合并单个项目数据（LWW 竞态保护） */

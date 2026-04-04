@@ -44,6 +44,7 @@ import { showBlackBoxPanel, gateState } from './state/focus-stores';
 import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability';
 import { ExportService } from './services/export.service';
 import { AppLifecycleOrchestratorService } from './services/app-lifecycle-orchestrator.service';
+import { NetworkAwarenessService } from './services/network-awareness.service';
 import { PwaInstallPromptService } from './services/pwa-install-prompt.service';
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
@@ -56,6 +57,8 @@ import { LaunchSnapshotService } from './services/launch-snapshot.service';
 import { TaskStore } from './services/stores';
 import { DockEngineService } from './services/dock-engine.service';
 import { reloadViaForceClearCache } from './utils/force-clear-cache';
+import { APP_LIFECYCLE_CONFIG } from './config/app-lifecycle.config';
+import { STARTUP_PERF_CONFIG } from './config/startup-performance.config';
 import {
   resolveDockFocusChromeLayoutLocked,
   type DockFocusChromePhase,
@@ -77,7 +80,11 @@ type RemoteChangeHandlerLike = {
 type EventDrivenSyncPulseLike = {
   initialize: () => void;
   destroy: () => void;
-  triggerNow: (reason: 'focus-entry' | 'manual' | 'focus' | 'visible' | 'pageshow' | 'online' | 'heartbeat') => Promise<void>;
+  triggerNow: (reason: 'focus-entry' | 'manual' | 'focus' | 'visible' | 'pageshow' | 'online' | 'heartbeat') => Promise<{
+    status: 'success' | 'failed' | 'skipped';
+    skipReason?: 'disabled' | 'cooldown' | 'offline' | 'hidden' | 'unauthenticated' | 'resuming' | 'compensating' | 'post-heavy-cooldown' | 'same-ticket';
+    retryAfterMs?: number;
+  }>;
 };
 
 type StartupDiagnosticsLike = {
@@ -214,6 +221,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   
   /** 数据保护服务（延迟注入，见上方 getter） */
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
+  private readonly networkAwareness = inject(NetworkAwarenessService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupTier = inject(StartupTierOrchestratorService);
   private readonly eventBus = inject(EventBusService);
@@ -729,6 +737,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly SEARCH_DEBOUNCE_DELAY = 300; // 300ms 搜索防抖
   private focusProbeInitializedForUser: string | null = null;
+  private focusEntryOwnerScope: string | null | undefined = undefined;
+  private focusEntryPulseGeneration = 0;
+  private focusEntryPulseDispatched = false;
+  private focusEntryPulsePending = false;
+  private focusEntryPulseRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private interactionWarmupDone = false;
   private syncHydrationDone = false;
   private remoteCallbacksInitialized = false;
@@ -864,9 +877,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly focusMountIntentListener = () => {
     if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) return;
     this.focusModeIntentActivated.set(true);
-    if (FEATURE_FLAGS.EVENT_DRIVEN_SYNC_PULSE_V1) {
-      this.triggerSyncPulse('focus-entry');
-    }
+    this.dispatchFocusEntrySyncPulseIfReady();
     this.teardownFocusMountIntentListener();
   };
 
@@ -988,6 +999,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupStartupTierEffects();
     this.setupRemoteCallbackEffect();
     this.setupSubscriptionEffect();
+    this.setupFocusEntryOwnerEffect();
     this.setupSyncPulseEffect();
     this.setupSessionRestoredHandler();
     this.setupSessionInvalidatedHandler();
@@ -1359,6 +1371,23 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     });
   }
 
+  private setupFocusEntryOwnerEffect(): void {
+    effect(() => {
+      const ownerId = this.currentUserId();
+      if (this.focusEntryOwnerScope === undefined) {
+        this.focusEntryOwnerScope = ownerId;
+        return;
+      }
+
+      if (this.focusEntryOwnerScope === ownerId) {
+        return;
+      }
+
+      this.focusEntryOwnerScope = ownerId;
+      this.resetFocusEntrySyncPulseState(ownerId !== null);
+    });
+  }
+
   /** 同步心跳管理 */
   private setupSyncPulseEffect(): void {
     effect(() => {
@@ -1379,6 +1408,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       }
 
       this.initializeSyncPulse();
+      this.dispatchFocusEntrySyncPulseIfReady();
     });
   }
 
@@ -1402,6 +1432,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         restoredUserId: event.userId,
         source: event.source,
       });
+      this.resetFocusEntrySyncPulseState(false);
       this.launchSnapshotWriteBlocked.set(true);
       this.launchSnapshot.cancelPendingPersist();
       this.simpleSync.stopRuntime();
@@ -1445,6 +1476,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         invalidatedUserId: event.userId,
         source: event.source,
       });
+      this.resetFocusEntrySyncPulseState(false);
       this.launchSnapshotWriteBlocked.set(true);
       this.launchSnapshot.cancelPendingPersist();
       this.simpleSync.stopRuntime();
@@ -1476,6 +1508,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     window.removeEventListener('toggle-sidebar', this.handleToggleSidebar);
     document.removeEventListener('keydown', this.keyboardShortcutCaptureListener, { capture: true } as AddEventListenerOptions);
     this.teardownFocusMountIntentListener();
+    this.clearFocusEntrySyncPulseRetry();
     this.teardownFlowRestoreBreadcrumbListener();
     this.teardownSyncPulseBreadcrumbListener();
     this.destroySyncPulse();
@@ -1613,15 +1646,130 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return this.eventDrivenSyncPulsePromise;
   }
 
-  private triggerSyncPulse(reason: 'focus-entry' | 'manual' | 'focus' | 'visible' | 'pageshow' | 'online' | 'heartbeat'): void {
-    void this.getEventDrivenSyncPulseLazy().then((service) => {
-      if (!service) return;
-      void service.triggerNow(reason);
-    });
+  private isSyncPulseReady(): boolean {
+    if (!FEATURE_FLAGS.EVENT_DRIVEN_SYNC_PULSE_V1) {
+      return false;
+    }
+
+    if (!this.currentUserId() || !this.coreDataLoaded()) {
+      return false;
+    }
+
+    if (!this.networkAwareness.isOnline()) {
+      return false;
+    }
+
+    if (this.appLifecycle.isResuming() || this.appLifecycle.isRecoveryCompensationInFlight()) {
+      return false;
+    }
+
+    if (FEATURE_FLAGS.RECOVERY_TICKET_DEDUP_V1 && this.appLifecycle.getCurrentRecoveryTicket()) {
+      return false;
+    }
+
+    if (FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1 && !this.startupTier.isTierReady('p2')) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private resetFocusEntrySyncPulseState(rearmIntentListener = true): void {
+    this.focusEntryPulseGeneration += 1;
+    this.clearFocusEntrySyncPulseRetry();
+    this.focusEntryPulsePending = false;
+    this.focusEntryPulseDispatched = false;
+    this.focusModeIntentActivated.set(!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1);
+    this.teardownFocusMountIntentListener();
+    if (rearmIntentListener) {
+      this.setupFocusMountIntentListener();
+    }
+  }
+
+  private dispatchFocusEntrySyncPulseIfReady(): void {
+    if (
+      !this.focusModeIntentActivated()
+      || this.focusEntryPulseDispatched
+      || this.focusEntryPulsePending
+      || !this.isSyncPulseReady()
+    ) {
+      return;
+    }
+
+    this.clearFocusEntrySyncPulseRetry();
+    const generation = this.focusEntryPulseGeneration;
+    this.focusEntryPulsePending = true;
+    void this.triggerSyncPulse('focus-entry')
+      .then((result) => {
+        if (generation !== this.focusEntryPulseGeneration || !result) {
+          return;
+        }
+
+        if (result.status === 'success') {
+          this.focusEntryPulseDispatched = true;
+          return;
+        }
+
+        if (result.status === 'skipped') {
+          this.scheduleFocusEntrySyncPulseRetry(result.skipReason, result.retryAfterMs);
+        }
+      })
+      .finally(() => {
+        if (generation === this.focusEntryPulseGeneration) {
+          this.focusEntryPulsePending = false;
+        }
+      });
+  }
+
+  private async triggerSyncPulse(
+    reason: 'focus-entry' | 'manual' | 'focus' | 'visible' | 'pageshow' | 'online' | 'heartbeat'
+  ): Promise<Awaited<ReturnType<EventDrivenSyncPulseLike['triggerNow']>> | null> {
+    if (!this.isSyncPulseReady()) {
+      return null;
+    }
+
+    const service = await this.getEventDrivenSyncPulseLazy();
+    if (!service) {
+      return null;
+    }
+
+    return service.triggerNow(reason);
   }
 
   private initializeSyncPulse(): void {
     void this.getEventDrivenSyncPulseLazy().then((service) => service?.initialize());
+  }
+
+  private clearFocusEntrySyncPulseRetry(): void {
+    if (!this.focusEntryPulseRetryTimer) {
+      return;
+    }
+
+    clearTimeout(this.focusEntryPulseRetryTimer);
+    this.focusEntryPulseRetryTimer = null;
+  }
+
+  private scheduleFocusEntrySyncPulseRetry(
+    skipReason?: Awaited<ReturnType<EventDrivenSyncPulseLike['triggerNow']>>['skipReason'],
+    retryAfterMs?: Awaited<ReturnType<EventDrivenSyncPulseLike['triggerNow']>>['retryAfterMs']
+  ): void {
+    const delay = retryAfterMs ?? (
+      skipReason === 'cooldown'
+        ? STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS
+        : skipReason === 'post-heavy-cooldown'
+          ? APP_LIFECYCLE_CONFIG.PULSE_SUPPRESS_AFTER_HEAVY_MS
+          : null
+    );
+
+    if (delay === null) {
+      return;
+    }
+
+    this.clearFocusEntrySyncPulseRetry();
+    this.focusEntryPulseRetryTimer = setTimeout(() => {
+      this.focusEntryPulseRetryTimer = null;
+      this.dispatchFocusEntrySyncPulseIfReady();
+    }, delay);
   }
 
   private destroySyncPulse(): void {
@@ -2027,6 +2175,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   switchToResetPassword() { this.authCoord.switchToResetPassword(); }
 
 async signOut() {
+  this.resetFocusEntrySyncPulseState(false);
     this.destroySyncPulse();
     await this.authCoord.signOut();
     this.projectCoord.clearState();

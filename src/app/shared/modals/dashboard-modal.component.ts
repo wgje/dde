@@ -7,8 +7,10 @@ import { ConflictStorageService, ConflictRecord } from '../../../services/confli
 import { ProjectOperationService } from '../../../services/project-operation.service';
 import { ToastService } from '../../../services/toast.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
+import { ConflictAutoResolverService, AutoResolutionReport, TaskResolutionRecommendation } from '../../../services/conflict-auto-resolver.service';
+import { type ConflictResolutionPlan, type TaskResolutionChoice } from '../../../services/conflict-resolution.types';
 import { Task } from '../../../models';
-import { ConflictTaskDiffComponent } from '../components/conflict-task-diff.component';
+import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conflict-task-diff.component';
 
 type TabKey = 'status' | 'conflicts' | 'queue';
 
@@ -20,6 +22,14 @@ interface ConflictItem {
   /** 云端任务原始数组 */
   remoteTasks: Task[];
   isResolving: boolean;
+  /** 自动解决报告 */
+  autoReport?: AutoResolutionReport;
+  /** 当前云端快照是否为本轮冲突中新鲜抓取的版本 */
+  remoteSnapshotFresh: boolean;
+  /** 用户逐任务选择结果 */
+  taskResolutions?: TaskResolutionMap;
+  /** 是否启用了逐任务选择模式 */
+  selectiveMode?: boolean;
 }
 
 /** 仪表盘模态框 - 展示数据冲突、同步状态，支持内联冲突解决 */
@@ -161,13 +171,13 @@ interface ConflictItem {
               </div>
             </div>
 
-            <!-- 离线模式提示 -->
+            <!-- 离线模式提示（安心感设计） -->
             @if (!isOnline()) {
-              <div class="p-3 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/50 rounded-lg flex items-start gap-2">
-                <svg class="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <div class="p-3 bg-sky-50 dark:bg-sky-900/30 border border-sky-200 dark:border-sky-800/50 rounded-lg flex items-start gap-2">
+                <svg class="w-4 h-4 text-sky-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                 <div>
-                  <h3 class="text-xs font-semibold text-blue-800 dark:text-blue-200 mb-0.5">离线模式</h3>
-                  <p class="text-[11px] text-blue-700 dark:text-blue-300">当前网络不可用，所有操作将保存在本地。网络恢复后将自动同步到云端。</p>
+                  <h3 class="text-xs font-semibold text-sky-800 dark:text-sky-200 mb-0.5">离线模式 · 数据安全</h3>
+                  <p class="text-[11px] text-sky-700 dark:text-sky-300">您可以继续正常编辑，所有更改都安全地保存在本地。网络恢复后将自动同步到云端，无需手动操作。</p>
                 </div>
               </div>
             }
@@ -189,18 +199,18 @@ interface ConflictItem {
             @if (conflictCount() > 0) {
               <div class="space-y-4">
                 @for (conflict of conflictItems(); track conflict.projectId) {
-                  <div class="border border-red-200 dark:border-red-800/50 rounded-lg overflow-hidden bg-white dark:bg-stone-900">
+                  <div class="border border-stone-200 dark:border-stone-700 rounded-lg overflow-hidden bg-white dark:bg-stone-900">
                     <!-- 冲突头部：项目名 + 原因 + 操作按钮 -->
-                    <div class="p-3 bg-red-50/80 dark:bg-red-900/20 border-b border-red-100 dark:border-red-800/50">
+                    <div class="p-3 bg-stone-50/80 dark:bg-stone-800/50 border-b border-stone-200 dark:border-stone-700">
                       <div class="flex items-center justify-between gap-3 mb-2">
                         <div class="flex items-center gap-2 min-w-0">
                           <span class="text-sm font-semibold text-stone-800 dark:text-stone-100 truncate">{{ conflict.projectName }}</span>
                           <span class="px-1.5 py-0.5 text-[9px] font-medium rounded flex-shrink-0"
                                 [ngClass]="{
-                                  'bg-amber-100 text-amber-700': conflict.reason === 'concurrent_edit',
-                                  'bg-blue-100 text-blue-700': conflict.reason === 'network_recovery',
-                                  'bg-red-100 text-red-700': conflict.reason === 'version_mismatch',
-                                  'bg-stone-100 text-stone-600': conflict.reason !== 'concurrent_edit' && conflict.reason !== 'network_recovery' && conflict.reason !== 'version_mismatch'
+                                  'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300': conflict.reason === 'concurrent_edit',
+                                  'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300': conflict.reason === 'network_recovery',
+                                  'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300': conflict.reason === 'version_mismatch',
+                                  'bg-stone-100 text-stone-600 dark:bg-stone-700 dark:text-stone-300': conflict.reason !== 'concurrent_edit' && conflict.reason !== 'network_recovery' && conflict.reason !== 'version_mismatch'
                                 }">
                             {{ conflict.reasonLabel }}
                           </span>
@@ -213,34 +223,82 @@ interface ConflictItem {
                           <span>{{ formatRelativeTime(conflict.conflictedAt) }}</span>
                         </div>
                       </div>
+
+                      <!-- 系统诊断摘要 -->
+                      @if (conflict.autoReport) {
+                        <div class="mb-3 p-2.5 bg-white dark:bg-stone-800 rounded-lg border border-stone-100 dark:border-stone-700">
+                          <div class="flex items-center gap-2 mb-1.5">
+                            <svg class="w-3.5 h-3.5 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                            </svg>
+                            <span class="text-[11px] font-semibold text-stone-700 dark:text-stone-200">智能诊断</span>
+                            <span class="flex-1"></span>
+                            <div class="flex gap-1.5 text-[9px]">
+                              @if (conflict.autoReport.autoCount > 0) {
+                                <span class="px-1.5 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400 rounded">{{ conflict.autoReport.autoCount }} 自动</span>
+                              }
+                              @if (conflict.autoReport.suggestCount > 0) {
+                                <span class="px-1.5 py-0.5 bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 rounded">{{ conflict.autoReport.suggestCount }} 建议</span>
+                              }
+                              @if (conflict.autoReport.manualCount > 0) {
+                                <span class="px-1.5 py-0.5 bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400 rounded">{{ conflict.autoReport.manualCount }} 需确认</span>
+                              }
+                            </div>
+                          </div>
+                          <p class="text-[10px] text-stone-500 dark:text-stone-400">{{ conflict.autoReport.overallSuggestion }}</p>
+                          <p class="text-[10px] text-violet-600 dark:text-violet-400 mt-1">{{ getSuggestedResolutionSummary(conflict) }}</p>
+                        </div>
+                      }
+
                       <!-- 操作按钮 -->
                       <div class="flex flex-wrap gap-2">
+                        @if (canApplySuggestedResolution(conflict)) {
+                          <button (click)="applyAutoResolution(conflict)" [disabled]="conflict.isResolving"
+                            class="flex-1 min-w-[100px] px-3 py-2 text-xs font-medium bg-violet-500 hover:bg-violet-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                            @if (conflict.isResolving) { <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> }
+                            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+                            {{ getSuggestedResolutionLabel(conflict) }}
+                          </button>
+                        }
+                        <button (click)="toggleSelectiveMode(conflict.projectId)" [disabled]="conflict.isResolving"
+                          class="px-3 py-2 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 border"
+                          [ngClass]="{
+                            'bg-violet-50 dark:bg-violet-900/30 border-violet-300 dark:border-violet-600 text-violet-700 dark:text-violet-300': conflict.selectiveMode,
+                            'bg-white dark:bg-stone-800 border-stone-200 dark:border-stone-600 text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-stone-700': !conflict.selectiveMode
+                          }">
+                          {{ conflict.selectiveMode ? '✓ 逐任务选择中' : '逐任务选择' }}
+                        </button>
                         <button (click)="resolveUseLocal(conflict.projectId)" [disabled]="conflict.isResolving"
-                          class="flex-1 min-w-[80px] px-3 py-2 text-xs font-medium bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
-                          @if (conflict.isResolving) { <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> }
-                          使用本地
+                          class="px-3 py-2 text-xs font-medium bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                          全部用本地
                         </button>
                         <button (click)="resolveUseRemote(conflict.projectId)" [disabled]="conflict.isResolving"
-                          class="flex-1 min-w-[80px] px-3 py-2 text-xs font-medium bg-teal-500 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
-                          使用云端
+                          class="px-3 py-2 text-xs font-medium bg-teal-500 hover:bg-teal-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                          全部用云端
                         </button>
                         <button (click)="resolveKeepBoth(conflict.projectId)" [disabled]="conflict.isResolving"
-                          class="flex-1 min-w-[80px] px-3 py-2 text-xs font-medium bg-violet-500 hover:bg-violet-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
-                          智能合并
+                          class="px-3 py-2 text-xs font-medium bg-stone-500 hover:bg-stone-600 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5">
+                          保留两者
                         </button>
                       </div>
                     </div>
-                    <!-- 字段级差异对比（使用新组件，直接展示无需额外点击） -->
+                    <!-- 字段级差异对比（含系统推荐） -->
                     <div class="p-3">
                       <app-conflict-task-diff
                         [localTasks]="conflict.localTasks"
-                        [remoteTasks]="conflict.remoteTasks" />
+                        [remoteTasks]="conflict.remoteTasks"
+                        [selectable]="!!conflict.selectiveMode"
+                        [recommendations]="conflict.autoReport?.recommendations || []"
+                        (selectionChange)="onTaskSelectionChange(conflict.projectId, $event)" />
                     </div>
                   </div>
                 }
-                <div class="text-[10px] text-stone-400 dark:text-stone-500 p-2 bg-stone-50 dark:bg-stone-800 rounded-lg">
-                  💡 <span class="font-medium">提示：</span>展开任务可查看具体字段的差异。
-                  「使用本地」保留此设备编辑；「使用云端」同步其他设备内容；「智能合并」保留双方新增内容。
+                <div class="text-[10px] text-stone-400 dark:text-stone-500 p-2 bg-stone-50 dark:bg-stone-800 rounded-lg space-y-1">
+                  <p>💡 <span class="font-medium">系统建议说明：</span></p>
+                  <p><span class="px-1 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400 rounded text-[9px]">自动</span> 系统可安全地自动处理（如仅布局变化）</p>
+                  <p><span class="px-1 py-0.5 bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 rounded text-[9px]">建议</span> 系统有推荐，建议您确认后应用</p>
+                  <p><span class="px-1 py-0.5 bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400 rounded text-[9px]">需确认</span> 需要您手动选择保留哪个版本</p>
+                  <p class="mt-1">您的手动选择始终拥有最高优先级，系统建议仅供参考。</p>
                 </div>
               </div>
             } @else {
@@ -323,6 +381,7 @@ export class DashboardModalComponent implements OnInit {
   private conflictStorage = inject(ConflictStorageService);
   private projectOps = inject(ProjectOperationService);
   private syncCoordinator = inject(SyncCoordinatorService);
+  private autoResolver = inject(ConflictAutoResolverService);
   private toastService = inject(ToastService);
 
   @Output() close = new EventEmitter<void>();
@@ -454,6 +513,9 @@ export class DashboardModalComponent implements OnInit {
     const localTasks: Task[] = Array.isArray(record.localProject?.tasks) ? record.localProject!.tasks : [];
     const remoteTasks: Task[] = Array.isArray(record.remoteProject?.tasks) ? record.remoteProject!.tasks : [];
 
+    // 生成自动解决报告
+    const autoReport = this.autoResolver.analyze(record.projectId, localTasks, remoteTasks);
+
     return {
       projectId: record.projectId,
       projectName: record.localProject?.name || record.remoteProject?.name || '未知项目',
@@ -465,6 +527,9 @@ export class DashboardModalComponent implements OnInit {
       localTasks,
       remoteTasks,
       isResolving: false,
+      autoReport,
+      remoteSnapshotFresh: record.remoteSnapshotFresh === true,
+      selectiveMode: false,
     };
   }
 
@@ -478,6 +543,61 @@ export class DashboardModalComponent implements OnInit {
 
   async resolveUseLocal(projectId: string): Promise<void> { await this.resolveConflictWithStrategy(projectId, 'local'); }
   async resolveUseRemote(projectId: string): Promise<void> { await this.resolveConflictWithStrategy(projectId, 'remote'); }
+
+  /** 切换逐任务选择模式 */
+  toggleSelectiveMode(projectId: string): void {
+    this.conflictItems.update(items =>
+      items.map(item => item.projectId === projectId
+        ? { ...item, selectiveMode: !item.selectiveMode }
+        : item
+      )
+    );
+  }
+
+  /** 接收逐任务选择变更 */
+  onTaskSelectionChange(projectId: string, selections: TaskResolutionMap): void {
+    this.conflictItems.update(items =>
+      items.map(item => item.projectId === projectId
+        ? { ...item, taskResolutions: selections }
+        : item
+      )
+    );
+  }
+
+  /**
+   * 应用系统自动解决建议
+   * 将 auto/suggest 的推荐直接应用，manual 的保留用户已有选择
+   */
+  async applyAutoResolution(conflict: ConflictItem): Promise<void> {
+    if (!conflict.autoReport) return;
+    if (!conflict.remoteSnapshotFresh) {
+      this.toastService.warning('建议暂不可直接应用', '当前云端快照不是本轮最新结果，请先重新同步或逐项确认后再处理');
+      return;
+    }
+
+    this.setResolving(conflict.projectId, true);
+    try {
+      const plan = this.buildResolutionPlan(conflict);
+      const counts = this.countResolutionChoices(plan);
+      const resolved = await this.projectOps.resolveConflictWithPlan(conflict.projectId, plan);
+      await this.loadConflicts();
+
+      if (!resolved) {
+        return;
+      }
+
+      const totalResolved = Object.keys(plan.taskChoices).length;
+      const userSelectionCount = conflict.taskResolutions?.size ?? 0;
+      this.toastService.success(
+        '智能解决完成',
+        `已按逐任务方案处理 ${totalResolved} 个冲突（${counts.local} 项保留本地，${counts.remote} 项采用云端${userSelectionCount > 0 ? `；其中 ${userSelectionCount} 项来自您的明确选择` : ''}）`
+      );
+    } catch {
+      this.toastService.error('错误', '应用系统建议时发生意外错误');
+    } finally {
+      this.setResolving(conflict.projectId, false);
+    }
+  }
 
   async resolveKeepBoth(projectId: string): Promise<void> {
     this.setResolving(projectId, true);
@@ -512,5 +632,86 @@ export class DashboardModalComponent implements OnInit {
     this.conflictItems.update(items =>
       items.map(item => item.projectId === projectId ? { ...item, isResolving } : item)
     );
+  }
+
+  canApplySuggestedResolution(conflict: ConflictItem): boolean {
+    if (!conflict.remoteSnapshotFresh) {
+      return false;
+    }
+
+    return !!conflict.autoReport
+      && conflict.autoReport.recommendations.length > 0
+      && this.getPendingManualSelections(conflict) === 0;
+  }
+
+  getSuggestedResolutionLabel(conflict: ConflictItem): string {
+    const userSelectionCount = conflict.taskResolutions?.size ?? 0;
+    return userSelectionCount > 0 ? `应用系统建议与 ${userSelectionCount} 项选择` : '应用系统建议';
+  }
+
+  getSuggestedResolutionSummary(conflict: ConflictItem): string {
+    if (!conflict.autoReport) {
+      return '';
+    }
+
+    if (!conflict.remoteSnapshotFresh) {
+      return '当前展示的云端快照不是本轮冲突中的最新结果，系统建议仅供参考；请先重新同步或逐项确认。';
+    }
+
+    const manualPending = this.getPendingManualSelections(conflict);
+    const userSelectionCount = conflict.taskResolutions?.size ?? 0;
+    if (manualPending > 0) {
+      return `系统已完成 ${conflict.autoReport.autoCount + conflict.autoReport.suggestCount} 项判断，仍有 ${manualPending} 项高风险冲突需要您确认。`;
+    }
+
+    if (userSelectionCount > 0) {
+      return `将优先采用您的 ${userSelectionCount} 项明确选择，其余 ${Math.max(conflict.autoReport.recommendations.length - userSelectionCount, 0)} 项按系统建议处理。`;
+    }
+
+    return '系统已完成逐任务判断，应用后会按任务分别保留本地或云端版本。';
+  }
+
+  private getPendingManualSelections(conflict: ConflictItem): number {
+    const report = conflict.autoReport;
+    if (!report) {
+      return 0;
+    }
+
+    const selections = conflict.taskResolutions ?? new Map<string, 'local' | 'remote'>();
+    return report.recommendations.filter(rec => rec.confidence === 'manual' && !selections.has(rec.taskId)).length;
+  }
+
+  private buildResolutionPlan(conflict: ConflictItem): ConflictResolutionPlan {
+    const taskChoices: Record<string, TaskResolutionChoice> = {};
+    const selections = conflict.taskResolutions ?? new Map<string, 'local' | 'remote'>();
+
+    for (const recommendation of conflict.autoReport?.recommendations ?? []) {
+      const userChoice = selections.get(recommendation.taskId);
+      if (userChoice) {
+        taskChoices[recommendation.taskId] = userChoice;
+        continue;
+      }
+
+      taskChoices[recommendation.taskId] = recommendation.recommendation === 'remote' ? 'remote' : 'local';
+    }
+
+    return {
+      taskChoices,
+      appliedBy: selections.size === 0 ? 'system' : 'mixed',
+    };
+  }
+
+  private countResolutionChoices(plan: ConflictResolutionPlan): { local: number; remote: number } {
+    const counts = { local: 0, remote: 0 };
+
+    for (const choice of Object.values(plan.taskChoices)) {
+      if (choice === 'local') {
+        counts.local++;
+      } else {
+        counts.remote++;
+      }
+    }
+
+    return counts;
   }
 }

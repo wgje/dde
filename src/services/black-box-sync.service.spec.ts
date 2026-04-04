@@ -147,6 +147,21 @@ describe('BlackBoxSyncService', () => {
     );
   });
 
+  it('should not report passive view refresh duplicates to Sentry', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(undefined);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+    mockSentry.captureMessage.mockClear();
+
+    await service.pullChanges({ reason: 'panel-open' });
+
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+    expect(mockSentry.captureMessage).not.toHaveBeenCalled();
+  });
+
   it('should map focus_meta from database row into focusMeta', () => {
     const mapRowToEntry = (service as unknown as {
       mapRowToEntry: (row: Record<string, unknown>) => { focusMeta?: unknown };

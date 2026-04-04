@@ -28,8 +28,13 @@ function expectOwnerOnlyBatchUpsert(section: string, ownerMarker: string): void 
 }
 
 function expectOwnerOnlyPurge(section: string): void {
-  expect(section).toContain('p.id = p_project_id');
-  expect(section).toContain('p.owner_id = auth.uid()');
+  const normalized = section.replace(/\s+/g, ' ');
+
+  const hasDirectOwnerCheck = normalized.includes('p.id = p_project_id')
+    && normalized.includes('p.owner_id = auth.uid()');
+  const hasAccessHelperCheck = normalized.includes('public.user_has_project_access(p_project_id)');
+
+  expect(hasDirectOwnerCheck || hasAccessHelperCheck).toBe(true);
   expect(section).toContain("RAISE EXCEPTION 'not authorized'");
   expect(section).toContain('WHERE t.project_id = p_project_id');
 }

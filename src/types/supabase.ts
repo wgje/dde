@@ -280,6 +280,7 @@ export type Database = {
         Row: {
           created_date: string | null
           data: Json | null
+          deleted_at: string | null
           description: string | null
           id: string
           migrated_to_v2: boolean | null
@@ -291,6 +292,7 @@ export type Database = {
         Insert: {
           created_date?: string | null
           data?: Json | null
+          deleted_at?: string | null
           description?: string | null
           id?: string
           migrated_to_v2?: boolean | null
@@ -302,6 +304,7 @@ export type Database = {
         Update: {
           created_date?: string | null
           data?: Json | null
+          deleted_at?: string | null
           description?: string | null
           id?: string
           migrated_to_v2?: boolean | null
@@ -787,33 +790,33 @@ export type Database = {
         Returns: {
           accessible: boolean
           project_id: string
-          watermark: string
+          watermark: string | null
         }[]
       }
       get_all_projects_data: {
         Args: { p_since_timestamp?: string }
         Returns: Json
       }
-      get_black_box_sync_watermark: { Args: never; Returns: string }
+      get_black_box_sync_watermark: { Args: never; Returns: string | null }
       get_dashboard_stats: { Args: never; Returns: Json }
       get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
       get_project_sync_watermark: {
         Args: { p_project_id: string }
-        Returns: string
+        Returns: string | null
       }
       get_projects_list: {
         Args: { p_limit?: number; p_offset?: number }
         Returns: Json
       }
       get_resume_recovery_probe: {
-        Args: { p_project_id?: string }
+        Args: { p_project_id?: string | null }
         Returns: {
           active_accessible: boolean
-          active_project_id: string
-          active_watermark: string
-          blackbox_watermark: string
-          projects_watermark: string
-          server_now: string
+          active_project_id: string | null
+          active_watermark: string | null
+          blackbox_watermark: string | null
+          projects_watermark: string | null
+          server_now: string | null
         }[]
       }
       get_server_time: { Args: never; Returns: string }
@@ -821,7 +824,7 @@ export type Database = {
         Args: { p_since_timestamp?: string }
         Returns: Json
       }
-      get_user_projects_watermark: { Args: never; Returns: string }
+      get_user_projects_watermark: { Args: never; Returns: string | null }
       get_vault_secret: { Args: { p_name: string }; Returns: string }
       is_connection_tombstoned: {
         Args: { p_connection_id: string }

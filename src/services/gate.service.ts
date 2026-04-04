@@ -166,7 +166,7 @@ export class GateService {
 
       this.reviewSyncInFlight = true;
 
-      this.blackBoxService.loadFromServer()
+      this.blackBoxService.loadFromServer('gate-review')
         .then(() => {
           this.ngZone.run(() => {
             if (gateState() !== 'reviewing') return;

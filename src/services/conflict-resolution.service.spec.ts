@@ -288,6 +288,121 @@ describe('ConflictResolutionService', () => {
         expect(mockToastService.info).toHaveBeenCalled();
       });
     });
+
+    describe('逐任务计划策略', () => {
+      it('应该按任务分别采用本地或云端版本', async () => {
+        const localProject = createTestProject({
+          id: 'proj-1',
+          version: 2,
+          tasks: [
+            createTestTask({ id: 'task-1', title: 'Local Task', content: 'local body', updatedAt: '2025-01-01T00:00:00.000Z' }),
+            createTestTask({ id: 'task-2', title: 'Only Local' }),
+          ],
+        });
+        const remoteProject = createTestProject({
+          id: 'proj-1',
+          version: 3,
+          tasks: [
+            createTestTask({ id: 'task-1', title: 'Remote Task', content: 'remote body', updatedAt: '2025-01-02T00:00:00.000Z' }),
+            createTestTask({ id: 'task-3', title: 'Only Remote' }),
+          ],
+        });
+
+        const result = await service.resolveConflictWithPlan(
+          'proj-1',
+          {
+            taskChoices: {
+              'task-1': 'remote',
+              'task-2': 'local',
+              'task-3': 'remote',
+            },
+            appliedBy: 'mixed',
+          },
+          localProject,
+          remoteProject,
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.version).toBe(4);
+          expect(result.value.tasks.find(task => task.id === 'task-1')?.title).toBe('Remote Task');
+          expect(result.value.tasks.some(task => task.id === 'task-2')).toBe(true);
+          expect(result.value.tasks.some(task => task.id === 'task-3')).toBe(true);
+        }
+        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
+          'proj-1',
+          expect.objectContaining({ version: 4 }),
+          'local',
+        );
+      });
+
+      it('显式选择版本时不应额外创建冲突副本', async () => {
+        const localProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({
+            id: 'task-1',
+            title: '原任务',
+            content: 'Common prefix here 111222333444555666777888999000 unique local numbers',
+            updatedAt: '2025-01-01T00:00:00.000Z',
+          })],
+        });
+        const remoteProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({
+            id: 'task-1',
+            title: '原任务',
+            content: 'Common prefix here @@##$$%%^^&&**()!!~~``|| unique remote symbols',
+            updatedAt: '2025-01-02T00:00:00.000Z',
+          })],
+        });
+
+        const result = await service.resolveConflictWithPlan(
+          'proj-1',
+          {
+            taskChoices: { 'task-1': 'remote' },
+            appliedBy: 'user',
+          },
+          localProject,
+          remoteProject,
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.tasks.find(task => task.id === 'task-1')?.content).toContain('remote symbols');
+          expect(result.value.tasks.filter(task => task.title.includes('(冲突副本)'))).toHaveLength(0);
+        }
+      });
+
+      it('local-only 和 remote-only 任务也应支持按计划覆写', async () => {
+        const localProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({ id: 'task-local-only', title: 'Only Local' })],
+        });
+        const remoteProject = createTestProject({
+          id: 'proj-1',
+          tasks: [createTestTask({ id: 'task-remote-only', title: 'Only Remote' })],
+        });
+
+        const result = await service.resolveConflictWithPlan(
+          'proj-1',
+          {
+            taskChoices: {
+              'task-local-only': 'remote',
+              'task-remote-only': 'local',
+            },
+            appliedBy: 'user',
+          },
+          localProject,
+          remoteProject,
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.tasks.some(task => task.id === 'task-local-only')).toBe(false);
+          expect(result.value.tasks.some(task => task.id === 'task-remote-only')).toBe(false);
+        }
+      });
+    });
   });
 
   // ==================== 智能合并算法 ====================

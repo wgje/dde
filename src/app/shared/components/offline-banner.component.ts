@@ -7,14 +7,12 @@ import { ActionQueueService } from '../../../services/action-queue.service';
 /**
  * 离线状态通知 + 持久化状态指示器组件
  * 
- * 设计理念：
- * - 使用 Toast 通知 + 持久化小型状态点，避免全屏 banner 遮挡内容
- * - 网络状态变化时弹一次通知
- * - 持久化状态点：
- *   - 在线：绿色圆点（3s 后淡出）
- *   - 离线：红色圆点 + "离线模式"
- *   - 存储受限：橙色圆点 + "存储受限"
- * - 首次加载即离线时发出通知（NEW-7）
+ * 设计理念（v6.0 离线友好重构）：
+ * - 离线不等于错误：使用平静的蓝色调，而非警告的红色
+ * - 给用户安全感：明确告知"数据安全"，避免焦虑
+ * - 待同步计数：让用户知道有多少编辑在等待同步
+ * - 网络恢复时给予正向反馈
+ * - 存储受限才用警告色（真正需要关注的问题）
  */
 @Component({
   selector: 'app-offline-banner',
@@ -24,21 +22,25 @@ import { ActionQueueService } from '../../../services/action-queue.service';
   template: `
     <!-- 持久化状态指示器 -->
     @if (showIndicator()) {
-      <div class="fixed top-2 right-2 z-50 flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-medium backdrop-blur-sm transition-all duration-300"
+      <div class="fixed top-2 right-2 z-50 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-medium backdrop-blur-sm transition-all duration-300 shadow-sm"
+           data-testid="offline-indicator"
            [ngClass]="{
-             'bg-red-100/90 dark:bg-red-900/70 text-red-700 dark:text-red-300': isOffline(),
-             'bg-amber-100/90 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300': !isOffline() && isStorageFrozen(),
-             'bg-green-100/90 dark:bg-green-900/70 text-green-700 dark:text-green-300 opacity-0': !isOffline() && !isStorageFrozen()
+             'bg-sky-50/95 dark:bg-sky-900/80 text-sky-700 dark:text-sky-300 border border-sky-200/60 dark:border-sky-700/60': isOffline() && !isStorageFrozen(),
+             'bg-amber-100/90 dark:bg-amber-900/70 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-700/60': isStorageFrozen(),
+             'bg-green-100/90 dark:bg-green-900/70 text-green-700 dark:text-green-300 opacity-0 border border-green-200/60 dark:border-green-700/60': !isOffline() && !isStorageFrozen()
            }">
         <div class="w-1.5 h-1.5 rounded-full flex-shrink-0"
              [ngClass]="{
-               'bg-red-500 animate-pulse': isOffline(),
-               'bg-amber-500 animate-pulse': !isOffline() && isStorageFrozen(),
+               'bg-sky-500': isOffline() && !isStorageFrozen(),
+               'bg-amber-500 animate-pulse': isStorageFrozen(),
                'bg-green-500': !isOffline() && !isStorageFrozen()
              }">
         </div>
-        @if (isOffline()) {
-          <span>离线模式</span>
+        @if (isOffline() && !isStorageFrozen()) {
+          <span>离线模式 · 数据已安全保存</span>
+          @if (pendingEditCount() > 0) {
+            <span class="px-1 py-0.5 rounded bg-sky-200/60 dark:bg-sky-800/60 text-[9px]">{{ pendingEditCount() }} 待同步</span>
+          }
         } @else if (isStorageFrozen()) {
           <span>存储受限</span>
         }
@@ -69,13 +71,16 @@ export class OfflineBannerComponent {
   /** 存储冻结状态 */
   readonly isStorageFrozen = this.actionQueue.queueFrozen;
 
+  /** 待同步编辑数（给用户可见的安心感） */
+  readonly pendingEditCount = computed(() => this.syncService.syncState().pendingCount);
+
   /** 在线恢复后淡出定时器 */
   private fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    // 【NEW-7】首次加载时检测离线状态
+    // 【NEW-7】首次加载时检测离线状态 — 使用平和的语气
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      this.toast.info('当前处于离线模式', '数据将保存在本地，联网后自动同步');
+      this.toast.info('离线模式已启用', '您可以继续编辑，所有更改都安全地保存在本地，联网后自动同步');
       this.showIndicator.set(true);
     }
     
@@ -91,11 +96,12 @@ export class OfflineBannerComponent {
       // 检测网络连接状态变化
       if (this.previousOnlineState !== null && this.previousOnlineState !== isOnline) {
         if (isOnline) {
-          this.toast.success('网络已恢复', '数据将自动同步到云端');
+          this.toast.success('网络已恢复', '正在自动同步您的更改到云端');
           // 在线恢复后 3s 淡出指示器
           this.scheduleFadeOut();
         } else {
-          this.toast.warning('网络已断开', '更改将保存到本地，联网后自动同步');
+          // 使用 info 而非 warning，离线不是警告事件
+          this.toast.info('已切换到离线模式', '您可以继续编辑，所有更改都安全地保存在本地');
           this.cancelFadeOut();
         }
       }
@@ -103,10 +109,10 @@ export class OfflineBannerComponent {
       // 检测服务中断状态变化（网络在线但服务不可用）
       if (this.previousOfflineMode !== null && this.previousOfflineMode !== offlineMode) {
         if (offlineMode) {
-          this.toast.warning('服务连接中断', '正在重试连接...更改将保存到本地');
+          this.toast.info('云端服务暂时不可用', '您可以继续编辑，更改将在服务恢复后自动同步');
           this.cancelFadeOut();
         } else if (isOnline) {
-          this.toast.success('服务已恢复', '数据将自动同步');
+          this.toast.success('服务已恢复', '正在自动同步您的更改');
           this.scheduleFadeOut();
         }
       }

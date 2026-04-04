@@ -103,6 +103,7 @@ export interface Project {
   tasks: Task[];
   connections: Connection[];
   updatedAt?: string;
+  deletedAt?: string | null;
   version?: number;
   /** Sync source marker for local-only vs cloud-linked project. */
   syncSource?: 'local-only' | 'synced';

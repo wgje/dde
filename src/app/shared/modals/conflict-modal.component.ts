@@ -1,7 +1,9 @@
-import { Component, signal, Output, EventEmitter, input, computed, ChangeDetectionStrategy } from '@angular/core';
+import { Component, signal, Output, EventEmitter, input, computed, ChangeDetectionStrategy, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Project, Task } from '../../../models';
 import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conflict-task-diff.component';
+import { ConflictAutoResolverService } from '../../../services/conflict-auto-resolver.service';
+import { type ConflictResolutionPlan, type TaskResolutionChoice } from '../../../services/conflict-resolution.types';
 
 /**
  * 冲突解决模态框组件
@@ -58,6 +60,7 @@ import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conf
             [localTasks]="localTasks()"
             [remoteTasks]="remoteTasks()"
             [selectable]="selectiveMode()"
+            [recommendations]="recommendations()"
             (selectionChange)="onSelectionChange($event)" />
         </div>
 
@@ -128,23 +131,47 @@ import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conf
           </div>
         </div>
 
-        <!-- 智能合并选项 -->
+        <!-- 系统建议 -->
         <div class="mb-4 p-3 bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-900/30 dark:to-indigo-900/30 rounded-lg border border-violet-200 dark:border-violet-700">
           <div class="flex items-start gap-2">
             <svg class="w-4 h-4 text-violet-500 dark:text-violet-400 mt-0.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
             </svg>
             <div class="flex-1">
-              <div class="text-xs font-medium text-violet-700 dark:text-violet-300 mb-1">智能合并（推荐）</div>
-              <p class="text-[10px] text-violet-600 dark:text-violet-400 mb-2">保留双方的新增内容，合并修改。如果同一任务在双方都有修改，将优先使用较新的版本。</p>
-              <button
-                (click)="resolveMerge.emit()"
-                class="px-3 py-1.5 bg-violet-500 text-white text-xs font-medium rounded-lg hover:bg-violet-600 transition-colors flex items-center gap-1.5">
-                <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/>
-                </svg>
-                执行智能合并
-              </button>
+              <div class="text-xs font-medium text-violet-700 dark:text-violet-300 mb-1">系统建议（推荐）</div>
+              <p class="text-[10px] text-violet-600 dark:text-violet-400 mb-1">{{ overallSuggestion() }}</p>
+              <p class="text-[10px] text-violet-500 dark:text-violet-400 mb-2">{{ suggestedResolutionSummary() }}</p>
+              <div class="flex flex-wrap items-center gap-2 mb-2 text-[9px]">
+                @if (autoReport()?.autoCount) {
+                  <span class="px-1.5 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400 rounded">{{ autoReport()?.autoCount }} 自动</span>
+                }
+                @if (autoReport()?.suggestCount) {
+                  <span class="px-1.5 py-0.5 bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 rounded">{{ autoReport()?.suggestCount }} 建议</span>
+                }
+                @if (autoReport()?.manualCount) {
+                  <span class="px-1.5 py-0.5 bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400 rounded">{{ autoReport()?.manualCount }} 需确认</span>
+                }
+              </div>
+              <div class="flex flex-wrap gap-2">
+                @if (canApplySuggestedResolution()) {
+                  <button
+                    (click)="applySuggestedResolution()"
+                    class="px-3 py-1.5 bg-violet-500 text-white text-xs font-medium rounded-lg hover:bg-violet-600 transition-colors flex items-center gap-1.5">
+                    <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                    </svg>
+                    {{ suggestedResolutionLabel() }}
+                  </button>
+                }
+                <button
+                  (click)="resolveMerge.emit()"
+                  class="px-3 py-1.5 bg-white/70 dark:bg-stone-800/80 text-violet-700 dark:text-violet-300 text-xs font-medium rounded-lg border border-violet-200 dark:border-violet-700 hover:bg-violet-100/60 dark:hover:bg-violet-900/40 transition-colors flex items-center gap-1.5">
+                  <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/>
+                  </svg>
+                  保留两者
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -175,6 +202,8 @@ import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conf
   `
 })
 export class ConflictModalComponent {
+  private readonly autoResolver = inject(ConflictAutoResolverService);
+
   /** 冲突数据（本地和远程项目信息） */
   conflictData = input<{
     localProject: Project;
@@ -185,6 +214,7 @@ export class ConflictModalComponent {
   @Output() resolveLocal = new EventEmitter<void>();
   @Output() resolveRemote = new EventEmitter<void>();
   @Output() resolveMerge = new EventEmitter<void>();
+  @Output() applyPlan = new EventEmitter<ConflictResolutionPlan>();
   @Output() cancel = new EventEmitter<void>();
 
   /** 是否启用逐任务选择模式 */
@@ -204,7 +234,85 @@ export class ConflictModalComponent {
     return data?.remoteProject?.tasks || [];
   });
 
+  autoReport = computed(() => {
+    const data = this.conflictData();
+    if (!data) {
+      return null;
+    }
+
+    return this.autoResolver.analyze(
+      data.projectId,
+      data.localProject?.tasks || [],
+      data.remoteProject?.tasks || [],
+    );
+  });
+
+  recommendations = computed(() => this.autoReport()?.recommendations || []);
+  overallSuggestion = computed(() => this.autoReport()?.overallSuggestion || '系统已完成冲突诊断');
+
   onSelectionChange(selections: TaskResolutionMap): void {
     this.taskResolutions.set(selections);
+  }
+
+  canApplySuggestedResolution(): boolean {
+    const report = this.autoReport();
+    return !!report && report.recommendations.length > 0 && this.getPendingManualSelections() === 0;
+  }
+
+  suggestedResolutionLabel(): string {
+    const selectedCount = this.taskResolutions().size;
+    return selectedCount > 0 ? `应用系统建议与 ${selectedCount} 项选择` : '应用系统建议';
+  }
+
+  suggestedResolutionSummary(): string {
+    const report = this.autoReport();
+    if (!report) {
+      return '系统建议不可用';
+    }
+
+    const manualPending = this.getPendingManualSelections();
+    const selectedCount = this.taskResolutions().size;
+    if (manualPending > 0) {
+      return `系统已完成 ${report.autoCount + report.suggestCount} 项判断，仍有 ${manualPending} 项需要您确认。`;
+    }
+
+    if (selectedCount > 0) {
+      return `将优先采用您的 ${selectedCount} 项明确选择，其余 ${Math.max(report.recommendations.length - selectedCount, 0)} 项按系统建议处理。`;
+    }
+
+    return '系统已完成逐任务判断，应用后会按任务分别保留本地或云端版本。';
+  }
+
+  applySuggestedResolution(): void {
+    this.applyPlan.emit(this.buildResolutionPlan());
+  }
+
+  private getPendingManualSelections(): number {
+    const report = this.autoReport();
+    if (!report) {
+      return 0;
+    }
+
+    return report.recommendations.filter(rec => rec.confidence === 'manual' && !this.taskResolutions().has(rec.taskId)).length;
+  }
+
+  private buildResolutionPlan(): ConflictResolutionPlan {
+    const taskChoices: Record<string, TaskResolutionChoice> = {};
+    const selections = this.taskResolutions();
+
+    for (const recommendation of this.autoReport()?.recommendations || []) {
+      const userChoice = selections.get(recommendation.taskId);
+      if (userChoice) {
+        taskChoices[recommendation.taskId] = userChoice;
+        continue;
+      }
+
+      taskChoices[recommendation.taskId] = recommendation.recommendation === 'remote' ? 'remote' : 'local';
+    }
+
+    return {
+      taskChoices,
+      appliedBy: selections.size === 0 ? 'system' : 'mixed',
+    };
   }
 }

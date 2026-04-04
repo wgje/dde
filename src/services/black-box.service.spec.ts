@@ -8,6 +8,7 @@ import { signal } from '@angular/core';
 import { BlackBoxService } from './black-box.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { AuthService } from './auth.service';
+import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { 
@@ -19,6 +20,7 @@ describe('BlackBoxService', () => {
   let mockSyncService: {
     scheduleSync: ReturnType<typeof vi.fn>;
     pullChanges: ReturnType<typeof vi.fn>;
+    loadFromLocal: ReturnType<typeof vi.fn>;
   };
   let mockAuthService: {
     currentUserId: ReturnType<typeof vi.fn>;
@@ -35,7 +37,8 @@ describe('BlackBoxService', () => {
 
     mockSyncService = {
       scheduleSync: vi.fn(),
-      pullChanges: vi.fn().mockResolvedValue(undefined)
+      pullChanges: vi.fn().mockResolvedValue(undefined),
+      loadFromLocal: vi.fn().mockResolvedValue([])
     };
 
     mockAuthService = {
@@ -52,7 +55,18 @@ describe('BlackBoxService', () => {
         BlackBoxService,
         { provide: BlackBoxSyncService, useValue: mockSyncService },
         { provide: AuthService, useValue: mockAuthService },
-        { provide: ProjectStateService, useValue: mockProjectStateService }
+        { provide: ProjectStateService, useValue: mockProjectStateService },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: vi.fn(() => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            })),
+          },
+        }
       ]
     });
 
@@ -222,6 +236,81 @@ describe('BlackBoxService', () => {
       const entry = service.getEntry('non-existent-id');
 
       expect(entry).toBeUndefined();
+    });
+  });
+
+  describe('ensureLocalEntriesLoaded', () => {
+    it('应在内存为空时从本地水合', async () => {
+      await service.ensureLocalEntriesLoaded();
+
+      expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(1);
+    });
+
+    it('同一用户二次进入时应跳过重复本地水合', async () => {
+      await service.ensureLocalEntriesLoaded();
+
+      mockSyncService.loadFromLocal.mockClear();
+
+      await service.ensureLocalEntriesLoaded();
+
+      expect(mockSyncService.loadFromLocal).not.toHaveBeenCalled();
+    });
+
+    it('并发调用时应复用同一次本地水合', async () => {
+      let resolveLoad: ((entries: never[]) => void) | null = null;
+      mockSyncService.loadFromLocal.mockImplementation(() => new Promise(resolve => {
+        resolveLoad = resolve as (entries: never[]) => void;
+      }));
+
+      const first = service.ensureLocalEntriesLoaded();
+      const second = service.ensureLocalEntriesLoaded();
+
+      expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(1);
+
+      resolveLoad?.([]);
+      await Promise.all([first, second]);
+    });
+
+    it('首次水合前已有内存条目时仍应补全本地历史快照', async () => {
+      const createResult = service.create({ content: '仅内存新增' });
+      if (!createResult.ok) throw new Error('Create failed');
+
+      mockSyncService.loadFromLocal.mockClear();
+
+      await service.ensureLocalEntriesLoaded();
+
+      expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(1);
+    });
+
+    it('水合失败后下次进入应允许重试', async () => {
+      mockSyncService.loadFromLocal
+        .mockRejectedValueOnce(new Error('load failed'))
+        .mockResolvedValueOnce([]);
+
+      await service.ensureLocalEntriesLoaded();
+      await service.ensureLocalEntriesLoaded();
+
+      expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('refreshForView', () => {
+    it('应先补本地快照，再走轻量远端刷新', async () => {
+      await service.refreshForView();
+
+      expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(1);
+      expect(mockSyncService.pullChanges).toHaveBeenCalledWith({ reason: 'panel-open' });
+    });
+
+    it('本地已完成水合时仍应允许面板触发远端补新', async () => {
+      await service.ensureLocalEntriesLoaded();
+      mockSyncService.loadFromLocal.mockClear();
+      mockSyncService.pullChanges.mockClear();
+
+      await service.refreshForView();
+
+      expect(mockSyncService.loadFromLocal).not.toHaveBeenCalled();
+      expect(mockSyncService.pullChanges).toHaveBeenCalledWith({ reason: 'panel-open' });
     });
   });
 });

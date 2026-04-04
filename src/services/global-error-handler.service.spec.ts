@@ -234,4 +234,46 @@ describe('GlobalErrorHandler', () => {
       window.location = originalLocation;
     }
   });
+
+  // ============ 离线错误静默降级测试 ============
+
+  it('should classify AbortError with "signal is aborted" message as SILENT', () => {
+    const error = new DOMException('signal is aborted without reason', 'AbortError');
+    service.handleError(error);
+
+    // SILENT 错误只记录 debug 日志，不弹 Toast
+    expect(loggerSpy.debug).toHaveBeenCalledWith('Silent error captured', expect.any(Object));
+    expect(toastSpy.error).not.toHaveBeenCalled();
+  });
+
+  it('should suppress network errors as SILENT when device is offline', () => {
+    // 模拟离线状态
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+
+    const error = new Error('Gateway Timeout');
+    service.handleError(error);
+
+    // 离线时网络错误降级为 SILENT
+    expect(loggerSpy.debug).toHaveBeenCalledWith('Silent error captured', expect.any(Object));
+    expect(toastSpy.error).not.toHaveBeenCalled();
+  });
+
+  it('should suppress 401 Unauthorized as SILENT when device is offline', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+
+    const error = new Error('401 Unauthorized');
+    service.handleError(error);
+
+    expect(loggerSpy.debug).toHaveBeenCalledWith('Silent error captured', expect.any(Object));
+    expect(toastSpy.error).not.toHaveBeenCalled();
+  });
+
+  it('should still show 401 Unauthorized as NOTIFY when device is online', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+
+    const error = new Error('401 Unauthorized');
+    service.handleError(error);
+
+    expect(toastSpy.error).toHaveBeenCalled();
+  });
 });

@@ -18,6 +18,12 @@ export type SyncPulseReason =
   | 'focus-entry'
   | 'manual';
 
+export type SyncPulseTriggerResult = {
+  status: 'success' | 'failed' | 'skipped';
+  skipReason?: SyncPulseSkipReason;
+  retryAfterMs?: number;
+};
+
 type SyncPulseStatus = 'triggered' | 'success' | 'failed' | 'skipped';
 type SyncPulseSkipReason =
   | 'disabled'
@@ -42,7 +48,7 @@ export class EventDrivenSyncPulseService {
   private readonly destroyRef = inject(DestroyRef);
 
   private initialized = false;
-  private pulsePromise: Promise<void> | null = null;
+  private pulsePromise: Promise<SyncPulseTriggerResult> | null = null;
   private lastPulseAt = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -103,6 +109,9 @@ export class EventDrivenSyncPulseService {
   }
 
   destroy(): void {
+    this.pulsePromise = null;
+    this.lastPulseAt = 0;
+
     if (!this.initialized || typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
@@ -130,7 +139,6 @@ export class EventDrivenSyncPulseService {
     this.stopHeartbeat();
 
     this.initialized = false;
-    this.pulsePromise = null;
   }
 
   /** 启动心跳定时器（仅在页面可见时调用） */
@@ -153,10 +161,10 @@ export class EventDrivenSyncPulseService {
     }
   }
 
-  async triggerNow(reason: SyncPulseReason): Promise<void> {
+  async triggerNow(reason: SyncPulseReason): Promise<SyncPulseTriggerResult> {
     if (!FEATURE_FLAGS.EVENT_DRIVEN_SYNC_PULSE_V1) {
       this.emitPulse('skipped', reason, 'disabled');
-      return;
+      return { status: 'skipped', skipReason: 'disabled' };
     }
 
     if (this.pulsePromise) {
@@ -166,21 +174,33 @@ export class EventDrivenSyncPulseService {
     const eligibility = this.getEligibility();
     if (!eligibility.ok) {
       this.emitPulse('skipped', reason, eligibility.skipReason);
-      return;
+      return { status: 'skipped', skipReason: eligibility.skipReason };
     }
 
     const elapsedSinceLastPulse = Date.now() - this.lastPulseAt;
     if (this.lastPulseAt > 0 && elapsedSinceLastPulse < STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS) {
       this.emitPulse('skipped', reason, 'cooldown');
-      return;
+      return {
+        status: 'skipped',
+        skipReason: 'cooldown',
+        retryAfterMs: Math.max(0, STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS - elapsedSinceLastPulse),
+      };
     }
 
     if (
       FEATURE_FLAGS.RESUME_PULSE_DEDUP_V1 &&
       this.appLifecycle.isHeavyRecoveryInCooldown(APP_LIFECYCLE_CONFIG.PULSE_SUPPRESS_AFTER_HEAVY_MS)
     ) {
+      const lastHeavyRecoveryAt = this.appLifecycle.lastHeavyRecoveryAt();
+      const retryAfterMs = lastHeavyRecoveryAt === null
+        ? APP_LIFECYCLE_CONFIG.PULSE_SUPPRESS_AFTER_HEAVY_MS
+        : Math.max(0, APP_LIFECYCLE_CONFIG.PULSE_SUPPRESS_AFTER_HEAVY_MS - (Date.now() - lastHeavyRecoveryAt));
       this.emitPulse('skipped', reason, 'post-heavy-cooldown');
-      return;
+      return {
+        status: 'skipped',
+        skipReason: 'post-heavy-cooldown',
+        retryAfterMs,
+      };
     }
 
     this.pulsePromise = this.executePulse(reason).finally(() => {
@@ -217,14 +237,14 @@ export class EventDrivenSyncPulseService {
     return { ok: true };
   }
 
-  private async executePulse(reason: SyncPulseReason): Promise<void> {
+  private async executePulse(reason: SyncPulseReason): Promise<SyncPulseTriggerResult> {
     this.emitPulse('triggered', reason);
 
     try {
       const recoveryTicket = this.appLifecycle.getCurrentRecoveryTicket();
       if (FEATURE_FLAGS.RECOVERY_TICKET_DEDUP_V1 && recoveryTicket) {
         this.emitPulse('skipped', reason, 'same-ticket');
-        return;
+        return { status: 'skipped', skipReason: 'same-ticket' };
       }
 
       // 只在实际执行同步后才更新 lastPulseAt，跳过时不更新以避免延长冷却窗口
@@ -248,6 +268,7 @@ export class EventDrivenSyncPulseService {
         });
       }
       this.emitPulse('success', reason);
+      return { status: 'success' };
     } catch (error) {
       this.emitPulse('failed', reason);
       this.logger.warn('同步脉冲执行失败', { reason, error });
@@ -255,6 +276,7 @@ export class EventDrivenSyncPulseService {
         operation: 'sync.pulse',
         reason,
       });
+      return { status: 'failed' };
     }
   }
 
