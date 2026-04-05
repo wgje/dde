@@ -39,7 +39,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             type="button"
             data-testid="task-title-preview"
             data-title-preview-trigger
-            (click)="enterEditMode('title'); $event.stopPropagation()"
+            (click)="enterEditMode('title', $event); $event.stopPropagation()"
             class="block w-full rounded-md text-left font-medium text-retro-dark dark:text-stone-200 leading-snug transition-colors hover:bg-stone-100/70 dark:hover:bg-stone-800/60 line-clamp-2"
             [ngClass]="{'text-sm px-1 py-0.5': !isMobile(), 'text-xs px-0.5 py-0.5': isMobile()}"
             title="点击编辑标题">
@@ -100,7 +100,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               <button
                 type="button"
                 data-testid="task-content-empty"
-                (click)="enterEditMode('content'); $event.stopPropagation()"
+                (click)="enterEditMode('content', $event); $event.stopPropagation()"
                 class="w-full min-h-[1.25rem] rounded-md text-left text-stone-400 dark:text-stone-500 italic transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
                 [ngClass]="{'px-1 py-0.5 text-xs': !isMobile(), 'px-0.5 py-0.5 text-[11px]': isMobile()}"
                 title="点击输入内容">
@@ -414,6 +414,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   isSelecting = false;
 
   private focusRequestTimer: ReturnType<typeof setTimeout> | null = null;
+  private suppressedDocumentClickStamp: number | null = null;
 
   /** 最大附件数量*/
   private readonly maxAttachments = 5;
@@ -519,6 +520,14 @@ export class TextTaskEditorComponent implements OnDestroy {
    */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
+    if (this.suppressedDocumentClickStamp !== null) {
+      const isSuppressedClick = Math.abs(event.timeStamp - this.suppressedDocumentClickStamp) < 1;
+      this.suppressedDocumentClickStamp = null;
+      if (isSuppressedClick) {
+        return;
+      }
+    }
+
     // 如果已经是预览模式，无需处理
     if (this.isPreview()) return;
 
@@ -566,8 +575,9 @@ export class TextTaskEditorComponent implements OnDestroy {
     }
   }
 
-  enterEditMode(field: 'title' | 'content') {
+  enterEditMode(field: 'title' | 'content', triggerEvent?: Event) {
     if (this.isPreview()) {
+      this.suppressNextDocumentClick(triggerEvent);
       this.isPreview.set(false);
       this.previewModeChange.emit(false);
     }
@@ -578,7 +588,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   onPreviewToggleButtonClick(event: Event) {
     event.stopPropagation();
     if (this.isPreview()) {
-      this.enterEditMode('content');
+      this.enterEditMode('content', event);
       return;
     }
     this.togglePreview();
@@ -751,7 +761,7 @@ export class TextTaskEditorComponent implements OnDestroy {
       // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
       this.cdr.markForCheck();
     } else {
-      this.enterEditMode('content');
+      this.enterEditMode('content', event);
     }
   }
 
@@ -901,6 +911,14 @@ export class TextTaskEditorComponent implements OnDestroy {
     }
 
     return host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+  }
+
+  private suppressNextDocumentClick(triggerEvent?: Event): void {
+    if (typeof triggerEvent?.timeStamp !== 'number') {
+      return;
+    }
+
+    this.suppressedDocumentClickStamp = triggerEvent.timeStamp;
   }
 
   private clearFocusRequestTimer(): void {

@@ -13,6 +13,12 @@ import type { Task } from '../../../../models';
 describe('TextTaskEditorComponent', () => {
   let fixture: ComponentFixture<TextTaskEditorComponent>;
 
+  const createClickEvent = (timeStamp: number, target: EventTarget = document.body) => ({
+    timeStamp,
+    target,
+    stopPropagation: vi.fn(),
+  } as unknown as MouseEvent);
+
   const mockTaskAdapter = {
     updateTaskTitle: vi.fn(),
     updateTaskContent: vi.fn(),
@@ -159,6 +165,95 @@ describe('TextTaskEditorComponent', () => {
     } finally {
       focusSpy.mockRestore();
       selectSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should ignore the same document click that opened title editing from preview', () => {
+    vi.useFakeTimers();
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+        suppressedDocumentClickStamp: number | null;
+      };
+      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+
+      titlePreview?.click();
+      fixture.detectChanges();
+
+      const openingStamp = component.suppressedDocumentClickStamp;
+      expect(openingStamp).not.toBeNull();
+
+      component.onDocumentClick(createClickEvent(openingStamp!));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(false);
+
+      component.onDocumentClick(createClickEvent(openingStamp! + 1));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(true);
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should suppress the same document click when entering content editing from the empty preview button', () => {
+    vi.useFakeTimers();
+    try {
+      render({ content: '' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+        suppressedDocumentClickStamp: number | null;
+      };
+      const emptyPreview = fixture.nativeElement.querySelector('[data-testid="task-content-empty"]') as HTMLButtonElement | null;
+
+      emptyPreview?.click();
+      fixture.detectChanges();
+
+      const openingStamp = component.suppressedDocumentClickStamp;
+      expect(openingStamp).not.toBeNull();
+
+      component.onDocumentClick(createClickEvent(openingStamp!));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(false);
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should suppress the same document click when entering content editing from the non-empty preview area', () => {
+    vi.useFakeTimers();
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+        suppressedDocumentClickStamp: number | null;
+      };
+      const contentPreview = fixture.nativeElement.querySelector('[data-testid="task-content"]') as HTMLElement | null;
+
+      contentPreview?.click();
+      fixture.detectChanges();
+
+      const openingStamp = component.suppressedDocumentClickStamp;
+      expect(openingStamp).not.toBeNull();
+
+      component.onDocumentClick(createClickEvent(openingStamp!));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(false);
+    } finally {
+      vi.runOnlyPendingTimers();
       vi.useRealTimers();
     }
   });

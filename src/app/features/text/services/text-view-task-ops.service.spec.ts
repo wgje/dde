@@ -11,6 +11,7 @@ import { ParkingService } from '../../../../services/parking.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
 import { UserSessionService } from '../../../../services/user-session.service';
+import type { Task } from '../../../../models';
 
 describe('TextViewTaskOpsService', () => {
   let service: TextViewTaskOpsService;
@@ -186,6 +187,51 @@ describe('TextViewTaskOpsService', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建任务暂不可用，owner 确认完成前保持只读');
   });
 
+  it('should clear the current selection when clicking the container blank area', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    const outside = document.createElement('div');
+    hostElement.appendChild(outside);
+
+    service.onContainerClick({ target: outside } as Event);
+
+    expect(selectedTaskId()).toBeNull();
+  });
+
+  it('should keep the current selection when clicking inside a task card', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    const taskCard = document.createElement('div');
+    taskCard.setAttribute('data-task-id', 'task-1');
+    const inner = document.createElement('span');
+    taskCard.appendChild(inner);
+    hostElement.appendChild(taskCard);
+
+    service.onContainerClick({ target: inner } as Event);
+
+    expect(selectedTaskId()).toBe('task-1');
+  });
+
   it('should reveal the compact title preview and focus the real title input when scrolling to a new task', () => {
     vi.useFakeTimers();
     const scrollIntoView = vi.fn();
@@ -237,5 +283,45 @@ describe('TextViewTaskOpsService', () => {
       rafSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it('should keep the current task selected when the same task emits select again', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    const focusFlowNode = { emit: vi.fn() };
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: focusFlowNode as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    service.onTaskSelect({ id: 'task-1' } as Task);
+
+    expect(selectedTaskId()).toBe('task-1');
+    expect(focusFlowNode.emit).not.toHaveBeenCalled();
+  });
+
+  it('should select a different task and focus its flow node on desktop', () => {
+    const selectedTaskId = signal<string | null>(null);
+    const focusFlowNode = { emit: vi.fn() };
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: focusFlowNode as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    service.onTaskSelect({ id: 'task-2' } as Task);
+
+    expect(selectedTaskId()).toBe('task-2');
+    expect(focusFlowNode.emit).toHaveBeenCalledWith('task-2');
   });
 });

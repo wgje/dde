@@ -26,7 +26,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       (touchmove)="onTouchMove($event)"
       (touchend)="onTouchEnd($event)"
       (touchcancel)="onTouchCancel($event)"
-      class="text-task-card virtual-list-item relative min-w-0 bg-canvas/80 dark:bg-stone-800/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
+      class="text-task-card relative min-w-0 bg-canvas/80 dark:bg-stone-800/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
       [ngClass]="cardClasses">
 
       <div class="flex justify-between items-start"
@@ -124,9 +124,6 @@ export class TextTaskCardComponent {
   private lastClickWasNonEdit = false;
   private readonly DOUBLE_CLICK_DELAY = 300;
 
-  private lastSelectTime = 0;
-  private readonly SELECT_COOLDOWN = 400;
-
   task = input.required<Task>();
   isMobile = input(false);
   isSelected = input(false);
@@ -183,6 +180,7 @@ export class TextTaskCardComponent {
     const selected = this.isSelected();
     const preview = this.editorPreview();
     return {
+      'virtual-list-item': !selected,
       'p-3': !this.isMobile(),
       'p-2': this.isMobile(),
       'shadow-sm border-retro-muted/20': !selected && !this.isDragging(),
@@ -239,12 +237,6 @@ export class TextTaskCardComponent {
     }
 
     if (!this.isMobile()) {
-      const now = Date.now();
-      if (now - this.lastSelectTime < this.SELECT_COOLDOWN) {
-        event.stopPropagation();
-        return;
-      }
-      this.lastSelectTime = now;
       this.select.emit(this.task());
       event.stopPropagation();
       return;

@@ -326,15 +326,16 @@ export class TextViewTaskOpsService {
   // ========== 任务选择和操作 ==========
 
   onTaskSelect(task: Task): void {
-    const wasSelected = this.ctx.selectedTaskId() === task.id;
-    this.ctx.selectedTaskId.update(id => id === task.id ? null : task.id);
+    if (this.ctx.selectedTaskId() === task.id) {
+      return;
+    }
 
-    if (!wasSelected && this.ctx.selectedTaskId() === task.id) {
-      if (!this.ctx.isMobile()) {
-        this.ctx.focusFlowNode.emit(task.id);
-      } else {
-        this.scrollToTaskAfterExpand(task.id);
-      }
+    this.ctx.selectedTaskId.set(task.id);
+
+    if (!this.ctx.isMobile()) {
+      this.ctx.focusFlowNode.emit(task.id);
+    } else {
+      this.scrollToTaskAfterExpand(task.id);
     }
   }
 
