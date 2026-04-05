@@ -1,6 +1,6 @@
 {
   "name": "NanoFlow DDE",
-  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-noble",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:4.0.7-22-bookworm",
   "runArgs": [
     "--cap-add=SYS_ADMIN",
     "--security-opt",
