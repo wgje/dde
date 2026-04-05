@@ -335,8 +335,8 @@ export class TaskOperationService {
    * 完成待办项
    * @see TaskAttributeService.completeUnfinishedItem
    */
-  completeUnfinishedItem(taskId: string, itemText: string): void {
-    this.taskAttr.completeUnfinishedItem(taskId, itemText);
+  completeUnfinishedItem(taskId: string, todoIndex: number): void {
+    this.taskAttr.completeUnfinishedItem(taskId, todoIndex);
   }
   
   // ========== 任务删除与恢复（委托给 TaskTrashService） ==========

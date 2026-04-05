@@ -54,7 +54,7 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
           @if (isUnfinishedOpen()) {
             <div class="px-2 pb-2 animate-slide-down">
               <ul class="space-y-1.5">
-                @for (item of projectState.unfinishedItems(); track item.taskId + item.text) {
+                @for (item of projectState.unfinishedItems(); track item.taskId + '-' + item.todoIndex) {
                   <li class="text-[11px] text-stone-600 dark:text-stone-300 flex items-center gap-2 bg-white/60 dark:bg-stone-800/80 border border-stone-100/50 dark:border-stone-700/50 p-1.5 rounded-md hover:border-orange-200 dark:hover:border-orange-700 cursor-pointer group shadow-sm transition-all active:scale-95" 
                       (click)="centerOnNode.emit(item.taskId)">
                     <span class="w-1 h-1 rounded-full bg-stone-300 dark:bg-stone-600 group-hover:bg-orange-400 transition-colors shrink-0"></span>

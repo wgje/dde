@@ -334,6 +334,7 @@ describe('ProjectStateService - taskTodoStats', () => {
       {
         taskId: 'task-1',
         taskDisplayId: '1',
+        todoIndex: 0,
         text: '待处理事项',
       },
     ]);
@@ -360,6 +361,7 @@ describe('ProjectStateService - taskTodoStats', () => {
       {
         taskId: 'task-2',
         taskDisplayId: '2',
+        todoIndex: 0,
         text: '复核遗留项',
       },
     ]);
@@ -392,6 +394,7 @@ describe('ProjectStateService - taskTodoStats', () => {
       {
         taskId: 'task-root',
         taskDisplayId: '1',
+        todoIndex: 0,
         text: '根任务待办',
       },
     ]);
@@ -418,8 +421,41 @@ describe('ProjectStateService - taskTodoStats', () => {
       {
         taskId: 'task-3',
         taskDisplayId: '3',
+        todoIndex: 0,
         text: '正常待办',
       },
     ]);
+  });
+
+  it('should assign stable todoIndex values to duplicate unfinished items in the same task', () => {
+    const task = createTask({
+      id: 'task-4',
+      displayId: '4',
+      content: '- [ ] 重复事项\n- [ ] 重复事项\n- [x] 已完成事项',
+    });
+
+    mockProjectsSignal.set([
+      createProject({
+        id: 'proj-1',
+        tasks: [task],
+      }),
+    ]);
+    mockActiveProjectIdSignal.set('proj-1');
+
+    expect(service.unfinishedItems()).toEqual([
+      {
+        taskId: 'task-4',
+        taskDisplayId: '4',
+        todoIndex: 0,
+        text: '重复事项',
+      },
+      {
+        taskId: 'task-4',
+        taskDisplayId: '4',
+        todoIndex: 1,
+        text: '重复事项',
+      },
+    ]);
+    expect(service.taskTodoStats()).toEqual({ total: 3, completed: 1, pending: 2 });
   });
 });

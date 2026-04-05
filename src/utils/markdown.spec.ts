@@ -55,6 +55,24 @@ describe('toggleMarkdownTodo', () => {
     const result = toggleMarkdownTodo(content, 0);
     expect(result).toBe('- 普通列表项\n- [x] 待办项\n- 另一个普通项');
   });
+
+  it('应按索引切换重复文案待办', () => {
+    const content = '- [ ] 重复事项\n- [ ] 重复事项';
+    const result = toggleMarkdownTodo(content, 1);
+    expect(result).toBe('- [ ] 重复事项\n- [x] 重复事项');
+  });
+
+  it('应忽略 fenced code block 中的待办索引', () => {
+    const content = '- [ ] 可切换\n```md\n- [ ] 不可切换\n```\n- [ ] 第二个可切换';
+    const result = toggleMarkdownTodo(content, 1);
+    expect(result).toBe('- [ ] 可切换\n```md\n- [ ] 不可切换\n```\n- [x] 第二个可切换');
+  });
+
+  it('应支持切换带缩进的待办', () => {
+    const content = '  - [ ] 缩进待办';
+    const result = toggleMarkdownTodo(content, 0);
+    expect(result).toBe('  - [x] 缩进待办');
+  });
 });
 
 describe('renderMarkdown - 待办渲染', () => {
@@ -83,6 +101,13 @@ describe('renderMarkdown - 待办渲染', () => {
     expect(html).toContain('data-todo-index="0"');
     expect(html).toContain('data-todo-index="1"');
     expect(html).not.toContain('data-todo-index="2"');
+  });
+
+  it('~~~ fenced code block 中的待办不应被渲染为可交互待办', () => {
+    const html = renderMarkdown('~~~md\n- [ ] 代码块待办\n~~~\n- [ ] 正常待办');
+    expect(html).toContain('data-todo-index="0"');
+    expect(html).not.toContain('data-todo-index="1"');
+    expect(html).toContain('正常待办');
   });
 
   it('完成态待办应有 line-through 样式', () => {

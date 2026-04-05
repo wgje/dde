@@ -4,6 +4,7 @@ import { LayoutService } from './layout.service';
 import { UiStateService } from './ui-state.service';
 import { TaskStore, ProjectStore, ConnectionStore } from '../core-bridge';
 import { SUPERSCRIPT_DIGITS } from '../config';
+import { summarizeMarkdownTodos } from '../utils/markdown-todo';
 
 /**
  * 任务连接信息（缓存用）
@@ -136,11 +137,12 @@ export class ProjectStateService {
       total += todoStats.total;
       completed += todoStats.completed;
 
-      todoStats.unfinishedItems.forEach(text => {
+      todoStats.unfinishedItems.forEach(item => {
         unfinishedItems.push({
           taskId: task.id,
           taskDisplayId: task.displayId,
-          text,
+          todoIndex: item.index,
+          text: item.text,
         });
       });
     });
@@ -168,8 +170,10 @@ export class ProjectStateService {
 
   readonly rootTasks = computed(() => {
     const tasks = this.tasks();
-    const regex = /- \[ \]/;
-    const tasksWithUnfinished = tasks.filter(t => !t.deletedAt && regex.test(t.content || ''));
+    const tasksWithUnfinished = tasks.filter(task => {
+      if (task.deletedAt) return false;
+      return this.extractTaskTodoStats(task.content || '').pending > 0;
+    });
     
     return tasks.filter(t => t.stage === 1 && !t.deletedAt).filter(root => {
       if (tasksWithUnfinished.some(u => u.id === root.id)) return true;
@@ -186,44 +190,23 @@ export class ProjectStateService {
   private extractTaskTodoStats(content: string): {
     total: number;
     completed: number;
-    unfinishedItems: string[];
+    pending: number;
+    unfinishedItems: Array<{
+      index: number;
+      text: string;
+    }>;
   } {
-    let total = 0;
-    let completed = 0;
-    const unfinishedItems: string[] = [];
-
-    let inCodeBlock = false;
-    const lines = content.split('\n');
-
-    lines.forEach(line => {
-      if (line.startsWith('```')) {
-        inCodeBlock = !inCodeBlock;
-        return;
-      }
-
-      if (inCodeBlock) {
-        return;
-      }
-
-      const match = line.match(/^[-*]\s*\[([ xX])\]\s*(.+)$/);
-      if (!match) {
-        return;
-      }
-
-      total += 1;
-
-      if ((match[1] ?? '').toLowerCase() === 'x') {
-        completed += 1;
-        return;
-      }
-
-      unfinishedItems.push((match[2] ?? '').trim());
-    });
-
+    const summary = summarizeMarkdownTodos(content);
     return {
-      total,
-      completed,
-      unfinishedItems,
+      total: summary.total,
+      completed: summary.completed,
+      pending: summary.pending,
+      unfinishedItems: summary.items
+        .filter(item => !item.checked)
+        .map(item => ({
+          index: item.index,
+          text: item.text,
+        })),
     };
   }
 

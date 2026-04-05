@@ -199,4 +199,15 @@ describe('FlowPaletteComponent', () => {
     expect(component.completionBasis()).toEqual({ total: 3, completed: 1 });
     expect(component.completionRate()).toBe(33);
   });
+
+  it('已归档黑匣子条目不应继续计入完成率基数', () => {
+    taskTodoStats.set({ total: 2, completed: 1, pending: 1 });
+    blackBoxEntriesMap.set(new Map([
+      ['bb-1', createBlackBoxEntry('bb-1', true)],
+      ['bb-2', { ...createBlackBoxEntry('bb-2', false), isArchived: true }],
+    ]));
+
+    expect(component.completionBasis()).toEqual({ total: 3, completed: 2 });
+    expect(component.completionRate()).toBe(67);
+  });
 });

@@ -127,6 +127,7 @@ export interface ViewState {
 export interface UnfinishedItem {
   taskId: string;
   taskDisplayId: string;
+  todoIndex: number;
   text: string;
 }
 

@@ -37,7 +37,7 @@ import { UnfinishedItem } from './text-view.types';
           @for (item of projectState.unfinishedItems(); track trackItem(item)) {
             <div class="p-2 bg-panel/50 dark:bg-stone-700/50 backdrop-blur-sm rounded-lg border border-retro-muted/20 dark:border-stone-600 hover:border-retro-rust hover:shadow-sm cursor-pointer group flex items-start gap-2 active:scale-[0.98] transition-all">
               <button 
-                (click)="onComplete(item.taskId, item.text, $event)"
+                (click)="onComplete(item.taskId, item.todoIndex, $event)"
                 class="mt-0.5 w-4 h-4 rounded-full border-2 border-retro-muted dark:border-stone-500 bg-canvas dark:bg-stone-800 hover:border-green-500 hover:bg-green-50 dark:hover:bg-green-900/30 active:scale-90 transition-all"
                 title="点击完成"></button>
               <div class="flex-1 min-w-0" (click)="jumpToTask.emit(item.taskId)">
@@ -83,10 +83,10 @@ export class TextUnfinishedComponent {
     });
   }
   
-  trackItem = (item: UnfinishedItem) => `${item.taskId}-${item.text}`;
+  trackItem = (item: UnfinishedItem) => `${item.taskId}-${item.todoIndex}`;
   
-  onComplete(taskId: string, text: string, event: Event) {
+  onComplete(taskId: string, todoIndex: number, event: Event) {
     event.stopPropagation();
-    this.taskOpsAdapter.core.completeUnfinishedItem(taskId, text);
+    this.taskOpsAdapter.core.completeUnfinishedItem(taskId, todoIndex);
   }
 }

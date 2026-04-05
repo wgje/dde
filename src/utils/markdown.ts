@@ -1,6 +1,7 @@
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import DOMPurify from 'dompurify';
 import { securityLogger } from './standalone-logger';
+import { toggleMarkdownTodoState } from './markdown-todo';
 
 /**
  * 安全的 Markdown 渲染器
@@ -155,6 +156,36 @@ function parseInline(text: string): string {
   return result;
 }
 
+interface MarkdownFenceState {
+  char: '`' | '~';
+  length: number;
+}
+
+function readMarkdownFence(line: string): MarkdownFenceState | null {
+  const trimmed = line.trimStart();
+  const match = trimmed.match(/^(`{3,}|~{3,})/);
+  if (!match) {
+    return null;
+  }
+
+  const marker = match[1];
+  return {
+    char: marker[0] as '`' | '~',
+    length: marker.length,
+  };
+}
+
+function isMarkdownFenceClosing(line: string, fence: MarkdownFenceState): boolean {
+  const trimmed = line.trimStart();
+  const pattern = fence.char === '`' ? /^`{3,}/ : /^~{3,}/;
+  const match = trimmed.match(pattern);
+  if (!match) {
+    return false;
+  }
+
+  return match[0].length >= fence.length;
+}
+
 /**
  * 渲染 Markdown 为 HTML
  */
@@ -163,7 +194,7 @@ export function renderMarkdown(content: string): string {
   
   const lines = content.split('\n');
   const htmlLines: string[] = [];
-  let inCodeBlock = false;
+  let codeFence: MarkdownFenceState | null = null;
   let codeBlockContent: string[] = [];
   let listItems: string[] = [];
   let todoIndex = 0; // 待办事项索引，用于交互式切换
@@ -183,22 +214,27 @@ export function renderMarkdown(content: string): string {
     const line = lines[i];
     
     // 代码块开始/结束
-    if (line.startsWith('```')) {
-      if (inCodeBlock) {
+    const nextFence = readMarkdownFence(line);
+    if (nextFence) {
+      if (codeFence) {
+        if (!isMarkdownFenceClosing(line, codeFence)) {
+          codeBlockContent.push(line);
+          continue;
+        }
+
         // 结束代码块
         htmlLines.push(`<pre class="bg-stone-800 text-stone-100 rounded-lg p-3 text-xs font-mono overflow-x-auto my-2"><code>${escapeHtml(codeBlockContent.join('\n'))}</code></pre>`);
         codeBlockContent = [];
-        inCodeBlock = false;
+        codeFence = null;
       } else {
         // 开始代码块
         flushList();
-        const _codeBlockLang = line.slice(3).trim();
-        inCodeBlock = true;
+        codeFence = nextFence;
       }
       continue;
     }
     
-    if (inCodeBlock) {
+    if (codeFence) {
       codeBlockContent.push(line);
       continue;
     }
@@ -222,11 +258,11 @@ export function renderMarkdown(content: string): string {
     }
     
     // 待办事项（特殊处理）
-    const todoMatch = line.match(/^-\s*\[([ xX])\]\s*(.+)$/);
+    const todoMatch = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s*(.*)$/);
     if (todoMatch) {
       flushList();
-      const isChecked = todoMatch[1].toLowerCase() === 'x';
-      const text = parseInline(todoMatch[2]);
+      const isChecked = todoMatch[2].toLowerCase() === 'x';
+      const text = parseInline(todoMatch[3]);
       const checkedClass = isChecked ? 'line-through text-stone-400 dark:text-stone-500' : 'text-stone-700 dark:text-stone-300';
       const checkboxClass = isChecked ? 'text-emerald-500' : 'text-stone-300 dark:text-stone-500';
       const currentIndex = todoIndex++;
@@ -276,7 +312,7 @@ export function renderMarkdown(content: string): string {
   }
   
   // 处理未闭合的代码块
-  if (inCodeBlock && codeBlockContent.length > 0) {
+  if (codeFence && codeBlockContent.length > 0) {
     htmlLines.push(`<pre class="bg-stone-800 text-stone-100 rounded-lg p-3 text-xs font-mono overflow-x-auto my-2"><code>${escapeHtml(codeBlockContent.join('\n'))}</code></pre>`);
   }
   
@@ -334,25 +370,7 @@ export function renderMarkdownRawSafe(content: string): string {
  * @returns 切换后的 Markdown 内容
  */
 export function toggleMarkdownTodo(content: string, todoIndex: number): string {
-  if (!content) return content;
-
-  const lines = content.split('\n');
-  let currentIndex = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const todoMatch = lines[i].match(/^(-\s*\[)([ xX])(\]\s*.+)$/);
-    if (todoMatch) {
-      if (currentIndex === todoIndex) {
-        // 切换状态：未完成 -> 完成，完成 -> 未完成
-        const isChecked = todoMatch[2].toLowerCase() === 'x';
-        lines[i] = `${todoMatch[1]}${isChecked ? ' ' : 'x'}${todoMatch[3]}`;
-        break;
-      }
-      currentIndex++;
-    }
-  }
-
-  return lines.join('\n');
+  return toggleMarkdownTodoState(content, todoIndex);
 }
 
 /**
@@ -377,7 +395,7 @@ function extractPlainText(content: string, maxLength: number = 100): string {
   
   // 移除 Markdown 语法
   let text = content
-    .replace(/```[\s\S]*?```/g, '') // 代码块
+    .replace(/(```|~~~)[\s\S]*?\1/g, '') // 代码块
     .replace(/`[^`]+`/g, '') // 行内代码
     .replace(/\*\*([^*]+)\*\*/g, '$1') // 粗体
     .replace(/__([^_]+)__/g, '$1')
@@ -390,7 +408,7 @@ function extractPlainText(content: string, maxLength: number = 100): string {
     .replace(/^\d+\.\s+/gm, '') // 有序列表
     .replace(/^>\s+/gm, '') // 引用
     .replace(/^[-*_]{3,}$/gm, '') // 分割线
-    .replace(/-\s*\[([ xX])\]\s*/g, '') // 待办
+    .replace(/^\s*[-*+]\s+\[([ xX])\]\s*/gm, '') // 待办
     .replace(/\n+/g, ' ') // 换行转空格
     .trim();
   

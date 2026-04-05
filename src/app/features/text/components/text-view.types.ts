@@ -49,6 +49,7 @@ export interface DropTargetInfo {
 export interface UnfinishedItem {
   taskId: string;
   taskDisplayId: string;
+  todoIndex: number;
   text: string;
 }
 

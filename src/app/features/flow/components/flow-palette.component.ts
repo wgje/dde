@@ -196,7 +196,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
           <div class="flex-1 overflow-y-auto custom-scroll p-3" #workbenchSection>
             @if (activeWorkbenchTab() === 'unfinished') {
               <ul class="space-y-2">
-                @for (item of projectState.unfinishedItems(); track item.taskId + item.text + $index) {
+                @for (item of projectState.unfinishedItems(); track item.taskId + '-' + item.todoIndex) {
                   <li class="task-item bg-white dark:bg-stone-800"
                       (click)="centerOnNode.emit(item.taskId)">
                     <div class="w-1.5 self-stretch rounded-full bg-indigo-500/80 mr-1"></div>
@@ -418,7 +418,7 @@ export class FlowPaletteComponent implements OnDestroy {
    */
   readonly allBlackBoxEntries = computed(() => {
     return Array.from(blackBoxEntriesMap().values())
-      .filter(e => !e.deletedAt);
+      .filter(e => !e.deletedAt && !e.isArchived);
   });
 
   /**

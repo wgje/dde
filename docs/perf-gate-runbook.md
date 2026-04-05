@@ -45,7 +45,7 @@ node scripts/run-perf-audit-batch.cjs --date=YYYY-MM-DD --rounds=5 --strict-thre
 
 ## 3. 环境变量
 
-必需（认证态弱网）：
+认证态弱网 / no-regression / nightly audit 必需：
 
 1. `E2E_PERF_EMAIL`
 2. `E2E_PERF_PASSWORD`
@@ -55,6 +55,12 @@ node scripts/run-perf-audit-batch.cjs --date=YYYY-MM-DD --rounds=5 --strict-thre
 1. `E2E_PERF_PROJECT_ID`（固定项目）
 2. `TEST_USER_EMAIL` / `TEST_USER_PASSWORD`（critical-path 云同步用例）
 3. `PERF_BUDGET_TEST=1`（启用弱网预算用例）
+
+说明：
+
+1. PR / push 的 `perf-and-resume-gates` 在缺少 `E2E_PERF_EMAIL` 或 `E2E_PERF_PASSWORD` 时，会保留 `npm run perf:guard`、恢复核心测试等无凭据门禁。
+2. 认证态弱网 E2E、`current-metrics.json` 上传、以及 `no-regression-guard` 会在缺少凭据时自动跳过，并在 Step Summary 中给出原因。
+3. 一旦凭据存在并进入认证态 perf E2E，`current-metrics.json` 仍属于硬性产物；成功执行后缺失该文件应直接判定 workflow 失败，而不是静默跳过。
 
 ## 4. 产物与判定
 
@@ -84,7 +90,7 @@ node scripts/run-perf-audit-batch.cjs --date=YYYY-MM-DD --rounds=5 --strict-thre
 3. `resume.interaction_ready_ms=0` 偶发  
    先看 `resume.interaction_zero_flag` 频率，再看 `heavyRecordCount/heavyTicketCount` 是否超限。
 4. `current-metrics.json` 缺失  
-   确认用例入口是否调用 `initPerfMetrics()`，并检查进程是否在极早阶段中断。
+   先确认当前 workflow 是否因为缺少 `E2E_PERF_EMAIL` / `E2E_PERF_PASSWORD` 而主动跳过认证态 perf 链路；若未跳过，再检查用例入口是否调用 `initPerfMetrics()`，以及进程是否在极早阶段中断。
 
 ## 6. 回滚策略
 

@@ -14,6 +14,8 @@ jobs:
   perf-and-resume-gates:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      perf_auth_available: ${{ steps.perf_auth.outputs.available }}
 
     steps:
       - name: Checkout
@@ -51,15 +53,34 @@ jobs:
           src/services/sync-coordinator.service.spec.ts
           src/services/remote-change-handler.service.spec.ts
 
-      - name: Validate Perf Auth Env
+      - name: Detect Perf Auth Env
+        id: perf_auth
         env:
           E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
           E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
         run: |
-          test -n "$E2E_PERF_EMAIL" || (echo "Missing secret: E2E_PERF_EMAIL" && exit 1)
-          test -n "$E2E_PERF_PASSWORD" || (echo "Missing secret: E2E_PERF_PASSWORD" && exit 1)
+          if [ -n "$E2E_PERF_EMAIL" ] && [ -n "$E2E_PERF_PASSWORD" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Perf auth secrets detected."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Missing E2E_PERF_EMAIL/E2E_PERF_PASSWORD; skipping authenticated perf E2E and no-regression artifact chain."
+          fi
+
+      - name: Perf Auth Gate Summary
+        if: ${{ steps.perf_auth.outputs.available != 'true' }}
+        run: |
+          {
+            echo "### Perf Auth Gate Skipped"
+            echo
+            echo "- Missing E2E_PERF_EMAIL / E2E_PERF_PASSWORD secrets."
+            echo "- Build perf guard and resume core tests still ran."
+            echo "- Authenticated weak-network E2E, metrics artifact upload, and no-regression guard were skipped."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Weak Network E2E Budget
+        id: perf_e2e
+        if: ${{ steps.perf_auth.outputs.available == 'true' }}
         env:
           PERF_BUDGET_TEST: '1'
           PLAYWRIGHT_WEB_SERVER_COMMAND: python3 -m http.server 4200 --directory dist/browser
@@ -73,8 +94,26 @@ jobs:
           e2e/weak-network-budget.spec.ts
           e2e/perf/resume-budget.spec.ts
 
+      - name: Detect Perf Metrics Snapshot
+        id: perf_metrics
+        if: ${{ always() && steps.perf_auth.outputs.available == 'true' }}
+        run: |
+          if [ -f test-results/perf/current-metrics.json ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Perf metrics snapshot detected."
+            exit 0
+          fi
+
+          if [ "${{ steps.perf_e2e.conclusion }}" = "success" ]; then
+            echo "::error::Perf metrics snapshot missing after successful authenticated perf E2E."
+            exit 1
+          fi
+
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Perf E2E did not complete successfully, so metrics snapshot is unavailable."
+
       - name: Upload Perf Metrics Snapshot
-        if: always()
+        if: ${{ always() && steps.perf_metrics.outputs.ready == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: perf-current-metrics
@@ -82,6 +121,7 @@ jobs:
           if-no-files-found: error
 
   no-regression-guard:
+    if: ${{ needs.perf-and-resume-gates.result == 'success' && needs.perf-and-resume-gates.outputs.perf_auth_available == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs:

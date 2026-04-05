@@ -7,6 +7,7 @@ import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { ParkingService } from './parking.service';
 import { ToastService } from './toast.service';
 import { sanitizePlannerFields } from '../utils/planner-fields';
+import { setMarkdownTodoChecked, summarizeMarkdownTodos } from '../utils/markdown-todo';
 
 /**
  * 任务属性更新服务
@@ -309,7 +310,7 @@ export class TaskAttributeService {
         return { 
           ...t, 
           content: newContent, 
-          hasIncompleteTask: true,
+          hasIncompleteTask: summarizeMarkdownTodos(newContent).hasIncomplete,
           updatedAt: now 
         };
       })
@@ -319,19 +320,20 @@ export class TaskAttributeService {
   /**
    * 完成待办事项
    */
-  completeUnfinishedItem(taskId: string, itemText: string): void {
+  completeUnfinishedItem(taskId: string, todoIndex: number): void {
     const now = new Date().toISOString();
     this.recordAndUpdate(p => ({
       ...p,
       tasks: p.tasks.map(t => {
         if (t.id !== taskId) return t;
-        const unfinishedPattern = `- [ ] ${itemText}`;
-        const finishedPattern = `- [x] ${itemText}`;
-        const newContent = t.content.replace(unfinishedPattern, finishedPattern);
+        const newContent = setMarkdownTodoChecked(t.content || '', todoIndex, true);
+        if (newContent === (t.content || '')) {
+          return t;
+        }
         return { 
           ...t, 
           content: newContent,
-          hasIncompleteTask: this.layoutService.detectIncomplete(newContent),
+          hasIncompleteTask: summarizeMarkdownTodos(newContent).hasIncomplete,
           updatedAt: now 
         };
       })

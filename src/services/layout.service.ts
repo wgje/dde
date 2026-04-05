@@ -3,6 +3,7 @@ import { Task, Project, Connection } from '../models';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { LAYOUT_CONFIG, LETTERS } from '../config';
+import { hasIncompleteMarkdownTodo } from '../utils/markdown-todo';
 
 /** 布局算法配置 */
 const ALGORITHM_CONFIG = {
@@ -560,7 +561,7 @@ export class LayoutService {
    * 检测内容中是否有未完成的待办项
    */
   detectIncomplete(content: string): boolean {
-    return /- \[ \]/.test(content || '');
+    return hasIncompleteMarkdownTodo(content || '');
   }
   
   /**

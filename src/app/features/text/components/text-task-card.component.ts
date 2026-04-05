@@ -231,6 +231,13 @@ export class TextTaskCardComponent {
       return;
     }
 
+    // 已选中时，点击卡片内部（头部区域等）不应取消选中
+    // 取消选中通过点击卡片外空白区域（onContainerClick）或选择其他任务触发
+    if (this.isSelected()) {
+      event.stopPropagation();
+      return;
+    }
+
     if (!this.isMobile()) {
       const now = Date.now();
       if (now - this.lastSelectTime < this.SELECT_COOLDOWN) {

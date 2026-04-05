@@ -42,15 +42,32 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Validate Perf Auth Env
+      - name: Detect Perf Auth Env
+        id: perf_auth
         env:
           E2E_PERF_EMAIL: ${{ secrets.E2E_PERF_EMAIL }}
           E2E_PERF_PASSWORD: ${{ secrets.E2E_PERF_PASSWORD }}
         run: |
-          test -n "$E2E_PERF_EMAIL" || (echo "Missing secret: E2E_PERF_EMAIL" && exit 1)
-          test -n "$E2E_PERF_PASSWORD" || (echo "Missing secret: E2E_PERF_PASSWORD" && exit 1)
+          if [ -n "$E2E_PERF_EMAIL" ] && [ -n "$E2E_PERF_PASSWORD" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Perf auth secrets detected."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Missing E2E_PERF_EMAIL/E2E_PERF_PASSWORD; skipping nightly authenticated perf audit."
+          fi
+
+      - name: Perf Nightly Skip Summary
+        if: ${{ steps.perf_auth.outputs.available != 'true' }}
+        run: |
+          {
+            echo "### Perf Nightly Audit Skipped"
+            echo
+            echo "- Missing E2E_PERF_EMAIL / E2E_PERF_PASSWORD secrets."
+            echo "- No authenticated perf batch or artifacts were produced in this run."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Perf Audit Batch
+        if: ${{ steps.perf_auth.outputs.available == 'true' }}
         env:
           PERF_BUDGET_TEST: '1'
           PLAYWRIGHT_WEB_SERVER_COMMAND: python3 -m http.server 4200 --directory dist/browser
@@ -81,7 +98,7 @@ jobs:
             --strict-thresholds="$STRICT_ARG"
 
       - name: Upload Perf Audit Artifacts
-        if: always()
+        if: ${{ always() && steps.perf_auth.outputs.available == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: perf-nightly-audit-${{ github.run_id }}

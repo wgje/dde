@@ -124,8 +124,16 @@ describe('LayoutService', () => {
       expect(service.detectIncomplete('some text\n- [ ] todo item')).toBe(true);
     });
 
+    it('缩进待办也应返回 true', () => {
+      expect(service.detectIncomplete('some text\n  - [ ] nested todo item')).toBe(true);
+    });
+
     it('无未完成待办返回 false', () => {
       expect(service.detectIncomplete('some text\n- [x] done item')).toBe(false);
+    });
+
+    it('代码块中的待办不应返回 true', () => {
+      expect(service.detectIncomplete('```md\n- [ ] code fence todo\n```')).toBe(false);
     });
 
     it('空字符串返回 false', () => {
