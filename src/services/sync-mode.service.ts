@@ -16,6 +16,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { LoggerService } from './logger.service';
+import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 
 /**
  * 同步模式枚举
@@ -80,6 +81,18 @@ export class SyncModeService {
   
   /** 自动同步定时器 */
   private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** 页面恢复后的自动同步抑制窗口，避免与恢复链路抢占带宽 */
+  private autoSyncBlockedUntil = 0;
+
+  /** 页面可见性监听器 */
+  private visibilityHandler: (() => void) | null = null;
+
+  /** BFCache 恢复监听器 */
+  private pageshowHandler: ((event: PageTransitionEvent) => void) | null = null;
+
+  /** 网络恢复监听器 */
+  private onlineHandler: (() => void) | null = null;
   
   /** 同步回调 */
   private syncCallback: ((direction: SyncDirection) => Promise<void>) | null = null;
@@ -108,8 +121,22 @@ export class SyncModeService {
   readonly currentConfig = computed(() => this.config());
   
   constructor() {
+    this.registerVisibilityListener();
+
     this.destroyRef.onDestroy(() => {
       this.stopAutoSync();
+
+      if (this.visibilityHandler && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', this.visibilityHandler);
+      }
+
+      if (this.pageshowHandler && typeof window !== 'undefined') {
+        window.removeEventListener('pageshow', this.pageshowHandler as EventListener);
+      }
+
+      if (this.onlineHandler && typeof window !== 'undefined') {
+        window.removeEventListener('online', this.onlineHandler);
+      }
     });
     
     // 如果是自动模式，启动定时器
@@ -311,6 +338,10 @@ export class SyncModeService {
     let syncCount = 0;
     
     this.autoSyncTimer = setInterval(async () => {
+      if (this.shouldSkipAutoSyncTick()) {
+        return;
+      }
+
       if (this.syncCallback && this.config().mode === 'automatic') {
         syncCount++;
         const syncStartTime = Date.now();
@@ -338,6 +369,48 @@ export class SyncModeService {
       intervalMs, 
       intervalMinutes: Math.round(intervalMs / 60000 * 10) / 10 
     });
+  }
+
+  private registerVisibilityListener(): void {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const armResumeGuard = () => {
+      this.autoSyncBlockedUntil = Date.now() + APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS;
+    };
+
+    this.visibilityHandler = () => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+
+      armResumeGuard();
+    };
+
+    this.pageshowHandler = (event: PageTransitionEvent) => {
+      if (!event.persisted) {
+        return;
+      }
+
+      armResumeGuard();
+    };
+
+    this.onlineHandler = () => {
+      armResumeGuard();
+    };
+
+    document.addEventListener('visibilitychange', this.visibilityHandler);
+    window.addEventListener('pageshow', this.pageshowHandler as EventListener);
+    window.addEventListener('online', this.onlineHandler);
+  }
+
+  private shouldSkipAutoSyncTick(): boolean {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return true;
+    }
+
+    return Date.now() < this.autoSyncBlockedUntil;
   }
   
   /**

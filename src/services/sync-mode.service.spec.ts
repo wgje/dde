@@ -11,16 +11,24 @@ import { TestBed } from '@angular/core/testing';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SyncModeService, SyncMode } from './sync-mode.service';
 import { LoggerService } from './logger.service';
+import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 
 describe('SyncModeService', () => {
   let service: SyncModeService;
   let mockLogger: any;
   
   const STORAGE_KEY = 'nanoflow.sync-mode-config';
+  const setVisibilityState = (state: DocumentVisibilityState): void => {
+    Object.defineProperty(document, 'visibilityState', {
+      value: state,
+      configurable: true,
+    });
+  };
   
   beforeEach(() => {
     // 清理 localStorage
     localStorage.clear();
+    setVisibilityState('visible');
     
     // 模拟 Logger
     mockLogger = {
@@ -169,6 +177,63 @@ describe('SyncModeService', () => {
         '自动同步已启动',
         expect.objectContaining({ intervalMs: 300000 })
       );
+    });
+
+    it('页面隐藏期间应跳过自动同步，恢复后等待恢复窗口结束再继续', async () => {
+      service = TestBed.inject(SyncModeService);
+
+      const mockCallback = vi.fn().mockResolvedValue(undefined);
+      service.setSyncCallback(mockCallback);
+
+      const internal = service as unknown as {
+        startAutoSyncTimer: (intervalMs: number) => void;
+        stopAutoSync: () => void;
+      };
+
+      internal.startAutoSyncTimer(1000);
+
+      setVisibilityState('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockCallback).not.toHaveBeenCalled();
+
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockCallback).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS - 1000);
+
+      expect(mockCallback).toHaveBeenCalledTimes(1);
+
+      internal.stopAutoSync();
+    });
+
+    it('online 事件后应等待恢复窗口结束再继续自动同步', async () => {
+      service = TestBed.inject(SyncModeService);
+
+      const mockCallback = vi.fn().mockResolvedValue(undefined);
+      service.setSyncCallback(mockCallback);
+
+      const internal = service as unknown as {
+        startAutoSyncTimer: (intervalMs: number) => void;
+        stopAutoSync: () => void;
+      };
+
+      internal.startAutoSyncTimer(1000);
+
+      window.dispatchEvent(new Event('online'));
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockCallback).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS - 1000);
+
+      expect(mockCallback).toHaveBeenCalledTimes(1);
+
+      internal.stopAutoSync();
     });
   });
 
