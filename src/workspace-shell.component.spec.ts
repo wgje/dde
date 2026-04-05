@@ -64,7 +64,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
   });
 
   it('onSearchTaskClick 命中停泊任务时应直接展开停泊坞并预览任务', () => {
-    const setActiveProjectId = vi.fn();
+    const switchActiveProject = vi.fn();
     const setDockExpanded = vi.fn();
     const previewTask = vi.fn();
     const context = {
@@ -73,7 +73,9 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       projectState: {
         activeProjectId: () => 'project-2',
-        setActiveProjectId,
+      },
+      userSession: {
+        switchActiveProject,
       },
       dockEngine: {
         setDockExpanded,
@@ -85,7 +87,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
 
     WorkspaceShellComponent.prototype.onSearchTaskClick.call(context, 'task-1', true);
 
-    expect(setActiveProjectId).toHaveBeenCalledWith('project-1');
+    expect(switchActiveProject).toHaveBeenCalledWith('project-1');
     expect(setDockExpanded).toHaveBeenCalledWith(true, { persistPreference: false });
     expect(previewTask).toHaveBeenCalledWith('task-1');
   });

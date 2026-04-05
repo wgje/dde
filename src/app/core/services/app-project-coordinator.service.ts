@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, inject, signal, Injector } from '@angular/core';
 import { Router } from '@angular/router';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { ProjectOperationService } from '../../../services/project-operation.service';
@@ -7,6 +7,7 @@ import { ModalService } from '../../../services/modal.service';
 import { ModalLoaderService } from './modal-loader.service';
 import { ToastService } from '../../../services/toast.service';
 import { Project } from '../../../models';
+import type { UserSessionService } from '../../../services/user-session.service';
 
 /**
  * 应用项目 UI 协调器
@@ -25,6 +26,16 @@ export class AppProjectCoordinatorService {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly toast = inject(ToastService);
   private readonly router = inject(Router);
+  private readonly injector = inject(Injector);
+  /** 延迟注入避免循环依赖 */
+  private userSessionRef: UserSessionService | null = null;
+  private get userSession(): UserSessionService {
+    if (!this.userSessionRef) {
+      const { UserSessionService: Svc } = require('../../../services/user-session.service');
+      this.userSessionRef = this.injector.get(Svc);
+    }
+    return this.userSessionRef!;
+  }
 
   // ========== UI 状态 Signals ==========
   readonly expandedProjectId = signal<string | null>(null);
@@ -49,7 +60,8 @@ export class AppProjectCoordinatorService {
     if (this.expandedProjectId() && this.isEditingDescription()) {
       this.saveProjectDetails(this.expandedProjectId()!);
     }
-    this.projectState.setActiveProjectId(id);
+    // 通过 UserSessionService 切换项目，触发空壳项目按需加载
+    this.userSession.switchActiveProject(id);
     this.expandedProjectId.set(id);
     this.ensureProjectDraft(id);
     this.isEditingDescription.set(false);
@@ -83,7 +95,8 @@ export class AppProjectCoordinatorService {
   }
 
   enterProject(id: string, sidebarOpen: { set: (v: boolean) => void }): void {
-    this.projectState.setActiveProjectId(id);
+    // 通过 UserSessionService 切换项目，触发空壳项目按需加载
+    this.userSession.switchActiveProject(id);
     this.expandedProjectId.set(id);
     this.ensureProjectDraft(id);
     const currentView = this.uiState.activeView() || 'text';

@@ -29,6 +29,7 @@ import { ToastContainerComponent } from './app/shared/components/toast-container
 import { SyncStatusComponent } from './app/shared/components/sync-status.component';
 import { OfflineBannerComponent } from './app/shared/components/offline-banner.component';
 import { DemoBannerComponent } from './app/shared/components/demo-banner.component';
+import { PwaInstallPromptBannerComponent } from './app/shared/components/pwa-install-prompt-banner.component';
 import { WorkspaceShellCoreComponent } from './app/core/shell/workspace-shell-core.component';
 import { WorkspaceSidebarComponent } from './app/core/shell/workspace-sidebar.component';
 import { WorkspaceOverlaysComponent } from './app/core/shell/workspace-overlays.component';
@@ -46,7 +47,6 @@ import { shouldAutoCloseSidebarOnViewportChange } from './utils/layout-stability
 import { ExportService } from './services/export.service';
 import { AppLifecycleOrchestratorService } from './services/app-lifecycle-orchestrator.service';
 import { NetworkAwarenessService } from './services/network-awareness.service';
-import { PwaInstallPromptService } from './services/pwa-install-prompt.service';
 import { FocusStartupProbeService } from './services/focus-startup-probe.service';
 import { SentryLazyLoaderService } from './services/sentry-lazy-loader.service';
 import { StartupTierOrchestratorService } from './services/startup-tier-orchestrator.service';
@@ -107,6 +107,7 @@ type StartupDiagnosticsLike = {
     SyncStatusComponent,
     OfflineBannerComponent,
     DemoBannerComponent,
+    PwaInstallPromptBannerComponent,
     WorkspaceShellCoreComponent,
     WorkspaceSidebarComponent,
     WorkspaceOverlaysComponent,
@@ -168,7 +169,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return (this._simpleSync ??= this.injector.get(SimpleSyncService));
   }
   readonly focusPrefs = inject(FocusPreferenceService);
-  readonly pwaInstall = inject(PwaInstallPromptService);
   private readonly authService = inject(AuthService);
 
   /** 认证协调器 — 管理所有认证相关状态和操作 */
@@ -820,6 +820,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   readonly showLoginRequired = computed(() =>
     this.authCoord.showLoginRequired() && this.handoffCoordinator.result().kind === 'login-required'
   );
+  readonly pwaPromptVisible = signal(false);
   
   /** 删除项目目标 - 从 ModalService 获取 */
   readonly deleteProjectTarget = computed(() => {
@@ -832,12 +833,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   /** 记录上一次视口断点状态，避免移动端 resize 抖动触发误收起 */
   private previousViewportIsMobile = this.uiState.isMobile();
 
-  /** PWA 安装提示（仅浏览器模式显示） */
-  readonly showInstallPrompt = computed(() =>
-    FEATURE_FLAGS.PWA_INSTALL_PROMPT_V1 && this.pwaInstall.canShowInstallPrompt()
-  );
-  readonly pwaInstallHint = computed(() => this.pwaInstall.installHint());
-  
   // 搜索防抖定时器
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly SEARCH_DEBOUNCE_DELAY = 300; // 300ms 搜索防抖
@@ -856,7 +851,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private eventDrivenSyncPulseRef: EventDrivenSyncPulseLike | null = null;
   private eventDrivenSyncPulsePromise: Promise<EventDrivenSyncPulseLike | null> | null = null;
   private startupDiagnosticsPromise: Promise<StartupDiagnosticsLike[] | null> | null = null;
-  private pwaPromptInitScheduled = false;
   private workspaceHandoffSignaled = false;
   private workspaceReadyCommitted = false;
   private readonly launchSnapshotWriteBlocked = signal(false);
@@ -1023,7 +1017,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     // ⚡ 性能优化：延迟会话检查到浏览器空闲时段
     this.authCoord.scheduleSessionBootstrap();
-    this.schedulePwaPromptInitialization();
     this.scheduleStartupFontInitialization();
     this.startupTier.initialize();
     this.scheduleFocusModePreload('startup');
@@ -1059,6 +1052,15 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   ngAfterViewInit(): void {
     this.signalWorkspaceHandoffReady();
   }
+
+  showInstallPrompt(): boolean {
+    return this.pwaPromptVisible();
+  }
+
+  onPwaPromptVisibleChange(visible: boolean): void {
+    this.pwaPromptVisible.set(visible);
+  }
+
   /**
    * 启动时校验关键 Feature Flags
    * 
@@ -1546,26 +1548,30 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         void this.simpleSync.unsubscribeFromProject();
       }
       this.destroySyncPulse();
-      void this.userSession.setCurrentUser(event.userId, {
-        forceLoad: true,
-      }).then(() => {
-        if (this.currentUserId() !== event.userId) {
-          return;
-        }
+      void (async () => {
+        try {
+          await this.userSession.setCurrentUser(event.userId, {
+            forceLoad: true,
+          });
 
-        this.authService.completeCrossTabSessionRestore(event.userId);
-        if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1 || this.startupTier.isTierReady('p2')) {
-          this.simpleSync.startRuntime();
+          if (this.currentUserId() !== event.userId) {
+            return;
+          }
+
+          this.authService.completeCrossTabSessionRestore(event.userId);
+          if (!FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1 || this.startupTier.isTierReady('p2')) {
+            this.simpleSync.startRuntime();
+          }
+        } catch (error) {
+          this.logger.warn('跨标签页会话恢复失败，已保持同步运行时暂停', {
+            restoredUserId: event.userId,
+            source: event.source,
+            error,
+          });
+        } finally {
+          this.launchSnapshotWriteBlocked.set(false);
         }
-      }).catch((error) => {
-        this.logger.warn('跨标签页会话恢复失败，已保持同步运行时暂停', {
-          restoredUserId: event.userId,
-          source: event.source,
-          error,
-        });
-      }).finally(() => {
-        this.launchSnapshotWriteBlocked.set(false);
-      });
+      })();
     });
   }
 
@@ -1639,58 +1645,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
     }
-  }
-
-  private schedulePwaPromptInitialization(): void {
-    if (this.pwaPromptInitScheduled) {
-      return;
-    }
-    this.pwaPromptInitScheduled = true;
-
-    if (!FEATURE_FLAGS.PWA_PROMPT_DEFER_V2) {
-      this.pwaInstall.initialize();
-      return;
-    }
-
-    const init = () => this.pwaInstall.initialize();
-
-    if (typeof window !== 'undefined') {
-      let initialized = false;
-      let idleTimer: ReturnType<typeof setTimeout> | null = null;
-      const cleanup = () => {
-        window.removeEventListener('pointerdown', onFirstIntent);
-        window.removeEventListener('keydown', onFirstIntent);
-        window.removeEventListener('touchstart', onFirstIntent);
-        if (idleTimer) {
-          clearTimeout(idleTimer);
-          idleTimer = null;
-        }
-      };
-      const initOnce = () => {
-        if (initialized) return;
-        initialized = true;
-        cleanup();
-        init();
-      };
-      const onFirstIntent = () => initOnce();
-
-      window.addEventListener('pointerdown', onFirstIntent, { once: true, passive: true });
-      window.addEventListener('keydown', onFirstIntent, { once: true });
-      window.addEventListener('touchstart', onFirstIntent, { once: true, passive: true });
-
-      if ('requestIdleCallback' in window) {
-        (
-          window as Window & {
-            requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-          }
-        ).requestIdleCallback(() => initOnce(), { timeout: 2500 });
-      } else {
-        idleTimer = setTimeout(initOnce, 1500);
-      }
-      return;
-    }
-
-    init();
   }
 
   private scheduleStartupFontInitialization(): void {
@@ -2164,22 +2118,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
   }
 
-  async installPwaApp(): Promise<void> {
-    const installed = await this.pwaInstall.promptInstall();
-    if (installed) {
-      this.toast.success('安装已开始', '安装完成后可在主屏/桌面直接启动');
-      return;
-    }
-
-    if (!this.pwaInstall.canInstall()) {
-      this.toast.info('安装提示', this.pwaInstall.installHint());
-    }
-  }
-
-  dismissPwaInstallPrompt(): void {
-    this.pwaInstall.dismissPrompt();
-  }
-
   // Resizing State
   isResizingSidebar = false;
   isResizingContent = false;
@@ -2337,7 +2275,8 @@ async signOut() {
     const projectId = this.taskStore.getTaskProjectId(taskId)
       ?? this.projectState.activeProjectId();
     if (projectId && projectId !== this.projectState.activeProjectId()) {
-      this.projectState.setActiveProjectId(projectId);
+      // 通过 UserSessionService 切换，触发空壳项目按需加载
+      this.userSession.switchActiveProject(projectId);
     }
 
     if (isParked) {

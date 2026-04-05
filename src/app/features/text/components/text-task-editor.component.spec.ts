@@ -130,7 +130,8 @@ describe('TextTaskEditorComponent', () => {
 
     expect(preview).not.toBeNull();
     expect(preview?.className).toContain('markdown-preview-adaptive');
-    expect(preview?.className).toContain('max-h-40');
+    expect(preview?.className).toContain('max-h-20');
+    expect(preview?.className).toContain('overflow-hidden');
     expect(preview?.className).not.toContain('min-h-24');
     expect(preview?.className).not.toContain('min-h-28');
   });

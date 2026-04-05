@@ -1,5 +1,5 @@
 import { Injector } from '@angular/core';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectDataService } from './project-data.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { AuthService } from '../../../../services/auth.service';
@@ -9,13 +9,26 @@ import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
+import { AUTH_CONFIG } from '../../../../config/auth.config';
 
 const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
 const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
 const OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
 const OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY = 'nanoflow.offline-cache-v2';
 
-async function writeOfflineSnapshotToIdb(payload: string): Promise<void> {
+function getOfflineSnapshotRecordId(ownerUserId?: string | null): string {
+  return typeof ownerUserId === 'string' && ownerUserId.length > 0
+    ? `${OFFLINE_SNAPSHOT_RECORD_ID}:${ownerUserId}`
+    : OFFLINE_SNAPSHOT_RECORD_ID;
+}
+
+function getOfflineSnapshotStorageKey(ownerUserId?: string | null): string {
+  return typeof ownerUserId === 'string' && ownerUserId.length > 0
+    ? `${OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY}.${ownerUserId}`
+    : OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY;
+}
+
+async function writeOfflineSnapshotToIdb(payload: string, ownerUserId?: string | null): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
 
@@ -30,7 +43,7 @@ async function writeOfflineSnapshotToIdb(payload: string): Promise<void> {
       const db = request.result;
       const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readwrite');
       tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).put({
-        id: OFFLINE_SNAPSHOT_RECORD_ID,
+        id: getOfflineSnapshotRecordId(ownerUserId),
         data: payload,
       });
       tx.oncomplete = () => {
@@ -45,7 +58,7 @@ async function writeOfflineSnapshotToIdb(payload: string): Promise<void> {
   });
 }
 
-async function readOfflineSnapshotFromIdb(): Promise<string | null> {
+async function readOfflineSnapshotFromIdb(ownerUserId?: string | null): Promise<string | null> {
   return await new Promise<string | null>((resolve) => {
     try {
       const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
@@ -60,7 +73,7 @@ async function readOfflineSnapshotFromIdb(): Promise<string | null> {
       request.onsuccess = () => {
         const db = request.result;
         const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readonly');
-        const req = tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).get(OFFLINE_SNAPSHOT_RECORD_ID);
+        const req = tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).get(getOfflineSnapshotRecordId(ownerUserId));
         req.onsuccess = () => {
           db.close();
           resolve(req.result?.data ?? null);
@@ -80,7 +93,7 @@ async function readOfflineSnapshotFromIdb(): Promise<string | null> {
   });
 }
 
-async function clearOfflineSnapshotIdb(): Promise<void> {
+async function clearOfflineSnapshotIdb(ownerUserId?: string | null): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
 
@@ -94,7 +107,34 @@ async function clearOfflineSnapshotIdb(): Promise<void> {
     request.onsuccess = () => {
       const db = request.result;
       const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readwrite');
-      tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).delete(OFFLINE_SNAPSHOT_RECORD_ID);
+      tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).delete(getOfflineSnapshotRecordId(ownerUserId));
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  });
+}
+
+async function clearAllOfflineSnapshotsIdb(): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(OFFLINE_SNAPSHOT_DB_NAME, 1);
+
+    request.onerror = () => reject(request.error);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(OFFLINE_SNAPSHOT_STORE_NAME)) {
+        db.createObjectStore(OFFLINE_SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(OFFLINE_SNAPSHOT_STORE_NAME, 'readwrite');
+      tx.objectStore(OFFLINE_SNAPSHOT_STORE_NAME).clear();
       tx.oncomplete = () => {
         db.close();
         resolve();
@@ -108,6 +148,11 @@ async function clearOfflineSnapshotIdb(): Promise<void> {
 }
 
 describe('ProjectDataService', () => {
+  beforeEach(async () => {
+    localStorage.clear();
+    await clearAllOfflineSnapshotsIdb();
+  });
+
   it('P0001 Access Denied 时不应 fallback 到 loadFullProject', async () => {
     const rpc = vi.fn().mockResolvedValue({
       data: null,
@@ -360,8 +405,9 @@ describe('ProjectDataService', () => {
       },
       error: null,
     });
+    const isProjectAvailable = vi.fn().mockReturnValue({ maybeSingle });
     const select = vi.fn().mockReturnValue({
-      eq: vi.fn().mockReturnValue({ maybeSingle }),
+      eq: vi.fn().mockReturnValue({ is: isProjectAvailable }),
     });
 
     const from = vi.fn((table: string) => {
@@ -443,6 +489,7 @@ describe('ProjectDataService', () => {
     expect(second?.id).toBe('proj-1');
     expect(rpc).toHaveBeenCalledTimes(1);
     expect(from).toHaveBeenCalledWith('projects');
+    expect(isProjectAvailable).toHaveBeenCalledWith('deleted_at', null);
   });
 
   it('PGRST202 schema cache miss 时应识别为 RPC 缺失并回退', async () => {
@@ -529,9 +576,6 @@ describe('ProjectDataService', () => {
   });
 
   it('startup snapshot 应优先读取 IndexedDB 并返回元数据', async () => {
-    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
-    await clearOfflineSnapshotIdb();
-
     const idbPayload = JSON.stringify({
       projects: [
         {
@@ -559,8 +603,8 @@ describe('ProjectDataService', () => {
       version: 6,
     });
 
-    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, localStoragePayload);
-    await writeOfflineSnapshotToIdb(idbPayload);
+    localStorage.setItem(getOfflineSnapshotStorageKey('user-1'), localStoragePayload);
+    await writeOfflineSnapshotToIdb(idbPayload, 'user-1');
 
     const injector = Injector.create({
       providers: [
@@ -634,16 +678,13 @@ describe('ProjectDataService', () => {
     expect(snapshot.source).toBe('idb');
     expect(snapshot.projectCount).toBe(1);
     expect(snapshot.migratedLegacy).toBe(false);
-    expect(snapshot.ownerUserId).toBeNull();
+    expect(snapshot.ownerUserId).toBe('user-1');
     expect(snapshot.bytes).toBeGreaterThan(0);
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('idb-project');
   }, 10000);
 
   it('startup snapshot 仅有 legacy localStorage 时应回迁到 IndexedDB', async () => {
-    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
-    await clearOfflineSnapshotIdb();
-
     const legacyPayload = JSON.stringify({
       projects: [
         {
@@ -673,7 +714,7 @@ describe('ProjectDataService', () => {
         {
           provide: AuthService,
           useValue: {
-            currentUserId: vi.fn(() => 'user-1'),
+            currentUserId: vi.fn(() => null),
           },
         },
         {
@@ -728,12 +769,12 @@ describe('ProjectDataService', () => {
     };
 
     const snapshot = await service.loadStartupOfflineSnapshot();
-    const migratedPayload = await readOfflineSnapshotFromIdb();
+    const migratedPayload = await readOfflineSnapshotFromIdb(AUTH_CONFIG.LOCAL_MODE_USER_ID);
 
     expect(snapshot.source).toBe('localStorage');
     expect(snapshot.projectCount).toBe(1);
     expect(snapshot.migratedLegacy).toBe(true);
-    expect(snapshot.ownerUserId).toBeNull();
+    expect(snapshot.ownerUserId).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
     expect(snapshot.bytes).toBeGreaterThan(0);
     expect(snapshot.projects).toHaveLength(1);
     expect((snapshot.projects[0] as { id?: string }).id).toBe('legacy-project');
@@ -903,9 +944,6 @@ describe('ProjectDataService', () => {
   }, 10000);
 
   it('hint-only 启动占位态下不应覆盖真实离线快照', async () => {
-    localStorage.removeItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY);
-    await clearOfflineSnapshotIdb();
-
     const injector = Injector.create({
       providers: [
         { provide: ProjectDataService, useClass: ProjectDataService },
@@ -983,12 +1021,13 @@ describe('ProjectDataService', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(localStorage.getItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(getOfflineSnapshotStorageKey(AUTH_CONFIG.LOCAL_MODE_USER_ID))).toBeNull();
     const snapshot = await service.loadStartupOfflineSnapshot();
     expect(snapshot.projectCount).toBe(0);
   }, 10000);
 
   it('loadOfflineSnapshot 默认不应因 persisted owner hint 放宽 owner 可见性', () => {
-    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+    localStorage.setItem(getOfflineSnapshotStorageKey('user-1'), JSON.stringify({
       projects: [
         {
           id: 'persisted-owner-project',
@@ -1074,7 +1113,7 @@ describe('ProjectDataService', () => {
   });
 
   it('loadOfflineSnapshot 在当前 owner 与快照 owner 不匹配时应直接丢弃', () => {
-    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+    localStorage.setItem(getOfflineSnapshotStorageKey('user-1'), JSON.stringify({
       projects: [
         {
           id: 'foreign-owner-project',
@@ -1156,7 +1195,7 @@ describe('ProjectDataService', () => {
   });
 
   it('loadOfflineSnapshot 缺少 owner 元数据时应直接丢弃', () => {
-    localStorage.setItem(OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY, JSON.stringify({
+    localStorage.setItem(getOfflineSnapshotStorageKey('user-1'), JSON.stringify({
       projects: [
         {
           id: 'ownerless-project',

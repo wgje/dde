@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { ensureEnvFiles } = require('./ensure-env-files.cjs');
 
 const projectRoot = process.cwd();
 const srcRoot = path.join(projectRoot, 'src');
@@ -115,6 +116,8 @@ const parsePathList = (value) => {
     .map((item) => item.trim())
     .filter(Boolean);
 };
+
+ensureEnvFiles();
 
 const sanitizeFilePart = (value) => String(value)
   .replace(/[^a-zA-Z0-9._-]+/g, '-')

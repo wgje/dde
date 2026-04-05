@@ -39,6 +39,12 @@ interface SessionGuardContext {
   generation: number;
 }
 
+type ProjectHydrationLoadResult =
+  | { status: 'loaded'; project: Project }
+  | { status: 'inaccessible' }
+  | { status: 'retry' }
+  | { status: 'stale' };
+
 const FULL_WIPE_LOCAL_STORAGE_PREFIXES = [
   'nanoflow.project-manifest-watermark',
   'nanoflow.blackbox-manifest-watermark',
@@ -75,6 +81,10 @@ export class UserSessionService {
   private lastProjectListMetadataSyncSucceeded = false;
   private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
   private readonly trustedPrehydratedSnapshotState = signal(false);
+  /** 已从云端完整加载过内容的项目 ID 集合，防止重复加载 */
+  private readonly hydratedProjectIds = new Set<string>();
+  /** 正在加载中的项目 ID，防止并发重复请求 */
+  private readonly hydrationInFlight = new Map<string, Promise<void>>();
 
   readonly startupProjectCatalogStage = this.startupProjectCatalogStageState.asReadonly();
   readonly trustedPrehydratedSnapshotVisible = this.trustedPrehydratedSnapshotState.asReadonly();
@@ -277,9 +287,14 @@ export class UserSessionService {
       return true;
     }
 
-    // 中文注释：owner hint 只用于定位 owner-scoped bucket，不能直接解锁真实项目名/内容。
-    // 只有 runtime user 或 persisted session 已确认 owner 时，才允许展示完整离线快照。
-    return this.authService.peekPersistedSessionIdentity?.()?.userId === ownerUserId;
+    if (this.authService.peekPersistedSessionIdentity?.()?.userId === ownerUserId) {
+      return true;
+    }
+
+    // PWA 数据为设备本地存储，owner hint 表示用户曾在此设备登录过。
+    // access token 过期但 refresh token 仍可恢复时，信任本地数据归属，
+    // 避免冷启动出现"正在确认会话"只读遮罩阻塞用户操作。
+    return this.authService.peekPersistedOwnerHint?.() === ownerUserId;
   }
 
   private cloneOfflineProjectsForPrehydrate(projects: Project[]): Project[] {
@@ -495,6 +510,26 @@ export class UserSessionService {
       userId,
       generation: ++this.sessionRequestGeneration,
     };
+  }
+
+  private captureCurrentSessionGuard(): SessionGuardContext {
+    return {
+      userId: this.currentUserId(),
+      generation: this.sessionRequestGeneration,
+    };
+  }
+
+  private invalidateSessionRequestGeneration(reason: string): void {
+    this.sessionRequestGeneration += 1;
+    this.logger.debug('会话请求代际已失效', {
+      reason,
+      generation: this.sessionRequestGeneration,
+    });
+  }
+
+  private resetProjectHydrationCache(): void {
+    this.hydratedProjectIds.clear();
+    this.hydrationInFlight.clear();
   }
 
   private isSessionGuardCurrent(guard: SessionGuardContext): boolean {
@@ -744,6 +779,7 @@ export class UserSessionService {
       // 之前整块 try-catch 导致任何一个异步操作（IDB/网络）失败就跳过全部同步清理，
       // 触发 forceClearCurrentSessionView 再次失败的级联告警。
       this.attachmentServiceRef?.clearMonitoredAttachments();
+      this.resetProjectHydrationCache();
 
       // === 阶段 1：可失败的异步持久化操作（单独 try-catch） ===
       let preservedGuestProjects: Project[] = [];
@@ -770,7 +806,7 @@ export class UserSessionService {
       const canPersistCurrentProjectsForPreviousOwner = this.canPersistCurrentProjectsForPreviousOwner();
       if (preserveOfflineSnapshot && previousUserId !== null && !shouldPreserveGuestDrafts && canPersistCurrentProjectsForPreviousOwner) {
         try {
-          await this.saveProjectsToOfflineSnapshot(this.projectState.projects(), previousUserId);
+          await this.saveProjectsToOfflineSnapshot(this.projectState.getProjectsWithCurrentData(), previousUserId);
         } catch (snapshotError) {
           this.logger.warn('保存旧用户离线快照失败，继续清理', snapshotError);
         }
@@ -921,13 +957,147 @@ export class UserSessionService {
       if (newProject) {
         void this.monitorProjectAttachments(newProject);
       }
+      // 【P0 修复】切换项目时按需加载目标项目数据
+      // 项目可能是 syncProjectListMetadata 创建的空壳（tasks: []），需要从云端全量加载
+      void this.hydrateProjectIfNeeded(projectId);
     } else {
       this.attachmentServiceRef?.clearMonitoredAttachments();
     }
   }
 
+  /**
+   * 按需全量加载项目数据（防止空壳项目显示空内容）
+   *
+   * 触发条件：
+   * - 项目在 TaskStore 中无任务（空壳项目）
+   * - 项目未标记为 local-only
+   * - 项目尚未被加载过
+   * - 用户已登录且非本地模式
+   */
+  private async hydrateProjectIfNeeded(projectId: string): Promise<void> {
+    // 已加载过或正在加载，跳过
+    if (this.hydratedProjectIds.has(projectId)) return;
+    const existing = this.hydrationInFlight.get(projectId);
+    if (existing) return;
+
+    const userId = this.currentUserId();
+    if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) return;
+
+    const project = this.projectState.getProject(projectId);
+    if (!project || project.syncSource === 'local-only') return;
+
+    // 检查 TaskStore 是否已有该项目的任务数据
+    const tasks = this.projectState.tasks();
+    // tasks 是基于 activeProjectId 的 computed，但此时 activeProjectId 已经切换过来了
+    // 如果已有任务，认为项目已水合（可能来自离线快照）
+    if (tasks.length > 0) {
+      this.hydratedProjectIds.add(projectId);
+      return;
+    }
+
+    // Project.tasks 也为空才需要加载
+    if (project.tasks && project.tasks.length > 0) {
+      this.hydratedProjectIds.add(projectId);
+      return;
+    }
+
+    const sessionGuard = this.captureCurrentSessionGuard();
+    this.logger.info('按需加载空壳项目数据', { projectId });
+    const hydrationPromise = this.doHydrateProject(projectId, userId, sessionGuard);
+    this.hydrationInFlight.set(projectId, hydrationPromise);
+    try {
+      await hydrationPromise;
+    } finally {
+      if (this.hydrationInFlight.get(projectId) === hydrationPromise) {
+        this.hydrationInFlight.delete(projectId);
+      }
+    }
+  }
+
+  private async loadProjectForHydration(
+    projectId: string,
+    sessionGuard?: SessionGuardContext,
+  ): Promise<ProjectHydrationLoadResult> {
+    const cloudProject = await this.syncCoordinator.loadSingleProjectFromCloud(projectId);
+    if (this.shouldAbortStaleSession(sessionGuard, `project-hydration:load:${projectId}`)) {
+      return { status: 'stale' };
+    }
+    if (cloudProject) {
+      return { status: 'loaded', project: cloudProject };
+    }
+
+    try {
+      const probe = await this.syncCoordinator.core.getAccessibleProjectProbe(projectId);
+      if (this.shouldAbortStaleSession(sessionGuard, `project-hydration:probe:${projectId}`)) {
+        return { status: 'stale' };
+      }
+      if (probe && !probe.accessible) {
+        return { status: 'inaccessible' };
+      }
+    } catch (error) {
+      this.logger.warn('空壳项目可访问性复核失败，保留后续重试机会', { projectId, error });
+    }
+
+    return { status: 'retry' };
+  }
+
+  /** 执行项目全量加载并合并到本地 */
+  private async doHydrateProject(
+    projectId: string,
+    userId: string,
+    sessionGuard?: SessionGuardContext,
+  ): Promise<void> {
+    try {
+      const loadResult = await this.loadProjectForHydration(projectId, sessionGuard);
+      if (loadResult.status === 'stale') {
+        return;
+      }
+      if (loadResult.status === 'inaccessible') {
+        this.logger.info('按需加载项目已确认不可访问，停止当前会话重试', { projectId });
+        this.hydratedProjectIds.add(projectId);
+        return;
+      }
+      if (loadResult.status === 'retry') {
+        this.logger.info('按需加载项目暂不可用，保留后续重试机会', { projectId });
+        return;
+      }
+
+      if (this.shouldAbortStaleSession(sessionGuard, `project-hydration:merge:${projectId}`)) {
+        return;
+      }
+
+      const cloudProject = loadResult.project;
+
+      await this.mergeSingleProject(cloudProject, userId);
+      this.hydratedProjectIds.add(projectId);
+
+      // 保存快照以防下次重新加载仍为空壳
+      try {
+        if (this.shouldAbortStaleSession(sessionGuard, `project-hydration:snapshot:${projectId}`)) {
+          return;
+        }
+        await this.saveProjectsToOfflineSnapshot(
+          this.projectState.getProjectsWithCurrentData(),
+          userId,
+          { allowEmpty: true }
+        );
+      } catch (snapshotError) {
+        this.logger.warn('按需加载后保存快照失败', snapshotError);
+      }
+
+      this.logger.info('空壳项目数据已加载', {
+        projectId,
+        taskCount: cloudProject.tasks?.length ?? 0,
+        connectionCount: cloudProject.connections?.length ?? 0,
+      });
+    } catch (error) {
+      this.logger.warn('按需加载项目数据失败', { projectId, error });
+    }
+  }
+
   /** 清空本地数据（内存状态），完整登出用 clearAllLocalData() */
   clearLocalData(): void {
+    this.invalidateSessionRequestGeneration('clearLocalData');
     this.projectState.clearData();
     this.uiState.clearAllState();
     this.undoService.clearHistory();
@@ -936,6 +1106,8 @@ export class UserSessionService {
     this.syncCoordinator.core.clearOfflineCache();
     this.syncCoordinator.clearActiveConflict();
     this.clearStartupProjectCatalogState();
+    // 清理项目补水缓存，避免旧会话状态污染后续会话
+    this.resetProjectHydrationCache();
   }
 
   /**
@@ -1264,6 +1436,13 @@ export class UserSessionService {
         }
         this.projectState.setProjects(validProjects);
         
+        // 标记有任务的项目为已水合（来自离线快照的数据已完整）
+        for (const p of validProjects) {
+          if (p.tasks && p.tasks.length > 0) {
+            this.hydratedProjectIds.add(p.id);
+          }
+        }
+        
         // 恢复之前的活动项目，或选择第一个
         if (previousActive && validProjects.some(p => p.id === previousActive)) {
           this.projectState.setActiveProjectId(previousActive);
@@ -1582,8 +1761,8 @@ export class UserSessionService {
     }
     
     // === 策略 2: 如果 Delta Sync 失败，只加载当前项目（按需加载）===
-    // 【优化 2026-01-27】不自动加载其他项目，节省带宽
-    // 其他项目在用户切换项目时再加载
+    // 【P0 修复 2026-04-05】后台同步完成后，加载所有空壳项目的完整数据
+    // 保证所有项目在下次切换时有内容可显示
 
     // 【修复 2026-04-03】登录后无本地缓存时 activeProjectId 为 null，
     // 但 syncProjectListMetadata 可能已从云端创建了项目壳。
@@ -1617,9 +1796,109 @@ export class UserSessionService {
         this.logger.warn('当前项目同步失败', e);
       }
     }
+
+    // 标记活跃项目已水合
+    if (activeProjectId && currentProjectSynced) {
+      this.hydratedProjectIds.add(activeProjectId);
+    }
+
+    // 【P0 修复 2026-04-05】后台加载所有空壳项目的完整数据
+    // 空壳项目由 syncProjectListMetadata 创建（tasks: []），需要从云端补充内容
+    if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:before-shell-hydration')) {
+      this.markStartupProjectCatalogResolved();
+      return;
+    }
+    await this.hydrateShellProjectsInBackground(userId, activeProjectId, sessionGuard);
     
     this.markStartupProjectCatalogResolved();
     this.logger.debug('后台同步完成', { currentProjectSynced });
+  }
+
+  /**
+   * 后台加载所有空壳项目的完整数据
+   *
+   * 空壳项目由 syncProjectListMetadata 创建（tasks: [], connections: []），
+   * 需要从云端逐个加载完整数据，以保证用户切换项目时能看到内容。
+   * 串行执行，避免并发请求过多。
+   */
+  private async hydrateShellProjectsInBackground(
+    userId: string,
+    activeProjectId: string | null,
+    sessionGuard?: SessionGuardContext,
+  ): Promise<void> {
+    const projects = this.projectState.projects();
+    const shellProjectIds = projects
+      .filter(p =>
+        p.id !== activeProjectId
+        && p.syncSource !== 'local-only'
+        && (!p.tasks || p.tasks.length === 0)
+        && !this.hydratedProjectIds.has(p.id)
+      )
+      .map(p => p.id);
+
+    if (shellProjectIds.length === 0) {
+      // 即使不需要加载空壳，也标记所有有内容的项目为已水合
+      for (const p of projects) {
+        if (p.tasks && p.tasks.length > 0) {
+          this.hydratedProjectIds.add(p.id);
+        }
+      }
+      return;
+    }
+
+    this.logger.info('开始后台加载空壳项目', {
+      count: shellProjectIds.length,
+      projectIds: shellProjectIds,
+    });
+
+    let loadedCount = 0;
+    for (const projectId of shellProjectIds) {
+      if (this.shouldAbortStaleSession(sessionGuard, `hydrateShell:${projectId}`)) {
+        break;
+      }
+
+      try {
+        const loadResult = await this.loadProjectForHydration(projectId, sessionGuard);
+        if (loadResult.status === 'stale') {
+          return;
+        }
+
+        if (loadResult.status === 'loaded') {
+          if (this.shouldAbortStaleSession(sessionGuard, `hydrateShell:merge:${projectId}`)) {
+            return;
+          }
+          await this.mergeSingleProject(loadResult.project, userId);
+          this.hydratedProjectIds.add(projectId);
+          loadedCount++;
+        } else if (loadResult.status === 'inaccessible') {
+          // 项目明确不可访问，标记为已处理避免同会话内重复重试
+          this.hydratedProjectIds.add(projectId);
+        } else {
+          this.logger.info('后台加载空壳项目暂不可用，等待后续机会重试', { projectId });
+        }
+      } catch (error) {
+        this.logger.warn('后台加载空壳项目失败', { projectId, error });
+        // 单个失败不影响后续项目加载
+      }
+    }
+
+    if (loadedCount > 0) {
+      // 保存快照以持久化已加载的项目数据
+      try {
+        if (this.shouldAbortStaleSession(sessionGuard, 'hydrateShell:save-snapshot')) {
+          return;
+        }
+        await this.saveProjectsToOfflineSnapshot(
+          this.projectState.getProjectsWithCurrentData(),
+          userId,
+          { allowEmpty: true }
+        );
+      } catch (snapshotError) {
+        this.logger.warn('后台加载空壳项目后保存快照失败', snapshotError);
+      }
+
+      this.logger.info('后台空壳项目加载完成', { loadedCount, total: shellProjectIds.length });
+    }
   }
   
   /** 同步项目列表元数据（不加载完整数据） */
@@ -1715,7 +1994,10 @@ export class UserSessionService {
     }
     
     if (hasChanges) {
-      this.projectState.setProjects(updatedProjects);
+      // 【P0 修复 2026-04-05】使用 setProjectsMetadataOnly 避免空壳项目的 tasks: []
+      // 覆盖 TaskStore 中已加载好的任务数据。syncProjectListMetadata 只更新项目元数据，
+      // 不应触碰任务和连接数据。
+      this.projectState.setProjectsMetadataOnly(updatedProjects);
 
       const activeProjectIdForPrune = this.projectState.activeProjectId();
       if (activeProjectIdForPrune && !updatedProjects.some(p => p.id === activeProjectIdForPrune)) {
@@ -1724,7 +2006,7 @@ export class UserSessionService {
       }
 
       try {
-        await this.saveProjectsToOfflineSnapshot(updatedProjects, userId, { allowEmpty: true });
+        await this.saveProjectsToOfflineSnapshot(this.projectState.getProjectsWithCurrentData(), userId, { allowEmpty: true });
       } catch (snapshotError) {
         this.logger.warn('持久化项目列表元数据快照失败', snapshotError);
       }
@@ -1748,7 +2030,8 @@ export class UserSessionService {
       || this.syncCoordinator.hasPendingChangesForProject(projectId);
 
     if (hasPendingLocalChanges) {
-      const preservedProjects: Project[] = this.projectState.projects().map(project => (
+      // 使用 getProjectsWithCurrentData 确保项目包含 TaskStore 中最新的任务数据
+      const preservedProjects: Project[] = this.projectState.getProjectsWithCurrentData().map(project => (
         project.id === projectId
           ? {
               ...project,
@@ -1769,7 +2052,8 @@ export class UserSessionService {
       return projectId;
     }
 
-    const remainingProjects = this.projectState.projects().filter(project => project.id !== projectId);
+    // 使用 getProjectsWithCurrentData 确保包含 TaskStore 中最新的任务数据
+    const remainingProjects = this.projectState.getProjectsWithCurrentData().filter(project => project.id !== projectId);
     this.projectState.setProjects(remainingProjects);
     this.projectState.setActiveProjectId(null);
 

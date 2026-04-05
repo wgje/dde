@@ -358,6 +358,21 @@ export class ProjectStateService {
     return this.projectStore.getProject(projectId);
   }
 
+  /**
+   * 获取所有项目，并将 tasks/connections 从 Store 实时化
+   *
+   * ProjectStore 中 Project.tasks 可能因 setProjectsMetadataOnly 等路径变陈旧，
+   * 此方法以 TaskStore/ConnectionStore 为真值来源重建 tasks/connections，
+   * 保证离线快照和云端推送包含最新数据。
+   */
+  getProjectsWithCurrentData(): Project[] {
+    return this.projectStore.projects().map(p => ({
+      ...p,
+      tasks: this.taskStore.getTasksByProject(p.id),
+      connections: this.connectionStore.getConnectionsByProject(p.id),
+    }));
+  }
+
   // ========== 内部更新方法（供 StoreService 调用） ==========
 
   /**
@@ -389,6 +404,16 @@ export class ProjectStateService {
     if (connectionEntries.length > 0) {
       this.connectionStore.setConnectionsForMultipleProjects(connectionEntries);
     }
+  }
+
+  /**
+   * 仅更新项目元数据（不触碰 TaskStore / ConnectionStore）
+   *
+   * 适用于 syncProjectListMetadata 等只更新项目 name/description/updatedAt 的场景。
+   * 空壳项目（tasks: []）不会覆盖 TaskStore 中已加载好的任务数据。
+   */
+  setProjectsMetadataOnly(projects: Project[]): void {
+    this.projectStore.setProjects(projects);
   }
 
   /**

@@ -308,7 +308,8 @@ export class SyncCoordinatorService {
       return;
     }
 
-    const localProjects = this.projectState.projects();
+    // 使用 getProjectsWithCurrentData 确保本地项目包含 TaskStore 中最新的任务数据
+    const localProjects = this.projectState.getProjectsWithCurrentData();
     const localProjectMap = new Map(localProjects.map(p => [p.id, p]));
     const remoteProjectMap = new Map(remoteProjects.map(p => [p.id, p]));
     const missingRemoteProjectMetas = remoteProjectMetas.filter(project => !remoteProjectMap.has(project.id));
@@ -580,7 +581,8 @@ export class SyncCoordinatorService {
     const debounceMs = Math.max(250, Math.min(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL, 1000));
     this.localSnapshotTimer = setTimeout(() => {
       this.localSnapshotTimer = null;
-      const projects = this.projectState.projects();
+      // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
+      const projects = this.projectState.getProjectsWithCurrentData();
       if (projects.length === 0) {
         return;
       }
@@ -642,7 +644,8 @@ export class SyncCoordinatorService {
     }
     
     // 同步保存到本地缓存（不等待云端）
-    const projects = this.projectState.projects();
+    // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
+    const projects = this.projectState.getProjectsWithCurrentData();
     if (projects.length > 0) {
       this.core.saveOfflineSnapshot(projects);
       this.logger.info('页面卸载前已保存本地缓存', { projectCount: projects.length });
@@ -653,7 +656,7 @@ export class SyncCoordinatorService {
       return;
     }
 
-    void this.flushPendingPersistToCloud('before-unload');
+    void this.flushPendingPersistToCloud('before-unload', { force: true });
   }
 
   async preparePendingPersistForOwnerChange(ownerUserId: string | null, reason: string): Promise<boolean> {
@@ -667,7 +670,8 @@ export class SyncCoordinatorService {
       this.localSnapshotTimer = null;
     }
 
-    const projects = this.projectState.projects();
+    // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
+    const projects = this.projectState.getProjectsWithCurrentData();
     if (projects.length > 0) {
       this.core.saveOfflineSnapshot(projects, ownerUserId);
       this.logger.info('切换账号前已保存本地快照', {
@@ -690,7 +694,7 @@ export class SyncCoordinatorService {
     }
 
     if (hadScheduledPersist || hasPendingLocalChanges) {
-      await this.flushPendingPersistToCloud(reason);
+      await this.flushPendingPersistToCloud(reason, { force: true });
     }
 
     const remainingOwnerHandoffProjectIds = this.getPendingOwnerHandoffProjectIds(activeProjectId);
@@ -788,15 +792,16 @@ export class SyncCoordinatorService {
    * 在页面切入后台/卸载前抢发一次云端持久化。
    * 同步本地快照仍是第一优先级；此方法仅在有待同步改动且在线时尝试补齐跨设备可见性。
    */
-  async flushPendingPersistToCloud(reason: string): Promise<boolean> {
+  async flushPendingPersistToCloud(reason: string, options?: { force?: boolean }): Promise<boolean> {
     if (this.flushPendingPersistPromise) {
       return this.flushPendingPersistPromise;
     }
 
     const state = this.persistState();
+    const force = options?.force === true;
     const hasPendingTimer = this.persistTimer !== null;
     const hasPendingLocalChanges = state.hasPendingLocalChanges;
-    if (!hasPendingTimer && !hasPendingLocalChanges) {
+    if (!force && !hasPendingTimer && !hasPendingLocalChanges) {
       return false;
     }
 
@@ -1631,7 +1636,8 @@ export class SyncCoordinatorService {
   
   private async doPersistActiveProject(persistVersion: number): Promise<PersistOutcome> {
     const project = this.projectState.activeProject();
-    const projects = this.projectState.projects();
+    // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
+    const projects = this.projectState.getProjectsWithCurrentData();
     const now = new Date().toISOString();
     
     // 更新活动项目的 updatedAt 时间戳
@@ -1683,7 +1689,7 @@ export class SyncCoordinatorService {
             : p
         )
       );
-      this.core.saveOfflineSnapshot(this.projectState.projects());
+      this.core.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
       return { remoteConfirmed: false, projectId: project.id };
     }
 
@@ -1716,7 +1722,7 @@ export class SyncCoordinatorService {
           )
         );
         // 同步成功后，再次保存快照以确保版本号同步
-        this.core.saveOfflineSnapshot(this.projectState.projects());
+        this.core.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
         
         if (shouldClearProjectDirtyState) {
           // 【关键】仅当本轮之后没有新增本地编辑时，才清理项目级 dirty 标记

@@ -79,35 +79,18 @@
   }
   
   <app-workspace-overlays>
-    <!-- Demo 模式横幅 - 本地模式时显示 -->
-    <app-demo-banner></app-demo-banner>
+    @defer (on immediate) {
+      <!-- Demo 模式横幅 - 本地模式时显示 -->
+      <app-demo-banner></app-demo-banner>
 
-    <!-- 离线状态横幅 - 固定在顶部，不阻碍操作 -->
-    <app-offline-banner data-testid="offline-indicator"></app-offline-banner>
+      <!-- 离线状态横幅 - 固定在顶部，不阻碍操作 -->
+      <app-offline-banner data-testid="offline-indicator"></app-offline-banner>
+    }
 
-    <!-- PWA 安装提示（浏览器模式） -->
-    @if (showInstallPrompt()) {
-      <div class="fixed left-1/2 z-30 -translate-x-1/2 px-3 py-2 rounded-xl border border-stone-200/80 dark:border-stone-700/80 bg-white/90 dark:bg-stone-900/90 backdrop-blur-md shadow-sm max-w-[92vw]"
-           [style.top]="installPromptTop()">
-        <div class="flex items-center gap-2">
-          <div class="text-[11px] text-stone-600 dark:text-stone-300">
-            {{ pwaInstallHint() }}
-          </div>
-          @if (pwaInstall.canInstall()) {
-            <button
-              (click)="installPwaApp()"
-              class="px-2 py-1 text-[11px] rounded-md bg-indigo-500 text-white hover:bg-indigo-600 transition-colors whitespace-nowrap">
-              安装应用
-            </button>
-          }
-          <button
-            (click)="dismissPwaInstallPrompt()"
-            class="w-5 h-5 text-stone-400 hover:text-stone-600 dark:hover:text-stone-300 transition-colors"
-            aria-label="关闭安装提示">
-            ×
-          </button>
-        </div>
-      </div>
+    @defer (on immediate) {
+      <app-pwa-install-prompt-banner
+        [top]="installPromptTop()"
+        (visibleChange)="onPwaPromptVisibleChange($event)"></app-pwa-install-prompt-banner>
     }
 
     <!-- Focus Mode 覆盖层 -->
@@ -122,8 +105,10 @@
   <app-workspace-shell-core>
     <div data-testid="app-container" class="relative flex flex-1 w-full min-h-0 overflow-hidden font-sans" style="background-color: var(--theme-bg); color: var(--theme-text);">
   
-  <!-- Toast 通知容器 -->
-  <app-toast-container data-testid="toast-container"></app-toast-container>
+  @defer (on immediate) {
+    <!-- Toast 通知容器 -->
+    <app-toast-container data-testid="toast-container"></app-toast-container>
+  }
 
   @if (showBlockingStartupHintOverlay()) {
     <div data-testid="startup-hint-overlay" class="fixed inset-0 z-[70] flex items-center justify-center bg-[color:var(--theme-bg)]/72 backdrop-blur-[2px]">

@@ -40,7 +40,7 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
             data-testid="task-title-preview"
             data-title-preview-trigger
             (click)="enterEditMode('title'); $event.stopPropagation()"
-            class="block w-full rounded-md text-left font-medium text-retro-dark dark:text-stone-200 leading-snug transition-colors hover:bg-stone-100/70 dark:hover:bg-stone-800/60 line-clamp-3"
+            class="block w-full rounded-md text-left font-medium text-retro-dark dark:text-stone-200 leading-snug transition-colors hover:bg-stone-100/70 dark:hover:bg-stone-800/60 line-clamp-2"
             [ngClass]="{'text-sm px-1 py-0.5': !isMobile(), 'text-xs px-0.5 py-0.5': isMobile()}"
             title="点击编辑标题">
             {{ previewTitle() }}
@@ -91,8 +91,8 @@ import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/mar
               <div
                 data-testid="task-content"
                 (click)="onPreviewClick($event)"
-                class="w-full rounded-lg border border-transparent overflow-y-auto overflow-x-hidden markdown-preview markdown-preview-adaptive cursor-pointer transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
-                [ngClass]="{'max-h-40 px-1 py-0.5 text-xs': !isMobile(), 'max-h-32 px-0.5 py-0.5 text-[11px]': isMobile()}"
+                class="w-full rounded-lg border border-transparent overflow-hidden markdown-preview markdown-preview-adaptive cursor-pointer transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
+                [ngClass]="{'max-h-20 px-1 py-0.5 text-xs': !isMobile(), 'max-h-16 px-0.5 py-0.5 text-[11px]': isMobile()}"
                 [innerHTML]="localContent() | safeMarkdown"
                 title="点击编辑">
               </div>

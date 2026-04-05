@@ -113,6 +113,26 @@ export class ProjectDataService {
     return Boolean(maybeSignal);
   }
 
+  private isSyncStateOfflineMode(): boolean {
+    const maybeSyncState = (this.syncState as unknown as {
+      syncState?: (() => { offlineMode?: boolean }) | { offlineMode?: boolean };
+    }).syncState;
+
+    if (typeof maybeSyncState === 'function') {
+      try {
+        return Boolean(maybeSyncState()?.offlineMode);
+      } catch {
+        return false;
+      }
+    }
+
+    if (typeof maybeSyncState === 'object' && maybeSyncState !== null) {
+      return Boolean(maybeSyncState.offlineMode);
+    }
+
+    return false;
+  }
+
   private isBatchRpcMissingError(error: {
     code?: string;
     message?: string;
@@ -150,7 +170,7 @@ export class ProjectDataService {
       }
       return null;
     }
-    if (this.syncState.syncState().offlineMode || this.isSupabaseOfflineMode()) {
+    if (this.isSyncStateOfflineMode() || this.isSupabaseOfflineMode()) {
       this.logger.debug('连接中断模式下跳过 ProjectData 远端读取');
       return null;
     }

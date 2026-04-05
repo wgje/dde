@@ -148,6 +148,11 @@ const mockProjectStateService = {
   setProjects: vi.fn(),
   setActiveProjectId: vi.fn(),
   getProject: vi.fn((id: string) => mockProjectStateService.projects().find((p: Project) => p.id === id)),
+  getProjectsWithCurrentData: vi.fn(() => mockProjectStateService.projects()),
+};
+
+const resolveMockActiveProjectId = (): string | null => {
+  return mockProjectStateService.activeProjectId() ?? mockProjectStateService.activeProject()?.id ?? null;
 };
 
 const bindProjectStateMockImplementations = () => {
@@ -156,7 +161,7 @@ const bindProjectStateMockImplementations = () => {
   );
   mockProjectStateService.setProjects.mockImplementation((projects: Project[]) => {
     mockProjectStateService.projects.set(projects);
-    const activeProjectId = mockProjectStateService.activeProjectId();
+    const activeProjectId = resolveMockActiveProjectId();
     mockProjectStateService.activeProject.set(
       activeProjectId ? projects.find((project: Project) => project.id === activeProjectId) ?? null : null
     );
@@ -170,7 +175,7 @@ const bindProjectStateMockImplementations = () => {
   mockProjectStateService.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
     const current = mockProjectStateService.projects();
     mockProjectStateService.projects.set(updater(current));
-    const activeProjectId = mockProjectStateService.activeProjectId();
+    const activeProjectId = resolveMockActiveProjectId();
     mockProjectStateService.activeProject.set(
       activeProjectId ? mockProjectStateService.projects().find((project: Project) => project.id === activeProjectId) ?? null : null
     );
@@ -233,16 +238,7 @@ const mockChangeTrackerService = {
   trackConnectionCreate: vi.fn(),
   trackConnectionDelete: vi.fn(),
   clearProjectFieldLocks: vi.fn(),
-  getProjectChanges: vi.fn().mockReturnValue({
-    tasksToCreate: [],
-    tasksToUpdate: [],
-    taskIdsToDelete: [],
-    connectionsToCreate: [],
-    connectionsToUpdate: [],
-    connectionsToDelete: [],
-    hasChanges: false,
-    totalChanges: 0,
-  }),
+  getProjectChanges: vi.fn(),
   clearProjectChanges: vi.fn(),
   getChangedProjectIds: vi.fn().mockReturnValue([]),
   hasProjectChanges: vi.fn().mockReturnValue(false),
@@ -308,6 +304,19 @@ const mockProjectSyncOperationsService = {
   validateAndRebalance: vi.fn().mockImplementation((project: Project) => project),
 };
 
+function createDefaultProjectChanges() {
+  return {
+    tasksToCreate: [],
+    tasksToUpdate: [],
+    taskIdsToDelete: [],
+    connectionsToCreate: [],
+    connectionsToUpdate: [],
+    connectionsToDelete: [],
+    hasChanges: false,
+    totalChanges: 0,
+  };
+}
+
 // ========== 辅助函数 ==========
 
 function createTestProject(overrides?: Partial<Project>): Project {
@@ -366,6 +375,24 @@ describe('SyncCoordinatorService', () => {
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_WATERMARK_RPC_V1 = originalResumeWatermarkFlag;
     (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = originalUserProjectsWatermarkFlag;
     (FEATURE_FLAGS as unknown as Record<string, boolean>).BLACKBOX_WATERMARK_PROBE_V1 = originalBlackBoxWatermarkFlag;
+
+    mockAuthService.currentUserId.mockReset();
+    mockAuthService.currentUserId.mockReturnValue('user-123');
+    mockSyncService.saveProjectSmart.mockReset();
+    mockSyncService.saveProjectSmart.mockResolvedValue({ success: true, newVersion: 2 });
+    mockSyncService.saveOfflineSnapshot.mockReset();
+    mockSyncService.loadOfflineSnapshot.mockReset();
+    mockSyncService.loadOfflineSnapshot.mockReturnValue(null);
+    mockActionQueueService.getPendingActionsForProject.mockReset();
+    mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+    mockActionQueueService.enqueueForOwner.mockReset();
+    mockActionQueueService.enqueueForOwner.mockResolvedValue(true);
+    mockChangeTrackerService.getProjectChanges.mockReset();
+    mockChangeTrackerService.getProjectChanges.mockImplementation(() => createDefaultProjectChanges());
+    mockChangeTrackerService.getChangedProjectIds.mockReset();
+    mockChangeTrackerService.getChangedProjectIds.mockReturnValue([]);
+    mockChangeTrackerService.hasProjectChanges.mockReset();
+    mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
     
     // 重置 mock signals
     mockSyncService.syncState.set(createMockSyncState());
@@ -381,8 +408,6 @@ describe('SyncCoordinatorService', () => {
       localStorage.removeItem('nanoflow.project-manifest-watermark.user-123');
       localStorage.removeItem('nanoflow.blackbox-manifest-watermark.user-123');
     }
-    mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
-    mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
 
     injector = Injector.create({
       providers: [

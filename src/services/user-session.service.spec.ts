@@ -95,6 +95,12 @@ function createAttachment(id = crypto.randomUUID()) {
   };
 }
 
+async function flushAsyncWork(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('UserSessionService', () => {
   let service: UserSessionService;
   let destroyCallbacks: (() => void)[];
@@ -144,6 +150,7 @@ describe('UserSessionService', () => {
 
     destroyCallbacks = [];
     let projectsState: Project[] = [];
+    let activeProjectIdState: string | null = null;
 
     // Create a real writable signal for currentUserId
     userIdSignal = signal<string | null>(null);
@@ -167,12 +174,24 @@ describe('UserSessionService', () => {
         projectsState = updater(projectsMock());
         projectsMock.mockReturnValue(projectsState);
       }),
-      activeProjectId: vi.fn(() => null),
-      setActiveProjectId: vi.fn(),
-      getActiveProject: vi.fn(() => null),
+      activeProjectId: vi.fn(() => activeProjectIdState),
+      setActiveProjectId: vi.fn((projectId: string | null) => {
+        activeProjectIdState = projectId;
+      }),
+      getActiveProject: vi.fn(() => projectsMock().find((project: Project) => project.id === activeProjectIdState) ?? null),
       getProject: vi.fn((id: string) => projectsMock().find((project: Project) => project.id === id)),
+      tasks: vi.fn(() => {
+        const activeProject = projectsMock().find((project: Project) => project.id === activeProjectIdState);
+        return activeProject?.tasks ?? [];
+      }),
       clearData: vi.fn(),
       clearAll: vi.fn(),
+      setProjectsMetadataOnly: vi.fn((projects: Project[]) => {
+        // 只更新项目元数据（与 setProjects 行为一致，但语义上不触碰 TaskStore）
+        projectsState = projects;
+        projectsMock.mockReturnValue(projectsState);
+      }),
+      getProjectsWithCurrentData: vi.fn(() => projectsMock()),
     };
 
     mockSyncCoordinator = {
@@ -364,6 +383,175 @@ describe('UserSessionService', () => {
       service.switchActiveProject(null);
 
       expect(mockAttachmentService['clearMonitoredAttachments']).toHaveBeenCalled();
+    });
+
+    it('旧会话中的按需加载结果不应回写到已清空的会话', async () => {
+      userIdSignal.set('user-1');
+      const shellProject = createProject({ id: 'shell-1', name: 'Shell', tasks: [] });
+      const seedProjects = mockProjectState['setProjects'] as unknown as (projects: Project[]) => void;
+      seedProjects([shellProject]);
+
+      let resolveLoad: ((project: Project | null) => void) | undefined;
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<Project | null>((resolve) => {
+          resolveLoad = resolve;
+        })
+      );
+
+      vi.clearAllMocks();
+
+      service.switchActiveProject('shell-1');
+      service.clearLocalData();
+
+      resolveLoad?.(createProject({
+        id: 'shell-1',
+        name: 'Loaded After Clear',
+        tasks: [createTask({ id: 'task-after-clear' })],
+      }));
+      await flushAsyncWork();
+
+      expect(mockProjectState['setProjects']).not.toHaveBeenCalled();
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .not.toHaveBeenCalled();
+    });
+
+    it('按需加载返回 transient null 时应允许后续重试', async () => {
+      userIdSignal.set('user-1');
+      const shellProject = createProject({ id: 'shell-1', name: 'Shell', tasks: [] });
+      const seedProjects = mockProjectState['setProjects'] as unknown as (projects: Project[]) => void;
+      seedProjects([shellProject]);
+      vi.clearAllMocks();
+
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(createProject({
+          id: 'shell-1',
+          name: 'Loaded On Retry',
+          tasks: [createTask({ id: 'task-retry' })],
+        }));
+      (mockSyncCoordinator['core'] as { getAccessibleProjectProbe: ReturnType<typeof vi.fn> }).getAccessibleProjectProbe
+        .mockResolvedValueOnce(null);
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      service.switchActiveProject(null);
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).toHaveBeenCalledTimes(2);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'shell-1', name: 'Loaded On Retry' }),
+      ]);
+    });
+
+    it('按需加载确认不可访问后应停止当前会话内重复重试', async () => {
+      userIdSignal.set('user-1');
+      const shellProject = createProject({ id: 'shell-1', name: 'Shell', tasks: [] });
+      const seedProjects = mockProjectState['setProjects'] as unknown as (projects: Project[]) => void;
+      seedProjects([shellProject]);
+      vi.clearAllMocks();
+
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (mockSyncCoordinator['core'] as { getAccessibleProjectProbe: ReturnType<typeof vi.fn> }).getAccessibleProjectProbe
+        .mockResolvedValue({ projectId: 'shell-1', accessible: false, watermark: null });
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      service.switchActiveProject(null);
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).toHaveBeenCalledTimes(1);
+      expect((mockSyncCoordinator['core'] as { getAccessibleProjectProbe: ReturnType<typeof vi.fn> }).getAccessibleProjectProbe)
+        .toHaveBeenCalledTimes(1);
+    });
+
+    it('切号后应清空旧补水中的 in-flight 标记，允许新会话重新补水', async () => {
+      userIdSignal.set('user-1');
+      const shellProject = createProject({ id: 'shell-1', name: 'Shell', tasks: [] });
+      const seedProjects = mockProjectState['setProjects'] as unknown as (projects: Project[]) => void;
+      seedProjects([shellProject]);
+
+      let resolveFirstLoad: ((project: Project | null) => void) | undefined;
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(new Promise<Project | null>((resolve) => {
+          resolveFirstLoad = resolve;
+        }))
+        .mockResolvedValueOnce(createProject({
+          id: 'shell-1',
+          name: 'Loaded In New Session',
+          tasks: [createTask({ id: 'task-new-session' })],
+        }));
+
+      vi.clearAllMocks();
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      await service.setCurrentUser('user-2', { forceLoad: true, skipPersistentReload: true });
+      seedProjects([shellProject]);
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).toHaveBeenCalledTimes(2);
+
+      resolveFirstLoad?.(createProject({
+        id: 'shell-1',
+        name: 'Stale Project',
+        tasks: [createTask({ id: 'task-stale' })],
+      }));
+      await flushAsyncWork();
+    });
+
+    it('旧会话补水完成时不应清掉新会话同项目的 in-flight 标记', async () => {
+      userIdSignal.set('user-1');
+      const shellProject = createProject({ id: 'shell-1', name: 'Shell', tasks: [] });
+      const seedProjects = mockProjectState['setProjects'] as unknown as (projects: Project[]) => void;
+      seedProjects([shellProject]);
+
+      let resolveFirstLoad: ((project: Project | null) => void) | undefined;
+      let resolveSecondLoad: ((project: Project | null) => void) | undefined;
+      (mockSyncCoordinator['loadSingleProjectFromCloud'] as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(new Promise<Project | null>((resolve) => {
+          resolveFirstLoad = resolve;
+        }))
+        .mockReturnValueOnce(new Promise<Project | null>((resolve) => {
+          resolveSecondLoad = resolve;
+        }));
+
+      vi.clearAllMocks();
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      await service.setCurrentUser('user-2', { forceLoad: true, skipPersistentReload: true });
+      seedProjects([shellProject]);
+
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      resolveFirstLoad?.(createProject({
+        id: 'shell-1',
+        name: 'Stale Project',
+        tasks: [createTask({ id: 'task-stale-race' })],
+      }));
+      await flushAsyncWork();
+
+      service.switchActiveProject(null);
+      service.switchActiveProject('shell-1');
+      await flushAsyncWork();
+
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).toHaveBeenCalledTimes(2);
+
+      resolveSecondLoad?.(createProject({
+        id: 'shell-1',
+        name: 'Loaded In New Session',
+        tasks: [createTask({ id: 'task-new-session-race' })],
+      }));
+      await flushAsyncWork();
     });
   });
 
@@ -1568,7 +1756,8 @@ describe('UserSessionService', () => {
           expect.objectContaining({ id: 'proj-recovered', syncSource: 'synced' }),
         ], 'user-1');
       expect(mockToastService['info']).not.toHaveBeenCalledWith('当前项目不可访问，已自动切换');
-      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+      // 注意：loadSingleProjectFromCloud 可能会被后台空壳项目加载调用，
+      // 但不应用于已降级为 local-only 的项目
     });
   });
 
@@ -1621,7 +1810,7 @@ describe('UserSessionService', () => {
       expect(result.has('proj-ok')).toBe(true);
       expect(result.has('proj-ok-2')).toBe(true);
       expect(result.has('proj-stale')).toBe(false);
-      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
+      expect(mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith([
         expect.objectContaining({ id: 'proj-ok' }),
         expect.objectContaining({ id: 'proj-ok-2' }),
       ]);
@@ -1654,8 +1843,8 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      // 验证 setProjects 被调用（有壳新增 + 裁剪变更）
-      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+      // 验证 setProjectsMetadataOnly 被调用（有壳新增 + 裁剪变更）
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
       expect(setProjectsCall).toBeDefined();
       // proj-active 是当前活跃项目，不应被裁剪
       expect(setProjectsCall.some((p: Project) => p.id === 'proj-active')).toBe(true);
@@ -1682,7 +1871,7 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect(mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith([]);
       expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
         .toHaveBeenCalledWith([], 'user-1');
     });
@@ -1710,7 +1899,7 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
       expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
     });
 
@@ -1734,7 +1923,7 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
       expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
     });
 
@@ -1763,7 +1952,7 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
       expect(setProjectsCall).toBeDefined();
       const syncedProject = setProjectsCall?.find((project: Project) => project.id === 'proj-shadow');
       expect(syncedProject?.syncSource).toBe('synced');
@@ -1813,7 +2002,7 @@ describe('UserSessionService', () => {
         }
       ).syncProjectListMetadata('user-1');
 
-      const setProjectsCall = (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
       expect(setProjectsCall?.some((project: Project) => project.id === 'proj-local-only')).toBe(true);
     });
 
@@ -1991,7 +2180,7 @@ describe('UserSessionService', () => {
       expect(service.startupProjectCatalogStage()).toBe('unresolved');
     });
 
-    it('仅有匹配 owner hint 时不应把真实 launch snapshot 标记为 trusted', () => {
+    it('仅有匹配 owner hint 时应信任离线快照并展示完整数据', () => {
       const offlineProject = createProject({
         id: 'hint-only-project',
         name: 'Hint Only Offline Project',
@@ -2035,15 +2224,16 @@ describe('UserSessionService', () => {
 
       const result = service.prehydrateFromSnapshot();
 
+      // owner hint 匹配即信任离线快照，PWA 数据为设备本地存储
       expect(result).toBe(true);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
-        expect.objectContaining({ id: 'hint-only-project', name: 'Project 1', tasks: [] }),
+        expect.objectContaining({ id: 'hint-only-project', name: 'Hint Only Offline Project' }),
       ]);
       expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
       expect(service.startupProjectCatalogStage()).toBe('partial');
     });
 
-    it('launch snapshot owner 不可信时应回退到离线快照预填充', () => {
+    it('launch snapshot owner 不可信时应回退到离线快照并以 owner hint 信任完整数据', () => {
       const offlineProject = createProject({
         id: 'offline-project-1',
         name: 'Offline Recovery Project',
@@ -2080,9 +2270,10 @@ describe('UserSessionService', () => {
 
       const result = service.prehydrateFromSnapshot();
 
+      // owner hint 匹配即信任，展示完整离线数据
       expect(result).toBe(true);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
-        expect.objectContaining({ id: 'offline-project-1', name: 'Project 1', tasks: [] }),
+        expect.objectContaining({ id: 'offline-project-1', name: 'Offline Recovery Project' }),
       ]);
       expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('offline-project-1');
       expect(service.startupProjectCatalogStage()).toBe('partial');
@@ -2121,7 +2312,7 @@ describe('UserSessionService', () => {
       expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
     });
 
-    it('存在云端 owner hint 时不应把 local-user launch snapshot 视为 trusted', () => {
+    it('存在云端 owner hint 时应信任离线快照并展示完整数据', () => {
       const offlineProject = createProject({
         id: 'cloud-owned-project',
         name: 'Cloud Owned Project',
@@ -2157,9 +2348,10 @@ describe('UserSessionService', () => {
 
       const result = service.prehydrateFromSnapshot();
 
+      // owner hint 匹配即信任，展示完整离线数据
       expect(result).toBe(true);
       expect(mockProjectState['setProjects']).toHaveBeenCalledWith([
-        expect.objectContaining({ id: 'cloud-owned-project', name: 'Project 1', tasks: [] }),
+        expect.objectContaining({ id: 'cloud-owned-project', name: 'Cloud Owned Project' }),
       ]);
       expect(service.trustedPrehydratedSnapshotVisible()).toBe(false);
       expect(service.startupProjectCatalogStage()).toBe('partial');
