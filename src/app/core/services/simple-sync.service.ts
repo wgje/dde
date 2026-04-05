@@ -39,7 +39,10 @@ import {
   type RetryableEntityType,
   type RetryableOperation
 } from './sync';
-import type { StartupOfflineSnapshotLoadResult } from './sync/project-data.service';
+import type {
+  ProjectListMetadataLoadOptions,
+  StartupOfflineSnapshotLoadResult,
+} from './sync/project-data.service';
 import { Task, Project, Connection, UserPreferences } from '../../../models';
 import {
   DockSnapshot,
@@ -1511,8 +1514,11 @@ export class SimpleSyncService {
     return this.projectDataService.loadProjectsFromCloud(userId);
   }
 
-  async loadProjectListMetadataFromCloud(userId: string): Promise<Project[] | null> {
-    return this.projectDataService.loadProjectListMetadataFromCloud(userId);
+  async loadProjectListMetadataFromCloud(
+    userId: string,
+    options: ProjectListMetadataLoadOptions = {}
+  ): Promise<Project[] | null> {
+    return this.projectDataService.loadProjectListMetadataFromCloud(userId, options);
   }
   
   async deleteProjectFromCloud(projectId: string, userId: string): Promise<boolean> {

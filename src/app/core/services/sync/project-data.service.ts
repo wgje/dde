@@ -57,6 +57,14 @@ export interface ParkedTaskDeltaResult {
   nextCursor: string | null;
 }
 
+export interface ProjectListMetadataLoadOptions {
+  timeout?: number;
+  retries?: number;
+  silent?: boolean;
+  purpose?: string;
+  treatTransientFailureAsSoft?: boolean;
+}
+
 export type StartupOfflineSnapshotSource = 'idb' | 'localStorage' | 'none';
 
 export interface StartupOfflineSnapshotLoadResult {
@@ -394,7 +402,10 @@ export class ProjectDataService {
    * 仅返回迁移判断所需的项目壳数据；拉取失败时返回 null，
    * 让上层能区分“云端已确认为空”和“当前无法确认云端状态”。
    */
-  async loadProjectListMetadataFromCloud(userId: string): Promise<Project[] | null> {
+  async loadProjectListMetadataFromCloud(
+    userId: string,
+    options: ProjectListMetadataLoadOptions = {}
+  ): Promise<Project[] | null> {
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过云端项目元数据加载');
       return [];
@@ -403,9 +414,12 @@ export class ProjectDataService {
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
+    const timeout = Math.max(TIMEOUT_CONFIG.QUICK, options.timeout ?? TIMEOUT_CONFIG.QUICK);
+    const retries = Math.max(0, options.retries ?? 0);
+
     try {
       const projectList = await this.throttle.execute(
-        `project-list-metadata:${userId}`,
+        this.buildProjectListMetadataRequestKey(userId, timeout, retries),
         async () => {
           const { data, error } = await client
             .from('projects')
@@ -420,19 +434,61 @@ export class ProjectDataService {
         {
           deduplicate: true,
           priority: 'high',
-          timeout: TIMEOUT_CONFIG.QUICK,
-          retries: 0,
+          timeout,
+          retries,
+          silent: options.silent ?? false,
         }
       );
 
       return projectList.map(row => this.rowToProject(row));
     } catch (e) {
-      this.logger.warn('加载项目元数据列表失败', e);
-      this.sentryLazyLoader.captureException(e, {
-        tags: { operation: 'loadProjectListMetadataFromCloud' }
+      const err = supabaseErrorToError(e);
+
+      if (options.treatTransientFailureAsSoft && this.isTransientMetadataLoadFailure(err)) {
+        this.logger.info('项目元数据列表拉取暂时不可用，已降级为软失败', {
+          userId,
+          purpose: options.purpose ?? 'default',
+          message: err.message,
+        });
+        return null;
+      }
+
+      this.logger.warn('加载项目元数据列表失败', err);
+      this.sentryLazyLoader.captureException(err, {
+        tags: {
+          operation: 'loadProjectListMetadataFromCloud',
+          ...(options.purpose ? { purpose: options.purpose } : {}),
+        }
       });
       return null;
     }
+  }
+
+  private buildProjectListMetadataRequestKey(
+    userId: string,
+    timeout: number,
+    retries: number
+  ): string {
+    return `project-list-metadata:${userId}:${timeout}:${retries}`;
+  }
+
+  private isTransientMetadataLoadFailure(error: Error): boolean {
+    const retryableError = error as Error & { isRetryable?: boolean; errorType?: string; code?: string | number };
+    if (retryableError.isRetryable === true) {
+      return true;
+    }
+
+    const message = error.message.toLowerCase();
+
+    return (
+      message.includes('请求超时') ||
+      message.includes('timeout') ||
+      message.includes('failed to fetch') ||
+      message.includes('network') ||
+      message.includes('429') ||
+      message.includes('503') ||
+      message.includes('504')
+    );
   }
 
   /**

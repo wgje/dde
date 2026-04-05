@@ -42,6 +42,7 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
+import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import { Result, OperationError } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
@@ -289,9 +290,16 @@ export class SyncCoordinatorService {
    * 确保本地的软删除状态不会被远程数据覆盖
    */
   private async downloadAndMerge(userId: string): Promise<void> {
-    const remoteProjectMetas = await this.core.loadProjectListMetadataFromCloud(userId);
+    const remoteProjectMetas = await this.core.loadProjectListMetadataFromCloud(userId, {
+      timeout: TIMEOUT_CONFIG.STANDARD,
+      retries: 1,
+      silent: true,
+      purpose: 'sync-download-merge',
+      treatTransientFailureAsSoft: true,
+    });
+
     if (remoteProjectMetas === null) {
-      this.logger.warn('远端项目元数据获取失败，已跳过 download merge', { userId });
+      this.logger.info('远端项目元数据暂不可用，已跳过 download merge', { userId });
       return;
     }
 

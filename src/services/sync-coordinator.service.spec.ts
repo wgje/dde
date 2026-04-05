@@ -1449,6 +1449,16 @@ describe('持久化状态管理', () => {
       await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
         .downloadAndMerge('user-123');
 
+      expect(mockSyncService.loadProjectListMetadataFromCloud).toHaveBeenCalledWith(
+        'user-123',
+        expect.objectContaining({
+          timeout: 10000,
+          retries: 1,
+          silent: true,
+          purpose: 'sync-download-merge',
+          treatTransientFailureAsSoft: true,
+        })
+      );
       expect(mockSyncService.loadProjectsFromCloud).not.toHaveBeenCalled();
       expect(mockProjectStateService.projects()).toEqual([localProject]);
     });
