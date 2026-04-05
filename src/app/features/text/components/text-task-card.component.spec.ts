@@ -10,6 +10,7 @@ import { ChangeTrackerService } from '../../../../services/change-tracker.servic
 import { UiStateService } from '../../../../services/ui-state.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
+import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import type { Task } from '../../../../models';
 
 describe('TextTaskCardComponent', () => {
@@ -55,6 +56,10 @@ describe('TextTaskCardComponent', () => {
     warning: vi.fn(),
     success: vi.fn(),
     error: vi.fn(),
+  };
+
+  const mockTextViewOps = {
+    armContainerClickGuard: vi.fn(),
   };
 
   const createTask = (overrides: Partial<Task> = {}): Task => ({
@@ -124,6 +129,7 @@ describe('TextTaskCardComponent', () => {
         { provide: UiStateService, useValue: mockUiState },
         { provide: AttachmentService, useValue: mockAttachmentService },
         { provide: ToastService, useValue: mockToast },
+        { provide: TextViewTaskOpsService, useValue: mockTextViewOps },
       ],
     }).compileComponents();
   });
@@ -150,5 +156,32 @@ describe('TextTaskCardComponent', () => {
 
     expect(emitSpy).toHaveBeenCalledTimes(2);
     expect(stopPropagation).toHaveBeenCalledTimes(2);
+  });
+
+  it('should ignore a late click when the task input is no longer available', () => {
+    const component = createComponent(false) as unknown as {
+      task: () => Task;
+      onCardClick: (event: Event) => void;
+      select: { emit: ReturnType<typeof vi.fn> };
+    };
+    const stopPropagation = vi.fn();
+    const emitSpy = vi.spyOn(component.select, 'emit');
+    component.task = () => {
+      throw new Error('task missing');
+    };
+
+    expect(() => component.onCardClick({ stopPropagation } as Event)).not.toThrow();
+    expect(emitSpy).not.toHaveBeenCalled();
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+  });
+
+  it('should arm the container click guard when a selected card receives a primary pointer down', () => {
+    const component = createComponent(true) as unknown as {
+      onCardPointerDown: (event: PointerEvent) => void;
+    };
+
+    component.onCardPointerDown({ button: 0, isPrimary: true } as PointerEvent);
+
+    expect(mockTextViewOps.armContainerClickGuard).toHaveBeenCalledTimes(1);
   });
 });

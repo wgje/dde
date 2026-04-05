@@ -232,6 +232,80 @@ describe('TextViewTaskOpsService', () => {
     expect(selectedTaskId()).toBe('task-1');
   });
 
+  it('should keep the current selection when the click target is detached but the event path still includes the task card', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    const taskCard = document.createElement('div');
+    taskCard.setAttribute('data-task-id', 'task-1');
+    const detachedButton = document.createElement('button');
+
+    service.onContainerClick({
+      target: detachedButton,
+      composedPath: () => [detachedButton, taskCard, hostElement, document.body, document, window],
+    } as Event);
+
+    expect(selectedTaskId()).toBe('task-1');
+  });
+
+  it('should ignore the same container click after arming the guard from an internal card interaction', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    const taskCard = document.createElement('div');
+    taskCard.setAttribute('data-task-id', 'task-1');
+    const inner = document.createElement('span');
+
+    service.armContainerClickGuard('task-1');
+    service.onContainerClick({
+      target: document.body,
+      composedPath: () => [inner, taskCard, hostElement, document.body, document, window],
+    } as Event);
+
+    expect(selectedTaskId()).toBe('task-1');
+
+    service.onContainerClick({ target: document.body } as Event);
+
+    expect(selectedTaskId()).toBeNull();
+  });
+
+  it('should let the first real outside click through after the container guard expires unused', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    service.armContainerClickGuard('task-1');
+    service.onContainerClick({ target: document.body } as Event);
+
+    expect(selectedTaskId()).toBeNull();
+  });
+
   it('should reveal the compact title preview and focus the real title input when scrolling to a new task', () => {
     vi.useFakeTimers();
     const scrollIntoView = vi.fn();
@@ -323,5 +397,25 @@ describe('TextViewTaskOpsService', () => {
 
     expect(selectedTaskId()).toBe('task-2');
     expect(focusFlowNode.emit).toHaveBeenCalledWith('task-2');
+  });
+
+  it('should ignore invalid task select payloads', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    const focusFlowNode = { emit: vi.fn() };
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: focusFlowNode as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
+    });
+
+    service.onTaskSelect(undefined);
+
+    expect(selectedTaskId()).toBe('task-1');
+    expect(focusFlowNode.emit).not.toHaveBeenCalled();
   });
 });

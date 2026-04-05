@@ -55,6 +55,7 @@ export class TextViewTaskOpsService {
 
   /** 待清理的定时器列表（防止内存泄漏） */
   readonly pendingTimers: ReturnType<typeof setTimeout>[] = [];
+  private pendingContainerClickGuardTaskId: string | null = null;
 
   /** 初始化：接收组件 signal 和 ViewChild 引用 */
   init(ctx: TextViewOpsContext): void {
@@ -74,6 +75,11 @@ export class TextViewTaskOpsService {
   destroy(): void {
     this.pendingTimers.forEach(timer => clearTimeout(timer));
     this.pendingTimers.length = 0;
+    this.pendingContainerClickGuardTaskId = null;
+  }
+
+  armContainerClickGuard(taskId: string): void {
+    this.pendingContainerClickGuardTaskId = taskId;
   }
 
   // ========== 容器点击 ==========
@@ -82,12 +88,52 @@ export class TextViewTaskOpsService {
    * 点击空白区域时收缩已展开的任务
    */
   onContainerClick(event: Event): void {
+    const guardTaskId = this.pendingContainerClickGuardTaskId;
+    if (guardTaskId) {
+      this.pendingContainerClickGuardTaskId = null;
+      const originatedFromGuardedTask = this.eventPathContains(event, node => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+
+        return node.getAttribute('data-task-id') === guardTaskId
+          || node.getAttribute('data-unassigned-task') === guardTaskId;
+      });
+
+      if (originatedFromGuardedTask) {
+        return;
+      }
+    }
+
     const target = event.target as HTMLElement;
+    if (this.eventPathContains(event, node => this.isTaskContainerNode(node))) return;
+    if (this.eventPathContains(event, node => this.isInteractiveNode(node))) return;
     if (target.closest('[data-task-id]') || target.closest('[data-unassigned-task]')) return;
     if (target.closest('button, input, textarea, a, [role="button"]')) return;
     if (this.ctx.selectedTaskId()) {
       this.ctx.selectedTaskId.set(null);
     }
+  }
+
+  private isTaskContainerNode(node: EventTarget): boolean {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+
+    return node.hasAttribute('data-task-id') || node.hasAttribute('data-unassigned-task');
+  }
+
+  private isInteractiveNode(node: EventTarget): boolean {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+
+    return node.matches('button, input, textarea, a, [role="button"]');
+  }
+
+  private eventPathContains(event: Event, predicate: (node: EventTarget) => boolean): boolean {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    return path.some(predicate);
   }
 
   // ========== DOM 辅助方法 ==========
@@ -325,7 +371,11 @@ export class TextViewTaskOpsService {
 
   // ========== 任务选择和操作 ==========
 
-  onTaskSelect(task: Task): void {
+  onTaskSelect(task: Task | null | undefined): void {
+    if (!task?.id) {
+      return;
+    }
+
     if (this.ctx.selectedTaskId() === task.id) {
       return;
     }

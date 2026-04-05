@@ -6,6 +6,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
+import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 
 @Component({
   selector: 'app-text-task-card',
@@ -17,6 +18,7 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
       data-testid="task-card"
       [attr.data-task-id]="task().id"
       [attr.data-indent-level]="task().parentId ? '1' : '0'"
+      (pointerdown)="onCardPointerDown($event)"
       (click)="onCardClick($event)"
       [attr.draggable]="!isSelected()"
       (dragstart)="onDragStart($event)"
@@ -113,6 +115,7 @@ export class TextTaskCardComponent {
   readonly dockEngine = inject(DockEngineService);
   readonly projectState = inject(ProjectStateService);
   private readonly logger = inject(LoggerService);
+  private readonly textViewOps = inject(TextViewTaskOpsService, { optional: true });
 
   taskEditor = viewChild<TextTaskEditorComponent>('taskEditor');
   taskEditorElement = viewChild('taskEditor', { read: ElementRef });
@@ -206,6 +209,7 @@ export class TextTaskCardComponent {
   }
 
   onCardClick(event: Event) {
+    const currentTask = this.readTask();
     const targetElement = event.target instanceof HTMLElement ? event.target : null;
 
     if (
@@ -237,7 +241,9 @@ export class TextTaskCardComponent {
     }
 
     if (!this.isMobile()) {
-      this.select.emit(this.task());
+      if (currentTask) {
+        this.select.emit(currentTask);
+      }
       event.stopPropagation();
       return;
     }
@@ -246,7 +252,9 @@ export class TextTaskCardComponent {
     const timeSinceLastClick = currentTime - this.lastClickTime;
 
     if (this.lastClickWasNonEdit && timeSinceLastClick < this.DOUBLE_CLICK_DELAY) {
-      this.select.emit(this.task());
+      if (currentTask) {
+        this.select.emit(currentTask);
+      }
       this.lastClickWasNonEdit = false;
       this.lastClickTime = 0;
     } else {
@@ -255,6 +263,31 @@ export class TextTaskCardComponent {
     }
 
     event.stopPropagation();
+  }
+
+  onCardPointerDown(event: PointerEvent) {
+    const currentTask = this.readTask();
+    if (!this.isSelected()) {
+      return;
+    }
+
+    if (event.button !== 0 || event.isPrimary === false) {
+      return;
+    }
+
+    if (!currentTask) {
+      return;
+    }
+
+    this.textViewOps?.armContainerClickGuard(currentTask.id);
+  }
+
+  private readTask(): Task | null {
+    try {
+      return this.task();
+    } catch {
+      return null;
+    }
   }
 
   private isClickInsideEditor(target: EventTarget | null): boolean {
