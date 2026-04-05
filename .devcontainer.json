@@ -9,10 +9,12 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postCreateCommand": "npm ci && npx playwright install chromium && bash scripts/init-vscode-env.sh",
+  "postCreateCommand": "npm ci && bash scripts/init-vscode-env.sh",
+  "postStartCommand": "bash scripts/init-vscode-env.sh",
   "customizations": {
     "vscode": {
       "extensions": [
+        "esbenp.prettier-vscode",
         "Angular.ng-template",
         "ms-vscode.vscode-typescript-next",
         "GitHub.copilot",
@@ -25,22 +27,22 @@
           "editor.defaultFormatter": "esbenp.prettier-vscode"
         },
         "terminal.integrated.env.linux": {
-          "CHROME_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-          "CHROMIUM_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-          "BROWSER": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-          "PUPPETEER_EXECUTABLE_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+          "CHROME_PATH": "/tmp/chrome-link/chrome",
+          "CHROMIUM_PATH": "/tmp/chrome-link/chrome",
+          "BROWSER": "/tmp/chrome-link/chrome",
+          "PUPPETEER_EXECUTABLE_PATH": "/tmp/chrome-link/chrome",
           "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "true",
-          "GOOGLE_CHROME_BIN": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+          "GOOGLE_CHROME_BIN": "/tmp/chrome-link/chrome"
         }
       }
     }
   },
   "remoteEnv": {
-    "CHROME_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "CHROMIUM_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "BROWSER": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
-    "PUPPETEER_EXECUTABLE_PATH": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome",
+    "CHROME_PATH": "/tmp/chrome-link/chrome",
+    "CHROMIUM_PATH": "/tmp/chrome-link/chrome",
+    "BROWSER": "/tmp/chrome-link/chrome",
+    "PUPPETEER_EXECUTABLE_PATH": "/tmp/chrome-link/chrome",
     "PUPPETEER_SKIP_CHROMIUM_DOWNLOAD": "true",
-    "GOOGLE_CHROME_BIN": "/home/codespace/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome"
+    "GOOGLE_CHROME_BIN": "/tmp/chrome-link/chrome"
   }
 }
