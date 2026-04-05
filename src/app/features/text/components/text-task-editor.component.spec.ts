@@ -17,6 +17,7 @@ describe('TextTaskEditorComponent', () => {
     timeStamp,
     target,
     stopPropagation: vi.fn(),
+    composedPath: () => [target, document.body, document, window],
   } as unknown as MouseEvent);
 
   const mockTaskAdapter = {
@@ -115,6 +116,13 @@ describe('TextTaskEditorComponent', () => {
     }).compileComponents();
   });
 
+  const createPathClickEvent = (target: EventTarget, path: EventTarget[], timeStamp = Date.now()) => ({
+    timeStamp,
+    target,
+    stopPropagation: vi.fn(),
+    composedPath: () => path,
+  } as unknown as MouseEvent);
+
   it('should keep the preview compact when the task has no description', () => {
     render({ content: '' });
 
@@ -171,28 +179,27 @@ describe('TextTaskEditorComponent', () => {
 
   it('should ignore the same document click that opened title editing from preview', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));
     try {
       render({ content: '联系供应商确认规格。' });
 
       const component = fixture.componentInstance as unknown as {
         onDocumentClick: (event: MouseEvent) => void;
         isPreview: () => boolean;
-        suppressedDocumentClickStamp: number | null;
       };
       const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+      const editorRoot = fixture.nativeElement.querySelector('.animate-collapse-open') as HTMLElement | null;
 
       titlePreview?.click();
       fixture.detectChanges();
 
-      const openingStamp = component.suppressedDocumentClickStamp;
-      expect(openingStamp).not.toBeNull();
-
-      component.onDocumentClick(createClickEvent(openingStamp!));
+      component.onDocumentClick(createPathClickEvent(titlePreview!, [titlePreview!, editorRoot!, document.body, document, window]));
       fixture.detectChanges();
 
       expect(component.isPreview()).toBe(false);
 
-      component.onDocumentClick(createClickEvent(openingStamp! + 1));
+      vi.advanceTimersByTime(250);
+      component.onDocumentClick(createClickEvent(Date.now(), document.body));
       fixture.detectChanges();
 
       expect(component.isPreview()).toBe(true);
@@ -204,23 +211,21 @@ describe('TextTaskEditorComponent', () => {
 
   it('should suppress the same document click when entering content editing from the empty preview button', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));
     try {
       render({ content: '' });
 
       const component = fixture.componentInstance as unknown as {
         onDocumentClick: (event: MouseEvent) => void;
         isPreview: () => boolean;
-        suppressedDocumentClickStamp: number | null;
       };
       const emptyPreview = fixture.nativeElement.querySelector('[data-testid="task-content-empty"]') as HTMLButtonElement | null;
+      const editorRoot = fixture.nativeElement.querySelector('.animate-collapse-open') as HTMLElement | null;
 
       emptyPreview?.click();
       fixture.detectChanges();
 
-      const openingStamp = component.suppressedDocumentClickStamp;
-      expect(openingStamp).not.toBeNull();
-
-      component.onDocumentClick(createClickEvent(openingStamp!));
+      component.onDocumentClick(createPathClickEvent(emptyPreview!, [emptyPreview!, editorRoot!, document.body, document, window]));
       fixture.detectChanges();
 
       expect(component.isPreview()).toBe(false);
@@ -232,26 +237,51 @@ describe('TextTaskEditorComponent', () => {
 
   it('should suppress the same document click when entering content editing from the non-empty preview area', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));
     try {
       render({ content: '联系供应商确认规格。' });
 
       const component = fixture.componentInstance as unknown as {
         onDocumentClick: (event: MouseEvent) => void;
         isPreview: () => boolean;
-        suppressedDocumentClickStamp: number | null;
       };
       const contentPreview = fixture.nativeElement.querySelector('[data-testid="task-content"]') as HTMLElement | null;
+      const editorRoot = fixture.nativeElement.querySelector('.animate-collapse-open') as HTMLElement | null;
 
       contentPreview?.click();
       fixture.detectChanges();
 
-      const openingStamp = component.suppressedDocumentClickStamp;
-      expect(openingStamp).not.toBeNull();
-
-      component.onDocumentClick(createClickEvent(openingStamp!));
+      component.onDocumentClick(createPathClickEvent(contentPreview!, [contentPreview!, editorRoot!, document.body, document, window]));
       fixture.detectChanges();
 
       expect(component.isPreview()).toBe(false);
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should keep editing open when the original preview trigger node has been detached before document click runs', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+      };
+      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+      const editorRoot = fixture.nativeElement.querySelector('.animate-collapse-open') as HTMLElement | null;
+
+      titlePreview?.click();
+      fixture.detectChanges();
+
+      component.onDocumentClick(createPathClickEvent(titlePreview!, [titlePreview!, editorRoot!, document.body, document, window]));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(false);
+      expect(fixture.nativeElement.querySelector('[data-testid="task-title-input"]')).not.toBeNull();
     } finally {
       vi.runOnlyPendingTimers();
       vi.useRealTimers();

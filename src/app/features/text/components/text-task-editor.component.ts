@@ -414,7 +414,8 @@ export class TextTaskEditorComponent implements OnDestroy {
   isSelecting = false;
 
   private focusRequestTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressedDocumentClickStamp: number | null = null;
+  private suppressNextDocumentClick = false;
+  private clearDocumentClickGuardTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 最大附件数量*/
   private readonly maxAttachments = 5;
@@ -444,15 +445,7 @@ export class TextTaskEditorComponent implements OnDestroy {
       });
     } catch {
       // 【防御】SW chunk 不一致可能导致 DestroyRef/injection context 丢失
-      // 回退：直接初始化本地状态
-      const task = this.task?.();
-      if (task) {
-        this.localTitle.set(task.title || '');
-        this.localContent.set(task.content || '');
-          this.localExpectedMinutes.set(task.expected_minutes == null ? '' : String(task.expected_minutes));
-          this.localWaitMinutes.set(task.wait_minutes == null ? '' : String(task.wait_minutes));
-          this.localCognitiveLoad.set(task.cognitive_load ?? '');
-      }
+      // 回退：等待 ngOnInit/effect 在可用的输入上下文中完成初始化。
     }
   }
 
@@ -461,6 +454,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     // 这是修复手机端点击关联块编辑后无法自动保存的核心逻辑
     this.persistCurrentEdits();
     this.clearFocusRequestTimer();
+    this.clearDocumentClickGuard();
 
     // 清理所有未完成的解锁定时器
     for (const timer of this.unlockTimers.values()) {
@@ -520,12 +514,9 @@ export class TextTaskEditorComponent implements OnDestroy {
    */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
-    if (this.suppressedDocumentClickStamp !== null) {
-      const isSuppressedClick = Math.abs(event.timeStamp - this.suppressedDocumentClickStamp) < 1;
-      this.suppressedDocumentClickStamp = null;
-      if (isSuppressedClick) {
-        return;
-      }
+    if (this.suppressNextDocumentClick) {
+      this.clearDocumentClickGuard();
+      return;
     }
 
     // 如果已经是预览模式，无需处理
@@ -540,14 +531,12 @@ export class TextTaskEditorComponent implements OnDestroy {
       return;
     }
 
-    const clickedInside = this.elementRef.nativeElement.contains(event.target as Node);
+    const clickedInside = this.isEventInsideEditor(event);
 
     // 如果点击在编辑器内部，不做任何处理（允许正常编辑与文本选择）
     if (clickedInside) return;
 
-    // 点击在编辑器外部，检查是否在任务卡片内
-    const target = event.target as HTMLElement;
-    const clickedInTaskCard = target.closest(`[data-task-id="${this.task().id}"]`);
+    const clickedInTaskCard = this.isEventInsideCurrentTaskCard(event);
 
     if (!clickedInTaskCard) {
       // 点击完全在任务卡片外，切换到预览模式
@@ -577,7 +566,7 @@ export class TextTaskEditorComponent implements OnDestroy {
 
   enterEditMode(field: 'title' | 'content', triggerEvent?: Event) {
     if (this.isPreview()) {
-      this.suppressNextDocumentClick(triggerEvent);
+      this.armOutsideClickGuard(triggerEvent);
       this.isPreview.set(false);
       this.previewModeChange.emit(false);
     }
@@ -913,12 +902,65 @@ export class TextTaskEditorComponent implements OnDestroy {
     return host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
   }
 
-  private suppressNextDocumentClick(triggerEvent?: Event): void {
-    if (typeof triggerEvent?.timeStamp !== 'number') {
+  private armOutsideClickGuard(triggerEvent?: Event): void {
+    if (!triggerEvent) {
       return;
     }
 
-    this.suppressedDocumentClickStamp = triggerEvent.timeStamp;
+    this.suppressNextDocumentClick = true;
+    if (this.clearDocumentClickGuardTimer) {
+      clearTimeout(this.clearDocumentClickGuardTimer);
+    }
+
+    this.clearDocumentClickGuardTimer = setTimeout(() => {
+      this.clearDocumentClickGuard();
+    }, 0);
+  }
+
+  private isEventInsideEditor(event: Event): boolean {
+    const host = this.elementRef.nativeElement as HTMLElement | null;
+    if (!host) {
+      return false;
+    }
+
+    if (this.eventPathContains(event, node => node === host)) {
+      return true;
+    }
+
+    const target = event.target;
+    return target instanceof Node ? host.contains(target) : false;
+  }
+
+  private isEventInsideCurrentTaskCard(event: Event): boolean {
+    const currentTaskId = this.task().id;
+
+    if (this.eventPathContains(event, node => {
+      return node instanceof HTMLElement && node.getAttribute('data-task-id') === currentTaskId;
+    })) {
+      return true;
+    }
+
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    return !!target.closest(`[data-task-id="${currentTaskId}"]`);
+  }
+
+  private eventPathContains(event: Event, predicate: (node: EventTarget) => boolean): boolean {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    return path.some(predicate);
+  }
+
+  private clearDocumentClickGuard(): void {
+    this.suppressNextDocumentClick = false;
+    if (!this.clearDocumentClickGuardTimer) {
+      return;
+    }
+
+    clearTimeout(this.clearDocumentClickGuardTimer);
+    this.clearDocumentClickGuardTimer = null;
   }
 
   private clearFocusRequestTimer(): void {
