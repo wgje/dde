@@ -19,16 +19,26 @@ import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { Task } from '../../../../models';
+import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 
 describe('TaskSyncOperationsService', () => {
   let service: TaskSyncOperationsService;
   let upsertPayload: Record<string, unknown> | null;
+  const mockTombstoneService = {
+    addLocalTombstones: vi.fn(),
+    invalidateCache: vi.fn(),
+    deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined),
+    getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+    getLocalTombstones: vi.fn(() => new Set<string>()),
+  };
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
     length: 0,
     recordCircuitSuccess: vi.fn(),
     recordCircuitFailure: vi.fn(),
+    removeByEntities: vi.fn(() => []),
+    removeConnectionsReferencingTasks: vi.fn(() => []),
   };
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
@@ -38,9 +48,12 @@ describe('TaskSyncOperationsService', () => {
   };
   const mockSessionManager = {
     tryRefreshSession: vi.fn(async () => false),
-    handleSessionExpired: vi.fn(),
+    handleSessionExpired: vi.fn(() => {
+      throw new Error('Session expired');
+    }),
     isSessionExpiredError: vi.fn(() => false),
     handleAuthErrorWithRefresh: vi.fn(async () => false),
+    isRlsPolicyViolation: vi.fn(() => false),
   };
 
   const mockLogger = {
@@ -155,13 +168,7 @@ describe('TaskSyncOperationsService', () => {
         },
         {
           provide: TombstoneService,
-          useValue: {
-            addLocalTombstones: vi.fn(),
-            invalidateCache: vi.fn(),
-            deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined),
-            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
-            getLocalTombstones: vi.fn(() => new Set<string>()),
-          },
+          useValue: mockTombstoneService,
         },
         { provide: ProjectDataService, useValue: {} },
         {
@@ -272,6 +279,240 @@ describe('TaskSyncOperationsService', () => {
       p_task_ids: ['task-delete-scoped'],
     });
   });
+
+  it('purgeTasksFromCloud 成功后应清理引用已删任务的连接重试项', async () => {
+    mockRetryQueue.removeByEntities.mockReturnValueOnce(['task-delete-scoped']);
+    mockRetryQueue.removeConnectionsReferencingTasks.mockReturnValueOnce(['conn-stale-a']);
+
+    const result = await service.purgeTasksFromCloud('project-1', ['task-delete-scoped'], 'user-1');
+
+    expect(result).toBe(true);
+    expect(mockRetryQueue.removeByEntities).toHaveBeenCalledWith('task', ['task-delete-scoped']);
+    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith('project-1', ['task-delete-scoped']);
+  });
+
+  it('softDeleteTasksBatch 成功后也应清理引用已删任务的连接重试项', async () => {
+    mockClient.rpc.mockImplementationOnce(async (fn: string, args: Record<string, unknown>) => {
+      if (fn === 'safe_delete_tasks') {
+        return { data: 1, error: null, args };
+      }
+      throw new Error(`Unexpected rpc: ${fn}`);
+    });
+    mockRetryQueue.removeByEntities.mockReturnValueOnce(['task-soft-delete-scoped']);
+    mockRetryQueue.removeConnectionsReferencingTasks.mockReturnValueOnce(['conn-stale-soft-delete']);
+
+    const result = await service.softDeleteTasksBatch('project-1', ['task-soft-delete-scoped']);
+
+    expect(result).toBe(1);
+    expect(mockRetryQueue.removeByEntities).toHaveBeenCalledWith('task', ['task-soft-delete-scoped']);
+    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith('project-1', ['task-soft-delete-scoped']);
+  });
+
+  it('pushTask 在 tombstone 查询失败时应 fail closed，避免误复活已删任务', async () => {
+    mockClient.from.mockImplementationOnce((table: string) => {
+      if (table === 'task_tombstones') {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              maybeSingle: vi.fn(async () => ({
+                data: null,
+                error: { code: '42501', message: 'permission denied' },
+              })),
+            })),
+          })),
+        };
+      }
+
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const task: Task = {
+      id: 'task-tombstone-query-error',
+      title: '任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-3',
+      createdDate: new Date().toISOString(),
+      deletedAt: null,
+    };
+
+    const result = await service.pushTask(task, 'project-1');
+
+    expect(result).toBe(false);
+    expect(upsertPayload).toBeNull();
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+      expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalled();
+  });
+
+    it('重试队列回放 task upsert 遇到会话过期时不应抛出永久失败', async () => {
+      mockClient.from.mockImplementationOnce((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                maybeSingle: vi.fn(async () => ({
+                  data: null,
+                  error: { code: 'PGRST301', message: 'JWT expired' },
+                })),
+              })),
+            })),
+          };
+        }
+
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) => error.code === 'PGRST301');
+      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(false);
+
+      const task: Task = {
+        id: 'task-retry-auth-expired',
+        title: '任务',
+        content: '内容',
+        stage: 0,
+        parentId: null,
+        order: 0,
+        rank: 10000,
+        status: 'active',
+        x: 0,
+        y: 0,
+        displayId: 'T-4',
+        createdDate: new Date().toISOString(),
+        deletedAt: null,
+      };
+
+      const result = await service.pushTask(task, 'project-1', false, true, 'user-1');
+
+      expect(result).toBe(false);
+      expect(upsertPayload).toBeNull();
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('重试队列回放 task upsert 刷新后仍为 42501 时应抛永久失败', async () => {
+      let tombstoneLookupCount = 0;
+      mockClient.from.mockImplementation((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                maybeSingle: vi.fn(async () => {
+                  tombstoneLookupCount += 1;
+                  return tombstoneLookupCount === 1
+                    ? { data: null, error: { code: 'PGRST301', message: 'JWT expired' } }
+                    : { data: null, error: { code: '42501', message: 'RLS Policy Violation' } };
+                }),
+              })),
+            })),
+          };
+        }
+
+        if (table === 'tasks') {
+          return {
+            upsert: vi.fn((payload: Record<string, unknown>) => {
+              upsertPayload = payload;
+              return {
+                select: vi.fn(() => ({
+                  single: vi.fn(async () => ({
+                    data: { updated_at: new Date().toISOString() },
+                    error: null,
+                  })),
+                })),
+              };
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) =>
+        error.code === 'PGRST301' || error.code === '42501'
+      );
+      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
+      mockSessionManager.isRlsPolicyViolation.mockImplementation((error: { code?: string | number }) => error.code === '42501');
+
+      const task: Task = {
+        id: 'task-retry-rls-denied-after-refresh',
+        title: '任务',
+        content: '内容',
+        stage: 0,
+        parentId: null,
+        order: 0,
+        rank: 10000,
+        status: 'active',
+        x: 0,
+        y: 0,
+        displayId: 'T-5',
+        createdDate: new Date().toISOString(),
+        deletedAt: null,
+      };
+
+      await expect(service.pushTask(task, 'project-1', false, true, 'user-1')).rejects.toBeInstanceOf(PermanentFailureError);
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+      expect(upsertPayload).toBeNull();
+    });
+
+    it('deleteTask 在会话已过期时应保留删除意图到重试队列而不是抛出', async () => {
+      mockSyncState.isSessionExpired.mockReturnValueOnce(true);
+
+      const result = await service.deleteTask('task-delete-session-expired', 'project-1', 'user-1');
+
+      expect(result).toBe(false);
+      expect(mockRetryQueue.add).toHaveBeenCalledWith(
+        'task',
+        'delete',
+        { id: 'task-delete-session-expired' },
+        'project-1',
+        'user-1',
+      );
+    });
+
+    it('重试队列回放 task delete 遇到会话过期时不应重复入队也不应抛出', async () => {
+      mockSyncState.isSessionExpired.mockReturnValueOnce(true);
+
+      const result = await service.deleteTask('task-delete-retry-session-expired', 'project-1', 'user-1', true);
+
+      expect(result).toBe(false);
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('重试队列回放单任务 delete 遇到 owner mismatch 时不应重复入队', async () => {
+      mockClient.auth.getSession.mockResolvedValueOnce({
+        data: { session: { user: { id: 'user-2' } } },
+      });
+
+      const result = await service.deleteTask('task-delete-retry-owner-mismatch', 'project-1', 'user-1', true);
+
+      expect(result).toBe(false);
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('重试队列回放批量任务删除遇到 owner mismatch 时不应重复入队', async () => {
+      mockClient.auth.getSession.mockResolvedValueOnce({
+        data: { session: { user: { id: 'user-2' } } },
+      });
+
+      const result = await service.purgeTasksFromCloud('project-1', ['task-delete-retry-owner-mismatch'], 'user-1', true);
+
+      expect(result).toBe(false);
+      expect(mockClient.rpc).not.toHaveBeenCalled();
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('重试队列回放批量任务删除在 purge 失败时不应自我重入队', async () => {
+      mockClient.rpc.mockImplementationOnce(async () => {
+        throw new Error('network unavailable');
+      });
+
+      const result = await service.purgeTasksFromCloud('project-1', ['task-delete-retry-rpc-failure'], 'user-1', true);
+
+      expect(result).toBe(false);
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    });
 
   it('purgeTasksFromCloud 在 sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
     mockClient.auth.getSession.mockResolvedValueOnce({

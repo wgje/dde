@@ -71,8 +71,9 @@ export class TaskSyncOperationsService {
     data: Task | { id: string },
     projectId?: string,
     sourceUserId?: string,
+    allowWhenSessionExpired = false,
   ): void {
-    if (this.syncStateService.isSessionExpired()) return;
+    if (this.syncStateService.isSessionExpired() && !allowWhenSessionExpired) return;
     if (!data?.id) {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
       return;
@@ -132,6 +133,79 @@ export class TaskSyncOperationsService {
       extra: sanitizedExtra
     });
   }
+
+  private settleDeletedTaskDependencies(projectId: string, taskIds: string[]): void {
+    const removedTaskIds = this.retryQueueService.removeByEntities('task', taskIds);
+    const removedConnectionIds = this.retryQueueService.removeConnectionsReferencingTasks(projectId, taskIds);
+    if (removedTaskIds.length === 0 && removedConnectionIds.length === 0) {
+      return;
+    }
+
+    this.logger.info('任务删除成功后已清理关联重试项', {
+      projectId,
+      taskCount: taskIds.length,
+      removedTaskRetryCount: removedTaskIds.length,
+      removedConnectionCount: removedConnectionIds.length,
+    });
+  }
+
+  private markSessionExpiredWithoutThrow(
+    context: string,
+    details?: Record<string, unknown>,
+  ): void {
+    try {
+      this.sessionManager.handleSessionExpired(context, details);
+    } catch (error) {
+      this.logger.debug('会话已标记为过期，保留当前变更等待恢复后重试', {
+        context,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private preserveTaskUpsertForSessionExpiry(
+    task: Task,
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    context: string,
+    details?: Record<string, unknown>,
+  ): boolean {
+    if (!fromRetryQueue) {
+      this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, true);
+    }
+    this.markSessionExpiredWithoutThrow(context, details);
+    return false;
+  }
+
+  private queueTaskDeletesForRetry(
+    taskIds: string[],
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    allowWhenSessionExpired = false,
+  ): void {
+    if (fromRetryQueue) {
+      return;
+    }
+
+    for (const taskId of taskIds) {
+      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId, allowWhenSessionExpired);
+    }
+  }
+
+  private preserveTaskDeleteForSessionExpiry(
+    taskIds: string[],
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    context: string,
+    details?: Record<string, unknown>,
+  ): boolean {
+    this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, true);
+    this.markSessionExpiredWithoutThrow(context, details);
+    return false;
+  }
   
   // 任务同步操作
 
@@ -145,8 +219,14 @@ export class TaskSyncOperationsService {
   ): Promise<boolean> {
     // 会话过期检查
     if (this.syncStateService.isSessionExpired()) {
-      this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId });
-      return false;
+      return this.preserveTaskUpsertForSessionExpiry(
+        task,
+        projectId,
+        fromRetryQueue,
+        sourceUserId,
+        'pushTask',
+        { taskId: task.id, projectId },
+      );
     }
     
     // Circuit Breaker 检查
@@ -179,8 +259,14 @@ export class TaskSyncOperationsService {
       }
 
       if (!sessionUserId) {
-        this.sessionManager.handleSessionExpired('pushTask.getSession', { taskId: task.id, projectId });
-        return false;
+        return this.preserveTaskUpsertForSessionExpiry(
+          task,
+          projectId,
+          fromRetryQueue,
+          sourceUserId,
+          'pushTask.getSession',
+          { taskId: task.id, projectId },
+        );
       }
 
       if (sourceUserId && sessionUserId !== sourceUserId) {
@@ -230,20 +316,39 @@ export class TaskSyncOperationsService {
                 this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
                   taskId: task.id, projectId, errorCode: retryEnhanced.code,
                 });
+                if (fromRetryQueue) {
+                  throw new PermanentFailureError(
+                    'Task tombstone lookup denied after refresh',
+                    retryEnhanced,
+                    { operation: 'pushTask.retryAfterRefresh', taskId: task.id, projectId }
+                  );
+                }
                 return false;
               }
-              this.sessionManager.handleSessionExpired('pushTask.retryAfterRefresh', {
-                taskId: task.id,
+              return this.preserveTaskUpsertForSessionExpiry(
+                task,
                 projectId,
-                errorCode: retryEnhanced.code
-              });
-              return false;
+                fromRetryQueue,
+                sourceUserId,
+                'pushTask.retryAfterRefresh',
+                {
+                  taskId: task.id,
+                  projectId,
+                  errorCode: retryEnhanced.code,
+                },
+              );
             }
             return this.handlePushTaskError(retryEnhanced, task, projectId, fromRetryQueue, sourceUserId);
           }
         } else {
-          this.sessionManager.handleSessionExpired('pushTask', { taskId: task.id, projectId, errorCode: enhanced.code });
-          return false;
+          return this.preserveTaskUpsertForSessionExpiry(
+            task,
+            projectId,
+            fromRetryQueue,
+            sourceUserId,
+            'pushTask',
+            { taskId: task.id, projectId, errorCode: enhanced.code },
+          );
         }
       }
       
@@ -263,11 +368,15 @@ export class TaskSyncOperationsService {
       async () => {
         // 防御层：tombstone 检查
         if (!skipTombstoneCheck) {
-          const { data: tombstone } = await client
+          const { data: tombstone, error: tombstoneError } = await client
             .from('task_tombstones')
             .select('task_id')
             .eq('task_id', task.id)
             .maybeSingle();
+
+          if (tombstoneError) {
+            throw supabaseErrorToError(tombstoneError);
+          }
           
           if (tombstone) {
             this.logger.info('pushTask: 跳过已删除任务（tombstone 防护）', { 
@@ -505,16 +614,21 @@ export class TaskSyncOperationsService {
   }
   
   /** 删除云端任务（优先 purge RPC 写入 tombstone，降级为软删除） */
-  async deleteTask(taskId: string, projectId: string, sourceUserId?: string): Promise<boolean> {
+  async deleteTask(taskId: string, projectId: string, sourceUserId?: string, fromRetryQueue = false): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
-      this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId });
-      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-      return false;
+      return this.preserveTaskDeleteForSessionExpiry(
+        [taskId],
+        projectId,
+        fromRetryQueue,
+        sourceUserId,
+        'deleteTask',
+        { taskId, projectId },
+      );
     }
     
     const client = this.getSupabaseClient();
     if (!client) {
-      this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+      this.queueTaskDeletesForRetry([taskId], projectId, fromRetryQueue, sourceUserId);
       return false;
     }
     
@@ -530,9 +644,14 @@ export class TaskSyncOperationsService {
       }
 
       if (!sessionUserId) {
-        this.sessionManager.handleSessionExpired('deleteTask.getSession', { taskId, projectId });
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-        return false;
+        return this.preserveTaskDeleteForSessionExpiry(
+          [taskId],
+          projectId,
+          fromRetryQueue,
+          sourceUserId,
+          'deleteTask.getSession',
+          { taskId, projectId },
+        );
       }
 
       if (sourceUserId && sessionUserId !== sourceUserId) {
@@ -542,11 +661,11 @@ export class TaskSyncOperationsService {
           sourceUserId,
           sessionUserId,
         });
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+        this.queueTaskDeletesForRetry([taskId], projectId, fromRetryQueue, sourceUserId);
         return false;
       }
 
-      const purgeSuccess = await this.purgeTasksFromCloud(projectId, [taskId], sourceUserId);
+      const purgeSuccess = await this.purgeTasksFromCloud(projectId, [taskId], sourceUserId, fromRetryQueue);
       if (purgeSuccess) {
         this.tombstoneService.invalidateCache(projectId);
       }
@@ -555,9 +674,14 @@ export class TaskSyncOperationsService {
       const enhanced = supabaseErrorToError(e);
       
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        this.sessionManager.handleSessionExpired('deleteTask', { taskId, projectId, errorCode: enhanced.code });
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-        return false;
+        return this.preserveTaskDeleteForSessionExpiry(
+          [taskId],
+          projectId,
+          fromRetryQueue,
+          sourceUserId,
+          'deleteTask',
+          { taskId, projectId, errorCode: enhanced.code },
+        );
       }
       
       this.logger.error('删除任务失败', enhanced);
@@ -569,7 +693,7 @@ export class TaskSyncOperationsService {
       });
       
       if (enhanced.isRetryable) {
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
+        this.queueTaskDeletesForRetry([taskId], projectId, fromRetryQueue, sourceUserId);
       }
       return false;
     }
@@ -584,6 +708,7 @@ export class TaskSyncOperationsService {
       this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
       // 【NEW-5 修复】离线时添加本地 tombstone，防止下次同步拉取时任务复活
       this.tombstoneService.addLocalTombstones(projectId, taskIds);
+      this.settleDeletedTaskDependencies(projectId, taskIds);
       return taskIds.length;
     }
 
@@ -620,6 +745,7 @@ export class TaskSyncOperationsService {
 
       // 【NEW-5 修复】服务端删除成功后添加本地 tombstone，防止同步窗口期内任务复活
       this.tombstoneService.addLocalTombstones(projectId, taskIds);
+      this.settleDeletedTaskDependencies(projectId, taskIds);
 
       this.logger.info('softDeleteTasksBatch: 删除成功', {
         projectId,
@@ -651,6 +777,7 @@ export class TaskSyncOperationsService {
 
         // 【NEW-5 修复】降级路径成功后同样添加本地 tombstone
         this.tombstoneService.addLocalTombstones(projectId, taskIds);
+        this.settleDeletedTaskDependencies(projectId, taskIds);
 
         return taskIds.length;
       } catch (fallbackError) {
@@ -663,15 +790,13 @@ export class TaskSyncOperationsService {
   }
   
   /** 永久删除云端任务（tombstone + 物理删除，v3→v2→v1 降级） */
-  async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string): Promise<boolean> {
+  async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string, fromRetryQueue = false): Promise<boolean> {
     if (taskIds.length === 0) return true;
     
     const client = this.getSupabaseClient();
     if (!client) {
       this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
-      for (const taskId of taskIds) {
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-      }
+      this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId);
       return false;
     }
     
@@ -688,11 +813,14 @@ export class TaskSyncOperationsService {
         }
 
         if (!sessionUserId) {
-          this.sessionManager.handleSessionExpired('purgeTasksFromCloud.getSession', { projectId, taskCount: taskIds.length });
-          for (const taskId of taskIds) {
-            this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-          }
-          return false;
+          return this.preserveTaskDeleteForSessionExpiry(
+            taskIds,
+            projectId,
+            fromRetryQueue,
+            sourceUserId,
+            'purgeTasksFromCloud.getSession',
+            { projectId, taskCount: taskIds.length },
+          );
         }
 
         if (sessionUserId !== sourceUserId) {
@@ -702,9 +830,7 @@ export class TaskSyncOperationsService {
             sourceUserId,
             sessionUserId,
           });
-          for (const taskId of taskIds) {
-            this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-          }
+          this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId);
           return false;
         }
       }
@@ -731,6 +857,7 @@ export class TaskSyncOperationsService {
         }
         
         this.addLocalTombstones(projectId, taskIds);
+        this.settleDeletedTaskDependencies(projectId, taskIds);
         return true;
       }
       
@@ -744,6 +871,7 @@ export class TaskSyncOperationsService {
       if (!purgeV2Result.error) {
         this.logger.info('purge_tasks_v2 成功', { projectId, purgedCount: purgeV2Result.data });
         this.addLocalTombstones(projectId, taskIds);
+        this.settleDeletedTaskDependencies(projectId, taskIds);
         return true;
       }
       
@@ -764,6 +892,7 @@ export class TaskSyncOperationsService {
       }
       
       this.addLocalTombstones(projectId, taskIds);
+      this.settleDeletedTaskDependencies(projectId, taskIds);
       this.logger.warn('purgeTasksFromCloud: 已降级为软删除（已添加本地 tombstone 保护）', { 
         projectId, 
         taskIds 
@@ -776,9 +905,7 @@ export class TaskSyncOperationsService {
         projectId,
         taskCount: taskIds.length
       });
-      for (const taskId of taskIds) {
-        this.safeAddToRetryQueue('task', 'delete', { id: taskId }, projectId, sourceUserId);
-      }
+      this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId);
       return false;
     }
   }
