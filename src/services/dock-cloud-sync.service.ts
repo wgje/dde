@@ -27,6 +27,11 @@ import { withTimeout } from '../utils/timeout';
 import { TimerHandle } from '../utils/timer-handle';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 const CLOUD_PUSH_DEBOUNCE_MS = SYNC_CONFIG.DEBOUNCE_DELAY;
 const CLOUD_PULL_DEBOUNCE_MS = PARKING_CONFIG.CLOUD_PULL_DEBOUNCE_MS;
@@ -69,6 +74,10 @@ export class DockCloudSyncService implements OnDestroy {
   private readonly lastEnqueuedSnapshotFingerprints = new Map<string, string>();
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
+
+  private isBrowserSuspendedResult(error: { details?: Record<string, unknown> } | null | undefined): boolean {
+    return error?.details?.['reason'] === 'browser-network-suspended';
+  }
 
   /**
    * 由 DockEngineService 在其构造函数中调用，注入引擎回调。
@@ -134,6 +143,24 @@ export class DockCloudSyncService implements OnDestroy {
     }, CLOUD_PULL_DEBOUNCE_MS);
   }
 
+  private deferCloudPullForBrowserResume(userId: string, reason: 'preflight' | 'error'): void {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.logger.debug('pullCloudSnapshot: 页面不可见，跳过当前云拉取', { userId, reason });
+      return;
+    }
+
+    const delayMs = Math.max(getRemainingBrowserNetworkResumeDelayMs(), CLOUD_PULL_DEBOUNCE_MS);
+    this.logger.debug('pullCloudSnapshot: 浏览器网络挂起窗口内延后云拉取', {
+      userId,
+      reason,
+      delayMs,
+    });
+    this.cloudPullTimer.schedule(() => {
+      this.lastCloudPullAt = 0;
+      void this.pullCloudSnapshot(userId);
+    }, delayMs);
+  }
+
   private async pullCloudSnapshot(userId: string): Promise<void> {
     const cb = this.callbacks;
     if (!cb) {
@@ -144,6 +171,11 @@ export class DockCloudSyncService implements OnDestroy {
     // 断路器开启时跳过拉取
     if (this.circuitBreakerOpen) {
       this.logger.warn('pullCloudSnapshot: circuit breaker open — skipping');
+      return;
+    }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.deferCloudPullForBrowserResume(userId, 'preflight');
       return;
     }
 
@@ -163,6 +195,11 @@ export class DockCloudSyncService implements OnDestroy {
 
       // H-2 fix: 显式检查 Result.ok，区分错误和"无数据"
       if (!loadResult.ok) {
+        if (this.isBrowserSuspendedResult(loadResult.error)) {
+          this.deferCloudPullForBrowserResume(userId, 'error');
+          return;
+        }
+
         this.logger.warn('loadFocusSession returned error, skipping legacy fallback', loadResult.error);
         await this.hydrateRoutineSlots(userId);
         return;
@@ -199,6 +236,11 @@ export class DockCloudSyncService implements OnDestroy {
       this.cloudPullRetryCount = 0; // reset on success
       this.resetCircuitBreaker();
     } catch (rawError) {
+      if (isBrowserNetworkSuspendedError(rawError)) {
+        this.deferCloudPullForBrowserResume(userId, 'error');
+        return;
+      }
+
       const error = supabaseErrorToError(rawError);
       this.logger.warn('Failed to pull focus session from cloud', error);
 
@@ -239,6 +281,16 @@ export class DockCloudSyncService implements OnDestroy {
       );
       // DATA-C5 fix: async 边界后检查用户是否仍为当前用户，防止跨用户数据污染
       if (!this.isCurrentUser(userId)) return;
+      if (!listResult.ok) {
+        if (this.isBrowserSuspendedResult(listResult.error)) {
+          this.deferCloudPullForBrowserResume(userId, 'error');
+          return;
+        }
+
+        this.logger.warn('hydrateRoutineSlots: listRoutineTasks returned error', listResult.error);
+        return;
+      }
+
       const routineTasks = listResult.ok ? listResult.value : [];
       if (routineTasks.length === 0) return;
       cb.updateDailySlots(prev => {
@@ -269,6 +321,11 @@ export class DockCloudSyncService implements OnDestroy {
         return next;
       });
     } catch (rawError) {
+      if (isBrowserNetworkSuspendedError(rawError)) {
+        this.logger.debug('hydrateRoutineSlots: 浏览器网络挂起窗口内跳过远端读取', { userId });
+        return;
+      }
+
       const error = supabaseErrorToError(rawError);
       this.logger.warn('hydrateRoutineSlots failed', error);
     }

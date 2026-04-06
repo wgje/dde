@@ -7,6 +7,10 @@ import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.serv
 import { LoggerService } from './logger.service';
 import type { DockSnapshot } from '../models/parking-dock';
 import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  ensureBrowserNetworkSuspensionTracking,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../utils/browser-network-suspension';
 
 // ─── Mocks ──────────────────────────────────
 
@@ -36,6 +40,13 @@ const mockSnapshotPersistence = {
   normalizeSnapshot: vi.fn(),
   isSnapshotNewer: vi.fn(),
 };
+
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
 
 // ─── Helpers ────────────────────────────────
 
@@ -89,6 +100,9 @@ describe('DockCloudSyncService', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    ensureBrowserNetworkSuspensionTracking();
+    setVisibilityState('visible');
 
     mockActionQueue.enqueue.mockClear();
     mockActionQueue.enqueueForOwner.mockClear();
@@ -116,6 +130,8 @@ describe('DockCloudSyncService', () => {
     service.cancelTimers();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
   });
 
   // ─── init ───────────────────────────────────
@@ -371,6 +387,50 @@ describe('DockCloudSyncService', () => {
       await vi.advanceTimersByTimeAsync(250);
 
       expect(mockSyncService.importLegacyDockSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('should defer cloud pull until browser resume grace window ends', async () => {
+      service.init(makeCallbacks());
+      mockSyncService.loadFocusSession.mockResolvedValueOnce({ ok: true, value: null });
+      mockSyncService.listRoutineTasks.mockResolvedValueOnce({ ok: true, value: [] });
+
+      setVisibilityState('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mockSyncService.loadFocusSession).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reschedule pull when focus sync returns a browser-suspended Result', async () => {
+      service.init(makeCallbacks());
+      mockSyncService.loadFocusSession
+        .mockResolvedValueOnce({
+          ok: false,
+          error: {
+            code: 'SYNC_OFFLINE',
+            message: '浏览器恢复连接中，请稍后重试',
+            details: { reason: 'browser-network-suspended', retryable: true },
+          },
+        })
+        .mockResolvedValueOnce({ ok: true, value: null });
+      mockSyncService.listRoutineTasks.mockResolvedValueOnce({ ok: true, value: [] });
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(2);
     });
   });
 
