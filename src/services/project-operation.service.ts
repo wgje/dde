@@ -142,6 +142,17 @@ export class ProjectOperationService {
     return { success: false, error: error.message };
   }
 
+  private async settleProjectDeleteSuccess(
+    sessionContext: { ownerUserId: string | null; sessionGeneration: number },
+    projectId: string,
+  ): Promise<void> {
+    const ownerUserId = sessionContext.ownerUserId;
+    if (ownerUserId) {
+      await this.actionQueue.settleProjectDeleteSuccessForOwner(ownerUserId, projectId);
+    }
+    this.retryQueue.removeByProjectId(projectId);
+  }
+
   // ========== 项目 CRUD 操作 ==========
 
   /**
@@ -256,6 +267,9 @@ export class ProjectOperationService {
       try {
         const deleteResult = await this.syncCoordinator.core.deleteProjectFromCloud(projectId, userId);
         if (!this.isProjectSessionContextCurrent(sessionContext, 'deleteProject:deleteProjectFromCloud', projectId)) {
+          if (!isFailure(deleteResult)) {
+            await this.settleProjectDeleteSuccess(sessionContext, projectId);
+          }
           if (isFailure(deleteResult) && this.shouldEnqueueProjectDeleteFailure(deleteResult.error)) {
             await this.settleStaleProjectCrudFailure(sessionContext, deleteQueueAction, 'deleteProject:deleteProjectFromCloud');
           }
@@ -273,6 +287,7 @@ export class ProjectOperationService {
           this.toastService.info('已在本地删除', '网络恢复后将同步到云端');
           this.optimisticState.commitSnapshot(snapshot.id);
         } else {
+          await this.settleProjectDeleteSuccess(sessionContext, projectId);
           this.optimisticState.commitSnapshot(snapshot.id);
         }
       } catch (_e) {

@@ -78,6 +78,7 @@ describe('ProjectOperationService', () => {
     enqueue: vi.fn(),
     enqueueForOwner: vi.fn().mockResolvedValue('queued-old-owner'),
     discardActions: vi.fn(),
+    settleProjectDeleteSuccessForOwner: vi.fn().mockResolvedValue(1),
   };
 
   const mockRetryQueue = {
@@ -333,6 +334,37 @@ describe('ProjectOperationService', () => {
     }));
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
     expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('删除项目在云端成功后应清理同项目的挂起 mutation', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.deleteProjectFromCloud.mockResolvedValueOnce({
+      ok: true,
+      value: undefined,
+    });
+
+    const result = await service.deleteProject('proj-success-delete');
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('user-1', 'proj-success-delete');
+    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-success-delete');
+    expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
+  });
+
+  it('删除项目的旧会话成功结果应清理原 owner 的挂起 mutation', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.deleteProjectFromCloud.mockResolvedValueOnce({
+      ok: true,
+      value: undefined,
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.deleteProject('proj-stale-success-delete');
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('user-1', 'proj-stale-success-delete');
+    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-stale-success-delete');
+    expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
   });
 
   it('删除项目遇到权限错误时应回滚本地状态而不是进入队列', async () => {

@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ActionQueueService } from './action-queue.service';
 import { QueuedAction } from './action-queue.types';
-import { SimpleSyncService } from '../core-bridge';
+import { RetryQueueService, SimpleSyncService } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
@@ -26,9 +26,15 @@ const mockActionQueueService = {
   registerProcessor: vi.fn(),
   setQueueProcessCallbacks: vi.fn(),
   moveToDeadLetter: vi.fn(),
+  discardActions: vi.fn(),
+  settleProjectDeleteSuccessForOwner: vi.fn().mockResolvedValue(1),
   enqueueForOwner: vi.fn().mockResolvedValue('queued-owner-action'),
   getCurrentQueueViewGeneration: vi.fn(() => 1),
   isQueueViewCurrent: vi.fn(() => true),
+};
+
+const mockRetryQueueService = {
+  removeByProjectId: vi.fn(),
 };
 
 const mockSyncService = {
@@ -81,6 +87,7 @@ describe('ActionQueueProcessorsService', () => {
     mockConflictStorageService.saveConflict.mockResolvedValue(true);
     mockActionQueueService.getCurrentQueueViewGeneration.mockReturnValue(1);
     mockActionQueueService.isQueueViewCurrent.mockReturnValue(true);
+    mockActionQueueService.settleProjectDeleteSuccessForOwner.mockResolvedValue(1);
 
     injector = Injector.create({
       providers: [
@@ -88,6 +95,7 @@ describe('ActionQueueProcessorsService', () => {
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
         { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },
         { provide: ConflictStorageService, useValue: mockConflictStorageService },
@@ -608,6 +616,8 @@ describe('ActionQueueProcessorsService', () => {
 
     expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith('p-1', 'test-user');
     expect(result).toBe(true);
+    expect(mockActionQueueService.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('test-user', 'p-1', undefined);
+    expect(mockRetryQueueService.removeByProjectId).toHaveBeenCalledWith('p-1');
   });
 
   it('project:delete should throw typed sync errors so queue can classify them', async () => {

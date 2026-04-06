@@ -13,7 +13,7 @@
  * casts are safe within the processor-registration pattern.
  */
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { RetryQueueService, SimpleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
@@ -59,6 +59,7 @@ export class ActionQueueProcessorsService {
   private readonly logger = this.loggerService.category('ActionQueueProcessors');
   private readonly actionQueue = inject(ActionQueueService);
   private readonly syncService = inject(SimpleSyncService);
+  private readonly retryQueue = inject(RetryQueueService);
   private readonly projectState = inject(ProjectStateService);
   private readonly authService = inject(AuthService);
   private readonly conflictStorage = inject(ConflictStorageService);
@@ -353,6 +354,7 @@ export class ActionQueueProcessorsService {
       try {
         const result = await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
         if (result.ok) {
+          await this.discardProjectDependentMutations(sourceUserId, payload.projectId, action.id);
           return true;
         }
 
@@ -427,6 +429,15 @@ export class ActionQueueProcessorsService {
         return false;
       }
     });
+  }
+
+  private async discardProjectDependentMutations(
+    ownerUserId: string,
+    projectId: string,
+    currentActionId?: string,
+  ): Promise<void> {
+    await this.actionQueue.settleProjectDeleteSuccessForOwner(ownerUserId, projectId, currentActionId);
+    this.retryQueue.removeByProjectId(projectId);
   }
 
   private wasProjectFailureTransferredToRetryQueue(
