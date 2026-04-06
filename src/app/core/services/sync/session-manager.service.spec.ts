@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { SessionManagerService } from './session-manager.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
@@ -7,6 +7,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { EventBusService } from '../../../../services/event-bus.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 
 describe('SessionManagerService', () => {
   let service: SessionManagerService;
@@ -17,8 +18,16 @@ describe('SessionManagerService', () => {
     refreshSession: vi.fn(),
   };
 
+  const setVisibilityState = (state: DocumentVisibilityState): void => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: state,
+    });
+  };
+
   beforeEach(() => {
     sessionExpired = false;
+    setVisibilityState('visible');
     mockAuth.getSession.mockReset();
     mockAuth.refreshSession.mockReset();
 
@@ -78,6 +87,12 @@ describe('SessionManagerService', () => {
     });
 
     service = TestBed.inject(SessionManagerService);
+  });
+
+  afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
+    TestBed.resetTestingModule();
   });
 
   it('should return ok without refresh when session is valid', async () => {
@@ -146,6 +161,25 @@ describe('SessionManagerService', () => {
     const result = await service.validateOrRefreshOnResume('resume:test');
 
     expect(result).toEqual({ ok: false, refreshed: false, deferred: true, reason: 'client-unready' });
+    expect(syncState.setSessionExpired).not.toHaveBeenCalledWith(true);
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it('should defer resume validation during suspended browser network window', async () => {
+    const syncState = TestBed.inject(SyncStateService) as unknown as {
+      setSessionExpired: ReturnType<typeof vi.fn>;
+    };
+    const toast = TestBed.inject(ToastService) as unknown as {
+      warning: ReturnType<typeof vi.fn>;
+    };
+
+    setVisibilityState('hidden');
+
+    const result = await service.validateOrRefreshOnResume('resume:test');
+
+    expect(result).toEqual({ ok: false, refreshed: false, deferred: true, reason: 'client-unready' });
+    expect(mockAuth.getSession).not.toHaveBeenCalled();
+    expect(mockAuth.refreshSession).not.toHaveBeenCalled();
     expect(syncState.setSessionExpired).not.toHaveBeenCalledWith(true);
     expect(toast.warning).not.toHaveBeenCalled();
   });

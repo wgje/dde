@@ -20,11 +20,22 @@ import { PermanentFailureError } from '../../../../utils/permanent-failure-error
 import { EnhancedError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
 
 interface SessionValidationSnapshot {
   valid: boolean;
   userId?: string;
   at: number;
+}
+
+interface SessionValidationResult {
+  valid: boolean;
+  userId?: string;
+  deferred?: boolean;
+  reason?: 'client-unready';
 }
 
 @Injectable({
@@ -142,6 +153,11 @@ export class SessionManagerService {
     refreshed: boolean;
     reason?: 'client-unready' | 'refresh-failed' | 'no-session';
   }> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.info('浏览器网络挂起窗口内延后会话刷新', { context });
+      return { refreshed: false, reason: 'client-unready' };
+    }
+
     if (this.syncState.isSessionExpired()) {
       this.logger.debug('会话已标记过期，跳过刷新尝试', { context });
       return { refreshed: false, reason: 'refresh-failed' };
@@ -182,6 +198,11 @@ export class SessionManagerService {
         return { refreshed: false, reason: 'no-session' };
       }
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e)) {
+        this.logger.info('浏览器网络挂起窗口内延后会话刷新', { context });
+        return { refreshed: false, reason: 'client-unready' };
+      }
+
       this.logger.warn('会话刷新异常', { context, error: e });
       return { refreshed: false, reason: 'refresh-failed' };
     }
@@ -232,7 +253,12 @@ export class SessionManagerService {
   /**
    * 验证当前会话是否有效
    */
-  async validateSession(): Promise<{ valid: boolean; userId?: string }> {
+  async validateSession(): Promise<SessionValidationResult> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.info('浏览器网络挂起窗口内延后 Session 验证');
+      return { valid: false, deferred: true, reason: 'client-unready' };
+    }
+
     const { client } = await this.getSupabaseClient();
     if (!client) {
       this.markValidationSnapshot(false);
@@ -248,6 +274,11 @@ export class SessionManagerService {
       this.markValidationSnapshot(false);
       return { valid: false };
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e)) {
+        this.logger.info('浏览器网络挂起窗口内延后 Session 验证');
+        return { valid: false, deferred: true, reason: 'client-unready' };
+      }
+
       this.logger.error('Session 验证失败', e);
       this.markValidationSnapshot(false);
       return { valid: false };
@@ -268,6 +299,11 @@ export class SessionManagerService {
     deferred: boolean;
     reason?: 'client-unready' | 'no-session' | 'refresh-failed';
   }> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.info('Resume 会话校验延后：浏览器网络挂起窗口未结束', { context });
+      return { ok: false, refreshed: false, deferred: true, reason: 'client-unready' };
+    }
+
     const sessionCheck = await this.getSupabaseClient();
     if (!sessionCheck.client) {
       this.logger.info('Resume 会话校验延后：Supabase 客户端未就绪', { context });
@@ -275,6 +311,11 @@ export class SessionManagerService {
     }
 
     const validated = await this.validateSession();
+
+    if (validated.deferred) {
+      this.logger.info('Resume 会话校验延后：浏览器网络挂起窗口未结束', { context });
+      return { ok: false, refreshed: false, deferred: true, reason: validated.reason ?? 'client-unready' };
+    }
 
     if (validated.valid) {
       if (this.syncState.isSessionExpired()) {
