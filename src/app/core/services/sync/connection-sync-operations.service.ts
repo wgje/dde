@@ -22,14 +22,32 @@ import { SyncStateService } from './sync-state.service';
 import { Connection } from '../../../../models';
 import {
   supabaseErrorToError,
+  EnhancedError,
   classifySupabaseClientFailure
 } from '../../../../utils/supabase-error';
 import { supabaseWithRetry } from '../../../../utils/timeout';
-import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { isPermanentFailureError, PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { TombstoneService } from './tombstone.service';
+
+type TaskValidationFailureReason = 'missing-task' | 'query-error' | 'permission-denied';
+
+type TaskValidationResult =
+  | { valid: true }
+  | {
+      valid: false;
+      shouldRetry: boolean;
+      reason: TaskValidationFailureReason;
+      error?: EnhancedError;
+      sourceExists?: boolean;
+      targetExists?: boolean;
+    };
+
+type ConnectionTombstoneCheckResult =
+  | { ok: true; tombstoneFound: boolean }
+  | { ok: false; shouldRetry: boolean; error: EnhancedError };
 
 @Injectable({
   providedIn: 'root'
@@ -196,17 +214,43 @@ export class ConnectionSyncOperationsService {
       
       // 防御层：tombstone 检查
       if (!skipTombstoneCheck) {
-        const { data: tombstone } = await client
-          .from('connection_tombstones')
-          .select('connection_id')
-          .eq('connection_id', connection.id)
-          .maybeSingle();
+        const tombstoneStatus = await this.checkConnectionTombstone(
+          client,
+          projectId,
+          connection,
+          fromRetryQueue,
+        );
+
+        if (!tombstoneStatus.ok) {
+          if (!tombstoneStatus.shouldRetry) {
+            if (fromRetryQueue) {
+              throw new PermanentFailureError(
+                'Connection tombstone lookup denied',
+                tombstoneStatus.error,
+                { operation: 'pushConnection.connectionTombstoneLookup', connectionId: connection.id, projectId }
+              );
+            }
+            return false;
+          }
+
+          if (!fromRetryQueue) {
+            this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+          }
+          return false;
+        }
         
-        if (tombstone) {
+        if (tombstoneStatus.tombstoneFound) {
           this.logger.info('pushConnection: 跳过已删除连接（tombstone 防护）', { 
             connectionId: connection.id, 
             projectId 
           });
+          if (fromRetryQueue) {
+            throw new PermanentFailureError(
+              'Connection remote tombstoned',
+              undefined,
+              { operation: 'pushConnection.remoteTombstone', connectionId: connection.id, projectId }
+            );
+          }
           return false;
         }
       }
@@ -216,10 +260,31 @@ export class ConnectionSyncOperationsService {
         const validationResult = await this.validateTasksExist(
           client, 
           projectId, 
-          connection
+          connection,
+          fromRetryQueue,
         );
         
         if (!validationResult.valid) {
+          if (!validationResult.shouldRetry) {
+            if (fromRetryQueue) {
+              throw new PermanentFailureError(
+                validationResult.reason === 'permission-denied'
+                  ? 'Connection task validation denied'
+                  : 'Connection references deleted tasks',
+                validationResult.error,
+                {
+                  operation: 'pushConnection.validateTasksExist',
+                  connectionId: connection.id,
+                  projectId,
+                  source: connection.source,
+                  target: connection.target,
+                  reason: validationResult.reason,
+                }
+              );
+            }
+            return false;
+          }
+
           if (!fromRetryQueue) {
             this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
           }
@@ -297,10 +362,190 @@ export class ConnectionSyncOperationsService {
   private async validateTasksExist(
     client: SupabaseClient,
     projectId: string,
-    connection: Connection
-  ): Promise<{ valid: boolean }> {
+    connection: Connection,
+    fromRetryQueue: boolean,
+  ): Promise<TaskValidationResult> {
+    let queryResult = await this.queryExistingTaskIds(client, projectId, connection);
+    let retriedAfterRefresh = false;
+
+    if (queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
+      const refreshed = await this.sessionManager.handleAuthErrorWithRefresh('pushConnection.validateTasksExist', {
+        connectionId: connection.id,
+        projectId,
+        source: connection.source,
+        target: connection.target,
+        errorCode: queryResult.error.code,
+      });
+      if (refreshed) {
+        retriedAfterRefresh = true;
+        queryResult = await this.queryExistingTaskIds(client, projectId, connection);
+      }
+    }
+
+    if (queryResult.error) {
+      const error = queryResult.error;
+      if (retriedAfterRefresh && this.sessionManager.isRlsPolicyViolation(error)) {
+        this.logger.info('刷新会话后任务存在性查询仍无权限，停止重放陈旧连接', {
+          connectionId: connection.id,
+          projectId,
+          source: connection.source,
+          target: connection.target,
+          errorCode: error.code,
+        });
+        return {
+          valid: false,
+          shouldRetry: false,
+          reason: 'permission-denied',
+          error,
+        };
+      }
+
+      const logLevel: 'debug' | 'warn' = fromRetryQueue ? 'debug' : 'warn';
+      this.logger[logLevel]('任务存在性查询失败，跳过连接推送', {
+        connectionId: connection.id,
+        projectId,
+        source: connection.source,
+        target: connection.target,
+        errorCode: error.code,
+        errorType: error.errorType,
+        message: error.message,
+        retriedAfterRefresh,
+      });
+
+      this.sentryLazyLoader.captureMessage('任务存在性查询失败', {
+        level: 'warning',
+        tags: {
+          operation: 'pushConnection',
+          errorType: error.errorType,
+        },
+        extra: {
+          connectionId: connection.id,
+          projectId,
+          source: connection.source,
+          target: connection.target,
+          errorCode: error.code,
+          message: error.message,
+        }
+      });
+
+      return {
+        valid: false,
+        shouldRetry: true,
+        reason: 'query-error',
+        error,
+      };
+    }
+
+    const existingTaskIds = new Set(queryResult.data.map(task => task.id));
+    const sourceExists = existingTaskIds.has(connection.source);
+    const targetExists = existingTaskIds.has(connection.target);
+
+    if (!sourceExists || !targetExists) {
+      const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
+      const referencesDeletedTask = localTombstones.has(connection.source) || localTombstones.has(connection.target);
+      const logLevel: 'debug' | 'info' = referencesDeletedTask
+        ? 'info'
+        : (fromRetryQueue ? 'debug' : 'info');
+
+      this.logger[logLevel](
+        referencesDeletedTask
+          ? '连接引用已删除任务，停止重放并收口'
+          : '连接依赖的任务尚未同步完成，延后连接推送',
+        {
+          connectionId: connection.id,
+          projectId,
+          source: connection.source,
+          target: connection.target,
+          sourceExists,
+          targetExists,
+        }
+      );
+
+      return {
+        valid: false,
+        shouldRetry: !referencesDeletedTask,
+        reason: 'missing-task',
+        sourceExists,
+        targetExists,
+      };
+    }
+
+    return { valid: true };
+  }
+
+  private async checkConnectionTombstone(
+    client: SupabaseClient,
+    projectId: string,
+    connection: Connection,
+    fromRetryQueue: boolean,
+  ): Promise<ConnectionTombstoneCheckResult> {
+    let queryResult = await this.queryConnectionTombstone(client, connection.id);
+    let retriedAfterRefresh = false;
+
+    if (queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
+      const refreshed = await this.sessionManager.handleAuthErrorWithRefresh('pushConnection.connectionTombstoneLookup', {
+        connectionId: connection.id,
+        projectId,
+        errorCode: queryResult.error.code,
+      });
+      if (refreshed) {
+        retriedAfterRefresh = true;
+        queryResult = await this.queryConnectionTombstone(client, connection.id);
+      }
+    }
+
+    if (queryResult.error) {
+      if (retriedAfterRefresh && this.sessionManager.isRlsPolicyViolation(queryResult.error)) {
+        this.logger.info('刷新会话后 connection tombstone 查询仍无权限，停止重放陈旧连接', {
+          connectionId: connection.id,
+          projectId,
+          errorCode: queryResult.error.code,
+        });
+        return { ok: false, shouldRetry: false, error: queryResult.error };
+      }
+
+      const logLevel: 'debug' | 'warn' = fromRetryQueue ? 'debug' : 'warn';
+      this.logger[logLevel]('connection tombstone 查询失败，停止本次连接推送', {
+        connectionId: connection.id,
+        projectId,
+        errorCode: queryResult.error.code,
+        errorType: queryResult.error.errorType,
+        message: queryResult.error.message,
+        retriedAfterRefresh,
+      });
+      return { ok: false, shouldRetry: true, error: queryResult.error };
+    }
+
+    return { ok: true, tombstoneFound: queryResult.tombstoneFound };
+  }
+
+  private async queryConnectionTombstone(
+    client: SupabaseClient,
+    connectionId: string,
+  ): Promise<{ tombstoneFound: boolean; error: EnhancedError | null }> {
     try {
-      // 中文注释：必须排除软删除任务，否则会为已删除任务创建/保留连接
+      const { data, error } = await client
+        .from('connection_tombstones')
+        .select('connection_id')
+        .eq('connection_id', connectionId)
+        .maybeSingle();
+
+      if (error) {
+        return { tombstoneFound: false, error: supabaseErrorToError(error) };
+      }
+
+      return { tombstoneFound: Boolean(data), error: null };
+    } catch (error) {
+      return { tombstoneFound: false, error: supabaseErrorToError(error) };
+    }
+  }
+
+  private async queryExistingTaskIds(
+    client: SupabaseClient,
+    projectId: string,
+    connection: Connection,
+  ): Promise<{ data: Array<{ id: string }>; error: EnhancedError | null }> {
+    try {
       const result = await supabaseWithRetry(
         () => client
           .from('tasks')
@@ -312,73 +557,15 @@ export class ConnectionSyncOperationsService {
           timeout: 'QUICK',
           maxRetries: 2
         }
-      );
-      
+      ) as { data: Array<{ id: string }> | null; error: unknown | null };
+
       if (result.error) {
-        this.logger.warn('任务存在性查询失败，跳过连接推送', {
-          connectionId: connection.id,
-          source: connection.source,
-          target: connection.target,
-          error: result.error
-        });
-        return { valid: false };
+        return { data: [], error: supabaseErrorToError(result.error) };
       }
-      
-      const existingTaskIds = new Set((result.data || []).map(t => t.id));
-      
-      if (!existingTaskIds.has(connection.source) || !existingTaskIds.has(connection.target)) {
-        this.logger.warn('跳过推送连接（引用的任务不存在）', {
-          connectionId: connection.id,
-          source: connection.source,
-          target: connection.target,
-          sourceExists: existingTaskIds.has(connection.source),
-          targetExists: existingTaskIds.has(connection.target)
-        });
-        
-        this.sentryLazyLoader.captureMessage('连接引用的任务不存在', {
-          level: 'warning',
-          tags: { 
-            operation: 'pushConnection',
-            errorType: 'FOREIGN_KEY_VIOLATION'
-          },
-          extra: {
-            connectionId: connection.id,
-            projectId,
-            source: connection.source,
-            target: connection.target,
-            sourceExists: existingTaskIds.has(connection.source),
-            targetExists: existingTaskIds.has(connection.target)
-          }
-        });
-        
-        return { valid: false };
-      }
-      
-      return { valid: true };
+
+      return { data: result.data ?? [], error: null };
     } catch (error) {
-      this.logger.warn('任务存在性查询失败（超时或错误），跳过连接推送', {
-        connectionId: connection.id,
-        source: connection.source,
-        target: connection.target,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      
-      this.sentryLazyLoader.captureMessage('任务存在性查询失败', {
-        level: 'warning',
-        tags: { 
-          operation: 'pushConnection', 
-          errorType: error instanceof Error && error.message.includes('timeout') ? 'QUERY_TIMEOUT' : 'QUERY_ERROR'
-        },
-        extra: {
-          connectionId: connection.id,
-          projectId,
-          source: connection.source,
-          target: connection.target,
-          errorMessage: error instanceof Error ? error.message : String(error)
-        }
-      });
-      
-      return { valid: false };
+      return { data: [], error: supabaseErrorToError(error) };
     }
   }
   
@@ -392,6 +579,10 @@ export class ConnectionSyncOperationsService {
     fromRetryQueue: boolean,
     sourceUserId?: string,
   ): boolean {
+    if (isPermanentFailureError(e)) {
+      throw e;
+    }
+
     const enhanced = supabaseErrorToError(e);
     
     // 版本冲突错误
