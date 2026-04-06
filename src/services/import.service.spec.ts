@@ -490,31 +490,45 @@ describe('ImportService', () => {
     });
     
     it('应拒绝并发导入', async () => {
-      // 使用 fake timers 避免等待真实 100ms
-      vi.useFakeTimers();
-      
       const data = createValidExportData();
-      const slowCallback = vi.fn().mockImplementation(
-        () => new Promise(resolve => setTimeout(resolve, 100))
-      );
+      let finishImport!: () => void;
+      const pendingImport = new Promise<void>(resolve => {
+        finishImport = resolve;
+      });
+      const slowCallback = vi.fn().mockImplementation(() => pendingImport);
       
       // 启动第一个导入（不 await，让它处于进行中状态）
       const promise1 = service.executeImport(data, [], defaultOptions, slowCallback);
-      
-      // 等待一个微任务周期确保第一个导入开始
-      await Promise.resolve();
-      
-      // 尝试启动第二个导入（应该立即被拒绝）
-      const result2 = await service.executeImport(data, [], defaultOptions, slowCallback);
-      
-      expect(result2.success).toBe(false);
-      expect(result2.error).toContain('正在进行中');
-      
-      // 快进定时器让第一个导入完成
-      await vi.runAllTimersAsync();
-      await promise1;
-      
-      vi.useRealTimers();
+      let result1;
+
+      try {
+        expect(service.isImporting()).toBe(true);
+
+        // 尝试启动第二个导入（应该立即被拒绝）
+        let secondImportResolved = false;
+        const result2Promise = service.executeImport(data, [], defaultOptions, slowCallback)
+          .then(result => {
+            secondImportResolved = true;
+            return result;
+          });
+
+        await Promise.resolve();
+
+        expect(secondImportResolved).toBe(true);
+
+        const result2 = await result2Promise;
+
+        expect(result2.success).toBe(false);
+        expect(result2.error).toContain('正在进行中');
+        expect(slowCallback).toHaveBeenCalledTimes(1);
+      } finally {
+        // 这里不用 fake timers，避免 isolate:false worker 下触发 fake-indexeddb 的全局调度循环。
+        finishImport();
+      }
+
+      result1 = await promise1;
+      expect(result1.success).toBe(true);
+      expect(service.isImporting()).toBe(false);
     });
     
     it('导入失败时应记录错误', async () => {
