@@ -576,6 +576,63 @@ export class RetryQueueService {
     }
     return removedCount;
   }
+
+  removeByEntities(type: RetryableEntityType, entityIds: string[]): string[] {
+    const targetIds = new Set(entityIds.filter(entityId => typeof entityId === 'string' && entityId.length > 0));
+    if (targetIds.size === 0) {
+      return [];
+    }
+
+    const itemIds = new Set<string>();
+    const removedEntityIds = new Set<string>();
+
+    for (const item of [...this.queue, ...this.hiddenQueueItems]) {
+      if (item.type !== type || !targetIds.has(item.data.id)) {
+        continue;
+      }
+
+      itemIds.add(item.id);
+      removedEntityIds.add(item.data.id);
+    }
+
+    if (itemIds.size > 0) {
+      this.removeItemsFromAllViews(itemIds);
+      this.saveToStorage();
+    }
+
+    return Array.from(removedEntityIds);
+  }
+
+  removeConnectionsReferencingTasks(projectId: string, taskIds: string[]): string[] {
+    const deletedTaskIds = new Set(taskIds.filter(taskId => typeof taskId === 'string' && taskId.length > 0));
+    if (deletedTaskIds.size === 0) {
+      return [];
+    }
+
+    const itemIds = new Set<string>();
+    const removedConnectionIds = new Set<string>();
+
+    for (const item of [...this.queue, ...this.hiddenQueueItems]) {
+      if (item.type !== 'connection' || item.projectId !== projectId) {
+        continue;
+      }
+
+      const connection = item.data as Connection;
+      if (!deletedTaskIds.has(connection.source) && !deletedTaskIds.has(connection.target)) {
+        continue;
+      }
+
+      itemIds.add(item.id);
+      removedConnectionIds.add(connection.id);
+    }
+
+    if (itemIds.size > 0) {
+      this.removeItemsFromAllViews(itemIds);
+      this.saveToStorage();
+    }
+
+    return Array.from(removedConnectionIds);
+  }
   
   /**
    * 清理过期和超过重试限制的项
@@ -1273,6 +1330,11 @@ export class RetryQueueService {
             this.logger.warn('熔断器触发，停止本轮队列处理');
             break;
           }
+        }
+
+        if (this.operationHandler.isSessionExpired()) {
+          this.logger.info('检测到会话过期，停止本轮重试切片，保留剩余项等待恢复后重放');
+          break;
         }
 
         if (success) {

@@ -7,7 +7,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
-import { Project, Task } from '../../../../models';
+import { Connection, Project, Task } from '../../../../models';
 
 /** 生成稳定的 UUID 供测试去重使用，同一 label 返回同一 UUID */
 const uuidCache = new Map<string, string>();
@@ -49,6 +49,14 @@ function createProject(label: string): Project {
     updatedAt: now,
     tasks: [],
     connections: [],
+  };
+}
+
+function createConnection(label: string, sourceLabel = `${label}-source`, targetLabel = `${label}-target`): Connection {
+  return {
+    id: stableUUID(`connection-${label}`),
+    source: stableUUID(sourceLabel),
+    target: stableUUID(targetLabel),
   };
 }
 
@@ -210,6 +218,39 @@ describe('RetryQueueService', () => {
     await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
 
     expect(handler.pushProject).toHaveBeenCalledWith(project, 'owner-a', undefined);
+  });
+
+  it('task replay handler 返回 false 时应保留队列项，避免 auth/tombstone 保护误删重试意图', async () => {
+    const task = createTask('task-auth-tombstone-replay-retained');
+    service.add('task', 'upsert', task, 'p-auth-tombstone');
+    online = true;
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(handler.pushTask).toHaveBeenCalledWith(task, 'p-auth-tombstone', 'test-user');
+    expect(service.getItems().map(item => item.data.id)).toContain(task.id);
+  });
+
+  it('命中 session expired 后应立即停止当前切片，避免消耗后续项的 retry budget', async () => {
+    const firstTask = createTask('task-stop-on-session-expired-a');
+    const secondTask = createTask('task-stop-on-session-expired-b');
+    let sessionExpired = false;
+    service.add('task', 'upsert', firstTask, 'p-stop-expired');
+    service.add('task', 'upsert', secondTask, 'p-stop-expired');
+    online = true;
+    (handler.isSessionExpired as ReturnType<typeof vi.fn>).mockImplementation(() => sessionExpired);
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      sessionExpired = true;
+      return false;
+    });
+
+    const result = await service.processQueueSlice({ maxItems: 2, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(handler.pushTask).toHaveBeenCalledTimes(1);
+    expect(service.getItems().map(item => item.data.id)).toEqual([firstTask.id, secondTask.id]);
   });
 
   it('processQueueSlice 重放项目时应透传 durable taskIdsToDelete', async () => {
@@ -621,6 +662,38 @@ describe('RetryQueueService', () => {
 
     expect(removed).toBe(2);
     expect(service.getItems()).toEqual([]);
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
+  });
+
+  it('removeByEntities 应同时清理 visible 与 hidden bucket 中的同实体重试项', () => {
+    const visibleTask = createTask('task-visible-remove-by-entities');
+    const hiddenTask = createTask('task-hidden-remove-by-entities');
+    const unrelatedTask = createTask('task-keep-remove-by-entities');
+    service.add('task', 'upsert', visibleTask, 'p-entities');
+    service.add('task', 'delete', hiddenTask, 'p-entities', 'other-user');
+    service.add('task', 'upsert', unrelatedTask, 'p-entities');
+
+    const removedTaskIds = service.removeByEntities('task', [visibleTask.id, hiddenTask.id]);
+
+    expect(removedTaskIds).toEqual(expect.arrayContaining([visibleTask.id, hiddenTask.id]));
+    expect(removedTaskIds).not.toContain(unrelatedTask.id);
+    expect(service.getItems().map(item => item.data.id)).toEqual([unrelatedTask.id]);
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
+  });
+
+  it('removeConnectionsReferencingTasks 应同时清理 visible 与 hidden 的悬挂连接重试项', () => {
+    const visibleConnection = createConnection('visible-orphan', 'task-deleted', 'task-keep');
+    const hiddenConnection = createConnection('hidden-orphan', 'task-keep', 'task-deleted');
+    const unrelatedConnection = createConnection('unrelated', 'task-keep-a', 'task-keep-b');
+    service.add('connection', 'upsert', visibleConnection, 'p-drop');
+    service.add('connection', 'upsert', hiddenConnection, 'p-drop', 'other-user');
+    service.add('connection', 'upsert', unrelatedConnection, 'p-drop');
+
+    const removedConnectionIds = service.removeConnectionsReferencingTasks('p-drop', [stableUUID('task-deleted')]);
+
+    expect(removedConnectionIds).toEqual(expect.arrayContaining([visibleConnection.id, hiddenConnection.id]));
+    expect(removedConnectionIds).not.toContain(unrelatedConnection.id);
+    expect(service.getItems().map(item => item.data.id)).toEqual([unrelatedConnection.id]);
     expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
   });
 
