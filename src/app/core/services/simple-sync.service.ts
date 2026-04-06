@@ -393,7 +393,7 @@ export class SimpleSyncService {
 
   private async probeRemoteReachability(
     reason: string,
-    timeoutMs = SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT,
+    timeoutMs: number = SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT,
     force = true
   ): Promise<boolean> {
     if (isBrowserNetworkSuspendedWindow()) {
@@ -418,7 +418,7 @@ export class SimpleSyncService {
     return true;
   }
 
-  private scheduleConnectivityRecovery(reason: string, delayMs = SYNC_CONFIG.DEBOUNCE_DELAY): void {
+  private scheduleConnectivityRecovery(reason: string, delayMs: number = SYNC_CONFIG.DEBOUNCE_DELAY): void {
     if (!this.runtimeStarted || this.connectivityRecoveryTimer) {
       return;
     }
