@@ -20,6 +20,7 @@ import { SYNC_CONFIG } from '../../../../config';
 import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { isBrowserNetworkSuspendedWindow } from '../../../../utils/browser-network-suspension';
 /**
  * 远程变更回调
  */
@@ -555,6 +556,16 @@ export class RealtimePollingService {
         }
 
         this.logger.info('Realtime 订阅状态', { status, channel: channelName, previousStatus });
+
+        if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && isBrowserNetworkSuspendedWindow()) {
+          this.logger.debug('浏览器网络挂起期间忽略 Realtime 通道中断', {
+            status,
+            channel: channelName,
+            error: err?.message,
+          });
+          previousStatus = status;
+          return;
+        }
         
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           consecutiveErrors++;

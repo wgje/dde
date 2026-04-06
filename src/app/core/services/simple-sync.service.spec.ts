@@ -25,6 +25,10 @@ import { EventBusService } from '../../../services/event-bus.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import {
+  ensureBrowserNetworkSuspensionTracking,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../utils/browser-network-suspension';
+import {
   TombstoneService,
   RealtimePollingService,
   SessionManagerService,
@@ -153,9 +157,19 @@ describe('SimpleSyncService', () => {
       }
     });
   };
+
+  const setVisibilityState = (state: DocumentVisibilityState): void => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: state,
+    });
+  };
   
   beforeEach(() => {
     disablePollutionGuard();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    ensureBrowserNetworkSuspensionTracking();
+    setVisibilityState('visible');
     mockSupabaseOfflineMode = signal(false);
     connectivityListener = null;
     windowAddEventListenerSpy = vi.spyOn(window, 'addEventListener');
@@ -533,6 +547,8 @@ describe('SimpleSyncService', () => {
   afterEach(() => {
     // 清理定时器
     vi.clearAllTimers();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     windowAddEventListenerSpy.mockRestore();
     windowRemoveEventListenerSpy.mockRestore();
     enablePollutionGuard();
@@ -3021,6 +3037,70 @@ describe('SimpleSyncService', () => {
 
       expect(mockSupabase.probeReachability).toHaveBeenCalled();
       expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('恢复后的 grace 窗口内应延后远端探测直到窗口结束', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+
+      setVisibilityState('hidden');
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      await service.recoverAfterResume('visibility-threshold', {
+        sessionValidated: true,
+      });
+
+      expect(mockSupabase.probeReachability).not.toHaveBeenCalled();
+      expect(mockRealtimePolling.resumeTransport).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1800);
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('会话校验延后时应安排一次自动恢复补跑', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+      mockSessionManager.validateSession.mockResolvedValueOnce({
+        valid: false,
+        deferred: true,
+        reason: 'client-unready',
+      });
+
+      await service.recoverAfterResume('online');
+
+      expect(mockSupabase.probeReachability).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('hidden 状态下连接恢复延后不应以 100ms 定时器自旋', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as SimpleSyncService & {
+        startRuntime: () => void;
+      };
+      runtimeService.startRuntime();
+
+      setVisibilityState('hidden');
+      connectivityListener?.({ offline: false, source: 'request' });
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(mockSupabase.probeReachability).not.toHaveBeenCalled();
       vi.useRealTimers();
     });
 

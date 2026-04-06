@@ -14,6 +14,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { MobileSyncStrategyService } from '../../../../services/mobile-sync-strategy.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 
 const strategySignal = signal({ enableRealtime: true } as { enableRealtime: boolean });
 
@@ -83,6 +84,13 @@ const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
   },
 };
 
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
+
 describe('RealtimePollingService', () => {
   let service: RealtimePollingService;
   let injector: Injector;
@@ -91,6 +99,7 @@ describe('RealtimePollingService', () => {
     vi.clearAllMocks();
     destroyCallbacks.length = 0;
     strategySignal.set({ enableRealtime: true });
+    setVisibilityState('visible');
 
     injector = Injector.create({
       providers: [
@@ -107,6 +116,11 @@ describe('RealtimePollingService', () => {
     });
 
     service = runInInjectionContext(injector, () => new RealtimePollingService());
+  });
+
+  afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
   });
 
   it('应跟随移动端同步策略切换 Realtime 开关', async () => {
@@ -194,5 +208,19 @@ describe('RealtimePollingService', () => {
 
     expect(mockClient.channel).toHaveBeenCalledTimes(1);
     expect(service.getCurrentProjectId()).toBe('project-2');
+  });
+
+  it('挂起窗口内的 Realtime 通道错误不应上报 Sentry', async () => {
+    await service.subscribeToProject('project-3', 'user-789');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    expect(statusCallback).toBeTypeOf('function');
+
+    setVisibilityState('hidden');
+    statusCallback?.('CHANNEL_ERROR', { message: 'network suspended' });
+
+    expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
   });
 });

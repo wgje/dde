@@ -11,6 +11,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { TIMEOUT_CONFIG } from '../../../../config/timeout.config';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 
 const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
 const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
@@ -27,6 +28,13 @@ function getOfflineSnapshotStorageKey(ownerUserId?: string | null): string {
   return typeof ownerUserId === 'string' && ownerUserId.length > 0
     ? `${OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY}.${ownerUserId}`
     : OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY;
+}
+
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
 }
 
 async function writeOfflineSnapshotToIdb(payload: string, ownerUserId?: string | null): Promise<void> {
@@ -151,7 +159,83 @@ async function clearAllOfflineSnapshotsIdb(): Promise<void> {
 describe('ProjectDataService', () => {
   beforeEach(async () => {
     localStorage.clear();
+    setVisibilityState('visible');
     await clearAllOfflineSnapshotsIdb();
+  });
+
+  afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
+  });
+
+  it('挂起窗口内 pullParkedTasksDelta 应直接跳过远端请求', async () => {
+    setVisibilityState('hidden');
+    const clientAsync = vi.fn(async () => ({
+      from: vi.fn(),
+    }));
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: true,
+            clientAsync,
+          },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: vi.fn(() => 'user-1'),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(),
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            getLocalTombstones: vi.fn().mockReturnValue(new Set()),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const result = await service.pullParkedTasksDelta(null, []);
+
+    expect(result).toEqual({ entries: [], removedTaskIds: [], nextCursor: null });
+    expect(clientAsync).not.toHaveBeenCalled();
   });
 
   it('P0001 Access Denied 时不应 fallback 到 loadFullProject', async () => {

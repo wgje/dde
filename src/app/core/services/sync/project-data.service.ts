@@ -29,6 +29,10 @@ import { TIMEOUT_CONFIG } from '../../../../config/timeout.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
+import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
 
 interface ParkedTaskCacheRecord {
   taskId: string;
@@ -1427,6 +1431,11 @@ export class ProjectDataService {
     since: string | null,
     knownParkedTaskIds: string[]
   ): Promise<ParkedTaskDeltaResult> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起窗口内跳过停泊任务增量拉取', { since });
+      return { entries: [], removedTaskIds: [], nextCursor: since };
+    }
+
     const client = await this.getSupabaseClient();
     if (!client) {
       return { entries: [], removedTaskIds: [], nextCursor: since };
@@ -1500,6 +1509,11 @@ export class ProjectDataService {
         nextCursor,
       };
     } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('浏览器网络挂起期间已跳过停泊任务增量拉取', { since });
+        return { entries: [], removedTaskIds: [], nextCursor: since };
+      }
+
       this.logger.warn('增量拉取停泊任务失败，保持现有缓存', { error, since });
       return { entries: [], removedTaskIds: [], nextCursor: since };
     }

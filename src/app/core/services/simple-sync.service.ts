@@ -66,6 +66,10 @@ import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.se
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { BlackBoxEntry } from '../../../models/focus';
 import { SyncStateService } from './sync/sync-state.service';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../utils/browser-network-suspension';
 
 /**
  * 冲突数据
@@ -385,6 +389,16 @@ export class SimpleSyncService {
     timeoutMs = SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT,
     force = true
   ): Promise<boolean> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+      this.logger.debug('浏览器网络仍处于挂起窗口，延后远端可达性探测', {
+        reason,
+        delayMs,
+      });
+      this.scheduleConnectivityRecovery(`${reason}:network-suspended`, delayMs);
+      return false;
+    }
+
     const reachable = await this.supabase.probeReachability({ timeoutMs, force });
     this.syncStateService.setOfflineMode(!reachable);
 
@@ -399,6 +413,13 @@ export class SimpleSyncService {
 
   private scheduleConnectivityRecovery(reason: string, delayMs = SYNC_CONFIG.DEBOUNCE_DELAY): void {
     if (!this.runtimeStarted || this.connectivityRecoveryTimer) {
+      return;
+    }
+
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.logger.debug('页面仍处于后台，跳过连接恢复定时器，等待下一次可见恢复事件', {
+        reason,
+      });
       return;
     }
 
@@ -541,7 +562,7 @@ export class SimpleSyncService {
       return;
     }
 
-    let session: { valid: boolean; userId?: string } | null = null;
+    let session: { valid: boolean; userId?: string; deferred?: boolean; reason?: 'client-unready' } | null = null;
     if (options.sessionValidated !== true) {
       if (skipSessionValidationWithinMs > 0) {
         const snapshot = this.sessionManager.getRecentValidationSnapshot(skipSessionValidationWithinMs);
@@ -552,6 +573,18 @@ export class SimpleSyncService {
 
       // light/heavy 都执行会话校验，确保恢复链路在无效会话下快速退出
       session = session ?? await this.sessionManager.validateSession();
+      if (session.deferred) {
+        const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+        this.scheduleConnectivityRecovery(`${reason}:session-deferred`, delayMs);
+        this.logger.info('页面恢复时会话校验延后，跳过本轮远端恢复链路', {
+          reason,
+          mode,
+          delayMs,
+          deferredReason: session.reason ?? 'client-unready',
+        });
+        return;
+      }
+
       if (!session.valid && !force) {
         this.logger.info('页面恢复时会话无效，跳过远端恢复链路', { reason, mode });
         return;
