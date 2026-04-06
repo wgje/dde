@@ -45,7 +45,14 @@ describe('ProjectOperationService', () => {
   const mockSyncCoordinator = {
     core: {
       saveProjectSmart: vi.fn().mockResolvedValue({ success: false, conflict: false }),
-      deleteProjectFromCloud: vi.fn().mockResolvedValue(false),
+      deleteProjectFromCloud: vi.fn().mockResolvedValue({
+        ok: false,
+        error: {
+          code: 'SYNC_OFFLINE',
+          message: '当前离线，删除将在恢复连接后重试',
+          details: { retryable: true },
+        },
+      }),
       deleteTask: vi.fn().mockResolvedValue(true),
       saveOfflineSnapshot: vi.fn(),
     },
@@ -86,6 +93,7 @@ describe('ProjectOperationService', () => {
   const mockOptimisticState = {
     createSnapshot: vi.fn(() => ({ id: 'snap-1' })),
     commitSnapshot: vi.fn(),
+    rollbackSnapshot: vi.fn(),
   };
 
   const mockLayout = {
@@ -303,6 +311,46 @@ describe('ProjectOperationService', () => {
       }),
     }));
     expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('删除项目遇到可重试失败时应保留本地删除并进入队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.deleteProjectFromCloud.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'SYNC_OFFLINE',
+        message: '当前离线，删除将在恢复连接后重试',
+        details: { retryable: true },
+      },
+    });
+
+    const result = await service.deleteProject('proj-retry-delete');
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'delete',
+      entityId: 'proj-retry-delete',
+    }));
+    expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
+    expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('删除项目遇到权限错误时应回滚本地状态而不是进入队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.deleteProjectFromCloud.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        message: '没有权限执行此操作',
+      },
+    });
+
+    const result = await service.deleteProject('proj-permission-denied');
+
+    expect(result).toEqual({ success: false, error: '没有权限执行此操作' });
+    expect(mockOptimisticState.rollbackSnapshot).toHaveBeenCalledWith('snap-1', false);
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
   });
 
   it('导入现有项目在云端保存失败时应进入 project:update 队列', async () => {

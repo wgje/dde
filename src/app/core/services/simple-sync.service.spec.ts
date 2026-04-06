@@ -3347,6 +3347,9 @@ describe('SimpleSyncService', () => {
     it('deleteProjectFromCloud 应通过 deleted_at 软删除项目行', async () => {
       mockSupabase.isConfigured = true;
       mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
 
       const eqOwner = vi.fn().mockResolvedValue({ error: null });
       const eqId = vi.fn().mockReturnValue({ eq: eqOwner });
@@ -3356,7 +3359,7 @@ describe('SimpleSyncService', () => {
 
       const result = await service.deleteProjectFromCloud('project-1', 'user-1');
 
-      expect(result).toBe(true);
+  expect(result.ok).toBe(true);
       expect(mockClient.from).toHaveBeenCalledWith('projects');
       expect(update).toHaveBeenCalledTimes(1);
       expect(eqId).toHaveBeenCalledWith('id', 'project-1');
@@ -3365,6 +3368,64 @@ describe('SimpleSyncService', () => {
       const payload = update.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(payload).toHaveProperty('deleted_at');
       expect(typeof payload['deleted_at']).toBe('string');
+    });
+
+    it('deleteProjectFromCloud 应在认证过期后刷新会话并重试一次', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockSessionManager.isSessionExpiredError.mockReturnValue(true);
+      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
+
+      const eqOwner = vi.fn()
+        .mockResolvedValueOnce({
+          error: { code: '42501', message: 'RLS Policy Violation', name: 'AuthError' },
+        })
+        .mockResolvedValueOnce({ error: null });
+      const eqId = vi.fn().mockReturnValue({ eq: eqOwner });
+      const update = vi.fn().mockReturnValue({ eq: eqId });
+
+      mockClient.from = vi.fn().mockReturnValue({ update });
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
+
+      const result = await service.deleteProjectFromCloud('project-1', 'user-1');
+
+      expect(result.ok).toBe(true);
+      expect(mockSessionManager.handleAuthErrorWithRefresh).toHaveBeenCalledWith(
+        'deleteProjectFromCloud',
+        expect.objectContaining({ projectId: 'project-1', userId: 'user-1', errorCode: '42501' }),
+      );
+      expect(update).toHaveBeenCalledTimes(2);
+    });
+
+    it('deleteProjectFromCloud 应在恢复窗口内将 session 刷新失败视为可重试离线', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: null },
+      });
+      mockSessionManager.tryRefreshSession.mockImplementationOnce(async () => {
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          value: 'hidden',
+        });
+        return false;
+      });
+
+      const result = await service.deleteProjectFromCloud('project-1', 'user-1');
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('SYNC_OFFLINE');
+        expect(result.error.details?.['reason']).toBe('browser-network-suspended');
+        expect(result.error.details?.['retryable']).toBe(true);
+      }
+
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'visible',
+      });
     });
   });
 

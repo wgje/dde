@@ -36,7 +36,7 @@ const mockSyncService = {
   resumeRealtimeUpdates: vi.fn(),
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
   loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
-  deleteProjectFromCloud: vi.fn().mockResolvedValue(true),
+  deleteProjectFromCloud: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
   pushTask: vi.fn().mockResolvedValue(true),
   deleteTask: vi.fn().mockResolvedValue(true),
   saveUserPreferences: vi.fn().mockResolvedValue(true),
@@ -71,7 +71,7 @@ describe('ActionQueueProcessorsService', () => {
     mockProjectStateService.getProject.mockReturnValue(undefined);
     mockSyncService.saveProjectSmart.mockResolvedValue({ success: true, newVersion: 2 });
     mockSyncService.loadFullProjectOptimized.mockResolvedValue(null);
-    mockSyncService.deleteProjectFromCloud.mockResolvedValue(true);
+    mockSyncService.deleteProjectFromCloud.mockResolvedValue({ ok: true, value: undefined });
     mockSyncService.pushTask.mockResolvedValue(true);
     mockSyncService.deleteTask.mockResolvedValue(true);
     mockSyncService.saveUserPreferences.mockResolvedValue(true);
@@ -608,6 +608,23 @@ describe('ActionQueueProcessorsService', () => {
 
     expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith('p-1', 'test-user');
     expect(result).toBe(true);
+  });
+
+  it('project:delete should throw typed sync errors so queue can classify them', async () => {
+    const handler = getProcessor('project:delete');
+    mockSyncService.deleteProjectFromCloud.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'PERMISSION_DENIED',
+        message: '没有权限执行此操作',
+        details: { errorType: 'PermissionError', errorCode: '42501' },
+      },
+    });
+
+    await expect(handler({
+      entityId: 'p-1',
+      payload: { projectId: 'p-1', userId: 'test-user', sourceUserId: 'test-user' },
+    } as QueuedAction)).rejects.toThrow('PERMISSION_DENIED');
   });
 
   it('project:delete should move queue items from another user to dead letter', async () => {

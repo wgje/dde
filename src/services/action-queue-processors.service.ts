@@ -96,6 +96,24 @@ export class ActionQueueProcessorsService {
     return null;
   }
 
+  private buildOperationErrorMessage(error: {
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }): string {
+    const parts = [error.code, error.message];
+    const errorType = typeof error.details?.['errorType'] === 'string'
+      ? String(error.details['errorType'])
+      : null;
+    const errorCode = error.details?.['errorCode'];
+
+    if (errorType || errorCode) {
+      parts.push(`[${[errorType, errorCode].filter(Boolean).join(':')}]`);
+    }
+
+    return parts.filter(part => typeof part === 'string' && part.length > 0).join(' | ');
+  }
+
   private hasConflictingOwnerHints(
     action: QueuedAction,
     actionType: string,
@@ -333,10 +351,15 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
+        const result = await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
+        if (result.ok) {
+          return true;
+        }
+
+        throw new Error(this.buildOperationErrorMessage(result.error));
       } catch (error) {
         this.logger.error('project:delete 异常', { error, projectId: action.entityId });
-        return false;
+        throw error instanceof Error ? error : new Error(String(error));
       }
     });
 

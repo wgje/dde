@@ -26,7 +26,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project } from '../models';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
-import { isFailure, type Result, type OperationError } from '../utils/result';
+import { ErrorCodes, isFailure, type Result, type OperationError } from '../utils/result';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { EnqueueParams, TaskDeletePayload, TaskPayload } from './action-queue.types';
 
@@ -121,6 +121,25 @@ export class ProjectOperationService {
       });
       return false;
     }
+  }
+
+  private shouldEnqueueProjectDeleteFailure(error: OperationError): boolean {
+    if (error.code === ErrorCodes.SYNC_OFFLINE) {
+      return true;
+    }
+
+    return error.details?.['retryable'] === true;
+  }
+
+  private rollbackProjectDelete(snapshotId: string, error: OperationError): { success: false; error: string } {
+    this.optimisticState.rollbackSnapshot(snapshotId, false);
+
+    if (error.code !== ErrorCodes.SYNC_AUTH_EXPIRED) {
+      this.toastService.error('删除项目失败', error.message);
+    }
+
+    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    return { success: false, error: error.message };
   }
 
   // ========== 项目 CRUD 操作 ==========
@@ -235,16 +254,20 @@ export class ProjectOperationService {
     
     if (isCloudBackedUser) {
       try {
-        const deleteSuccess = await this.syncCoordinator.core.deleteProjectFromCloud(projectId, userId);
+        const deleteResult = await this.syncCoordinator.core.deleteProjectFromCloud(projectId, userId);
         if (!this.isProjectSessionContextCurrent(sessionContext, 'deleteProject:deleteProjectFromCloud', projectId)) {
-          if (!deleteSuccess) {
+          if (isFailure(deleteResult) && this.shouldEnqueueProjectDeleteFailure(deleteResult.error)) {
             await this.settleStaleProjectCrudFailure(sessionContext, deleteQueueAction, 'deleteProject:deleteProjectFromCloud');
           }
           this.optimisticState.commitSnapshot(snapshot.id);
           return { success: true };
         }
         
-        if (!deleteSuccess) {
+        if (isFailure(deleteResult)) {
+          if (!this.shouldEnqueueProjectDeleteFailure(deleteResult.error)) {
+            return this.rollbackProjectDelete(snapshot.id, deleteResult.error);
+          }
+
           // 同步失败（离线或网络异常）：保留本地乐观更新，加入离线队列
           this.actionQueue.enqueue(deleteQueueAction);
           this.toastService.info('已在本地删除', '网络恢复后将同步到云端');
