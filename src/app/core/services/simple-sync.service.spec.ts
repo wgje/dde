@@ -2545,6 +2545,18 @@ describe('SimpleSyncService', () => {
       expect(taskSyncOps.pushTaskPosition).toHaveBeenCalledWith(task.id, 10, 20, 'project-1', task, 'owner-a');
       expect(connectionSyncOps.pushConnection).toHaveBeenCalledWith(connection, 'project-1', true, false, false, 'owner-a');
     });
+
+    it('RetryQueue 回放 task upsert 时不应绕过 tombstone 检查', async () => {
+      const task = createMockTask({ id: 'task-retry-tombstone-guard' });
+      const taskSyncOps = service['taskSyncOps'];
+      const retryHandlers = mockRetryQueueService.setOperationHandler.mock.calls[0]?.[0] as {
+        pushTask: (task: Task, projectId: string, sourceUserId?: string) => Promise<boolean>;
+      };
+
+      await retryHandlers.pushTask(task, 'project-1', 'owner-a');
+
+      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', false, true, 'owner-a');
+    });
   });
 
   // 【P1 修复】队列容量警告功能已迁移到 RetryQueueService

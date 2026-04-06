@@ -255,8 +255,8 @@ export class SimpleSyncService {
     
     // 设置重试队列操作处理器
     this.retryQueueService.setOperationHandler({
-      pushTask: (task, pid, sourceUserId) => this.pushTask(task, pid, true, true, sourceUserId),
-      deleteTask: (tid, pid, sourceUserId) => this.deleteTask(tid, pid, sourceUserId),
+      pushTask: (task, pid, sourceUserId) => this.pushTask(task, pid, false, true, sourceUserId),
+      deleteTask: (tid, pid, sourceUserId) => this.deleteTask(tid, pid, sourceUserId, true),
       pushProject: async (project, sourceUserId, taskIdsToDelete) => {
         const actionQueue = this.getActionQueue();
         if (!actionQueue) {
@@ -280,8 +280,8 @@ export class SimpleSyncService {
         });
         return true;
       },
-      // 重试连接时保留任务存在性校验，避免 23503 外键错误风暴
-      pushConnection: (conn, pid, sourceUserId) => this.pushConnection(conn, pid, true, false, true, sourceUserId),
+      // 重试连接时保留 tombstone + 任务存在性校验，避免陈旧连接重放与 23503 外键错误风暴
+      pushConnection: (conn, pid, sourceUserId) => this.pushConnection(conn, pid, false, false, true, sourceUserId),
       pushBlackBoxEntry: (entry: BlackBoxEntry) => this.blackBoxSync.pushToServer(entry),
       isSessionExpired: () => this.syncState().sessionExpired,
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
@@ -906,8 +906,8 @@ export class SimpleSyncService {
     return this.taskSyncOps.pullTasks(projectId, since);
   }
   
-  async deleteTask(taskId: string, projectId: string, sourceUserId?: string): Promise<boolean> {
-    return this.taskSyncOps.deleteTask(taskId, projectId, sourceUserId);
+  async deleteTask(taskId: string, projectId: string, sourceUserId?: string, fromRetryQueue = false): Promise<boolean> {
+    return this.taskSyncOps.deleteTask(taskId, projectId, sourceUserId, fromRetryQueue);
   }
   
   async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
