@@ -11,6 +11,10 @@ import {
 import { nowISO } from '../../../../utils/date';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
+import {
   type Result,
   type OperationError,
   success,
@@ -53,6 +57,14 @@ export class FocusConsoleSyncService {
 
   /** 短时请求去重：同一 userId 的 inflight loadFocusSession 共享同一 Promise */
   private loadInflight: Map<string, Promise<Result<DockSnapshot | null, OperationError>>> = new Map();
+
+  private buildBrowserSuspendedFailure<T>(): Result<T, OperationError> {
+    return failure(ErrorCodes.SYNC_OFFLINE, '浏览器恢复连接中，请稍后重试', {
+      retryable: true,
+      deferred: true,
+      reason: 'browser-network-suspended',
+    });
+  }
 
   /**
    * Supabase client 安全获取：未就绪或未配置时返回 null，
@@ -97,6 +109,11 @@ export class FocusConsoleSyncService {
     userId: string,
     localUpdatedAt?: string,
   ): Promise<Result<DockSnapshot | null, OperationError>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
+      return this.buildBrowserSuspendedFailure();
+    }
+
     const client = this.getSupabaseClient();
     if (!client) {
       // 离线时返回 null，让调用方使用本地数据继续工作
@@ -131,6 +148,11 @@ export class FocusConsoleSyncService {
       if (!isDockSnapshotLike(state)) return success(null);
       return success(state);
     } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
+        return this.buildBrowserSuspendedFailure();
+      }
+
       this.logger.warn('loadFocusSession failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED, '加载专注会话失败');
     }
@@ -182,6 +204,11 @@ export class FocusConsoleSyncService {
   }
 
   async listRoutineTasks(userId: string): Promise<Result<RoutineTask[], OperationError>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
+      return this.buildBrowserSuspendedFailure();
+    }
+
     const client = this.getSupabaseClient();
     if (!client) {
       // 离线时返回空列表，让调用方使用本地缓存的日常任务
@@ -207,6 +234,11 @@ export class FocusConsoleSyncService {
         updatedAt: row.updated_at,
       })));
     } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
+        return this.buildBrowserSuspendedFailure();
+      }
+
       this.logger.warn('listRoutineTasks failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '获取日常任务失败');
     }

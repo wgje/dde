@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FocusConsoleSyncService } from './focus-console-sync.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
+import {
+  createBrowserNetworkSuspendedError,
+  ensureBrowserNetworkSuspensionTracking,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../../utils/browser-network-suspension';
 
 describe('FocusConsoleSyncService', () => {
   let service: FocusConsoleSyncService;
@@ -24,10 +29,20 @@ describe('FocusConsoleSyncService', () => {
     })),
   };
 
+  const setVisibilityState = (state: DocumentVisibilityState): void => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: state,
+    });
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockClient.from.mockReset();
     mockSupabaseClientService.client.mockClear();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    ensureBrowserNetworkSuspensionTracking();
+    setVisibilityState('visible');
 
     TestBed.configureTestingModule({
       providers: [
@@ -38,6 +53,11 @@ describe('FocusConsoleSyncService', () => {
     });
 
     service = TestBed.inject(FocusConsoleSyncService);
+  });
+
+  afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
   });
 
   it('loadFocusSession should use updated_at desc + limit(1) for LWW latest snapshot', async () => {
@@ -128,6 +148,34 @@ describe('FocusConsoleSyncService', () => {
     }
     expect(mockSupabaseClientService.client).not.toHaveBeenCalled();
     mockSupabaseClientService.isConfigured = true;
+  });
+
+  it('loadFocusSession should skip remote read during browser suspension window', async () => {
+    setVisibilityState('hidden');
+
+    const result = await service.loadFocusSession('user-1');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('SYNC_OFFLINE');
+      expect(result.error.details?.['reason']).toBe('browser-network-suspended');
+    }
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it('listRoutineTasks should return success([]) when browser IO is suspended mid-request', async () => {
+    const order = vi.fn().mockRejectedValue(createBrowserNetworkSuspendedError());
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const result = await service.listRoutineTasks('user-1');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('SYNC_OFFLINE');
+      expect(result.error.details?.['reason']).toBe('browser-network-suspended');
+    }
   });
 
   // TODO(L-28): Add test for listRoutineTasks — verify it maps RoutineTaskRow to RoutineTask[]
