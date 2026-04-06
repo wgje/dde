@@ -512,6 +512,21 @@ export class ActionQueueService {
     }
 
     if (outcome.success) {
+      if (action.entityType === 'project' && action.type === 'delete') {
+        const removedCount = await this.storage.settleProjectDeleteSuccessForOwner(
+          processOwnerUserId,
+          action.entityId,
+          action.id,
+        );
+        this.logger.debug('旧 owner 的项目删除已在持久化队列中收口', {
+          actionId: action.id,
+          processOwnerUserId,
+          projectId: action.entityId,
+          removedCount,
+        });
+        return;
+      }
+
       await this.storage.settleSuccessfulActionForOwner(processOwnerUserId, action.id);
       this.logger.debug('旧 owner 的成功 action 已在持久化队列中收口', {
         actionId: action.id,
@@ -530,6 +545,33 @@ export class ActionQueueService {
       processOwnerUserId,
       settleResult,
     });
+  }
+
+  async settleProjectDeleteSuccessForOwner(
+    ownerUserId: string,
+    projectId: string,
+    actionId?: string,
+  ): Promise<number> {
+    if (ownerUserId === this.getCurrentOwnerUserId()) {
+      return this.discardActions(action => {
+        if (actionId && action.id === actionId) {
+          return false;
+        }
+
+        if (action.entityType === 'project' && action.entityId === projectId) {
+          return true;
+        }
+
+        if (action.entityType === 'task') {
+          const payload = action.payload as TaskPayload | TaskDeletePayload;
+          return payload.projectId === projectId;
+        }
+
+        return false;
+      });
+    }
+
+    return await this.storage.settleProjectDeleteSuccessForOwner(ownerUserId, projectId, actionId);
   }
   
   /**

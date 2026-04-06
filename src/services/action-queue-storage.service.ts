@@ -17,7 +17,7 @@ import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { AuthService } from './auth.service';
-import { QueuedAction, DeadLetterItem } from './action-queue.types';
+import { DeadLetterItem, QueuedAction, TaskDeletePayload, TaskPayload } from './action-queue.types';
 
 // ========== IndexedDB 备份支持 ==========
 const QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
@@ -314,6 +314,43 @@ export class ActionQueueStorageService {
 
     await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
     return true;
+  }
+
+  async settleProjectDeleteSuccessForOwner(
+    ownerUserId: string,
+    projectId: string,
+    actionId?: string,
+  ): Promise<number> {
+    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
+    const nextQueue = queue.filter(action => {
+      if (actionId && action.id === actionId) {
+        return false;
+      }
+
+      if (action.entityType === 'project' && action.entityId === projectId) {
+        return false;
+      }
+
+      if (action.entityType === 'task') {
+        const payload = action.payload as TaskPayload | TaskDeletePayload;
+        return payload.projectId !== projectId;
+      }
+
+      return true;
+    });
+
+    const removedCount = queue.length - nextQueue.length;
+    if (removedCount === 0) {
+      this.logger.debug('旧 owner 队列中未找到待收口的项目删除关联 action', {
+        ownerUserId,
+        projectId,
+        actionId,
+      });
+      return 0;
+    }
+
+    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
+    return removedCount;
   }
 
   async settleFailedActionForOwner(
