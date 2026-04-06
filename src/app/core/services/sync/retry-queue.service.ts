@@ -563,22 +563,15 @@ export class RetryQueueService {
 
   /** 移除指定项目相关的所有待重试项，用于冲突解决后的旧 mutation 收口 */
   removeByProjectId(projectId: string): number {
-    const originalLength = this.queue.length;
-    this.queue = this.queue.filter(item => {
-      if (item.projectId === projectId) {
-        return false;
-      }
+    const itemIds = new Set(
+      [...this.queue, ...this.hiddenQueueItems]
+        .filter(item => item.projectId === projectId || (item.type === 'project' && item.data.id === projectId))
+        .map(item => item.id)
+    );
 
-      if (item.type === 'project' && item.data.id === projectId) {
-        return false;
-      }
-
-      return true;
-    });
-
-    const removedCount = originalLength - this.queue.length;
+    const removedCount = itemIds.size;
     if (removedCount > 0) {
-      this.touchQueueState();
+      this.removeItemsFromAllViews(itemIds);
       this.saveToStorage();
     }
     return removedCount;

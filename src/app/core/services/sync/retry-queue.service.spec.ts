@@ -611,6 +611,19 @@ describe('RetryQueueService', () => {
     expect(service.getItems().some(item => item.projectId === 'p-drop')).toBe(false);
   });
 
+  it('removeByProjectId 应同时清理 hidden bucket 中的同项目重试项', () => {
+    const visibleTask = createTask('t-visible-remove-by-project');
+    const hiddenTask = createTask('t-hidden-remove-by-project');
+    service.add('task', 'upsert', visibleTask, 'p-drop');
+    service.add('task', 'upsert', hiddenTask, 'p-drop', 'other-user');
+
+    const removed = service.removeByProjectId('p-drop');
+
+    expect(removed).toBe(2);
+    expect(service.getItems()).toEqual([]);
+    expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
+  });
+
   it('切账号期间已成功的 in-flight 重试项应从 hidden 持久化队列移除', async () => {
     initDbSpy.mockResolvedValue(null);
     saveToStorageSpy.mockImplementation(() => {
