@@ -141,8 +141,9 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
     errorType = 'PermissionError';
   } else if (code === '42501' || code === 42501) {
     // Postgres RLS (Row-Level Security) policy violation
-    message = '权限不足或登录已过期 (RLS Policy Violation)';
-    errorType = 'AuthError';
+    // 42501 是 RLS 策略违规，可能由过期 token 引起，也可能是真正的权限不足
+    message = '权限不足 (RLS Policy Violation)';
+    errorType = 'PermissionError';
   } else if (code === '23503' || code === 23503) {
     // Postgres 外键约束错误
     message = '关联数据尚未同步 (Foreign Key Violation)';

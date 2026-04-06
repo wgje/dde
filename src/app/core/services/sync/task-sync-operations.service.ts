@@ -224,6 +224,14 @@ export class TaskSyncOperationsService {
           } catch (retryError) {
             const retryEnhanced = supabaseErrorToError(retryError);
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+              // 会话刷新成功后重试仍然失败
+              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+                // 42501: RLS 策略违规，真正的权限不足，非会话过期
+                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+                  taskId: task.id, projectId, errorCode: retryEnhanced.code,
+                });
+                return false;
+              }
               this.sessionManager.handleSessionExpired('pushTask.retryAfterRefresh', {
                 taskId: task.id,
                 projectId,

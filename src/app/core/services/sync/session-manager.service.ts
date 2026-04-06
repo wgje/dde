@@ -86,8 +86,12 @@ export class SessionManagerService {
    * 仅匹配 401/42501 状态码和特定 AuthError 消息，排除速率限制、邮箱未确认等无关错误
    */
   isSessionExpiredError(error: EnhancedError): boolean {
-    if (error.code === 401 || error.code === '401' ||
-        error.code === 42501 || error.code === '42501') {
+    if (error.code === 401 || error.code === '401') {
+      return true;
+    }
+    // 42501 (RLS violation) 不再直接匹配：可能由过期 token 引起，也可能是真正的权限不足
+    // 使用 isRlsPolicyViolation() 判断后走单独的 refresh-then-permission 路径
+    if (error.code === 42501 || error.code === '42501') {
       return true;
     }
     if (error.errorType === 'AuthError') {
@@ -100,6 +104,15 @@ export class SessionManagerService {
              msg.includes('session_not_found');
     }
     return false;
+  }
+
+  /**
+   * 判断错误是否为 RLS 策略违规（42501）
+   * RLS 违规可能由过期 token 导致，也可能是真正的权限不足
+   * 刷新后重试仍失败时应视为权限不足而非会话过期
+   */
+  isRlsPolicyViolation(error: EnhancedError): boolean {
+    return error.code === 42501 || error.code === '42501';
   }
 
   /**

@@ -195,7 +195,15 @@ export class SyncOperationHelperService {
             const retryEnhanced = supabaseErrorToError(retryError);
             
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              // 重试后仍然是认证错误，标记会话过期
+              // 会话刷新成功后重试仍然失败
+              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+                // 42501: RLS 策略违规，真正的权限不足，非会话过期
+                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+                  operationName, entityId, errorCode: retryEnhanced.code,
+                });
+                return { success: false, error: retryEnhanced };
+              }
+              // 非 RLS 的认证错误（如 401），标记会话过期
               this.syncState.setSessionExpired(true);
               this.toast.warning('登录已过期', '请重新登录以继续同步数据');
               return { success: false, error: retryEnhanced };

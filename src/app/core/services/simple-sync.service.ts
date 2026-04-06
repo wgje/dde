@@ -1145,6 +1145,19 @@ export class SimpleSyncService {
             if (isPermanentFailureError(retryError)) throw retryError;
             const retryEnhanced = supabaseErrorToError(retryError);
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+              // 会话刷新成功后重试仍然失败
+              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+                // 42501: RLS 策略违规，真正的权限不足，非会话过期
+                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+                  projectId: project.id,
+                  errorCode: retryEnhanced.code,
+                });
+                return {
+                  success: false,
+                  retryEnqueued,
+                  failureReason: 'project sync permission denied (RLS policy violation after refresh)',
+                };
+              }
               enqueueRetry();
               this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
                 projectId: project.id,
@@ -1701,6 +1714,21 @@ export class SimpleSyncService {
 
             const retryEnhanced = supabaseErrorToError(retryError);
             if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+              // 会话刷新成功后重试仍然失败：
+              // - 若为 42501 (RLS 违规)，说明是真正的权限不足，非会话过期
+              // - 若为 401，说明刷新未能完全恢复，标记为会话过期
+              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+                  projectId, userId, errorCode: retryEnhanced.code,
+                });
+                return failure(ErrorCodes.PERMISSION_DENIED, '权限不足，无法删除此项目', {
+                  projectId,
+                  userId,
+                  retryable: false,
+                  errorCode: retryEnhanced.code,
+                  errorType: retryEnhanced.errorType,
+                });
+              }
               return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.retryAfterRefresh', {
                 projectId,
                 userId,
