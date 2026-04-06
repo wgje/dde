@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
 type MutableService = SentryLazyLoaderService & {
   pendingEvents: Array<Record<string, unknown>>;
@@ -37,6 +38,13 @@ const createSentryMock = (scope: ScopeMock) => ({
   setMeasurement: vi.fn(),
 });
 
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
+
 describe('SentryLazyLoaderService', () => {
   let service: SentryLazyLoaderService;
   const originalDsn = environment.SENTRY_DSN;
@@ -51,6 +59,8 @@ describe('SentryLazyLoaderService', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
   });
 
@@ -99,6 +109,43 @@ describe('SentryLazyLoaderService', () => {
     expect(sentryMock.captureMessage).not.toHaveBeenCalled();
     expect(scope.setExtra).toHaveBeenCalledWith('operation', 'sync');
     expect(scope.setExtra).toHaveBeenCalledWith('delayedCapture', true);
+  });
+
+  it('挂起窗口内 captureMessage 不应立即发送到 Sentry', () => {
+    vi.useFakeTimers();
+    setVisibilityState('hidden');
+
+    const scope = createScopeMock();
+    const sentryMock = createSentryMock(scope);
+    (service as MutableService).sentryModule.set(sentryMock);
+
+    service.captureMessage('resume warning', { level: 'warning' });
+
+    expect(sentryMock.captureMessage).not.toHaveBeenCalled();
+    expect((service as MutableService).pendingEvents).toHaveLength(1);
+
+    vi.useRealTimers();
+    setVisibilityState('visible');
+  });
+
+  it('恢复可见后应在 grace 窗口结束后冲刷挂起期间的消息', async () => {
+    vi.useFakeTimers();
+    setVisibilityState('hidden');
+
+    const scope = createScopeMock();
+    const sentryMock = createSentryMock(scope);
+    (service as MutableService).sentryModule.set(sentryMock);
+
+    service.captureMessage('resume warning', { level: 'warning' });
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(1800);
+
+    expect(sentryMock.captureMessage).toHaveBeenCalledWith('resume warning');
+    expect((service as MutableService).pendingEvents).toHaveLength(0);
+
+    vi.useRealTimers();
   });
 });
 
@@ -155,6 +202,8 @@ describe('SentryLazyLoaderService setUser', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = originalDsn;
   });
 

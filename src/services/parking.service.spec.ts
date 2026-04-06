@@ -20,6 +20,7 @@ import { ContextRestoreService } from './context-restore.service';
 import { ProjectDataService } from '../core-bridge';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { AuthService } from './auth.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
 describe('ParkingService', () => {
   let service: ParkingService;
@@ -138,9 +139,17 @@ describe('ParkingService', () => {
     saveParkedTasksCache: vi.fn(async () => {}),
   };
 
+  const setVisibilityState = (state: DocumentVisibilityState): void => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: state,
+    });
+  };
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-02-23T10:00:00.000Z'));
+    setVisibilityState('visible');
 
     taskMap.clear();
     parkedTasksSignal.set([]);
@@ -172,6 +181,8 @@ describe('ParkingService', () => {
 
   afterEach(() => {
     service?.ngOnDestroy();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     vi.useRealTimers();
     TestBed.resetTestingModule();
   });
@@ -448,6 +459,29 @@ describe('ParkingService', () => {
       currentUserIdSignal.set('user-1');
 
       await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
+
+      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
+    });
+
+    it('挂起窗口内不应触发停泊任务云端拉取', async () => {
+      currentUserIdSignal.set('user-1');
+      setVisibilityState('hidden');
+
+      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
+
+      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
+    });
+
+    it('恢复可见后应延迟补拉一次停泊任务增量', async () => {
+      currentUserIdSignal.set('user-1');
+      setVisibilityState('hidden');
+
+      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
+      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
+
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(1800);
 
       expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
     });

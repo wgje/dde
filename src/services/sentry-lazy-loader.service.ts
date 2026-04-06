@@ -1,5 +1,9 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { environment } from '../environments/environment';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 /**
  * Sentry 客户端类型定义
@@ -99,13 +103,72 @@ export class SentryLazyLoaderService {
   
   /** 初始化 Promise（防止重复初始化） */
   private initPromise: Promise<void> | null = null;
+  private pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingFlushListenersBound = false;
   private hasLoggedMissingDsn = false;
 
   /** 初始化前缓存的用户信息，待 Sentry 就绪后设置 */
   private pendingUser: { id: string; email?: string } | null = null;
 
+  constructor() {
+    this.bindPendingFlushResumeListeners();
+  }
+
   isConfigured(): boolean {
     return this.isConfiguredFlag;
+  }
+
+  private bindPendingFlushResumeListeners(): void {
+    if (this.pendingFlushListenersBound || typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const tryFlush = () => {
+      if (document.visibilityState === 'visible') {
+        this.schedulePendingFlush();
+      }
+    };
+
+    document.addEventListener('visibilitychange', tryFlush);
+    window.addEventListener('online', tryFlush);
+    window.addEventListener('pageshow', tryFlush as EventListener);
+    this.pendingFlushListenersBound = true;
+  }
+
+  private schedulePendingFlush(): void {
+    if (this.pendingFlushTimer || this.pendingEvents.length === 0 || !this.sentryModule()) {
+      return;
+    }
+
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return;
+    }
+
+    const delayMs = Math.max(50, getRemainingBrowserNetworkResumeDelayMs() + 50);
+    this.pendingFlushTimer = setTimeout(() => {
+      this.pendingFlushTimer = null;
+      this.flushPendingEvents();
+    }, delayMs);
+  }
+
+  private deferPendingException(error: unknown, context?: Record<string, unknown>): void {
+    this.addPendingEvent({
+      type: 'exception',
+      error,
+      context,
+      timestamp: Date.now(),
+    });
+    this.schedulePendingFlush();
+  }
+
+  private deferPendingMessage(message: string, options?: CaptureMessageOptions): void {
+    this.addPendingEvent({
+      type: 'message',
+      message,
+      options,
+      timestamp: Date.now(),
+    });
+    this.schedulePendingFlush();
   }
 
   /**
@@ -248,6 +311,11 @@ export class SentryLazyLoaderService {
     const sentry = this.sentryModule();
     
     if (sentry) {
+      if (isBrowserNetworkSuspendedWindow()) {
+        this.deferPendingException(error, context);
+        return;
+      }
+
       // Sentry 已初始化，直接发送
       this.sendExceptionToSentry(sentry, error, context);
     } else {
@@ -363,6 +431,11 @@ export class SentryLazyLoaderService {
     if (!sentry || this.pendingEvents.length === 0) {
       return;
     }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.schedulePendingFlush();
+      return;
+    }
     
     this.logDiagnostic(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
@@ -473,6 +546,11 @@ export class SentryLazyLoaderService {
 
     const sentry = this.sentryModule();
     if (sentry) {
+      if (isBrowserNetworkSuspendedWindow()) {
+        this.deferPendingMessage(message, options);
+        return;
+      }
+
       this.sendMessageToSentry(sentry, message, options);
     } else {
       this.addPendingEvent({

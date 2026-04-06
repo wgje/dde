@@ -32,6 +32,10 @@ import { ContextRestoreService } from './context-restore.service';
 import { AuthService } from './auth.service';
 import { isLocalModeEnabled } from './guards/auth.guard';
 import { ProjectDataService } from '../core-bridge';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 interface SnapshotDraft {
   taskId: string;
@@ -84,10 +88,13 @@ export class ParkingService implements OnDestroy {
   private parkedDeltaTimer: ReturnType<typeof setInterval> | null = null;
   /** 启动延迟执行 timer */
   private startupEvictionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 挂起恢复后的停泊增量补拉 timer */
+  private parkedDeltaRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   /** M-13: initEviction 递归 ready-check 定时器 */
   private evictionReadyCheckTimer: ReturnType<typeof setTimeout> | null = null;
   /** 在线事件监听器 */
   private onlineListener: (() => void) | null = null;
+  private parkedSyncOnlineListener: (() => void) | null = null;
   private visibilityChangeHandler: (() => void) | null = null;
   /** 首次交互监听器 */
   private firstInteractionHandler: (() => void) | null = null;
@@ -138,9 +145,19 @@ export class ParkingService implements OnDestroy {
       this.visibilityChangeHandler = () => {
         if (document.visibilityState === 'hidden') {
           void this.saveSnapshotToIndexedDB();
+          return;
         }
+
+        this.scheduleParkedDeltaRefresh('visible');
       };
       document.addEventListener('visibilitychange', this.visibilityChangeHandler);
+    }
+
+    if (typeof window !== 'undefined') {
+      this.parkedSyncOnlineListener = () => {
+        this.scheduleParkedDeltaRefresh('online');
+      };
+      window.addEventListener('online', this.parkedSyncOnlineListener);
     }
 
     // Start stale parked-task eviction flow.
@@ -166,6 +183,10 @@ export class ParkingService implements OnDestroy {
       clearTimeout(this.startupEvictionTimer);
       this.startupEvictionTimer = null;
     }
+    if (this.parkedDeltaRecoveryTimer) {
+      clearTimeout(this.parkedDeltaRecoveryTimer);
+      this.parkedDeltaRecoveryTimer = null;
+    }
     if (this.evictionReadyCheckTimer) {
       clearTimeout(this.evictionReadyCheckTimer);
       this.evictionReadyCheckTimer = null;
@@ -173,6 +194,10 @@ export class ParkingService implements OnDestroy {
     if (this.onlineListener) {
       window.removeEventListener('online', this.onlineListener);
       this.onlineListener = null;
+    }
+    if (this.parkedSyncOnlineListener) {
+      window.removeEventListener('online', this.parkedSyncOnlineListener);
+      this.parkedSyncOnlineListener = null;
     }
     if (this.visibilityChangeHandler && typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
@@ -407,6 +432,12 @@ export class ParkingService implements OnDestroy {
     // M-24 fix: 离线时跳过增量拉取，避免不必要的网络错误
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     if (!this.authService.currentUserId() || isLocalModeEnabled()) return;
+    if (isBrowserNetworkSuspendedWindow()) {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        this.scheduleParkedDeltaRefresh('network-suspended');
+      }
+      return;
+    }
 
     const knownParkedTaskIds = Array.from(this.taskStore.parkedTaskIds());
     const delta = await this.projectDataService.pullParkedTasksDelta(this.parkedCursor, knownParkedTaskIds);
@@ -437,6 +468,24 @@ export class ParkingService implements OnDestroy {
     await this.projectDataService.saveParkedTasksCache({
       entries,
       cursor: this.parkedCursor,
+    });
+  }
+
+  private scheduleParkedDeltaRefresh(reason: 'visible' | 'online' | 'network-suspended'): void {
+    if (this.parkedDeltaRecoveryTimer) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    if (!this.authService.currentUserId() || isLocalModeEnabled()) return;
+
+    const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+    this.parkedDeltaRecoveryTimer = setTimeout(() => {
+      this.parkedDeltaRecoveryTimer = null;
+      void this.syncParkedDelta();
+    }, delayMs);
+
+    this.logger.debug('ParkingService', '延后停泊任务增量同步以避开浏览器网络挂起窗口', {
+      reason,
+      delayMs,
     });
   }
 
