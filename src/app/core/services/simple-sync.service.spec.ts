@@ -3344,30 +3344,34 @@ describe('SimpleSyncService', () => {
   // 【技术债务重构】此测试组测试 pushProject 的错误处理逻辑
   // 需要根据新架构重新设计
   describe('项目软删除', () => {
-    it('deleteProjectFromCloud 应通过 deleted_at 软删除项目行', async () => {
+    it('deleteProjectFromCloud 应调用 soft_delete_project RPC', async () => {
       mockSupabase.isConfigured = true;
       mockSupabase.clientAsync.mockResolvedValue(mockClient);
       mockClient.auth.getSession = vi.fn().mockResolvedValue({
         data: { session: { user: { id: 'user-1' } } },
       });
 
-      const eqOwner = vi.fn().mockResolvedValue({ error: null });
-      const eqId = vi.fn().mockReturnValue({ eq: eqOwner });
-      const update = vi.fn().mockReturnValue({ eq: eqId });
-
-      mockClient.from = vi.fn().mockReturnValue({ update });
+      mockClient.rpc = vi.fn().mockResolvedValue({ data: true, error: null });
 
       const result = await service.deleteProjectFromCloud('project-1', 'user-1');
 
-  expect(result.ok).toBe(true);
-      expect(mockClient.from).toHaveBeenCalledWith('projects');
-      expect(update).toHaveBeenCalledTimes(1);
-      expect(eqId).toHaveBeenCalledWith('id', 'project-1');
-      expect(eqOwner).toHaveBeenCalledWith('owner_id', 'user-1');
+      expect(result.ok).toBe(true);
+      expect(mockClient.rpc).toHaveBeenCalledWith('soft_delete_project', {
+        p_project_id: 'project-1',
+      });
+    });
 
-      const payload = update.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(payload).toHaveProperty('deleted_at');
-      expect(typeof payload['deleted_at']).toBe('string');
+    it('deleteProjectFromCloud 应将已软删项目视为幂等成功', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
+      mockClient.rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+
+      const result = await service.deleteProjectFromCloud('project-1', 'user-1');
+
+      expect(result.ok).toBe(true);
     });
 
     it('deleteProjectFromCloud 应在认证过期后刷新会话并重试一次', async () => {
@@ -3376,15 +3380,11 @@ describe('SimpleSyncService', () => {
       mockSessionManager.isSessionExpiredError.mockReturnValue(true);
       mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
 
-      const eqOwner = vi.fn()
+      mockClient.rpc = vi.fn()
         .mockResolvedValueOnce({
           error: { code: '42501', message: 'RLS Policy Violation', name: 'AuthError' },
         })
-        .mockResolvedValueOnce({ error: null });
-      const eqId = vi.fn().mockReturnValue({ eq: eqOwner });
-      const update = vi.fn().mockReturnValue({ eq: eqId });
-
-      mockClient.from = vi.fn().mockReturnValue({ update });
+        .mockResolvedValueOnce({ data: true, error: null });
       mockClient.auth.getSession = vi.fn().mockResolvedValue({
         data: { session: { user: { id: 'user-1' } } },
       });
@@ -3396,7 +3396,7 @@ describe('SimpleSyncService', () => {
         'deleteProjectFromCloud',
         expect.objectContaining({ projectId: 'project-1', userId: 'user-1', errorCode: '42501' }),
       );
-      expect(update).toHaveBeenCalledTimes(2);
+      expect(mockClient.rpc).toHaveBeenCalledTimes(2);
     });
 
     it('deleteProjectFromCloud 应在恢复窗口内将 session 刷新失败视为可重试离线', async () => {

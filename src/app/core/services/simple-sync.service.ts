@@ -1642,11 +1642,9 @@ export class SimpleSyncService {
       });
     }
 
-    const { error } = await client
-      .from('projects')
-      .update({ deleted_at: nowISO() })
-      .eq('id', projectId)
-      .eq('owner_id', userId);
+    const { error } = await client.rpc('soft_delete_project', {
+      p_project_id: projectId,
+    });
     if (error) throw supabaseErrorToError(error);
 
     return success(undefined);
