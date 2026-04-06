@@ -18,10 +18,11 @@ import { ChangeTrackerService } from '../../../../services/change-tracker.servic
 import { MobileSyncStrategyService } from '../../../../services/mobile-sync-strategy.service';
 import { SyncStateService } from './sync-state.service';
 import { RetryQueueService } from './retry-queue.service';
+import { SessionManagerService } from './session-manager.service';
 import { Task, Project, Connection } from '../../../../models';
 import { nowISO } from '../../../../utils/date';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
-import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
+import { classifySupabaseClientFailure, supabaseErrorToError } from '../../../../utils/supabase-error';
 import { AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -97,6 +98,7 @@ export class BatchSyncService {
   private readonly mobileSync = inject(MobileSyncStrategyService);
   private readonly syncState = inject(SyncStateService);
   private readonly retryQueue = inject(RetryQueueService);
+  private readonly sessionManager = inject(SessionManagerService);
   
   /** 同步计数器（用于数据漂移检测） */
   private syncCounter = 0;
@@ -282,8 +284,17 @@ export class BatchSyncService {
     
     // Session 验证
     try {
-      const { data: { session } } = await client.auth.getSession();
-      const sessionUserId = session?.user?.id ?? null;
+      let { data: { session } } = await client.auth.getSession();
+      let sessionUserId = session?.user?.id ?? null;
+
+      if (!sessionUserId) {
+        const refreshed = await this.sessionManager.tryRefreshSession('saveProjectToCloud.getSession');
+        if (refreshed) {
+          ({ data: { session } } = await client.auth.getSession());
+          sessionUserId = session?.user?.id ?? null;
+        }
+      }
+
       if (!sessionUserId) {
         this.syncState.setSessionExpired(true);
         // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
@@ -320,21 +331,108 @@ export class BatchSyncService {
         };
       }
     } catch (e) {
-      this.logger.error('Session 验证失败', e);
-      this.syncState.setSessionExpired(true);
-      // 【NEW-3 修复】Session 验证异常时同样保护数据
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-      retryEnqueued.push(`project:${project.id}`);
-      this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
-      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-      return {
-        success: false,
-        failedTaskIds,
-        failedConnectionIds,
-        retryEnqueued,
-        projectPushed,
-        failureReason: 'project sync session validation failed',
-      };
+      const enhanced = supabaseErrorToError(e);
+      if (this.sessionManager.isSessionExpiredError(enhanced)) {
+        this.logger.info('Session 预检命中认证错误，尝试刷新后继续项目批量同步', {
+          projectId: project.id,
+          userId,
+          errorCode: enhanced.code,
+        });
+        const refreshed = await this.sessionManager.tryRefreshSession('saveProjectToCloud.getSession');
+
+        if (refreshed) {
+          try {
+            const { data: { session } } = await client.auth.getSession();
+            const sessionUserId = session?.user?.id ?? null;
+            if (sessionUserId === userId) {
+              this.logger.info('Session 刷新成功，继续项目批量同步', { projectId: project.id, userId });
+            } else if (!sessionUserId) {
+              this.syncState.setSessionExpired(true);
+              this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+              retryEnqueued.push(`project:${project.id}`);
+              this.logger.warn('Session 刷新后仍无有效会话，项目数据已入重试队列', { projectId: project.id });
+              this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+              return {
+                success: false,
+                failedTaskIds,
+                failedConnectionIds,
+                retryEnqueued,
+                projectPushed,
+                failureReason: 'project sync session expired after refresh',
+              };
+            } else {
+              this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+              retryEnqueued.push(`project:${project.id}`);
+              this.logger.warn('Session 刷新后项目同步 owner 与当前会话不匹配，已回退到原 owner 重试队列', {
+                projectId: project.id,
+                expectedUserId: userId,
+                sessionUserId,
+              });
+              this.syncState.setSyncError('账号已切换，项目稍后将按原 owner 重试');
+              return {
+                success: false,
+                failedTaskIds,
+                failedConnectionIds,
+                retryEnqueued,
+                projectPushed,
+                failureReason: 'project sync owner mismatch after refresh',
+              };
+            }
+          } catch (retrySessionError) {
+            const retryEnhanced = supabaseErrorToError(retrySessionError);
+            this.logger.warn('Session 刷新后再次校验失败，项目数据已入重试队列', {
+              projectId: project.id,
+              errorCode: retryEnhanced.code,
+              errorType: retryEnhanced.errorType,
+            });
+            this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+            retryEnqueued.push(`project:${project.id}`);
+            this.syncState.setSyncError(retryEnhanced.message);
+            return {
+              success: false,
+              failedTaskIds,
+              failedConnectionIds,
+              retryEnqueued,
+              projectPushed,
+              failureReason: 'project sync session validation retried and deferred',
+            };
+          }
+
+          // 刷新成功且会话校验通过时，继续后续批量同步逻辑。
+        } else {
+          this.logger.error('Session 验证失败', enhanced);
+          this.syncState.setSessionExpired(true);
+          this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+          retryEnqueued.push(`project:${project.id}`);
+          this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
+          this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+          return {
+            success: false,
+            failedTaskIds,
+            failedConnectionIds,
+            retryEnqueued,
+            projectPushed,
+            failureReason: 'project sync session validation failed',
+          };
+        }
+      } else {
+        this.logger.warn('Session 预检暂不可用，项目数据已入重试队列等待恢复', {
+          projectId: project.id,
+          errorCode: enhanced.code,
+          errorType: enhanced.errorType,
+        });
+        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+        retryEnqueued.push(`project:${project.id}`);
+        this.syncState.setSyncError(enhanced.message);
+        return {
+          success: false,
+          failedTaskIds,
+          failedConnectionIds,
+          retryEnqueued,
+          projectPushed,
+          failureReason: 'project sync session validation deferred',
+        };
+      }
     }
     
     this.syncState.setSyncing(true);

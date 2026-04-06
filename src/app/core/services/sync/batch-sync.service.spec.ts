@@ -9,6 +9,7 @@ import { ChangeTrackerService } from '../../../../services/change-tracker.servic
 import { MobileSyncStrategyService } from '../../../../services/mobile-sync-strategy.service';
 import { SyncStateService } from './sync-state.service';
 import { RetryQueueService } from './retry-queue.service';
+import { SessionManagerService } from './session-manager.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import type { Connection, Project, Task } from '../../../../models';
 
@@ -99,6 +100,12 @@ describe('BatchSyncService owner isolation', () => {
     setSessionExpired: vi.fn(),
   };
 
+  const mockSessionManager = {
+    tryRefreshSession: vi.fn(async () => false),
+    handleAuthErrorWithRefresh: vi.fn(async () => false),
+    isSessionExpiredError: vi.fn(() => false),
+  };
+
   const mockSentry = {
     captureMessage: vi.fn(),
     captureException: vi.fn(),
@@ -106,6 +113,13 @@ describe('BatchSyncService owner isolation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockClient.auth.getSession.mockReset();
+    mockSessionManager.tryRefreshSession.mockReset();
+    mockSessionManager.tryRefreshSession.mockImplementation(async () => false);
+    mockSessionManager.handleAuthErrorWithRefresh.mockReset();
+    mockSessionManager.handleAuthErrorWithRefresh.mockImplementation(async () => false);
+    mockSessionManager.isSessionExpiredError.mockReset();
+    mockSessionManager.isSessionExpiredError.mockImplementation(() => false);
 
     const injector = Injector.create({
       providers: [
@@ -118,6 +132,7 @@ describe('BatchSyncService owner isolation', () => {
         { provide: MobileSyncStrategyService, useValue: mockMobileSync },
         { provide: SyncStateService, useValue: mockSyncState },
         { provide: RetryQueueService, useValue: { removeByEntity: vi.fn() } },
+        { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: SentryLazyLoaderService, useValue: mockSentry },
       ],
     });
@@ -164,6 +179,48 @@ describe('BatchSyncService owner isolation', () => {
     expect(result.retryEnqueued).toContain('project:project-owner-mismatch');
     expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
     expect(mockToast.warning).not.toHaveBeenCalled();
+  });
+
+  it('saveProjectToCloud 在首次无 session 时应先尝试 refresh，再继续同步', async () => {
+    const project = createProject({ id: 'project-refresh-before-expire' });
+    mockSessionManager.tryRefreshSession.mockImplementationOnce(async () => true);
+    mockClient.auth.getSession
+      .mockResolvedValueOnce({ data: { session: null } })
+      .mockResolvedValueOnce({ data: { session: { user: { id: 'user-a' } } } });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(true);
+    expect(mockSessionManager.tryRefreshSession).toHaveBeenCalledWith('saveProjectToCloud.getSession');
+    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
+    expect(callbacks.addToRetryQueue).not.toHaveBeenCalled();
+  });
+
+  it('saveProjectToCloud 在 getSession 抛认证错误后 refresh 成功时应继续同步', async () => {
+    const project = createProject({ id: 'project-refresh-after-auth-error' });
+    let getSessionCallCount = 0;
+    mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) => error.code === 'PGRST301');
+    mockSessionManager.tryRefreshSession.mockImplementationOnce(async () => true);
+    mockClient.auth.getSession.mockImplementation(async () => {
+      getSessionCallCount += 1;
+      if (getSessionCallCount === 1) {
+        throw { code: 'PGRST301', message: 'JWT expired' };
+      }
+
+      return { data: { session: { user: { id: 'user-a' } } } };
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(true);
+    expect(mockSessionManager.tryRefreshSession).toHaveBeenCalledWith('saveProjectToCloud.getSession');
+    expect(callbacks.pushProject).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'project-refresh-after-auth-error' }),
+      false,
+      'user-a',
+      [],
+    );
+    expect(callbacks.addToRetryQueue).not.toHaveBeenCalled();
   });
 
   it('saveProjectToCloud 应将 sourceUserId 透传给 pushProject 回调', async () => {
