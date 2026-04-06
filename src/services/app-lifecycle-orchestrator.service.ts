@@ -8,6 +8,7 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { SimpleSyncService, SessionManagerService } from '../core-bridge';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { reloadViaForceClearCache } from '../utils/force-clear-cache';
+import { getRemainingBrowserNetworkResumeDelayMs } from '../utils/browser-network-suspension';
 
 export type AppResumeReason =
   | 'visibility-threshold'
@@ -53,6 +54,7 @@ export class AppLifecycleOrchestratorService {
   private lastBackgroundDurationMs = 0;
   private consecutiveFailures = 0;
   private autoReloadScheduled = false;
+  private deferredResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private hasPendingVersion = false;
   private hasShownResumeVersionPrompt = false;
@@ -247,10 +249,12 @@ export class AppLifecycleOrchestratorService {
       );
 
       if (pipelineResult.deferred) {
+        const deferredDelayMs = this.scheduleDeferredResumeRetry(reason);
         this.addLifecycleBreadcrumb('lifecycle.resume.success', reason, {
           elapsedMs: Date.now() - startAt,
           deferred: true,
           deferredReason: pipelineResult.reason ?? 'unknown',
+          deferredDelayMs,
         });
         return;
       }
@@ -668,6 +672,27 @@ export class AppLifecycleOrchestratorService {
     });
   }
 
+  private scheduleDeferredResumeRetry(reason: AppResumeReason): number {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.logger.info('页面仍处于后台，跳过 deferred resume 定时器，等待下一次可见恢复事件', { reason });
+      return 0;
+    }
+
+    const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+
+    if (this.deferredResumeTimer) {
+      return delayMs;
+    }
+
+    this.logger.info('Resume recovery deferred, scheduling retry', { reason, delayMs });
+    this.deferredResumeTimer = setTimeout(() => {
+      this.deferredResumeTimer = null;
+      void this.triggerResume(reason);
+    }, delayMs);
+
+    return delayMs;
+  }
+
   private maybeScheduleAutoReload(reason: AppResumeReason, error: unknown): void {
     if (this.autoReloadScheduled) {
       return;
@@ -736,6 +761,11 @@ export class AppLifecycleOrchestratorService {
   }
 
   private cleanup(): void {
+    if (this.deferredResumeTimer) {
+      clearTimeout(this.deferredResumeTimer);
+      this.deferredResumeTimer = null;
+    }
+
     if (typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }

@@ -275,6 +275,11 @@ describe('AppLifecycleOrchestratorService', () => {
       deferred: true,
       reason: 'client-unready',
     });
+    mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: true,
+      refreshed: false,
+      deferred: false,
+    });
 
     await service.triggerResume('visibility-threshold');
 
@@ -282,6 +287,41 @@ describe('AppLifecycleOrchestratorService', () => {
     expect(mockSyncCoordinator.refreshBlackBoxWatermarkIfNeeded).not.toHaveBeenCalled();
     expect(mockToast.warning).not.toHaveBeenCalled();
     expect(service.isResuming()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledTimes(2);
+    expect(mockSimpleSync.recoverAfterResume).toHaveBeenCalled();
+  });
+
+  it('hidden 状态下 online 触发 deferred 后不应以 100ms 自旋重试', async () => {
+    service.initialize();
+    mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: false,
+      refreshed: false,
+      deferred: true,
+      reason: 'client-unready',
+    });
+    mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: true,
+      refreshed: false,
+      deferred: false,
+    });
+
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('online'));
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledTimes(1);
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.runAllTimersAsync();
+
+    expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledTimes(2);
+    expect(mockSimpleSync.recoverAfterResume).toHaveBeenCalled();
   });
 
   it('should stop resume pipeline after timeout without blocking UI state', async () => {
