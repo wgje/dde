@@ -762,15 +762,20 @@ export class ActionQueueStorageService {
     const msg = errorMessage.toLowerCase();
 
     if (msg.includes('network') || msg.includes('failed to fetch') ||
-        msg.includes('networkerror') || msg.includes('connection') || msg.includes('offline')) {
+        msg.includes('networkerror') || msg.includes('connection') || msg.includes('offline') ||
+        msg.includes('browsernetworksuspendederror') || msg.includes('network io suspended') ||
+        msg.includes('离线') || msg.includes('网络')) {
       return 'network';
     }
-    if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('deadline exceeded')) {
+    if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('deadline exceeded') ||
+        msg.includes('超时')) {
       return 'timeout';
     }
     if (msg.includes('permission') || msg.includes('unauthorized') || msg.includes('forbidden') ||
         msg.includes('401') || msg.includes('403') || msg.includes('jwt') ||
-        msg.includes('token') || msg.includes('policy')) {
+        msg.includes('token') || msg.includes('policy') || msg.includes('42501') ||
+        msg.includes('autherror') || msg.includes('expired') || msg.includes('权限不足') ||
+        msg.includes('登录已过期') || msg.includes('未授权') || msg.includes('重新登录')) {
       return 'permission';
     }
     for (const pattern of LOCAL_QUEUE_CONFIG.BUSINESS_ERROR_PATTERNS) {

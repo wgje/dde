@@ -563,6 +563,15 @@ describe('ActionQueueStorageService', () => {
       expect(service.hasDeadLetters()).toBe(true);
     });
 
+    it('should move localized auth-expired errors directly to dead letter queue', () => {
+      const action = createMockAction({ retryCount: 0 });
+
+      const result = service.handleRetry(action, 'SYNC_AUTH_EXPIRED | 登录已过期，请重新登录 | [AuthError:42501]');
+
+      expect(result).toBe('dead-letter');
+      expect(service.hasDeadLetters()).toBe(true);
+    });
+
     it('should retry on network errors when under max retries', () => {
       const action = createMockAction({ retryCount: 0 });
       ctx.pendingActions.set([action]);
