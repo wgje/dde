@@ -31,6 +31,7 @@ describe('项目软删除契约', () => {
     const sql = readSql('scripts/init-supabase.sql');
 
     expect(sql).toContain('deleted_at TIMESTAMP WITH TIME ZONE');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)');
 
     const accessHelperSection = getLastSection(
       sql,
@@ -109,6 +110,7 @@ describe('项目软删除契约', () => {
 
   it('前向修复 migration 必须补 deleted_at 列并重写关键访问 helper', () => {
     const sql = readSql('supabase/migrations/20260404103000_projects_soft_delete_alignment.sql');
+    const softDeleteRpcSql = readSql('supabase/migrations/20260406143000_project_soft_delete_rpc.sql');
     const accessibleProjectIdsSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()',
@@ -137,6 +139,7 @@ describe('项目软删除契约', () => {
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id uuid)');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id uuid)');
+    expect(softDeleteRpcSql).toContain('CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)');
     expect(sql).toContain('CREATE POLICY "owner select" ON public.projects');
     expect(sql).toContain('CREATE POLICY "tasks owner select" ON public.tasks');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.purge_tasks_v3(');

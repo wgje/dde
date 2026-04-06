@@ -858,6 +858,10 @@ export type Database = {
         }[]
       }
       purge_tasks: { Args: { p_task_ids: string[] }; Returns: number }
+      soft_delete_project: {
+        Args: { p_project_id: string }
+        Returns: boolean
+      }
       purge_tasks_v2: {
         Args: { p_project_id: string; p_task_ids: string[] }
         Returns: number

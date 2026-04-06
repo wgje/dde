@@ -252,6 +252,11 @@ interface Database {
         Args: { p_project_id: string; p_task_ids: string[] };
         Returns: number;
       };
+      /** 安全软删除项目（owner-only, idempotent） */
+      soft_delete_project: {
+        Args: { p_project_id: string };
+        Returns: boolean;
+      };
       /** 永久清除任务 v1 */
       purge_tasks: {
         Args: { p_task_ids: string[] };
