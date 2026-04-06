@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
 const createClientMock = vi.fn(() => ({
   auth: {
@@ -19,12 +20,20 @@ const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
 };
 
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
+
 describe('SupabaseClientService', () => {
   let service: SupabaseClientService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    setVisibilityState('visible');
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     const injector = Injector.create({
       providers: [
@@ -36,6 +45,8 @@ describe('SupabaseClientService', () => {
   });
 
   afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     fetchSpy.mockRestore();
   });
 
@@ -157,6 +168,23 @@ describe('SupabaseClientService', () => {
       expect(service.isOfflineMode()).toBe(true);
     });
 
+    it('挂起窗口内 probeReachability 不应发起真实网络探测', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      setVisibilityState('hidden');
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(false);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(service.isOfflineMode()).toBe(false);
+    });
+
     it('probeReachability 返回非 2xx 时应保持连接中断状态', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;
@@ -194,6 +222,31 @@ describe('SupabaseClientService', () => {
       ).rejects.toThrow('Failed to fetch');
 
       expect(listener).toHaveBeenCalledWith({ offline: true, source: 'request' });
+      unsubscribe();
+    });
+
+    it('挂起窗口内请求级 fetch 应快速拒绝且不切换离线状态', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      setVisibilityState('hidden');
+
+      const listener = vi.fn();
+      const unsubscribe = service.onConnectivityChange(listener);
+
+      await expect(
+        mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects')
+      ).rejects.toThrow('Browser network IO suspended');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+      expect(service.isOfflineMode()).toBe(false);
       unsubscribe();
     });
   });

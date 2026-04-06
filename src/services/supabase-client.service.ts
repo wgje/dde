@@ -4,6 +4,11 @@ import { LoggerService } from './logger.service';
 import { environment } from '../environments/environment';
 import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
+import {
+  createBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 export interface SupabaseConnectivityChange {
   offline: boolean;
@@ -210,6 +215,11 @@ export class SupabaseClientService {
       return false;
     }
 
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起窗口内跳过 Supabase 连通性探测');
+      return false;
+    }
+
     const now = Date.now();
     const force = options?.force === true;
     const timeoutMs = Math.max(250, options?.timeoutMs ?? 5000);
@@ -298,6 +308,10 @@ export class SupabaseClientService {
   }
 
   private shouldMarkOfflineFromFetchFailure(error: unknown): boolean {
+    if (isBrowserNetworkSuspendedError(error)) {
+      return false;
+    }
+
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return true;
     }
@@ -399,6 +413,10 @@ export class SupabaseClientService {
         // 保留请求超时保护，并优先复用调用方 signal
         // 离线时快速失败，避免 120s 超时爆出 AbortError
         fetch: (url: RequestInfo | URL, options: RequestInit = {}) => {
+          if (isBrowserNetworkSuspendedWindow()) {
+            return Promise.reject(createBrowserNetworkSuspendedError());
+          }
+
           // 离线时直接拒绝，避免等待超时产生 AbortError
           if (typeof navigator !== 'undefined' && !navigator.onLine) {
             return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
