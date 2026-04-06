@@ -4,6 +4,7 @@ import { provideRouter, withComponentInputBinding, withHashLocation, withRouterC
 import { provideServiceWorker } from '@angular/service-worker';
 import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-registration-strategy';
 import { pushStartupTrace } from './src/utils/startup-trace';
+import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-network-suspension';
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -14,6 +15,9 @@ import { pushStartupTrace } from './src/utils/startup-trace';
 
 // 简化日志 - 仅在显式 verbose 时输出，避免启动期控制台噪音
 const VERBOSE_LOGS = isDevMode() && localStorage.getItem('nanoflow.verbose') === 'true';
+
+// 启动期尽早挂上浏览器后台网络挂起跟踪，避免首次恢复事件被错过。
+ensureBrowserNetworkSuspensionTracking();
 
 // ============= BUILD ID =============
 // 使用入口 chunk URL 作为构建指纹，确保 outputHashing 变化能触发版本偏移恢复。
