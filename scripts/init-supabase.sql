@@ -4048,6 +4048,7 @@ DECLARE
   v_user_id uuid;
   v_owner_id uuid;
   v_deleted_at timestamptz;
+  v_operation_ts timestamptz;
 BEGIN
   v_user_id := auth.uid();
 
@@ -4059,7 +4060,8 @@ BEGIN
   SELECT owner_id, deleted_at
   INTO v_owner_id, v_deleted_at
   FROM public.projects
-  WHERE id = p_project_id;
+  WHERE id = p_project_id
+  FOR UPDATE;
 
   IF NOT FOUND THEN
     RETURN true;
@@ -4073,9 +4075,55 @@ BEGIN
     RETURN true;
   END IF;
 
+  v_operation_ts := now();
+
+  UPDATE public.tasks
+  SET deleted_at = v_operation_ts,
+      updated_at = CASE
+        WHEN updated_at IS NULL OR updated_at < v_operation_ts THEN v_operation_ts
+        ELSE updated_at
+      END
+  WHERE project_id = p_project_id
+    AND deleted_at IS NULL;
+
+  UPDATE public.connections
+  SET deleted_at = v_operation_ts,
+      updated_at = CASE
+        WHEN updated_at IS NULL OR updated_at < v_operation_ts THEN v_operation_ts
+        ELSE updated_at
+      END
+  WHERE project_id = p_project_id
+    AND deleted_at IS NULL;
+
+  INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
+  SELECT
+    t.id,
+    t.project_id,
+    COALESCE(t.deleted_at, v_operation_ts),
+    v_user_id
+  FROM public.tasks t
+  WHERE t.project_id = p_project_id
+  ON CONFLICT (task_id) DO UPDATE
+  SET project_id = EXCLUDED.project_id,
+      deleted_at = GREATEST(public.task_tombstones.deleted_at, EXCLUDED.deleted_at),
+      deleted_by = COALESCE(public.task_tombstones.deleted_by, EXCLUDED.deleted_by);
+
+  INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+  SELECT
+    c.id,
+    c.project_id,
+    COALESCE(c.deleted_at, v_operation_ts),
+    v_user_id
+  FROM public.connections c
+  WHERE c.project_id = p_project_id
+  ON CONFLICT (connection_id) DO UPDATE
+  SET project_id = EXCLUDED.project_id,
+      deleted_at = GREATEST(public.connection_tombstones.deleted_at, EXCLUDED.deleted_at),
+      deleted_by = COALESCE(public.connection_tombstones.deleted_by, EXCLUDED.deleted_by);
+
   UPDATE public.projects
-  SET deleted_at = now(),
-      updated_at = now()
+  SET deleted_at = v_operation_ts,
+      updated_at = v_operation_ts
   WHERE id = p_project_id;
 
   RETURN true;

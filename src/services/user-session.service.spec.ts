@@ -83,6 +83,17 @@ function createProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
+function saveGuestDraftProjects(projects: Project[]): void {
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  localStorage.setItem('nanoflow.guest-data', JSON.stringify({
+    projects,
+    version: 2,
+    savedAt: now,
+    expiresAt,
+  }));
+}
+
 function createAttachment(id = crypto.randomUUID()) {
   const now = new Date().toISOString();
   return {
@@ -231,6 +242,7 @@ describe('UserSessionService', () => {
 
     mockChangeTracker = {
       clearAllChanges: vi.fn(),
+      hasProjectChanges: vi.fn().mockReturnValue(false),
     };
 
     mockUndoService = {
@@ -1624,6 +1636,43 @@ describe('UserSessionService', () => {
       expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
     });
 
+    it('远端已删的 local-only 影子项目在无真实本地改动时应被移除', async () => {
+      const shadowProject = createProject({
+        id: 'proj-shadow-deleted',
+        name: 'Shadow Deleted',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([shadowProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-shadow-deleted');
+      (mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
+      (
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        activeProjectId: 'proj-shadow-deleted',
+        activeAccessible: false,
+        activeWatermark: null,
+        projectsWatermark: '2026-02-17T10:02:00.000Z',
+        blackboxWatermark: '2026-02-17T10:03:00.000Z',
+        serverNow: '2026-02-17T10:03:01.000Z',
+      });
+      (mockSyncCoordinator['refreshProjectManifestIfNeeded'] as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ skipped: true, watermark: '2026-02-17T10:02:00.000Z' });
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(mockProjectState['setActiveProjectId']).toHaveBeenCalledWith(null);
+      expect(mockProjectState['setProjects']).toHaveBeenCalledWith([]);
+      expect((mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
+        .toHaveBeenCalledWith([], 'user-1');
+      expect(mockSyncCoordinator['performDeltaSync']).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
+    });
+
     it('项目元数据慢路成功后应提交 deferred manifest watermark', async () => {
       const query = {
         select: vi.fn().mockReturnThis(),
@@ -1977,6 +2026,7 @@ describe('UserSessionService', () => {
         name: 'Guest Draft',
         syncSource: 'local-only',
       });
+      saveGuestDraftProjects([localOnlyProject]);
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
         remoteProjectA,
         remoteProjectB,
@@ -2004,6 +2054,104 @@ describe('UserSessionService', () => {
 
       const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
       expect(setProjectsCall?.some((project: Project) => project.id === 'proj-local-only')).toBe(true);
+    });
+
+    it('expired guest draft 标记不应阻止 local-only 影子项目被裁剪', async () => {
+      const remoteProject = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
+      const shadowProject = createProject({
+        id: 'proj-expired-shadow',
+        name: 'Expired Shadow',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      localStorage.setItem('nanoflow.guest-data', JSON.stringify({
+        projects: [shadowProject],
+        version: 2,
+        savedAt: '2026-02-01T00:00:00.000Z',
+        expiresAt: '2026-02-02T00:00:00.000Z',
+      }));
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, shadowProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([
+        {
+          id: 'proj-a', title: 'A', description: '',
+          created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
+        },
+      ]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a']);
+    });
+
+    it('无 guest draft 标记且无真实本地改动的 local-only 影子项目应被裁剪', async () => {
+      const remoteProject = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
+      const shadowProject = createProject({
+        id: 'proj-shadow-only',
+        name: 'Shadow',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, shadowProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([
+        {
+          id: 'proj-a', title: 'A', description: '',
+          created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
+        },
+      ]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a']);
+    });
+
+    it('存在 ChangeTracker 本地改动时，应继续保留 remote 缺席的 local-only 项目', async () => {
+      const remoteProject = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
+      const localOnlyProject = createProject({
+        id: 'proj-local-change',
+        name: 'Local Change',
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, localOnlyProject]);
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockImplementation(
+        (projectId: string) => projectId === 'proj-a'
+      );
+      (mockChangeTracker['hasProjectChanges'] as ReturnType<typeof vi.fn>).mockImplementation(
+        (projectId: string) => projectId === 'proj-local-change'
+      );
+
+      setupSupabaseQuery([
+        {
+          id: 'proj-a', title: 'A', description: '',
+          created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
+        },
+      ]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      const setProjectsCall = (mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
+      expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a', 'proj-local-change']);
     });
 
     it('裁剪后清理不可访问的 activeProjectId 时应弹提示', async () => {
@@ -2462,6 +2610,7 @@ describe('UserSessionService', () => {
         name: 'Guest Draft',
         syncSource: 'local-only',
       });
+      saveGuestDraftProjects([localOnlyProject]);
       (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([localOnlyProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-local-only');
 

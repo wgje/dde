@@ -50,6 +50,8 @@ const FULL_WIPE_LOCAL_STORAGE_PREFIXES = [
   'nanoflow.blackbox-manifest-watermark',
 ];
 
+const GUEST_DATA_STORAGE_KEY = 'nanoflow.guest-data';
+
 @Injectable({
   providedIn: 'root'
 })
@@ -1515,12 +1517,77 @@ export class UserSessionService {
     }
   }
 
+  private getPersistedGuestDraftProjectIds(): Set<string> {
+    if (typeof localStorage === 'undefined') {
+      return new Set();
+    }
+
+    try {
+      const rawGuestData = localStorage.getItem(GUEST_DATA_STORAGE_KEY);
+      if (!rawGuestData) {
+        return new Set();
+      }
+
+      const parsedGuestData = JSON.parse(rawGuestData) as { projects?: unknown };
+      const expiresAt = typeof (parsedGuestData as { expiresAt?: unknown }).expiresAt === 'string'
+        ? (parsedGuestData as { expiresAt: string }).expiresAt
+        : null;
+      if (expiresAt) {
+        const expiresAtMs = new Date(expiresAt).getTime();
+        if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now()) {
+          return new Set();
+        }
+      }
+
+      if (!Array.isArray(parsedGuestData?.projects)) {
+        return new Set();
+      }
+
+      const projectIds = new Set<string>();
+      for (const project of parsedGuestData.projects) {
+        if (!project || typeof project !== 'object') {
+          continue;
+        }
+
+        const projectId = (project as { id?: unknown }).id;
+        if (typeof projectId === 'string' && projectId.trim().length > 0) {
+          projectIds.add(projectId);
+        }
+      }
+
+      return projectIds;
+    } catch (error) {
+      this.logger.debug('读取 guest draft 标记失败，按无标记处理', { error });
+      return new Set();
+    }
+  }
+
+  private hasRealLocalChanges(projectId: string): boolean {
+    return this.syncCoordinator.hasPendingChangesForProject(projectId)
+      || this.changeTracker.hasProjectChanges(projectId);
+  }
+
+  private isProtectedLocalOnlyProject(
+    project: Project | null | undefined,
+    guestDraftProjectIds = this.getPersistedGuestDraftProjectIds()
+  ): boolean {
+    if (!project || project.syncSource !== 'local-only') {
+      return false;
+    }
+
+    if (guestDraftProjectIds.has(project.id)) {
+      return true;
+    }
+
+    return this.hasRealLocalChanges(project.id);
+  }
+
   private isLocalOnlyProject(projectId: string | null | undefined): boolean {
     if (!projectId) {
       return false;
     }
 
-    return this.projectState.getProject(projectId)?.syncSource === 'local-only';
+    return this.isProtectedLocalOnlyProject(this.projectState.getProject(projectId));
   }
 
   private hasLocalOnlyProjectsAwaitingPromotion(): boolean {
@@ -1929,6 +1996,7 @@ export class UserSessionService {
     // 更新本地项目列表的元数据（不覆盖 tasks/connections）
     let updatedProjects = [...localProjects];
     let hasChanges = false;
+    const guestDraftProjectIds = this.getPersistedGuestDraftProjectIds();
     
     for (const remote of data || []) {
       const localIndex = updatedProjects.findIndex(p => p.id === remote.id);
@@ -1950,7 +2018,7 @@ export class UserSessionService {
       } else {
         // 已有项目：只更新元数据，不覆盖 tasks
         const local = updatedProjects[localIndex];
-        const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(local.id);
+        const hasPendingLocalChanges = this.hasRealLocalChanges(local.id);
         const nextProject: Project = {
           ...local,
           syncSource: 'synced',
@@ -1978,15 +2046,15 @@ export class UserSessionService {
     }
 
     // 查询成功时，远端列表缺失意味着项目已不可访问或已被软删除。
-    // 这里允许列表合法收缩，但仍保留 local-only / active / pending changes 项目。
+    // 这里允许列表合法收缩，但仍保留 guest draft / active / real pending changes 项目。
     const activeProjectId = this.projectState.activeProjectId();
     const beforePruneCount = updatedProjects.length;
     updatedProjects = updatedProjects.filter(project => {
       if (accessibleProjectIds.has(project.id)) return true;
-      if (project.syncSource === 'local-only') return true;
+      if (this.isProtectedLocalOnlyProject(project, guestDraftProjectIds)) return true;
       // 不裁剪当前活跃项目，交由调用方处理
       if (project.id === activeProjectId) return true;
-      const hasPendingLocalChanges = this.syncCoordinator.hasPendingChangesForProject(project.id);
+      const hasPendingLocalChanges = this.hasRealLocalChanges(project.id);
       return hasPendingLocalChanges;
     });
     if (updatedProjects.length !== beforePruneCount) {
@@ -2025,9 +2093,9 @@ export class UserSessionService {
       return null;
     }
 
-    const hasPendingLocalChanges = localProject.syncSource === 'local-only'
-      || localProject.pendingSync === true
-      || this.syncCoordinator.hasPendingChangesForProject(projectId);
+    const guestDraftProjectIds = this.getPersistedGuestDraftProjectIds();
+    const hasPendingLocalChanges = this.hasRealLocalChanges(projectId)
+      || this.isProtectedLocalOnlyProject(localProject, guestDraftProjectIds);
 
     if (hasPendingLocalChanges) {
       // 使用 getProjectsWithCurrentData 确保项目包含 TaskStore 中最新的任务数据

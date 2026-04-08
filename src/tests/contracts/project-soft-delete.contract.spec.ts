@@ -83,6 +83,11 @@ describe('项目软删除契约', () => {
       'CREATE OR REPLACE FUNCTION public.get_resume_recovery_probe(',
       'REVOKE ALL ON FUNCTION public.get_resume_recovery_probe(UUID) FROM PUBLIC;'
     );
+    const softDeleteRpcSection = getSection(
+      sql,
+      'CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)',
+      'REVOKE EXECUTE ON FUNCTION public.soft_delete_project(uuid) FROM PUBLIC, anon;'
+    );
 
   expect(accessibleProjectIdsSection).toContain('AND deleted_at IS NULL');
     expect(accessHelperSection).toContain('AND p.deleted_at IS NULL');
@@ -106,11 +111,21 @@ describe('项目软删除契约', () => {
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
+    expect(softDeleteRpcSection).toContain('FROM public.projects');
+    expect(softDeleteRpcSection).toContain('FOR UPDATE');
+    expect(softDeleteRpcSection).toContain('UPDATE public.tasks');
+    expect(softDeleteRpcSection).toContain('WHERE project_id = p_project_id');
+    expect(softDeleteRpcSection).toContain('AND deleted_at IS NULL');
+    expect(softDeleteRpcSection).toContain('UPDATE public.connections');
+    expect(softDeleteRpcSection).toContain('INSERT INTO public.task_tombstones');
+    expect(softDeleteRpcSection).toContain('INSERT INTO public.connection_tombstones');
+    expect(softDeleteRpcSection).toContain('SET deleted_at = v_operation_ts');
   });
 
-  it('前向修复 migration 必须补 deleted_at 列并重写关键访问 helper', () => {
+  it('前向修复 migrations 必须补 deleted_at 列并收口项目删除一致性', () => {
     const sql = readSql('supabase/migrations/20260404103000_projects_soft_delete_alignment.sql');
     const softDeleteRpcSql = readSql('supabase/migrations/20260406143000_project_soft_delete_rpc.sql');
+    const softDeleteConsistencySql = readSql('supabase/migrations/20260408050338_project_soft_delete_children_consistency.sql');
     const accessibleProjectIdsSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()',
@@ -134,12 +149,18 @@ describe('项目软删除契约', () => {
     const resumeProbeStart = sql.indexOf('CREATE OR REPLACE FUNCTION public.get_resume_recovery_probe(');
     expect(resumeProbeStart).toBeGreaterThanOrEqual(0);
     const resumeProbeSection = sql.slice(resumeProbeStart);
+    const softDeleteConsistencySection = getSection(
+      softDeleteConsistencySql,
+      'CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)',
+      'REVOKE ALL ON FUNCTION public.soft_delete_project(uuid) FROM PUBLIC, anon;'
+    );
 
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id uuid)');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id uuid)');
     expect(softDeleteRpcSql).toContain('CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)');
+    expect(softDeleteConsistencySql).toContain('CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)');
     expect(sql).toContain('CREATE POLICY "owner select" ON public.projects');
     expect(sql).toContain('CREATE POLICY "tasks owner select" ON public.tasks');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.purge_tasks_v3(');
@@ -176,6 +197,18 @@ describe('项目软删除契约', () => {
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = c.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = tt.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
     expect(resumeProbeSection).toContain('JOIN public.projects p ON p.id = ct.project_id WHERE p.owner_id = v_user_id AND p.deleted_at IS NULL');
+    expect(softDeleteConsistencySection).toContain('FOR UPDATE');
+    expect(softDeleteConsistencySection).toContain('UPDATE public.tasks');
+    expect(softDeleteConsistencySection).toContain('UPDATE public.connections');
+    expect(softDeleteConsistencySection).toContain('INSERT INTO public.task_tombstones');
+    expect(softDeleteConsistencySection).toContain('INSERT INTO public.connection_tombstones');
+    expect(softDeleteConsistencySection).toContain('ON CONFLICT (task_id) DO UPDATE');
+    expect(softDeleteConsistencySection).toContain('ON CONFLICT (connection_id) DO UPDATE');
+    expect(softDeleteConsistencySql).toContain('p.deleted_at IS NOT NULL');
+    expect(softDeleteConsistencySql).toContain('UPDATE public.tasks t');
+    expect(softDeleteConsistencySql).toContain('UPDATE public.connections c');
+    expect(softDeleteConsistencySql).toContain('JOIN public.projects p ON p.id = t.project_id');
+    expect(softDeleteConsistencySql).toContain('JOIN public.projects p ON p.id = c.project_id');
   });
 
   it('客户端 Database 类型必须与项目相关 RPC 的可空返回保持一致', () => {
