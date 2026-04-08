@@ -386,11 +386,15 @@ export class RequestThrottleService {
    */
   private cleanupDedupeCache(): void {
     const now = Date.now();
-    for (const [key, value] of this.dedupeCache) {
+    const expiredKeys: string[] = [];
+    this.dedupeCache.forEach((value, key) => {
       if (value.expiresAt < now) {
-        this.dedupeCache.delete(key);
+        expiredKeys.push(key);
       }
-    }
+    });
+    expiredKeys.forEach(key => {
+      this.dedupeCache.delete(key);
+    });
     // 容量保护：超过上限时按过期时间排序淘汰最旧的条目
     if (this.dedupeCache.size > this.MAX_DEDUPE_CACHE_SIZE) {
       const entries = Array.from(this.dedupeCache.entries())

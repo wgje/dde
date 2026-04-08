@@ -93,10 +93,10 @@ export class TaskStore {
     const ids = this.parkedTaskIds();
     const map = this.tasksMap();
     const tasks: Task[] = [];
-    for (const id of ids) {
+    ids.forEach(id => {
       const task = map.get(id);
       if (task?.parkingMeta) tasks.push(task);
-    }
+    });
     // 按 parkedAt 降序（最近停泊在上）
     tasks.sort((a, b) => {
       const aTime = a.parkingMeta?.parkedAt ?? '';

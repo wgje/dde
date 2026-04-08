@@ -786,11 +786,15 @@ export class SimpleSyncService {
     }
 
     const ttlMs = APP_LIFECYCLE_CONFIG.RESUME_HEAVY_COOLDOWN_MS * 4;
-    for (const [ticketId, state] of this.recoveryTicketState.entries()) {
+    const expiredTicketIds: string[] = [];
+    this.recoveryTicketState.forEach((state, ticketId) => {
       if (nowMs - state.createdAt > ttlMs) {
-        this.recoveryTicketState.delete(ticketId);
+        expiredTicketIds.push(ticketId);
       }
-    }
+    });
+    expiredTicketIds.forEach(ticketId => {
+      this.recoveryTicketState.delete(ticketId);
+    });
   }
 
   private scheduleRetryQueueContinuation(

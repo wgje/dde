@@ -56,6 +56,7 @@ export type SnapshotType =
   | 'project-create' 
   | 'project-delete' 
   | 'project-update'
+  | 'project-import'
   | 'task-create'
   | 'task-update'
   | 'task-delete'
@@ -358,17 +359,19 @@ export class OptimisticStateService {
   }
   
   private evictOldestSnapshot(): void {
-    let oldest: { id: string; createdAt: number } | null = null;
+    let oldestId: string | null = null;
+    let oldestCreatedAt = Number.POSITIVE_INFINITY;
     
-    for (const [id, snapshot] of this.snapshots) {
-      if (!oldest || snapshot.createdAt < oldest.createdAt) {
-        oldest = { id, createdAt: snapshot.createdAt };
+    this.snapshots.forEach((snapshot, id) => {
+      if (snapshot.createdAt < oldestCreatedAt) {
+        oldestCreatedAt = snapshot.createdAt;
+        oldestId = id;
       }
-    }
+    });
     
-    if (oldest) {
-      this.snapshots.delete(oldest.id);
-      this.logger.debug('驱逐最旧快照', { id: oldest.id });
+    if (oldestId !== null) {
+      this.snapshots.delete(oldestId);
+      this.logger.debug('驱逐最旧快照', { id: oldestId });
     }
   }
   
@@ -391,11 +394,11 @@ export class OptimisticStateService {
     const now = Date.now();
     const expiredIds: string[] = [];
     
-    for (const [id, snapshot] of this.snapshots) {
+    this.snapshots.forEach((snapshot, id) => {
       if (now - snapshot.createdAt > SNAPSHOT_CONFIG.MAX_AGE_MS) {
         expiredIds.push(id);
       }
-    }
+    });
     
     for (const id of expiredIds) {
       this.snapshots.delete(id);

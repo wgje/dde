@@ -60,6 +60,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
           [isMobile]="isMobile()"
           [draggingTaskId]="dragDropService.draggingTaskId()"
           (taskClick)="ops.onUnassignedTaskClick($event)"
+          (openLinkedTask)="ops.onOpenLinkedTask($event)"
           (createUnassigned)="ops.onCreateUnassigned()"
           (dragStart)="onDragStart($event)"
           (dragEnd)="onDragEnd()"

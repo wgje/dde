@@ -26,6 +26,14 @@ describe('flow-view.component.html', () => {
 
     expect(template).toContain('[readOnly]="link.isHintOnlyStartupReadOnly()"');
   });
+
+  it('应将 flow 侧任务链接输出绑定到中心定位逻辑', () => {
+    const templatePath = join(process.cwd(), 'src/app/features/flow/components/flow-view.component.html');
+    const template = readFileSync(templatePath, 'utf8');
+
+    expect(template).toContain('(openLinkedTask)="centerOnNode($event)"');
+    expect(template).toContain('(openTask)="centerOnNode($event)"');
+  });
 });
 
 describe('flow-view.component.ts', () => {
@@ -36,5 +44,14 @@ describe('flow-view.component.ts', () => {
     expect(source).toContain('if (this.link.confirmParentChildLink()) {');
     expect(source).toContain('if (this.link.confirmCrossTreeLink()) {');
     expect(source).toContain('if (this.link.saveConnectionContent(data.sourceId, data.targetId, data.title, data.description)) {');
+  });
+
+  it('应忽略指向不存在任务的流程图链接跳转', () => {
+    const sourcePath = join(process.cwd(), 'src/app/features/flow/components/flow-view.component.ts');
+    const source = readFileSync(sourcePath, 'utf8');
+
+    expect(source).toContain('const task = taskId ? this.projectState.getTask(taskId) : undefined;');
+    expect(source).toContain('if (!isNavigableFlowTask(task)) {');
+    expect(source).toContain("this.logger.warn('目标任务不存在，忽略流程图链接跳转'");
   });
 });

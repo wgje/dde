@@ -11,7 +11,7 @@ import { UserSessionService } from '../../../../services/user-session.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
-import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
+import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 
 /**
@@ -255,6 +255,7 @@ export class TextUnassignedComponent implements OnDestroy {
   touchMove = output<TouchEvent>();
   touchEnd = output<TouchEvent>();
   touchCancel = output<TouchEvent>();
+  openLinkedTask = output<{ taskId: string; event: Event }>();
   
   protected taskAdapter = inject(TaskOperationAdapterService);
   protected uiState = inject(UiStateService);
@@ -388,6 +389,21 @@ export class TextUnassignedComponent implements OnDestroy {
    * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
   protected onContentPreviewClick(event: MouseEvent, task: Task): void {
+    const linkTarget = handleMarkdownLinkAction(event, this.toast);
+    if (linkTarget) {
+      // task 类型链接：跳转到关联任务
+      if (linkTarget.kind === 'task' && linkTarget.taskId) {
+        this.openLinkedTask.emit({ taskId: linkTarget.taskId, event });
+      }
+      return;
+    }
+
+    // false = 链接已检测到且已内部消化（blocked/internal/local/external）
+    if (linkTarget === false) {
+      return;
+    }
+
+    // null = 非链接点击，继续处理 todo checkbox / 进入编辑模式
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {

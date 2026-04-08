@@ -118,12 +118,15 @@ export class ToastService {
   private cleanupRecentMessages(): void {
     const now = Date.now();
     const expireThreshold = TOAST_CONFIG.ERROR_DEDUP_INTERVAL * 2;
-    
-    for (const [key, timestamp] of this.recentMessages.entries()) {
+    const expiredKeys: string[] = [];
+    this.recentMessages.forEach((timestamp, key) => {
       if (now - timestamp > expireThreshold) {
-        this.recentMessages.delete(key);
+        expiredKeys.push(key);
       }
-    }
+    });
+    expiredKeys.forEach(key => {
+      this.recentMessages.delete(key);
+    });
   }
 
   /**
@@ -247,9 +250,9 @@ export class ToastService {
    * 清理全部计时器
    */
   private clearAllDismissTimers(): void {
-    for (const timer of this.dismissTimers.values()) {
+    this.dismissTimers.forEach(timer => {
       clearTimeout(timer);
-    }
+    });
     this.dismissTimers.clear();
   }
 

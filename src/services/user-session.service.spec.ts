@@ -1209,6 +1209,27 @@ describe('UserSessionService', () => {
       ]);
     });
 
+    it('空 startup snapshot 缺少 owner 元数据时不应输出误报警告', async () => {
+      (
+        mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadStartupOfflineSnapshot.mockResolvedValue({
+        source: 'none',
+        projectCount: 0,
+        bytes: 0,
+        migratedLegacy: false,
+        projects: [],
+      });
+
+      await service.setCurrentUser(null);
+
+      expect(mockLoggerCategory.warn).not.toHaveBeenCalledWith(
+        '检测到缺少 owner 元数据的离线快照，已忽略本次恢复',
+        expect.anything(),
+      );
+    });
+
     it('owner 不匹配的 startup snapshot 不应在登录态被恢复', async () => {
       (
         mockSyncCoordinator['core'] as {

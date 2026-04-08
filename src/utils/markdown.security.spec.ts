@@ -2,8 +2,13 @@
  * Markdown 渲染器安全测试
  * 验证 XSS 防护和 URL 清洗功能
  */
-import { describe, it, expect, beforeEach } from 'vitest';
-import { renderMarkdown } from './markdown';
+import { describe, it, expect, vi } from 'vitest';
+import { renderMarkdown, resolveMarkdownLinkTarget } from './markdown';
+import { securityLogger } from './standalone-logger';
+
+function decodeBackslashEntities(value: string | null): string | null {
+  return value?.split('&#92;').join('\\') ?? null;
+}
 
 describe('Markdown Security', () => {
   describe('XSS Prevention', () => {
@@ -54,7 +59,7 @@ describe('Markdown Security', () => {
       const result = renderMarkdown(malicious);
       
       expect(result).not.toContain('javascript:');
-      expect(result).toContain('#blocked');
+      expect(result).toContain('#__nf_blocked__');
     });
 
     it('should block vbscript: protocol', () => {
@@ -62,7 +67,7 @@ describe('Markdown Security', () => {
       const result = renderMarkdown(malicious);
       
       expect(result).not.toContain('vbscript:');
-      expect(result).toContain('#blocked');
+      expect(result).toContain('#__nf_blocked__');
     });
 
     it('should block data: protocol with HTML', () => {
@@ -70,7 +75,7 @@ describe('Markdown Security', () => {
       const result = renderMarkdown(malicious);
       
       expect(result).not.toContain('data:text/html');
-      expect(result).toContain('#blocked');
+      expect(result).toContain('#__nf_blocked__');
     });
 
     it('should block encoded javascript protocol', () => {
@@ -80,6 +85,48 @@ describe('Markdown Security', () => {
       
       // 应该被阻止或转义
       expect(result).not.toMatch(/href="java.*script:/i);
+    });
+
+    it('should block whitespace-obfuscated dangerous protocols', () => {
+      expect(resolveMarkdownLinkTarget('java\tscript:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('java\nscript:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('java\rscript:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+    });
+
+    it('should block HTML-entity-obfuscated dangerous protocols', () => {
+      expect(resolveMarkdownLinkTarget('javascript&colon;alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('jav&#x61;script:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('&#106;avascript:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('vscode&#58;open')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+    });
+
+    it('should handle out-of-range numeric entities without crashing and still block the URL', () => {
+      expect(() => resolveMarkdownLinkTarget('&#1114112;javascript:alert(1)')).not.toThrow();
+      expect(resolveMarkdownLinkTarget('&#1114112;javascript:alert(1)')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
     });
 
     it('should allow safe http: URLs', () => {
@@ -96,11 +143,51 @@ describe('Markdown Security', () => {
       expect(result).toContain('href="mailto:test@example.com"');
     });
 
+    it('should allow stable task: links for internal navigation', () => {
+      const safe = '[task](task:task-123)';
+      const result = renderMarkdown(safe);
+
+      expect(result).toContain('data-link-kind="task"');
+      expect(result).toContain('data-task-link-id="task-123"');
+      expect(result).toContain('href="#task:task-123"');
+    });
+
     it('should allow relative URLs', () => {
       const safe = '[page](/about)';
       const result = renderMarkdown(safe);
       
       expect(result).toContain('href="/about"');
+    });
+
+    it('should convert file: links into local-path sentinel anchors', () => {
+      const malicious = '[click](file:///C:/Windows/System32/calc.exe)';
+      const container = document.createElement('div');
+      container.innerHTML = renderMarkdown(malicious);
+      const link = container.querySelector('a');
+
+      expect(container.innerHTML).not.toContain('href="file:///C:/Windows/System32/calc.exe"');
+      expect(link?.getAttribute('href')).toBe('#local-path');
+      expect(link?.getAttribute('data-link-kind')).toBe('local');
+      expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\Windows\\System32\\calc.exe');
+    });
+
+    it('should block ambiguous relative URLs that contain backslashes', () => {
+      expect(resolveMarkdownLinkTarget('/\\evil.example/path')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('.\\docs\\guide')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('..\\logout')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
+      expect(resolveMarkdownLinkTarget('docs\\guide')).toMatchObject({
+        kind: 'blocked',
+        href: '#__nf_blocked__',
+      });
     });
 
     it('should add rel="noopener noreferrer" to external links', () => {
@@ -109,6 +196,18 @@ describe('Markdown Security', () => {
       
       expect(result).toContain('rel="noopener noreferrer"');
       expect(result).toContain('target="_blank"');
+    });
+
+    it('should sanitize control characters in blocked URL logs', () => {
+      const warnSpy = vi.spyOn(securityLogger, 'warn').mockImplementation(() => undefined);
+
+      resolveMarkdownLinkTarget('java\nscript:alert(1)');
+
+      const [message] = warnSpy.mock.calls.at(-1) ?? [''];
+      expect(String(message)).not.toContain('\n');
+      expect(String(message)).not.toContain('\r');
+
+      warnSpy.mockRestore();
     });
   });
 

@@ -357,6 +357,7 @@
       (archiveTask)="archiveTask($event)"
       (deleteTask)="deleteTask($event)"
       (parkTask)="parkTaskAction($event)"
+      (openLinkedTask)="centerOnNode($event)"
       (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
       (attachmentAdd)="taskOps.addTaskAttachment($event.taskId, $event.attachment)"
       (attachmentRemove)="taskOps.removeTaskAttachment($event.taskId, $event.attachmentId)"
@@ -423,6 +424,7 @@
   (save)="saveConnectionDescription($event)"
   (modeChange)="link.setConnectionEditorMode($event)"
   (delete)="deleteConnection()"
+  (openTask)="centerOnNode($event)"
   (dragStart)="link.startDragConnEditor($event)">
 </app-flow-connection-editor>
 

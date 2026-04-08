@@ -132,7 +132,7 @@ export class TextStageCardComponent {
   readonly deleteTask = output<Task>();
   readonly parkTask = output<Task>();
   readonly attachmentError = output<string>();
-  readonly openLinkedTask = output<{ task: Task; event: Event }>();
+  readonly openLinkedTask = output<{ taskId: string; event: Event }>();
   
   // 拖拽事件
   readonly taskDragStart = output<{ event: DragEvent; task: Task }>();

@@ -16,20 +16,24 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { FocusAttentionService } from './focus-attention.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
-import { UiStateService } from './ui-state.service';
-import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { Task } from '../models';
 import { DockSnapshot } from '../models/parking-dock';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
-
-const PARKING_DOCK_OPEN_KEY = 'nanoflow.parking-dock-open';
 
 describe('DockEngineService', () => {
   let service: DockEngineService;
   let currentUserId: ReturnType<typeof signal<string | null>>;
   let activeProjectId: ReturnType<typeof signal<string | null>>;
   let focusPreferences: ReturnType<typeof signal<typeof DEFAULT_FOCUS_PREFERENCES>>;
+
+  type MockAddTaskResult =
+    | { ok: true; value: string }
+    | { ok: false; error: { message: string } };
+
+  type MockBlackBoxCreateResult =
+    | { ok: true; value: { id: string; content: string } }
+    | { ok: false; error: { message: string } };
 
   const taskMap = new Map<string, Task>();
   const taskProjectMap = new Map<string, string>();
@@ -47,7 +51,7 @@ describe('DockEngineService', () => {
 
   const mockActionQueue = {
     enqueue: vi.fn(() => crypto.randomUUID()),
-    enqueueForOwner: vi.fn(() => Promise.resolve(crypto.randomUUID())),
+    enqueueForOwner: vi.fn().mockResolvedValue('queued-owner-action'),
   };
 
   const mockTaskOps = {
@@ -56,12 +60,12 @@ describe('DockEngineService', () => {
     updateTaskCognitiveLoad: vi.fn(),
     updateTaskWaitMinutes: vi.fn(),
     updateTaskStatus: vi.fn(),
-    addTask: vi.fn((title: string) => ({ ok: true as const, value: `created-${title}-${crypto.randomUUID()}` })),
+    addTask: vi.fn((title: string): MockAddTaskResult => ({ ok: true, value: `created-${title}-${crypto.randomUUID()}` })),
   };
 
   const mockBlackBoxService = {
-    create: vi.fn((payload?: { content?: string; focusMeta?: { title?: string } }) => ({
-      ok: true as const,
+    create: vi.fn((payload?: { content?: string; focusMeta?: { title?: string } }): MockBlackBoxCreateResult => ({
+      ok: true,
       value: {
         id: `bb-${crypto.randomUUID()}`,
         content: payload?.content ?? payload?.focusMeta?.title ?? '',
@@ -185,28 +189,6 @@ describe('DockEngineService', () => {
     projectConnections.set(projectId, list);
   };
 
-  const configureDockEngineTestingModule = (): void => {
-    TestBed.configureTestingModule({
-      providers: [
-        UiStateService,
-        DockEngineService,
-        { provide: TaskStore, useValue: mockTaskStore },
-        { provide: PreferenceService, useValue: mockPreferenceService },
-        { provide: SimpleSyncService, useValue: mockSyncService },
-        { provide: ActionQueueService, useValue: mockActionQueue },
-        { provide: ProjectStateService, useValue: mockProjectState },
-        { provide: TaskOperationAdapterService, useValue: mockTaskOps },
-        { provide: BlackBoxService, useValue: mockBlackBoxService },
-        { provide: AuthService, useValue: { currentUserId } },
-        { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
-        { provide: LoggerService, useValue: mockLogger },
-        { provide: ToastService, useValue: mockToast },
-        { provide: FocusAttentionService, useValue: mockFocusAttention },
-        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
-      ],
-    });
-  };
-
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
@@ -242,132 +224,33 @@ describe('DockEngineService', () => {
     mockFocusAttention.notify.mockClear();
     mockFocusHudWindow.isActive.set(false);
     mockFocusPreferenceService.update.mockClear();
-    localStorage.removeItem(PARKING_DOCK_OPEN_KEY);
 
-    configureDockEngineTestingModule();
+    TestBed.configureTestingModule({
+      providers: [
+        DockEngineService,
+        { provide: TaskStore, useValue: mockTaskStore },
+        { provide: PreferenceService, useValue: mockPreferenceService },
+        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOps },
+        { provide: BlackBoxService, useValue: mockBlackBoxService },
+        { provide: AuthService, useValue: { currentUserId } },
+        { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: ToastService, useValue: mockToast },
+        { provide: FocusAttentionService, useValue: mockFocusAttention },
+        { provide: FocusHudWindowService, useValue: mockFocusHudWindow },
+      ],
+    });
 
     service = TestBed.inject(DockEngineService);
   });
 
   afterEach(() => {
-    localStorage.removeItem(PARKING_DOCK_OPEN_KEY);
     TestBed.resetTestingModule();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
-  });
-
-  it('scheduleLocalPersist should prefer the provided snapshot over a later export', () => {
-    const snapshotPersistence = TestBed.inject(DockSnapshotPersistenceService);
-    let capturedSnapshotFn: (() => DockSnapshot) | null = null;
-    vi.spyOn(snapshotPersistence, 'scheduleLocalPersist').mockImplementation((snapshotFn) => {
-      capturedSnapshotFn = snapshotFn;
-    });
-    const baseSnapshot = service.exportSnapshot();
-    const frozenSnapshot: DockSnapshot = {
-      ...baseSnapshot,
-      focusMode: false,
-      session: {
-        ...baseSnapshot.session,
-        mainTaskId: 'from-arg',
-      },
-    };
-    const latestSnapshot: DockSnapshot = {
-      ...baseSnapshot,
-      focusMode: true,
-      session: {
-        ...baseSnapshot.session,
-        mainTaskId: 'from-current',
-      },
-    };
-
-    (service as unknown as {
-      scheduleLocalPersist: (snapshot: DockSnapshot | null, userId: string | null) => void;
-    }).scheduleLocalPersist(frozenSnapshot, 'user-1');
-    service.restoreSnapshot(latestSnapshot);
-
-    expect(capturedSnapshotFn).not.toBeNull();
-    expect(capturedSnapshotFn?.().focusMode).toBe(false);
-    expect(capturedSnapshotFn?.().session.mainTaskId).toBe('from-arg');
-  });
-
-  it('应在移动端启动与快照恢复时保持停泊坞收起且不污染桌面偏好', async () => {
-    const originalInnerWidth = window.innerWidth;
-    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
-
-    TestBed.resetTestingModule();
-    Object.defineProperty(window, 'innerWidth', {
-      configurable: true,
-      value: 390,
-    });
-    window.dispatchEvent(new Event('resize'));
-
-    try {
-      configureDockEngineTestingModule();
-
-      const mobileService = TestBed.inject(DockEngineService);
-      const uiState = TestBed.inject(UiStateService);
-      const snapshot = mobileService.exportSnapshot();
-
-      snapshot.isDockExpanded = true;
-      mobileService.restoreSnapshot(snapshot);
-
-      await Promise.resolve();
-
-      expect(mobileService.dockExpanded()).toBe(false);
-      expect(mobileService.exportSnapshot().isDockExpanded).toBe(true);
-      expect(uiState.isParkingDockOpen()).toBe(true);
-      expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('true');
-
-      Object.defineProperty(window, 'innerWidth', {
-        configurable: true,
-        value: 1280,
-      });
-      window.dispatchEvent(new Event('resize'));
-
-      mobileService.reset();
-
-      expect(mobileService.dockExpanded()).toBe(true);
-      expect(uiState.isParkingDockOpen()).toBe(true);
-    } finally {
-      Object.defineProperty(window, 'innerWidth', {
-        configurable: true,
-        value: originalInnerWidth,
-      });
-      window.dispatchEvent(new Event('resize'));
-    }
-  });
-
-  it('应在桌面端无快照场景保留已持久化的停泊坞展开偏好', () => {
-    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
-
-    TestBed.resetTestingModule();
-    configureDockEngineTestingModule();
-
-    const desktopService = TestBed.inject(DockEngineService);
-    const uiState = TestBed.inject(UiStateService);
-
-    desktopService.reset();
-
-    expect(desktopService.dockExpanded()).toBe(true);
-    expect(uiState.isParkingDockOpen()).toBe(true);
-  });
-
-  it('应只在显式切换时持久化停泊坞偏好', () => {
-    localStorage.setItem(PARKING_DOCK_OPEN_KEY, 'true');
-
-    TestBed.resetTestingModule();
-    configureDockEngineTestingModule();
-
-    const persistedService = TestBed.inject(DockEngineService);
-
-    persistedService.setDockExpanded(false, { persistPreference: false });
-    expect(persistedService.dockExpanded()).toBe(false);
-    expect(persistedService.exportSnapshot().isDockExpanded).toBe(true);
-    expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('true');
-
-    persistedService.setDockExpanded(false, { persistPreference: true });
-    expect(persistedService.exportSnapshot().isDockExpanded).toBe(false);
-    expect(localStorage.getItem(PARKING_DOCK_OPEN_KEY)).toBe('false');
   });
 
   it('only first drag auto-sets main task in a focus session', () => {
@@ -505,8 +388,8 @@ describe('DockEngineService', () => {
 
   it('createInDock should create shared black-box entry and record sourceBlackBoxEntryId', () => {
     mockBlackBoxService.create.mockReturnValueOnce({
-      ok: true as const,
-      value: { id: 'bb-inline-1' },
+      ok: true,
+      value: { id: 'bb-inline-1', content: 'Inline Task' },
     });
 
     const dockEntryId = service.createInDock('Inline Task', 'backup', 'low', {
@@ -535,7 +418,7 @@ describe('DockEngineService', () => {
 
   it('createInDock should keep UI creation when black-box create fails and mark failed status', () => {
     mockBlackBoxService.create.mockReturnValueOnce({
-      ok: false as const,
+      ok: false,
       error: { message: 'network failed' },
     });
 
@@ -550,8 +433,8 @@ describe('DockEngineService', () => {
 
   it('archiveInlineEntriesToActiveProject should convert inline entries and replace with project-task', () => {
     mockBlackBoxService.create.mockReturnValueOnce({
-      ok: true as const,
-      value: { id: 'bb-inline-archive-1' },
+      ok: true,
+      value: { id: 'bb-inline-archive-1', content: 'Archive Me' },
     });
     mockTaskOps.addTask.mockReturnValueOnce({
       ok: true as const,
@@ -584,8 +467,8 @@ describe('DockEngineService', () => {
   it('archiveInlineEntriesToActiveProject should mark failed when no active project', () => {
     activeProjectId.set(null);
     mockBlackBoxService.create.mockReturnValueOnce({
-      ok: true as const,
-      value: { id: 'bb-no-project' },
+      ok: true,
+      value: { id: 'bb-no-project', content: 'No Project' },
     });
 
     const inlineId = service.createInDock('No Project', 'backup', 'low');
@@ -600,11 +483,11 @@ describe('DockEngineService', () => {
 
   it('archiveInlineEntriesToActiveProject should support partial failures', () => {
     mockBlackBoxService.create
-      .mockReturnValueOnce({ ok: true as const, value: { id: 'bb-partial-1' } })
-      .mockReturnValueOnce({ ok: true as const, value: { id: 'bb-partial-2' } });
+      .mockReturnValueOnce({ ok: true, value: { id: 'bb-partial-1', content: 'Partial A' } })
+      .mockReturnValueOnce({ ok: true, value: { id: 'bb-partial-2', content: 'Partial B' } });
     mockTaskOps.addTask
-      .mockReturnValueOnce({ ok: true as const, value: 'partial-ok-task' })
-      .mockReturnValueOnce({ ok: false as const, error: { message: 'addTask failed' } });
+      .mockReturnValueOnce({ ok: true, value: 'partial-ok-task' })
+      .mockReturnValueOnce({ ok: false, error: { message: 'addTask failed' } });
 
     const inlineA = service.createInDock('Partial A', 'combo-select', 'low');
     const inlineB = service.createInDock('Partial B', 'backup', 'high');
@@ -1004,7 +887,7 @@ describe('DockEngineService', () => {
   it('export snapshot should include v3 fields', () => {
     seedTask('A');
     service.dockTask('A');
-    service.setDockExpanded(false, { persistPreference: true });
+    service.setDockExpanded(false);
     service.toggleMuteWaitTone();
     const snapshot = service.exportSnapshot();
 
@@ -1540,7 +1423,7 @@ describe('DockEngineService', () => {
       if (originalVisibilityDescriptor) {
         Object.defineProperty(document, 'visibilityState', originalVisibilityDescriptor);
       } else {
-        delete (document as Record<string, unknown>).visibilityState;
+        Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'visibilityState');
       }
     }
   });
@@ -1645,7 +1528,12 @@ describe('DockEngineService', () => {
       pendingDecision: {
         rootTaskId: 'A',
         rootRemainingMinutes: 25,
-        candidateTaskIds: ['C', 'D'],
+        candidateGroups: [
+          {
+            type: 'homologous-advancement',
+            taskIds: ['C', 'D'],
+          },
+        ],
         reason: '候选任务时长匹配异常',
         createdAt: new Date(Date.now() - 5_000).toISOString(),
         expiresAt: new Date(Date.now() - 1_000).toISOString(),
@@ -2369,7 +2257,13 @@ describe('DockEngineService', () => {
     seedTask('A');
     service.dockTask('A');
     service.markExitAction('clear_exit');
-    service.pendingDecision.set({ reason: 'still visible during exit' });
+    service.pendingDecision.set({
+      rootTaskId: 'A',
+      rootRemainingMinutes: 15,
+      candidateGroups: [],
+      reason: 'still visible during exit',
+      createdAt: new Date().toISOString(),
+    });
     service.lastRuleDecision.set({
       type: 'idle_promote',
       reason: 'rule',
@@ -2379,7 +2273,9 @@ describe('DockEngineService', () => {
     service.clearDockForExit();
 
     expect(service.entries()).toHaveLength(0);
-    expect(service.pendingDecision()).toEqual({ reason: 'still visible during exit' });
+    expect(service.pendingDecision()).toEqual(
+      expect.objectContaining({ reason: 'still visible during exit' }),
+    );
     service.finalizeClearDockForExit();
     expect(service.lastRuleDecision()).toBeNull();
   });
@@ -2485,8 +2381,25 @@ describe('DockEngineService', () => {
     service.dailySlotService.completeDailySlot(slotId);
 
     expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
-    expect(mockActionQueue.enqueueForOwner.mock.calls[0][0]).toBe('user-1');
-    const payload = mockActionQueue.enqueueForOwner.mock.calls[0][1];
+    const firstCall = mockActionQueue.enqueueForOwner.mock.calls.at(0) as [
+      string,
+      {
+        entityType: string;
+        payload: {
+          completion: {
+            userId: string;
+            routineId: string;
+            completionId: string;
+          };
+        };
+      },
+    ] | undefined;
+    expect(firstCall).toBeDefined();
+    expect(firstCall?.[0]).toBe('user-1');
+    const payload = firstCall?.[1];
+    if (!payload) {
+      throw new Error('Expected action queue payload to be present');
+    }
     expect(payload.entityType).toBe('routine-completion');
     expect(payload.payload.completion.userId).toBe('user-1');
     expect(payload.payload.completion.routineId).toBe(slotId);

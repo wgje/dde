@@ -45,10 +45,10 @@ function makeEntry(overrides: Partial<DockEntry> & { taskId: string }): DockEntr
 const mockBlackBox = {
   create: vi.fn().mockReturnValue({
     ok: true,
-    value: { id: 'bb-entry-1' },
+    value: { id: 'bb-entry-1', content: 'inline entry' },
   }),
-  markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1' } }),
-  archive: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1' } }),
+  markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
+  archive: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
 };
 
 // LoggerService：测试不关注日志输出，提供最小无操作实现

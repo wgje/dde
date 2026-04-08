@@ -1,6 +1,6 @@
 # NanoFlow - Global Agent Instructions
 
-> 最后更新：2026-02-27
+> 最后更新：2026-04-08
 > 说明：本文件按 VS Code 官方建议组织为「仓库上下文 + 编码标准 + 测试与验证流程」执行手册。
 
 ## 1. 目标与适用范围
@@ -137,9 +137,29 @@
 | `FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY` | `3` |
 | `FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA` | `50` |
 
-## 10. Agent 执行流程（标准作业）
+## 10. Agent 工具与生命周期规则（必须遵守）
 
-1. 读取上下文
+### 10.1 Memory 路径 ≠ 文件系统路径
+- `/memories/repo/...`、`/memories/session/...` 是 **虚拟路径**，只能通过 `memory` 工具访问。
+- **禁止** 用 `read_file` 读取 `/memories/` 路径或 `d:\Code\dde\memories\repo\...` 等物理路径。
+- 正确用法：`memory` 工具的 `view` 命令 + 虚拟路径 `/memories/repo/xxx.md`。
+
+### 10.2 文件存在性验证
+- 调用 `read_file` 前，若文件由本次会话的终端命令或 subagent 生成，必须先用 `list_dir` 或 `file_search` 确认文件已存在。
+- 对 `tmp/` 等临时目录的文件尤其如此——不要假设上游步骤一定成功。
+
+### 10.3 task_complete 生命周期
+- 所有会话（无论代码改动、问答、还是调研）完成后，**必须** 调用 `task_complete`。
+- 调用前先输出一段简短文字总结（1-3 句），然后立即调用 `task_complete`。
+- VS Code 内部 stop hook 会检测 `task_complete` 是否被调用；未调用将触发 autopilot 重入循环并浪费 premium requests。
+
+### 10.4 Subagent 注意事项
+- Subagent 不共享 memory 工具状态，不要在 subagent prompt 中引用 `/memories/` 虚拟路径。
+- Subagent 的工作结果通过其最终消息返回，不要依赖 subagent 写入的 tmp 文件。
+
+## 11. Agent 执行流程（标准作业）
+
+1. 读取上下文（包括检查 `/memories/repo/` 中的相关历史记录）
 - 先定位改动边界：功能、数据流、受影响服务。
 - 必读同目录测试与调用链，避免局部修复破坏全局。
 
@@ -158,7 +178,7 @@
 5. 交付说明
 - 说明改了什么、为何这样改、潜在风险与回滚点。
 
-## 11. 代码规范
+## 12. 代码规范
 
 - 中文注释解释业务意图；英文标识符。
 - `standalone: true` + `OnPush`。
@@ -167,7 +187,7 @@
 - 测试同目录：`*.service.ts -> *.service.spec.ts`。
 - 规模约束：单文件建议 200-400 行（最大 800），函数 <= 50 行，嵌套 <= 4 层。
 
-## 12. 安全规则
+## 13. 安全规则
 
 1. API Key 只允许存储于 Supabase Secrets，禁止前端硬编码。
 2. 所有表启用 RLS，数据按 `user_id` 隔离。
@@ -175,14 +195,14 @@
 4. 文件上传必须经过类型验证与病毒扫描。
 5. Edge Function 代理第三方 API，前端不直连敏感凭证。
 
-## 13. 测试策略与命令
+## 14. 测试策略与命令
 
-### 13.1 测试金字塔
+### 14.1 测试金字塔
 `E2E(少量关键路径) -> Integration(服务边界) -> Unit(大量快速)`
 
 测试执行基于 `scripts/run-test-matrix.cjs`，支持 Lane 分片、Quarantine 隔离和 LPT 调度策略。
 
-### 13.2 常用命令
+### 14.2 常用命令
 
 ```bash
 # 开发
@@ -222,7 +242,7 @@ npm run perf:guard          # 构建 + nojit 检查 + startup + font + supabase-
 npm run db:types
 ```
 
-## 14. 目录导航（精简）
+## 15. 目录导航（精简）
 
 ```text
 src/
@@ -241,7 +261,7 @@ supabase/functions/         # Edge Functions
 supabase/migrations/        # 数据库迁移
 ```
 
-## 15. 常见陷阱与规避
+## 16. 常见陷阱与规避
 
 | 陷阱 | 规避 |
 |------|------|
@@ -253,8 +273,12 @@ supabase/migrations/        # 数据库迁移
 | Edge Function API Key 泄露 | `supabase secrets set` 管理密钥 |
 | iOS Safari 不支持 webm | 运行时检测 mimeType，回退 mp4 |
 | 同步时 `content` 丢失覆盖 | 查询字段必须包含 `content` |
+| Memory 路径误用为文件路径 | `/memories/repo/` 只能通过 `memory` 工具访问，禁止 `read_file` |
+| tmp 文件不存在就读取 | 读取 tmp 产物前用 `list_dir` 或 `file_search` 确认存在 |
+| 未调用 `task_complete` 导致循环 | 任务结束必须调用 `task_complete`，防止 autopilot 无限重入 |
+| Subagent 依赖 tmp 文件交互 | Subagent 结果通过最终消息返回，不依赖文件交互 |
 
-## 16. 完成定义（Definition of Done）
+## 17. 完成定义（Definition of Done）
 
 - 所有 Hard Rules 仍成立。
 - 关键路径（同步、离线、GoJS、专注模式）无回归。

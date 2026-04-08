@@ -190,7 +190,7 @@ export class TextStagesComponent {
   @Output() deleteTask = new EventEmitter<Task>();
   @Output() parkTask = new EventEmitter<Task>();
   @Output() attachmentError = new EventEmitter<string>();
-  @Output() openLinkedTask = new EventEmitter<{ task: Task; event: Event }>();
+  @Output() openLinkedTask = new EventEmitter<{ taskId: string; event: Event }>();
   
   // 拖拽事件
   @Output() taskDragStart = new EventEmitter<{ event: DragEvent; task: Task }>();

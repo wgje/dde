@@ -216,16 +216,29 @@ export class DeltaSyncCoordinatorService {
     const tasks1Map = new Map(project1.tasks.map(t => [t.id, t]));
     const tasks2Map = new Map(project2.tasks.map(t => [t.id, t]));
     
-    for (const id of tasks1Map.keys()) {
-      if (!tasks2Map.has(id)) return true;
-    }
+    let hasDifference = false;
+    tasks1Map.forEach((_task1, id) => {
+      if (!tasks2Map.has(id)) {
+        hasDifference = true;
+      }
+    });
+    if (hasDifference) return true;
     
-    for (const [id, task1] of tasks1Map) {
+    tasks1Map.forEach((task1, id) => {
       const task2 = tasks2Map.get(id);
-      if (!task2) return true;
-      if (task1.title !== task2.title || task1.content !== task2.content) return true;
-      if (task1.parentId !== task2.parentId || task1.stage !== task2.stage) return true;
-    }
+      if (!task2) {
+        hasDifference = true;
+        return;
+      }
+      if (task1.title !== task2.title || task1.content !== task2.content) {
+        hasDifference = true;
+        return;
+      }
+      if (task1.parentId !== task2.parentId || task1.stage !== task2.stage) {
+        hasDifference = true;
+      }
+    });
+    if (hasDifference) return true;
     
     return false;
   }

@@ -12,6 +12,10 @@ import { isLocalModeEnabled, saveAuthCache } from './guards/auth.guard';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -253,6 +257,47 @@ export class AuthService {
     return this.readPersistedSessionIdentity(true);
   }
 
+  private getDeferredSessionFallback(): { userId: string | null; email: string | null } {
+    return {
+      userId: this.currentUserId(),
+      email: this.sessionEmail(),
+    };
+  }
+
+  private deferSessionCheckForBrowserResume(
+    source: 'preflight' | 'catch',
+  ): { userId: string | null; email: string | null } {
+    const fallback = this.getDeferredSessionFallback();
+
+    this.logger.info('[CheckSession] 浏览器网络挂起窗口内延后会话检查', {
+      source,
+      hasCachedUser: !!fallback.userId,
+    });
+
+    this.authState.update(s => ({
+      ...s,
+      userId: fallback.userId,
+      email: fallback.email,
+      error: null,
+    }));
+
+    this.scheduleBackgroundSessionRefresh();
+
+    const ensureRuntimeReady = () => {
+      void this.ensureRuntimeAuthReady().catch(() => {
+        // 恢复窗口内 runtime listener 初始化失败不阻断当前会话兜底。
+      });
+    };
+
+    if (typeof queueMicrotask === 'function') {
+      queueMicrotask(ensureRuntimeReady);
+    } else {
+      void Promise.resolve().then(ensureRuntimeReady);
+    }
+
+    return fallback;
+  }
+
   private readPersistedOwnerHintFromStorage(): string | null {
     try {
       const storageKey = this.supabase.getStorageKey();
@@ -465,6 +510,10 @@ export class AuthService {
 
       return localSession;
     }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      return this.deferSessionCheckForBrowserResume('preflight');
+    }
     
     // 网络回退路径：超时保护 5 秒（原 10 秒，移动端体验优化）
     const SESSION_TIMEOUT = 5000;
@@ -542,6 +591,10 @@ export class AuthService {
       this.setPersistedSessionUserId(null);
       return { userId: null, email: null };
     } catch (e: unknown) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        return this.deferSessionCheckForBrowserResume('catch');
+      }
+
       const err = e as Error | undefined;
       this.logger.error('========== checkSession 异常 ==========', {
         message: err?.message,

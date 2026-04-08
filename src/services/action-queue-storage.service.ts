@@ -454,7 +454,7 @@ export class ActionQueueStorageService {
           ...this.readScopedDeadLetterQueueFromStorage(),
           ...this.deadLetterQueue(),
         ]
-      : this.readDeadLetterSnapshotFromStorage(ownerUserId);
+      : this.readDeadLetterSnapshotFromLocalStorage(ownerUserId);
 
     for (const item of [...existingDeadLetters, ...deadLetters]) {
       mergedByActionId.set(item.action.id, item);

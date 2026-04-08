@@ -2,24 +2,13 @@ import { Component, ChangeDetectionStrategy, input, output, signal, ElementRef, 
 import { CommonModule } from '@angular/common';
 import { COMPOSITION_BUFFER_MODE, FormsModule } from '@angular/forms';
 import { Task } from '../../../../models';
-import type { ConnectionEditorMode } from '../../../../models/flow-view-state';
+import type { ConnectionEditorMode, ConnectionEditorData } from '../../../../models/flow-view-state';
+import { ToastService } from '../../../../services/toast.service';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { LoggerService } from '../../../../services/logger.service';
+import { handleMarkdownLinkAction } from '../../../../utils/markdown';
 
-export interface ConnectionEditorData {
-  sourceId: string;
-  targetId: string;
-  /** 联系块标题（外显内容） */
-  title: string;
-  /** 联系块详细描述 */
-  description: string;
-  /** 当前打开的是跨树关联还是父子关系 */
-  isCrossTree: boolean;
-  /** 当前浮层模式：预览或编辑 */
-  mode: ConnectionEditorMode;
-  x: number;
-  y: number;
-}
+export { ConnectionEditorData, ConnectionEditorMode };
 
 export interface ConnectionTasks {
   source: Task | null;
@@ -208,6 +197,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   @ViewChild('editorContainer') editorContainer!: ElementRef<HTMLDivElement>;
 
   private readonly loggerService = inject(LoggerService);
+  private readonly toast = inject(ToastService);
   private readonly logger = this.loggerService.category('ConnectionEditor');
 
   readonly data = input<ConnectionEditorData | null>(null);
@@ -222,6 +212,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   readonly delete = output<void>();
   readonly positionChange = output<{ x: number; y: number }>();
   readonly dragStart = output<MouseEvent | TouchEvent>();
+  readonly openTask = output<string>();
   
   // 编辑模式状态（默认预览模式）
   readonly isEditMode = signal(false);
@@ -570,8 +561,26 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   }
 
   onPreviewClick(event: Event): void {
+    if (event instanceof MouseEvent && this.handlePreviewLinkClick(event)) {
+      return;
+    }
+
     event.stopPropagation();
     this.enterEditMode();
+  }
+
+  private handlePreviewLinkClick(event: MouseEvent): boolean {
+    const linkTarget = handleMarkdownLinkAction(event, this.toast);
+    if (!linkTarget) {
+      // null = 无链接; false = 已内部消化（blocked/internal/local/external）
+      return linkTarget === false;
+    }
+
+    // task 类型：由组件决定导航行为
+    if (linkTarget.kind === 'task' && linkTarget.taskId) {
+      this.openTask.emit(linkTarget.taskId);
+    }
+    return true;
   }
 
   /**

@@ -23,10 +23,26 @@ describe('TextViewTaskOpsService', () => {
   };
   const mockToast = {
     info: vi.fn(),
+    warning: vi.fn(),
     error: vi.fn(),
   };
   const mockUserSession = {
     isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+  };
+  const stageFilter = signal<number | 'all'>('all');
+  const stageViewRootFilter = signal<'all' | string>('all');
+  const isTextUnassignedOpen = signal(false);
+  const mockProjectState = {
+    getTask: vi.fn(() => null),
+    stages: vi.fn(() => []),
+    tasks: vi.fn(() => []),
+    unassignedTasks: vi.fn(() => []),
+  };
+  const mockUiState = {
+    stageFilter,
+    stageViewRootFilter,
+    setStageFilter: vi.fn((value: number | 'all') => stageFilter.set(value)),
+    isTextUnassignedOpen,
   };
 
   const mockRect = (element: HTMLElement, top: number, height: number) => {
@@ -76,8 +92,8 @@ describe('TextViewTaskOpsService', () => {
         { provide: ElementRef, useValue: new ElementRef(hostElement) },
         { provide: NgZone, useValue: new NgZone({ enableLongStackTrace: false }) },
         { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
-        { provide: ProjectStateService, useValue: {} },
-        { provide: UiStateService, useValue: {} },
+        { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: UiStateService, useValue: mockUiState },
         { provide: ToastService, useValue: mockToast },
         {
           provide: LoggerService,
@@ -103,9 +119,18 @@ describe('TextViewTaskOpsService', () => {
     });
 
     service = TestBed.inject(TextViewTaskOpsService);
+  stageFilter.set('all');
+  stageViewRootFilter.set('all');
+  isTextUnassignedOpen.set(false);
+  mockProjectState.getTask.mockReturnValue(null);
+  mockProjectState.stages.mockReturnValue([]);
+  mockProjectState.tasks.mockReturnValue([]);
+  mockProjectState.unassignedTasks.mockReturnValue([]);
+  mockUiState.setStageFilter.mockClear();
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockTaskOpsAdapter.addTask.mockReset();
     mockToast.info.mockReset();
+    mockToast.warning.mockReset();
     mockToast.error.mockReset();
   });
 
@@ -417,5 +442,182 @@ describe('TextViewTaskOpsService', () => {
 
     expect(selectedTaskId()).toBe('task-1');
     expect(focusFlowNode.emit).not.toHaveBeenCalled();
+  });
+
+  it('should reuse jump logic for staged linked tasks', () => {
+    const selectedTaskId = signal<string | null>(null);
+    const expandStage = vi.fn();
+    const linkedTask = { id: 'task-2', stage: 2 } as Task;
+    mockProjectState.getTask.mockReturnValue(linkedTask);
+
+    const stagedTask = document.createElement('div');
+    stagedTask.setAttribute('data-task-id', linkedTask.id);
+    Object.defineProperty(stagedTask, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    hostElement.appendChild(stagedTask);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => ({ expandStage } as never),
+      getUnassignedRef: () => undefined,
+    });
+
+    service.onOpenLinkedTask({ taskId: linkedTask.id, event: { stopPropagation: vi.fn() } as unknown as Event });
+
+    expect(expandStage).toHaveBeenCalledWith(2);
+    expect(selectedTaskId()).toBe('task-2');
+  });
+
+  it('should warn when a linked task id cannot be resolved', () => {
+    const stopPropagation = vi.fn();
+    mockProjectState.getTask.mockReturnValue(null);
+
+    service.onOpenLinkedTask({ taskId: 'missing-task', event: { stopPropagation } as unknown as Event });
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(mockToast.warning).toHaveBeenCalledWith('任务链接不可用', '目标任务不存在、已删除或已归档');
+  });
+
+  it('should clear the root filter before jumping to a staged linked task outside the current subtree', async () => {
+    const selectedTaskId = signal<string | null>(null);
+    const expandStage = vi.fn();
+    const rootTask = { id: 'root-1', displayId: '1' } as Task;
+    const linkedTask = { id: 'task-4', stage: 3, displayId: '2,1' } as Task;
+    stageViewRootFilter.set(rootTask.id);
+    mockProjectState.getTask.mockImplementation((id: string) => {
+      if (id === rootTask.id) {
+        return rootTask;
+      }
+
+      if (id === linkedTask.id) {
+        return linkedTask;
+      }
+
+      return null;
+    });
+
+    const stagedTask = document.createElement('div');
+    stagedTask.setAttribute('data-task-id', linkedTask.id);
+    Object.defineProperty(stagedTask, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    hostElement.appendChild(stagedTask);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => ({ expandStage } as never),
+      getUnassignedRef: () => undefined,
+    });
+
+    await service.onJumpToTask(linkedTask.id);
+
+    expect(stageViewRootFilter()).toBe('all');
+    expect(expandStage).toHaveBeenCalledWith(3);
+    expect(selectedTaskId()).toBe(linkedTask.id);
+  });
+
+  it('should treat stage 0 linked tasks as staged instead of unassigned', async () => {
+    const selectedTaskId = signal<string | null>(null);
+    const expandStage = vi.fn();
+    const setEditingTask = vi.fn().mockResolvedValue(undefined);
+    const linkedTask = { id: 'task-0', stage: 0 } as Task;
+    mockProjectState.getTask.mockReturnValue(linkedTask);
+
+    const stagedTask = document.createElement('div');
+    stagedTask.setAttribute('data-task-id', linkedTask.id);
+    Object.defineProperty(stagedTask, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    hostElement.appendChild(stagedTask);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => ({ expandStage } as never),
+      getUnassignedRef: () => ({ setEditingTask } as never),
+    });
+
+    await service.onJumpToTask(linkedTask.id);
+
+    expect(expandStage).toHaveBeenCalledWith(0);
+    expect(setEditingTask).not.toHaveBeenCalled();
+    expect(isTextUnassignedOpen()).toBe(false);
+    expect(selectedTaskId()).toBe(linkedTask.id);
+  });
+
+  it('should clear staged selection and reuse jump logic for unassigned linked tasks', async () => {
+    vi.useFakeTimers();
+    const selectedTaskId = signal<string | null>('task-1');
+    const setEditingTask = vi.fn().mockResolvedValue(undefined);
+    const linkedTask = { id: 'task-3', stage: null } as Task;
+    mockProjectState.getTask.mockReturnValue(linkedTask);
+
+    const unassignedTask = document.createElement('div');
+    unassignedTask.setAttribute('data-unassigned-task', linkedTask.id);
+    Object.defineProperty(unassignedTask, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    hostElement.appendChild(unassignedTask);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => ({ setEditingTask } as never),
+    });
+
+    const jumpPromise = service.onJumpToTask(linkedTask.id);
+    await vi.advanceTimersByTimeAsync(60);
+    await jumpPromise;
+
+    expect(isTextUnassignedOpen()).toBe(true);
+    expect(setEditingTask).toHaveBeenCalledWith('task-3', false);
+    expect(selectedTaskId()).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('should ignore linked-task jumps for deleted or archived tasks', async () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    const expandStage = vi.fn();
+    const setEditingTask = vi.fn().mockResolvedValue(undefined);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => ({ expandStage } as never),
+      getUnassignedRef: () => ({ setEditingTask } as never),
+    });
+
+    mockProjectState.getTask.mockReturnValueOnce({ id: 'deleted-task', stage: 1, status: 'active', deletedAt: new Date().toISOString() } as Task);
+    await service.onJumpToTask('deleted-task');
+
+    mockProjectState.getTask.mockReturnValueOnce({ id: 'archived-task', stage: 2, status: 'archived', deletedAt: null } as Task);
+    await service.onJumpToTask('archived-task');
+
+    expect(expandStage).not.toHaveBeenCalled();
+    expect(setEditingTask).not.toHaveBeenCalled();
+    expect(selectedTaskId()).toBe('task-1');
   });
 });

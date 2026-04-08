@@ -19,6 +19,11 @@ import { EventBusService } from './event-bus.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  createBrowserNetworkSuspendedError,
+  ensureBrowserNetworkSuspensionTracking,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../utils/browser-network-suspension';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -66,6 +71,13 @@ describe('AuthService', () => {
 
     return JSON.stringify(wrapped ? { currentSession: payload } : payload);
   }
+
+  function setVisibilityState(state: DocumentVisibilityState): void {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: state,
+    });
+  }
   
   const mockLogger = {
     category: () => ({
@@ -80,6 +92,9 @@ describe('AuthService', () => {
     vi.clearAllMocks();
     authStateCallback = null;
     mockUnsubscribe = vi.fn();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    ensureBrowserNetworkSuspensionTracking();
+    setVisibilityState('visible');
     
     mockToastService = {
       show: vi.fn(),
@@ -140,6 +155,8 @@ describe('AuthService', () => {
   });
   
   afterEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     localStorage.removeItem('sb-test-auth-token');
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
     delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
@@ -454,6 +471,32 @@ describe('AuthService', () => {
 
       expect(service.authState().error).toBe('mock-session-error');
       expect(service.authState().isCheckingSession).toBe(false);
+    });
+
+    it('浏览器网络挂起时应返回当前缓存身份而不是记录异常', async () => {
+      service.setProvisionalCurrentUserId('cached-user');
+      (service.sessionEmail as { set: (value: string | null) => void }).set('cached@example.com');
+      mockSupabaseClient.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
+
+      await expect(service.checkSession()).resolves.toEqual({
+        userId: 'cached-user',
+        email: 'cached@example.com',
+      });
+
+      expect(service.authState().error).toBeNull();
+      expect(service.authState().isCheckingSession).toBe(false);
+    });
+
+    it('页面隐藏时应走挂起预检而不是发起 getSession 请求', async () => {
+      service.setProvisionalCurrentUserId('cached-user');
+      setVisibilityState('hidden');
+
+      await expect(service.checkSession()).resolves.toEqual({
+        userId: 'cached-user',
+        email: null,
+      });
+
+      expect(mockSupabaseClient.getSession).not.toHaveBeenCalled();
     });
   });
 

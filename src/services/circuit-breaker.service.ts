@@ -504,7 +504,9 @@ export class CircuitBreakerService {
       while (indices.size < sampleSize) {
         indices.add(Math.floor(Math.random() * allTasks.length));
       }
-      for (const idx of indices) {
+      const sampledIndices = Array.from(indices);
+      for (let index = 0; index < sampledIndices.length; index += 1) {
+        const idx = sampledIndices[index]!;
         tasksToCheck.push(allTasks[idx]);
       }
     }
@@ -743,22 +745,30 @@ export class CircuitBreakerService {
    * 更新全局状态
    */
   private updateGlobalState(): void {
-    let maxLevel: CircuitLevel = 'L0';
-    
-    for (const level of this.circuitStates.values()) {
+    let maxRank = 0;
+    this.circuitStates.forEach(level => {
       if (level === 'L3') {
-        maxLevel = 'L3' as CircuitLevel;
-        break;
+        maxRank = Math.max(maxRank, 3);
+        return;
       }
-      if (level === 'L2' && maxLevel !== 'L3') {
-        maxLevel = 'L2' as CircuitLevel;
+      if (level === 'L2') {
+        maxRank = Math.max(maxRank, 2);
+        return;
       }
-      if (level === 'L1' && maxLevel === 'L0') {
-        maxLevel = 'L1' as CircuitLevel;
+      if (level === 'L1') {
+        maxRank = Math.max(maxRank, 1);
       }
-    }
+    });
+
+    const rankToLevel: Record<number, CircuitLevel> = {
+      0: 'L0',
+      1: 'L1',
+      2: 'L2',
+      3: 'L3',
+    };
+    const maxLevel = rankToLevel[maxRank] ?? 'L0';
     
     this.currentLevel.set(maxLevel);
-    this.isCircuitOpen.set(maxLevel === 'L2' || maxLevel === 'L3');
+    this.isCircuitOpen.set(maxRank >= 2);
   }
 }

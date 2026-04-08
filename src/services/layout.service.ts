@@ -750,9 +750,9 @@ export class LayoutService {
         fixedCount++;
       } else {
         // 路径上所有节点都已确认无环
-        for (const id of path) {
+        path.forEach(id => {
           confirmed.add(id);
-        }
+        });
       }
     }
     

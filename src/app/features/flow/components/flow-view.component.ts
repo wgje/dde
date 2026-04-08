@@ -48,6 +48,10 @@ import { FlowBatchToolbarComponent } from './flow-batch-toolbar.component';
 
 import * as go from 'gojs';
 
+function isNavigableFlowTask(task: Task | undefined | null): task is Task {
+  return !!task && !task.deletedAt && task.status !== 'archived';
+}
+
 /** 流程图视图组件 —— 模板渲染 + 子组件通信 + 服务协调 + 生命周期管理 */
 @Component({
   selector: 'app-flow-view',
@@ -523,6 +527,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
   /** 居中到指定节点 */
   centerOnNode(taskId: string, openDetail: boolean = true): void {
+    const task = taskId ? this.projectState.getTask(taskId) : undefined;
+    if (!isNavigableFlowTask(task)) {
+      this.logger.warn('目标任务不存在，忽略流程图链接跳转', { taskId });
+      return;
+    }
+
     this.flowCommand.centerOnNode(taskId, openDetail);
   }
   

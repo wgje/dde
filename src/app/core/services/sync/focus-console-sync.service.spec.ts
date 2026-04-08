@@ -136,6 +136,47 @@ describe('FocusConsoleSyncService', () => {
     expect(result.ok).toBe(false);
   });
 
+  it('saveFocusSession should defer remote write during browser suspension window', async () => {
+    setVisibilityState('hidden');
+
+    const result = await service.saveFocusSession({
+      id: 'session-1',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('SYNC_OFFLINE');
+      expect(result.error.details?.['reason']).toBe('browser-network-suspended');
+    }
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
   it('loadFocusSession should return success(null) when Supabase is not configured (offline fallback)', async () => {
     mockSupabaseClientService.isConfigured = false;
 

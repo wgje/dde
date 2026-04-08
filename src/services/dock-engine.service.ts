@@ -42,7 +42,6 @@ import { DockSnapshotManagerService } from './dock-snapshot-manager.service';
 import { DockEntryCrudService } from './dock-entry-crud.service';
 import { DockTaskFlowService } from './dock-task-flow.service';
 import { TimerHandle } from '../utils/timer-handle';
-import { UiStateService } from './ui-state.service';
 import {
   resolveDockFocusChromePhase,
   type DockFocusChromePhase,
@@ -59,11 +58,12 @@ import {
   providedIn: 'root',
 })
 export class DockEngineService {
+  private static readonly DEFAULT_DOCK_EXPANDED_PREFERENCE = true;
+
   private readonly taskStore = inject(TaskStore);
   private readonly logger = inject(LoggerService).category('DockEngine');
   private readonly syncService = inject(SimpleSyncService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly uiState = inject(UiStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly toast = inject(ToastService);
@@ -99,8 +99,7 @@ export class DockEngineService {
   readonly focusMode = signal(false);
   readonly focusTransition = signal<DockFocusTransitionState | null>(null);
   private readonly focusChromeRestoring = signal(false);
-  private readonly dockExpandedPreference = signal(this.uiState.isParkingDockOpen());
-  readonly dockExpanded = signal(this.resolveInitialDockExpanded());
+  readonly dockExpanded = signal(true);
   readonly muteWaitTone = signal(false);
   readonly focusScrimOn = signal(true);
   readonly dailySlots = signal<DailySlotEntry[]>([]);
@@ -203,6 +202,7 @@ export class DockEngineService {
   private readonly focusChromeRestoreTimer = new TimerHandle();
 
   private currentSnapshotUserId: string | null = null;
+  private dockExpandedPreference = DockEngineService.DEFAULT_DOCK_EXPANDED_PREFERENCE;
   /** 快照恢复锁：使用 signal 确保 effect 能响应式追踪恢复状态，避免异步竞态 */
   private readonly restoringSnapshot = signal(false);
   private waitEndNotifiedIds = new Set<string>();
@@ -365,24 +365,6 @@ export class DockEngineService {
     this.initLifecycle();
   }
 
-  private resolveInitialDockExpanded(): boolean {
-    // 移动端启动阶段始终优先保留内容视图，避免秒开后被停泊坞直接盖住。
-    if (this.uiState.isMobile()) {
-      return false;
-    }
-
-    return this.dockExpandedPreference();
-  }
-
-  private persistDockExpandedPreference(expanded: boolean): void {
-    if (this.dockExpandedPreference() !== expanded) {
-      this.dockExpandedPreference.set(expanded);
-    }
-    if (this.uiState.isParkingDockOpen() !== expanded) {
-      this.uiState.setParkingDockOpen(expanded);
-    }
-  }
-
   // ---------------------------------------------------------------------------
   //  Constructor 子初始化流程
   // ---------------------------------------------------------------------------
@@ -462,8 +444,8 @@ export class DockEngineService {
       lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
       consoleVisibleOrderHint: this.consoleVisibleOrderHint,
       waitEndNotifiedIds: this.waitEndNotifiedIds,
-      getDockExpandedPreference: () => this.dockExpandedPreference(),
-      persistDockExpandedPreference: (expanded) => this.persistDockExpandedPreference(expanded),
+      getDockExpandedPreference: () => this.getDockExpandedPreference(),
+      persistDockExpandedPreference: (expanded: boolean) => this.persistDockExpandedPreference(expanded),
       clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
@@ -681,11 +663,14 @@ export class DockEngineService {
     this.entryCrud.reorderDockEntries(sourceTaskId, targetTaskId);
   }
 
-  setDockExpanded(expanded: boolean, options?: { persistPreference?: boolean }): void {
-    this.entryCrud.setDockExpanded(expanded);
-    if (options?.persistPreference ?? false) {
+  setDockExpanded(
+    expanded: boolean,
+    options?: { persistPreference?: boolean },
+  ): void {
+    if (options?.persistPreference ?? true) {
       this.persistDockExpandedPreference(expanded);
     }
+    this.entryCrud.setDockExpanded(expanded);
   }
 
   toggleMuteWaitTone(): void {
@@ -814,12 +799,20 @@ export class DockEngineService {
     this.entries.update(prev => this.zoneService.rebalanceAutoZonesEntries(prev));
   }
 
-  private scheduleLocalPersist(snapshot: DockSnapshot | null, userId: string | null): void {
+  private scheduleLocalPersist(_snapshot: DockSnapshot | null, userId: string | null): void {
     this.snapshotPersistence.scheduleLocalPersist(
-      () => snapshot ?? this.exportSnapshot(),
+      () => this.exportSnapshot(),
       userId,
       () => this.lifecycle.getNonCriticalHoldDelay(),
     );
+  }
+
+  private getDockExpandedPreference(): boolean {
+    return this.dockExpandedPreference;
+  }
+
+  private persistDockExpandedPreference(expanded: boolean): void {
+    this.dockExpandedPreference = expanded;
   }
 
   private startFirstMainSelectionWindow(taskId: string): void {

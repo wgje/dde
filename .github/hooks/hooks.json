@@ -1,12 +1,17 @@
 {
-  "version": 1,
-  "description": "NanoFlow Copilot Hooks",
   "hooks": {
-    "preToolUse": [
+    "PreToolUse": [
       {
         "type": "command",
-        "command": "bash .github/hooks/scripts/pre-tool-check.sh",
-        "timeoutSec": 10
+        "command": "node .github/hooks/scripts/pre-tool-check.mjs",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node .github/hooks/scripts/stop-guard.mjs",
+        "timeout": 5
       }
     ]
   }

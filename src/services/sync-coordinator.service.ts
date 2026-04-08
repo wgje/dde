@@ -747,7 +747,7 @@ export class SyncCoordinatorService {
   ): Promise<Set<string>> {
     const handedOffProjectIds = new Set<string>();
 
-    for (const projectId of projectIds) {
+    for (const projectId of Array.from(projectIds)) {
       const project = this.projectState.getProject(projectId)
         ?? (this.projectState.activeProject()?.id === projectId ? this.projectState.activeProject() : null);
       if (!project) {
@@ -1376,7 +1376,7 @@ export class SyncCoordinatorService {
       projectId: localProject.id,
       localProject,
       remoteProject,
-      ownerUserId,
+      ownerUserId: ownerUserId ?? undefined,
       remoteSnapshotFresh: !!remoteProject,
       conflictedAt: new Date().toISOString(),
       localVersion: localProject.version ?? 0,

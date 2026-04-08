@@ -221,7 +221,7 @@ export class ConnectionSyncOperationsService {
           fromRetryQueue,
         );
 
-        if (!tombstoneStatus.ok) {
+        if (tombstoneStatus.ok === false) {
           if (!tombstoneStatus.shouldRetry) {
             if (fromRetryQueue) {
               throw new PermanentFailureError(
@@ -264,7 +264,7 @@ export class ConnectionSyncOperationsService {
           fromRetryQueue,
         );
         
-        if (!validationResult.valid) {
+        if (validationResult.valid === false) {
           if (!validationResult.shouldRetry) {
             if (fromRetryQueue) {
               throw new PermanentFailureError(

@@ -8,7 +8,7 @@ import { Injector, runInInjectionContext } from '@angular/core';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ActionQueueService } from './action-queue.service';
-import { QueuedAction } from './action-queue.types';
+import { QueuedAction as QueuedActionModel } from './action-queue.types';
 import { RetryQueueService, SimpleSyncService } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
@@ -16,6 +16,9 @@ import { LoggerService } from './logger.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ToastService } from './toast.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+
+type QueuedAction = Omit<Partial<QueuedActionModel>, 'payload'> & { payload: unknown };
+type RegisteredProcessor = (action: QueuedActionModel) => Promise<boolean>;
 
 // ── Mock factories ───────────────────────────────────────────
 
@@ -51,8 +54,11 @@ const mockSyncService = {
   incrementRoutineCompletion: vi.fn().mockResolvedValue({ ok: true }),
 };
 
-const mockProjectStateService = { updateProjects: vi.fn(), getProject: vi.fn(() => undefined) };
-const mockAuthService = { currentUserId: vi.fn(() => 'test-user') };
+const mockProjectStateService = {
+  updateProjects: vi.fn(),
+  getProject: vi.fn<(projectId: string) => { id: string; syncSource?: string } | undefined>(() => undefined),
+};
+const mockAuthService = { currentUserId: vi.fn<() => string | null>(() => 'test-user') };
 const mockConflictStorageService = { saveConflict: vi.fn().mockResolvedValue(true) };
 const mockToastService = { warning: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn() };
 
@@ -61,10 +67,10 @@ const mockToastService = { warning: vi.fn(), info: vi.fn(), error: vi.fn(), succ
 /** Retrieve the handler registered for a given action type */
 function getProcessor(type: string): (action: QueuedAction) => Promise<boolean> {
   const call = mockActionQueueService.registerProcessor.mock.calls.find(
-    (c: [string, (action: QueuedAction) => Promise<boolean>]) => c[0] === type,
-  );
+    (c: unknown[]) => c[0] === type,
+  ) as [string, RegisteredProcessor] | undefined;
   if (!call) throw new Error(`No processor registered for "${type}"`);
-  return call[1];
+  return call[1] as unknown as (action: QueuedAction) => Promise<boolean>;
 }
 
 describe('ActionQueueProcessorsService', () => {
@@ -114,8 +120,42 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockActionQueueService.registerProcessor).toHaveBeenCalledTimes(13);
   });
 
+  it('setupProcessors should stay idempotent after eager bootstrap', () => {
+    mockActionQueueService.registerProcessor.mockClear();
+
+    service.setupProcessors();
+
+    expect(mockActionQueueService.registerProcessor).not.toHaveBeenCalled();
+  });
+
   it('should set queue sync callbacks', () => {
     expect(mockActionQueueService.setQueueProcessCallbacks).toHaveBeenCalledOnce();
+  });
+
+  it('focus-session:update should surface retryable Result details to the queue layer', async () => {
+    mockSyncService.saveFocusSession.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'SYNC_OFFLINE',
+        message: '浏览器恢复连接中，请稍后重试',
+        details: { reason: 'browser-network-suspended' },
+      },
+    });
+    const handler = getProcessor('focus-session:update');
+
+    await expect(handler({
+      payload: {
+        record: {
+          id: 'focus-1',
+          userId: 'test-user',
+          startedAt: '2026-04-08T00:00:00.000Z',
+          endedAt: null,
+          updatedAt: '2026-04-08T00:00:01.000Z',
+          snapshot: { version: 6 },
+        },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction)).rejects.toThrow('SYNC_OFFLINE');
   });
 
   // ── project:update ─────────────────────────────────────────

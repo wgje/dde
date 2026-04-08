@@ -23,11 +23,52 @@ export interface LinkTypeDialogData {
 }
 
 /**
+ * 连接线数据引用（GoJS ObjectData 包装）
+ */
+export interface LinkDataRef {
+  data: Record<string, unknown>;
+}
+
+/**
+ * 移动端连接线删除提示数据
+ */
+export interface LinkDeleteHint {
+  link: LinkDataRef;
+  x: number;
+  y: number;
+  /** 是否跨树连接 */
+  isCrossTree: boolean;
+}
+
+/**
+ * 连接块编辑器模式
+ */
+export type ConnectionEditorMode = 'preview' | 'edit';
+
+/**
+ * 连接块编辑器数据（流程图视图中浮动编辑面板）
+ */
+export interface ConnectionEditorData {
+  sourceId: string;
+  targetId: string;
+  /** 联系块标题（外显内容） */
+  title: string;
+  /** 联系块详细描述 */
+  description: string;
+  /** 当前打开的是跨树关联还是父子关系 */
+  isCrossTree: boolean;
+  /** 当前浮层模式：预览或编辑 */
+  mode: ConnectionEditorMode;
+  x: number;
+  y: number;
+}
+
+/**
  * 移动端连接线操作菜单数据
  * 长按连接线时显示，提供编辑和删除两个操作
  */
 export interface LinkActionMenu {
-  link: LinkDataRef; // 连接线数据引用
+  link: LinkDataRef;
   x: number;
   y: number;
   /** 是否跨树连接（用于 UI 文案和功能区分） */

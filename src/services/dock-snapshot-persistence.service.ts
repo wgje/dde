@@ -28,9 +28,8 @@ import {
 } from '../models/parking-dock';
 import { sanitizePlannerFields } from '../utils/planner-fields';
 import { LoggerService } from './logger.service';
-import { del, get, set } from 'idb-keyval';
+import { get, set } from 'idb-keyval';
 import { TimerHandle } from '../utils/timer-handle';
-import { AUTH_CONFIG } from '../config/auth.config';
 
 export const DOCK_SNAPSHOT_IDB_DB_NAME = 'keyval-store';
 const LOCAL_IDB_KEY_PREFIX = 'nanoflow.focus-session.v5';
@@ -95,37 +94,6 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     ctx: SnapshotNormalizeContext,
   ): Promise<DockSnapshot | null> {
-    if (userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return this.readScopedSnapshot(userId, ctx);
-    }
-
-    const localUserSnapshot = await this.readScopedSnapshot(userId, ctx);
-    const anonymousSnapshot = await this.readScopedSnapshot(null, ctx);
-
-    if (anonymousSnapshot && (!localUserSnapshot || this.isSnapshotNewer(anonymousSnapshot, localUserSnapshot))) {
-      await this.migrateAnonymousSnapshotToLocalUser(anonymousSnapshot);
-      return anonymousSnapshot;
-    }
-
-    if (localUserSnapshot) {
-      if (anonymousSnapshot) {
-        await this.deleteScopedSnapshot(null);
-      }
-      return localUserSnapshot;
-    }
-
-    if (!anonymousSnapshot) {
-      return null;
-    }
-
-    await this.migrateAnonymousSnapshotToLocalUser(anonymousSnapshot);
-    return anonymousSnapshot;
-  }
-
-  private async readScopedSnapshot(
-    userId: string | null,
-    ctx: SnapshotNormalizeContext,
-  ): Promise<DockSnapshot | null> {
     let normalizedIdbSnapshot: DockSnapshot | null = null;
     let normalizedLegacySnapshot: DockSnapshot | null = null;
     const legacyKey = this.legacyLocalStorageKey(userId);
@@ -173,47 +141,6 @@ export class DockSnapshotPersistenceService {
     return normalizedIdbSnapshot;
   }
 
-  private async migrateAnonymousSnapshotToLocalUser(snapshot: DockSnapshot): Promise<void> {
-    let migrated = await this.persistToIdb(this.localCacheKey(AUTH_CONFIG.LOCAL_MODE_USER_ID), snapshot);
-
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(
-          this.legacyLocalStorageKey(AUTH_CONFIG.LOCAL_MODE_USER_ID),
-          JSON.stringify(snapshot),
-        );
-        migrated = true;
-      } catch (err) {
-        this.logger.warn('Legacy localStorage migration failed', {
-          code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
-          error: err,
-        });
-      }
-    }
-
-    if (!migrated) {
-      return;
-    }
-
-    await this.deleteScopedSnapshot(null);
-  }
-
-  private async deleteScopedSnapshot(userId: string | null): Promise<void> {
-    try {
-      await del(this.localCacheKey(userId));
-    } catch (err) {
-      this.logger.warn('IDB snapshot delete failed', {
-        code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
-        key: this.localCacheKey(userId),
-        error: err,
-      });
-    }
-
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem(this.legacyLocalStorageKey(userId));
-    }
-  }
-
   cancelPendingPersist(): void {
     if (this.pendingLocalPersist) {
       const { snapshotFn, userId } = this.pendingLocalPersist;
@@ -230,7 +157,7 @@ export class DockSnapshotPersistenceService {
     try {
       await this.persistChain;
     } catch {
-      // persistChain 内部已做错误恢复，这里仅确保 full wipe 不再等待失败向上冒泡
+      // persistChain 内部已自行恢复，这里只负责等待当前串行写入收敛。
     }
 
     this.persistChain = Promise.resolve();
@@ -249,7 +176,7 @@ export class DockSnapshotPersistenceService {
   }
 
   /** IDB 写入（含 1 次重试），失败不阻塞业务流 */
-  private async persistToIdb(key: string, value: DockSnapshot): Promise<boolean> {
+  private async persistToIdb(key: string, value: DockSnapshot): Promise<void> {
     // 配额预检：移动端 Safari 等环境 IDB 配额有限，静默降级避免数据丢失
     if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
       try {
@@ -261,7 +188,7 @@ export class DockSnapshotPersistenceService {
             quota,
             key,
           });
-          return false;
+          return;
         }
       } catch {
         // estimate() 不可用时静默跳过检查，继续尝试写入
@@ -271,7 +198,7 @@ export class DockSnapshotPersistenceService {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         await set(key, value);
-        return true;
+        return;
       } catch (err) {
         if (attempt < maxRetries) continue;
         this.logger.warn('IDB persist failed after retry', {
@@ -281,8 +208,6 @@ export class DockSnapshotPersistenceService {
         });
       }
     }
-
-    return false;
   }
 
   localCacheKey(userId: string | null): string {
@@ -382,7 +307,7 @@ export class DockSnapshotPersistenceService {
       version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries,
       focusMode,
-      isDockExpanded: source.isDockExpanded === undefined ? false : Boolean(source.isDockExpanded),
+      isDockExpanded: source.isDockExpanded === undefined ? true : Boolean(source.isDockExpanded),
       muteWaitTone: Boolean(source.muteWaitTone),
       session,
       firstDragDone: session.firstDragIntervened,
@@ -601,7 +526,7 @@ export class DockSnapshotPersistenceService {
       : [];
   }
 
-  private static readonly VALID_DECISION_TYPES: ReadonlySet<DockRuleDecisionType> = new Set([
+  private static readonly VALID_DECISION_TYPES: ReadonlySet<DockRuleDecisionType> = new Set<DockRuleDecisionType>([
     'first_suspend_recommendation',
     'completion_followup',
     'pending_decision',

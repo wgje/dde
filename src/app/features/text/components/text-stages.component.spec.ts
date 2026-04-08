@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -63,5 +65,11 @@ describe('TextStagesComponent', () => {
 
     const stageList = host.querySelector('div.overflow-auto');
     expect(stageList).not.toBeNull();
+  });
+
+  it('should declare the forwarded linked-task payload as taskId plus event', () => {
+    const source = readFileSync(resolve(__dirname, 'text-stages.component.ts'), 'utf8');
+
+    expect(source).toContain("@Output() openLinkedTask = new EventEmitter<{ taskId: string; event: Event }>();");
   });
 });

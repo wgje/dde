@@ -83,9 +83,9 @@ export class ProjectStateService {
       stagesMap.get(t.stage!)!.push(t);
     });
     
-    for (const [, val] of stagesMap.entries()) {
+    stagesMap.forEach((val) => {
       val.sort((a, b) => a.order - b.order);
-    }
+    });
     
     const sortedKeys = Array.from(stagesMap.keys()).sort((a, b) => a - b);
     return sortedKeys.map(k => ({

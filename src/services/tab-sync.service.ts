@@ -238,12 +238,15 @@ export class TabSyncService implements OnDestroy {
     let count = 0;
     const now = Date.now();
     
-    for (const [tabId, tab] of this.activeTabs) {
-      if (tabId === this.tabId) continue;
-      if (tab.projectId !== projectId) continue;
-      if (now - tab.lastSeen > TAB_SYNC_CONFIG.TAB_TIMEOUT) continue;
-      count++;
-    }
+    this.activeTabs.forEach((tab, tabId) => {
+      if (
+        tabId !== this.tabId
+        && tab.projectId === projectId
+        && now - tab.lastSeen <= TAB_SYNC_CONFIG.TAB_TIMEOUT
+      ) {
+        count++;
+      }
+    });
     
     return count;
   }
@@ -416,11 +419,11 @@ export class TabSyncService implements OnDestroy {
     const now = Date.now();
     const staleTabIds: string[] = [];
     
-    for (const [tabId, tab] of this.activeTabs) {
+    this.activeTabs.forEach((tab, tabId) => {
       if (now - tab.lastSeen > TAB_SYNC_CONFIG.TAB_TIMEOUT) {
         staleTabIds.push(tabId);
       }
-    }
+    });
     
     for (const tabId of staleTabIds) {
       this.activeTabs.delete(tabId);
@@ -428,11 +431,11 @@ export class TabSyncService implements OnDestroy {
     }
     
     // 【P3-20 修复】清理过期的远程编辑锁
-    for (const [key, lock] of this.remoteEditLocks) {
+    this.remoteEditLocks.forEach((lock, key) => {
       if (lock.expiresAt <= now) {
         this.remoteEditLocks.delete(key);
       }
-    }
+    });
   }
   
   private cleanup(): void {
@@ -579,14 +582,14 @@ export class TabSyncService implements OnDestroy {
    */
   releaseAllEditLocks(): void {
     // 【v5.10】清除所有锁刷新定时器
-    for (const timer of this.lockRefreshTimers.values()) {
+    this.lockRefreshTimers.forEach(timer => {
       clearInterval(timer);
-    }
+    });
     this.lockRefreshTimers.clear();
     
-    for (const lock of this.localEditLocks.values()) {
+    this.localEditLocks.forEach(lock => {
       this.broadcastEditUnlock(lock);
-    }
+    });
     this.localEditLocks.clear();
   }
   
@@ -599,16 +602,19 @@ export class TabSyncService implements OnDestroy {
    */
   isBeingEditedByOtherTab(taskId: string, field?: string): boolean {
     const now = Date.now();
-    
-    for (const [_key, lock] of this.remoteEditLocks) {
-      if (lock.taskId !== taskId) continue;
-      if (field && lock.field !== field) continue;
-      if (lock.expiresAt <= now) continue;
-      
-      return true;
-    }
-    
-    return false;
+    let edited = false;
+
+    this.remoteEditLocks.forEach(lock => {
+      if (
+        lock.taskId === taskId
+        && (!field || lock.field === field)
+        && lock.expiresAt > now
+      ) {
+        edited = true;
+      }
+    });
+
+    return edited;
   }
   
   /**
@@ -618,11 +624,11 @@ export class TabSyncService implements OnDestroy {
     const now = Date.now();
     const editors: TabEditLock[] = [];
     
-    for (const lock of this.remoteEditLocks.values()) {
+    this.remoteEditLocks.forEach(lock => {
       if (lock.taskId === taskId && lock.expiresAt > now) {
         editors.push(lock);
       }
-    }
+    });
     
     return editors;
   }
@@ -736,9 +742,9 @@ export class TabSyncService implements OnDestroy {
    */
   private cleanupConcurrencyState(): void {
     // 清理锁刷新定时器
-    for (const timer of this.lockRefreshTimers.values()) {
+    this.lockRefreshTimers.forEach(timer => {
       clearInterval(timer);
-    }
+    });
     this.lockRefreshTimers.clear();
     
     // 清理警告冷却追踪

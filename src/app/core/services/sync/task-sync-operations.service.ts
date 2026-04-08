@@ -924,9 +924,9 @@ export class TaskSyncOperationsService {
     let fromRemote = false;
     
     const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
-    for (const id of localTombstones) {
+    localTombstones.forEach(id => {
       tombstoneIds.add(id);
-    }
+    });
     
     const client = this.getSupabaseClient();
     if (!client) {

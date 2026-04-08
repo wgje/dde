@@ -121,9 +121,13 @@ export class TombstoneService {
     
     try {
       const data: Record<string, Record<string, number>> = {};
-      for (const [projectId, taskIds] of this.localTombstones.entries()) {
-        data[projectId] = Object.fromEntries(taskIds.entries());
-      }
+      this.localTombstones.forEach((taskIds, projectId) => {
+        const serializedTaskIds: Record<string, number> = {};
+        taskIds.forEach((timestamp, taskId) => {
+          serializedTaskIds[taskId] = timestamp;
+        });
+        data[projectId] = serializedTaskIds;
+      });
       localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(data));
     } catch (e) {
       this.logger.warn('保存本地 tombstone 缓存失败', e);
@@ -422,12 +426,16 @@ export class TombstoneService {
       if (!records) {
         continue;
       }
-      for (const [taskId, timestamp] of records.entries()) {
+      const expiredTaskIds: string[] = [];
+      records.forEach((timestamp, taskId) => {
         if (timestamp < cutoff) {
-          records.delete(taskId);
-          cleaned++;
+          expiredTaskIds.push(taskId);
         }
-      }
+      });
+      expiredTaskIds.forEach(taskId => {
+        records.delete(taskId);
+        cleaned++;
+      });
       if (records.size === 0) {
         this.localTombstones.delete(pid);
       }
@@ -509,9 +517,13 @@ export class TombstoneService {
    */
   exportLocalTombstones(): Record<string, string[]> {
     const data: Record<string, string[]> = {};
-    for (const [projectId, ids] of this.localTombstones.entries()) {
-      data[projectId] = Array.from(ids.keys());
-    }
+    this.localTombstones.forEach((ids, projectId) => {
+      const taskIds: string[] = [];
+      ids.forEach((_timestamp, taskId) => {
+        taskIds.push(taskId);
+      });
+      data[projectId] = taskIds;
+    });
     return data;
   }
   

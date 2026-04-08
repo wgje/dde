@@ -9,7 +9,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
-import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
+import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 
 /**
  * 任务编辑器组件（展开态）
@@ -372,7 +372,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   readonly deleteTask = output<void>();
   readonly parkTask = output<void>();
   readonly attachmentError = output<string>();
-  readonly openLinkedTask = output<{ task: Task; event: Event }>();
+  readonly openLinkedTask = output<{ taskId: string; event: Event }>();
   readonly previewModeChange = output<boolean>();
 
   readonly isPreview = signal(true);
@@ -739,6 +739,10 @@ export class TextTaskEditorComponent implements OnDestroy {
    * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
   onPreviewClick(event: MouseEvent) {
+    if (this.handlePreviewLinkClick(event)) {
+      return;
+    }
+
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
@@ -752,6 +756,18 @@ export class TextTaskEditorComponent implements OnDestroy {
     } else {
       this.enterEditMode('content', event);
     }
+  }
+
+  private handlePreviewLinkClick(event: MouseEvent): boolean {
+    const linkTarget = handleMarkdownLinkAction(event, this.toast);
+    if (!linkTarget) {
+      return linkTarget === false;
+    }
+
+    if (linkTarget.kind === 'task' && linkTarget.taskId) {
+      this.openLinkedTask.emit({ taskId: linkTarget.taskId, event });
+    }
+    return true;
   }
 
   addQuickTodo(inputElement: HTMLInputElement) {

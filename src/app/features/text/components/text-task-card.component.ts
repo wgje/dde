@@ -3,10 +3,12 @@ import { CommonModule, DatePipe } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
+import { handleMarkdownLinkAction } from '../../../../utils/markdown';
 
 @Component({
   selector: 'app-text-task-card',
@@ -83,6 +85,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
         @if (task().content) {
           <div class="text-stone-500 dark:text-stone-400 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em] markdown-preview-compact"
                [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}"
+               (click)="onContentPreviewClick($event)"
                [innerHTML]="task().content | safeMarkdown">
           </div>
         } @else {
@@ -114,6 +117,7 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 export class TextTaskCardComponent {
   readonly dockEngine = inject(DockEngineService);
   readonly projectState = inject(ProjectStateService);
+  private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService);
   private readonly textViewOps = inject(TextViewTaskOpsService, { optional: true });
 
@@ -142,7 +146,7 @@ export class TextTaskCardComponent {
   deleteTask = output<void>();
   parkTask = output<void>();
   attachmentError = output<string>();
-  openLinkedTask = output<{ task: Task; event: Event }>();
+  openLinkedTask = output<{ taskId: string; event: Event }>();
 
   dragStart = output<{ event: DragEvent; task: Task }>();
   dragEnd = output<void>();
@@ -218,7 +222,8 @@ export class TextTaskCardComponent {
         targetElement.tagName === 'INPUT'
         || targetElement.tagName === 'TEXTAREA'
         || targetElement.tagName === 'BUTTON'
-        || !!targetElement.closest('input, textarea, button')
+        || targetElement.tagName === 'A'
+        || !!targetElement.closest('input, textarea, button, a')
       )
     ) {
       event.stopPropagation();
@@ -263,6 +268,17 @@ export class TextTaskCardComponent {
     }
 
     event.stopPropagation();
+  }
+
+  onContentPreviewClick(event: MouseEvent) {
+    const linkTarget = handleMarkdownLinkAction(event, this.toast);
+    if (!linkTarget) {
+      return;
+    }
+
+    if (linkTarget.kind === 'task' && linkTarget.taskId) {
+      this.openLinkedTask.emit({ taskId: linkTarget.taskId, event });
+    }
   }
 
   onCardPointerDown(event: PointerEvent) {

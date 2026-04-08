@@ -15,6 +15,7 @@ import { ProjectStore, TaskStore } from '../../../core/state/stores';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { resolveDockFocusChromePhase } from '../../../../utils/dock-focus-phase';
+import type { Project } from '../../../../models';
 
 import { clampHudPosition } from '../utils/dock-hud-position';
 
@@ -27,19 +28,28 @@ import {
   DockFocusTransitionState,
 } from '../../../../models/parking-dock';
 
+type MockDockEntry = Partial<DockEntry>
+  & Pick<DockEntry, 'taskId' | 'title' | 'status' | 'load' | 'lane' | 'isMain'>;
+
+type MockPendingDecision = Partial<DockPendingDecision>
+  & Pick<DockPendingDecision, 'reason'>;
+
+type MockPendingDecisionEntry = Partial<DockPendingDecisionEntry>
+  & Pick<DockPendingDecisionEntry, 'taskId' | 'title' | 'lane' | 'load' | 'expectedMinutes' | 'recommendedScore'>;
+
 describe('ParkingDockComponent v4', () => {
   let fixture: ComponentFixture<ParkingDockComponent>;
   let component: ParkingDockComponent;
   let uiState: UiStateService;
 
-  const dockedEntries = signal<DockEntry[]>([]);
+  const dockedEntries = signal<MockDockEntry[]>([]);
   const focusMode = signal(false);
   const focusScrimOn = signal(true);
   const focusTransition = signal<DockFocusTransitionState | null>(null);
   const focusChromeRestoring = signal(false);
   const dockExpanded = signal(true);
-  const pendingDecision = signal<DockPendingDecision | null>(null);
-  const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
+  const pendingDecision = signal<MockPendingDecision | null>(null);
+  const pendingDecisionEntries = signal<MockPendingDecisionEntry[]>([]);
   const statusMachineEntries = signal<StatusMachineEntry[]>([]);
   const muteWaitTone = signal(false);
   const suspendedEntries = signal<DockEntry[]>([]);
@@ -121,7 +131,7 @@ describe('ParkingDockComponent v4', () => {
     toggleFocusMode: vi.fn(() => focusMode.update(value => !value)),
     toggleFocusScrim: vi.fn(() => focusScrimOn.update(value => !value)),
     setFocusScrim: vi.fn((on: boolean) => focusScrimOn.set(on)),
-    beginFocusTransition: vi.fn((state: unknown) => focusTransition.set(state)),
+    beginFocusTransition: vi.fn((state: DockFocusTransitionState) => focusTransition.set(state)),
     endFocusTransition: vi.fn(() => focusTransition.set(null)),
     beginFocusChromeRestore: vi.fn((durationMs: number = PARKING_CONFIG.DOCK_ANIMATION_MS) => {
       focusChromeRestoring.set(true);
@@ -129,7 +139,7 @@ describe('ParkingDockComponent v4', () => {
     }),
     clearFocusChromeRestore: vi.fn(() => focusChromeRestoring.set(false)),
     holdNonCriticalWork: vi.fn(),
-    setDockExpanded: vi.fn((expanded: boolean) => dockExpanded.set(expanded)),
+    setDockExpanded: vi.fn((expanded: boolean, _options?: { persistPreference?: boolean }) => dockExpanded.set(expanded)),
     choosePendingDecisionCandidate: vi.fn(),
     cancelPendingDecisionAutoPromote: vi.fn(),
     toggleMuteWaitTone: vi.fn(),

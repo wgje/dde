@@ -311,6 +311,10 @@ export class GateService {
     this.animationTimeoutId = null;
   }
 
+  private toVoidResult(result: Result<BlackBoxEntry, OperationError>): Result<void, OperationError> {
+    return result.ok ? success(undefined) : { ok: false, error: result.error };
+  }
+
   /**
    * 检查是否需要显示大门
    * 在应用启动时调用
@@ -365,7 +369,7 @@ export class GateService {
     }
 
     // 【修复 P2-01】传播内部操作结果，而非恒返 success
-    return result.ok ? success(undefined) : result;
+    return this.toVoidResult(result);
   }
 
   /** 标记当前条目为完成 */
@@ -381,7 +385,7 @@ export class GateService {
     }
 
     // 【修复 P2-01】传播内部操作结果
-    return result.ok ? success(undefined) : result;
+    return this.toVoidResult(result);
   }
 
   /**
@@ -411,7 +415,7 @@ export class GateService {
       this.startActionTransition('heave_read');
     }
 
-    return result.ok ? success(undefined) : result;
+    return this.toVoidResult(result);
   }
 
   /**

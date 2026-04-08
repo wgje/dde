@@ -23,15 +23,13 @@ describe('TextUnassignedComponent', () => {
     status: 'active',
     stage: null,
     order: 0,
-    projectId: 'project-1',
     parentId: null,
-    level: 0,
-    path: 'task-1',
-    sortKey: 'task-1',
-    createdAt: new Date().toISOString(),
+    rank: 0,
+    x: 0,
+    y: 0,
+    createdDate: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    userId: 'local-user',
-    isExpanded: false,
+    displayId: '1,a',
     attachments: [],
     tags: [],
     parkingMeta: null,
@@ -65,6 +63,7 @@ describe('TextUnassignedComponent', () => {
   };
   const mockToast = {
     info: vi.fn(),
+    warning: vi.fn(),
   };
   const mockUserSession = {
     isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
@@ -74,6 +73,7 @@ describe('TextUnassignedComponent', () => {
     vi.clearAllMocks();
     tasks.set([createTask()]);
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
+    mockProjectState.getTask.mockImplementation((taskId: string) => tasks().find(task => task.id === taskId) ?? null);
 
     await TestBed.configureTestingModule({
       imports: [TextUnassignedComponent],
@@ -218,5 +218,105 @@ describe('TextUnassignedComponent', () => {
     expect(internal.localTitle()).toBe('未保存标题');
     expect(internal.localContent()).toBe('未保存正文');
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '编辑任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should emit openLinkedTask when clicking a task markdown link in preview', () => {
+    const internal = component as unknown as {
+      onContentPreviewClick: (event: MouseEvent, task: Task) => void;
+      editingTaskId: { (): string | null };
+      openLinkedTask: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(internal.openLinkedTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#task:linked-task');
+    anchor.setAttribute('data-link-kind', 'task');
+    anchor.setAttribute('data-task-link-id', 'linked-task');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+    const event = { target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent;
+
+    internal.onContentPreviewClick(event, tasks()[0]!);
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith({ taskId: 'linked-task', event });
+    expect(internal.editingTaskId()).toBeNull();
+  });
+
+  it('should keep preview mode when clicking an external markdown link in preview', () => {
+    const internal = component as unknown as {
+      onContentPreviewClick: (event: MouseEvent, task: Task) => void;
+      editingTaskId: { (): string | null };
+    };
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', 'https://example.com');
+    anchor.setAttribute('data-link-kind', 'external');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+
+    internal.onContentPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent, tasks()[0]!);
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBeNull();
+  });
+
+  it('should block unsafe markdown links without entering edit mode', () => {
+    const internal = component as unknown as {
+      onContentPreviewClick: (event: MouseEvent, task: Task) => void;
+      editingTaskId: { (): string | null };
+      openLinkedTask: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(internal.openLinkedTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#__nf_blocked__');
+    anchor.setAttribute('data-link-kind', 'blocked');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+
+    internal.onContentPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent, tasks()[0]!);
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(emitSpy).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBeNull();
+  });
+
+  it('should handle local markdown links without entering edit mode', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    try {
+      const internal = component as unknown as {
+        onContentPreviewClick: (event: MouseEvent, task: Task) => void;
+        editingTaskId: { (): string | null };
+      };
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', '#local-path');
+      anchor.setAttribute('data-link-kind', 'local');
+      anchor.setAttribute('data-local-link-path', 'C:\\Docs\\Plan.md');
+      const stopPropagation = vi.fn();
+      const preventDefault = vi.fn();
+
+      internal.onContentPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent, tasks()[0]!);
+      await Promise.resolve();
+
+      expect(stopPropagation).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(internal.editingTaskId()).toBeNull();
+      expect(writeText).toHaveBeenCalledWith('C:\\Docs\\Plan.md');
+      expect(clickSpy).toHaveBeenCalled();
+    } finally {
+      clickSpy.mockRestore();
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator as object, 'clipboard');
+      }
+    }
   });
 });

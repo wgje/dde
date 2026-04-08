@@ -124,7 +124,7 @@ export class TextTaskConnectionsComponent {
   @Input() connections: TaskConnectionInfo | null = null;
   @Input() isMobile = false;
   
-  @Output() openTask = new EventEmitter<{ task: Task; event: Event }>();
+  @Output() openTask = new EventEmitter<{ taskId: string; event: Event }>();
   
   readonly isCollapsed = signal(false);
   
@@ -136,7 +136,7 @@ export class TextTaskConnectionsComponent {
   onOpenTask(task: Task, event: Event) {
     event.stopPropagation();
     if (task) {
-      this.openTask.emit({ task, event });
+      this.openTask.emit({ taskId: task.id, event });
     }
   }
 }

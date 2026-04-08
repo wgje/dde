@@ -64,16 +64,32 @@ export class ActionQueueProcessorsService {
   private readonly authService = inject(AuthService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly toast = inject(ToastService);
-  private projectConflictHandler: ((localProject: Project, remoteProject: Project, ownerUserId?: string | null) => void) | null = null;
+  private projectConflictHandler: ((
+    localProject: Project,
+    remoteProject: Project,
+    ownerUserId?: string | null,
+    taskIdsToDelete?: string[],
+  ) => void) | null = null;
   private legacyQueueWarningShown = false;
+  private processorsInitialized = false;
+
+  constructor() {
+    // 恢复/联网事件可能早于 SyncCoordinator.initialize()，处理器必须先注册。
+    this.setupProcessors();
+  }
 
   /** 初始化所有处理器 */
   setupProcessors(): void {
+    if (this.processorsInitialized) {
+      return;
+    }
+
     this.setupQueueSyncCoordination();
     this.setupProjectProcessors();
     this.setupTaskProcessors();
     this.setupPreferenceProcessors();
     this.setupFocusConsoleProcessors();
+    this.processorsInitialized = true;
   }
 
   setProjectConflictHandler(
@@ -813,10 +829,13 @@ export class ActionQueueProcessorsService {
           ? payload.record
           : { ...payload.record, userId: sourceUserId };
         const result = await this.syncService.saveFocusSession(record);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('focus-session:create 异常', { error });
-        return false;
+        throw error;
       }
     });
 
@@ -843,10 +862,13 @@ export class ActionQueueProcessorsService {
           ? payload.record
           : { ...payload.record, userId: sourceUserId };
         const result = await this.syncService.saveFocusSession(record);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('focus-session:update 异常', { error });
-        return false;
+        throw error;
       }
     });
 
@@ -869,10 +891,13 @@ export class ActionQueueProcessorsService {
 
       try {
         const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('routine-task:create 异常', { error });
-        return false;
+        throw error;
       }
     });
 
@@ -895,10 +920,13 @@ export class ActionQueueProcessorsService {
 
       try {
         const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('routine-task:update 异常', { error });
-        return false;
+        throw error;
       }
     });
 
@@ -925,10 +953,13 @@ export class ActionQueueProcessorsService {
           ? payload.completion
           : { ...payload.completion, userId: sourceUserId };
         const result = await this.syncService.incrementRoutineCompletion(completion);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('routine-completion:create 异常', { error });
-        return false;
+        throw error;
       }
     });
 
@@ -955,10 +986,13 @@ export class ActionQueueProcessorsService {
           ? payload.completion
           : { ...payload.completion, userId: sourceUserId };
         const result = await this.syncService.incrementRoutineCompletion(completion);
-        return result.ok;
+        if (!result.ok) {
+          throw new Error(this.buildOperationErrorMessage(result.error));
+        }
+        return true;
       } catch (error) {
         this.logger.error('routine-completion:update 异常', { error });
-        return false;
+        throw error;
       }
     });
   }

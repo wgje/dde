@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "node"
+    ],
+    "noEmit": false
+  },
+  "files": [
+    "./main.ts",
+    "./src/typings.d.ts"
+  ],
+  "exclude": [
+    "src/**/*.spec.ts",
+    "src/**/*.test.ts",
+    "e2e/**/*",
+    "playwright.config.ts",
+    "supabase/**/*"
+  ]
+}

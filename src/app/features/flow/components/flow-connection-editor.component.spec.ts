@@ -24,6 +24,16 @@ function createTask(overrides: Partial<Task> = {}): Task {
   } as Task;
 }
 
+function createPreviewMouseEvent(target: EventTarget): MouseEvent {
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'target', { configurable: true, value: target });
+  return event;
+}
+
+function createPreviewTouchEvent(target: EventTarget): TouchEvent {
+  return { target } as unknown as TouchEvent;
+}
+
 describe('FlowConnectionEditorComponent', () => {
   let fixture: ComponentFixture<FlowConnectionEditorComponent>;
   let component: FlowConnectionEditorComponent;
@@ -117,6 +127,94 @@ describe('FlowConnectionEditorComponent', () => {
     expect(component.isEditMode()).toBe(false);
     expect(fixture.nativeElement.querySelector('input')).toBeNull();
     expect(modeChangeSpy).not.toHaveBeenCalledWith('edit');
+  });
+
+  it('点击任务 markdown 链接时应发射 openTask，而不是进入编辑态', () => {
+    const openSpy = vi.spyOn(component.openTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#task:linked-task');
+    anchor.setAttribute('data-link-kind', 'task');
+    anchor.setAttribute('data-task-link-id', 'linked-task');
+    const event = createPreviewMouseEvent(anchor);
+    const stopPropagation = vi.spyOn(event, 'stopPropagation');
+    const preventDefault = vi.spyOn(event, 'preventDefault');
+
+    component.onPreviewClick(event);
+
+    expect(stopPropagation).toHaveBeenCalled();
+    expect(preventDefault).toHaveBeenCalled();
+    expect(openSpy).toHaveBeenCalledWith('linked-task');
+    expect(component.isEditMode()).toBe(false);
+  });
+
+  it('点击外链时应保持预览态', () => {
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', 'https://example.com');
+    anchor.setAttribute('data-link-kind', 'external');
+    const event = createPreviewMouseEvent(anchor);
+    const stopPropagation = vi.spyOn(event, 'stopPropagation');
+    const preventDefault = vi.spyOn(event, 'preventDefault');
+
+    component.onPreviewClick(event);
+
+    expect(stopPropagation).toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(component.isEditMode()).toBe(false);
+  });
+
+  it('点击 blocked 链接时应阻止默认行为并保持预览态', () => {
+    const openSpy = vi.spyOn(component.openTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#__nf_blocked__');
+    anchor.setAttribute('data-link-kind', 'blocked');
+    const event = createPreviewMouseEvent(anchor);
+    const stopPropagation = vi.spyOn(event, 'stopPropagation');
+    const preventDefault = vi.spyOn(event, 'preventDefault');
+
+    component.onPreviewClick(event);
+
+    expect(stopPropagation).toHaveBeenCalled();
+    expect(preventDefault).toHaveBeenCalled();
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(component.isEditMode()).toBe(false);
+  });
+
+  it('点击本地路径链接时应尝试打开并保持预览态', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    try {
+      const openSpy = vi.spyOn(component.openTask, 'emit');
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', '#local-path');
+      anchor.setAttribute('data-link-kind', 'local');
+      anchor.setAttribute('data-local-link-path', 'C:\\Docs\\Plan.md');
+      const event = createPreviewMouseEvent(anchor);
+      const stopPropagation = vi.spyOn(event, 'stopPropagation');
+      const preventDefault = vi.spyOn(event, 'preventDefault');
+
+      component.onPreviewClick(event);
+      await Promise.resolve();
+
+      expect(stopPropagation).toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalled();
+      expect(openSpy).not.toHaveBeenCalled();
+      expect(component.isEditMode()).toBe(false);
+      expect(writeText).toHaveBeenCalledWith('C:\\Docs\\Plan.md');
+      expect(clickSpy).toHaveBeenCalled();
+    } finally {
+      clickSpy.mockRestore();
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator as object, 'clipboard');
+      }
+    }
   });
 
   it('只读预览态应移除可编辑提示文案和可点击光标', () => {
@@ -216,7 +314,7 @@ describe('FlowConnectionEditorComponent', () => {
     document.body.appendChild(outsideEl);
 
     // 直接调用组件方法模拟触摸事件
-    component.onDocumentTouchStart({ target: outsideEl } as TouchEvent);
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
     // 推进定时器以触发延迟保存
     vi.advanceTimersByTime(100);
 
@@ -355,7 +453,7 @@ describe('FlowConnectionEditorComponent', () => {
     outsideEl = document.createElement('button');
     document.body.appendChild(outsideEl);
 
-    component.onDocumentTouchStart({ target: outsideEl } as TouchEvent);
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
     vi.advanceTimersByTime(120);
 
     expect(saveSpy).toHaveBeenCalledTimes(1);
@@ -462,7 +560,7 @@ describe('FlowConnectionEditorComponent', () => {
     // 同一外部点击继续冒泡到 document:click，不应立即关闭浮层
     outsideEl = document.createElement('button');
     document.body.appendChild(outsideEl);
-    component.onDocumentClick({ target: outsideEl } as MouseEvent);
+    component.onDocumentClick(createPreviewMouseEvent(outsideEl));
 
     expect(saveSpy).toHaveBeenCalledTimes(1);
     expect(saveSpy).toHaveBeenCalledWith({
@@ -512,7 +610,7 @@ describe('FlowConnectionEditorComponent', () => {
     outsideEl = document.createElement('button');
     document.body.appendChild(outsideEl);
 
-    component.onDocumentTouchStart({ target: outsideEl } as TouchEvent);
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
     // 推进定时器以触发延迟保存
     vi.advanceTimersByTime(100);
 
@@ -566,7 +664,7 @@ describe('FlowConnectionEditorComponent', () => {
     outsideEl = document.createElement('button');
     document.body.appendChild(outsideEl);
 
-    component.onDocumentTouchStart({ target: outsideEl } as TouchEvent);
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
     // IME 输入中需要更长延迟：touchstart 延迟 100ms + saveAndClose 延迟 100ms = 200ms
     vi.advanceTimersByTime(250);
 
@@ -686,7 +784,7 @@ describe('FlowConnectionEditorComponent', () => {
     document.body.appendChild(outsideEl);
 
     saveSpy.mockClear();
-    component.onDocumentTouchStart({ target: outsideEl } as TouchEvent);
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
     vi.advanceTimersByTime(100);
 
     expect(saveSpy).toHaveBeenCalledTimes(1);

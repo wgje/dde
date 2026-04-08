@@ -219,40 +219,41 @@ export class ChangeTrackerService {
     // 【流量优化 2026-01-12】收集每个任务的变更字段
     const taskUpdateFieldsById: Record<string, string[] | undefined> = {};
     
-    for (const [_key, record] of this.pendingChanges.entries()) {
-      if (record.projectId !== projectId) continue;
-      
-      if (record.entityType === 'task') {
-        switch (record.changeType) {
-          case 'create':
-            if (record.data) tasksToCreate.push(record.data as Task);
-            break;
-          case 'update':
-            if (record.data) {
-              tasksToUpdate.push(record.data as Task);
-              // 记录该任务变更的字段
-              taskUpdateFieldsById[record.entityId] = record.changedFields;
+    this.pendingChanges.forEach((record) => {
+      if (record.projectId === projectId) {
+        if (record.entityType === 'task') {
+          switch (record.changeType) {
+            case 'create':
+              if (record.data) tasksToCreate.push(record.data as Task);
+              break;
+            case 'update':
+              if (record.data) {
+                tasksToUpdate.push(record.data as Task);
+                // 记录该任务变更的字段
+                taskUpdateFieldsById[record.entityId] = record.changedFields;
+              }
+              break;
+            case 'delete':
+              taskIdsToDelete.push(record.entityId);
+              break;
+          }
+        } else if (record.entityType === 'connection') {
+          switch (record.changeType) {
+            case 'create':
+              if (record.data) connectionsToCreate.push(record.data as Connection);
+              break;
+            case 'update':
+              if (record.data) connectionsToUpdate.push(record.data as Connection);
+              break;
+            case 'delete': {
+              const conn = record.data as { source: string; target: string };
+              if (conn) connectionsToDelete.push({ source: conn.source, target: conn.target });
+              break;
             }
-            break;
-          case 'delete':
-            taskIdsToDelete.push(record.entityId);
-            break;
-        }
-      } else if (record.entityType === 'connection') {
-        switch (record.changeType) {
-          case 'create':
-            if (record.data) connectionsToCreate.push(record.data as Connection);
-            break;
-          case 'update':
-            if (record.data) connectionsToUpdate.push(record.data as Connection);
-            break;
-          case 'delete':
-            const conn = record.data as { source: string; target: string };
-            if (conn) connectionsToDelete.push({ source: conn.source, target: conn.target });
-            break;
+          }
         }
       }
-    }
+    });
     
     const totalChanges = 
       tasksToCreate.length + tasksToUpdate.length + taskIdsToDelete.length +
@@ -273,20 +274,23 @@ export class ChangeTrackerService {
   }
   /** 检查项目是否有待同步的变更 */
   hasProjectChanges(projectId: string): boolean {
-    for (const record of this.pendingChanges.values()) {
-      if (record.projectId === projectId) return true;
-    }
-    return false;
+    let hasChanges = false;
+    this.pendingChanges.forEach(record => {
+      if (record.projectId === projectId) {
+        hasChanges = true;
+      }
+    });
+    return hasChanges;
   }
   /** 清除项目的所有变更记录 */
   clearProjectChanges(projectId: string): number {
     const keysToDelete: string[] = [];
     
-    for (const [key, record] of this.pendingChanges.entries()) {
+    this.pendingChanges.forEach((record, key) => {
       if (record.projectId === projectId) {
         keysToDelete.push(key);
       }
-    }
+    });
     
     for (const key of keysToDelete) {
       this.pendingChanges.delete(key);
@@ -311,9 +315,9 @@ export class ChangeTrackerService {
   /** 获取所有有变更的项目ID */
   getChangedProjectIds(): string[] {
     const projectIds = new Set<string>();
-    for (const record of this.pendingChanges.values()) {
+    this.pendingChanges.forEach(record => {
       projectIds.add(record.projectId);
-    }
+    });
     return Array.from(projectIds);
   }
   /** 导出所有待同步变更 */
@@ -358,12 +362,16 @@ export class ChangeTrackerService {
   pruneExpiredChanges(maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS): number {
     const now = Date.now();
     let cleaned = 0;
-    for (const [key, record] of this.pendingChanges.entries()) {
+    const keysToDelete: string[] = [];
+    this.pendingChanges.forEach((record, key) => {
       if (now - record.timestamp > maxAgeMs) {
-        this.pendingChanges.delete(key);
-        cleaned++;
+        keysToDelete.push(key);
       }
-    }
+    });
+    keysToDelete.forEach(key => {
+      this.pendingChanges.delete(key);
+      cleaned++;
+    });
     if (cleaned > 0) {
       this.updateCounters();
       this.logger.info('批量清理过期脏记录', { cleaned, maxAgeMs });
@@ -376,14 +384,14 @@ export class ChangeTrackerService {
    */
   getOldestChangeAgeMs(projectId?: string): number {
     let oldestTimestamp = 0;
-    for (const record of this.pendingChanges.values()) {
+    this.pendingChanges.forEach(record => {
       if (projectId && record.projectId !== projectId) {
-        continue;
+        return;
       }
       if (oldestTimestamp === 0 || record.timestamp < oldestTimestamp) {
         oldestTimestamp = record.timestamp;
       }
-    }
+    });
     return oldestTimestamp === 0 ? 0 : Math.max(0, Date.now() - oldestTimestamp);
   }
   /** 导入变更记录 */
@@ -687,11 +695,11 @@ export class ChangeTrackerService {
   unlockAllTaskFields(taskId: string, projectId: string): void {
     const prefix = `${projectId}:${taskId}:`;
     const keysToDelete: string[] = [];
-    for (const key of this.fieldLocks.keys()) {
+    this.fieldLocks.forEach((_lockData, key) => {
       if (key.startsWith(prefix)) {
         keysToDelete.push(key);
       }
-    }
+    });
     for (const key of keysToDelete) {
       this.fieldLocks.delete(key);
     }
@@ -730,7 +738,7 @@ export class ChangeTrackerService {
     const lockedFields: string[] = [];
     const now = Date.now();
     
-    for (const [key, lockData] of this.fieldLocks.entries()) {
+    this.fieldLocks.forEach((lockData, key) => {
       if (key.startsWith(prefix)) {
         // 支持新格式（带 duration）和旧格式（纯时间戳）的兼容
         const timestamp = typeof lockData === 'number' ? lockData : (lockData as FieldLockData).timestamp;
@@ -747,7 +755,7 @@ export class ChangeTrackerService {
           this.fieldLocks.delete(key);
         }
       }
-    }
+    });
     
     return lockedFields;
   }
@@ -755,11 +763,11 @@ export class ChangeTrackerService {
   clearProjectFieldLocks(projectId: string): void {
     const prefix = `${projectId}:`;
     const keysToDelete: string[] = [];
-    for (const key of this.fieldLocks.keys()) {
+    this.fieldLocks.forEach((_lockData, key) => {
       if (key.startsWith(prefix)) {
         keysToDelete.push(key);
       }
-    }
+    });
     for (const key of keysToDelete) {
       this.fieldLocks.delete(key);
     }

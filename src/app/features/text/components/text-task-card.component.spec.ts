@@ -22,6 +22,7 @@ describe('TextTaskCardComponent', () => {
   const mockProjectState = {
     compressDisplayId: vi.fn((displayId: string) => displayId),
     activeProjectId: vi.fn(() => null),
+    getTask: vi.fn(() => null),
   };
 
   const mockLogger = {
@@ -53,6 +54,7 @@ describe('TextTaskCardComponent', () => {
   };
 
   const mockToast = {
+    info: vi.fn(),
     warning: vi.fn(),
     success: vi.fn(),
     error: vi.fn(),
@@ -69,15 +71,12 @@ describe('TextTaskCardComponent', () => {
     status: 'active',
     stage: 1,
     order: 0,
-    projectId: 'project-1',
     parentId: null,
-    level: 0,
-    path: 'task-1',
-    sortKey: 'task-1',
-    createdAt: new Date('2026-04-04T08:00:00.000Z').toISOString(),
+    rank: 0,
+    x: 0,
+    y: 0,
+    createdDate: new Date('2026-04-04T08:00:00.000Z').toISOString(),
     updatedAt: new Date('2026-04-04T08:00:00.000Z').toISOString(),
-    userId: 'local-user',
-    isExpanded: false,
     attachments: [],
     tags: [],
     parkingMeta: null,
@@ -85,7 +84,6 @@ describe('TextTaskCardComponent', () => {
     wait_minutes: null,
     cognitive_load: null,
     displayId: '1,a',
-    createdDate: new Date('2026-04-04T08:00:00.000Z'),
     ...overrides,
   });
 
@@ -117,6 +115,7 @@ describe('TextTaskCardComponent', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockProjectState.getTask.mockReturnValue(null);
 
     await TestBed.configureTestingModule({
       imports: [TextTaskCardComponent],
@@ -151,8 +150,8 @@ describe('TextTaskCardComponent', () => {
     const stopPropagation = vi.fn();
     const emitSpy = vi.spyOn(component.select, 'emit');
 
-    component.onCardClick({ stopPropagation } as Event);
-    component.onCardClick({ stopPropagation } as Event);
+    component.onCardClick({ stopPropagation } as unknown as Event);
+    component.onCardClick({ stopPropagation } as unknown as Event);
 
     expect(emitSpy).toHaveBeenCalledTimes(2);
     expect(stopPropagation).toHaveBeenCalledTimes(2);
@@ -170,7 +169,7 @@ describe('TextTaskCardComponent', () => {
       throw new Error('task missing');
     };
 
-    expect(() => component.onCardClick({ stopPropagation } as Event)).not.toThrow();
+    expect(() => component.onCardClick({ stopPropagation } as unknown as Event)).not.toThrow();
     expect(emitSpy).not.toHaveBeenCalled();
     expect(stopPropagation).toHaveBeenCalledTimes(1);
   });
@@ -180,8 +179,102 @@ describe('TextTaskCardComponent', () => {
       onCardPointerDown: (event: PointerEvent) => void;
     };
 
-    component.onCardPointerDown({ button: 0, isPrimary: true } as PointerEvent);
+    component.onCardPointerDown({ button: 0, isPrimary: true } as unknown as PointerEvent);
 
     expect(mockTextViewOps.armContainerClickGuard).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not emit select when clicking an anchor inside the card', () => {
+    const component = createComponent(false) as unknown as {
+      onCardClick: (event: Event) => void;
+      select: { emit: ReturnType<typeof vi.fn> };
+    };
+    const anchor = document.createElement('a');
+    const stopPropagation = vi.fn();
+    const emitSpy = vi.spyOn(component.select, 'emit');
+
+    component.onCardClick({ target: anchor, stopPropagation } as unknown as Event);
+
+    expect(emitSpy).not.toHaveBeenCalled();
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+  });
+
+  it('should emit openLinkedTask when collapsed preview task link is clicked', () => {
+    const component = createComponent(false) as unknown as {
+      onContentPreviewClick: (event: MouseEvent) => void;
+      openLinkedTask: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#task:linked-task');
+    anchor.setAttribute('data-link-kind', 'task');
+    anchor.setAttribute('data-task-link-id', 'linked-task');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+    const event = { target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent;
+
+    component.onContentPreviewClick(event);
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith({ taskId: 'linked-task', event });
+  });
+
+  it('should prevent blocked link clicks inside collapsed preview', () => {
+    const component = createComponent(false) as unknown as {
+      onContentPreviewClick: (event: MouseEvent) => void;
+      openLinkedTask: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#__nf_blocked__');
+    anchor.setAttribute('data-link-kind', 'blocked');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+
+    component.onContentPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('should handle local links inside collapsed preview without selecting the card', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    try {
+      const component = createComponent(false) as unknown as {
+        onContentPreviewClick: (event: MouseEvent) => void;
+        openLinkedTask: { emit: ReturnType<typeof vi.fn> };
+      };
+      const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', '#local-path');
+      anchor.setAttribute('data-link-kind', 'local');
+      anchor.setAttribute('data-local-link-path', 'C:\\Docs\\Plan.md');
+      const stopPropagation = vi.fn();
+      const preventDefault = vi.fn();
+
+      component.onContentPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+      await Promise.resolve();
+
+      expect(stopPropagation).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(emitSpy).not.toHaveBeenCalled();
+      expect(writeText).toHaveBeenCalledWith('C:\\Docs\\Plan.md');
+      expect(clickSpy).toHaveBeenCalled();
+    } finally {
+      clickSpy.mockRestore();
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator as object, 'clipboard');
+      }
+    }
   });
 });

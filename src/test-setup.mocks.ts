@@ -557,10 +557,10 @@ patchEventTarget(globalThis as unknown as EventTarget);
 
 const cleanupEventListeners = () => {
   if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) return;
-  for (const [target, registry] of listenerRegistry.entries()) {
+  listenerRegistry.forEach((registry, target) => {
     const patch = eventPatches.get(target);
-    if (!patch) continue;
-    for (const [type, listeners] of registry.entries()) {
+    if (!patch) return;
+    registry.forEach((listeners, type) => {
       listeners.forEach(listener => {
         try {
           patch.remove(type, listener);
@@ -568,8 +568,8 @@ const cleanupEventListeners = () => {
           // noop
         }
       });
-    }
-  }
+    });
+  });
   listenerRegistry.clear();
 };
 
@@ -601,7 +601,9 @@ afterEach(() => {
 
   const leakedListeners = Array.from(listenerRegistry.values())
     .reduce((count, registry) => {
-      for (const listeners of registry.values()) count += listeners.size;
+      registry.forEach(listeners => {
+        count += listeners.size;
+      });
       return count;
     }, 0);
 

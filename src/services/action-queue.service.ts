@@ -535,16 +535,18 @@ export class ActionQueueService {
       return;
     }
 
-    const settleResult = await this.storage.settleFailedActionForOwner(
-      processOwnerUserId,
-      action,
-      outcome.error
-    );
-    this.logger.debug('旧 owner 的失败 action 已在持久化队列中收口', {
-      actionId: action.id,
-      processOwnerUserId,
-      settleResult,
-    });
+    if (!outcome.success) {
+      const settleResult = await this.storage.settleFailedActionForOwner(
+        processOwnerUserId,
+        action,
+        outcome.error
+      );
+      this.logger.debug('旧 owner 的失败 action 已在持久化队列中收口', {
+        actionId: action.id,
+        processOwnerUserId,
+        settleResult,
+      });
+    }
   }
 
   async settleProjectDeleteSuccessForOwner(

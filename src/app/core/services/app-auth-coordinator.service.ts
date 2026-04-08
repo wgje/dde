@@ -712,6 +712,10 @@ export class AppAuthCoordinatorService {
       return;
     }
 
+    if (!userId) {
+      return;
+    }
+
     const remoteProjects = await projectDataService.loadProjectListMetadataFromCloud(userId);
     if (!this.isMigrationCheckCurrent(userId, generation)) {
       return;

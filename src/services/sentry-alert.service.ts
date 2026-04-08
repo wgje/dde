@@ -488,11 +488,15 @@ export class SentryAlertService {
     
     // 同时清理过期的去重缓存
     const now = Date.now();
-    for (const [key, time] of this.dedupeCache.entries()) {
+    const expiredKeys: string[] = [];
+    this.dedupeCache.forEach((time, key) => {
       if (now - time > SENTRY_ALERT_CONFIG.DEDUPE_WINDOW) {
-        this.dedupeCache.delete(key);
+        expiredKeys.push(key);
       }
-    }
+    });
+    expiredKeys.forEach(key => {
+      this.dedupeCache.delete(key);
+    });
   }
   
   private sendToSentry(

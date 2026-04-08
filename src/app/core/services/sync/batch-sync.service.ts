@@ -616,7 +616,10 @@ export class BatchSyncService {
         projectSnapshot.id,
         referencedTaskIds
       );
-      const allSyncedTaskIds = new Set<string>([...successfulTaskIds, ...remoteExistingTaskIds]);
+      const allSyncedTaskIds = new Set<string>(successfulTaskIds);
+      remoteExistingTaskIds.forEach(taskId => {
+        allSyncedTaskIds.add(taskId);
+      });
       const purgedTaskIds = taskPurgeSucceeded
         ? new Set(changes.taskIdsToDelete)
         : new Set<string>();

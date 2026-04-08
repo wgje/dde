@@ -545,7 +545,7 @@ export class BlackBoxSyncService {
           project_id: entry.projectId,
           user_id: entry.userId,
           content: entry.content,
-          focus_meta: (entry.focusMeta ?? null) as Json | null,
+          focus_meta: (entry.focusMeta ?? null) as unknown as Json | null,
           date: entry.date,
           created_at: entry.createdAt,
           updated_at: entry.updatedAt,

@@ -197,7 +197,9 @@ export class AttachmentService {
     const now = Date.now();
     const expiryBuffer = ATTACHMENT_CONFIG.URL_EXPIRY_BUFFER;
 
-    for (const [id, { userId, projectId, taskId, attachment }] of this.monitoredAttachments) {
+    const monitoredEntries = Array.from(this.monitoredAttachments.entries());
+    for (let index = 0; index < monitoredEntries.length; index += 1) {
+      const [id, { userId, projectId, taskId, attachment }] = monitoredEntries[index]!;
       // 检查 URL 是否即将过期（优先使用 signedAt，fallback 到 createdAt）
       const signedAt = attachment.signedAt ? new Date(attachment.signedAt).getTime() : new Date(attachment.createdAt).getTime();
       const urlAge = now - signedAt;
@@ -407,7 +409,9 @@ export class AttachmentService {
    * 取消所有正在进行的上传
    */
   cancelAllUploads(): void {
-    for (const [fileName, controller] of this.uploadAbortControllers) {
+    const uploadControllers = Array.from(this.uploadAbortControllers.entries());
+    for (let index = 0; index < uploadControllers.length; index += 1) {
+      const [fileName, controller] = uploadControllers[index]!;
       controller.abort();
       this.updateProgress(fileName, 0, 'cancelled');
     }

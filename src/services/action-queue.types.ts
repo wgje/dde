@@ -90,8 +90,8 @@ export interface QueuedAction<T extends ActionPayload = ActionPayload> {
   timestamp: number;
   retryCount: number;
   lastError?: string;
-  /** 错误类型：network=网络错误可重试，business=业务错误不可重试，timeout=超时，unknown=未知错误 */
-  errorType?: 'network' | 'business' | 'timeout' | 'unknown';
+  /** 错误类型：network=网络错误可重试，business=业务错误不可重试，permission=权限错误，timeout=超时，unknown=未知错误 */
+  errorType?: 'network' | 'business' | 'permission' | 'timeout' | 'unknown';
   /** 操作优先级：决定失败后的处理策略 */
   priority?: OperationPriority;
 }

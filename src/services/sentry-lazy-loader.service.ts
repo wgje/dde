@@ -600,7 +600,8 @@ export class SentryLazyLoaderService {
    */
   private buildRelease(): string {
     try {
-      const entryUrl = new URL(import.meta.url, window.location.href);
+      const currentScript = document.currentScript as HTMLScriptElement | null;
+      const entryUrl = new URL(currentScript?.src ?? window.location.href, window.location.href);
       // 提取文件名中的 hash 部分作为构建指纹
       const pathHash = entryUrl.pathname.replace(/^.*\//, '').replace(/\.\w+$/, '');
       return `nanoflow@${pathHash}`;

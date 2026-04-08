@@ -845,7 +845,7 @@ export class ProjectDataService {
     
     // 合并本地 tombstones
     const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
-    for (const id of localTombstones) {
+    for (const id of Array.from(localTombstones)) {
       tombstoneIds.add(id);
     }
     
@@ -943,11 +943,11 @@ export class ProjectDataService {
       : AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
-  private getOfflineSnapshotStorageKey(ownerUserId = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
+  private getOfflineSnapshotStorageKey(ownerUserId: string = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
     return `${this.OFFLINE_CACHE_KEY}.${ownerUserId}`;
   }
 
-  private getOfflineSnapshotRecordId(ownerUserId = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
+  private getOfflineSnapshotRecordId(ownerUserId: string = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
     return `${this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID}:${ownerUserId}`;
   }
   

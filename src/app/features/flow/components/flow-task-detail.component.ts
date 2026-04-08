@@ -4,11 +4,12 @@ import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
+import { ToastService } from '../../../../services/toast.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { FlowTaskDetailFormService } from '../services/flow-task-detail-form.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
-import { toggleMarkdownTodo, getTodoIndexFromClick } from '../../../../utils/markdown';
+import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { SimpleReminderService } from '../../../../services/simple-reminder.service';
 
@@ -479,6 +480,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly uiState = inject(UiStateService);
   readonly projectState = inject(ProjectStateService);
   readonly userSession = inject(UserSessionService);
+  private readonly toast = inject(ToastService);
   private readonly elementRef = inject(ElementRef);
   private readonly cdr = inject(ChangeDetectorRef);
   readonly formService = inject(FlowTaskDetailFormService);
@@ -538,6 +540,7 @@ export class FlowTaskDetailComponent implements OnDestroy {
   readonly archiveTask = output<Task>();
   readonly deleteTask = output<Task>();
   readonly parkTask = output<Task>();
+  readonly openLinkedTask = output<string>();
   readonly quickTodoAdd = output<{ taskId: string; text: string }>();
   
   // 附件操作输出
@@ -815,6 +818,10 @@ export class FlowTaskDetailComponent implements OnDestroy {
    * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
   onPreviewClick(event: MouseEvent): void {
+    if (this.handlePreviewLinkClick(event)) {
+      return;
+    }
+
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
@@ -834,6 +841,18 @@ export class FlowTaskDetailComponent implements OnDestroy {
       this.suppressedDocumentClickStamp = event.timeStamp;
       this.toggleEditMode();
     }
+  }
+
+  private handlePreviewLinkClick(event: MouseEvent): boolean {
+    const linkTarget = handleMarkdownLinkAction(event, this.toast);
+    if (!linkTarget) {
+      return linkTarget === false;
+    }
+
+    if (linkTarget.kind === 'task' && linkTarget.taskId) {
+      this.openLinkedTask.emit(linkTarget.taskId);
+    }
+    return true;
   }
   
   /** 监听 document 点击事件，编辑模式下点击非交互区域退出编辑 */

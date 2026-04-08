@@ -635,7 +635,7 @@ export class TaskOperationService {
     const activeP = this.getActiveProject();
     if (!activeP || this.stagesNeedingRebalance.size === 0) return;
     
-    const stages = [...this.stagesNeedingRebalance];
+    const stages = Array.from(this.stagesNeedingRebalance);
     this.stagesNeedingRebalance.clear();
     
     stages.forEach(s => this.layoutService.markStageRebalancing(s));

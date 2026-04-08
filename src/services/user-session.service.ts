@@ -20,7 +20,6 @@ import { FOCUS_CONFIG } from '../config/focus.config';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
 import {
-  DOCK_SNAPSHOT_IDB_DB_NAME,
   DockSnapshotPersistenceService,
 } from './dock-snapshot-persistence.service';
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
@@ -38,6 +37,8 @@ interface SessionGuardContext {
   userId: string | null;
   generation: number;
 }
+
+const DOCK_SNAPSHOT_DB_NAME = 'keyval-store';
 
 type ProjectHydrationLoadResult =
   | { status: 'loaded'; project: Project }
@@ -592,9 +593,10 @@ export class UserSessionService {
     stage: string
   ): { projects: Project[]; ownerMatched: boolean } {
     const expectedOwnerUserId = expectedUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const hasSnapshotProjects = snapshot.projects.length > 0;
     if (!snapshot.ownerUserId) {
       // 旧版快照可能缺少 ownerUserId 字段，尝试通过 persisted hint 推断归属
-      if (this.authService.isConfigured && snapshot.projects.length > 0) {
+      if (this.authService.isConfigured && hasSnapshotProjects) {
         const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.() ?? null;
         if (persistedOwnerHint && persistedOwnerHint === expectedOwnerUserId) {
           this.logger.debug('缺少 owner 元数据的快照通过 persisted hint 匹配，允许恢复', {
@@ -606,10 +608,14 @@ export class UserSessionService {
           return { projects: snapshot.projects, ownerMatched: true };
         }
       }
-      this.logger.warn('检测到缺少 owner 元数据的离线快照，已忽略本次恢复', {
-        stage,
-        expectedOwnerUserId,
-      });
+
+      if (hasSnapshotProjects) {
+        this.logger.warn('检测到缺少 owner 元数据的离线快照，已忽略本次恢复', {
+          stage,
+          expectedOwnerUserId,
+        });
+      }
+
       return { projects: [], ownerMatched: false };
     }
 
@@ -629,11 +635,14 @@ export class UserSessionService {
         }
       }
 
-      this.logger.warn('检测到 owner 不匹配的离线快照，已忽略本次恢复', {
-        stage,
-        snapshotOwnerUserId: snapshot.ownerUserId,
-        expectedOwnerUserId,
-      });
+      if (hasSnapshotProjects) {
+        this.logger.warn('检测到 owner 不匹配的离线快照，已忽略本次恢复', {
+          stage,
+          snapshotOwnerUserId: snapshot.ownerUserId,
+          expectedOwnerUserId,
+        });
+      }
+
       return { projects: [], ownerMatched: false };
     }
 
@@ -1119,7 +1128,14 @@ export class UserSessionService {
   async clearAllLocalData(userId?: string): Promise<void> {
     this.logger.info('执行完整的本地数据清理', { userId });
 
-    await this.dockSnapshotPersistence.discardPendingPersist();
+    const dockSnapshotPersistence = this.dockSnapshotPersistence as DockSnapshotPersistenceService & {
+      discardPendingPersist?: () => Promise<void>;
+    };
+    if (typeof dockSnapshotPersistence.discardPendingPersist === 'function') {
+      await dockSnapshotPersistence.discardPendingPersist();
+    } else {
+      dockSnapshotPersistence.cancelPendingPersist();
+    }
     
     // 1. 清理内存状态（原有逻辑）
     this.clearLocalData();
@@ -1246,7 +1262,7 @@ export class UserSessionService {
       this.clearIndexedDB('nanoflow-conflicts'),
       this.clearIndexedDB('nanoflow-offline-snapshots'),
       this.clearIndexedDB(FOCUS_CONFIG.SYNC.IDB_NAME),
-      this.clearIndexedDB(DOCK_SNAPSHOT_IDB_DB_NAME),
+      this.clearIndexedDB(DOCK_SNAPSHOT_DB_NAME),
     ]);
     const cleanupTargets = [
       'nanoflow-db',
@@ -1255,7 +1271,7 @@ export class UserSessionService {
       'nanoflow-conflicts',
       'nanoflow-offline-snapshots',
       FOCUS_CONFIG.SYNC.IDB_NAME,
-      DOCK_SNAPSHOT_IDB_DB_NAME,
+      DOCK_SNAPSHOT_DB_NAME,
     ];
     const failedCleanupTargets = cleanupTargets.filter((_, index) => !indexedDbCleanup[index]);
     if (failedCleanupTargets.length > 0) {

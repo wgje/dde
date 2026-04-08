@@ -164,6 +164,11 @@ export class FocusConsoleSyncService {
    * 调用方（DockCloudSyncService）负责将失败操作入队到 RetryQueue。
    */
   async saveFocusSession(record: FocusSessionRecord): Promise<Result<void, OperationError>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
+      return this.buildBrowserSuspendedFailure();
+    }
+
     const client = this.getSupabaseClient();
     if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
@@ -198,6 +203,11 @@ export class FocusConsoleSyncService {
       if (error) throw supabaseErrorToError(error);
       return success(undefined);
     } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
+        return this.buildBrowserSuspendedFailure();
+      }
+
       this.logger.warn('saveFocusSession failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '保存专注会话失败');
     }
@@ -249,6 +259,11 @@ export class FocusConsoleSyncService {
    * 离线时返回 SYNC_OFFLINE，调用方负责 RetryQueue。
    */
   async upsertRoutineTask(userId: string, task: RoutineTask): Promise<Result<void, OperationError>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
+      return this.buildBrowserSuspendedFailure();
+    }
+
     const client = this.getSupabaseClient();
     if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
@@ -268,6 +283,11 @@ export class FocusConsoleSyncService {
       if (error) throw supabaseErrorToError(error);
       return success(undefined);
     } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
+        return this.buildBrowserSuspendedFailure();
+      }
+
       this.logger.warn('upsertRoutineTask failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '更新日常任务失败');
     }
@@ -284,6 +304,11 @@ export class FocusConsoleSyncService {
   async incrementRoutineCompletion(
     mutation: RoutineCompletionMutation,
   ): Promise<Result<void, OperationError>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
+      return this.buildBrowserSuspendedFailure();
+    }
+
     const client = this.getSupabaseClient();
     if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
@@ -349,6 +374,11 @@ export class FocusConsoleSyncService {
           this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${attempt + 1}/${maxRetries}`);
         }
       } catch (error) {
+        if (isBrowserNetworkSuspendedError(error)) {
+          this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
+          return this.buildBrowserSuspendedFailure();
+        }
+
         this.logger.warn('incrementRoutineCompletion failed', error);
         return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
       }

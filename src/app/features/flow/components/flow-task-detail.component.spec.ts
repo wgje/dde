@@ -609,6 +609,88 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       
       vi.useRealTimers();
     }, 5000);
+
+    it('点击任务 markdown 链接时应发射 openLinkedTask，而不是进入编辑态', () => {
+      const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', '#task:linked-task');
+      anchor.setAttribute('data-link-kind', 'task');
+      anchor.setAttribute('data-task-link-id', 'linked-task');
+      const stopPropagation = vi.fn();
+      const preventDefault = vi.fn();
+
+      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+
+      expect(stopPropagation).toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalled();
+      expect(emitSpy).toHaveBeenCalledWith('linked-task');
+      expect(component.isEditMode()).toBe(false);
+    });
+
+    it('点击外链时应保持预览态', () => {
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', 'https://example.com');
+      anchor.setAttribute('data-link-kind', 'external');
+      const stopPropagation = vi.fn();
+      const preventDefault = vi.fn();
+
+      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+
+      expect(stopPropagation).toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(component.isEditMode()).toBe(false);
+    });
+
+    it('点击 blocked 链接时应阻止默认行为并保持预览态', () => {
+      const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', '#__nf_blocked__');
+      anchor.setAttribute('data-link-kind', 'blocked');
+      const stopPropagation = vi.fn();
+      const preventDefault = vi.fn();
+
+      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+
+      expect(stopPropagation).toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalled();
+      expect(emitSpy).not.toHaveBeenCalled();
+      expect(component.isEditMode()).toBe(false);
+    });
+
+    it('点击本地路径链接时应尝试打开并保持预览态', async () => {
+      const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      });
+
+      try {
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', '#local-path');
+        anchor.setAttribute('data-link-kind', 'local');
+        anchor.setAttribute('data-local-link-path', 'C:\\Docs\\Plan.md');
+        const stopPropagation = vi.fn();
+        const preventDefault = vi.fn();
+
+        component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
+        await Promise.resolve();
+
+        expect(stopPropagation).toHaveBeenCalled();
+        expect(preventDefault).toHaveBeenCalled();
+        expect(component.isEditMode()).toBe(false);
+        expect(writeText).toHaveBeenCalledWith('C:\\Docs\\Plan.md');
+        expect(clickSpy).toHaveBeenCalled();
+      } finally {
+        clickSpy.mockRestore();
+        if (originalClipboard) {
+          Object.defineProperty(navigator, 'clipboard', originalClipboard);
+        } else {
+          Reflect.deleteProperty(navigator as object, 'clipboard');
+        }
+      }
+    });
   });
 
   describe('移动端抽屉高度自适应', () => {

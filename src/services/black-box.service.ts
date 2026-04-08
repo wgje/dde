@@ -17,10 +17,10 @@ import {
   getTodayDate
 } from '../state/focus-stores';
 import { BlackBoxSyncService } from './black-box-sync.service';
+import type { PullChangesOptions } from './black-box-sync.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { AUTH_CONFIG } from '../config/auth.config';
-import type { PullChangesOptions } from './black-box-sync.service';
 
 @Injectable({
   providedIn: 'root'
@@ -269,8 +269,7 @@ export class BlackBoxService {
   }
 
   /**
-   * 视图打开时先补本地快照，再走一次轻量远端刷新。
-   * 远端刷新会经过 watermark/single-flight/freshness window 去重。
+   * 面板打开时先用本地快照填充，再走一次轻量远端刷新。
    */
   async refreshForView(): Promise<void> {
     await this.ensureLocalEntriesLoaded();
@@ -278,10 +277,7 @@ export class BlackBoxService {
   }
 
   /**
-   * 确保面板首屏至少拿到本地快照。
-   *
-   * 说明：BlackBox 的远端刷新由启动/恢复协调器统一负责，
-   * 视图挂载时只做本地水合，避免切换 Tab 重复触发 manual pull。
+   * 避免同一用户重复触发本地水合。
    */
   async ensureLocalEntriesLoaded(): Promise<void> {
     const hydrationKey = this.resolveLocalHydrationKey();
@@ -299,7 +295,7 @@ export class BlackBoxService {
       })
       .catch((error: unknown) => {
         this.logger.debug('本地黑匣子快照水合失败', {
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         });
       })
       .finally(() => {
@@ -307,10 +303,6 @@ export class BlackBoxService {
       });
 
     await this.localHydrationPromise;
-  }
-
-  private resolveLocalHydrationKey(): string {
-    return this.resolveEffectiveUserId() ?? '__anonymous__';
   }
   
   /**
@@ -320,5 +312,9 @@ export class BlackBoxService {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     return tomorrow.toISOString().split('T')[0];
+  }
+
+  private resolveLocalHydrationKey(): string {
+    return this.resolveEffectiveUserId() ?? '__anonymous__';
   }
 }

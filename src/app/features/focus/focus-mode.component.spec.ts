@@ -19,6 +19,12 @@ describe('FocusModeComponent', () => {
   const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
     onDestroy: (cb: () => void) => {
       destroyCallbacks.push(cb);
+      return () => {
+        const index = destroyCallbacks.indexOf(cb);
+        if (index >= 0) {
+          destroyCallbacks.splice(index, 1);
+        }
+      };
     },
   };
 

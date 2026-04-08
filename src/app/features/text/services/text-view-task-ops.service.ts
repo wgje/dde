@@ -12,6 +12,14 @@ import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 
+function isNavigableLinkedTask(task: Task | undefined | null): task is Task {
+  return !!task && !task.deletedAt && task.status !== 'archived';
+}
+
+function hasStageAssignment(task: Task): task is Task & { stage: number } {
+  return task.stage !== null && task.stage !== undefined;
+}
+
 /**
  * 组件上下文接口
  * 用于从组件传递 signal 引用和 ViewChild getter
@@ -273,6 +281,34 @@ export class TextViewTaskOpsService {
     this.pendingTimers.push(retryTimer);
   }
 
+  private isTaskVisibleUnderCurrentRootFilter(task: Task): boolean {
+    const rootFilter = this.uiState.stageViewRootFilter();
+    if (rootFilter === 'all') {
+      return true;
+    }
+
+    const rootTask = this.projectState.getTask(rootFilter);
+    if (!rootTask) {
+      return true;
+    }
+
+    if (task.id === rootTask.id) {
+      return true;
+    }
+
+    if (!rootTask.displayId || !task.displayId) {
+      return false;
+    }
+
+    return task.displayId.startsWith(`${rootTask.displayId},`);
+  }
+
+  private ensureStageTaskVisible(task: Task): void {
+    if (!this.isTaskVisibleUnderCurrentRootFilter(task)) {
+      this.uiState.stageViewRootFilter.set('all');
+    }
+  }
+
   // ========== 阶段折叠管理 ==========
 
   /** 折叠在拖拽过程中临时展开但尚未收起的阶段 */
@@ -316,9 +352,10 @@ export class TextViewTaskOpsService {
 
   async onJumpToTask(taskId: string): Promise<void> {
     const task = this.projectState.getTask(taskId);
-    if (!task) return;
+    if (!isNavigableLinkedTask(task)) return;
 
-    if (task.stage) {
+    if (hasStageAssignment(task)) {
+      this.ensureStageTaskVisible(task);
       this.ctx.getStagesRef()?.expandStage(task.stage);
       if (this.uiState.stageFilter() !== 'all' && this.uiState.stageFilter() !== task.stage) {
         this.uiState.setStageFilter('all');
@@ -326,6 +363,7 @@ export class TextViewTaskOpsService {
       this.ctx.selectedTaskId.set(taskId);
       this.scrollToElementById(`[data-task-id="${taskId}"]`);
     } else {
+      this.ctx.selectedTaskId.set(null);
       if (!this.uiState.isTextUnassignedOpen()) {
         this.uiState.isTextUnassignedOpen.set(true);
       }
@@ -491,15 +529,16 @@ export class TextViewTaskOpsService {
     this.toast.error('附件操作失败', error);
   }
 
-  onOpenLinkedTask(data: { task: Task; event: Event }): void {
-    const { task, event } = data;
+  onOpenLinkedTask(data: { taskId: string; event: Event }): void {
+    const { taskId, event } = data;
     event.stopPropagation();
-    if (!task) return;
-    if (task.stage) {
-      this.ctx.getStagesRef()?.expandStage(task.stage);
+    const task = this.projectState.getTask(taskId);
+    if (!isNavigableLinkedTask(task)) {
+      this.toast.warning('任务链接不可用', '目标任务不存在、已删除或已归档');
+      return;
     }
-    this.ctx.selectedTaskId.set(task.id);
-    this.scrollToElementById(`[data-task-id="${task.id}"]`);
+
+    void this.onJumpToTask(task.id);
   }
 
   onAddNewStage(): void {

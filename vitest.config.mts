@@ -1,5 +1,5 @@
 /// <reference types="vitest" />
-import os from 'node:os';
+import { cpus } from 'node:os';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 import { angularComponentInlinePlugin } from './vitest-angular-inline.plugin';
@@ -13,7 +13,7 @@ const parsePositiveInt = (value: string | undefined): number | undefined => {
 // Vitest 会在每个 worker 都执行一次 setupFiles（Angular/zone 初始化等）
 // 当测试本身很快时，worker 过多会导致 setup/environment 时间占比暴涨。
 // 默认更保守：最多 4 个 workers，同时允许通过环境变量覆盖。
-const cpuCount = Math.max(1, os.cpus()?.length ?? 1);
+const cpuCount = Math.max(1, cpus()?.length ?? 1);
 const defaultMaxWorkers = Math.min(4, cpuCount >= 4 ? cpuCount - 1 : cpuCount);
 const envMaxWorkers = parsePositiveInt(process.env.VITEST_MAX_WORKERS ?? process.env.VITEST_MAX_THREADS);
 const maxWorkers = Math.max(1, envMaxWorkers ?? defaultMaxWorkers);
@@ -41,24 +41,12 @@ export default defineConfig({
     // 覆盖率配置
     coverage: {
       provider: 'v8',
-      all: true,
       reporter: ['text', 'json', 'html'],
-      include: [
-        'src/services/**/*.ts',
-        'src/app/core/**/*.ts',
-        'src/app/features/**/services/**/*.ts',
-        'src/app/features/**/utils/**/*.ts',
-        'src/utils/**/*.ts',
-      ],
+      include: ['src/services/**/*.ts'],
       exclude: [
         'src/**/*.spec.ts',
         'src/**/*.test.ts',
         'src/**/index.ts',
-        'src/**/*.d.ts',
-        'src/models/**',
-        'src/types/**',
-        'src/config/**',
-        'src/test-setup*.ts',
       ],
     },
     

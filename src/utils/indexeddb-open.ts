@@ -54,7 +54,7 @@ function openIndexedDB(
   ensureStores?: IndexedDBUpgradeHandler
 ): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    let blockedTimer = null;
+    let blockedTimer: ReturnType<typeof setTimeout> | null = null;
     let request: IDBOpenDBRequest;
     try {
       request = version === undefined ? indexedDB.open(dbName) : indexedDB.open(dbName, version);

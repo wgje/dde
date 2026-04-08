@@ -11,12 +11,16 @@
     ],
     "skipLibCheck": true,
     "types": [
-      "node"
+      "node",
+      "vitest/globals"
     ],
     "moduleResolution": "bundler",
     "isolatedModules": true,
     "moduleDetection": "force",
     "allowJs": true,
+    "allowSyntheticDefaultImports": true,
+    "downlevelIteration": true,
+    "noEmit": true,
     "paths": {
       "@/*": [
         "./*"
@@ -36,14 +40,21 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true
   },
-  "files": [
-    "./main.ts",
-    "./src/typings.d.ts"
+  "include": [
+    "main.ts",
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "vitest*.mts",
+    "playwright.config.ts",
+    "*.ts",
+    "*.mts",
+    "*.js"
   ],
   "exclude": [
-    "e2e/**/*",
-    "playwright.config.ts",
-    "supabase/**/*"
+    "dist/**/*",
+    "supabase/**/*",
+    "test-results/**/*",
+    "tmp/**/*"
   ],
   "angularCompilerOptions": {
     "disableTypeScriptVersionCheck": true

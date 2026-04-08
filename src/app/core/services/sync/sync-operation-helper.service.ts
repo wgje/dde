@@ -160,7 +160,7 @@ export class SyncOperationHelperService {
     
     // 获取 userId
     const userIdResult = await this.getUserId(client, context);
-    if (!userIdResult.success) {
+    if (userIdResult.success === false) {
       return { success: false, error: userIdResult.error };
     }
     
@@ -185,7 +185,7 @@ export class SyncOperationHelperService {
           // 刷新成功，重试一次
           try {
             const retryUserIdResult = await this.getUserId(client, context);
-            if (!retryUserIdResult.success) {
+            if (retryUserIdResult.success === false) {
               return { success: false, error: retryUserIdResult.error };
             }
             
