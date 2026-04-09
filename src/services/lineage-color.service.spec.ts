@@ -116,5 +116,13 @@ describe('LineageColorService', () => {
       const rootColor = result.nodeDataArray.find(n => n.key === 'root')!.familyColor;
       expect(result.linkDataArray[0].familyColor).toBe(rootColor);
     });
+
+    it('应能将 HEX 调色板颜色压暗用于细节提示', () => {
+      expect(service.getDarkerFamilyColor('#e63946')).toBe('#bd2f39');
+    });
+
+    it('应能将 HEX 调色板颜色提亮用于高亮提示', () => {
+      expect(service.getLighterFamilyColor('#2a9d8f')).toBe('#55b1a5');
+    });
   });
 });

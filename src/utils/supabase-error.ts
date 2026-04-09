@@ -4,6 +4,8 @@
  * 统一处理 Supabase 错误，提供友好的错误消息和错误分类
  */
 
+import { isBrowserNetworkSuspendedError } from './browser-network-suspension';
+
 /**
  * 增强的错误类型
  */
@@ -42,6 +44,7 @@ const RETRYABLE_ERROR_TYPES = new Set([
   'TimeoutError',
   'NetworkError',
   'OfflineError',
+  'BrowserNetworkSuspendedError',
   'RateLimitError',  // 429 速率限制错误应该重试
   'UnknownServerError',  // 504 等服务端错误返回非 JSON 响应时的回退类型
   'HtmlResponseError',  // 【#95057880】CDN/代理返回 HTML 替代 JSON，临时网络/缓存问题
@@ -68,6 +71,14 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
     // 【P2-10 修复】创建新 Error 而非直接修改原始 Error
     const enhanced = Object.create(error) as EnhancedError;
     Object.assign(enhanced, { message: error.message, name: error.name, stack: error.stack });
+
+    if (isBrowserNetworkSuspendedError(error)) {
+      enhanced.errorType = 'BrowserNetworkSuspendedError';
+      enhanced.isRetryable = true;
+      enhanced.name = 'BrowserNetworkSuspendedError';
+      return enhanced;
+    }
+
     const lowerMsg = enhanced.message.toLowerCase();
     
     // 【#95057880 修复】识别 HTML 响应错误
@@ -173,7 +184,9 @@ export function supabaseErrorToError(error: unknown): EnhancedError {
   } else if (message && typeof message === 'string') {
     // 如果没有状态码，尝试从消息中识别错误类型
     const lowerMsg = message.toLowerCase();
-    if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out')) {
+    if (lowerMsg.includes('network_io_suspended') || lowerMsg.includes('network io suspended')) {
+      errorType = 'BrowserNetworkSuspendedError';
+    } else if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out')) {
       errorType = 'TimeoutError';
     } else if (lowerMsg.includes('network') || lowerMsg.includes('fetch')) {
       errorType = 'NetworkError';
@@ -297,6 +310,8 @@ export function getFriendlyErrorMessage(error: unknown): string {
         return '网络连接失败，数据将自动重试同步';
       case 'OfflineError':
         return '当前离线，数据将在恢复连接后同步';
+      case 'BrowserNetworkSuspendedError':
+        return '浏览器恢复连接中，数据将在稍后自动重试同步';
       case 'UnknownServerError':
         return '服务器响应异常，已加入重试队列';
       case 'HtmlResponseError':

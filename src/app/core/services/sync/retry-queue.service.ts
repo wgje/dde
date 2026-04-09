@@ -25,6 +25,10 @@ import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { isValidUUID } from '../../../../utils/validation';
+import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
 /**
  * 可重试的实体类型
  */
@@ -1071,6 +1075,10 @@ export class RetryQueueService {
    * 从 Error 对象推断错误类型（用于未携带 errorType 的异常）
    */
   private classifyErrorType(error: Error): string {
+    if (isBrowserNetworkSuspendedError(error)) {
+      return 'BrowserNetworkSuspendedError';
+    }
+
     const msg = (error.message || '').toLowerCase();
     if (msg.includes('failed to fetch') || msg.includes('network')) return 'NetworkError';
     if (msg.includes('timeout') || msg.includes('timed out')) return 'NetworkTimeoutError';
@@ -1175,6 +1183,18 @@ export class RetryQueueService {
         remaining: this.queue.length,
         durationMs: Date.now() - sliceStartedAt,
         completed: true
+      };
+    }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起窗口内暂停重试切片', {
+        remainingCount: this.queue.length,
+      });
+      return {
+        processed: 0,
+        remaining: this.queue.length,
+        durationMs: Date.now() - sliceStartedAt,
+        completed: false
       };
     }
 
@@ -1300,6 +1320,7 @@ export class RetryQueueService {
         notifySyncStartOnce();
 
         let success = false;
+        let deferredByBrowserSuspension = false;
         try {
           if (item.type === 'task') {
             success = item.operation === 'upsert'
@@ -1320,20 +1341,33 @@ export class RetryQueueService {
             processedIds.add(item.id);
             continue;
           }
+          if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+            deferredByBrowserSuspension = true;
+            this.logger.info('浏览器网络挂起，保留当前重试项等待恢复', {
+              type: item.type,
+              id: item.data.id,
+            });
+          } else {
           // 【2026-03-23 修复】网络类错误记录到熔断器，触发熔断保护避免重试风暴
-          const errorType = (e as { errorType?: string })?.errorType
-            || this.classifyErrorType(e as Error);
-          this.recordCircuitFailure(errorType);
-          this.logger.error('重试失败', e);
-          // 熔断器已打开时，停止处理当前批次中剩余项
-          if (!this.checkCircuitBreaker()) {
-            this.logger.warn('熔断器触发，停止本轮队列处理');
-            break;
+            const errorType = (e as { errorType?: string })?.errorType
+              || this.classifyErrorType(e as Error);
+            this.recordCircuitFailure(errorType);
+            this.logger.error('重试失败', e);
+            // 熔断器已打开时，停止处理当前批次中剩余项
+            if (!this.checkCircuitBreaker()) {
+              this.logger.warn('熔断器触发，停止本轮队列处理');
+              break;
+            }
           }
         }
 
         if (this.operationHandler.isSessionExpired()) {
           this.logger.info('检测到会话过期，停止本轮重试切片，保留剩余项等待恢复后重放');
+          break;
+        }
+
+        if (deferredByBrowserSuspension || (!success && isBrowserNetworkSuspendedWindow())) {
+          stoppedByBudget = true;
           break;
         }
 

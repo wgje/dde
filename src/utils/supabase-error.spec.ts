@@ -2,6 +2,7 @@
  * Supabase 错误处理工具测试
  */
 import { describe, it, expect } from 'vitest';
+import { createBrowserNetworkSuspendedError } from './browser-network-suspension';
 import { 
   supabaseErrorToError, 
   isRetryableError, 
@@ -144,6 +145,14 @@ describe('supabase-error', () => {
       expect(result.errorType).toBe('UnknownServerError');
       expect(result.isRetryable).toBe(true);
     });
+
+    it('应该将浏览器网络挂起错误识别为可重试的延后状态', () => {
+      const result = supabaseErrorToError(createBrowserNetworkSuspendedError());
+
+      expect(result.name).toBe('BrowserNetworkSuspendedError');
+      expect(result.errorType).toBe('BrowserNetworkSuspendedError');
+      expect(result.isRetryable).toBe(true);
+    });
     
     it('应该识别 Error 实例中的 "unknown error" 变体', () => {
       const error = new Error('Some unknown error occurred');
@@ -271,6 +280,7 @@ describe('supabase-error', () => {
       expect(isRetryableError({ code: 429 })).toBe(true); // 速率限制错误应该重试
       expect(isRetryableError({ message: 'timeout' })).toBe(true);
       expect(isRetryableError({ message: 'network error' })).toBe(true);
+      expect(isRetryableError(createBrowserNetworkSuspendedError())).toBe(true);
     });
     
     it('应该正确判断不可重试错误', () => {
@@ -292,6 +302,7 @@ describe('supabase-error', () => {
       expect(getFriendlyErrorMessage({ code: 502 })).toContain('网关错误');
       expect(getFriendlyErrorMessage({ message: 'timeout' })).toContain('网络响应超时');
       expect(getFriendlyErrorMessage({ message: 'offline' })).toContain('离线');
+      expect(getFriendlyErrorMessage(createBrowserNetworkSuspendedError())).toContain('浏览器恢复连接中');
     });
     
     it('应该为 Unknown Supabase error 提供友好提示', () => {

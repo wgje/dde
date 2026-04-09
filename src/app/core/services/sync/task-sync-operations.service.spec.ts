@@ -20,6 +20,17 @@ import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { Task } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import {
+  createBrowserNetworkSuspendedError,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../../utils/browser-network-suspension';
+
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
 
 describe('TaskSyncOperationsService', () => {
   let service: TaskSyncOperationsService;
@@ -116,6 +127,8 @@ describe('TaskSyncOperationsService', () => {
   beforeEach(() => {
     upsertPayload = null;
     vi.clearAllMocks();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     mockClient.rpc.mockImplementation(async (fn: string, args: Record<string, unknown>) => {
       if (fn === 'purge_tasks_v3') {
         return {
@@ -190,6 +203,77 @@ describe('TaskSyncOperationsService', () => {
     });
 
     service = TestBed.inject(TaskSyncOperationsService);
+  });
+
+  it('pushTask 在浏览器网络挂起导致 session 暂不可用时应延后而非标记过期', async () => {
+    const task: Task = {
+      id: 'task-browser-suspended-session',
+      title: '任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-S',
+      createdDate: new Date().toISOString(),
+      deletedAt: null,
+    };
+    setVisibilityState('hidden');
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
+
+    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockSessionManager.handleSessionExpired).not.toHaveBeenCalled();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
+  });
+
+  it('重试队列回放 task upsert 遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
+    const task: Task = {
+      id: 'task-browser-suspended-replay',
+      title: '任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-SR',
+      createdDate: new Date().toISOString(),
+      deletedAt: null,
+    };
+    setVisibilityState('hidden');
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
+
+    await expect(service.pushTask(task, 'project-1', false, true, 'user-1'))
+      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('pushTaskPosition 在浏览器网络挂起导致 session 暂不可用时不应标记过期', async () => {
+    setVisibilityState('hidden');
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
+
+    const result = await service.pushTaskPosition('task-position-suspended', 10, 20, 'project-1', undefined, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockSessionManager.handleSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it('重试队列回放 task delete 遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
+    mockClient.auth.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
+
+    await expect(service.deleteTask('task-delete-suspended', 'project-1', 'user-1', true))
+      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
   });
 
   it('pushTask 应将 parking_meta 上行到 Supabase', async () => {

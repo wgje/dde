@@ -14,6 +14,17 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { TombstoneService } from './tombstone.service';
 import type { Connection } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import {
+  createBrowserNetworkSuspendedError,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../../utils/browser-network-suspension';
+
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
 
 describe('ConnectionSyncOperationsService', () => {
   let service: ConnectionSyncOperationsService;
@@ -104,6 +115,8 @@ describe('ConnectionSyncOperationsService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     connectionTombstoneResult = { data: null, error: null };
     taskExistenceResult = {
       data: [{ id: 'task-a' }, { id: 'task-b' }],
@@ -242,6 +255,70 @@ describe('ConnectionSyncOperationsService', () => {
 
     await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
       .rejects.toBeInstanceOf(PermanentFailureError);
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
+    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+  });
+
+  it('session 在浏览器网络挂起窗口内暂不可用时应延后连接同步而非标记过期', async () => {
+    const connection: Connection = {
+      id: 'connection-browser-suspended-session',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    setVisibilityState('hidden');
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+  });
+
+  it('首次缺少 session 时应先尝试 refresh，再继续连接同步', async () => {
+    const connection: Connection = {
+      id: 'connection-refresh-before-expire',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(true);
+    mockClient.auth.getSession
+      .mockResolvedValueOnce({ data: { session: null } })
+      .mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(true);
+    expect(mockSessionManager.tryRefreshSession).toHaveBeenCalledWith('pushConnection.getSession');
+    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it('重试队列回放连接遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
+    const connection: Connection = {
+      id: 'connection-browser-suspended-replay',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    mockClient.auth.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
+
+    await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
+      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('重试队列回放连接在任务存在性查询遇到浏览器网络挂起时应抛出延后错误', async () => {
+    const connection: Connection = {
+      id: 'connection-browser-suspended-validation',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    taskExistenceResult = {
+      data: [],
+      error: createBrowserNetworkSuspendedError(),
+    };
+
+    await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
+      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
     expect(mockRetryQueue.add).not.toHaveBeenCalled();
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
   });

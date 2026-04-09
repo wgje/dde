@@ -75,6 +75,10 @@ export class LineageColorService {
   private readonly MIN_HUE_STEP = 40;
   /** 色相环起始偏移，避免从纯红色开始 */
   private readonly HUE_OFFSET = 15;
+  /** HEX 颜色提亮时的混合比例 */
+  private readonly HEX_LIGHTEN_MIX = 0.2;
+  /** HEX 颜色压暗时的混合比例 */
+  private readonly HEX_DARKEN_MIX = 0.18;
   
   /**
    * 预处理图表数据，注入血缘信息
@@ -288,13 +292,59 @@ export class LineageColorService {
     
     return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
   }
+
+  private parseHexColor(hexColor: string): { r: number; g: number; b: number } | null {
+    const normalized = hexColor.trim().replace('#', '');
+    const fullHex = normalized.length === 3
+      ? normalized.split('').map(char => `${char}${char}`).join('')
+      : normalized;
+
+    if (!/^[0-9a-fA-F]{6}$/.test(fullHex)) {
+      return null;
+    }
+
+    return {
+      r: parseInt(fullHex.slice(0, 2), 16),
+      g: parseInt(fullHex.slice(2, 4), 16),
+      b: parseInt(fullHex.slice(4, 6), 16),
+    };
+  }
+
+  private toHexColor({ r, g, b }: { r: number; g: number; b: number }): string {
+    const toHex = (value: number) => Math.max(0, Math.min(255, Math.round(value)))
+      .toString(16)
+      .padStart(2, '0');
+
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  private mixHexColor(
+    familyColor: string,
+    mixRatio: number,
+    targetChannel: number,
+  ): string | null {
+    const rgb = this.parseHexColor(familyColor);
+    if (!rgb) {
+      return null;
+    }
+
+    const mixChannel = (channel: number) => channel + ((targetChannel - channel) * mixRatio);
+
+    return this.toHexColor({
+      r: mixChannel(rgb.r),
+      g: mixChannel(rgb.g),
+      b: mixChannel(rgb.b),
+    });
+  }
   
   /**
    * 获取家族颜色的亮色版本（用于高亮显示）
    */
   getLighterFamilyColor(familyColor: string): string {
     const match = familyColor.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
-    if (!match) return familyColor;
+    if (!match) {
+      return this.mixHexColor(familyColor, this.HEX_LIGHTEN_MIX, 255) ?? familyColor;
+    }
     
     const h = match[1];
     const s = match[2];
@@ -309,7 +359,9 @@ export class LineageColorService {
    */
   getDarkerFamilyColor(familyColor: string): string {
     const match = familyColor.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
-    if (!match) return familyColor;
+    if (!match) {
+      return this.mixHexColor(familyColor, this.HEX_DARKEN_MIX, 0) ?? familyColor;
+    }
     
     const h = match[1];
     const s = match[2];

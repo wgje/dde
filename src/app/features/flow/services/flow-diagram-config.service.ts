@@ -239,7 +239,20 @@ export class FlowDiagramConfigService {
       tasksToShow
     );
 
-    return enhancedData;
+    return {
+      nodeDataArray: enhancedData.nodeDataArray.map(node => {
+        if (node.stage === null || node.isSearchMatch || !node.familyColor) {
+          return node;
+        }
+
+        return {
+          ...node,
+          // 用家族色轻微强化 displayId，让自动整理后的纵向分区更容易扫读。
+          displayIdColor: this.lineageColorService.getDarkerFamilyColor(node.familyColor),
+        };
+      }),
+      linkDataArray: enhancedData.linkDataArray,
+    };
   }
 
   /**

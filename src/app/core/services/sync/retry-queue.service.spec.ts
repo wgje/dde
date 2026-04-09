@@ -8,6 +8,10 @@ import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Connection, Project, Task } from '../../../../models';
+import {
+  createBrowserNetworkSuspendedError,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../../utils/browser-network-suspension';
 
 /** 生成稳定的 UUID 供测试去重使用，同一 label 返回同一 UUID */
 const uuidCache = new Map<string, string>();
@@ -60,6 +64,13 @@ function createConnection(label: string, sourceLabel = `${label}-source`, target
   };
 }
 
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
+
 describe('RetryQueueService', () => {
   let service: RetryQueueService;
   let injector: Injector;
@@ -98,6 +109,8 @@ describe('RetryQueueService', () => {
     uuidCache.clear();
     localStorage.clear();
     destroyCallbacks.length = 0;
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
 
     loggerCategory = {
       info: vi.fn(),
@@ -960,5 +973,25 @@ describe('RetryQueueService', () => {
     expect(third.remaining).toBe(0);
 
     nowSpy.mockRestore();
+  });
+
+  it('processQueueSlice 遇到浏览器网络挂起异常时不应消耗 retry budget', async () => {
+    const recordCircuitFailureSpy = vi.spyOn(service, 'recordCircuitFailure');
+    const task = createTask('suspended-retry-item');
+    service.add('task', 'upsert', task, 'p-1');
+    online = true;
+    (handler.pushTask as ReturnType<typeof vi.fn>).mockRejectedValueOnce(createBrowserNetworkSuspendedError());
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(result.completed).toBe(false);
+    expect(recordCircuitFailureSpy).not.toHaveBeenCalled();
+    expect(service.getItems()).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({ id: task.id }),
+        retryCount: 0,
+      }),
+    ]);
   });
 });

@@ -37,6 +37,289 @@ export interface LayoutOptions {
   columnSpacing?: number;
 }
 
+/**
+ * 自动布局输入节点
+ */
+export interface AutoLayoutNodeData {
+  key: string;
+  stage: number | null;
+  rank?: number;
+}
+
+/**
+ * 自动布局输入连线
+ */
+export interface AutoLayoutLinkData {
+  from: string;
+  to: string;
+  isCrossTree?: boolean;
+}
+
+interface ResolvedAutoLayoutOptions {
+  layerSpacing: number;
+  columnSpacing: number;
+  familyGapRows: number;
+  minFamilyBlockRows: number;
+}
+
+interface FamilyLayoutBlock {
+  rootKey: string;
+  nodes: AutoLayoutNodeData[];
+  stageGroups: Map<number, AutoLayoutNodeData[]>;
+  blockRows: number;
+  pathMap: Map<string, readonly number[]>;
+}
+
+function isAssignedLayoutNode(node: AutoLayoutNodeData): boolean {
+  return node.stage != null && node.stage > 0;
+}
+
+function compareLayoutNodes(a: AutoLayoutNodeData, b: AutoLayoutNodeData): number {
+  return (a.rank ?? 0) - (b.rank ?? 0) || a.key.localeCompare(b.key);
+}
+
+function compareRootNodes(a: AutoLayoutNodeData, b: AutoLayoutNodeData): number {
+  return (a.stage ?? Number.MAX_SAFE_INTEGER) - (b.stage ?? Number.MAX_SAFE_INTEGER)
+    || compareLayoutNodes(a, b);
+}
+
+function comparePath(pathA: readonly number[], pathB: readonly number[]): number {
+  const maxLength = Math.max(pathA.length, pathB.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const left = pathA[index];
+    const right = pathB[index];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left !== right) return left - right;
+  }
+  return 0;
+}
+
+function buildParentAndChildrenMaps(
+  assignedNodeMap: Map<string, AutoLayoutNodeData>,
+  links: readonly AutoLayoutLinkData[],
+): {
+  parentMap: Map<string, string>;
+  childrenMap: Map<string, AutoLayoutNodeData[]>;
+} {
+  const parentMap = new Map<string, string>();
+  const childrenMap = new Map<string, AutoLayoutNodeData[]>();
+
+  for (const link of links) {
+    if (link.isCrossTree) {
+      continue;
+    }
+
+    const parent = assignedNodeMap.get(link.from);
+    const child = assignedNodeMap.get(link.to);
+    if (!parent || !child || parentMap.has(child.key)) {
+      continue;
+    }
+
+    parentMap.set(child.key, parent.key);
+    const siblings = childrenMap.get(parent.key) ?? [];
+    siblings.push(child);
+    childrenMap.set(parent.key, siblings);
+  }
+
+  for (const siblings of childrenMap.values()) {
+    siblings.sort(compareLayoutNodes);
+  }
+
+  return { parentMap, childrenMap };
+}
+
+function buildFamilyPathMap(
+  root: AutoLayoutNodeData,
+  childrenMap: Map<string, AutoLayoutNodeData[]>,
+  allowedNodeKeys: ReadonlySet<string>,
+): Map<string, readonly number[]> {
+  const pathMap = new Map<string, readonly number[]>([[root.key, []]]);
+  const queue: AutoLayoutNodeData[] = [root];
+  const seen = new Set<string>([root.key]);
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const parentPath = pathMap.get(current.key) ?? [];
+    const children = (childrenMap.get(current.key) ?? []).filter(child => allowedNodeKeys.has(child.key));
+
+    children.forEach((child, childIndex) => {
+      if (seen.has(child.key)) {
+        return;
+      }
+
+      pathMap.set(child.key, [...parentPath, childIndex]);
+      seen.add(child.key);
+      queue.push(child);
+    });
+  }
+
+  return pathMap;
+}
+
+function buildFamilyBlocks(
+  assignedNodes: readonly AutoLayoutNodeData[],
+  parentMap: Map<string, string>,
+  childrenMap: Map<string, AutoLayoutNodeData[]>,
+  minFamilyBlockRows: number,
+): FamilyLayoutBlock[] {
+  const naturalRoots = assignedNodes
+    .filter(node => {
+      const parentKey = parentMap.get(node.key);
+      return !parentKey;
+    })
+    .sort(compareRootNodes);
+
+  const visited = new Set<string>();
+  const blocks: FamilyLayoutBlock[] = [];
+
+  const collectFamily = (root: AutoLayoutNodeData) => {
+    const familyNodes: AutoLayoutNodeData[] = [];
+    const stack: AutoLayoutNodeData[] = [root];
+
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (visited.has(current.key)) {
+        continue;
+      }
+
+      visited.add(current.key);
+      familyNodes.push(current);
+
+      const children = childrenMap.get(current.key) ?? [];
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (!visited.has(child.key)) {
+          stack.push(child);
+        }
+      }
+    }
+
+    const familyNodeKeys = new Set(familyNodes.map(node => node.key));
+    const pathMap = buildFamilyPathMap(root, childrenMap, familyNodeKeys);
+    const stageGroups = new Map<number, AutoLayoutNodeData[]>();
+
+    familyNodes.forEach(node => {
+      if (!isAssignedLayoutNode(node)) {
+        return;
+      }
+
+      const group = stageGroups.get(node.stage) ?? [];
+      group.push(node);
+      stageGroups.set(node.stage, group);
+    });
+
+    for (const stageNodes of stageGroups.values()) {
+      stageNodes.sort((left, right) => {
+        const pathCompare = comparePath(pathMap.get(left.key) ?? [], pathMap.get(right.key) ?? []);
+        return pathCompare || compareLayoutNodes(left, right);
+      });
+    }
+
+    const blockRows = Math.max(
+      minFamilyBlockRows,
+      ...Array.from(stageGroups.values(), nodes => nodes.length),
+      1,
+    );
+
+    blocks.push({
+      rootKey: root.key,
+      nodes: familyNodes,
+      stageGroups,
+      blockRows,
+      pathMap,
+    });
+  };
+
+  naturalRoots.forEach(collectFamily);
+
+  assignedNodes
+    .filter(node => !visited.has(node.key))
+    .sort(compareRootNodes)
+    .forEach(collectFamily);
+
+  return blocks;
+}
+
+/**
+ * 计算“主任务家族区块”自动布局。
+ * 同一阶段仍在同一列，但每个主任务家族会保留独立纵向区块，
+ * 防止前一个主任务的子孙任务侵入下一个主任务的视觉领地。
+ */
+export function computeFamilyBlockAutoLayout(
+  nodes: readonly AutoLayoutNodeData[],
+  links: readonly AutoLayoutLinkData[],
+  options: LayoutOptions = {},
+): NodePosition[] {
+  const resolvedOptions: ResolvedAutoLayoutOptions = {
+    layerSpacing: options.layerSpacing ?? LAYOUT_CONFIG.STAGE_SPACING,
+    columnSpacing: options.columnSpacing ?? LAYOUT_CONFIG.ROW_SPACING,
+    familyGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_FAMILY_GAP_ROWS,
+    minFamilyBlockRows: LAYOUT_CONFIG.AUTO_LAYOUT_MIN_FAMILY_BLOCK_ROWS,
+  };
+
+  const assignedNodes = nodes.filter(isAssignedLayoutNode);
+  const unassignedNodes = nodes.filter(node => !isAssignedLayoutNode(node));
+  const assignedNodeMap = new Map(assignedNodes.map(node => [node.key, node]));
+  const { parentMap, childrenMap } = buildParentAndChildrenMaps(assignedNodeMap, links);
+  const stageNums = Array.from(new Set(assignedNodes.map(node => node.stage!))).sort((a, b) => a - b);
+  const stageIndexMap = new Map(stageNums.map((stage, index) => [stage, index]));
+  const familyBlocks = buildFamilyBlocks(
+    assignedNodes,
+    parentMap,
+    childrenMap,
+    resolvedOptions.minFamilyBlockRows,
+  );
+
+  const positionMap = new Map<string, NodePosition>();
+  let currentFamilyStartRow = 0;
+
+  familyBlocks.forEach(block => {
+    const stages = Array.from(block.stageGroups.keys()).sort((left, right) => left - right);
+
+    stages.forEach(stage => {
+      const stageNodes = block.stageGroups.get(stage) ?? [];
+      const stageIndex = stageIndexMap.get(stage);
+      if (stageIndex === undefined || stageNodes.length === 0) {
+        return;
+      }
+
+      const topPaddingRows = (block.blockRows - stageNodes.length) / 2;
+      const x = stageIndex * resolvedOptions.layerSpacing;
+
+      stageNodes.forEach((node, nodeIndex) => {
+        const y = (currentFamilyStartRow + topPaddingRows + nodeIndex) * resolvedOptions.columnSpacing;
+        positionMap.set(node.key, {
+          key: node.key,
+          x,
+          y,
+        });
+      });
+    });
+
+    currentFamilyStartRow += block.blockRows + resolvedOptions.familyGapRows;
+  });
+
+  const unassignedX = stageNums.length > 0
+    ? stageNums.length * resolvedOptions.layerSpacing
+    : 0;
+
+  unassignedNodes
+    .slice()
+    .sort(compareLayoutNodes)
+    .forEach((node, nodeIndex) => {
+      positionMap.set(node.key, {
+        key: node.key,
+        x: unassignedX,
+        y: nodeIndex * resolvedOptions.columnSpacing,
+      });
+    });
+
+  return nodes
+    .map(node => positionMap.get(node.key))
+    .filter((position): position is NodePosition => position !== undefined);
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -75,75 +358,56 @@ export class FlowLayoutService {
     // 【P1-12 根治】事务内同步完成布局 + 位置保存，不跨 setTimeout
     this.diagram.startTransaction('auto-layout');
     
-    // 按阶段分组节点
-    const stageGroups = new Map<number, go.Node[]>();
-    const unassignedNodes: go.Node[] = [];
-    
+    const layoutNodes: AutoLayoutNodeData[] = [];
+    const nodeMap = new Map<string, go.Node>();
+
     this.diagram.nodes.each((node: go.Node) => {
-      const data = node.data;
-      if (data?.stage != null && data.stage > 0) {
-        const list = stageGroups.get(data.stage) || [];
-        list.push(node);
-        stageGroups.set(data.stage, list);
-      } else {
-        unassignedNodes.push(node);
+      const data = node.data as { key?: string; stage?: number | null; rank?: number } | undefined;
+      if (!data?.key) {
+        return;
       }
-    });
-    
-    // 从连线构建父子关系映射
-    const parentMap = new Map<string, string>();
-    this.diagram.links.each((link: go.Link) => {
-      const fromData = link.fromNode?.data;
-      const toData = link.toNode?.data;
-      if (fromData?.key && toData?.key && !link.data?.isCrossTree) {
-        parentMap.set(toData.key, fromData.key);
-      }
-    });
-    
-    // 获取排序后的阶段编号
-    const stageNums = Array.from(stageGroups.keys()).sort((a, b) => a - b);
-    
-    // 逐阶段定位节点，同阶段的节点在同一列
-    const nodeYMap = new Map<string, number>();
-    
-    for (let stageIdx = 0; stageIdx < stageNums.length; stageIdx++) {
-      const stage = stageNums[stageIdx];
-      const nodes = stageGroups.get(stage)!;
-      
-      // 按父节点 Y 位置排序（减少连线交叉），同父则按 rank 排序
-      nodes.sort((a, b) => {
-        const aParent = parentMap.get(a.data.key);
-        const bParent = parentMap.get(b.data.key);
-        const aParentY = aParent ? (nodeYMap.get(aParent) ?? 0) : 0;
-        const bParentY = bParent ? (nodeYMap.get(bParent) ?? 0) : 0;
-        if (aParentY !== bParentY) return aParentY - bParentY;
-        return (a.data.rank || 0) - (b.data.rank || 0);
+
+      layoutNodes.push({
+        key: data.key,
+        stage: data.stage ?? null,
+        rank: data.rank,
       });
-      
-      const x = stageIdx * layerSpacing;
-      for (let j = 0; j < nodes.length; j++) {
-        const y = j * columnSpacing;
-        nodes[j].location = new go.Point(x, y);
-        nodeYMap.set(nodes[j].data.key, y);
+      nodeMap.set(data.key, node);
+    });
+
+    const layoutLinks: AutoLayoutLinkData[] = [];
+    this.diagram.links.each((link: go.Link) => {
+      const fromData = link.fromNode?.data as { key?: string } | undefined;
+      const toData = link.toNode?.data as { key?: string } | undefined;
+      if (!fromData?.key || !toData?.key) {
+        return;
       }
-    }
-    
-    // 未分配阶段的节点放在所有阶段列的右侧
-    if (unassignedNodes.length > 0) {
-      const unassignedX = stageNums.length > 0
-        ? stageNums.length * layerSpacing
-        : 0;
-      unassignedNodes.sort((a, b) => (a.data.rank || 0) - (b.data.rank || 0));
-      for (let j = 0; j < unassignedNodes.length; j++) {
-        const y = j * columnSpacing;
-        unassignedNodes[j].location = new go.Point(unassignedX, y);
+
+      layoutLinks.push({
+        from: fromData.key,
+        to: toData.key,
+        isCrossTree: Boolean(link.data?.isCrossTree),
+      });
+    });
+
+    const positions = computeFamilyBlockAutoLayout(layoutNodes, layoutLinks, {
+      layerSpacing,
+      columnSpacing,
+    });
+
+    positions.forEach(position => {
+      const node = nodeMap.get(position.key);
+      if (!node) {
+        return;
       }
-    }
+
+      node.location = new go.Point(position.x, position.y);
+    });
     
     this.saveAllNodePositions();
     this.diagram.commitTransaction('auto-layout');
     
-    this.logger.info('自动布局已应用（按阶段对齐）');
+    this.logger.info('自动布局已应用（主任务分区式阶段对齐）');
   }
   
   /**

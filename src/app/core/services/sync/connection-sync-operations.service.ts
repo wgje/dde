@@ -31,6 +31,11 @@ import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { TombstoneService } from './tombstone.service';
+import {
+  createBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
 
 type TaskValidationFailureReason = 'missing-task' | 'query-error' | 'permission-denied';
 
@@ -75,8 +80,9 @@ export class ConnectionSyncOperationsService {
     data: Connection | { id: string },
     projectId?: string,
     sourceUserId?: string,
+    allowWhenSessionExpired = false,
   ): void {
-    if (this.syncStateService.isSessionExpired()) return;
+    if (this.syncStateService.isSessionExpired() && !allowWhenSessionExpired) return;
     if (!data?.id) {
       this.logger.warn('safeAddToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
       return;
@@ -91,6 +97,29 @@ export class ConnectionSyncOperationsService {
     } else {
       this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
+  }
+
+  private preserveConnectionUpsertForBrowserSuspension(
+    connection: Connection,
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId?: string,
+    context?: string,
+  ): boolean {
+    if (fromRetryQueue) {
+      throw createBrowserNetworkSuspendedError();
+    }
+
+    if (!fromRetryQueue) {
+      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId, true);
+    }
+
+    this.logger.info('浏览器网络挂起，延后连接同步', {
+      connectionId: connection.id,
+      projectId,
+      context,
+    });
+    return false;
   }
   
   /**
@@ -162,7 +191,7 @@ export class ConnectionSyncOperationsService {
     if (this.syncStateService.isSessionExpired()) {
       this.logger.warn('会话已过期，连接同步被阻止', { connectionId: connection.id });
       if (!fromRetryQueue) {
-        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId, true);
       }
       return false;
     }
@@ -187,14 +216,32 @@ export class ConnectionSyncOperationsService {
     try {
       // 验证用户会话
       const { data: { session } } = await client.auth.getSession();
-      const sessionUserId = session?.user?.id ?? null;
+      let sessionUserId = session?.user?.id ?? null;
       if (!sessionUserId) {
+        const refreshed = await this.sessionManager.tryRefreshSession('pushConnection.getSession');
+        if (refreshed) {
+          const { data: { session: newSession } } = await client.auth.getSession();
+          sessionUserId = newSession?.user?.id ?? null;
+        }
+      }
+
+      if (!sessionUserId) {
+        if (isBrowserNetworkSuspendedWindow()) {
+          return this.preserveConnectionUpsertForBrowserSuspension(
+            connection,
+            projectId,
+            fromRetryQueue,
+            sourceUserId,
+            'pushConnection.getSession'
+          );
+        }
+
         this.syncStateService.setSessionExpired(true);
         this.logger.warn('检测到会话丢失', { connectionId: connection.id, operation: 'pushConnection' });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
         // 【P0-06 修复】会话丢失时入队重试，防止连接数据永久丢失
         if (!fromRetryQueue) {
-          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+          this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId, true);
         }
         return false;
       }
@@ -231,6 +278,10 @@ export class ConnectionSyncOperationsService {
               );
             }
             return false;
+          }
+
+          if (fromRetryQueue && tombstoneStatus.error.errorType === 'BrowserNetworkSuspendedError') {
+            throw tombstoneStatus.error;
           }
 
           if (!fromRetryQueue) {
@@ -283,6 +334,10 @@ export class ConnectionSyncOperationsService {
               );
             }
             return false;
+          }
+
+          if (fromRetryQueue && validationResult.error?.errorType === 'BrowserNetworkSuspendedError') {
+            throw validationResult.error;
           }
 
           if (!fromRetryQueue) {
@@ -352,6 +407,16 @@ export class ConnectionSyncOperationsService {
       
       return true;
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        return this.preserveConnectionUpsertForBrowserSuspension(
+          connection,
+          projectId,
+          fromRetryQueue,
+          sourceUserId,
+          'pushConnection'
+        );
+      }
+
       return this.handlePushConnectionError(e, connection, projectId, fromRetryQueue, sourceUserId);
     }
   }
@@ -584,6 +649,19 @@ export class ConnectionSyncOperationsService {
     }
 
     const enhanced = supabaseErrorToError(e);
+
+    if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
+      if (fromRetryQueue) {
+        throw enhanced;
+      }
+
+      this.logger.info('浏览器网络挂起，延后连接同步', {
+        connectionId: connection.id,
+        projectId,
+      });
+      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId, true);
+      return false;
+    }
     
     // 版本冲突错误
     if (enhanced.errorType === 'VersionConflictError') {

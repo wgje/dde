@@ -11,6 +11,10 @@ export const LAYOUT_CONFIG = {
   STAGE_SPACING: 260,
   /** 任务行垂直间距 */
   ROW_SPACING: 140,
+  /** 自动布局中主任务家族之间的额外留白（按行高倍数） */
+  AUTO_LAYOUT_FAMILY_GAP_ROWS: 0.85,
+  /** 自动布局中单个主任务家族的最小行数 */
+  AUTO_LAYOUT_MIN_FAMILY_BLOCK_ROWS: 1,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */

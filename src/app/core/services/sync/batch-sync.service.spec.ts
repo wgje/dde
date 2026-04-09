@@ -12,6 +12,17 @@ import { RetryQueueService } from './retry-queue.service';
 import { SessionManagerService } from './session-manager.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import type { Connection, Project, Task } from '../../../../models';
+import {
+  createBrowserNetworkSuspendedError,
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../../../../utils/browser-network-suspension';
+
+function setVisibilityState(state: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: state,
+  });
+}
 
 function createProject(overrides: Partial<Project> = {}): Project {
   const now = '2026-03-31T00:00:00.000Z';
@@ -113,6 +124,8 @@ describe('BatchSyncService owner isolation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetBrowserNetworkSuspensionTrackingForTests();
+    setVisibilityState('visible');
     mockClient.auth.getSession.mockReset();
     mockSessionManager.tryRefreshSession.mockReset();
     mockSessionManager.tryRefreshSession.mockImplementation(async () => false);
@@ -487,6 +500,87 @@ describe('BatchSyncService owner isolation', () => {
       expect.objectContaining({ id: 'connection-covered-by-purge' }),
       'project-task-purge-skips-connection-retry',
       'user-a',
+    );
+  });
+
+  it('远端任务存在性查询遇到浏览器挂起时应整体延后连接同步，而不是降级为未同步依赖', async () => {
+    const task: Task = {
+      id: 'task-browser-suspended',
+      title: 'Task Browser Suspended',
+      content: '',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: '1',
+      createdDate: '2026-03-31T00:00:00.000Z',
+    };
+    const connection: Connection = {
+      id: 'connection-browser-suspended',
+      source: task.id,
+      target: task.id,
+    };
+    const project = createProject({
+      id: 'project-browser-suspended-connections',
+      tasks: [task],
+      connections: [connection],
+    });
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+    mockClient.from.mockImplementation((table: string) => {
+      if (table === 'tasks') {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              in: vi.fn(() => ({
+                is: vi.fn(async () => ({ data: null, error: createBrowserNetworkSuspendedError() })),
+              })),
+            })),
+          })),
+        };
+      }
+
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.failedConnectionIds).toEqual(['connection-browser-suspended']);
+    expect(result.retryEnqueued).toContain('connection:connection-browser-suspended');
+    expect(callbacks.pushConnection).not.toHaveBeenCalled();
+    expect(callbacks.addToRetryQueue).toHaveBeenCalledWith(
+      'connection',
+      'upsert',
+      connection,
+      'project-browser-suspended-connections',
+      'user-a',
+    );
+  });
+
+  it('session 在浏览器网络挂起窗口内暂不可用时应延后项目批同步而非标记过期', async () => {
+    const project = createProject({ id: 'project-browser-suspended-session' });
+    setVisibilityState('hidden');
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toBe('project sync deferred by browser suspension');
+    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
+    expect(mockToast.warning).not.toHaveBeenCalled();
+    expect(callbacks.addToRetryQueue).toHaveBeenCalledWith(
+      'project',
+      'upsert',
+      project,
+      undefined,
+      'user-a',
+      [],
     );
   });
 });

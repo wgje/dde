@@ -35,6 +35,10 @@ import { PermanentFailureError } from '../../../../utils/permanent-failure-error
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, FLOATING_TREE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import {
+  createBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
 /** Tombstone 查询结果 */
 export interface TombstoneQueryResult {
   ids: Set<string>;
@@ -171,6 +175,23 @@ export class TaskSyncOperationsService {
     context: string,
     details?: Record<string, unknown>,
   ): boolean {
+    if (isBrowserNetworkSuspendedWindow()) {
+      if (fromRetryQueue) {
+        throw createBrowserNetworkSuspendedError();
+      }
+
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, true);
+      }
+      this.logger.info('浏览器网络挂起，延后任务同步', {
+        taskId: task.id,
+        projectId,
+        context,
+        ...details,
+      });
+      return false;
+    }
+
     if (!fromRetryQueue) {
       this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, true);
     }
@@ -202,6 +223,21 @@ export class TaskSyncOperationsService {
     context: string,
     details?: Record<string, unknown>,
   ): boolean {
+    if (isBrowserNetworkSuspendedWindow()) {
+      if (fromRetryQueue) {
+        throw createBrowserNetworkSuspendedError();
+      }
+
+      this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, true);
+      this.logger.info('浏览器网络挂起，延后任务删除同步', {
+        taskIds,
+        projectId,
+        context,
+        ...details,
+      });
+      return false;
+    }
+
     this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, true);
     this.markSessionExpiredWithoutThrow(context, details);
     return false;
@@ -440,6 +476,19 @@ export class TaskSyncOperationsService {
     fromRetryQueue = false,
     sourceUserId?: string,
   ): boolean {
+    if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
+      if (fromRetryQueue) {
+        throw enhanced;
+      }
+
+      this.logger.info('浏览器网络挂起，延后任务同步', {
+        taskId: task.id,
+        projectId,
+      });
+      this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, true);
+      return false;
+    }
+
     if (enhanced.errorType === 'VersionConflictError') {
       this.logger.warn('推送任务版本冲突', { taskId: task.id, projectId });
       this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
@@ -518,6 +567,11 @@ export class TaskSyncOperationsService {
       }
 
       if (!sessionUserId) {
+        if (isBrowserNetworkSuspendedWindow()) {
+          this.logger.info('浏览器网络挂起，延后任务位置同步', { taskId, projectId });
+          return false;
+        }
+
         this.sessionManager.handleSessionExpired('pushTaskPosition.getSession', { taskId, projectId });
         return false;
       }
@@ -564,6 +618,11 @@ export class TaskSyncOperationsService {
       this.retryQueueService.recordCircuitSuccess();
       return true;
     } catch (e) {
+      if (isBrowserNetworkSuspendedWindow()) {
+        this.logger.info('浏览器网络挂起，延后任务位置同步', { taskId, projectId });
+        return false;
+      }
+
       this.logger.debug('pushTaskPosition 异常', { taskId, error: e });
       return false;
     }
@@ -672,6 +731,19 @@ export class TaskSyncOperationsService {
       return purgeSuccess;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
+
+      if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
+        if (fromRetryQueue) {
+          throw enhanced;
+        }
+
+        this.logger.info('浏览器网络挂起，延后任务删除同步', {
+          taskId,
+          projectId,
+        });
+        this.queueTaskDeletesForRetry([taskId], projectId, fromRetryQueue, sourceUserId, true);
+        return false;
+      }
       
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
         return this.preserveTaskDeleteForSessionExpiry(
@@ -900,6 +972,20 @@ export class TaskSyncOperationsService {
       
       return true;
     } catch (e) {
+      const enhanced = supabaseErrorToError(e);
+      if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
+        if (fromRetryQueue) {
+          throw enhanced;
+        }
+
+        this.logger.info('浏览器网络挂起，延后批量任务删除同步', {
+          projectId,
+          taskCount: taskIds.length,
+        });
+        this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, true);
+        return false;
+      }
+
       this.logger.error('purgeTasksFromCloud 失败', e);
       this.captureExceptionWithContext(e, 'purgeTasksFromCloud', {
         projectId,

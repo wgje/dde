@@ -26,6 +26,16 @@ import { classifySupabaseClientFailure, supabaseErrorToError } from '../../../..
 import { AUTH_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../../../../utils/browser-network-suspension';
+
+interface RemoteExistingTaskIdsResult {
+  existingIds: Set<string>;
+  deferredBySuspension: boolean;
+}
 /** 批量同步结果 */
 export interface BatchSyncResult {
   success: boolean;
@@ -144,6 +154,39 @@ export class BatchSyncService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  private deferProjectSyncForBrowserSuspension(
+    project: Project,
+    userId: string,
+    pendingTaskIdsToDelete: string[],
+    retryEnqueued: string[],
+    failedTaskIds: string[],
+    failedConnectionIds: string[],
+    projectPushed: boolean,
+    context: string,
+  ): BatchSyncResult {
+    if (this.callbacks && !retryEnqueued.includes(`project:${project.id}`)) {
+      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+      retryEnqueued.push(`project:${project.id}`);
+    }
+
+    this.logger.info('浏览器网络挂起，延后项目批同步', {
+      projectId: project.id,
+      userId,
+      context,
+      resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+    });
+    this.syncState.setSyncError('浏览器恢复连接中，项目稍后继续同步');
+
+    return {
+      success: false,
+      failedTaskIds,
+      failedConnectionIds,
+      retryEnqueued,
+      projectPushed,
+      failureReason: 'project sync deferred by browser suspension',
+    };
+  }
+
   /**
    * 查询远端已存在的任务 ID。
    * 仅用于连接推送前做依赖校验，避免外键约束错误风暴。
@@ -152,28 +195,57 @@ export class BatchSyncService {
     client: SupabaseClient,
     projectId: string,
     taskIds: string[]
-  ): Promise<Set<string>> {
+  ): Promise<RemoteExistingTaskIdsResult> {
     const existingIds = new Set<string>();
-    if (taskIds.length === 0) return existingIds;
+    if (taskIds.length === 0) {
+      return { existingIds, deferredBySuspension: false };
+    }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.info('浏览器网络挂起，延后远端任务存在性查询', {
+        projectId,
+        taskCount: taskIds.length,
+        resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+      });
+      return { existingIds, deferredBySuspension: true };
+    }
 
     const CHUNK_SIZE = 100;
     for (let offset = 0; offset < taskIds.length; offset += CHUNK_SIZE) {
       const chunk = taskIds.slice(offset, offset + CHUNK_SIZE);
-      // 中文注释：必须排除软删除任务，避免为已删除任务同步连接
-      const { data, error } = await client
-        .from('tasks')
-        .select('id')
-        .eq('project_id', projectId)
-        .in('id', chunk)
-        .is('deleted_at', null);
+      let data: Array<{ id: string }> | null = null;
+      let error: unknown | null = null;
+
+      try {
+        // 中文注释：必须排除软删除任务，避免为已删除任务同步连接
+        ({ data, error } = await client
+          .from('tasks')
+          .select('id')
+          .eq('project_id', projectId)
+          .in('id', chunk)
+          .is('deleted_at', null));
+      } catch (queryError) {
+        error = queryError;
+      }
 
       if (error) {
+        if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
+          this.logger.info('浏览器网络挂起，延后连接依赖校验', {
+            projectId,
+            chunkSize: chunk.length,
+            resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+          });
+          return { existingIds, deferredBySuspension: true };
+        }
+
+        const enhanced = supabaseErrorToError(error);
         this.logger.warn('查询远端任务存在性失败，连接依赖校验降级为本地成功集', {
           projectId,
           chunkSize: chunk.length,
-          error: error.message
+          error: enhanced.message,
+          errorType: enhanced.errorType,
         });
-        return existingIds;
+        return { existingIds, deferredBySuspension: false };
       }
 
       for (const row of (data || [])) {
@@ -181,7 +253,7 @@ export class BatchSyncService {
       }
     }
 
-    return existingIds;
+    return { existingIds, deferredBySuspension: false };
   }
   
   /**
@@ -296,6 +368,19 @@ export class BatchSyncService {
       }
 
       if (!sessionUserId) {
+        if (isBrowserNetworkSuspendedWindow()) {
+          return this.deferProjectSyncForBrowserSuspension(
+            project,
+            userId,
+            pendingTaskIdsToDelete,
+            retryEnqueued,
+            failedTaskIds,
+            failedConnectionIds,
+            projectPushed,
+            'saveProjectToCloud.getSession'
+          );
+        }
+
         this.syncState.setSessionExpired(true);
         // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
         this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
@@ -347,6 +432,19 @@ export class BatchSyncService {
             if (sessionUserId === userId) {
               this.logger.info('Session 刷新成功，继续项目批量同步', { projectId: project.id, userId });
             } else if (!sessionUserId) {
+              if (isBrowserNetworkSuspendedWindow()) {
+                return this.deferProjectSyncForBrowserSuspension(
+                  project,
+                  userId,
+                  pendingTaskIdsToDelete,
+                  retryEnqueued,
+                  failedTaskIds,
+                  failedConnectionIds,
+                  projectPushed,
+                  'saveProjectToCloud.getSession.afterRefresh'
+                );
+              }
+
               this.syncState.setSessionExpired(true);
               this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
               retryEnqueued.push(`project:${project.id}`);
@@ -379,6 +477,19 @@ export class BatchSyncService {
               };
             }
           } catch (retrySessionError) {
+            if (isBrowserNetworkSuspendedError(retrySessionError) || isBrowserNetworkSuspendedWindow()) {
+              return this.deferProjectSyncForBrowserSuspension(
+                project,
+                userId,
+                pendingTaskIdsToDelete,
+                retryEnqueued,
+                failedTaskIds,
+                failedConnectionIds,
+                projectPushed,
+                'saveProjectToCloud.getSession.retry'
+              );
+            }
+
             const retryEnhanced = supabaseErrorToError(retrySessionError);
             this.logger.warn('Session 刷新后再次校验失败，项目数据已入重试队列', {
               projectId: project.id,
@@ -400,6 +511,19 @@ export class BatchSyncService {
 
           // 刷新成功且会话校验通过时，继续后续批量同步逻辑。
         } else {
+          if (isBrowserNetworkSuspendedWindow()) {
+            return this.deferProjectSyncForBrowserSuspension(
+              project,
+              userId,
+              pendingTaskIdsToDelete,
+              retryEnqueued,
+              failedTaskIds,
+              failedConnectionIds,
+              projectPushed,
+              'saveProjectToCloud.getSession.refreshDeferred'
+            );
+          }
+
           this.logger.error('Session 验证失败', enhanced);
           this.syncState.setSessionExpired(true);
           this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
@@ -611,11 +735,12 @@ export class BatchSyncService {
       const referencedTaskIds = Array.from(
         new Set(activeConnections.flatMap(conn => [conn.source, conn.target]))
       );
-      const remoteExistingTaskIds = await this.fetchRemoteExistingTaskIds(
+      const remoteTaskLookup = await this.fetchRemoteExistingTaskIds(
         client,
         projectSnapshot.id,
         referencedTaskIds
       );
+      const remoteExistingTaskIds = remoteTaskLookup.existingIds;
       const allSyncedTaskIds = new Set<string>(successfulTaskIds);
       remoteExistingTaskIds.forEach(taskId => {
         allSyncedTaskIds.add(taskId);
@@ -623,6 +748,32 @@ export class BatchSyncService {
       const purgedTaskIds = taskPurgeSucceeded
         ? new Set(changes.taskIdsToDelete)
         : new Set<string>();
+
+      if (remoteTaskLookup.deferredBySuspension) {
+        this.logger.info('浏览器网络挂起，延后连接批同步到重试队列', {
+          projectId: projectSnapshot.id,
+          connectionCount: activeConnections.length,
+          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+        });
+
+        for (const connection of activeConnections) {
+          const coveredByTaskPurge =
+            purgedTaskIds.has(connection.source) || purgedTaskIds.has(connection.target);
+          if (coveredByTaskPurge) {
+            this.logger.info('连接已随 task purge 在云端删除，跳过无意义重试', {
+              connectionId: connection.id,
+              projectId: projectSnapshot.id,
+              source: connection.source,
+              target: connection.target,
+            });
+            continue;
+          }
+
+          failedConnectionIds.push(connection.id);
+          retryEnqueued.push(`connection:${connection.id}`);
+          this.callbacks.addToRetryQueue('connection', 'upsert', connection, projectSnapshot.id, userId);
+        }
+      } else {
 
       const blockedConnections: Connection[] = [];
       const connectionsToSync = activeConnections.filter(conn => {
@@ -683,6 +834,7 @@ export class BatchSyncService {
           }
           throw e;
         }
+      }
       }
 
       const success =
