@@ -309,6 +309,7 @@ describe('UserSessionService', () => {
 
     mockSupabaseClientService = {
       isConfigured: true,
+      isOfflineMode: vi.fn(() => false),
       client: vi.fn(() => null),
       clientAsync: vi.fn(() => Promise.resolve(null)),
       getClient: vi.fn(() => null),

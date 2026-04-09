@@ -2102,6 +2102,13 @@ export class UserSessionService {
   }
 
   private async reconcileInaccessibleActiveProject(projectId: string, userId: string): Promise<string | null> {
+    // 【安全阀】Supabase 连接中断时不做激进裁剪，
+    // 避免因瞬时网络/认证问题误删活跃项目
+    if (this.supabase.isOfflineMode()) {
+      this.logger.warn('Supabase 连接中断，跳过 activeProject 不可访问裁剪', { projectId });
+      return projectId;
+    }
+
     const localProject = this.projectState.getProject(projectId);
     if (!localProject) {
       this.projectState.setActiveProjectId(null);

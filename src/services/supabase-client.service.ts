@@ -243,10 +243,10 @@ export class SupabaseClientService {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const authProbeUrl = new URL('/auth/v1/health', this.supabaseUrl).toString();
-    const restProbeUrl = new URL('/rest/v1/', this.supabaseUrl).toString();
 
-    this.reachabilityProbePromise = Promise.all([
-      fetch(authProbeUrl, {
+    // 可达性探测：只用 Auth health 端点判断（公开，不需要认证）
+    // REST /rest/v1/ 端点可能因 anon key 权限不足返回 401，这不代表服务不可达
+    this.reachabilityProbePromise = fetch(authProbeUrl, {
         method: 'GET',
         cache: 'no-store',
         credentials: 'omit',
@@ -255,30 +255,19 @@ export class SupabaseClientService {
         headers: {
           apikey: this.supabaseAnonKey,
         },
-      }),
-      fetch(restProbeUrl, {
-        method: 'GET',
-        cache: 'no-store',
-        credentials: 'omit',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          apikey: this.supabaseAnonKey,
-          Authorization: `Bearer ${this.supabaseAnonKey}`,
-          'Accept-Profile': 'public',
-        },
-      }),
-    ])
-      .then(([authResponse, restResponse]) => {
-        const reachable = authResponse.ok && restResponse.ok;
+      })
+      .then((authResponse) => {
+        // 收到 HTTP 响应即表示网络可达
+        // 仅 502-504 网关错误可能表示 Supabase 后端不可用
+        const isGatewayError = authResponse.status >= 502 && authResponse.status <= 504;
+        const reachable = !isGatewayError;
         this.setOfflineModeState(!reachable, 'probe');
         this.lastReachabilityProbeResult = reachable;
         this.lastReachabilityProbeAt = Date.now();
 
         if (!reachable) {
-          this.logger.info('Supabase 连通性探测返回非健康状态', {
+          this.logger.info('Supabase 连通性探测返回网关错误', {
             authStatus: authResponse.status,
-            restStatus: restResponse.status,
           });
         }
 
@@ -440,7 +429,9 @@ export class SupabaseClientService {
             ...options,
             signal: mergedSignal,
           }).then((response) => {
-            if (this.isOfflineMode()) {
+            // 收到 HTTP 响应表示网络可达，但 502-504 网关错误不清除离线模式
+            const isGatewayError = response.status >= 502 && response.status <= 504;
+            if (this.isOfflineMode() && !isGatewayError) {
               this.setOfflineModeState(false, 'request');
             }
             return response;

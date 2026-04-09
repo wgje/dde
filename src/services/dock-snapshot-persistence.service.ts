@@ -28,7 +28,7 @@ import {
 } from '../models/parking-dock';
 import { sanitizePlannerFields } from '../utils/planner-fields';
 import { LoggerService } from './logger.service';
-import { get, set } from 'idb-keyval';
+import { del, get, set } from 'idb-keyval';
 import { TimerHandle } from '../utils/timer-handle';
 
 export const DOCK_SNAPSHOT_IDB_DB_NAME = 'keyval-store';
@@ -42,6 +42,11 @@ export interface SnapshotNormalizeContext {
   muteWaitTone: boolean;
   todayDateKey: string;
   buildOverflowMeta: (entries: DockEntry[]) => { comboSelectOverflow: number; backupOverflow: number };
+}
+
+interface PersistedSnapshotCandidate {
+  snapshot: DockSnapshot;
+  source: 'idb-current' | 'idb-anonymous' | 'legacy-current' | 'legacy-anonymous';
 }
 
 @Injectable({
@@ -94,51 +99,77 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     ctx: SnapshotNormalizeContext,
   ): Promise<DockSnapshot | null> {
-    let normalizedIdbSnapshot: DockSnapshot | null = null;
-    let normalizedLegacySnapshot: DockSnapshot | null = null;
-    const legacyKey = this.legacyLocalStorageKey(userId);
+    const currentIdbKey = this.localCacheKey(userId);
+    const anonymousIdbKey = userId === null ? null : this.localCacheKey(null);
+    const currentLegacyKey = this.legacyLocalStorageKey(userId);
+    const anonymousLegacyKey = userId === null ? null : this.legacyLocalStorageKey(null);
 
-    try {
-      const raw = await get(this.localCacheKey(userId));
-      normalizedIdbSnapshot = this.normalizeSnapshot(raw, ctx);
-    } catch (err) {
-      this.logger.warn('IDB restore failed', {
-        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
-        error: err,
-      });
+    const [currentIdbSnapshot, anonymousIdbSnapshot] = await Promise.all([
+      this.readNormalizedIdbSnapshot(currentIdbKey, ctx),
+      anonymousIdbKey ? this.readNormalizedIdbSnapshot(anonymousIdbKey, ctx) : Promise.resolve(null),
+    ]);
+
+    const currentLegacySnapshot = this.readNormalizedLegacySnapshot(currentLegacyKey, ctx);
+    const anonymousLegacySnapshot = anonymousLegacyKey
+      ? this.readNormalizedLegacySnapshot(anonymousLegacyKey, ctx)
+      : null;
+
+    const candidates: PersistedSnapshotCandidate[] = [];
+    if (currentIdbSnapshot) {
+      candidates.push({ snapshot: currentIdbSnapshot, source: 'idb-current' });
+    }
+    if (anonymousIdbSnapshot) {
+      candidates.push({ snapshot: anonymousIdbSnapshot, source: 'idb-anonymous' });
+    }
+    if (currentLegacySnapshot) {
+      candidates.push({ snapshot: currentLegacySnapshot, source: 'legacy-current' });
+    }
+    if (anonymousLegacySnapshot) {
+      candidates.push({ snapshot: anonymousLegacySnapshot, source: 'legacy-anonymous' });
     }
 
-    if (typeof localStorage !== 'undefined') {
+    const winner = candidates.reduce<PersistedSnapshotCandidate | null>(
+      (best, candidate) => this.pickNewerPersistedSnapshot(best, candidate),
+      null,
+    );
+
+    if (!winner) return null;
+
+    if (winner.source !== 'idb-current') {
       try {
-        const legacyRaw = localStorage.getItem(legacyKey);
-        if (legacyRaw) {
-          const parsed = JSON.parse(legacyRaw) as DockSnapshot;
-          normalizedLegacySnapshot = this.normalizeSnapshot(parsed, ctx);
-        }
+        await set(currentIdbKey, winner.snapshot);
       } catch (err) {
-        this.logger.warn('Legacy localStorage restore failed', {
+        this.logger.warn('IDB restore failed', {
           code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
           error: err,
         });
       }
     }
 
-    if (normalizedIdbSnapshot && normalizedLegacySnapshot) {
-      const preferLegacy = this.isSnapshotNewer(normalizedLegacySnapshot, normalizedIdbSnapshot);
-      if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(legacyKey);
+    if (typeof localStorage !== 'undefined') {
+      if (winner.source === 'idb-anonymous' || winner.source === 'legacy-anonymous') {
+        this.persistShadowToLocalStorage(winner.snapshot, userId);
+      } else if (currentLegacySnapshot) {
+        localStorage.removeItem(currentLegacyKey);
       }
-      return preferLegacy ? normalizedLegacySnapshot : normalizedIdbSnapshot;
+
+      if (anonymousLegacyKey) {
+        localStorage.removeItem(anonymousLegacyKey);
+      }
     }
 
-    if (normalizedLegacySnapshot) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(legacyKey);
+    if (anonymousIdbKey) {
+      try {
+        await del(anonymousIdbKey);
+      } catch (err) {
+        this.logger.warn('IDB fallback cleanup failed', {
+          code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+          error: err,
+        });
       }
-      return normalizedLegacySnapshot;
     }
 
-    return normalizedIdbSnapshot;
+    return winner.snapshot;
   }
 
   cancelPendingPersist(): void {
@@ -307,7 +338,7 @@ export class DockSnapshotPersistenceService {
       version: CURRENT_DOCK_SNAPSHOT_VERSION,
       entries,
       focusMode,
-      isDockExpanded: source.isDockExpanded === undefined ? true : Boolean(source.isDockExpanded),
+      isDockExpanded: source.isDockExpanded === undefined ? false : Boolean(source.isDockExpanded),
       muteWaitTone: Boolean(source.muteWaitTone),
       session,
       firstDragDone: session.firstDragIntervened,
@@ -325,6 +356,44 @@ export class DockSnapshotPersistenceService {
           : ctx.todayDateKey,
       savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
     };
+  }
+
+  private async readNormalizedIdbSnapshot(key: string, ctx: SnapshotNormalizeContext): Promise<DockSnapshot | null> {
+    try {
+      const raw = await get(key);
+      return this.normalizeSnapshot(raw, ctx);
+    } catch (err) {
+      this.logger.warn('IDB restore failed', {
+        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+        error: err,
+      });
+      return null;
+    }
+  }
+
+  private readNormalizedLegacySnapshot(key: string, ctx: SnapshotNormalizeContext): DockSnapshot | null {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+      const legacyRaw = localStorage.getItem(key);
+      if (!legacyRaw) return null;
+      const parsed = JSON.parse(legacyRaw) as unknown;
+      return this.normalizeSnapshot(parsed, ctx);
+    } catch (err) {
+      this.logger.warn('Legacy localStorage restore failed', {
+        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+        error: err,
+      });
+      return null;
+    }
+  }
+
+  private pickNewerPersistedSnapshot(
+    current: PersistedSnapshotCandidate | null,
+    incoming: PersistedSnapshotCandidate | null,
+  ): PersistedSnapshotCandidate | null {
+    if (!current) return incoming;
+    if (!incoming) return current;
+    return this.isSnapshotNewer(incoming.snapshot, current.snapshot) ? incoming : current;
   }
 
   /** 合并 normalizedSession 与 legacyFocusSessionState（v2-v5 兼容） */

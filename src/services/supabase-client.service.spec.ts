@@ -129,24 +129,13 @@ describe('SupabaseClientService', () => {
 
       await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(true);
 
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(fetchSpy).toHaveBeenNthCalledWith(
         1,
         'https://example.supabase.co/auth/v1/health',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({ apikey: 'anon-key' }),
-        })
-      );
-      expect(fetchSpy).toHaveBeenNthCalledWith(
-        2,
-        'https://example.supabase.co/rest/v1/',
-        expect.objectContaining({
-          method: 'GET',
-          headers: expect.objectContaining({
-            apikey: 'anon-key',
-            Authorization: 'Bearer anon-key',
-            'Accept-Profile': 'public',
-          }),
         })
       );
       expect(service.isOfflineMode()).toBe(false);
@@ -185,7 +174,7 @@ describe('SupabaseClientService', () => {
       expect(service.isOfflineMode()).toBe(false);
     });
 
-    it('probeReachability 返回非 2xx 时应保持连接中断状态', async () => {
+    it('probeReachability 返回网关错误时应保持连接中断状态', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;
         supabaseUrl: string;
@@ -194,13 +183,28 @@ describe('SupabaseClientService', () => {
       mutable.canInitialize = true;
       mutable.supabaseUrl = 'https://example.supabase.co';
       mutable.supabaseAnonKey = 'anon-key';
-      fetchSpy
-        .mockResolvedValueOnce(new Response(null, { status: 200 }))
-        .mockResolvedValueOnce(new Response(null, { status: 503 }));
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 502 }));
 
       await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(false);
 
       expect(service.isOfflineMode()).toBe(true);
+    });
+
+    it('probeReachability 返回 401 时仍视为可达', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      service.isOfflineMode.set(true);
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 401 }));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(true);
+
+      expect(service.isOfflineMode()).toBe(false);
     });
 
     it('请求级网络失败时应通知连接状态监听器', async () => {
