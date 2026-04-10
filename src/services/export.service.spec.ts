@@ -3,7 +3,7 @@
  * 
  * 使用 Injector 隔离模式，避免 TestBed 全局状态污染
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   ExportService, 
@@ -13,10 +13,12 @@ import {
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { PreferenceService } from './preference.service';
+import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
 import { Project, Task, Connection } from '../models';
 
 describe('ExportService', () => {
   let service: ExportService;
+  let injector: Injector;
   let mockToast: {
     success: ReturnType<typeof vi.fn>;
     error: ReturnType<typeof vi.fn>;
@@ -30,6 +32,7 @@ describe('ExportService', () => {
   
   beforeEach(() => {
     localStorage.removeItem('nanoflow.lastExportAt');
+    localStorage.removeItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME);
 
     mockToast = {
       success: vi.fn(),
@@ -53,7 +56,7 @@ describe('ExportService', () => {
       category: () => loggerMethods,
     };
     
-    const injector = Injector.create({
+    injector = Injector.create({
       providers: [
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
@@ -63,6 +66,14 @@ describe('ExportService', () => {
     
     service = runInInjectionContext(injector, () => new ExportService());
   });
+
+      afterEach(() => {
+        (injector as { destroy?: () => void }).destroy?.();
+      });
+
+  function createService(): ExportService {
+    return runInInjectionContext(injector, () => new ExportService());
+  }
   
   // 辅助函数：创建测试项目
   function createTestProject(overrides: Partial<Project> = {}): Project {
@@ -400,6 +411,36 @@ describe('ExportService', () => {
     it('从未导出过应需要提醒', () => {
       expect(localStorage.getItem('nanoflow.lastExportAt')).toBeNull();
       expect(service.needsExportReminder()).toBe(true);
+    });
+
+    it('最近完成过本地备份时不应提醒', () => {
+      service.recordLocalBackupSuccess(new Date().toISOString());
+
+      expect(service.needsExportReminder()).toBe(false);
+      expect(service.lastSuccessfulBackupTime()).not.toBeNull();
+    });
+
+    it('初始化时应读取持久化的本地备份时间', () => {
+      const recentBackupTime = new Date().toISOString();
+      localStorage.setItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME, recentBackupTime);
+
+      const restoredService = createService();
+
+      expect(restoredService.lastLocalBackupTime()).toBe(new Date(recentBackupTime).toISOString());
+      expect(restoredService.needsExportReminder()).toBe(false);
+    });
+
+    it('跨标签页写入本地备份时间后应同步清除提醒', () => {
+      const recentBackupTime = new Date().toISOString();
+
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME,
+        newValue: recentBackupTime,
+        storageArea: localStorage,
+      }));
+
+      expect(service.lastLocalBackupTime()).toBe(new Date(recentBackupTime).toISOString());
+      expect(service.needsExportReminder()).toBe(false);
     });
   });
 });

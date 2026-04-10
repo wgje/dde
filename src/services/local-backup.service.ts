@@ -28,6 +28,7 @@ import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
 import { DisasterBackupService } from './disaster-backup.service';
+import { ExportService } from './export.service';
 import type { Project } from '../models';
 import {
   LOCAL_BACKUP_CONFIG,
@@ -56,6 +57,7 @@ export class LocalBackupService implements OnDestroy {
   private readonly logger = inject(LoggerService).category('LocalBackup');
   private readonly toast = inject(ToastService);
   private readonly disasterBackupService = inject(DisasterBackupService);
+  private readonly exportService = inject(ExportService);
   private readonly uiState = inject(UiStateService);
   private readonly preferenceService = inject(PreferenceService);
   
@@ -362,6 +364,7 @@ export class LocalBackupService implements OnDestroy {
       const backupTime = new Date().toISOString();
       this._lastBackupTime.set(backupTime);
       this.savePersistedState();
+      this.exportService.recordLocalBackupSuccess(backupTime);
       
       this.logger.info('本地备份完成', { filename, size: blob.size });
       

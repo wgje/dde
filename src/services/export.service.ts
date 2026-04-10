@@ -13,11 +13,12 @@
  * - 离线也可导出
  * - 导出文件人类可读（JSON 格式化）
  */
-import { Injectable, inject, signal, computed } from '@angular/core';
+import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { PreferenceService } from './preference.service';
 import { Project, Task, Connection } from '../models';
+import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
 
 // ============================================
 // 导出配置
@@ -54,6 +55,8 @@ export const EXPORT_CONFIG = {
   /** 导出提醒间隔（毫秒）- 7 天 */
   REMINDER_INTERVAL: 7 * 24 * 60 * 60 * 1000,
 } as const;
+
+const LAST_EXPORT_AT_STORAGE_KEY = 'nanoflow.lastExportAt';
 
 // ============================================
 // 类型定义
@@ -216,6 +219,7 @@ export interface ExportProgress {
   providedIn: 'root'
 })
 export class ExportService {
+  private readonly destroyRef = inject(DestroyRef);
   private readonly logger = inject(LoggerService).category('Export');
   private readonly toast = inject(ToastService);
   private readonly preference = inject(PreferenceService);
@@ -227,24 +231,38 @@ export class ExportService {
     percentage: 0,
   });
   private readonly _lastExportTime = signal<string | null>(null);
+  private readonly _lastLocalBackupTime = signal<string | null>(null);
   
   // 公开的计算属性
   readonly isExporting = computed(() => this._isExporting());
   readonly progress = computed(() => this._progress());
   readonly lastExportTime = computed(() => this._lastExportTime());
+  readonly lastLocalBackupTime = computed(() => this._lastLocalBackupTime());
+  readonly lastSuccessfulBackupTime = computed(() =>
+    this.selectLatestTimestamp(this._lastExportTime(), this._lastLocalBackupTime())
+  );
   
   /** 是否需要导出提醒 */
   readonly needsExportReminder = computed(() => {
-    const lastExport = this._lastExportTime();
-    if (!lastExport) return true;
+    const lastBackup = this.lastSuccessfulBackupTime();
+    if (!lastBackup) return true;
     
-    const elapsed = Date.now() - new Date(lastExport).getTime();
+    const elapsed = Date.now() - new Date(lastBackup).getTime();
     return elapsed > EXPORT_CONFIG.REMINDER_INTERVAL;
   });
   
   constructor() {
     // 加载上次导出时间
     this.loadLastExportTime();
+    this.loadLastLocalBackupTime();
+    this.setupStorageSync();
+  }
+
+  /**
+   * 记录本地备份成功时间，用于同步更新全局备份提醒状态。
+   */
+  recordLocalBackupSuccess(timestamp: string): void {
+    this._lastLocalBackupTime.set(this.normalizeTimestamp(timestamp, 'local-backup:runtime'));
   }
   
   /**
@@ -655,13 +673,96 @@ export class ExportService {
    */
   private loadLastExportTime(): void {
     try {
-      const stored = localStorage.getItem('nanoflow.lastExportAt');
-      if (stored) {
-        this._lastExportTime.set(stored);
-      }
+      this._lastExportTime.set(
+        this.normalizeTimestamp(localStorage.getItem(LAST_EXPORT_AT_STORAGE_KEY), LAST_EXPORT_AT_STORAGE_KEY)
+      );
     } catch (e) {
       this.logger.debug('读取上次导出时间失败', { error: e });
     }
+  }
+
+  /**
+   * 加载上次本地备份时间
+   */
+  private loadLastLocalBackupTime(): void {
+    try {
+      this._lastLocalBackupTime.set(
+        this.normalizeTimestamp(
+          localStorage.getItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME),
+          LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME,
+        )
+      );
+    } catch (e) {
+      this.logger.debug('读取上次本地备份时间失败', { error: e });
+    }
+  }
+
+  /**
+   * 跨标签页同步备份时间，避免提醒状态滞后。
+   */
+  private setupStorageSync(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.storageArea !== localStorage) {
+        return;
+      }
+
+      if (event.key === LAST_EXPORT_AT_STORAGE_KEY) {
+        this._lastExportTime.set(this.normalizeTimestamp(event.newValue, LAST_EXPORT_AT_STORAGE_KEY));
+        return;
+      }
+
+      if (event.key === LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME) {
+        this._lastLocalBackupTime.set(
+          this.normalizeTimestamp(event.newValue, LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME)
+        );
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    this.destroyRef.onDestroy(() => window.removeEventListener('storage', handleStorage));
+  }
+
+  /**
+   * 选择最近一次有效的备份时间，统一导出与本地备份提醒语义。
+   */
+  private selectLatestTimestamp(...timestamps: Array<string | null>): string | null {
+    let latest: string | null = null;
+    let latestTime = -Infinity;
+
+    for (const timestamp of timestamps) {
+      if (!timestamp) {
+        continue;
+      }
+
+      const time = new Date(timestamp).getTime();
+      if (time > latestTime) {
+        latest = timestamp;
+        latestTime = time;
+      }
+    }
+
+    return latest;
+  }
+
+  /**
+   * 规范化持久化时间戳，损坏数据不参与提醒判断。
+   */
+  private normalizeTimestamp(value: string | null, source: string): string | null {
+    if (!value) {
+      return null;
+    }
+
+    const time = new Date(value).getTime();
+    if (Number.isNaN(time)) {
+      this.logger.warn('忽略无效备份时间戳', { source, value });
+      return null;
+    }
+
+    return new Date(time).toISOString();
   }
   
   /**
@@ -672,7 +773,7 @@ export class ExportService {
     this._lastExportTime.set(now);
     
     try {
-      localStorage.setItem('nanoflow.lastExportAt', now);
+      localStorage.setItem(LAST_EXPORT_AT_STORAGE_KEY, now);
       // 仅本地存储，不同步到云端
     } catch (e) {
       this.logger.debug('保存上次导出时间失败', { error: e });

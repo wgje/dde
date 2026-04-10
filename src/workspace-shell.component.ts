@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector, AfterViewInit } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector, AfterViewInit, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
 import { UiStateService } from './services/ui-state.service';
@@ -91,6 +91,9 @@ type EventDrivenSyncPulseLike = {
 type StartupDiagnosticsLike = {
   initialize: () => Promise<void> | void;
 };
+
+const DATA_PROTECTION_REMINDER_TITLE = '数据备份提醒';
+const DATA_PROTECTION_REMINDER_MESSAGE = '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。';
 
 /**
  * 应用根组件
@@ -1158,14 +1161,33 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     effect(() => {
       const needsReminder = this.exportService.needsExportReminder();
       const userId = this.userSession.currentUserId();
-      if (needsReminder && userId) {
+      this.syncDataProtectionReminderToast(Boolean(needsReminder && userId));
+    });
+  }
+
+  private syncDataProtectionReminderToast(shouldShowReminder: boolean): void {
+    const reminderToast = untracked(() =>
+      this.toast.messages().find(message =>
+        message.type === 'info' &&
+        message.title === DATA_PROTECTION_REMINDER_TITLE &&
+        message.message === DATA_PROTECTION_REMINDER_MESSAGE,
+      )
+    );
+
+    if (shouldShowReminder) {
+      if (!reminderToast) {
         this.toast.info(
-          '数据备份提醒',
-          '已超过 7 天未导出备份，建议前往设置导出数据。',
-          { duration: 10000 }
+          DATA_PROTECTION_REMINDER_TITLE,
+          DATA_PROTECTION_REMINDER_MESSAGE,
+          { duration: 10000 },
         );
       }
-    });
+      return;
+    }
+
+    if (reminderToast) {
+      this.toast.dismiss(reminderToast.id);
+    }
   }
 
   /** 启动快照：将最近项目摘要写入轻量快照，供下次冷启动直接显示。 */

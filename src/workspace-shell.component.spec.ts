@@ -10,6 +10,57 @@ import { Subject } from 'rxjs';
 import { WorkspaceShellComponent } from './workspace-shell.component';
 import { FEATURE_FLAGS } from './config/feature-flags.config';
 
+describe('WorkspaceShellComponent 数据保护提醒', () => {
+  it('应在没有现存提醒时展示备份提醒', () => {
+    const info = vi.fn();
+    const dismiss = vi.fn();
+    const context = {
+      toast: {
+        messages: () => [],
+        info,
+        dismiss,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncDataProtectionReminderToast: (this: WorkspaceShellComponent, shouldShowReminder: boolean) => void;
+    }).syncDataProtectionReminderToast.call(context, true);
+
+    expect(info).toHaveBeenCalledWith(
+      '数据备份提醒',
+      '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。',
+      { duration: 10000 },
+    );
+    expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it('应在提醒条件解除后关闭现有备份提醒', () => {
+    const info = vi.fn();
+    const dismiss = vi.fn();
+    const context = {
+      toast: {
+        messages: () => [
+          {
+            id: 'backup-reminder',
+            type: 'info',
+            title: '数据备份提醒',
+            message: '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。',
+          },
+        ],
+        info,
+        dismiss,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncDataProtectionReminderToast: (this: WorkspaceShellComponent, shouldShowReminder: boolean) => void;
+    }).syncDataProtectionReminderToast.call(context, false);
+
+    expect(dismiss).toHaveBeenCalledWith('backup-reminder');
+    expect(info).not.toHaveBeenCalled();
+  });
+});
+
 describe('WorkspaceShellComponent 输入事件处理', () => {
   it('onUnifiedSearchInput 应转发输入值到 onUnifiedSearchChange', () => {
     const onUnifiedSearchChange = vi.fn();

@@ -17,18 +17,24 @@ const disasterBackupServiceMock = {
   buildLocalBlob: vi.fn(),
 };
 
+const exportServiceMock = {
+  recordLocalBackupSuccess: vi.fn(),
+};
+
 describe('LocalBackupService', () => {
   let service: LocalBackupService;
 
   beforeEach(() => {
+    localStorage.clear();
+    exportServiceMock.recordLocalBackupSuccess.mockReset();
     const injector = Injector.create({
       providers: [
         { provide: LocalBackupService, useClass: LocalBackupService },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
         { provide: ToastService, useValue: { info: vi.fn(), warning: vi.fn(), error: vi.fn(), success: vi.fn() } },
-        { provide: ExportService, useValue: { exportProjectToJson: vi.fn().mockReturnValue('{}') } },
+        { provide: ExportService, useValue: exportServiceMock },
         { provide: UiStateService, useValue: { isMobile: vi.fn(() => false) } },
-        { provide: PreferenceService, useValue: { get: vi.fn(), set: vi.fn() } },
+        { provide: PreferenceService, useValue: { get: vi.fn(), set: vi.fn(), syncLocalBackupSettings: vi.fn() } },
         { provide: SentryLazyLoaderService, useValue: { captureException: vi.fn() } },
         { provide: DisasterBackupService, useValue: disasterBackupServiceMock },
       ],
@@ -145,6 +151,7 @@ describe('LocalBackupService', () => {
         [{ id: 'p1', name: 'Test', tasks: [], connections: [] }],
         { autoBackupEnabled: false, autoBackupIntervalMs: 900000 },
       );
+      expect(exportServiceMock.recordLocalBackupSuccess).toHaveBeenCalledWith(result.timestamp);
       expect(writes).toHaveLength(1);
     });
   });
