@@ -53,9 +53,12 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
   const isBuildCommand = scriptArgs.some((arg) => arg === 'build');
   const heartbeatIntervalMs = Number(process.env.RUN_NG_HEARTBEAT_INTERVAL_MS || 8000);
 
+  // Windows 下 .cmd/.bat 文件必须通过 shell 执行，否则 Node 24 会抛出 EINVAL
+  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(nodeBin);
   const child = spawn(nodeBin, scriptArgs, {
     stdio: 'inherit',
     env: childEnv,
+    ...(needsShell ? { shell: true } : {}),
   });
 
   let heartbeatTimer = null;

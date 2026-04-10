@@ -715,7 +715,7 @@ describe('ActionQueueStorageService', () => {
     it('freezeQueueWrites 应启动重试计时器', () => {
       vi.useFakeTimers();
 
-      service.freezeQueueWrites('test_pressure');
+      (service as any).freezeQueueWrites('test_pressure');
       expect(service.queueFrozen()).toBe(true);
 
       // 验证计时器字段已设置
@@ -728,8 +728,8 @@ describe('ActionQueueStorageService', () => {
     it('clearQueueFreeze 应停止重试计时器', () => {
       vi.useFakeTimers();
 
-      service.freezeQueueWrites('test_pressure');
-      service.clearQueueFreeze();
+      (service as any).freezeQueueWrites('test_pressure');
+      (service as any).clearQueueFreeze();
 
       const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
       expect(timerField).toBeNull();
@@ -741,7 +741,7 @@ describe('ActionQueueStorageService', () => {
     it('reset 应清理冻结重试计时器', () => {
       vi.useFakeTimers();
 
-      service.freezeQueueWrites('test_pressure');
+      (service as any).freezeQueueWrites('test_pressure');
       service.reset();
 
       const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;

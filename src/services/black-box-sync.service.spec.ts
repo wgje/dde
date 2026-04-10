@@ -118,7 +118,7 @@ describe('BlackBoxSyncService', () => {
 
     expect(doPullSpy).toHaveBeenCalledTimes(1);
 
-    resolvePull?.();
+    resolvePull!();
     await Promise.all([p1, p2]);
   });
 

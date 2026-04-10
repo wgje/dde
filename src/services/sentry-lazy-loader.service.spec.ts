@@ -3,12 +3,15 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
-type MutableService = SentryLazyLoaderService & {
+type MutableService = {
   pendingEvents: Array<Record<string, unknown>>;
   pendingUser: { id: string; email?: string } | null;
   sentryModule: { set: (value: unknown) => void };
   flushPendingEvents: () => void;
 };
+
+/** 绕过 private 访问限制的测试辅助 */
+const mut = (s: SentryLazyLoaderService): MutableService => s as unknown as MutableService;
 
 type ScopeMock = {
   setLevel: ReturnType<typeof vi.fn>;
@@ -67,7 +70,7 @@ describe('SentryLazyLoaderService', () => {
   it('captureMessage 在未初始化时应缓存为 message 事件', () => {
     service.captureMessage('性能告警: FCP 超出阈值', { level: 'warning' });
 
-    const pendingEvents = (service as MutableService).pendingEvents;
+    const pendingEvents = mut(service).pendingEvents;
     expect(pendingEvents).toHaveLength(1);
     expect(pendingEvents[0]).toMatchObject({
       type: 'message',
@@ -84,15 +87,15 @@ describe('SentryLazyLoaderService', () => {
 
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
-    (service as MutableService).flushPendingEvents();
+    mut(service).flushPendingEvents();
 
     expect(sentryMock.captureMessage).toHaveBeenCalledWith('性能告警: FCP 超出阈值');
     expect(sentryMock.captureException).not.toHaveBeenCalled();
     expect(scope.setExtra).toHaveBeenCalledWith('delayedCapture', true);
     expect(scope.setExtra).toHaveBeenCalledWith('captureDelay', expect.any(Number));
-    expect((service as MutableService).pendingEvents).toHaveLength(0);
+    expect(mut(service).pendingEvents).toHaveLength(0);
   });
 
   it('flushPendingEvents 应保持异常事件仍走 captureException', () => {
@@ -101,9 +104,9 @@ describe('SentryLazyLoaderService', () => {
 
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
-    (service as MutableService).flushPendingEvents();
+    mut(service).flushPendingEvents();
 
     expect(sentryMock.captureException).toHaveBeenCalledWith(error);
     expect(sentryMock.captureMessage).not.toHaveBeenCalled();
@@ -117,12 +120,12 @@ describe('SentryLazyLoaderService', () => {
 
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
     service.captureMessage('resume warning', { level: 'warning' });
 
     expect(sentryMock.captureMessage).not.toHaveBeenCalled();
-    expect((service as MutableService).pendingEvents).toHaveLength(1);
+    expect(mut(service).pendingEvents).toHaveLength(1);
 
     vi.useRealTimers();
     setVisibilityState('visible');
@@ -134,7 +137,7 @@ describe('SentryLazyLoaderService', () => {
 
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
     service.captureMessage('resume warning', { level: 'warning' });
 
@@ -143,7 +146,7 @@ describe('SentryLazyLoaderService', () => {
     await vi.advanceTimersByTimeAsync(1800);
 
     expect(sentryMock.captureMessage).toHaveBeenCalledWith('resume warning');
-    expect((service as MutableService).pendingEvents).toHaveLength(0);
+    expect(mut(service).pendingEvents).toHaveLength(0);
 
     vi.useRealTimers();
   });
@@ -171,7 +174,7 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
     disabledService.captureMessage('should be dropped');
     disabledService.captureException(new Error('should also be dropped'));
 
-    expect((disabledService as MutableService).pendingEvents).toHaveLength(0);
+    expect(mut(disabledService).pendingEvents).toHaveLength(0);
   });
 
   it('verbose 模式下缺少 DSN 仅输出一次诊断信息', () => {
@@ -210,7 +213,7 @@ describe('SentryLazyLoaderService setUser', () => {
   it('Sentry 已初始化时直接调用 setUser', () => {
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
     service.setUser({ id: 'user-123', email: 'test@example.com' });
 
@@ -220,7 +223,7 @@ describe('SentryLazyLoaderService setUser', () => {
   it('Sentry 未初始化时缓存用户信息', () => {
     service.setUser({ id: 'user-456', email: 'cached@example.com' });
 
-    expect((service as MutableService).pendingUser).toEqual({
+    expect(mut(service).pendingUser).toEqual({
       id: 'user-456',
       email: 'cached@example.com',
     });
@@ -228,16 +231,16 @@ describe('SentryLazyLoaderService setUser', () => {
 
   it('setUser(null) 清除缓存的用户信息', () => {
     service.setUser({ id: 'user-789' });
-    expect((service as MutableService).pendingUser).not.toBeNull();
+    expect(mut(service).pendingUser).not.toBeNull();
 
     service.setUser(null);
-    expect((service as MutableService).pendingUser).toBeNull();
+    expect(mut(service).pendingUser).toBeNull();
   });
 
   it('Sentry 已初始化时 setUser(null) 直接清除', () => {
     const scope = createScopeMock();
     const sentryMock = createSentryMock(scope);
-    (service as MutableService).sentryModule.set(sentryMock);
+    mut(service).sentryModule.set(sentryMock);
 
     service.setUser(null);
 

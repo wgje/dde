@@ -20,6 +20,7 @@ if (!g[globalKey]) {
   g[globalKey] = true;
   TestBed.initTestEnvironment(BrowserDynamicTestingModule, platformBrowserDynamicTesting(), {
     // 全局提供 SentryLazyLoaderService mock
+    // @ts-expect-error Angular runtime accepts providers but TestEnvironmentOptions lacks the property
     providers: [
       { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService }
     ]

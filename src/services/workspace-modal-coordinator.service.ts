@@ -389,7 +389,7 @@ export class WorkspaceModalCoordinatorService {
           resolveLocal: () => this.resolveConflictLocal(),
           resolveRemote: () => this.resolveConflictRemote(),
           resolveMerge: () => this.resolveConflictMerge(),
-          applyPlan: (plan: ConflictResolutionPlan) => this.applyConflictResolutionPlan(plan),
+          applyPlan: (event: unknown) => { void this.applyConflictResolutionPlan(event as ConflictResolutionPlan); },
           cancel: () => this.cancelConflictResolution()
         },
         closeOnBackdropClick: false,

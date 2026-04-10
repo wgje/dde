@@ -362,7 +362,7 @@ describe('DockFragmentRestService', () => {
     });
 
     it('should reset all rest reminder state', () => {
-      service.tickRestReminderAccumulator('high', 'high');
+      service.tickRestReminderAccumulator(true, 'high');
       service.cumulativeHighLoadMs.set(999999);
       service.restReminderHighShown.set(true);
       service.restReminderActive.set(true);

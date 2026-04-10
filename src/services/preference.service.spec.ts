@@ -92,13 +92,13 @@ describe('PreferenceService', () => {
     it('云端失败时入队的 payload 应携带 sourceUserId', async () => {
       mockSyncService.saveUserPreferences.mockResolvedValueOnce(false);
 
-      await service.saveUserPreferences('user-1', { theme: 'dark' });
+      await service.saveUserPreferences('user-1', { theme: 'default' });
 
       expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
         'user-1',
         expect.objectContaining({
           payload: {
-            preferences: { theme: 'dark' },
+            preferences: { theme: 'default' },
             userId: 'user-1',
             sourceUserId: 'user-1',
           },
@@ -109,13 +109,13 @@ describe('PreferenceService', () => {
     it('云端异常时入队的 payload 应携带 sourceUserId', async () => {
       mockSyncService.saveUserPreferences.mockRejectedValueOnce(new Error('network down'));
 
-      await service.saveUserPreferences('user-1', { layoutMode: 'compact' as never });
+      await service.saveUserPreferences('user-1', { layoutDirection: 'ltr' });
 
       expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith(
         'user-1',
         expect.objectContaining({
           payload: {
-            preferences: { layoutMode: 'compact' },
+            preferences: { layoutDirection: 'ltr' },
             userId: 'user-1',
             sourceUserId: 'user-1',
           },

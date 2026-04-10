@@ -16,7 +16,7 @@ describe('gojs mock', () => {
       'toolManager.hoverDelay': 200,
       'undoManager.isEnabled': false,
     });
-    const overview = new go.Overview(container, {
+    const overview = new go.Overview(container as unknown as HTMLDivElement, {
       observed: diagram,
       'animationManager.isEnabled': false,
     });
@@ -62,17 +62,17 @@ describe('gojs mock', () => {
   it('can fail fast on unknown api in strict mode', () => {
     const strictGlobal = globalThis as typeof globalThis & { __GOJS_MOCK_STRICT__?: boolean };
     const previousValue = strictGlobal.__GOJS_MOCK_STRICT__;
-    expect((go.Link as Record<string, unknown>).Bezirr).toBeUndefined();
+    expect((go.Link as unknown as Record<string, unknown>).Bezirr).toBeUndefined();
     strictGlobal.__GOJS_MOCK_STRICT__ = true;
 
     try {
       const diagram = new go.Diagram();
       expect(() => diagram.selection.each(() => undefined)).not.toThrow();
       expect(() => diagram.linkTemplateMap.add('strict-link', new go.Link())).not.toThrow();
-      expect(() => (diagram.toolManager as Record<string, unknown>).typoSelectingTool).toThrow(/unknown property access/);
-      expect(() => (diagram.toolManager.draggingTool as Record<string, unknown>).isActve).toThrow(/unknown property access/);
-      expect(() => (go.Link as Record<string, unknown>).Bezirr).toThrow(/unknown property access/);
-      expect(() => go.Orientation.Alogn).toThrow(/unknown property access/);
+      expect(() => (diagram.toolManager as unknown as Record<string, unknown>).typoSelectingTool).toThrow(/unknown property access/);
+      expect(() => (diagram.toolManager.draggingTool as unknown as Record<string, unknown>).isActve).toThrow(/unknown property access/);
+      expect(() => (go.Link as unknown as Record<string, unknown>).Bezirr).toThrow(/unknown property access/);
+      expect(() => (go.Orientation as unknown as Record<string, unknown>).Alogn).toThrow(/unknown property access/);
     } finally {
       strictGlobal.__GOJS_MOCK_STRICT__ = previousValue;
     }

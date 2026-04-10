@@ -130,13 +130,13 @@ describe('FlowDiagramService', () => {
     if (originalRequestAnimationFrame) {
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     } else {
-      delete globalThis.requestAnimationFrame;
+      delete (globalThis as unknown as { requestAnimationFrame?: typeof globalThis.requestAnimationFrame }).requestAnimationFrame;
     }
 
     if (originalCancelAnimationFrame) {
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
     } else {
-      delete globalThis.cancelAnimationFrame;
+      delete (globalThis as unknown as { cancelAnimationFrame?: typeof globalThis.cancelAnimationFrame }).cancelAnimationFrame;
     }
 
     vi.useRealTimers();

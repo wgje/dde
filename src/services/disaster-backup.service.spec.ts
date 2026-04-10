@@ -398,19 +398,20 @@ describe('DisasterBackupService', () => {
         connectionTombstones: [expect.objectContaining({ connectionId: 'conn-deleted' })],
       }),
     );
-    expect(payload.localState.offlineSnapshot?.localStorage).not.toContain('foreign-legacy-offline-project');
-    expect(payload.localState.offlineSnapshot?.indexedDb).not.toContain('foreign-legacy-snapshot-project');
-    expect(payload.localState.retryQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'retry-foreign' })]));
-    expect(payload.localState.actionQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'action-foreign' })]));
-    expect(payload.localState.deadLetters).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'foreign' })]));
-    expect(payload.localState.parkedTaskCache.entries).not.toEqual(
+    expect(payload.localState).toBeDefined();
+    expect(payload.localState!.offlineSnapshot?.localStorage).not.toContain('foreign-legacy-offline-project');
+    expect(payload.localState!.offlineSnapshot?.indexedDb).not.toContain('foreign-legacy-snapshot-project');
+    expect(payload.localState!.retryQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'retry-foreign' })]));
+    expect(payload.localState!.actionQueue).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'action-foreign' })]));
+    expect(payload.localState!.deadLetters).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'foreign' })]));
+    expect(payload.localState!.parkedTaskCache!.entries).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ taskId: 'task-parked-foreign' })]),
     );
-    expect(payload.localState.taskTombstones).toEqual({ 'project-1': { 'task-deleted': 123 } });
-    expect(payload.localState.connectionTombstones).not.toEqual(
+    expect(payload.localState!.taskTombstones).toEqual({ 'project-1': { 'task-deleted': 123 } });
+    expect(payload.localState!.connectionTombstones).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ connectionId: 'conn-deleted-foreign' })]),
     );
-    expect(payload.localState.connectionTombstones).not.toEqual(
+    expect(payload.localState!.connectionTombstones).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ connectionId: 'conn-without-project' })]),
     );
     expect(payload.tableCounts).toEqual(expect.objectContaining({
@@ -474,7 +475,7 @@ describe('DisasterBackupService', () => {
       autoBackupIntervalMs: 900000,
     });
 
-    expect(payload.localState.actionQueue).toEqual([
+    expect(payload.localState!.actionQueue).toEqual([
       expect.objectContaining({ id: 'action-backed-up', entityType: 'project' }),
     ]);
   });

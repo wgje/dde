@@ -46,6 +46,11 @@ import type { RetryQueueItem } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
+// vitest 4.x: vi.fn() 类型为 Mock<Procedure | Constructable>，不可直接调用；
+// 使用交集类型让 mock 对象既保留 Mock 方法又可直接调用
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type MockFn = ReturnType<typeof vi.fn> & ((...args: any[]) => any);
+
 // 使用 SentryLazyLoaderService mock（来自 test-setup.mocks.ts）
 // 注意：现在服务使用 this.sentryLazyLoader 而非直接的 Sentry
 // 测试应验证 mockSentryLazyLoaderService 的调用
@@ -78,15 +83,18 @@ describe('SimpleSyncService', () => {
     lastWarningPercent: number;
     isProcessingQueue: boolean;
     length: number;
-    add: ReturnType<typeof vi.fn>;
-    setOperationHandler: ReturnType<typeof vi.fn>;
-    startLoop: ReturnType<typeof vi.fn>;
-    stopLoop: ReturnType<typeof vi.fn>;
-    flushSync: ReturnType<typeof vi.fn>;
-    processQueue: ReturnType<typeof vi.fn>;
-    checkCircuitBreaker: ReturnType<typeof vi.fn>;
-    recordCircuitSuccess: ReturnType<typeof vi.fn>;
-    recordCircuitFailure: ReturnType<typeof vi.fn>;
+    add: MockFn;
+    setOperationHandler: MockFn;
+    startLoop: MockFn;
+    stopLoop: MockFn;
+    flushSync: MockFn;
+    processQueue: MockFn;
+    processQueueSlice: MockFn;
+    checkCircuitBreaker: MockFn;
+    recordCircuitSuccess: MockFn;
+    recordCircuitFailure: MockFn;
+    checkCapacityWarning: MockFn;
+    getTypeBreakdown: MockFn;
   };
   
   // Sentry Mock 变量（从 mockSentryLazyLoaderService 提取）
@@ -495,20 +503,22 @@ describe('SimpleSyncService', () => {
         });
         return true;
       }),
-      setOperationHandler: vi.fn(),
-      startLoop: vi.fn(),
-      stopLoop: vi.fn(),
-      flushSync: vi.fn(),
-      processQueue: vi.fn(),
+      setOperationHandler: vi.fn() as MockFn,
+      startLoop: vi.fn() as MockFn,
+      stopLoop: vi.fn() as MockFn,
+      flushSync: vi.fn() as MockFn,
+      processQueue: vi.fn() as MockFn,
       processQueueSlice: vi.fn().mockResolvedValue({
         processed: 0,
         remaining: 0,
         durationMs: 0,
         completed: true
-      }),
-      checkCircuitBreaker: vi.fn().mockReturnValue(true),
-      recordCircuitSuccess: vi.fn(),
-      recordCircuitFailure: vi.fn()
+      }) as MockFn,
+      checkCircuitBreaker: vi.fn().mockReturnValue(true) as MockFn,
+      recordCircuitSuccess: vi.fn() as MockFn,
+      recordCircuitFailure: vi.fn() as MockFn,
+      checkCapacityWarning: vi.fn() as MockFn,
+      getTypeBreakdown: vi.fn().mockReturnValue({ task: 0, project: 0, connection: 0 }) as MockFn,
     };
     
     const injector = Injector.create({
@@ -712,9 +722,6 @@ describe('SimpleSyncService', () => {
     });
     
     it('pushTask 失败时应该加入重试队列', async () => {
-      // 避免 retryWithBackoff 的真实指数退避等待（Zone.js 下 fake timers 不稳定）
-      service['delay'] = vi.fn().mockResolvedValue(undefined);
-
       const task = createMockTask();
       // 保留 auth mock，只修改 from 的返回值
       mockClient.from = vi.fn().mockImplementation((table: string) => {
@@ -1165,7 +1172,7 @@ describe('SimpleSyncService', () => {
 
       // 避免 retryWithBackoff 指数退避导致测试超时
       // 注意：retryWithBackoff 已委托给 syncOpHelper，通过 service 内部引用访问
-      const syncOpHelper = service['syncOpHelper'];
+      const syncOpHelper = service['syncOpHelper'] as unknown as { retryWithBackoff: MockFn };
       syncOpHelper.retryWithBackoff.mockImplementation(async (fn: () => Promise<void>) => {
         await fn();
       });
@@ -1202,20 +1209,20 @@ describe('SimpleSyncService', () => {
       });
       
       // 手动添加到队列（模拟之前的入队）
-      service['retryQueue'] = [];
+      mockRetryQueueService.queue = [];
       service.addToRetryQueue('task', 'upsert', task, 'project-1');
-      const queueLengthBefore = service['retryQueue'].length;
+      const queueLengthBefore = mockRetryQueueService.queue.length;
       expect(queueLengthBefore).toBe(1);
       
       // 处理队列（应该失败但不双重入队）
-      await service['processRetryQueue']();
+      await mockRetryQueueService.processQueue();
       
       // 【关键断言】队列长度应该仍为 1（同一任务不应出现 2 次）
-      const queueLengthAfter = service['retryQueue'].length;
+      const queueLengthAfter = mockRetryQueueService.queue.length;
       expect(queueLengthAfter).toBe(1);
       
       // 验证是同一个任务（通过去重机制或 fromRetryQueue 参数）
-      const queuedItem = service['retryQueue'][0];
+      const queuedItem = mockRetryQueueService.queue[0];
       expect(queuedItem.data.id).toBe('task-double-queue');
       expect(queuedItem.retryCount).toBe(1); // 重试次数应该增加
     });
@@ -1538,9 +1545,6 @@ describe('SimpleSyncService', () => {
     });
     
     it('pushTask 推送失败时加入重试队列（tombstone 检查已移至调用方）', async () => {
-      // 避免 retryWithBackoff 的真实指数退避等待（Zone.js 下 fake timers 不稳定）
-      service['delay'] = vi.fn().mockResolvedValue(undefined);
-
       // 验证推送失败会加入重试队列
       const task = createMockTask({ id: 'failed-task' });
       
@@ -1737,9 +1741,6 @@ describe('SimpleSyncService', () => {
     });
     
     it('pushTask 失败时应该调用 Sentry.captureException 并包含正确的 tags', async () => {
-      // Zone.js 环境下 Vitest fake timers 对 setTimeout 拦截不稳定，
-      // 这里直接 stub 服务内部 delay()，避免指数退避造成真实 1+2+4 秒等待。
-      service['delay'] = vi.fn().mockResolvedValue(undefined);
       
       const task = createMockTask({ id: 'fail-task' });
       const networkError = new Error('Network error');
@@ -1779,8 +1780,6 @@ describe('SimpleSyncService', () => {
     });
     
     it('pushTask 失败时应该将任务加入 RetryQueue', async () => {
-      // 同上：stub delay() 避免真实等待
-      service['delay'] = vi.fn().mockResolvedValue(undefined);
       
       const task = createMockTask({ id: 'retry-task' });
       const networkError = new Error('Network error');
@@ -1973,7 +1972,7 @@ describe('SimpleSyncService', () => {
       service.addToRetryQueue('connection', 'upsert', conn, 'project-1');
 
       // Trigger processing
-      await service['processRetryQueue']();
+      await mockRetryQueueService.processQueue();
 
       // Verify task-1 failed, task-2 succeeded
       // Verify connection was NOT attempted (because source task-1 failed)
@@ -1982,10 +1981,10 @@ describe('SimpleSyncService', () => {
       expect(connectionCalls.length).toBe(0);
 
       // Verify connection remains in queue
-      expect(service['retryQueue'].length).toBeGreaterThan(0);
-      const queuedConn = service['retryQueue'].find((item: RetryQueueItem) => item.type === 'connection');
+      expect(mockRetryQueueService.queue.length).toBeGreaterThan(0);
+      const queuedConn = mockRetryQueueService.queue.find((item: RetryQueueItem) => item.type === 'connection');
       expect(queuedConn).toBeDefined();
-      expect(queuedConn.data.id).toBe('conn-1');
+      expect(queuedConn!.data.id).toBe('conn-1');
     });
 
     it('should sync connection if both tasks succeed', async () => {
@@ -2055,12 +2054,12 @@ describe('SimpleSyncService', () => {
       service.addToRetryQueue('task', 'upsert', task2, 'project-1');
       service.addToRetryQueue('connection', 'upsert', conn, 'project-1');
 
-      await service['processRetryQueue']();
+      await mockRetryQueueService.processQueue();
 
       const calls = mockClient.from.mock.calls;
       const connectionCalls = calls.filter((call: unknown[]) => call[0] === 'connections');
       expect(connectionCalls.length).toBe(1);
-      expect(service['retryQueue'].length).toBe(0);
+      expect(mockRetryQueueService.queue.length).toBe(0);
     });
   });
   
@@ -2575,7 +2574,7 @@ describe('SimpleSyncService', () => {
       }
 
       // 手动调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
 
       // 不应该显示错误 Toast
       expect(mockToast.error).not.toHaveBeenCalled();
@@ -2597,7 +2596,7 @@ describe('SimpleSyncService', () => {
       }));
 
       // 调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
 
       // 应该显示警告
       expect(mockToast.error).toHaveBeenCalledWith(
@@ -2628,21 +2627,21 @@ describe('SimpleSyncService', () => {
       }));
 
       // 第一次调用 - 应该显示
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(1);
 
       // 立即再次调用 - 应该被节流跳过
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(1);
 
       // 2 分钟后调用 - 仍在冷却期内（冷却时间是 5 分钟）
       vi.advanceTimersByTime(120_000);
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(1);
 
       // 5 分钟后调用 - 冷却结束，应该再次显示
       vi.advanceTimersByTime(180_000 + 1000); // 再过 3 分钟 + 1 秒 = 总共 5 分 1 秒
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       expect(mockToast.error).toHaveBeenCalledTimes(2);
 
       vi.useRealTimers();
@@ -2670,7 +2669,7 @@ describe('SimpleSyncService', () => {
       }));
 
       // 调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       
       // 情况恶化时应该记录 Sentry（即使在冷却期内）
       expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
@@ -2706,7 +2705,7 @@ describe('SimpleSyncService', () => {
       }));
 
       // 调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
 
       // 验证状态被重置
       expect(mockRetryQueueService.lastWarningPercent).toBe(0);
@@ -2740,7 +2739,7 @@ describe('SimpleSyncService', () => {
       }));
 
       // 调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       
       // 验证记录了队列容量警告日志（包含诊断信息）
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
@@ -2787,7 +2786,7 @@ describe('SimpleSyncService', () => {
       }));
 
       // 调用容量检查
-      service['checkQueueCapacityWarning']();
+      mockRetryQueueService.checkCapacityWarning();
       
       // 【修复 2026-02-02】验证记录了 isSyncing 状态不一致警告
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
@@ -2814,7 +2813,7 @@ describe('SimpleSyncService', () => {
         { id: '4', type: 'connection' as const, operation: 'upsert' as const, data: { id: 'c1' }, projectId: 'p1', retryCount: 0, createdAt: Date.now() },
       ] as unknown as RetryQueueItem[];
 
-      const breakdown = service['getQueueTypeBreakdown']();
+      const breakdown = mockRetryQueueService.getTypeBreakdown();
       
       expect(breakdown).toEqual({
         task: 2,
@@ -3162,7 +3161,7 @@ describe('SimpleSyncService', () => {
       mockSupabase.probeReachability.mockImplementation(() => new Promise<boolean>((resolve) => {
         resolveProbe = resolve;
       }));
-      const runtimeService = service as SimpleSyncService & {
+      const runtimeService = service as unknown as {
         startRuntime: () => void;
         stopRuntime: () => void;
         restoreRemoteConnectivity: (reason: string) => Promise<void>;
@@ -3171,7 +3170,7 @@ describe('SimpleSyncService', () => {
 
       const restorePromise = runtimeService.restoreRemoteConnectivity('online-event');
       runtimeService.stopRuntime();
-      resolveProbe?.(true);
+      resolveProbe!(true);
       await restorePromise;
 
       expect(mockRealtimePolling.resumeTransport).not.toHaveBeenCalled();

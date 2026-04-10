@@ -81,6 +81,7 @@ const destroyCallbacks: Array<() => void> = [];
 const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
   onDestroy: (callback: () => void) => {
     destroyCallbacks.push(callback);
+    return () => {};
   },
 };
 
@@ -173,7 +174,7 @@ describe('RealtimePollingService', () => {
     await Promise.resolve();
 
     await service.unsubscribeFromProject();
-    resolveRemoveChannel?.();
+    resolveRemoveChannel!();
     await Promise.resolve();
     await Promise.resolve();
 

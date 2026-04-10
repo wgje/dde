@@ -69,7 +69,7 @@ describe('DockStatusMachinePipComponent', () => {
       expectedMinutes: 25,
       waitMinutes: null,
       isMain: true,
-    });
+    } as DockEntry);
     statusEntries.set([
       {
         taskId: 'A',

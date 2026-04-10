@@ -168,7 +168,7 @@ describe('Markdown Security', () => {
       expect(container.innerHTML).not.toContain('href="file:///C:/Windows/System32/calc.exe"');
       expect(link?.getAttribute('href')).toBe('#local-path');
       expect(link?.getAttribute('data-link-kind')).toBe('local');
-      expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\Windows\\System32\\calc.exe');
+      expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\Windows\\System32\\calc.exe');
     });
 
     it('should block ambiguous relative URLs that contain backslashes', () => {

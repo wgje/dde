@@ -73,7 +73,7 @@ describe('WorkspaceModalCoordinatorService', () => {
     mockProjectOps.resolveConflict.mockResolvedValue(true);
     mockProjectOps.resolveConflictWithPlan.mockResolvedValue(true);
     mockModalCloseRef.result = new Promise(resolve => {
-      resolveModalResult = resolve;
+      resolveModalResult = resolve as (value?: unknown) => void;
     });
 
     injector = Injector.create({
@@ -154,13 +154,13 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(mockModalLoader.loadLoginModal).toHaveBeenCalledOnce();
     expect(mockDynamicModal.open).toHaveBeenCalledOnce();
 
-    const openCall = mockDynamicModal.open.mock.calls[0];
-    const config = openCall[1];
-    expect(config.inputs).toHaveProperty('authError');
-    expect(config.inputs).toHaveProperty('isLoading');
-    expect(config.inputs).toHaveProperty('resetPasswordSent');
-    expect(config.closeOnBackdropClick).toBe(false);
-    expect(config.closeOnEscape).toBe(false);
+    const openCall = mockDynamicModal.open.mock.calls[0] as unknown[];
+    const config = openCall[1] as Record<string, unknown>;
+    expect(config['inputs']).toHaveProperty('authError');
+    expect(config['inputs']).toHaveProperty('isLoading');
+    expect(config['inputs']).toHaveProperty('resetPasswordSent');
+    expect(config['closeOnBackdropClick']).toBe(false);
+    expect(config['closeOnEscape']).toBe(false);
   });
 
   // ── closeLoginModal ────────────────────────────────────────

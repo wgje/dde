@@ -536,7 +536,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       type: 'update',
       entityType: 'project',
       entityId: 'proj-1',
-      payload: { name: 'Test', description: '' },
+      payload: { name: 'Test', description: '' } as never,
     });
 
     const action = actionQueue.pendingActions()[0];
@@ -564,7 +564,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       type: 'update',
       entityType: 'preference',
       entityId: 'pref-1',
-      payload: { key: 'theme', value: 'dark' },
+      payload: { key: 'theme', value: 'dark' } as never,
     });
 
     const action = actionQueue.pendingActions()[0];
@@ -657,7 +657,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       type: 'update',
       entityType: 'project',
       entityId: 'proj-q',
-      payload: { name: 'Test', description: '' },
+      payload: { name: 'Test', description: '' } as never,
     });
 
     // 项目下的任务操作

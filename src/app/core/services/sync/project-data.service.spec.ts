@@ -755,6 +755,7 @@ describe('ProjectDataService', () => {
         bytes: number;
         migratedLegacy: boolean;
         projects: unknown[];
+        ownerUserId?: string | null;
       }>;
     };
 
@@ -850,6 +851,7 @@ describe('ProjectDataService', () => {
         bytes: number;
         migratedLegacy: boolean;
         projects: unknown[];
+        ownerUserId?: string | null;
       }>;
     };
 

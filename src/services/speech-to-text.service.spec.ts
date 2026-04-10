@@ -170,7 +170,7 @@ describe('SpeechToTextService', () => {
       setMediaDevices({
         enumerateDevices: mockEnumerateDevices,
         getUserMedia: vi.fn()
-      } as MediaDevices);
+      } as unknown as MediaDevices);
 
       const result = await service.checkMicrophoneAvailability();
       expect(result).toBe(false);
@@ -185,7 +185,7 @@ describe('SpeechToTextService', () => {
       setMediaDevices({
         enumerateDevices: mockEnumerateDevices,
         getUserMedia: vi.fn()
-      } as MediaDevices);
+      } as unknown as MediaDevices);
 
       const result = await service.checkMicrophoneAvailability();
       expect(result).toBe(true);

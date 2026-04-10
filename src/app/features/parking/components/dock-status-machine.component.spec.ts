@@ -187,7 +187,7 @@ describe('DockStatusMachineComponent', () => {
   });
 
   it('should switch to full mode for blank period when not forced', () => {
-    pendingDecision.set({ reason: '窗口过短' });
+    pendingDecision.set({ reason: '窗口过短', rootTaskId: 'root', rootRemainingMinutes: 0, candidateGroups: [], createdAt: new Date().toISOString() });
     pendingDecisionEntries.set([]);
     statusEntries.set([]);
     fixture.componentRef.setInput('forcedMode', null);

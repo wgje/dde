@@ -75,7 +75,7 @@ describe('ThemeService', () => {
   it('setColorMode 应更新 data-color-mode 与本地覆盖缓存', () => {
     const getComputedStyleSpy = vi.spyOn(window, 'getComputedStyle').mockReturnValue({
       getPropertyValue: () => '',
-    } as CSSStyleDeclaration);
+    } as unknown as CSSStyleDeclaration);
     const service = createService();
     const meta = TestBed.inject(Meta);
 

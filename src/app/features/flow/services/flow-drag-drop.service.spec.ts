@@ -17,7 +17,7 @@ describe('FlowDragDropService', () => {
   const tasksSignal = signal<Task[]>([]);
   const mockProjectState = {
     tasks: tasksSignal,
-    getTask: vi.fn((_: string) => null),
+    getTask: vi.fn((_: string): Task | null => null),
     unassignedTasks: vi.fn(() => [] as Task[]),
   };
 
@@ -28,15 +28,13 @@ describe('FlowDragDropService', () => {
     status: 'active',
     stage: null,
     order: 0,
-    projectId: 'project-1',
+    rank: 0,
+    x: 0,
+    y: 0,
     parentId: null,
-    level: 0,
-    path: 'task-1',
-    sortKey: 'task-1',
-    createdAt: new Date().toISOString(),
+    displayId: 'T1',
+    createdDate: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    userId: 'local-user',
-    isExpanded: false,
     attachments: [],
     tags: [],
     parkingMeta: null,
@@ -47,8 +45,8 @@ describe('FlowDragDropService', () => {
     isHintOnlyStartupReadOnly: vi.fn(() => false),
     updateTaskPosition: vi.fn(),
     detachTask: vi.fn(),
-    insertTaskBetween: vi.fn(() => ({ ok: true })),
-    moveTaskToStage: vi.fn(() => ({ ok: true })),
+    insertTaskBetween: vi.fn((): { ok: boolean; error?: { code: string; message: string } } => ({ ok: true })),
+    moveTaskToStage: vi.fn((): { ok: boolean; error?: { code: string; message: string } } => ({ ok: true })),
   };
 
   const mockLayoutService = {

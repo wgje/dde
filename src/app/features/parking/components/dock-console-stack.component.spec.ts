@@ -104,7 +104,7 @@ describe('DockConsoleStackComponent', () => {
         .filter(entry => entry.taskId !== taskId)
         .map((entry, index) => ({
           ...entry,
-          status: index === 0 ? 'focusing' : 'pending_start',
+          status: (index === 0 ? 'focusing' : 'pending_start') as EntryStatus,
         }));
       entries.set(next);
     }),
@@ -115,7 +115,7 @@ describe('DockConsoleStackComponent', () => {
         .filter(entry => entry.taskId !== taskId)
         .map((entry, index) => ({
           ...entry,
-          status: index === 0 ? 'focusing' : 'pending_start',
+          status: (index === 0 ? 'focusing' : 'pending_start') as EntryStatus,
         }));
       if (suspended) {
         const visible = remaining.slice(0, 3);
@@ -124,7 +124,7 @@ describe('DockConsoleStackComponent', () => {
           ...visible,
           {
             ...suspended,
-            status: 'suspended_waiting',
+            status: 'suspended_waiting' as EntryStatus,
             waitMinutes: minutes,
           },
           ...overflow,
@@ -139,12 +139,12 @@ describe('DockConsoleStackComponent', () => {
         .filter(entry => entry.taskId !== taskId)
         .map(entry => ({
           ...entry,
-          status: entry.status === 'focusing' ? 'stalled' : 'pending_start',
+          status: (entry.status === 'focusing' ? 'stalled' : 'pending_start') as EntryStatus,
         }));
       entries.set([
         {
           ...target,
-          status: 'focusing',
+          status: 'focusing' as EntryStatus,
           waitMinutes: null,
         },
         ...others,
@@ -191,7 +191,7 @@ describe('DockConsoleStackComponent', () => {
       '3 小时',
       '1 天',
     ]);
-    expect(component.waitPresets.some(preset => preset.minutes < 0)).toBe(false);
+    expect(component.waitPresets.some(preset => preset.minutes! < 0)).toBe(false);
   });
 
   it('setLoad should only toggle when target load differs', () => {

@@ -50,7 +50,7 @@ describe('FlowViewCleanupService', () => {
   let FlowDragDropServiceClass: typeof import('./flow-drag-drop.service').FlowDragDropService;
   let FlowTaskOperationsServiceClass: typeof import('./flow-task-operations.service').FlowTaskOperationsService;
   let FlowCommandServiceClass: typeof import('./flow-command.service').FlowCommandService;
-  let flowTemplateEventHandlers: { onDeleteKeyPressed: undefined | (() => void) };
+  let flowTemplateEventHandlers: import('./flow-template-events').FlowTemplateEventHandlers;
 
   const diagram = {
     cancelIdleOverviewInit: vi.fn(),
@@ -118,7 +118,7 @@ describe('FlowViewCleanupService', () => {
       flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
     }
     if (originalCancelIdleCallback === undefined) {
-      delete globalThis.cancelIdleCallback;
+      delete (globalThis as unknown as { cancelIdleCallback?: typeof globalThis.cancelIdleCallback }).cancelIdleCallback;
     } else {
       Object.defineProperty(globalThis, 'cancelIdleCallback', {
         configurable: true,

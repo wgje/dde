@@ -443,7 +443,7 @@ describe('ActionQueueService', () => {
     });
 
     it('切账号后旧处理循环失败结果应进入旧 owner 死信而不是污染新 owner', async () => {
-      let rejectProcessing: ((reason?: unknown) => void) | null = null;
+      let rejectProcessing = null as ((reason?: unknown) => void) | null;
       const processor = vi.fn().mockImplementation(
         () => new Promise<boolean>((_resolve, reject) => {
           rejectProcessing = reject;
@@ -479,7 +479,7 @@ describe('ActionQueueService', () => {
     });
 
     it('切账号后旧处理循环成功结果应从旧 owner 的持久化队列中移除', async () => {
-      let resolveProcessing: ((value: boolean) => void) | null = null;
+      let resolveProcessing = null as ((value: boolean) => void) | null;
       const processor = vi.fn().mockImplementation(
         () => new Promise<boolean>(resolve => {
           resolveProcessing = resolve;
@@ -508,7 +508,7 @@ describe('ActionQueueService', () => {
     });
 
     it('切账号后旧处理循环返回 false 时也应推进旧 owner 的失败收口', async () => {
-      let resolveProcessing: ((value: boolean) => void) | null = null;
+      let resolveProcessing = null as ((value: boolean) => void) | null;
       const processor = vi.fn().mockImplementation(
         () => new Promise<boolean>(resolve => {
           resolveProcessing = resolve;
@@ -538,7 +538,7 @@ describe('ActionQueueService', () => {
     });
 
     it('full wipe 开始后旧处理循环成功结果不应把旧 owner 队列写回本地', async () => {
-      let resolveProcessing: ((value: boolean) => void) | null = null;
+      let resolveProcessing = null as ((value: boolean) => void) | null;
       const processor = vi.fn().mockImplementation(
         () => new Promise<boolean>(resolve => {
           resolveProcessing = resolve;
@@ -570,7 +570,7 @@ describe('ActionQueueService', () => {
     });
 
     it('full wipe 开始后旧处理循环失败结果不应把旧 owner 死信写回本地', async () => {
-      let rejectProcessing: ((reason?: unknown) => void) | null = null;
+      let rejectProcessing = null as ((reason?: unknown) => void) | null;
       const processor = vi.fn().mockImplementation(
         () => new Promise<boolean>((_resolve, reject) => {
           rejectProcessing = reject;
@@ -607,8 +607,8 @@ describe('ActionQueueService', () => {
     });
 
     it('切账号后旧循环 finally 不应覆盖新 owner 的 processing 状态', async () => {
-      let resolveFirst: ((value: boolean) => void) | null = null;
-      let resolveSecond: ((value: boolean) => void) | null = null;
+      let resolveFirst = null as ((value: boolean) => void) | null;
+      let resolveSecond = null as ((value: boolean) => void) | null;
       const onStart = vi.fn();
       const onEnd = vi.fn();
       const processor = vi.fn()

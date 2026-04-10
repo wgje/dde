@@ -134,7 +134,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     expect(mockSimpleSync.recoverAfterResume).toHaveBeenCalledTimes(1);
 
-    resolveRecovery?.();
+    resolveRecovery!();
     await Promise.all([p1, p2]);
   });
 

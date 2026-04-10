@@ -10,7 +10,7 @@ describe('AppProjectCoordinatorService rename guard', () => {
       renamingProjectId,
       renameProjectName,
       originalProjectName: '',
-    } as unknown as AppProjectCoordinatorService & { originalProjectName: string };
+    } as unknown as AppProjectCoordinatorService;
 
     AppProjectCoordinatorService.prototype.startRenameProject.call(
       context,
@@ -22,7 +22,8 @@ describe('AppProjectCoordinatorService rename guard', () => {
     expect(stopPropagation).toHaveBeenCalledOnce();
     expect(renamingProjectId.set).toHaveBeenCalledWith('proj-1');
     expect(renameProjectName.set).toHaveBeenCalledWith('');
-    expect(context.originalProjectName).toBe('');
+    // originalProjectName 是私有属性，测试通过 context 对象直接验证
+    expect((context as unknown as Record<string, unknown>)['originalProjectName']).toBe('');
   });
 
   it('executeRenameProject should not throw when renameProjectName is null at runtime', () => {

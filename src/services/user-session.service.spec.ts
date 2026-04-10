@@ -135,6 +135,7 @@ describe('UserSessionService', () => {
   let mockToastService: Record<string, unknown>;
   let mockSupabaseClientService: {
     isConfigured: boolean;
+    isOfflineMode: ReturnType<typeof vi.fn>;
     client: ReturnType<typeof vi.fn>;
     clientAsync: ReturnType<typeof vi.fn>;
     getClient: ReturnType<typeof vi.fn>;
@@ -689,7 +690,7 @@ describe('UserSessionService', () => {
     it('IndexedDB 未真正删除时应中止 full wipe', async () => {
       localStorage.setItem('sb-test-auth-token', JSON.stringify({ access_token: 'token' }));
       (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__ = { projects: ['stale'] };
-      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = { userId: 'stale-user' };
+      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' as const };
       vi.spyOn(service as unknown as { clearIndexedDB: (dbName: string) => Promise<boolean> }, 'clearIndexedDB')
         .mockResolvedValueOnce(false);
 
@@ -929,7 +930,7 @@ describe('UserSessionService', () => {
       const staleLoad = service.setCurrentUser('stale-user', { forceLoad: true });
       await service.setCurrentUser(null, { skipPersistentReload: true });
 
-      resolveSnapshot?.({
+      resolveSnapshot!({
         source: 'idb',
         projectCount: 1,
         bytes: 256,
@@ -1422,7 +1423,7 @@ describe('UserSessionService', () => {
         tasks: [
           createTask({
             id: 'task-1',
-            attachments: [createAttachment('att-1')],
+            attachments: [createAttachment('00000000-0000-0000-0000-000000000001')],
           }),
         ],
       });
@@ -1446,7 +1447,7 @@ describe('UserSessionService', () => {
         tasks: [
           createTask({
             id: 'task-1',
-            attachments: [createAttachment('att-1')],
+            attachments: [createAttachment('00000000-0000-0000-0000-000000000001')],
           }),
         ],
       });
@@ -1616,7 +1617,7 @@ describe('UserSessionService', () => {
         syncSource: 'local-only',
         pendingSync: true,
       });
-      (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([localOnlyProject]);
+      (mockProjectState['setProjects'] as (...args: unknown[]) => void)([localOnlyProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-legacy-local-only');
       (
         (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
@@ -1637,7 +1638,7 @@ describe('UserSessionService', () => {
         },
         'syncProjectListMetadata'
       ).mockImplementation(async () => {
-        (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([
+        (mockProjectState['setProjects'] as (...args: unknown[]) => void)([
           {
             ...localOnlyProject,
             syncSource: 'synced',
@@ -1782,7 +1783,7 @@ describe('UserSessionService', () => {
         syncSource: 'synced',
         pendingSync: false,
       });
-      (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([deniedProject, localOnlyProject]);
+      (mockProjectState['setProjects'] as (...args: unknown[]) => void)([deniedProject, localOnlyProject]);
       (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-denied');
       (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockImplementation(
         (projectId: string) => projectId === 'proj-denied'
@@ -1807,7 +1808,7 @@ describe('UserSessionService', () => {
         },
         'syncProjectListMetadata'
       ).mockImplementation(async () => {
-        (mockProjectState['setProjects'] as ReturnType<typeof vi.fn>)([deniedProject, recoveredProject]);
+        (mockProjectState['setProjects'] as (...args: unknown[]) => void)([deniedProject, recoveredProject]);
         return new Set(['proj-recovered']);
       });
 

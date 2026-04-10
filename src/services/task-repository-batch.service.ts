@@ -53,7 +53,7 @@ export class TaskRepositoryBatchService {
       while (!success && retryCount <= MAX_RETRIES) {
         const { error } = await this.supabase.client()
           .from('tasks')
-          .upsert(batch, { onConflict: 'id' });
+          .upsert(batch as never, { onConflict: 'id' });
 
         if (error) {
           retryCount++;
@@ -343,7 +343,7 @@ export class TaskRepositoryBatchService {
           // 使用 upsert 以处理重复创建的边缘情况
           const { error } = await this.supabase.client()
             .from('tasks')
-            .upsert(batch, { onConflict: 'id' });
+            .upsert(batch as never, { onConflict: 'id' });
           
           if (error) {
             if (retry < MAX_RETRIES) {
@@ -384,7 +384,7 @@ export class TaskRepositoryBatchService {
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           const { error } = await this.supabase.client()
             .from('tasks')
-            .upsert(batch, { onConflict: 'id' });
+            .upsert(batch as never, { onConflict: 'id' });
           
           if (error) {
             if (retry < MAX_RETRIES) {

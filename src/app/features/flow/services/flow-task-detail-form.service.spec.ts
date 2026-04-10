@@ -117,7 +117,7 @@ describe('FlowTaskDetailFormService', () => {
 
     it('无活动项目时应直接返回，不调用锁定', () => {
       // 模拟无活动项目
-      mockProjectState.activeProjectId.mockReturnValueOnce(null);
+      mockProjectState.activeProjectId.mockReturnValueOnce(null as unknown as string);
 
       service.lockTaskFields('task-1', ['title']);
 
@@ -143,7 +143,7 @@ describe('FlowTaskDetailFormService', () => {
     });
 
     it('无活动项目时应直接返回，不调用解锁', () => {
-      mockProjectState.activeProjectId.mockReturnValueOnce(null);
+      mockProjectState.activeProjectId.mockReturnValueOnce(null as unknown as string);
 
       service.unlockTaskFields('task-1', ['title']);
 

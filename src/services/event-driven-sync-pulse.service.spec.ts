@@ -38,6 +38,7 @@ describe('EventDrivenSyncPulseService', () => {
   const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
     onDestroy: (cb: () => void) => {
       destroyCallbacks.push(cb);
+      return () => {};
     },
   };
 
@@ -158,7 +159,7 @@ describe('EventDrivenSyncPulseService', () => {
     const p2 = service.triggerNow('manual');
     expect(recoverAfterResume).toHaveBeenCalledTimes(1);
 
-    resolvePull?.();
+    resolvePull!();
     await Promise.all([p1, p2]);
   });
 

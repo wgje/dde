@@ -54,7 +54,7 @@ function setup(options?: {
     onUserLogout: vi.fn(),
   };
   const defaultMigrationService = {
-    checkMigrationNeeded: vi.fn(() => false),
+    checkMigrationNeeded: vi.fn((..._args: unknown[]): boolean => false),
   };
   const projectDataMock = {
     loadProjectListMetadataFromCloud: vi.fn().mockResolvedValue([]),
@@ -79,6 +79,8 @@ function setup(options?: {
     signUp: vi.fn(),
     checkSession: vi.fn(),
     resetPassword: vi.fn(),
+    runtimeState: vi.fn(() => 'idle' as const),
+    sessionInitialized: vi.fn(() => false),
   };
 
   const userSessionMock = {
@@ -92,7 +94,7 @@ function setup(options?: {
 
   const modalMock = {
     isOpen: vi.fn(() => false),
-    getData: vi.fn(() => undefined),
+    getData: vi.fn((): unknown => undefined),
     closeByType: vi.fn(),
     show: vi.fn(),
   };
@@ -472,7 +474,7 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
 
     let resolveRemoteProjects: ((value: Array<{ id: string; syncSource: 'synced' }>) => void) | null = null;
     projectDataMock.loadProjectListMetadataFromCloud.mockImplementation(() => {
-      return new Promise(resolve => {
+      return new Promise<Array<{ id: string; syncSource: 'synced' }>>(resolve => {
         resolveRemoteProjects = resolve;
       });
     });
@@ -483,6 +485,7 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
     await service.handleLogin();
     await flushAsyncTimers();
     userId.set('user-2');
+    // @ts-expect-error TS2349 - closure reassignment defeats CFA
     resolveRemoteProjects?.([{ id: 'proj-remote', syncSource: 'synced' }]);
     await Promise.resolve();
     await Promise.resolve();
@@ -493,12 +496,12 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
   it('同一用户重新登录后，上一轮迁移探测结果也必须失效', async () => {
     const { service, authMock, projectDataMock, defaultMigrationService, modalMock, userId } = setup();
     authMock.signIn.mockResolvedValue({ ok: true, value: { userId: 'user-1' } });
-    defaultMigrationService.checkMigrationNeeded.mockImplementation(remoteProjects => remoteProjects.length > 0);
+    defaultMigrationService.checkMigrationNeeded.mockImplementation((remoteProjects: unknown) => (remoteProjects as unknown[]).length > 0);
 
     let resolveFirstProbe: ((value: Array<{ id: string; syncSource: 'synced' }>) => void) | null = null;
     projectDataMock.loadProjectListMetadataFromCloud
       .mockImplementationOnce(() => {
-        return new Promise(resolve => {
+        return new Promise<Array<{ id: string; syncSource: 'synced' }>>(resolve => {
           resolveFirstProbe = resolve;
         });
       })
@@ -514,6 +517,7 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
     await service.handleLogin();
     await flushAsyncTimers();
 
+    // @ts-expect-error TS2349 - closure reassignment defeats CFA
     resolveFirstProbe?.([{ id: 'proj-old', syncSource: 'synced' }]);
     await Promise.resolve();
     await Promise.resolve();
@@ -678,8 +682,6 @@ describe('bootstrapSession forceLoad', () => {
   it('冷启动 bootstrapSession 应传 forceLoad: true 给 setCurrentUser', async () => {
     const { service, authMock, userSessionMock, userId } = setup();
     // 补充 bootstrapSession 内部使用的 signal 属性
-    authMock.runtimeState = vi.fn(() => 'idle');
-    authMock.sessionInitialized = vi.fn(() => false);
     authMock.checkSession.mockImplementation(async () => {
       userId.set('cold-start-user');
       return { userId: 'cold-start-user', email: 'test@x.com' };
@@ -694,14 +696,12 @@ describe('bootstrapSession forceLoad', () => {
 
   it('bootstrap 超时转后台后若用户已登出，旧后台失败不应再次触发普通匿名重载', async () => {
     const { service, authMock, userSessionMock, userId } = setup();
-    authMock.runtimeState = vi.fn(() => 'idle');
-    authMock.sessionInitialized = vi.fn(() => false);
     authMock.checkSession.mockResolvedValue({ userId: 'cold-start-user', email: 'test@x.com' });
 
     let rejectBackgroundLoad: ((reason?: unknown) => void) | null = null;
     const defaultSetCurrentUser = userSessionMock.setCurrentUser.getMockImplementation();
     userSessionMock.setCurrentUser
-      .mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
         userId.set('cold-start-user');
         rejectBackgroundLoad = reject;
       }))
@@ -716,6 +716,7 @@ describe('bootstrapSession forceLoad', () => {
     await (service as unknown as { bootstrapSession: () => Promise<void> }).bootstrapSession();
     await service.signOut();
 
+    // @ts-expect-error TS2349 - closure reassignment defeats CFA
     rejectBackgroundLoad?.(new Error('background load failed'));
     await Promise.resolve();
     await Promise.resolve();

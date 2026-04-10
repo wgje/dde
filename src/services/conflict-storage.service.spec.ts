@@ -11,10 +11,10 @@ function createIdbRequest<T>(resolver: () => T): IDBRequest<T> {
   queueMicrotask(() => {
     try {
       (request as { result: T }).result = resolver();
-      request.onsuccess?.({ target: request } as Event);
+      request.onsuccess?.call(request as IDBRequest<T>, { target: request } as Event);
     } catch (error) {
       (request as { error: DOMException }).error = error as DOMException;
-      request.onerror?.({ target: request } as Event);
+      request.onerror?.call(request as IDBRequest<T>, { target: request } as Event);
     }
   });
 

@@ -9,6 +9,7 @@ import { vi, describe, it, expect } from 'vitest';
 import { Subject } from 'rxjs';
 import { WorkspaceShellComponent } from './workspace-shell.component';
 import { FEATURE_FLAGS } from './config/feature-flags.config';
+import { AUTH_CONFIG } from './config/auth.config';
 
 describe('WorkspaceShellComponent 数据保护提醒', () => {
   it('应在没有现存提醒时展示备份提醒', () => {
@@ -65,7 +66,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
   it('onUnifiedSearchInput 应转发输入值到 onUnifiedSearchChange', () => {
     const onUnifiedSearchChange = vi.fn();
     const context = { onUnifiedSearchChange } as unknown as WorkspaceShellComponent;
-    const event = { target: { value: 'roadmap' } } as Event;
+    const event = { target: { value: 'roadmap' } } as unknown as Event;
 
     WorkspaceShellComponent.prototype.onUnifiedSearchInput.call(context, event);
 
@@ -79,7 +80,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         renameProjectName: { set },
       },
     } as unknown as WorkspaceShellComponent;
-    const event = { target: { value: 'New Name' } } as Event;
+    const event = { target: { value: 'New Name' } } as unknown as Event;
 
     WorkspaceShellComponent.prototype.onRenameProjectNameInput.call(context, event);
 
@@ -89,7 +90,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
   it('onProjectDescriptionInput 应调用 updateProjectDraft 写入 description', () => {
     const updateProjectDraft = vi.fn();
     const context = { updateProjectDraft } as unknown as WorkspaceShellComponent;
-    const event = { target: { value: 'Project intro' } } as Event;
+    const event = { target: { value: 'Project intro' } } as unknown as Event;
 
     WorkspaceShellComponent.prototype.onProjectDescriptionInput.call(context, 'proj-1', event);
 
@@ -107,7 +108,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       updateProjectDraft: WorkspaceShellComponent.prototype.updateProjectDraft,
     } as unknown as WorkspaceShellComponent;
-    const event = { target: { value: 'Project intro' } } as Event;
+    const event = { target: { value: 'Project intro' } } as unknown as Event;
 
     WorkspaceShellComponent.prototype.onProjectDescriptionInput.call(context, 'proj-1', event);
 
@@ -172,13 +173,13 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       clearFocusEntrySyncPulseRetry,
       scheduleFocusEntrySyncPulseRetry,
       triggerSyncPulse,
-    } as unknown as WorkspaceShellComponent & {
+    } as unknown as {
       focusEntryPulseDispatched: boolean;
       focusEntryPulsePending: boolean;
     };
 
     (WorkspaceShellComponent.prototype as unknown as {
-      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+      dispatchFocusEntrySyncPulseIfReady: (this: unknown) => void;
     }).dispatchFocusEntrySyncPulseIfReady.call(context);
 
     await Promise.resolve();
@@ -207,13 +208,13 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       clearFocusEntrySyncPulseRetry,
       scheduleFocusEntrySyncPulseRetry,
       triggerSyncPulse,
-    } as unknown as WorkspaceShellComponent & {
+    } as unknown as {
       focusEntryPulseDispatched: boolean;
       focusEntryPulsePending: boolean;
     };
 
     (WorkspaceShellComponent.prototype as unknown as {
-      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+      dispatchFocusEntrySyncPulseIfReady: (this: unknown) => void;
     }).dispatchFocusEntrySyncPulseIfReady.call(context);
 
     await Promise.resolve();
@@ -238,13 +239,13 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       focusModeIntentActivated: { set },
       teardownFocusMountIntentListener,
       setupFocusMountIntentListener,
-    } as unknown as WorkspaceShellComponent & {
+    } as unknown as {
       focusEntryPulsePending: boolean;
       focusEntryPulseDispatched: boolean;
     };
 
     (WorkspaceShellComponent.prototype as unknown as {
-      resetFocusEntrySyncPulseState: (this: WorkspaceShellComponent) => void;
+      resetFocusEntrySyncPulseState: (this: unknown) => void;
     }).resetFocusEntrySyncPulseState.call(context);
 
     expect(clearFocusEntrySyncPulseRetry).toHaveBeenCalledTimes(1);
@@ -276,23 +277,23 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       triggerSyncPulse,
       teardownFocusMountIntentListener,
       setupFocusMountIntentListener,
-    } as unknown as WorkspaceShellComponent & {
+    } as unknown as {
       focusEntryPulseGeneration: number;
       focusEntryPulseDispatched: boolean;
       focusEntryPulsePending: boolean;
     };
 
     (WorkspaceShellComponent.prototype as unknown as {
-      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+      dispatchFocusEntrySyncPulseIfReady: (this: unknown) => void;
     }).dispatchFocusEntrySyncPulseIfReady.call(context);
 
     expect(context.focusEntryPulsePending).toBe(true);
 
     (WorkspaceShellComponent.prototype as unknown as {
-      resetFocusEntrySyncPulseState: (this: WorkspaceShellComponent, rearmIntentListener?: boolean) => void;
+      resetFocusEntrySyncPulseState: (this: unknown, rearmIntentListener?: boolean) => void;
     }).resetFocusEntrySyncPulseState.call(context, true);
 
-    resolvePulse?.({ status: 'success' });
+    resolvePulse!({ status: 'success' });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -313,13 +314,13 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       clearFocusEntrySyncPulseRetry,
       scheduleFocusEntrySyncPulseRetry,
       triggerSyncPulse,
-    } as unknown as WorkspaceShellComponent & {
+    } as unknown as {
       focusEntryPulseDispatched: boolean;
       focusEntryPulsePending: boolean;
     };
 
     (WorkspaceShellComponent.prototype as unknown as {
-      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+      dispatchFocusEntrySyncPulseIfReady: (this: unknown) => void;
     }).dispatchFocusEntrySyncPulseIfReady.call(context);
 
     await Promise.resolve();
@@ -329,7 +330,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
 
     triggerSyncPulse.mockClear();
     (WorkspaceShellComponent.prototype as unknown as {
-      dispatchFocusEntrySyncPulseIfReady: (this: WorkspaceShellComponent) => void;
+      dispatchFocusEntrySyncPulseIfReady: (this: unknown) => void;
     }).dispatchFocusEntrySyncPulseIfReady.call(context);
 
     await Promise.resolve();

@@ -70,7 +70,7 @@ interface FamilyLayoutBlock {
   pathMap: Map<string, readonly number[]>;
 }
 
-function isAssignedLayoutNode(node: AutoLayoutNodeData): boolean {
+function isAssignedLayoutNode(node: AutoLayoutNodeData): node is AutoLayoutNodeData & { stage: number } {
   return node.stage != null && node.stage > 0;
 }
 

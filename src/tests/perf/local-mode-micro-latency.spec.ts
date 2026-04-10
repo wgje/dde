@@ -28,7 +28,7 @@ describe('Local Mode Micro Perf Budget', () => {
         createdDate: new Date().toISOString(),
       };
 
-      const getSessionSpy = vi.spyOn(service as never, 'getSupabaseClient').mockReturnValue(null as never);
+      const getSessionSpy = vi.spyOn(service as unknown as Record<string, () => unknown>, 'getSupabaseClient').mockReturnValue(null);
 
       const perfStart = performance.now();
       const result = await service.saveProjectToCloud(project, AUTH_CONFIG.LOCAL_MODE_USER_ID);
@@ -50,7 +50,7 @@ describe('Local Mode Micro Perf Budget', () => {
 
     it('loadProjects local mode budget <50ms', async () => {
       vi.spyOn(service, 'currentUserId').mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      const loadFromCacheSpy = vi.spyOn(service as never, 'loadFromCacheOrSeed').mockImplementation(() => undefined);
+      const loadFromCacheSpy = vi.spyOn(service as unknown as Record<string, () => unknown>, 'loadFromCacheOrSeed').mockImplementation(() => undefined);
 
       const perfStart = performance.now();
       await service.loadProjects();

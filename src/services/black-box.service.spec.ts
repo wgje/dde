@@ -267,7 +267,7 @@ describe('BlackBoxService', () => {
 
       expect(mockSyncService.loadFromLocal).toHaveBeenCalledTimes(1);
 
-      resolveLoad?.([]);
+      resolveLoad!([]);
       await Promise.all([first, second]);
     });
 

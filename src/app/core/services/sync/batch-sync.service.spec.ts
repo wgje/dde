@@ -54,7 +54,7 @@ describe('BatchSyncService owner isolation', () => {
           select: vi.fn(() => ({
             eq: vi.fn(() => ({
               in: vi.fn(() => ({
-                is: vi.fn(async () => ({ data: taskLookupRows, error: null })),
+                is: vi.fn(async () => ({ data: taskLookupRows as { id: string }[] | null, error: null as Error | null })),
               })),
             })),
           })),
@@ -95,7 +95,7 @@ describe('BatchSyncService owner isolation', () => {
 
   const mockChangeTracker = {
     getProjectChanges: vi.fn(() => ({
-      taskIdsToDelete: [],
+      taskIdsToDelete: [] as string[],
       taskUpdateFieldsById: {},
     })),
     clearTaskChange: vi.fn(),
@@ -115,7 +115,7 @@ describe('BatchSyncService owner isolation', () => {
   const mockSessionManager = {
     tryRefreshSession: vi.fn(async () => false),
     handleAuthErrorWithRefresh: vi.fn(async () => false),
-    isSessionExpiredError: vi.fn(() => false),
+    isSessionExpiredError: vi.fn((_error: unknown) => false),
   };
 
   const mockSentry = {
@@ -214,7 +214,7 @@ describe('BatchSyncService owner isolation', () => {
   it('saveProjectToCloud 在 getSession 抛认证错误后 refresh 成功时应继续同步', async () => {
     const project = createProject({ id: 'project-refresh-after-auth-error' });
     let getSessionCallCount = 0;
-    mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) => error.code === 'PGRST301');
+    mockSessionManager.isSessionExpiredError.mockImplementation((error: unknown) => (error as { code?: string | number }).code === 'PGRST301');
     mockSessionManager.tryRefreshSession.mockImplementationOnce(async () => true);
     mockClient.auth.getSession.mockImplementation(async () => {
       getSessionCallCount += 1;

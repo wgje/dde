@@ -33,7 +33,7 @@ describe('TextViewTaskOpsService', () => {
   const stageViewRootFilter = signal<'all' | string>('all');
   const isTextUnassignedOpen = signal(false);
   const mockProjectState = {
-    getTask: vi.fn(() => null),
+    getTask: vi.fn((_id?: string): Task | null => null),
     stages: vi.fn(() => []),
     tasks: vi.fn(() => []),
     unassignedTasks: vi.fn(() => []),
@@ -228,7 +228,7 @@ describe('TextViewTaskOpsService', () => {
     const outside = document.createElement('div');
     hostElement.appendChild(outside);
 
-    service.onContainerClick({ target: outside } as Event);
+    service.onContainerClick({ target: outside } as unknown as Event);
 
     expect(selectedTaskId()).toBeNull();
   });
@@ -252,7 +252,7 @@ describe('TextViewTaskOpsService', () => {
     taskCard.appendChild(inner);
     hostElement.appendChild(taskCard);
 
-    service.onContainerClick({ target: inner } as Event);
+    service.onContainerClick({ target: inner } as unknown as Event);
 
     expect(selectedTaskId()).toBe('task-1');
   });
@@ -277,7 +277,7 @@ describe('TextViewTaskOpsService', () => {
     service.onContainerClick({
       target: detachedButton,
       composedPath: () => [detachedButton, taskCard, hostElement, document.body, document, window],
-    } as Event);
+    } as unknown as Event);
 
     expect(selectedTaskId()).toBe('task-1');
   });
@@ -303,11 +303,11 @@ describe('TextViewTaskOpsService', () => {
     service.onContainerClick({
       target: document.body,
       composedPath: () => [inner, taskCard, hostElement, document.body, document, window],
-    } as Event);
+    } as unknown as Event);
 
     expect(selectedTaskId()).toBe('task-1');
 
-    service.onContainerClick({ target: document.body } as Event);
+    service.onContainerClick({ target: document.body } as unknown as Event);
 
     expect(selectedTaskId()).toBeNull();
   });
@@ -326,7 +326,7 @@ describe('TextViewTaskOpsService', () => {
     });
 
     service.armContainerClickGuard('task-1');
-    service.onContainerClick({ target: document.body } as Event);
+    service.onContainerClick({ target: document.body } as unknown as Event);
 
     expect(selectedTaskId()).toBeNull();
   });
@@ -490,7 +490,7 @@ describe('TextViewTaskOpsService', () => {
     const rootTask = { id: 'root-1', displayId: '1' } as Task;
     const linkedTask = { id: 'task-4', stage: 3, displayId: '2,1' } as Task;
     stageViewRootFilter.set(rootTask.id);
-    mockProjectState.getTask.mockImplementation((id: string) => {
+    mockProjectState.getTask.mockImplementation((id?: string) => {
       if (id === rootTask.id) {
         return rootTask;
       }

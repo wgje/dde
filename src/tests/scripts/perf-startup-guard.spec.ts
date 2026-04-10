@@ -125,6 +125,6 @@ describe('perf-startup-guard', () => {
 
     expect(result.violations).toContain('launch.html 缺少 main 入口 modulepreload');
     expect(result.violations).toContain('launch.html 缺少 polyfills 入口 modulepreload');
-    expect(result.violations.some((violation) => violation.startsWith('launch.html main 发现位置超限:'))).toBe(true);
+    expect(result.violations.some((violation: string) => violation.startsWith('launch.html main 发现位置超限:'))).toBe(true);
   });
 });

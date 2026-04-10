@@ -375,7 +375,7 @@ describe('数据完整性验证', () => {
       
       const data: ExportData = JSON.parse(await result.blob!.text());
       const task = data.projects[0].tasks.find(t => t.id === 'task-1')!;
-      const attachment = task.attachments![0] as Record<string, unknown>;
+      const attachment = task.attachments![0] as unknown as Record<string, unknown>;
       
       expect('signedAt' in attachment).toBe(false);
     });

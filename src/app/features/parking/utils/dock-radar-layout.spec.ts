@@ -35,6 +35,8 @@ function makeDockEntry(overrides: Partial<DockEntry> & { taskId: string }): Dock
     dockedOrder: 0,
     detail: '',
     sourceKind: 'project-task',
+    systemSelected: false,
+    recommendedScore: null,
     ...overrides,
   };
 }

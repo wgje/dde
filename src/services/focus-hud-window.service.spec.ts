@@ -81,7 +81,7 @@ describe('FocusHudWindowService', () => {
     if (originalDescriptor) {
       Object.defineProperty(window, 'documentPictureInPicture', originalDescriptor);
     } else {
-      delete (window as Record<string, unknown>).documentPictureInPicture;
+      delete (window as unknown as Record<string, unknown>).documentPictureInPicture;
     }
     TestBed.resetTestingModule();
   });
@@ -95,7 +95,7 @@ describe('FocusHudWindowService', () => {
     });
     const requestWindow = vi.fn().mockResolvedValue(undefined);
     const closeSpy = vi.fn(() => {
-      pipWindow.closed = true;
+      (pipWindow as unknown as { closed: boolean }).closed = true;
       pageHideHandler?.({} as PageTransitionEvent);
     });
     const pipWindow = {

@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
-import { Task, Connection } from '../models';
+import { Task, Connection, Attachment } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
@@ -12,7 +12,7 @@ import {
 } from './task-repository.types';
 
 // 重新导出类型以保持向后兼容
-export { TaskRow, ConnectionRow, ProjectRow } from './task-repository.types';
+export type { TaskRow, ConnectionRow, ProjectRow } from './task-repository.types';
 
 /**
  * 任务仓库服务
@@ -57,7 +57,7 @@ export class TaskRepositoryService {
 
     // 预先将所有行映射为 Task（包含将被过滤掉的软删/ tombstone 任务），
     // 以便在父任务被删除时，让子任务能够“顶替”父任务的位置属性（stage/order/rank/x/y）。
-    const allTasks = data.map(row => this.mapRowToTask(row as TaskRow));
+    const allTasks = data.map(row => this.mapRowToTask(row as unknown as TaskRow));
     const taskById = new Map(allTasks.map(t => [t.id, t] as const));
 
     // 2. 获取该项目的所有 tombstone 记录
@@ -172,7 +172,7 @@ export class TaskRepositoryService {
 
     const { error } = await this.supabase.client()
       .from('tasks')
-      .upsert(rowToUpsert, { onConflict: 'id' });
+      .upsert(rowToUpsert as never, { onConflict: 'id' });
 
     if (error) {
       this.logger.error('Failed to save task', error);
@@ -297,7 +297,7 @@ export class TaskRepositoryService {
 
     const { error } = await this.supabase.client()
       .from('tasks')
-      .update(updates)
+      .update(updates as never)
       .eq('id', taskId);
 
     if (error) {
@@ -321,7 +321,7 @@ export class TaskRepositoryService {
     const { error } = await this.supabase.client()
       .rpc('append_task_attachment', {
         p_task_id: taskId,
-        p_attachment: attachment
+        p_attachment: JSON.parse(JSON.stringify(attachment))
       });
 
     if (error) {
@@ -355,7 +355,7 @@ export class TaskRepositoryService {
       return { success: false, error: '任务不存在' };
     }
 
-    const currentAttachments = data?.attachments || [];
+    const currentAttachments = (data?.attachments ?? []) as unknown as Attachment[];
     // 去重：如果附件 ID 已存在则跳过
     if (currentAttachments.some((a: Attachment) => a.id === attachment.id)) {
       return { success: true };
@@ -364,7 +364,7 @@ export class TaskRepositoryService {
 
     const updateQuery = this.supabase.client()
       .from('tasks')
-      .update({ attachments: newAttachments, updated_at: new Date().toISOString() })
+      .update({ attachments: newAttachments as unknown as undefined, updated_at: new Date().toISOString() })
       .eq('id', taskId);
     
     // 如果有 updated_at，用它做乐观锁
@@ -427,7 +427,7 @@ export class TaskRepositoryService {
       return { success: false, error: '任务不存在' };
     }
 
-    const currentAttachments = data?.attachments || [];
+    const currentAttachments = (data?.attachments ?? []) as unknown as Attachment[];
     const newAttachments = currentAttachments.filter(
       (a: Attachment) => a.id !== attachmentId
     );
@@ -435,7 +435,7 @@ export class TaskRepositoryService {
     // 【P2-1 修复】与 addAttachmentFallback 保持一致，显式更新 updated_at
     const { error } = await this.supabase.client()
       .from('tasks')
-      .update({ attachments: newAttachments, updated_at: new Date().toISOString() })
+      .update({ attachments: newAttachments as unknown as undefined, updated_at: new Date().toISOString() })
       .eq('id', taskId);
 
     if (error) {
@@ -563,7 +563,7 @@ export class TaskRepositoryService {
       throw supabaseErrorToError(error);
     }
 
-    return (data || []).map(row => this.mapRowToTask(row as TaskRow));
+    return (data || []).map(row => this.mapRowToTask(row as unknown as TaskRow));
   }
 
   // ========== 映射函数 ==========
@@ -596,7 +596,7 @@ export class TaskRepositoryService {
       cognitive_load: row.cognitive_load ?? null,
       wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
-      parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../models/parking').TaskParkingMeta | undefined ?? undefined,
+      parkingMeta: row.parking_meta ?? undefined,
     });
   }
 

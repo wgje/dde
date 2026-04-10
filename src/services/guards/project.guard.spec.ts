@@ -71,7 +71,7 @@ describe('projectExistsGuard', () => {
 
     const route = {
       params: { projectId: 'project-9' },
-    } as ActivatedRouteSnapshot;
+    } as unknown as ActivatedRouteSnapshot;
     const state = { url: '/projects/project-9' } as RouterStateSnapshot;
 
     const result = await TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
@@ -89,7 +89,7 @@ describe('projectExistsGuard', () => {
 
     const route = {
       params: { projectId: 'project-9' },
-    } as ActivatedRouteSnapshot;
+    } as unknown as ActivatedRouteSnapshot;
     const state = { url: '/projects/project-9' } as RouterStateSnapshot;
 
     const result = await TestBed.runInInjectionContext(() => projectExistsGuard(route, state));

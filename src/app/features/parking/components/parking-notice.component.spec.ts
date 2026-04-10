@@ -386,7 +386,7 @@ describe('ParkingNoticeComponent', () => {
       // 撤回后 visibleEvictionItems 应为空 → 触发 dismissNotice
       // getEvictionToken 返回 null 意味着 token 已消费
       mockParkingService.getEvictionToken.mockReturnValueOnce({ tokenId: 'token-solo' });
-      mockParkingService.getEvictionToken.mockReturnValue(null);
+      mockParkingService.getEvictionToken.mockReturnValue(null as never);
 
       component.undoEvictionItem(
         notice,
@@ -438,7 +438,7 @@ describe('ParkingNoticeComponent', () => {
         ],
       });
 
-      mockParkingService.getEvictionToken.mockReturnValue(null);
+      mockParkingService.getEvictionToken.mockReturnValue(null as never);
 
       const visible = component.visibleEvictionItems(notice);
       expect(visible.length).toBe(0);
@@ -454,7 +454,7 @@ describe('ParkingNoticeComponent', () => {
     });
 
     it('token 不存在时返回 false', () => {
-      mockParkingService.getEvictionToken.mockReturnValue(null);
+      mockParkingService.getEvictionToken.mockReturnValue(null as never);
       expect(component.isEvictionTokenActive('expired-token')).toBe(false);
     });
   });

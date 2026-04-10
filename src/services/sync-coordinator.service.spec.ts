@@ -358,7 +358,7 @@ function createTestTask(overrides?: Partial<Task>): Task {
 // DestroyRef mock（服务内部使用 inject(DestroyRef)）
 const destroyCallbacks: Array<() => void> = [];
 const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
-  onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); },
+  onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); return () => {}; },
 };
 
 describe('SyncCoordinatorService', () => {
@@ -676,7 +676,7 @@ describe('持久化状态管理', () => {
       (service as unknown as { authContextGeneration: number }).authContextGeneration += 1;
       mockAuthService.currentUserId.mockReturnValue('user-456');
 
-      resolvePersist?.({
+      resolvePersist!({
         success: false,
         conflict: true,
         remoteData: createTestProject({ id: 'proj-stale-conflict', version: 3 }),

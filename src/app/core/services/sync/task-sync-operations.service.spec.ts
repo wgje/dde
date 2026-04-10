@@ -48,8 +48,8 @@ describe('TaskSyncOperationsService', () => {
     length: 0,
     recordCircuitSuccess: vi.fn(),
     recordCircuitFailure: vi.fn(),
-    removeByEntities: vi.fn(() => []),
-    removeConnectionsReferencingTasks: vi.fn(() => []),
+    removeByEntities: vi.fn((): string[] => []),
+    removeConnectionsReferencingTasks: vi.fn((): string[] => []),
   };
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
@@ -62,9 +62,9 @@ describe('TaskSyncOperationsService', () => {
     handleSessionExpired: vi.fn(() => {
       throw new Error('Session expired');
     }),
-    isSessionExpiredError: vi.fn(() => false),
+    isSessionExpiredError: vi.fn((_error?: any) => false),
     handleAuthErrorWithRefresh: vi.fn(async () => false),
-    isRlsPolicyViolation: vi.fn(() => false),
+    isRlsPolicyViolation: vi.fn((_error?: any) => false),
   };
 
   const mockLogger = {
@@ -121,7 +121,7 @@ describe('TaskSyncOperationsService', () => {
       }
 
       throw new Error(`Unexpected table: ${table}`);
-    }),
+    }) as any,
   };
 
   beforeEach(() => {
@@ -222,7 +222,7 @@ describe('TaskSyncOperationsService', () => {
       deletedAt: null,
     };
     setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
     mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
 
     const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
@@ -249,7 +249,7 @@ describe('TaskSyncOperationsService', () => {
       deletedAt: null,
     };
     setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
     mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
 
     await expect(service.pushTask(task, 'project-1', false, true, 'user-1'))
@@ -259,7 +259,7 @@ describe('TaskSyncOperationsService', () => {
 
   it('pushTaskPosition 在浏览器网络挂起导致 session 暂不可用时不应标记过期', async () => {
     setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
     mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
 
     const result = await service.pushTaskPosition('task-position-suspended', 10, 20, 'project-1', undefined, 'user-1');

@@ -89,6 +89,7 @@ function makeCallbacks(overrides?: Partial<CloudSyncEngineCallbacks>): CloudSync
       todayDateKey: '2025-01-01',
       buildOverflowMeta: () => ({ comboSelectOverflow: 0, backupOverflow: 0 }),
     })),
+    getCurrentSnapshotUserId: vi.fn(() => null),
     ...overrides,
   };
 }

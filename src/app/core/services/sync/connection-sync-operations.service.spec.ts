@@ -249,9 +249,9 @@ describe('ConnectionSyncOperationsService', () => {
       data: [],
       error: { code: '42501', message: 'RLS Policy Violation' },
     };
-    mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) => error.code === '42501');
+    mockSessionManager.isSessionExpiredError.mockImplementation(((error: { code?: string | number }) => error.code === '42501') as any);
     mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
-    mockSessionManager.isRlsPolicyViolation.mockImplementation((error: { code?: string | number }) => error.code === '42501');
+    mockSessionManager.isRlsPolicyViolation.mockImplementation(((error: { code?: string | number }) => error.code === '42501') as any);
 
     await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
       .rejects.toBeInstanceOf(PermanentFailureError);
@@ -266,7 +266,7 @@ describe('ConnectionSyncOperationsService', () => {
       target: 'task-b',
     };
     setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } });
+    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null as any } });
 
     const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
 
@@ -283,7 +283,7 @@ describe('ConnectionSyncOperationsService', () => {
     };
     mockSessionManager.tryRefreshSession.mockResolvedValueOnce(true);
     mockClient.auth.getSession
-      .mockResolvedValueOnce({ data: { session: null } })
+      .mockResolvedValueOnce({ data: { session: null as any } })
       .mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
 
     const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');

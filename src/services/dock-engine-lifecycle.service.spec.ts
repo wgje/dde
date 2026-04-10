@@ -260,7 +260,7 @@ describe('DockEngineLifecycleService', () => {
       expect(mockCloudSync.scheduleCloudPull).not.toHaveBeenCalled();
       expect(idleCallback).not.toBeNull();
 
-      idleCallback?.();
+      idleCallback!();
 
       expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledTimes(1);
       expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledWith('user-a', true);
@@ -270,7 +270,7 @@ describe('DockEngineLifecycleService', () => {
           requestIdleCallback?: (cb: () => void) => number;
         }).requestIdleCallback = originalRequestIdleCallback;
       } else {
-        delete (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+        delete (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
       }
     }
   });

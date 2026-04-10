@@ -34,6 +34,7 @@ describe('RequestThrottleService', () => {
     const destroyRef: Pick<DestroyRef, 'onDestroy'> = {
       onDestroy: (cb: () => void) => {
         destroyCallbacks.push(cb);
+        return () => {};
       },
     };
 

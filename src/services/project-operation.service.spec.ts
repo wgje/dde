@@ -15,6 +15,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Project } from '../models';
+import type { ConflictData } from '../app/core/services/sync';
 
 function createProject(overrides: Partial<Project> = {}): Project {
   const now = '2026-03-30T00:00:00.000Z';
@@ -35,11 +36,11 @@ describe('ProjectOperationService', () => {
   let service: ProjectOperationService;
 
   const mockProjectState = {
-    projects: vi.fn<Project[]>(() => []),
+    projects: vi.fn((): Project[] => []),
     updateProjects: vi.fn(),
     setActiveProjectId: vi.fn(),
-    activeProjectId: vi.fn(() => null),
-    getProject: vi.fn(() => undefined),
+    activeProjectId: vi.fn((): string | null => null),
+    getProject: vi.fn((): Project | undefined => undefined),
   };
 
   const mockSyncCoordinator = {
@@ -56,7 +57,7 @@ describe('ProjectOperationService', () => {
       deleteTask: vi.fn().mockResolvedValue(true),
       saveOfflineSnapshot: vi.fn(),
     },
-    conflictData: vi.fn(() => null),
+    conflictData: vi.fn((): (Omit<ConflictData, 'remote'> & { remote?: Project }) | null => null),
     resolveConflict: vi.fn().mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) }),
     resolveConflictWithPlan: vi.fn().mockResolvedValue({ ok: true, value: createProject({ id: 'proj-1' }) }),
     validateAndRebalance: vi.fn((project: Project) => project),
@@ -68,7 +69,7 @@ describe('ProjectOperationService', () => {
   };
 
   const mockUserSession = {
-    currentUserId: vi.fn(() => AUTH_CONFIG.LOCAL_MODE_USER_ID),
+    currentUserId: vi.fn((): string => AUTH_CONFIG.LOCAL_MODE_USER_ID),
     getCurrentSessionGeneration: vi.fn(() => 1),
     isSessionContextCurrent: vi.fn(() => true),
     isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
@@ -572,7 +573,7 @@ describe('ProjectOperationService', () => {
       expect.objectContaining({ id: 'proj-plan', name: 'Remote Plan', version: 3 }),
     );
     expect(mockSyncCoordinator.resolveConflict).not.toHaveBeenCalled();
-    expect(finalProjects[0]?.tasks.some(task => task.id === 'task-delete-1')).toBe(true);
+    expect(finalProjects[0]?.tasks.some((task: { id: string }) => task.id === 'task-delete-1')).toBe(true);
     expect(mockConflictStorage.deleteConflict).toHaveBeenCalled();
     expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
   });

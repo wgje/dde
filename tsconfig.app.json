@@ -4,6 +4,7 @@
     "types": [
       "node"
     ],
+    "allowImportingTsExtensions": false,
     "noEmit": false
   },
   "files": [

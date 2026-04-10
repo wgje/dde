@@ -64,6 +64,9 @@ describe('GateService', () => {
       strataEnabled: true,
       blackBoxEnabled: true,
       maxSnoozePerDay: 3,
+      routineResetHourLocal: 0,
+      restReminderHighLoadMinutes: 120,
+      restReminderLowLoadMinutes: 20,
     });
     localStorage.clear();
 

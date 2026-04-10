@@ -69,7 +69,7 @@ describe('UserPreferencesSyncService', () => {
     const prefs = await service.loadUserPreferences('user-1');
 
     expect(select).toHaveBeenCalled();
-    expect(select.mock.calls[0][0]).not.toContain('dock_snapshot');
+    expect((select.mock.calls[0] as unknown[])[0]).not.toContain('dock_snapshot');
     expect(prefs?.dockSnapshot).toBeUndefined();
     expect(prefs?.focusPreferences?.routineResetHourLocal).toBe(5);
     expect(prefs?.focusPreferences?.restReminderHighLoadMinutes).toBe(120);

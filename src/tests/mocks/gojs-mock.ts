@@ -320,7 +320,8 @@ function createEnumBag(seed: Record<string, string>) {
 function createMockClass<TStatic extends Record<string, unknown> = Record<string, unknown>>(
   name: string,
   staticValues: TStatic = {} as TStatic,
-  ctor?: new (...args: unknown[]) => object,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctor?: new (...args: any[]) => object,
 ) {
   const MockClass = ctor ?? class MockClass extends MockGoBase {};
 
@@ -503,6 +504,14 @@ export class Margin extends MockGoBase {
 }
 
 export class Spot extends MockGoBase {
+  static Top: Spot;
+  static Bottom: Spot;
+  static Left: Spot;
+  static Right: Spot;
+  static Center: Spot;
+  static None: Spot;
+  static AllSides: Spot;
+
   constructor(
     public x = 0,
     public y = 0,
@@ -544,7 +553,7 @@ export class GraphObject extends MockGoBase {
         instance.panelType = args[0];
       }
       if (config) {
-        applyTemplateConfig(instance, config);
+        applyTemplateConfig(instance, config as Record<string, unknown>);
       }
       instance.mockArgs = args;
       instance.mockChildren = children;
@@ -558,11 +567,11 @@ export class GraphObject extends MockGoBase {
 class MockGraphLinksModel extends MockGoBase {
   public nodeDataArray: Record<string, unknown>[];
   public linkDataArray: Record<string, unknown>[];
-  public linkKeyProperty: string;
-  public nodeKeyProperty: string;
-  public linkFromPortIdProperty: string;
-  public linkToPortIdProperty: string;
-  public linkCategoryProperty: string;
+  public linkKeyProperty!: string;
+  public nodeKeyProperty!: string;
+  public linkFromPortIdProperty!: string;
+  public linkToPortIdProperty!: string;
+  public linkCategoryProperty!: string;
 
   constructor(
     nodeDataArray: unknown[] = [],

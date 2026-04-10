@@ -37,7 +37,7 @@ describe('ConflictTaskDiffComponent', () => {
       rank: 1000,
       wait_minutes: 5,
       attachments: [{ id: 'att-local', name: 'local.txt' }] as Task['attachments'],
-      parkingMeta: { state: 'parked', pinned: false },
+      parkingMeta: { state: 'parked', pinned: false, parkedAt: null, lastVisitedAt: null, contextSnapshot: null, reminder: null },
     });
     const remoteTask = createTask({
       id: 'task-1',
@@ -49,7 +49,7 @@ describe('ConflictTaskDiffComponent', () => {
       rank: 2000,
       wait_minutes: 15,
       attachments: [{ id: 'att-remote', name: 'remote.txt' }] as Task['attachments'],
-      parkingMeta: { state: 'parked', pinned: true },
+      parkingMeta: { state: 'parked', pinned: true, parkedAt: null, lastVisitedAt: null, contextSnapshot: null, reminder: null },
     });
 
     Object.assign(component, {
@@ -71,11 +71,11 @@ describe('ConflictTaskDiffComponent', () => {
     const component = runInInjectionContext(injector, () => new ConflictTaskDiffComponent());
     const localTask = createTask({
       id: 'task-1',
-      parkingMeta: { state: 'parked', pinned: true, reminder: { reminderAt: '2026-04-04T12:00:00.000Z', snoozeCount: 0 } },
+      parkingMeta: { state: 'parked', pinned: true, parkedAt: null, lastVisitedAt: null, contextSnapshot: null, reminder: { reminderAt: '2026-04-04T12:00:00.000Z', snoozeCount: 0, maxSnoozeCount: 5 } },
     });
     const remoteTask = createTask({
       id: 'task-1',
-      parkingMeta: { state: 'parked', pinned: true, reminder: { reminderAt: '2026-04-04T12:00:00.000Z', snoozeCount: 0 } },
+      parkingMeta: { state: 'parked', pinned: true, parkedAt: null, lastVisitedAt: null, contextSnapshot: null, reminder: { reminderAt: '2026-04-04T12:00:00.000Z', snoozeCount: 0, maxSnoozeCount: 5 } },
     });
 
     Object.assign(component, {

@@ -176,7 +176,7 @@ describe('renderMarkdown - 链接渲染', () => {
     const link = container.querySelector('a');
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\Docs\\Folder (Archive)\\Plan.md');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\Docs\\Folder (Archive)\\Plan.md');
   });
 
   it('应支持显式 UNC 共享路径中的空格', () => {
@@ -185,7 +185,7 @@ describe('renderMarkdown - 链接渲染', () => {
     const link = container.querySelector('a');
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('\\\\server\\My Share\\report.md');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('\\\\server\\My Share\\report.md');
   });
 
   it('应保留外链的 target 和 rel 安全属性', () => {
@@ -249,7 +249,7 @@ describe('renderMarkdown - 链接渲染', () => {
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
     expect(link?.getAttribute('href')).toBe('#local-path');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\secret.txt');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\secret.txt');
     expect(container.innerHTML).not.toContain('href="file:///C:/secret.txt"');
   });
 
@@ -287,7 +287,7 @@ describe('renderMarkdown - 链接渲染', () => {
     const link = container.querySelector('a');
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\Work\\Plan.md');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\Work\\Plan.md');
     expect(link?.getAttribute('href')).toBe('#local-path');
   });
 
@@ -297,7 +297,7 @@ describe('renderMarkdown - 链接渲染', () => {
     const link = container.querySelector('a');
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('\\\\server\\share\\report.md');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('\\\\server\\share\\report.md');
     expect(link?.getAttribute('href')).toBe('#local-path');
   });
 
@@ -307,7 +307,7 @@ describe('renderMarkdown - 链接渲染', () => {
     const link = container.querySelector('a');
 
     expect(link?.getAttribute('data-link-kind')).toBe('local');
-    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path'))).toBe('C:\\Docs\\Plan.md');
+    expect(decodeBackslashEntities(link?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\Docs\\Plan.md');
   });
 
   it('应保留与旧占位符文本同名的普通内容', () => {

@@ -83,15 +83,16 @@ describe('RetryQueueService', () => {
   let handler: RetryOperationHandler;
   let online = false;
   const authServiceMock = {
-    currentUserId: vi.fn(() => 'test-user')
+    currentUserId: vi.fn((): string | null => 'test-user')
   };
   const projectStateMock = {
-    getProject: vi.fn(() => undefined),
+    getProject: vi.fn((): Record<string, string> | undefined => undefined),
   };
   const destroyCallbacks: Array<() => void> = [];
   const destroyRefMock: Pick<DestroyRef, 'onDestroy'> = {
     onDestroy: (callback: () => void) => {
       destroyCallbacks.push(callback);
+      return () => {};
     },
   };
   let toastMock: {
@@ -399,7 +400,7 @@ describe('RetryQueueService', () => {
     const freshTask = createTask('t-fresh-after-reload');
     service.add('task', 'upsert', freshTask, 'p-fresh');
 
-    resolveDbInit?.(null);
+    resolveDbInit!(null);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -734,7 +735,7 @@ describe('RetryQueueService', () => {
 
     authServiceMock.currentUserId.mockReturnValue('other-user');
     service.clearCurrentView();
-    resolvePush?.(true);
+    resolvePush!(true);
     await processing;
 
     const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as {
@@ -769,7 +770,7 @@ describe('RetryQueueService', () => {
 
     authServiceMock.currentUserId.mockReturnValue('other-user');
     service.clearCurrentView();
-    rejectPush?.(new Error('network down'));
+    rejectPush!(new Error('network down'));
     await processing;
 
     const hiddenItems = (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems;
@@ -811,7 +812,7 @@ describe('RetryQueueService', () => {
       expect(handler.pushTask).toHaveBeenCalledTimes(2);
     });
 
-    resolveFirst?.(true);
+    resolveFirst!(true);
     await firstProcessing;
     await secondProcessing;
 

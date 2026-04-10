@@ -37,7 +37,7 @@ describe('StrataService', () => {
     title: '已完成项目',
     type: 'task',
     completedAt: new Date().toISOString(),
-    source: null,  // 测试时可以为 null
+    source: undefined,  // 测试时可以为 undefined
     ...overrides
   });
 
@@ -49,7 +49,10 @@ describe('StrataService', () => {
       gateEnabled: true,
       strataEnabled: true,
       blackBoxEnabled: true,
-      maxSnoozePerDay: 3
+      maxSnoozePerDay: 3,
+      routineResetHourLocal: 0,
+      restReminderHighLoadMinutes: 90,
+      restReminderLowLoadMinutes: 120,
     });
 
     mockBlackBoxService = {
