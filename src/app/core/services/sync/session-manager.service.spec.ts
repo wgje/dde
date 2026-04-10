@@ -183,4 +183,28 @@ describe('SessionManagerService', () => {
     expect(syncState.setSessionExpired).not.toHaveBeenCalledWith(true);
     expect(toast.warning).not.toHaveBeenCalled();
   });
+
+  it('should classify transient refresh transport failures as client-unready', async () => {
+    mockAuth.refreshSession.mockResolvedValue({
+      data: { session: null },
+      error: { message: 'Failed to fetch' },
+    });
+
+    const result = await service.tryRefreshSessionWithReason('speech:test');
+
+    expect(result).toEqual({ refreshed: false, reason: 'client-unready' });
+  });
+
+  it('should allow explicit refresh attempts even when sessionExpired is already set', async () => {
+    sessionExpired = true;
+    mockAuth.refreshSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-explicit' }, expires_at: 1 } },
+      error: null,
+    });
+
+    const result = await service.tryRefreshSessionWithReason('speech:test');
+
+    expect(result).toEqual({ refreshed: true });
+    expect(mockAuth.refreshSession).toHaveBeenCalledTimes(1);
+  });
 });

@@ -18,6 +18,7 @@ import { EventBusService } from '../../../../services/event-bus.service';
 import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { EnhancedError } from '../../../../utils/supabase-error';
+import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import {
@@ -142,6 +143,13 @@ export class SessionManagerService {
     return result.refreshed;
   }
 
+  async tryRefreshSessionWithReason(context: string): Promise<{
+    refreshed: boolean;
+    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
+  }> {
+    return this.tryRefreshSessionDetailed(context, { allowWhenExpired: true });
+  }
+
   getRecentValidationSnapshot(maxAgeMs: number): { valid: boolean; userId?: string; at: number } | null {
     if (!this.lastValidationSnapshot) {
       return null;
@@ -165,13 +173,29 @@ export class SessionManagerService {
   private async tryRefreshSessionDetailed(context: string): Promise<{
     refreshed: boolean;
     reason?: 'client-unready' | 'refresh-failed' | 'no-session';
+  }>;
+  private async tryRefreshSessionDetailed(
+    context: string,
+    options: { allowWhenExpired?: boolean }
+  ): Promise<{
+    refreshed: boolean;
+    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
+  }>;
+  private async tryRefreshSessionDetailed(
+    context: string,
+    options: { allowWhenExpired?: boolean } = {}
+  ): Promise<{
+    refreshed: boolean;
+    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
   }> {
+    const { allowWhenExpired = false } = options;
+
     if (isBrowserNetworkSuspendedWindow()) {
       this.logger.info('浏览器网络挂起窗口内延后会话刷新', { context });
       return { refreshed: false, reason: 'client-unready' };
     }
 
-    if (this.syncState.isSessionExpired()) {
+    if (!allowWhenExpired && this.syncState.isSessionExpired()) {
       this.logger.debug('会话已标记过期，跳过刷新尝试', { context });
       return { refreshed: false, reason: 'refresh-failed' };
     }
@@ -188,6 +212,16 @@ export class SessionManagerService {
       const { data, error } = await client.auth.refreshSession();
       
       if (error) {
+        if (this.isRetryableRefreshFailure(error)) {
+          this.logger.info('会话刷新暂时失败，后续可重试', { context, error: error.message });
+          return { refreshed: false, reason: 'client-unready' };
+        }
+
+        if (this.isAuthenticationRefreshFailure(error)) {
+          this.logger.warn('会话刷新失败：刷新令牌已失效', { context, error: error.message });
+          return { refreshed: false, reason: 'no-session' };
+        }
+
         this.logger.warn('会话刷新失败', { context, error: error.message });
         return { refreshed: false, reason: 'refresh-failed' };
       }
@@ -211,14 +245,55 @@ export class SessionManagerService {
         return { refreshed: false, reason: 'no-session' };
       }
     } catch (e) {
-      if (isBrowserNetworkSuspendedError(e)) {
+      if (this.isRetryableRefreshFailure(e)) {
         this.logger.info('浏览器网络挂起窗口内延后会话刷新', { context });
         return { refreshed: false, reason: 'client-unready' };
+      }
+
+      if (this.isAuthenticationRefreshFailure(e)) {
+        this.logger.warn('会话刷新异常：刷新令牌已失效', { context, error: e });
+        return { refreshed: false, reason: 'no-session' };
       }
 
       this.logger.warn('会话刷新异常', { context, error: e });
       return { refreshed: false, reason: 'refresh-failed' };
     }
+  }
+
+  private isRetryableRefreshFailure(error: unknown): boolean {
+    if (isBrowserNetworkSuspendedError(error)) {
+      return true;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return true;
+    }
+
+    return supabaseErrorToError(error).isRetryable;
+  }
+
+  private isAuthenticationRefreshFailure(error: unknown): boolean {
+    if (!error || typeof error !== 'object') {
+      return false;
+    }
+
+    const authError = error as { status?: number; code?: string | number; message?: string };
+    if (authError.status === 401 || authError.status === 403) {
+      return true;
+    }
+
+    if (authError.code === 'session_not_found' || authError.code === 'refresh_token_not_found') {
+      return true;
+    }
+
+    const message = (authError.message ?? '').toLowerCase();
+    return message.includes('refresh token') ||
+      message.includes('invalid token') ||
+      message.includes('token expired') ||
+      message.includes('session expired') ||
+      message.includes('invalid claim') ||
+      message.includes('jwt expired') ||
+      message.includes('session_not_found');
   }
 
   /**

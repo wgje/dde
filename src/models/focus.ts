@@ -168,6 +168,8 @@ export interface StrataLayer {
 export interface OfflineAudioCacheEntry {
   /** UUID */
   id: string;
+  /** 缓存归属用户 ID；仅允许回放到同一账号 */
+  ownerUserId: string | null;
   /** 音频 Blob */
   blob: Blob;
   /** 创建时间 */
