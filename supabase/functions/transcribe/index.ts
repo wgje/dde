@@ -53,6 +53,9 @@ const GROQ_API_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions'
 /** 最大文件大小 25MB */
 const MAX_FILE_SIZE = 25 * 1024 * 1024
 
+/** Groq API 调用超时（毫秒）- 必须短于 Supabase Edge Function 网关超时，确保函数能返回带 CORS 头的响应 */
+const GROQ_TIMEOUT_MS = 25_000
+
 serve(async (req: Request) => {
   // 获取请求来源，用于 CORS 响应
   const origin = req.headers.get('Origin');
@@ -176,13 +179,39 @@ serve(async (req: Request) => {
     
     console.log('🎤 [Transcribe] Calling Groq API with whisper-large-v3...');
 
-    const groqResponse = await fetch(GROQ_API_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${groqApiKey}`,
-      },
-      body: groqFormData,
-    })
+    // 使用 AbortController 设置超时，确保在 Supabase 网关超时前返回带 CORS 头的响应
+    const groqAbort = new AbortController();
+    const groqTimer = setTimeout(() => groqAbort.abort(), GROQ_TIMEOUT_MS);
+
+    let groqResponse: Response;
+    try {
+      groqResponse = await fetch(GROQ_API_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${groqApiKey}`,
+        },
+        body: groqFormData,
+        signal: groqAbort.signal,
+      });
+    } catch (fetchErr: unknown) {
+      clearTimeout(groqTimer);
+      // AbortError 表示超时，返回带 CORS 头的 504 而非让网关吞掉响应
+      if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
+        console.error('🎤 [Transcribe] Groq API timed out after', GROQ_TIMEOUT_MS, 'ms');
+        return new Response(
+          JSON.stringify({ error: '转写服务响应超时，请缩短录音后重试', code: 'GROQ_TIMEOUT' }),
+          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      // 网络错误（DNS 失败、连接拒绝等）
+      console.error('🎤 [Transcribe] Groq API fetch failed:', fetchErr);
+      return new Response(
+        JSON.stringify({ error: '无法连接转写服务', code: 'GROQ_UNREACHABLE' }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    } finally {
+      clearTimeout(groqTimer);
+    }
 
     if (!groqResponse.ok) {
       const errorText = await groqResponse.text()

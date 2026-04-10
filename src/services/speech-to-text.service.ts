@@ -425,14 +425,33 @@ export class SpeechToTextService {
     
     this.logger.debug('SpeechToText', `Calling: ${functionUrl}`);
     
-    const response = await fetch(functionUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'apikey': environment.supabaseAnonKey,
-      },
-      body: formData
-    });
+    // 使用 AbortController 设置超时，避免等待 Supabase 网关 504
+    const abortCtrl = new AbortController();
+    const timeoutId = setTimeout(() => abortCtrl.abort(), FOCUS_CONFIG.BLACK_BOX.TRANSCRIBE_TIMEOUT);
+    
+    let response: Response;
+    try {
+      response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': environment.supabaseAnonKey,
+        },
+        body: formData,
+        signal: abortCtrl.signal
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      // AbortError 表示客户端超时
+      if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
+        this.logger.error('SpeechToText', `Transcription timed out after ${FOCUS_CONFIG.BLACK_BOX.TRANSCRIBE_TIMEOUT}ms`);
+        this.toast.error('转写超时', '服务响应超慢，请缩短录音后重试');
+        throw new Error(ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
+      }
+      throw fetchErr;
+    } finally {
+      clearTimeout(timeoutId);
+    }
     
     const responseText = await response.text();
     
@@ -463,6 +482,12 @@ export class SpeechToTextService {
       if (response.status === 401 || errorData.code === 'AUTH_INVALID') {
         this.toast.error('认证失败', '请重新登录后再试');
         throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
+      }
+      
+      // 处理 Groq 超时（Edge Function 主动返回的 504，带 CORS 头）
+      if (errorData.code === 'GROQ_TIMEOUT' || errorData.code === 'GROQ_UNREACHABLE') {
+        this.toast.error('转写超时', errorData.error || '转写服务响应超时，请缩短录音后重试');
+        throw new Error(ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
       }
       
       // 处理服务配置错误

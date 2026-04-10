@@ -34,8 +34,8 @@ export const FOCUS_CONFIG = {
   BLACK_BOX: {
     /** 录音最大时长（秒）- 个人使用，不设上限，设置为极大值 */
     MAX_RECORDING_DURATION: 86400,
-    /** 转写 API 超时（毫秒）- Groq 极快，通常 1-2 秒 */
-    TRANSCRIBE_TIMEOUT: 10000,
+    /** 转写 API 超时（毫秒）- 需略大于 Edge Function 的 Groq 超时（25s），确保能收到带 CORS 头的错误响应 */
+    TRANSCRIBE_TIMEOUT: 30000,
     /** 条目每日显示上限 */
     MAX_ENTRIES_PER_DAY: 999999,
   },
