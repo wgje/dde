@@ -6,6 +6,8 @@ import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import {
   createBrowserNetworkSuspendedError,
+  ensureBrowserNetworkSuspensionTracking,
+  getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
@@ -34,6 +36,15 @@ export class SupabaseClientService {
   private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
   private lastReachabilityProbeAt = 0;
   private lastReachabilityProbeResult = true;
+  private authAutoRefreshTakenOver = false;
+  private authAutoRefreshRunning = false;
+  private authAutoRefreshResumeTimer: ReturnType<typeof setTimeout> | null = null;
+  private authAutoRefreshSyncChain: Promise<void> = Promise.resolve();
+  private authAutoRefreshLifecycleBound = false;
+  private authVisibilityChangeHandler: (() => void) | null = null;
+  private authPageShowHandler: ((event: PageTransitionEvent) => void) | null = null;
+  private authOnlineHandler: (() => void) | null = null;
+  private authOfflineHandler: (() => void) | null = null;
 
   private readonly canInitialize: boolean;
   private readonly supabaseUrl: string;
@@ -151,6 +162,8 @@ export class SupabaseClientService {
           this.supabaseAnonKey,
           this.buildClientOptions()
         );
+        this.ensureAuthAutoRefreshLifecycle();
+        void this.syncAuthAutoRefresh('client-init');
         return this.supabase;
       })
       .catch((error) => {
@@ -332,8 +345,166 @@ export class SupabaseClientService {
   }
 
   reset(): void {
+    const client = this.supabase;
+    this.clearAuthAutoRefreshResumeTimer();
+    this.teardownAuthAutoRefreshLifecycle();
+    this.authAutoRefreshTakenOver = false;
+    this.authAutoRefreshRunning = false;
+    this.authAutoRefreshSyncChain = Promise.resolve();
+    if (client) {
+      void client.auth.stopAutoRefresh().catch((error: unknown) => {
+        this.logger.debug('重置时停止 Supabase Auth 自动刷新失败', { error });
+      });
+    }
     this.supabase = null;
     this.initPromise = null;
+  }
+
+  private ensureAuthAutoRefreshLifecycle(): void {
+    if (this.authAutoRefreshLifecycleBound || typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    ensureBrowserNetworkSuspensionTracking();
+
+    this.authVisibilityChangeHandler = () => {
+      void this.syncAuthAutoRefresh('visibilitychange');
+    };
+    this.authPageShowHandler = () => {
+      void this.syncAuthAutoRefresh('pageshow');
+    };
+    this.authOnlineHandler = () => {
+      void this.syncAuthAutoRefresh('online');
+    };
+    this.authOfflineHandler = () => {
+      void this.syncAuthAutoRefresh('offline');
+    };
+
+    document.addEventListener('visibilitychange', this.authVisibilityChangeHandler);
+    window.addEventListener('pageshow', this.authPageShowHandler as EventListener);
+    window.addEventListener('online', this.authOnlineHandler);
+    window.addEventListener('offline', this.authOfflineHandler);
+    this.authAutoRefreshLifecycleBound = true;
+  }
+
+  private teardownAuthAutoRefreshLifecycle(): void {
+    if (typeof document !== 'undefined' && this.authVisibilityChangeHandler) {
+      document.removeEventListener('visibilitychange', this.authVisibilityChangeHandler);
+    }
+
+    if (typeof window !== 'undefined' && this.authPageShowHandler) {
+      window.removeEventListener('pageshow', this.authPageShowHandler as EventListener);
+    }
+
+    if (typeof window !== 'undefined' && this.authOnlineHandler) {
+      window.removeEventListener('online', this.authOnlineHandler);
+    }
+
+    if (typeof window !== 'undefined' && this.authOfflineHandler) {
+      window.removeEventListener('offline', this.authOfflineHandler);
+    }
+
+    this.authVisibilityChangeHandler = null;
+    this.authPageShowHandler = null;
+    this.authOnlineHandler = null;
+    this.authOfflineHandler = null;
+    this.authAutoRefreshLifecycleBound = false;
+  }
+
+  private clearAuthAutoRefreshResumeTimer(): void {
+    if (!this.authAutoRefreshResumeTimer) {
+      return;
+    }
+
+    clearTimeout(this.authAutoRefreshResumeTimer);
+    this.authAutoRefreshResumeTimer = null;
+  }
+
+  private shouldPauseAuthAutoRefresh(): boolean {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return true;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private syncAuthAutoRefresh(
+    reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
+  ): Promise<void> {
+    if (!this.supabase) {
+      return Promise.resolve();
+    }
+
+    this.authAutoRefreshSyncChain = this.authAutoRefreshSyncChain
+      .catch(() => undefined)
+      .then(async () => {
+        const client = this.supabase;
+        if (!client) {
+          return;
+        }
+
+        if (this.shouldPauseAuthAutoRefresh()) {
+          this.clearAuthAutoRefreshResumeTimer();
+          await this.stopAuthAutoRefresh(client, reason);
+          return;
+        }
+
+        if (isBrowserNetworkSuspendedWindow()) {
+          const delayMs = Math.max(getRemainingBrowserNetworkResumeDelayMs(), 50);
+          this.clearAuthAutoRefreshResumeTimer();
+          await this.stopAuthAutoRefresh(client, reason);
+          this.authAutoRefreshResumeTimer = setTimeout(() => {
+            this.authAutoRefreshResumeTimer = null;
+            void this.syncAuthAutoRefresh('resume-timer');
+          }, delayMs);
+          return;
+        }
+
+        this.clearAuthAutoRefreshResumeTimer();
+        await this.startAuthAutoRefresh(client, reason);
+      });
+
+    return this.authAutoRefreshSyncChain;
+  }
+
+  private async stopAuthAutoRefresh(
+    client: SupabaseClient<Database>,
+    reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
+  ): Promise<void> {
+    if (this.authAutoRefreshTakenOver && !this.authAutoRefreshRunning) {
+      return;
+    }
+
+    try {
+      await client.auth.stopAutoRefresh();
+      this.authAutoRefreshTakenOver = true;
+      this.authAutoRefreshRunning = false;
+      this.logger.debug('Supabase Auth 自动刷新已暂停', { reason });
+    } catch (error) {
+      this.logger.warn('暂停 Supabase Auth 自动刷新失败', { reason, error });
+    }
+  }
+
+  private async startAuthAutoRefresh(
+    client: SupabaseClient<Database>,
+    reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
+  ): Promise<void> {
+    if (this.authAutoRefreshTakenOver && this.authAutoRefreshRunning) {
+      return;
+    }
+
+    try {
+      await client.auth.startAutoRefresh();
+      this.authAutoRefreshTakenOver = true;
+      this.authAutoRefreshRunning = true;
+      this.logger.debug('Supabase Auth 自动刷新已启动', { reason });
+    } catch (error) {
+      this.logger.warn('启动 Supabase Auth 自动刷新失败', { reason, error });
+    }
   }
 
   async getSession(): Promise<{ data: { session: Session | null }; error: null | { message: string; status?: number; name?: string } }> {

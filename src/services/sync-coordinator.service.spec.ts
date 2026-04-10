@@ -55,6 +55,11 @@ const createMockSyncState = (overrides?: Partial<SyncState>): SyncState => ({
 
 const mockSyncService = {
   syncState: signal(createMockSyncState()),
+  state: {
+    update: vi.fn((updater: (state: SyncState) => SyncState) => {
+      mockSyncService.syncState.update(updater);
+    }),
+  },
   isLoadingRemote: signal(false),
   setConflict: vi.fn((conflictData) => {
     mockSyncService.syncState.update(state => ({
@@ -116,6 +121,8 @@ const mockActionQueueService = {
 const mockRetryQueueService = {
   length: 0,
   getItems: vi.fn().mockReturnValue([]),
+  removeByEntities: vi.fn().mockReturnValue([]),
+  removeConnectionsReferencingTasks: vi.fn().mockReturnValue([]),
   pressureEvents: 0,
 };
 
@@ -563,6 +570,142 @@ describe('持久化状态管理', () => {
       await vi.waitFor(() => {
         expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
       }, { timeout: 200, interval: 10 });
+    });
+
+    it('自动持久化应使用当前 store 快照而不是陈旧 activeProject，并清理过期重试项', async () => {
+      const staleTask = createTestTask({
+        id: 'task-stale',
+        title: 'Stale Task',
+        updatedAt: '2026-04-10T00:00:00.000Z',
+      });
+      const currentTask = createTestTask({
+        id: 'task-current',
+        title: 'Current Task',
+        updatedAt: '2026-04-10T01:00:00.000Z',
+      });
+      const staleProject = createTestProject({
+        id: 'proj-store-snapshot',
+        tasks: [staleTask],
+        connections: [
+          {
+            id: 'connection-stale',
+            source: 'task-stale',
+            target: 'task-gone',
+            title: 'stale edge',
+          },
+        ],
+      });
+      const currentProject = {
+        ...staleProject,
+        tasks: [currentTask],
+        connections: [],
+      };
+
+      mockProjectStateService.activeProject.set(staleProject);
+      mockProjectStateService.projects.set([staleProject]);
+      mockProjectStateService.getProjectsWithCurrentData.mockImplementation(() => [currentProject]);
+      mockProjectStateService.setProjects.mockClear();
+      mockSyncService.saveProjectSmart.mockClear();
+      mockRetryQueueService.removeByEntities.mockReset();
+      mockRetryQueueService.removeConnectionsReferencingTasks.mockReset();
+      mockRetryQueueService.removeByEntities
+        .mockReturnValueOnce(['task-stale'])
+        .mockReturnValueOnce(['connection-stale']);
+      mockRetryQueueService.removeConnectionsReferencingTasks.mockReturnValueOnce(['connection-stale']);
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
+      });
+
+      expect(mockProjectStateService.setProjects).toHaveBeenCalledWith([currentProject]);
+      expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'proj-store-snapshot',
+          tasks: [currentTask],
+          connections: [],
+        }),
+        'user-123',
+      );
+      expect(mockRetryQueueService.removeByEntities).toHaveBeenNthCalledWith(1, 'task', ['task-stale']);
+      expect(mockRetryQueueService.removeByEntities).toHaveBeenNthCalledWith(2, 'connection', ['connection-stale']);
+      expect(mockRetryQueueService.removeConnectionsReferencingTasks).toHaveBeenCalledWith(
+        'proj-store-snapshot',
+        ['task-stale'],
+      );
+      mockProjectStateService.getProjectsWithCurrentData.mockImplementation(() => mockProjectStateService.projects());
+    });
+
+    it('自动持久化检测到同 id 新快照时应清理过期重试载荷', async () => {
+      const staleTask = createTestTask({
+        id: 'task-shared',
+        title: 'Stale Task',
+        updatedAt: '2026-04-10T00:00:00.000Z',
+      });
+      const currentTask = {
+        ...staleTask,
+        title: 'Current Task',
+        updatedAt: '2026-04-10T01:00:00.000Z',
+      };
+      const staleProject = createTestProject({
+        id: 'proj-superseded-retry',
+        tasks: [staleTask],
+        connections: [
+          {
+            id: 'connection-shared',
+            source: 'task-shared',
+            target: 'task-shared',
+            title: 'stale edge',
+            updatedAt: '2026-04-10T00:00:00.000Z',
+          },
+        ],
+      });
+      const currentProject = {
+        ...staleProject,
+        tasks: [currentTask],
+        connections: [
+          {
+            ...staleProject.connections[0],
+            title: 'current edge',
+            updatedAt: '2026-04-10T01:00:00.000Z',
+          },
+        ],
+      };
+
+      mockProjectStateService.activeProject.set(staleProject);
+      mockProjectStateService.projects.set([staleProject]);
+      mockProjectStateService.getProjectsWithCurrentData.mockImplementation(() => [currentProject]);
+      mockProjectStateService.setProjects.mockClear();
+      mockSyncService.saveProjectSmart.mockClear();
+      mockRetryQueueService.removeByEntities.mockReset();
+      mockRetryQueueService.removeConnectionsReferencingTasks.mockReset();
+      mockRetryQueueService.removeByEntities
+        .mockReturnValueOnce(['task-shared'])
+        .mockReturnValueOnce(['connection-shared']);
+      mockRetryQueueService.removeConnectionsReferencingTasks.mockReturnValue([]);
+
+      service.schedulePersist();
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await vi.waitFor(() => {
+        expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1);
+      });
+
+      expect(mockProjectStateService.setProjects).toHaveBeenCalledWith([currentProject]);
+      expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'proj-superseded-retry',
+          tasks: [currentTask],
+          connections: currentProject.connections,
+        }),
+        'user-123',
+      );
+      expect(mockRetryQueueService.removeByEntities).toHaveBeenNthCalledWith(1, 'task', ['task-shared']);
+      expect(mockRetryQueueService.removeByEntities).toHaveBeenNthCalledWith(2, 'connection', ['connection-shared']);
+      expect(mockRetryQueueService.removeConnectionsReferencingTasks).not.toHaveBeenCalled();
+      mockProjectStateService.getProjectsWithCurrentData.mockImplementation(() => mockProjectStateService.projects());
     });
 
     it('连续调用 schedulePersist 应该只触发一次持久化', async () => {

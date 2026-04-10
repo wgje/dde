@@ -1641,12 +1641,145 @@ export class SyncCoordinatorService {
     });
     return false;
   }
+
+  private buildPersistTaskSignature(task: Task): string {
+    return JSON.stringify([
+      task.id,
+      task.updatedAt ?? '',
+      task.parentId ?? '',
+      task.stage ?? '',
+      task.order,
+      task.rank,
+      task.displayId,
+      task.x,
+      task.y,
+      task.status,
+      task.deletedAt ?? '',
+      task.shortId ?? '',
+    ]);
+  }
+
+  private buildPersistConnectionSignature(connection: Connection): string {
+    return JSON.stringify([
+      connection.id,
+      connection.source,
+      connection.target,
+      connection.title ?? '',
+      connection.description ?? '',
+      connection.updatedAt ?? '',
+      connection.deletedAt ?? '',
+    ]);
+  }
+
+  private buildPersistDataSignature(project: Project): string {
+    const taskSignature = [...project.tasks]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(task => this.buildPersistTaskSignature(task));
+    const connectionSignature = [...project.connections]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(connection => this.buildPersistConnectionSignature(connection));
+
+    return JSON.stringify({ taskSignature, connectionSignature });
+  }
+
+  private reconcileStaleRetryEntries(
+    projectId: string,
+    supersededTaskIds: string[],
+    supersededConnectionIds: string[],
+    deletedTaskIds: string[],
+  ): void {
+    const removedTaskIds = supersededTaskIds.length > 0
+      ? this.retryQueue.removeByEntities('task', supersededTaskIds)
+      : [];
+    const removedConnectionIds = supersededConnectionIds.length > 0
+      ? this.retryQueue.removeByEntities('connection', supersededConnectionIds)
+      : [];
+    const removedConnectionIdsByTask = deletedTaskIds.length > 0
+      ? this.retryQueue.removeConnectionsReferencingTasks(projectId, deletedTaskIds)
+      : [];
+
+    if (
+      removedTaskIds.length === 0
+      && removedConnectionIds.length === 0
+      && removedConnectionIdsByTask.length === 0
+    ) {
+      return;
+    }
+
+    this.core.state?.update?.(state => ({
+      ...state,
+      pendingCount: this.retryQueue.length,
+    }));
+
+    this.logger.info('自动持久化前已清理陈旧重试项', {
+      projectId,
+      removedTaskRetryCount: removedTaskIds.length,
+      removedConnectionRetryCount: removedConnectionIds.length + removedConnectionIdsByTask.length,
+    });
+  }
   
   private async doPersistActiveProject(persistVersion: number): Promise<PersistOutcome> {
-    const project = this.projectState.activeProject();
+    const activeProject = this.projectState.activeProject();
+    const activeProjectId = this.projectState.activeProjectId() ?? activeProject?.id ?? null;
     // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
     const projects = this.projectState.getProjectsWithCurrentData();
+    const currentProject = activeProjectId
+      ? projects.find(candidate => candidate.id === activeProjectId) ?? activeProject ?? null
+      : activeProject;
     const now = new Date().toISOString();
+
+    if (activeProject && currentProject && activeProject.id === currentProject.id) {
+      const activeSignature = this.buildPersistDataSignature(activeProject);
+      const currentSignature = this.buildPersistDataSignature(currentProject);
+      if (activeSignature !== currentSignature) {
+        const activeTasksById = new Map(activeProject.tasks.map(task => [task.id, task]));
+        const activeConnectionsById = new Map(activeProject.connections.map(connection => [connection.id, connection]));
+        const currentTaskIds = new Set(currentProject.tasks.map(task => task.id));
+        const currentConnectionIds = new Set(currentProject.connections.map(connection => connection.id));
+        const staleTaskIds = activeProject.tasks
+          .filter(task => !currentTaskIds.has(task.id))
+          .map(task => task.id);
+        const changedTaskIds = currentProject.tasks
+          .filter(task => {
+            const activeTask = activeTasksById.get(task.id);
+            return activeTask !== undefined
+              && this.buildPersistTaskSignature(activeTask) !== this.buildPersistTaskSignature(task);
+          })
+          .map(task => task.id);
+        const staleConnectionIds = activeProject.connections
+          .filter(connection => !currentConnectionIds.has(connection.id))
+          .map(connection => connection.id);
+        const changedConnectionIds = currentProject.connections
+          .filter(connection => {
+            const activeConnection = activeConnectionsById.get(connection.id);
+            return activeConnection !== undefined
+              && this.buildPersistConnectionSignature(activeConnection) !== this.buildPersistConnectionSignature(connection);
+          })
+          .map(connection => connection.id);
+        const supersededTaskIds = Array.from(new Set([...staleTaskIds, ...changedTaskIds]));
+        const supersededConnectionIds = Array.from(new Set([...staleConnectionIds, ...changedConnectionIds]));
+
+        this.projectState.setProjects(projects);
+        this.reconcileStaleRetryEntries(
+          currentProject.id,
+          supersededTaskIds,
+          supersededConnectionIds,
+          staleTaskIds,
+        );
+
+        this.logger.info('自动持久化改用当前 store 快照，已修复 ProjectStore 陈旧任务/连接', {
+          projectId: currentProject.id,
+          staleTaskCount: staleTaskIds.length,
+          staleConnectionCount: staleConnectionIds.length,
+          changedTaskCount: changedTaskIds.length,
+          changedConnectionCount: changedConnectionIds.length,
+        });
+      }
+    }
+
+    const project = currentProject
+      ? { ...currentProject, updatedAt: now }
+      : null;
     
     // 更新活动项目的 updatedAt 时间戳
     const updatedProjects = projects.map(p => 

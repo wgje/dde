@@ -2,15 +2,21 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
-import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
+import {
+  resetBrowserNetworkSuspensionTrackingForTests,
+} from '../utils/browser-network-suspension';
 
-const createClientMock = vi.fn(() => ({
+const authClientMock = {
   auth: {
     getSession: vi.fn().mockResolvedValue({ data: { session: null }, error: null }),
     signInWithPassword: vi.fn().mockResolvedValue({ data: {}, error: null }),
     signOut: vi.fn().mockResolvedValue(undefined),
+    startAutoRefresh: vi.fn().mockResolvedValue(undefined),
+    stopAutoRefresh: vi.fn().mockResolvedValue(undefined),
   },
-}));
+};
+
+const createClientMock = vi.fn(() => authClientMock);
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: createClientMock,
@@ -27,13 +33,27 @@ function setVisibilityState(state: DocumentVisibilityState): void {
   });
 }
 
+function setNavigatorOnLine(online: boolean): void {
+  Object.defineProperty(navigator, 'onLine', {
+    configurable: true,
+    value: online,
+  });
+}
+
 describe('SupabaseClientService', () => {
   let service: SupabaseClientService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
+    authClientMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+    authClientMock.auth.signInWithPassword.mockResolvedValue({ data: {}, error: null });
+    authClientMock.auth.signOut.mockResolvedValue(undefined);
+    authClientMock.auth.startAutoRefresh.mockResolvedValue(undefined);
+    authClientMock.auth.stopAutoRefresh.mockResolvedValue(undefined);
     setVisibilityState('visible');
+    setNavigatorOnLine(true);
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     const injector = Injector.create({
       providers: [
@@ -47,6 +67,9 @@ describe('SupabaseClientService', () => {
   afterEach(() => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    setNavigatorOnLine(true);
+    service.reset();
+    vi.useRealTimers();
     fetchSpy.mockRestore();
   });
 
@@ -252,6 +275,102 @@ describe('SupabaseClientService', () => {
       expect(listener).not.toHaveBeenCalled();
       expect(service.isOfflineMode()).toBe(false);
       unsubscribe();
+    });
+
+    it('client 初始化后应接管 Auth 自动刷新，并在可见状态下启动', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+
+      await service.clientAsync();
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
+      expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
+    });
+
+    it('页面恢复时应等待浏览器网络恢复宽限期结束后再启动 Auth 自动刷新', async () => {
+      vi.useFakeTimers();
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+
+      await service.clientAsync();
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
+
+      authClientMock.auth.startAutoRefresh.mockClear();
+      setVisibilityState('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+
+      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
+
+      authClientMock.auth.stopAutoRefresh.mockClear();
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await Promise.resolve();
+
+      expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
+      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2);
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('网络恢复时应等待浏览器网络恢复宽限期结束后再启动 Auth 自动刷新', async () => {
+      vi.useFakeTimers();
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+
+      await service.clientAsync();
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
+
+      authClientMock.auth.startAutoRefresh.mockClear();
+      setNavigatorOnLine(false);
+      window.dispatchEvent(new Event('offline'));
+      await Promise.resolve();
+
+      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
+
+      authClientMock.auth.stopAutoRefresh.mockClear();
+      setNavigatorOnLine(true);
+      window.dispatchEvent(new Event('online'));
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2);
+      await Promise.resolve();
+
+      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
     });
   });
 
