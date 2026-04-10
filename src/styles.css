@@ -846,8 +846,7 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
 
 /* 折叠的区域 */
 .collapsed-section {
-  content-visibility: hidden;
-  contain-intrinsic-size: 0 0;
+  contain: layout paint;
 }
 
 /* ========== 拖拽幽灵元素样式 ========== */

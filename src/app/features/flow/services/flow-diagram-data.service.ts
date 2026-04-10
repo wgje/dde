@@ -391,6 +391,13 @@ export class FlowDiagramDataService {
     }, 1000);
   }
 
+  cancelPendingViewStateSave(): void {
+    if (this.viewStateSaveTimer) {
+      clearTimeout(this.viewStateSaveTimer);
+      this.viewStateSaveTimer = null;
+    }
+  }
+
   /**
    * 恢复上次保存的视图状态
    */

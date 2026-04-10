@@ -20,6 +20,14 @@ export const FOCUS_CONFIG = {
     IDLE_RECHECK_THRESHOLD: 5 * 60 * 1000,
   },
   
+  // 聚光灯配置
+  SPOTLIGHT: {
+    /** 任务完成后延迟显示下一个（毫秒） */
+    NEXT_TASK_DELAY: 500,
+    /** 背景地质层透明度 */
+    STRATA_BACKGROUND_OPACITY: 0.3,
+  },
+  
   // 地质层配置
   STRATA: {
     /** 显示的最大天数 */
@@ -106,3 +114,49 @@ export const FOCUS_CONFIG = {
     ENTRY_ARCHIVE: ['a', 'A'],
   },
 } as const;
+
+/**
+ * 专注模式错误码
+ * @reserved 预留的错误码系统，供专注模式错误处理使用
+ */
+export const FocusErrorCodes = {
+  /** 配额已用完 */
+  QUOTA_EXCEEDED: 'FOCUS_QUOTA_EXCEEDED',
+  /** 转写失败 */
+  TRANSCRIBE_FAILED: 'FOCUS_TRANSCRIBE_FAILED',
+  /** 浏览器不支持录音 */
+  RECORDING_NOT_SUPPORTED: 'FOCUS_RECORDING_NOT_SUPPORTED',
+  /** 麦克风权限被拒绝 */
+  RECORDING_PERMISSION_DENIED: 'FOCUS_RECORDING_PERMISSION_DENIED',
+  /** 录音太短 */
+  RECORDING_TOO_SHORT: 'FOCUS_RECORDING_TOO_SHORT',
+  /** 录音太长 */
+  RECORDING_TOO_LONG: 'FOCUS_RECORDING_TOO_LONG',
+  /** 网络错误 */
+  NETWORK_ERROR: 'FOCUS_NETWORK_ERROR',
+  /** 条目不存在 */
+  ENTRY_NOT_FOUND: 'FOCUS_ENTRY_NOT_FOUND',
+  /** 跳过次数已达上限 */
+  SNOOZE_LIMIT_EXCEEDED: 'FOCUS_SNOOZE_LIMIT_EXCEEDED',
+  /** 服务不可用 */
+  SERVICE_UNAVAILABLE: 'FOCUS_SERVICE_UNAVAILABLE',
+} as const;
+
+export type FocusErrorCode = typeof FocusErrorCodes[keyof typeof FocusErrorCodes];
+
+/**
+ * 专注模式错误消息
+ * @reserved 预留的错误消息映射，供专注模式错误处理使用
+ */
+export const FocusErrorMessages: Record<FocusErrorCode, string> = {
+  [FocusErrorCodes.QUOTA_EXCEEDED]: '今日转写次数已达上限',
+  [FocusErrorCodes.TRANSCRIBE_FAILED]: '语音转写失败，请重试',
+  [FocusErrorCodes.RECORDING_NOT_SUPPORTED]: '当前浏览器不支持录音功能',
+  [FocusErrorCodes.RECORDING_PERMISSION_DENIED]: '请允许麦克风权限后重试',
+  [FocusErrorCodes.RECORDING_TOO_SHORT]: '录音太短，请按住久一点',
+  [FocusErrorCodes.RECORDING_TOO_LONG]: '录音超过最大时长限制',
+  [FocusErrorCodes.NETWORK_ERROR]: '网络连接失败，已保存待重试',
+  [FocusErrorCodes.ENTRY_NOT_FOUND]: '条目不存在',
+  [FocusErrorCodes.SNOOZE_LIMIT_EXCEEDED]: '今日跳过次数已达上限',
+  [FocusErrorCodes.SERVICE_UNAVAILABLE]: '转写服务暂不可用',
+};

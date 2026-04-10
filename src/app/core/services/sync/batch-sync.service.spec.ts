@@ -42,6 +42,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
 describe('BatchSyncService owner isolation', () => {
   let service: BatchSyncService;
   let callbacks: BatchSyncCallbacks;
+  let taskLookupRows: Array<{ id: string }>;
 
   const mockClient = {
     auth: {
@@ -53,7 +54,7 @@ describe('BatchSyncService owner isolation', () => {
           select: vi.fn(() => ({
             eq: vi.fn(() => ({
               in: vi.fn(() => ({
-                is: vi.fn(async () => ({ data: [], error: null })),
+                is: vi.fn(async () => ({ data: taskLookupRows, error: null })),
               })),
             })),
           })),
@@ -126,6 +127,7 @@ describe('BatchSyncService owner isolation', () => {
     vi.clearAllMocks();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    taskLookupRows = [];
     mockClient.auth.getSession.mockReset();
     mockSessionManager.tryRefreshSession.mockReset();
     mockSessionManager.tryRefreshSession.mockImplementation(async () => false);
@@ -347,8 +349,113 @@ describe('BatchSyncService owner isolation', () => {
       connection,
       'project-owner-pass-through-batch',
       true,
+      true,
       false,
+      'user-a',
+    );
+  });
+
+  it('连接通过批量远端任务校验后应跳过逐条任务存在性查询', async () => {
+    const sourceTask: Task = {
+      id: 'task-remote-source',
+      title: 'Task Remote Source',
+      content: '',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: '1',
+      createdDate: '2026-03-31T00:00:00.000Z',
+    };
+    const targetTask: Task = {
+      ...sourceTask,
+      id: 'task-remote-target',
+      title: 'Task Remote Target',
+      displayId: '2',
+    };
+    const connection: Connection = {
+      id: 'connection-remote-validated',
+      source: sourceTask.id,
+      target: targetTask.id,
+    };
+    const project = createProject({
+      id: 'project-remote-task-validation',
+      tasks: [sourceTask, targetTask],
+      connections: [connection],
+    });
+    taskLookupRows = [{ id: sourceTask.id }, { id: targetTask.id }];
+    callbacks.pushTask = vi.fn().mockResolvedValue({ success: false, retryEnqueued: false });
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.failedTaskIds).toEqual([sourceTask.id, targetTask.id]);
+    expect(result.failedConnectionIds).toEqual([]);
+    expect(callbacks.pushConnection).toHaveBeenCalledWith(
+      connection,
+      'project-remote-task-validation',
+      true,
+      true,
       false,
+      'user-a',
+    );
+  });
+
+  it('远端任务校验缺失任一端点时不应推送连接', async () => {
+    const sourceTask: Task = {
+      id: 'task-missing-target-source',
+      title: 'Task Missing Target Source',
+      content: '',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: '1',
+      createdDate: '2026-03-31T00:00:00.000Z',
+    };
+    const targetTask: Task = {
+      ...sourceTask,
+      id: 'task-missing-target',
+      title: 'Task Missing Target',
+      displayId: '2',
+    };
+    const connection: Connection = {
+      id: 'connection-missing-target',
+      source: sourceTask.id,
+      target: targetTask.id,
+    };
+    const project = createProject({
+      id: 'project-missing-target-validation',
+      tasks: [sourceTask, targetTask],
+      connections: [connection],
+    });
+    taskLookupRows = [{ id: sourceTask.id }];
+    callbacks.pushTask = vi.fn().mockResolvedValue({ success: false, retryEnqueued: false });
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.failedConnectionIds).toEqual([connection.id]);
+    expect(callbacks.pushConnection).not.toHaveBeenCalled();
+    expect(callbacks.addToRetryQueue).toHaveBeenCalledWith(
+      'connection',
+      'upsert',
+      connection,
+      'project-missing-target-validation',
       'user-a',
     );
   });

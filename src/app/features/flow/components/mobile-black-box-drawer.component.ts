@@ -90,8 +90,8 @@ import {
           
           <!-- 空状态 -->
           @if (entriesByDate().length === 0) {
-            <div class="py-6 text-center text-xs text-stone-400 dark:text-stone-500">
-              <p class="mb-1">按住按钮开始录音</p>
+            <div class="py-2 text-center text-[10px] leading-tight text-stone-400 dark:text-stone-500 sm:py-6 sm:text-xs">
+              <p class="mb-0.5 sm:mb-1">按住按钮开始录音</p>
               <p class="opacity-60">语音会自动转为文字</p>
             </div>
           }

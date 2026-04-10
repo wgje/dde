@@ -6,6 +6,7 @@ import { ThemeService } from '../../../../services/theme.service';
 import { FlowLayoutService } from './flow-layout.service';
 import { FlowSelectionService } from './flow-selection.service';
 import { FlowZoomService } from './flow-zoom.service';
+import type { ViewState } from './flow-zoom.service';
 import { FlowEventService } from './flow-event.service';
 import { FlowTemplateService } from './flow-template.service';
 import { FlowLinkTemplateService } from './flow-link-template.service';
@@ -40,6 +41,9 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
   providedIn: 'root'
 })
 export class FlowDiagramService {
+  private static readonly MIN_SAFE_DIAGRAM_WIDTH = 220;
+  private static readonly MIN_SAFE_DIAGRAM_HEIGHT = 160;
+
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly uiState = inject(UiStateService);
   private readonly loggerService = inject(LoggerService);
@@ -71,6 +75,10 @@ export class FlowDiagramService {
 
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private resizeRecoveryRafId: number | null = null;
+  private resizeRecoveryArmed = false;
+  private lastRecoverableViewState: ViewState | null = null;
+  private lastStableViewState: ViewState | null = null;
   
   // ========== 僵尸模式 ==========
   private isSuspended = false;
@@ -159,6 +167,9 @@ export class FlowDiagramService {
     try {
       this.isDestroyed = false;
       this.diagramDiv = container;
+      this.resizeRecoveryArmed = !this.isSafeDiagramSize(container.clientWidth, container.clientHeight);
+      this.lastRecoverableViewState = null;
+      this.lastStableViewState = null;
       
       if (environment.gojsLicenseKey) {
         (go.Diagram as unknown as { licenseKey: string }).licenseKey = environment.gojsLicenseKey;
@@ -234,7 +245,7 @@ export class FlowDiagramService {
       // 添加视口变化监听（用于保存视图状态）
       // 【修复 C-07】存储 handler 引用，dispose() 时显式移除，防止监听器泄漏
       this.viewportBoundsHandler = () => {
-        this.dataService.saveViewState();
+        this.handleViewportBoundsChanged();
       };
       this.diagram.addDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
       
@@ -249,6 +260,7 @@ export class FlowDiagramService {
       this.layoutService.setDiagram(this.diagram);
       this.selectionService.setDiagram(this.diagram);
       this.zoomService.setDiagram(this.diagram);
+      this.zoomService.setViewStatePersistenceGuard(() => this.canPersistViewState());
       
       // 初始化时设置正确的画布背景色
       this.applyCanvasBackground();
@@ -732,6 +744,9 @@ export class FlowDiagramService {
 
   dispose(): void {
     this.isDestroyed = true;
+    this.resizeRecoveryArmed = false;
+    this.lastRecoverableViewState = null;
+    this.lastStableViewState = null;
     
     // 清理数据服务
     this.dataService.dispose();
@@ -770,6 +785,7 @@ export class FlowDiagramService {
     // 清理子服务
     this.layoutService.dispose();
     this.selectionService.setDiagram(null);
+    this.zoomService.setViewStatePersistenceGuard(null);
     this.zoomService.dispose();
     
     this.logger.info('GoJS Diagram 已销毁');
@@ -949,7 +965,15 @@ export class FlowDiagramService {
   private setupResizeObserver(): void {
     if (!this.diagramDiv) return;
     
-    this.resizeObserver = new ResizeObserver(() => {
+    this.resizeObserver = new ResizeObserver((entries) => {
+      const latestEntry = entries[entries.length - 1];
+      const entryWidth = latestEntry?.contentRect.width ?? this.diagramDiv?.clientWidth ?? 0;
+      const entryHeight = latestEntry?.contentRect.height ?? this.diagramDiv?.clientHeight ?? 0;
+
+      if (!this.isSafeDiagramSize(entryWidth, entryHeight)) {
+        this.armResizeRecovery();
+      }
+
       if (this.resizeDebounceTimer) {
         clearTimeout(this.resizeDebounceTimer);
       }
@@ -959,10 +983,8 @@ export class FlowDiagramService {
         
         const width = this.diagramDiv.clientWidth;
         const height = this.diagramDiv.clientHeight;
-        
-        if (width > 0 && height > 0) {
-          this.diagram.requestUpdate();
-        }
+
+        this.handleDiagramContainerResize(width, height);
       }, UI_CONFIG.RESIZE_DEBOUNCE_DELAY);
     });
     
@@ -974,7 +996,233 @@ export class FlowDiagramService {
       clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
     }
+    if (this.resizeRecoveryRafId !== null) {
+      cancelAnimationFrame(this.resizeRecoveryRafId);
+      this.resizeRecoveryRafId = null;
+    }
     this.dataService.clearTimers();
+  }
+
+  private handleViewportBoundsChanged(): void {
+    this.captureStableViewState();
+    if (!this.canPersistViewState()) {
+      return;
+    }
+    this.dataService.saveViewState();
+  }
+
+  private handleDiagramContainerResize(width: number, height: number): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
+      return;
+    }
+
+    if (width <= 0 || height <= 0) {
+      this.armResizeRecovery();
+      return;
+    }
+
+    if (!this.isSafeDiagramSize(width, height)) {
+      this.armResizeRecovery();
+      return;
+    }
+
+    this.diagram.requestUpdate();
+
+    if (this.resizeRecoveryArmed) {
+      this.scheduleResizeRecovery();
+    }
+  }
+
+  private scheduleResizeRecovery(): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
+      return;
+    }
+
+    if (this.resizeRecoveryRafId !== null) {
+      cancelAnimationFrame(this.resizeRecoveryRafId);
+      this.resizeRecoveryRafId = null;
+    }
+
+    this.zone.runOutsideAngular(() => {
+      this.resizeRecoveryRafId = requestAnimationFrame(() => {
+        this.resizeRecoveryRafId = requestAnimationFrame(() => {
+          this.resizeRecoveryRafId = null;
+          this.recoverDiagramAfterUnsafeResize();
+        });
+      });
+    });
+  }
+
+  private recoverDiagramAfterUnsafeResize(): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
+      return;
+    }
+
+    const width = this.diagramDiv.clientWidth;
+    const height = this.diagramDiv.clientHeight;
+    if (!this.isSafeDiagramSize(width, height)) {
+      return;
+    }
+
+    this.diagram.updateAllTargetBindings();
+    this.diagram.requestUpdate();
+
+    if (!this.hasVisibleDiagramContent() && !this.restoreBestKnownViewState()) {
+      this.zoomService.fitToContents();
+    }
+
+    this.diagram.requestUpdate();
+    this.overviewService.refreshOverview();
+    this.resizeRecoveryArmed = false;
+    this.captureStableViewState();
+
+    if (this.canPersistViewState()) {
+      this.dataService.saveViewState();
+    }
+  }
+
+  private captureStableViewState(): void {
+    if (!this.diagram || !this.canPersistViewState()) {
+      return;
+    }
+
+    const viewState: ViewState = {
+      scale: this.diagram.scale,
+      positionX: this.diagram.position.x,
+      positionY: this.diagram.position.y,
+    };
+
+    this.lastRecoverableViewState = viewState;
+
+    if (this.hasVisibleDiagramContent()) {
+      this.lastStableViewState = viewState;
+    }
+  }
+
+  private restoreBestKnownViewState(): boolean {
+    const recoverableViewState = this.normalizeViewState(this.lastRecoverableViewState);
+    const stableViewState = this.normalizeViewState(this.lastStableViewState);
+
+    if (recoverableViewState) {
+      this.applyViewState(recoverableViewState);
+      if (this.hasVisibleDiagramContent()) {
+        return true;
+      }
+    }
+
+    if (stableViewState) {
+      this.applyViewState(stableViewState);
+      if (this.hasVisibleDiagramContent()) {
+        return true;
+      }
+    }
+
+    const persistedViewState = this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
+    if (!persistedViewState) {
+      if (recoverableViewState && !stableViewState) {
+        this.applyViewState(recoverableViewState);
+        return true;
+      }
+      return false;
+    }
+
+    this.applyViewState(persistedViewState);
+    if (this.hasVisibleDiagramContent()) {
+      return true;
+    }
+
+    if (recoverableViewState && !stableViewState) {
+      this.applyViewState(recoverableViewState);
+      return true;
+    }
+
+    return false;
+  }
+
+  private armResizeRecovery(): void {
+    this.resizeRecoveryArmed = true;
+    this.dataService.cancelPendingViewStateSave();
+    this.zoomService.cancelPendingViewStateSave();
+  }
+
+  private applyViewState(viewState: ViewState): void {
+    if (!this.diagram) {
+      return;
+    }
+
+    this.diagram.scale = viewState.scale;
+    this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
+  }
+
+  private normalizeViewState(viewState: ViewState | null | undefined): ViewState | null {
+    if (!viewState) {
+      return null;
+    }
+
+    if (
+      !Number.isFinite(viewState.scale) ||
+      viewState.scale <= 0 ||
+      viewState.scale > 4 ||
+      !Number.isFinite(viewState.positionX) ||
+      !Number.isFinite(viewState.positionY)
+    ) {
+      return null;
+    }
+
+    return {
+      scale: viewState.scale,
+      positionX: viewState.positionX,
+      positionY: viewState.positionY,
+    };
+  }
+
+  private canPersistViewState(): boolean {
+    if (!this.diagram || this.resizeRecoveryArmed) {
+      return false;
+    }
+
+    return this.isSafeDiagramSize(this.diagramDiv?.clientWidth ?? 0, this.diagramDiv?.clientHeight ?? 0)
+      && Number.isFinite(this.diagram.scale)
+      && this.diagram.scale > 0
+      && Number.isFinite(this.diagram.position.x)
+      && Number.isFinite(this.diagram.position.y);
+  }
+
+  private hasVisibleDiagramContent(): boolean {
+    if (!this.diagram) {
+      return false;
+    }
+
+    const viewportBounds = this.diagram.viewportBounds;
+    if (!viewportBounds.isReal() || viewportBounds.width <= 0 || viewportBounds.height <= 0) {
+      return false;
+    }
+
+    const nodeCount = this.getDiagramNodeCount();
+    if (nodeCount === 0) {
+      return true;
+    }
+
+    const documentBounds = this.diagram.documentBounds;
+    if (!documentBounds.isReal() || documentBounds.width <= 0 || documentBounds.height <= 0) {
+      return false;
+    }
+
+    return viewportBounds.intersectsRect(documentBounds);
+  }
+
+  private getDiagramNodeCount(): number {
+    if (!this.diagram) {
+      return 0;
+    }
+
+    const diagramWithNodes = this.diagram as go.Diagram & { nodes?: { count?: number } };
+    return typeof diagramWithNodes.nodes?.count === 'number' ? diagramWithNodes.nodes.count : 0;
+  }
+
+  private isSafeDiagramSize(width: number, height: number): boolean {
+    return width >= FlowDiagramService.MIN_SAFE_DIAGRAM_WIDTH
+      && height >= FlowDiagramService.MIN_SAFE_DIAGRAM_HEIGHT;
   }
   
   private handleError(userMessage: string, error: unknown): void {

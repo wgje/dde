@@ -39,6 +39,7 @@ export class FlowZoomService {
   
   /** 视图状态保存定时器 */
   private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private viewStatePersistenceGuard: (() => boolean) | null = null;
   
   /** 默认缩放范围 */
   private readonly MIN_SCALE = 0.1;
@@ -51,6 +52,17 @@ export class FlowZoomService {
    */
   setDiagram(diagram: go.Diagram | null): void {
     this.diagram = diagram;
+  }
+
+  setViewStatePersistenceGuard(guard: (() => boolean) | null): void {
+    this.viewStatePersistenceGuard = guard;
+  }
+
+  cancelPendingViewStateSave(): void {
+    if (this.viewStateSaveTimer) {
+      clearTimeout(this.viewStateSaveTimer);
+      this.viewStateSaveTimer = null;
+    }
   }
   
   /**
@@ -208,6 +220,8 @@ export class FlowZoomService {
    * 保存视图状态到 Store
    */
   saveViewState(): void {
+    if (!this.isViewStatePersistenceAllowed()) return;
+
     const viewState = this.getCurrentViewState();
     const projectId = this.projectState.activeProjectId();
     if (viewState && projectId) {
@@ -236,14 +250,16 @@ export class FlowZoomService {
    * 延迟保存视图状态（防抖）
    */
   private scheduleSaveViewState(): void {
-    if (this.viewStateSaveTimer) {
-      clearTimeout(this.viewStateSaveTimer);
-    }
+    this.cancelPendingViewStateSave();
     
     this.viewStateSaveTimer = setTimeout(() => {
       this.saveViewState();
       this.viewStateSaveTimer = null;
     }, 300);
+  }
+
+  private isViewStatePersistenceAllowed(): boolean {
+    return this.viewStatePersistenceGuard ? this.viewStatePersistenceGuard() : true;
   }
   
   /**
@@ -273,10 +289,8 @@ export class FlowZoomService {
    * 清理资源
    */
   dispose(): void {
-    if (this.viewStateSaveTimer) {
-      clearTimeout(this.viewStateSaveTimer);
-      this.viewStateSaveTimer = null;
-    }
+    this.cancelPendingViewStateSave();
+    this.viewStatePersistenceGuard = null;
     this.diagram = null;
   }
 }

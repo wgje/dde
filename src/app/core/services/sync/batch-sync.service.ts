@@ -818,7 +818,8 @@ export class BatchSyncService {
         try {
           const connection = connectionsToSync[i];
           this.retryQueue.removeByEntity('connection', connection.id);
-          const connectionResult = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, false, false, userId);
+          // 中文注释：此处已用批量查询构建 allSyncedTaskIds，避免 pushConnection 再次逐条查询 tasks 造成 N+1 校验风暴。
+          const connectionResult = await this.callbacks.pushConnection(connection, projectSnapshot.id, true, true, false, userId);
           if (!connectionResult.success) {
             failedConnectionIds.push(connection.id);
             if (connectionResult.retryEnqueued) {
