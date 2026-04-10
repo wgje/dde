@@ -19,6 +19,7 @@ import { ErrorCodes, ErrorMessages } from '../utils/result';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import { environment } from '../environments/environment';
 import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
+import type { Session } from '@supabase/supabase-js';
 import { 
   isRecording, 
   isTranscribing, 
@@ -517,11 +518,12 @@ export class SpeechToTextService {
     let response = await this.invokeTranscribe(functionUrl, audioBlob, await this.resolveAccessToken('SpeechToText.transcribe', userId));
     if (response.status === 401) {
       this.logger.warn('SpeechToText', 'Edge Function rejected JWT, attempting one session refresh before failing');
-      const refreshed = await this.refreshSessionForTranscribe('SpeechToText.transcribe.retry401');
-
-      if (refreshed) {
-        response = await this.invokeTranscribe(functionUrl, audioBlob, await this.resolveAccessToken('SpeechToText.transcribe.retry', userId));
-      }
+      const refreshedSession = await this.refreshSessionForTranscribe('SpeechToText.transcribe.retry401');
+      response = await this.invokeTranscribe(
+        functionUrl,
+        audioBlob,
+        await this.resolveAccessToken('SpeechToText.transcribe.retry', userId, refreshedSession)
+      );
     }
     
     const responseText = await response.text();
@@ -620,7 +622,11 @@ export class SpeechToTextService {
     return this.replayOfflineCachePromise;
   }
 
-  private async resolveAccessToken(context: string, expectedOwnerUserId: string): Promise<string> {
+  private async resolveAccessToken(
+    context: string,
+    expectedOwnerUserId: string,
+    prefetchedSession: Session | null = null
+  ): Promise<string> {
     await this.auth.ensureRuntimeAuthReady();
 
     if (!this.isRecordingOwnerActive(expectedOwnerUserId)) {
@@ -631,14 +637,20 @@ export class SpeechToTextService {
       throw new Error(this.RETRYABLE_SESSION_RECOVERY_ERROR);
     }
 
-    const client = await this.supabaseClient.clientAsync();
-    if (!client) {
-      this.logger.warn('SpeechToText', 'Supabase client temporarily unavailable while resolving access token', { context });
-      throw new Error(this.RETRYABLE_SESSION_RECOVERY_ERROR);
-    }
+    let session = prefetchedSession;
+    let sessionError: { message?: string } | null = null;
 
-    let { data: sessionData, error: sessionError } = await client.auth.getSession();
-    let session = sessionData.session;
+    if (!session) {
+      const client = await this.supabaseClient.clientAsync();
+      if (!client) {
+        this.logger.warn('SpeechToText', 'Supabase client temporarily unavailable while resolving access token', { context });
+        throw new Error(this.RETRYABLE_SESSION_RECOVERY_ERROR);
+      }
+
+      const sessionResult = await client.auth.getSession();
+      session = sessionResult.data.session;
+      sessionError = sessionResult.error;
+    }
 
     if (session?.user?.id && session.user.id !== expectedOwnerUserId) {
       this.logger.warn('SpeechToText', 'Resolved session belongs to a different owner than the recording', {
@@ -658,10 +670,8 @@ export class SpeechToTextService {
         sessionError: sessionError?.message,
       });
 
-      await this.refreshSessionForTranscribe(`${context}.getSession`);
-
-      ({ data: sessionData, error: sessionError } = await client.auth.getSession());
-      session = sessionData.session;
+      session = await this.refreshSessionForTranscribe(`${context}.getSession`);
+      sessionError = null;
     }
 
     if (session?.user?.id && session.user.id !== expectedOwnerUserId) {
@@ -682,15 +692,19 @@ export class SpeechToTextService {
     return session.access_token;
   }
 
-  private async refreshSessionForTranscribe(context: string): Promise<boolean> {
-    const result = await this.sessionManager.tryRefreshSessionWithReason(context);
-    if (result.refreshed) {
-      return true;
+  private async refreshSessionForTranscribe(context: string): Promise<Session> {
+    const result = await this.sessionManager.tryRefreshSessionWithSession(context);
+    if (result.refreshed && result.session?.access_token && result.session.user?.id) {
+      return result.session;
     }
 
     if (result.reason === 'client-unready') {
       this.logger.warn('SpeechToText', 'Session refresh deferred because client is temporarily unavailable', { context });
       throw new Error(this.RETRYABLE_SESSION_RECOVERY_ERROR);
+    }
+
+    if (result.refreshed) {
+      this.logger.error('SpeechToText', 'Session refresh reported success but returned no usable session', { context });
     }
 
     this.logger.error('SpeechToText', 'Failed to refresh session before transcribe', { context, reason: result.reason ?? 'unknown' });

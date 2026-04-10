@@ -47,6 +47,7 @@ describe('SpeechToTextService', () => {
   };
   let mockSessionManager: {
     tryRefreshSessionWithReason: ReturnType<typeof vi.fn>;
+    tryRefreshSessionWithSession: ReturnType<typeof vi.fn>;
   };
   let mockEventBus: {
     onSessionRestored$: Subject<{ type: 'session-restored'; userId: string; source: string }>;
@@ -158,6 +159,14 @@ describe('SpeechToTextService', () => {
 
     mockSessionManager = {
       tryRefreshSessionWithReason: vi.fn().mockResolvedValue({ refreshed: true }),
+      tryRefreshSessionWithSession: vi.fn().mockResolvedValue({
+        refreshed: true,
+        session: {
+          access_token: 'fresh-session-token',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: 'local-user' }
+        }
+      }),
     };
 
     mockEventBus = {
@@ -309,17 +318,15 @@ describe('SpeechToTextService', () => {
             }
           },
           error: null,
-        })
-        .mockResolvedValueOnce({
-          data: {
-            session: {
-              access_token: 'fresh-token',
-              expires_at: Math.floor(Date.now() / 1000) + 3600,
-              user: { id: 'cloud-user' }
-            }
-          },
-          error: null,
         });
+      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
+        refreshed: true,
+        session: {
+          access_token: 'fresh-token',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: 'cloud-user' }
+        }
+      });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ text: '转写成功', duration: 1 }), {
@@ -332,7 +339,7 @@ describe('SpeechToTextService', () => {
         .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
 
       expect(result).toBe('转写成功');
-      expect(mockSessionManager.tryRefreshSessionWithReason).toHaveBeenCalledWith('SpeechToText.transcribe.getSession');
+      expect(mockSessionManager.tryRefreshSessionWithSession).toHaveBeenCalledWith('SpeechToText.transcribe.getSession');
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
         headers: expect.objectContaining({
@@ -343,27 +350,24 @@ describe('SpeechToTextService', () => {
 
     it('首次收到 401 时应刷新会话并仅重试一次', async () => {
       mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession
-        .mockResolvedValueOnce({
-          data: {
-            session: {
-              access_token: 'first-token',
-              expires_at: Math.floor(Date.now() / 1000) + 3600,
-              user: { id: 'cloud-user' }
-            }
-          },
-          error: null,
-        })
-        .mockResolvedValueOnce({
-          data: {
-            session: {
-              access_token: 'second-token',
-              expires_at: Math.floor(Date.now() / 1000) + 3600,
-              user: { id: 'cloud-user' }
-            }
-          },
-          error: null,
-        });
+      mockAuthApi.getSession.mockResolvedValueOnce({
+        data: {
+          session: {
+            access_token: 'first-token',
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            user: { id: 'cloud-user' }
+          }
+        },
+        error: null,
+      });
+      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
+        refreshed: true,
+        session: {
+          access_token: 'second-token',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: 'cloud-user' }
+        }
+      });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(new Response(JSON.stringify({ code: 401, message: 'Invalid JWT' }), {
@@ -379,7 +383,7 @@ describe('SpeechToTextService', () => {
         .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
 
       expect(result).toBe('重试成功');
-      expect(mockSessionManager.tryRefreshSessionWithReason).toHaveBeenCalledWith('SpeechToText.transcribe.retry401');
+      expect(mockSessionManager.tryRefreshSessionWithSession).toHaveBeenCalledWith('SpeechToText.transcribe.retry401');
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
         headers: expect.objectContaining({
@@ -393,13 +397,56 @@ describe('SpeechToTextService', () => {
       });
     });
 
+    it('401 重试时应直接使用 refresh 返回的新 session，避免再次读到旧 token', async () => {
+      mockAuthService.currentUserId.set('cloud-user');
+      mockAuthApi.getSession.mockResolvedValue({
+        data: {
+          session: {
+            access_token: 'stale-token',
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            user: { id: 'cloud-user' }
+          }
+        },
+        error: null,
+      });
+      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
+        refreshed: true,
+        session: {
+          access_token: 'refreshed-token',
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: 'cloud-user' }
+        }
+      });
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response(JSON.stringify({ code: 401, message: 'Invalid JWT' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' }
+        }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ text: '刷新后成功', duration: 1 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }));
+
+      const result = await (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
+        .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
+
+      expect(result).toBe('刷新后成功');
+      expect(mockAuthApi.getSession).toHaveBeenCalledTimes(1);
+      expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer refreshed-token'
+        })
+      });
+    });
+
     it('刷新失败且原因是 no-session 时应抛出 SYNC_AUTH_EXPIRED', async () => {
       mockAuthService.currentUserId.set('cloud-user');
       mockAuthApi.getSession.mockResolvedValueOnce({
         data: { session: null },
         error: null,
       });
-      mockSessionManager.tryRefreshSessionWithReason.mockResolvedValueOnce({
+      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
         refreshed: false,
         reason: 'no-session'
       });
@@ -461,7 +508,7 @@ describe('SpeechToTextService', () => {
         data: { session: null },
         error: null,
       });
-      mockSessionManager.tryRefreshSessionWithReason.mockResolvedValueOnce({
+      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
         refreshed: false,
         reason: 'client-unready'
       });

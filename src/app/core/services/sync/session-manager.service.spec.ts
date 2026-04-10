@@ -207,4 +207,26 @@ describe('SessionManagerService', () => {
     expect(result).toEqual({ refreshed: true });
     expect(mockAuth.refreshSession).toHaveBeenCalledTimes(1);
   });
+
+  it('should expose refreshed session for callers that must avoid rereading stale getSession data', async () => {
+    const refreshedSession = {
+      access_token: 'fresh-token',
+      refresh_token: 'refresh-token',
+      expires_at: 1,
+      token_type: 'bearer',
+      user: { id: 'user-refresh' },
+    };
+
+    mockAuth.refreshSession.mockResolvedValue({
+      data: { session: refreshedSession },
+      error: null,
+    });
+
+    const result = await service.tryRefreshSessionWithSession('speech:test');
+
+    expect(result).toEqual({
+      refreshed: true,
+      session: refreshedSession,
+    });
+  });
 });

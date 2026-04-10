@@ -19,7 +19,7 @@ import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { EnhancedError } from '../../../../utils/supabase-error';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import {
   isBrowserNetworkSuspendedError,
@@ -37,6 +37,12 @@ interface SessionValidationResult {
   userId?: string;
   deferred?: boolean;
   reason?: 'client-unready';
+}
+
+interface SessionRefreshResult {
+  refreshed: boolean;
+  session?: Session;
+  reason?: 'client-unready' | 'refresh-failed' | 'no-session';
 }
 
 @Injectable({
@@ -147,6 +153,18 @@ export class SessionManagerService {
     refreshed: boolean;
     reason?: 'client-unready' | 'refresh-failed' | 'no-session';
   }> {
+    const result = await this.tryRefreshSessionDetailed(context, { allowWhenExpired: true });
+    if (result.refreshed) {
+      return { refreshed: true };
+    }
+
+    return {
+      refreshed: false,
+      reason: result.reason,
+    };
+  }
+
+  async tryRefreshSessionWithSession(context: string): Promise<SessionRefreshResult> {
     return this.tryRefreshSessionDetailed(context, { allowWhenExpired: true });
   }
 
@@ -170,24 +188,15 @@ export class SessionManagerService {
     };
   }
 
-  private async tryRefreshSessionDetailed(context: string): Promise<{
-    refreshed: boolean;
-    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
-  }>;
+  private async tryRefreshSessionDetailed(context: string): Promise<SessionRefreshResult>;
   private async tryRefreshSessionDetailed(
     context: string,
     options: { allowWhenExpired?: boolean }
-  ): Promise<{
-    refreshed: boolean;
-    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
-  }>;
+  ): Promise<SessionRefreshResult>;
   private async tryRefreshSessionDetailed(
     context: string,
     options: { allowWhenExpired?: boolean } = {}
-  ): Promise<{
-    refreshed: boolean;
-    reason?: 'client-unready' | 'refresh-failed' | 'no-session';
-  }> {
+  ): Promise<SessionRefreshResult> {
     const { allowWhenExpired = false } = options;
 
     if (isBrowserNetworkSuspendedWindow()) {
@@ -239,7 +248,7 @@ export class SessionManagerService {
           this.logger.info('会话过期标志已重置');
         }
         
-        return { refreshed: true };
+        return { refreshed: true, session: data.session };
       } else {
         this.logger.warn('刷新返回空 session', { context });
         return { refreshed: false, reason: 'no-session' };
