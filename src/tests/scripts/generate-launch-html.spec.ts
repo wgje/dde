@@ -60,7 +60,7 @@ describe('generate-launch-html', () => {
     }
   });
 
-  it('generates a narrow launch shell from shared index.html blocks', () => {
+  it('generates a compatibility redirect shell from shared index.html blocks', () => {
     const { root, distDir } = createFixture();
     const { generateLaunchHtml } = require('../../../scripts/generate-launch-html.cjs');
 
@@ -72,12 +72,14 @@ describe('generate-launch-html', () => {
     const launchHtml = fs.readFileSync(path.join(distDir, 'launch.html'), 'utf8');
 
     expect(launchHtml).toContain('<meta charset="utf-8">');
-    expect(launchHtml).toContain('__NANOFLOW_BOOT_FLAGS__');
-    expect(launchHtml).toContain('__LOADER_DISMISS__');
-    expect(launchHtml).toContain('history.replaceState');
+    expect(launchHtml).toContain('nanoflow-launch-mode');
+    expect(launchHtml).toContain('location.replace');
     expect(launchHtml).toContain('loader-status');
-    expect(launchHtml).toContain('polyfills-XYZ999.js');
-    expect(launchHtml).toContain('main-ABC123.js');
+    expect(launchHtml).not.toContain('__NANOFLOW_BOOT_FLAGS__');
+    expect(launchHtml).not.toContain('__LOADER_DISMISS__');
+    expect(launchHtml).not.toContain('history.replaceState');
+    expect(launchHtml).not.toContain('polyfills-XYZ999.js');
+    expect(launchHtml).not.toContain('main-ABC123.js');
     expect(launchHtml).not.toContain('__NANOFLOW_SESSION_PREWARM__');
   });
 
@@ -117,7 +119,7 @@ describe('generate-launch-html', () => {
     expect(launchHtml).toContain('<body');
   });
 
-  it('throws when no entry scripts found in index.html', () => {
+  it('does not depend on Angular entry scripts because launch.html is compat-only', () => {
     const { root, distDir } = createFixture();
     // 覆盖 index.html 移除 entry scripts
     writeFile(
@@ -130,14 +132,10 @@ describe('generate-launch-html', () => {
   <!-- LAUNCH_SHARED_HEAD_END -->
 </head>
 <body>
-  <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
-  <script>window.__FLAGS__ = {};</script>
-  <!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_START --><script>window.__FLAGS__ = {};</script><!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START -->
   <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
-  <!-- LAUNCH_SHARED_LOADER_DISMISS_START -->
-  <script>true;</script>
-  <!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_START --><script>true;</script><!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
 </body>
 </html>`,
     );
@@ -145,6 +143,11 @@ describe('generate-launch-html', () => {
     const { generateLaunchHtml } = require('../../../scripts/generate-launch-html.cjs');
     expect(() =>
       generateLaunchHtml({ distDir, templatePath: path.join(root, 'public', 'launch.html') }),
-    ).toThrow('未在 index.html 中找到 main/polyfills 入口脚本');
+    ).not.toThrow();
+
+    const launchHtml = fs.readFileSync(path.join(distDir, 'launch.html'), 'utf8');
+    expect(launchHtml).toContain('location.replace');
+    expect(launchHtml).not.toContain('main-');
+    expect(launchHtml).not.toContain('polyfills-');
   });
 });

@@ -6,6 +6,7 @@
  * - workspace shell chunk <= 125KB（raw）
  * - modulepreload 数量 <= 10
  * - 首屏 modulepreload 不允许包含 route component chunk
+ * - launch.html 只能作为 legacy compat redirect shell，不能执行 Angular 入口
  * - main 不包含 @angular/compiler
  */
 
@@ -223,6 +224,31 @@ function findEntryDiscoveryByteOffset(html, entryFile) {
   return html.indexOf(entryFile);
 }
 
+function evaluateCompatLaunchShell(options) {
+  const { shellName, html } = options;
+  const violations = [];
+
+  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']compat-redirect["']/i.test(html)) {
+    violations.push(`${shellName} 缺少兼容启动标记`);
+  }
+
+  if (!/location\.replace\(/i.test(html)) {
+    violations.push(`${shellName} 缺少兼容重定向脚本`);
+  }
+
+  if (extractModulepreloadHrefs(html).length > 0) {
+    violations.push(`${shellName} 不应注入 modulepreload`);
+  }
+
+  const hasMainEntry = /<script\b[^>]*src=["'][^"']*main-[^"']+\.js["'][^>]*>/i.test(html);
+  const hasPolyfillsEntry = /<script\b[^>]*src=["'][^"']*polyfills-[^"']+\.js["'][^>]*>/i.test(html);
+  if (hasMainEntry || hasPolyfillsEntry) {
+    violations.push(`${shellName} 不应直接执行 main/polyfills 入口脚本`);
+  }
+
+  return violations;
+}
+
 function evaluateShellPreloads(options) {
   const {
     shellName,
@@ -373,17 +399,11 @@ function evaluateStartupGuard(options = {}) {
   );
 
   if (launchHtml) {
-    violations.push(
-      ...evaluateShellPreloads({
-        shellName: 'launch.html',
-        html: launchHtml,
-        distDir,
-        mainKey,
-        polyfillsKey,
-        launchDiscoveryMaxBytes: launchHtmlMaxDiscoveryBytes,
-        checkDiscovery: true,
-      }),
-    );
+    violations.push(...evaluateCompatLaunchShell({
+      shellName: 'launch.html',
+      html: launchHtml,
+      launchDiscoveryMaxBytes: launchHtmlMaxDiscoveryBytes,
+    }));
   } else {
     violations.push(`未找到构建后的 launch.html: ${launchHtmlPath}`);
   }
@@ -456,6 +476,7 @@ if (require.main === module) {
 module.exports = {
   FORBIDDEN_MODULEPRELOAD_MARKERS,
   FORBIDDEN_MODULEPRELOAD_PATTERNS,
+  evaluateCompatLaunchShell,
   evaluateStartupGuard,
   extractModulepreloadHrefs,
   findEntryDiscoveryByteOffset,

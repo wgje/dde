@@ -80,6 +80,32 @@ function validateDistShell(html, shellName) {
   return violations;
 }
 
+function validateCompatLaunchShell(html, shellName) {
+  const violations = [];
+
+  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']compat-redirect["']/i.test(html)) {
+    violations.push(`${shellName} 缺少兼容启动标记`);
+  }
+
+  if (!/location\.replace\(/i.test(html)) {
+    violations.push(`${shellName} 缺少兼容重定向脚本`);
+  }
+
+  if (/<link\b[^>]*rel=["']modulepreload["'][^>]*>/i.test(html)) {
+    violations.push(`${shellName} 不应注入 modulepreload`);
+  }
+
+  if (/<script\b[^>]*src=["'][^"']*main-[^"']+\.js["'][^>]*>/i.test(html)) {
+    violations.push(`${shellName} 不应直接执行 main 入口脚本`);
+  }
+
+  if (/<script\b[^>]*src=["'][^"']*polyfills-[^"']+\.js["'][^>]*>/i.test(html)) {
+    violations.push(`${shellName} 不应直接执行 polyfills 入口脚本`);
+  }
+
+  return violations;
+}
+
 function validateLaunchSharedMarkers(options = {}) {
   const indexHtmlPath = options.indexHtmlPath || INDEX_HTML_PATH;
   const distIndexHtmlPath = options.distIndexHtmlPath || DIST_INDEX_HTML_PATH;
@@ -98,7 +124,7 @@ function validateLaunchSharedMarkers(options = {}) {
   }
 
   if (fs.existsSync(distLaunchHtmlPath)) {
-    violations.push(...validateDistShell(fs.readFileSync(distLaunchHtmlPath, 'utf8'), 'dist/launch.html'));
+    violations.push(...validateCompatLaunchShell(fs.readFileSync(distLaunchHtmlPath, 'utf8'), 'dist/launch.html'));
   }
 
   return { violations };

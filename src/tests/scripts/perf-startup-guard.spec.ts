@@ -110,7 +110,7 @@ describe('perf-startup-guard', () => {
     expect(findForbiddenModulepreloadFiles({ indexHtml: html, distDir })).toEqual(['chunk-text-view.js']);
   });
 
-  it('flags launch shell when main/polyfills preloads are missing', () => {
+  it('flags launch shell when it behaves like a second executable startup entry', () => {
     const root = createDistFixture();
     const launchHtmlPath = path.join(root, 'browser', 'launch.html');
     const evaluateStartupGuard = require('../../../scripts/perf-startup-guard.cjs').evaluateStartupGuard;
@@ -123,8 +123,9 @@ describe('perf-startup-guard', () => {
       launchHtmlMaxDiscoveryBytes: 2048,
     });
 
-    expect(result.violations).toContain('launch.html 缺少 main 入口 modulepreload');
-    expect(result.violations).toContain('launch.html 缺少 polyfills 入口 modulepreload');
-    expect(result.violations.some((violation: string) => violation.startsWith('launch.html main 发现位置超限:'))).toBe(true);
+    expect(result.violations).toContain('launch.html 缺少兼容启动标记');
+    expect(result.violations).toContain('launch.html 缺少兼容重定向脚本');
+    expect(result.violations).toContain('launch.html 不应注入 modulepreload');
+    expect(result.violations).toContain('launch.html 不应直接执行 main/polyfills 入口脚本');
   });
 });

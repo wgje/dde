@@ -38,11 +38,10 @@ function createDistFixture(): string {
     `<!doctype html>
 <html>
 <head>
-  <script>window.__NANOFLOW_BOOT_FLAGS__ = { STRICT_MODULEPRELOAD_V2: false };</script>
+  <meta name="nanoflow-launch-mode" content="compat-redirect">
 </head>
 <body>
-  <script type="module" src="polyfills-XYZ999.js"></script>
-  <script type="module" src="main-ABC123.js"></script>
+  <script>window.location.replace('/');</script>
 </body>
 </html>`,
   );
@@ -76,10 +75,10 @@ describe('inject-modulepreload', () => {
     }
   });
 
-  it('injects entry preloads for both startup shells while omitting route component chunks', () => {
+  it('injects entry preloads into index.html only while leaving launch compatibility shell untouched', () => {
     const distDir = createDistFixture();
 
-    processModulePreload({ distDir, htmlFiles: ['index.html', 'launch.html'], maxCriticalPreloads: 10 });
+    processModulePreload({ distDir, maxCriticalPreloads: 10 });
     const indexHtml = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
     const launchHtml = fs.readFileSync(path.join(distDir, 'launch.html'), 'utf8');
 
@@ -91,11 +90,8 @@ describe('inject-modulepreload', () => {
     expect(indexHtml).not.toContain('/chunk-flow-view.js');
     expect(indexHtml).not.toContain('/old-preload.js');
 
-    expect(launchHtml).toContain('/main-ABC123.js');
-    expect(launchHtml).toContain('/polyfills-XYZ999.js');
-    expect(launchHtml).toContain('/chunk-shared.js');
-    expect(launchHtml).not.toContain('/chunk-text-view.js');
-    expect(launchHtml).not.toContain('/chunk-workspace.js');
-    expect(launchHtml).not.toContain('/chunk-flow-view.js');
+    expect(launchHtml).toContain('compat-redirect');
+    expect(launchHtml).toContain('location.replace');
+    expect(launchHtml).not.toContain('modulepreload');
   });
 });

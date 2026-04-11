@@ -15,11 +15,12 @@ import { SupabaseClientService } from '../../../../services/supabase-client.serv
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
+import { ProjectStateService } from '../../../../services/project-state.service';
 import { SyncOperationHelperService } from './sync-operation-helper.service';
 import { SessionManagerService } from './session-manager.service';
 import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
-import { Connection } from '../../../../models';
+import { Connection, Project } from '../../../../models';
 import {
   supabaseErrorToError,
   EnhancedError,
@@ -54,6 +55,14 @@ type ConnectionTombstoneCheckResult =
   | { ok: true; tombstoneFound: boolean }
   | { ok: false; shouldRetry: boolean; error: EnhancedError };
 
+interface EndpointConnectionMatch {
+  id: string;
+  deleted_at: string | null;
+  updated_at?: string | null;
+  title?: string | null;
+  description?: string | null;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -64,11 +73,311 @@ export class ConnectionSyncOperationsService {
   private readonly logger = this.loggerService.category('ConnectionSyncOps');
   private readonly toast = inject(ToastService);
   private readonly throttle = inject(RequestThrottleService);
+  private readonly projectState = inject(ProjectStateService);
   private readonly syncOpHelper = inject(SyncOperationHelperService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
   private readonly tombstoneService = inject(TombstoneService);
+
+  private updateProjectsFromCurrentData(mutator: (projects: Project[]) => Project[]): void {
+    const projectState = this.projectState as ProjectStateService & {
+      getProjectsWithCurrentData?: () => Project[];
+      setProjects?: (projects: Project[]) => void;
+    };
+
+    if (typeof projectState.getProjectsWithCurrentData === 'function' && typeof projectState.setProjects === 'function') {
+      projectState.setProjects(mutator(projectState.getProjectsWithCurrentData()));
+      return;
+    }
+
+    this.projectState.updateProjects(mutator);
+  }
+
+  private normalizeLocalConnectionUpdatedAt(projectId: string, connectionId: string, serverUpdatedAt?: string | null): void {
+    if (!serverUpdatedAt) {
+      return;
+    }
+
+    this.updateProjectsFromCurrentData(projects => projects.map(project => {
+      if (project.id !== projectId) {
+        return project;
+      }
+
+      let changed = false;
+      const connections = (project.connections || []).map(connection => {
+        if (connection.id !== connectionId || connection.updatedAt === serverUpdatedAt) {
+          return connection;
+        }
+
+        changed = true;
+        return {
+          ...connection,
+          updatedAt: serverUpdatedAt,
+        };
+      });
+
+      return changed
+        ? {
+            ...project,
+            connections,
+          }
+        : project;
+    }));
+  }
+
+  private applyCanonicalConnectionPatchToLocalStore(
+    projectId: string,
+    connectionId: string,
+    canonicalMatch: EndpointConnectionMatch,
+  ): void {
+    this.updateProjectsFromCurrentData(projects => projects.map(project => {
+      if (project.id !== projectId) {
+        return project;
+      }
+
+      let changed = false;
+      const connections = (project.connections || []).map(connection => {
+        if (connection.id !== connectionId) {
+          return connection;
+        }
+
+        changed = true;
+        return {
+          ...connection,
+          title: Object.prototype.hasOwnProperty.call(canonicalMatch, 'title')
+            ? canonicalMatch.title ?? undefined
+            : connection.title,
+          description: Object.prototype.hasOwnProperty.call(canonicalMatch, 'description')
+            ? canonicalMatch.description ?? undefined
+            : connection.description,
+          deletedAt: canonicalMatch.deleted_at ?? undefined,
+          updatedAt: canonicalMatch.updated_at ?? connection.updatedAt,
+        };
+      });
+
+      return changed
+        ? {
+            ...project,
+            connections,
+          }
+        : project;
+    }));
+  }
+
+  private rebindLocalConnectionIdentity(projectId: string, previousId: string, nextId: string): {
+    connection: Connection | null;
+    previousFound: boolean;
+  } {
+    if (!previousId || !nextId || previousId === nextId) {
+      return { connection: null, previousFound: false };
+    }
+
+    let reboundConnection: Connection | null = null;
+    let previousFound = false;
+
+    this.updateProjectsFromCurrentData(projects => projects.map(project => {
+      if (project.id !== projectId) {
+        return project;
+      }
+
+      const previousConnection = (project.connections || []).find(connection => connection.id === previousId);
+      const nextConnection = (project.connections || []).find(connection => connection.id === nextId);
+
+      if (!previousConnection) {
+        reboundConnection = nextConnection ?? null;
+        return project;
+      }
+      previousFound = true;
+      const previousFreshness = this.getConnectionFreshnessTimestamp(
+        previousConnection.updatedAt,
+        previousConnection.deletedAt,
+      );
+      const nextFreshness = this.getConnectionFreshnessTimestamp(
+        nextConnection?.updatedAt,
+        nextConnection?.deletedAt,
+      );
+      const preferredLocalConnection = nextConnection && nextFreshness >= previousFreshness
+        ? nextConnection
+        : previousConnection;
+      const fallbackLocalConnection = preferredLocalConnection === previousConnection
+        ? nextConnection
+        : previousConnection;
+      const mergedConnection = nextConnection
+        ? {
+            ...nextConnection,
+            ...previousConnection,
+            id: nextId,
+            source: previousConnection.source,
+            target: previousConnection.target,
+            title: preferredLocalConnection.title ?? fallbackLocalConnection?.title,
+            description: preferredLocalConnection.description ?? fallbackLocalConnection?.description,
+            deletedAt: preferredLocalConnection.deletedAt,
+            updatedAt: preferredLocalConnection.updatedAt ?? fallbackLocalConnection?.updatedAt,
+          }
+        : {
+            ...previousConnection,
+            id: nextId,
+          };
+      reboundConnection = mergedConnection;
+
+      const connections = (project.connections || []).filter(connection => (
+        connection.id !== previousId && connection.id !== nextId
+      ));
+      connections.push(mergedConnection);
+
+      return {
+        ...project,
+        connections,
+      };
+    }));
+
+    return {
+      connection: reboundConnection,
+      previousFound,
+    };
+  }
+
+  private buildConnectionUpsertPayload(connection: Connection, projectId: string): {
+    id: string;
+    project_id: string;
+    source_id: string;
+    target_id: string;
+    title: string | null;
+    description: string | null;
+    deleted_at: string | null;
+  } {
+    return {
+      id: connection.id,
+      project_id: projectId,
+      source_id: connection.source,
+      target_id: connection.target,
+      title: connection.title || null,
+      description: connection.description || null,
+      deleted_at: connection.deletedAt || null,
+    };
+  }
+
+  private pickNewestDeletedEndpointMatch(matches: EndpointConnectionMatch[]): EndpointConnectionMatch | null {
+    const deletedMatches = matches.filter(match => !!match.deleted_at);
+    if (deletedMatches.length === 0) {
+      return null;
+    }
+
+    const toTimestamp = (value?: string | null): number => {
+      if (!value) {
+        return 0;
+      }
+
+      const timestamp = new Date(value).getTime();
+      return Number.isNaN(timestamp) ? 0 : timestamp;
+    };
+
+    return deletedMatches.reduce((latest, current) => {
+      const latestTimestamp = Math.max(toTimestamp(latest.updated_at), toTimestamp(latest.deleted_at));
+      const currentTimestamp = Math.max(toTimestamp(current.updated_at), toTimestamp(current.deleted_at));
+      return currentTimestamp >= latestTimestamp ? current : latest;
+    });
+  }
+
+  private getConnectionFreshnessTimestamp(updatedAt?: string | null, deletedAt?: string | null): number {
+    const toTimestamp = (value?: string | null): number => {
+      if (!value) {
+        return 0;
+      }
+
+      const timestamp = new Date(value).getTime();
+      return Number.isNaN(timestamp) ? 0 : timestamp;
+    };
+
+    return Math.max(toTimestamp(updatedAt), toTimestamp(deletedAt));
+  }
+
+  private async lookupCanonicalEndpointMatch(
+    client: SupabaseClient,
+    projectId: string,
+    connection: Connection,
+  ): Promise<EndpointConnectionMatch | null> {
+    const { data, error } = await client
+      .from('connections')
+      .select('id,deleted_at,updated_at,title,description')
+      .eq('project_id', projectId)
+      .eq('source_id', connection.source)
+      .eq('target_id', connection.target);
+
+    if (error || !Array.isArray(data) || data.length === 0) {
+      return null;
+    }
+
+    const activeMatch = data.find(match => !match.deleted_at) ?? null;
+    return activeMatch ?? this.pickNewestDeletedEndpointMatch(data);
+  }
+
+  private hydrateConnectionFromCanonicalMatch(
+    connection: Connection,
+    canonicalMatch: EndpointConnectionMatch,
+    fallbackConnection?: Connection | null,
+  ): void {
+    connection.title = Object.prototype.hasOwnProperty.call(canonicalMatch, 'title')
+      ? canonicalMatch.title ?? undefined
+      : fallbackConnection?.title ?? connection.title;
+    connection.description = Object.prototype.hasOwnProperty.call(canonicalMatch, 'description')
+      ? canonicalMatch.description ?? undefined
+      : fallbackConnection?.description ?? connection.description;
+    connection.deletedAt = canonicalMatch.deleted_at ?? undefined;
+    connection.updatedAt = canonicalMatch.updated_at ?? fallbackConnection?.updatedAt ?? connection.updatedAt;
+  }
+
+  private applyCanonicalConnectionIdentity(
+    projectId: string,
+    connection: Connection,
+    canonicalMatch: EndpointConnectionMatch,
+  ): void {
+    if (!canonicalMatch.id || canonicalMatch.id === connection.id) {
+      return;
+    }
+
+    const previousConnectionId = connection.id;
+    const reboundResult = this.rebindLocalConnectionIdentity(projectId, previousConnectionId, canonicalMatch.id);
+    connection.id = canonicalMatch.id;
+    if (reboundResult.connection) {
+      connection.source = reboundResult.connection.source;
+      connection.target = reboundResult.connection.target;
+
+      const localFreshness = this.getConnectionFreshnessTimestamp(
+        reboundResult.connection.updatedAt,
+        reboundResult.connection.deletedAt,
+      );
+      const canonicalFreshness = this.getConnectionFreshnessTimestamp(
+        canonicalMatch.updated_at,
+        canonicalMatch.deleted_at,
+      );
+      const serverCanonicalIsNewer = canonicalFreshness >= localFreshness && canonicalFreshness > 0;
+
+      if (serverCanonicalIsNewer) {
+        this.hydrateConnectionFromCanonicalMatch(connection, canonicalMatch, reboundResult.connection);
+        this.applyCanonicalConnectionPatchToLocalStore(projectId, canonicalMatch.id, canonicalMatch);
+        return;
+      }
+
+      if (reboundResult.previousFound) {
+        connection.title = reboundResult.connection.title;
+        connection.description = reboundResult.connection.description;
+        connection.deletedAt = reboundResult.connection.deletedAt;
+        connection.updatedAt = reboundResult.connection.updatedAt;
+        return;
+      }
+
+      connection.title = reboundResult.connection.title;
+      connection.description = reboundResult.connection.description;
+      connection.deletedAt = reboundResult.connection.deletedAt;
+      connection.updatedAt = reboundResult.connection.updatedAt;
+      return;
+    }
+
+    this.hydrateConnectionFromCanonicalMatch(connection, canonicalMatch);
+    this.applyCanonicalConnectionPatchToLocalStore(projectId, canonicalMatch.id, canonicalMatch);
+  }
   
   /**
    * 安全添加到重试队列（含会话和数据有效性检查）
@@ -258,6 +567,22 @@ export class ConnectionSyncOperationsService {
         }
         return false;
       }
+
+      if (connection.source === connection.target) {
+        this.logger.warn('检测到无效自连接，已拒绝云端写入', {
+          connectionId: connection.id,
+          projectId,
+          taskId: connection.source,
+        });
+        if (fromRetryQueue) {
+          throw new PermanentFailureError(
+            'Invalid self-link connection',
+            undefined,
+            { operation: 'pushConnection.invalidSelfLink', connectionId: connection.id, projectId }
+          );
+        }
+        return false;
+      }
       
       // 防御层：tombstone 检查
       if (!skipTombstoneCheck) {
@@ -348,23 +673,30 @@ export class ConnectionSyncOperationsService {
       }
 
       // 预检查：同一 source/target 已存在不同 id 时视为幂等成功，避免 409 冲突刷屏
-      const { data: existingByEndpoints, error: existingByEndpointsError } = await client
-        .from('connections')
-        .select('id')
-        .eq('project_id', projectId)
-        .eq('source_id', connection.source)
-        .eq('target_id', connection.target)
-        .maybeSingle();
+      const canonicalEndpointMatch = await this.lookupCanonicalEndpointMatch(client, projectId, connection);
 
-      if (!existingByEndpointsError && existingByEndpoints && existingByEndpoints.id !== connection.id) {
-        this.logger.info('连接已存在（按 source/target 去重，视为幂等成功）', {
-          connectionId: connection.id,
-          existingConnectionId: existingByEndpoints.id,
-          projectId,
-          source: connection.source,
-          target: connection.target
-        });
-        return true;
+      if (canonicalEndpointMatch && canonicalEndpointMatch.id !== connection.id) {
+          this.logger.info('检测到远端同端点连接，复用既有 id 继续同步', {
+            connectionId: connection.id,
+            existingConnectionId: canonicalEndpointMatch.id,
+            projectId,
+            source: connection.source,
+            target: connection.target,
+            remoteDeletedAt: canonicalEndpointMatch.deleted_at,
+            localDeletedAt: connection.deletedAt,
+          });
+        this.applyCanonicalConnectionIdentity(projectId, connection, canonicalEndpointMatch);
+      } else if (canonicalEndpointMatch) {
+        const localFreshness = this.getConnectionFreshnessTimestamp(connection.updatedAt, connection.deletedAt);
+        const canonicalFreshness = this.getConnectionFreshnessTimestamp(
+          canonicalEndpointMatch.updated_at,
+          canonicalEndpointMatch.deleted_at,
+        );
+
+        if (canonicalFreshness >= localFreshness && canonicalFreshness > 0) {
+          this.hydrateConnectionFromCanonicalMatch(connection, canonicalEndpointMatch);
+          this.applyCanonicalConnectionPatchToLocalStore(projectId, canonicalEndpointMatch.id, canonicalEndpointMatch);
+        }
       }
       
       // 执行 upsert
@@ -374,15 +706,7 @@ export class ConnectionSyncOperationsService {
           await this.syncOpHelper.retryWithBackoff(async () => {
             const { error } = await client
               .from('connections')
-              .upsert({
-                id: connection.id,
-                project_id: projectId,
-                source_id: connection.source,
-                target_id: connection.target,
-                title: connection.title || null,
-                description: connection.description || null,
-                deleted_at: connection.deletedAt || null
-              }, {
+              .upsert(this.buildConnectionUpsertPayload(connection, projectId), {
                 onConflict: 'id',
                 ignoreDuplicates: false
               });
@@ -390,7 +714,31 @@ export class ConnectionSyncOperationsService {
             // 处理复合唯一约束冲突
             if (error) {
               const code = error.code || (error as { code?: string }).code;
-              if (code === '23505' && error.message?.includes('connections_project_id_source_id_target_id')) {
+              if (
+                code === '23505'
+                && (
+                  error.message?.includes('connections_project_id_source_id_target_id')
+                  || error.message?.includes('uq_connections_project_source_target_active')
+                )
+              ) {
+                const racedCanonicalMatch = await this.lookupCanonicalEndpointMatch(client, projectId, connection);
+                if (!racedCanonicalMatch) {
+                  const conflictRecoveryError = new Error('Unknown Supabase error: canonical connection lookup missed after 23505 conflict');
+                  conflictRecoveryError.name = 'UnknownServerError';
+                  throw conflictRecoveryError;
+                }
+
+                this.applyCanonicalConnectionIdentity(projectId, connection, racedCanonicalMatch);
+                const retryResult = await client
+                  .from('connections')
+                  .upsert(this.buildConnectionUpsertPayload(connection, projectId), {
+                    onConflict: 'id',
+                    ignoreDuplicates: false,
+                  });
+
+                if (retryResult.error) {
+                  throw supabaseErrorToError(retryResult.error);
+                }
                 this.logger.info('连接已存在（幂等成功）', {
                   connectionId: connection.id,
                   source: connection.source,
@@ -404,6 +752,26 @@ export class ConnectionSyncOperationsService {
         },
         { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
       );
+
+      const { data: persistedConnection, error: persistedConnectionError } = await client
+        .from('connections')
+        .select('updated_at')
+        .eq('id', connection.id)
+        .maybeSingle();
+
+      if (persistedConnectionError) {
+        this.logger.debug('连接服务端时间戳读取失败，保留本地 updatedAt', {
+          connectionId: connection.id,
+          projectId,
+          error: persistedConnectionError.message,
+        });
+      } else {
+        this.normalizeLocalConnectionUpdatedAt(
+          projectId,
+          connection.id,
+          typeof persistedConnection?.updated_at === 'string' ? persistedConnection.updated_at : null,
+        );
+      }
       
       return true;
     } catch (e) {
@@ -544,7 +912,7 @@ export class ConnectionSyncOperationsService {
     connection: Connection,
     fromRetryQueue: boolean,
   ): Promise<ConnectionTombstoneCheckResult> {
-    let queryResult = await this.queryConnectionTombstone(client, connection.id);
+    let queryResult = await this.queryConnectionTombstone(client, projectId, connection);
     let retriedAfterRefresh = false;
 
     if (queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
@@ -555,7 +923,7 @@ export class ConnectionSyncOperationsService {
       });
       if (refreshed) {
         retriedAfterRefresh = true;
-        queryResult = await this.queryConnectionTombstone(client, connection.id);
+        queryResult = await this.queryConnectionTombstone(client, projectId, connection);
       }
     }
 
@@ -586,20 +954,75 @@ export class ConnectionSyncOperationsService {
 
   private async queryConnectionTombstone(
     client: SupabaseClient,
-    connectionId: string,
+    projectId: string,
+    connection: Connection,
   ): Promise<{ tombstoneFound: boolean; error: EnhancedError | null }> {
     try {
       const { data, error } = await client
         .from('connection_tombstones')
         .select('connection_id')
-        .eq('connection_id', connectionId)
+        .eq('connection_id', connection.id)
         .maybeSingle();
 
       if (error) {
         return { tombstoneFound: false, error: supabaseErrorToError(error) };
       }
 
-      return { tombstoneFound: Boolean(data), error: null };
+      if (data) {
+        return { tombstoneFound: true, error: null };
+      }
+
+      const endpointTombstoneResult = await client
+        .from('connection_tombstones')
+        .select('deleted_at')
+        .eq('project_id', projectId)
+        .eq('source_id', connection.source)
+        .eq('target_id', connection.target)
+        .order('deleted_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (endpointTombstoneResult.error) {
+        return { tombstoneFound: false, error: supabaseErrorToError(endpointTombstoneResult.error) };
+      }
+
+      const endpointDeletedAt = endpointTombstoneResult.data?.deleted_at;
+      const localFreshnessTimestamp = this.getConnectionFreshnessTimestamp(connection.updatedAt, connection.deletedAt);
+      const tombstoneFound = !!endpointDeletedAt && (() => {
+        const deletedAtTimestamp = new Date(endpointDeletedAt).getTime();
+        return !Number.isNaN(deletedAtTimestamp)
+          && (localFreshnessTimestamp === 0 || deletedAtTimestamp >= localFreshnessTimestamp);
+      })();
+
+      if (tombstoneFound) {
+        return { tombstoneFound: true, error: null };
+      }
+
+      const legacyEndpointlessTombstoneResult = await client
+        .from('connection_tombstones')
+        .select('deleted_at,source_id,target_id')
+        .eq('project_id', projectId)
+        .is('source_id', null)
+        .is('target_id', null)
+        .order('deleted_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (legacyEndpointlessTombstoneResult.error) {
+        return { tombstoneFound: false, error: supabaseErrorToError(legacyEndpointlessTombstoneResult.error) };
+      }
+
+      const legacyDeletedAt = legacyEndpointlessTombstoneResult.data?.deleted_at;
+      if (!legacyDeletedAt) {
+        return { tombstoneFound: false, error: null };
+      }
+
+      const legacyDeletedAtTimestamp = new Date(legacyDeletedAt).getTime();
+      const legacyGuardTriggered = Number.isNaN(legacyDeletedAtTimestamp)
+        ? false
+        : localFreshnessTimestamp === 0 || legacyDeletedAtTimestamp >= localFreshnessTimestamp;
+
+      return { tombstoneFound: legacyGuardTriggered, error: null };
     } catch (error) {
       return { tombstoneFound: false, error: supabaseErrorToError(error) };
     }

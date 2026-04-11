@@ -5,6 +5,7 @@ import { provideServiceWorker } from '@angular/service-worker';
 import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-registration-strategy';
 import { pushStartupTrace } from './src/utils/startup-trace';
 import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-network-suspension';
+import { applyStartupVersionAction, decideStartupVersionAction } from './src/utils/startup-version-policy';
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -61,57 +62,85 @@ const readBootFlag = (key: string, fallback: boolean): boolean => {
   return typeof value === 'boolean' ? value : fallback;
 };
 
+function clearRecoveryStorage(): void {
+  localStorage.removeItem('nanoflow.offline-cache-v2');
+  localStorage.removeItem('nanoflow.escape-pod');
+}
+
+async function clearApplicationCaches(): Promise<void> {
+  if (!('caches' in window)) {
+    return;
+  }
+
+  const cacheNames = await caches.keys();
+  log(`清理 ${cacheNames.length} 个缓存...`);
+  await Promise.all(cacheNames.map(name => {
+    log(`  删除缓存: ${name}`);
+    return caches.delete(name);
+  }));
+}
+
+async function unregisterApplicationServiceWorkers(): Promise<void> {
+  if (!('serviceWorker' in navigator)) {
+    return;
+  }
+
+  const registrations = await navigator.serviceWorker.getRegistrations();
+  log(`注销 ${registrations.length} 个 Service Worker...`);
+  await Promise.all(registrations.map(reg => reg.unregister()));
+}
+
 // ========== 版本检测与缓存清理 ==========
 async function checkAndClearCacheIfNeeded(): Promise<boolean> {
   try {
     const storedVersion = localStorage.getItem(VERSION_STORAGE_KEY);
-    const forceClear = localStorage.getItem(FORCE_CLEAR_KEY);
+    const forceClear = localStorage.getItem(FORCE_CLEAR_KEY) === 'true';
+    const action = decideStartupVersionAction({
+      storedVersion,
+      currentVersion: BUILD_ID,
+      forceClear,
+    });
     
     log(`当前版本: ${BUILD_ID}, 存储版本: ${storedVersion || '无'}`);
-    
-    // 如果有强制清理标记，或者版本不匹配
-    if (forceClear === 'true' || (storedVersion && storedVersion !== BUILD_ID)) {
-      log('🔄 检测到版本更新或强制清理标记，正在清理缓存...');
-      
-      // 清除强制清理标记
-      localStorage.removeItem(FORCE_CLEAR_KEY);
-      
-      // 清理所有 caches
-      if ('caches' in window) {
-        const cacheNames = await caches.keys();
-        log(`清理 ${cacheNames.length} 个缓存...`);
-        await Promise.all(cacheNames.map(name => {
-          log(`  删除缓存: ${name}`);
-          return caches.delete(name);
-        }));
-      }
-      
-      // 注销所有 Service Worker
-      if ('serviceWorker' in navigator) {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        log(`注销 ${registrations.length} 个 Service Worker...`);
-        await Promise.all(registrations.map(reg => reg.unregister()));
-      }
-      
-      // 保存新版本号
-      localStorage.setItem(VERSION_STORAGE_KEY, BUILD_ID);
-      
-      // 如果是版本更新（不是首次加载），需要刷新页面
-      if (storedVersion && storedVersion !== BUILD_ID) {
-        log('✅ 缓存已清理，即将刷新页面加载新版本...');
+
+    const maintenanceResult = await applyStartupVersionAction(action, {
+      persistCurrentVersion: () => {
+        localStorage.setItem(VERSION_STORAGE_KEY, BUILD_ID);
+      },
+      clearForceClearFlag: () => {
+        localStorage.removeItem(FORCE_CLEAR_KEY);
+      },
+      clearRecoveryStorage: () => {
+        clearRecoveryStorage();
+      },
+      clearCaches: async () => {
+        log('🔄 检测到强制清理标记，正在清理缓存...');
+        await clearApplicationCaches();
+      },
+      unregisterServiceWorkers: async () => {
+        await unregisterApplicationServiceWorkers();
+      },
+      reloadCurrentLocation: () => {
+        log('✅ 缓存已清理，即将刷新页面...');
         // 使用 replace 避免产生历史记录循环
         setTimeout(() => {
           window.location.replace(window.location.href);
         }, 100);
-        return true; // 表示需要刷新
-      }
-    } else if (!storedVersion) {
-      // 首次加载，保存版本号
-      localStorage.setItem(VERSION_STORAGE_KEY, BUILD_ID);
-      log('首次加载，已保存版本号');
-    }
+      },
+      onVersionAdvanced: () => {
+        log('📦 检测到版本前进，已记录新版本号并保留当前启动实例');
+        pushStartupTrace('app.version_advanced', {
+          previousBuildId: storedVersion,
+          currentBuildId: BUILD_ID,
+          recoveryMode: 'non-destructive',
+        });
+      },
+      onFirstLaunch: () => {
+        log('首次加载，已保存版本号');
+      },
+    });
     
-    return false; // 不需要刷新
+    return maintenanceResult === 'reload-scheduled';
   } catch (e) {
     logError('版本检测失败', e);
     // 出错时保存版本号并继续
@@ -133,22 +162,16 @@ function registerForceClearCacheTool(): void {
     localStorage.setItem(FORCE_CLEAR_KEY, 'true');
     
     try {
-      if ('caches' in window) {
-        const cacheNames = await caches.keys();
-        await Promise.all(cacheNames.map(name => caches.delete(name)));
-      }
-      if ('serviceWorker' in navigator) {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(registrations.map(reg => reg.unregister()));
-      }
-      // 清除可能导致问题的本地数据
-      localStorage.removeItem('nanoflow.offline-cache-v2');
-      localStorage.removeItem('nanoflow.escape-pod');
+      clearRecoveryStorage();
+      await clearApplicationCaches();
+      await unregisterApplicationServiceWorkers();
+      // 当前页已完成清理，移除标记避免下一次启动再次触发恢复刷新。
+      localStorage.removeItem(FORCE_CLEAR_KEY);
     } catch (e) {
       logError('强制清理失败', e);
     }
     
-    window.location.reload();
+    window.location.replace(window.location.href);
   };
 }
 
@@ -384,7 +407,7 @@ async function startApplication() {
       void initWebVitals();
     }
 
-    // 启动后维护任务：版本检查/缓存清理/SW 注销
+    // 启动后维护任务：同步版本标记，显式 force-clear 才执行破坏性恢复
     scheduleIdleTask(() => {
       void runPostBootstrapMaintenance();
     });

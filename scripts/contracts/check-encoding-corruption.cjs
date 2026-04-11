@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
@@ -69,7 +70,7 @@ function isExcludedPath(filePath) {
     || excludedPathPatterns.some((pattern) => pattern.test(filePath));
 }
 
-function listWorkspaceFiles(rootDir = projectRoot) {
+function listWorkspaceFilesFromFs(rootDir = projectRoot) {
   const files = [];
   const queue = [rootDir];
 
@@ -105,6 +106,37 @@ function listWorkspaceFiles(rootDir = projectRoot) {
   return files.sort((left, right) => left.localeCompare(right));
 }
 
+function listGitVisibleFiles(rootDir = projectRoot) {
+  try {
+    const output = execFileSync(
+      'git',
+      ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      {
+        cwd: rootDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+
+    return output
+      .split('\0')
+      .map(filePath => normalizePath(filePath))
+      .filter(filePath => filePath.length > 0 && !isExcludedPath(filePath))
+      .sort((left, right) => left.localeCompare(right));
+  } catch {
+    return null;
+  }
+}
+
+function listWorkspaceFiles(rootDir = projectRoot) {
+  const gitVisibleFiles = listGitVisibleFiles(rootDir);
+  if (gitVisibleFiles) {
+    return gitVisibleFiles;
+  }
+
+  return listWorkspaceFilesFromFs(rootDir);
+}
+
 function isLikelyBinary(filePath, buffer) {
   const ext = path.extname(filePath).toLowerCase();
   if (binaryExtensions.has(ext)) {
@@ -123,6 +155,11 @@ function hasUtf8Bom(buffer) {
     && buffer[0] === 0xef
     && buffer[1] === 0xbb
     && buffer[2] === 0xbf;
+}
+
+function countCrlfSequences(content) {
+  const matches = content.match(/\r\n/g);
+  return matches ? matches.length : 0;
 }
 
 function validateFile(relativePath) {
@@ -157,6 +194,15 @@ function validateFile(relativePath) {
         detail: error instanceof Error ? error.message : String(error),
       }],
     };
+  }
+
+  const crlfCount = countCrlfSequences(content);
+  if (crlfCount > 0) {
+    issues.push({
+      type: 'crlf_line_endings',
+      line: 1,
+      detail: `Detected ${crlfCount} CRLF line ending(s); repository requires LF.`,
+    });
   }
 
   const lines = content.split(/\r?\n/);
@@ -235,11 +281,11 @@ function main() {
   }
 
   if (allIssues.length === 0) {
-    console.log(`[encoding-guard] PASS: scanned ${scannedCount} workspace text files, no corruption found.`);
+    console.log(`[encoding-guard] PASS: scanned ${scannedCount} workspace text files, no encoding or line-ending issues found.`);
     return;
   }
 
-  console.error(`[encoding-guard] FAIL: ${allIssues.length} file(s) contain encoding corruption.`);
+  console.error(`[encoding-guard] FAIL: ${allIssues.length} file(s) contain encoding or line-ending issues.`);
   for (const item of allIssues) {
     console.error(`- ${item.file}`);
     for (const issue of item.issues.slice(0, 20)) {

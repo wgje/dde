@@ -22,6 +22,39 @@ export class TaskConnectionService {
 
   // ========== 公共 API ==========
 
+  private pickNewestDeletedConnection(connections: Connection[], sourceId: string, targetId: string): Connection | undefined {
+    const deletedConnections = connections.filter(
+      connection => connection.source === sourceId && connection.target === targetId && !!connection.deletedAt
+    );
+
+    if (deletedConnections.length === 0) {
+      return undefined;
+    }
+
+    const toTimestamp = (value?: string | null): number => {
+      if (!value) return 0;
+      const timestamp = new Date(value).getTime();
+      return Number.isNaN(timestamp) ? 0 : timestamp;
+    };
+
+    return deletedConnections.reduce((latest, current) => {
+      const latestTimestamp = Math.max(toTimestamp(latest.updatedAt), toTimestamp(latest.deletedAt));
+      const currentTimestamp = Math.max(toTimestamp(current.updatedAt), toTimestamp(current.deletedAt));
+      return currentTimestamp >= latestTimestamp ? current : latest;
+    });
+  }
+
+  private hasValidConnectionEndpoints(project: Project, sourceId: string, targetId: string): boolean {
+    if (sourceId === targetId) {
+      return false;
+    }
+
+    const sourceTask = this.projectState.getTask(sourceId);
+    const targetTask = this.projectState.getTask(targetId);
+
+    return !!sourceTask && !sourceTask.deletedAt && !!targetTask && !targetTask.deletedAt;
+  }
+
   /**
    * 获取任务的连接（包括入度和出度）
    */
@@ -40,45 +73,28 @@ export class TaskConnectionService {
 
   /**
    * 添加跨树连接
-   * 如果连接已存在（被软删除），则恢复它
+   * 如果存在已删除历史，则保留历史并创建新的活跃连接，避免复用已 tombstone 的旧 id
    */
   addCrossTreeConnection(sourceId: string, targetId: string): void {
     const activeP = this.getActiveProject();
     if (!activeP) return;
+    if (!this.hasValidConnectionEndpoints(activeP, sourceId, targetId)) return;
+    const now = new Date().toISOString();
     
-    // 检查是否存在相同的连接（包括软删除的）
-    const existingConn = activeP.connections.find(
-      c => c.source === sourceId && c.target === targetId
+    const activeConnection = activeP.connections.find(
+      c => c.source === sourceId && c.target === targetId && !c.deletedAt
     );
     
     // 如果存在且未删除，跳过
-    if (existingConn && !existingConn.deletedAt) return;
-    
-    // 如果存在但被软删除，恢复它
-    if (existingConn && existingConn.deletedAt) {
-      this.recordAndUpdate(p => ({
-        ...p,
-        connections: p.connections.map(c => 
-          (c.source === sourceId && c.target === targetId)
-            ? { ...c, deletedAt: undefined }
-            : c
-        )
-      }));
-      return;
-    }
-    
-    const sourceTask = this.projectState.getTask(sourceId);
-    const targetTask = this.projectState.getTask(targetId);
-    if (!sourceTask || !targetTask) return;
-    
-    if (sourceId === targetId) return;
-    
+    if (activeConnection) return;
+
     this.recordAndUpdate(p => ({
       ...p,
       connections: [...p.connections, { 
         id: crypto.randomUUID(),
         source: sourceId, 
-        target: targetId 
+        target: targetId,
+        updatedAt: now,
       }]
     }));
   }
@@ -98,20 +114,34 @@ export class TaskConnectionService {
     newSourceId: string,
     newTargetId: string
   ): void {
+    if (oldSourceId === newSourceId && oldTargetId === newTargetId) {
+      return;
+    }
+
     const now = new Date().toISOString();
     this.recordAndUpdate(p => {
-      // 【P2-43 修复】检查是否已存在相同 source→target 的活跃连接
-      const duplicateExists = p.connections.some(
+      if (!this.hasValidConnectionEndpoints(p, newSourceId, newTargetId)) {
+        return p;
+      }
+
+      const oldActiveConnection = p.connections.find(
+        c => c.source === oldSourceId && c.target === oldTargetId && !c.deletedAt
+      );
+      const activeTargetConnection = p.connections.find(
         c => c.source === newSourceId && c.target === newTargetId && !c.deletedAt
       );
+      const duplicateExists = !!activeTargetConnection;
+
+      if (!oldActiveConnection) {
+        return p;
+      }
       
       const updatedConnections = p.connections.map(c => 
-        (c.source === oldSourceId && c.target === oldTargetId)
-          ? { ...c, deletedAt: now }
+        (c.id === oldActiveConnection.id)
+          ? { ...c, deletedAt: now, updatedAt: now }
           : c
       );
       
-      // 仅在无重复时添加新连接
       if (!duplicateExists) {
         updatedConnections.push({
           id: crypto.randomUUID(),
@@ -131,28 +161,49 @@ export class TaskConnectionService {
    */
   removeConnection(sourceId: string, targetId: string): void {
     const now = new Date().toISOString();
-    this.recordAndUpdate(p => ({
-      ...p,
-      connections: p.connections.map(c => 
-        (c.source === sourceId && c.target === targetId)
-          ? { ...c, deletedAt: now }
-          : c
-      )
-    }));
+    this.recordAndUpdate(p => {
+      const activeConnection = p.connections.find(
+        c => c.source === sourceId && c.target === targetId && !c.deletedAt
+      );
+
+      if (!activeConnection) {
+        return p;
+      }
+
+      return {
+        ...p,
+        connections: p.connections.map(c => 
+          (c.id === activeConnection.id)
+            ? { ...c, deletedAt: now, updatedAt: now }
+            : c
+        )
+      };
+    });
   }
 
   /**
    * 更新连接内容（标题和描述）
    */
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
-    this.recordAndUpdateDebounced(p => ({
-      ...p,
-      connections: p.connections.map(c => 
-        (c.source === sourceId && c.target === targetId) 
-          ? { ...c, title, description } 
-          : c
-      )
-    }));
+    const now = new Date().toISOString();
+    this.recordAndUpdateDebounced(p => {
+      const activeConnection = p.connections.find(
+        c => c.source === sourceId && c.target === targetId && !c.deletedAt
+      );
+
+      if (!activeConnection) {
+        return p;
+      }
+
+      return {
+        ...p,
+        connections: p.connections.map(c => 
+          (c.id === activeConnection.id) 
+            ? { ...c, title, description, updatedAt: now } 
+            : c
+        )
+      };
+    });
   }
 
   // ========== 私有辅助方法 ==========

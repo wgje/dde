@@ -10,16 +10,18 @@ const DEFAULT_LAUNCH_LOADER_MARKUP = `
 <div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:100dvh;">
   <div style="text-align:center;">
     <div style="width:32px;height:32px;border:3px solid var(--loader-skeleton-base,#e7e5e4);border-top-color:#4f46e5;border-radius:50%;animation:loader-spin 0.8s linear infinite;margin:0 auto 12px;"></div>
-    <div id="loader-status" style="font-size:13px;color:#78716c;"></div>
+    <div id="loader-status" style="font-size:13px;color:#78716c;">正在打开 NanoFlow...</div>
   </div>
 </div>
 <style>@keyframes loader-spin { to { transform: rotate(360deg); } }</style>
 `.trim();
 
-const LAUNCH_PATH_NORMALIZER = `
+const LAUNCH_COMPAT_META = '<meta name="nanoflow-launch-mode" content="compat-redirect">';
+
+const LAUNCH_COMPAT_REDIRECT_SCRIPT = `
 <script>
   (function() {
-    if (typeof window === 'undefined' || typeof history?.replaceState !== 'function') {
+    if (typeof window === 'undefined' || typeof window.location?.replace !== 'function') {
       return;
     }
 
@@ -28,10 +30,22 @@ const LAUNCH_PATH_NORMALIZER = `
       return;
     }
 
-    var normalizedPath = pathname.replace(/launch\.html$/, '') || '/';
-    history.replaceState(null, '', normalizedPath + window.location.search + window.location.hash);
+    var target = new URL('./', window.location.href);
+    target.search = window.location.search;
+    target.hash = window.location.hash;
+    if (target.toString() === window.location.href) {
+      return;
+    }
+
+    window.location.replace(target.toString());
   })();
 </script>
+`.trim();
+
+const LAUNCH_COMPAT_NOSCRIPT = `
+<noscript>
+  <meta http-equiv="refresh" content="0;url=./">
+</noscript>
 `.trim();
 
 function readFileStrict(filepath) {
@@ -87,17 +101,9 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
 
   const headShared = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_HEAD');
   const stylesShared = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_STYLES', { optional: true });
-  const bootFlags = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_BOOT_FLAGS');
   const shell = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_SHELL', { optional: true });
-  const snapshotRenderer = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_SNAPSHOT_RENDERER', { optional: true });
-  const loaderDismiss = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_LOADER_DISMISS');
   const bodyOpenTag = extractBodyOpenTag(indexHtml);
-  const entryScripts = extractEntryScripts(indexHtml);
   const launchLoaderMarkup = shell || DEFAULT_LAUNCH_LOADER_MARKUP;
-
-  if (entryScripts.length === 0) {
-    throw new Error('未在 index.html 中找到 main/polyfills 入口脚本，launch.html 无法引导 Angular');
-  }
 
   return [
     '<!doctype html>',
@@ -105,17 +111,14 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
     '<head>',
     headShared,
     stylesShared,
+    LAUNCH_COMPAT_META,
+    LAUNCH_COMPAT_NOSCRIPT,
     '</head>',
     bodyOpenTag,
     '<div id="initial-loader">',
     launchLoaderMarkup,
     '</div>',
-    LAUNCH_PATH_NORMALIZER,
-    bootFlags,
-    snapshotRenderer,
-    '<app-root></app-root>',
-    loaderDismiss,
-    ...entryScripts,
+    LAUNCH_COMPAT_REDIRECT_SCRIPT,
     '</body>',
     '</html>',
     '',

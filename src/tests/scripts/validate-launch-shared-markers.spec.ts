@@ -50,9 +50,19 @@ describe('validate-launch-shared-markers', () => {
 </body>
 </html>`;
 
+    const distLaunchHtml = `<!doctype html>
+<html>
+<head>
+  <meta name="nanoflow-launch-mode" content="compat-redirect">
+</head>
+<body>
+  <script>window.location.replace('/');</script>
+</body>
+</html>`;
+
     writeFile(path.join(root, 'index.html'), sourceHtml);
     writeFile(path.join(distDir, 'index.html'), distHtml);
-    writeFile(path.join(distDir, 'launch.html'), distHtml);
+    writeFile(path.join(distDir, 'launch.html'), distLaunchHtml);
 
     const { validateLaunchSharedMarkers } = require('../../../scripts/validate-launch-shared-markers.cjs');
     const result = validateLaunchSharedMarkers({
@@ -62,5 +72,60 @@ describe('validate-launch-shared-markers', () => {
     });
 
     expect(result.violations).toEqual([]);
+  });
+
+  it('rejects launch compatibility shell when modulepreload sneaks back in', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-launch-markers-bad-'));
+    const distDir = path.join(root, 'dist', 'browser');
+    tempRoots.push(root);
+
+    const sourceHtml = `<!doctype html>
+<html>
+<head>
+  <!-- LAUNCH_SHARED_HEAD_START --><meta charset="utf-8"><!-- LAUNCH_SHARED_HEAD_END -->
+  <!-- LAUNCH_SHARED_STYLES_START --><style></style><!-- LAUNCH_SHARED_STYLES_END -->
+</head>
+<body>
+  <!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_START --><!-- LAUNCH_SHARED_SNAPSHOT_RENDERER_END -->
+  <!-- LAUNCH_SHARED_BOOT_FLAGS_START --><script>window.__NANOFLOW_BOOT_FLAGS__ = {};</script><!-- LAUNCH_SHARED_BOOT_FLAGS_END -->
+  <!-- LAUNCH_SHARED_LOADER_DISMISS_START --><script>window.addEventListener('nanoflow:boot-stage', function() {});</script><!-- LAUNCH_SHARED_LOADER_DISMISS_END -->
+</body>
+</html>`;
+
+    const distHtml = `<!doctype html>
+<html>
+<head>
+  <script>window.__NANOFLOW_BOOT_FLAGS__ = {};</script>
+</head>
+<body>
+  <script>window.addEventListener('nanoflow:boot-stage', function() {});</script>
+  <script type="module" src="polyfills-AAA.js"></script>
+  <script type="module" src="main-BBB.js"></script>
+</body>
+</html>`;
+
+    const distLaunchHtml = `<!doctype html>
+<html>
+<head>
+  <meta name="nanoflow-launch-mode" content="compat-redirect">
+  <link rel="modulepreload" href="/main-BBB.js">
+</head>
+<body>
+  <script>window.location.replace('/');</script>
+</body>
+</html>`;
+
+    writeFile(path.join(root, 'index.html'), sourceHtml);
+    writeFile(path.join(distDir, 'index.html'), distHtml);
+    writeFile(path.join(distDir, 'launch.html'), distLaunchHtml);
+
+    const { validateLaunchSharedMarkers } = require('../../../scripts/validate-launch-shared-markers.cjs');
+    const result = validateLaunchSharedMarkers({
+      indexHtmlPath: path.join(root, 'index.html'),
+      distIndexHtmlPath: path.join(distDir, 'index.html'),
+      distLaunchHtmlPath: path.join(distDir, 'launch.html'),
+    });
+
+    expect(result.violations).toContain('dist/launch.html 不应注入 modulepreload');
   });
 });

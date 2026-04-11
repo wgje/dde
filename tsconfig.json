@@ -53,10 +53,28 @@
   ],
   "exclude": [
     "dist/**/*",
+    ".angular/**/*",
+    ".cache/**/*",
+    ".tmp/**/*",
+    ".worktrees/**/*",
+    "playwright-report/**/*",
     "supabase/**/*",
     "test-results/**/*",
     "tmp/**/*"
   ],
+  "watchOptions": {
+    "excludeDirectories": [
+      "**/node_modules",
+      "**/.angular",
+      "**/.cache",
+      "**/.tmp",
+      "**/.worktrees",
+      "**/dist",
+      "**/playwright-report",
+      "**/test-results",
+      "**/tmp"
+    ]
+  },
   "angularCompilerOptions": {
     "disableTypeScriptVersionCheck": true
   }

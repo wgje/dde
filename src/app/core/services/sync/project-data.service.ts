@@ -80,6 +80,12 @@ export interface StartupOfflineSnapshotLoadResult {
   ownerUserId?: string | null;
 }
 
+interface ParsedOfflineSnapshotEnvelope {
+  projects: Project[];
+  ownerUserId: string | null;
+  savedAt: string | null;
+}
+
 interface OfflineSnapshotLoadOptions {
   allowOwnerHint?: boolean;
   ownerUserId?: string | null;
@@ -357,8 +363,7 @@ export class ProjectDataService {
           const { data, error } = await client
             .from('connections')
             .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-            .eq('project_id', projectId)
-            .is('deleted_at', null);
+            .eq('project_id', projectId);
           if (error) {
             this.logger.error('连接查询失败', { projectId, error: error.message });
             return [];
@@ -892,18 +897,7 @@ export class ProjectDataService {
       return;
     }
 
-    // 过滤已删除的任务及其关联连接
-    const cleanedProjects = projects.map(p => {
-      const activeTasks = (p.tasks || []).filter(t => !t.deletedAt);
-      const activeTaskIds = new Set(activeTasks.map(t => t.id));
-      return {
-        ...p,
-        tasks: activeTasks,
-        connections: (p.connections || []).filter(c =>
-          !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
-        ),
-      };
-    });
+    const cleanedProjects = projects.map(project => this.normalizeOfflineSnapshotProject(project));
 
     const snapshotOwnerUserId = ownerUserId
       ?? this.authService?.currentUserId()
@@ -914,6 +908,7 @@ export class ProjectDataService {
       projects: cleanedProjects,
       version: this.CACHE_VERSION,
       ownerUserId: snapshotOwnerUserId,
+      savedAt: new Date().toISOString(),
     });
     
     const sizeKB = Math.round(payload.length / 1024);
@@ -1066,19 +1061,48 @@ export class ProjectDataService {
       this.logger.warn('启动快照加载失败（IndexedDB）', error);
       return null;
     });
+    const idbSnapshot = idbPayload ? this.parseSnapshotEnvelope(idbPayload) : null;
+    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw(startupOptions);
+    const localStorageSnapshot = localStoragePayload ? this.parseSnapshotEnvelope(localStoragePayload) : null;
 
-    if (idbPayload) {
-      const parsedSnapshot = this.parseSnapshotEnvelope(idbPayload);
-      if (parsedSnapshot) {
-        // 旧版快照可能缺少 ownerUserId，用 IDB key 对应的 userId 补全
-        if (!parsedSnapshot.ownerUserId && resolvedOwnerUserId) {
-          parsedSnapshot.ownerUserId = resolvedOwnerUserId;
-        }
-        return this.buildStartupSnapshotResult('idb', idbPayload, parsedSnapshot, false);
+    this.hydrateParsedSnapshotOwner(idbSnapshot, resolvedOwnerUserId);
+    this.hydrateParsedSnapshotOwner(localStorageSnapshot, resolvedOwnerUserId);
+
+    const preferredSnapshot = this.pickPreferredStartupSnapshot(
+      idbPayload,
+      idbSnapshot,
+      localStoragePayload,
+      localStorageSnapshot,
+    );
+
+    const alternateSnapshot = this.pickAlternateStartupSnapshot(
+      preferredSnapshot,
+      idbPayload,
+      idbSnapshot,
+      localStoragePayload,
+      localStorageSnapshot,
+    );
+
+    const selectedSnapshot = this.selectVisibleStartupSnapshot(
+      preferredSnapshot,
+      alternateSnapshot,
+      startupOptions,
+    );
+
+    if (selectedSnapshot?.snapshot) {
+      if (selectedSnapshot.source === 'idb' && selectedSnapshot.raw) {
+        return this.buildStartupSnapshotResult('idb', selectedSnapshot.raw, selectedSnapshot.snapshot, false);
+      }
+
+      if (selectedSnapshot.source === 'localStorage' && selectedSnapshot.raw) {
+        const migratedLegacy = await this.migrateLegacySnapshotToIDB(
+          selectedSnapshot.raw,
+          resolvedOwnerUserId
+        );
+        return this.buildStartupSnapshotResult('localStorage', selectedSnapshot.raw, selectedSnapshot.snapshot, migratedLegacy);
       }
     }
 
-    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw(startupOptions);
     if (!localStoragePayload) {
       return {
         source: 'none',
@@ -1089,28 +1113,14 @@ export class ProjectDataService {
       };
     }
 
-    const parsedSnapshot = this.parseSnapshotEnvelope(localStoragePayload);
-    if (!parsedSnapshot) {
-      return {
-        source: 'none',
-        projectCount: 0,
-        bytes: 0,
-        migratedLegacy: false,
-        projects: [],
-        ownerUserId: null,
-      };
-    }
-
-    // 旧版快照可能缺少 ownerUserId，用 localStorage key 对应的 userId 补全
-    if (!parsedSnapshot.ownerUserId && resolvedOwnerUserId) {
-      parsedSnapshot.ownerUserId = resolvedOwnerUserId;
-    }
-
-    const migratedLegacy = await this.migrateLegacySnapshotToIDB(
-      localStoragePayload,
-      resolvedOwnerUserId
-    );
-    return this.buildStartupSnapshotResult('localStorage', localStoragePayload, parsedSnapshot, migratedLegacy);
+    return {
+      source: 'none',
+      projectCount: 0,
+      bytes: 0,
+      migratedLegacy: false,
+      projects: [],
+      ownerUserId: null,
+    };
   }
 
   /**
@@ -1216,24 +1226,31 @@ export class ProjectDataService {
     return true;
   }
 
-  private parseSnapshotEnvelope(raw: string): { projects: Project[]; ownerUserId: string | null } | null {
+  private normalizeOfflineSnapshotProject(project: Project): Project {
+    const activeTasks = (project.tasks || []).filter(task => !task.deletedAt);
+    const activeTaskIds = new Set(activeTasks.map(task => task.id));
+
+    return {
+      ...project,
+      tasks: activeTasks,
+      // 保留活跃任务之间的已删连接，确保重启/离线恢复后仍能继续传播删除意图。
+      connections: (project.connections || []).filter(connection =>
+        activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
+      ),
+    };
+  }
+
+  private parseSnapshotEnvelope(raw: string): ParsedOfflineSnapshotEnvelope | null {
     try {
-      const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown };
+      const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown; savedAt?: unknown };
       if (Array.isArray(parsed?.projects)) {
         return {
-          projects: parsed.projects.map((p: Project) => {
-            const activeTasks = (p.tasks || []).filter((t: Task) => !t.deletedAt);
-            const activeTaskIds = new Set(activeTasks.map((t: Task) => t.id));
-            return {
-              ...p,
-              tasks: activeTasks,
-              connections: (p.connections || []).filter((c: Connection) =>
-                !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
-              ),
-            };
-          }),
+          projects: parsed.projects.map((project: Project) => this.normalizeOfflineSnapshotProject(project)),
           ownerUserId: typeof parsed.ownerUserId === 'string' && parsed.ownerUserId.trim().length > 0
             ? parsed.ownerUserId
+            : null,
+          savedAt: typeof parsed.savedAt === 'string' && parsed.savedAt.trim().length > 0
+            ? parsed.savedAt
             : null,
         };
       }
@@ -1251,7 +1268,7 @@ export class ProjectDataService {
   private buildStartupSnapshotResult(
     source: StartupOfflineSnapshotSource,
     raw: string,
-    snapshot: { projects: Project[]; ownerUserId: string | null },
+    snapshot: ParsedOfflineSnapshotEnvelope,
     migratedLegacy: boolean
   ): StartupOfflineSnapshotLoadResult {
     return {
@@ -1270,6 +1287,117 @@ export class ProjectDataService {
     } catch {
       return raw.length;
     }
+  }
+
+  private getSnapshotSavedAtTimestamp(snapshot: ParsedOfflineSnapshotEnvelope | null): number {
+    if (!snapshot?.savedAt) {
+      return 0;
+    }
+
+    const timestamp = new Date(snapshot.savedAt).getTime();
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+
+  private hydrateParsedSnapshotOwner(snapshot: ParsedOfflineSnapshotEnvelope | null, resolvedOwnerUserId: string): void {
+    if (snapshot && !snapshot.ownerUserId && resolvedOwnerUserId) {
+      snapshot.ownerUserId = resolvedOwnerUserId;
+    }
+  }
+
+  private pickPreferredStartupSnapshot(
+    idbRaw: string | null,
+    idbSnapshot: ParsedOfflineSnapshotEnvelope | null,
+    localStorageRaw: string | null,
+    localStorageSnapshot: ParsedOfflineSnapshotEnvelope | null,
+  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
+    if (idbSnapshot && localStorageSnapshot && idbRaw && localStorageRaw) {
+      const idbSavedAt = this.getSnapshotSavedAtTimestamp(idbSnapshot);
+      const localStorageSavedAt = this.getSnapshotSavedAtTimestamp(localStorageSnapshot);
+
+      if (localStorageSavedAt > idbSavedAt) {
+        return {
+          source: 'localStorage',
+          raw: localStorageRaw,
+          snapshot: localStorageSnapshot,
+        };
+      }
+
+      return {
+        source: 'idb',
+        raw: idbRaw,
+        snapshot: idbSnapshot,
+      };
+    }
+
+    if (idbSnapshot && idbRaw) {
+      return {
+        source: 'idb',
+        raw: idbRaw,
+        snapshot: idbSnapshot,
+      };
+    }
+
+    if (localStorageSnapshot && localStorageRaw) {
+      return {
+        source: 'localStorage',
+        raw: localStorageRaw,
+        snapshot: localStorageSnapshot,
+      };
+    }
+
+    return null;
+  }
+
+  private pickAlternateStartupSnapshot(
+    preferredSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
+    idbRaw: string | null,
+    idbSnapshot: ParsedOfflineSnapshotEnvelope | null,
+    localStorageRaw: string | null,
+    localStorageSnapshot: ParsedOfflineSnapshotEnvelope | null,
+  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
+    if (!preferredSnapshot) {
+      return null;
+    }
+
+    if (preferredSnapshot.source === 'idb' && localStorageRaw && localStorageSnapshot) {
+      return {
+        source: 'localStorage',
+        raw: localStorageRaw,
+        snapshot: localStorageSnapshot,
+      };
+    }
+
+    if (preferredSnapshot.source === 'localStorage' && idbRaw && idbSnapshot) {
+      return {
+        source: 'idb',
+        raw: idbRaw,
+        snapshot: idbSnapshot,
+      };
+    }
+
+    return null;
+  }
+
+  private selectVisibleStartupSnapshot(
+    preferredSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
+    alternateSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
+    options?: OfflineSnapshotLoadOptions,
+  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
+    if (
+      preferredSnapshot
+      && this.isSnapshotVisibleToCurrentOwner(preferredSnapshot.snapshot.ownerUserId, 'sync-load', options)
+    ) {
+      return preferredSnapshot;
+    }
+
+    if (
+      alternateSnapshot
+      && this.isSnapshotVisibleToCurrentOwner(alternateSnapshot.snapshot.ownerUserId, 'sync-load', options)
+    ) {
+      return alternateSnapshot;
+    }
+
+    return null;
   }
 
   private async migrateLegacySnapshotToIDB(payload: string, ownerUserId: string): Promise<boolean> {
