@@ -184,6 +184,47 @@ describe('TextTaskCardComponent', () => {
     expect(mockTextViewOps.armContainerClickGuard).toHaveBeenCalledTimes(1);
   });
 
+  it('should ignore mobile body touch starts so stage scrolling keeps priority', () => {
+    const component = createComponent(false) as unknown as {
+      isMobile: () => boolean;
+      onTouchStart: (event: TouchEvent) => void;
+      touchStart: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(component.touchStart, 'emit');
+    component.isMobile = () => true;
+
+    component.onTouchStart({} as TouchEvent);
+
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  it('should emit mobile drag start only from the explicit handle touch', () => {
+    const component = createComponent(false) as unknown as {
+      isMobile: () => boolean;
+      onDragHandleTouchStart: (event: TouchEvent) => void;
+      touchStart: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(component.touchStart, 'emit');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+    const event = {
+      cancelable: true,
+      stopPropagation,
+      preventDefault,
+    } as unknown as TouchEvent;
+    component.isMobile = () => true;
+
+    component.onDragHandleTouchStart(event);
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith({
+      event,
+      task: expect.objectContaining({ id: 'task-1' }),
+      gestureMode: 'handle',
+    });
+  });
+
   it('should not emit select when clicking an anchor inside the card', () => {
     const component = createComponent(false) as unknown as {
       onCardClick: (event: Event) => void;

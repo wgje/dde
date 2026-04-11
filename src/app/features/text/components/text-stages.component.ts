@@ -4,7 +4,7 @@ import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
-import { DropTargetInfo } from './text-view.types';
+import { DropTargetInfo, TaskTouchStartPayload } from './text-view.types';
 import { TextStageCardComponent } from './text-stage-card.component';
 
 /**
@@ -196,7 +196,7 @@ export class TextStagesComponent {
   @Output() taskDragStart = new EventEmitter<{ event: DragEvent; task: Task }>();
   @Output() taskDragEnd = new EventEmitter<void>();
   @Output() taskDragOver = new EventEmitter<{ event: DragEvent; task: Task; stageNumber: number }>();
-  @Output() taskTouchStart = new EventEmitter<{ event: TouchEvent; task: Task }>();
+  @Output() taskTouchStart = new EventEmitter<TaskTouchStartPayload>();
   @Output() taskTouchMove = new EventEmitter<TouchEvent>();
   @Output() taskTouchEnd = new EventEmitter<TouchEvent>();
   @Output() taskTouchCancel = new EventEmitter<TouchEvent>();

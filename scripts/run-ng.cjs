@@ -1,9 +1,52 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const { buildDevServerUrl, resolveDevServerBinding } = require('./dev-server-port.cjs');
 
 const args = process.argv.slice(2);
 const nodeMajor = Number(process.versions.node.split('.')[0]);
+
+function hasOption(argsToInspect, optionNames) {
+  return argsToInspect.some((arg) => {
+    return optionNames.some((optionName) => arg === optionName || arg.startsWith(`${optionName}=`));
+  });
+}
+
+function isServeCommand(argsToInspect) {
+  return argsToInspect.some((arg) => arg === 'serve');
+}
+
+async function prepareNgArgs(argsToInspect) {
+  if (!isServeCommand(argsToInspect)) {
+    return argsToInspect;
+  }
+
+  const binding = await resolveDevServerBinding({ args: argsToInspect, env: process.env });
+  if (binding.unresolved) {
+    console.error(
+      `[run-ng] 默认开发端口 ${binding.port} 在当前机器上不可用（最后错误：${binding.lastErrorCode ?? 'UNKNOWN'}）。请设置 PORT 或 NANOFLOW_DEV_SERVER_PORT 后重试。`,
+    );
+    process.exit(1);
+  }
+
+  const resolvedArgs = [...argsToInspect];
+
+  if (!hasOption(argsToInspect, ['--port', '-p'])) {
+    resolvedArgs.push(`--port=${binding.port}`);
+  }
+
+  if (!hasOption(argsToInspect, ['--host', '-H']) && binding.hostSource !== 'default') {
+    resolvedArgs.push(`--host=${binding.host}`);
+  }
+
+  if (binding.fallbackApplied) {
+    console.warn(
+      `[run-ng] 默认开发端口 3000 当前不可用（${binding.lastErrorCode ?? 'UNKNOWN'}），已自动回退到 ${buildDevServerUrl(binding)}。如需固定端口，请设置 PORT 或 NANOFLOW_DEV_SERVER_PORT。`,
+    );
+  }
+
+  return resolvedArgs;
+}
 
 function resolveDependencyPath(...segments) {
   let currentDir = path.join(__dirname, '..');
@@ -118,31 +161,42 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
  * 即使 esbuild >= 0.23.0，在 Node 24 下仍会出现 goroutine 死锁。
  * 强制在 Node 24+ 环境下使用 Node 22 运行构建，确保稳定性。
  */
-if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
-  // Node 24+ 与 Angular CLI 19.x 不兼容，强制使用 Node 22
-  let node22Path = null;
+async function main() {
+  const resolvedArgs = await prepareNgArgs(args);
 
-  // 方法1：检查 nvm (Linux/macOS) 安装的 Node 22
-  const nvmDir = process.env.NVM_DIR || path.join(process.env.HOME || '', '.nvm');
-  const nvmNode22Versions = path.join(nvmDir, 'versions', 'node');
-  if (fs.existsSync(nvmNode22Versions)) {
-    const versions = fs.readdirSync(nvmNode22Versions).filter(v => v.startsWith('v22.'));
-    if (versions.length > 0) {
-      versions.sort().reverse();
-      node22Path = path.join(nvmNode22Versions, versions[0], 'bin', 'node');
-      if (!fs.existsSync(node22Path)) node22Path = null;
+  if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
+    // Node 24+ 与 Angular CLI 19.x 不兼容，强制使用 Node 22
+    let node22Path = null;
+
+    // 方法1：检查 nvm (Linux/macOS) 安装的 Node 22
+    const nvmDir = process.env.NVM_DIR || path.join(process.env.HOME || '', '.nvm');
+    const nvmNode22Versions = path.join(nvmDir, 'versions', 'node');
+    if (fs.existsSync(nvmNode22Versions)) {
+      const versions = fs.readdirSync(nvmNode22Versions).filter(v => v.startsWith('v22.'));
+      if (versions.length > 0) {
+        versions.sort().reverse();
+        node22Path = path.join(nvmNode22Versions, versions[0], 'bin', 'node');
+        if (!fs.existsSync(node22Path)) node22Path = null;
+      }
     }
+
+    // 方法2：使用 npx 下载并运行 Node 22（作为后备）
+    if (!node22Path) {
+      console.log('[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用 npx node@22 运行构建...');
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      runWithSignalForwarding(npxCmd, ['-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs]);
+      return;
+    }
+
+    console.log(`[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用本地 Node 22: ${node22Path}`);
+    runWithSignalForwarding(node22Path, [ngPath, ...resolvedArgs]);
+    return;
   }
 
-  // 方法2：使用 npx 下载并运行 Node 22（作为后备）
-  if (!node22Path) {
-    console.log('[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用 npx node@22 运行构建...');
-    const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    runWithSignalForwarding(npxCmd, ['-y', 'node@22.14.0', '--', ngPath, ...args]);
-  } else {
-    console.log(`[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用本地 Node 22: ${node22Path}`);
-    runWithSignalForwarding(node22Path, [ngPath, ...args]);
-  }
-} else {
-  runWithSignalForwarding(process.execPath, [ngPath, ...args]);
+  runWithSignalForwarding(process.execPath, [ngPath, ...resolvedArgs]);
 }
+
+main().catch((err) => {
+  console.error(`[run-ng] 启动前准备失败: ${err.message}`);
+  process.exit(1);
+});

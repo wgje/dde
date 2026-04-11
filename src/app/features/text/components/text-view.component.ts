@@ -9,6 +9,7 @@ import { SyncCoordinatorService } from '../../../../services/sync-coordinator.se
 import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/task-drag-payload';
+import type { TaskTouchStartPayload } from './text-view.types';
 
 // 子组件导入
 import { TextViewLoadingComponent } from './text-view-loading.component';
@@ -251,26 +252,13 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
   
   /** 处理拖拽超时 - 当 touchend 丢失时自动完成拖拽 */
-  private handleTouchDragTimeout(event: CustomEvent) {
-    const { task, targetStage, targetBeforeId } = event.detail;
-    
-    if (task && targetStage !== null) {
-      this.ngZone.run(() => {
-        const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId);
-        if (isFailure(result)) {
-          this.logger.error('[TouchDragTimeout] Move failed', { error: getErrorMessage(result.error) });
-        }
-        const touchEndResult = this.dragDropService.endTouchDrag();
-        const mouseExpandedStages = this.dragDropService.endDrag();
-        this.ops.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
-        this.ops.restoreAutoCollapsedSourceStage();
+  private handleTouchDragTimeout(_event: CustomEvent) {
+    this.ngZone.run(() => {
+      const dragResult = this.cleanupTouchGestureState();
+      this.applyTouchDropResult(dragResult, message => {
+        this.logger.error('[TouchDragTimeout] Move failed', { error: message });
       });
-    } else {
-      const touchEndResult = this.dragDropService.endTouchDrag();
-      const mouseExpandedStages = this.dragDropService.endDrag();
-      this.ops.collapseAutoExpandedStages(touchEndResult.autoExpandedStages, mouseExpandedStages);
-      this.ops.restoreAutoCollapsedSourceStage();
-    }
+    });
   }
   
   /** 紧急清理处理器 */
@@ -439,19 +427,19 @@ export class TextViewComponent implements OnInit, OnDestroy {
   
   // ========== 触摸拖拽处理 ==========
   
-  onTouchStart(data: { event: TouchEvent; task: Task }) {
+  onTouchStart(data: TaskTouchStartPayload) {
     const { event, task } = data;
     if (event.touches.length !== 1) return;
     const touch = event.touches[0];
-    this.dragDropService.startTouchDrag(task, touch, () => {});
+    this.dragDropService.startTouchDrag(task, touch, () => {}, { gestureMode: data.gestureMode });
   }
   
-  onTaskTouchStart(data: { event: TouchEvent; task: Task }) {
+  onTaskTouchStart(data: TaskTouchStartPayload) {
     const { event, task } = data;
     if (event.touches.length !== 1) return;
     if (!task || this.selectedTaskId() === task.id) return;
     const touch = event.touches[0];
-    this.dragDropService.startTouchDrag(task, touch, () => {});
+    this.dragDropService.startTouchDrag(task, touch, () => {}, { gestureMode: data.gestureMode });
   }
   
   onTouchMove(event: TouchEvent) {
@@ -483,7 +471,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       if (currentHoverStage !== stageNum) {
         const wasCollapsed = this.stagesRef ? !this.stagesRef.isStageExpanded(stageNum) : false;
         this.dragDropService.beginDOMUpdate();
-        const collapseStage = this.dragDropService.switchToStage(stageNum);
+        const collapseStage = this.dragDropService.switchToStage(stageNum, { autoExpanded: wasCollapsed });
         
         if (collapseStage !== null) this.stagesRef?.collapseStage(collapseStage);
         
@@ -569,36 +557,49 @@ export class TextViewComponent implements OnInit, OnDestroy {
     }
   }
   
-  onTouchEnd(_event: TouchEvent) {
+  private cleanupTouchGestureState() {
     const touchEndResult = this.dragDropService.endTouchDrag();
     const mouseExpandedStages = this.dragDropService.endDrag();
-    const { task, targetStage, targetBeforeId, targetUnassignedId, wasDragging, autoExpandedStages } = touchEndResult;
+    const { autoExpandedStages } = touchEndResult;
     this.ops.collapseAutoExpandedStages(autoExpandedStages, mouseExpandedStages);
     this.ops.restoreAutoCollapsedSourceStage();
-    
-    if (!task) return;
-    
-    // 场景1：待分配块间的拖放（重新挂载父子关系）
-    if (wasDragging && targetUnassignedId !== null && targetUnassignedId !== undefined && task.stage === null) {
+    return touchEndResult;
+  }
+
+  private applyTouchDropResult(
+    dragResult: ReturnType<TextViewDragDropService['endTouchDrag']>,
+    onFailure: (message: string) => void,
+  ): void {
+    const { task, targetStage, targetBeforeId, targetUnassignedId, wasDragging } = dragResult;
+
+    if (!task || !wasDragging) {
+      return;
+    }
+
+    if (targetUnassignedId !== null && targetUnassignedId !== undefined && task.stage === null) {
       const result = this.taskOpsAdapter.moveTaskToStage(task.id, null, undefined, targetUnassignedId);
       if (isFailure(result)) {
-        this.ops.onAttachmentError(`重新挂载失败：${getErrorMessage(result.error)}`);
+        onFailure(`重新挂载失败：${getErrorMessage(result.error)}`);
       }
       return;
     }
-    
-    // 场景2：拖到阶段区域
-    if (wasDragging && targetStage !== null) {
+
+    if (targetStage !== null) {
       const inferredParentId = this.ops.inferParentIdForDrop(targetStage, targetBeforeId ?? null);
       const result = this.taskOpsAdapter.moveTaskToStage(task.id, targetStage, targetBeforeId, inferredParentId);
       if (isFailure(result)) {
-        this.ops.onAttachmentError(`无法将任务移动到阶段 ${targetStage}：${getErrorMessage(result.error)}`);
+        onFailure(`无法将任务移动到阶段 ${targetStage}：${getErrorMessage(result.error)}`);
       }
     }
   }
 
+  onTouchEnd(_event: TouchEvent) {
+    const dragResult = this.cleanupTouchGestureState();
+    this.applyTouchDropResult(dragResult, message => this.ops.onAttachmentError(message));
+  }
+
   onTouchCancel(_event: TouchEvent) {
-    // 暂时忽略 touchcancel，让全局的 touchend 处理器来处理
+    this.cleanupTouchGestureState();
   }
   
   // ========== 全局触摸处理 ==========
@@ -628,7 +629,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   /** document 级别的全局 touchcancel 处理器 */
   private handleGlobalTouchCancel(event: TouchEvent) {
     if (this.dragDropService.isDOMUpdating) return;
-    if (!this.dragDropService.draggingTaskId()) return;
+    if (!this.dragDropService.draggingTaskId() && !this.dragDropService.touchDragTask) return;
     this.ngZone.run(() => this.onTouchCancel(event));
   }
 }

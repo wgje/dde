@@ -2,7 +2,7 @@ import { Component, inject, input, output, ChangeDetectionStrategy } from '@angu
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
-import { StageData, DropTargetInfo } from './text-view.types';
+import { StageData, DropTargetInfo, TaskTouchStartPayload } from './text-view.types';
 import { TextTaskCardComponent } from './text-task-card.component';
 
 /**
@@ -98,6 +98,12 @@ import { TextTaskCardComponent } from './text-task-card.component';
     </article>
   `,
   styles: [`
+    .task-stack {
+      touch-action: pan-y;
+      overscroll-behavior-y: contain;
+      -webkit-overflow-scrolling: touch;
+    }
+
     .animate-collapse-open { 
       animation: collapseOpen 0.15s ease-out; 
     }
@@ -139,7 +145,7 @@ export class TextStageCardComponent {
   readonly taskDragStart = output<{ event: DragEvent; task: Task }>();
   readonly taskDragEnd = output<void>();
   readonly taskDragOver = output<{ event: DragEvent; task: Task; stageNumber: number }>();
-  readonly taskTouchStart = output<{ event: TouchEvent; task: Task }>();
+  readonly taskTouchStart = output<TaskTouchStartPayload>();
   readonly taskTouchMove = output<TouchEvent>();
   readonly taskTouchEnd = output<TouchEvent>();
   readonly taskTouchCancel = output<TouchEvent>();

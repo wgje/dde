@@ -83,6 +83,8 @@ describe('computeFamilyBlockAutoLayout', () => {
     const familyOneMaxY = Math.max(...familyOneKeys.map(key => positionMap.get(key)?.y ?? -1));
 
     expect(positionMap.get('root-2')?.y ?? -1).toBeGreaterThan(familyOneMaxY);
+    expect((positionMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER) - familyOneMaxY)
+      .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING * 2);
   });
 
   it('keeps root family order driven by root rank', () => {
@@ -149,6 +151,55 @@ describe('computeFamilyBlockAutoLayout', () => {
     const positionMap = toPositionMap(positions);
     expect(positionMap.get('root-2')?.y ?? -1).toBeGreaterThan(positionMap.get('root-1')?.y ?? Number.MAX_SAFE_INTEGER);
     expect(positionMap.get('child-2')?.y).toBe(positionMap.get('root-2')?.y);
+  });
+
+  it('keeps a single-chain tree compact instead of reserving a tall empty block', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-1', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-1', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-1', to: 'child-1' }),
+        createLayoutLink({ from: 'child-1', to: 'grand-1' }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('root-1')?.y).toBe(0);
+    expect(positionMap.get('child-1')?.y).toBe(0);
+    expect(positionMap.get('grand-1')?.y).toBe(0);
+    expect(positionMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING * 1.5);
+  });
+
+  it('adds controlled extra spacing when cross-tree link labels need breathing room', () => {
+    const nodes = [
+      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'child-1', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
+      createLayoutNode({ key: 'child-2', stage: 2, rank: 210 }),
+    ];
+    const baseLinks = [
+      createLayoutLink({ from: 'root-1', to: 'child-1' }),
+      createLayoutLink({ from: 'root-2', to: 'child-2' }),
+    ];
+
+    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
+    const crossTreePositions = computeFamilyBlockAutoLayout(nodes, [
+      ...baseLinks,
+      createLayoutLink({ from: 'child-1', to: 'child-2', isCrossTree: true }),
+    ]);
+
+    const compactMap = toPositionMap(compactPositions);
+    const crossTreeMap = toPositionMap(crossTreePositions);
+
+    expect(crossTreeMap.get('root-2')?.y ?? -1)
+      .toBeGreaterThan(compactMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER);
+    expect((crossTreeMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER) - (compactMap.get('root-2')?.y ?? 0))
+      .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING);
   });
 });
 

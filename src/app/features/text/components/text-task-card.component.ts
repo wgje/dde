@@ -9,6 +9,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
+import type { TaskTouchStartPayload } from './text-view.types';
 
 @Component({
   selector: 'app-text-task-card',
@@ -33,86 +34,120 @@ import { handleMarkdownLinkAction } from '../../../../utils/markdown';
       class="text-task-card relative min-w-0 bg-canvas/80 dark:bg-stone-800/80 backdrop-blur-sm border rounded-lg cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all group stack-card overflow-hidden"
       [ngClass]="cardClasses">
 
-      <div class="flex justify-between items-start"
-           [ngClass]="{'mb-1': !isMobile(), 'mb-0.5': isMobile()}">
-        <div class="flex items-center gap-1">
-          <span class="font-mono font-medium text-retro-muted dark:text-stone-400"
-                [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
-            {{ projectState.compressDisplayId(task().displayId) }}
-          </span>
-          @if (task().parkingMeta?.state === 'parked') {
-            <span
-              class="text-[8px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium"
-              title="Parked">
-              Parked
+      <div class="flex min-w-0 items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex justify-between items-start"
+               [ngClass]="{'mb-1': !isMobile(), 'mb-0.5': isMobile()}">
+            <div class="flex items-center gap-1">
+              <span class="font-mono font-medium text-retro-muted dark:text-stone-400"
+                    [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
+                {{ projectState.compressDisplayId(task().displayId) }}
+              </span>
+              @if (task().parkingMeta?.state === 'parked') {
+                <span
+                  class="text-[8px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium"
+                  title="Parked">
+                  Parked
+                </span>
+              }
+              @if (isDockFocused()) {
+                <span
+                  class="text-[8px] px-1 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 font-medium"
+                  title="Focus task">
+                  Focus
+                </span>
+              } @else if (isDocked()) {
+                <span
+                  class="text-[8px] px-1 py-0.5 rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 font-medium"
+                  title="Docked task">
+                  Docked
+                </span>
+              }
+              <span
+                data-testid="text-task-status-badge"
+                class="text-[8px] px-1 py-0.5 rounded font-medium"
+                [ngClass]="{
+                  'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300': task().status === 'completed',
+                  'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300': task().status !== 'completed'
+                }">
+                {{ task().status === 'completed' ? 'Completed' : 'Active' }}
+              </span>
+            </div>
+            <span class="text-retro-muted/60 dark:text-stone-500 font-light"
+                  [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
+              {{ task().createdDate | date:'yyyy/MM/dd HH:mm' }}
             </span>
-          }
-          @if (isDockFocused()) {
-            <span
-              class="text-[8px] px-1 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 font-medium"
-              title="Focus task">
-              Focus
-            </span>
-          } @else if (isDocked()) {
-            <span
-              class="text-[8px] px-1 py-0.5 rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 font-medium"
-              title="Docked task">
-              Docked
-            </span>
-          }
-          <span
-            data-testid="text-task-status-badge"
-            class="text-[8px] px-1 py-0.5 rounded font-medium"
-            [ngClass]="{
-              'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300': task().status === 'completed',
-              'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300': task().status !== 'completed'
-            }">
-            {{ task().status === 'completed' ? 'Completed' : 'Active' }}
-          </span>
-        </div>
-        <span class="text-retro-muted/60 dark:text-stone-500 font-light"
-              [ngClass]="{'text-[10px]': !isMobile(), 'text-[9px]': isMobile()}">
-          {{ task().createdDate | date:'yyyy/MM/dd HH:mm' }}
-        </span>
-      </div>
+          </div>
 
-      @if (!isSelected()) {
-        <div class="font-medium text-retro-dark dark:text-stone-200 leading-snug line-clamp-2 cursor-pointer"
-             data-testid="task-title-label"
-             [ngClass]="{'text-sm mb-1': !isMobile(), 'text-xs mb-0.5': isMobile()}">
-          {{ task().title || 'Untitled task' }}
+          @if (!isSelected()) {
+            <div class="font-medium text-retro-dark dark:text-stone-200 leading-snug line-clamp-2 cursor-pointer"
+                 data-testid="task-title-label"
+                 [ngClass]="{'text-sm mb-1': !isMobile(), 'text-xs mb-0.5': isMobile()}">
+              {{ task().title || 'Untitled task' }}
+            </div>
+            @if (task().content) {
+              <div class="text-stone-500 dark:text-stone-400 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em] markdown-preview-compact"
+                   [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}"
+                   (click)="onContentPreviewClick($event)"
+                   [innerHTML]="task().content | safeMarkdown">
+              </div>
+            } @else {
+              <div class="text-stone-400 dark:text-stone-500 italic font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em]"
+                   [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">
+                No description
+              </div>
+            }
+          } @else {
+            <app-text-task-editor
+              #taskEditor
+              [task]="task()"
+              [isMobile]="isMobile()"
+              [userId]="userId()"
+              [projectId]="projectId()"
+              [connections]="connections()"
+              (addSibling)="addSibling.emit()"
+              (addChild)="addChild.emit()"
+              (deleteTask)="deleteTask.emit()"
+              (parkTask)="parkTask.emit()"
+              (attachmentError)="attachmentError.emit($event)"
+              (openLinkedTask)="openLinkedTask.emit($event)"
+              (previewModeChange)="onEditorPreviewChange($event)">
+            </app-text-task-editor>
+          }
         </div>
-        @if (task().content) {
-          <div class="text-stone-500 dark:text-stone-400 font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em] markdown-preview-compact"
-               [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}"
-               (click)="onContentPreviewClick($event)"
-               [innerHTML]="task().content | safeMarkdown">
-          </div>
-        } @else {
-          <div class="text-stone-400 dark:text-stone-500 italic font-light leading-relaxed line-clamp-1 cursor-pointer min-h-[1em]"
-               [ngClass]="{'text-xs': !isMobile(), 'text-[10px]': isMobile()}">
-            No description
-          </div>
+
+        @if (showMobileDragHandle()) {
+          <button
+            type="button"
+            data-testid="task-drag-handle"
+            data-drag-handle
+            class="text-task-drag-handle mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-retro-muted/25 bg-canvas/85 text-retro-muted/80 shadow-sm transition-all active:scale-95 active:border-retro-teal active:text-retro-teal dark:border-stone-600/70 dark:bg-stone-800/90 dark:text-stone-300/80"
+            aria-label="拖动任务"
+            title="拖动任务"
+            (click)="onDragHandleClick($event)"
+            (touchstart)="onDragHandleTouchStart($event)">
+            <svg viewBox="0 0 16 16" class="h-4 w-4" fill="currentColor" aria-hidden="true">
+              <circle cx="5" cy="3.5" r="1"></circle>
+              <circle cx="11" cy="3.5" r="1"></circle>
+              <circle cx="5" cy="8" r="1"></circle>
+              <circle cx="11" cy="8" r="1"></circle>
+              <circle cx="5" cy="12.5" r="1"></circle>
+              <circle cx="11" cy="12.5" r="1"></circle>
+            </svg>
+          </button>
         }
-      } @else {
-        <app-text-task-editor
-          #taskEditor
-          [task]="task()"
-          [isMobile]="isMobile()"
-          [userId]="userId()"
-          [projectId]="projectId()"
-          [connections]="connections()"
-          (addSibling)="addSibling.emit()"
-          (addChild)="addChild.emit()"
-          (deleteTask)="deleteTask.emit()"
-          (parkTask)="parkTask.emit()"
-          (attachmentError)="attachmentError.emit($event)"
-          (openLinkedTask)="openLinkedTask.emit($event)"
-          (previewModeChange)="onEditorPreviewChange($event)">
-        </app-text-task-editor>
-      }
+      </div>
     </div>
   `,
+  styles: [`
+    .text-task-card {
+      touch-action: pan-y;
+    }
+
+    .text-task-drag-handle {
+      touch-action: none;
+    }
+  `],
 })
 export class TextTaskCardComponent {
   readonly dockEngine = inject(DockEngineService);
@@ -151,7 +186,7 @@ export class TextTaskCardComponent {
   dragStart = output<{ event: DragEvent; task: Task }>();
   dragEnd = output<void>();
   dragOver = output<{ event: DragEvent; task: Task; stageNumber: number }>();
-  touchStart = output<{ event: TouchEvent; task: Task }>();
+  touchStart = output<TaskTouchStartPayload>();
   touchMove = output<TouchEvent>();
   touchEnd = output<TouchEvent>();
   touchCancel = output<TouchEvent>();
@@ -202,6 +237,10 @@ export class TextTaskCardComponent {
 
   onEditorPreviewChange(isPreview: boolean) {
     this.editorPreview.set(isPreview);
+  }
+
+  showMobileDragHandle(): boolean {
+    return this.isMobile() && !this.isSelected();
   }
 
   isDocked(): boolean {
@@ -298,6 +337,25 @@ export class TextTaskCardComponent {
     this.textViewOps?.armContainerClickGuard(currentTask.id);
   }
 
+  onDragHandleClick(event: Event): void {
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
+  }
+
+  onDragHandleTouchStart(event: TouchEvent): void {
+    if (this.isSelected()) {
+      return;
+    }
+
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
+    this.touchStart.emit({ event, task: this.task(), gestureMode: 'handle' });
+  }
+
   private readTask(): Task | null {
     try {
       return this.task();
@@ -341,29 +399,37 @@ export class TextTaskCardComponent {
   }
 
   onTouchStart(event: TouchEvent) {
-    if (!this.isSelected()) {
-      this.touchStart.emit({ event, task: this.task() });
+    if (this.isSelected() || this.isMobile()) {
+      return;
     }
+
+    this.touchStart.emit({ event, task: this.task() });
   }
 
   onTouchMove(event: TouchEvent) {
-    if (!this.isSelected()) {
-      this.touchMove.emit(event);
-      if (this.isDragging() && event.cancelable) {
-        event.preventDefault();
-      }
+    if (this.isSelected() || this.isMobile()) {
+      return;
+    }
+
+    this.touchMove.emit(event);
+    if (this.isDragging() && event.cancelable) {
+      event.preventDefault();
     }
   }
 
   onTouchEnd(event: TouchEvent) {
-    if (!this.isSelected()) {
-      this.touchEnd.emit(event);
+    if (this.isSelected() || this.isMobile()) {
+      return;
     }
+
+    this.touchEnd.emit(event);
   }
 
   onTouchCancel(event: TouchEvent) {
-    if (!this.isSelected()) {
-      this.touchCancel.emit(event);
+    if (this.isSelected() || this.isMobile()) {
+      return;
     }
+
+    this.touchCancel.emit(event);
   }
 }

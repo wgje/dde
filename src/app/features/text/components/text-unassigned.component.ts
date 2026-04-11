@@ -13,6 +13,7 @@ import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
+import type { TaskTouchStartPayload } from './text-view.types';
 
 /**
  * 待分配区组件
@@ -251,7 +252,7 @@ export class TextUnassignedComponent implements OnDestroy {
   createUnassigned = output<void>();
   dragStart = output<{ event: DragEvent; task: Task }>();
   dragEnd = output<void>();
-  touchStart = output<{ event: TouchEvent; task: Task }>();
+  touchStart = output<TaskTouchStartPayload>();
   touchMove = output<TouchEvent>();
   touchEnd = output<TouchEvent>();
   touchCancel = output<TouchEvent>();

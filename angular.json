@@ -78,7 +78,6 @@
         "serve": {
           "builder": "@angular/build:dev-server",
           "options": {
-            "port": 3000,
             "hmr": false
           },
           "configurations": {

@@ -1,12 +1,53 @@
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
+
+interface ResolvedDevServerInfo {
+  port: number;
+  url: string;
+}
+
+function resolvePlaywrightDevServer(): ResolvedDevServerInfo {
+  const resolverPath = path.join(process.cwd(), 'scripts', 'dev-server-port.cjs');
+  const raw = execFileSync(process.execPath, [resolverPath, '--json', '--allow-existing'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: process.env,
+  });
+
+  const parsed = JSON.parse(raw) as Partial<ResolvedDevServerInfo>;
+  if (typeof parsed.port !== 'number' || typeof parsed.url !== 'string') {
+    throw new Error('无法解析 Playwright 开发服务器端口');
+  }
+
+  return {
+    port: parsed.port,
+    url: parsed.url,
+  };
+}
+
+const hasCustomBaseURL = typeof process.env['PLAYWRIGHT_BASE_URL'] === 'string' && process.env['PLAYWRIGHT_BASE_URL'].length > 0;
+const hasCustomWebServerCommand = typeof process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] === 'string' && process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'].length > 0;
+if (hasCustomWebServerCommand && !hasCustomBaseURL) {
+  throw new Error('PLAYWRIGHT_WEB_SERVER_COMMAND 需要同时设置 PLAYWRIGHT_BASE_URL，避免等待错误的端口。');
+}
+
+const shouldManageWebServer = hasCustomWebServerCommand || !hasCustomBaseURL;
+const needsResolvedDevServer = !hasCustomBaseURL && !hasCustomWebServerCommand;
+const resolvedDevServer = needsResolvedDevServer
+  ? resolvePlaywrightDevServer()
+  : null;
 
 /**
  * Playwright 配置文件
  * 用于 NanoFlow 项目的 E2E 测试
  */
-const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || 'http://localhost:3000';
+const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || resolvedDevServer?.url || 'http://localhost:3000';
 // E2E 默认使用专用起服脚本，避免嵌套 npm run 在 Playwright webServer 管理下提前退出。
-const webServerCommand = process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] || 'npm run start:e2e';
+const webServerCommand = process.env['PLAYWRIGHT_WEB_SERVER_COMMAND']
+  || (shouldManageWebServer && resolvedDevServer
+    ? `npm run start:e2e -- --port=${resolvedDevServer.port}`
+    : undefined);
 // Angular dev server 首次编译耗时较长，默认给 8 分钟防止超时
 const webServerTimeout = Number(process.env['PLAYWRIGHT_WEB_SERVER_TIMEOUT'] || 480_000);
 const configuredWorkers = Number.parseInt(process.env['PLAYWRIGHT_WORKERS'] || '', 10);
@@ -71,10 +112,10 @@ export default defineConfig({
   ],
 
   /* 测试前启动开发服务器 */
-  webServer: {
+  webServer: webServerCommand ? {
     command: webServerCommand,
     url: baseURL,
     reuseExistingServer: !process.env['CI'] && !process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'],
     timeout: webServerTimeout,
-  },
+  } : undefined,
 });

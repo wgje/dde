@@ -11,10 +11,12 @@ export const LAYOUT_CONFIG = {
   STAGE_SPACING: 260,
   /** 任务行垂直间距 */
   ROW_SPACING: 140,
-  /** 自动布局中主任务家族之间的额外留白（按行高倍数） */
-  AUTO_LAYOUT_FAMILY_GAP_ROWS: 0.85,
-  /** 自动布局中单个主任务家族的最小行数 */
-  AUTO_LAYOUT_MIN_FAMILY_BLOCK_ROWS: 1,
+  /** 自动布局中家族之间的基础额外留白（按行高倍数） */
+  AUTO_LAYOUT_FAMILY_GAP_ROWS: 0.18,
+  /** 跨树链接块对家族间距施加的额外压力（按行高倍数） */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS: 0.24,
+  /** 高密度家族相邻时额外增加的留白系数（按行高倍数） */
+  AUTO_LAYOUT_DENSE_FAMILY_GAP_ROWS: 0.06,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */

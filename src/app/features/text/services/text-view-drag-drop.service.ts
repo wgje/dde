@@ -1,7 +1,11 @@
 import { inject, Injectable, signal } from '@angular/core';
 import { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
-import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo } from '../components/text-view.types';
+import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo, TouchDragGestureMode } from '../components/text-view.types';
+
+interface TouchDragStartOptions {
+  gestureMode?: TouchDragGestureMode;
+}
 
 /** 拖拽服务：统一管理鼠标/触摸拖拽状态和逻辑 */
 @Injectable({ providedIn: 'root' })
@@ -62,6 +66,7 @@ export class TextViewDragDropService {
       startY: 0,
       currentX: 0,
       currentY: 0,
+      gestureMode: 'default',
       longPressTimer: null,
       dragGhost: null,
       previousHoverStage: null,
@@ -146,15 +151,32 @@ export class TextViewDragDropService {
     return null;
   }
 
-  /** 长按延迟时间 - 500ms，降低滚动时误触概率 */
-  private readonly LONG_PRESS_DELAY = 500;
+  /** 普通触摸长按延迟 - 保持滚动优先，降低正文区域误拖概率 */
+  private readonly DEFAULT_LONG_PRESS_DELAY = 500;
+
+  /** 显式拖拽抓手延迟 - 用户已明确表达拖拽意图，可更快响应 */
+  private readonly HANDLE_LONG_PRESS_DELAY = 180;
+
+  /** 普通触摸移动阈值 */
+  private readonly DEFAULT_MOVE_THRESHOLD = 15;
+
+  /** 抓手触摸移动阈值 */
+  private readonly HANDLE_MOVE_THRESHOLD = 6;
+
+  /** 普通卡片触摸判定为纵向滚动的斜率阈值 */
+  private readonly DEFAULT_VERTICAL_SCROLL_RATIO = 3.5;
   
   /** 长按回调 - 用于通知组件拖拽已开始 */
   private onDragStartCallback: (() => void) | null = null;
   
   /** 开始触摸拖拽准备（长按检测） */
-  startTouchDrag(task: Task, touch: Touch, onDragStart: () => void): void {
-    this.logger.debug('startTouchDrag', { taskId: task?.id?.slice(-4) ?? '?', stage: task?.stage });
+  startTouchDrag(task: Task, touch: Touch, onDragStart: () => void, options: TouchDragStartOptions = {}): void {
+    const gestureMode = options.gestureMode ?? 'default';
+    this.logger.debug('startTouchDrag', {
+      taskId: task?.id?.slice(-4) ?? '?',
+      stage: task?.stage,
+      gestureMode,
+    });
     
     this.resetTouchState();
     
@@ -163,8 +185,13 @@ export class TextViewDragDropService {
     this.touchState.startY = touch.clientY;
     this.touchState.currentX = touch.clientX;
     this.touchState.currentY = touch.clientY;
+    this.touchState.gestureMode = gestureMode;
     this.touchState.originalStage = task.stage ?? null;  // 记录任务原始阶段
     this.onDragStartCallback = onDragStart;
+
+    const longPressDelay = gestureMode === 'handle'
+      ? this.HANDLE_LONG_PRESS_DELAY
+      : this.DEFAULT_LONG_PRESS_DELAY;
     
     // 使用长按延迟来区分点击和拖拽
     this.touchState.longPressTimer = setTimeout(() => {
@@ -172,7 +199,7 @@ export class TextViewDragDropService {
       if (this.touchState.task) {
         this.activateDrag();
       }
-    }, this.LONG_PRESS_DELAY);
+    }, longPressDelay);
   }
   
   /** 激活拖拽状态（长按后或移动距离足够后） */
@@ -194,9 +221,6 @@ export class TextViewDragDropService {
     this.touchState.previousHoverStage = this.touchState.originalStage;
     if (this.touchState.originalStage !== null) {
       this.dragOverStage.set(this.touchState.originalStage);
-      // 关键修复：将原始阶段也添加到追踪集合中
-      // 这样当拖入其他阶段时，原始阶段可以被正确折叠
-      this.touchState.expandedDuringDrag.add(this.touchState.originalStage);
     }
     
     this.logger.debug('Creating ghost', { x: this.touchState.currentX, y: this.touchState.currentY });
@@ -258,11 +282,16 @@ export class TextViewDragDropService {
     if (!this.touchState.isDragging) {
       const deltaX = Math.abs(touch.clientX - this.touchState.startX);
       const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-      const moveThreshold = 15; // 🔧 优化：提高到15像素，降低滚动时误触拖拽
+      const gestureMode = this.touchState.gestureMode;
+      const moveThreshold = gestureMode === 'handle'
+        ? this.HANDLE_MOVE_THRESHOLD
+        : this.DEFAULT_MOVE_THRESHOLD;
       
       // 判断移动方向：如果主要是垂直移动，认为是滚动意图
-      // 🔧 优化：提高到3.5倍，让垂直滚动更容易被识别（避免阶段内滚动时误触拖拽）
-      const isVerticalScroll = deltaY > deltaX * 3.5; // 垂直移动超过水平移动的3.5倍才认为是滚动
+      // 显式拖拽抓手不参与滚动意图识别，任何方向都按拖拽处理。
+      const isVerticalScroll = gestureMode === 'handle'
+        ? false
+        : deltaY > deltaX * this.DEFAULT_VERTICAL_SCROLL_RATIO;
       const totalDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
       
       this.logger.debug('Move check:', {
@@ -270,7 +299,8 @@ export class TextViewDragDropService {
         deltaY: deltaY.toFixed(1),
         totalDistance: totalDistance.toFixed(1),
         isVerticalScroll,
-        threshold: moveThreshold
+        threshold: moveThreshold,
+        gestureMode,
       });
       
       if (totalDistance > moveThreshold) {
@@ -334,8 +364,9 @@ export class TextViewDragDropService {
    * 仅折叠“拖拽过程中自动展开”的阶段，避免把原本就展开的阶段折叠掉
    */
   /** 切换到新阶段（处理阶段展开/折叠逻辑） */
-  switchToStage(stageNumber: number): number | null {
+  switchToStage(stageNumber: number, options?: { autoExpanded?: boolean }): number | null {
     const prevStage = this.touchState.previousHoverStage;
+    const autoExpanded = options?.autoExpanded ?? false;
     
     // 检查是否需要折叠之前的阶段
     let stageToCollapse: number | null = null;
@@ -344,18 +375,16 @@ export class TextViewDragDropService {
       prevStage !== stageNumber &&
       this.touchState.expandedDuringDrag.has(prevStage)
     ) {
-      // 🔧 修复：折叠时不要删除，保持追踪，这样下次拖入再拖出时仍能折叠
       stageToCollapse = prevStage;
-      // 不删除：this.touchState.expandedDuringDrag.delete(prevStage);
     }
     
     // 更新当前阶段
     this.touchState.previousHoverStage = stageNumber;
     this.dragOverStage.set(stageNumber);
     
-    // 🔧 关键修复：无论进入哪个阶段，都将其加入追踪集合
-    // 这确保了每次拖出（包括从原始阶段第二次拖出）都能正确触发折叠
-    this.touchState.expandedDuringDrag.add(stageNumber);
+    if (autoExpanded) {
+      this.touchState.expandedDuringDrag.add(stageNumber);
+    }
     
     return stageToCollapse;
   }
@@ -377,8 +406,6 @@ export class TextViewDragDropService {
         // 否则原任务卡会被折叠隐藏，用户会误以为“拖出失败”。
         if (prevStage !== this.dragSourceStage) {
           stageToCollapse = prevStage;
-          // 🔧 修复：不删除记录，保持追踪，这样下次拖入再拖出时仍能折叠
-          // 不删除：this.touchState.expandedDuringDrag.delete(prevStage);
         }
       }
       

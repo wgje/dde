@@ -3,6 +3,14 @@
  */
 import { Task } from '../../../../models';
 
+export type TouchDragGestureMode = 'default' | 'handle';
+
+export interface TaskTouchStartPayload {
+  event: TouchEvent;
+  task: Task;
+  gestureMode?: TouchDragGestureMode;
+}
+
 /** 拖拽状态 */
 export interface DragState {
   task: Task | null;
@@ -19,6 +27,7 @@ export interface TouchDragState extends DragState {
   startY: number;
   currentX: number;
   currentY: number;
+  gestureMode: TouchDragGestureMode;
   longPressTimer: ReturnType<typeof setTimeout> | null;
   dragGhost: HTMLElement | null;
   previousHoverStage: number | null;
