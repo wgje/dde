@@ -201,6 +201,46 @@ describe('computeFamilyBlockAutoLayout', () => {
     expect((crossTreeMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER) - (compactMap.get('root-2')?.y ?? 0))
       .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING);
   });
+
+  it('caps extra gap under MAX_EXTRA_GAP_ROWS even with many cross-tree links and dense families', () => {
+    // 构造大型复杂场景：密集家族 + 多条跨树链接
+    const nodes = [
+      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+      ...Array.from({ length: 6 }, (_, i) =>
+        createLayoutNode({ key: `child-1-${i}`, stage: 2, rank: 110 + i }),
+      ),
+      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
+      ...Array.from({ length: 4 }, (_, i) =>
+        createLayoutNode({ key: `child-2-${i}`, stage: 2, rank: 210 + i }),
+      ),
+    ];
+    const links = [
+      ...Array.from({ length: 6 }, (_, i) =>
+        createLayoutLink({ from: 'root-1', to: `child-1-${i}` }),
+      ),
+      ...Array.from({ length: 4 }, (_, i) =>
+        createLayoutLink({ from: 'root-2', to: `child-2-${i}` }),
+      ),
+      // 多条跨树链接
+      createLayoutLink({ from: 'child-1-0', to: 'child-2-0', isCrossTree: true }),
+      createLayoutLink({ from: 'child-1-2', to: 'child-2-1', isCrossTree: true }),
+      createLayoutLink({ from: 'child-1-4', to: 'child-2-3', isCrossTree: true }),
+    ];
+
+    const positions = computeFamilyBlockAutoLayout(nodes, links);
+    const positionMap = toPositionMap(positions);
+
+    const family1Keys = ['root-1', ...Array.from({ length: 6 }, (_, i) => `child-1-${i}`)];
+    const family2Keys = ['root-2', ...Array.from({ length: 4 }, (_, i) => `child-2-${i}`)];
+    const family1MaxY = Math.max(...family1Keys.map(key => positionMap.get(key)?.y ?? -Infinity));
+    const family2MinY = Math.min(...family2Keys.map(key => positionMap.get(key)?.y ?? Infinity));
+
+    // 家族之间的边界间距 = 家族 2 最上方节点 - 家族 1 最下方节点
+    // 应被 (1 + MAX_EXTRA_GAP_ROWS) * ROW_SPACING 严格约束
+    const maxAllowedGap = (1 + LAYOUT_CONFIG.AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS) * LAYOUT_CONFIG.ROW_SPACING;
+    expect(family2MinY - family1MaxY).toBeLessThanOrEqual(maxAllowedGap + 1); // +1 浮点容差
+    expect(family2MinY - family1MaxY).toBeGreaterThan(0); // 家族之间必须有正间距
+  });
 });
 
 describe('FlowLayoutService', () => {

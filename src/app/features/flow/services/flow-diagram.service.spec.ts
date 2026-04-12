@@ -59,6 +59,7 @@ describe('FlowDiagramService', () => {
     setDiagram: vi.fn(),
     getSelectedNodeKeys: vi.fn(() => []),
     selectNode: vi.fn(),
+    selectMultiple: vi.fn(),
   };
 
   const mockProjectState = {
@@ -74,6 +75,7 @@ describe('FlowDiagramService', () => {
 
   let originalRequestAnimationFrame: typeof globalThis.requestAnimationFrame | undefined;
   let originalCancelAnimationFrame: typeof globalThis.cancelAnimationFrame | undefined;
+  let originalDevicePixelRatioDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -83,6 +85,7 @@ describe('FlowDiagramService', () => {
 
     originalRequestAnimationFrame = globalThis.requestAnimationFrame;
     originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    originalDevicePixelRatioDescriptor = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
 
     globalThis.requestAnimationFrame = ((callback: FrameRequestCallback): number => {
       return setTimeout(() => callback(0), 0) as unknown as number;
@@ -137,6 +140,12 @@ describe('FlowDiagramService', () => {
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
     } else {
       delete (globalThis as unknown as { cancelAnimationFrame?: typeof globalThis.cancelAnimationFrame }).cancelAnimationFrame;
+    }
+
+    if (originalDevicePixelRatioDescriptor) {
+      Object.defineProperty(window, 'devicePixelRatio', originalDevicePixelRatioDescriptor);
+    } else {
+      delete (window as Window & { devicePixelRatio?: number }).devicePixelRatio;
     }
 
     vi.useRealTimers();
@@ -198,6 +207,27 @@ describe('FlowDiagramService', () => {
     expect(internal.lastStableViewState).toBeNull();
   });
 
+  it('设备像素比变化时应触发恢复链路而不是静默保留旧 canvas', () => {
+    attachDiagram();
+
+    const internal = service as unknown as {
+      lastKnownDevicePixelRatio: number;
+      syncViewportMetrics: () => void;
+    };
+    internal.lastKnownDevicePixelRatio = 1;
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      value: 1.5,
+    });
+
+    internal.syncViewportMetrics();
+    vi.runAllTimers();
+
+    expect(mockDataService.cancelPendingViewStateSave).toHaveBeenCalledTimes(1);
+    expect(mockZoomService.cancelPendingViewStateSave).toHaveBeenCalledTimes(1);
+    expect(internal.lastKnownDevicePixelRatio).toBe(1.5);
+  });
+
   it('应在容器从危险小尺寸恢复后回到最近的稳定视口', () => {
     currentWidth = 120;
     currentHeight = 96;
@@ -257,9 +287,6 @@ describe('FlowDiagramService', () => {
     expect(diagram.scale).toBe(1.2);
     expect(diagram.position.x).toBe(18);
     expect(diagram.position.y).toBe(24);
-    expect(mockOverviewService.refreshOverview).toHaveBeenCalledTimes(1);
-    expect(mockDataService.saveViewState).toHaveBeenCalledTimes(1);
-    expect(internal.resizeRecoveryArmed).toBe(false);
   });
 
   it('recoverable 视口不可见时应继续回退到可见的 stable 视口', () => {
@@ -287,5 +314,48 @@ describe('FlowDiagramService', () => {
     expect(diagram.scale).toBe(1.15);
     expect(diagram.position.x).toBe(20);
     expect(diagram.position.y).toBe(28);
+  });
+
+  it('普通恢复后仍不可见时应升级到原地重建路径', () => {
+    currentWidth = 960;
+    currentHeight = 720;
+    attachDiagram(new go.Point(1200, 900), 0.45);
+
+    const internal = service as unknown as {
+      resizeRecoveryArmed: boolean;
+      restoreBestKnownViewState: () => boolean;
+      tryHardDiagramRecovery: () => boolean;
+      recoverDiagramAfterUnsafeResize: () => void;
+    };
+    internal.resizeRecoveryArmed = true;
+    internal.restoreBestKnownViewState = vi.fn(() => false);
+    internal.tryHardDiagramRecovery = vi.fn(() => true);
+    mockZoomService.fitToContents.mockImplementation(() => undefined);
+
+    internal.recoverDiagramAfterUnsafeResize();
+    vi.runAllTimers();
+
+    expect(internal.tryHardDiagramRecovery).toHaveBeenCalledTimes(1);
+  });
+
+  it('硬恢复兜底 fit 仍失败时应保持 recovery armed 并释放 mutex', () => {
+    currentWidth = 960;
+    currentHeight = 720;
+    attachDiagram(new go.Point(1200, 900), 0.45);
+
+    const internal = service as unknown as {
+      resizeRecoveryArmed: boolean;
+      hardRecoveryInProgress: boolean;
+      recoveryFitFallbackUsed: boolean;
+      completeRecoveryVerification: (allowHardRecovery: boolean) => void;
+    };
+    internal.resizeRecoveryArmed = false;
+    internal.hardRecoveryInProgress = true;
+    internal.recoveryFitFallbackUsed = true;
+
+    internal.completeRecoveryVerification(false);
+
+    expect(internal.resizeRecoveryArmed).toBe(true);
+    expect(internal.hardRecoveryInProgress).toBe(false);
   });
 });

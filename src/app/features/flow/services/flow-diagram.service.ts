@@ -43,6 +43,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 export class FlowDiagramService {
   private static readonly MIN_SAFE_DIAGRAM_WIDTH = 220;
   private static readonly MIN_SAFE_DIAGRAM_HEIGHT = 160;
+  private static readonly MAX_HARD_RECOVERY_ATTEMPTS = 2;
 
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly uiState = inject(UiStateService);
@@ -79,6 +80,13 @@ export class FlowDiagramService {
   private resizeRecoveryArmed = false;
   private lastRecoverableViewState: ViewState | null = null;
   private lastStableViewState: ViewState | null = null;
+  private lastKnownDevicePixelRatio = 1;
+  private hardRecoveryAttemptCount = 0;
+  private hardRecoveryInProgress = false;
+  private overviewContainer: HTMLDivElement | null = null;
+  private shouldRestoreOverview = false;
+  private pendingOverviewRestore = false;
+  private recoveryFitFallbackUsed = false;
   
   // ========== 僵尸模式 ==========
   private isSuspended = false;
@@ -154,6 +162,9 @@ export class FlowDiagramService {
       this.handleError('GoJS 库未加载', 'GoJS library not loaded');
       return false;
     }
+
+    this.hardRecoveryAttemptCount = 0;
+    this.hardRecoveryInProgress = false;
     
     // 【性能关键】在 Angular Zone 外部创建和配置 GoJS Diagram
     // 避免 GoJS 内部事件（鼠标移动、canvas 重绘、工具切换等）触发不必要的变更检测
@@ -170,6 +181,7 @@ export class FlowDiagramService {
       this.resizeRecoveryArmed = !this.isSafeDiagramSize(container.clientWidth, container.clientHeight);
       this.lastRecoverableViewState = null;
       this.lastStableViewState = null;
+      this.lastKnownDevicePixelRatio = this.getDevicePixelRatio();
       
       if (environment.gojsLicenseKey) {
         (go.Diagram as unknown as { licenseKey: string }).licenseKey = environment.gojsLicenseKey;
@@ -251,16 +263,16 @@ export class FlowDiagramService {
       
       // 设置 ResizeObserver
       this.setupResizeObserver();
-      
-      // 恢复视图状态
-      this.dataService.restoreViewState();
-      
+
       // 将 diagram 实例传递给其他子服务
       this.dataService.setDiagram(this.diagram);
       this.layoutService.setDiagram(this.diagram);
       this.selectionService.setDiagram(this.diagram);
       this.zoomService.setDiagram(this.diagram);
       this.zoomService.setViewStatePersistenceGuard(() => this.canPersistViewState());
+
+      // 恢复视图状态
+      this.dataService.restoreViewState();
       
       // 初始化时设置正确的画布背景色
       this.applyCanvasBackground();
@@ -608,6 +620,10 @@ export class FlowDiagramService {
    */
   initializeOverview(container: HTMLDivElement): void {
     if (!this.diagram || this.isDestroyed) return;
+
+    this.overviewContainer = container;
+    this.shouldRestoreOverview = true;
+    this.pendingOverviewRestore = false;
     
     // 设置 OverviewService 的主图引用
     this.overviewService.setDiagram(this.diagram);
@@ -698,12 +714,28 @@ export class FlowDiagramService {
    * 【重构完成】完全委托给 FlowOverviewService
    */
   disposeOverview(): void {
+    this.shouldRestoreOverview = false;
+    this.pendingOverviewRestore = false;
     // 完全委托给 FlowOverviewService
     this.overviewService.destroyOverview();
   }
   
   refreshOverview(): void {
     this.overviewService.refreshOverview();
+  }
+
+  public syncViewportMetrics(): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed || this.hardRecoveryInProgress) {
+      return;
+    }
+
+    const pixelRatioChanged = this.updateDevicePixelRatio();
+    this.handleDiagramContainerResize(
+      this.diagramDiv.clientWidth,
+      this.diagramDiv.clientHeight,
+      pixelRatioChanged,
+    );
+    this.attemptPendingOverviewRestore();
   }
 
   /** 调度小地图初始化（idle 优先） */
@@ -715,7 +747,16 @@ export class FlowDiagramService {
     scheduleTimer: (cb: () => void, delay: number) => void,
     immediate = false
   ): void {
-    if (!isVisible || isCollapsed) return;
+    if (!isVisible || isCollapsed) {
+      this.shouldRestoreOverview = false;
+      return;
+    }
+
+    if (overviewDiv?.nativeElement) {
+      this.overviewContainer = overviewDiv.nativeElement;
+      this.shouldRestoreOverview = true;
+    }
+
     const runInit = () => {
       if (overviewDiv?.nativeElement && this.isInitialized) {
         this.initializeOverview(overviewDiv.nativeElement);
@@ -747,6 +788,13 @@ export class FlowDiagramService {
     this.resizeRecoveryArmed = false;
     this.lastRecoverableViewState = null;
     this.lastStableViewState = null;
+    this.lastKnownDevicePixelRatio = 1;
+    this.hardRecoveryAttemptCount = 0;
+    this.hardRecoveryInProgress = false;
+    this.overviewContainer = null;
+    this.shouldRestoreOverview = false;
+    this.pendingOverviewRestore = false;
+    this.recoveryFitFallbackUsed = false;
     
     // 清理数据服务
     this.dataService.dispose();
@@ -764,6 +812,7 @@ export class FlowDiagramService {
     // 【P1-11 修复】清理 drop 事件监听器
     this.dropHandlerCleanup?.();
     this.dropHandlerCleanup = null;
+    this.diagramDropHandler = null;
     
     // 清理事件服务
     this.eventService.dispose();
@@ -853,9 +902,12 @@ export class FlowDiagramService {
   
   // 【P1-11 修复】保存事件监听器引用，用于 dispose 时清理
   private dropHandlerCleanup: (() => void) | null = null;
+  private diagramDropHandler: ((taskData: Task, docPoint: go.Point) => void) | null = null;
 
   setupDropHandler(onDrop: (taskData: Task, docPoint: go.Point) => void): void {
     if (!this.diagramDiv) return;
+
+    this.diagramDropHandler = onDrop;
     
     // 【P1-11 修复】先清理旧的监听器，防止重复注册
     this.dropHandlerCleanup?.();
@@ -966,11 +1018,16 @@ export class FlowDiagramService {
     if (!this.diagramDiv) return;
     
     this.resizeObserver = new ResizeObserver((entries) => {
+      if (this.isDestroyed || this.hardRecoveryInProgress) {
+        return;
+      }
+
       const latestEntry = entries[entries.length - 1];
       const entryWidth = latestEntry?.contentRect.width ?? this.diagramDiv?.clientWidth ?? 0;
       const entryHeight = latestEntry?.contentRect.height ?? this.diagramDiv?.clientHeight ?? 0;
+      const pixelRatioChanged = this.updateDevicePixelRatio();
 
-      if (!this.isSafeDiagramSize(entryWidth, entryHeight)) {
+      if (pixelRatioChanged || !this.isSafeDiagramSize(entryWidth, entryHeight)) {
         this.armResizeRecovery();
       }
 
@@ -979,12 +1036,7 @@ export class FlowDiagramService {
       }
       
       this.resizeDebounceTimer = setTimeout(() => {
-        if (this.isDestroyed || !this.diagram || !this.diagramDiv) return;
-        
-        const width = this.diagramDiv.clientWidth;
-        const height = this.diagramDiv.clientHeight;
-
-        this.handleDiagramContainerResize(width, height);
+        this.syncViewportMetrics();
       }, UI_CONFIG.RESIZE_DEBOUNCE_DELAY);
     });
     
@@ -1011,9 +1063,13 @@ export class FlowDiagramService {
     this.dataService.saveViewState();
   }
 
-  private handleDiagramContainerResize(width: number, height: number): void {
+  private handleDiagramContainerResize(width: number, height: number, forceRecovery: boolean = false): void {
     if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
       return;
+    }
+
+    if (forceRecovery) {
+      this.armResizeRecovery();
     }
 
     if (width <= 0 || height <= 0) {
@@ -1028,9 +1084,12 @@ export class FlowDiagramService {
 
     this.diagram.requestUpdate();
 
-    if (this.resizeRecoveryArmed) {
+    if (this.resizeRecoveryArmed || forceRecovery) {
       this.scheduleResizeRecovery();
+      return;
     }
+
+    this.captureStableViewState();
   }
 
   private scheduleResizeRecovery(): void {
@@ -1067,18 +1126,12 @@ export class FlowDiagramService {
     this.diagram.updateAllTargetBindings();
     this.diagram.requestUpdate();
 
-    if (!this.hasVisibleDiagramContent() && !this.restoreBestKnownViewState()) {
+    if (!this.restoreBestKnownViewState()) {
       this.zoomService.fitToContents();
     }
 
     this.diagram.requestUpdate();
-    this.overviewService.refreshOverview();
-    this.resizeRecoveryArmed = false;
-    this.captureStableViewState();
-
-    if (this.canPersistViewState()) {
-      this.dataService.saveViewState();
-    }
+    this.scheduleRecoveryVerification(true);
   }
 
   private captureStableViewState(): void {
@@ -1100,39 +1153,22 @@ export class FlowDiagramService {
   }
 
   private restoreBestKnownViewState(): boolean {
-    const recoverableViewState = this.normalizeViewState(this.lastRecoverableViewState);
     const stableViewState = this.normalizeViewState(this.lastStableViewState);
-
-    if (recoverableViewState) {
-      this.applyViewState(recoverableViewState);
-      if (this.hasVisibleDiagramContent()) {
-        return true;
-      }
-    }
 
     if (stableViewState) {
       this.applyViewState(stableViewState);
-      if (this.hasVisibleDiagramContent()) {
-        return true;
-      }
-    }
-
-    const persistedViewState = this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
-    if (!persistedViewState) {
-      if (recoverableViewState && !stableViewState) {
-        this.applyViewState(recoverableViewState);
-        return true;
-      }
-      return false;
-    }
-
-    this.applyViewState(persistedViewState);
-    if (this.hasVisibleDiagramContent()) {
       return true;
     }
 
-    if (recoverableViewState && !stableViewState) {
+    const recoverableViewState = this.normalizeViewState(this.lastRecoverableViewState);
+    if (recoverableViewState) {
       this.applyViewState(recoverableViewState);
+      return true;
+    }
+
+    const persistedViewState = this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
+    if (persistedViewState) {
+      this.applyViewState(persistedViewState);
       return true;
     }
 
@@ -1141,8 +1177,273 @@ export class FlowDiagramService {
 
   private armResizeRecovery(): void {
     this.resizeRecoveryArmed = true;
+    this.recoveryFitFallbackUsed = false;
     this.dataService.cancelPendingViewStateSave();
     this.zoomService.cancelPendingViewStateSave();
+  }
+
+  private tryHardDiagramRecovery(): boolean {
+    if (!this.diagramDiv || !this.diagram || this.isDestroyed || this.hardRecoveryInProgress) {
+      return false;
+    }
+
+    if (typeof (this.diagram as go.Diagram & { clear?: unknown }).clear !== 'function') {
+      return false;
+    }
+
+    if (this.hardRecoveryAttemptCount >= FlowDiagramService.MAX_HARD_RECOVERY_ATTEMPTS) {
+      this.logger.warn('流程图原地重建次数已达上限，停止继续重试');
+      return false;
+    }
+
+    this.hardRecoveryAttemptCount += 1;
+    this.hardRecoveryInProgress = true;
+
+    const container = this.diagramDiv;
+    const selectionKeys = this.selectionService.getSelectedNodeKeys();
+    const recoveryViewState = this.getPreferredRecoveryViewState();
+    const shouldRestoreOverview = this.shouldRestoreOverview;
+    const overviewContainer = shouldRestoreOverview ? this.overviewContainer : null;
+
+    try {
+      this.logger.warn('普通恢复失败，开始原地重建 GoJS Diagram', {
+        attempt: this.hardRecoveryAttemptCount,
+      });
+
+      this.teardownDiagramForRecovery();
+
+      const initialized = this._initializeOutsideZone(container);
+      if (!initialized || !this.diagram) {
+        this.dataService.setDiagram(null);
+        this.layoutService.setDiagram(null);
+        this.selectionService.setDiagram(null);
+        this.zoomService.setDiagram(null);
+        this.hardRecoveryInProgress = false;
+        return false;
+      }
+
+      this.resizeRecoveryArmed = true;
+
+      this.updateDiagram(this.projectState.tasks(), true);
+
+      if (recoveryViewState) {
+        this.applyViewState(recoveryViewState);
+      } else {
+        this.zoomService.fitToContents();
+      }
+
+      this.diagram.requestUpdate();
+
+      if (selectionKeys.length > 0) {
+        this.selectionService.selectMultiple(selectionKeys);
+      }
+
+      if (this.diagramDropHandler) {
+        this.setupDropHandler(this.diagramDropHandler);
+      }
+
+      if (shouldRestoreOverview && overviewContainer) {
+        this.restoreOverviewAfterRecovery(overviewContainer);
+      }
+
+      this.scheduleRecoveryVerification(false);
+      return true;
+    } catch (error) {
+      this.hardRecoveryInProgress = false;
+      this.logger.error('流程图原地重建失败', error);
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'hardResizeRecovery' } });
+      return false;
+    }
+  }
+
+  private scheduleRecoveryVerification(allowHardRecovery: boolean): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
+      return;
+    }
+
+    if (this.resizeRecoveryRafId !== null) {
+      cancelAnimationFrame(this.resizeRecoveryRafId);
+      this.resizeRecoveryRafId = null;
+    }
+
+    this.zone.runOutsideAngular(() => {
+      this.resizeRecoveryRafId = requestAnimationFrame(() => {
+        this.resizeRecoveryRafId = null;
+        this.completeRecoveryVerification(allowHardRecovery);
+      });
+    });
+  }
+
+  private completeRecoveryVerification(allowHardRecovery: boolean): void {
+    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
+      return;
+    }
+
+    if (!this.isSafeDiagramSize(this.diagramDiv.clientWidth, this.diagramDiv.clientHeight)) {
+      if (this.hardRecoveryInProgress) {
+        this.hardRecoveryInProgress = false;
+      }
+      return;
+    }
+
+    if (this.hasVisibleDiagramContent()) {
+      this.finishResizeRecovery();
+      return;
+    }
+
+    if (allowHardRecovery && this.tryHardDiagramRecovery()) {
+      return;
+    }
+
+    if (!allowHardRecovery && !this.recoveryFitFallbackUsed) {
+      this.recoveryFitFallbackUsed = true;
+      this.zoomService.fitToContents();
+      this.diagram.requestUpdate();
+      this.scheduleRecoveryVerification(false);
+      return;
+    }
+
+    this.resizeRecoveryArmed = true;
+    this.hardRecoveryInProgress = false;
+    this.recoveryFitFallbackUsed = false;
+    this.logger.warn('流程图在容器恢复后仍不可见，等待下一次恢复机会');
+  }
+
+  private teardownDiagramForRecovery(): void {
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+
+    this.suspendedResizeObserver = null;
+    this.clearAllTimers();
+    this.cleanupFontLoadListener();
+    this.dropHandlerCleanup?.();
+    this.dropHandlerCleanup = null;
+    this.cancelIdleOverviewInit();
+    this.overviewService.destroyOverview();
+    this.overviewService.setDiagram(null);
+    this.dataService.clearTimers();
+    this.zoomService.cancelPendingViewStateSave();
+    this.zoomService.setViewStatePersistenceGuard(null);
+
+    if (!this.diagram) {
+      return;
+    }
+
+    if (this.viewportBoundsHandler) {
+      this.diagram.removeDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
+      this.viewportBoundsHandler = null;
+    }
+
+    this.eventService.setDiagram(null);
+    this.selectionService.setDiagram(null);
+    this.layoutService.setDiagram(null);
+    this.zoomService.setDiagram(null);
+
+    this.diagram.clear();
+    this.diagram.div = null;
+    this.diagram = null;
+  }
+
+  private getPreferredRecoveryViewState(): ViewState | null {
+    return this.normalizeViewState(this.lastStableViewState)
+      ?? this.normalizeViewState(this.lastRecoverableViewState)
+      ?? this.getCurrentViewStateSnapshot()
+      ?? this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
+  }
+
+  private getCurrentViewStateSnapshot(): ViewState | null {
+    if (!this.diagram) {
+      return null;
+    }
+
+    return this.normalizeViewState({
+      scale: this.diagram.scale,
+      positionX: this.diagram.position.x,
+      positionY: this.diagram.position.y,
+    });
+  }
+
+  private finishResizeRecovery(): void {
+    if (!this.diagram || this.isDestroyed) {
+      return;
+    }
+
+    this.attemptPendingOverviewRestore();
+    this.overviewService.refreshOverview();
+    this.resizeRecoveryArmed = false;
+    this.hardRecoveryInProgress = false;
+    this.hardRecoveryAttemptCount = 0;
+    this.recoveryFitFallbackUsed = false;
+    this.captureStableViewState();
+
+    if (this.canPersistViewState()) {
+      this.dataService.saveViewState();
+    }
+  }
+
+  private updateDevicePixelRatio(): boolean {
+    const nextRatio = this.getDevicePixelRatio();
+    if (Math.abs(nextRatio - this.lastKnownDevicePixelRatio) < 0.001) {
+      return false;
+    }
+
+    const previousRatio = this.lastKnownDevicePixelRatio;
+    this.lastKnownDevicePixelRatio = nextRatio;
+    this.logger.info('检测到设备像素比变化，触发流程图恢复', {
+      previousRatio,
+      nextRatio,
+    });
+    return true;
+  }
+
+  private getDevicePixelRatio(): number {
+    if (typeof window === 'undefined') {
+      return 1;
+    }
+
+    const ratio = window.devicePixelRatio;
+    return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  }
+
+  private restoreOverviewAfterRecovery(container: HTMLDivElement, retriesLeft: number = 3): void {
+    this.zone.runOutsideAngular(() => {
+      requestAnimationFrame(() => {
+        if (this.isDestroyed || !this.shouldRestoreOverview) {
+          return;
+        }
+
+        if (container.clientWidth <= 0 || container.clientHeight <= 0) {
+          this.pendingOverviewRestore = true;
+          if (retriesLeft > 0) {
+            this.restoreOverviewAfterRecovery(container, retriesLeft - 1);
+          }
+          return;
+        }
+
+        this.pendingOverviewRestore = false;
+        this.initializeOverview(container);
+      });
+    });
+  }
+
+  private attemptPendingOverviewRestore(): void {
+    if (!this.pendingOverviewRestore || !this.shouldRestoreOverview || !this.overviewContainer) {
+      return;
+    }
+
+    if (this.overviewService.isOverviewInitialized) {
+      this.pendingOverviewRestore = false;
+      return;
+    }
+
+    if (this.overviewContainer.clientWidth <= 0 || this.overviewContainer.clientHeight <= 0) {
+      return;
+    }
+
+    this.pendingOverviewRestore = false;
+    this.initializeOverview(this.overviewContainer);
   }
 
   private applyViewState(viewState: ViewState): void {
@@ -1177,7 +1478,7 @@ export class FlowDiagramService {
   }
 
   private canPersistViewState(): boolean {
-    if (!this.diagram || this.resizeRecoveryArmed) {
+    if (!this.diagram || this.resizeRecoveryArmed || this.hardRecoveryInProgress) {
       return false;
     }
 

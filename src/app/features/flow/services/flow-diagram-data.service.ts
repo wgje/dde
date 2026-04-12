@@ -68,8 +68,9 @@ export class FlowDiagramDataService {
    * 由 FlowDiagramService 在初始化后调用，传入 diagram 实例
    */
   setDiagram(diagram: go.Diagram | null): void {
+    const wasDetached = this.diagram === null;
     this.diagram = diagram;
-    if (diagram) {
+    if (diagram && wasDetached) {
       this.isFirstLoad = true;
       this._familyColorLogged = false;
       this.pendingAutoFitToContents = false;

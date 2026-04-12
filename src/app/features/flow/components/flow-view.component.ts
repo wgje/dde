@@ -199,8 +199,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.bumpDetailLayoutTick();
     if (this.overviewResizeTimer) clearTimeout(this.overviewResizeTimer);
     this.overviewResizeTimer = setTimeout(() => {
-      if (!this.isDestroyed && !this.isOverviewCollapsed()) {
-        this.diagram.refreshOverview();
+      if (!this.isDestroyed) {
+        this.syncDiagramViewportMetrics();
+        if (!this.isOverviewCollapsed()) {
+          this.diagram.refreshOverview();
+        }
       }
     }, 300);
   }
@@ -209,8 +212,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   onOrientationChange(): void {
     this.bumpDetailLayoutTick();
     this.scheduleTimer(() => {
-      if (!this.isDestroyed && !this.isOverviewCollapsed()) {
-        this.diagram.refreshOverview();
+      if (!this.isDestroyed) {
+        this.syncDiagramViewportMetrics();
+        if (!this.isOverviewCollapsed()) {
+          this.diagram.refreshOverview();
+        }
       }
     }, 500);
   }
@@ -280,6 +286,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         }
       }, 150);
     }, { injector: this.injector }));
+  }
+
+  private syncDiagramViewportMetrics(): void {
+    const diagramService = this.diagram as FlowDiagramService & {
+      syncViewportMetrics: () => void;
+    };
+    diagramService.syncViewportMetrics();
   }
   
   // ========== 生命周期 ==========

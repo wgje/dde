@@ -61,6 +61,7 @@ interface ResolvedAutoLayoutOptions {
   familyGapRows: number;
   crossTreeLabelGapRows: number;
   denseFamilyGapRows: number;
+  maxExtraGapRows: number;
 }
 
 interface FamilyLayoutBlock {
@@ -278,6 +279,7 @@ export function computeFamilyBlockAutoLayout(
     familyGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_FAMILY_GAP_ROWS,
     crossTreeLabelGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS,
     denseFamilyGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_DENSE_FAMILY_GAP_ROWS,
+    maxExtraGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS,
   };
 
   const assignedNodes = nodes.filter(isAssignedLayoutNode);
@@ -346,18 +348,28 @@ export function computeFamilyBlockAutoLayout(
     }
 
     const densityPressure = Math.min(
-      0.18,
+      0.10,
       (Math.max(block.maxStageDensity, nextBlock.maxStageDensity) - 1) * resolvedOptions.denseFamilyGapRows,
     );
-    const crossTreePressure = Math.min(0.45, familyGapPressures[familyIndex] ?? 0);
+    // 跨树链接压力使用 sqrt 衰减，多条链接边际递减，避免间距暴涨
+    const rawCrossTree = familyGapPressures[familyIndex] ?? 0;
+    const crossTreePressure = rawCrossTree > 0
+      ? Math.min(0.20, Math.sqrt(rawCrossTree) * 0.30)
+      : 0;
     const leafPressure = Math.min(
-      0.12,
+      0.08,
       Math.max(block.leafCount, nextBlock.leafCount, 1) > 2
-        ? (Math.max(block.leafCount, nextBlock.leafCount) - 2) * 0.03
+        ? (Math.max(block.leafCount, nextBlock.leafCount) - 2) * 0.02
         : 0,
     );
 
-    currentFamilyStartRow = blockMaxRow + 1 + resolvedOptions.familyGapRows + densityPressure + crossTreePressure + leafPressure;
+    // 总额外间距受硬上限约束，保持视觉节奏一致
+    const totalExtraGap = Math.min(
+      resolvedOptions.maxExtraGapRows,
+      resolvedOptions.familyGapRows + densityPressure + crossTreePressure + leafPressure,
+    );
+
+    currentFamilyStartRow = blockMaxRow + 1 + totalExtraGap;
   });
 
   const unassignedX = stageNums.length > 0

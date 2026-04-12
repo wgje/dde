@@ -757,7 +757,9 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   /* 防止文本选择 */
   -webkit-user-select: none;
   user-select: none;
-  contain: strict; /* 最强隔离：布局、绘制、大小 */
+  /* 避免 size containment 在桌面缩放/窗口回弹时冻结 GoJS canvas 尺寸 */
+  contain: layout paint;
+  overflow: hidden;
   /* 【修复】移动端触碰流程图时消除白色边框/轮廓 */
   outline: none;
   -webkit-tap-highlight-color: transparent;
