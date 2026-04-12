@@ -18,6 +18,10 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { AuthService } from './auth.service';
 import { DeadLetterItem, QueuedAction, TaskDeletePayload, TaskPayload } from './action-queue.types';
+import {
+  getRemainingBrowserNetworkResumeDelayMs,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 // ========== IndexedDB 备份支持 ==========
 const QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
@@ -76,6 +80,12 @@ export interface ActionQueueContext {
   queueSize: WritableSignal<number>;
 }
 
+export interface QueueRetryError {
+  code?: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 interface LegacyActionReviewItem {
   action: QueuedAction;
   source: 'legacy-global-queue' | 'legacy-idb-backup';
@@ -114,9 +124,12 @@ export class ActionQueueStorageService {
   // ========== 网络监听器引用 ==========
   private onlineHandler: (() => void) | null = null;
   private offlineHandler: (() => void) | null = null;
+  private visibilityChangeHandler: (() => void) | null = null;
+  private pageShowHandler: ((event: PageTransitionEvent) => void) | null = null;
 
   // ========== 重试定时器 ==========
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimerDueAt: number | null = null;
 
   private readonly LEGACY_QUEUE_BACKUP_RECORD_ID = 'queue';
   private readonly LEGACY_REVIEW_STORAGE_KEY_PREFIX = 'nanoflow.action-queue.legacy-review.';
@@ -372,7 +385,7 @@ export class ActionQueueStorageService {
   async settleFailedActionForOwner(
     ownerUserId: string,
     action: QueuedAction,
-    error: string
+    error: string | QueueRetryError
   ): Promise<'retry' | 'dead-letter' | 'missing'> {
     const queue = await this.loadPersistedQueueForOwner(ownerUserId);
     const existingAction = queue.find(item => item.id === action.id);
@@ -384,19 +397,21 @@ export class ActionQueueStorageService {
       return 'missing';
     }
 
-    const errorType = this.classifyError(error);
+    const normalizedError = this.normalizeRetryError(error);
+    const errorMessage = this.formatRetryError(normalizedError);
+    const errorType = this.classifyError(normalizedError);
     if (errorType === 'business' || errorType === 'permission' || existingAction.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
       const nextQueue = queue.filter(item => item.id !== action.id);
       const deadLetterItem: DeadLetterItem = {
         action: {
           ...existingAction,
-          lastError: error,
+          lastError: errorMessage,
           errorType,
         },
         failedAt: new Date().toISOString(),
         reason: errorType === 'business' || errorType === 'permission'
-          ? `${errorType === 'business' ? '业务' : '权限'}错误: ${error}`
-          : `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${error}`,
+          ? `${errorType === 'business' ? '业务' : '权限'}错误: ${errorMessage}`
+          : `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${errorMessage}`,
       };
 
       const deadLetters = this.readDeadLetterSnapshotFromLocalStorage(ownerUserId)
@@ -414,8 +429,8 @@ export class ActionQueueStorageService {
     const nextQueue = queue.map(item => item.id === action.id
       ? {
           ...item,
-          retryCount: item.retryCount + 1,
-          lastError: error,
+          retryCount: errorType === 'deferred' ? item.retryCount : item.retryCount + 1,
+          lastError: errorMessage,
           errorType,
         }
       : item
@@ -757,23 +772,49 @@ export class ActionQueueStorageService {
    * 处理重试逻辑
    * 根据错误分类决定：重试 or 移入死信队列
    */
-  handleRetry(action: QueuedAction, error: string): 'retry' | 'dead-letter' {
-    const errorType = this.classifyError(error);
+  handleRetry(action: QueuedAction, error: string | QueueRetryError): 'retry' | 'dead-letter' {
+    const normalizedError = this.normalizeRetryError(error);
+    const errorMessage = this.formatRetryError(normalizedError);
+    const errorType = this.classifyError(normalizedError);
 
     // 业务/权限错误不可重试
     if (errorType === 'business' || errorType === 'permission') {
-      this.logger.warn(`${errorType === 'business' ? '业务' : '权限'}错误，不可重试`, { error });
-      this.moveToDeadLetter(action, `${errorType === 'business' ? '业务' : '权限'}错误: ${error}`);
+      this.logger.warn(`${errorType === 'business' ? '业务' : '权限'}错误，不可重试`, {
+        actionId: action.id,
+        error: errorMessage,
+      });
+      this.moveToDeadLetter(action, `${errorType === 'business' ? '业务' : '权限'}错误: ${errorMessage}`);
       return 'dead-letter';
+    }
+
+    if (errorType === 'deferred') {
+      const delay = this.resolveBrowserSuspensionDelay(normalizedError);
+      this.ctx.pendingActions.update(queue =>
+        queue.map(a => a.id === action.id
+          ? { ...a, lastError: errorMessage, errorType }
+          : a
+        )
+      );
+      this.saveQueueToStorage();
+
+      this.logger.info('浏览器网络挂起，延后队列重试且不消耗 retry budget', {
+        actionId: action.id,
+        type: action.type,
+        entityType: action.entityType,
+        entityId: action.entityId,
+        delay,
+      });
+      this.scheduleRetry(delay);
+      return 'retry';
     }
 
     // 超过最大重试次数
     if (action.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
       this.logger.error('超过最大重试次数，移入死信队列', {
         actionId: action.id, type: action.type,
-        entityType: action.entityType, entityId: action.entityId, error
+        entityType: action.entityType, entityId: action.entityId, error: errorMessage
       });
-      this.moveToDeadLetter(action, `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${error}`);
+      this.moveToDeadLetter(action, `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${errorMessage}`);
 
       if (action.priority === 'critical') {
         this.toast.error('重要操作失败', `${this.getActionLabel(action)} 失败，请检查网络后重试`);
@@ -784,7 +825,7 @@ export class ActionQueueStorageService {
     // 更新重试次数
     this.ctx.pendingActions.update(queue =>
       queue.map(a => a.id === action.id
-        ? { ...a, retryCount: a.retryCount + 1, lastError: error, errorType }
+        ? { ...a, retryCount: a.retryCount + 1, lastError: errorMessage, errorType }
         : a
       )
     );
@@ -811,8 +852,14 @@ export class ActionQueueStorageService {
 
   // ========== 错误分类（纯函数） ==========
 
-  classifyError(errorMessage: string): 'network' | 'timeout' | 'permission' | 'business' | 'unknown' {
-    const msg = errorMessage.toLowerCase();
+  classifyError(error: string | QueueRetryError): 'network' | 'timeout' | 'permission' | 'business' | 'deferred' | 'unknown' {
+    const normalizedError = this.normalizeRetryError(error);
+
+    if (this.isBrowserSuspensionError(normalizedError)) {
+      return 'deferred';
+    }
+
+    const msg = normalizedError.message.toLowerCase();
 
     if (msg.includes('network') || msg.includes('failed to fetch') ||
         msg.includes('networkerror') || msg.includes('connection') || msg.includes('offline') ||
@@ -835,6 +882,44 @@ export class ActionQueueStorageService {
       if (msg.includes(pattern.toLowerCase())) return 'business';
     }
     return 'unknown';
+  }
+
+  private normalizeRetryError(error: string | QueueRetryError): QueueRetryError {
+    if (typeof error === 'string') {
+      return { message: error };
+    }
+
+    return {
+      code: typeof error.code === 'string' ? error.code : undefined,
+      message: typeof error.message === 'string' ? error.message : String(error.message ?? ''),
+      details: error.details && typeof error.details === 'object'
+        ? error.details
+        : undefined,
+    };
+  }
+
+  private formatRetryError(error: QueueRetryError): string {
+    return [error.code, error.message].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
+  }
+
+  private isBrowserSuspensionError(error: QueueRetryError): boolean {
+    if (error.details?.['reason'] === 'browser-network-suspended') {
+      return true;
+    }
+
+    const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
+    return msg.includes('browser-network-suspended')
+      || msg.includes('browsernetworksuspendederror')
+      || msg.includes('network io suspended');
+  }
+
+  private resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
+    const requestedDelay = error?.details?.['resumeDelayMs'];
+    if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
+      return Math.max(0, requestedDelay);
+    }
+
+    return Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
   }
 
   getActionDescription(action: QueuedAction): string {
@@ -870,14 +955,27 @@ export class ActionQueueStorageService {
 
     this.onlineHandler = () => {
       this._isOnline = true;
-      void this.ctx.processQueue();
+      this.requestQueueProcessing('online');
     };
     this.offlineHandler = () => {
       this._isOnline = false;
     };
+    this.visibilityChangeHandler = () => {
+      if (typeof document === 'undefined' || document.visibilityState !== 'visible') {
+        return;
+      }
+      this.requestQueueProcessing('visibilitychange');
+    };
+    this.pageShowHandler = (_event: PageTransitionEvent) => {
+      this.requestQueueProcessing('pageshow');
+    };
 
     window.addEventListener('online', this.onlineHandler);
     window.addEventListener('offline', this.offlineHandler);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.visibilityChangeHandler);
+    }
+    window.addEventListener('pageshow', this.pageShowHandler as EventListener);
     this._isOnline = navigator.onLine;
   }
 
@@ -885,20 +983,80 @@ export class ActionQueueStorageService {
     if (typeof window === 'undefined') return;
     if (this.onlineHandler) { window.removeEventListener('online', this.onlineHandler); this.onlineHandler = null; }
     if (this.offlineHandler) { window.removeEventListener('offline', this.offlineHandler); this.offlineHandler = null; }
+    if (typeof document !== 'undefined' && this.visibilityChangeHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
+      this.visibilityChangeHandler = null;
+    }
+    if (this.pageShowHandler) {
+      window.removeEventListener('pageshow', this.pageShowHandler as EventListener);
+      this.pageShowHandler = null;
+    }
   }
 
   // ========== 重试调度 ==========
 
+  shouldDeferQueueProcessing(): boolean {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return true;
+    }
+
+    return isBrowserNetworkSuspendedWindow();
+  }
+
+  requestQueueProcessing(reason: string): void {
+    if (!this._isOnline) {
+      return;
+    }
+
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.logger.debug('页面仍处于后台，延后队列处理直到重新可见', { reason });
+      return;
+    }
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.scheduleDeferredQueueProcessing(reason);
+      return;
+    }
+
+    this.clearRetryTimer();
+    void this.ctx.processQueue();
+  }
+
+  scheduleDeferredQueueProcessing(reason: string, explicitDelay?: number): void {
+    if (!this._isOnline) {
+      return;
+    }
+
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.logger.debug('页面仍处于后台，跳过 defer 队列定时器，等待可见恢复事件', { reason });
+      return;
+    }
+
+    const delay = Math.max(0, explicitDelay ?? this.resolveBrowserSuspensionDelay());
+    this.logger.debug('浏览器恢复窗口未结束，延后队列处理', { reason, delay });
+    this.scheduleRetry(delay);
+  }
+
   scheduleRetry(delay: number): void {
-    if (this.retryTimer) return;
+    const normalizedDelay = Math.max(0, delay);
+    const nextDueAt = Date.now() + normalizedDelay;
+
+    if (this.retryTimer && this.retryTimerDueAt !== null && this.retryTimerDueAt <= nextDueAt) {
+      return;
+    }
+
+    this.clearRetryTimer();
+    this.retryTimerDueAt = nextDueAt;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      if (this._isOnline) { void this.ctx.processQueue(); }
-    }, delay);
+      this.retryTimerDueAt = null;
+      this.requestQueueProcessing('retry-timer');
+    }, normalizedDelay);
   }
 
   clearRetryTimer(): void {
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+    this.retryTimerDueAt = null;
   }
 
   // ========== 存储操作 ==========

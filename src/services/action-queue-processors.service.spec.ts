@@ -134,13 +134,16 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockActionQueueService.setQueueProcessCallbacks).toHaveBeenCalledOnce();
   });
 
-  it('focus-session:update should surface retryable Result details to the queue layer', async () => {
+  it('focus-session:update should preserve browser-suspension details for the queue layer', async () => {
     mockSyncService.saveFocusSession.mockResolvedValueOnce({
       ok: false,
       error: {
         code: 'SYNC_OFFLINE',
         message: '浏览器恢复连接中，请稍后重试',
-        details: { reason: 'browser-network-suspended' },
+        details: {
+          reason: 'browser-network-suspended',
+          resumeDelayMs: 321,
+        },
       },
     });
     const handler = getProcessor('focus-session:update');
@@ -157,7 +160,14 @@ describe('ActionQueueProcessorsService', () => {
         },
         sourceUserId: 'test-user',
       },
-    } as QueuedAction)).rejects.toThrow('SYNC_OFFLINE');
+    } as QueuedAction)).rejects.toMatchObject({
+      message: expect.stringContaining('SYNC_OFFLINE'),
+      code: 'SYNC_OFFLINE',
+      details: expect.objectContaining({
+        reason: 'browser-network-suspended',
+        resumeDelayMs: 321,
+      }),
+    });
   });
 
   // ── project:update ─────────────────────────────────────────

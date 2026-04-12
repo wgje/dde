@@ -131,6 +131,20 @@ export class ActionQueueProcessorsService {
     return parts.filter(part => typeof part === 'string' && part.length > 0).join(' | ');
   }
 
+  private buildOperationError(error: {
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }): Error & { code: string; details?: Record<string, unknown> } {
+    const queueError = new Error(this.buildOperationErrorMessage(error)) as Error & {
+      code: string;
+      details?: Record<string, unknown>;
+    };
+    queueError.code = error.code;
+    queueError.details = error.details;
+    return queueError;
+  }
+
   private hasConflictingOwnerHints(
     action: QueuedAction,
     actionType: string,
@@ -374,7 +388,7 @@ export class ActionQueueProcessorsService {
           return true;
         }
 
-        throw new Error(this.buildOperationErrorMessage(result.error));
+        throw this.buildOperationError(result.error);
       } catch (error) {
         this.logger.error('project:delete 异常', { error, projectId: action.entityId });
         throw error instanceof Error ? error : new Error(String(error));
@@ -872,7 +886,7 @@ export class ActionQueueProcessorsService {
           : { ...payload.record, userId: sourceUserId };
         const result = await this.syncService.saveFocusSession(record);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {
@@ -905,7 +919,7 @@ export class ActionQueueProcessorsService {
           : { ...payload.record, userId: sourceUserId };
         const result = await this.syncService.saveFocusSession(record);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {
@@ -934,7 +948,7 @@ export class ActionQueueProcessorsService {
       try {
         const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {
@@ -963,7 +977,7 @@ export class ActionQueueProcessorsService {
       try {
         const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {
@@ -996,7 +1010,7 @@ export class ActionQueueProcessorsService {
           : { ...payload.completion, userId: sourceUserId };
         const result = await this.syncService.incrementRoutineCompletion(completion);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {
@@ -1029,7 +1043,7 @@ export class ActionQueueProcessorsService {
           : { ...payload.completion, userId: sourceUserId };
         const result = await this.syncService.incrementRoutineCompletion(completion);
         if (!result.ok) {
-          throw new Error(this.buildOperationErrorMessage(result.error));
+          throw this.buildOperationError(result.error);
         }
         return true;
       } catch (error) {

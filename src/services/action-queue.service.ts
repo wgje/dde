@@ -5,7 +5,7 @@ import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
 import { extractErrorMessage } from '../utils/result';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
+import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG, type QueueRetryError } from './action-queue-storage.service';
 import { RetryQueueService, type RetryableEntityType } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { AUTH_CONFIG } from '../config/auth.config';
@@ -602,7 +602,7 @@ export class ActionQueueService {
     processGeneration: number,
     processOwnerUserId: string,
     action: QueuedAction,
-    outcome: { success: true } | { success: false; error: string }
+    outcome: { success: true } | { success: false; error: QueueRetryError }
   ): Promise<void> {
     const stalePolicy = this.getStaleProcessPolicy(processGeneration);
     if (stalePolicy !== 'settle-owner') {
@@ -687,6 +687,11 @@ export class ActionQueueService {
    */
   async processQueue(): Promise<{ processed: number; failed: number; movedToDeadLetter: number }> {
     if (this.isProcessing() || !this.storage.isOnline) {
+      return { processed: 0, failed: 0, movedToDeadLetter: 0 };
+    }
+
+    if (this.storage.shouldDeferQueueProcessing()) {
+      this.storage.requestQueueProcessing('processQueue');
       return { processed: 0, failed: 0, movedToDeadLetter: 0 };
     }
 
@@ -786,7 +791,7 @@ export class ActionQueueService {
             } else {
               await this.settleStaleActionResult(processGeneration, processOwnerUserId, action, {
                 success: false,
-                error: 'Operation returned false',
+                error: { message: 'Operation returned false' },
               });
             }
             this.logger.debug('旧账号队列项处理结果已失效，已转入旧 owner 收口流程', {
@@ -818,10 +823,10 @@ export class ActionQueueService {
           }
         } catch (error: unknown) {
           if (this.isStaleProcess(processGeneration)) {
-            const errorMessage = extractErrorMessage(error);
+            const retryError = this.toRetryError(error);
             await this.settleStaleActionResult(processGeneration, processOwnerUserId, action, {
               success: false,
-              error: errorMessage,
+              error: retryError,
             });
             this.logger.debug('旧账号队列项处理异常已失效，已转入旧 owner 收口流程', {
               actionId: action.id,
@@ -832,8 +837,8 @@ export class ActionQueueService {
             break;
           }
 
-          const errorMessage = extractErrorMessage(error);
-          const result = this.storage.handleRetry(action, errorMessage);
+          const retryError = this.toRetryError(error);
+          const result = this.storage.handleRetry(action, retryError);
           if (result === 'dead-letter') {
             movedToDeadLetter++;
             if (action.type === 'create') {
@@ -859,6 +864,21 @@ export class ActionQueueService {
     }
     
     return { processed, failed, movedToDeadLetter };
+  }
+
+  private toRetryError(error: unknown): QueueRetryError {
+    if (error && typeof error === 'object') {
+      const maybeError = error as { code?: unknown; message?: unknown; details?: unknown };
+      return {
+        code: typeof maybeError.code === 'string' ? maybeError.code : undefined,
+        message: extractErrorMessage(error),
+        details: maybeError.details && typeof maybeError.details === 'object'
+          ? maybeError.details as Record<string, unknown>
+          : undefined,
+      };
+    }
+
+    return { message: extractErrorMessage(error) };
   }
   
   /** 清空队列 */

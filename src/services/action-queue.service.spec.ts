@@ -202,6 +202,14 @@ describe('ActionQueueService', () => {
     }
   }
 
+  function setVisibilityState(state: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', {
+      value: state,
+      writable: true,
+      configurable: true,
+    });
+  }
+
   // 辅助函数：创建测试操作
   function createTestProjectAction(): EnqueueParams {
     return {
@@ -245,6 +253,7 @@ describe('ActionQueueService', () => {
       writable: true,
       configurable: true,
     });
+    setVisibilityState('visible');
 
     currentUserIdSignal = signal<string | null>('test-user');
 
@@ -745,6 +754,29 @@ describe('ActionQueueService', () => {
           setTimeout(() => reject(new Error('网络恢复后未触发自动处理')), 1000);
         }),
       ]);
+
+      expect(processor).toHaveBeenCalledTimes(1);
+      expect(service.queueSize()).toBe(0);
+    });
+
+    it('hidden 状态下 online 不应消费队列，并应在重新可见后恢复处理', async () => {
+      vi.useFakeTimers();
+      const processor = vi.fn().mockResolvedValue(true);
+      service.registerProcessor('project:update', processor);
+
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+
+      setVisibilityState('hidden');
+      triggerNetworkEvent(true);
+      await Promise.resolve();
+
+      expect(processor).not.toHaveBeenCalled();
+      expect(service.queueSize()).toBe(1);
+
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.runAllTimersAsync();
 
       expect(processor).toHaveBeenCalledTimes(1);
       expect(service.queueSize()).toBe(0);

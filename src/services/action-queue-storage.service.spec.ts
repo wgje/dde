@@ -602,6 +602,26 @@ describe('ActionQueueStorageService', () => {
       const updated = ctx.pendingActions().find(a => a.id === action.id);
       expect(updated?.retryCount).toBe(2);
     });
+
+    it('should defer browser-suspended errors without consuming retry budget', () => {
+      const action = createMockAction({ retryCount: 1 });
+      ctx.pendingActions.set([action]);
+      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
+
+      const result = service.handleRetry(action, {
+        code: 'SYNC_OFFLINE',
+        message: '浏览器恢复连接中，请稍后重试',
+        details: {
+          reason: 'browser-network-suspended',
+          resumeDelayMs: 321,
+        },
+      } as never);
+
+      expect(result).toBe('retry');
+      expect(scheduleRetrySpy).toHaveBeenCalledWith(321);
+      expect(service.hasDeadLetters()).toBe(false);
+      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(1);
+    });
   });
 
   // ==================== 辅助方法 ====================
