@@ -622,6 +622,19 @@ describe('ActionQueueStorageService', () => {
       expect(service.hasDeadLetters()).toBe(false);
       expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(1);
     });
+
+    it('should defer flattened browser-suspended error strings without consuming retry budget', () => {
+      const action = createMockAction({ retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES });
+      ctx.pendingActions.set([action]);
+      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
+
+      const result = service.handleRetry(action, 'SYNC_OFFLINE | 浏览器恢复连接中，请稍后重试');
+
+      expect(result).toBe('retry');
+      expect(scheduleRetrySpy).toHaveBeenCalled();
+      expect(service.hasDeadLetters()).toBe(false);
+      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
+    });
   });
 
   // ==================== 辅助方法 ====================

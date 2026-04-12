@@ -170,6 +170,53 @@ describe('ActionQueueProcessorsService', () => {
     });
   });
 
+  it('focus-session:update should not log browser resume deferrals as errors', async () => {
+    mockSyncService.saveFocusSession.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'SYNC_OFFLINE',
+        message: '浏览器恢复连接中，请稍后重试',
+        details: {
+          reason: 'browser-network-suspended',
+          resumeDelayMs: 321,
+        },
+      },
+    });
+    const handler = getProcessor('focus-session:update');
+
+    await expect(handler({
+      payload: {
+        record: {
+          id: 'focus-1',
+          userId: 'test-user',
+          startedAt: '2026-04-08T00:00:00.000Z',
+          endedAt: null,
+          updatedAt: '2026-04-08T00:00:01.000Z',
+          snapshot: { version: 6 },
+        },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction)).rejects.toMatchObject({
+      code: 'SYNC_OFFLINE',
+    });
+
+    expect(mockLoggerCategory.error).not.toHaveBeenCalledWith(
+      'focus-session:update 异常',
+      expect.anything(),
+    );
+    expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+      'focus-session:update 延后重试（浏览器恢复中）',
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: 'SYNC_OFFLINE',
+          details: expect.objectContaining({
+            reason: 'browser-network-suspended',
+          }),
+        }),
+      }),
+    );
+  });
+
   // ── project:update ─────────────────────────────────────────
 
   it('project:update should call saveProjectSmart and update version', async () => {

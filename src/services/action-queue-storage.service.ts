@@ -886,15 +886,32 @@ export class ActionQueueStorageService {
 
   private normalizeRetryError(error: string | QueueRetryError): QueueRetryError {
     if (typeof error === 'string') {
-      return { message: error };
+      return this.parseRetryErrorMessage(error);
     }
 
+    const message = typeof error.message === 'string' ? error.message : String(error.message ?? '');
+    const parsed = this.parseRetryErrorMessage(message);
     return {
-      code: typeof error.code === 'string' ? error.code : undefined,
-      message: typeof error.message === 'string' ? error.message : String(error.message ?? ''),
+      code: typeof error.code === 'string' ? error.code : parsed.code,
+      message: parsed.message,
       details: error.details && typeof error.details === 'object'
         ? error.details
         : undefined,
+    };
+  }
+
+  private parseRetryErrorMessage(message: string): QueueRetryError {
+    const parts = message.split('|').map(part => part.trim()).filter(part => part.length > 0);
+    const firstPart = parts[0] ?? '';
+    const looksLikeErrorCode = /^[A-Z0-9_]+$/.test(firstPart);
+
+    if (!looksLikeErrorCode) {
+      return { message };
+    }
+
+    return {
+      code: firstPart,
+      message: parts.slice(1).join(' | ') || message,
     };
   }
 
@@ -910,7 +927,9 @@ export class ActionQueueStorageService {
     const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
     return msg.includes('browser-network-suspended')
       || msg.includes('browsernetworksuspendederror')
-      || msg.includes('network io suspended');
+      || msg.includes('network io suspended')
+      || (error.code === 'SYNC_OFFLINE' && error.message.includes('浏览器恢复连接中'))
+      || msg.includes('resuming connection');
   }
 
   private resolveBrowserSuspensionDelay(error?: QueueRetryError): number {

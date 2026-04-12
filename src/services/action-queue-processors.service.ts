@@ -145,6 +145,34 @@ export class ActionQueueProcessorsService {
     return queueError;
   }
 
+  private isDeferredQueueError(error: unknown): boolean {
+    const details = (error as { details?: Record<string, unknown> } | null)?.details;
+    if (details?.['reason'] === 'browser-network-suspended') {
+      return true;
+    }
+
+    const code = (error as { code?: unknown } | null)?.code;
+    const message = error instanceof Error
+      ? error.message
+      : String((error as { message?: unknown } | null)?.message ?? error ?? '');
+    const normalized = `${String(code ?? '')} ${message}`.toLowerCase();
+
+    return normalized.includes('browser-network-suspended')
+      || normalized.includes('browsernetworksuspendederror')
+      || normalized.includes('network io suspended')
+      || (String(code ?? '') === 'SYNC_OFFLINE' && message.includes('浏览器恢复连接中'))
+      || normalized.includes('sync_offline') && message.includes('浏览器恢复连接中');
+  }
+
+  private logProcessorFailure(actionType: string, error: unknown, context?: Record<string, unknown>): void {
+    if (this.isDeferredQueueError(error)) {
+      this.logger.debug(`${actionType} 延后重试（浏览器恢复中）`, { error, ...context });
+      return;
+    }
+
+    this.logger.error(`${actionType} 异常`, { error, ...context });
+  }
+
   private hasConflictingOwnerHints(
     action: QueuedAction,
     actionType: string,
@@ -890,7 +918,7 @@ export class ActionQueueProcessorsService {
         }
         return true;
       } catch (error) {
-        this.logger.error('focus-session:create 异常', { error });
+        this.logProcessorFailure('focus-session:create', error);
         throw error;
       }
     });
@@ -923,7 +951,7 @@ export class ActionQueueProcessorsService {
         }
         return true;
       } catch (error) {
-        this.logger.error('focus-session:update 异常', { error });
+        this.logProcessorFailure('focus-session:update', error);
         throw error;
       }
     });
