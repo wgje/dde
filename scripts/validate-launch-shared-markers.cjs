@@ -83,24 +83,18 @@ function validateDistShell(html, shellName) {
 function validateCompatLaunchShell(html, shellName) {
   const violations = [];
 
-  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']compat-redirect["']/i.test(html)) {
-    violations.push(`${shellName} 缺少兼容启动标记`);
+  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']bootstrap-alias["']/i.test(html)) {
+    violations.push(`${shellName} 缺少启动别名标记`);
   }
 
-  if (!/location\.replace\(/i.test(html)) {
-    violations.push(`${shellName} 缺少兼容重定向脚本`);
+  if (!/history\.replaceState\(/i.test(html)) {
+    violations.push(`${shellName} 缺少原地路径归一化脚本`);
   }
 
-  if (/<link\b[^>]*rel=["']modulepreload["'][^>]*>/i.test(html)) {
-    violations.push(`${shellName} 不应注入 modulepreload`);
-  }
+  violations.push(...validateDistShell(html, shellName));
 
-  if (/<script\b[^>]*src=["'][^"']*main-[^"']+\.js["'][^>]*>/i.test(html)) {
-    violations.push(`${shellName} 不应直接执行 main 入口脚本`);
-  }
-
-  if (/<script\b[^>]*src=["'][^"']*polyfills-[^"']+\.js["'][^>]*>/i.test(html)) {
-    violations.push(`${shellName} 不应直接执行 polyfills 入口脚本`);
+  if (!/<app-root><\/app-root>/i.test(html)) {
+    violations.push(`${shellName} 缺少 app-root 启动宿主`);
   }
 
   return violations;

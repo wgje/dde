@@ -367,6 +367,18 @@ export class RetryQueueService {
   getItems(): RetryQueueItem[] {
     return [...this.queue];
   }
+
+  findItemForOwner(
+    type: RetryableEntityType,
+    entityId: string,
+    ownerUserId: string,
+  ): RetryQueueItem | undefined {
+    return this.getPersistedItems().find(
+      item => item.type === type
+        && item.data.id === entityId
+        && this.resolveItemOwnerUserId(item) === ownerUserId
+    );
+  }
   
   /**
    * 检查队列中是否存在指定实体的待重试操作
@@ -449,6 +461,52 @@ export class RetryQueueService {
     sourceUserId?: string,
     taskIdsToDelete?: string[],
   ): boolean {
+    return this.addInternal(type, operation, data, projectId, sourceUserId, taskIdsToDelete, 'debounced');
+  }
+
+  async addDurably(
+    type: RetryableEntityType,
+    operation: RetryableOperation,
+    data: Task | Project | Connection | BlackBoxEntry | { id: string },
+    projectId?: string,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ): Promise<boolean> {
+    const previousVisibleQueue = [...this.queue];
+    const previousHiddenQueue = [...this.hiddenQueueItems];
+    const accepted = this.addInternal(type, operation, data, projectId, sourceUserId, taskIdsToDelete, 'manual');
+    if (!accepted) {
+      return false;
+    }
+
+    const persisted = await this.persistNow();
+    if (persisted) {
+      return true;
+    }
+
+    this.queue = previousVisibleQueue;
+    this.hiddenQueueItems = previousHiddenQueue;
+    this.touchQueueState();
+    this.saveToStorage();
+    this.checkCapacityWarning();
+    this.logger.warn('RetryQueue.addDurably: 持久化确认失败，已回滚内存队列', {
+      type,
+      operation,
+      dataId: data.id,
+      sourceUserId,
+    });
+    return false;
+  }
+
+  private addInternal(
+    type: RetryableEntityType,
+    operation: RetryableOperation,
+    data: Task | Project | Connection | BlackBoxEntry | { id: string },
+    projectId?: string,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+    persistMode: 'debounced' | 'manual' = 'debounced',
+  ): boolean {
     // 入队前校验实体 ID 格式，拦截脏数据
     if (data?.id && !isValidUUID(data.id)) {
       this.logger.warn('RetryQueue.add：拒绝非法 ID 入队', { type, id: data.id });
@@ -487,7 +545,9 @@ export class RetryQueueService {
         retryCount: existing.retryCount,
         hidden: targetQueue === this.hiddenQueueItems,
       });
-      this.saveToStorage();
+      if (persistMode === 'debounced') {
+        this.saveToStorage();
+      }
       this.checkCapacityWarning();
       return true;
     }
@@ -537,7 +597,9 @@ export class RetryQueueService {
     
     targetQueue.push(item);
     this.touchQueueState();
-    this.saveToStorage();
+    if (persistMode === 'debounced') {
+      this.saveToStorage();
+    }
 
     this.logger.debug('添加到重试队列', {
       type,
@@ -1372,6 +1434,29 @@ export class RetryQueueService {
         }
 
         if (success) {
+          if (item.type === 'project') {
+            const previousVisibleQueue = [...this.queue];
+            const previousHiddenQueue = [...this.hiddenQueueItems];
+            this.removeItemsFromAllViews(new Set([item.id]));
+            const persistedRemoval = await this.persistNow();
+            if (!persistedRemoval) {
+              this.queue = previousVisibleQueue;
+              this.hiddenQueueItems = previousHiddenQueue;
+              this.touchQueueState();
+              this.checkCapacityWarning();
+              this.logger.warn('项目重试项移除未能完成持久化确认，保留在 RetryQueue 中等待后续回放', {
+                projectId: item.data.id,
+                sourceUserId: item.sourceUserId,
+              });
+              stoppedByBudget = true;
+              break;
+            }
+
+            successCount++;
+            this.recordCircuitSuccess();
+            continue;
+          }
+
           successCount++;
           processedIds.add(item.id);
           this.recordCircuitSuccess();
@@ -1702,8 +1787,17 @@ export class RetryQueueService {
     if (this.saveDebounceTimer) return; // 已有待执行的保存，跳过
     this.saveDebounceTimer = setTimeout(() => {
       this.saveDebounceTimer = null;
-      this.saveToStorageImmediate();
+      void this.saveToStorageImmediate();
     }, this.SAVE_DEBOUNCE_MS);
+  }
+
+  async persistNow(): Promise<boolean> {
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = null;
+    }
+
+    return this.saveToStorageImmediate();
   }
 
   /**
@@ -1712,7 +1806,7 @@ export class RetryQueueService {
    * 【P2-17 修复】添加 catch 处理，防止未捕获的 Promise rejection
    * 注意：调用方故意不 await，采用 fire-and-forget 模式以不阻塞主线程
    */
-  private async saveToStorageImmediate(): Promise<void> {
+  private async saveToStorageImmediate(): Promise<boolean> {
     try {
       const db = await this.initDb();
       
@@ -1722,18 +1816,19 @@ export class RetryQueueService {
           if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
             this.clearPressureMode();
           }
-          return;
+          return true;
         }
       }
       
       // 降级到 localStorage
-      this.saveToLocalStorage();
+      return this.saveToLocalStorage();
     } catch (e) {
       this.logger.warn('saveToStorage 失败，降级到 localStorage', e);
       try {
-        this.saveToLocalStorage();
+        return this.saveToLocalStorage();
       } catch {
         // 完全静默：localStorage 也失败时只能丢弃
+        return false;
       }
     }
   }
@@ -1785,8 +1880,8 @@ export class RetryQueueService {
   /**
    * 保存到 localStorage
    */
-  private saveToLocalStorage(): void {
-    if (typeof localStorage === 'undefined') return;
+  private saveToLocalStorage(): boolean {
+    if (typeof localStorage === 'undefined') return false;
     
     try {
       const items = this.getPersistedItems();
@@ -1806,13 +1901,14 @@ export class RetryQueueService {
           limit: SYNC_CONFIG.RETRY_QUEUE_SIZE_LIMIT_BYTES
         });
         this.toast.error('本地存储压力过高', '同步队列写入已冻结，请释放存储空间');
-        return;
+        return false;
       }
       
       localStorage.setItem(this.STORAGE_KEY, json);
       if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
         this.clearPressureMode();
       }
+      return true;
     } catch (e) {
       if ((e as Error).name === 'QuotaExceededError') {
         this.enterPressureMode('storage_quota_exceeded');
@@ -1823,6 +1919,7 @@ export class RetryQueueService {
       } else {
         this.logger.error('localStorage 保存失败', e);
       }
+      return false;
     }
   }
   

@@ -352,7 +352,7 @@ describe('ActionQueueService', () => {
       expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
     });
 
-    it('project update 合并时应保留 sourceUserId 并合并 taskIdsToDelete', () => {
+    it('project update 合并时应保留 sourceUserId 并以最后一次 taskIdsToDelete 为准', () => {
       setNetworkStatus(false);
       const projectId = 'proj-merge-delete-intent';
 
@@ -383,7 +383,48 @@ describe('ActionQueueService', () => {
           payload: expect.objectContaining({
             sourceUserId: 'owner-a',
             project: expect.objectContaining({ id: projectId, name: 'After Merge' }),
-            taskIdsToDelete: expect.arrayContaining(['task-delete-a', 'task-delete-b']),
+            taskIdsToDelete: ['task-delete-b'],
+          }),
+        }),
+      );
+    });
+
+    it('foreign-owner project handoff 应复用同一 project 的合并语义', async () => {
+      const projectId = 'proj-foreign-owner-merge';
+
+      await service.enqueueDurablyForOwner('owner-b', {
+        type: 'update',
+        entityType: 'project',
+        entityId: projectId,
+        payload: {
+          project: createMockProject({ id: projectId, name: 'Before Foreign Merge' }),
+          sourceUserId: 'owner-b',
+          taskIdsToDelete: ['task-delete-a'],
+        },
+      });
+
+      await service.enqueueDurablyForOwner('owner-b', {
+        type: 'update',
+        entityType: 'project',
+        entityId: projectId,
+        payload: {
+          project: createMockProject({ id: projectId, name: 'After Foreign Merge' }),
+          sourceUserId: 'owner-b',
+          taskIdsToDelete: ['task-delete-b'],
+        },
+      });
+
+      const ownerQueue = await service.storage.loadQueueSnapshotForOwner('owner-b');
+
+      expect(ownerQueue).toHaveLength(1);
+      expect(ownerQueue[0]).toEqual(
+        expect.objectContaining({
+          entityType: 'project',
+          entityId: projectId,
+          payload: expect.objectContaining({
+            sourceUserId: 'owner-b',
+            project: expect.objectContaining({ id: projectId, name: 'After Foreign Merge' }),
+            taskIdsToDelete: ['task-delete-b'],
           }),
         }),
       );

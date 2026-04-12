@@ -163,7 +163,9 @@ describe('BatchSyncService owner isolation', () => {
       getConnectionTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
       purgeTasksFromCloud: vi.fn().mockResolvedValue({ success: true, retriedTaskIds: [] }),
       topologicalSortTasks: vi.fn((tasks) => tasks),
-      addToRetryQueue: vi.fn(),
+      addToRetryQueue: vi.fn().mockReturnValue(true),
+      addToRetryQueueDurably: vi.fn().mockResolvedValue(true),
+      confirmRetryQueuePersistence: vi.fn().mockResolvedValue(true),
     };
 
     service.setCallbacks(callbacks);
@@ -183,7 +185,7 @@ describe('BatchSyncService owner isolation', () => {
 
     expect(result.success).toBe(false);
     expect(callbacks.pushProject).not.toHaveBeenCalled();
-    expect(callbacks.addToRetryQueue).toHaveBeenCalledWith(
+    expect(callbacks.addToRetryQueueDurably).toHaveBeenCalledWith(
       'project',
       'upsert',
       project,
@@ -577,6 +579,40 @@ describe('BatchSyncService owner isolation', () => {
     expect(result.retryEnqueued).toContain('task:task-delete-a');
   });
 
+  it('批内 child retry marker 仅在 RetryQueue 持久化确认成功后才返回', async () => {
+    const task: Task = {
+      id: 'task-retry-confirmation',
+      title: 'Task Retry Confirmation',
+      content: '',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: '1',
+      createdDate: '2026-03-31T00:00:00.000Z',
+    };
+    const project = createProject({
+      id: 'project-child-retry-confirmation',
+      tasks: [task],
+    });
+    callbacks.pushTask = vi.fn().mockResolvedValue({ success: false, retryEnqueued: true });
+    callbacks.confirmRetryQueuePersistence = vi.fn().mockResolvedValue(false);
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.failedTaskIds).toEqual(['task-retry-confirmation']);
+    expect(result.retryEnqueued).not.toContain('task:task-retry-confirmation');
+    expect(callbacks.confirmRetryQueuePersistence).toHaveBeenCalled();
+  });
+
   it('task purge 成功后不应为引用已 purge 任务的连接创建无意义重试', async () => {
     const project = createProject({
       id: 'project-task-purge-skips-connection-retry',
@@ -681,7 +717,7 @@ describe('BatchSyncService owner isolation', () => {
     expect(result.failureReason).toBe('project sync deferred by browser suspension');
     expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
     expect(mockToast.warning).not.toHaveBeenCalled();
-    expect(callbacks.addToRetryQueue).toHaveBeenCalledWith(
+    expect(callbacks.addToRetryQueueDurably).toHaveBeenCalledWith(
       'project',
       'upsert',
       project,

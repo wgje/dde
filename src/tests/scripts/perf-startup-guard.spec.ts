@@ -37,12 +37,9 @@ function createDistFixture(): string {
     `<!doctype html>
 <html>
 <head>
-  <link rel="modulepreload" href="/chunk-shared.js">
 </head>
 <body>
-  <div>${'x'.repeat(4096)}</div>
-  <script type="module" src="polyfills-XYZ999.js"></script>
-  <script type="module" src="main-ABC123.js"></script>
+  <script>window.location.replace('/');</script>
 </body>
 </html>`,
   );
@@ -110,7 +107,7 @@ describe('perf-startup-guard', () => {
     expect(findForbiddenModulepreloadFiles({ indexHtml: html, distDir })).toEqual(['chunk-text-view.js']);
   });
 
-  it('flags launch shell when it behaves like a second executable startup entry', () => {
+  it('flags launch document when it regresses into a redirect shell', () => {
     const root = createDistFixture();
     const launchHtmlPath = path.join(root, 'browser', 'launch.html');
     const evaluateStartupGuard = require('../../../scripts/perf-startup-guard.cjs').evaluateStartupGuard;
@@ -123,9 +120,12 @@ describe('perf-startup-guard', () => {
       launchHtmlMaxDiscoveryBytes: 2048,
     });
 
-    expect(result.violations).toContain('launch.html 缺少兼容启动标记');
-    expect(result.violations).toContain('launch.html 缺少兼容重定向脚本');
-    expect(result.violations).toContain('launch.html 不应注入 modulepreload');
-    expect(result.violations).toContain('launch.html 不应直接执行 main/polyfills 入口脚本');
+    expect(result.violations).toContain('launch.html 缺少启动别名标记');
+    expect(result.violations).toContain('launch.html 缺少原地路径归一化脚本');
+    expect(result.violations).toContain('launch.html 缺少 Boot Flags');
+    expect(result.violations).toContain('launch.html 缺少 loader dismiss 脚本');
+    expect(result.violations).toContain('launch.html 缺少 main/polyfills 入口脚本');
+    expect(result.violations).toContain('launch.html 缺少 main 入口 modulepreload');
+    expect(result.violations).toContain('launch.html 缺少 polyfills 入口 modulepreload');
   });
 });

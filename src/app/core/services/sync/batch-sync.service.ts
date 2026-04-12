@@ -91,7 +91,16 @@ export interface BatchSyncCallbacks {
     projectId?: string,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ) => void;
+  ) => boolean;
+  addToRetryQueueDurably: (
+    type: 'task' | 'project' | 'connection',
+    operation: 'upsert' | 'delete',
+    data: unknown,
+    projectId?: string,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ) => Promise<boolean>;
+  confirmRetryQueuePersistence: () => Promise<boolean>;
 }
 
 @Injectable({
@@ -154,7 +163,7 @@ export class BatchSyncService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  private deferProjectSyncForBrowserSuspension(
+  private async deferProjectSyncForBrowserSuspension(
     project: Project,
     userId: string,
     pendingTaskIdsToDelete: string[],
@@ -163,10 +172,12 @@ export class BatchSyncService {
     failedConnectionIds: string[],
     projectPushed: boolean,
     context: string,
-  ): BatchSyncResult {
+  ): Promise<BatchSyncResult> {
     if (this.callbacks && !retryEnqueued.includes(`project:${project.id}`)) {
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-      retryEnqueued.push(`project:${project.id}`);
+      const confirmed = await this.callbacks.addToRetryQueueDurably('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+      if (confirmed) {
+        retryEnqueued.push(`project:${project.id}`);
+      }
     }
 
     this.logger.info('浏览器网络挂起，延后项目批同步', {
@@ -271,7 +282,8 @@ export class BatchSyncService {
    */
   async saveProjectToCloud(
     project: Project,
-    userId: string
+    userId: string,
+    taskIdsToDelete?: string[],
   ): Promise<BatchSyncResult> {
     const failedTaskIds: string[] = [];
     const failedConnectionIds: string[] = [];
@@ -292,7 +304,39 @@ export class BatchSyncService {
     }
 
     const changes = this.changeTracker.getProjectChanges(project.id);
-    const pendingTaskIdsToDelete = changes.taskIdsToDelete;
+    const pendingTaskIdsToDelete = taskIdsToDelete ?? changes.taskIdsToDelete;
+    const durablyConfirmedRetryMarkers = new Set<string>();
+    const recordRetryMarker = (marker: string): void => {
+      if (!retryEnqueued.includes(marker)) {
+        retryEnqueued.push(marker);
+      }
+    };
+    const enqueueProjectRetry = async (): Promise<boolean> => {
+      const confirmed = await this.callbacks!.addToRetryQueueDurably('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
+      if (!confirmed) {
+        return false;
+      }
+
+      const marker = `project:${project.id}`;
+      recordRetryMarker(marker);
+      durablyConfirmedRetryMarkers.add(marker);
+      return true;
+    };
+    const confirmAccumulatedRetryMarkers = async (): Promise<void> => {
+      const pendingMarkers = retryEnqueued.filter(marker => !durablyConfirmedRetryMarkers.has(marker));
+      if (pendingMarkers.length === 0) {
+        return;
+      }
+
+      const confirmed = await this.callbacks!.confirmRetryQueuePersistence();
+      if (confirmed) {
+        pendingMarkers.forEach(marker => durablyConfirmedRetryMarkers.add(marker));
+        return;
+      }
+
+      const durableMarkers = retryEnqueued.filter(marker => durablyConfirmedRetryMarkers.has(marker));
+      retryEnqueued.splice(0, retryEnqueued.length, ...durableMarkers);
+    };
     
     // 本地模式快速退出
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
@@ -310,8 +354,7 @@ export class BatchSyncService {
     // 网络感知检查
     if (!this.mobileSync.shouldAllowSync()) {
       this.logger.debug('网络感知: 同步被延迟', { projectId: project.id });
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-      retryEnqueued.push(`project:${project.id}`);
+      await enqueueProjectRetry();
       return {
         success: false,
         failedTaskIds,
@@ -342,8 +385,7 @@ export class BatchSyncService {
     
     const client = this.getSupabaseClient();
     if (!client) {
-      this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-      retryEnqueued.push(`project:${project.id}`);
+      await enqueueProjectRetry();
       return {
         success: false,
         failedTaskIds,
@@ -383,8 +425,7 @@ export class BatchSyncService {
 
         this.syncState.setSessionExpired(true);
         // 【NEW-3 修复】Session 过期时将项目数据入队，防止浏览器崩溃导致数据丢失
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-        retryEnqueued.push(`project:${project.id}`);
+        await enqueueProjectRetry();
         this.logger.warn('Session 过期，项目数据已入重试队列', { projectId: project.id });
         this.toast.warning('登录已过期', '请重新登录以继续同步数据');
         return {
@@ -398,8 +439,7 @@ export class BatchSyncService {
       }
 
       if (sessionUserId !== userId) {
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-        retryEnqueued.push(`project:${project.id}`);
+        await enqueueProjectRetry();
         this.logger.warn('检测到项目批量同步 owner 与当前会话不匹配，已拒绝云端写入', {
           projectId: project.id,
           expectedUserId: userId,
@@ -446,8 +486,7 @@ export class BatchSyncService {
               }
 
               this.syncState.setSessionExpired(true);
-              this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-              retryEnqueued.push(`project:${project.id}`);
+              await enqueueProjectRetry();
               this.logger.warn('Session 刷新后仍无有效会话，项目数据已入重试队列', { projectId: project.id });
               this.toast.warning('登录已过期', '请重新登录以继续同步数据');
               return {
@@ -459,8 +498,7 @@ export class BatchSyncService {
                 failureReason: 'project sync session expired after refresh',
               };
             } else {
-              this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-              retryEnqueued.push(`project:${project.id}`);
+              await enqueueProjectRetry();
               this.logger.warn('Session 刷新后项目同步 owner 与当前会话不匹配，已回退到原 owner 重试队列', {
                 projectId: project.id,
                 expectedUserId: userId,
@@ -496,8 +534,7 @@ export class BatchSyncService {
               errorCode: retryEnhanced.code,
               errorType: retryEnhanced.errorType,
             });
-            this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-            retryEnqueued.push(`project:${project.id}`);
+            await enqueueProjectRetry();
             this.syncState.setSyncError(retryEnhanced.message);
             return {
               success: false,
@@ -526,8 +563,7 @@ export class BatchSyncService {
 
           this.logger.error('Session 验证失败', enhanced);
           this.syncState.setSessionExpired(true);
-          this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-          retryEnqueued.push(`project:${project.id}`);
+          await enqueueProjectRetry();
           this.logger.warn('Session 验证异常，项目数据已入重试队列', { projectId: project.id });
           this.toast.warning('登录已过期', '请重新登录以继续同步数据');
           return {
@@ -545,8 +581,7 @@ export class BatchSyncService {
           errorCode: enhanced.code,
           errorType: enhanced.errorType,
         });
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-        retryEnqueued.push(`project:${project.id}`);
+        await enqueueProjectRetry();
         this.syncState.setSyncError(enhanced.message);
         return {
           success: false,
@@ -598,7 +633,9 @@ export class BatchSyncService {
       }
       if (!projectPushed) {
         if (projectPushResult.retryEnqueued) {
-          retryEnqueued.push(`project:${projectSnapshot.id}`);
+          const marker = `project:${projectSnapshot.id}`;
+          recordRetryMarker(marker);
+          durablyConfirmedRetryMarkers.add(marker);
         }
         this.syncState.setSyncing(false);
         this.syncState.setSyncError('项目元数据同步失败，已停止批量同步并等待重试');
@@ -770,8 +807,9 @@ export class BatchSyncService {
           }
 
           failedConnectionIds.push(connection.id);
-          retryEnqueued.push(`connection:${connection.id}`);
-          this.callbacks.addToRetryQueue('connection', 'upsert', connection, projectSnapshot.id, userId);
+          if (this.callbacks.addToRetryQueue('connection', 'upsert', connection, projectSnapshot.id, userId)) {
+            retryEnqueued.push(`connection:${connection.id}`);
+          }
         }
       } else {
 
@@ -808,8 +846,9 @@ export class BatchSyncService {
           targetReady: allSyncedTaskIds.has(blocked.target)
         });
         failedConnectionIds.push(blocked.id);
-        retryEnqueued.push(`connection:${blocked.id}`);
-        this.callbacks.addToRetryQueue('connection', 'upsert', blocked, projectSnapshot.id, userId);
+        if (this.callbacks.addToRetryQueue('connection', 'upsert', blocked, projectSnapshot.id, userId)) {
+          retryEnqueued.push(`connection:${blocked.id}`);
+        }
       }
       
       for (let i = 0; i < connectionsToSync.length; i++) {
@@ -843,6 +882,10 @@ export class BatchSyncService {
         taskPurgeSucceeded &&
         failedTaskIds.length === 0 &&
         failedConnectionIds.length === 0;
+
+      if (!success) {
+        await confirmAccumulatedRetryMarkers();
+      }
       
       this.syncState.setSyncing(false);
       if (success) {
@@ -866,9 +909,9 @@ export class BatchSyncService {
       };
     } catch (e) {
       if (!retryEnqueued.includes(`project:${project.id}`)) {
-        this.callbacks.addToRetryQueue('project', 'upsert', project, undefined, userId, pendingTaskIdsToDelete);
-        retryEnqueued.push(`project:${project.id}`);
+        await enqueueProjectRetry();
       }
+      await confirmAccumulatedRetryMarkers();
       this.logger.error('保存项目失败', e);
       this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'saveProjectToCloud' },

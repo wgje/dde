@@ -286,6 +286,19 @@ export class ActionQueueStorageService {
     throw new Error(`owner-scoped 队列保存失败: ${ownerUserId}`);
   }
 
+  async persistQueueSnapshotForOwner(ownerUserId: string, queue: QueuedAction[]): Promise<boolean> {
+    try {
+      await this.saveQueueSnapshotForOwner(ownerUserId, queue);
+      return true;
+    } catch (error) {
+      this.logger.warn('持久化 owner-scoped 队列快照失败', {
+        ownerUserId,
+        error,
+      });
+      return false;
+    }
+  }
+
   private saveDeadLetterSnapshotForOwner(ownerUserId: string, queue: DeadLetterItem[]): void {
     if (typeof localStorage === 'undefined') {
       return;
@@ -311,9 +324,12 @@ export class ActionQueueStorageService {
       this.logger.debug('旧 owner 队列中未找到待收口的成功 action', { ownerUserId, actionId });
       return false;
     }
-
     await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
     return true;
+  }
+
+  async loadQueueSnapshotForOwner(ownerUserId: string): Promise<QueuedAction[]> {
+    return this.loadPersistedQueueForOwner(ownerUserId);
   }
 
   async settleProjectDeleteSuccessForOwner(

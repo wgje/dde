@@ -19,9 +19,11 @@ import { SimpleSyncService } from './simple-sync.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
+import { ActionQueueService } from '../../../services/action-queue.service';
 import { RequestThrottleService } from '../../../services/request-throttle.service';
 import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
+import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import {
@@ -61,6 +63,7 @@ describe('SimpleSyncService', () => {
   let mockLogger: any;
   let mockLoggerCategory: any; // The category logger instance
   let mockToast: any;
+  let mockActionQueue: any;
   let mockThrottle: any;
   let mockClient: any;
   let windowAddEventListenerSpy: ReturnType<typeof vi.spyOn>;
@@ -71,6 +74,7 @@ describe('SimpleSyncService', () => {
   let mockSessionManager: any;
   let mockRealtimeEnabledState = false;
   let mockProjectData: any;
+  let mockChangeTracker: any;
   let mockSupabaseOfflineMode = signal(false);
   let connectivityListener: ((change: { offline: boolean; source: 'probe' | 'request' | 'manual' }) => void) | null = null;
   
@@ -84,6 +88,10 @@ describe('SimpleSyncService', () => {
     isProcessingQueue: boolean;
     length: number;
     add: MockFn;
+    addDurably: MockFn;
+    persistNow: MockFn;
+    hasEntity?: MockFn;
+    getItems: MockFn;
     setOperationHandler: MockFn;
     startLoop: MockFn;
     stopLoop: MockFn;
@@ -263,6 +271,12 @@ describe('SimpleSyncService', () => {
       success: vi.fn(),
       warning: vi.fn()
     };
+
+    mockActionQueue = {
+      enqueue: vi.fn().mockReturnValue('action-1'),
+      enqueueDurably: vi.fn().mockResolvedValue('action-1'),
+      enqueueDurablyForOwner: vi.fn().mockResolvedValue('action-1'),
+    };
     
     // Mock RequestThrottleService - 直接执行传入的函数
     mockThrottle = {
@@ -431,6 +445,21 @@ describe('SimpleSyncService', () => {
       invalidateTombstoneCache: vi.fn(),
       isLoadingRemote: { set: vi.fn() }
     };
+
+    mockChangeTracker = {
+      getProjectChanges: vi.fn().mockImplementation((projectId: string) => ({
+        projectId,
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: [],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: false,
+        totalChanges: 0,
+        taskUpdateFieldsById: {},
+      })),
+    };
     
     // Sprint 9 新增：BatchSyncService Mock
     const mockBatchSync = {
@@ -503,6 +532,27 @@ describe('SimpleSyncService', () => {
         });
         return true;
       }),
+      addDurably: vi.fn().mockImplementation(async function(
+        this: { add: (...args: unknown[]) => boolean; persistNow: () => Promise<boolean> },
+        ...args: unknown[]
+      ) {
+        const accepted = this.add(...args);
+        if (!accepted) {
+          return false;
+        }
+        return this.persistNow();
+      }),
+      persistNow: vi.fn().mockResolvedValue(true),
+      hasEntity: vi.fn().mockImplementation(function(
+        this: { queue: RetryQueueItem[] },
+        type: RetryQueueItem['type'],
+        entityId: string,
+      ) {
+        return this.queue.some((item) => item.type === type && item.data.id === entityId);
+      }),
+      getItems: vi.fn().mockImplementation(function(this: { queue: RetryQueueItem[] }) {
+        return [...this.queue];
+      }),
       setOperationHandler: vi.fn() as MockFn,
       startLoop: vi.fn() as MockFn,
       stopLoop: vi.fn() as MockFn,
@@ -526,6 +576,7 @@ describe('SimpleSyncService', () => {
         { provide: SupabaseClientService, useValue: mockSupabase },
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
+        { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: RequestThrottleService, useValue: mockThrottle },
         { provide: ClockSyncService, useValue: mockClockSync },
         { provide: EventBusService, useValue: mockEventBus },
@@ -539,6 +590,7 @@ describe('SimpleSyncService', () => {
         { provide: UserPreferencesSyncService, useValue: mockUserPrefsSync },
         { provide: FocusConsoleSyncService, useValue: mockFocusConsoleSync },
         { provide: ProjectDataService, useValue: mockProjectData },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: BatchSyncService, useValue: mockBatchSync },
         // 【技术债务重构】新增的子服务
         { provide: TaskSyncOperationsService, useValue: mockTaskSyncOps },
@@ -2159,7 +2211,7 @@ describe('SimpleSyncService', () => {
       await service.saveProjectToCloud(project, 'test-user-id');
       
       // 验证 BatchSyncService 被调用
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id');
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined);
     });
     
     // 【技术债务重构】以下测试应迁移至 task-sync-operations.service.spec.ts
@@ -2386,7 +2438,7 @@ describe('SimpleSyncService', () => {
 
       const result = await service.saveProjectToCloud(project, 'test-user-id');
 
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id');
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined);
       expect(result.success).toBe(true);
     });
 
@@ -2401,6 +2453,849 @@ describe('SimpleSyncService', () => {
 
       expect(result.success).toBe(false);
       expect(result.conflict).toBe(true);
+    });
+
+    it('saveProjectToCloud 应复用同项目的并发请求', async () => {
+      const project = createMockProject({
+        id: 'project-single-flight',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      let resolveSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementation(() => new Promise((resolve) => {
+        resolveSave = resolve;
+      }));
+
+      const firstPromise = service.saveProjectToCloud(project, 'test-user-id');
+      const secondPromise = service.saveProjectToCloud({ ...project }, 'test-user-id');
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+
+      resolveSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+      expect(firstResult).toEqual({ success: true, newVersion: 2 });
+      expect(secondResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 应串行折叠同项目的后续快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const secondProject = createMockProject({
+        id: 'project-collapse',
+        updatedAt: '2026-04-11T08:00:01.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:01.000Z' })],
+        connections: [],
+      });
+      const latestProject = createMockProject({
+        id: 'project-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-3', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id');
+      const latestPromise = service.saveProjectToCloud(latestProject, 'test-user-id');
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, secondResult, latestResult] = await Promise.all([
+        firstPromise,
+        secondPromise,
+        latestPromise,
+      ]);
+
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(secondResult).toEqual({ success: true, newVersion: 2 });
+      expect(latestResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 不应让迟到的 in-flight 快照重放冲掉排队中的更新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-return-to-active',
+        name: 'Active Snapshot',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-return-to-active',
+        name: 'Queued Snapshot',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        version: 2,
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const replayedActivePromise = service.saveProjectToCloud({ ...firstProject }, 'test-user-id');
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, queuedResult, replayedActiveResult] = await Promise.all([
+        firstPromise,
+        queuedPromise,
+        replayedActivePromise,
+      ]);
+
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(queuedResult).toEqual({ success: true, newVersion: 2 });
+      expect(replayedActiveResult).toEqual({ success: true, newVersion: 1 });
+    });
+
+    it('saveProjectToCloud 不应让更旧的后到快照覆盖排队中的更新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-freshness-guard',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const newerProject = createMockProject({
+        id: 'project-freshness-guard',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        version: 2,
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const olderLateProject = createMockProject({
+        id: 'project-freshness-guard',
+        updatedAt: '2026-04-11T08:00:01.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-3', updatedAt: '2026-04-11T08:00:01.000Z' })],
+        connections: [],
+      });
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id');
+      const olderLatePromise = service.saveProjectToCloud(olderLateProject, 'test-user-id');
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, newerResult, olderLateResult] = await Promise.all([
+        firstPromise,
+        newerPromise,
+        olderLatePromise,
+      ]);
+
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(newerResult).toEqual({ success: true, newVersion: 2 });
+      expect(olderLateResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 应根据 task/connection 的更新时间保护更新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-nested-freshness',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const newerNestedProject = createMockProject({
+        id: 'project-nested-freshness',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const olderNestedProject = createMockProject({
+        id: 'project-nested-freshness',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-3', updatedAt: '2026-04-11T08:00:01.000Z' })],
+        connections: [],
+      });
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const newerPromise = service.saveProjectToCloud(newerNestedProject, 'test-user-id');
+      const olderPromise = service.saveProjectToCloud(olderNestedProject, 'test-user-id');
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerNestedProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, newerResult, olderResult] = await Promise.all([
+        firstPromise,
+        newerPromise,
+        olderPromise,
+      ]);
+
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(newerResult).toEqual({ success: true, newVersion: 2 });
+      expect(olderResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 不应吞掉仅项目元数据变化的后续快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-metadata-only',
+        name: 'Before Rename',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const renamedProject = createMockProject({
+        id: 'project-metadata-only',
+        name: 'After Rename',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const renamedPromise = service.saveProjectToCloud(renamedProject, 'test-user-id');
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, renamedProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, renamedResult] = await Promise.all([firstPromise, renamedPromise]);
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(renamedResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 在同等新鲜度时应保留最后到达的元数据快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-equal-freshness',
+        name: 'Initial',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        version: 1,
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-equal-freshness',
+        name: 'Queued Rename',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        version: 2,
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const latestEqualFreshnessProject = createMockProject({
+        id: 'project-equal-freshness',
+        name: 'Latest Rename',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        version: 2,
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      let resolveFirstSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const latestPromise = service.saveProjectToCloud(latestEqualFreshnessProject, 'test-user-id');
+
+      resolveFirstSave?.({ success: true, newVersion: 1 });
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestEqualFreshnessProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, queuedResult, latestResult] = await Promise.all([
+        firstPromise,
+        queuedPromise,
+        latestPromise,
+      ]);
+
+      expect(firstResult).toEqual({ success: true, newVersion: 1 });
+      expect(queuedResult).toEqual({ success: true, newVersion: 2 });
+      expect(latestResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectSmart 应透传并发折叠后的真实云端版本号', async () => {
+      const project = createMockProject({
+        id: 'project-smart-version',
+        version: 3,
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      let resolveSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementation(() => new Promise((resolve) => {
+        resolveSave = resolve;
+      }));
+
+      const firstPromise = service.saveProjectSmart(project, 'test-user-id');
+      const secondPromise = service.saveProjectSmart({ ...project }, 'test-user-id');
+
+      resolveSave?.({ success: true, newVersion: 11 });
+
+      const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+      expect(firstResult.newVersion).toBe(11);
+      expect(secondResult.newVersion).toBe(11);
+    });
+
+    it('saveProjectToCloud 在项目级重试已接管时应将最新折叠快照刷新到 RetryQueue', async () => {
+      const firstProject = createMockProject({
+        id: 'project-failure-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-failure-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync deferred by network awareness',
+        retryEnqueued: ['project:project-failure-collapse'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+      mockChangeTracker.getProjectChanges.mockReturnValueOnce({
+        projectId: 'project-failure-collapse',
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: ['task-delete-newest'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: true,
+        totalChanges: 1,
+        taskUpdateFieldsById: {},
+      });
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        queuedProject,
+        undefined,
+        'test-user-id',
+        ['task-delete-newest'],
+      );
+      expect(firstResult).toEqual(failedResult);
+      expect(queuedResult).toEqual(failedResult);
+    });
+
+    it('saveProjectToCloud 在最新折叠快照未 durably 刷新到 RetryQueue 时不应复用旧 project retry marker', async () => {
+      const firstProject = createMockProject({
+        id: 'project-refresh-persistence-guard',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-refresh-persistence-guard',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync deferred by network awareness',
+        retryEnqueued: ['project:project-refresh-persistence-guard'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      const queuedSuccess = {
+        success: true,
+        newVersion: 12,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockResolvedValueOnce(queuedSuccess);
+      mockRetryQueueService.persistNow.mockResolvedValueOnce(false);
+      mockChangeTracker.getProjectChanges.mockReturnValueOnce({
+        projectId: 'project-refresh-persistence-guard',
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: ['task-delete-newest'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: true,
+        totalChanges: 1,
+        taskUpdateFieldsById: {},
+      });
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        queuedProject,
+        undefined,
+        'test-user-id',
+        ['task-delete-newest'],
+      );
+      expect(mockRetryQueueService.persistNow).toHaveBeenCalled();
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      expect(firstResult).toEqual(failedResult);
+      expect(queuedResult).toEqual(queuedSuccess);
+    });
+
+    it('saveProjectToCloud 在折叠重试刷新时应保留显式 taskIdsToDelete payload', async () => {
+      const firstProject = createMockProject({
+        id: 'project-explicit-delete-payload',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-explicit-delete-payload',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync deferred by network awareness',
+        retryEnqueued: ['project:project-explicit-delete-payload'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+      mockChangeTracker.getProjectChanges.mockReturnValueOnce({
+        projectId: 'project-explicit-delete-payload',
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: [],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: false,
+        totalChanges: 0,
+        taskUpdateFieldsById: {},
+      });
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-original']);
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', ['task-delete-explicit']);
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        queuedProject,
+        undefined,
+        'test-user-id',
+        ['task-delete-explicit'],
+      );
+      expect(firstResult).toEqual(failedResult);
+      expect(queuedResult).toEqual(failedResult);
+    });
+
+    it('saveProjectToCloud 在折叠重试刷新时不应因 ChangeTracker 清空而丢失已捕获的 taskIdsToDelete payload', async () => {
+      const firstProject = createMockProject({
+        id: 'project-preserve-captured-delete-payload',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-preserve-captured-delete-payload',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync deferred by network awareness',
+        retryEnqueued: ['project:project-preserve-captured-delete-payload'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+      mockChangeTracker.getProjectChanges
+        .mockReturnValueOnce({
+          projectId: 'project-preserve-captured-delete-payload',
+          tasksToCreate: [],
+          tasksToUpdate: [],
+          taskIdsToDelete: ['task-delete-captured'],
+          connectionsToCreate: [],
+          connectionsToUpdate: [],
+          connectionsToDelete: [],
+          hasChanges: true,
+          totalChanges: 1,
+          taskUpdateFieldsById: {},
+        })
+        .mockReturnValueOnce({
+          projectId: 'project-preserve-captured-delete-payload',
+          tasksToCreate: [],
+          tasksToUpdate: [],
+          taskIdsToDelete: [],
+          connectionsToCreate: [],
+          connectionsToUpdate: [],
+          connectionsToDelete: [],
+          hasChanges: false,
+          totalChanges: 0,
+          taskUpdateFieldsById: {},
+        });
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        queuedProject,
+        undefined,
+        'test-user-id',
+        ['task-delete-captured'],
+      );
+      expect(firstResult).toEqual(failedResult);
+      expect(queuedResult).toEqual(failedResult);
+    });
+
+    it('saveProjectToCloud 在多次折叠后应保留最后一次请求的 taskIdsToDelete payload', async () => {
+      const firstProject = createMockProject({
+        id: 'project-folded-delete-payload',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const secondProject = createMockProject({
+        id: 'project-folded-delete-payload',
+        updatedAt: '2026-04-11T08:00:01.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:01.000Z' })],
+        connections: [],
+      });
+      const thirdProject = createMockProject({
+        id: 'project-folded-delete-payload',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-3', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync deferred by network awareness',
+        retryEnqueued: ['project:project-folded-delete-payload'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-a']);
+      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id', ['task-delete-b']);
+      const thirdPromise = service.saveProjectToCloud(thirdProject, 'test-user-id', ['task-delete-c']);
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, secondResult, thirdResult] = await Promise.all([firstPromise, secondPromise, thirdPromise]);
+
+      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        thirdProject,
+        undefined,
+        'test-user-id',
+        ['task-delete-c'],
+      );
+      expect(firstResult).toEqual(failedResult);
+      expect(secondResult).toEqual(failedResult);
+      expect(thirdResult).toEqual(failedResult);
+    });
+
+    it('saveProjectToCloud 在 sessionExpired 的项目级 handoff 下仍应保留最新折叠快照', async () => {
+      service['syncState'].update((state) => ({ ...state, sessionExpired: true }));
+
+      const firstProject = createMockProject({
+        id: 'project-session-expired-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-session-expired-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const failedResult = {
+        success: false,
+        failureReason: 'project sync session expired',
+        retryEnqueued: ['project:project-session-expired-collapse'],
+        failedTaskIds: [],
+        failedConnectionIds: [],
+        projectPushed: false,
+      };
+      let resolveFirstSave: ((value: typeof failedResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+      mockChangeTracker.getProjectChanges.mockReturnValueOnce({
+        projectId: 'project-session-expired-collapse',
+        tasksToCreate: [],
+        tasksToUpdate: [],
+        taskIdsToDelete: ['task-delete-after-expiry'],
+        connectionsToCreate: [],
+        connectionsToUpdate: [],
+        connectionsToDelete: [],
+        hasChanges: true,
+        totalChanges: 1,
+        taskUpdateFieldsById: {},
+      });
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(failedResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockRetryQueueService.queue.at(-1)).toEqual(expect.objectContaining({
+        type: 'project',
+        data: queuedProject,
+        taskIdsToDelete: ['task-delete-after-expiry'],
+      }));
+      expect(firstResult).toEqual(failedResult);
+      expect(queuedResult).toEqual(failedResult);
+    });
+
+    it('saveProjectToCloud 在仅子实体失败时仍应继续执行排队中的新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-partial-failure-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-partial-failure-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const partialFailureResult = {
+        success: false,
+        failureReason: 'project batch sync delegated remaining work to retry queue',
+        retryEnqueued: ['task:task-1'],
+        failedTaskIds: ['task-1'],
+        failedConnectionIds: [],
+        projectPushed: true,
+      };
+      let resolveFirstSave: ((value: typeof partialFailureResult) => void) | null = null;
+      let resolveSecondSave: ((value: { success: boolean; newVersion: number }) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn()
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveFirstSave = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveSecondSave = resolve;
+        }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(partialFailureResult);
+
+      await vi.waitFor(() => {
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
+      });
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
+
+      resolveSecondSave?.({ success: true, newVersion: 2 });
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(firstResult).toEqual(partialFailureResult);
+      expect(queuedResult).toEqual({ success: true, newVersion: 2 });
+    });
+
+    it('saveProjectToCloud 在冲突结果后不应继续重放排队中的新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-conflict-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-conflict-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const conflictResult = {
+        success: false,
+        conflict: true,
+        remoteData: createMockProject({ id: 'project-conflict-collapse', version: 9 }),
+        failureReason: 'project sync version conflict',
+      };
+      let resolveFirstSave: ((value: typeof conflictResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      resolveFirstSave?.(conflictResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+      expect(firstResult).toEqual(conflictResult);
+      expect(queuedResult).toEqual(conflictResult);
+    });
+
+    it('saveProjectToCloud 在前序请求抛错时不应立即重放排队中的新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-error-collapse',
+        updatedAt: '2026-04-11T08:00:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:00:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-error-collapse',
+        updatedAt: '2026-04-11T08:00:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:00:02.000Z' })],
+        connections: [],
+      });
+      const expectedError = new Error('network suspended');
+      let rejectFirstSave: ((reason?: unknown) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((_, reject) => {
+        rejectFirstSave = reject;
+      }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      rejectFirstSave?.(expectedError);
+
+      await expect(firstPromise).rejects.toThrow('network suspended');
+      await expect(queuedPromise).rejects.toThrow('network suspended');
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
     });
 
     it('saveProjectToCloud 应该在 BatchSyncService 返回错误时处理', async () => {
@@ -2500,6 +3395,32 @@ describe('SimpleSyncService', () => {
       );
     });
 
+    it('pushProject 回退重试时仅在 RetryQueue 持久化确认成功后才返回 retryEnqueued', async () => {
+      const project = createMockProject({ id: 'project-durable-retry-confirm', tasks: [], connections: [] });
+      const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
+        pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
+      };
+
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'new-owner' } } }
+      });
+      mockRetryQueueService.persistNow.mockResolvedValueOnce(false);
+
+      const result = await callbacks.pushProject(project, false, 'owner-a', ['task-delete-a']);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        project,
+        undefined,
+        'owner-a',
+        ['task-delete-a'],
+      );
+      expect(mockRetryQueueService.persistNow).toHaveBeenCalledTimes(1);
+      expect(result.retryEnqueued).toBe(false);
+      expect(result.success).toBe(false);
+    });
+
     it('BatchSync addToRetryQueue 回调应透传 taskIdsToDelete', () => {
       const project = createMockProject({ id: 'project-batch-retry-adapter', tasks: [], connections: [] });
       const callbacks = mockBatchSync.setCallbacks.mock.calls[0]?.[0] as {
@@ -2510,7 +3431,7 @@ describe('SimpleSyncService', () => {
           projectId?: string,
           sourceUserId?: string,
           taskIdsToDelete?: string[],
-        ) => void;
+        ) => boolean;
       };
 
       callbacks.addToRetryQueue('project', 'upsert', project, undefined, 'owner-a', ['task-delete-a']);
@@ -2555,6 +3476,36 @@ describe('SimpleSyncService', () => {
       await retryHandlers.pushTask(task, 'project-1', 'owner-a');
 
       expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', false, true, 'owner-a');
+    });
+
+    it('RetryQueue 转交 project 时仅在 ActionQueue 真正接受后才视为成功', async () => {
+      const project = createMockProject({ id: 'project-retry-enqueue-guard' });
+      const retryHandlers = mockRetryQueueService.setOperationHandler.mock.calls[0]?.[0] as {
+        pushProject: (project: Project, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<boolean>;
+      };
+      mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('');
+
+      const accepted = await retryHandlers.pushProject(project, 'owner-a', ['task-delete-1']);
+
+      expect(accepted).toBe(false);
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalledWith('owner-a', {
+        type: 'update',
+        entityType: 'project',
+        entityId: project.id,
+        payload: {
+          project,
+          sourceUserId: 'owner-a',
+          taskIdsToDelete: ['task-delete-1'],
+        },
+      });
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        '项目重试转交 ActionQueue 失败，保留在 RetryQueue 中等待后续回放',
+        expect.objectContaining({
+          projectId: project.id,
+          sourceUserId: 'owner-a',
+          pendingTaskDeleteCount: 1,
+        })
+      );
     });
   });
 

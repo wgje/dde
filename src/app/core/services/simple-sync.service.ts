@@ -70,6 +70,7 @@ import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
+import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { BlackBoxEntry } from '../../../models/focus';
 import { SyncStateService } from './sync/sync-state.service';
 import {
@@ -86,6 +87,35 @@ interface ConflictData {
   remote: Project;
   projectId: string;
   pendingTaskDeleteIds?: string[];
+}
+
+type ProjectSaveResult = {
+  success: boolean;
+  conflict?: boolean;
+  remoteData?: Project;
+  newVersion?: number;
+  projectPushed?: boolean;
+  failedTaskIds?: string[];
+  failedConnectionIds?: string[];
+  retryEnqueued?: string[];
+  failureReason?: string;
+};
+
+interface QueuedProjectSaveRequest {
+  project: Project;
+  userId: string;
+  signature: string;
+  taskIdsToDelete?: string[];
+  promise: Promise<ProjectSaveResult>;
+  resolve: (result: ProjectSaveResult) => void;
+  reject: (error: unknown) => void;
+}
+
+interface ProjectSaveFlight {
+  activeSignature: string;
+  activeTaskIdsToDelete?: string[];
+  activePromise: Promise<ProjectSaveResult>;
+  queuedRequest: QueuedProjectSaveRequest | null;
 }
 
 /** 远程变更回调 */
@@ -129,6 +159,7 @@ export class SimpleSyncService {
   private readonly clockSync = inject(ClockSyncService);
   private readonly eventBus = inject(EventBusService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly changeTracker = inject(ChangeTrackerService);
   
   // 子服务注入
   private readonly tombstoneService = inject(TombstoneService);
@@ -200,6 +231,11 @@ export class SimpleSyncService {
   
   /** 最后一次同步时间 */
   private lastSyncTimeByProject: Map<string, string> = new Map();
+  /**
+   * 项目云端持久化单飞 gate。
+   * 恢复窗口里 AutoPersist / RetryQueue / ActionQueue 可能同时推同一项目，这里统一串行并折叠为最新快照。
+   */
+  private readonly projectSaveFlights = new Map<string, ProjectSaveFlight>();
   
   /** 配置常量 */
   private readonly RETRY_INTERVAL = 5000;
@@ -250,7 +286,16 @@ export class SimpleSyncService {
         p,
         sourceUserId,
         taskIdsToDelete,
-      )
+      ),
+      addToRetryQueueDurably: (t, o, d, p, sourceUserId, taskIdsToDelete) => this.addToRetryQueueDurably(
+        t,
+        o,
+        d as Task | Project | Connection | { id: string },
+        p,
+        sourceUserId,
+        taskIdsToDelete,
+      ),
+      confirmRetryQueuePersistence: () => this.confirmRetryQueuePersistence(),
     });
     
     // 设置重试队列操作处理器
@@ -268,7 +313,15 @@ export class SimpleSyncService {
           return false;
         }
 
-        actionQueue.enqueue({
+        if (!sourceUserId) {
+          this.logger.warn('项目重试缺少 sourceUserId，拒绝转交 ActionQueue 以避免 owner bucket 错位', {
+            projectId: project.id,
+            pendingTaskDeleteCount: taskIdsToDelete?.length ?? 0,
+          });
+          return false;
+        }
+
+        const actionId = await actionQueue.enqueueDurablyForOwner(sourceUserId, {
           type: 'update',
           entityType: 'project',
           entityId: project.id,
@@ -278,6 +331,16 @@ export class SimpleSyncService {
             taskIdsToDelete,
           },
         });
+
+        if (!actionId) {
+          this.logger.warn('项目重试转交 ActionQueue 失败，保留在 RetryQueue 中等待后续回放', {
+            projectId: project.id,
+            sourceUserId,
+            pendingTaskDeleteCount: taskIdsToDelete?.length ?? 0,
+          });
+          return false;
+        }
+
         return true;
       },
       // 重试连接时保留 tombstone + 任务存在性校验，避免陈旧连接重放与 23503 外键错误风暴
@@ -1051,13 +1114,12 @@ export class SimpleSyncService {
   ): Promise<{ success: boolean; retryEnqueued: boolean; failureReason?: string }> {
     let retryEnqueued = false;
 
-    const enqueueRetry = (): void => {
+    const enqueueRetry = async (): Promise<void> => {
       if (fromRetryQueue) {
         return;
       }
 
-      this.addToRetryQueue('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-      retryEnqueued = true;
+      retryEnqueued = await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
     };
 
     if (this.syncState().sessionExpired) {
@@ -1071,7 +1133,7 @@ export class SimpleSyncService {
     
     const client = await this.getSupabaseClient();
     if (!client) {
-      enqueueRetry();
+      await enqueueRetry();
       return {
         success: false,
         retryEnqueued,
@@ -1093,7 +1155,7 @@ export class SimpleSyncService {
       }
 
       if (!sessionUserId) {
-        enqueueRetry();
+        await enqueueRetry();
         this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
         return false;
       }
@@ -1104,7 +1166,7 @@ export class SimpleSyncService {
           sourceUserId,
           sessionUserId,
         });
-        enqueueRetry();
+        await enqueueRetry();
         return false;
       }
 
@@ -1162,7 +1224,7 @@ export class SimpleSyncService {
                   failureReason: 'project sync permission denied (RLS policy violation after refresh)',
                 };
               }
-              enqueueRetry();
+              await enqueueRetry();
               this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
                 projectId: project.id,
                 errorCode: retryEnhanced.code
@@ -1181,7 +1243,7 @@ export class SimpleSyncService {
             };
           }
         } else {
-          enqueueRetry();
+          await enqueueRetry();
           this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
           return {
             success: false,
@@ -1197,7 +1259,7 @@ export class SimpleSyncService {
       }
       
       if (enhanced.isRetryable) {
-        enqueueRetry();
+        await enqueueRetry();
       }
       return {
         success: false,
@@ -1205,6 +1267,10 @@ export class SimpleSyncService {
         failureReason: enhanced.message,
       };
     }
+  }
+
+  private async confirmRetryQueuePersistence(): Promise<boolean> {
+    return this.retryQueueService.persistNow();
   }
 
   private async pushProjectWithResult(
@@ -1297,15 +1363,15 @@ export class SimpleSyncService {
     projectId?: string,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ): void {
-    if (this.syncState().sessionExpired) return;
+  ): boolean {
+    if (this.syncState().sessionExpired && type !== 'project') return false;
     if (!data?.id) {
       this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
-      return;
+      return false;
     }
     if ((type === 'task' || type === 'connection') && !projectId) {
       this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
-      return;
+      return false;
     }
     const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
     if (enqueued) {
@@ -1313,6 +1379,36 @@ export class SimpleSyncService {
     } else {
       this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
     }
+
+    return enqueued;
+  }
+
+  async addToRetryQueueDurably(
+    type: RetryableEntityType,
+    operation: RetryableOperation,
+    data: Task | Project | Connection | { id: string },
+    projectId?: string,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ): Promise<boolean> {
+    if (this.syncState().sessionExpired && type !== 'project') return false;
+    if (!data?.id) {
+      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 id）', { type, operation });
+      return false;
+    }
+    if ((type === 'task' || type === 'connection') && !projectId) {
+      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
+      return false;
+    }
+
+    const enqueued = await this.retryQueueService.addDurably(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
+    if (enqueued) {
+      this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
+    } else {
+      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+    }
+
+    return enqueued;
   }
   
   clearRetryQueue(): void {
@@ -1547,16 +1643,380 @@ export class SimpleSyncService {
   clearConflict(): void {
     this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
   }
+
+  private buildProjectSaveFlightKey(projectId: string, userId: string): string {
+    return `${userId}:${projectId}`;
+  }
+
+  private captureEffectiveTaskIdsToDelete(
+    projectId: string,
+    taskIdsToDelete?: string[],
+    fallbackTaskIdsToDelete?: string[],
+  ): string[] | undefined {
+    if (taskIdsToDelete !== undefined) {
+      return [...taskIdsToDelete];
+    }
+
+    const trackedTaskIdsToDelete = this.changeTracker.getProjectChanges(projectId).taskIdsToDelete;
+    if (trackedTaskIdsToDelete.length > 0) {
+      return [...trackedTaskIdsToDelete];
+    }
+
+    if (fallbackTaskIdsToDelete !== undefined) {
+      return [...fallbackTaskIdsToDelete];
+    }
+
+    return undefined;
+  }
+
+  private getExistingProjectRetryTaskIdsToDelete(projectId: string): string[] | undefined {
+    const retryItem = this.retryQueueService.getItems().find(
+      item => item.type === 'project' && item.data.id === projectId
+    );
+
+    return retryItem?.taskIdsToDelete ? [...retryItem.taskIdsToDelete] : undefined;
+  }
+
+  private buildProjectSaveSignature(project: Project, taskIdsToDelete?: string[]): string {
+    const normalizedTaskIdsToDelete = [...(taskIdsToDelete ?? [])].sort();
+    return JSON.stringify({ project, taskIdsToDelete: normalizedTaskIdsToDelete });
+  }
+
+  private createQueuedProjectSaveRequest(
+    project: Project,
+    userId: string,
+    signature: string,
+    taskIdsToDelete?: string[],
+  ): QueuedProjectSaveRequest {
+    let resolve!: (result: ProjectSaveResult) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<ProjectSaveResult>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+
+    return {
+      project,
+      userId,
+      signature,
+      taskIdsToDelete,
+      promise,
+      resolve,
+      reject,
+    };
+  }
+
+  private hasProjectRetryMarker(projectId: string, retryEnqueued?: string[]): boolean {
+    return retryEnqueued?.includes(`project:${projectId}`) === true
+      || this.hasRetryQueueEntity('project', projectId);
+  }
+
+  private async refreshQueuedProjectRetryPayload(
+    queuedRequest: QueuedProjectSaveRequest,
+    retryEnqueued?: string[],
+  ): Promise<boolean> {
+    if (!this.hasProjectRetryMarker(queuedRequest.project.id, retryEnqueued)) {
+      return false;
+    }
+
+    const latestTaskIdsToDelete = queuedRequest.taskIdsToDelete
+      ?? this.getExistingProjectRetryTaskIdsToDelete(queuedRequest.project.id)
+      ?? this.captureEffectiveTaskIdsToDelete(queuedRequest.project.id);
+    const refreshed = await this.addToRetryQueueDurably(
+      'project',
+      'upsert',
+      queuedRequest.project,
+      undefined,
+      queuedRequest.userId,
+      latestTaskIdsToDelete,
+    );
+    if (!refreshed) {
+      return false;
+    }
+
+    this.logger.debug('项目云端持久化失败后已刷新重试队列为最新折叠快照', {
+      projectId: queuedRequest.project.id,
+      userId: queuedRequest.userId,
+      taskDeleteCount: latestTaskIdsToDelete?.length ?? 0,
+    });
+
+    return true;
+  }
+
+  private getProjectSaveFreshness(project: Project): { updatedAtMs: number; version: number } {
+    let updatedAtMs = project.updatedAt ? Date.parse(project.updatedAt) : 0;
+    updatedAtMs = Number.isFinite(updatedAtMs) ? updatedAtMs : 0;
+
+    for (const task of project.tasks) {
+      const taskUpdatedAtMs = task.updatedAt ? Date.parse(task.updatedAt) : 0;
+      const taskDeletedAtMs = task.deletedAt ? Date.parse(task.deletedAt) : 0;
+      updatedAtMs = Math.max(
+        updatedAtMs,
+        Number.isFinite(taskUpdatedAtMs) ? taskUpdatedAtMs : 0,
+        Number.isFinite(taskDeletedAtMs) ? taskDeletedAtMs : 0,
+      );
+    }
+
+    for (const connection of project.connections) {
+      const connectionUpdatedAtMs = connection.updatedAt ? Date.parse(connection.updatedAt) : 0;
+      const connectionDeletedAtMs = connection.deletedAt ? Date.parse(connection.deletedAt) : 0;
+      updatedAtMs = Math.max(
+        updatedAtMs,
+        Number.isFinite(connectionUpdatedAtMs) ? connectionUpdatedAtMs : 0,
+        Number.isFinite(connectionDeletedAtMs) ? connectionDeletedAtMs : 0,
+      );
+    }
+
+    return {
+      updatedAtMs,
+      version: project.version ?? 0,
+    };
+  }
+
+  private isProjectSaveNewer(candidate: Project, current: Project): boolean {
+    const candidateFreshness = this.getProjectSaveFreshness(candidate);
+    const currentFreshness = this.getProjectSaveFreshness(current);
+
+    if (candidateFreshness.updatedAtMs !== currentFreshness.updatedAtMs) {
+      return candidateFreshness.updatedAtMs > currentFreshness.updatedAtMs;
+    }
+
+    if (candidateFreshness.version !== currentFreshness.version) {
+      return candidateFreshness.version > currentFreshness.version;
+    }
+
+    return true;
+  }
+
+  private startProjectSaveFlight(
+    key: string,
+    project: Project,
+    userId: string,
+    signature: string,
+    taskIdsToDelete?: string[],
+    flight?: ProjectSaveFlight,
+    queuedRequest?: QueuedProjectSaveRequest,
+  ): Promise<ProjectSaveResult> {
+    const targetFlight = flight ?? {
+      activeSignature: signature,
+      activeTaskIdsToDelete: taskIdsToDelete ?? queuedRequest?.taskIdsToDelete,
+      activePromise: Promise.resolve({ success: false }),
+      queuedRequest: null,
+    };
+    const basePromise = this.batchSyncService.saveProjectToCloud(
+      project,
+      userId,
+      taskIdsToDelete ?? queuedRequest?.taskIdsToDelete,
+    );
+    const activePromise = queuedRequest
+      ? basePromise.then(
+          (result) => {
+            queuedRequest.resolve(result);
+            return result;
+          },
+          (error) => {
+            queuedRequest.reject(error);
+            throw error;
+          }
+        )
+      : basePromise;
+
+    targetFlight.activeSignature = signature;
+  targetFlight.activeTaskIdsToDelete = taskIdsToDelete ?? queuedRequest?.taskIdsToDelete;
+    targetFlight.activePromise = activePromise;
+    this.projectSaveFlights.set(key, targetFlight);
+
+    void activePromise
+      .then(
+        (result) => this.settleProjectSaveFlight(key, targetFlight, result),
+        (error) => this.abortProjectSaveFlight(key, targetFlight, error),
+      )
+      .catch((error) => {
+        this.logger.warn('推进项目云端持久化单飞队列失败', { error, key });
+      });
+
+    return activePromise;
+  }
+
+  private async settleProjectSaveFlight(
+    key: string,
+    flight: ProjectSaveFlight,
+    result: ProjectSaveResult,
+  ): Promise<void> {
+    if (this.projectSaveFlights.get(key) !== flight) {
+      return;
+    }
+
+    if (!result.success) {
+      const queuedRequest = flight.queuedRequest;
+      if (!queuedRequest) {
+        this.projectSaveFlights.delete(key);
+        return;
+      }
+
+      if (result.conflict) {
+        flight.queuedRequest = null;
+        this.projectSaveFlights.delete(key);
+        queuedRequest.resolve(result);
+        this.logger.debug('项目云端持久化冲突，折叠队列等待显式冲突解决', {
+          projectId: queuedRequest.project.id,
+          userId: queuedRequest.userId,
+        });
+        return;
+      }
+
+      if (await this.refreshQueuedProjectRetryPayload(queuedRequest, result.retryEnqueued)) {
+        flight.queuedRequest = null;
+        this.projectSaveFlights.delete(key);
+        queuedRequest.resolve(result);
+        this.logger.debug('项目级重试已接管，折叠队列与当前失败结果一起结算', {
+          projectId: queuedRequest.project.id,
+          userId: queuedRequest.userId,
+          failureReason: result.failureReason ?? null,
+        });
+        return;
+      }
+
+      this.logger.debug('项目级失败未覆盖最新折叠快照，继续执行排队中的项目云端持久化', {
+        projectId: queuedRequest.project.id,
+        userId: queuedRequest.userId,
+        failureReason: result.failureReason ?? null,
+      });
+      await this.advanceProjectSaveFlight(key, flight);
+      return;
+    }
+
+    await this.advanceProjectSaveFlight(key, flight);
+  }
+
+  private async abortProjectSaveFlight(
+    key: string,
+    flight: ProjectSaveFlight,
+    error: unknown,
+  ): Promise<void> {
+    if (this.projectSaveFlights.get(key) !== flight) {
+      return;
+    }
+
+    const queuedRequest = flight.queuedRequest;
+    flight.queuedRequest = null;
+    this.projectSaveFlights.delete(key);
+
+    if (queuedRequest) {
+      await this.refreshQueuedProjectRetryPayload(queuedRequest);
+      queuedRequest.reject(error);
+      this.logger.debug('项目云端持久化异常，取消排队中的折叠快照', {
+        projectId: queuedRequest.project.id,
+        userId: queuedRequest.userId,
+      });
+    }
+  }
+
+  private async advanceProjectSaveFlight(key: string, flight: ProjectSaveFlight): Promise<void> {
+    if (this.projectSaveFlights.get(key) !== flight) {
+      return;
+    }
+
+    const queuedRequest = flight.queuedRequest;
+    if (!queuedRequest) {
+      this.projectSaveFlights.delete(key);
+      return;
+    }
+
+    flight.queuedRequest = null;
+    this.logger.debug('执行折叠后的项目云端持久化', {
+      projectId: queuedRequest.project.id,
+      userId: queuedRequest.userId,
+    });
+    this.startProjectSaveFlight(
+      key,
+      queuedRequest.project,
+      queuedRequest.userId,
+      queuedRequest.signature,
+      queuedRequest.taskIdsToDelete,
+      flight,
+      queuedRequest,
+    );
+  }
+
+  private saveProjectToCloudSingleFlight(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<ProjectSaveResult> {
+    const key = this.buildProjectSaveFlightKey(project.id, userId);
+    const existingFlight = this.projectSaveFlights.get(key);
+
+    if (!existingFlight) {
+      const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(project.id, taskIdsToDelete);
+      const signature = this.buildProjectSaveSignature(project, effectiveTaskIdsToDelete);
+      return this.startProjectSaveFlight(key, project, userId, signature, effectiveTaskIdsToDelete);
+    }
+
+    const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(
+      project.id,
+      taskIdsToDelete,
+      existingFlight.activeTaskIdsToDelete,
+    );
+    const signature = this.buildProjectSaveSignature(project, effectiveTaskIdsToDelete);
+
+    if (existingFlight.activeSignature === signature) {
+      this.logger.debug('复用进行中的项目云端持久化', {
+        projectId: project.id,
+        userId,
+      });
+      return existingFlight.activePromise;
+    }
+
+    if (existingFlight.queuedRequest) {
+      if (existingFlight.queuedRequest.signature === signature) {
+        return existingFlight.queuedRequest.promise;
+      }
+
+      const queuedRequestTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(
+        project.id,
+        taskIdsToDelete,
+        existingFlight.queuedRequest.taskIdsToDelete ?? existingFlight.activeTaskIdsToDelete,
+      );
+      const queuedRequestSignature = this.buildProjectSaveSignature(project, queuedRequestTaskIdsToDelete);
+
+      if (this.isProjectSaveNewer(project, existingFlight.queuedRequest.project)) {
+        existingFlight.queuedRequest.project = project;
+        existingFlight.queuedRequest.userId = userId;
+        existingFlight.queuedRequest.signature = queuedRequestSignature;
+        existingFlight.queuedRequest.taskIdsToDelete = queuedRequestTaskIdsToDelete;
+        this.logger.debug('合并项目云端持久化请求到更新/同等新鲜度的后到快照', {
+          projectId: project.id,
+          userId,
+        });
+      } else {
+        this.logger.debug('保留排队中的更新快照，忽略更旧的项目云端持久化请求', {
+          projectId: project.id,
+          userId,
+        });
+      }
+      return existingFlight.queuedRequest.promise;
+    }
+
+    const queuedRequest = this.createQueuedProjectSaveRequest(
+      project,
+      userId,
+      signature,
+      effectiveTaskIdsToDelete,
+    );
+    existingFlight.queuedRequest = queuedRequest;
+    this.logger.debug('项目云端持久化排队等待单飞窗口结束', {
+      projectId: project.id,
+      userId,
+    });
+    return queuedRequest.promise;
+  }
   
   // ==================== 项目加载 ====================
   
-  async saveProjectToCloud(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
-    return this.batchSyncService.saveProjectToCloud(project, userId);
+  async saveProjectToCloud(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<ProjectSaveResult> {
+    return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete);
   }
 
-  async saveProjectSmart(project: Project, userId: string): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
-    const result = await this.saveProjectToCloud(project, userId);
-    return { ...result, newVersion: project.version };
+  async saveProjectSmart(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
+    const result = await this.saveProjectToCloud(project, userId, taskIdsToDelete);
+    return { ...result, newVersion: result.newVersion ?? project.version };
   }
   
   async loadFullProjectOptimized(projectId: string): Promise<Project | null> {

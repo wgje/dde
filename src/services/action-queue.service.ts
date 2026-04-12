@@ -172,6 +172,116 @@ export class ActionQueueService {
    * 支持优先级分级 + 智能合并
    */
   enqueue(action: EnqueueParams): string {
+    return this.enqueueInternal(action, true, true);
+  }
+
+  async enqueueDurably(action: EnqueueParams): Promise<string> {
+    return this.enqueueDurablyInternal(action, true);
+  }
+
+  private async enqueueDurablyInternal(action: EnqueueParams, removeRetrySourceOnSuccess: boolean): Promise<string> {
+    const previousQueue = [...this.pendingActions()];
+    const actionId = this.enqueueInternal(action, false, false);
+    if (!actionId) {
+      return '';
+    }
+
+    const persisted = await this.storage.persistQueueSnapshotForOwner(
+      this.getCurrentOwnerUserId(),
+      this.pendingActions(),
+    );
+    if (!persisted) {
+      this.pendingActions.set(previousQueue);
+      this.queueSize.set(previousQueue.length);
+      this.syncSentryContext();
+      this.logger.warn('ActionQueue durable enqueue 未能完成持久化确认', {
+        actionId,
+        entityType: action.entityType,
+        entityId: action.entityId,
+      });
+      return '';
+    }
+
+    if (removeRetrySourceOnSuccess && (action.entityType === 'task' || action.entityType === 'project')) {
+      this.retryQueue.removeByEntity(action.entityType as RetryableEntityType, action.entityId);
+    }
+
+    if (this.storage.isOnline) {
+      void this.processQueue();
+    }
+
+    return actionId;
+  }
+
+  async enqueueDurablyForOwner(ownerUserId: string, action: EnqueueParams): Promise<string> {
+    if (ownerUserId === this.getCurrentOwnerUserId()) {
+      return this.enqueueDurablyInternal(action, false);
+    }
+
+    const queuedAction = this.createQueuedAction(action);
+    const existingQueue = await this.storage.loadQueueSnapshotForOwner(ownerUserId);
+    const nextQueue = [...existingQueue];
+    const existingIndex = nextQueue.findIndex(existing =>
+      existing.entityType === action.entityType &&
+      existing.entityId === action.entityId &&
+      existing.retryCount === 0
+    );
+
+    let actionId = queuedAction.id;
+    if (existingIndex !== -1) {
+      const existing = nextQueue[existingIndex];
+
+      if (existing.type === 'delete' && (action.type === 'update' || action.type === 'create')) {
+        this.logger.debug('忽略 foreign-owner 队列中已删除实体的操作', {
+          ownerUserId,
+          entityType: action.entityType,
+          entityId: action.entityId,
+        });
+        return '';
+      }
+
+      if (existing.type === 'update' && action.type === 'update') {
+        nextQueue[existingIndex] = { ...this.mergeQueuedAction(existing, queuedAction), id: existing.id };
+        actionId = existing.id;
+      } else if (existing.type === 'create' && action.type === 'update') {
+        nextQueue[existingIndex] = {
+          ...this.mergeQueuedAction(existing, queuedAction),
+          type: 'create',
+          id: existing.id,
+        };
+        actionId = existing.id;
+      } else if (existing.type === 'create' && action.type === 'delete') {
+        nextQueue.splice(existingIndex, 1);
+        actionId = existing.id;
+      } else {
+        nextQueue.push(queuedAction);
+      }
+    } else {
+      nextQueue.push(queuedAction);
+    }
+
+    const persisted = await this.storage.persistQueueSnapshotForOwner(ownerUserId, nextQueue);
+    if (!persisted) {
+      this.logger.warn('foreign-owner ActionQueue durable enqueue 未能完成持久化确认', {
+        ownerUserId,
+        actionId,
+        entityType: action.entityType,
+        entityId: action.entityId,
+      });
+      return '';
+    }
+
+    this.logger.info('已将离线操作 durably 写入指定 owner 队列', {
+      ownerUserId,
+      actionId,
+      type: queuedAction.type,
+      entityType: queuedAction.entityType,
+      entityId: queuedAction.entityId,
+    });
+    return actionId;
+  }
+
+  private enqueueInternal(action: EnqueueParams, autoProcess: boolean, dedupeRetry: boolean): string {
     if (this.storage.queueFrozen()) {
       this.logger.warn('队列处于冻结状态，改为内存兜底接收写入', {
         type: action.type,
@@ -289,7 +399,7 @@ export class ActionQueueService {
 
     // 跨队列去重：新操作入队后，移除 RetryQueue 中同一实体的旧重试条目
     // 因为新操作的数据更新，旧的重试一旦成功反而会用过时数据覆盖
-    if (action.entityType === 'task' || action.entityType === 'project') {
+    if (dedupeRetry && (action.entityType === 'task' || action.entityType === 'project')) {
       this.retryQueue.removeByEntity(action.entityType as RetryableEntityType, action.entityId);
     }
     
@@ -308,7 +418,7 @@ export class ActionQueueService {
       }
     });
     
-    if (this.storage.isOnline) {
+    if (autoProcess && this.storage.isOnline) {
       void this.processQueue();
     }
     
@@ -394,17 +504,10 @@ export class ActionQueueService {
     existingPayload: ProjectPayload,
     nextPayload: ProjectPayload,
   ): ProjectPayload {
-    const mergedTaskIdsToDelete = [
-      ...(existingPayload.taskIdsToDelete ?? []),
-      ...(nextPayload.taskIdsToDelete ?? []),
-    ];
-
     return {
       ...nextPayload,
       sourceUserId: nextPayload.sourceUserId ?? existingPayload.sourceUserId,
-      taskIdsToDelete: mergedTaskIdsToDelete.length > 0
-        ? Array.from(new Set(mergedTaskIdsToDelete))
-        : undefined,
+      taskIdsToDelete: nextPayload.taskIdsToDelete,
     };
   }
 

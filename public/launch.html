@@ -2,9 +2,32 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>NanoFlow Launch Compatibility</title>
+  <title>NanoFlow Legacy Launch Alias</title>
 </head>
 <body>
-  <!-- dist/browser/launch.html is generated as a compatibility redirect shell for legacy PWA shortcuts. -->
+  <!-- dev/unbuilt serving falls back to a redirect; dist/browser/launch.html is generated as a legacy bootstrap alias. -->
+  <script>
+    (function() {
+      if (typeof window === 'undefined' || typeof window.location?.replace !== 'function') {
+        return;
+      }
+
+      var pathname = window.location.pathname || '';
+      if (!pathname.endsWith('/launch.html')) {
+        return;
+      }
+
+      var normalizedPath = pathname.slice(0, -'launch.html'.length) || '/';
+      var normalizedUrl = normalizedPath + window.location.search + window.location.hash;
+      if (normalizedUrl === pathname + window.location.search + window.location.hash) {
+        return;
+      }
+
+      window.location.replace(normalizedUrl);
+    })();
+  </script>
+  <noscript>
+    <meta http-equiv="refresh" content="0;url=./">
+  </noscript>
 </body>
 </html>

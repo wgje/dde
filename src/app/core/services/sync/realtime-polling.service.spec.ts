@@ -224,4 +224,117 @@ describe('RealtimePollingService', () => {
 
     expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
   });
+
+  it('应仅在连续失败达到阈值后上报 Sentry 并降级到轮询', async () => {
+    const fallbackSpy = vi.spyOn(
+      service as unknown as { fallbackToPolling: (projectId: string, userId: string, transportGeneration: number) => void },
+      'fallbackToPolling'
+    );
+
+    await service.subscribeToProject('project-4', 'user-321');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'first transient failure' });
+    statusCallback?.('TIMED_OUT', { message: 'second transient failure' });
+
+    expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'third failure' });
+
+    expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledTimes(1);
+    expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
+      'Realtime 订阅错误',
+      expect.objectContaining({
+        extra: expect.objectContaining({
+          consecutiveErrors: 3,
+          degradedToPolling: true,
+        })
+      })
+    );
+    expect(fallbackSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('SUBSCRIBED 应重置连续失败计数', async () => {
+    const fallbackSpy = vi.spyOn(
+      service as unknown as { fallbackToPolling: (projectId: string, userId: string, transportGeneration: number) => void },
+      'fallbackToPolling'
+    );
+
+    await service.subscribeToProject('project-5', 'user-654');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'first failure' });
+    statusCallback?.('SUBSCRIBED');
+    statusCallback?.('CHANNEL_ERROR', { message: 'second first failure' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'second second failure' });
+
+    expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it('Realtime 禁用时的通道错误不应上报或降级', async () => {
+    await service.subscribeToProject('project-6', 'user-987');
+    const fallbackSpy = vi.spyOn(
+      service as unknown as { fallbackToPolling: (projectId: string, userId: string, transportGeneration: number) => void },
+      'fallbackToPolling'
+    );
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    service.setRealtimeEnabled(false);
+    statusCallback?.('CHANNEL_ERROR', { message: 'teardown failure' });
+
+    expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it('降级后的冷却期内重新订阅应继续使用轮询', async () => {
+    const startPollingSpy = vi.spyOn(
+      service as unknown as { startPolling: (projectId: string, userId: string | null, transportGeneration: number) => void },
+      'startPolling'
+    );
+
+    await service.subscribeToProject('project-7', 'user-741');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 1' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 2' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 3' });
+
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+
+    await service.subscribeToProject('project-7', 'user-741');
+
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+    expect(startPollingSpy).toHaveBeenCalled();
+  });
+
+  it('旧通道迟到的 SUBSCRIBED 不应清掉降级冷却期', async () => {
+    const startPollingSpy = vi.spyOn(
+      service as unknown as { startPolling: (projectId: string, userId: string | null, transportGeneration: number) => void },
+      'startPolling'
+    );
+
+    await service.subscribeToProject('project-8', 'user-852');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 1' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 2' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'failure 3' });
+    statusCallback?.('SUBSCRIBED');
+
+    await service.subscribeToProject('project-8', 'user-852');
+
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+    expect(startPollingSpy).toHaveBeenCalled();
+  });
 });

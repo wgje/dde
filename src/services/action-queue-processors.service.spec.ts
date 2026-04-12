@@ -38,6 +38,8 @@ const mockActionQueueService = {
 
 const mockRetryQueueService = {
   removeByProjectId: vi.fn(),
+  getItems: vi.fn(() => []),
+  findItemForOwner: vi.fn(() => undefined),
 };
 
 const mockSyncService = {
@@ -166,7 +168,7 @@ describe('ActionQueueProcessorsService', () => {
 
     const result = await handler({ payload: { project, sourceUserId: 'test-user' } } as QueuedAction);
 
-    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user');
+    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user', undefined);
     expect(mockProjectStateService.updateProjects).toHaveBeenCalled();
     expect(result).toBe(true);
   });
@@ -183,7 +185,7 @@ describe('ActionQueueProcessorsService', () => {
       },
     } as QueuedAction);
 
-    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user');
+    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledWith(project, 'test-user', ['task-a', 'task-b']);
     expect(mockSyncService.deleteTask).toHaveBeenNthCalledWith(1, 'task-a', 'p-delete-after-project', 'test-user');
     expect(mockSyncService.deleteTask).toHaveBeenNthCalledWith(2, 'task-b', 'p-delete-after-project', 'test-user');
     expect(result).toBe(true);
@@ -440,23 +442,114 @@ describe('ActionQueueProcessorsService', () => {
   });
 
   it('project:update should acknowledge RetryQueue handoff even after queue view becomes stale', async () => {
+    const project = { id: 'p-stale-retry-transfer', syncSource: 'synced' };
     mockSyncService.saveProjectSmart.mockResolvedValueOnce({
       success: false,
       projectPushed: false,
       retryEnqueued: ['project:p-stale-retry-transfer'],
       failureReason: 'offline sync deferred',
     });
+    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
+      type: 'project',
+      data: project,
+      sourceUserId: 'test-user',
+      taskIdsToDelete: [],
+    });
     mockActionQueueService.isQueueViewCurrent.mockReturnValueOnce(false);
     const handler = getProcessor('project:update');
 
     const result = await handler({
       payload: {
-        project: { id: 'p-stale-retry-transfer', syncSource: 'synced' },
+        project,
         sourceUserId: 'test-user',
       },
     } as QueuedAction);
 
     expect(result).toBe(true);
+  });
+
+  it('project:update should acknowledge RetryQueue handoff when the retry item is hidden under the source owner', async () => {
+    const project = { id: 'p-hidden-owner-retry-transfer', syncSource: 'synced' };
+    mockAuthService.currentUserId.mockReturnValue('old-owner');
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: ['project:p-hidden-owner-retry-transfer'],
+      failureReason: 'offline sync deferred',
+    });
+    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
+      type: 'project',
+      data: project,
+      sourceUserId: 'old-owner',
+      taskIdsToDelete: [],
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project,
+        sourceUserId: 'old-owner',
+      },
+    } as QueuedAction);
+
+    expect(mockRetryQueueService.findItemForOwner).toHaveBeenCalledWith(
+      'project',
+      'p-hidden-owner-retry-transfer',
+      'old-owner',
+    );
+    expect(result).toBe(true);
+  });
+
+  it('project:update should keep failing when persisted project retry payload loses deferred task deletes', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: ['project:p-mismatched-delete-payload'],
+      failureReason: 'offline sync deferred',
+    });
+    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
+      type: 'project',
+      data: { id: 'p-mismatched-delete-payload' },
+      sourceUserId: 'test-user',
+      taskIdsToDelete: ['task-delete-stale'],
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-mismatched-delete-payload', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-delete-current'],
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
+  });
+
+  it('project:update should keep failing when persisted project retry snapshot differs from the action snapshot', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      projectPushed: false,
+      retryEnqueued: ['project:p-mismatched-project-snapshot'],
+      failureReason: 'offline sync deferred',
+    });
+    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
+      type: 'project',
+      data: { id: 'p-mismatched-project-snapshot', syncSource: 'synced', name: 'stale-project' },
+      sourceUserId: 'test-user',
+      taskIdsToDelete: ['task-delete-current'],
+    });
+    const handler = getProcessor('project:update');
+
+    const result = await handler({
+      payload: {
+        project: { id: 'p-mismatched-project-snapshot', syncSource: 'synced', name: 'fresh-project' },
+        sourceUserId: 'test-user',
+        taskIdsToDelete: ['task-delete-current'],
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(false);
   });
 
   it('project:update should persist conflict when remote snapshot is unavailable', async () => {
@@ -574,6 +667,7 @@ describe('ActionQueueProcessorsService', () => {
       retryEnqueued: ['task:task-a'],
       failureReason: 'project batch sync delegated remaining work to retry queue',
     });
+    mockRetryQueueService.getItems.mockReturnValueOnce([]);
     const handler = getProcessor('project:create');
 
     const result = await handler({

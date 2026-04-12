@@ -53,10 +53,15 @@ describe('validate-launch-shared-markers', () => {
     const distLaunchHtml = `<!doctype html>
 <html>
 <head>
-  <meta name="nanoflow-launch-mode" content="compat-redirect">
+  <meta name="nanoflow-launch-mode" content="bootstrap-alias">
 </head>
 <body>
-  <script>window.location.replace('/');</script>
+  <script>history.replaceState(null, '', '/');</script>
+  <script>window.__NANOFLOW_BOOT_FLAGS__ = {};</script>
+  <app-root></app-root>
+  <script>window.addEventListener('nanoflow:boot-stage', function() {});</script>
+  <script type="module" src="polyfills-AAA.js"></script>
+  <script type="module" src="main-BBB.js"></script>
 </body>
 </html>`;
 
@@ -74,7 +79,7 @@ describe('validate-launch-shared-markers', () => {
     expect(result.violations).toEqual([]);
   });
 
-  it('rejects launch compatibility shell when modulepreload sneaks back in', () => {
+  it('rejects launch shell when it regresses into redirect-only fallback', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-launch-markers-bad-'));
     const distDir = path.join(root, 'dist', 'browser');
     tempRoots.push(root);
@@ -108,7 +113,6 @@ describe('validate-launch-shared-markers', () => {
 <html>
 <head>
   <meta name="nanoflow-launch-mode" content="compat-redirect">
-  <link rel="modulepreload" href="/main-BBB.js">
 </head>
 <body>
   <script>window.location.replace('/');</script>
@@ -126,6 +130,10 @@ describe('validate-launch-shared-markers', () => {
       distLaunchHtmlPath: path.join(distDir, 'launch.html'),
     });
 
-    expect(result.violations).toContain('dist/launch.html 不应注入 modulepreload');
+    expect(result.violations).toContain('dist/launch.html 缺少启动别名标记');
+    expect(result.violations).toContain('dist/launch.html 缺少原地路径归一化脚本');
+    expect(result.violations).toContain('dist/launch.html 缺少 Boot Flags');
+    expect(result.violations).toContain('dist/launch.html 缺少 main/polyfills 入口脚本');
+    expect(result.violations).toContain('dist/launch.html 缺少 app-root 启动宿主');
   });
 });

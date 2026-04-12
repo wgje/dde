@@ -16,7 +16,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { MobileSyncStrategyService } from '../../../../services/mobile-sync-strategy.service';
 import { SyncStateService } from './sync-state.service';
-import { SYNC_CONFIG } from '../../../../config';
+import { MOBILE_SYNC_CONFIG, SYNC_CONFIG } from '../../../../config';
 import { classifySupabaseClientFailure } from '../../../../utils/supabase-error';
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -60,6 +60,8 @@ export class RealtimePollingService {
   private currentUserId: string | null = null;
   private transportGeneration = 0;
   private transportSuspended = false;
+  private realtimeBackoffProjectId: string | null = null;
+  private realtimeBackoffUntil = 0;
   
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
@@ -171,6 +173,30 @@ export class RealtimePollingService {
     return this.realtimeChannel !== null || this.pollingTimer !== null || this.isPolling;
   }
 
+  private getRemainingRealtimeBackoffMs(projectId: string): number {
+    if (this.realtimeBackoffProjectId !== projectId) {
+      return 0;
+    }
+
+    return Math.max(0, this.realtimeBackoffUntil - Date.now());
+  }
+
+  private armRealtimeBackoff(projectId: string): number {
+    const backoffMs = MOBILE_SYNC_CONFIG.MEDIUM_QUALITY_SYNC_DELAY;
+    this.realtimeBackoffProjectId = projectId;
+    this.realtimeBackoffUntil = Date.now() + backoffMs;
+    return backoffMs;
+  }
+
+  private clearRealtimeBackoff(projectId?: string): void {
+    if (projectId && this.realtimeBackoffProjectId !== projectId) {
+      return;
+    }
+
+    this.realtimeBackoffProjectId = null;
+    this.realtimeBackoffUntil = 0;
+  }
+
   private async teardownActiveTransport(preserveContext = false): Promise<void> {
     if (!preserveContext) {
       this.currentProjectId = null;
@@ -224,6 +250,16 @@ export class RealtimePollingService {
     }
 
     if (this.isRealtimeEnabled()) {
+      const realtimeBackoffMs = this.getRemainingRealtimeBackoffMs(projectId);
+      if (realtimeBackoffMs > 0) {
+        this.logger.info('Realtime 冷却期内继续使用轮询', {
+          projectId,
+          remainingMs: realtimeBackoffMs,
+        });
+        this.startPolling(projectId, userId, transportGeneration);
+        return;
+      }
+
       await this.subscribeToProjectRealtime(projectId, userId, transportGeneration);
       return;
     }
@@ -454,9 +490,9 @@ export class RealtimePollingService {
     let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
     
-    this.realtimeChannel = client
-      .channel(channelName)
-      .on(
+    const channel = client.channel(channelName);
+
+    channel.on(
         'postgres_changes',
         {
           event: '*',
@@ -498,8 +534,7 @@ export class RealtimePollingService {
             });
           }
         }
-      )
-      .on(
+      ).on(
         'postgres_changes',
         {
           event: '*',
@@ -527,8 +562,7 @@ export class RealtimePollingService {
             });
           }
         }
-      )
-      .on(
+      ).on(
         'postgres_changes',
         {
           event: '*',
@@ -549,9 +583,12 @@ export class RealtimePollingService {
             });
           }
         }
-      )
-      .subscribe((status, err) => {
+      ).subscribe((status, err) => {
         if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+          return;
+        }
+
+        if (this.realtimeChannel !== channel) {
           return;
         }
 
@@ -566,21 +603,44 @@ export class RealtimePollingService {
           previousStatus = status;
           return;
         }
+
+        if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && !this.isRealtimeEnabled()) {
+          this.logger.debug('Realtime 已被策略禁用，忽略通道中断', {
+            status,
+            channel: channelName,
+            error: err?.message,
+          });
+          previousStatus = status;
+          return;
+        }
         
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           consecutiveErrors++;
-          this.sentryLazyLoader.captureMessage('Realtime 订阅错误', { 
-            level: 'warning',
-            extra: { status, error: err?.message, consecutiveErrors }
-          });
           
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            this.sentryLazyLoader.captureMessage('Realtime 订阅错误', {
+              level: 'warning',
+              extra: {
+                status,
+                error: err?.message,
+                consecutiveErrors,
+                degradedToPolling: true,
+              }
+            });
             this.logger.warn('Realtime 连续失败，降级到轮询', { consecutiveErrors });
             this.fallbackToPolling(projectId, userId, transportGeneration);
             return;
           }
+
+          this.logger.debug('Realtime 通道瞬时错误，等待连续失败阈值', {
+            status,
+            channel: channelName,
+            consecutiveErrors,
+            error: err?.message,
+          });
         } else if (status === 'SUBSCRIBED') {
           consecutiveErrors = 0;
+          this.clearRealtimeBackoff(projectId);
         }
         
         if (status === 'SUBSCRIBED' && previousStatus && previousStatus !== 'SUBSCRIBED') {
@@ -598,6 +658,8 @@ export class RealtimePollingService {
         
         previousStatus = status;
       });
+
+      this.realtimeChannel = channel;
   }
 
   /**
@@ -611,7 +673,8 @@ export class RealtimePollingService {
       return;
     }
 
-    this.logger.info('Realtime 降级到轮询模式', { projectId });
+    const backoffMs = this.armRealtimeBackoff(projectId);
+    this.logger.info('Realtime 降级到轮询模式', { projectId, backoffMs });
 
     const channel = this.realtimeChannel;
     this.realtimeChannel = null;
@@ -693,6 +756,7 @@ export class RealtimePollingService {
     this.transportSuspended = false;
     this.currentProjectId = null;
     this.currentUserId = null;
+    this.clearRealtimeBackoff();
     this.stopPolling();
 
     // 清理 realtime channel

@@ -16,36 +16,29 @@ const DEFAULT_LAUNCH_LOADER_MARKUP = `
 <style>@keyframes loader-spin { to { transform: rotate(360deg); } }</style>
 `.trim();
 
-const LAUNCH_COMPAT_META = '<meta name="nanoflow-launch-mode" content="compat-redirect">';
+const LAUNCH_ALIAS_META = '<meta name="nanoflow-launch-mode" content="bootstrap-alias">';
 
-const LAUNCH_COMPAT_REDIRECT_SCRIPT = `
+const LAUNCH_PATH_NORMALIZER_SCRIPT = `
 <script>
   (function() {
-    if (typeof window === 'undefined' || typeof window.location?.replace !== 'function') {
+    if (typeof window === 'undefined' || typeof history?.replaceState !== 'function') {
       return;
     }
 
     var pathname = window.location.pathname || '';
-    if (!/\/launch\.html$/.test(pathname)) {
+    if (!pathname.endsWith('/launch.html')) {
       return;
     }
 
-    var target = new URL('./', window.location.href);
-    target.search = window.location.search;
-    target.hash = window.location.hash;
-    if (target.toString() === window.location.href) {
+    var normalizedPath = pathname.slice(0, -'launch.html'.length) || '/';
+    var normalizedUrl = normalizedPath + window.location.search + window.location.hash;
+    if (normalizedUrl === pathname + window.location.search + window.location.hash) {
       return;
     }
 
-    window.location.replace(target.toString());
+    history.replaceState(null, '', normalizedUrl);
   })();
 </script>
-`.trim();
-
-const LAUNCH_COMPAT_NOSCRIPT = `
-<noscript>
-  <meta http-equiv="refresh" content="0;url=./">
-</noscript>
 `.trim();
 
 function readFileStrict(filepath) {
@@ -74,8 +67,7 @@ function extractMarkedBlock(html, name, options = {}) {
 function extractBodyOpenTag(html) {
   const match = html.match(/<body\b[^>]*>/i);
   if (!match) return '<body>';
-  // 移除 Tailwind 工具类 — launch.html 不包含 Tailwind CSS 定义，保留无效 class 会产生样式不一致
-  return match[0].replace(/\bclass="[^"]*"/, '');
+  return match[0];
 }
 
 function extractEntryScripts(html) {
@@ -101,9 +93,17 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
 
   const headShared = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_HEAD');
   const stylesShared = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_STYLES', { optional: true });
+  const bootFlags = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_BOOT_FLAGS');
   const shell = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_SHELL', { optional: true });
+  const snapshotRenderer = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_SNAPSHOT_RENDERER', { optional: true });
+  const loaderDismiss = extractMarkedBlock(indexHtml, 'LAUNCH_SHARED_LOADER_DISMISS');
   const bodyOpenTag = extractBodyOpenTag(indexHtml);
+  const entryScripts = extractEntryScripts(indexHtml);
   const launchLoaderMarkup = shell || DEFAULT_LAUNCH_LOADER_MARKUP;
+
+  if (entryScripts.length === 0) {
+    throw new Error('未在 index.html 中找到 main/polyfills 入口脚本，launch.html 无法作为启动别名');
+  }
 
   return [
     '<!doctype html>',
@@ -111,14 +111,18 @@ function buildLaunchHtml(indexHtml, templateHtml = '') {
     '<head>',
     headShared,
     stylesShared,
-    LAUNCH_COMPAT_META,
-    LAUNCH_COMPAT_NOSCRIPT,
+    LAUNCH_ALIAS_META,
     '</head>',
     bodyOpenTag,
     '<div id="initial-loader">',
     launchLoaderMarkup,
     '</div>',
-    LAUNCH_COMPAT_REDIRECT_SCRIPT,
+    LAUNCH_PATH_NORMALIZER_SCRIPT,
+    bootFlags,
+    snapshotRenderer,
+    '<app-root></app-root>',
+    loaderDismiss,
+    ...entryScripts,
     '</body>',
     '</html>',
     '',

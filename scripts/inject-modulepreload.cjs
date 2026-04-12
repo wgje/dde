@@ -15,7 +15,7 @@ const path = require('path');
 
 const DEFAULT_DIST_DIR = path.join(__dirname, '..', 'dist', 'browser');
 const DEFAULT_INDEX_HTML = path.join(DEFAULT_DIST_DIR, 'index.html');
-const DEFAULT_HTML_FILES = ['index.html'];
+const DEFAULT_HTML_FILES = ['index.html', 'launch.html'];
 const DEFAULT_MAX_CRITICAL_PRELOADS = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 6);
 const DEFAULT_MAX_TRACE_DEPTH = Number(process.env.STARTUP_MODULEPRELOAD_TRACE_DEPTH || 3);
 const MAX_PRELOAD_CHUNK_BYTES = Number(process.env.STARTUP_MAX_PRELOAD_CHUNK_BYTES || 96 * 1024);

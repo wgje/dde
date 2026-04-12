@@ -222,6 +222,44 @@ describe('RetryQueueService', () => {
     ]);
   });
 
+  it('findItemForOwner 应能命中 hidden bucket 中的旧 owner 重试项', () => {
+    const hiddenProject = createProject('hidden-owner-project');
+    authServiceMock.currentUserId.mockReturnValue('new-user');
+
+    service.add('project', 'upsert', hiddenProject, undefined, 'old-user');
+
+    expect(service.findItemForOwner('project', hiddenProject.id, 'old-user')).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({ id: hiddenProject.id }),
+        sourceUserId: 'old-user',
+      }),
+    );
+  });
+
+  it('addDurably 回滚后应重新挂起已恢复队列的防抖持久化', async () => {
+    saveToStorageSpy.mockRestore();
+    const existingTask = createTask('existing-pending-persist');
+    const failedTask = createTask('durable-persist-failure');
+
+    service.add('task', 'upsert', existingTask, 'p-1');
+    const originalTimer = (service as unknown as { saveDebounceTimer: ReturnType<typeof setTimeout> | null }).saveDebounceTimer;
+    expect(originalTimer).not.toBeNull();
+
+    (service as unknown as { saveToStorageImmediate: () => Promise<boolean> }).saveToStorageImmediate = vi.fn().mockResolvedValue(false);
+
+    const accepted = await service.addDurably('task', 'upsert', failedTask, 'p-1');
+
+    expect(accepted).toBe(false);
+    expect(service.getItems().map(item => item.data.id)).toEqual([existingTask.id]);
+    expect((service as unknown as { saveDebounceTimer: ReturnType<typeof setTimeout> | null }).saveDebounceTimer).not.toBeNull();
+
+    const rearmedTimer = (service as unknown as { saveDebounceTimer: ReturnType<typeof setTimeout> | null }).saveDebounceTimer;
+    if (rearmedTimer) {
+      clearTimeout(rearmedTimer);
+      (service as unknown as { saveDebounceTimer: ReturnType<typeof setTimeout> | null }).saveDebounceTimer = null;
+    }
+  });
+
   it('processQueueSlice 重放项目时应透传捕获的 sourceUserId', async () => {
     const project = createProject('captured-owner');
     authServiceMock.currentUserId.mockReturnValue('owner-a');

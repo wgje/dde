@@ -298,8 +298,8 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        const result = await this.syncService.saveProjectSmart(payload.project, userId);
-        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload.project.id);
+        const result = await this.syncService.saveProjectSmart(payload.project, userId, payload.taskIdsToDelete);
+        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
           : payload.project;
@@ -392,8 +392,8 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        const result = await this.syncService.saveProjectSmart(payload.project, userId);
-        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload.project.id);
+        const result = await this.syncService.saveProjectSmart(payload.project, userId, payload.taskIdsToDelete);
+        const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
           : payload.project;
@@ -458,15 +458,21 @@ export class ActionQueueProcessorsService {
 
   private wasProjectFailureTransferredToRetryQueue(
     result: ProjectSyncResult,
-    projectId: string,
+    payload: ProjectPayload,
   ): boolean {
     const retryEntries = new Set(result.retryEnqueued ?? []);
     if (retryEntries.size === 0) {
       return false;
     }
 
-    if (result.projectPushed === false && !retryEntries.has(`project:${projectId}`)) {
-      return false;
+    if (result.projectPushed === false) {
+      if (!retryEntries.has(`project:${payload.project.id}`)) {
+        return false;
+      }
+
+      if (!this.doesProjectRetryPayloadMatch(payload)) {
+        return false;
+      }
     }
 
     const allFailedTasksTransferred = (result.failedTaskIds ?? [])
@@ -477,6 +483,42 @@ export class ActionQueueProcessorsService {
 
     return (result.failedConnectionIds ?? [])
       .every(connectionId => retryEntries.has(`connection:${connectionId}`));
+  }
+
+  private doesProjectRetryPayloadMatch(payload: ProjectPayload): boolean {
+    const ownerUserId = payload.sourceUserId
+      ?? this.authService.currentUserId()
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const queuedProjectRetry = this.retryQueue.findItemForOwner(
+      'project',
+      payload.project.id,
+      ownerUserId,
+    );
+    if (!queuedProjectRetry) {
+      return false;
+    }
+
+    return this.buildProjectRetryPayloadSignature(
+      queuedProjectRetry.data as Project,
+      queuedProjectRetry.sourceUserId,
+      queuedProjectRetry.taskIdsToDelete,
+    ) === this.buildProjectRetryPayloadSignature(
+      payload.project,
+      payload.sourceUserId,
+      payload.taskIdsToDelete,
+    );
+  }
+
+  private buildProjectRetryPayloadSignature(
+    project: Project,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ): string {
+    return JSON.stringify({
+      project,
+      sourceUserId: sourceUserId ?? null,
+      taskIdsToDelete: [...(taskIdsToDelete ?? [])].sort(),
+    });
   }
 
   private shouldStopProjectMutation(

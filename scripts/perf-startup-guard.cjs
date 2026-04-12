@@ -6,7 +6,7 @@
  * - workspace shell chunk <= 125KB（raw）
  * - modulepreload 数量 <= 10
  * - 首屏 modulepreload 不允许包含 route component chunk
- * - launch.html 只能作为 legacy compat redirect shell，不能执行 Angular 入口
+ * - launch.html 必须作为 legacy bootstrap alias，与旧安装图标保持同一路启动能力
  * - main 不包含 @angular/compiler
  */
 
@@ -224,27 +224,57 @@ function findEntryDiscoveryByteOffset(html, entryFile) {
   return html.indexOf(entryFile);
 }
 
-function evaluateCompatLaunchShell(options) {
-  const { shellName, html } = options;
+function evaluateLaunchBootstrapAlias(options) {
+  const {
+    shellName,
+    html,
+    distDir,
+    mainKey,
+    polyfillsKey,
+    launchDiscoveryMaxBytes = STARTUP_LAUNCH_DISCOVERY_MAX_BYTES,
+  } = options;
   const violations = [];
 
-  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']compat-redirect["']/i.test(html)) {
-    violations.push(`${shellName} 缺少兼容启动标记`);
+  if (!/name=["']nanoflow-launch-mode["'][^>]*content=["']bootstrap-alias["']/i.test(html)) {
+    violations.push(`${shellName} 缺少启动别名标记`);
   }
 
-  if (!/location\.replace\(/i.test(html)) {
-    violations.push(`${shellName} 缺少兼容重定向脚本`);
+  if (!/history\.replaceState\(/i.test(html)) {
+    violations.push(`${shellName} 缺少原地路径归一化脚本`);
   }
 
-  if (extractModulepreloadHrefs(html).length > 0) {
-    violations.push(`${shellName} 不应注入 modulepreload`);
+  const bootFlagsIndex = html.indexOf('__NANOFLOW_BOOT_FLAGS__');
+  const loaderDismissIndex = html.indexOf('nanoflow:boot-stage');
+  const mainScriptIndex = html.search(/<script\b[^>]*src=["'][^"']*main-[^"']+\.js["'][^>]*>/i);
+  const polyfillsScriptIndex = html.search(/<script\b[^>]*src=["'][^"']*polyfills-[^"']+\.js["'][^>]*>/i);
+
+  if (bootFlagsIndex === -1) {
+    violations.push(`${shellName} 缺少 Boot Flags`);
+  }
+  if (loaderDismissIndex === -1) {
+    violations.push(`${shellName} 缺少 loader dismiss 脚本`);
+  }
+  if (mainScriptIndex === -1 || polyfillsScriptIndex === -1) {
+    violations.push(`${shellName} 缺少 main/polyfills 入口脚本`);
+  }
+  if (bootFlagsIndex !== -1 && mainScriptIndex !== -1 && bootFlagsIndex > mainScriptIndex) {
+    violations.push(`${shellName} Boot Flags 必须在 main 入口之前`);
+  }
+  if (loaderDismissIndex !== -1 && mainScriptIndex !== -1 && loaderDismissIndex > mainScriptIndex) {
+    violations.push(`${shellName} loader dismiss 必须在 main 入口之前`);
   }
 
-  const hasMainEntry = /<script\b[^>]*src=["'][^"']*main-[^"']+\.js["'][^>]*>/i.test(html);
-  const hasPolyfillsEntry = /<script\b[^>]*src=["'][^"']*polyfills-[^"']+\.js["'][^>]*>/i.test(html);
-  if (hasMainEntry || hasPolyfillsEntry) {
-    violations.push(`${shellName} 不应直接执行 main/polyfills 入口脚本`);
-  }
+  violations.push(
+    ...evaluateShellPreloads({
+      shellName,
+      html,
+      distDir,
+      mainKey,
+      polyfillsKey,
+      launchDiscoveryMaxBytes,
+      checkDiscovery: true,
+    }),
+  );
 
   return violations;
 }
@@ -399,9 +429,12 @@ function evaluateStartupGuard(options = {}) {
   );
 
   if (launchHtml) {
-    violations.push(...evaluateCompatLaunchShell({
+    violations.push(...evaluateLaunchBootstrapAlias({
       shellName: 'launch.html',
       html: launchHtml,
+      distDir,
+      mainKey,
+      polyfillsKey,
       launchDiscoveryMaxBytes: launchHtmlMaxDiscoveryBytes,
     }));
   } else {
@@ -476,7 +509,7 @@ if (require.main === module) {
 module.exports = {
   FORBIDDEN_MODULEPRELOAD_MARKERS,
   FORBIDDEN_MODULEPRELOAD_PATTERNS,
-  evaluateCompatLaunchShell,
+  evaluateLaunchBootstrapAlias,
   evaluateStartupGuard,
   extractModulepreloadHrefs,
   findEntryDiscoveryByteOffset,
