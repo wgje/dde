@@ -27,7 +27,7 @@ function getLastSection(sql: string, startMarker: string, endMarker: string): st
 }
 
 describe('项目软删除契约', () => {
-  it('init script 必须把 soft-deleted projects 视为不可访问且不可见', () => {
+  it('init script 必须允许 owner 查看和更新自己的软删除项目（用于同步检测和恢复）', () => {
     const sql = readSql('scripts/init-supabase.sql');
 
     expect(sql).toContain('deleted_at TIMESTAMP WITH TIME ZONE');
@@ -90,9 +90,12 @@ describe('项目软删除契约', () => {
     );
 
   expect(accessibleProjectIdsSection).toContain('AND deleted_at IS NULL');
-    expect(accessHelperSection).toContain('AND p.deleted_at IS NULL');
-    expect(ownerHelperSection).toContain('AND p.deleted_at IS NULL');
-    expect(finalProjectsPolicySection).toContain('deleted_at IS NULL');
+    // user_has_project_access 和 user_is_project_owner 不再过滤 deleted_at，
+    // 允许 owner 操作自己的软删除项目（同步恢复 + 连接级联不阻断）
+    expect(accessHelperSection).not.toContain('AND p.deleted_at IS NULL');
+    expect(ownerHelperSection).not.toContain('AND p.deleted_at IS NULL');
+    // projects RLS SELECT/UPDATE 也不再过滤 deleted_at，应用层自行过滤
+    expect(finalProjectsPolicySection).toContain('(SELECT auth.uid() AS uid) = owner_id');
     expect(fullProjectSection).toContain('public.user_has_project_access(p_project_id)');
     expect(fullProjectSection).toContain('SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version');
     expect(userProjectsMetaSection).toContain('AND deleted_at IS NULL');

@@ -157,7 +157,6 @@ AS $$
     SELECT 1 FROM public.projects p
     WHERE p.id = p_project_id 
     AND p.owner_id = public.current_user_id()
-    AND p.deleted_at IS NULL
   )
 $$;
 
@@ -906,12 +905,10 @@ DROP POLICY IF EXISTS "owner delete" ON public.projects;
 
 CREATE POLICY "owner select" ON public.projects FOR SELECT USING (
   (select auth.uid()) = owner_id
-  AND deleted_at IS NULL
 );
 CREATE POLICY "owner insert" ON public.projects FOR INSERT WITH CHECK ((select auth.uid()) = owner_id);
 CREATE POLICY "owner update" ON public.projects FOR UPDATE USING (
   (select auth.uid()) = owner_id
-  AND deleted_at IS NULL
 ) WITH CHECK ((select auth.uid()) = owner_id);
 CREATE POLICY "owner delete" ON public.projects FOR DELETE USING (
   (select auth.uid()) = owner_id
@@ -4034,7 +4031,6 @@ AS $$
     FROM public.projects p
     WHERE p.id = p_project_id
       AND p.owner_id = public.current_user_id()
-      AND p.deleted_at IS NULL
   )
 $$;
 
@@ -4136,12 +4132,12 @@ GRANT EXECUTE ON FUNCTION public.soft_delete_project(uuid) TO authenticated;
 DROP POLICY IF EXISTS "owner select" ON public.projects;
 CREATE POLICY "owner select" ON public.projects
 FOR SELECT
-USING (((SELECT auth.uid() AS uid) = owner_id) AND (deleted_at IS NULL));
+USING (((SELECT auth.uid() AS uid) = owner_id));
 
 DROP POLICY IF EXISTS "owner update" ON public.projects;
 CREATE POLICY "owner update" ON public.projects
 FOR UPDATE
-USING (((SELECT auth.uid() AS uid) = owner_id) AND (deleted_at IS NULL))
+USING (((SELECT auth.uid() AS uid) = owner_id))
 WITH CHECK ((SELECT auth.uid() AS uid) = owner_id);
 
 DROP POLICY IF EXISTS "owner delete" ON public.projects;

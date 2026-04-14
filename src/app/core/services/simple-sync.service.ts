@@ -1314,6 +1314,7 @@ export class SimpleSyncService {
    */
   private async doProjectPush(client: SupabaseClient, project: Project, userId: string): Promise<void> {
     // 【P2-1 修复】不发送客户端 updated_at，让 DB 触发器统一设置，避免时钟偏移影响 LWW 判定
+    // 【RLS 修复】显式传 deleted_at: null，确保本地活跃项目能清除远端软删除状态（LWW 语义）
     const { error } = await client
       .from('projects')
       .upsert({
@@ -1322,7 +1323,8 @@ export class SimpleSyncService {
         title: project.name,
         description: project.description,
         version: project.version || 1,
-        migrated_to_v2: true
+        migrated_to_v2: true,
+        deleted_at: project.deletedAt ?? null,
       });
     
     if (error) throw supabaseErrorToError(error);
