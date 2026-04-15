@@ -214,7 +214,7 @@ export class SessionManagerService {
    */
   async warmupSessionValidation(): Promise<{ valid: boolean; userId?: string }> {
     try {
-      const client = this.supabase.getClient();
+      const { client } = await this.getSupabaseClient();
       if (!client) {
         return { valid: false };
       }

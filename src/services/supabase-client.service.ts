@@ -528,7 +528,6 @@ export class SupabaseClientService {
     reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
   ): Promise<void> {
     try {
-      this.proactiveRefreshMetrics.totalAttempts++;
       const { data, error } = await client.auth.getSession();
       if (error || !data.session) {
         return;
@@ -544,6 +543,8 @@ export class SupabaseClientService {
       if (remainingMs > REFRESH_THRESHOLD_MS) {
         return;
       }
+      // 仅在真正触发刷新时才计入指标，避免分母虚高导致成功率失真
+      this.proactiveRefreshMetrics.totalAttempts++;
       this.proactiveRefreshMetrics.nearingExpiryCount++;
       this.logger.debug('浏览器恢复时 token 临近/已过期，主动刷新', {
         reason,
@@ -690,12 +691,18 @@ export class SupabaseClientService {
 
       // 缓存本次请求的 promise，后续请求会 await 它而不是重新发送
       const fetchPromise = (async () => {
-        const response = await this.fetchWithTimeout(url, options);
-        const cacheEntry = this.requestDeduplicationCache.get(signature);
-        if (cacheEntry) {
-          cacheEntry.response = response.clone();
+        try {
+          const response = await this.fetchWithTimeout(url, options);
+          const cacheEntry = this.requestDeduplicationCache.get(signature);
+          if (cacheEntry) {
+            cacheEntry.response = response.clone();
+          }
+          return response;
+        } catch (err) {
+          // 请求失败时主动清除缓存，允许后续请求立即重试而非复用失败的 promise
+          this.requestDeduplicationCache.delete(signature);
+          throw err;
         }
-        return response;
       })();
 
       this.requestDeduplicationCache.set(signature, {
@@ -740,9 +747,15 @@ export class SupabaseClientService {
             });
             this.fetch401RetryCount.set(retryKey, currentRetryCount + 1);
             const retryOptions = this.replaceAuthorizationHeader(options, data.session.access_token);
-            const retryResponse = await this.fetchWithTimeout(url, retryOptions);
-            this.fetch401RetryCount.delete(retryKey);
-            return retryResponse;
+            try {
+              const retryResponse = await this.fetchWithTimeout(url, retryOptions);
+              this.fetch401RetryCount.delete(retryKey);
+              return retryResponse;
+            } catch {
+              // 重试请求本身抛出（如网络断开），清除计数器让下次请求重新尝试
+              this.fetch401RetryCount.delete(retryKey);
+              throw;
+            }
           }
         }
       } catch (refreshError) {
