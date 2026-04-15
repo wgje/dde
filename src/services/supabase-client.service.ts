@@ -607,7 +607,7 @@ export class SupabaseClientService {
     const response = await this.fetchWithTimeout(url, options);
 
     // 仅对业务端点 401 自愈；/auth/v1/token 的刷新请求本身跳过以防递归
-    if (response.status === 401 && this.shouldAttemptJwtRefreshForFetch(url)) {
+    if (response.status === 401 && this.shouldAttemptJwtRefreshForFetch(url) && this.looksLikeJwtAuthFailure(response)) {
       try {
         const client = this.supabase;
         if (client) {
@@ -631,6 +631,28 @@ export class SupabaseClientService {
     }
 
     return response;
+  }
+
+  /**
+   * 通过 response headers 判断 401 是否由 JWT 问题引起（而非 RLS 权限）。
+   * 优势：不消费 body（下游 Supabase JS 仍能正常解析），且精准识别——避免对真正的
+   * 权限错误做无意义的 refresh 浪费网络 / 触发 Supabase 速率限制。
+   *
+   * PostgREST/GoTrue 的约定：
+   *   - JWT 相关 401 返回 WWW-Authenticate: Bearer error="invalid_token"
+   *   - 某些 Edge Function / Storage 实现直接返回 401 无 header → 为保守起见放行
+   */
+  private looksLikeJwtAuthFailure(response: Response): boolean {
+    const wwwAuth = response.headers.get('www-authenticate') ?? '';
+    if (wwwAuth.toLowerCase().includes('invalid_token') || wwwAuth.toLowerCase().includes('expired_token')) {
+      return true;
+    }
+    // 没有 WWW-Authenticate 头时保守视为可能的 JWT 问题；若刷新后仍 401 也只多一次请求，成本可控
+    if (!wwwAuth) {
+      return true;
+    }
+    // 有 WWW-Authenticate 但不含 JWT 相关字眼（如 "Bearer realm=..." 无 error）→ 疑似权限问题，跳过刷新
+    return false;
   }
 
   /**
