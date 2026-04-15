@@ -17,8 +17,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { EventBusService } from '../../../../services/event-bus.service';
 import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
-import { EnhancedError } from '../../../../utils/supabase-error';
-import { supabaseErrorToError } from '../../../../utils/supabase-error';
+import { EnhancedError, supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import {
@@ -191,6 +190,62 @@ export class SessionManagerService {
     }
 
     return { ...this.lastValidationSnapshot };
+  }
+
+  /**
+   * 【鲁棒性 4】启动时主动验证 session 有效性，预热 token 状态
+   * 目的：提前发现过期/失效 token，避免首个数据请求就 401
+   */
+  async warmupSessionValidation(): Promise<{ valid: boolean; userId?: string }> {
+    try {
+      const client = this.supabase.getClient();
+      if (!client) {
+        return { valid: false };
+      }
+
+      const { data, error } = await client.auth.getSession();
+      
+      if (error) {
+        this.logger.warn('session 预热验证异常', { error });
+        this.markValidationSnapshot(false);
+        return { valid: false };
+      }
+
+      if (data.session) {
+        // 检查 token 是否已过期
+        const expiresAt = data.session.expires_at ?? 0;
+        const isExpired = expiresAt * 1000 < Date.now();
+
+        if (isExpired) {
+          // 过期 token 立即尝试刷新
+          this.logger.info('预热时发现 session 已过期，主动刷新', {
+            expiresAt,
+            now: Date.now()
+          });
+          const refreshResult = await this.tryRefreshSessionDetailed('warmup', { allowWhenExpired: true });
+          const userId = refreshResult.session?.user?.id;
+          this.markValidationSnapshot(refreshResult.refreshed, userId);
+          return { valid: refreshResult.refreshed, userId };
+        } else {
+          // token 有效
+          this.logger.debug('session 预热验证通过', {
+            userId: data.session.user.id,
+            expiresAt
+          });
+          this.markValidationSnapshot(true, data.session.user.id);
+          return { valid: true, userId: data.session.user.id };
+        }
+      } else {
+        // 无 session
+        this.logger.info('预热时发现无有效 session');
+        this.markValidationSnapshot(false);
+        return { valid: false };
+      }
+    } catch (e) {
+      this.logger.warn('session 预热验证异常', { error: e });
+      this.markValidationSnapshot(false);
+      return { valid: false };
+    }
   }
 
   markValidationSnapshot(valid: boolean, userId?: string): void {
